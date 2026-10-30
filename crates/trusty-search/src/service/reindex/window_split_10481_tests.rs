@@ -13,13 +13,13 @@ use crate::core::store::{UsearchStore, VectorStore};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-const DIM: usize = 32;
-const WINDOW: usize = 20;
+pub(super) const DIM: usize = 32;
+pub(super) const WINDOW: usize = 20;
 
 /// A chunking mock that counts `embed_batch` calls.
-struct Counting {
-    inner: MockEmbedder,
-    calls: Arc<AtomicUsize>,
+pub(super) struct Counting {
+    pub(super) inner: MockEmbedder,
+    pub(super) calls: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]

@@ -126,4 +126,5 @@ mod sops_8922;
 // #10195: rehydrate stage timings and the search's rehydrate flag.
 mod stage_timings_10195;
 mod window_split_10481;
+mod window_split_10504;
 mod zero_chunk_8976;

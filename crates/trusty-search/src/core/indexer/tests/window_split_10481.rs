@@ -14,12 +14,12 @@ use std::sync::Mutex;
 use trusty_common::embedder::CHUNK_OVERLAP_PERCENT;
 
 // Wide, so a hash collision between words cannot outrank the window that holds them.
-const DIM: usize = 4096;
-const WINDOW: usize = 20;
-const OVERHEAD: usize = 2;
+pub(super) const DIM: usize = 4096;
+pub(super) const WINDOW: usize = 20;
+pub(super) const OVERHEAD: usize = 2;
 
 /// `lines` lines of five words each; word `i` is `w{i}`.
-fn text(lines: usize) -> String {
+pub(super) fn text(lines: usize) -> String {
     (0..lines)
         .map(|l| {
             (0..5)
@@ -31,18 +31,18 @@ fn text(lines: usize) -> String {
         .join("\n")
 }
 
-fn long_chunk(id: &str, content: &str) -> RawChunk {
+pub(super) fn long_chunk(id: &str, content: &str) -> RawChunk {
     let mut c = raw(id, "src/a.rs", content);
     c.start_line = 1;
     c.end_line = content.lines().count();
     c
 }
 
-fn roots() -> IndexRoots {
+pub(super) fn roots() -> IndexRoots {
     IndexRoots::new(std::path::PathBuf::from("/tmp/test"), Vec::new())
 }
 
-fn tokenizer() -> Arc<trusty_common::embedder::ChunkTokenizer> {
+pub(super) fn tokenizer() -> Arc<trusty_common::embedder::ChunkTokenizer> {
     MockEmbedder::new(DIM)
         .with_chunking(WINDOW)
         .chunking_tokenizer()
@@ -50,7 +50,7 @@ fn tokenizer() -> Arc<trusty_common::embedder::ChunkTokenizer> {
         .expect("a chunking mock has one")
 }
 
-fn words(s: &str) -> Vec<&str> {
+pub(super) fn words(s: &str) -> Vec<&str> {
     s.split_whitespace().collect()
 }
 
@@ -88,13 +88,13 @@ impl Embedder for Recording {
     }
 }
 
-struct Rig {
-    indexer: CodeIndexer,
-    store: Arc<dyn VectorStore>,
-    seen: Arc<Mutex<Vec<String>>>,
+pub(super) struct Rig {
+    pub(super) indexer: CodeIndexer,
+    pub(super) store: Arc<dyn VectorStore>,
+    pub(super) seen: Arc<Mutex<Vec<String>>>,
 }
 
-fn rig(window: Option<usize>) -> Rig {
+pub(super) fn rig(window: Option<usize>) -> Rig {
     let mock = match window {
         Some(w) => MockEmbedder::new(DIM).with_chunking(w),
         None => MockEmbedder::new(DIM),
@@ -115,7 +115,7 @@ fn rig(window: Option<usize>) -> Rig {
 }
 
 /// A Rust function whose last comment line holds a word nothing else has.
-fn long_fn(marker: &str) -> String {
+pub(super) fn long_fn(marker: &str) -> String {
     let body: Vec<String> = (0..40).map(|i| format!("    let v{i} = {i};")).collect();
     format!(
         "fn long_one() {{\n{}\n    // {marker}\n}}\n",
