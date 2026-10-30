@@ -118,7 +118,7 @@ const WORKFLOW: ShippedSkill = ShippedSkill {
 const STRATEGY: ShippedSkill = ShippedSkill {
     stem: "architect-strategy",
     // #10161: the U1b text, before the factory issue-tracking rule.
-    // D95: the text before the daily factory status-update rule.
+    // The text before the daily factory status-update rule.
     previous: &[
         "2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77",
         "5388a82b3a5bcab32b10486084d185da24770620aa825099b19327d7a8203dd9",

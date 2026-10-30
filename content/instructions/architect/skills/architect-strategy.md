@@ -107,7 +107,7 @@ changes go to an engineer or the owning PM. Record what you find in
   next. When several sessions share a board, one session owns the daily update
   and covers all lanes from the board itself; the others do not post. Before
   posting, a sweep reads the date of the board's latest status update and
-  posts nothing if one exists for the day. (Owner ruling 2026-10-30, D95.)
+  posts nothing if one exists for the day. (Owner ruling 2026-10-30 03:18Z.)
 
 ## Board sweeps
 

@@ -288,7 +288,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-strategy",
-            "2b353e7db98cd84720bc8d77be386b296f70c0fe77446808f878143f944b9dae",
+            "c09c629ca5e93fa6c540955caa7f399a28c905d9356e0366628d55feed62ecbf",
         ),
         (
             "architect-completion-standard",
