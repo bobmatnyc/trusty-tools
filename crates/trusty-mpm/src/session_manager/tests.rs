@@ -731,7 +731,7 @@ async fn manager_create_store_failure_reaps_orphan() {
     );
 }
 
-// `manager_naming_convention` (full `tm-<leaf>-NN` format assertion) lives in
+// `manager_naming_convention` (full `tm-<leaf>[-NN]` format assertion) lives in
 // `naming_tests.rs` alongside the rest of the #1955 naming-scheme coverage —
 // this file is at the 1500-SLOC test cap (see naming_tests.rs's module doc).
 
@@ -752,7 +752,8 @@ async fn manager_name_hint_overrides() {
         .await
         .expect("create");
 
-    assert_eq!(record.tmux_name, "tm-ticket-1234-01");
+    // #10478: the first session for a hint is bare.
+    assert_eq!(record.tmux_name, "tm-ticket-1234");
 }
 
 /// `stop` must kill the runtime but KEEP the workspace directory and record,
