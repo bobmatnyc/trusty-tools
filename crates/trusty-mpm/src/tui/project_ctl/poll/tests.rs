@@ -486,3 +486,64 @@ async fn refresh_deliverables_keeps_stale_list_on_transient_fetch_failure() {
          never flip to Dangling"
     );
 }
+
+/// #10476: the tui fleet poll asks the daemon to skip the stale-assets probe
+/// (`?slim=true`), while the plain `fleet_managed_sessions` — `tm projects
+/// show`, the executor's `managed-fleet` — still sends no flag and so still
+/// probes. `unresumable` must still reach the tui row.
+/// What: a fake daemon records each fleet request's raw query string and
+/// answers one session flagged `unresumable`.
+#[tokio::test]
+async fn tui_fleet_fetch_sends_slim_and_other_callers_do_not() {
+    use std::future::IntoFuture;
+    use std::sync::{Arc, Mutex};
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let fleet_seen = Arc::clone(&seen);
+    let fleet_body = serde_json::json!({"projects": [{
+        "project_name": "widget",
+        "repo_url": "https://github.com/acme/widget",
+        "sessions": [{"id": "00000000-0000-0000-0000-0000000000aa",
+                      "name": "s-dead", "state": "errored", "unresumable": true}],
+    }]});
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/projects",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"projects": []})) }),
+        )
+        .route(
+            "/api/v1/sessions/managed/fleet",
+            axum::routing::get(move |uri: axum::http::Uri| {
+                fleet_seen
+                    .lock()
+                    .expect("query log")
+                    .push(uri.query().unwrap_or_default().to_string());
+                std::future::ready(axum::Json(fleet_body.clone()))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
+    let client = DaemonClient::new(format!("http://{addr}"));
+
+    let (_rows, sessions_by_project, _full) = fetch_projects_and_sessions(&client)
+        .await
+        .expect("tui fetch");
+    client
+        .fleet_managed_sessions()
+        .await
+        .expect("plain fleet fetch");
+
+    let seen = seen.lock().expect("query log").clone();
+    assert_eq!(
+        seen,
+        vec!["slim=true".to_string(), String::new()],
+        "the tui fetch must send slim=true; the plain method must send no query"
+    );
+    let widget = &sessions_by_project["widget"];
+    assert_eq!(widget.len(), 1);
+    assert!(
+        widget[0].unresumable,
+        "unresumable must still reach the tui row"
+    );
+}

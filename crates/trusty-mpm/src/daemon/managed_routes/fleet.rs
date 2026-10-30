@@ -5,11 +5,16 @@
 //! request/response types and is large enough to warrant a sibling file.
 //! What: defines [`FleetProjectGroup`], [`FleetByProjectResponse`], and the
 //! [`fleet_by_project_route`] axum handler.
-//! Test: `fleet_route_groups_by_project` in `tests/session_manager_mvp.rs`.
+//! Test: `fleet_route_marks_dead_session_unresumable` in
+//! `tests/session_manager_mvp.rs`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::{extract::State, response::IntoResponse};
+use axum::{
+    extract::{Query, State},
+    response::IntoResponse,
+};
 use serde::Serialize;
 use tracing::warn;
 
@@ -17,6 +22,7 @@ use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::SessionRecord;
 
+use super::summary::checked_summaries_with;
 use super::{SessionSummary, checked_summaries};
 
 /// Per-project group entry for GET /api/v1/sessions/managed/fleet.
@@ -60,18 +66,30 @@ pub struct FleetByProjectResponse {
 /// landscape, not just active ones). Each session's `unresumable` flag (#2595)
 /// is computed via [`checked_summaries`] — the SAME checked, concurrently-probed
 /// path `list_managed_sessions` uses — so the TUI (the primary consumer of
-/// this route) never offers a dead session for resume either.
-/// Test: `fleet_route_groups_by_project` in `tests/session_manager_mvp.rs`;
-/// `fleet_route_marks_dead_session_unresumable` in the same file (#2595).
-pub async fn fleet_by_project_route(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
-    fleet_core(&state).await // #6288
+/// this route) never offers a dead session for resume either. The optional
+/// `?slim=true` (or `slim=1`) query parameter skips the per-session
+/// `stale_assets` probe, as on the list route (#4335); anything else (absent,
+/// `slim=false`, malformed, an unknown key) keeps the full probe.
+/// Test: `fleet_route_marks_dead_session_unresumable` in
+/// `tests/session_manager_mvp.rs` (#2595);
+/// `managed_fleet_slim_skips_only_the_stale_assets_probe`.
+pub async fn fleet_by_project_route(
+    State(state): State<Arc<DaemonState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    // #10476: `?slim=true` lets the tui poll skip the stale-assets probe.
+    let slim = q.get("slim").is_some_and(|v| v == "true" || v == "1");
+    fleet_core(&state, slim).await // #6288
 }
 
 /// The transport-neutral body of `GET .../managed/fleet` (#6288), served over
-/// the socket as `mpm.managed.fleet`.
+/// the socket as `mpm.managed.fleet`. `slim` skips the stale-assets probe
+/// (#10476); `unresumable` is computed either way.
 ///
-/// Test: `managed_fleet_parity` in `daemon::rpc::managed_tests`.
-pub(crate) async fn fleet_core(state: &Arc<DaemonState>) -> RouteOutcome {
+/// Test: `managed_fleet_parity`,
+/// `managed_fleet_slim_skips_only_the_stale_assets_probe` in
+/// `daemon::rpc::managed_tests`.
+pub(crate) async fn fleet_core(state: &Arc<DaemonState>, slim: bool) -> RouteOutcome {
     let mgr = state.session_manager().await;
     let registry = state.project_registry().await;
 
@@ -99,7 +117,12 @@ pub(crate) async fn fleet_core(state: &Arc<DaemonState>) -> RouteOutcome {
         project_groups.push(FleetProjectGroup {
             project_name: pf.project.name.clone(),
             repo_url: pf.project.repo_url.clone(),
-            sessions: checked_summaries(&pf.sessions).await,
+            // #10476: the default (non-slim) call is unchanged.
+            sessions: if slim {
+                checked_summaries_with(&pf.sessions, false).await
+            } else {
+                checked_summaries(&pf.sessions).await
+            },
         });
     }
 

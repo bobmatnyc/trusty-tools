@@ -339,7 +339,7 @@ fn apply_activity_outcome(
 ///
 /// Why: one place owns the two-call fetch + merge so [`project_ctl_poll_daemon`]
 /// stays a thin health/rediscover wrapper.
-/// What: GETs `registry_list_projects` and `fleet_managed_sessions`, then
+/// What: GETs `registry_list_projects` and `fleet_managed_sessions_slim`, then
 /// builds the `Vec<ProjectRow>` (registry order, counts from the matching
 /// fleet group), the `sessions_by_project` map (every fleet group, even a
 /// project the registry list omitted — defensive against a transient
@@ -358,7 +358,8 @@ async fn fetch_projects_and_sessions(
     std::collections::BTreeMap<String, Project>,
 )> {
     let projects = client.registry_list_projects(None).await?;
-    let groups = client.fleet_managed_sessions().await?;
+    // #10476: the tui reads `unresumable`, never `stale_assets`.
+    let groups = client.fleet_managed_sessions_slim().await?;
 
     let mut sessions_by_project = std::collections::BTreeMap::new();
     for group in &groups {
