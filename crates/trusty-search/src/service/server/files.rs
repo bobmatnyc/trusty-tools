@@ -5,9 +5,8 @@
 //! corpus (`POST /index-file`, `POST /remove-file`, `GET /chunks`,
 //! `POST /grep`, `GET /call_chain`) into one focused module.
 //! What: the transport-free cores behind the index-file, remove-file, chunks,
-//! grep and call-chain routes, `grep_one_index`, and their param types. #9214
-//! (ruling D1): the HTTP handlers that wrap them live in `files_http`,
-//! compiled only for tests.
+//! grep and call-chain routes, `grep_one_index`, and their param types. #9939:
+//! the test-only axum handlers that wrapped them are gone.
 //! Test: `grep_endpoint_returns_matches` and related.
 use axum::{http::StatusCode, Json};
 use serde::Deserialize;
@@ -19,13 +18,6 @@ use super::helpers::file_is_within_any_root;
 use super::router::{IndexFileRequest, RemoveFileRequest};
 use super::state::SearchAppState;
 
-// #9214 (D1): the HTTP routes moved to `files_http`, compiled only for tests.
-#[cfg(test)]
-pub(super) use super::files_http::{
-    call_chain_handler, get_index_chunks_handler, global_grep_handler, grep_handler,
-    index_file_handler, remove_file_handler,
-};
-
 /// The body `POST /indexes/{id}/index-file` serves, without the transport
 /// (#6285 slice 4).
 ///
@@ -33,7 +25,7 @@ pub(super) use super::files_http::{
 /// that matters is the one #5061 named — a write that never landed reported as
 /// one that did — so the error arm returning `index_file_failed` rather than
 /// `indexed: true` has to be the SAME arm on both transports.
-/// What: `index_file_handler`'s whole former body, with the refusal as its
+/// What: the former `index_file_handler`'s whole body, with the refusal as its
 /// HTTP status beside its body. #8976: `indexed` is `true` only when chunks
 /// landed (or a tombstone removed them); a zero-chunk write answers
 /// `indexed: false` with a `reason`, and every body carries `chunks`. #8922:
@@ -277,7 +269,7 @@ const MAX_CHUNKS_LIMIT: usize = 1_000;
 /// Why: `search.chunks.list` pages the same corpus over the socket. The two
 /// pagination modes disagree on ordering by design, so a second implementation
 /// would be the one place a caller could silently lose or duplicate rows.
-/// What: `get_index_chunks_handler`'s whole former body, including the
+/// What: the former `get_index_chunks_handler`'s whole body, including the
 /// `MAX_CHUNKS_LIMIT` clamp and the mode selection.
 /// Test: `chunks_over_the_socket_matches_the_http_body`.
 pub(crate) async fn index_chunks_report(
@@ -287,7 +279,7 @@ pub(crate) async fn index_chunks_report(
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     // #4715: 404 must mean "no such index anywhere", not "not resident" —
-    // see `index_status_handler` for why the MCP layer depends on that.
+    // see `index_status_report` for why the MCP layer depends on that.
     // #5061: the miss now carries a body, via the builder all three
     // non-reloading endpoints share.
     let handle = match state.registry.get(&index_id) {
@@ -452,7 +444,7 @@ async fn grep_one_index(
 
 /// Render a grep or call-chain corpus-read failure as the shared 503 (#5917).
 ///
-/// Why: both grep handlers and `call_chain_handler` need the identical mapping,
+/// Why: both grep cores and `call_chain_report` need the identical mapping,
 /// and BOTH sub-cases belong under one shape. `ensure_corpus_view_is_current`
 /// raises a typed `CorpusReadUnavailable` for a read that FAILED and an untyped
 /// bail for a rehydrate still in flight past the retry budget — but a caller
@@ -478,7 +470,7 @@ fn corpus_backed_read_error(
 /// Why: `search.grep` answers the same question over the socket. One body is
 /// what stops the two transports compiling the same pattern into different
 /// matchers, or one reporting an unreadable corpus as zero matches.
-/// What: `grep_handler`'s whole former body. A refusal keeps its HTTP status
+/// What: the former `grep_handler`'s whole body. A refusal keeps its HTTP status
 /// beside its body, because that status is what
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code — so a cold-parked index is the retryable 503 class on both.
@@ -504,7 +496,7 @@ pub(crate) async fn grep_report(
         )
     })?;
     let index_id = IndexId::new(id.to_string());
-    // #4715: same rule as `index_status_handler` — a cold-parked index exists.
+    // #4715: same rule as `index_status_report` — a cold-parked index exists.
     // #5061: the three-way verdict (and the `restore_via` hint that tells a
     // caller a plain `search` reloads a cold-parked index) now lives in one
     // builder, so this handler cannot drift from its two neighbours.
@@ -563,7 +555,7 @@ pub(crate) async fn grep_report(
 /// fan-out's tolerance rules — an unknown `index_id` narrows to nothing rather
 /// than 404-ing, one unreadable corpus refuses the whole sweep — are exactly the
 /// kind a second implementation would get subtly wrong.
-/// What: `global_grep_handler`'s whole former body.
+/// What: the former `global_grep_handler`'s whole body.
 /// Test: `global_grep_over_the_socket_matches_the_http_body`.
 pub(crate) async fn global_grep_report(
     state: &Arc<SearchAppState>,
@@ -645,7 +637,7 @@ pub(crate) async fn global_grep_report(
 /// the daemon) need to specify an entry point and traversal options without
 /// posting a JSON body.
 /// What: mirrors the `get_call_chain` MCP tool args.
-/// Test: integration test `test_call_chain_handler_*`.
+/// Test: `call_chain_over_the_socket_reports_a_kg_disabled_index_as_unavailable`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct CallChainParams {
     pub(crate) entry_point: String,
@@ -661,9 +653,8 @@ pub(crate) struct CallChainParams {
 /// route's value is the rendered text, and the three refusal classes it
 /// distinguishes — invalid params, unknown index, KG disabled — are what a
 /// caller branches on, so both transports must derive them from one body.
-/// What: `call_chain_handler`'s whole former body up to the response. The
-/// result is the plain-text report; the socket returns it as a JSON string and
-/// the handler above sets the `text/plain` content type.
+/// What: the former `call_chain_handler`'s whole body up to the response. The
+/// result is the plain-text report; the socket returns it as a JSON string.
 /// Test: `call_chain_over_the_socket_matches_the_http_body`,
 /// `call_chain_over_the_socket_reports_a_kg_disabled_index_as_unavailable`.
 pub(crate) async fn call_chain_report(

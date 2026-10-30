@@ -665,9 +665,12 @@ Per-index stats.
     window applies to whose length could not be counted (no tokenizer, a
     tokenizer error, or a failed count task). `window: null` means either no
     embed pass has run since the daemon started, or the embedder reports no
-    window (every sidecar embedder today, since no window crosses the wire);
+    window (a sidecar that predates the optional `result.window` field, #9284);
     in the second case nothing is counted, and `0` does not mean nothing was
-    cut. Each embed pass logs one WARN per affected file for at most 8 files,
+    cut. A sidecar reports its window on its first answer, so a lazy sidecar's
+    first pass learns it after its first wave and counts from there. Counts
+    need the MiniLM tokenizer in the fastembed cache; without it the chunks
+    are `unmeasured`, not `truncated`. Each embed pass logs one WARN per affected file for at most 8 files,
     then one summary.
 - **Response 404 / 503**: see the index-scoped error contract above.
 
@@ -807,6 +810,18 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     installs its embedder. The `search.query.all` fan-out carries the same
     object as a top-level `embedder`. Whether the index's own vectors are
     built is a separate signal: `vector_unavailable` and `search_capabilities`.
+  - `meta.timings` (#10195): milliseconds per stage — `resolve_ms` (index
+    lookup, including a cold lazy load), `lock_ms` (the index read lock),
+    `embed_ms` (query and `refine_query` embeds), `vector_ms`, `lexical_ms`,
+    `ripgrep_ms` (grep lane, grep fallback, exact-match lane), `fusion_ms` (RRF,
+    MMR, KG, score adjustments, materialisation), `rehydrate_wait_ms` (inside
+    `lexical_ms` and `ripgrep_ms`) and `total_ms`, equal to `latency_ms`, which now starts
+    before the index is resolved. `rehydrate_ran` / `hnsw_promoted` say
+    whether the query started a corpus rehydrate or ran while the vector index
+    promoted its mmap view. The `search` log line carries the same fields. A
+    search the query deadline cancels logs one `query_timeout` line at WARN
+    with `index_id`, `query`, `stage` and `elapsed_ms`; `search_all` logs one
+    `info` line naming its target indexes.
   - `meta.dropped` / `meta.dropped_total` (#2203): how many candidates this
     query retrieved and then discarded, per site. Without it a short `results`
     array was indistinguishable from a small match set. Sites:

@@ -12,7 +12,6 @@ use super::*;
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::indexer::{CodeIndexer, ParsedBatch};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
-use axum::extract::State;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -80,13 +79,9 @@ async fn status_and_search_meta(
         .unwrap_or_else(|(code, body)| panic!("status {code}: {body}"));
     let query =
         serde_json::from_value(serde_json::json!({ "text": "shared_probe" })).expect("SearchQuery");
-    let axum::Json(body) = super::search::search_handler(
-        State(Arc::clone(state)),
-        axum::extract::Path(id.to_string()),
-        axum::Json(query),
-    )
-    .await
-    .unwrap_or_else(|(code, axum::Json(body))| panic!("search {code}: {body}"));
+    let body = super::search_report(state, id, query)
+        .await
+        .unwrap_or_else(|(code, body)| panic!("search {code}: {body}"));
     (status, body["meta"].clone())
 }
 

@@ -118,7 +118,11 @@ const WORKFLOW: ShippedSkill = ShippedSkill {
 const STRATEGY: ShippedSkill = ShippedSkill {
     stem: "architect-strategy",
     // #10161: the U1b text, before the factory issue-tracking rule.
-    previous: &["2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77"],
+    // The text before the daily factory status-update rule.
+    previous: &[
+        "2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77",
+        "5388a82b3a5bcab32b10486084d185da24770620aa825099b19327d7a8203dd9",
+    ],
 };
 
 /// `architect-project-provision`, edited since its first release.
@@ -130,6 +134,20 @@ const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
         "102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8",
         "a1059ba1af14510618d08bd6f99bc46861052f3418ce3bb21fa2c627c908860b",
     ],
+};
+
+/// `architect-improvements`, edited since its first release.
+const IMPROVEMENTS: ShippedSkill = ShippedSkill {
+    stem: "architect-improvements",
+    // R-192/R-193: the D2 text, before the owner-asks rules.
+    previous: &["bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0"],
+};
+
+/// `architect-dashboard`, edited since its first release.
+const DASHBOARD: ShippedSkill = ShippedSkill {
+    stem: "architect-dashboard",
+    // R-192/R-193: the D3b text, before the owner-asks rules.
+    previous: &["c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a"],
 };
 
 /// A skill on its first release: no earlier shipped text to recognise.
@@ -160,10 +178,10 @@ pub const SHIPPED: &[ShippedSkill] = &[
     first_release("architect-review"),
     PROJECT_PROVISION,
     first_release("architect-macos"),
-    first_release("architect-improvements"),
+    IMPROVEMENTS,
     first_release("architect-host-admin"),
     // #10161 D3b: the dashboard skill, with the served page it describes.
-    first_release("architect-dashboard"),
+    DASHBOARD,
 ];
 
 /// The deploy record, beside the skills in the project tier.

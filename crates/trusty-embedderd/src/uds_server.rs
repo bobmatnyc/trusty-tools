@@ -177,7 +177,10 @@ pub async fn dispatch_request(frame: &str, queue: &BatchQueue) -> RpcResponse {
 
     match queue.embed_many(params.texts).await {
         Ok(embeddings) => {
-            let result = match serde_json::to_value(EmbedResult { embeddings }) {
+            let result = match serde_json::to_value(EmbedResult {
+                embeddings,
+                window: queue.input_window(),
+            }) {
                 Ok(v) => v,
                 Err(e) => {
                     return RpcResponse::err(id, ERR_INTERNAL, format!("serialise result: {e}"));
@@ -315,6 +318,21 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("embeddings array");
         assert_eq!(embs.len(), 2);
+    }
+
+    /// #9284: a success frame carries the embedder's input window, and a
+    /// window-less embedder leaves the field out of the frame.
+    #[tokio::test]
+    async fn dispatch_reports_the_embedder_window() {
+        let windowed: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(EMBED_DIM).with_chunking(256));
+        let q = BatchQueue::new(windowed, BatchConfig::default());
+        let frame = r#"{"jsonrpc":"2.0","method":"embed","params":{"texts":["a"]},"id":1}"#;
+        let result = dispatch_request(frame, &q).await.result.expect("result");
+        assert_eq!(result.get("window").and_then(|w| w.as_u64()), Some(256));
+
+        let q = test_queue();
+        let result = dispatch_request(frame, &q).await.result.expect("result");
+        assert!(result.get("window").is_none(), "no window, no field");
     }
 
     #[tokio::test]

@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use trusty_common::control_bus::{PushClient, PushFlushOutcome};
+use trusty_common::control_bus::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
 
 use crate::core::hook::HookEventRecord;
 use crate::daemon::DaemonState;
@@ -45,6 +45,7 @@ pub mod message;
 pub mod projection;
 // #9167 PR2: the receiving side of a cross-session message.
 pub mod received;
+mod replayed;
 // #10412: the once-only settle at stop.
 mod settle;
 pub use settle::Settled;
@@ -174,6 +175,12 @@ impl ActionEvents {
     }
 }
 
+/// The push buffer's byte budget: 8 MiB, the `PushClient` default.
+///
+/// #10467: named here because the replay claims no more than the buffer
+/// holds ([`spool::Budget`]), and trusty-common does not export its default.
+const BUFFER_BYTES: u64 = 8 * 1024 * 1024;
+
 /// One buffered `PushClient` plus the projection state.
 ///
 /// Why: one per daemon, shared behind an `Arc` by the hook path and the flush
@@ -194,13 +201,24 @@ pub struct ActionPublisher {
     spool: Option<PathBuf>,
     /// #10412: the once-only settle and the closed buffer ([`settle`]).
     settle: settle::SettleState,
+    /// #10467: replayed spool files, held until their events are written.
+    replayed: replayed::Replayed,
+    /// #10467: the buffer's room, which bounds what a replay claims.
+    budget: spool::Budget,
 }
 
 impl ActionPublisher {
     /// A publisher dialling `socket`, showing paths relative to `$HOME`.
     pub fn new(socket: impl Into<PathBuf>) -> Self {
+        Self::with_buffer(socket, DEFAULT_PUSH_BUFFER_CAPACITY, BUFFER_BYTES)
+    }
+
+    /// A publisher whose buffer holds `events` frames and `bytes` bytes.
+    ///
+    /// #10467: the replay budget is half of each limit.
+    pub fn with_buffer(socket: impl Into<PathBuf>, events: usize, bytes: u64) -> Self {
         Self {
-            client: PushClient::new(socket),
+            client: PushClient::with_limits(socket, events, bytes),
             threader: parking_lot::Mutex::new(projection::Threader::new(dirs::home_dir())),
             seq: AtomicU64::new(0),
             flush_interval: DEFAULT_FLUSH_INTERVAL,
@@ -208,6 +226,13 @@ impl ActionPublisher {
             scanning: parking_lot::Mutex::new(()),
             spool: None,
             settle: settle::SettleState::default(),
+            replayed: replayed::Replayed::default(),
+            // #10467: half the buffer, so hooks before the first flush
+            // fit beside the replay instead of evicting it.
+            budget: spool::Budget {
+                events: (events / 2).max(1),
+                bytes: (bytes / 2).max(1),
+            },
         }
     }
 
@@ -215,52 +240,6 @@ impl ActionPublisher {
     pub fn with_spool(mut self, dir: Option<PathBuf>) -> Self {
         self.spool = dir;
         self
-    }
-
-    /// Buffer every event a previous run spooled; returns how many.
-    ///
-    /// Why: events spooled at shutdown reach the bus only if a later start
-    /// sends them (#10412).
-    /// What: [`spool::take_all`] takes each file under a lock and deletes it, so a file is
-    /// replayed once; its events join the buffer ahead of any new hook.
-    /// Overflow is counted in [`Self::dropped`], and logged here too.
-    /// Test: `spooled_events_replay_on_the_next_start_exactly_once_10412`.
-    pub fn replay_spool(&self) -> usize {
-        let Some(dir) = &self.spool else { return 0 };
-        let replay = match spool::take_all(dir) {
-            Ok(replay) => replay,
-            Err(e) => {
-                tracing::warn!(error = %e, dir = %dir.display(), "action events: spool unreadable; nothing replayed");
-                return 0;
-            }
-        };
-        if replay.skipped > 0 || replay.failed_files > 0 {
-            tracing::warn!(
-                skipped = replay.skipped,
-                failed_files = replay.failed_files,
-                "action events: part of the spool was unreadable"
-            );
-        }
-        if replay.held > 0 {
-            tracing::info!(
-                held = replay.held,
-                "action events: spool files held by a live process; left to it"
-            );
-        }
-        let dropped_before = self.client.dropped();
-        let count = replay.events.len();
-        for event in replay.events {
-            self.buffer(event);
-        }
-        let overflowed = self.client.dropped().saturating_sub(dropped_before);
-        if count > 0 {
-            tracing::info!(
-                replayed = count,
-                overflowed,
-                "action events: replayed the spool from the last stop"
-            );
-        }
-        count
     }
 
     /// Show paths outside a session's `cwd` relative to `home`.
@@ -404,8 +383,11 @@ impl ActionPublisher {
     }
 
     /// Drain the buffer to the bus once (the only call that does I/O).
+    ///
+    /// #10467: through [`Self::flush_counted`], so a replayed spool file
+    /// goes only once its events are written.
     pub async fn flush(&self) -> PushFlushOutcome {
-        self.client.flush().await
+        self.flush_counted().await
     }
 
     /// Events waiting for a flush.
@@ -418,20 +400,26 @@ impl ActionPublisher {
         self.client.dropped()
     }
 
-    /// Drain once per interval until aborted. A slow flush delays the next
-    /// tick rather than stacking; no connection is held between flushes.
+    /// Drain at once, then once per interval until aborted. A slow flush
+    /// delays the next tick rather than stacking; no connection is held
+    /// between flushes.
+    ///
+    /// Test: `a_capacity_spool_file_retires_after_a_hook_and_the_deferred_file_follows_10467`.
     pub fn spawn_flush_task(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             let every = me.flush_interval;
-            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            // #10467: the first tick is immediate, so a replay goes out
+            // before hooks can evict it from the buffer.
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now(), every);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut health = FlushHealth::default();
             loop {
                 tick.tick().await;
                 // #9167: received messages ride the same flush.
                 me.collect_received().await;
-                let outcome = me.client.flush().await;
+                // #10467: counted, so delivered replay files are retired.
+                let outcome = me.flush_counted().await;
                 health.report(&outcome, me.client.dropped(), Instant::now());
             }
         })
@@ -532,27 +520,71 @@ pub fn bus_allowed(data_dir_overridden: bool, real_environment: bool) -> bool {
     data_dir_overridden || real_environment
 }
 
-/// [`start_with`] on this process's environment and `events_socket_path`.
+/// Where [`start_at`] dials and spools (#10464).
+///
+/// Why: a test drives the production start on a scratch bus and data dir
+/// without setting the process-global data-dir override.
+pub struct StartAt {
+    /// [`bus_allowed`]'s verdict.
+    pub allowed: bool,
+    /// The bus socket; called only when `allowed`.
+    pub socket: Box<dyn FnOnce() -> anyhow::Result<PathBuf>>,
+    /// The data dir the spool lives under; `Err` starts with no spool.
+    pub data_dir: anyhow::Result<PathBuf>,
+}
+
+impl StartAt {
+    /// This process's environment, `events_socket_path` and data dir.
+    pub fn from_env(state: &DaemonState) -> Self {
+        let overridden =
+            std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty());
+        let real = crate::core::host_state_gate::host_state_access_for_root(state.framework_root())
+            .is_allowed();
+        Self {
+            allowed: bus_allowed(overridden, real),
+            socket: Box::new(trusty_common::control_bus::events_socket_path),
+            data_dir: trusty_common::resolve_data_dir("trusty-mpm"),
+        }
+    }
+}
+
+/// [`start_at`] on [`StartAt::from_env`].
 pub fn start(state: &DaemonState) -> bool {
-    let overridden =
-        std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty());
-    let real = crate::core::host_state_gate::host_state_access_for_root(state.framework_root())
-        .is_allowed();
+    start_at(state, StartAt::from_env(state))
+}
+
+/// [`start_with_spool`] with the spool under `at.data_dir`.
+///
+/// Test: `sm_stdio_stop_spools_and_next_start_replays_10464`.
+pub fn start_at(state: &DaemonState, at: StartAt) -> bool {
     // #10412: the spool follows the data dir, as the bus socket does.
-    let spool = match trusty_common::resolve_data_dir("trusty-mpm") {
+    let spool = match at.data_dir {
         Ok(data_dir) => Some(spool::spool_dir(&data_dir)),
         Err(e) => {
             tracing::warn!(error = %format!("{e:#}"), "action events: no data dir; events undelivered at stop are lost");
             None
         }
     };
-    start_with_spool(
-        state,
-        bus_allowed(overridden, real),
-        DEFAULT_FLUSH_INTERVAL,
-        trusty_common::control_bus::events_socket_path,
-        spool,
-    )
+    start_with_spool(state, at.allowed, DEFAULT_FLUSH_INTERVAL, at.socket, spool)
+}
+
+/// The serve exit's settle: the bounded final flush, then `served` back.
+///
+/// Why: a dead accept loop returns its error without stopping the managed
+/// sessions, so no later step logs the late total on that exit.
+/// What: [`ActionEvents::shutdown`]; on `Err`, also
+/// [`ActionEvents::report_late`]. The `Ok` path logs it after the sessions stop.
+/// Test: `a_serve_error_still_logs_the_final_late_total_10464`.
+pub async fn settle_serve_exit(
+    state: &DaemonState,
+    served: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    state.action_events().shutdown().await;
+    if served.is_err() {
+        // #10464: the error exit returns before the `Ok` path's late total.
+        state.action_events().report_late();
+    }
+    served
 }
 
 /// [`start_with_spool`] with no spool: what the bus does not take at stop is
@@ -626,6 +658,8 @@ pub fn start_with_spool(
 mod message_tests;
 #[cfg(test)]
 mod received_tests;
+#[cfg(test)]
+mod replayed_tests;
 #[cfg(test)]
 mod spool_tests;
 #[cfg(test)]

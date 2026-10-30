@@ -653,6 +653,12 @@ fn write_project_hooks_enabled_output_is_unchanged_by_the_toggle() {
         .cloned()
         .collect();
     let mut owned = project_managed_hook_events();
+    // #10459: the strip domain also owns the Architect-only
+    // `UserPromptExpansion` key; a PM file carries no tm entry there, so
+    // stripping it is still a no-op for every PM write.
+    let architect_only = owned.iter().position(|e| e == "UserPromptExpansion");
+    assert!(architect_only.is_some(), "{owned:?}");
+    owned.retain(|e| e != "UserPromptExpansion");
     from_additions.sort();
     owned.sort();
     assert_eq!(

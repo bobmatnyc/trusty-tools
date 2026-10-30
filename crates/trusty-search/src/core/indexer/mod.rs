@@ -54,6 +54,7 @@ pub use idle_evict::WriteCooldownPersist;
 mod ingest;
 // #9284: named in `embed_window_stats`, read by the status report.
 pub(crate) use ingest::truncation::EmbedWindowStats;
+pub use ingest::window_split::deferred_split_enabled;
 pub(crate) mod migration_state;
 pub(crate) mod migrations;
 mod persist;
@@ -165,6 +166,9 @@ pub use search::exact::ExactMatchReport;
 pub use search::lexical_lane::{
     check_lexical_limit, LexicalLaneDefaults, LexicalLimitError, MAX_LEXICAL_LIMIT, ORIGIN_CONFIG,
 };
+// #10195: per-stage search timings and the query phase.
+pub(crate) use search::timings as query_timings;
+pub use search::timings::{QueryPhase, SearchTimings};
 pub use search::SearchOutcome;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
@@ -399,7 +403,7 @@ pub struct CodeIndexer {
     /// see `search::lanes::bm25_search` / `grep_fallback_search`) is the
     /// machine-readable signal that closes that gap, surfaced in the search
     /// HTTP response's `meta.bm25_lane_degraded` field
-    /// (`service::server::search::search_handler`) mirroring how
+    /// (`service::server::search::search_report`) mirroring how
     /// `WarmBootSummary.warm_boot_degraded` is surfaced on `/health`.
     /// What: set `true` by either lane's retry-exhausted tail; reset to
     /// `false` by `idle_evict::spawn_detached_rehydrate`'s commit-success
@@ -1166,7 +1170,7 @@ impl CodeIndexer {
     /// Why: the `GET /indexes/{id}/graph` endpoint needs to read the whole
     /// symbol graph without holding a lock.
     /// What: clones the inner `Arc<SymbolGraph>` while holding the read lock.
-    /// Test: covered by the `graph_handler` integration path.
+    /// Test: `graph_report_exports_nodes_and_edges`.
     pub async fn snapshot_symbol_graph(&self) -> Arc<SymbolGraph> {
         Arc::clone(&*self.symbol_graph.read().await)
     }
@@ -1299,7 +1303,7 @@ impl CodeIndexer {
     /// boot-race fix, PR #3784 review finding 1).
     ///
     /// Why: `restore_one_index` / `restore_index_on_demand` /
-    /// `create_index_handler` / the relocate handler all resolve the pool
+    /// `create_index_report` / the relocate handler all resolve the pool
     /// via `state.current_embed_pool()` at construction time — but
     /// `install_embedder` (which unblocks these handlers) completes strictly
     /// BEFORE `install_embed_pool` in `commands/start/daemon.rs`, so a

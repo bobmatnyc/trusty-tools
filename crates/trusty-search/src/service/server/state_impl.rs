@@ -113,7 +113,7 @@ impl SearchAppState {
             ),
             shutdown_tx: Arc::new(shutdown_tx),
             // PR #1103: in-memory rate-limit gate replacing the sync disk read
-            // that `search_handler` previously did on every warm query.
+            // that `search_report` previously did on every warm query.
             last_queried_write_cache: Arc::new(DashMap::new()),
             // Issue #1621: empty until indexes register; populated by the
             // warm-boot restore + `POST /indexes` paths.
@@ -132,7 +132,7 @@ impl SearchAppState {
             // read wait-free by `/health` via `ArcSwapOption`.
             switchable_embedder: Arc::new(arc_swap::ArcSwapOption::empty()),
             // Issue #3748 slice A: 0 until the first deferred-embed catch-up
-            // drain is observed by `health_handler`.
+            // drain is observed by `health_report`.
             last_seen_defer_embed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             warm: Arc::new(super::warm_all::WarmTracker::default()),
         }
@@ -411,7 +411,7 @@ impl SearchAppState {
     /// `install_embedder`'s readiness watch) while this handle is still
     /// `None`. `/health` additionally treats a `None` read here as
     /// non-fatal regardless (falls back to the pre-PR-2 provider-inference
-    /// path — see `health::health_handler`), so a caller that races this
+    /// path — see `health::health_report`), so a caller that races this
     /// ordering some other way still gets a graceful answer, never a panic
     /// or a 500.
     /// What: `store`s into the wait-free `ArcSwapOption` — never blocks a

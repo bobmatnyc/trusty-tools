@@ -36,7 +36,9 @@ pub(crate) const MAX_FILE_WARNINGS_PER_PASS: usize = 8;
 /// tokens included, exceeded the window. `unmeasured` counts embed events the
 /// window applied to but whose length could not be counted. `window` is the
 /// window of the latest embed pass, `0` when that embedder reports none, and
-/// stays `0` until a pass runs since the indexer was built.
+/// stays `0` until a pass runs since the indexer was built. `chunks_split`
+/// counts chunks the split step replaced with windows that each fit (#10481);
+/// those windows count in neither `truncated` nor `unmeasured`.
 /// Test: `a_chunk_over_the_window_counts_exactly_once`,
 /// `a_chunk_within_the_window_does_not_count`,
 /// `a_second_embed_of_the_same_chunk_counts_again`.
@@ -45,6 +47,7 @@ pub struct EmbedWindowStats {
     truncated: AtomicU64,
     unmeasured: AtomicU64,
     window: AtomicUsize,
+    chunks_split: AtomicU64,
 }
 
 impl EmbedWindowStats {
@@ -56,6 +59,16 @@ impl EmbedWindowStats {
     /// Embedded chunks whose length could not be counted against the window.
     pub fn unmeasured(&self) -> u64 {
         self.unmeasured.load(Ordering::Relaxed)
+    }
+
+    /// Chunks replaced by window-sized chunks before embedding (#10481).
+    pub fn chunks_split(&self) -> u64 {
+        self.chunks_split.load(Ordering::Relaxed)
+    }
+
+    /// Count `n` chunks split at the window (#10481).
+    pub(crate) fn add_split(&self, n: u64) {
+        self.chunks_split.fetch_add(n, Ordering::Relaxed);
     }
 
     /// The latest pass's window; `None` before any pass has run, or when the
@@ -106,8 +119,7 @@ pub(crate) enum Measure {
 /// `an_embedder_with_no_window_counts_nothing`.
 #[derive(Clone)]
 pub(crate) enum WindowProbe {
-    // See #9284: a sidecar embedder carries no window on the wire (plan Q2),
-    // so its chunks are not counted and no window is invented for it.
+    // #9284: no window reported (an older sidecar, or one not yet spawned).
     Unknown,
     Blind {
         window: usize,
@@ -150,7 +162,10 @@ impl WindowProbe {
 
     /// Start measuring `chunks`; tokenizing runs on a blocking thread so it
     /// overlaps the embed call and never stalls the runtime.
-    pub(crate) fn start(&self, chunks: &[RawChunk]) -> PendingMeasure {
+    ///
+    /// `headers` (1:1 with `chunks`) measure the text the embedder receives: the
+    /// header each chunk is sent with, when the pass adds one (#10481).
+    pub(crate) fn start(&self, chunks: &[RawChunk], headers: Option<&[String]>) -> PendingMeasure {
         match self {
             Self::Unknown => PendingMeasure::Skip,
             Self::Blind { reason, .. } => PendingMeasure::Ready(vec![
@@ -161,7 +176,13 @@ impl WindowProbe {
             ]),
             Self::Counting { window, tokenizer } => {
                 let (window, tokenizer) = (*window, Arc::clone(tokenizer));
-                let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+                let texts: Vec<String> = chunks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        super::window_split::embed_text(c, headers.map(|h| h[i].as_str()))
+                    })
+                    .collect();
                 let n = texts.len();
                 let task = tokio::task::spawn_blocking(move || {
                     texts
@@ -277,6 +298,11 @@ pub(crate) struct PassTally {
 }
 
 impl PassTally {
+    /// Adopt a window learned mid-pass (#9284), so warnings name it.
+    pub(crate) fn set_window(&mut self, window: usize) {
+        self.window = window;
+    }
+
     pub(crate) fn new(window: Option<usize>) -> Self {
         Self {
             window: window.unwrap_or(0),

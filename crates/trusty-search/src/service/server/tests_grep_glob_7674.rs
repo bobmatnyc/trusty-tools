@@ -8,13 +8,11 @@
 //! caller could not tell a real zero from a broken filter. The fixture below
 //! mirrors those two sibling paths exactly.
 
-use super::files::{global_grep_handler, grep_handler};
+use super::files::{global_grep_report, grep_report};
 use super::tests_grep::stage_grep_index;
 use super::*;
 use crate::service::grep::GrepRequest;
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 
 /// The sibling that L4 globbed successfully.
 const WORKING_SIBLING: &str = "crates/trusty-mpm/src/core/session_launch/settings.rs";
@@ -47,10 +45,9 @@ async fn grep(
     state: Arc<SearchAppState>,
     glob: Option<&str>,
 ) -> crate::service::grep::GrepResponse {
-    let Json(resp) = grep_handler(State(state), Path("grep-test".to_string()), Json(req(glob)))
+    grep_report(&state, "grep-test", req(glob))
         .await
-        .expect("200");
-    resp
+        .expect("200")
 }
 
 /// The files a response reports, sorted, for order-independent comparison.
@@ -222,18 +219,11 @@ async fn grep_reports_a_glob_that_selected_no_files() {
 #[serial_test::parallel]
 async fn a_glob_that_fails_to_parse_is_an_error_not_an_empty_result() {
     let (state, _tmp) = both_siblings().await;
-    let err = grep_handler(
-        State(state),
-        Path("grep-test".to_string()),
-        Json(req(Some("crates/[unterminated"))),
-    )
-    .await
-    .expect_err("an unparseable glob must be rejected");
+    let err = grep_report(&state, "grep-test", req(Some("crates/[unterminated")))
+        .await
+        .expect_err("an unparseable glob must be rejected");
     assert_eq!(err.0, StatusCode::BAD_REQUEST);
-    let msg = err.1 .0["error"]
-        .as_str()
-        .expect("error string")
-        .to_string();
+    let msg = err.1["error"].as_str().expect("error string").to_string();
     assert!(
         msg.contains("invalid glob pattern"),
         "the 400 must name the glob as the cause, was: {msg}"
@@ -256,7 +246,7 @@ async fn a_request_without_a_glob_carries_no_meta() {
 #[serial_test::parallel]
 async fn global_grep_reports_the_glob_diagnostic_too() {
     let (state, _tmp) = both_siblings().await;
-    let Json(resp) = global_grep_handler(State(state), Json(req(Some("src/**/*.rs"))))
+    let resp = global_grep_report(&state, req(Some("src/**/*.rs")))
         .await
         .expect("200");
     assert_eq!(resp.total, 0);

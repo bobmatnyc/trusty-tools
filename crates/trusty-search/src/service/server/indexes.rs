@@ -3,19 +3,13 @@
 //! Why: Groups the core index registry endpoints (`GET /indexes`, `POST /indexes`)
 //! with their request/response types. The `PATCH /indexes/:id` relocate handler
 //! lives in `indexes_relocate` to keep this file under the 500-line cap.
-//! What: `list_indexes_handler`, `create_index_handler`, and the types they use
+//! What: `list_indexes_report`, `create_index_report`, and the types they use
 //! (`ListIndexesParams`, `IndexDetailEntry`).
-//! Issue #2336: `create_index_handler` also guards against registering a
+//! Issue #2336: `create_index_report` also guards against registering a
 //! second index over a `root_path` already owned by a different registered
 //! id (409), and refuses to register a handle whose corpus open failed.
 //! Test: `create_index_rejects_relative_root_path`, `tests_2336.rs`, and
 //! related tests.
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Query, State},
-    response::{IntoResponse, Json, Response},
-};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -169,38 +163,21 @@ fn normalize_identity_filter(raw: &str) -> Option<String> {
     )
 }
 
-/// `GET /indexes[?format=tree][?details=true]` — list registered indexes.
-///
-/// Why: the default flat format is byte-compatible with today's response so
-/// existing callers (CLI, MCP, integrators) see no breaking change.  The
-/// optional `?format=tree` variant exposes the index hierarchy derived from
-/// `root_path` prefix containment (#404 MVP).  The optional `?details=true`
-/// variant returns `[{id, size_bytes}]` objects so callers can show per-index
-/// disk usage without a separate status round-trip (#312).
-/// What: without query params, returns `{ "indexes": ["id1", …] }`.
-/// With `?format=tree`, returns object array with hierarchy fields.
-/// With `?details=true`, returns `{ "indexes": [{"id": …, "size_bytes": …}] }`.
-/// Test: `list_indexes_flat_default_unchanged`, `list_indexes_tree_format_shape`,
-/// `list_indexes_details_includes_size_bytes`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn list_indexes_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Query(params): Query<ListIndexesParams>,
-) -> Response {
-    Json(list_indexes_report(&state, &params).await).into_response()
-}
-
 /// The body `GET /indexes` serves, without the transport (#6285 slice 2).
 ///
 /// Why: `search.indexes.list` answers the same question over the socket, and
 /// two implementations would let the flat / tree / details arms drift apart on
-/// one transport without the other noticing. This is the ONE body; the axum
-/// handler above wraps it in `Json` and the RPC registration returns it as the
-/// frame's `result`.
-/// What: [`list_indexes_handler`]'s whole former body, returning the value it
-/// used to serialise. `async` since #6699 — the `?details=true` arm reads each
+/// one transport without the other noticing. This is the ONE body; the RPC
+/// registration returns it as the frame's `result`. The default flat format
+/// stays byte-compatible so CLI, MCP and integrators see no breaking change;
+/// `?format=tree` adds hierarchy (#404) and `?details=true` per-index disk
+/// usage (#312).
+/// What: `{ "indexes": ["id1", …] }` flat, an object array with hierarchy
+/// fields for `format=tree`, or `[{id, size_bytes, …}]` for `details`. `async` since #6699 — the `?details=true` arm reads each
 /// handle's stage snapshot and live vector count, both behind `RwLock`s.
-/// Test: `indexes_list_over_the_socket_matches_the_http_body` in
+/// Test: `list_indexes_flat_default_unchanged`, `list_indexes_tree_format_shape`,
+/// `list_indexes_details_includes_size_bytes`;
+/// `indexes_list_over_the_socket_matches_the_http_body` in
 /// `service::rpc::reads::tests`.
 pub(crate) async fn list_indexes_report(
     state: &Arc<SearchAppState>,
@@ -306,17 +283,6 @@ pub(crate) async fn list_indexes_report(
     }
 }
 
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn create_index_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Json(req): Json<CreateIndexRequest>,
-) -> Response {
-    match create_index_report(&state, req).await {
-        Ok(body) => Json(body).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
-}
-
 /// The body `POST /indexes` serves, without the transport (#6285 slice 4).
 ///
 /// Why: `search.index.create` registers an index over the socket, and this is
@@ -324,7 +290,7 @@ pub(super) async fn create_index_handler(
 /// where the registration must NOT happen. One core is what stops the socket
 /// registering an index the HTTP route would have refused, or reporting
 /// `created: true` for a registration that did not land.
-/// What: [`create_index_handler`]'s whole former body. A refusal keeps its HTTP
+/// What: the whole `POST /indexes` body. A refusal keeps its HTTP
 /// status beside its body, because that status is what
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code.

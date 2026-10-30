@@ -13,14 +13,14 @@ const UPSTREAM_KINDS = [
   'tracked_cli_setting_refused', 'cli_not_installed', 'backend_locked',
   'file_backend_not_selected', 'backend_not_enabled', 'deadline_exceeded',
   'vault_not_visible', 'backend_timeout', 'grant_refused', 'grant_limit_reached',
-  'bridge_refused', 'agent_key_denied', 'internal',
+  'bridge_refused', 'agent_key_denied', 'ticket_refused', 'internal',
 ];
 
 const nonBlank = (lines) => lines.length > 0 && lines.every((l) => l.trim() !== '');
 
 describe('errorLines', () => {
   test('every upstream kind renders its own text', () => {
-    expect(UPSTREAM_KINDS).toHaveLength(38);
+    expect(UPSTREAM_KINDS).toHaveLength(39);
     expect(Object.keys(KIND_TEXT).sort()).toEqual([...UPSTREAM_KINDS].sort());
     for (const kind of UPSTREAM_KINDS) {
       const lines = errorLines({ status: 403, error: 'fixed', kind });

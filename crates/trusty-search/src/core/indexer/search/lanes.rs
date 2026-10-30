@@ -10,6 +10,7 @@
 //! Test: covered by every `test_search_*` and `test_kg_*` integration test
 //! in `indexer::tests`.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use anyhow::{Context, Result};
 use crate::core::classifier::QueryIntent;
 use crate::core::embed::Embedder;
 use crate::core::entity::EdgeKind;
+use crate::core::search::rrf::RRF_K;
 use crate::service::embed_pool::RequestPriority;
 
 use super::super::{hash_query, CodeIndexer, SearchQuery};
@@ -59,7 +61,7 @@ use super::path_filter;
 /// request-timeout ceiling. PROVIDED the degrade is observable: see
 /// [`CodeIndexer::lane_degraded`] and the `trusty_bm25_lane_degraded` gauge
 /// it drives (surfaced in the search HTTP response as
-/// `meta.bm25_lane_degraded` — `service::server::search::search_handler`),
+/// `meta.bm25_lane_degraded` — `service::server::search::search_report`),
 /// plus the `trusty_bm25_lane_degraded_total` / `trusty_grep_fallback_lane_degraded_total`
 /// counters, at the bottom of `bm25_search` / `grep_fallback_search`. These
 /// are the load-bearing signals distinguishing "degraded, rehydrate still
@@ -348,7 +350,7 @@ impl CodeIndexer {
         // genuinely-empty corpus at the HTTP layer. Finding 3(a): flip the
         // sticky per-index flag AND set the gauge —
         // together these are `meta.bm25_lane_degraded` in the search HTTP
-        // response (`service::server::search::search_handler`) and the
+        // response (`service::server::search::search_report`) and the
         // `trusty_bm25_lane_degraded` Prometheus signal, so both a single
         // caller and a dashboard can tell this apart from a true empty
         // result without tailing logs. Reset (finding 5) happens in
@@ -592,4 +594,36 @@ pub(super) async fn embed_one(
             .context("embed pool returned no vector for interactive request");
     }
     embedder.embed(text).await
+}
+
+/// Merge a grep lane into an already-RRF-fused list (issue #75).
+///
+/// Why: `rrf_fuse` is hard-coded to two lanes (HNSW + BM25). Rather than
+/// reshape its signature, we fold the grep lane in via the same reciprocal
+/// rank formula and re-truncate to `top_k`.
+/// What: walks `grep_lane` (ordered best-first), adds `weight * 1/(k+rank)`
+/// to each id's score, re-sorts by score desc with id as tie-break, truncates.
+/// Test: `test_merge_grep_lane_appends_new_ids` in `indexer::tests`.
+pub(crate) fn merge_grep_lane(
+    fused: Vec<(String, f32)>,
+    grep_lane: &[(String, f32)],
+    weight: f32,
+    top_k: usize,
+) -> Vec<(String, f32)> {
+    if grep_lane.is_empty() {
+        return fused;
+    }
+    let mut accum: HashMap<String, f32> = fused.into_iter().collect();
+    for (rank0, (id, _)) in grep_lane.iter().enumerate() {
+        let rank = (rank0 + 1) as f32;
+        *accum.entry(id.clone()).or_insert(0.0) += weight * (1.0 / (RRF_K + rank));
+    }
+    let mut out: Vec<(String, f32)> = accum.into_iter().collect();
+    out.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    out.truncate(top_k);
+    out
 }

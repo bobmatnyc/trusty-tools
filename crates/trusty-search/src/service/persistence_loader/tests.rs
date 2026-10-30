@@ -46,7 +46,7 @@ fn minimal_raw_chunk(id: &str) -> RawChunk {
 
 // ── Issue #313 / #2984 (Phase 0 follow-up) regression ────────────────────
 
-/// End-to-end regression for the `create_index_handler` re-register door:
+/// End-to-end regression for the `create_index_report` re-register door:
 /// `build_indexer_from_entry` itself must never load a persisted symbol
 /// graph for an entry whose `skip_kg` is `true`, even when that entry's
 /// redb corpus already has a fully-built graph from an earlier session.
@@ -54,7 +54,7 @@ fn minimal_raw_chunk(id: &str) -> RawChunk {
 /// Why: this is the exact bug the code-critic caught in the initial
 /// #2988 PR — the Phase-0 fix wired `CodeIndexer::skip_kg` into
 /// `build_indexer_from_entry` via `entry.skip_kg`, but
-/// `create_index_handler` (the `POST /indexes` create/re-register path,
+/// `create_index_report` (the `POST /indexes` create/re-register path,
 /// issue #85's warm-restore-on-create) built its `init_entry` with
 /// `..Default::default()` (`skip_kg = false`) BEFORE the real `skip_kg`
 /// value was computed further down the handler, and never propagated the
@@ -63,7 +63,7 @@ fn minimal_raw_chunk(id: &str) -> RawChunk {
 /// loaded that graph into memory during the SAME call — the identical
 /// warm-boot bug via a second door. This test exercises
 /// `build_indexer_from_entry` directly (the shared helper both the
-/// daemon-restart path and `create_index_handler` call) with a
+/// daemon-restart path and `create_index_report` call) with a
 /// `skip_kg=true` entry pointed at a corpus that already has a persisted
 /// graph, proving the loader itself honors the flag regardless of caller.
 /// What: builds an indexer with `skip_kg=false`, indexes two files with a
@@ -108,7 +108,7 @@ async fn skip_kg_true_entry_never_loads_persisted_graph_via_build_indexer_from_e
     } // indexer (and its corpus Arc) dropped — releases the redb file lock.
 
     // Phase 2: re-register the SAME id/root_path — this mirrors what
-    // create_index_handler does when a caller re-creates an existing
+    // create_index_report does when a caller re-creates an existing
     // index id with skip_kg=true — via a fresh `build_indexer_from_entry`
     // call with `skip_kg=true` on the entry.
     let entry_skip = PersistedIndex {
@@ -136,14 +136,14 @@ async fn skip_kg_true_entry_never_loads_persisted_graph_via_build_indexer_from_e
 // ── Issue #483 regression ─────────────────────────────────────────────────
 
 /// Why: guards the writer/loader path divergence (#483) where
-/// `create_index_handler` used `colocated: false`, routing the corpus to
+/// `create_index_report` used `colocated: false`, routing the corpus to
 /// app-data, while warm-boot used `colocated: true`, opening an empty
 /// `.trusty-search/` dir.
 /// What: builds a colocated indexer, writes a chunk, drops the handle
 /// (releasing the redb file lock), then reloads via `build_indexer_from_entry`
 /// and asserts the chunk count is > 0.
 /// Test: this IS the test; exercises the exact call path used by the fixed
-/// `create_index_handler`.
+/// `create_index_report`.
 #[tokio::test]
 #[serial_test::parallel]
 async fn colocated_create_handler_path_survives_simulated_reload() {
@@ -151,7 +151,7 @@ async fn colocated_create_handler_path_survives_simulated_reload() {
     let root = tmp.path().to_path_buf();
     let embedder = mock_embedder();
 
-    // --- Phase 1: simulate what the fixed create_index_handler does ---
+    // --- Phase 1: simulate what the fixed create_index_report does ---
     let entry = PersistedIndex {
         id: "test-idx-483".to_string(),
         root_path: root.clone(),

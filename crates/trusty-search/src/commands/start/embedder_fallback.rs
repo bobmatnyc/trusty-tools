@@ -256,6 +256,36 @@ impl Embedder for FallbackEmbedderAdapter {
             .unwrap_or_else(|| Arc::clone(&self.primary))
             .resolved_provider_label()
     }
+
+    // #9284: the active backend's window, so the sidecar's reaches the embed pass.
+    fn input_window(&self) -> Option<usize> {
+        self.active_fallback()
+            .unwrap_or_else(|| Arc::clone(&self.primary))
+            .input_window()
+    }
+
+    fn chunking_tokenizer(
+        &self,
+    ) -> std::result::Result<
+        Option<Arc<trusty_common::embedder::ChunkTokenizer>>,
+        trusty_common::embedder::ChunkError,
+    > {
+        self.active_fallback()
+            .unwrap_or_else(|| Arc::clone(&self.primary))
+            .chunking_tokenizer()
+    }
+
+    // #10504: the active backend's split window.
+    fn split_window(
+        &self,
+    ) -> std::result::Result<
+        Option<(usize, Arc<trusty_common::embedder::ChunkTokenizer>)>,
+        trusty_common::embedder::ChunkError,
+    > {
+        self.active_fallback()
+            .unwrap_or_else(|| Arc::clone(&self.primary))
+            .split_window()
+    }
 }
 
 #[cfg(test)]

@@ -19,6 +19,8 @@ pub mod coordinator;
 pub mod dashboard;
 mod event_loop;
 pub mod health;
+// #10491: the console home screen `tm tui` opens on.
+pub mod home;
 pub mod iterm2;
 pub mod project_ctl;
 pub mod terminal;

@@ -4,20 +4,18 @@
 //! #3993). A root INSIDE an existing index's root, or one ENCLOSING it, was
 //! registered happily, and overlapping roots are what let the #402 / #2178
 //! reindex hijack and prune another index's corpus.
-//! What: drives `create_index_handler` directly (`MockEmbedder`, no daemon)
+//! What: drives `create_index_report` directly (`MockEmbedder`, no daemon)
 //! for the four directory relations — descendant, ancestor, sibling, symlinked
 //! alias of an ancestor — and calls `find_root_overlap` directly for the
 //! fail-closed case, where the candidate cannot be canonicalized at all.
 //! Test: run with `cargo test -p trusty-search tests_4289`.
 
 use super::root_overlap::{find_root_overlap, overlap_check_failed_response};
+use super::test_support::create_answer;
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
-use axum::body::to_bytes;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -65,22 +63,8 @@ fn approved_child(parent: &Path, name: &str) -> PathBuf {
 
 /// Register `id` at `root`, asserting the registration succeeded.
 async fn register_ok(state: &Arc<SearchAppState>, id: &str, root: PathBuf) {
-    let response =
-        super::indexes::create_index_handler(State(Arc::clone(state)), Json(create_req(id, root)))
-            .await;
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "first create must succeed"
-    );
-}
-
-/// Read a refusal's JSON body.
-async fn body_json(response: axum::response::Response) -> serde_json::Value {
-    let bytes = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    serde_json::from_slice(&bytes).expect("body is JSON")
+    let (status, body) = create_answer(state, create_req(id, root)).await;
+    assert_eq!(status, StatusCode::OK, "first create must succeed: {body}");
 }
 
 /// A root BELOW an existing index's root is refused with a `409` naming the
@@ -93,14 +77,9 @@ async fn create_index_refuses_a_root_inside_an_existing_index_root() {
     let inner = approved_child(&outer, "nested");
 
     register_ok(&state, "outer-index-4289", outer.clone()).await;
-    let response = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("inner-index-4289", inner.clone())),
-    )
-    .await;
+    let (status, body) = create_answer(&state, create_req("inner-index-4289", inner.clone())).await;
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = body_json(response).await;
+    assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["overlap"], "inside_existing_root");
     assert_eq!(body["existing_index_id"], "outer-index-4289");
     assert_eq!(
@@ -121,14 +100,9 @@ async fn create_index_refuses_a_root_that_encloses_an_existing_index_root() {
     let inner = approved_child(&outer, "nested");
 
     register_ok(&state, "inner-index-4289", inner).await;
-    let response = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("outer-index-4289", outer.clone())),
-    )
-    .await;
+    let (status, body) = create_answer(&state, create_req("outer-index-4289", outer.clone())).await;
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = body_json(response).await;
+    assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["overlap"], "encloses_existing_root");
     assert_eq!(body["existing_index_id"], "inner-index-4289");
 }
@@ -144,14 +118,10 @@ async fn create_index_accepts_a_sibling_of_an_existing_index_root() {
     let second = approved_child(&parent, "app2");
 
     register_ok(&state, "first-index", first).await;
-    let response = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("second-index-4289", second)),
-    )
-    .await;
+    let response = create_answer(&state, create_req("second-index-4289", second)).await;
 
     assert_eq!(
-        response.status(),
+        response.0,
         StatusCode::OK,
         "a sibling root overlaps nothing and must be accepted"
     );
@@ -172,13 +142,7 @@ async fn create_index_refuses_a_symlinked_ancestor_of_an_existing_index_root() {
     crate::allowlist::test_fixtures::approve(&link);
 
     register_ok(&state, "inner-index-4289", inner).await;
-    let response = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("alias-index-4289", link.clone())),
-    )
-    .await;
-    let status = response.status();
-    let body = body_json(response).await;
+    let (status, body) = create_answer(&state, create_req("alias-index-4289", link.clone())).await;
     let _ = std::fs::remove_file(&link);
 
     assert_eq!(status, StatusCode::CONFLICT, "symlink alias: {body}");

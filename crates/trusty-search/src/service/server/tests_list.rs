@@ -1,8 +1,6 @@
 //! Tests for list_indexes variants and global_search hierarchy.
 use super::indexes::ListIndexesParams;
 use super::*;
-use axum::extract::{Query, State};
-use axum::Json;
 #[tokio::test]
 #[serial_test::parallel]
 async fn list_indexes_flat_default_unchanged() {
@@ -24,19 +22,15 @@ async fn list_indexes_flat_default_unchanged() {
     let state = std::sync::Arc::new(SearchAppState::new(registry));
 
     // No format param → flat list
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: false,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = value["indexes"].as_array().expect("indexes array");
     // Must be strings (flat format)
     for item in arr {
@@ -91,19 +85,15 @@ async fn list_indexes_tree_format_shape() {
 
     let state = Arc::new(SearchAppState::new(registry));
 
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: Some("tree".to_string()),
             details: false,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = value["indexes"].as_array().expect("indexes array");
     assert_eq!(arr.len(), 2);
     // Each entry must be an object with required fields.
@@ -171,19 +161,15 @@ async fn list_indexes_details_includes_size_bytes() {
     }
     let state = std::sync::Arc::new(SearchAppState::new(registry));
 
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: true,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = value["indexes"].as_array().expect("indexes array");
     assert_eq!(arr.len(), 2);
     for entry in arr {
@@ -232,19 +218,15 @@ async fn list_indexes_details_includes_root_path() {
     ));
     let state = std::sync::Arc::new(SearchAppState::new(registry));
 
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: true,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = value["indexes"].as_array().expect("indexes array");
     assert_eq!(arr.len(), 1, "expected exactly one index entry");
     let entry = &arr[0];
@@ -296,9 +278,9 @@ async fn global_search_nested_hierarchy_dedup_count_present() {
     }
     let state = Arc::new(SearchAppState::new(registry));
 
-    let Json(value) = global_search_handler(
-        State(state),
-        Json(GlobalSearchRequest {
+    let value = global_search_report(
+        &state,
+        GlobalSearchRequest {
             query: "beta_function".into(),
             top_k: 10,
             full_content: false,
@@ -313,7 +295,7 @@ async fn global_search_nested_hierarchy_dedup_count_present() {
             per_index_deadline_ms: None,
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await
     .expect("handler ok");
@@ -383,9 +365,9 @@ async fn global_search_sub_index_boost_applied() {
 
     let state = Arc::new(SearchAppState::new(registry));
 
-    let Json(value) = global_search_handler(
-        State(state),
-        Json(GlobalSearchRequest {
+    let value = global_search_report(
+        &state,
+        GlobalSearchRequest {
             query: "gamma_function".into(),
             top_k: 10,
             full_content: false,
@@ -400,7 +382,7 @@ async fn global_search_sub_index_boost_applied() {
             per_index_deadline_ms: None,
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await
     .expect("handler ok");
@@ -473,9 +455,9 @@ async fn global_search_serial_returns_all_results() {
     }
     let state = Arc::new(SearchAppState::new(registry));
 
-    let Json(value) = global_search_handler(
-        State(state),
-        Json(GlobalSearchRequest {
+    let value = global_search_report(
+        &state,
+        GlobalSearchRequest {
             query: "delta_function".into(),
             top_k: 10,
             full_content: false,
@@ -490,7 +472,7 @@ async fn global_search_serial_returns_all_results() {
             per_index_deadline_ms: None,
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await
     .expect("handler ok");
@@ -541,9 +523,9 @@ async fn global_search_request_override_echoed() {
     ));
     let state = Arc::new(SearchAppState::new(registry));
 
-    let Json(value) = global_search_handler(
-        State(state),
-        Json(GlobalSearchRequest {
+    let value = global_search_report(
+        &state,
+        GlobalSearchRequest {
             query: "epsilon_function".into(),
             top_k: 5,
             full_content: false,
@@ -558,7 +540,7 @@ async fn global_search_request_override_echoed() {
             per_index_deadline_ms: None,
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await
     .expect("handler ok");

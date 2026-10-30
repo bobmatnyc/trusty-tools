@@ -19,12 +19,9 @@
 //! basename is not classified as a test file by the line-cap gate and it sits
 //! at 455 of its 500-SLOC production cap. The `_tests.rs` basename here earns
 //! the 3000-SLOC test cap instead.
-use super::health::HealthResponse;
 use super::*;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageState};
-use axum::extract::State;
-use axum::Json;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -42,10 +39,9 @@ fn registry_with_one_index(id: &str) -> (IndexRegistry, Arc<IndexHandle>) {
     (registry, handle)
 }
 
-/// Serialize a `/health` response and hand back its `warmboot_summary` object.
-fn warmboot_summary_of(resp: &HealthResponse) -> Value {
-    let json: Value = serde_json::to_value(resp).expect("serialize /health response");
-    json["warmboot_summary"].clone()
+/// Hand back the `warmboot_summary` object of a `/health` report.
+fn warmboot_summary_of(resp: &Value) -> Value {
+    resp["warmboot_summary"].clone()
 }
 
 /// #5927: a failed SEMANTIC lane on an index whose corpus opened fine must not
@@ -81,7 +77,7 @@ async fn health_does_not_count_a_semantic_lane_failure_as_a_corpus_failure() {
     }
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     let summary = warmboot_summary_of(&resp);
 
     assert_eq!(
@@ -103,7 +99,7 @@ async fn health_does_not_count_a_semantic_lane_failure_as_a_corpus_failure() {
          failure already produced"
     );
     assert_eq!(
-        resp.status, "degraded",
+        resp["status"], "degraded",
         "#5927: a dead search lane still degrades the daemon that `status != \"ok\"` \
          monitors gate on"
     );
@@ -150,7 +146,7 @@ async fn health_counts_a_corpus_open_failure_under_both_names() {
     }
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     let summary = warmboot_summary_of(&resp);
 
     assert_eq!(
@@ -164,7 +160,7 @@ async fn health_counts_a_corpus_open_failure_under_both_names() {
         "#5927: a corpus-open failure fails every lane, so the lane counter must \
          remain a superset of the corpus counter; summary={summary}"
     );
-    assert_eq!(resp.status, "degraded");
+    assert_eq!(resp["status"], "degraded");
 }
 
 /// #5927 fail-open arm: an unreadable `corpus_open_failed` flag must not clear
@@ -210,7 +206,7 @@ async fn health_stays_degraded_when_the_corpus_flag_read_is_contended() {
     // fails, exactly as a concurrent ingest write would make it fail.
     let _writer = handle.indexer.write().await;
 
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     let summary = warmboot_summary_of(&resp);
 
     assert_eq!(
@@ -226,7 +222,7 @@ async fn health_stays_degraded_when_the_corpus_flag_read_is_contended() {
          reported even when the corpus flag cannot be read; summary={summary}"
     );
     assert_eq!(
-        resp.status, "degraded",
+        resp["status"], "degraded",
         "#5927: the fail-open on the corpus read must never advance the daemon to \
          'ok' while a lane is dead"
     );
@@ -292,7 +288,7 @@ async fn health_names_the_indexes_with_a_failed_lane() {
     ));
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     let json: Value = serde_json::to_value(&resp).expect("serialize /health response");
 
     let ids = json["indexes_stage_failed_ids"]
@@ -332,7 +328,7 @@ async fn health_omits_the_failing_index_ids_when_nothing_is_failing() {
     let (registry, _handle) = registry_with_one_index("healthy-6688");
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     let json: Value = serde_json::to_value(&resp).expect("serialize /health response");
 
     assert_eq!(
@@ -371,7 +367,7 @@ async fn health_counter_wire_shape_is_unchanged_by_the_id_field() {
     let (registry, _handle) = registry_with_one_index("wire-shape-6688");
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     let json: Value = serde_json::to_value(&resp).expect("serialize /health response");
     let obj = json
         .as_object()

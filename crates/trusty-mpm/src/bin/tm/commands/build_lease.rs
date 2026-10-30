@@ -43,16 +43,16 @@ use trusty_mpm::core::build_lease::census::LiveSampler;
 use trusty_mpm::core::build_lease::config::{BuildLeaseConfig, clamp_wait};
 use trusty_mpm::core::build_lease::deps_rotate::{lease_notice, rotate_before_build};
 use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, SlotGuard, summarize_command};
-use trusty_mpm::core::build_lease::stale_guard::{
-    Invalidation, cargo_lock_held, checkout_root, invalidate_if_checkout_changed,
-    workspace_packages,
-};
+use trusty_mpm::core::build_lease::stale_guard::{cargo_lock_held, checkout_root};
 use trusty_mpm::core::build_lease::target_dir::{
-    SharedDirs, TargetPlan, explicit_target_dir_arg, plan, resolve_pool, rewrite_target_dir_arg,
+    SharedDirs, TargetPlan, explicit_target_dir_arg, plan_with_worktree, resolve_pool,
+    rewrite_target_dir_arg,
 };
 use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
+use trusty_mpm::core::harness_root::linked_worktree_owner;
 
 use super::build_lease_status::{print_census, print_status};
+use super::build_lease_target::{announce_slot, target_dir};
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
 
@@ -207,10 +207,12 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
     let ambient = explicit_target_dir
         .clone()
         .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
-    let target_plan = plan(
+    // #10215: an unset CARGO_TARGET_DIR in a linked worktree takes a slot too.
+    let target_plan = plan_with_worktree(
         ambient.as_deref(),
         &SharedDirs::resolve(&builders, &home_or_root),
         resolve_pool(&builders, &home_or_root, &cwd),
+        linked_worktree_owner(&cwd).is_some(),
     );
     if let TargetPlan::Refuse(why) = &target_plan {
         refuse(&format!("not running the build (#8261) — {why}"))
@@ -229,7 +231,9 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
     // #8261 round 3: a free slot whose directory an orphaned build still uses
     // (cargo's `.cargo-lock` held) is skipped.
     let busy = |slot: u32| match &target_plan {
-        TargetPlan::Slot { pool, .. } => cargo_lock_held(&pool.slot_path(slot)),
+        TargetPlan::Slot { pool, .. } | TargetPlan::UnsetSlot { pool, .. } => {
+            cargo_lock_held(&pool.slot_path(slot))
+        }
         _ => false,
     };
     let params = AcquireParams::new(&builders, &lease, resolve_max_concurrent(), wait, &checkout)
@@ -368,33 +372,6 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
     }
 }
 
-/// Name the slot directory that replaced a shared `CARGO_TARGET_DIR`.
-///
-/// Why: the build gets the slot through its own environment, but the agent
-/// that ran it still holds the shared `CARGO_TARGET_DIR` from `.envrc`, or a
-/// slot path a brief named. Its next `$CARGO_TARGET_DIR/debug/<bin>` would run
-/// another worktree's binary (#8261 round 5).
-/// What: one stderr line, `slot N — CARGO_TARGET_DIR=<dir>`, only when the
-/// plan replaced the directory; a kept or unset one prints nothing. Names the
-/// directory as exclusive only while THIS lease holds it (critic MEDIUM,
-/// round 6): another checkout can win the same slot once this build's flock
-/// releases and rebuild `debug/<bin>` there. #8831: it restates the
-/// `CLAUDE.md` rule's one exception, so the notice and the rule never read as
-/// two contradictory instructions.
-/// Test: `a_subagents_leased_build_runs_in_its_slot_directory`.
-fn announce_slot(plan: &TargetPlan, slot: u32, target: Option<&str>) {
-    if let (TargetPlan::Slot { .. }, Some(dir)) = (plan, target) {
-        eprintln!(
-            "tm build-lease: slot {slot} — CARGO_TARGET_DIR={dir} for this build; its \
-             binaries are under that directory, not the inherited one, and are exclusively \
-             this build's only while the lease is held — once it releases, another checkout \
-             can win the same slot and rebuild debug/<bin> there (#8261). Never override \
-             CARGO_TARGET_DIR EXCEPT with this granted slot: the lease sets it for this build, \
-             so the command needs no override of its own."
-        );
-    }
-}
-
 /// Print `tm build-lease: <why>` and exit [`EXIT_LEASE_TIMEOUT`].
 fn refuse(why: &str) -> ! {
     eprintln!("tm build-lease: {why}");
@@ -433,93 +410,6 @@ fn render(decision: &Decision, holders: &[HolderRecord]) -> String {
          (builders.max_concurrent).{degraded}",
         decision.readings, decision.n_effective, decision.ceiling
     )
-}
-
-/// The `CARGO_TARGET_DIR` for this build, seeding the slot directory if new.
-///
-/// What: `Ok(None)` leaves cargo's own choice; `Ok(Some(dir))` sets `dir`.
-/// #9239: the seed is bounded by `seed_wait` (the lease wait); past it the
-/// slot starts cold. A slot is handed out only when its seed has committed.
-/// `Err` when the build would otherwise run in a SHARED target directory
-/// because its slot directory cannot be made or its stale fingerprints cannot
-/// be cleared — the caller refuses instead (#8261, owner ruling 2026-09-21: an
-/// unsafe target never admits).
-/// Test: `an_unusable_slot_directory_refuses_instead_of_sharing`,
-/// `a_busy_orphan_slot_is_not_reused` in `tests/tm_build_lease.rs`.
-fn target_dir(
-    plan: &TargetPlan,
-    slot: u32,
-    cwd: &Path,
-    seed_wait: Duration,
-) -> Result<Option<String>, String> {
-    let (pool, clone_from) = match plan {
-        TargetPlan::Keep(dir) => return Ok(Some(dir.clone())),
-        TargetPlan::Slot { pool, clone_from } => (pool, clone_from),
-        TargetPlan::Refuse(why) => return Err(why.clone()),
-        _ => return Ok(None),
-    };
-    let path = pool.slot_path(slot);
-    if pool.committed(slot).is_none() {
-        eprintln!(
-            "tm build-lease: seeding slot {slot} from the shared target directory, bounded at \
-             {}s; past that it starts cold (#9239). `tm build-lease status` shows the seed.",
-            seed_wait.as_secs()
-        );
-    }
-    let seeded =
-        tokio::task::block_in_place(|| pool.seed_within(slot, clone_from.as_deref(), seed_wait));
-    let dir = seeded.map(|(dir, _)| dir).map_err(|err| {
-        format!(
-            "slot directory {} is unusable ({err}), and the inherited CARGO_TARGET_DIR is a \
-             shared target directory, which concurrent worktrees overwrite. Repair the slot \
-             pool root (`builders.slot_pool_root`, see `tm doctor`) or set a private \
-             CARGO_TARGET_DIR for this build",
-            path.display()
-        )
-    })?;
-    // #9239: never a staging tree, never an uncommitted seed.
-    if pool.committed(slot).as_ref() != Some(&dir) {
-        return Err(format!(
-            "slot directory {} has no committed seed, so no build runs in it (#9239); \
-             `tm build-lease status` shows the slot",
-            dir.display()
-        ));
-    }
-    guard_against_stale_builds(&dir, cwd)?;
-    Ok(Some(dir.display().to_string()))
-}
-
-/// Clear the slot's workspace fingerprints when it last built another checkout.
-///
-/// Why: see `trusty_mpm::core::build_lease::stale_guard` — without this a
-/// slot shared in turn by two worktrees can report the second one "Fresh" and
-/// hand back the first one's binary. A fingerprint that cannot be cleared is
-/// an `Err`: the slot is not used (#8261 round 3).
-fn guard_against_stale_builds(slot_dir: &Path, cwd: &Path) -> Result<(), String> {
-    let root = checkout_root(cwd);
-    let result = tokio::task::block_in_place(|| {
-        invalidate_if_checkout_changed(slot_dir, &root, || workspace_packages(&root))
-    });
-    match result {
-        Ok(Invalidation::Cleared {
-            previous,
-            removed,
-            all,
-        }) => eprintln!(
-            "tm build-lease: slot {} last built {}; cleared {removed} {} fingerprint(s) so this \
-             checkout's crates rebuild instead of reading as Fresh (#8261).",
-            slot_dir.display(),
-            previous.as_deref().unwrap_or("an unrecorded checkout"),
-            if all {
-                "(ALL — the package list was unreadable)"
-            } else {
-                "workspace-package"
-            },
-        ),
-        Ok(_) => {}
-        Err(err) => return Err(err),
-    }
-    Ok(())
 }
 
 fn write_record(guard: &mut SlotGuard, record: &HolderRecord) {

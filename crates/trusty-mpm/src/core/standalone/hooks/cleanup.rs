@@ -164,8 +164,8 @@ pub fn foreign_hook_event_names(val: &Value) -> Vec<String> {
 pub fn build_tree_hook_commands(val: &Value) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for cmd in hook_commands(val).filter(|c| is_build_tree_hook_command(c)) {
-        if !found.iter().any(|seen| seen == cmd) {
-            found.push(cmd.to_string());
+        if !found.iter().any(|seen| *seen == *cmd) {
+            found.push(cmd.into_owned());
         }
     }
     found
@@ -184,7 +184,8 @@ pub fn build_tree_hook_commands(val: &Value) -> Vec<String> {
 /// Test: exercised through both callers'
 /// tests (`build_tree_hook_commands_lists_the_incident_commands`,
 /// `clean_settings_file_flags_a_removed_pm_guard_entry`).
-fn hook_commands(val: &Value) -> impl Iterator<Item = &str> {
+// #10459: an exec-form entry yields its joined argv (`hook_entry_command_line`).
+fn hook_commands(val: &Value) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {
     val.get("hooks")
         .and_then(Value::as_object)
         .into_iter()
@@ -193,7 +194,7 @@ fn hook_commands(val: &Value) -> impl Iterator<Item = &str> {
         .flatten()
         .filter_map(|group| group.get("hooks").and_then(Value::as_array))
         .flatten()
-        .filter_map(|entry| entry.get("command").and_then(Value::as_str))
+        .filter_map(super::hook_entry_command_line)
 }
 
 /// Would a strip of `val` remove the PM enforcement guard's entry?
@@ -211,7 +212,7 @@ fn hook_commands(val: &Value) -> impl Iterator<Item = &str> {
 /// `<abs>/tm hook --pm-guard` is left in place, and correctly reports `false`.
 /// Test: `strips_pm_guard_entry_is_true_only_for_a_removable_guard`.
 pub fn strips_pm_guard_entry(val: &Value) -> bool {
-    hook_commands(val).any(|cmd| cmd.ends_with(PM_GUARD_SUFFIX) && is_mpm_hook_command(cmd))
+    hook_commands(val).any(|cmd| cmd.ends_with(PM_GUARD_SUFFIX) && is_mpm_hook_command(&cmd))
 }
 
 /// The `statusLine.command` when it points into a Cargo build tree (#7262).
@@ -266,11 +267,9 @@ pub fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> 
                 .get("hooks")
                 .and_then(Value::as_array)
                 .is_some_and(|inner| {
+                    // #10459: exec-form entries are read by their joined argv.
                     inner.iter().any(|entry| {
-                        entry
-                            .get("command")
-                            .and_then(Value::as_str)
-                            .is_some_and(&matches_cmd)
+                        super::hook_entry_command_line(entry).is_some_and(|line| matches_cmd(&line))
                     })
                 })
         });

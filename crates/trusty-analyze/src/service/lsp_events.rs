@@ -319,9 +319,27 @@ impl LspCall {
     /// metadata (counts, document version, snapshot). An error contributes
     /// only its stable code, never its message, which can quote server
     /// stderr (D8).
-    pub fn finish<T>(mut self, result: &Result<T, LspError>, stamps: impl FnOnce(&T) -> Attrs) {
+    pub fn finish<T>(self, result: &Result<T, LspError>, stamps: impl FnOnce(&T) -> Attrs) {
+        self.finish_as(result, |v| ("ok", stamps(v)));
+    }
+
+    /// [`LspCall::finish`] for a success that is not always `ok`.
+    ///
+    /// Why: #10087 — a barrier that timed out is an answer (DOC-72 §3), so the
+    /// call Finishes, but a subscriber must not read it as ready.
+    /// What: `classify` names the `outcome` and the stamps for an `Ok`; an
+    /// `Err` still ends Errored with its code.
+    /// Test: `analysed_at_timeout_finishes_as_timed_out_not_ok`.
+    pub fn finish_as<T>(
+        mut self,
+        result: &Result<T, LspError>,
+        classify: impl FnOnce(&T) -> (&'static str, Attrs),
+    ) {
         let (phase, outcome, extra) = match result {
-            Ok(v) => (CallPhase::Finished, "ok", stamps(v)),
+            Ok(v) => {
+                let (outcome, extra) = classify(v);
+                (CallPhase::Finished, outcome, extra)
+            }
             Err(e) => (CallPhase::Errored, e.code(), Vec::new()),
         };
         self.end(phase, outcome, extra);

@@ -638,6 +638,12 @@ impl SocketDaemon {
             .unwrap_or_else(|e| panic!("session.events must open over the socket: {e}"))
     }
 
+    /// The daemon's `TRUSTY_DATA_DIR_OVERRIDE` — a CLI given the same one
+    /// resolves this daemon's socket (#10169).
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self.isolation.data_dir()
+    }
+
     /// The daemon's own stderr so far, for a failure message.
     pub fn stderr(&self) -> String {
         std::fs::read_to_string(self.isolation.home().join("daemon.stderr")).unwrap_or_default()

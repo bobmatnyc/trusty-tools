@@ -1,45 +1,41 @@
 //! `tcode session list` / `tcode session status <id>` (#2060).
 //!
-//! Why: the thin-client demonstration of the simplest `session.*` calls —
-//! no streaming, just spawn, call, print, exit.
+//! Why: the thin-client view of the running daemon's session registry — no
+//! streaming, just dial, call, print, exit.
 //! What: [`list`] calls `session.list` and prints
 //! `cli_client::render::render_session_table`; [`status`] calls
-//! `session.status` and prints one line. Both spawn a FRESH ephemeral
-//! daemon per invocation (per `cli_client::stdio`'s module docs) — since
-//! M1 sessions are in-memory-only per daemon process (`session::registry`'s
-//! own docs), these commands only ever see sessions created within THIS
-//! same invocation's daemon; they cannot inspect a session created by a
-//! separate `tcode run-task` process. This is a known scope limitation, not
-//! a bug — see this crate's `tests/cli_e2e.rs` module docs for the fuller
-//! rationale.
-//! Test: `tests/cli_e2e.rs::session_list_on_fresh_project_reports_no_sessions`.
+//! `session.status` and prints one line. Both dial the daemon serving
+//! `--project` on its Unix socket ([`super::daemon_client::connect`]), so they
+//! see every session that daemon holds. Before #10169 each invocation spawned
+//! its own `serve --stdio` child and could only ever see an empty registry.
+//! Test: `thin_clients_uds_10169::session_list_shows_a_session_created_on_the_daemon`,
+//! `thin_clients_uds_10169::session_status_reads_a_session_created_on_the_daemon`,
+//! `thin_clients_uds_10169::session_list_refuses_an_unverifiable_daemon_instead_of_listing_nothing`.
 
 use std::path::Path;
-use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 
-use trusty_code::cli_client::StdioRpcClient;
 use trusty_code::cli_client::render::render_session_table;
 use trusty_code::session::Session;
 
-use super::tcode_exe;
+use super::daemon_client;
 
 /// `tcode session list [--project P]`.
 ///
-/// Why/What: see module docs.
+/// Why/What: see module docs. A response without a `sessions` array is an
+/// error, never an empty table.
 pub async fn list(project: &Path) -> Result<()> {
-    let exe = tcode_exe::resolve()?;
-    let mut client = StdioRpcClient::spawn(&exe, project)?;
+    // #10169: the running daemon's registry, not a fresh stdio child's.
+    let client = daemon_client::connect(project).await?;
     let result = client.call("session.list", json!({})).await?;
-    client.shutdown(Duration::from_secs(5)).await?;
 
     let sessions: Vec<Session> = serde_json::from_value(
         result
             .get("sessions")
             .cloned()
-            .unwrap_or(serde_json::Value::Null),
+            .context("tcode session list: daemon response carried no `sessions` field")?,
     )
     .map_err(|e| anyhow::anyhow!("tcode session list: malformed daemon response: {e}"))?;
     println!("{}", render_session_table(&sessions));
@@ -51,14 +47,12 @@ pub async fn list(project: &Path) -> Result<()> {
 /// Why/What: see module docs. Errors (e.g. `session_not_found`) propagate as
 /// a plain `anyhow::Error` — `main.rs` prints it and exits nonzero.
 pub async fn status(project: &Path, session_id: &str) -> Result<()> {
-    let exe = tcode_exe::resolve()?;
-    let mut client = StdioRpcClient::spawn(&exe, project)?;
+    // #10169: see `list`.
+    let client = daemon_client::connect(project).await?;
     let result = client
         .call("session.status", json!({"session_id": session_id}))
-        .await;
-    client.shutdown(Duration::from_secs(5)).await?;
+        .await?;
 
-    let result = result?;
     let session: Session = serde_json::from_value(result)
         .map_err(|e| anyhow::anyhow!("tcode session status: malformed daemon response: {e}"))?;
     println!(

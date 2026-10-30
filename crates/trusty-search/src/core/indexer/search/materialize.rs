@@ -67,7 +67,9 @@ impl CodeIndexer {
     /// Errors when the durable corpus read fails (#5917): every id would land
     /// in the drop block, so the result set would be empty for a reason the
     /// tally cannot express.
+    /// #10498: a BM25-lane row also carries the engine's raw score in `bm25_raw`.
     /// Test: `bugdebt_query_backfills_code_past_a_docstring_filled_top_k`,
+    /// `a_bm25_hit_carries_the_engines_raw_score`,
     /// `docstring_only_matches_return_the_docstrings_not_an_empty_page`,
     /// `bugdebt_query_backfills_code_past_doc_files_filling_top_k`,
     /// `doc_file_only_matches_return_an_empty_page_with_every_row_counted`,
@@ -75,13 +77,14 @@ impl CodeIndexer {
     /// `archived_only_matches_return_an_empty_page_with_every_row_counted`;
     /// `search_handler_meta_reports_rows_dropped_when_the_corpus_has_no_matching_row`
     /// in `service::server::tests_search` pins the unresolved count.
-    // #9404: the page filters are the eighth argument.
+    // #9404: the page filters are the eighth argument; #10498 adds `bm25_raw`.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn materialize_search_results(
         &self,
         all: Vec<(String, f32)>,
         hnsw_results: &[(String, f32)],
         bm25_results: &[(String, f32)],
+        bm25_raw: &std::collections::HashMap<String, f32>,
         kg_ids: &HashSet<String>,
         branch_files: Option<&HashSet<String>>,
         query: &SearchQuery,
@@ -169,6 +172,10 @@ impl CodeIndexer {
                     None
                 };
                 let mut chunk = raw_to_code_chunk(raw, score, match_reason, snippet, &roots);
+                // #10498: only a row the BM25 lane holds carries its raw score.
+                if in_bm25.contains(&id) {
+                    chunk.bm25_raw = bm25_raw.get(&id).copied();
+                }
                 if let Some(set) = branch_files {
                     chunk.on_branch = set.contains(normalize_path(&raw.file));
                 }

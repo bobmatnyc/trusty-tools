@@ -11426,7 +11426,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -11444,7 +11444,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd-py"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "flate2",
@@ -11750,7 +11750,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.62.1"
+version = "0.62.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -11840,7 +11840,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "which 6.0.3",
- "zip 9.0.4",
+ "zip 9.0.5",
 ]
 
 [[package]]
@@ -13845,9 +13845,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.0.4"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",
