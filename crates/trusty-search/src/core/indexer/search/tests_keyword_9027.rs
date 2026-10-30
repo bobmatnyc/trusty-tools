@@ -36,6 +36,7 @@ fn chunk(id: &str, file: &str) -> CodeChunk {
         index_id: None,
         on_branch: false,
         archive_reason: None,
+        bm25_raw: None,
     }
 }
 
