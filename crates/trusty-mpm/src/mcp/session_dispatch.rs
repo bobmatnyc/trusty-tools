@@ -123,9 +123,10 @@ pub async fn try_dispatch<B: OrchestratorBackend>(
 ///
 /// Why: `session_new` has the widest argument surface (repo/ref/task + two
 /// optionals); pulling it into its own helper keeps [`try_dispatch`] readable.
-/// What: requires `repo_url`, `ref`, and `task`; reads the optional `name_hint`
-/// and `runtime`; then calls [`OrchestratorBackend::session_new`]. Any missing
-/// required field yields a descriptive error string.
+/// What: requires `repo_url`, `ref`, and `task`; reads the optional `name_hint`,
+/// `runtime`, `ephemeral` and `parent_session_id` (#10476); then calls
+/// [`OrchestratorBackend::session_new`]. Any missing required field yields a
+/// descriptive error string.
 /// Test: `super::tests::dispatch_session_new_tool`,
 /// `super::tests::dispatch_session_new_requires_repo_url`.
 async fn session_new<B: OrchestratorBackend>(backend: &B, args: &Value) -> Result<Value, String> {
@@ -135,8 +136,11 @@ async fn session_new<B: OrchestratorBackend>(backend: &B, args: &Value) -> Resul
     let name_hint = args.get("name_hint").and_then(Value::as_str);
     let runtime = args.get("runtime").and_then(Value::as_str);
     let ephemeral = args.get("ephemeral").and_then(Value::as_bool);
+    let parent = args.get("parent_session_id").and_then(Value::as_str); // #10476
     backend
-        .session_new(&repo_url, &git_ref, &task, name_hint, runtime, ephemeral)
+        .session_new(
+            &repo_url, &git_ref, &task, name_hint, runtime, ephemeral, parent,
+        )
         .await
 }
 

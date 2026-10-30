@@ -143,6 +143,7 @@ async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
     let canonical_wt = wt_path.clone();
     let record = super::super::record::SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: session_id,
         tmux_name: "test-toctou".into(),
         cwd: PathBuf::from("/tmp"),
@@ -1044,6 +1045,7 @@ async fn reap_aged_ephemeral_spares_a_worktree_holding_unsaved_work() {
     let id = crate::session_manager::record::ManagedSessionId::new();
     let record = crate::session_manager::record::SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id,
         tmux_name: format!("tmpm-aged-{id}"),
         cwd: fx.repo.clone(),
@@ -1371,6 +1373,7 @@ async fn phase2_fresh_snapshot_spares_a_record_the_caller_set_missed() {
         .expect("seed session record");
     let stopped = SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         state: ManagedSessionState::Stopped,
         ..record
     };

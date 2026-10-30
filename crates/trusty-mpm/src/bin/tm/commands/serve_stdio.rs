@@ -25,6 +25,10 @@
 //! Claude Code spawned it inside the managed pane, while the daemon it forwards
 //! to is long-lived and shared.
 //!
+//! #10476: on `session_new` it also sets `parent_session_id` to that id,
+//! overwriting any caller value and stripping it on an unmanaged bridge — see
+//! [`stamp_parent_session_id`].
+//!
 //! #9856: the daemon proves an `ask_owner` asker from the kernel's peer pid,
 //! which only the socket carries — since #6288 every call travels that way.
 //!
@@ -262,6 +266,44 @@ fn stamp_caller_session_id(req: &mut serde_json::Value, managed: Option<&str>) {
     );
 }
 
+/// The tool whose `parent_session_id` argument the bridge owns (#10476).
+const PARENT_STAMP_TOOL: &str = "session_new";
+
+/// Set `parent_session_id` on a `session_new` call to the calling session.
+///
+/// Why: #10476 — `tm tui` draws a bridge-spawned worker under the session that
+/// made it. Only this process knows the caller (see
+/// [`stamp_caller_session_id`]), so the bridge owns the argument: a value the
+/// model wrote is not evidence of anything.
+/// What: on a `tools/call` for [`PARENT_STAMP_TOOL`] with an arguments object,
+/// writes the non-empty `managed` id as `parent_session_id`, overwriting any
+/// caller value; with no managed id it removes the key. Every other request is
+/// untouched.
+/// Test: `stamp_sets_parent_on_session_new`, `stamp_overwrites_forged_parent`,
+/// `stamp_strips_parent_without_env`, `stamp_leaves_other_tools_untouched`.
+fn stamp_parent_session_id(req: &mut serde_json::Value, managed: Option<&str>) {
+    if req.get("method").and_then(serde_json::Value::as_str) != Some("tools/call") {
+        return;
+    }
+    let Some(params) = req.get_mut("params") else {
+        return;
+    };
+    if params.get("name").and_then(serde_json::Value::as_str) != Some(PARENT_STAMP_TOOL) {
+        return;
+    }
+    let Some(args) = params.get_mut("arguments").and_then(|a| a.as_object_mut()) else {
+        return;
+    };
+    match managed.filter(|m| !m.is_empty()) {
+        Some(id) => {
+            args.insert("parent_session_id".to_string(), id.into());
+        }
+        None => {
+            args.remove("parent_session_id");
+        }
+    }
+}
+
 /// Send one MCP request as `mpm.mcp.dispatch` over the daemon socket.
 ///
 /// What: the socket client's `POST /rpc` mapping to the socket `url` locates;
@@ -360,7 +402,7 @@ fn hide_chat_tool(req: &serde_json::Value, resp: &mut serde_json::Value, allow_c
 /// Why: one function carries the whole per-request path so the `--allow-chat`
 /// gate is testable against a fake socket (#9979).
 /// What: a gated `sessions_chat` call is answered locally with no socket
-/// call; otherwise the request is stamped (#6888), forwarded to `url`, and the
+/// call; otherwise the request is stamped (#6888, #10476), forwarded to `url`, and the
 /// reply has `sessions_chat` hidden from a `tools/list`.
 /// Test: the `tools_list_*` and `a_chat_call_*` tests below.
 async fn handle_request(
@@ -374,6 +416,7 @@ async fn handle_request(
         return Response::ok(req.id.clone(), result);
     }
     stamp_caller_session_id(&mut req_value, managed);
+    stamp_parent_session_id(&mut req_value, managed); // #10476
     let list_req = req_value.clone();
     match forward_over_socket(url, req_value).await {
         Ok(mut resp_value) => {
@@ -942,5 +985,71 @@ mod tests {
         let before = ping.clone();
         stamp_caller_session_id(&mut ping, Some("mgr-1"));
         assert_eq!(ping, before);
+    }
+
+    /// A `session_new` call with the spawn arguments a model would send.
+    fn session_new_call(extra: serde_json::Value) -> serde_json::Value {
+        let mut args = json!({ "repo_url": "/r", "ref": "main", "task": "t" });
+        if let (Some(a), Some(e)) = (args.as_object_mut(), extra.as_object()) {
+            a.extend(e.clone());
+        }
+        call("session_new", args)
+    }
+
+    /// Why: #10476 — a managed bridge names its own session as the parent.
+    /// Test: itself.
+    #[test]
+    fn stamp_sets_parent_on_session_new() {
+        let mut req = session_new_call(json!({}));
+        stamp_parent_session_id(&mut req, Some("mgr-1"));
+        assert_eq!(req["params"]["arguments"]["parent_session_id"], "mgr-1");
+        assert_eq!(req["params"]["arguments"]["repo_url"], "/r");
+    }
+
+    /// Why: #10476 REGRESSION — the bridge owns the argument, so a value the
+    /// caller wrote is replaced by the bridge's own managed id.
+    /// Test: itself.
+    #[test]
+    fn stamp_overwrites_forged_parent() {
+        let mut req = session_new_call(json!({ "parent_session_id": "forged" }));
+        stamp_parent_session_id(&mut req, Some("mgr-1"));
+        assert_eq!(req["params"]["arguments"]["parent_session_id"], "mgr-1");
+    }
+
+    /// Why: #10476 — with no `TM_MANAGED_SESSION_ID` there is no caller to
+    /// record, so a caller-supplied parent is removed rather than forwarded.
+    /// Test: itself.
+    #[test]
+    fn stamp_strips_parent_without_env() {
+        for managed in [None, Some("")] {
+            let mut req = session_new_call(json!({ "parent_session_id": "forged" }));
+            stamp_parent_session_id(&mut req, managed);
+            let args = req["params"]["arguments"].as_object().expect("args");
+            assert!(
+                !args.contains_key("parent_session_id"),
+                "{managed:?}: {args:?}"
+            );
+        }
+    }
+
+    /// Why: #10476 — only `session_new` carries a parent; every other tool and
+    /// method arrives unchanged, including one that has the same key.
+    /// Test: itself.
+    #[test]
+    fn stamp_leaves_other_tools_untouched() {
+        for mut req in [
+            call(
+                "session_stop",
+                json!({ "session_id": "s", "parent_session_id": "x" }),
+            ),
+            call("session_context_pause", json!({ "project_dir": "/tmp/p" })),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+        ] {
+            let before = req.clone();
+            stamp_parent_session_id(&mut req, Some("mgr-1"));
+            assert_eq!(req, before);
+            stamp_parent_session_id(&mut req, None);
+            assert_eq!(req, before);
+        }
     }
 }

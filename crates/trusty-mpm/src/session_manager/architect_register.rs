@@ -273,6 +273,7 @@ fn architect_record(
     };
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id,
         tmux_name: name.to_owned(),
         cwd: dir.to_path_buf(),

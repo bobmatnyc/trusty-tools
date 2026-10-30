@@ -293,6 +293,8 @@ Parallel engineers inside one workstream legitimately need their own checkouts â
 
 Unreaped children are the documented source of worktree sprawl. Giving them a parent is what makes them reapable at all: today nothing owns them, so nothing may delete them (ADR-0020's fail-closed rule correctly refuses to touch an owner-unknown worktree).
 
+A managed session records its parent the same way: `SessionRecord::parent_session_id` (#10476) names the session whose MCP bridge called `session_new`. It is a recorded id, never containment, and it carries no lifetime or reclamation authority; `tm tui` uses it for display only.
+
 ---
 
 ## 6. Disk {#SPEC-SESSWS-06~draft}
