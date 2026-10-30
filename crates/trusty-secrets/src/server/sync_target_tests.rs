@@ -22,7 +22,7 @@ const VERCEL: &str = "vercel";
 const TARGET_IDS: [&str; 2] = [GITHUB, VERCEL];
 
 /// `copy` params from the fixture's Keychain double to `to`.
-fn push_params(fx: &Fixture, to: &str, keys: &[&str]) -> Value {
+pub(super) fn push_params(fx: &Fixture, to: &str, keys: &[&str]) -> Value {
     json!({"project": fx.project(), "from_backend": "keychain", "to_backend": to, "keys": keys})
 }
 
@@ -133,7 +133,7 @@ async fn config_tracked_sync_target_section_is_refused() {
 
 /// A write-only target that records each pushed key and value.
 #[derive(Debug, Default)]
-struct FakeTarget {
+pub(super) struct FakeTarget {
     pushed: Mutex<Vec<(String, String)>>,
 }
 
@@ -158,7 +158,7 @@ impl SecretBackend for FakeTarget {
 }
 
 /// `state` with a sync-target opener over `target` that counts its opens.
-fn with_fake_target(mut state: State) -> (State, Arc<FakeTarget>, Arc<AtomicUsize>) {
+pub(super) fn with_fake_target(mut state: State) -> (State, Arc<FakeTarget>, Arc<AtomicUsize>) {
     let target = Arc::new(FakeTarget::default());
     let opens = Arc::new(AtomicUsize::new(0));
     let (shared, counter) = (Arc::clone(&target), Arc::clone(&opens));

@@ -86,6 +86,18 @@ pub enum AuditMethod {
     /// per call (#9067 P1). It has no direct method.
     #[serde(rename = "secrets.backends")]
     Backends,
+    /// `secrets.ticket.mint`: one record per mint or refusal, written
+    /// before the ticket is stored (#10459 PR1).
+    #[serde(rename = "secrets.ticket.mint")]
+    TicketMint,
+    /// A ticket voided unredeemed, by `secrets.ticket.void` or by the
+    /// server (#10459 PR1). A void that found nothing writes none.
+    #[serde(rename = "secrets.ticket.void")]
+    TicketVoid,
+    /// A ticket a `set` or local `copy` consumed, written before the
+    /// write it allows (#10459 PR1). It has no wire method.
+    #[serde(rename = "secrets.ticket.redeem")]
+    TicketRedeem,
     /// A method a newer server audits. Never written by this build.
     #[serde(other)]
     Other,
@@ -229,6 +241,21 @@ pub struct AuditRecord {
     /// `None` otherwise, and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_policy: Option<bool>,
+    /// `true` on a `set` or `copy` record (and the deny changes it made) of a
+    /// caller that passed the Architect launch-record check, so an agent's
+    /// write of a denied key is told apart (#10459 P1). `None` otherwise, and
+    /// then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architect: Option<bool>,
+    /// Why an agent caller was not granted the Architect exemption, when a
+    /// record directory is known (#10459). Names no pid, path or value.
+    /// `None` otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architect_refusal: Option<super::architect::ArchitectRefusal>,
+    /// The main-thread ticket a `secrets.ticket.*` record is about
+    /// (#10459 PR1). `None` otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<super::ticket::TicketAudit>,
 }
 
 impl AuditRecord {
@@ -253,6 +280,9 @@ impl AuditRecord {
             agent_parent: None,
             source: None,
             default_policy: None,
+            architect: None,
+            architect_refusal: None,
+            ticket: None,
         }
     }
 
@@ -273,12 +303,17 @@ pub(crate) struct AuditSink {
     path: PathBuf,
     max_bytes: u64,
     opening: Mutex<()>,
+    /// Fail every append of this method's records; tests only (#10459).
+    #[cfg(test)]
+    fail_method: Mutex<Option<AuditMethod>>,
 }
 
 /// An open, checked audit file that records can be appended to.
 #[derive(Debug)]
 pub(crate) struct AuditFile {
     file: File,
+    #[cfg(test)]
+    fail_method: Option<AuditMethod>,
 }
 
 impl AuditSink {
@@ -287,7 +322,19 @@ impl AuditSink {
             path,
             max_bytes,
             opening: Mutex::new(()),
+            #[cfg(test)]
+            fail_method: Mutex::new(None),
         }
+    }
+
+    /// Make every later append of a `method` record fail, so one record
+    /// can fail while the others land (#10459 PR1 fix round).
+    #[cfg(test)]
+    pub(crate) fn fail_appends_of(&self, method: AuditMethod) {
+        *self
+            .fail_method
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(method);
     }
 
     /// Create or check the directory, rotate a full log, and open it.
@@ -347,7 +394,14 @@ impl AuditSink {
                 handle.write_all(b"\n").map_err(io)?;
             }
         }
-        Ok(AuditFile { file: handle })
+        Ok(AuditFile {
+            file: handle,
+            #[cfg(test)]
+            fail_method: *self
+                .fail_method
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        })
     }
 
     /// Rename a log at or past the cap to `<log>.1`, replacing the old one.
@@ -386,6 +440,10 @@ impl AuditFile {
     /// Any serialization, write or sync failure; the caller decides what a
     /// failure means (see `gate`).
     pub(crate) fn append(&mut self, record: &AuditRecord) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.fail_method == Some(record.method) {
+            return Err(std::io::Error::other("injected append failure"));
+        }
         let mut line = serde_json::to_vec(record).map_err(std::io::Error::other)?;
         line.push(b'\n');
         self.file.write_all(&line)?;
