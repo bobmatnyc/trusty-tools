@@ -382,6 +382,7 @@ pub(crate) fn raw_to_code_chunk(
         index_id: None,
         on_branch: false,
         archive_reason: None,
+        bm25_raw: None,
     }
 }
 
