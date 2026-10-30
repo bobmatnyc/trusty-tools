@@ -430,7 +430,7 @@ pub(super) async fn check_search(_home: &Path, project_dir: Option<&Path>) -> Do
             let found = accepted
                 .iter()
                 .find(|id| index_present(&body, id))
-                .unwrap_or(&accepted[0]);
+                .map_or("<unknown>", String::as_str);
             DoctorCheck::new(
                 "search",
                 CheckStatus::Ok,
@@ -442,7 +442,7 @@ pub(super) async fn check_search(_home: &Path, project_dir: Option<&Path>) -> Do
             CheckStatus::Warn,
             format!(
                 "trusty-search healthy at {at} but the `{}` index is missing",
-                accepted[0]
+                accepted.first().map_or("<unknown>", String::as_str)
             ),
         ),
         Err(e) => DoctorCheck::new(
@@ -470,7 +470,10 @@ pub(super) async fn check_search(_home: &Path, project_dir: Option<&Path>) -> Do
 /// Test: `expected_search_index_id_derives_from_project_dir_not_hardcoded`.
 #[cfg(test)]
 pub(super) fn expected_search_index_id(project_dir: Option<&Path>) -> String {
-    accepted_search_index_ids(project_dir).swap_remove(0)
+    accepted_search_index_ids(project_dir)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 /// Every index id the doctor accepts as this project's index (#10530).

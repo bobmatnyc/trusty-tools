@@ -49,7 +49,7 @@ pub fn project_key_from_repo_url(repo_url: &str) -> Option<String> {
 /// Why: every registered project needs a key; a project with no origin still
 /// needs a stable one.
 /// What: [`project_key_from_repo_url`], falling back to a fresh `local:<uuid>`.
-/// Test: `assign_falls_back_to_a_local_uuid`.
+/// Test: `key_from_path_without_origin_is_none`.
 pub fn assign_project_key(repo_url: &str) -> String {
     project_key_from_repo_url(repo_url).unwrap_or_else(|| format!("local:{}", uuid::Uuid::new_v4()))
 }
@@ -79,7 +79,7 @@ pub fn registered_project_for_root(projects: &[Project], root: &Path) -> Option<
 /// What: reads `<registry dir>/projects.json` with no lock (every publish is an
 /// atomic rename); `None` when it is absent or unreadable, so the caller falls
 /// back to the legacy basename id.
-/// Test: `index_id_matches_between_registration_and_publication`.
+/// Test: `index_id_matches_between_registration_publication_and_trusty_code`.
 pub fn registered_project_for_root_in(
     registry_dir: &Path,
     root: &Path,
@@ -94,7 +94,7 @@ pub fn registered_project_for_root_in(
 /// What: resolves `root` to its project root exactly as
 /// `ensure_project_indexed_reporting_as` does, then applies
 /// [`trusty_common::index_id_for_root`] over [`registered_project_for_root_in`].
-/// Test: `index_id_matches_between_registration_and_publication`.
+/// Test: `index_id_matches_between_registration_publication_and_trusty_code`.
 pub fn index_id_for_root_in(registry_dir: &Path, root: &Path) -> String {
     let root = trusty_common::resolve_project_root(root);
     let registered = registered_project_for_root_in(registry_dir, &root);
@@ -104,7 +104,7 @@ pub fn index_id_for_root_in(registry_dir: &Path, root: &Path) -> String {
 /// [`index_id_for_root_in`] against the daemon's registry directory.
 ///
 /// Why: `tm doctor` has a root and no registry handle.
-/// Test: `index_id_matches_between_registration_and_publication`.
+/// Test: `index_id_matches_between_registration_publication_and_trusty_code`.
 pub fn index_id_for_registered_root(root: &Path) -> String {
     index_id_for_root_in(&super::registry_data_dir(), root)
 }

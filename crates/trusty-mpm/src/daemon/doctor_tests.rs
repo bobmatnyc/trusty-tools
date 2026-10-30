@@ -1165,3 +1165,16 @@ fn accepted_ids_include_legacy_and_registry_forms() {
     assert!(ids.contains(&trusty_common::derive_registry_index_id("cto", "acme/cto")));
     assert_eq!(accepted_ids_for(root, None), vec!["cto".to_string()]);
 }
+
+/// Why (#10530 review): a root with no file name (`/`, a launchd daemon with no
+/// project dir) yields no id; the doctor must print a placeholder, not panic.
+/// Test: itself.
+#[test]
+fn a_root_with_no_file_name_yields_no_ids_and_no_panic() {
+    use crate::project::accepted_index_ids_for;
+    assert!(accepted_index_ids_for(std::path::Path::new("/"), None).is_empty());
+    assert_eq!(
+        expected_search_index_id(Some(std::path::Path::new("/"))),
+        ""
+    );
+}

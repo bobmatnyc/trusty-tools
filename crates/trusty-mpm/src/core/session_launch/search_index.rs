@@ -91,7 +91,7 @@ pub(crate) fn register_project_index(project_root: &Path) -> Option<String> {
 /// stored key; both resolve the root first, so this does too.
 /// What: [`crate::project::registered_project_for_root_in`] over
 /// [`trusty_common::resolve_project_root`]; `None` for an unregistered root.
-/// Test: `index_id_matches_between_registration_and_publication` in
+/// Test: `index_id_matches_between_registration_publication_and_trusty_code` in
 /// `project/project_key_tests.rs`.
 pub(crate) fn registered_project_for(
     project_root: &Path,

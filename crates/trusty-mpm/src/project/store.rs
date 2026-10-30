@@ -408,7 +408,7 @@ impl ProjectStore {
 /// every publish is an atomic rename (see the module `Concurrency` note).
 /// What: parses `<data_dir>/projects.json`; `None` when absent or unparseable,
 /// so a caller falls back to the legacy id rather than failing.
-/// Test: `index_id_matches_between_registration_and_publication`.
+/// Test: `index_id_matches_between_registration_publication_and_trusty_code`.
 pub(super) fn read_projects_blocking(data_dir: &Path) -> Option<Vec<Project>> {
     let path = data_dir.join("projects.json");
     let bytes = std::fs::read(&path).ok()?;
