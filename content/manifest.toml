@@ -320,7 +320,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-strategy.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-tmux-ops.md"
