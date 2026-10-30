@@ -132,6 +132,20 @@ const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
     ],
 };
 
+/// `architect-improvements`, edited since its first release.
+const IMPROVEMENTS: ShippedSkill = ShippedSkill {
+    stem: "architect-improvements",
+    // R-192/R-193: the D2 text, before the owner-asks rules.
+    previous: &["bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0"],
+};
+
+/// `architect-dashboard`, edited since its first release.
+const DASHBOARD: ShippedSkill = ShippedSkill {
+    stem: "architect-dashboard",
+    // R-192/R-193: the D3b text, before the owner-asks rules.
+    previous: &["c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a"],
+};
+
 /// A skill on its first release: no earlier shipped text to recognise.
 const fn first_release(stem: &'static str) -> ShippedSkill {
     ShippedSkill {
@@ -160,10 +174,10 @@ pub const SHIPPED: &[ShippedSkill] = &[
     first_release("architect-review"),
     PROJECT_PROVISION,
     first_release("architect-macos"),
-    first_release("architect-improvements"),
+    IMPROVEMENTS,
     first_release("architect-host-admin"),
     // #10161 D3b: the dashboard skill, with the served page it describes.
-    first_release("architect-dashboard"),
+    DASHBOARD,
 ];
 
 /// The deploy record, beside the skills in the project tier.

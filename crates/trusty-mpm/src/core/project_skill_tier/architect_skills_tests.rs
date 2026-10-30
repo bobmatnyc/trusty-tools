@@ -316,7 +316,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-improvements",
-            "bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0",
+            "b37627e2c31c3118884dd5a5e46cbbde5494d9b8206eb17a1c521a53883b5416",
         ),
         (
             "architect-host-admin",
@@ -324,12 +324,12 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-dashboard",
-            "c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a",
+            "e08b26d58e8e9c39a43fa71752ec8b191a795a786708f3ce002103b975956e82",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 11] = [
+    const FIRST_RELEASE: [&str; 9] = [
         "architect-tmux-ops",
         "architect-search-memory",
         "architect-github",
@@ -338,9 +338,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         "architect-drift-check",
         "architect-review",
         "architect-macos",
-        "architect-improvements",
         "architect-host-admin",
-        "architect-dashboard",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {

@@ -276,7 +276,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-dashboard.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-drift-check.md"
@@ -292,7 +292,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-improvements.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-macos.md"

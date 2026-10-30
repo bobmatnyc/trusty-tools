@@ -3,7 +3,7 @@ name: architect-dashboard
 description: Architect skill. Load at the end of every pass that changed a session, goal or owner item, when the owner says "dashboard" (terminal or Remote Control), when an owner write from the dashboard page waits, or when the dashboard is set up on a new host. Covers the served page, the data model, the per-pass update, the answer flow and the owner controls. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 category: monitoring
 tags: [architect, dashboard, owner, store]
 effort: medium
@@ -42,8 +42,10 @@ search box above the sections. The main sections are, in order:
 2. **Questions**: one row per open `questions` doc, newest answer first, with
    Clear, Clear all and a collapsed Cleared bucket with Restore. Every answer
    the Architect gives to an owner question (terminal, voice relay or Remote
-   Control) goes here in the same pass, as well as in the reply. Only the owner
-   clears; the Architect never sets `cleared`.
+   Control) goes here in the same pass, as well as in the reply. The Q&A
+   collection `questions/Q..` is the home for every answer to an owner
+   question; an answer that exists only in chat is a miss (r-193). Only the
+   owner clears; the Architect never sets `cleared`.
 3. **Actions**: items whose id starts with A, T or R, open first, then
    answered, then a collapsed Done list.
 4. **Goals**: directed then standing, one row per goal (id, title, rank chip).
@@ -138,6 +140,10 @@ control, and the Live page follows it.
   serves any `.md` under that root and refuses dot segments, node_modules,
   target and secret, credential or .env names. An addendum is never its own
   spec: the main brief links it.
+- **Brief reader links.** Every brief link the Architect gives the owner
+  (dashboard fields, Q&A links, chat) uses the dashboard reader
+  `<dashboard>/#doc/<project>/<rel path>`, never a GitHub blob URL. A project
+  missing from the reader allowlist is a finding.
 - **Long text.** No dashboard field holds more than one paragraph. Write longer
   text to a brief and link it.
 - **Media.** The right pane lists briefs, diagrams and images under the doc
