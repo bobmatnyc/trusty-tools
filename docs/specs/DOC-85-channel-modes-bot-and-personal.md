@@ -38,7 +38,7 @@ A channel call runs in exactly one mode.
 | Write or post | Allow where a route lists the target. | Ask per call; a route never replaces the Ask (Dd9). |
 | Outward message (comment, mention, share, invite) | Allow when a route names the recipient and kind. | Ask per call (Dd9). |
 | Delete | Deny. | Deny (Dd9). |
-| Audit line | Every action. | Every action; the only mark of the proxy (Dda, section 6). |
+| Audit line | Every action. | Every action; the personal-mode footer marks the proxy (D5c rev., section 6). |
 
 A mode never grants more than the route and the host ceiling already allow. The table is the most a mode may do.
 
@@ -102,7 +102,7 @@ Gaps, as of 2026-10-27:
 
 **ID:** SPEC-CHMODE-06~draft
 
-Every audit line and tool result carries `mode` and `actor` (integration id or owner id). A deny line carries `mode` and the reason code. A `personal` outward action also records the approval id of the Ask. Records hold no message text. The audit line is the only mark of a proxy action; no footer or marker on personal-mode content; bot-mode posts carry the section 8 footer (D58) (Dda). Where the service shows only the owner as author, only the audit line tells proxy from owner.
+Every audit line and tool result carries `mode` and `actor` (integration id or owner id). A deny line carries `mode` and the reason code. A `personal` outward action also records the approval id of the Ask. Records hold no message text. Bot-mode posts carry the section 8 footer (D58). Personal-mode posts carry a footer whose form the user picks in their settings: "posted by @trusty" or "posted on behalf of <user> by @trusty" (Bob D5c rev., 2026-10-30; supersedes the Dda no-footer rule for personal mode). Where the service shows only the owner as author, the footer and the audit line tell proxy from owner.
 
 ## 7. Worked example: Notion, and the amendment {#SPEC-CHMODE-07~draft}
 
@@ -128,13 +128,14 @@ Notion credential per use (Bob ruling, 12:17Z; De6; PD-5). Refs and scopes only.
 Owner rulings: Bob, 2026-10-30 02:38Z (#10499): "We should use a similar convention for the trusty bot channel: 'Sent using @Trusty'." It mirrors Slack's "Sent using @Claude". D58 (Bob, 2026-10-30, #10499): "Footers for bot mode."
 
 - **Rule.** A bot-mode post ends with the footer `Sent using @Trusty`, exactly that text.
-- **Scope.** `bot` mode (section 1). `personal` posts carry no footer, per Dda (section 6).
+- **Scope.** `bot` mode (section 1). `personal` posts carry the user-selected footer below (D5c rev.).
+
+- **Personal-mode footer. Decided (Bob D5c rev., 2026-10-30).** The user picks the form in their settings: "posted by @trusty" or "posted on behalf of <user> by @trusty".
 
 Not yet ruled (OPEN, no decision):
 
 - Per-channel format: a Slack context block or a plain trailing line; the other channels.
 - Edits and threads: whether an edited message, or each reply in a thread, carries the footer.
 - Opt-out: whether any route or user may turn the footer off.
-- Decided (Bob D5c, 2026-10-30): section 6 notes that where a service shows only the owner as author, only the audit line tells proxy from owner. `personal` mode shows no visible marker; the audit line only, as specced (Dda).
 
-Tests: one per channel adapter, asserting a bot-mode post ends with `Sent using @Trusty` and a personal-mode post does not. Refs #10499.
+Tests: one per channel adapter, asserting a bot-mode post ends with `Sent using @Trusty` and a personal-mode post ends with the user-selected footer. Refs #10499.
