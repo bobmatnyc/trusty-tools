@@ -465,6 +465,74 @@ fn palace_entry(info: &crate::engine::palace::Palace, counts: &PalaceCounts) -> 
 mod tests {
     use super::*;
 
+    /// Why (#10515): dropping a palace handle does not release its `kg.redb`
+    /// lock on the spot. The handle's `KgWriter` aborts its actor task on drop,
+    /// but a `tokio` task's state is only dropped when the runtime next polls
+    /// it. A `#[tokio::test]` runs `current_thread`, so a test that has not
+    /// awaited since the drop still holds the exclusive lock, and a read-only
+    /// open from `spawn_blocking` races the runtime for it. Under CPU load the
+    /// blocking thread won about one run in a thousand, and the row came back
+    /// `stats_source: "unavailable"` instead of the counts.
+    /// What: yields to the runtime until the process-wide handle cache no
+    /// longer holds a live `kg.redb` at `data_dir`. One yield is enough on
+    /// `current_thread`; the bound only turns a leaked handle into a panic that
+    /// names the path, where a wait on the clock would hide it.
+    /// Test: `an_evicted_palace_holds_its_kg_lock_until_the_runtime_polls_the_aborted_writer`.
+    async fn await_kg_released(data_dir: &std::path::Path) {
+        use crate::engine::store::kg_redb::KgStoreRedb;
+        let kg = data_dir.join("kg.redb");
+        for _ in 0..100 {
+            if !KgStoreRedb::is_cached(&kg) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("{} is still held after 100 runtime yields", kg.display());
+    }
+
+    /// Why (#10515): pins the cause the helper above exists for, so a change
+    /// that makes the release synchronous shows up here and retires the helper
+    /// instead of leaving it as unexplained ceremony.
+    /// What: creates a palace, drops its handle and removes it from the
+    /// registry with no `.await` in between, and asserts the lock is still held
+    /// and a disk read is refused. Then awaits the release and asserts the same
+    /// read succeeds with the real counts.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn an_evicted_palace_holds_its_kg_lock_until_the_runtime_polls_the_aborted_writer() {
+        use crate::engine::palace::{Palace, PalaceId};
+        use crate::engine::store::kg_redb::KgStoreRedb;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_root = tmp.path().to_path_buf();
+        let palace_dir = data_root.join("held");
+        let registry = PalaceRegistry::with_max_open(4);
+        let handle = registry
+            .create_palace(
+                &data_root,
+                Palace {
+                    id: PalaceId::new("held"),
+                    name: "held".to_string(),
+                    description: None,
+                    created_at: chrono::Utc::now(),
+                    data_dir: palace_dir.clone(),
+                },
+            )
+            .expect("create_palace");
+        drop(handle);
+        registry.remove(&PalaceId::new("held"));
+
+        assert!(
+            KgStoreRedb::is_cached(&palace_dir.join("kg.redb")),
+            "no await has run, so the aborted writer task still owns the store"
+        );
+        let refused = disk_stats::read(&palace_dir).expect_err("a held kg.redb must refuse");
+        assert!(refused.contains("kg.redb is not readable"), "{refused}");
+
+        await_kg_released(&palace_dir).await;
+        disk_stats::read(&palace_dir).expect("the lock is free once the writer task is dropped");
+    }
+
     /// Why: The `console_metrics` handler must return a structurally valid
     /// `ConsoleMetricsReport` even when no palaces exist (empty state).
     /// What: Builds a minimal `AppState` backed by a temp directory, calls
@@ -647,6 +715,8 @@ mod tests {
             registry.peek(&PalaceId::new("a")).is_none(),
             "'a' must already be evicted before console_metrics runs"
         );
+        // #10515: the evicted handle's writer task must be gone before the read.
+        await_kg_released(&data_root.join("a")).await;
 
         let mut state = crate::AppState::new(data_root);
         state.registry = std::sync::Arc::new(registry);
@@ -739,6 +809,8 @@ mod tests {
             drop(handle);
             registry.remove(&PalaceId::new("cold"));
         }
+        // #10515: the dropped handle's writer task must be gone before the read.
+        await_kg_released(&data_root.join("cold")).await;
 
         let state = crate::AppState::new(data_root);
         assert_eq!(state.registry.len(), 0, "nothing may be cache-resident");
