@@ -665,9 +665,12 @@ Per-index stats.
     window applies to whose length could not be counted (no tokenizer, a
     tokenizer error, or a failed count task). `window: null` means either no
     embed pass has run since the daemon started, or the embedder reports no
-    window (every sidecar embedder today, since no window crosses the wire);
+    window (a sidecar that predates the optional `result.window` field, #9284);
     in the second case nothing is counted, and `0` does not mean nothing was
-    cut. Each embed pass logs one WARN per affected file for at most 8 files,
+    cut. A sidecar reports its window on its first answer, so a lazy sidecar's
+    first pass learns it after its first wave and counts from there. Counts
+    need the MiniLM tokenizer in the fastembed cache; without it the chunks
+    are `unmeasured`, not `truncated`. Each embed pass logs one WARN per affected file for at most 8 files,
     then one summary.
 - **Response 404 / 503**: see the index-scoped error contract above.
 

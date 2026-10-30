@@ -34,6 +34,7 @@ pub mod error;
 pub mod in_process;
 mod spawn_retry;
 pub mod stdio;
+mod stdio_readback;
 pub mod supervisor;
 pub mod types;
 pub mod uds;
@@ -91,6 +92,18 @@ pub trait EmbedderClient: Send + Sync {
     /// Test: `StdioEmbedderClient`'s override is covered by
     /// `reader_task_captures_wire_device` in `stdio_tests.rs`.
     fn last_reported_device(&self) -> Option<String> {
+        None
+    }
+
+    /// The input window, in tokens, the backend reported over the wire on its
+    /// first successful response (#9284).
+    ///
+    /// Why: trusty-search counts chunks cut at the embedder window, and a
+    /// sidecar is the only place that knows its window.
+    /// What: default `None`. `StdioEmbedderClient` reads the optional
+    /// `result.window` field; a sidecar that omits it leaves `None`.
+    /// Test: `reader_task_captures_wire_window` in `stdio_tests.rs`.
+    fn last_reported_window(&self) -> Option<usize> {
         None
     }
 }

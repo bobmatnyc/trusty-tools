@@ -452,6 +452,10 @@ impl EmbedderClient for TrackedClient {
     fn last_reported_device(&self) -> Option<String> {
         self.inner.last_reported_device()
     }
+
+    fn last_reported_window(&self) -> Option<usize> {
+        self.inner.last_reported_window()
+    }
 }
 
 /// Recycle bookkeeping for the live sidecar generation.

@@ -106,8 +106,7 @@ pub(crate) enum Measure {
 /// `an_embedder_with_no_window_counts_nothing`.
 #[derive(Clone)]
 pub(crate) enum WindowProbe {
-    // See #9284: a sidecar embedder carries no window on the wire (plan Q2),
-    // so its chunks are not counted and no window is invented for it.
+    // #9284: no window reported (an older sidecar, or one not yet spawned).
     Unknown,
     Blind {
         window: usize,
@@ -277,6 +276,11 @@ pub(crate) struct PassTally {
 }
 
 impl PassTally {
+    /// Adopt a window learned mid-pass (#9284), so warnings name it.
+    pub(crate) fn set_window(&mut self, window: usize) {
+        self.window = window;
+    }
+
     pub(crate) fn new(window: Option<usize>) -> Self {
         Self {
             window: window.unwrap_or(0),

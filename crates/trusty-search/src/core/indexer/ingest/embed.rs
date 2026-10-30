@@ -376,7 +376,7 @@ impl EmbedContext {
 
         let mut embeddings: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
         let mut stalled = None;
-        let (Some(embedder), Some(probe)) = (&self.embedder, &state.probe) else {
+        let (Some(embedder), Some(first_probe)) = (&self.embedder, state.probe.clone()) else {
             return Ok(EmbedRun {
                 embeddings,
                 stalled,
@@ -384,6 +384,7 @@ impl EmbedContext {
         };
         let chunk_total = chunks.len();
         // #9284: count each embedded chunk against the embedder's window.
+        let mut probe = first_probe;
         self.embed_window.set_window(probe.window());
         let is_coreml = state.is_coreml;
         let tripwire_mb = state.tripwire_mb;
@@ -433,7 +434,7 @@ impl EmbedContext {
                 wave_pos = end;
             }
             // #9284: tokenize alongside the embed call, off the runtime.
-            let measuring = probe.start(&chunks[wave_start..wave_pos]);
+            let mut measuring = probe.start(&chunks[wave_start..wave_pos]);
 
             let rss_before = if is_coreml { current_rss_mb() } else { 0 };
             let wave_embed_start = std::time::Instant::now();
@@ -511,6 +512,19 @@ impl EmbedContext {
                 };
                 for (offset, vec) in batch_vecs.into_iter().enumerate() {
                     embeddings[start_pos + offset] = Some(vec);
+                }
+            }
+            // #9284: a lazy sidecar reports its window only after its first
+            // answer, so a pass that began blind re-reads it once a wave has
+            // been embedded, and measures that wave then.
+            if probe.window().is_none() {
+                let fresh = WindowProbe::from_embedder(embedder.as_ref());
+                if let Some(window) = fresh.window() {
+                    self.embed_window.set_window(Some(window));
+                    state.tally.set_window(window);
+                    state.probe = Some(fresh.clone());
+                    measuring = fresh.start(&chunks[wave_start..wave_pos]);
+                    probe = fresh;
                 }
             }
             // #9284: count only the chunks this wave actually embedded — the

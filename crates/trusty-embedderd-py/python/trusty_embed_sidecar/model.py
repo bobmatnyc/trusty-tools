@@ -202,4 +202,9 @@ def build_encoder(log=lambda _m: None) -> Callable[[List[str]], List[List[float]
     # threading a `(encode, device)` tuple through every caller) keeps
     # `Encoder` a simple `Callable[[List[str]], List[List[float]]]`.
     encode.device = device  # type: ignore[attr-defined]
+    # #9284: the tokens the model encodes before it truncates, echoed so
+    # trusty-search can report it. Absent when the model reports none.
+    window = getattr(model, "max_seq_length", None)
+    if isinstance(window, int) and window > 0:
+        encode.window = window  # type: ignore[attr-defined]
     return encode

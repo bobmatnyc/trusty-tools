@@ -16,7 +16,10 @@ Wire contract (newline-framed, one JSON object per line):
   issue #3493 P1) is a Python/MPS-sidecar-only extension: the ACTUAL torch
   device (``"mps"`` / ``"cuda"`` / ``"cpu"``) the encoder resolved, read from
   the encoder callable's ``device`` attribute (see ``model.build_encoder``).
-  The reference Rust ``trusty-embedderd`` never emits this key; the Rust
+  The optional ``window`` key (#9284) is the model's input window in tokens
+  (``encode.window``, from ``model.max_seq_length``); it is omitted when the
+  encoder sets none.
+  The reference Rust ``trusty-embedderd`` never emits ``device``; the Rust
   client (``StdioEmbedderClient``) treats it as optional (``#[serde(default)]``)
   so parsing an older/reference frame without it is unaffected.
 
@@ -53,7 +56,12 @@ ERR_INTERNAL = -32603
 Encoder = Callable[[List[str]], List[List[float]]]
 
 
-def build_success(req_id: Any, embeddings: List[List[float]], device: Optional[str] = None) -> str:
+def build_success(
+    req_id: Any,
+    embeddings: List[List[float]],
+    device: Optional[str] = None,
+    window: Optional[int] = None,
+) -> str:
     """Serialize a success response frame (terminating newline included).
 
     ``device`` (epic #3524 slice 5) is included as ``result.device`` when
@@ -63,6 +71,10 @@ def build_success(req_id: Any, embeddings: List[List[float]], device: Optional[s
     result: dict = {"embeddings": embeddings}
     if device:
         result["device"] = device
+    # #9284: the model's input window in tokens; omitted when unknown so an
+    # older parent and the reference server see an unchanged frame.
+    if window:
+        result["window"] = window
     return (
         json.dumps(
             {"jsonrpc": JSONRPC_VERSION, "result": result, "id": req_id},
@@ -136,6 +148,7 @@ def handle_frame(line: str, encoder: Encoder) -> Optional[str]:
         # encoder (e.g. the conformance tests' `stub_encoder`) that never
         # sets the attribute.
         device = getattr(encoder, "device", None)
-        return build_success(req_id, embeddings, device)
+        window = getattr(encoder, "window", None)
+        return build_success(req_id, embeddings, device, window)
     except Exception as exc:  # noqa: BLE001 — report as JSON-RPC error, never crash the loop
         return build_error(req_id, ERR_INTERNAL, f"internal error: {exc}")

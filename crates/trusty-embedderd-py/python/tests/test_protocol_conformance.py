@@ -149,6 +149,23 @@ def test_response_omits_device_when_encoder_has_none():
     assert "device" not in resp["result"]
 
 
+def stub_encoder_with_window(texts: List[str]) -> List[List[float]]:
+    return stub_encoder(texts)
+
+
+stub_encoder_with_window.window = 256  # type: ignore[attr-defined]
+
+
+def test_response_carries_window_only_when_encoder_reports_one():
+    # Why (#9284): trusty-search reads `result.window`; an encoder with no
+    # `.window` must leave the frame as the reference server writes it.
+    with_window = json.loads(handle_frame(_req(1, ["hello"]), stub_encoder_with_window))
+    assert with_window["result"]["window"] == 256
+    assert len(with_window["result"]["embeddings"]) == 1
+    without = json.loads(handle_frame(_req(2, ["hello"]), stub_encoder))
+    assert "window" not in without["result"]
+
+
 def test_response_includes_device_when_encoder_reports_one():
     # Why: this is the actual behaviour `/health`'s real-provider readback
     # depends on (epic #3524 slice 5, issue #3493 P1) — `handle_frame` must

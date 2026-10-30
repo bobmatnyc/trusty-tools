@@ -91,6 +91,8 @@ impl Default for BatchConfig {
 #[derive(Clone)]
 pub struct BatchQueue {
     tx: mpsc::Sender<PendingEmbed>,
+    /// The embedder's input window, read once at construction (#9284).
+    window: Option<usize>,
 }
 
 impl BatchQueue {
@@ -105,8 +107,19 @@ impl BatchQueue {
     /// Test: covered by the worker behaviour test in this module.
     pub fn new(embedder: Arc<dyn Embedder>, config: BatchConfig) -> Self {
         let (tx, rx) = mpsc::channel(PENDING_CHANNEL_CAPACITY);
+        let window = embedder.input_window();
         tokio::spawn(batch_worker(rx, embedder, config));
-        Self { tx }
+        Self { tx, window }
+    }
+
+    /// The embedder's input window in tokens, if it reports one (#9284).
+    ///
+    /// Why: the worker owns the embedder, so the dispatcher cannot ask it;
+    /// the response frames carry this value to the parent.
+    /// What: the value `Embedder::input_window` returned at construction.
+    /// Test: `dispatch_reports_the_embedder_window` in `uds_server`.
+    pub fn input_window(&self) -> Option<usize> {
+        self.window
     }
 
     /// Embed a single text and return the resulting vector.
