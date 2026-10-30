@@ -2736,7 +2736,7 @@ fn new_session_name_escape_returns_to_the_list_intact() {
 fn new_session_name_preview_shows_the_slug() {
     let named = naming_apex("Auth Refactor");
     let naming = open_flow(&named).naming().expect("name step open");
-    assert_eq!(naming.preview().as_deref(), Some("tm-auth-refactor-NN"));
+    assert_eq!(naming.preview().as_deref(), Some("tm-auth-refactor"));
     let symbols = naming_apex("!!!");
     let naming = open_flow(&symbols).naming().expect("name step open");
     assert_eq!(naming.preview(), None);
@@ -2756,7 +2756,7 @@ fn new_session_name_overlay_shows_the_text_and_preview() {
     let joined = draw(110, 30, &sessions, &mut state).join("\n");
     assert!(joined.contains("in apex"), "{joined}");
     assert!(joined.contains("> Auth Refactor"), "{joined}");
-    assert!(joined.contains("tm-auth-refactor-NN"), "{joined}");
+    assert!(joined.contains("tm-auth-refactor"), "{joined}");
     assert!(joined.contains("Esc goes back"), "{joined}");
 }
 
@@ -2799,8 +2799,19 @@ fn new_session_name_long_name_preview_matches_the_capped_slug() {
     let state = naming_apex(name);
     let naming = open_flow(&state).naming().expect("name step open");
     let preview = naming.preview().expect("a long name still slugs");
-    assert_eq!(preview, format!("tm-{slug}-NN"));
-    assert!(!preview.trim_end_matches("-NN").ends_with('-'), "{preview}");
+    assert_eq!(preview, format!("tm-{slug}"));
+    assert!(!preview.ends_with('-'), "{preview}");
+}
+
+/// #10478: a typed name shaped like a session name previews what the daemon
+/// builds — no doubled `tm-`, no kept `-NN`.
+#[test]
+fn new_session_name_preview_strips_a_session_name_shape() {
+    let state = naming_apex("tm-mpm-bugs-01");
+    let naming = open_flow(&state).naming().expect("name step open");
+    assert_eq!(naming.preview().as_deref(), Some("tm-mpm-bugs"));
+    let daemon = trusty_common::session_naming::build_session_name("tm-mpm-bugs-01", &[]);
+    assert_eq!(naming.preview(), daemon.ok());
 }
 
 /// Arrow keys while naming move nothing: the step owns the keys.

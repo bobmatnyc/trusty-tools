@@ -786,7 +786,7 @@ pub(super) async fn spawn_managed_inproject(
     write_task_md(&worktree, &params.task, session_id);
 
     // `source.repo_url` is a canonical GitHub HTTPS URL, so the session-manager can
-    // derive the project name (`tm-<repo>-NN`, issue #1955, formerly
+    // derive the project name (`tm-<repo>[-NN]`, issue #1955, formerly
     // `tmpm-<repo>-<8hex>` per #1789) for the tmux session name. Using a
     // synthetic HTTPS URL is safe: `parse_github_path`
     // normalises both SSH and HTTPS forms to the same `{ owner, repo }` pair, and

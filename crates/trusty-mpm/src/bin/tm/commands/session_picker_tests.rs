@@ -593,7 +593,7 @@ fn command_legend_glob_row_advertises_dry_run() {
 
 /// #4965: `n <name>` must be self-documenting. `r1 <name>` right below it
 /// takes a VERBATIM full session name while `n <name>` takes a leaf the daemon
-/// wraps as `tm-<name>-NN` — adjacent rows with an unexplained `<name>` each
+/// wraps as `tm-<name>[-NN]` — adjacent rows with an unexplained `<name>` each
 /// read as interchangeable.
 #[test]
 fn command_legend_n_row_names_the_resulting_session_shape() {
@@ -603,7 +603,7 @@ fn command_legend_n_row_names_the_resulting_session_shape() {
         .find(|l| l.starts_with("[n <name>]"))
         .expect("the n row must be present");
     assert!(
-        n_row.contains("tm-<name>-NN"),
+        n_row.contains("tm-<name>[-NN]"),
         "the n row must spell out the name it produces: {n_row}"
     );
 }
