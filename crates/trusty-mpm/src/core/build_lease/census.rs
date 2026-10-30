@@ -247,17 +247,47 @@ fn lease_processes() -> Result<LeaseProcesses, String> {
         .process(Pid::from_u32(me))
         .map(sysinfo::Process::start_time)
         .ok_or_else(|| "this process is missing from the process table".to_string())?;
+    let rows = sys.processes().iter().map(|(pid, proc_)| LeaseCandidate {
+        pid: pid.as_u32(),
+        start_time: proc_.start_time(),
+        argv: proc_.cmd(),
+        // #10260: on Linux sysinfo lists every thread as a process.
+        is_thread: matches!(proc_.thread_kind(), Some(sysinfo::ThreadKind::Userland)),
+    });
+    Ok(select_lease_processes(me, my_start, rows))
+}
+
+/// One process-table row, as [`select_lease_processes`] reads it.
+struct LeaseCandidate<'a> {
+    pid: u32,
+    start_time: u64,
+    argv: &'a [std::ffi::OsString],
+    /// A user thread of some process, not a process of its own.
+    is_thread: bool,
+}
+
+/// Pick the other `tm build-lease` processes out of `rows`.
+///
+/// Why: sysinfo on Linux lists each thread of a process as its own row, with
+/// the process's argv, so one `tm build-lease` and its ~29 tokio threads read
+/// as ~29 unleased builds and filled the ceiling (#10260).
+/// What: keeps rows that are not threads, are not `me`, carry a
+/// `build-lease` argument and whose program basename is `tm` or
+/// `trusty-mpm`; `earlier` holds those ordered before `(my_start, me)`.
+/// Test: `threads_of_a_lease_process_are_not_counted`,
+/// `only_tm_build_lease_processes_are_selected`.
+fn select_lease_processes<'a>(
+    me: u32,
+    my_start: u64,
+    rows: impl IntoIterator<Item = LeaseCandidate<'a>>,
+) -> LeaseProcesses {
     let mut all = Vec::new();
     let mut earlier = Vec::new();
-    for (pid, proc_) in sys.processes() {
-        let pid = pid.as_u32();
-        if pid == me || !proc_.cmd().iter().any(|a| a == "build-lease") {
+    for row in rows {
+        if row.is_thread || row.pid == me || !row.argv.iter().any(|a| a == "build-lease") {
             continue;
         }
-        let program = proc_
-            .cmd()
-            .first()
-            .map(|a| a.to_string_lossy().into_owned());
+        let program = row.argv.first().map(|a| a.to_string_lossy());
         let base = program
             .as_deref()
             .and_then(|p| p.rsplit('/').next())
@@ -265,12 +295,12 @@ fn lease_processes() -> Result<LeaseProcesses, String> {
         if base != "tm" && base != "trusty-mpm" {
             continue;
         }
-        all.push(pid);
-        if (proc_.start_time(), pid) < (my_start, me) {
-            earlier.push(pid);
+        all.push(row.pid);
+        if (row.start_time, row.pid) < (my_start, me) {
+            earlier.push(row.pid);
         }
     }
-    Ok(LeaseProcesses { all, earlier })
+    LeaseProcesses { all, earlier }
 }
 
 /// A census entry standing for one earlier `tm build-lease` with no lease.
@@ -418,6 +448,51 @@ mod tests {
         assert!(r.foreign.is_ok(), "{:?}", r.foreign);
         let u = sampler.sample_unleased();
         assert!(u.foreign.is_ok(), "{:?}", u.foreign);
+    }
+
+    fn argv(words: &[&str]) -> Vec<std::ffi::OsString> {
+        words.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    /// #10260: one `tm build-lease` (pid 50) plus its threads (51..=79, same
+    /// argv, as Linux sysinfo lists them) is one lease process, not 30.
+    #[test]
+    fn threads_of_a_lease_process_are_not_counted() {
+        let lease = argv(&["/usr/bin/tm", "build-lease", "--", "cargo", "test"]);
+        let rows = (50..80).map(|pid| LeaseCandidate {
+            pid,
+            start_time: 100,
+            argv: &lease,
+            is_thread: pid != 50,
+        });
+        let found = select_lease_processes(1000, 200, rows);
+        assert_eq!(found.all, vec![50]);
+        assert_eq!(found.earlier, vec![50]);
+    }
+
+    #[test]
+    fn only_tm_build_lease_processes_are_selected() {
+        let tm = argv(&["tm", "build-lease", "--", "cargo", "build"]);
+        let long = argv(&["/opt/bin/trusty-mpm", "build-lease"]);
+        let other = argv(&["/bin/grep", "build-lease"]);
+        let plain = argv(&["tm", "status"]);
+        let cand = |pid, start_time, argv| LeaseCandidate {
+            pid,
+            start_time,
+            argv,
+            is_thread: false,
+        };
+        let rows = vec![
+            cand(10, 300, &tm),
+            cand(11, 100, &long),
+            cand(12, 100, &other),
+            cand(13, 100, &plain),
+            cand(7, 200, &tm), // `me`
+            cand(6, 200, &tm), // same start, lower pid: earlier
+        ];
+        let found = select_lease_processes(7, 200, rows);
+        assert_eq!(found.all, vec![10, 11, 6]);
+        assert_eq!(found.earlier, vec![11, 6]);
     }
 
     #[test]
