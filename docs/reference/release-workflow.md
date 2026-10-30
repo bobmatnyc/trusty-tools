@@ -232,6 +232,25 @@ push and would silently disable every release) against the true
 loudly and the whole pipeline — build, release, homebrew-bump, and the
 publish-dry-run job below — is skipped rather than silently proceeding.
 
+### Merging main into a release branch (#10497)
+
+Merge `main` into a `release/<crate>-<semver>` branch (GitHub's "Update
+branch" does this); do not rebase it. The merge brings in the fragments `main`
+gained after the cut. Leave them in `changelog.d/`: they belong to the next
+release, and this release's `## [<version>]` section must not list them.
+
+The changelog gates ignore those fragments. The PR gate
+(`scripts/check-pr-changelog-assembled.sh`) and preflight CHECK 9 run
+`scripts/check-changelog-assembled.sh --base origin/main`. That option skips a
+fragment only when all three hold: it was absent at the cut, it matches
+`main`'s copy byte for byte, and none of its bullets is in the new section.
+A fragment present at the cut, one the release branch added or edited, and one
+already folded into the section still fail as `STRANDED-FRAGMENTS`. A fragment
+the release branch adds itself follows the
+[release-window rule](changelog-fragments.md#the-release-window---merge-in-the-same-pr):
+fold it in with `assemble-changelog.sh <crate> <version> --merge`. A rebase
+onto `main` moves the cut to `main`'s tip, so every `main` fragment then fails.
+
 ## Tag/Publish-Commit Parity Guard
 
 🔴 **The release tag must name the commit `cargo publish` actually ships.**

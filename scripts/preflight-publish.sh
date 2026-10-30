@@ -1826,8 +1826,15 @@ gate_unverified() {
 # synthetic fixtures. No override — see the header comment for why.
 check9_changelog_assembled() {
   local log="${TMP_CHANGELOG}" rc=0
+  local base_args=()
 
-  bash "${REPO_ROOT}/scripts/check-changelog-assembled.sh" "$PKG_NAME" "$VERSION" > "$log" 2>&1 || rc=$?
+  # #10497: a release-branch tip (D96) that merged main carries main's
+  # post-cut fragments; --base keeps them off this release. At main's own tip
+  # the branch has no commits of its own, so --base excludes nothing there.
+  if git -C "$REPO_ROOT" rev-parse --verify -q 'origin/main^{commit}' >/dev/null; then
+    base_args=(--base origin/main)
+  fi
+  bash "${REPO_ROOT}/scripts/check-changelog-assembled.sh" ${base_args[@]+"${base_args[@]}"} "$PKG_NAME" "$VERSION" > "$log" 2>&1 || rc=$?
 
   if [ "$rc" -eq 0 ]; then
     echo "[PASS] changelog-assembled: $(tail -1 "$log")" >&2

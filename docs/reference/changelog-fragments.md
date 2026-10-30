@@ -167,6 +167,10 @@ hold:
   asks that gate rather than re-deriving what "assembled" means, which is what
   keeps the two verdicts in step.
 
+A release branch that merges `main` is different: the fragments `main` gained
+after the cut stay in `changelog.d/` for the next release, and the gates ignore
+them (#10497, [release-workflow.md](release-workflow.md#merging-main-into-a-release-branch-10497)).
+
 Outside that window nothing changes: a hand-written `CHANGELOG.md` bullet is
 still not a record, and the fragment is still the rule.
 `scripts/check_changelog_release_window_selftest.sh` holds both directions.

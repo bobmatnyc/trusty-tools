@@ -52,7 +52,7 @@
 #   `cargo publish`, as its own CHECK 9.
 #
 # Usage:
-#   scripts/check-changelog-assembled.sh [--repo <dir>] <crate-name-or-dir> [version]
+#   scripts/check-changelog-assembled.sh [--repo <dir>] [--base <ref>] <crate-name-or-dir> [version]
 #
 #   <crate-name-or-dir>  the crates.io package name (e.g. `tga`) or the
 #                        crates/ directory name (e.g. `trusty-git-analytics`),
@@ -61,17 +61,35 @@
 #                        that crate's Cargo.toml — the version `cargo publish`
 #                        will actually ship.
 #   --repo <dir>         operate on a different repo root (self-test only).
+#   --base <ref>         the branch a release branch was cut from (normally
+#                        origin/main). Opt-in; without it nothing changes.
+#                        With it, a fragment that <ref> gained AFTER the
+#                        release cut, and that reached this tree only by
+#                        merging <ref> into the release branch, belongs to the
+#                        NEXT release and is not counted as stranded (#10497).
+#                        A fragment still counts when ANY of these holds:
+#                        it existed at the cut (the parent, outside <ref>, of
+#                        one of the branch's own non-merge commits); it is
+#                        absent from <ref> or differs from <ref>'s copy (the
+#                        branch added or edited it); or one of its `- `
+#                        bullets already sits in the `## [<version>]` section
+#                        (consumed, not deleted). On <ref>'s own tip the
+#                        branch has no own commits, so nothing is excluded.
+#                        A <ref> that does not resolve exits 2.
 #
 # Exit codes: 0 = the assembler ran for this version — safe on this axis.
 #   1 = at least one finding (STRANDED-FRAGMENTS and/or NO-SECTION) — do NOT
-#   tag or publish. 2 = usage error.
+#   tag or publish. 2 = usage error, or a --base ref that does not resolve.
 #
 # Test: scripts/check-changelog-assembled-selftest.sh builds synthetic repos
 #   for a stranded-fragment crate, a crate missing its version section, and a
 #   correctly-assembled crate, and asserts both the exit status and the
 #   finding code for each. It also runs this script against the REAL
 #   trusty-audit crate at its current (post-#6400-repair) state to prove the
-#   live repo passes.
+#   live repo passes. The --base cases (a release branch that merged main,
+#   and each real strand it must still catch) live in
+#   scripts/check-pr-changelog-assembled-selftest.sh, which builds the git
+#   history they need.
 #
 # Portability: POSIX tools only, bash 3.2 (macOS) and bash 5 (Linux CI).
 
@@ -87,17 +105,23 @@ for arg in "$@"; do
 done
 
 usage() {
-  echo "usage: scripts/check-changelog-assembled.sh [--repo <dir>] <crate-name-or-dir> [version]" >&2
+  echo "usage: scripts/check-changelog-assembled.sh [--repo <dir>] [--base <ref>] <crate-name-or-dir> [version]" >&2
   exit 2
 }
 
 REPO_ARG=""
+BASE_ARG=""
 POSITIONAL=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo)
       [ "$#" -ge 2 ] || usage
       REPO_ARG="$2"
+      shift 2
+      ;;
+    --base)
+      [ "$#" -ge 2 ] || usage
+      BASE_ARG="$2"
       shift 2
       ;;
     -*)
@@ -188,6 +212,57 @@ if [ -d "$FRAG_DIR" ]; then
   STRANDED="$(find "$FRAG_DIR" -maxdepth 1 -type f -name '*.md' ! -name 'README.md' | LC_ALL=C sort || true)"
 else
   STRANDED=""
+fi
+
+# #10497: with --base, drop the next release's fragments that a release branch
+# picked up by merging its base after the cut. See the --base header note.
+if [ -n "$BASE_ARG" ]; then
+  if ! BASE_SHA="$(git rev-parse --verify -q "${BASE_ARG}^{commit}")"; then
+    echo "check-changelog-assembled: ERROR: --base '${BASE_ARG}' does not resolve to a commit." >&2
+    echo "      Fetch it first, e.g.: git fetch origin main" >&2
+    exit 2
+  fi
+  # The cut: each parent outside BASE..HEAD of a commit the branch made itself.
+  # Merge commits are skipped, so neither an update-branch merge nor CI's
+  # refs/pull/N/merge commit can move the cut forward to the base tip.
+  IN_RANGE="$(git rev-list "${BASE_SHA}..HEAD")"
+  CUTS=""
+  for own in $(git rev-list --no-merges "${BASE_SHA}..HEAD"); do
+    parent="$(git rev-parse -q --verify "${own}^1" || true)"
+    [ -z "$parent" ] && continue
+    printf '%s\n' "$IN_RANGE" | grep -qxF "$parent" || CUTS="${CUTS} ${parent}"
+  done
+  SECTION="$(awk -v h="## [${VERSION}]" 'index($0, h) == 1 { f = 1; next } /^## \[/ { if (f) exit } f' \
+    "${CRATE_PATH}/CHANGELOG.md" 2>/dev/null | sed 's/[[:space:]]*$//' || true)"
+  KEPT=""
+  IGNORED=""
+  if [ -n "$CUTS" ] && [ -n "$STRANDED" ]; then
+    while IFS= read -r frag; do
+      [ -z "$frag" ] && continue
+      rel="${frag#"${REPO_ROOT}"/}"
+      keep=0
+      for cut in $CUTS; do
+        if git cat-file -e "${cut}:${rel}" 2>/dev/null; then keep=1; fi
+      done
+      base_blob="$(git rev-parse -q --verify "${BASE_SHA}:${rel}" || true)"
+      [ "$base_blob" = "$(git hash-object "$frag")" ] || keep=1
+      while IFS= read -r bullet; do
+        [ -z "$bullet" ] && continue
+        if printf '%s\n' "$SECTION" | grep -qxF -- "$bullet"; then keep=1; fi
+      done <<<"$(grep -E '^- ' "$frag" | sed 's/[[:space:]]*$//' || true)"
+      if [ "$keep" -eq 1 ]; then
+        KEPT="${KEPT}${frag}"$'\n'
+      else
+        IGNORED="${IGNORED}${frag}"$'\n'
+      fi
+    done <<<"$STRANDED"
+    STRANDED="${KEPT%$'\n'}"
+  fi
+  if [ -n "$IGNORED" ]; then
+    echo "NOTE: next-release fragment(s) merged from ${BASE_ARG} after the release cut —" >&2
+    echo "      absent at the cut and from the '## [${VERSION}]' section, so not stranded (#10497):" >&2
+    printf '%s' "$IGNORED" | sed "s#^${CRATE_PATH}/#         #" >&2
+  fi
 fi
 
 if [ -n "$STRANDED" ]; then
