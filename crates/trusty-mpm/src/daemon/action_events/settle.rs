@@ -154,9 +154,13 @@ impl ActionPublisher {
     /// What: the bus gets half of `budget`, and never more than half of
     /// [`SIGNAL_FLUSH_BUDGET`] (a cut-off write re-queues its frame).
     /// #10412: the first caller's budget sets the settle's, and on SIGTERM
-    /// that may be the serve drain's 1 s; the cap gets the rest to the spool
-    /// inside the signal handler's 200 ms whichever caller won. The buffer is then closed and drained in one step; the drained
-    /// events go to the spool on the blocking pool, cut off at `budget`.
+    /// that may be the serve drain's 1 s; the cap leaves room for the spool
+    /// write inside the signal handler's fixed 200 ms. Under load that budget
+    /// can still end first: the signal caller then returns its at-risk count
+    /// as `lost`, an upper bound, while the settle finishes and spools the
+    /// events for the other caller (see #10412). The buffer is then closed
+    /// and drained in one step; the drained events go to the spool on the
+    /// blocking pool, cut off at `budget`.
     /// Every event neither sent nor spooled is counted in [`Settled::lost`]
     /// and logged with that count.
     /// #10467: replayed spool files still held are retired only once the
