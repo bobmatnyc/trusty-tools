@@ -42,6 +42,9 @@ pub enum ChunkError {
     /// A tokenizer file exists but does not parse.
     #[error("tokenizer file {} could not be loaded: {reason}", path.display())]
     TokenizerLoad { path: PathBuf, reason: String },
+    /// The cached `refs/main` revision is not a plain directory name.
+    #[error("model cache revision {revision:?} is not a plain name; refusing to read from it")]
+    InvalidRevision { revision: String },
     /// The tokenizer refused to encode the text.
     #[error("tokenizer failed to encode text: {0}")]
     Encode(String),
@@ -118,13 +121,17 @@ impl ChunkTokenizer {
     /// fastembed's `load_tokenizer`: registers the special-token map and
     /// records `max_length = min(FASTEMBED_MAX_LENGTH, model_max_length)`,
     /// the length fastembed truncates at. A missing file is
-    /// [`ChunkError::TokenizerMissing`].
+    /// [`ChunkError::TokenizerMissing`]. A `refs/main` revision that is not a
+    /// plain name (see [`validate_revision`]) is [`ChunkError::InvalidRevision`]
+    /// and no snapshot file is read (#10514).
     /// Test: `fastembed_cache_without_the_model_is_an_error`,
-    /// `fastembed_truncates_at_minilm_window_on_every_model_revision`.
+    /// `fastembed_truncates_at_minilm_window_on_every_model_revision`,
+    /// `traversal_revision_is_rejected_without_reading`,
+    /// `backslash_revision_is_rejected`, `sha_revision_still_loads`.
     pub fn for_fastembed_model_in(cache_dir: &Path, model_code: &str) -> Result<Self, ChunkError> {
         let repo = cache_dir.join(format!("models--{}", model_code.replace('/', "--")));
         let revision = read_file(&repo.join("refs").join("main"))?;
-        let snapshot = repo.join("snapshots").join(revision.trim());
+        let snapshot = repo.join("snapshots").join(validate_revision(&revision)?);
 
         let tokenizer_path = snapshot.join("tokenizer.json");
         let mut tokenizer = Tokenizer::from_bytes(read_file(&tokenizer_path)?).map_err(|e| {
@@ -316,6 +323,29 @@ fn word_start_at_or_before(word_ids: &[Option<u32>], lo: usize, hi: usize) -> us
             _ => true,
         })
         .unwrap_or(hi)
+}
+
+/// Why: #10514 — `refs/main` is joined into the snapshot path; `../../x`
+/// would read the tokenizer files from an arbitrary directory.
+/// What: trims `raw` and accepts only a non-empty name of `[A-Za-z0-9._-]`
+/// that is neither `.` nor contains `..`; returns the trimmed name.
+/// Test: `traversal_revision_is_rejected_without_reading`,
+/// `backslash_revision_is_rejected`, `sha_revision_still_loads`.
+fn validate_revision(raw: &str) -> Result<&str, ChunkError> {
+    let revision = raw.trim();
+    let plain = !revision.is_empty()
+        && revision != "."
+        && !revision.contains("..")
+        && revision
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if plain {
+        Ok(revision)
+    } else {
+        Err(ChunkError::InvalidRevision {
+            revision: revision.to_string(),
+        })
+    }
 }
 
 fn read_file(path: &Path) -> Result<String, ChunkError> {
