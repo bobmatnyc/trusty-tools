@@ -93,6 +93,17 @@ pub struct ListParams {
     pub slim: bool,
 }
 
+/// `mpm.managed.fleet` parameters — the HTTP route's one query flag (#10476).
+///
+/// No `deny_unknown_fields`: an older or newer client's stray key is ignored,
+/// matching the HTTP route's `HashMap` query.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct FleetParams {
+    /// Skip the per-session `stale_assets` probe, as [`ListParams::slim`].
+    pub slim: bool,
+}
+
 /// `mpm.managed.send` parameters: the id plus the HTTP body.
 #[derive(Debug, Deserialize)]
 pub struct SendParams {
@@ -313,9 +324,9 @@ fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter
             let state = Arc::clone(&rw_s);
             async move { reconcile::reconcile_worktrees_core(&state).await.into_rpc() }
         })
-        .typed("mpm.managed.fleet", move |_: NoParams| {
+        .typed("mpm.managed.fleet", move |req: FleetParams| {
             let state = Arc::clone(&fleet_s);
-            async move { fleet::fleet_core(&state).await.into_rpc() }
+            async move { fleet::fleet_core(&state, req.slim).await.into_rpc() }
         })
         .typed(
             trusty_common::mpm_rpc::METHOD_RESIDENCY_ACTIVE,

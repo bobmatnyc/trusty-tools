@@ -1,0 +1,2 @@
+Changed
+- The `tm tui` / `tm projects` fleet poll no longer runs the per-session stale-assets probe, which was most of each poll's ~1 s. `GET /api/v1/sessions/managed/fleet` (and the socket method `mpm.managed.fleet`) accepts an optional `slim=true` flag, as the list route already does; the tui sends it, so its sessions report `stale_assets: false` with `stale_assets_unchecked` set, and `unresumable` is still computed. Every other caller sends no flag and still probes. An older daemon ignores the flag (#10476).
