@@ -23,6 +23,10 @@ pub use loader::{VoiceLoader, VoiceLoaderError};
 pub use principles::principles_addendum;
 pub use types::{VoiceKnobs, VoiceMeta, VoicePackage, VoiceProvenance, VoiceSection};
 
+use trusty_common::content::ResolvedContent;
+
+use crate::runtime_content::PromptContentError;
+
 /// Configuration for the voice layer passed into the prompt builder.
 ///
 /// Why: the prompt builder needs to know (a) which principles/voice/template
@@ -36,7 +40,8 @@ pub use types::{VoiceKnobs, VoiceMeta, VoicePackage, VoiceProvenance, VoiceSecti
 #[derive(Debug, Default, Clone)]
 pub struct VoiceConfig {
     /// Resolved universal best-practices addendum (from `principles`).
-    /// `None` = principles layer disabled (default-on in production via `VoiceConfig::default_production`).
+    /// `None` = principles layer disabled (default-on in production; see
+    /// `pipeline::voice_config::build_voice_config`).
     pub principles: Option<String>,
     /// Resolved voice package addendum (base + custom overlay merged).
     /// `None` = no voice package selected (opt-in).
@@ -57,16 +62,22 @@ impl VoiceConfig {
     ///
     /// Why: issue #756 specifies the principles layer is default-on (universal /
     /// safe); voice is always opt-in.  This constructor reflects that default.
-    /// What: enables the principles addendum; leaves `voice_addendum` as `None`.
-    /// Test: `voice_config_production_default_enables_principles`.
-    pub fn default_production() -> Self {
-        Self {
-            principles: Some(principles_addendum().to_string()),
-            voice_addendum: None,
-            voice_name: None,
-            review_template: None,
-            review_template_name: None,
-        }
+    /// Since #9991 the principles text is runtime content, so it is read from
+    /// `content` and the constructor can fail.
+    /// What: enables the principles addendum read by [`principles_addendum`];
+    /// leaves every other layer `None`.
+    /// Test: `voice_config_production_default_enables_principles`,
+    /// `voice_config_production_default_refuses_without_the_principles`.
+    ///
+    /// # Errors
+    /// The [`PromptContentError`] of [`principles_addendum`]: `Missing` for an
+    /// absent file, `Invalid` for an empty one.
+    pub fn default_production(content: &ResolvedContent) -> Result<Self, PromptContentError> {
+        // #9991: the principles text is runtime content; no compiled-in default.
+        Ok(Self {
+            principles: Some(principles_addendum(content)?),
+            ..Self::default()
+        })
     }
 
     /// Construct a stock-only `VoiceConfig` with no layers (testing / legacy).

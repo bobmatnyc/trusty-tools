@@ -68,12 +68,12 @@ pub(super) fn subject_of(source: &DiffSource) -> (String, String, u64, bool) {
 /// The reviewer prompts and voice layers this review builds from
 /// (`Continue`), or the finished abort (`Break`) (#9015).
 ///
-/// Why: the prompts, and any voice or review template the config names, are
-/// runtime content (ADR-0064). Without them the review cannot run as
+/// Why: the prompts, the principles addendum when enabled (#9991), and any
+/// voice or review template the config names, are runtime content (ADR-0064). Without them the review cannot run as
 /// configured, and the run must stop before it claims a dedup slot, fetches
 /// the PR or calls a model, so a retry once content is installed starts clean.
 /// What: the prompts the caller supplied, else [`ReviewerPrompts::load`]; then
-/// [`build_voice_config`]. On an error: one ERROR line, then
+/// [`build_voice_config`] over those prompts' content. On an error: one ERROR line, then
 /// [`ReviewResult::mark_infra_skip`] with `"not reviewed: <error>"` (the error
 /// text names its remedy; the MCP envelope turns `isError` on), finished by
 /// [`abort_dry`] with [`DedupClaim::NotHeld`]. Never a default or empty prompt,
@@ -92,7 +92,11 @@ pub(super) async fn content_or_abort(
         Some(prompts) => Ok(Arc::clone(prompts)),
         None => ReviewerPrompts::load().map(Arc::new),
     }
-    .and_then(|prompts| Ok((prompts, build_voice_config(config)?)));
+    .and_then(|prompts| {
+        // #9991: the principles addendum comes from the prompts' own content.
+        let voice = build_voice_config(config, &prompts)?;
+        Ok((prompts, voice))
+    });
     let err = match loaded {
         Ok(content) => return ControlFlow::Continue(content),
         Err(err) => err,

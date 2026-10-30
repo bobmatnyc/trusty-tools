@@ -1,4 +1,5 @@
-//! Universal best-practices principles layer (#756).
+//! Universal best-practices principles layer (#756), read at runtime from
+//! instructional content (ADR-0064, #9991).
 //!
 //! Why: research into authoritative code-review guidance (Google Engineering
 //! Practices, Bacchelli & Bird ICSE 2013, Sadowski et al. ICSE-SEIP 2018,
@@ -6,12 +7,14 @@
 //! injectable prompt component.  This layer captures WHAT the field considers
 //! effective code review — distinct from HOW the Duetto team reviews (the voice
 //! layer).  It is composed BETWEEN the stock base prompt and the voice layer:
-//! stock → principles → voice.
+//! stock → principles → voice.  It is a product prompt, so a fix to it must not
+//! need a crate release: the text lives in
+//! `content/instructions/trusty-review/prompts/principles_addendum.md`.
 //!
-//! What: exposes a single constant `PRINCIPLES_ADDENDUM` (the prompt text) and
-//! `principles_addendum()` (the accessor function) so callers remain
-//! source-agnostic to whether this is a constant or loaded at runtime in the
-//! future.
+//! What: [`principles_addendum`] reads that file from a resolved content source
+//! through `crate::runtime_content::require_text`. An absent file is
+//! `PromptContentError::Missing` and an empty one `Invalid`, each naming the
+//! path and the remedy. There is no compiled-in default.
 //!
 //! Sources (cited in research/best-practices/code-review-best-practices-2026-06-04.md):
 //!   Google Eng Practices — Reviewer Guide (https://google.github.io/eng-practices/review/reviewer/)
@@ -22,85 +25,39 @@
 //!   Automated Code Review In Practice, arXiv 2412.18531
 //!
 //! Test: `principles_addendum_is_non_empty`, `principles_contains_key_concepts`
-//! in voice/tests.rs.
+//! in voice/tests.rs; `the_repository_principles_load_byte_identical` in
+//! pipeline/prompt_templates_tests.rs.
 
-/// The universal best-practices principles layer injected between the stock
-/// base prompt and any voice package addendum.
-const PRINCIPLES_ADDENDUM: &str = r#"## Review principles
+use trusty_common::content::ResolvedContent;
 
-Review changes in priority order: design and correctness first, then tests,
-then complexity, then naming and clarity, then style last. Approve any change
-that genuinely improves the codebase even if it is not perfect; never approve
-one that worsens it.
+use crate::runtime_content::{PromptContentError, content_path, require_text};
 
-**Severity — be explicit, be sparse with blocks.**
-BLOCK only on real correctness defects, security issues, data-integrity risk,
-or a broken build/tests. ADVISE on design, reuse, naming, and coverage — these
-are strong recommendations, not mandates. DEMOTE pure style to nits labeled as
-such. Use Conventional Comments labels (issue:, suggestion:, nitpick:,
-question:, thought:, praise:, todo:) so authors know the weight of every
-comment without asking.
+/// File name of the principles addendum under
+/// `instructions/trusty-review/prompts/`.
+pub const PRINCIPLES_FILE: &str = "principles_addendum.md";
 
-**Feedback — actionable, reasoned, respectful.**
-Comment on the code, not the author. Explain *why* every finding matters; a
-conclusion without reasoning reads as personal opinion. Propose the concrete
-fix when you can. When uncertain, ask a question rather than issuing a mandate.
-Do not open with or pad reviews with praise, affirmation, or restated
-approval — lead with what needs action and keep every comment proportionate
-to its substance. Praise from an automated reviewer is not equivalent to
-praise from a human colleague: it costs the reader attention without carrying
-the social value, so include a `praise:` comment only when clearly justified —
-a non-obvious correct decision or a real risk averted. It is never a per-review
-formality and never used to soften criticism. When nothing clearly rises to
-that bar, omit praise entirely. Avoid the words "simply,"
-"just," "obviously"; do not use sarcasm or hyperbole. Request that unclear code
-be rewritten in the source — explanations in review comments do not help future
-readers.
+/// The bundle path of the principles addendum
+/// (`instructions/trusty-review/prompts/principles_addendum.md`).
+pub fn principles_path() -> String {
+    content_path(&format!("prompts/{PRINCIPLES_FILE}"))
+}
 
-**Calibration — keep signal-to-noise high.**
-Limit the number of comments: a review flooded with low-severity nits trains
-authors to ignore the feed entirely, burying real issues. For a style pattern
-appearing many times, one comment noting the pattern is enough. Never block on
-preference when the author's approach is valid; if multiple approaches are
-equally sound, defer to the author.
-
-**Scope discipline.**
-Separate in-scope fixes from out-of-scope cleanup; defer the latter to a
-tracked follow-up rather than expanding the PR. Do not approve "I'll fix it
-later" promises for real correctness or complexity problems.
-
-**Do NOT flag.**
-Stay silent on — do not emit a finding for — any of the following:
-- Pure style/formatting nits already enforced by fmt/clippy/linters (spacing,
-  import order, trailing commas, line length).
-- Speculative or hypothetical concerns ("if someone later calls this with X…")
-  with no evidence the diff actually triggers them.
-- Restating what the diff obviously does, or narrating the change back to the
-  author without identifying a problem.
-- Subjective preferences (naming taste, "I'd structure this differently") that
-  carry no correctness or maintainability consequence.
-A finding must name a concrete consequence; if you cannot, do not raise it."#;
-
-/// Return the universal best-practices principles addendum.
+/// Reads the universal best-practices principles addendum from `content`.
 ///
-/// Why: function wrapper keeps the call site source-agnostic to whether the
-/// text is a constant or loaded from disk, and makes the call clearly
-/// identifiable in prompt-assembly code.
-/// What: returns `PRINCIPLES_ADDENDUM` — the prompt component compiled from
-/// Google Eng Practices, Conventional Comments, and peer-reviewed code-review
-/// research (see module doc for full citation list).
-/// Test: `principles_addendum_is_non_empty`, `principles_contains_key_concepts`.
+/// Why: the principles text is a product prompt (ADR-0064), so it is runtime
+/// content rather than a compiled constant, and a stale or broken release must
+/// stop the review instead of sending a prompt without the layer (#9991).
+/// What: [`require_text`] over [`principles_path`]; the text is returned
+/// verbatim, with no default and no fallback.
+/// Test: `the_repository_principles_load_byte_identical`,
+/// `a_release_without_the_principles_is_missing_naming_the_path`,
+/// `an_empty_principles_file_is_invalid`.
 ///
-/// # Forward-compatibility note
-///
-/// Today this returns a compile-time constant (`&'static str`).  A future
-/// runtime-config path (e.g., loading a user-supplied `principles.md` from the
-/// XDG config dir, similar to how `VoiceLoader` handles voice packages) would
-/// change the return type to `Cow<'static, str>` or `String`.  All call sites
-/// already go through this function, so that migration will be a single-file
-/// change here plus a `Cow`/`String` adjustment at the handful of call sites
-/// that currently elide the type.  No over-engineering is warranted until that
-/// runtime path is actually needed.
-pub fn principles_addendum() -> &'static str {
-    PRINCIPLES_ADDENDUM
+/// # Errors
+/// [`PromptContentError::Missing`] for an absent file,
+/// [`PromptContentError::Invalid`] for an empty one, and the resolver's own
+/// error otherwise.
+pub fn principles_addendum(content: &ResolvedContent) -> Result<String, PromptContentError> {
+    // #9991: read from content; the compiled-in `PRINCIPLES_ADDENDUM` is gone.
+    require_text(content, &principles_path())
 }

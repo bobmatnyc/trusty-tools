@@ -40,6 +40,10 @@ pub const STOCK_PATH: &str = "instructions/trusty-review/prompts/system_prompt_s
 pub const COVERAGE_GATING_PATH: &str =
     "instructions/trusty-review/prompts/system_prompt_coverage_gating.md";
 
+/// The bundle path of the principles addendum (#9991). Spelled out, like
+/// [`STOCK_PATH`], so it compiles against a crate that still embeds the text.
+pub const PRINCIPLES_PATH: &str = "instructions/trusty-review/prompts/principles_addendum.md";
+
 /// The checkout's two prompts as `(bundle path, bytes)`, read from the runtime
 /// checkout (#9298), never the compile-time build path.
 pub fn repo_prompts() -> Vec<(String, Vec<u8>)> {
