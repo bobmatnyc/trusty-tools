@@ -15,6 +15,9 @@
 //! and the shim survives to reap and propagate the child's real exit status —
 //! the standard wrapper convention. Non-macOS is a plain pass-through spawn (no
 //! TCC there, and the shim is never emitted into a pane off macOS).
+//! #9092: a launch spec naming the supervisor session is refused before
+//! anything spawns; an Architect starts only via `tm fleet init|relaunch`
+//! ([`launch_from_spec`]).
 //! Test: `run_rejects_empty_argv`; the disclaim/spawn behaviour is covered by
 //! `trusty_mpm::core::spawn_disclaim`'s `disclaimed_status_*` tests, and the
 //! wrapped-pane PID discovery + signal topology by
@@ -111,6 +114,37 @@ pub(crate) fn run(argv: Vec<String>) -> anyhow::Result<()> {
 /// `run_launch_spec_reports_a_program_that_cannot_be_spawned`,
 /// `run_launch_spec_marks_started_before_it_spawns`.
 pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
+    // #9092: the root of the daemon's session store.
+    let root = dirs::home_dir().map(|home| home.join(".trusty-mpm"));
+    let started = std::time::Instant::now();
+    let (status, code) = launch_from_spec(path, root.as_deref())?;
+    println!(
+        "{}",
+        trusty_mpm::runtime::launch_report::report_exit(code, started.elapsed())
+    );
+    std::process::exit(status);
+}
+
+/// [`run_launch_spec`] up to the child's exit, under the `~/.trusty-mpm`
+/// `root` (`None` when the home directory cannot be resolved).
+///
+/// Why: #9092 — the spec arrives from any path, so a spec naming the
+/// supervisor session must not start an Architect outside `tm fleet
+/// init|relaunch`; a test drives that against a scratch root without
+/// `process::exit`.
+/// What: consumes the spec and marks it started (#8233). #9092: a spec with a
+/// non-empty `session_id` is refused before the spawn when
+/// [`claims_supervisor`](trusty_mpm::session_manager::architect_spawn::claims_supervisor)
+/// says it names a `supervisor` record, or cannot say (unreadable store, no
+/// home). Otherwise spawns as before and returns `(exit status, raw code)` as
+/// [`spawn_and_wait`] does.
+/// Test: `a_supervisor_spec_with_markers_stripped_writes_no_record_and_spawns_nothing_9092`,
+/// `ordinary_unknown_and_unlisted_specs_still_launch_9092`,
+/// `an_unreadable_store_refuses_a_spec_that_names_a_session_9092`.
+pub(crate) fn launch_from_spec(
+    path: &std::path::Path,
+    root: Option<&std::path::Path>,
+) -> anyhow::Result<(i32, Option<i32>)> {
     let spec = trusty_mpm::runtime::launch_spec::LaunchSpec::consume(path)
         .with_context(|| "managed launch aborted: its launch spec could not be used")?;
     // #8233: the pane's shell parsed and ran the launch line — record that before
@@ -119,14 +153,31 @@ pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
     // #8233 review round 2: keyed on the LAUNCH, so a marker from an earlier
     // launch of this same session can never satisfy this one.
     trusty_mpm::runtime::launch_spec::LaunchSpec::mark_started(path, &spec.launch_id);
+    // #9092: an Architect starts only via `tm fleet init|relaunch`. Fails
+    // closed when a spec names a session whose kind cannot be read.
+    let claims = match root {
+        Some(root) => {
+            trusty_mpm::session_manager::architect_spawn::claims_supervisor(root, &spec.session_id)
+        }
+        None if spec.session_id.trim().is_empty() => Ok(false),
+        None => Err("the home directory cannot be resolved".to_owned()),
+    }
+    .map_err(|why| {
+        anyhow::anyhow!(
+            "managed launch of session {} aborted: cannot tell whether it is the Architect's: \
+             {why}",
+            spec.session_id
+        )
+    })?;
+    if claims {
+        anyhow::bail!(
+            "managed launch of session {} refused: it is the supervisor (Architect) session, \
+             which starts only through `tm fleet init` or `tm fleet relaunch`",
+            spec.session_id
+        );
+    }
     let mut cmd = spec.to_command();
-    let started = std::time::Instant::now();
-    let (status, code) = spawn_and_wait(&mut cmd, &spec.program)?;
-    println!(
-        "{}",
-        trusty_mpm::runtime::launch_report::report_exit(code, started.elapsed())
-    );
-    std::process::exit(status);
+    spawn_and_wait(&mut cmd, &spec.program)
 }
 
 /// Spawn `cmd` disclaimed, wait, and report its status two ways.
@@ -174,6 +225,15 @@ mod tests {
     /// session, so a marker from an earlier launch cannot satisfy a later one.
     const TEST_LAUNCH_ID: &str = "aaaabbbbccccddddeeeeffff00001111";
 
+    /// [`launch_from_spec`] under a scratch `~/.trusty-mpm` in `home`, so no
+    /// test reads the real session store (#9092).
+    fn launch_in(
+        home: &std::path::Path,
+        spec: &std::path::Path,
+    ) -> anyhow::Result<(i32, Option<i32>)> {
+        launch_from_spec(spec, Some(&home.join(".trusty-mpm")))
+    }
+
     /// Write a spec naming `program` into `dir`, and return its path.
     ///
     /// Why: both cases below need a spec that decodes cleanly, so the only
@@ -205,7 +265,7 @@ mod tests {
             &dir.path().join("no-such-claude").to_string_lossy(),
         );
 
-        let err = run_launch_spec(&path).expect_err("an unspawnable program must error");
+        let err = launch_in(dir.path(), &path).expect_err("an unspawnable program must error");
 
         assert!(
             err.to_string().contains("failed to spawn"),
@@ -225,7 +285,7 @@ mod tests {
             &dir.path().join("no-such-claude").to_string_lossy(),
         );
 
-        let _ = run_launch_spec(&path);
+        let _ = launch_in(dir.path(), &path);
 
         let marker = trusty_mpm::runtime::launch_spec::LaunchSpec::started_marker_in(
             dir.path(),
@@ -291,7 +351,7 @@ mod tests {
     #[test]
     fn run_launch_spec_rejects_a_missing_spec() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let err = run_launch_spec(&dir.path().join("absent.json"))
+        let err = launch_in(dir.path(), &dir.path().join("absent.json"))
             .expect_err("a missing spec must abort the launch");
         assert!(
             format!("{err:#}").contains("managed launch aborted"),
@@ -306,10 +366,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("corrupt.json");
         std::fs::write(&path, b"{\"session_id\":").expect("seed");
-        let err = run_launch_spec(&path).expect_err("a corrupt spec must abort the launch");
+        let err = launch_in(dir.path(), &path).expect_err("a corrupt spec must abort the launch");
         assert!(
             format!("{err:#}").contains("managed launch aborted"),
             "the pane must be told what happened: {err:#}"
         );
     }
 }
+
+#[cfg(test)]
+#[path = "spawn_disclaimed_architect_tests.rs"]
+mod architect_tests;

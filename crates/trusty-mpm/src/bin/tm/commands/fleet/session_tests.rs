@@ -331,6 +331,36 @@ fn status_is_complete_only_when_the_architect_is_bound() {
     assert!(text.ends_with("\ncomplete\n"), "{text}");
 }
 
+/// #9092: a live session whose `claude` has no launch record prints a
+/// warning naming the PID; the record silences it, and so does a session
+/// with no `claude` or no live pane.
+#[test]
+fn status_warns_when_the_live_claude_has_no_launch_record_9092() {
+    let h = Home::new();
+    init(&h.dir(), h.home(), false, NO_TMUX).expect("init");
+    let me = std::process::id();
+
+    let report = h.status(None, LIVE_ME);
+    let text = report.render();
+    let warning = report.unrecorded.as_deref().expect("a warning");
+    assert!(warning.contains(&format!("pid {me}")), "{text}");
+    assert!(warning.contains(&format!("{me}.architect")), "{text}");
+    assert!(text.contains("WARNING: the live `claude` pid"), "{text}");
+
+    let no_claude = Probe {
+        claude: |_| None,
+        ..LIVE_ME
+    };
+    assert!(h.status(None, no_claude).unrecorded.is_none());
+    assert!(h.status(None, NO_TMUX).unrecorded.is_none());
+
+    let root = h.home().join(".trusty-mpm");
+    record_launch(&root, me, &h.dir(), "tm-architect").expect("record");
+    let report = h.status(None, LIVE_ME);
+    assert!(report.unrecorded.is_none(), "{}", report.render());
+    assert!(!report.render().contains("WARNING"), "{}", report.render());
+}
+
 thread_local! {
     /// The directory a [`LIVE_HERE`] session runs in.
     static HERE: RefCell<PathBuf> = const { RefCell::new(PathBuf::new()) };

@@ -13,7 +13,10 @@
 //! in its project tier (#9540); it is never part of `complete`. #10448: an
 //! unbound `binding` makes the setup incomplete.
 //! It also warns on the pre-#9997 records directory and moves nothing.
-//! Test: `status_reports_incomplete_setup`,
+//! #9092: it warns, naming the PID, when the session's live `claude` has no
+//! launch record.
+//! Test: `status_warns_when_the_live_claude_has_no_launch_record_9092`,
+//! `status_reports_incomplete_setup`,
 //! `status_warns_about_a_stale_records_dir_and_moves_nothing`,
 //! `fleet_status_names_why_this_session_is_not_bound`,
 //! `the_skills_row_names_a_missing_or_custom_skill`,
@@ -66,6 +69,9 @@ pub(crate) struct StatusReport {
     /// Whether the calling session is bound as the Architect; informational,
     /// never part of `complete`. `None` when not evaluated.
     pub(crate) this_session: Option<Check>,
+    /// #9092: the warning that the session's live `claude` has no launch
+    /// record, naming its PID; `None` when it has one or none was found.
+    pub(crate) unrecorded: Option<String>,
 }
 
 impl StatusReport {
@@ -85,6 +91,9 @@ impl StatusReport {
         for c in std::iter::once(&self.binding).chain(&self.this_session) {
             let mark = if c.ok { "ok     " } else { "UNBOUND" };
             out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
+        }
+        if let Some(warning) = &self.unrecorded {
+            out.push_str(&format!("WARNING: {warning}\n"));
         }
         if self.complete {
             out.push_str("complete\n");
@@ -142,7 +151,12 @@ pub(crate) fn status(
     let binding = binding_check(&dir, home, probe, &names);
     // #10448: an unbound Architect is denied every anchor write; not complete.
     let complete = checks.iter().all(|c| c.ok) && binding.ok;
+    let unrecorded = names
+        .as_ref()
+        .ok()
+        .and_then(|n| unrecorded_claude(&dir, home, probe, n.architect()));
     StatusReport {
+        unrecorded,
         binding,
         skills: skills_check(&dir),
         session: names
@@ -185,6 +199,35 @@ pub(crate) fn binding_check(
         ok,
         detail,
     }
+}
+
+/// The warning that the live `claude` in `session` has no launch record.
+///
+/// Why: #9092 — a `claude` started outside `tm fleet init|relaunch` (a
+/// hand-typed `claude --resume`) runs unbound for hours with every exemption
+/// silently denied; the operator needs the PID named, not only `UNBOUND`.
+/// What: `Some` only when the pane is live, `probe` finds its `claude`, and
+/// `home`'s `architect-launch/` holds no record for that PID (a record that
+/// does not read is reported by `binding` instead). Names the PID, the record
+/// path and `tm fleet relaunch`.
+/// Test: `status_warns_when_the_live_claude_has_no_launch_record_9092`.
+fn unrecorded_claude(dir: &Path, home: &Path, probe: Probe, session: &str) -> Option<String> {
+    if !matches!((probe.pane)(session), PaneState::Live(_)) {
+        return None;
+    }
+    let pid = (probe.claude)(session)?;
+    let root = home.join(".trusty-mpm");
+    let records = trusty_mpm::core::architect_launch::ARCHITECT_RECORDS;
+    if !matches!(records.read(&root, pid), Ok(None)) {
+        return None;
+    }
+    Some(format!(
+        "the live `claude` pid {pid} in tmux session {session} has no Architect launch record \
+         ({}); it runs UNBOUND and every Architect exemption is denied. Run `tm fleet relaunch \
+         --dir {}` from an operator terminal",
+        records.path(&root, pid).display(),
+        dir.display()
+    ))
 }
 
 /// `Ok` when the `claude` in `session` is the bound Architect of `dir`, else
