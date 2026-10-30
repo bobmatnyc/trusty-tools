@@ -131,8 +131,12 @@ impl Fixture {
         std::fs::create_dir_all(&bin).expect("mkdir bin");
         let exe = bin.join("claude");
         // See #10248
-        trusty_common::exec_stub::write_executable(&exe, b"#!/bin/sh\nexit 0\n")
-            .expect("write fake claude");
+        // #10459: an Architect launch probes `claude --version` first.
+        trusty_common::exec_stub::write_executable(
+            &exe,
+            b"#!/bin/sh\n[ \"$1\" = --version ] && echo '2.1.312 (Claude Code)'\nexit 0\n",
+        )
+        .expect("write fake claude");
         let repos_root = home.join("projects");
         let project = repos_root.join("acme").join("widget");
         std::fs::create_dir_all(&project).expect("mkdir project");

@@ -154,15 +154,6 @@ fn pm_session_registers_no_ticket_handler() {
             None,
         )
         .expect("pm additions");
-        let before = project_managed_hook_additions_with_pm_guard(
-            Some(Path::new(EXE)),
-            on(0),
-            on(1),
-            on(2),
-            on(3),
-        )
-        .expect("pm additions");
-        assert_eq!(got, before, "bits {bits:05b}");
         assert!(got["hooks"].get("UserPromptExpansion").is_none(), "{got}");
         for (event, entry) in entries(&got) {
             assert!(entry.get("args").is_none(), "{event}: {entry}");
@@ -174,6 +165,71 @@ fn pm_session_registers_no_ticket_handler() {
             "bits {bits:05b}: {got}"
         );
     }
+}
+
+/// The literal PM golden: the default-toggle PM block, byte for byte, with
+/// the PM guard's host-resolved binary written as `<BIN>` (#10459 fix round).
+const PM_GOLDEN: &str = include_str!("architect_hooks_pm_golden.json");
+
+/// A PM session's default hook block equals [`PM_GOLDEN`].
+#[test]
+fn the_pm_hook_block_matches_its_literal_golden() {
+    let got = project_managed_hook_additions_for_profile(
+        Some(Path::new(EXE)),
+        true,
+        false,
+        false,
+        true,
+        None,
+    )
+    .expect("pm additions");
+    let text = serde_json::to_string_pretty(&got).expect("json").replace(
+        &format!("\"{}{PM_GUARD_SUFFIX}\"", resolve_statusline_binary()),
+        &format!("\"<BIN>{PM_GUARD_SUFFIX}\""),
+    );
+    assert_eq!(text.trim(), PM_GOLDEN.trim(), "actual PM block:\n{text}");
+}
+
+/// An Architect prep on an old Claude Code is a fatal refusal that writes
+/// nothing: no `.claude/`, no settings (#10459 fix round).
+#[test]
+#[serial_test::serial]
+fn an_old_claude_code_refuses_the_architect_prep_before_any_write() {
+    let project = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let root = home.path().join(".trusty-mpm");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        format!(
+            "[architect]\nprojects = [{:?}]\n",
+            project.path().display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join(".trusty-mpm.toml"),
+        "profile = \"supervisor\"\n",
+    )
+    .unwrap();
+    let probe = &crate::core::architect_claude_version::TEST_PROBE;
+    probe.with(|p| *p.borrow_mut() = Ok("2.1.294 (Claude Code)".to_owned()));
+    let _home = EnvVarGuard::set("HOME", home.path());
+    let fw = crate::core::paths::FrameworkPaths::under(home.path());
+    let mut host = super::super::HostInputs::with_home(Some(home.path()));
+    host.hook_exe = Some(Path::new(EXE));
+    let result =
+        super::super::prepare_session_inner(&fw, project.path(), None, true, None, None, host);
+    probe.with(|p| *p.borrow_mut() = Ok("2.1.312 (Claude Code)".to_owned()));
+    let Err(err) = result else {
+        panic!("an old Claude Code must refuse the Architect prep");
+    };
+    assert!(err.is_fatal(), "{err}");
+    assert!(err.to_string().contains("older than v2.1.295"), "{err}");
+    assert!(
+        !project.path().join(".claude").exists(),
+        "prep wrote before refusing"
+    );
 }
 
 #[test]

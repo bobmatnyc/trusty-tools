@@ -816,6 +816,27 @@ fn strip_mpm_hook_entries_for_events(
     strip_hook_entries_matching_for_events(val, events, is_mpm_hook_command)
 }
 
+/// The command line one hook entry runs, as the identity predicates read it.
+///
+/// Why (#10459): an exec-form entry keeps its argv in `args`, so its `command`
+/// is the bare executable and no ` hook --pm-guard` suffix predicate sees it.
+/// What: `command` alone for a shell-form entry (no `args`), byte for byte;
+/// for an exec-form entry, `command` and every string `args` element joined
+/// by one space. `None` when `command` is missing or not a string.
+/// Test: `an_exec_form_entry_reads_as_its_joined_argv`.
+pub(crate) fn hook_entry_command_line(entry: &serde_json::Value) -> Option<Cow<'_, str>> {
+    let command = entry.get("command")?.as_str()?;
+    let Some(args) = entry.get("args").and_then(serde_json::Value::as_array) else {
+        return Some(Cow::Borrowed(command));
+    };
+    let mut line = command.to_owned();
+    for arg in args.iter().filter_map(serde_json::Value::as_str) {
+        line.push(' ');
+        line.push_str(arg);
+    }
+    Some(Cow::Owned(line))
+}
+
 /// Remove hook group ENTRIES matching `matches_cmd` for the given events (or
 /// all events) in-place, at PER-ENTRY (not per-group) granularity.
 ///
@@ -844,27 +865,6 @@ fn strip_mpm_hook_entries_for_events(
 /// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
 /// `test_write_project_hooks_replaces_stale_exe_path_group`,
 /// `test_strip_mpm_hook_entries_removes_only_tm_entry_from_mixed_group`.
-/// The command line one hook entry runs, as the identity predicates read it.
-///
-/// Why (#10459): an exec-form entry keeps its argv in `args`, so its `command`
-/// is the bare executable and no ` hook --pm-guard` suffix predicate sees it.
-/// What: `command` alone for a shell-form entry (no `args`), byte for byte;
-/// for an exec-form entry, `command` and every string `args` element joined
-/// by one space. `None` when `command` is missing or not a string.
-/// Test: `an_exec_form_entry_reads_as_its_joined_argv`.
-pub(crate) fn hook_entry_command_line(entry: &serde_json::Value) -> Option<Cow<'_, str>> {
-    let command = entry.get("command")?.as_str()?;
-    let Some(args) = entry.get("args").and_then(serde_json::Value::as_array) else {
-        return Some(Cow::Borrowed(command));
-    };
-    let mut line = command.to_owned();
-    for arg in args.iter().filter_map(serde_json::Value::as_str) {
-        line.push(' ');
-        line.push_str(arg);
-    }
-    Some(Cow::Owned(line))
-}
-
 pub(crate) fn strip_hook_entries_matching_for_events(
     val: &mut serde_json::Value,
     events: Option<&[String]>,
