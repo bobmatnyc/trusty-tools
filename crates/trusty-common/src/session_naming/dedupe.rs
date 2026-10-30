@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(name, "tm-tagents-3");
     }
 
-    /// Why: the zero-padded `tm-<leaf>-NN` scheme (#1955) must keep its width
+    /// Why: the zero-padded `tm-<leaf>[-NN]` scheme (#1955) must keep its width
     /// when auto-suffixed — `tm-trusty-tools-01` colliding must become
     /// `tm-trusty-tools-02`, not the unpadded `tm-trusty-tools-2` (which would
     /// look like a foreign/different scheme next to sibling `-01`/`-03` names).
