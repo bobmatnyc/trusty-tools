@@ -1319,6 +1319,75 @@ fn fleet_relaunch_binds_when_no_prior_record_exists() {
     assert_eq!(env.status_json()["binding"]["ok"], true);
 }
 
+/// #10357: a reboot leaves neither session; `init` starts the Architect and
+/// its poller and registers both, and a second `init` starts no second poller.
+#[test]
+fn fleet_init_restores_the_poller_after_a_reboot() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let daemon = FakeDaemon::start(env.tmux_dir.path().join("d.sock"));
+    let init = ["fleet", "init", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+
+    env.kill_session("tm-architect");
+    env.kill_session("tm-architect-poll");
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("started poller session tm-architect-poll"),
+        "{}",
+        text(&out)
+    );
+    assert!(env.has_session("tm-architect-poll"));
+    let requests = daemon.requests();
+    assert_eq!(
+        requests[1]["poll_session"], "tm-architect-poll",
+        "{requests:?}"
+    );
+
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("poller session tm-architect-poll is running"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// #10357 regression: the poller died with the reboot while the Architect
+/// came back; `relaunch` binds the Architect and restarts its poller once, so
+/// the registration that follows records the `tm-architect-poll` helper.
+#[test]
+fn fleet_relaunch_restores_a_missing_poller() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    env.kill_session("tm-architect-poll");
+
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let out = env.tm(&relaunch);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("started poller session tm-architect-poll"),
+        "{}",
+        text(&out)
+    );
+    assert!(env.has_session("tm-architect-poll"), "{}", text(&out));
+
+    let out = env.tm(&relaunch);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("poller session tm-architect-poll is running"),
+        "{}",
+        text(&out)
+    );
+}
+
 /// #9092 ruling Q3: `relaunch` never starts an absent session; it exits 1
 /// naming `tm fleet init`, and writes nothing.
 #[test]
