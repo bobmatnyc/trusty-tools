@@ -33,9 +33,10 @@ use super::{
 /// reported or which rule they carry — a prefix, a length, an allowlist, a
 /// branch. The fingerprint test fails until the bump is made.
 /// Test: `secret_filter_version_pins_the_rule_inputs`.
-// #9748: 2 admits GitHub Projects v2 node ids.
+// #9748: 2 admits GitHub Projects v2 node ids; 3 reads `:line` file
+// references and credentials in a URL's userinfo, query and fragment.
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
-pub const SECRET_FILTER_VERSION: u32 = 2;
+pub const SECRET_FILTER_VERSION: u32 = 3;
 
 /// Which detector rule flagged a span. Only the label is ever reported; the
 /// rule carries no part of the secret.
