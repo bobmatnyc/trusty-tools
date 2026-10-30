@@ -1,2 +1,0 @@
-Fixed
-- A child process no longer inherits the parent's sockets on macOS. `mio` sets close-on-exec on a new socket in a second step, so a child forked in that window kept a dropped connection open (511 of 20,000 in the issue's model). The new `child_fds::seal_inherited` hook marks every inherited descriptor close-on-exec before `exec`, and `git::command*`, `GhCommand`, `daemon_guard` detached spawns and the UDS supervisor child use it (#10083).
