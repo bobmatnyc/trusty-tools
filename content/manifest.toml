@@ -519,6 +519,10 @@ path = "skills/neon-postgres.md"
 version = "1.0.0"
 
 [[member]]
+path = "skills/prototype-then-port.md"
+version = "0.1.0"
+
+[[member]]
 path = "skills/requesting-code-review.md"
 version = "1.0.0"
 
