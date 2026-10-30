@@ -1,0 +1,4 @@
+crate   trusty-common
+version 0.67.4
+reason  Owner ruling df-D54 (a), under the 2026-09-26 versioning ruling (a public-API break never forces a major version): #10523 added ChunkError::InvalidRevision for the tokenizer revision path-separator check. Refs #10507.
+accept  enum_variant_added  variant ChunkError:InvalidRevision
