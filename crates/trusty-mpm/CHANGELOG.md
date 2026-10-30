@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.11.1] — 2026-10-30
+
+### Added
+
+- A session spawned through the MCP `session_new` tool now records the managed session that called it as `parent_session_id`. The `tm serve --stdio` bridge sets the value from its own `TM_MANAGED_SESSION_ID`, overwrites any value the caller sent, and removes it when the bridge runs outside a managed session. The daemon keeps it only when it names an existing session that is not decommissioned or deleted; a malformed or unknown id is dropped and the spawn still succeeds. `GET /api/v1/sessions/managed`, the fleet route and the MCP `session_list` return the field; a session with no parent, including every `tm sessions new` session, has no such key, and `tm sessions ls` and `tm ls` output is unchanged. During a rolling deploy an older daemon drops the field on its next write to that record (#10476).
+
+### Fixed
+
+- `tm fleet status` prints a `WARNING` line naming the PID when the Architect session's live `claude` has no launch record, for example one started by a hand-typed `claude --resume`, and points at `tm fleet relaunch` (#9092).
+- The managed-launch shim (`tm internal-spawn-disclaimed --launch-spec`) refuses a launch spec that names the supervisor (Architect) session and starts nothing; the Architect starts only through `tm fleet init` or `tm fleet relaunch`. A spec that names a session is also refused when the session store cannot be read. Other launches are unchanged (#9092).
+- `tm doctor`'s `events` row warns, instead of failing, on a host without the trusty-events bus: no socket and no trusty-events LaunchAgent plist. The row says the bus is optional and needs no action, and names no command (#10151). A missing socket beside an installed plist, a stale socket, and a bus that answers without a frame still fail. The not-running remedy now names only `tctl start trusty-events`; it no longer names `tctl install trusty-events`, which exits 3 because the bus is internal (#10130).
+- The turnkey task-injection status write now reads and writes the session record under one store lock, so it no longer overwrites a field another setter wrote in between (#10476).
+
+### Changed
+
+- The `tm tui` / `tm projects` fleet poll no longer runs the per-session stale-assets probe, which was most of each poll's ~1 s. `GET /api/v1/sessions/managed/fleet` (and the socket method `mpm.managed.fleet`) accepts an optional `slim=true` flag, as the list route already does; the tui sends it, so its sessions report `stale_assets: false` with `stale_assets_unchecked` set, and `unresumable` is still computed. Every other caller sends no flag and still probes. An older daemon ignores the flag (#10476).
+
 ## [1.11.0] — 2026-10-30
 
 ### Added
