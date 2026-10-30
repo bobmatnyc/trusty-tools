@@ -102,7 +102,7 @@ impl DeferredEmbedPlan {
             });
         }
         self.embed
-            .embed_chunks_in_pass(&self.to_embed, progress_tx, pause, state)
+            .embed_chunks_in_pass(&self.to_embed, progress_tx, pause, state, false)
             .await
     }
 
