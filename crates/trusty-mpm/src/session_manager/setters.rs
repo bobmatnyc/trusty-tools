@@ -11,7 +11,8 @@
 //! transitions; these cover incidental fields set alongside or after them).
 //! What: [`SessionManager::mark_errored`], [`SessionManager::set_workspace`],
 //! [`SessionManager::set_pending_decision`],
-//! [`SessionManager::set_source_id`] and [`SessionManager::set_deliverable_id`].
+//! [`SessionManager::set_source_id`], [`SessionManager::set_deliverable_id`]
+//! and [`SessionManager::set_parent_session_id`] (#10476).
 //! #9841 removed `clear_pending_decision`: an answer now clears the decision
 //! by claiming it (`decision.rs`).
 //! Test: covered by handler_spawn_wires_provision_and_spawn (`mark_errored`,
@@ -22,7 +23,8 @@
 //! `set_source_id_returns_err_after_retries_for_missing_session` in
 //! `tests.rs` (`set_source_id`), `set_deliverable_id_persists` /
 //! `set_deliverable_id_missing_session_errors` in
-//! `set_deliverable_id_tests.rs` (`set_deliverable_id`).
+//! `set_deliverable_id_tests.rs` (`set_deliverable_id`),
+//! `set_parent_session_id_persists` in `parent_session_tests.rs`.
 
 use chrono::Utc;
 use tracing::{error, warn};
@@ -239,6 +241,31 @@ impl SessionManager {
         let mut record = self.get(id).await?;
         record.deliverable_id = Some(deliverable_id);
         self.store.write().await.upsert(record).await?;
+        Ok(())
+    }
+
+    /// Record the session that spawned `id` through the MCP bridge (#10476).
+    ///
+    /// Why: the bridge-stamped caller is known only after `spawn_managed`
+    /// returns the new record; a post-creation setter keeps `SpawnParams` and
+    /// `create_with_id` unchanged, as [`Self::set_deliverable_id`] does.
+    /// What: read-modify-write of `parent_session_id` under one store guard,
+    /// so the turnkey injection task writing `injection_status` at the same
+    /// moment cannot drop the link. The caller
+    /// (`daemon::mcp_session::link_parent`) validates the parent; this does
+    /// no lookup of it.
+    /// Test: `set_parent_session_id_persists`,
+    /// `set_parent_session_id_missing_session_errors` in
+    /// `parent_session_tests.rs`.
+    pub async fn set_parent_session_id(
+        &self,
+        id: &ManagedSessionId,
+        parent: ManagedSessionId,
+    ) -> Result<(), ManagedError> {
+        let mut store = self.store.write().await;
+        let mut record = locked_get(&mut store, id).await?;
+        record.parent_session_id = Some(parent);
+        store.upsert(record).await?;
         Ok(())
     }
 }

@@ -53,6 +53,7 @@ fn session(name: &str, state: &str, slot: u32) -> ManagedSessionSummary {
         deleted: false,
         auto_resume_parked: None,
         kind: None,
+        parent_session_id: None,
     }
 }
 

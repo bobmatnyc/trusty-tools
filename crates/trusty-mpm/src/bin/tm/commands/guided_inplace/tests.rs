@@ -650,6 +650,7 @@ fn stopped_record_at(workspace: &std::path::Path) -> trusty_mpm::client::Managed
         deleted: false,
         auto_resume_parked: None,
         kind: None,
+        parent_session_id: None,
     }
 }
 

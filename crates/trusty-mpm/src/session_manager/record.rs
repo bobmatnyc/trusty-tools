@@ -630,6 +630,23 @@ pub struct SessionRecord {
     /// `a_session_record_lacking_context_usage_still_deserializes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<crate::core::context_usage::ContextUsage>,
+
+    // #10476: the session that spawned this one through the MCP bridge.
+    /// The managed session that created this one through the stdio bridge's
+    /// `session_new` call (#10476).
+    ///
+    /// Why: `tm tui` groups a worker under the session that made it, and only
+    /// the bridge knows the caller (its `TM_MANAGED_SESSION_ID`).
+    /// What: a recorded parent id and nothing more; not containment (DOC-66
+    /// §5). Set once after spawn by
+    /// [`super::SessionManager::set_parent_session_id`]. `#[serde(default)]`
+    /// loads every older record as `None`; skipped when `None`, so a parentless
+    /// record re-saves byte-identical. An older daemon drops the field on its
+    /// next upsert.
+    /// Test: `parent_round_trips_with_and_without_value`,
+    /// `old_sessions_json_resaves_without_new_key` in `parent_session_tests.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<ManagedSessionId>,
 }
 
 impl SessionRecord {

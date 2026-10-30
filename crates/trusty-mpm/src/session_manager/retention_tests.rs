@@ -76,6 +76,7 @@ fn session_worktree(root: &Path, leaf: &str) -> PathBuf {
 fn base_record() -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: super::super::record::ManagedSessionId::new(),
         tmux_name: "tm-retention-test".into(),
         cwd: PathBuf::from("/tmp"),

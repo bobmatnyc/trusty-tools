@@ -206,6 +206,7 @@ fn bare_record(
 ) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: PathBuf::from("/tmp/bare"),

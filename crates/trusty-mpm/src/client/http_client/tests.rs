@@ -251,6 +251,7 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
     for id in [sibling, target] {
         let record = SessionRecord {
             context_usage: None,
+            parent_session_id: None,
             id,
             tmux_name: format!("tm-7877-client-{id}"),
             cwd: shared.clone(),
@@ -768,6 +769,25 @@ fn managed_session_summary_carries_the_kind() {
     let omitted = serde_json::json!({"id": "x", "name": "n", "state": "stopped"});
     let s: ManagedSessionSummary = serde_json::from_value(omitted).unwrap();
     assert_eq!(s.kind, None);
+}
+
+/// #10476: the client reads the daemon's `parent_session_id`, and a row from a
+/// parentless session or an older daemon reads `None`.
+#[test]
+fn managed_summary_deserializes_with_and_without_parent() {
+    let with = serde_json::json!({
+        "id": "x", "name": "n", "state": "active",
+        "parent_session_id": "00000000-0000-0000-0000-000000000001",
+    });
+    let s: ManagedSessionSummary = serde_json::from_value(with).unwrap();
+    assert_eq!(
+        s.parent_session_id.as_deref(),
+        Some("00000000-0000-0000-0000-000000000001")
+    );
+
+    let omitted = serde_json::json!({"id": "x", "name": "n", "state": "active"});
+    let s: ManagedSessionSummary = serde_json::from_value(omitted).unwrap();
+    assert_eq!(s.parent_session_id, None);
 }
 
 /// #2595: `unresumable` must round-trip when present, and default `false`

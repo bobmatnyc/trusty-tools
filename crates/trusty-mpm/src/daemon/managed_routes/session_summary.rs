@@ -266,4 +266,10 @@ pub struct SessionSummary {
     /// The record's fleet role (#8942), so a listing can pin and tag the
     /// Architect; mirrors `SessionRecord::kind`.
     pub kind: crate::session_manager::SessionKind,
+    /// #10476: the managed session that spawned this one through the MCP
+    /// bridge; mirrors `SessionRecord::parent_session_id`. Omitted when `None`,
+    /// so a parentless row's JSON is unchanged.
+    /// Test: `record_to_json_and_summary_carry_parent` in `super::tests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }

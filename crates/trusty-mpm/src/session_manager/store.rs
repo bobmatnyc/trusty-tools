@@ -561,6 +561,7 @@ mod tests {
     fn make_record(id: ManagedSessionId) -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
             id,
             tmux_name: format!("tmpm-test-{id}"),
             cwd: PathBuf::from("/tmp"),
@@ -647,6 +648,7 @@ mod tests {
     fn make_record_with_state(id: ManagedSessionId, state: ManagedSessionState) -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
             state,
             ..make_record(id)
         }
