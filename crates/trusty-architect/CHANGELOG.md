@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.0] — 2026-10-30
+
+### Added
+
+- `dashboard::rpc`: the twelve `mpm.architect.dashboard.*` methods (`get`, `list`, `set`, `update`, `delete`, `batch`, `pruned`, `validate`, `fsck`, `tally`, `footer`, `ids`), one request type per verb that refuses unknown keys, and `DashError::code`: a stale `if_version` exits 1, a refused request 2, an unreadable or locked store 3 ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))
+- `dashboard::verbs`: one body per verb over the store a request names (an absolute root; for a write, the prune log outside it), a `set` with no `if_version` on an existing document refused as a conflict under the store lock (`Store::with_blind_set_refused`), so of two concurrent blind `set`s of one new id exactly one wins, a prune log not named `pruned.jsonl` refused for both `delete` and `pruned` (exit 2), and `render`, which prints each reply as `dashboard-db.py` does ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))
+- `fsck` reports a live record whose `goal`, `depends_on` or `links` entry names an id no document holds (LDG-2.2.5), and reports `references not checked: <error>` when the id collections cannot be read ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))
+- `dashboard::pending` ports the prototype's owner-event rules (`pending`, `stale_tasks`, `last_activity`) and `dashboard::derive` gains `run_progress`, `ordered` and `goal_sessions`, all pure functions of a snapshot and `now` whose output is byte-equal to `dashboard_derive.py`; unparseable timestamps keep the prototype's result and are also listed by `skipped()` (#10403).
+
+### Fixed
+
+- The first logged batch on a dashboard store creates `changes.jsonl` before its commit, with one `baseline` line per document already on disk: `fsck` no longer reports a legacy document as having no change line, and still finds a first batch whose change-log append failed ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))
+- Dashboard store writes (documents, the change log, the prune log) open every directory below the store root, or below `/` for the prune log, without following a symlink, so a directory swapped for a symlink after a check can no longer redirect a write ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))
+- `dashboard` batch ops refuse a key outside `op`, `collection`, `id`, `data`, `if_version` (exit 2), so a misspelled `if_version` fails the whole batch instead of dropping the stale-write guard ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))
+
 ## [0.1.0] — 2026-10-26
 
 ### Breaking

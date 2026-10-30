@@ -6,6 +6,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.36.2] — 2026-10-30
+
+### Performance
+
+- An upsert into a vector index at or below the exhaustive-scan threshold (24,576 points) no longer re-tests stranded graph points, which cost 3.5-4.5x the insert and is unread at that size. The upsert that takes the index past the threshold rebuilds the stranded set as open does; above it nothing changes ([#10271](https://github.com/bobmatnyc/trusty-tools/issues/10271))
+
+## [0.36.1] — 2026-10-30
+
+### Added
+
+- `memory_recall`, `memory_recall_all` and `memory_list` rows now carry `access_count`, `accumulated_boost` and `last_accessed_at` (#9881). The fields are additive. A recall row shows the count as of before its own access.
+
+### Fixed
+
+- `memory_remember` and `memory_note` accept a file reference with a `:line` or `:line:column` suffix, such as `architect/.claude/skills/instance-evo/SKILL.md:38`. The digits-only suffix is removed and the rest of the path is judged by the same rules as any path, so a credential-shaped file name is still refused. `SECRET_FILTER_VERSION` is now 3, so a kuzu-import review verdict recorded under version 2 refuses its row until the row is exported and reviewed again. Memories already stored are untouched ([#9748](https://github.com/bobmatnyc/trusty-tools/issues/9748))
+- The secret gate no longer overflows the stack on a token with thousands of `=`, such as a 100 KB `a=b&a=b&...` query string. Past 64 `=` the token is judged by the entropy rules instead of the key=value rule ([#9748](https://github.com/bobmatnyc/trusty-tools/issues/9748))
+- A palace loaded from disk (restart, idle evict and reload, restore) now builds its closet keyword index on open. Before, the index stayed empty until the next write or dream cycle, and every recall lost the 0.15 closet tag boost in that window (#10377).
+
+### Changed
+
+- The HNSW op-budget watcher reads its start time from tokio's clock instead of `std::time::Instant` (#10335). Behaviour is unchanged: tokio's clock is the system clock unless a test pauses it. The op-budget progress tests now run on a paused clock and no longer trip a progressing group when the host is under load.
+
+### Security
+
+- The secret gate refuses a URL that carries a credential in its userinfo (`https://user:pass@host/path?x=1`, including a password holding a raw `#` or `?`), its query string or its fragment. A parameter is a credential by name, matched after lowercasing and reading `-` as `_`: a name ending in `token`, `signature` or `credential` (value of 8 bytes or more), a name ending in `password`, `passwd`, `pwd` or `secret` (any value, so `?password=hunter2` is refused), or `sig`, `key` or `auth` as a whole word (`x-api-key`, `secret_key`, and the camelCase and dotted spellings `clientKey` and `api.key`; `key` and `auth` need 16 or more letters and digits, so `?sort_key=asc` and `?keyword=rust` stay accepted). Any parameter value that is itself credential-shaped is refused too. Before, a `?`, `&` or `#` in the URL let these through ([#9748](https://github.com/bobmatnyc/trusty-tools/issues/9748))
+
 ## [0.36.0] — 2026-10-26
 
 ### Breaking

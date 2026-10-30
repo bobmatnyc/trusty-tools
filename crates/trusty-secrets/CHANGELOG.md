@@ -6,6 +6,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.0] — 2026-10-30
+
+### Added
+
+- `secrets.ticket.mint`, `secrets.ticket.void` and `secrets.ticket.pending`: in-memory, one-use main-thread tickets with a 60 s TTL, bound to the session, prompt and tool-use ids, the redeemer's argv hash, the Architect `claude` (pid and start time), the op, the project and the key. A mint comes only from the installed `tm` running `tm hook --pm-guard` as a fresh direct child of the launched Architect's `claude`; every refusal is `ticket_refused`. Every void cause a hook sends (`pre_tool_use`, `subagent_pre_tool_use`, `stop`) removes the session's tickets. A restart drops every ticket (#10459).
+- Audit records `secrets.ticket.mint`, `secrets.ticket.void` and `secrets.ticket.redeem` with a `ticket` object (event, ids, argv hash, `reason_arm`, `void_cause`). Mint and redeem records are written first; a void removes the ticket, then records it. No value and no argv (#10459).
+
+### Changed
+
+- `secrets.set` and a local one-key `secrets.copy` accept any key, including one the operator denied to agents, from a caller whose nearest Claude Code process is the `claude` that `tm fleet init` or `tm fleet relaunch` launched as the Architect, and only when that caller also redeems a main-thread ticket minted for that exact call. The launch-record check reads `~/.trusty-mpm/architect-launch/<pid>.architect` and requires its PID, start time and project directory to match the live process. A missing, unreadable, stale or mismatched record, or no matching ticket, keeps the agent rules (#10459).
+- Minting is off in this release (`mint_enabled` defaults to `false` and nothing turns it on), so every caller under Claude Code keeps today's agent rules (#10459).
+- Audit records of a write the Architect exemption allowed carry `architect: true`; when an agent caller is refused the exemption, the records name the failed check in `architect_refusal` (for example `start_time_mismatch` or `no_ticket`), with no pid, path or value. `architect: true` is not proof of identity: same-uid code can forge a record or a mint. `delete`, removing a deny and a sync-target copy stay operator-only (#10459).
+
+## [0.3.0] — 2026-10-30
+
+### Breaking
+
+- `SecretBackend` replaces `agents_may_use`/`set_agents_may_use` with `holds_agent_controls`, `control_item` and `set_control_item` over `store::ControlItem`. A backend that stores no control item keeps the defaults, which refuse with `unsupported` (#10386).
+
+### Added
+
+- `secrets.copy` to `vercel` pushes the named keys into the `production` and `preview` environment variables of the Vercel project the account's own machine config maps the checkout to (`secrets.vercel.projects."<owner>/<repo>"`, DOC-74 S6, `cli-backends` builds). The value reaches `vercel env add` on stdin only; `development` is never pushed. No mapping for the checkout is `backend_not_enabled` before the CLI runs (Refs #9069).
+- A Vercel push runs the pinned `secrets.vercel.program` in a fresh empty 0700 directory passed as `--cwd`, with `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` from the mapping, every inherited `VERCEL_*`, `NODE_*`, `NOW_*`, `npm_config_*`, `NPM_CONFIG_*`, `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` (either case), `SSL_CERT_FILE` and `SSL_CERT_DIR` variable removed with no setting to keep one, and `PATH` set to the program's directory plus `/usr/bin:/bin` (Refs #9069).
+- A key is reported copied only when `vercel env ls` names it on both targets after the push. A failing target fails the key with a reason saying a target may have been written; an unrecognised listing is a failure; a variable that already existed is overwritten in place with `--force` but reported failed, since a listing cannot prove the value changed (Refs #9069).
+- `secrets.doctor` lists a `vercel` row, judged without running the CLI. `BackendId::vercel`, `store::vercel`, `store::config::VercelSection`, `store::config::VercelProject`, the `vercel` field on `MachineSecretsConfig`, and `store::cli::WorkDir`; `store::open_sync_target_at` now takes the root each push's working directory is made under (Refs #9069).
+- `secrets.set`, `secrets.delete` and `secrets.copy` refuse a caller with a Claude Code ancestor (`agent_use_refused`), directly or through the console bridge; an unreadable ancestry or a missing peer pid refuses (`grant_refused`). A copy to a sync target and removing a deny stay refused to agents; writing a deny is allowed (#10386).
+- The file backend persists the per-key agent deny as a 0600 file under `<values root>/.agent-controls/`, so a host with no Keychain can deny a key to agents (#10386, subsumes #10090).
+- Grant and resolve allow records for a caller under Claude Code carry `default_policy: true` (#10386).
+- `server::serve_without_agent_callers` (`test-support` feature only): a server whose process table reports no Claude Code process, so a consumer's suite that stores keys through a real server passes the same in CI and in an agent session (#10386).
+
+### Changed
+
+- Agents use keys by default (#10386, the `.env.local` model): a key in the caller's project or owner vault is usable under a Claude Code parent through `secrets.grant`, `secrets.resolve` and `tm secrets exec` unless the operator denied it to agents. The stored backend item now means DENY (Keychain service `trusty-secrets.agents-deny`); `secrets.set_agents_may_use` keeps its wire shape, with `allowed: false` writing the deny and `allowed: true` removing it. `list` reports `agents_may_use: true` for a key with no deny.
+- A vault written before #10386 is migrated once, recorded per vault. `store::DEFAULT_AGENT_DENY_MIGRATION` selects `OpenAll` (the default: no deny is written, every existing key becomes usable by agents) or `KeepClosed` (a key whose old "agents may use" flag was off gets a deny). The old flag items are removed. An unreadable marker or a failed deny lookup refuses.
+- `agent_use_refused` now reads "this key is denied to agents, or the operation is operator-only".
+- `mask_secret`, the one-time `secrets.set` confirmation, follows the owner ruling of 2026-10-28 (#10394): a value of 16 characters or more shows its first 4 and last 5 characters and its length, a value of 10 to 15 characters shows its last 5 and its length, and a shorter value shows only its length. It replaced a format that showed the first 8 characters. `MASK_HEAD_CHARS` is now 4. The console bridge uses the same function.
+- An agent (a caller under Claude Code) may now `secrets.set` and locally `secrets.copy` a key in its project or owner scope that has no per-key deny; the deny is re-checked under the key index lock and a failed lookup refuses. Its `set` confirmation shows `[N chars]` only and its allow record carries `default_policy: true` (#10459, reverses #10386 Q2 for `set`).
+- A per-key deny now refuses with the new wire kind `agent_key_denied` (-32085); `agent_use_refused` now means only an operator-only method (`delete`, removing a deny, a copy to a sync target) (#10459).
+
+### Security
+
+- `secrets.copy` carries a key's agent deny into the destination before the value; a denied key copied into a backend that cannot hold a deny (1Password, Keeper) fails with `unsupported` and nothing is written (#10386).
+- `delete` removes a key's deny only after every backend's value delete succeeded, so a failed delete keeps the deny (#10386).
+- A new key's `set` no longer clears a deny left from an earlier key of the same name; the deny stays (#10386).
+- Every deny the store writes or removes on its own (the `KeepClosed` migration, `delete`, `copy`) has a write-ahead `secrets.set_agents_may_use` audit record with `agents_allowed`; a record that cannot be written leaves the deny unchanged (`audit_unavailable`). `SecretStore::with_deny_audit`, `store::DenyAudit` and `SecretsError::AuditUnavailable` carry it (#10386).
+
+### Documentation
+
+- Comments no longer cite the retired `src/assets/` paths or a private ruling label; they point at `content/` paths or an issue (#10096).
+
 ## [0.2.0] — 2026-10-26
 
 ### Breaking
