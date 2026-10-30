@@ -43,6 +43,10 @@
 #                         This is the defect observed directly rather than
 #                         inferred, and is the one check that still works after
 #                         the upload has happened.
+#     VCS-INFO-CRATE-SHA-MISMATCH
+#                         --vcs-info auto only: the crate crates.io serves is
+#                         not byte-identical (sha256) to the local .crate, so
+#                         its recorded sha1 says nothing about this publish.
 #
 #   The publish commit is `git rev-parse HEAD^{commit}`, because that is the
 #   sha1 `cargo package` writes into .cargo_vcs_info.json — the same field that
@@ -55,9 +59,11 @@
 #   against a commit sha. `--no-fetch` reads local refs only.
 #
 # WHY --vcs-info IS NOT AUTOMATIC IN preflight-publish.sh: cargo leaves
-#   target/package/<pkg>-<version>/.cargo_vcs_info.json behind after any
-#   `cargo package` / `cargo publish --dry-run` / `cargo publish`, and it is
-#   not invalidated by a later checkout. Reading whatever happens to be on disk
+#   target/package/<pkg>-<version>.crate behind after any `cargo package` /
+#   `cargo publish --dry-run` / `cargo publish`, and it is not invalidated by a
+#   later checkout. The extracted target/package/<pkg>-<version>/ directory is
+#   NOT guaranteed — a successful `cargo publish` can leave only the .crate
+#   (#10506, trusty-common 0.67.2). Reading whatever happens to be on disk
 #   would fail a legitimate release whose dry-run predated a rebase, and a gate
 #   that cries wolf gets bypassed. The git-level TAG-DRIFT check is the
 #   fail-closed one and it runs unconditionally; --vcs-info is the explicit
@@ -79,10 +85,17 @@
 #                             `auto` resolves
 #                             <target>/package/<pkg>-<version>/.cargo_vcs_info.json
 #                             where <target> is $CARGO_TARGET_DIR if set, else
-#                             `cargo metadata`'s target_directory, else <repo>/target
-#                             and FAILS if it is absent or unreadable — an
+#                             `cargo metadata`'s target_directory, else <repo>/target.
+#                             If that file is absent but the local
+#                             <target>/package/<pkg>-<version>.crate exists, it
+#                             fetches the crate crates.io serves, requires its
+#                             sha256 to equal the local .crate's, and reads
+#                             .cargo_vcs_info.json out of it (#10506). It FAILS
+#                             if no record can be obtained or read — an
 #                             explicit request to verify cannot degrade into a
 #                             skip. Run this immediately after `cargo publish`.
+#                             Env: TAG_PUBLISH_PARITY_CRATES_BASE_URL overrides
+#                             https://static.crates.io/crates (self-test: file://).
 #     --repo <dir>            operate on a different repo root (self-test).
 #     --no-fetch              never contact origin; resolve tags from local
 #                             refs only (offline, and the self-test).
@@ -336,16 +349,75 @@ cargo_target_dir() {
   echo "${REPO_ROOT}/target"
 }
 
+# sha256_of <file> — prints the hex digest; sha256sum (Linux) or shasum (macOS).
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# vcs_info_missing <path> <detail...> — the fail-closed VCS-INFO-MISSING exit.
+vcs_info_missing() {
+  local path="$1"
+  shift
+  echo "FAIL: VCS-INFO-MISSING — no .cargo_vcs_info.json at ${path}." >&2
+  printf '      %s\n' "$@" >&2
+  echo "      --vcs-info is an explicit request to verify the recorded commit and" >&2
+  echo "      cannot degrade into a skip. Pass --vcs-info <path> to a" >&2
+  echo "      .cargo_vcs_info.json taken from the crate crates.io serves, or run" >&2
+  echo "      'cargo package -p ${PKG_NAME}' before publishing, then re-run." >&2
+  exit 1
+}
+
+# #10506: `cargo publish` guarantees <target>/package/<pkg>-<ver>.crate, not
+# the extracted directory. With no extracted record, verify the crate
+# crates.io serves is byte-identical to the local .crate, then read its record.
+SERVED_TMP=""
+trap 'rm -rf "${SERVED_TMP:-}"' EXIT
+# Sets VCS_INFO to the extracted record, or exits. Called directly, never in
+# $(...), so its `exit 1` ends the script rather than a subshell.
+vcs_info_from_served_crate() { # <local .crate> <wanted path>
+  local local_crate="$1" wanted="$2" base url served local_sum served_sum
+  base="${TAG_PUBLISH_PARITY_CRATES_BASE_URL:-https://static.crates.io/crates}"
+  url="${base%/}/${PKG_NAME}/${PKG_NAME}-${VERSION}.crate"
+  SERVED_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tag-parity-served.XXXXXX")"
+  served="${SERVED_TMP}/served.crate"
+  echo "check-tag-publish-parity: no extracted record; fetching ${url}" >&2
+  curl -fsSL -o "$served" "$url" \
+    || vcs_info_missing "$wanted" "Fetching the served crate failed: ${url}"
+  local_sum="$(sha256_of "$local_crate")"
+  served_sum="$(sha256_of "$served")"
+  if [ "$local_sum" != "$served_sum" ]; then
+    echo "FAIL: VCS-INFO-CRATE-SHA-MISMATCH — the served crate is not the local one." >&2
+    echo "      local  ${local_crate}  sha256 ${local_sum}" >&2
+    echo "      served ${url}  sha256 ${served_sum}" >&2
+    echo "      The local .crate is not what crates.io holds for ${VERSION}, so its" >&2
+    echo "      record cannot vouch for the upload. Inspect the served crate directly." >&2
+    exit 1
+  fi
+  tar -xzf "$served" -C "$SERVED_TMP" "${PKG_NAME}-${VERSION}/.cargo_vcs_info.json" 2>/dev/null \
+    || vcs_info_missing "$wanted" "The served crate ${url} (sha256 matches the local" \
+      ".crate) carries no ${PKG_NAME}-${VERSION}/.cargo_vcs_info.json."
+  VCS_INFO="${SERVED_TMP}/${PKG_NAME}-${VERSION}/.cargo_vcs_info.json"
+}
+
 if [ -n "$VCS_INFO" ]; then
   if [ "$VCS_INFO" = "auto" ]; then
-    VCS_INFO="$(cargo_target_dir)/package/${PKG_NAME}-${VERSION}/.cargo_vcs_info.json"
+    PKG_OUT="$(cargo_target_dir)/package"
+    VCS_INFO="${PKG_OUT}/${PKG_NAME}-${VERSION}/.cargo_vcs_info.json"
+    LOCAL_CRATE="${PKG_OUT}/${PKG_NAME}-${VERSION}.crate"
+    if [ ! -f "$VCS_INFO" ] && [ -f "$LOCAL_CRATE" ]; then
+      vcs_info_from_served_crate "$LOCAL_CRATE" "$VCS_INFO"
+    fi
   fi
   if [ ! -f "$VCS_INFO" ]; then
-    echo "FAIL: VCS-INFO-MISSING — no .cargo_vcs_info.json at ${VCS_INFO}." >&2
-    echo "      --vcs-info is an explicit request to verify the recorded commit and" >&2
-    echo "      cannot degrade into a skip. Run 'cargo package -p ${PKG_NAME}' (or" >&2
-    echo "      publish) first, then re-run." >&2
-    exit 1
+    if [ -n "${LOCAL_CRATE:-}" ]; then
+      vcs_info_missing "$VCS_INFO" "No local ${LOCAL_CRATE} either, so no served" \
+        "copy can be verified against it."
+    fi
+    vcs_info_missing "$VCS_INFO" "The path given to --vcs-info does not exist."
   fi
   # Same `|| true` reason as resolve_tag_commit: a file with no git.sha1 must
   # reach the VCS-INFO-UNREADABLE branch, not die on pipefail with no message.
