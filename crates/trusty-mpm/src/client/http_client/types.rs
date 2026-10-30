@@ -606,6 +606,12 @@ pub struct ManagedSessionSummary {
     /// Test: `managed_session_summary_carries_the_kind`.
     #[serde(default)]
     pub kind: Option<crate::session_manager::SessionKind>,
+    /// #10476: the managed session that spawned this one through the MCP
+    /// bridge, mirroring `daemon::managed_routes::SessionSummary::parent_session_id`.
+    /// `None` for a parentless session and from an older daemon.
+    /// Test: `managed_summary_deserializes_with_and_without_parent`.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).

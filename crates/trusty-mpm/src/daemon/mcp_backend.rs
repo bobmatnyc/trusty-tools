@@ -409,6 +409,7 @@ impl OrchestratorBackend for StateBackend {
         name_hint: Option<&str>,
         runtime: Option<&str>,
         ephemeral: Option<bool>,
+        parent_session_id: Option<&str>, // #10476
     ) -> Result<Value, String> {
         super::mcp_session::session_new(
             &self.state,
@@ -418,6 +419,7 @@ impl OrchestratorBackend for StateBackend {
             name_hint,
             runtime,
             ephemeral,
+            parent_session_id,
         )
         .await
     }

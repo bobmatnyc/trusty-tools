@@ -81,6 +81,7 @@ async fn seed(state: &Arc<DaemonState>, record: SessionRecord) {
 fn base_record(id: ManagedSessionId, state: ManagedSessionState, cwd: PathBuf) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id,
         tmux_name: format!("tmpm-test-{id}"),
         cwd,

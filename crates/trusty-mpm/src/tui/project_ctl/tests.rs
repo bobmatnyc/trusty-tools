@@ -63,6 +63,7 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         deleted: false,
         auto_resume_parked: None,
         kind: None,
+        parent_session_id: None,
     }
 }
 

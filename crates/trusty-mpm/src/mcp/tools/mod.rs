@@ -229,6 +229,23 @@ mod tests {
         }
     }
 
+    /// #10476: `session_new` accepts the bridge-stamped `parent_session_id`
+    /// as an optional string and still rejects unknown keys.
+    /// Test: itself.
+    #[test]
+    fn session_new_schema_lists_parent_and_keeps_additional_properties_false() {
+        let catalog = tool_catalog();
+        let new = catalog
+            .iter()
+            .find(|t| t["name"] == "session_new")
+            .expect("session_new must be in the catalog");
+        let schema = &new["inputSchema"];
+        assert_eq!(schema["properties"]["parent_session_id"]["type"], "string");
+        assert_eq!(schema["additionalProperties"], false);
+        let required = schema["required"].as_array().expect("required list");
+        assert!(!required.iter().any(|r| r == "parent_session_id"));
+    }
+
     /// #4091 REGRESSION: `session_context_pause` must expose NO knob that could
     /// authorise discarding uncommitted work.
     ///

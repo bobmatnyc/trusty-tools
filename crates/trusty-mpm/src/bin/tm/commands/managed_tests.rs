@@ -1502,6 +1502,7 @@ fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummar
         deleted: false,
         auto_resume_parked: None,
         kind: None,
+        parent_session_id: None,
     }
 }
 
@@ -1575,6 +1576,28 @@ fn ls_row_plain_when_color_disabled() {
     let tomb_plain = format_tombstone_row(7, false);
     assert!(!tomb_plain.contains('\u{1b}'));
     assert_eq!(strip_ansi(&format_tombstone_row(7, true)), tomb_plain);
+}
+
+/// Why: #10476 — `parent_session_id` is data for `tm tui`, not a column; the
+/// `tm sessions ls` row and the `tm ls` picker row must be byte-identical
+/// whether or not a session has a parent.
+/// Test: this test.
+#[test]
+fn ls_rows_are_unchanged_by_a_parent_session_id() {
+    use crate::commands::session_picker_render::format_session_row;
+    let plain = ls_session("tm-trusty-tools-01", 7);
+    let mut child = plain.clone();
+    child.parent_session_id = Some("00000000-0000-0000-0000-000000000001".into());
+    for color in [false, true] {
+        assert_eq!(
+            format_ls_row(&child, color, 14, None),
+            format_ls_row(&plain, color, 14, None)
+        );
+        assert_eq!(
+            format_session_row(7, &child, color),
+            format_session_row(7, &plain, color)
+        );
+    }
 }
 
 /// Why: `{:<5}`/`{:<24}` measure the formatted value, so an ANSI-wrapped column

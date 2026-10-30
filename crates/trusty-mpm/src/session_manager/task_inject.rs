@@ -404,7 +404,9 @@ impl SessionManager {
     /// which is a visibility gap, not a correctness hazard (the actual
     /// delivery outcome — sent or not — is unaffected).
     /// What: fetches the current record, overwrites `injection_status`, and
-    /// upserts. Errors are logged and swallowed (`fn` returns nothing) so a
+    /// upserts, holding the store guard across the read and the write so a
+    /// field another setter wrote in between is kept (#10476: this task runs
+    /// while `session_new` records the parent). Errors are logged and swallowed (`fn` returns nothing) so a
     /// transient store failure never aborts injection itself — the caller
     /// already has its own `Result` for the substantive outcome.
     /// Test: `inject_when_ready_marks_success_status`,
@@ -412,7 +414,9 @@ impl SessionManager {
     /// `inject_when_ready_skips_empty_task` (asserts status stays
     /// `NotApplicable` for the early-return empty-task path).
     async fn set_injection_status(&self, id: &ManagedSessionId, status: InjectionStatus) {
-        let mut record = match self.get(id).await {
+        // #10476: read and write under one guard; see the doc above.
+        let mut store = self.store.write().await;
+        let mut record = match super::decision::locked_get(&mut store, id).await {
             Ok(r) => r,
             Err(e) => {
                 warn!(id = %id, "set_injection_status({status}): record lookup failed: {e}");
@@ -420,7 +424,7 @@ impl SessionManager {
             }
         };
         record.injection_status = status;
-        if let Err(e) = self.store.write().await.upsert(record).await {
+        if let Err(e) = store.upsert(record).await {
             warn!(id = %id, "set_injection_status({status}): persist failed: {e}");
         }
     }

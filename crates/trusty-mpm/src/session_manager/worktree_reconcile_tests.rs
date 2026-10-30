@@ -50,6 +50,7 @@ fn canonical(p: &std::path::Path) -> PathBuf {
 fn record_at(state: ManagedSessionState, workspace: Option<PathBuf>) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tm-reconcile-test".into(),
         cwd: PathBuf::from("/tmp"),

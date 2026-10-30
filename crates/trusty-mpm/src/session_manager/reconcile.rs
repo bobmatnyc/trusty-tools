@@ -449,6 +449,7 @@ impl SessionManager {
             let (pane_id, tmux_server) = super::pane_identity::capture(self.tmux.as_ref(), name);
             let external = SessionRecord {
                 context_usage: None,
+                parent_session_id: None,
                 id,
                 tmux_name: name.clone(),
                 cwd: resolved_cwd.clone(),

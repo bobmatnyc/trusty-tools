@@ -37,11 +37,13 @@ use super::SessionSummary;
 /// callers can filter or reconnect by project identity, matching what the HTTP
 /// `GET /api/v1/sessions/managed` path already exposes (#1733).
 /// What: maps the record to a JSON object including the derived `attach_cmd`
-/// and `source_id` (null when the session has no project identity).
-/// Test: `serializers_include_source_id` unit test in `super::tests`; also
-/// covered by `crate::daemon::mcp_session` tests that assert echoed fields.
+/// and `source_id` (null when the session has no project identity). The
+/// `parent_session_id` key appears only when the record has one (#10476).
+/// Test: `serializers_include_source_id`, `record_to_json_and_summary_carry_parent`
+/// in `super::tests`; also covered by `crate::daemon::mcp_session` tests that
+/// assert echoed fields.
 pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "id": r.id.to_string(),
         "name": r.tmux_name,
         "state": r.state.to_string(),
@@ -61,7 +63,12 @@ pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
         "deliverable_id": r.deliverable_id.map(|id| id.to_string()),
         "pane_id": r.pane_id,
         "injection_status": injection_status_wire(r.injection_status),
-    })
+    });
+    // #10476: omitted when absent, as on `SessionSummary`.
+    if let (Some(parent), Some(obj)) = (r.parent_session_id, json.as_object_mut()) {
+        obj.insert("parent_session_id".into(), parent.to_string().into());
+    }
+    json
 }
 
 /// Map [`InjectionStatus`] to its wire form, `None` for "never attempted"
@@ -139,7 +146,8 @@ pub(crate) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         // #6568: read straight off the record's `stop_cause`, so every listing
         // surface says the same thing about a parked session.
         auto_resume_parked: r.auto_resume_park_reason().map(str::to_string),
-        kind: r.kind, // #8942
+        kind: r.kind,                                                  // #8942
+        parent_session_id: r.parent_session_id.map(|p| p.to_string()), // #10476
     }
 }
 
@@ -376,6 +384,7 @@ pub(super) fn tombstone_summary(slot: u32) -> SessionSummary {
         deleted: true,
         auto_resume_parked: None,
         kind: crate::session_manager::SessionKind::Ordinary,
+        parent_session_id: None,
     }
 }
 

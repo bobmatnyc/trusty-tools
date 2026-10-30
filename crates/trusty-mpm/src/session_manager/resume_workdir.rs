@@ -327,6 +327,7 @@ mod tests {
     ) -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-resume-workdir-test".into(),
             cwd,

@@ -579,6 +579,7 @@ mod cores_tests {
     ) -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
             id,
             tmux_name: format!("tm-7877-{id}"),
             cwd: workspace_path.to_path_buf(),

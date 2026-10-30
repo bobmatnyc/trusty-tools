@@ -90,6 +90,7 @@ Spawn a new managed Claude Code (or trusty-code) session for `repo_url` at `ref`
 |---|---|---|
 | `ephemeral` | `boolean` | no |
 | `name_hint` | `string` | no |
+| `parent_session_id` | `string` | no |
 | `ref` | `string` | yes |
 | `repo_url` | `string` | yes |
 | `runtime` | `string` | no |

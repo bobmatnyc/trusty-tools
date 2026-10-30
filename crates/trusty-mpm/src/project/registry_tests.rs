@@ -22,6 +22,7 @@ use tempfile::TempDir;
 fn make_session_with_repo(repo_url: &str, branch: Option<&str>) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-test".into(),
         cwd: PathBuf::from("/tmp"),
@@ -59,6 +60,7 @@ fn make_session_with_repo(repo_url: &str, branch: Option<&str>) -> SessionRecord
 fn make_session_no_repo() -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-no-repo".into(),
         cwd: PathBuf::from("/tmp"),

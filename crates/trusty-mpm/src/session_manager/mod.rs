@@ -329,6 +329,10 @@ mod send_input_gate_tests;
 #[cfg(test)]
 mod stop_cause_tests;
 
+// #10476: the bridge-recorded parent link loads, persists and re-saves cleanly.
+#[cfg(test)]
+mod parent_session_tests;
+
 // #8935: a stale record never tears down a live session that reused its name.
 #[cfg(test)]
 mod runtime_identity_tests;

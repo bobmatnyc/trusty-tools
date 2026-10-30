@@ -39,6 +39,8 @@ mod scratch_home_tmux_gate;
 mod scratch_root_tmux_gate;
 mod session_manager_mvp;
 mod session_new_requires_a_local_path;
+// #10476: a bridge-spawned session records its parent; a bad parent is dropped.
+mod session_parent_link_10476;
 mod standalone_isolation;
 mod test_session_lifecycle;
 mod worktree_disk_usage_gate;
