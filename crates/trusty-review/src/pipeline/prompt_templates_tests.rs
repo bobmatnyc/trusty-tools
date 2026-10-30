@@ -1,7 +1,9 @@
 //! Tests for the reviewer prompts read from content (#9015): the checkout's
-//! text, and one test per fail-closed arm.
+//! text, and one test per fail-closed arm; the same for the principles
+//! addendum (#9991).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use trusty_common::content::{
     ContentError, ContentLock, DevOverride, LOCK_FILE_NAME, ResolveOptions, resolve,
@@ -10,6 +12,7 @@ use trusty_common::integrity::Sha256Digest;
 
 use super::test_support::{fake_checkout, prompts, repo_prompt_files};
 use super::*;
+use crate::voice::principles::{PRINCIPLES_FILE, principles_path};
 
 /// Loads the prompts from a staged checkout holding `files`.
 fn load_from_checkout(
@@ -18,7 +21,7 @@ fn load_from_checkout(
 ) -> Result<ReviewerPrompts, PromptContentError> {
     fake_checkout(root, files);
     let options = ResolveOptions::new(root, DevOverride::At(root.to_path_buf()));
-    ReviewerPrompts::from_content(&resolve(&options)?)
+    ReviewerPrompts::from_content(&Arc::new(resolve(&options)?))
 }
 
 /// Pin the prompt bytes so the move into `content/` can never silently drift.
@@ -56,6 +59,29 @@ fn the_repository_prompts_load_byte_identical() {
     assert_eq!(p.for_coverage(false), p.stock());
 }
 
+/// Pin the principles addendum bytes to what the compiled-in constant sent
+/// before #9991, so the move into `content/` can never silently drift.
+///
+/// Why: the principles layer is part of every default reviewer prompt; the
+/// move must not change one byte, and the text must not stay compiled in, so
+/// the test pins a digest rather than a copy.
+/// What: the sha256 and byte length of `PRINCIPLES_ADDENDUM` at fe808b2956,
+/// against the text the staged content serves. It carries no leading or
+/// trailing newline, as the raw string had none.
+#[test]
+fn the_repository_principles_load_byte_identical() {
+    let text = prompts()
+        .principles()
+        .expect("the checkout ships the principles");
+    assert!(text.starts_with("## Review principles\n\n"), "{text}");
+    assert!(text.ends_with("if you cannot, do not raise it."), "{text}");
+    assert_eq!(text.len(), 3085);
+    assert_eq!(
+        Sha256Digest::of_bytes(text.as_bytes()).as_hex(),
+        "8db2a004e1d2d9710fe2fdc71810fe8db443e0829eab94f7721693c1cafaf22d"
+    );
+}
+
 /// No checkout and no lock: `NotInstalled`, naming the fetch and the offline
 /// install.
 #[test]
@@ -63,7 +89,7 @@ fn no_content_is_not_installed_naming_the_remedy() {
     let cache = tempfile::tempdir().expect("cache");
     let err = resolve(&ResolveOptions::new(cache.path(), DevOverride::Off))
         .map_err(PromptContentError::from)
-        .and_then(|c| ReviewerPrompts::from_content(&c))
+        .and_then(|c| ReviewerPrompts::from_content(&Arc::new(c)))
         .expect_err("nothing is installed");
     assert!(
         matches!(err, PromptContentError::NotInstalled { .. }),
@@ -156,4 +182,41 @@ fn every_prompt_content_error_names_its_remedy() {
     for err in cases {
         assert!(err.to_string().contains("tm content update"), "{err}");
     }
+}
+
+/// Content released before #9991 has no principles addendum: the prompts
+/// still load, and reading the principles is `Missing`, naming the path and,
+/// from a checkout, `git pull`.
+#[test]
+fn a_release_without_the_principles_is_missing_naming_the_path() {
+    let root = tempfile::tempdir().expect("root");
+    let mut files = repo_prompt_files();
+    files.retain(|(rel, _)| !rel.ends_with(PRINCIPLES_FILE));
+    let prompts = load_from_checkout(root.path(), &files).expect("the prompts load");
+    let err = prompts.principles().expect_err("the principles are absent");
+    let PromptContentError::Missing { path, .. } = &err else {
+        panic!("expected Missing, got {err:?}");
+    };
+    assert_eq!(path, &principles_path());
+    let text = err.to_string();
+    assert!(text.contains(&principles_path()), "{text}");
+    assert!(text.contains("git pull"), "{text}");
+}
+
+/// An empty principles addendum is `Invalid`, never an empty layer.
+#[test]
+fn an_empty_principles_file_is_invalid() {
+    let root = tempfile::tempdir().expect("root");
+    let mut files = repo_prompt_files();
+    for (rel, body) in &mut files {
+        if rel.ends_with(PRINCIPLES_FILE) {
+            *body = b"  \n".to_vec();
+        }
+    }
+    let prompts = load_from_checkout(root.path(), &files).expect("the prompts load");
+    let err = prompts.principles().expect_err("the principles are empty");
+    assert!(
+        matches!(&err, PromptContentError::Invalid { path, .. } if path == &principles_path()),
+        "{err:?}"
+    );
 }
