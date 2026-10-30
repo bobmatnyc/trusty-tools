@@ -279,6 +279,7 @@ universal = [
   "json-data-handling",
   "model-context-builder",
   "neon-postgres",
+  "prototype-then-port",
   "requesting-code-review",
   "root-cause-tracing",
   "rust-build-performance",

@@ -27,6 +27,8 @@ const CODING_SKILLS: &[&str] = &[
     "database-migration",
     "env-manager",
     "model-context-builder",
+    // Owner ruling 2026-10-30: engineer-only Python-to-Rust port guidance.
+    "prototype-then-port",
     "requesting-code-review",
     "root-cause-tracing",
     "rust-build-performance",
