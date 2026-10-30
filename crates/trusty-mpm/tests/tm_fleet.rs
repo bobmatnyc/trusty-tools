@@ -35,17 +35,23 @@ impl FleetEnv {
         // RESUME_FAILS marker exists, a `--resume` start dies after 1 s, as
         // a `claude` that cannot load its conversation does. #9092: each start
         // also appends its PID, which `exec` keeps.
+        // #10459: `--version` prints the CLAUDE_VERSION file, else a version
+        // the Architect gate accepts, and exits 1 while VERSION_FAILS exists.
         let sleeper = sleeper.display().to_string();
         // See #10248
         trusty_common::exec_stub::write_executable(
             &claude,
             format!(
-                "#!/bin/sh\necho \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ncase \" $* \" in \
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then [ -e {fails:?} ] && exit 1; \
+                 cat {version:?} 2>/dev/null || echo '2.1.312 (Claude Code)'; exit 0; fi\n\
+                 echo \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ncase \" $* \" in \
                  *\" --resume \"*) [ -e {:?} ] && exec {sleeper:?} 1;; esac\nexec {sleeper:?} \
                  600\n",
                 bin.path().join(PID_LOG).display().to_string(),
                 bin.path().join(ARGV_LOG).display().to_string(),
                 bin.path().join(RESUME_FAILS).display().to_string(),
+                fails = bin.path().join(VERSION_FAILS).display().to_string(),
+                version = bin.path().join(CLAUDE_VERSION).display().to_string(),
             ),
         )
         .expect("fake claude");
@@ -332,6 +338,12 @@ const RESUME_FAILS: &str = "resume-fails";
 
 /// The marker that makes [`FleetEnv::wrap_tmux`]'s tmux fail a pane pid read.
 const PANE_UNREADABLE: &str = "pane-unreadable";
+
+/// The file whose text the fake `claude --version` prints (#10459).
+const CLAUDE_VERSION: &str = "claude-version";
+
+/// The marker that makes the fake `claude --version` exit 1 (#10459).
+const VERSION_FAILS: &str = "version-fails";
 
 /// The marker that makes [`FleetEnv::wrap_tmux`]'s tmux fail a kill-session.
 const KILL_FAILS: &str = "kill-fails";
@@ -931,6 +943,35 @@ fn fleet_init_refuses_an_invalid_session_name_before_writing() {
         );
         assert!(!env.dir().exists(), "{bad:?}: {}", text(&out));
         assert!(!env.home.path().join(".trusty-mpm/config.toml").exists());
+    }
+}
+
+/// #10459 (DOC-86 §5): `tm fleet init` refuses the Architect on a Claude Code
+/// older than v2.1.295, and on a version it cannot read or parse, before it
+/// writes the project's hooks or starts a session.
+#[test]
+fn fleet_init_refuses_an_old_claude_code() {
+    for (setup, cause) in [
+        (Some("2.1.294 (Claude Code)\n"), "older than v2.1.295"),
+        (Some("Claude Code\n"), "printed no version"),
+        (None, "cannot read the Claude Code version"),
+    ] {
+        let env = FleetEnv::new();
+        match setup {
+            Some(version) => {
+                std::fs::write(env.bin.path().join(CLAUDE_VERSION), version).unwrap();
+            }
+            None => env.mark(VERSION_FAILS),
+        }
+        let dir = env.dir();
+        let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+        assert!(!out.status.success(), "{cause}: {}", text(&out));
+        assert!(text(&out).contains(cause), "{cause}: {}", text(&out));
+        assert!(!env.has_session("tm-architect"), "{cause}: {}", text(&out));
+        assert!(
+            !dir.join(".claude/settings.json").exists(),
+            "{cause}: hooks were written before the refusal"
+        );
     }
 }
 

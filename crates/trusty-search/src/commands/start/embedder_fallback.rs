@@ -274,6 +274,18 @@ impl Embedder for FallbackEmbedderAdapter {
             .unwrap_or_else(|| Arc::clone(&self.primary))
             .chunking_tokenizer()
     }
+
+    // #10504: the active backend's split window.
+    fn split_window(
+        &self,
+    ) -> std::result::Result<
+        Option<(usize, Arc<trusty_common::embedder::ChunkTokenizer>)>,
+        trusty_common::embedder::ChunkError,
+    > {
+        self.active_fallback()
+            .unwrap_or_else(|| Arc::clone(&self.primary))
+            .split_window()
+    }
 }
 
 #[cfg(test)]

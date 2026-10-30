@@ -106,7 +106,8 @@ async fn sm_stdio_setup_error_still_settles_replayed_events_10464() {
     let state = started(dir.path());
     let publisher = state.action_events().publisher().expect("attached");
     assert_eq!(publisher.buffered_len(), 3, "not replayed");
-    assert_eq!(spooled(dir.path()), 0, "the start left the spool");
+    // #10467: the replayed file stays until its events are delivered.
+    assert_eq!(spooled(dir.path()), 3, "deleted before delivery");
 
     let ended = run_sm_stdio_with(
         &state,
@@ -138,7 +139,8 @@ async fn sm_stdio_stop_spools_and_next_start_replays_10464() {
     let next = started(dir.path());
     let publisher = next.action_events().publisher().expect("attached");
     assert_eq!(publisher.buffered_len(), 2, "not replayed");
-    assert_eq!(spooled(dir.path()), 0, "the spool is still there");
+    // #10467: held by `next` until delivered; `again` must leave it.
+    assert_eq!(spooled(dir.path()), 2, "deleted before delivery");
     let again = started(dir.path());
     let publisher = again.action_events().publisher().expect("attached");
     assert_eq!(publisher.buffered_len(), 0, "replayed twice");

@@ -227,6 +227,9 @@ pub(crate) async fn launch(
     let twin_root = twin
         .then(|| super::launch_twin::precheck(&project_dir))
         .transpose()?;
+    // #10459: an Architect checkout refuses an old Claude Code before any
+    // clone, worktree or settings write (prep gates again, for every seam).
+    trusty_mpm::core::architect_claude_version::require_for_dir(&live_path)?;
     let session_uuid = trusty_mpm::session_manager::ManagedSessionId::new();
     let workspace = super::managed_workspace::provision_for_launch(
         &origin_url,
@@ -529,6 +532,8 @@ pub(crate) async fn connect(
     // 1. Resolve the target directory (absolute, so the banner is unambiguous).
     let path = resolve_dir(dir)?;
     let path = path.canonicalize().unwrap_or(path);
+    // #10459: before the alias registration and every prep write.
+    trusty_mpm::core::architect_claude_version::require_for_dir(&path)?;
     let workdir = path.to_string_lossy().to_string();
 
     // Auto-register the git project root as a local path alias (non-fatal, silent).

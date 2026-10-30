@@ -89,6 +89,8 @@ async fn serve_judging(
         StartEnv::default(),
         account_home.as_deref(),
     );
+    // #10459 P1: no consumer test reads the account's launch records.
+    state.architect_records = None;
     state.grants = Arc::new(GrantRegistry::new(
         Arc::new(FixedAgentTable(agent)),
         Arc::new(SystemClock),

@@ -4,7 +4,7 @@
 **Subsystem:** `trusty-channels` — route policy, host ceiling, audit; `trusty-common` — credential registry; `trusty-agents` — channel adapters
 **Owner:** owner
 **Last-updated:** 2026-10-28
-**Spec ID:** `SPEC-CHMODE-01~draft` … `SPEC-CHMODE-07~draft` (DOC-85)
+**Spec ID:** `SPEC-CHMODE-01~draft` … `SPEC-CHMODE-08~draft` (DOC-85)
 **DOC-N claim:** `DOC-85`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft); `DOC-84` was the highest on `origin/main` (2026-10-27).
 **Builds on:** [DOC-45](./DOC-45-credential-authority-model.md) (principal, scope, audit); [DOC-74](./DOC-74-secrets-integration.md) (storage, owner scope); [DOC-60](./DOC-60-bus-based-agent-messaging.md) §8 (channels ride the bus).
 
@@ -38,7 +38,7 @@ A channel call runs in exactly one mode.
 | Write or post | Allow where a route lists the target. | Ask per call; a route never replaces the Ask (Dd9). |
 | Outward message (comment, mention, share, invite) | Allow when a route names the recipient and kind. | Ask per call (Dd9). |
 | Delete | Deny. | Deny (Dd9). |
-| Audit line | Every action. | Every action; the only mark of the proxy (Dda, section 6). |
+| Audit line | Every action. | Every action; the personal-mode footer marks the proxy (D5c rev., section 6). |
 
 A mode never grants more than the route and the host ceiling already allow. The table is the most a mode may do.
 
@@ -102,7 +102,7 @@ Gaps, as of 2026-10-27:
 
 **ID:** SPEC-CHMODE-06~draft
 
-Every audit line and tool result carries `mode` and `actor` (integration id or owner id). A deny line carries `mode` and the reason code. A `personal` outward action also records the approval id of the Ask. Records hold no message text. The audit line is the only mark of a proxy action; no footer or marker is added to content on any channel (Dda). Where the service shows only the owner as author, only the audit line tells proxy from owner.
+Every audit line and tool result carries `mode` and `actor` (integration id or owner id). A deny line carries `mode` and the reason code. A `personal` outward action also records the approval id of the Ask. Records hold no message text. Bot-mode posts carry the section 8 footer (D58). Personal-mode posts carry a footer whose form the user picks in their settings: "posted by @trusty" or "posted on behalf of <user> by @trusty" (Bob D5c rev., 2026-10-30; supersedes the Dda no-footer rule for personal mode). Where the service shows only the owner as author, the footer and the audit line tell proxy from owner.
 
 ## 7. Worked example: Notion, and the amendment {#SPEC-CHMODE-07~draft}
 
@@ -120,3 +120,22 @@ Notion credential per use (Bob ruling, 12:17Z; De6; PD-5). Refs and scopes only.
 `NOTION.NOTION_PAT` is never accepted in `bot_ref` (Ddb is resolved by De6).
 
 **Amendment (Dd7).** This spec amends the #8454 "no user token" ruling of 2026-09-23. A user token was refused in every slot; it is now refused in `bot_ref` only and accepted in `personal_ref`. The doc comment on `allowed_refs` in `crates/trusty-channels/src/policy/host.rs` (line 294, "a user token is never accepted (#8454 ruling 2026-09-23)") must cite Dd7 and this spec (`SPEC-CHMODE-04~draft`). The test `slack_user_ref_refused_in_either_slot` (`crates/trusty-channels/src/policy/tests/host_refs.rs:252`) changes to refuse a user ref in `bot_ref` only. Both edits are code work, tracked in the source plan as P3.
+
+## 8. "Sent using @Trusty" footer {#SPEC-CHMODE-08~draft}
+
+**ID:** SPEC-CHMODE-08~draft
+
+Owner rulings: Bob, 2026-10-30 02:38Z (#10499): "We should use a similar convention for the trusty bot channel: 'Sent using @Trusty'." It mirrors Slack's "Sent using @Claude". D58 (Bob, 2026-10-30, #10499): "Footers for bot mode."
+
+- **Rule.** A bot-mode post ends with the footer `Sent using @Trusty`, exactly that text.
+- **Scope.** `bot` mode (section 1). `personal` posts carry the user-selected footer below (D5c rev.).
+
+- **Personal-mode footer. Decided (Bob D5c rev., 2026-10-30).** The user picks the form in their settings: "posted by @trusty" or "posted on behalf of <user> by @trusty".
+
+Not yet ruled (OPEN, no decision):
+
+- Per-channel format: a Slack context block or a plain trailing line; the other channels.
+- Edits and threads: whether an edited message, or each reply in a thread, carries the footer.
+- Opt-out: whether any route or user may turn the footer off.
+
+Tests: one per channel adapter, asserting a bot-mode post ends with `Sent using @Trusty` and a personal-mode post ends with the user-selected footer. Refs #10499.

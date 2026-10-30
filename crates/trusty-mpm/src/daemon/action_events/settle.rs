@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use trusty_common::control_bus::{HarnessEvent, PushFlushOutcome};
 
-use super::{ActionEvents, ActionPublisher, FINAL_FLUSH_BUDGET, SIGNAL_FLUSH_BUDGET, spool};
+use super::{
+    ActionEvents, ActionPublisher, FINAL_FLUSH_BUDGET, SIGNAL_FLUSH_BUDGET, replayed, spool,
+};
 
 /// Kept back from a settle's own budget so its result lands before the
 /// caller's outer timeout does.
@@ -152,13 +154,24 @@ impl ActionPublisher {
     /// What: the bus gets half of `budget`, and never more than half of
     /// [`SIGNAL_FLUSH_BUDGET`] (a cut-off write re-queues its frame).
     /// #10412: the first caller's budget sets the settle's, and on SIGTERM
-    /// that may be the serve drain's 1 s; the cap gets the rest to the spool
-    /// inside the signal handler's 200 ms whichever caller won. The buffer is then closed and drained in one step; the drained
-    /// events go to the spool on the blocking pool, cut off at `budget`.
+    /// that may be the serve drain's 1 s; the cap leaves room for the spool
+    /// write inside the signal handler's fixed 200 ms. Under load that budget
+    /// can still end first: the signal caller then returns its at-risk count
+    /// as `lost`, an upper bound, while the settle finishes and spools the
+    /// events for the other caller (see #10412). The buffer is then closed
+    /// and drained in one step; the drained events go to the spool on the
+    /// blocking pool, cut off at `budget`.
     /// Every event neither sent nor spooled is counted in [`Settled::lost`]
     /// and logged with that count.
+    /// #10467: replayed spool files still held are retired only once the
+    /// spool write lands (inside the blocking task, so a write that outlives
+    /// the budget still retires them when it lands). If it fails, they are
+    /// dropped and stay on disk, and their events count as spooled, not lost.
+    /// After an eviction since the replay, no claim comes back to retire
+    /// (`take_claims`), so those files stay and replay again.
     /// Test: `events_buffered_at_shutdown_with_the_bus_down_are_spooled_10412`,
-    /// `a_hung_bus_and_an_unwritable_spool_stop_in_bound_and_count_the_loss_10412`.
+    /// `a_hung_bus_and_an_unwritable_spool_stop_in_bound_and_count_the_loss_10412`,
+    /// `an_unwritable_spool_at_stop_keeps_the_replayed_files_10467`.
     async fn settle_within(&self, budget: Duration) -> Settled {
         let deadline = tokio::time::Instant::now() + budget;
         let mut settled = Settled::default();
@@ -168,7 +181,7 @@ impl ActionPublisher {
             self.client.buffered_len()
         };
         let at_bus = budget.min(SIGNAL_FLUSH_BUDGET) / 2;
-        match tokio::time::timeout(at_bus, self.client.flush()).await {
+        match tokio::time::timeout(at_bus, self.flush_counted()).await {
             Ok(PushFlushOutcome { error: None, sent }) => settled.sent = sent,
             Ok(PushFlushOutcome {
                 error: Some(e),
@@ -186,20 +199,37 @@ impl ActionPublisher {
                 );
             }
         }
-        let left = {
+        let (left, claims, on_disk) = {
             let mut closed = self.settle.closed.lock();
             *closed = true;
             self.settle.at_bus.store(false, Ordering::Relaxed);
             let left = self.client.drain_buffered();
-            self.settle.in_flight.store(left.len(), Ordering::Relaxed);
-            left
+            // #10467: replayed events still in their files are not at risk.
+            let (claims, replayed) = self.take_claims();
+            let on_disk = replayed.min(left.len());
+            self.settle
+                .in_flight
+                .store(left.len() - on_disk, Ordering::Relaxed);
+            (left, claims, on_disk)
         };
         let count = left.len();
-        settled.lost = count;
+        // Replayed events in their still-held files survive a failed write.
+        let fresh = count - on_disk;
+        settled.lost = fresh;
         if count == 0 {
+            replayed::retire_all(claims);
             tracing::debug!(sent = settled.sent, "action events: final flush delivered");
         } else if let Some(dir) = self.spool.clone() {
-            let write = tokio::task::spawn_blocking(move || spool::persist(&dir, &left));
+            settled.spooled = on_disk;
+            let write = tokio::task::spawn_blocking(move || {
+                let written = spool::persist(&dir, &left);
+                // #10467: the old files go only once the new one is down;
+                // on an error the dropped claims leave them for replay.
+                if written.is_ok() {
+                    replayed::retire_all(claims);
+                }
+                written
+            });
             match tokio::time::timeout_at(deadline, write).await {
                 Ok(Ok(Ok(written))) => {
                     tracing::info!(
@@ -210,19 +240,20 @@ impl ActionPublisher {
                     settled.lost = count.saturating_sub(written);
                 }
                 Ok(Ok(Err(e))) => {
-                    tracing::warn!(lost = count, error = %e, "action events: spool write failed; lost");
+                    tracing::warn!(lost = fresh, kept = on_disk, error = %e, "action events: spool write failed; lost, except replayed events kept in their files");
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!(lost = count, error = %e, "action events: spool write did not finish; lost");
+                    tracing::warn!(lost = fresh, kept = on_disk, error = %e, "action events: spool write did not finish; lost, except replayed events kept in their files");
                 }
                 Err(_) => tracing::warn!(
-                    lost = count,
+                    lost = fresh,
+                    kept = on_disk,
                     "action events: spool write outlived the stop budget; counted lost, though the file may still land and replay"
                 ),
             }
         } else {
             tracing::warn!(
-                lost = count,
+                lost = fresh,
                 "action events: undelivered at stop and no spool; lost"
             );
         }

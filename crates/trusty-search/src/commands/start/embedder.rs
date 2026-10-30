@@ -914,20 +914,25 @@ impl crate::core::Embedder for LazySlotEmbedderAdapter {
         Option<Arc<trusty_common::embedder::ChunkTokenizer>>,
         trusty_common::embedder::ChunkError,
     > {
-        static TOKENIZER: std::sync::OnceLock<Arc<trusty_common::embedder::ChunkTokenizer>> =
-            std::sync::OnceLock::new();
         if self.handle.last_reported_window().is_none() {
             return Ok(None);
         }
-        if let Some(t) = TOKENIZER.get() {
-            return Ok(Some(Arc::clone(t)));
-        }
-        let loaded = Arc::new(
-            trusty_common::embedder::ChunkTokenizer::for_fastembed_model(
-                "Qdrant/all-MiniLM-L6-v2-onnx",
-            )?,
-        );
-        Ok(Some(Arc::clone(TOKENIZER.get_or_init(|| loaded))))
+        super::embedder_split::minilm_tokenizer().map(Some)
+    }
+
+    /// The window and tokenizer a chunk is split against (#10504).
+    ///
+    /// Why: the window is reported only after the first answer, which a deferred
+    /// first index parses before.
+    /// What: the reported window, else the MiniLM tokenizer's `max_length()`.
+    /// Test: `a_lazy_adapter_assumes_the_minilm_window_before_the_sidecar_reports`.
+    fn split_window(
+        &self,
+    ) -> std::result::Result<
+        Option<(usize, Arc<trusty_common::embedder::ChunkTokenizer>)>,
+        trusty_common::embedder::ChunkError,
+    > {
+        super::embedder_split::split_window(self.handle.last_reported_window())
     }
 
     /// Real give-up-signal override (review finding, PR #3560 HIGH fix).

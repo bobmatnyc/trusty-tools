@@ -255,10 +255,11 @@ impl CodeIndexer {
         chunks: &[RawChunk],
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+        headers: Option<&[String]>,
     ) -> Result<Vec<Option<Vec<f32>>>> {
         self.embed_context()
             .await
-            .embed_chunks_in_batches(chunks, progress_tx, pause)
+            .embed_chunks_in_batches(chunks, progress_tx, pause, headers)
             .await
     }
 }
@@ -278,9 +279,10 @@ impl EmbedContext {
         chunks: &[RawChunk],
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+        headers: Option<&[String]>,
     ) -> Result<Vec<Option<Vec<f32>>>> {
         let run = self
-            .embed_chunks_keeping_prefix(chunks, progress_tx, pause)
+            .embed_chunks_keeping_prefix(chunks, progress_tx, pause, headers)
             .await?;
         match run.stalled {
             Some(stall) => Err(stall),
@@ -293,6 +295,9 @@ impl EmbedContext {
     /// Why: serial loop left ANE ~78% idle; `TRUSTY_EMBED_INFLIGHT` (default 2)
     /// sub-batches now run concurrently via ordered `buffered`, filling the ANE
     /// queue. CoreML tripwire fires between waves.
+    /// `headers` (#10481): one per chunk, prepended to each embedded text (empty:
+    /// none); only the inline paths that just split their chunks pass it, so every
+    /// other pass embeds stored text unchanged and old vectors stay valid.
     /// What: returns `Vec<Option<Vec<f32>>>` 1:1 with `chunks` (None = BM25-only
     /// mode). `progress_tx`: when `Some`, a `(chunks_in_wave, wave_embed_ms)` pair
     /// is sent after each wave of ≥ `PROGRESS_CHUNK_INTERVAL` chunks so callers
@@ -314,10 +319,11 @@ impl EmbedContext {
         chunks: &[RawChunk],
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+        headers: Option<&[String]>,
     ) -> Result<EmbedRun> {
         let mut state = self.pass_state();
         let run = self
-            .embed_chunks_in_pass(chunks, progress_tx, pause, &mut state)
+            .embed_chunks_in_pass(chunks, progress_tx, pause, &mut state, headers)
             .await;
         state.finish();
         run
@@ -364,6 +370,7 @@ impl EmbedContext {
 
     /// [`Self::embed_chunks_keeping_prefix`] as one call of a longer pass:
     /// the tripwire, batch size and tally carry over in `state` (#10294).
+    /// `headers` (1:1 with `chunks`) prepend the #10481 header to each embedded text.
     /// Test: `a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass`.
     pub(crate) async fn embed_chunks_in_pass(
         &self,
@@ -371,6 +378,7 @@ impl EmbedContext {
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
         state: &mut EmbedPassState,
+        headers: Option<&[String]>,
     ) -> Result<EmbedRun> {
         use futures::StreamExt as _;
 
@@ -428,13 +436,20 @@ impl EmbedContext {
                 let end = (wave_pos + state.batch_size).min(chunk_total);
                 let sub: Vec<String> = chunks[wave_pos..end]
                     .iter()
-                    .map(|c| c.content.clone())
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let h = headers.map(|h| h[wave_pos + i].as_str());
+                        super::window_split::embed_text(c, h)
+                    })
                     .collect();
                 wave_sub_batches.push((wave_pos, sub));
                 wave_pos = end;
             }
             // #9284: tokenize alongside the embed call, off the runtime.
-            let mut measuring = probe.start(&chunks[wave_start..wave_pos]);
+            let mut measuring = probe.start(
+                &chunks[wave_start..wave_pos],
+                headers.map(|h| &h[wave_start..wave_pos]),
+            );
 
             let rss_before = if is_coreml { current_rss_mb() } else { 0 };
             let wave_embed_start = std::time::Instant::now();
@@ -523,7 +538,10 @@ impl EmbedContext {
                     self.embed_window.set_window(Some(window));
                     state.tally.set_window(window);
                     state.probe = Some(fresh.clone());
-                    measuring = fresh.start(&chunks[wave_start..wave_pos]);
+                    measuring = fresh.start(
+                        &chunks[wave_start..wave_pos],
+                        headers.map(|h| &h[wave_start..wave_pos]),
+                    );
                     probe = fresh;
                 }
             }
