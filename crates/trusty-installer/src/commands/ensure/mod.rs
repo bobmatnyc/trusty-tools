@@ -20,7 +20,8 @@
 //!
 //! Exit codes (#1341): `0` = fully provisioned (and, if `--wait`, ready);
 //! `2` = a `.mcp.json` patch or a reachable-daemon project-setup stage failed;
-//! `4` = `--wait` was requested but readiness was not reached before the timeout.
+//! `4` = `--wait` was requested but readiness was not reached before the timeout;
+//! `1` = refused to run as root, before any write or socket dial ([`root_guard`]).
 //!
 //! Test: the submodules are unit-tested; `run` is side-effecting (filesystem +
 //! sockets + a tokio runtime) and is exercised end-to-end by the CLI smoke path.
@@ -31,6 +32,7 @@ pub mod mcp_patch;
 pub mod project_setup;
 pub mod readiness;
 pub mod report;
+pub mod root_guard;
 
 /// Process-wide lock serialising tests that mutate global env vars.
 ///
@@ -112,8 +114,16 @@ fn render(report: &EnsureReport, json: bool) -> bool {
 /// renders it, and returns the exit code (`0`/`2`/`4` per the module note). The
 /// `.mcp.json` patch is synchronous and runs first so it always happens even if
 /// the daemons are down.
-/// Test: side-effecting; the submodules carry the unit coverage.
+/// Refuses to run as root first (see [`root_guard`]).
+/// Test: side-effecting; the submodules carry the unit coverage, and the root
+/// refusal is covered by `guarded_root_never_provisions`.
 pub fn run(wait: bool, json: bool) -> i32 {
+    // #10320: refuse effective uid 0 before any file write or socket dial.
+    root_guard::guarded(root_guard::effective_uid(), || provision(wait, json))
+}
+
+/// Run the three ensure phases and return the report's exit code.
+fn provision(wait: bool, json: bool) -> i32 {
     let root = project_root();
 
     // Phase 1 — synchronous, always-on `.mcp.json` patch.
