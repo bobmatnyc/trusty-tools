@@ -65,6 +65,39 @@ sqlite3 assistants-app/assistants.db "SELECT * FROM assistants"
 `seed.py` creates the "General" and "Code Helper" assistants. A re-run adds
 no duplicates.
 
+## Server
+
+`server.py` is a FastAPI app. Start it from the repository root:
+
+```bash
+assistants-app/.venv/bin/uvicorn assistants-app.server:app --reload
+```
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/assistants` | Create: `{"name", "instructions", "model"}`; 409 on a duplicate name |
+| `GET` | `/assistants` | List all assistants |
+| `GET` | `/assistants/{id}` | Get one assistant |
+| `POST` | `/assistants/{id}/chat` | Send `{"content": "..."}`; streams the reply |
+| `GET` | `/assistants/{id}/messages` | Message history, oldest first |
+
+The chat endpoint sends the assistant's full history to Bedrock
+`converse_stream` and streams newline-delimited JSON:
+
+```
+{"type": "delta", "text": "Hello! How can I help"}
+{"type": "done", "message_id": 2, "tokens_in": 33, "tokens_out": 13, "cost_usd": 0.000294}
+```
+
+The user message is stored before the call; the assistant message, with
+tokens and cost, is stored when the stream completes. Throttling and quota
+errors are retried with exponential backoff (4 attempts) until the first
+delta is sent. After that, or for any other error, the stream ends with
+`{"type": "error", "error": "..."}` and no assistant message is stored.
+
+CORS allows `localhost` and `127.0.0.1` on ports 5173 and 3000, plus
+`tauri://localhost`.
+
 ## Tests
 
 ```bash

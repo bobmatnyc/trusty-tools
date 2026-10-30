@@ -18,6 +18,7 @@ fn project(name: &str, repo_url: &str) -> Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     }
 }
 
@@ -30,6 +31,7 @@ fn session(
 ) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tm-test".to_string(),
         cwd: PathBuf::from("/tmp"),

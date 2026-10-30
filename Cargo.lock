@@ -1257,9 +1257,9 @@ dependencies = [
 
 [[package]]
 name = "calamine"
-version = "0.36.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6975084f43060e56343ffba7f9731fa52a7dcf2e1cd8e2459fd4c6bf4a1bff59"
+checksum = "c9ca341b94bc4b29e08970b1a03914fad2dfe177e2ecb67fcd6de9046004aafb"
 dependencies = [
  "atoi_simd",
  "byteorder",
@@ -1267,9 +1267,9 @@ dependencies = [
  "encoding_rs",
  "fast-float2",
  "log",
- "quick-xml",
+ "quick-xml 0.42.0",
  "serde",
- "zip 8.6.0",
+ "zip 9.0.5",
 ]
 
 [[package]]
@@ -6433,7 +6433,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6693,7 +6693,7 @@ dependencies = [
  "nix 0.31.3",
  "parking_lot",
  "percent-encoding",
- "quick-xml",
+ "quick-xml 0.41.0",
  "rand 0.10.2",
  "reqwest 0.13.3",
  "rustls-pki-types",
@@ -7224,7 +7224,7 @@ checksum = "7da1d65da6dd5d1e44199ac0f58712d241c0f439f80adea8924d832384087f85"
 dependencies = [
  "base64 0.22.1",
  "indexmap 2.14.0",
- "quick-xml",
+ "quick-xml 0.41.0",
  "serde",
  "time",
 ]
@@ -7549,9 +7549,18 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
- "encoding_rs",
  "memchr",
  "serde",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "encoding_rs",
+ "memchr",
 ]
 
 [[package]]
@@ -11273,7 +11282,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.67.3"
+version = "0.67.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11575,7 +11584,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11624,7 +11633,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.9.0"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11792,7 +11801,7 @@ dependencies = [
  "ort",
  "pdf-extract",
  "petgraph 0.6.5",
- "quick-xml",
+ "quick-xml 0.41.0",
  "rand 0.8.6",
  "rayon",
  "redb 2.6.3",
@@ -11845,7 +11854,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",
@@ -13827,20 +13836,6 @@ dependencies = [
  "indexmap 2.14.0",
  "memchr",
  "typed-path",
-]
-
-[[package]]
-name = "zip"
-version = "8.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
-dependencies = [
- "crc32fast",
- "flate2",
- "indexmap 2.14.0",
- "memchr",
- "typed-path",
- "zopfli",
 ]
 
 [[package]]

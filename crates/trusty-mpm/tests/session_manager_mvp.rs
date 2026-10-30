@@ -2418,14 +2418,21 @@ async fn fleet_route_marks_dead_session_unresumable() {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
         })
         .await
         .expect("register project");
 
     let id = seed_dead_errored_session(&mgr, root.path(), &repo_url, "fleet").await;
 
-    let (status, body) =
-        decode_response(fleet_by_project_route(axum::extract::State(state.clone())).await).await;
+    let (status, body) = decode_response(
+        fleet_by_project_route(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(std::collections::HashMap::new()),
+        )
+        .await,
+    )
+    .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let projects = body["projects"].as_array().expect("projects array");
     let widget = find_row(projects, "project_name", "widget");

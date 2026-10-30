@@ -191,6 +191,7 @@ mod tests {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
         }
     }
 
@@ -222,6 +223,7 @@ mod tests {
             deleted: false,
             auto_resume_parked: None,
             kind: None,
+            parent_session_id: None,
         }
     }
 

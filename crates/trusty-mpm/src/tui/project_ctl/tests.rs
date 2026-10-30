@@ -32,6 +32,7 @@ fn project(name: &str) -> Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     }
 }
 
@@ -63,6 +64,7 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         deleted: false,
         auto_resume_parked: None,
         kind: None,
+        parent_session_id: None,
     }
 }
 

@@ -89,6 +89,7 @@ impl ManagedTmuxDriver for PaneAwareTmux {
 pub(super) fn make_record(source_id: Option<&str>) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-test-session".into(),
         cwd: PathBuf::from("/tmp/test"),
@@ -610,6 +611,25 @@ fn serializers_include_source_id() {
     );
 }
 
+/// Why: #10476 — the MCP `session_list` (`record_to_json`) and the HTTP list
+/// (`record_to_summary`) must both return a recorded parent, and a parentless
+/// row must look exactly as before: no key on either wire shape.
+/// Test: this test.
+#[test]
+fn record_to_json_and_summary_carry_parent() {
+    let parent = crate::session_manager::ManagedSessionId::new();
+    let mut r = make_record(None);
+    r.parent_session_id = Some(parent);
+    assert_eq!(record_to_json(&r)["parent_session_id"], parent.to_string());
+    let wire = serde_json::to_value(record_to_summary(&r)).unwrap();
+    assert_eq!(wire["parent_session_id"], parent.to_string());
+
+    let r_none = make_record(None);
+    assert!(record_to_json(&r_none).get("parent_session_id").is_none());
+    let wire = serde_json::to_value(record_to_summary(&r_none)).unwrap();
+    assert!(wire.get("parent_session_id").is_none(), "{wire}");
+}
+
 /// Why: `record_to_json` (MCP path) and `record_to_summary` (HTTP path) must
 /// both surface `deliverable_id` (DOC-35 §10.6, #2379) so `tm sessions ls`/
 /// `status` and the MCP tools can show which Deliverable a session is bound
@@ -700,6 +720,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         deleted: false,
         auto_resume_parked: None,
         kind: Default::default(),
+        parent_session_id: None,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -745,6 +766,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         deleted: false,
         auto_resume_parked: None,
         kind: Default::default(),
+        parent_session_id: None,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,

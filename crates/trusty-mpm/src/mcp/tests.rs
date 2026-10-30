@@ -75,6 +75,7 @@ impl OrchestratorBackend for MockBackend {
         _name_hint: Option<&str>,
         runtime: Option<&str>,
         ephemeral: Option<bool>,
+        parent_session_id: Option<&str>,
     ) -> Result<Value, String> {
         Ok(json!({
             "id": "m-1",
@@ -82,6 +83,7 @@ impl OrchestratorBackend for MockBackend {
             "branch": git_ref,
             "runtime": runtime.unwrap_or("claude-code"),
             "ephemeral": ephemeral.unwrap_or(false),
+            "parent_session_id": parent_session_id,
             "state": "active",
         }))
     }
@@ -835,12 +837,24 @@ async fn dispatch_session_new_tool() {
     .await;
     let result = resp.result.unwrap();
     assert_eq!(result["isError"], false);
-    assert!(
-        result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("example.com")
-    );
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("example.com"));
+    assert!(text.contains("\"parent_session_id\":null"), "{text}");
+
+    // #10476: a stamped `parent_session_id` reaches the backend.
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_new",
+            json!({ "repo_url": "/r", "ref": "main", "task": "t", "parent_session_id": "p-1" }),
+        ),
+    )
+    .await;
+    let text = resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains("\"parent_session_id\":\"p-1\""), "{text}");
 }
 
 /// Why: `session_new` must reject a call missing the required `repo_url`.

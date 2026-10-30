@@ -28,6 +28,7 @@ fn proj(name: &str, repo_url: &str) -> Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     }
 }
 
@@ -45,12 +46,14 @@ fn proj_tagged(name: &str, repo_url: &str, tags: &[&str], desc: &str) -> Project
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     }
 }
 
 fn session_with_repo(repo_url: &str) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "test".into(),
         cwd: PathBuf::from("/tmp"),
@@ -88,6 +91,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
 fn session_no_repo() -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "no-repo".into(),
         cwd: PathBuf::from("/tmp"),

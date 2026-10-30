@@ -57,8 +57,13 @@ fn managed_err(e: ManagedError) -> String {
 /// creates the tmux host, launches the harness, and returns the new record as
 /// JSON (id, tmux name, workspace path, state, attach command, runtime). The
 /// optional `ephemeral` flag (#1508) tags a test/throwaway session for the
-/// bulk-teardown + auto-reap paths.
-/// Test: `session_new_invalid_runtime_errors` (unit, no tmux needed).
+/// bulk-teardown + auto-reap paths. `parent_session_id` (#10476) is the
+/// bridge-stamped caller; [`link_parent`] records it on a newly created session
+/// and drops it when invalid, never failing the spawn.
+/// Test: `session_new_invalid_runtime_errors` (unit, no tmux needed),
+/// `session_new_records_valid_parent` in `tests/session_parent_link_10476.rs`.
+// #10476: the parent id is the eighth input; a struct would churn every caller.
+#[allow(clippy::too_many_arguments)]
 pub async fn session_new(
     state: &Arc<DaemonState>,
     repo_url: &str,
@@ -67,6 +72,7 @@ pub async fn session_new(
     name_hint: Option<&str>,
     runtime: Option<&str>,
     ephemeral: Option<bool>,
+    parent_session_id: Option<&str>,
 ) -> Result<Value, String> {
     let params = SpawnParams {
         repo_url: repo_url.to_string(),
@@ -95,13 +101,59 @@ pub async fn session_new(
         // `tm launch --worktree` is how a human asks for the other placement.
         worktree: false,
     };
-    let record = spawn_managed(
-        state,
-        crate::session_manager::ManagedSessionId::new(),
-        params,
-    )
-    .await?;
+    let minted = ManagedSessionId::new();
+    let mut record = spawn_managed(state, minted, params).await?;
+    // #10476: a reconnect (#1707) returns an existing record under another id;
+    // only a session this call created gets the caller as its parent.
+    if record.id == minted {
+        link_parent(state, &mut record, parent_session_id).await;
+    }
     Ok(record_to_json(&record))
+}
+
+/// Record `parent` as the parent of the freshly spawned `record` (#10476).
+///
+/// Why: the bridge stamps the caller's `TM_MANAGED_SESSION_ID`, but the value
+/// still crosses a process boundary, so the daemon checks it before storing a
+/// link the `tm tui` tree will draw. The link is display-only; a bad value must
+/// never fail a spawn that already happened.
+/// What: parses `parent`, requires a stored record that is not terminal and is
+/// not `record` itself, then persists it via
+/// [`crate::session_manager::SessionManager::set_parent_session_id`] and mirrors
+/// it on `record`. A malformed, unknown or terminal id, or a store error, is
+/// logged and dropped; `record` keeps `parent_session_id: None`.
+/// Test: `session_new_records_valid_parent`,
+/// `session_new_unknown_parent_is_none_and_spawn_ok`,
+/// `session_new_malformed_parent_dropped` in `tests/session_parent_link_10476.rs`.
+async fn link_parent(
+    state: &Arc<DaemonState>,
+    record: &mut crate::session_manager::SessionRecord,
+    parent: Option<&str>,
+) {
+    let Some(raw) = parent.map(str::trim).filter(|p| !p.is_empty()) else {
+        return;
+    };
+    let parent_id = match parse_managed_id(raw) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(id = %record.id, "session_new: parent dropped: {e}");
+            return;
+        }
+    };
+    let mgr = state.session_manager().await;
+    let live = parent_id != record.id
+        && mgr
+            .get(&parent_id)
+            .await
+            .is_ok_and(|p| !p.state.is_terminal());
+    if !live {
+        tracing::warn!(id = %record.id, "session_new: parent {parent_id} is unknown or terminal; dropped");
+        return;
+    }
+    match mgr.set_parent_session_id(&record.id, parent_id).await {
+        Ok(()) => record.parent_session_id = Some(parent_id),
+        Err(e) => tracing::warn!(id = %record.id, "session_new: parent link not recorded: {e}"),
+    }
 }
 
 /// Stop a session's runtime, keeping its workspace (`session_stop` tool).
@@ -768,6 +820,7 @@ mod tests {
             "t",
             None,
             Some("bogus"),
+            None,
             None,
         )
         .await

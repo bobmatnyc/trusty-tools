@@ -81,6 +81,8 @@ pub mod architect;
 pub mod architect_floor;
 // #8942: `tm fleet init`'s registration of the Architect's sessions.
 pub mod architect_register;
+// #9092: whether a launch spec names the supervisor session (the shim refuses it).
+pub mod architect_spawn;
 // #6194: `stop` / `stop_with_cause`, split out of `manager.rs` at its SLOC cap.
 pub mod stop;
 pub mod store;
@@ -328,6 +330,10 @@ mod send_input_gate_tests;
 // #6194: a stop somebody asked for must survive both automatic resume paths.
 #[cfg(test)]
 mod stop_cause_tests;
+
+// #10476: the bridge-recorded parent link loads, persists and re-saves cleanly.
+#[cfg(test)]
+mod parent_session_tests;
 
 // #8935: a stale record never tears down a live session that reused its name.
 #[cfg(test)]
