@@ -453,6 +453,8 @@ pub mod trusty_tools_config;
 pub mod twin_arming;
 // #8878 ruling A: the Architect is bound to the `claude` tm launched for it.
 pub mod architect_compat;
+// #10459: the Claude Code version an Architect launch requires (`onFailure`).
+pub mod architect_claude_version;
 // #8436: the Architect's fixed core and its composed prompt.
 pub mod architect_core;
 pub mod architect_launch;

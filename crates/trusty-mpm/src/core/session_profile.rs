@@ -112,6 +112,10 @@ pub struct ArchitectConfig {
     /// `[supervisor.twin]` — projects granted supervisor-twin mode.
     // #8878: nested here so the grant needs this allowlist too (ruling D1).
     pub twin: crate::core::twin_identity::TwinGrant,
+    /// `[architect] direct_commands` — register the Architect's prompt hooks.
+    // #10459: default off (DOC-86 §3, §5); written only when `true`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub direct_commands: bool,
 }
 
 /// The supervisor profile's sections, in composition order.

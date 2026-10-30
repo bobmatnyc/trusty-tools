@@ -222,6 +222,8 @@ pub(crate) fn gui_spawn_line(
     let content = crate::core::content_source::framework_content_for(workdir)
         .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
     let cli = crate::core::session_launch::cli_launch(&content, workdir, None);
+    // #10459: a GUI-spawned Architect needs Claude Code v2.1.295 (`onFailure`).
+    crate::core::architect_claude_version::require_for_profile(cli.profile)?;
     let file = crate::core::model_inject::write_pm_prompt_file_in(
         prompt_dir,
         &cli.prompt,

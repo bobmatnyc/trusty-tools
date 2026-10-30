@@ -298,6 +298,10 @@ fn client_prompt_spec(
     // #8992: resolve the profile once, so the prompt and the tool trim agree.
     // This is the resolution `build_system_prompt_for` performs internally.
     let profile = crate::core::session_profile::resolve_ambient(project);
+    // #10459: the TUI `/connect` and launch paths run no prep, so the
+    // Architect's Claude Code floor is checked here, before the prompt write,
+    // the daemon POST and the spawn.
+    crate::core::architect_claude_version::require_for_profile(profile)?;
     client_prompt_spec_as(dir, project, config_root, action, profile)
 }
 
@@ -437,6 +441,10 @@ mod prompt_refusal_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "session_connect_10459_tests.rs"]
+mod architect_version_tests;
 
 #[cfg(test)]
 mod renderer_tests {
