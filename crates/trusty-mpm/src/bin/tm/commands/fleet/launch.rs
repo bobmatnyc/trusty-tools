@@ -252,6 +252,8 @@ impl Prepared {
     /// of [`start`] before the session is created.
     fn new(dir: &Path, home: &Path, session: &str) -> anyhow::Result<Self> {
         require_architect(dir, session)?;
+        // #10459: before any write — the guard's `onFailure` needs v2.1.295.
+        trusty_mpm::core::architect_claude_version::require_architect_claude_version()?;
         match trusty_mpm::core::session_launch::prepare_isolated_session_under(
             dir,
             None,

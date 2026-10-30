@@ -29,6 +29,8 @@ pub use entry::{
     prepare_session_with_repo_url_and_exe, prepare_session_with_style,
     prepare_session_with_style_and_native,
 };
+// #10459: the Architect's exec-form PM-guard and prompt-hook groups.
+mod architect_hooks;
 // #6887: the bulk-read diversion `PreToolUse` groups.
 mod divert_hooks;
 // #7849: the read-only diff between a project's settings file and the hook
@@ -1027,7 +1029,7 @@ pub(super) fn prepare_session_inner(
     //
     // #9018: `[pm_guard] enabled = false` leaves the `hook --pm-guard` entry
     // out and strips one a prior launch wrote; every other hook is unchanged.
-    let additions = project_hooks::project_managed_hook_additions_with_pm_guard(
+    let additions = project_hooks::project_managed_hook_additions_for_profile(
         // #7244: `None` resolves the running installed binary. When nothing
         // stable resolves this now returns an error and writes NOTHING, rather
         // than wiring every hook to a build artifact. A test pins a stable path
@@ -1039,6 +1041,8 @@ pub(super) fn prepare_session_inner(
         // is on, so a project with the feature off spawns no process per turn.
         crate::core::prompt_self_improvement::enabled_for(project_dir),
         config.pm_guard.enabled,
+        // #10459: exec form + `onFailure: "block"` for the Architect only.
+        architect_hooks::ArchitectHooks::for_profile(profile, &config),
     );
     let hooks_written = match write_project_hooks_with(project_dir, additions) {
         Ok(()) => true,

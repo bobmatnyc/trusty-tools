@@ -1,0 +1,3 @@
+Security
+- The Architect session registers its PM guard in exec form (`<tm>` with `args: ["hook", "--pm-guard"]`, no `sh -c`) with `onFailure: "block"`, so a guard that cannot start, crashes or times out denies the tool call. The prompt hooks (`UserPromptSubmit`, `UserPromptExpansion` matcher `tm-run`) are registered only when `[architect] direct_commands = true` (default `false`). PM and agent sessions keep their hooks unchanged (#10459).
+- `tm fleet init`, `tm fleet relaunch`, `tm launch` and `tm connect` refuse an Architect launch on Claude Code older than v2.1.295, and when `claude --version` cannot be read or parsed (#10459).

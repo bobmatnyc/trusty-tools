@@ -324,6 +324,9 @@ pub(crate) async fn launch(
     let cli =
         trusty_mpm::core::session_launch::cli_launch(&content, &managed_path, Some(&origin_url));
     let pm_model = trusty_mpm::core::session_profile::launch_model(cli.profile, &mpm_cfg);
+    // #10459: an Architect's PM guard needs Claude Code v2.1.295 (`onFailure`);
+    // refused before the session is registered or started.
+    trusty_mpm::core::architect_claude_version::require_for_profile(cli.profile)?;
 
     // Build the `--append-system-prompt` text from the managed clone (where the
     // framework was deployed at session prep). Style is not supported in managed
@@ -597,6 +600,8 @@ pub(crate) async fn connect(
     let content = trusty_mpm::core::content_source::framework_content_for(&path)
         .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
     let cli = trusty_mpm::core::session_launch::cli_launch(&content, &path, None);
+    // #10459: `tm connect` launches an Architect too; same version gate.
+    trusty_mpm::core::architect_claude_version::require_for_profile(cli.profile)?;
     let prompt_path = connect_prompt_file(&std::env::temp_dir(), &cli.prompt, &path)?;
 
     // 2. Register the session with the daemon via the connect endpoint. When
