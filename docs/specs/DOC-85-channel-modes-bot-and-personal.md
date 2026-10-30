@@ -4,7 +4,7 @@
 **Subsystem:** `trusty-channels` — route policy, host ceiling, audit; `trusty-common` — credential registry; `trusty-agents` — channel adapters
 **Owner:** owner
 **Last-updated:** 2026-10-28
-**Spec ID:** `SPEC-CHMODE-01~draft` … `SPEC-CHMODE-07~draft` (DOC-85)
+**Spec ID:** `SPEC-CHMODE-01~draft` … `SPEC-CHMODE-08~draft` (DOC-85)
 **DOC-N claim:** `DOC-85`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft); `DOC-84` was the highest on `origin/main` (2026-10-27).
 **Builds on:** [DOC-45](./DOC-45-credential-authority-model.md) (principal, scope, audit); [DOC-74](./DOC-74-secrets-integration.md) (storage, owner scope); [DOC-60](./DOC-60-bus-based-agent-messaging.md) §8 (channels ride the bus).
 
@@ -120,3 +120,22 @@ Notion credential per use (Bob ruling, 12:17Z; De6; PD-5). Refs and scopes only.
 `NOTION.NOTION_PAT` is never accepted in `bot_ref` (Ddb is resolved by De6).
 
 **Amendment (Dd7).** This spec amends the #8454 "no user token" ruling of 2026-09-23. A user token was refused in every slot; it is now refused in `bot_ref` only and accepted in `personal_ref`. The doc comment on `allowed_refs` in `crates/trusty-channels/src/policy/host.rs` (line 294, "a user token is never accepted (#8454 ruling 2026-09-23)") must cite Dd7 and this spec (`SPEC-CHMODE-04~draft`). The test `slack_user_ref_refused_in_either_slot` (`crates/trusty-channels/src/policy/tests/host_refs.rs:252`) changes to refuse a user ref in `bot_ref` only. Both edits are code work, tracked in the source plan as P3.
+
+## 8. "Sent using @Trusty" footer {#SPEC-CHMODE-08~draft}
+
+**ID:** SPEC-CHMODE-08~draft
+
+Owner instruction (Bob, 2026-10-30 02:38Z, #10499): "We should use a similar convention for the trusty bot channel: 'Sent using @Trusty'." It mirrors Slack's "Sent using @Claude".
+
+- **Rule.** A message trusty posts through a channel on someone's behalf ends with the footer `Sent using @Trusty`, exactly that text.
+- **Scope.** Posts on someone's behalf, which is `personal` mode (section 1).
+- **Supersedes section 6 in part.** Section 6 says no footer or marker is added to content on any channel (Dda). The 2026-10-30 instruction is later; for `personal` posts the footer is now required. Rewording section 6 is OPEN.
+
+Not yet ruled (OPEN, no decision):
+
+- Whether `bot` mode posts carry the footer too.
+- Per-channel format: a Slack context block or a plain trailing line; the other channels.
+- Edits and threads: whether an edited message, or each reply in a thread, carries the footer.
+- Opt-out: whether any route or user may turn the footer off.
+
+Tests: one per channel adapter, asserting a `personal` post ends with `Sent using @Trusty`. Refs #10499.
