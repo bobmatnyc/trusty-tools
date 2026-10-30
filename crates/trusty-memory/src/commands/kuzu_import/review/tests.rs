@@ -210,7 +210,7 @@ fn scrub_removes_random_names_but_keeps_real_content() {
     );
     let scrubbed = scrub_random_names(&seen, &[tmp]);
     for tok in [mixed_token(), provider_token()] {
-        assert!(leaked_windows(&tok, &seen).len() >= 1, "raw scan trips");
+        assert!(!leaked_windows(&tok, &seen).is_empty(), "raw scan trips");
         assert!(leaked_windows(&tok, &scrubbed).is_empty(), "{scrubbed}");
     }
     let real = scrub_random_names(&format!("{seen} leak {}", mixed_token()), &[tmp]);
