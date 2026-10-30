@@ -1115,7 +1115,7 @@ impl SessionManager {
             // heals it. Best-effort — `None` on failure, consistent with
             // every other `get_pane_id` call site.
             // #9004: the new pane with the server it was read on.
-            (record.pane_id, record.tmux_server) =
+            (record.pane_id, record.tmux_server, record.tmux_session_id) =
                 super::pane_identity::capture(self.tmux.as_ref(), &record.tmux_name);
             info!(
                 id = %id,

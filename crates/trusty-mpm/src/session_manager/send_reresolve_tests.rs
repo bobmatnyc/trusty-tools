@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::core::process::PaneClaude;
-use crate::session_manager::pane_identity::PaneIdentity;
+use crate::session_manager::pane_identity::{PaneFacts, PaneIdentity};
+use crate::session_manager::record::SessionRecord;
+use crate::session_manager::store::SessionStore;
 use crate::session_manager::tests::make_active_test_record;
 use crate::session_manager::{
     ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, SessionManager,
@@ -19,6 +21,9 @@ use crate::session_manager::{
 
 /// The one live tmux server every test runs on.
 const SERVER: &str = "4242:1791300000";
+
+/// The `$N` id of the tmux session the record launched.
+const LIVE_SESSION: &str = "$7";
 
 /// An in-memory tmux: live session names and a pane table.
 #[derive(Default)]
@@ -28,6 +33,10 @@ struct ReresolveTmux {
     panes: HashMap<String, (String, PathBuf)>,
     /// Every `send_line_to_pane` as `"<session> <pane> <text>"`.
     sends: Mutex<Vec<String>>,
+    /// The `$N` id of the live session holding every pane.
+    session_id: String,
+    /// That session's `session_created`, epoch seconds.
+    session_created: i64,
 }
 
 impl ReresolveTmux {
@@ -38,8 +47,17 @@ impl ReresolveTmux {
                 .iter()
                 .map(|(p, s, cwd)| (p.to_string(), (s.to_string(), PathBuf::from(cwd))))
                 .collect(),
+            session_id: LIVE_SESSION.into(),
             ..Self::default()
         }
+    }
+
+    /// The same tmux, but its live session is `$9`, created at `created`:
+    /// the record's session was killed and another took its name.
+    fn recreated(mut self, created: i64) -> Self {
+        self.session_id = "$9".into();
+        self.session_created = created;
+        self
     }
 
     fn sends(&self) -> Vec<String> {
@@ -79,11 +97,15 @@ impl ManagedTmuxDriver for ReresolveTmux {
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(self.sessions.clone())
     }
-    fn get_pane_cwd(&self, name: &str) -> Option<PathBuf> {
-        self.panes
-            .values()
-            .find(|(s, _)| s == name)
-            .map(|(_, cwd)| cwd.clone())
+    fn pane_facts(&self, pane_id: &str) -> Result<PaneFacts, ManagedError> {
+        let (_, cwd) = self.panes.get(pane_id).ok_or_else(|| {
+            ManagedError::TmuxUnavailable(format!("fake: can't find pane {pane_id}"))
+        })?;
+        Ok(PaneFacts {
+            session_id: self.session_id.clone(),
+            session_created: self.session_created,
+            current_path: cwd.clone(),
+        })
     }
     fn pane_exists_checked(&self, name: &str, pane_id: &str) -> Option<bool> {
         Some(self.panes.get(pane_id).is_some_and(|(s, _)| s == name))
@@ -104,7 +126,7 @@ impl ManagedTmuxDriver for ReresolveTmux {
         })?;
         Ok(PaneIdentity {
             pane_id: pane_id.to_owned(),
-            session_id: "$7".into(),
+            session_id: self.session_id.clone(),
             server: SERVER.into(),
             session_name: session.clone(),
         })
@@ -115,9 +137,19 @@ impl ManagedTmuxDriver for ReresolveTmux {
 }
 
 /// A manager over `tmux` holding one `Active` tm-architect record bound to
-/// the dead pane `%17` on [`SERVER`], with `cwd` `/tmp`.
+/// the dead pane `%17` on [`SERVER`] in session [`LIVE_SESSION`], with `cwd`
+/// `/tmp`.
 async fn architect(
     tmux: Arc<ReresolveTmux>,
+) -> (tempfile::TempDir, SessionManager, ManagedSessionId) {
+    architect_in(tmux, Some(LIVE_SESSION)).await
+}
+
+/// [`architect`] with the record storing `session` as its tmux session id;
+/// `None` is a record written before #10442 stored one.
+async fn architect_in(
+    tmux: Arc<ReresolveTmux>,
+    session: Option<&str>,
 ) -> (tempfile::TempDir, SessionManager, ManagedSessionId) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let mgr = SessionManager::new(dir.path(), tmux)
@@ -126,6 +158,7 @@ async fn architect(
     let mut record = make_active_test_record("tm-architect", "t", "/tmp");
     record.pane_id = Some("%17".into());
     record.tmux_server = Some(SERVER.into());
+    record.tmux_session_id = session.map(str::to_owned);
     let id = record.id;
     mgr.store.write().await.upsert(record).await.expect("seed");
     (dir, mgr, id)
@@ -192,6 +225,7 @@ async fn a_send_to_a_stale_pane_reresolves_the_live_pane_and_delivers() {
     let record = mgr.get(&id).await.expect("record");
     assert_eq!(record.pane_id.as_deref(), Some("%44"));
     assert_eq!(record.tmux_server.as_deref(), Some(SERVER));
+    assert_eq!(record.tmux_session_id.as_deref(), Some(LIVE_SESSION));
     assert_eq!(record.state, ManagedSessionState::Active);
 }
 
@@ -265,4 +299,78 @@ async fn a_send_whose_session_pane_is_another_projects_still_refuses() {
     let (result, lines) = send_logged(&mgr, &id).await;
 
     assert_refused(&tmux, &mgr, &id, result, &lines).await;
+}
+
+/// #10442 critic MEDIUM: the record's tmux session was killed and an
+/// unmanaged one took its name, with one pane in the project. A record that
+/// stored its `$N` id, and a legacy record older than the new session, both
+/// refuse; nothing is typed and the record is unchanged.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_send_into_a_session_recreated_under_the_same_name_refuses() {
+    let later = chrono::Utc::now().timestamp() + 60;
+    for stored in [Some(LIVE_SESSION), None] {
+        let tmux = Arc::new(
+            ReresolveTmux::new(&["tm-architect"], &[("%44", "tm-architect", "/tmp")])
+                .recreated(later),
+        );
+        let (_dir, mgr, id) = architect_in(Arc::clone(&tmux), stored).await;
+        let before = mgr.get(&id).await.expect("record");
+
+        let (result, lines) = send_logged(&mgr, &id).await;
+
+        assert_refused(&tmux, &mgr, &id, result, &lines).await;
+        let after = mgr.get(&id).await.expect("record");
+        assert_eq!(
+            serde_json::to_value(&after).expect("after"),
+            serde_json::to_value(&before).expect("before"),
+            "stored {stored:?}: the record changed"
+        );
+    }
+}
+
+/// #10442: a legacy record (no stored session id) re-resolves into a session
+/// created no later than the record, and then stores that session's id.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_legacy_record_reresolves_into_a_session_older_than_itself() {
+    let tmux = Arc::new(ReresolveTmux::new(
+        &["tm-architect"],
+        &[("%44", "tm-architect", "/tmp")],
+    ));
+    let (_dir, mgr, id) = architect_in(Arc::clone(&tmux), None).await;
+
+    let submit = mgr.send_input_observed(&id, "hello").await;
+
+    assert!(submit.is_ok(), "send refused: {submit:?}");
+    assert_eq!(tmux.sends(), vec!["tm-architect %44 hello".to_string()]);
+    let record = mgr.get(&id).await.expect("record");
+    assert_eq!(record.tmux_session_id.as_deref(), Some(LIVE_SESSION));
+}
+
+/// #10442: `tmux_session_id` is additive. An old `sessions.json` loads with
+/// `None` and re-saves without the key; a stored id survives a round trip.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn tmux_session_id_round_trips_and_old_records_load() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("sessions.json");
+    std::fs::write(&path, include_str!("testdata/session-record-pre-d07.json")).expect("seed");
+    let mut store = SessionStore::load(dir.path())
+        .await
+        .expect("old store loads");
+    let records = store.all().await.expect("records");
+    assert!(records.iter().all(|r| r.tmux_session_id.is_none()));
+    store.save().await.expect("re-save");
+    let written = std::fs::read_to_string(&path).expect("read back");
+    assert!(!written.contains("tmux_session_id"), "{written}");
+
+    let mut record = records.into_iter().next().expect("one record");
+    record.tmux_session_id = Some(LIVE_SESSION.into());
+    let json = serde_json::to_string(&record).expect("serializes");
+    let back: SessionRecord = serde_json::from_str(&json).expect("reloads");
+    assert_eq!(back.tmux_session_id.as_deref(), Some(LIVE_SESSION));
 }

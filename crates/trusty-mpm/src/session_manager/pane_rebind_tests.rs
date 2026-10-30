@@ -14,7 +14,7 @@ use crate::daemon::managed_routes::cores::list_core;
 use crate::daemon::managed_routes::rebind::{rebind_all_core, rebind_core};
 use crate::daemon::rpc::managed::outcome::RouteBody;
 use crate::daemon::state::DaemonState;
-use crate::session_manager::pane_identity::PaneIdentity;
+use crate::session_manager::pane_identity::{PaneFacts, PaneIdentity};
 use crate::session_manager::pane_rebind::RebindOutcome;
 use crate::session_manager::record::StopCause;
 use crate::session_manager::store::SessionStore;
@@ -111,13 +111,19 @@ impl ManagedTmuxDriver for RebindTmux {
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(self.sessions.clone())
     }
-    fn get_pane_cwd(&self, name: &str) -> Option<PathBuf> {
-        Some(
-            self.pane_cwds
-                .get(name)
+    fn pane_facts(&self, pane_id: &str) -> Result<PaneFacts, ManagedError> {
+        let (_, session) = self.panes.get(pane_id).ok_or_else(|| {
+            ManagedError::TmuxUnavailable(format!("fake: can't find pane {pane_id}"))
+        })?;
+        Ok(PaneFacts {
+            session_id: "$3".into(),
+            session_created: 0,
+            current_path: self
+                .pane_cwds
+                .get(session)
                 .cloned()
                 .unwrap_or_else(|| PathBuf::from("/tmp")),
-        )
+        })
     }
     fn pane_exists_checked(&self, name: &str, pane_id: &str) -> Option<bool> {
         Some(self.panes.get(pane_id).is_some_and(|(_, s)| s == name))

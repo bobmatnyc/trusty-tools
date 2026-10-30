@@ -272,6 +272,7 @@ mod tests {
         SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id,
             tmux_name: format!("tm-foreign-claim-{id}"),
             cwd: PathBuf::from("/tmp/unrelated-cwd"),

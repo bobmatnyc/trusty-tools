@@ -227,6 +227,7 @@ async fn seed_sessions(
         let rec = SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id,
             // #9101: bound to the fake's pane for this name, on its server.
             pane_id: Some(fake_pane(&tmux_name)),
@@ -461,6 +462,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-x".into(),
         cwd: PathBuf::from("/tmp"),

@@ -52,6 +52,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "test".into(),
         cwd: PathBuf::from("/tmp"),
@@ -90,6 +91,7 @@ fn session_no_repo() -> SessionRecord {
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "no-repo".into(),
         cwd: PathBuf::from("/tmp"),

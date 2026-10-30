@@ -286,7 +286,7 @@ impl SessionManager {
         // the signal that tells a same-name collision below apart from a
         // recycled one.
         // #9004: with the server it was read on, or the record never owns it.
-        let (pane_id, tmux_server) =
+        let (pane_id, tmux_server, tmux_session_id) =
             super::pane_identity::capture(self.tmux_driver().as_ref(), tmux_name);
 
         // Live-tmux snapshot BEFORE the guard (#3698 round-2 HIGH-A):
@@ -302,6 +302,7 @@ impl SessionManager {
         let build_record = |final_name: String| SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: tmux_session_id.clone(),
             id: ManagedSessionId::new(),
             tmux_name: final_name,
             cwd: cwd.clone(),
@@ -531,6 +532,7 @@ mod tests {
         SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-test".into(),
             cwd: workspace.clone(),
@@ -569,6 +571,7 @@ mod tests {
         SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-external".into(),
             cwd: PathBuf::from("/unknown"),
