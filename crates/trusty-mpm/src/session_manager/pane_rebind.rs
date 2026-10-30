@@ -76,6 +76,20 @@ impl RebindOutcome {
     }
 }
 
+/// Which caller a rebind runs for; each adds its own gates (#9313, #10442).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RebindMode {
+    /// `tm sessions rebind <id>`: the operator decides, so no server or
+    /// project gate.
+    Manual,
+    /// `tm sessions rebind --all`: only a record whose tmux server was
+    /// replaced, and only to a pane in its own project.
+    ServerReplaced,
+    /// #10442: a pane send whose recorded pane is gone. Only an `Active`
+    /// record on the live server, and only to a pane in its own project.
+    LivePane,
+}
+
 /// Whether `record` may be rebound: only `Active` and `Stopped` records
 /// describe a session tm would list as running, and (#9850) a rebind writes
 /// `Active`, so never one its front gate holds or denied.
@@ -243,7 +257,7 @@ impl SessionManager {
         id: &ManagedSessionId,
         tmux: Option<&str>,
     ) -> Result<RebindOutcome, ManagedError> {
-        self.rebind_one(id, tmux, false).await
+        self.rebind_one(id, tmux, RebindMode::Manual).await
     }
 
     /// `tm sessions rebind --all`'s per-record rebind (#9313).
@@ -261,17 +275,41 @@ impl SessionManager {
         &self,
         id: &ManagedSessionId,
     ) -> Result<RebindOutcome, ManagedError> {
-        self.rebind_one(id, None, true).await
+        self.rebind_one(id, None, RebindMode::ServerReplaced).await
+    }
+
+    /// Re-resolve an `Active` record whose recorded pane is gone to the one
+    /// live pane its own tmux session holds (#10442).
+    ///
+    /// Why: a relaunch or respawn inside the same tmux session gives the
+    /// agent a new `%N`; the record keeps the dead one and every send is
+    /// refused while the agent runs.
+    /// What: [`Self::rebind_session`] with no `--tmux`, plus three gates: the
+    /// record is `Active`, it captured a tmux server and that server is the
+    /// live one, and the pane's current path lies under the record's `cwd`
+    /// or `workspace_path`. Any other case answers without a write.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::rebind_session`].
+    /// Test: `a_send_to_a_stale_pane_reresolves_the_live_pane_and_delivers`,
+    /// `a_send_to_a_session_with_a_sibling_pane_still_refuses`,
+    /// `a_send_whose_session_pane_is_another_projects_still_refuses`.
+    pub(crate) async fn reresolve_live_pane(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<RebindOutcome, ManagedError> {
+        self.rebind_one(id, None, RebindMode::LivePane).await
     }
 
     /// The shared body of [`Self::rebind_session`] and
-    /// [`Self::rebind_if_server_replaced`]; `replaced_only` adds the
-    /// automatic pass's server gate.
+    /// [`Self::rebind_if_server_replaced`] and [`Self::reresolve_live_pane`];
+    /// `mode` adds each caller's gates.
     async fn rebind_one(
         &self,
         id: &ManagedSessionId,
         tmux: Option<&str>,
-        replaced_only: bool,
+        mode: RebindMode,
     ) -> Result<RebindOutcome, ManagedError> {
         let record = self.get(id).await?;
         // #9850: refused first, so the error names the front gate.
@@ -285,8 +323,15 @@ impl SessionManager {
                 ),
             ));
         }
+        // #10442: a send never reactivates a stopped record.
+        if mode == RebindMode::LivePane && record.state != ManagedSessionState::Active {
+            return Ok(RebindOutcome::Skipped(format!(
+                "a {} record is not re-resolved by a send",
+                record.state
+            )));
+        }
         // #9313: the automatic pass never rebinds a record with no server.
-        if replaced_only && record.tmux_server.is_none() {
+        if mode != RebindMode::Manual && record.tmux_server.is_none() {
             return Ok(RebindOutcome::Skipped(format!(
                 "the record captured no tmux server, so no replacement can be seen; \
                  `tm sessions rebind {id}` rebinds it by hand"
@@ -311,15 +356,23 @@ impl SessionManager {
             });
         }
         // #9313: `--all` takes the automatic pass's server gate.
-        if replaced_only && same_server {
+        if mode == RebindMode::ServerReplaced && same_server {
             return Ok(RebindOutcome::Skipped(format!(
                 "the record is on the live tmux server; `tm sessions rebind {id}` \
                  binds it to pane {} by hand",
                 identity.pane_id
             )));
         }
-        // #9313: `--all` also takes the automatic pass's project gate.
-        if replaced_only
+        // #10442: a send re-resolves a pane change on the record's own server
+        // only; a replaced server is the automatic pass's.
+        if mode == RebindMode::LivePane && !same_server {
+            return Ok(RebindOutcome::Skipped(format!(
+                "pane {} is on tmux server {}, not the record's",
+                identity.pane_id, identity.server
+            )));
+        }
+        // #9313: `--all` and (#10442) a send take the project gate.
+        if mode != RebindMode::Manual
             && let Some(why) = outside_project(self.tmux.as_ref(), &record, &identity.pane_id)
         {
             return Ok(RebindOutcome::NoMatch(why));

@@ -682,7 +682,7 @@ impl SessionManager {
         text: &str,
         submit: Submit,
     ) -> Result<(String, String), ManagedError> {
-        let mut record = self.get(id).await?;
+        let record = self.get(id).await?;
         if matches!(
             record.state,
             ManagedSessionState::Stopped | ManagedSessionState::Decommissioned
@@ -692,7 +692,8 @@ impl SessionManager {
                 record.tmux_name, record.state
             )));
         }
-        let pane = self.owned_pane(id, &record)?;
+        // #10442: a gone recorded pane is re-resolved to the session's live one.
+        let (mut record, pane) = self.live_owned_pane(id, record).await?;
         // #10127: a pane whose harness exited is a shell; type nothing there.
         // Ctrl-C stays ungated: it stops, it never runs text.
         if !matches!(submit, Submit::Interrupt) {
