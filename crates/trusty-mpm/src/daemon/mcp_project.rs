@@ -118,11 +118,15 @@ pub async fn project_register(
         // `config_write` instead) — preserve any existing value rather than
         // silently resetting it back to worktree-ON.
         worktree: existing.as_ref().and_then(|p| p.worktree),
+        // #10530: carried forward; the store assigns it on first register.
+        project_key: existing.as_ref().and_then(|p| p.project_key.clone()),
     };
     registry
         .register(project.clone())
         .await
         .map_err(|e| format!("project_register: registry error: {e}"))?;
+    // #10530: answer with the stored record, which carries the minted key.
+    let project = registry.get(name).await.unwrap_or(project);
     // #7357: the SAME function the CLI transport calls, so the two surfaces
     // cannot diverge on what registration adopts.
     let adoption = adopt_pre_existing_worktrees(state, &project);
