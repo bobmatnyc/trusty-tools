@@ -67,7 +67,7 @@ fn registry_id_for_root_falls_back_to_the_legacy_basename() {
 /// Test: itself.
 #[test]
 fn index_id_for_root_stays_legacy_until_adoption() {
-    assert!(!REGISTRY_IDS_ADOPTED);
+    const { assert!(!REGISTRY_IDS_ADOPTED) };
     let reg = RegisteredProject::new("renamed", "acme/widget");
     assert_eq!(
         index_id_for_root(Path::new("/x/widget"), Some(&reg)),
