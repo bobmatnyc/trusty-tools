@@ -19,6 +19,11 @@ use crate::core::session::SessionId;
 /// A flush interval no test outlives: only the final flush delivers.
 const NO_TICK: Duration = Duration::from_secs(3600);
 
+/// #10467: a child spawned while a spool file is locked inherits that fd and
+/// holds the lock until its exec, so a concurrent take sees the file held.
+/// The SIGKILL test spawns under this lock; each write-then-take test holds it.
+static SPOOL_FDS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn hook(session: SessionId, id: &str) -> HookEventRecord {
     HookEventRecord::now(
         session,
@@ -141,6 +146,7 @@ async fn a_hung_bus_and_an_unwritable_spool_stop_in_bound_and_count_the_loss_104
 /// Spooled at one stop, sent at the next start, and never sent again.
 #[tokio::test]
 async fn spooled_events_replay_on_the_next_start_exactly_once_10412() {
+    let _fds = SPOOL_FDS.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let spool = dir.path().join("spool");
     let sock = dir.path().join("bus.sock");
@@ -186,6 +192,7 @@ async fn spooled_events_replay_on_the_next_start_exactly_once_10412() {
 /// A torn last line is skipped and counted; the complete lines replay.
 #[test]
 fn a_torn_spool_line_is_skipped_and_the_rest_replay_10412() {
+    let _fds = SPOOL_FDS.blocking_lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let spool_dir = dir.path().join("spool");
     let s = SessionId::new();
@@ -333,6 +340,7 @@ async fn an_event_after_the_settle_is_counted_lost_10412() {
 /// is gone without deleting it (a taker that died), it replays once.
 #[test]
 fn a_spool_file_held_by_a_live_taker_is_left_alone_10412() {
+    let _fds = SPOOL_FDS.blocking_lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let spool_dir = dir.path().join("spool");
     let publisher = ActionPublisher::new(dir.path().join("absent.sock"));
@@ -516,6 +524,7 @@ fn a_taker_sigkilled_before_delivery_loses_no_spooled_event_10467() {
         .split_once("::")
         .map(|(_, rest)| rest)
         .expect("crate prefix");
+    let fds = SPOOL_FDS.blocking_lock();
     let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .args([child_test, "--exact", "--test-threads=1"])
         .env(CHILD_SPOOL, &spool_dir)
@@ -523,6 +532,7 @@ fn a_taker_sigkilled_before_delivery_loses_no_spooled_event_10467() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn the taker");
+    drop(fds);
     let marker = dir.path().join("taken-2");
     let begun = Instant::now();
     while !marker.exists() {
@@ -558,6 +568,7 @@ fn a_taker_sigkilled_before_delivery_loses_no_spooled_event_10467() {
 /// delivery that succeeds removes it.
 #[tokio::test]
 async fn a_failed_bus_flush_keeps_the_replayed_file_and_a_delivery_removes_it_10467() {
+    let _fds = SPOOL_FDS.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let spool_dir = dir.path().join("spool");
     let sock = dir.path().join("bus.sock");
@@ -602,6 +613,7 @@ async fn a_failed_bus_flush_keeps_the_replayed_file_and_a_delivery_removes_it_10
 /// fails, stay in their original files and are not counted lost.
 #[tokio::test]
 async fn an_unwritable_spool_at_stop_keeps_the_replayed_files_10467() {
+    let _fds = SPOOL_FDS.lock().await;
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().expect("tempdir");
     let spool_dir = dir.path().join("spool");
@@ -640,6 +652,7 @@ pub(super) fn fresh_events(n: usize) -> Vec<HarnessEvent> {
 /// spool write succeeds: every event is still on disk and none is lost.
 #[tokio::test]
 async fn a_replay_larger_than_the_buffer_loses_no_event_at_stop_10467() {
+    let _fds = SPOOL_FDS.lock().await;
     use trusty_common::control_bus::DEFAULT_PUSH_BUFFER_CAPACITY;
     let dir = tempfile::tempdir().expect("tempdir");
     let spool_dir = dir.path().join("spool");
@@ -665,6 +678,7 @@ async fn a_replay_larger_than_the_buffer_loses_no_event_at_stop_10467() {
 /// the delivery that follows, and the stop, both keep the replayed file.
 #[tokio::test]
 async fn hooks_that_evict_replayed_events_keep_their_file_10467() {
+    let _fds = SPOOL_FDS.lock().await;
     use trusty_common::control_bus::DEFAULT_PUSH_BUFFER_CAPACITY;
     let dir = tempfile::tempdir().expect("tempdir");
     let spool_dir = dir.path().join("spool");
