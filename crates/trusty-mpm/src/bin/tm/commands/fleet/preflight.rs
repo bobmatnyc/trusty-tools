@@ -328,6 +328,16 @@ fn refuse_workspace_parent(target: &Path, home: &Path, device: DeviceOf) -> Resu
     for worktree in &worktrees {
         let within = format!(", nested in its linked worktree {}", worktree.display());
         refuse_child_repo(target, worktree, &except, device, within)?;
+        // #10262 critic: config the target's own listing does not read, such
+        // as an `includeIf "onbranch:"` on the worktree's branch, can add a remote.
+        let remotes = list_remotes(worktree)?;
+        if !remotes.is_empty() {
+            return Err(parent(format!(
+                "its linked worktree {} has remote(s) {}",
+                worktree.display(),
+                remotes.join(", ")
+            )));
+        }
     }
     Ok(())
 }
@@ -384,13 +394,19 @@ fn worktree_fix(repo: &Path) -> String {
 /// guard is about other projects, so only a worktree that is provably the
 /// target's own is left out of the scan.
 /// What: for each record `<target>/.git/worktrees/<name>` (a real `.git`
-/// directory only), reads its `gitdir` back pointer. The worktree counts when
-/// it resolves to a directory strictly inside `target` other than `local/`,
-/// and its `.git` is a regular file whose `gitdir:` resolves to that same
-/// record. Anything unreadable or unmatched is left out, so the scan still
-/// sees it and refuses: the check fails closed.
+/// directory only), the worktree counts when every file that names its
+/// repository names `target`'s: the record's `commondir` resolves to
+/// `<target>/.git`; the record holds no `config.worktree`; its `gitdir` back
+/// pointer resolves to a directory strictly inside `target` other than
+/// `local/`; and that directory's `.git` is a regular file whose `gitdir:`
+/// resolves to the same record. Neither pointer may hold `..`. Anything
+/// unreadable or unmatched is left out, so the scan still sees it and refuses:
+/// the check fails closed.
 /// Test: `a_linked_worktree_of_the_dirs_own_repository_passes`,
-/// `a_worktree_that_is_not_the_dirs_own_still_refuses`.
+/// `a_worktree_that_is_not_the_dirs_own_still_refuses`,
+/// `a_worktree_record_whose_commondir_is_not_the_dirs_own_refuses`,
+/// `a_worktree_with_its_own_config_or_remote_refuses`,
+/// `a_worktree_record_or_pointer_that_escapes_refuses`.
 fn own_worktrees(target: &Path) -> Vec<PathBuf> {
     let git_dir = target.join(".git");
     if !std::fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_dir()) {
@@ -413,8 +429,20 @@ fn own_worktree(target: &Path, records: &Path, record: &Path) -> Option<PathBuf>
     if record.parent() != Some(records) {
         return None;
     }
+    // #10262 critic CRITICAL: `commondir` names the repository git operates
+    // on; a relative one is relative to the record, as git reads it.
+    let common = std::fs::read_to_string(record.join("commondir")).ok()?;
+    let common = std::fs::canonicalize(record.join(common.trim())).ok()?;
+    if common != std::fs::canonicalize(records.parent()?).ok()? {
+        return None;
+    }
+    // #10262: a per-worktree config can set its own remotes or `core.worktree`.
+    match std::fs::symlink_metadata(record.join("config.worktree")) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        _ => return None,
+    }
     let back = std::fs::read_to_string(record.join("gitdir")).ok()?;
-    let back = record.join(back.trim());
+    let back = record.join(without_parent_dir(back.trim())?);
     if back.file_name()? != ".git" {
         return None;
     }
@@ -428,8 +456,17 @@ fn own_worktree(target: &Path, records: &Path, record: &Path) -> Option<PathBuf>
         return None;
     }
     let pointer = std::fs::read_to_string(&git).ok()?;
-    let pointer = pointer.trim().strip_prefix("gitdir:")?.trim();
+    let pointer = without_parent_dir(pointer.trim().strip_prefix("gitdir:")?.trim())?;
     (std::fs::canonicalize(worktree.join(pointer)).ok()? == record).then_some(worktree)
+}
+
+/// `raw` as a path, or `None` when it is empty or holds a `..` component.
+// #10262 critic LOW: git writes these pointers absolute unless
+// `worktree.useRelativePaths` is set; a `..` one is refused, not resolved.
+fn without_parent_dir(raw: &str) -> Option<&Path> {
+    let path = Path::new(raw);
+    let plain = !raw.is_empty() && path.components().all(|c| c != Component::ParentDir);
+    plain.then_some(path)
 }
 
 /// `<target>/local` when it is a real directory whose `.git` is a real
