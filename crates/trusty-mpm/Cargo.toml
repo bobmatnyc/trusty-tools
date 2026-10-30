@@ -164,12 +164,21 @@ categories = ["command-line-utilities", "development-tools"]
 # See #10373: crates.io 10 MiB upload limit (1.9.0 got HTTP 413). CHANGELOG.md
 # and tests/ are not read by any include_str!/build.rs; the [[test]] targets
 # still run from the repo.
+# #10373 (1.10.0): the 1.9.0 + excludes archive was still 10.99 MB. The three
+# `/src/**` globs drop the ~713 unit-test module files (`tests.rs`,
+# `*_tests.rs`, `*_test.rs`, ~13 MB). Each is declared `#[cfg(test)] mod ...;`
+# (directly or through another excluded test file), so a consumer build never
+# reads one. Keep every new test module named to this shape, and never declare
+# one without `#[cfg(test)]`.
 exclude = [
     "/.claude/",
     "/.trusty-mpm/",
     "/CLAUDE.md",
     "/tests/",
     "/CHANGELOG.md",
+    "/src/**/tests.rs",
+    "/src/**/*_tests.rs",
+    "/src/**/*_test.rs",
 ]
 # #8345: every `tests/*.rs` file is a module of one of the two `[[test]]`
 # targets declared below, not a binary of its own — linking ~60 test binaries
