@@ -385,7 +385,8 @@ vcs_info_from_served_crate() { # <local .crate> <wanted path>
   SERVED_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tag-parity-served.XXXXXX")"
   served="${SERVED_TMP}/served.crate"
   echo "check-tag-publish-parity: no extracted record; fetching ${url}" >&2
-  curl -fsSL -o "$served" "$url" \
+  # Bounded so a stalled static.crates.io cannot hang the release gate.
+  curl -fsSL --connect-timeout 10 --max-time 120 -o "$served" "$url" \
     || vcs_info_missing "$wanted" "Fetching the served crate failed: ${url}"
   local_sum="$(sha256_of "$local_crate")"
   served_sum="$(sha256_of "$served")"
@@ -398,8 +399,9 @@ vcs_info_from_served_crate() { # <local .crate> <wanted path>
     exit 1
   fi
   tar -xzf "$served" -C "$SERVED_TMP" "${PKG_NAME}-${VERSION}/.cargo_vcs_info.json" 2>/dev/null \
-    || vcs_info_missing "$wanted" "The served crate ${url} (sha256 matches the local" \
-      ".crate) carries no ${PKG_NAME}-${VERSION}/.cargo_vcs_info.json."
+    || vcs_info_missing "${url} (member ${PKG_NAME}-${VERSION}/)" \
+      "The served crate's sha256 matches the local .crate, but it carries no" \
+      "VCS record: it was packaged without git information."
   VCS_INFO="${SERVED_TMP}/${PKG_NAME}-${VERSION}/.cargo_vcs_info.json"
 }
 
