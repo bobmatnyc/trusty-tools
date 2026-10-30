@@ -622,3 +622,89 @@ async fn an_unwritable_spool_at_stop_keeps_the_replayed_files_10467() {
     );
     assert_eq!((settled.spooled, settled.lost), (2, 0), "{settled:?}");
 }
+
+/// `n` distinct events, each with its own id, for buffer-sized spools.
+pub(super) fn fresh_events(n: usize) -> Vec<HarnessEvent> {
+    let publisher = ActionPublisher::new("/nonexistent/absent.sock");
+    publisher.publish(&hook(SessionId::new(), "t1"));
+    let template = publisher.client.drain_buffered().remove(0);
+    (0..n)
+        .map(|_| HarnessEvent {
+            id: EventId::new(),
+            ..template.clone()
+        })
+        .collect()
+}
+
+/// #10467: a backlog one event larger than the buffer, then a stop whose
+/// spool write succeeds: every event is still on disk and none is lost.
+#[tokio::test]
+async fn a_replay_larger_than_the_buffer_loses_no_event_at_stop_10467() {
+    use trusty_common::control_bus::DEFAULT_PUSH_BUFFER_CAPACITY;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spool_dir = dir.path().join("spool");
+    let events = fresh_events(DEFAULT_PUSH_BUFFER_CAPACITY + 1);
+    let (older, newer) = events.split_at(2000);
+    spool::persist(&spool_dir, older).expect("persist the older file");
+    spool::persist(&spool_dir, newer).expect("persist the newer file");
+    let state = started(&dir.path().join("absent.sock"), &spool_dir);
+
+    let settled = state.action_events().shutdown().await;
+
+    let on_disk: std::collections::HashSet<EventId> =
+        ids(&spooled(&spool_dir)).into_iter().collect();
+    let missing = events.iter().filter(|e| !on_disk.contains(&e.id)).count();
+    assert_eq!(
+        missing, 0,
+        "evicted replayed events left the disk: {settled:?}"
+    );
+    assert_eq!(settled.lost, 0, "{settled:?}");
+}
+
+/// #10467: new hooks that evict every replayed event while the bus is down:
+/// the delivery that follows, and the stop, both keep the replayed file.
+#[tokio::test]
+async fn hooks_that_evict_replayed_events_keep_their_file_10467() {
+    use trusty_common::control_bus::DEFAULT_PUSH_BUFFER_CAPACITY;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spool_dir = dir.path().join("spool");
+    let sock = dir.path().join("bus.sock");
+    let events = persisted(dir.path(), &spool_dir);
+    let publisher = ActionPublisher::new(&sock).with_spool(Some(spool_dir.clone()));
+    assert_eq!(publisher.replay_spool(), 2);
+    for event in fresh_events(DEFAULT_PUSH_BUFFER_CAPACITY) {
+        publisher.publish_event(event);
+    }
+    assert_eq!(
+        publisher.dropped(),
+        2,
+        "the hooks evicted both replayed events"
+    );
+
+    let listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+    let read = tokio::spawn(async move {
+        let (mut conn, _) = listener.accept().await.expect("accept");
+        let mut buf = Vec::new();
+        conn.read_to_end(&mut buf).await.expect("read");
+        buf
+    });
+    let delivered = publisher.flush().await;
+    assert!(delivered.error.is_none(), "{delivered:?}");
+    assert_eq!(delivered.sent, DEFAULT_PUSH_BUFFER_CAPACITY);
+    tokio::time::timeout(Duration::from_secs(10), read)
+        .await
+        .expect("bus read")
+        .expect("join");
+    assert_eq!(
+        ids(&spooled(&spool_dir)),
+        ids(&events),
+        "a file whose events were evicted was retired mid-run"
+    );
+
+    let settled = publisher.final_flush().await;
+    assert_eq!(
+        ids(&spooled(&spool_dir)),
+        ids(&events),
+        "a file whose events were evicted was retired at stop: {settled:?}"
+    );
+}
