@@ -132,25 +132,20 @@ fn judge(command: &str, depth: usize) -> bool {
         return true;
     }
     let secrets_named = names_secrets(command);
-    // #10548: a command that may redefine a listed program trusts no operand list.
-    let trusted = !redefines_a_never_run_program(command);
+    // #10548 P7: only the top-level command, and only one plain command.
+    let plain = depth == 0 && one_plain_command(command);
     split_shell_segments(command)
         .iter()
-        .any(|segment| segment_deletes_a_secret(segment, secrets_named, trusted, depth))
+        .any(|segment| segment_deletes_a_secret(segment, secrets_named, plain, depth))
 }
 
 /// Whether one segment runs a call the guard must refuse.
-fn segment_deletes_a_secret(
-    segment: &str,
-    secrets_named: bool,
-    trusted: bool,
-    depth: usize,
-) -> bool {
+fn segment_deletes_a_secret(segment: &str, secrets_named: bool, plain: bool, depth: usize) -> bool {
     let Ok(argv) = tokenize(segment) else {
         // #8875 round 3 (owner ruling): an unlexable call is refused outright.
         return starts_a_watched_call(segment);
     };
-    let calls = |sub| gh_calls(&argv, sub, trusted);
+    let calls = |sub| gh_calls(&argv, sub, plain);
     reruns_a_refused_command(&argv, depth)
         || calls("api").any(|(_, tail)| gh_api_deletes(tail, secrets_named))
         || calls("secret").any(|(sub, tail)| secret_subcommand_deletes(sub, tail))
@@ -208,17 +203,16 @@ fn reruns_a_refused_command(argv: &[String], depth: usize) -> bool {
 }
 
 /// The subcommand word and the argv tail after each `gh <sub>` pair in `argv`.
-/// #10548: with `trusted`, a pair among the operands of a
-/// [`NEVER_RUNS_OPERANDS`] program is no call.
+/// #10548 P7: with `plain` ([`one_plain_command`]), an operand pair followed
+/// only by plain long flags ([`flags_only`]) is no call.
 fn gh_calls<'a>(
     argv: &'a [String],
     sub: &'a str,
-    trusted: bool,
+    plain: bool,
 ) -> impl Iterator<Item = (&'a str, &'a [String])> {
-    let operands_from = operands_never_run_from(argv).filter(|_| trusted);
     argv.windows(2)
         .enumerate()
-        .filter(move |(at, _)| operands_from.is_none_or(|from| *at < from))
+        .filter(move |(at, _)| !(plain && *at > 0 && flags_only(&argv[at + 2..])))
         .filter(move |(_, w)| possibly_named(&w[0], "gh") && possibly_sub(&w[1], sub))
         .map(move |(at, w)| (w[1].as_str(), &argv[at + 2..]))
 }
@@ -226,36 +220,14 @@ fn gh_calls<'a>(
 /// Programs that never execute an operand as a command (#10548).
 const NEVER_RUNS_OPERANDS: &[&str] = &["cargo", "rsync", "cp", "mv", "ln", "mkdir", "touch"];
 
-/// Shell words that may precede a segment's command word.
-const LEADING_KEYWORDS: &[&str] = &["do", "then", "else", "elif", "!", "{", "("];
+/// Bytes that end a segment, open a subshell, group or substitution,
+/// assign, escape, redirect or comment (#10548).
+const NOT_ONE_PLAIN_COMMAND: &[char] = &[
+    ';', '&', '|', '\n', '\r', '(', ')', '`', '{', '}', '=', '\\', '#', '<', '>',
+];
 
-/// The index of the first operand when the segment's command word is a
-/// literal [`NEVER_RUNS_OPERANDS`] program, else `None`.
-///
-/// Why: #10548 P7 — `cargo test -p "$c" "$t" --no-fail-fast` read `"$c" "$t"`
-/// as a rewritten `gh api` call and refused it as a secret DELETE. Those
-/// operands reach cargo as arguments; nothing runs them.
-/// What: skips leading [`LEADING_KEYWORDS`]; a `NAME=value` prefix
-/// (`PATH=./shim cp …`, #10548 round 2), a command word the shell rewrites,
-/// or any other program (a wrapper such as `xargs`, `env` or `sudo` that runs
-/// its operands) answers `None`, so every pair is still judged.
-/// Test: `adjacent_expansions_are_no_gh_api_call_10548`,
-/// `a_rewritten_gh_api_pair_in_command_position_still_denies_10548`,
-/// `a_command_that_may_redefine_a_listed_program_trusts_no_operands_10548`.
-fn operands_never_run_from(argv: &[String]) -> Option<usize> {
-    let at = argv
-        .iter()
-        .position(|w| !LEADING_KEYWORDS.contains(&w.as_str()))?;
-    let program = argv.get(at)?;
-    (!is_rewritten(program) && NEVER_RUNS_OPERANDS.contains(&program.as_str())).then_some(at + 1)
-}
-
-/// Text that can make a word run another program: a function or alias
-/// definition, a hashed or searched path, a sourced or evaluated file, an
-/// inherited function, or a changed directory (#10548 round 2).
+/// Words that define, assign, source, re-path or re-run a program (#10548).
 const REDEFINERS: &[&str] = &[
-    "(",
-    "`",
     "alias",
     "function",
     "hash",
@@ -263,26 +235,69 @@ const REDEFINERS: &[&str] = &[
     "source",
     "eval",
     "enable",
+    "exec",
+    "builtin",
+    "command",
     "BASH_FUNC",
     "BASH_ENV",
-    "ENV=",
+    "ENV",
     "cd",
     "pushd",
+    "popd",
+    "export",
+    "declare",
+    "typeset",
+    "readonly",
+    "read",
+    "printf",
+    "local",
+    "let",
+    "set",
+    "unset",
+    "shopt",
+    "trap",
+    "BASH_CMDS",
+    "commands",
+    "BASH_ALIASES",
+    "aliases",
 ];
 
-/// Whether `command` may make a [`NEVER_RUNS_OPERANDS`] word run something
-/// else (`cargo() { gh "$@"; }`, `alias cp=gh`, `hash -p /usr/bin/env cp`,
-/// `source defs.sh`, `. defs.sh`): its operand lists are then judged as before.
-/// Matched as raw text, so a stray match only keeps a refusal.
-fn redefines_a_never_run_program(command: &str) -> bool {
-    REDEFINERS.iter().any(|text| command.contains(text))
-        || split_shell_segments(command).iter().any(|segment| {
-            tokenize(segment).is_ok_and(|argv| {
-                argv.iter()
-                    .find(|w| !LEADING_KEYWORDS.contains(&w.as_str()))
-                    .is_some_and(|w| w == ".")
-            })
+/// Whether `command` is one plain command whose program is a literal
+/// [`NEVER_RUNS_OPERANDS`] word.
+///
+/// Why: #10548 P7 — `cargo test -p "$c" "$t" --no-fail-fast` read `"$c" "$t"`
+/// as a rewritten `gh api` call and refused it as a secret DELETE.
+/// What: read on the raw text, with no lexer: the command starts with the
+/// program word and a space, carries none of [`NOT_ONE_PLAIN_COMMAND`], and
+/// no identifier in it is one of [`REDEFINERS`]. So no other segment, no
+/// assignment (`NAME=`, `BASH_CMDS[cp]=`, `PA''TH=`) and no redefinition can
+/// make the program run its operands. Anything else judges every pair.
+/// Test: `a_single_segment_operand_pair_is_no_gh_api_call_10548`,
+/// `every_review_bypass_row_refuses_10548`.
+fn one_plain_command(command: &str) -> bool {
+    let text = command.trim();
+    let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    !text.contains(NOT_ONE_PLAIN_COMMAND)
+        && !text
+            .split(|c: char| !identifier(c))
+            .any(|word| REDEFINERS.contains(&word))
+        && NEVER_RUNS_OPERANDS.iter().any(|p| {
+            text.strip_prefix(p)
+                .is_some_and(|rest| rest.starts_with(' '))
         })
+}
+
+/// Whether every word of `tail` is a plain long flag (`--no-fail-fast`), so
+/// the tail names no endpoint, method, subcommand or value (#10548).
+fn flags_only(tail: &[String]) -> bool {
+    tail.iter().all(|w| {
+        w.len() > 2
+            && w != "--method"
+            && w.strip_prefix("--").is_some_and(|name| {
+                name.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            })
+    })
 }
 
 /// Whether a program word could run `name`: by basename, or a word the shell

@@ -84,14 +84,6 @@ use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_read_rules;
 use crate::commands::pm_guard_secret_read::{
     Scan, command_basename, evaluate_secret_file_read_command, secret_files_named_in,
 };
-// #10548: case-arm patterns and unrunnable paths are no script runs.
-use crate::commands::pm_guard_secret_script_case::{
-    blank_case_patterns, cannot_run_directly, mask_method_calls,
-};
-// #10548 round 2: only a line outside every quote is a comment.
-use crate::commands::pm_guard_secret_script_comments::{
-    mask_heredoc_programs, without_true_comments,
-};
 // #8879: the bounded, fail-closed read lives in its own file (500-SLOC cap).
 // #10548: so do the rule classes and the refusal text.
 pub(crate) use crate::commands::pm_guard_secret_script_read::{
@@ -208,30 +200,25 @@ pub(crate) fn evaluate_script_body_secret_read(command: &str, cwd: &Path) -> Opt
     let bases = [cwd.to_path_buf()];
     each_script(
         command,
-        command,
         &bases,
-        false,
+        true,
         |word, found, interpreter, seg_bases| {
-            let refused = match found {
+            let rule = match found {
                 Ok(path) => judge_script(&path, interpreter, seg_bases, 0, &mut seen),
                 Err(why) => Some((Rule::Unread(why), None)),
             };
-            refused.map(|(rule, inner)| deny_reason(word, inner.as_deref(), rule))
+            rule.map(|(rule, inner)| deny_reason(word, inner.as_deref(), rule))
         },
     )
 }
 
-/// Call `judge` on each located script of `command` until one answers. A
-/// script the command runs but whose path cannot be resolved is handed over
-/// as an [`Unread`] error ([`unresolved`]); `names` is the text a missing
-/// script must be named in only once. With `nested` (`command` is a script
-/// body), a directory run directly is no candidate (#10548,
-/// [`cannot_run_directly`]).
+/// Call `judge` on each located script of `command` until one answers. With
+/// `strict`, a script the command runs but whose path cannot be resolved is
+/// handed over as an [`Unread`] error ([`unresolved`]).
 fn each_script<T>(
     command: &str,
-    names: &str,
     bases: &[PathBuf],
-    nested: bool,
+    strict: bool,
     mut judge: impl FnMut(&str, Result<PathBuf, Unread>, Option<&str>, &[PathBuf]) -> Option<T>,
 ) -> Option<T> {
     let (argv_text, _) = split_heredoc_bodies(command);
@@ -240,31 +227,20 @@ fn each_script<T>(
         let Ok(argv) = tokenize(trimmed) else {
             continue;
         };
-        let (mut candidates, exact) = candidates(&argv);
+        let (candidates, exact) = candidates(&argv);
         if candidates.is_empty() {
             continue;
         }
         let seg_bases = segment_bases(&argv_text, trimmed, bases);
-        // #10548: a directory run by its path runs nothing.
-        if nested {
-            candidates.retain(|c| {
-                let paths = existing_paths(&c.word, &seg_bases);
-                c.interpreter.is_some()
-                    || paths.is_empty()
-                    || !paths.iter().all(|p| cannot_run_directly(p))
-            });
-        }
-        if candidates.is_empty() {
-            continue;
-        }
         for (word, path, interpreter) in locate(&candidates, &seg_bases) {
             if let Some(answer) = judge(&word, Ok(path), interpreter.as_deref(), &seg_bases) {
                 return Some(answer);
             }
         }
-        // #8879: an unresolvable or missing script fails closed.
-        if exact
-            && let Some((word, why)) = unresolved(&candidates, &seg_bases, names)
+        // #8879: an unresolvable or missing script fails closed at the top level.
+        if strict
+            && exact
+            && let Some((word, why)) = unresolved(&candidates, &seg_bases, command)
             && let Some(answer) = judge(&word, Err(why), None, &seg_bases)
         {
             return Some(answer);
@@ -364,46 +340,25 @@ fn judge_script(
         .unwrap_or_else(|| shebang_interpreter(&body));
     let cwd = bases.first().map_or(Path::new("/"), PathBuf::as_path);
     let plain = without_comment_lines(&body);
-    let shell = family_of(&interpreter) == Some(Family::Shell);
-    // #10548: method calls are masked in program text only, never shell argv.
-    let masked = if shell {
-        without_comment_lines(&mask_heredoc_programs(&body))
-    } else {
-        mask_method_calls(&plain).into_owned()
-    };
-    if let Some(rule) = judge_text(&inline_equivalent(&interpreter, &plain), &masked, cwd) {
+    if let Some(rule) = judge_text(&inline_equivalent(&interpreter, &plain), &plain, cwd) {
         return Some((rule, None));
     }
-    if !shell {
+    if family_of(&interpreter) != Some(Family::Shell) {
         return None;
     }
     // #9037: nested runs resolve as strictly as the top level.
-    // #10548 round 2: the candidates come from the raw body (case-arm
-    // patterns blanked), as before #10548. A missing or non-regular script
-    // is waived only when its word sits solely on true comment lines.
-    let nested = resolve_self_paths(&blank_case_patterns(&body), path);
-    let uncommented = without_true_comments(&body);
-    let only_in_comments = |word: &str| {
-        uncommented
-            .as_ref()
-            .is_some_and(|text| !text.contains(word))
-    };
-    // #10548: a nested refusal names the innermost word it could not judge.
-    let name = |word: &str, refused: Option<(Rule, Option<String>)>| {
-        refused.map(|(rule, inner)| (rule, inner.or_else(|| Some(word.to_string()))))
-    };
+    let nested = resolve_self_paths(&body, path);
     each_script(
-        &nested,
         &nested,
         bases,
         true,
-        |word, inner, inner_interp, inner_bases| match inner {
-            Ok(inner) => match judge_script(&inner, inner_interp, inner_bases, depth + 1, seen) {
-                Some((Rule::Unread(Unread::NotRegular), None)) if only_in_comments(word) => None,
-                refused => name(word, refused),
-            },
-            Err(Unread::Missing) if only_in_comments(word) => None,
-            Err(why) => name(word, Some((Rule::Unread(why), None))),
+        // #10548: a nested refusal names the innermost word it could not judge.
+        |word, inner, inner_interp, inner_bases| {
+            let refused = match inner {
+                Ok(inner) => judge_script(&inner, inner_interp, inner_bases, depth + 1, seen),
+                Err(why) => Some((Rule::Unread(why), None)),
+            };
+            refused.map(|(rule, named)| (rule, named.or_else(|| Some(word.to_string()))))
         },
     )
 }
@@ -417,12 +372,8 @@ fn judge_script(
 /// scripts. A file-rule denial therefore stands only when `body`, read as
 /// program text, names a secret-bearing file by a word with no bracket or
 /// brace (`.env`, `keys/app.pem`, `.env*`). Residual 9 in the module doc.
-/// #10548: `body` arrives with method calls (`token.strip()`) masked in its
-/// program text only, never in shell argv, where `cat 'token.get(1)'` opens
-/// that file.
 /// Test: `refuses_a_secret_file_read_in_a_python_script`,
-/// `the_repo_gate_scripts_allow_8879`,
-/// `a_method_call_spelling_in_shell_argv_still_denies_10548`.
+/// `the_repo_gate_scripts_allow_8879`.
 fn judge_text(command: &str, body: &str, cwd: &Path) -> Option<Rule> {
     if evaluate_credential_print_command(command).is_some() {
         return Some(Rule::CredentialCommand);
@@ -441,25 +392,25 @@ fn judge_text(command: &str, body: &str, cwd: &Path) -> Option<Rule> {
     evaluate_env_plist_read("Bash", Some(&input), cwd).map(|_| Rule::LaunchdPlist)
 }
 
-/// `body` with each true comment line blanked, so an apostrophe in prose
+/// `body` with each full-line `#` comment blanked, so an apostrophe in prose
 /// (`# the crate's gate`) cannot unbalance the quoting the inline rules read,
 /// and each backslash-newline joined as the shell joins it, so a continued
-/// line lexes as the one command it is. A `#` line inside an open quote runs,
-/// so it stays (#10548 round 2, [`without_true_comments`]).
+/// line lexes as the one command it is.
 /// A `#` line carrying `$(` stays: inside a multi-line double-quoted string
 /// it runs. A backtick does not keep a line (prose quotes code in backticks);
 /// that is residual 7 in the module doc.
 /// Test: `without_comment_lines_keeps_a_substitution_8879`,
 /// `the_repo_gate_scripts_allow_8879`.
 fn without_comment_lines(body: &str) -> String {
-    // #10548 round 2: only a true comment line is blanked; when the lexing
-    // cannot be followed, nothing is.
-    let Some(uncommented) = without_true_comments(body) else {
-        return body.replace("\\\n", " ");
-    };
     body.split_inclusive('\n')
-        .zip(uncommented.split_inclusive('\n'))
-        .map(|(line, kept)| if line.contains("$(") { line } else { kept })
+        .map(|line| {
+            let comment = line.trim_start().starts_with('#') && !line.contains("$(");
+            if comment {
+                if line.ends_with('\n') { "\n" } else { "" }
+            } else {
+                line
+            }
+        })
         .collect::<String>()
         .replace("\\\n", " ")
 }

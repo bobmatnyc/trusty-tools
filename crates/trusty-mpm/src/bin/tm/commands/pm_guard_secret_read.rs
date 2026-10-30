@@ -394,7 +394,6 @@ use crate::commands::pm_guard_secret_positions::{
 use crate::commands::pm_guard_secret_env_files::names_a_process_manager_dump;
 // #8756 round 2: the dump rules, and every rule on each substitution body.
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
-use crate::commands::pm_guard_secret_script_case::{mask_program_text, runs_a_shell};
 // #8869: a key consumer and a GET secret listing are granted beside the verbs.
 use crate::commands::pm_guard_secret_consumers::{key_only_consumed, listed_or_searched};
 use crate::commands::pm_guard_secret_substitution_read::evaluate_substitution_read_command;
@@ -703,7 +702,7 @@ fn evaluate_secret_file_read_command_in(command: &str, cwd: Option<&Path>) -> Op
         return None;
     }
     for body in &bodies {
-        if let Some(first) = secret_files_named_in_program_text(body, true).first() {
+        if let Some(first) = secret_files_named_in_program_text(body).first() {
             return Some(deny_reason(first, "a here-document body"));
         }
     }
@@ -827,7 +826,7 @@ fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
             continue;
         }
         let words = if program_at.contains(&index) {
-            secret_files_named_in_program_text(token, !runs_a_shell(&argv))
+            secret_files_named_in_program_text(token)
         } else {
             secret_files_named_in(token, Scan::Argv)
         };
@@ -876,14 +875,14 @@ fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
 /// `denies_a_quote_joined_name_in_an_inline_program`,
 /// `denies_a_name_split_by_a_backslash_newline_continuation`,
 /// `allows_program_text_that_only_looks_like_a_brace_group`.
-fn secret_files_named_in_program_text(text: &str, mask: bool) -> Vec<String> {
+fn secret_files_named_in_program_text(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    push_program_text_words(text, mask, &mut out);
+    push_program_text_words(text, &mut out);
     // #7266: the shell strips `\<newline>` before it splits words, so the
     // continuation-joined spelling is a second way to read the same text.
     let joined = text.replace("\\\n", "");
     if joined != text {
-        push_program_text_words(&joined, mask, &mut out);
+        push_program_text_words(&joined, &mut out);
     }
     out
 }
@@ -894,7 +893,7 @@ fn secret_files_named_in_program_text(text: &str, mask: bool) -> Vec<String> {
 /// documents. Split out so the same pass runs over the original text and over
 /// its continuation-joined spelling without a second implementation.
 /// Test: see [`secret_files_named_in_program_text`].
-fn push_program_text_words(text: &str, mask: bool, out: &mut Vec<String>) {
+fn push_program_text_words(text: &str, out: &mut Vec<String>) {
     for line in text.lines() {
         // #7266: the lexed spelling and the raw spelling are both scanned —
         // neither is trusted to be the only way the shell reads the line.
@@ -903,10 +902,7 @@ fn push_program_text_words(text: &str, mask: bool, out: &mut Vec<String>) {
             spellings.extend(tokens);
         }
         for spelling in spellings {
-            // #10548: `token.strip()` is a method call, not a file — in a non-shell program.
-            for word in
-                secret_files_named_in(&mask_program_text(&spelling, mask), Scan::ProgramText)
-            {
+            for word in secret_files_named_in(&spelling, Scan::ProgramText) {
                 if !out.contains(&word) {
                     out.push(word);
                 }
