@@ -1,2 +1,0 @@
-Changed
-- The project registry record stores a `project_key` (`owner/repo` or `local:<uuid>`) minted once at register and never recomputed; a NEW project name carrying a key another record holds is refused. Session launch, the base-facet index, the active-project set and `tm doctor` now share one index id function, so the id tm publishes equals the id registration creates (it was `derive_project_index_id`, which matched no registered index). The id stays the directory basename until trusty-code adopts the key; `tm doctor` accepts either form (#10530)

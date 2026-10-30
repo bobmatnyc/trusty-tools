@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.67.4] — 2026-10-30
 
+### Added
+
+- `derive_registry_index_id(name, project_key)`, `registry_id_for_root`, `index_id_for_root` and `RegisteredProject` (feature `registry-index-id`, implied by `search-index`) derive an index id, `<slug(name)>-<8 hex of sha256("v2:" + project_key)>`, from a key tm stores once. `ensure_project_indexed_reporting_as` and `ensure_project_indexed_with_as` take the registry project. Index naming stays the legacy `derive_index_id` basename until `REGISTRY_IDS_ADOPTED` flips, so tm and trusty-code keep naming one index (#10530)
+
 ### Security
 
 - `ChunkTokenizer::for_fastembed_model` and `for_fastembed_model_in` now reject a model-cache `refs/main` revision that is empty, contains `/`, `\` or `..`, or uses a character outside `[A-Za-z0-9._-]`, returning the new `ChunkError::InvalidRevision` before any tokenizer file is read (#10514)

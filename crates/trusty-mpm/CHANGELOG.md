@@ -22,6 +22,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - The `tm tui` / `tm projects` fleet poll no longer runs the per-session stale-assets probe, which was most of each poll's ~1 s. `GET /api/v1/sessions/managed/fleet` (and the socket method `mpm.managed.fleet`) accepts an optional `slim=true` flag, as the list route already does; the tui sends it, so its sessions report `stale_assets: false` with `stale_assets_unchecked` set, and `unresumable` is still computed. Every other caller sends no flag and still probes. An older daemon ignores the flag (#10476).
+- The project registry record stores a `project_key` (`owner/repo` or `local:<uuid>`) minted once at register and never recomputed; a NEW project name carrying a key another record holds is refused. Session launch, the base-facet index, the active-project set and `tm doctor` now share one index id function, so the id tm publishes equals the id registration creates (it was `derive_project_index_id`, which matched no registered index). The id stays the directory basename until trusty-code adopts the key; `tm doctor` accepts either form (#10530)
 
 ## [1.11.0] — 2026-10-30
 
