@@ -1,0 +1,3 @@
+Fixed
+- A managed launch whose spec names the supervisor (Architect) session now writes the Architect launch record and its session sidecar for the `claude` it spawns, the same records `tm fleet init` and `tm fleet relaunch` write. The launch fails instead of starting an unbound `claude` when the record cannot be written, when the session store cannot say whether the session is the Architect's, when the launch runs outside the session's workspace, or when the launch runs inside a Claude Code session. Other sessions write no record (#9092).
+- `tm fleet status` prints a `WARNING` line naming the PID when the Architect session's live `claude` has no launch record, for example one started by a hand-typed `claude --resume`, and points at `tm fleet relaunch` (#9092).

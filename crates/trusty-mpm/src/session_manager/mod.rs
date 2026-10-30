@@ -81,6 +81,8 @@ pub mod architect;
 pub mod architect_floor;
 // #8942: `tm fleet init`'s registration of the Architect's sessions.
 pub mod architect_register;
+// #9092: the launch record a managed launch of the supervisor session writes.
+pub mod architect_spawn;
 // #6194: `stop` / `stop_with_cause`, split out of `manager.rs` at its SLOC cap.
 pub mod stop;
 pub mod store;

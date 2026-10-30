@@ -20,8 +20,9 @@
 //! `commands::fleet::relaunch::tests`, `tests/tm_fleet.rs`.
 
 mod config;
-// #10033: relaunch refuses inside a Claude Code session.
-mod inside_claude;
+// #10033: relaunch refuses inside a Claude Code session; #9092: so does the
+// launch shim's supervisor record.
+pub(crate) mod inside_claude;
 // #8902: the pm-guard's Architect pane floor names the launch session.
 pub(crate) mod launch;
 mod poller;
