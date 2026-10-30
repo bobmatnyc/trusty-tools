@@ -144,6 +144,132 @@ fn extract_response_device_malformed_json_returns_none() {
     assert_eq!(extract_response_device("{not valid json"), None);
 }
 
+// ── extract_response_window unit tests (#9284) ──
+
+#[test]
+fn extract_response_window_present_returns_it() {
+    // Why: the sidecar's `result.window` is the model's input window in tokens.
+    let json = r#"{"jsonrpc":"2.0","result":{"embeddings":[[0.1]],"window":256},"id":1}"#;
+    assert_eq!(extract_response_window(json), Some(256));
+}
+
+#[test]
+fn extract_response_window_absent_zero_or_error_returns_none() {
+    // Why: an older sidecar omits the field; a zero or error frame is no window.
+    let absent = r#"{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":1}"#;
+    let zero = r#"{"jsonrpc":"2.0","result":{"embeddings":[],"window":0},"id":1}"#;
+    let err = r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"x"},"id":1}"#;
+    assert_eq!(extract_response_window(absent), None);
+    assert_eq!(extract_response_window(zero), None);
+    assert_eq!(extract_response_window(err), None);
+    assert_eq!(extract_response_window("{not json"), None);
+}
+
+/// `reader_task` stores the window from the first frame (#9284).
+#[tokio::test]
+async fn reader_task_captures_wire_window() {
+    use tokio::io::{AsyncWriteExt, duplex};
+
+    let (mut writer, reader_end) = duplex(4096);
+    let reader = tokio::io::BufReader::new(reader_end);
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (unhealthy_tx, _unhealthy_rx) = watch::channel(false);
+    let last_window = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handle = tokio::spawn(reader_task(
+        reader,
+        Arc::clone(&pending),
+        Duration::from_secs(30),
+        Arc::new(TimeoutTracker::new()),
+        unhealthy_tx,
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::clone(&last_window),
+    ));
+    let (tx, rx) = oneshot::channel();
+    pending
+        .lock()
+        .await
+        .insert(1, PendingRequest { sent: 1, reply: tx });
+    let frame =
+        b"{\"jsonrpc\":\"2.0\",\"result\":{\"embeddings\":[[0.1]],\"window\":256},\"id\":1}\n";
+    writer.write_all(frame).await.unwrap();
+    writer.flush().await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("rx timed out")
+        .expect("channel closed unexpectedly");
+    assert!(result.is_ok());
+    assert_eq!(last_window.load(std::sync::atomic::Ordering::Acquire), 256);
+    drop(writer);
+    let _ = handle.await;
+}
+
+/// An error frame arriving first must not stop the window being learned
+/// from a later success frame (#9284).
+///
+/// Why: the first-frame device flag was also gating the window, so an error
+/// first frame left `last_reported_window()` at `None` for the generation.
+/// What: sends an error frame for id 1, then a success frame with
+/// `window: 256` for id 2; asserts the stored window is 256.
+/// Test: this test.
+#[tokio::test]
+async fn reader_task_learns_window_after_an_error_first_frame() {
+    use tokio::io::{AsyncWriteExt, duplex};
+
+    let (mut writer, reader_end) = duplex(4096);
+    let reader = tokio::io::BufReader::new(reader_end);
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (unhealthy_tx, _unhealthy_rx) = watch::channel(false);
+    let last_window = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handle = tokio::spawn(reader_task(
+        reader,
+        Arc::clone(&pending),
+        Duration::from_secs(30),
+        Arc::new(TimeoutTracker::new()),
+        unhealthy_tx,
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::clone(&last_window),
+    ));
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    {
+        let mut guard = pending.lock().await;
+        guard.insert(
+            1,
+            PendingRequest {
+                sent: 1,
+                reply: tx1,
+            },
+        );
+        guard.insert(
+            2,
+            PendingRequest {
+                sent: 1,
+                reply: tx2,
+            },
+        );
+    }
+    let err = b"{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"boom\"},\"id\":1}\n";
+    let ok = b"{\"jsonrpc\":\"2.0\",\"result\":{\"embeddings\":[[0.1]],\"window\":256},\"id\":2}\n";
+    writer.write_all(err).await.unwrap();
+    writer.write_all(ok).await.unwrap();
+    writer.flush().await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), rx1)
+        .await
+        .expect("rx1 timed out")
+        .expect("channel 1 closed");
+    assert!(first.is_err());
+    let second = tokio::time::timeout(Duration::from_secs(2), rx2)
+        .await
+        .expect("rx2 timed out")
+        .expect("channel 2 closed");
+    assert!(second.is_ok());
+    assert_eq!(last_window.load(std::sync::atomic::Ordering::Acquire), 256);
+    drop(writer);
+    let _ = handle.await;
+}
+
 /// End-to-end: `reader_task` captures the real device from a live response
 /// frame into the shared `last_device` slot (epic #3524 slice 5, issue #3493
 /// P1) — this is what `StdioEmbedderClient::last_reported_device()` reads.
@@ -168,6 +294,7 @@ async fn reader_task_captures_wire_device() {
         unhealthy_tx,
         Arc::clone(&last_device),
         Arc::clone(&device_capture_attempted),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     ));
 
     let (tx, rx) = oneshot::channel();
@@ -239,6 +366,7 @@ async fn reader_task_captures_device_once_and_never_reparses() {
         unhealthy_tx,
         Arc::clone(&last_device),
         Arc::clone(&device_capture_attempted),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     ));
 
     let (tx1, rx1) = oneshot::channel();
@@ -400,6 +528,7 @@ async fn reader_task_survives_timeout_and_serves_next_request() {
         unhealthy_tx,
         Arc::clone(&last_device),
         Arc::clone(&device_capture_attempted),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     ));
 
     // ── Request A (id=1): push a oneshot, wait for the timeout to fire ────
@@ -616,6 +745,7 @@ async fn reader_panic_drains_pending_and_signals_unhealthy() {
         long_timeout,
         Arc::new(std::sync::Mutex::new(None)),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     );
     // Mirrors `_unhealthy_rx_keepalive` on the real client: keep the sender
     // alive so `send(true)` in the monitor task doesn't silently no-op
@@ -668,6 +798,7 @@ async fn reader_eof_exit_also_signals_unhealthy() {
         Duration::from_secs(30),
         Arc::new(std::sync::Mutex::new(None)),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     );
     let _keepalive_tx = unhealthy_tx;
 
@@ -785,6 +916,7 @@ async fn wedge_threshold_fires_after_consecutive_timeouts() {
         unhealthy_tx,
         Arc::clone(&last_device),
         Arc::clone(&device_capture_attempted),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     ));
 
     tokio::time::timeout(Duration::from_secs(5), unhealthy_rx.changed())
@@ -854,6 +986,7 @@ async fn wedge_threshold_resets_on_success() {
         unhealthy_tx,
         Arc::clone(&last_device),
         Arc::clone(&device_capture_attempted),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     ));
 
     // Condition-poll until the first `below` entries have all timed out and
@@ -922,6 +1055,7 @@ fn spawn_test_reader(
         unhealthy_tx,
         Arc::new(std::sync::Mutex::new(None)),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     ));
     (handle, unhealthy_rx)
 }
