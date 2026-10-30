@@ -1,6 +1,6 @@
 /*
  * Why: #9067 — a refusal must never render blank. The console relays a
- * server refusal as `{"error": <fixed text>, "kind": <kind>}` only for the 38
+ * server refusal as `{"error": <fixed text>, "kind": <kind>}` only for the 39
  * kinds in its closed table (crates/trusty-console/src/secrets_uds/errors.rs
  * `UPSTREAM_KINDS`); its own refusals carry `error` and no `kind`.
  * What: `KIND_TEXT`, one sentence per upstream kind; `AGENT_HINT`, the one
@@ -49,6 +49,7 @@ export const KIND_TEXT = {
   grant_limit_reached: 'The grant limit was reached.',
   bridge_refused: 'The secrets server refused the console bridge.',
   agent_key_denied: 'The operator denied this key to agents (per-key deny).',
+  ticket_refused: 'The secrets server refused a main-thread ticket.',
   internal: 'The secrets server failed.',
 };
 

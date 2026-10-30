@@ -26,6 +26,10 @@ mod flag_tests;
 #[path = "agent_default_tests.rs"]
 mod agent_default_tests;
 
+// #10459 P1: the Architect exemption for `set` and a local `copy`.
+#[path = "architect_tests.rs"]
+mod architect_tests;
+
 // #9066: S3a, the console bridge's verdict; it shares this module's helpers.
 #[path = "bridge_tests.rs"]
 mod bridge_tests;

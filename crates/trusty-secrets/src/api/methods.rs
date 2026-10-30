@@ -52,6 +52,12 @@ pub mod method {
     pub const REVOKE: &str = "secrets.revoke";
     /// Write or remove one key's agent deny (DOC-74 §15.8, #9070, #10386).
     pub const SET_AGENTS_MAY_USE: &str = "secrets.set_agents_may_use";
+    /// Mint a main-thread ticket for one Architect call (#10459, DOC-86 §2).
+    pub const TICKET_MINT: &str = "secrets.ticket.mint";
+    /// Void a session's pending tickets (#10459, DOC-86 §2).
+    pub const TICKET_VOID: &str = "secrets.ticket.void";
+    /// Whether a ticket is pending (#10459, DOC-86 §4).
+    pub const TICKET_PENDING: &str = "secrets.ticket.pending";
 }
 
 /// Which kind of scope a vault serves (DOC-74 §15.3).

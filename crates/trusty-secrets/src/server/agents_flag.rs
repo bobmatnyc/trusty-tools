@@ -19,12 +19,15 @@
 use serde_json::Value;
 
 use super::ancestry::has_agent_ancestor;
+use super::architect::check_architect;
 use super::audit::AuditMethod;
 use super::errors::ErrorKind;
 use super::gate::{Gate, Recording, audited};
 use super::methods::{Caller, decode, split_project, to_json};
 use super::project::ProjectContext;
 use super::router::State;
+use super::ticket_checks::TicketCall;
+use super::ticket_methods::redeem;
 use crate::api::methods::{SetAgentsMayUseRequest, SetAgentsMayUseResponse};
 use crate::store::SecretStore;
 
@@ -146,4 +149,77 @@ pub(crate) fn judge_agent_caller(
     };
     gate.agent_parent(agent_parent);
     Ok(agent_parent)
+}
+
+/// Who a `set` or a local `copy` writes as (#10459).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Writer {
+    /// No Claude Code ancestor: the operator's rules.
+    Person,
+    /// Under Claude Code: keys with no deny only.
+    Agent,
+    /// Under the `claude` tm launched as the Architect: any key.
+    Architect,
+}
+
+/// The [`Writer`] for a caller [`judge_agent_caller`] already judged.
+///
+/// Why: #10459 P1 (Architect clearance 2026-10-29 22:58Z) — the Architect
+/// may write keys denied to agents; every other agent may not. #10459 PR1
+/// (DOC-86 §2, Q4): only for the one call its main thread's hook ticketed.
+/// What: `agent == false` is [`Writer::Person`]. An agent through the
+/// console bridge is [`Writer::Agent`]: its peer is the console, not the
+/// client (a console under Claude Code is already `BridgeRefused`; this arm
+/// keeps the rule if that ever changes). Otherwise [`check_architect`] on
+/// the peer, and then `ticket_methods::redeem` of that `claude`'s ticket
+/// for `call`: both `Ok` marks the gate's records `architect: true` and is
+/// [`Writer::Architect`]; any refusal of either is [`Writer::Agent`] (fail
+/// closed), and with a record directory known its name goes on the records
+/// as `architect_refusal`. Only `set` and a local `copy` call this;
+/// `delete`, deny removal and a sync-target push never do.
+///
+/// # Errors
+///
+/// [`ErrorKind::AuditUnavailable`] when the redeem record could not be
+/// written; the ticket is spent and the caller writes nothing.
+///
+/// Test: `architect_with_a_valid_record_sets_a_denied_key`,
+/// `architect_refusals_each_keep_the_agent_rules`,
+/// `nested_claude_under_the_architect_is_not_the_architect`,
+/// `record_without_ticket_keeps_agent_rules`,
+/// `ticket_without_record_is_refused`,
+/// `bridge_call_from_under_the_architect_is_refused`,
+/// `verified_bridge_call_over_an_architect_peer_keeps_the_agent_rules`.
+pub(crate) fn writer_for(
+    state: &State,
+    caller: Caller,
+    peer: u32,
+    gate: &mut Gate<'_>,
+    agent: bool,
+    call: &TicketCall<'_>,
+) -> Result<Writer, ErrorKind> {
+    if !agent {
+        return Ok(Writer::Person);
+    }
+    // #10459: the bridge's peer is the console; its client is never judged here.
+    if caller.bridge().is_some() {
+        return Ok(Writer::Agent);
+    }
+    let dir = state.architect_records.as_deref();
+    let refusal = match check_architect(state.grants.processes(), dir, peer) {
+        // #10459 PR1: the record is necessary, never sufficient (Q4).
+        Ok(claude) => match redeem(state, caller, peer, claude, call)? {
+            None => {
+                gate.architect();
+                return Ok(Writer::Architect);
+            }
+            Some(refusal) => refusal,
+        },
+        Err(refusal) => refusal,
+    };
+    // #10459: the reason is audited; no record directory, nothing to say.
+    if dir.is_some() {
+        gate.architect_refusal(refusal);
+    }
+    Ok(Writer::Agent)
 }

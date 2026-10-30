@@ -146,6 +146,11 @@ pub struct ServerSettings {
     /// The 0700 directory a CLI backend writes template files under, and
     /// the startup sweep clears (#7519).
     pub template_root: PathBuf,
+    /// Whether `secrets.ticket.mint` may mint a main-thread ticket.
+    // #10459 PR1: always `false` — no flag, environment variable or config
+    // file sets it in this release (DOC-86 §2, "Minting switch"); PR 5 adds
+    // the carrier for the Architect project. Tests turn it on directly.
+    pub(crate) mint_enabled: bool,
 }
 
 impl ServerSettings {
@@ -169,6 +174,7 @@ impl ServerSettings {
             machine_config,
             idle_timeout,
             cache_max_age: DEFAULT_CACHE_MAX_AGE,
+            mint_enabled: false,
         }
     }
 
@@ -294,6 +300,8 @@ impl ServerSettings {
             audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
             template_root,
             index_root,
+            // #10459 PR1: no `serve` flag or variable turns minting on.
+            mint_enabled: false,
         })
     }
 }

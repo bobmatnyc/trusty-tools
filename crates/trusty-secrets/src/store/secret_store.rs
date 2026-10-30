@@ -51,6 +51,14 @@ pub struct SecretStore {
     deny_audit: Option<DenyAudit>,
 }
 
+/// Who a value write is judged as (#10459): the deny check and the mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Writer {
+    Person,
+    Agent,
+    Architect,
+}
+
 impl fmt::Debug for SecretStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretStore")
@@ -203,7 +211,7 @@ impl SecretStore {
         key: &SecretKey,
         value: &SecretValue,
     ) -> Result<SetResponse, SecretsError> {
-        self.set_judged(vault, key, value, false)
+        self.set_judged(vault, key, value, Writer::Person)
     }
 
     /// [`Self::set`] for a caller under Claude Code (#10459).
@@ -223,16 +231,33 @@ impl SecretStore {
         key: &SecretKey,
         value: &SecretValue,
     ) -> Result<SetResponse, SecretsError> {
-        self.set_judged(vault, key, value, true)
+        self.set_judged(vault, key, value, Writer::Agent)
     }
 
-    /// The body of [`Self::set`] and [`Self::set_for_agent`].
+    /// [`Self::set`] for the launched Architect (#10459 P1).
+    ///
+    /// Why: the Architect may write a key the operator denied to agents, and
+    /// its confirmation still lands in an agent transcript.
+    /// What: as [`Self::set`] (no deny check; a deny on the key stays), with
+    /// the [`mask_length_only`] confirmation of [`Self::set_for_agent`].
+    /// Test: `architect_with_a_valid_record_sets_a_denied_key`.
+    pub fn set_for_architect(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &SecretValue,
+    ) -> Result<SetResponse, SecretsError> {
+        self.set_judged(vault, key, value, Writer::Architect)
+    }
+
+    /// The body of [`Self::set`], [`Self::set_for_agent`] and
+    /// [`Self::set_for_architect`].
     fn set_judged(
         &self,
         vault: &VaultName,
         key: &SecretKey,
         value: &SecretValue,
-        agent: bool,
+        writer: Writer,
     ) -> Result<SetResponse, SecretsError> {
         if value.is_empty() {
             return Err(SecretsError::InvalidValue { reason: "is empty" });
@@ -249,7 +274,7 @@ impl SecretStore {
             // #10386: no deny is cleared here; a stale one keeps the key shut.
             |_| {
                 // #10459: under the lock, so a deny added mid-call refuses.
-                if agent && !self.may_use_migrated(vault, key)? {
+                if writer == Writer::Agent && !self.may_use_migrated(vault, key)? {
                     return Err(SecretsError::AgentUseRefused {
                         key: key.to_string(),
                         vault: vault.to_string(),
@@ -259,8 +284,9 @@ impl SecretStore {
             },
             |outcome, publish| self.compensate(vault, key, outcome, publish),
         )?;
-        // #10459: an agent's confirmation shows the length only.
-        let masked = if agent {
+        // #10459: an agent's (and the Architect's) confirmation shows the
+        // length only.
+        let masked = if writer != Writer::Person {
             mask_length_only(value.expose())
         } else {
             mask_secret(value.expose())

@@ -88,6 +88,15 @@ impl BridgeVerdict {
         }
     }
 
+    /// A verdict as the verified console would state it; tests only (#10459).
+    #[cfg(test)]
+    pub(crate) fn mapped(agent_parent: bool) -> Self {
+        Self {
+            agent_parent: Some(agent_parent),
+            source: AuditSource::Mapped,
+        }
+    }
+
     /// The verdict of an assertion the server refused.
     fn malformed() -> Self {
         Self {

@@ -5,7 +5,8 @@
 //! `ancestry`-only test run builds it with no `server` code.
 //! What: [`FakeProcs`] maps pid to (parent, start time) and can fail every
 //! read, fail one pid's start time, panic on one pid, mark a pid as
-//! Claude Code, or give a pid an executable path (#9066).
+//! Claude Code, or give a pid an executable path (#9066), launch facts or
+//! an argv (#10459).
 //! Test: used by `ancestry_tests.rs`, `grant_tests.rs` and `wire_tests.rs`.
 
 use std::collections::{HashMap, HashSet};
@@ -24,6 +25,11 @@ struct ProcState {
     agents: HashSet<u32>,
     // #9066: the executable each pid runs; a pid with none is unreadable.
     exes: HashMap<u32, PathBuf>,
+    // #10459: whole-second start time and working directory per pid.
+    unix_starts: HashMap<u32, u64>,
+    cwds: HashMap<u32, PathBuf>,
+    // #10459 PR1: the argv per pid; a pid with none is unreadable.
+    argvs: HashMap<u32, Vec<String>>,
     parent_delay: Option<Duration>,
 }
 
@@ -82,6 +88,21 @@ impl FakeProcs {
     /// Give `pid` the executable `path` (#9066).
     pub(crate) fn set_executable(&self, pid: u32, path: &str) {
         self.with(|s| s.exes.insert(pid, PathBuf::from(path)));
+    }
+
+    /// Give `pid` the Unix-seconds start time `secs` and the working
+    /// directory `cwd` (#10459); a pid with neither refuses both reads.
+    pub(crate) fn set_launch_facts(&self, pid: u32, secs: u64, cwd: &std::path::Path) {
+        self.with(|s| {
+            s.unix_starts.insert(pid, secs);
+            s.cwds.insert(pid, cwd.to_path_buf());
+        });
+    }
+
+    /// Give `pid` the argv `args` (#10459 PR1).
+    pub(crate) fn set_argv(&self, pid: u32, args: &[&str]) {
+        let args = args.iter().map(|a| (*a).to_owned()).collect();
+        self.with(|s| s.argvs.insert(pid, args));
     }
 
     /// Panic when `pid`'s start time is read.
@@ -149,6 +170,39 @@ impl ProcessTable for FakeProcs {
                 .get(&pid)
                 .cloned()
                 .ok_or(ProcessError::Unreadable { pid })
+        })
+    }
+
+    fn start_unix_secs(&self, pid: u32) -> Result<u64, ProcessError> {
+        self.with(|s| match s.unreadable {
+            true => Err(ProcessError::Unreadable { pid }),
+            false => s
+                .unix_starts
+                .get(&pid)
+                .copied()
+                .ok_or(ProcessError::StartTimeUnreadable { pid }),
+        })
+    }
+
+    fn cwd(&self, pid: u32) -> Result<PathBuf, ProcessError> {
+        self.with(|s| match s.unreadable {
+            true => Err(ProcessError::Unreadable { pid }),
+            false => s
+                .cwds
+                .get(&pid)
+                .cloned()
+                .ok_or(ProcessError::Unreadable { pid }),
+        })
+    }
+
+    fn argv(&self, pid: u32) -> Result<Vec<String>, ProcessError> {
+        self.with(|s| match s.unreadable {
+            true => Err(ProcessError::Unreadable { pid }),
+            false => s
+                .argvs
+                .get(&pid)
+                .cloned()
+                .ok_or(ProcessError::Unreadable { pid }),
         })
     }
 }
