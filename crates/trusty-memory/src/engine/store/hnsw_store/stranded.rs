@@ -61,6 +61,19 @@ const SELF_SEARCH_EF: usize = 64;
 /// Points per `parallel_search` batch, bounding the vector copies it needs.
 const SELF_SEARCH_BATCH: usize = 4096;
 
+#[cfg(test)]
+thread_local! {
+    /// #10271: per-upsert stranded searches run on this thread, for the gate test.
+    pub(super) static UPKEEP_SEARCHES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// #10271: count one per-upsert stranded search (tests only).
+fn count_upkeep_search() {
+    #[cfg(test)]
+    UPKEEP_SEARCHES.with(|n| n.set(n.get() + 1));
+}
+
 /// Every point that a search for its own vector does not return, grouped by
 /// vector.
 ///
@@ -105,6 +118,7 @@ pub(super) fn stranded_points(index: &Hnsw<'static, f32, DistCosine>) -> Vec<Str
 /// What: `Hnsw::search(vector, 1, SELF_SEARCH_EF)`.
 /// Test: `search_finds_drawers_the_graph_cannot_reach`.
 pub(super) fn reachable(index: &Hnsw<'static, f32, DistCosine>, vector: &[f32], id: u64) -> bool {
+    count_upkeep_search();
     index
         .search(vector, 1, SELF_SEARCH_EF)
         .iter()
@@ -146,6 +160,7 @@ pub(super) fn neighbourhoods_before_insert(
     index: &Hnsw<'static, f32, DistCosine>,
     vector: &[f32],
 ) -> Neighbourhoods {
+    count_upkeep_search();
     let ef = index.get_ef_construction();
     let picks: HashSet<PointId> = index
         .search(vector, ef, ef)

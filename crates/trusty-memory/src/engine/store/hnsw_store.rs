@@ -638,7 +638,8 @@ impl HnswStore {
     /// a pool sized for `k` rows (#5179, #9174). Tombstones and the id → key
     /// mapping are applied by the caller, `groups::group_rows`.
     /// Test: `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
-    /// `search_widens_until_k_drawers_in_the_graph_arm`.
+    /// `search_widens_until_k_drawers_in_the_graph_arm`,
+    /// `a_row_committed_ahead_of_the_graph_never_hides_a_stranded_drawer`.
     fn ranked(&self, query: &[f32], k: usize, keys: &key_cache::KeyMap) -> Result<Vec<(u64, f32)>> {
         let (reverse, tombstones) = (&keys.reverse, &keys.tombstones);
 
@@ -652,7 +653,13 @@ impl HnswStore {
         // bounding instead, on the corrected ranking.
         let mut raw: Vec<(u64, f32)> = {
             let index = self.bounded_graph("search")?; // #9487
-            if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS {
+            // #10271: the graph arm also needs more graph points than the
+            // threshold, the only size at which upserts keep the stranded set.
+            // Committed rows can lead the graph (a group mid-loop, a failed
+            // insert); the scan then costs at most the threshold.
+            if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS
+                || index.get_nb_point() <= EXHAUSTIVE_SCAN_MAX_POINTS
+            {
                 exhaustive_nearest(&index, query, tombstones)
             } else {
                 // #5179: both budgets are functions of the collection, not
