@@ -31,6 +31,7 @@
 //! [`worktree_enabled_for_project`]: crate::project::worktree_enabled_for_project
 //! [`dispatched_agent_worktree_enabled`]: crate::project::dispatched_agent_worktree_enabled
 
+pub mod project_key;
 pub mod record;
 pub mod registry;
 pub mod resolver;
@@ -38,6 +39,10 @@ pub mod store;
 pub mod worktree_adoption;
 pub mod worktree_policy;
 
+pub use project_key::{
+    accepted_index_ids_for, assign_project_key, index_id_for_registered_root, index_id_for_root_in,
+    project_key_from_repo_url, registered_project_for_root, registered_project_for_root_in,
+};
 pub use record::{Project, derive_name_from_url};
 pub use registry::ProjectRegistry;
 pub use resolver::{

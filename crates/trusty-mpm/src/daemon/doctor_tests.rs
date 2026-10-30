@@ -1151,3 +1151,30 @@ async fn memory_protocol_mismatch_is_warn_with_the_reason() {
     assert_eq!(check.status, CheckStatus::Warn, "{check:?}");
     assert!(check.message.contains("protocol"), "{check:?}");
 }
+
+/// Why (#10530): the doctor must accept the legacy basename and the registry id
+/// until index naming adopts the latter, current form first.
+/// Test: itself.
+#[test]
+fn accepted_ids_include_legacy_and_registry_forms() {
+    use crate::project::accepted_index_ids_for as accepted_ids_for;
+    let root = std::path::Path::new("/x/cto");
+    let reg = trusty_common::RegisteredProject::new("cto", "acme/cto");
+    let ids = accepted_ids_for(root, Some(&reg));
+    assert_eq!(ids[0], "cto", "current form first");
+    assert!(ids.contains(&trusty_common::derive_registry_index_id("cto", "acme/cto")));
+    assert_eq!(accepted_ids_for(root, None), vec!["cto".to_string()]);
+}
+
+/// Why (#10530 review): a root with no file name (`/`, a launchd daemon with no
+/// project dir) yields no id; the doctor must print a placeholder, not panic.
+/// Test: itself.
+#[test]
+fn a_root_with_no_file_name_yields_no_ids_and_no_panic() {
+    use crate::project::accepted_index_ids_for;
+    assert!(accepted_index_ids_for(std::path::Path::new("/"), None).is_empty());
+    assert_eq!(
+        expected_search_index_id(Some(std::path::Path::new("/"))),
+        ""
+    );
+}

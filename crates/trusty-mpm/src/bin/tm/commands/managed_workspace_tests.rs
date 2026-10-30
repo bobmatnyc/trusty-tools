@@ -143,6 +143,7 @@ async fn registry_with(repo_url: &str, worktree: Option<bool>) -> TempDir {
             commit_name: None,
             commit_email: None,
             worktree,
+            project_key: None,
         })
         .await
         .unwrap();
