@@ -20,7 +20,6 @@ use crate::core::registry::{
     IndexHandle, IndexId, IndexRegistry, IndexStages, StageState, StageStatus,
 };
 use crate::service::persistence::PersistedIndex;
-use axum::extract::State;
 use axum::http::StatusCode;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,13 +69,9 @@ async fn semantic_stage_on_skip_vector_index_is_503_not_degraded_200() {
     let state = state_with_handle("vec-off", |h| {
         h.skip_vector = true;
     });
-    let (code, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("vec-off".to_string()),
-        axum::Json(semantic_query()),
-    )
-    .await
-    .expect_err("a semantic search against a vector-less index must not succeed");
+    let (code, body) = super::search_report(&state, "vec-off", semantic_query())
+        .await
+        .expect_err("a semantic search against a vector-less index must not succeed");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "vector_unavailable");
@@ -104,13 +99,9 @@ async fn semantic_stage_before_embed_completes_is_503_retryable() {
     let state = state_with_handle("vec-pending", |h| {
         h.skip_vector = false;
     });
-    let (code, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("vec-pending".to_string()),
-        axum::Json(semantic_query()),
-    )
-    .await
-    .expect_err("an unbuilt vector lane cannot serve a semantic search");
+    let (code, body) = super::search_report(&state, "vec-pending", semantic_query())
+        .await
+        .expect_err("an unbuilt vector lane cannot serve a semantic search");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "vector_unavailable");
@@ -166,13 +157,9 @@ async fn unpinned_search_reports_vector_unavailable_in_meta() {
     let query: crate::core::indexer::SearchQuery =
         serde_json::from_value(serde_json::json!({ "text": "authentication" }))
             .expect("plain SearchQuery");
-    let axum::Json(body) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("vec-meta".to_string()),
-        axum::Json(query),
-    )
-    .await
-    .expect("an unpinned query degrades rather than failing");
+    let body = super::search_report(&state, "vec-meta", query)
+        .await
+        .expect("an unpinned query degrades rather than failing");
 
     assert_eq!(
         body["meta"]["vector_unavailable"], true,
@@ -204,7 +191,7 @@ fn state_with_cold_index(id: &str) -> Arc<SearchAppState> {
 
 /// The cold-parked 503 carries a body naming `search` as what restores it.
 ///
-/// Why (#5061): `index_status_handler` returned a bare `StatusCode`, so an MCP
+/// Why (#5061): `GET /status` returned a bare `StatusCode`, so an MCP
 /// caller saw `returned 503 Service Unavailable: ` — empty text, nothing to
 /// branch on, and no hint that a plain `search` against the same id reloads it
 /// while this endpoint stays 503 forever. Pre-fix the handler's error type was
@@ -215,12 +202,9 @@ fn state_with_cold_index(id: &str) -> Arc<SearchAppState> {
 #[serial_test::parallel]
 async fn cold_parked_status_503_body_names_search_as_the_restore_path() {
     let state = state_with_cold_index("cold-body");
-    let (code, axum::Json(body)) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-body".to_string()),
-    )
-    .await
-    .expect_err("a non-resident index cannot be reported");
+    let (code, body) = super::status::index_status_report(&state, "cold-body")
+        .await
+        .expect_err("a non-resident index cannot be reported");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_not_resident");
@@ -244,12 +228,9 @@ async fn restore_failed_status_503_body_is_not_retryable() {
     let id = IndexId::new("failed-body".to_string());
     state.cold_store.mark_failed(&id);
 
-    let (code, axum::Json(body)) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("failed-body".to_string()),
-    )
-    .await
-    .expect_err("a permanently-failed index cannot be reported");
+    let (code, body) = super::status::index_status_report(&state, "failed-body")
+        .await
+        .expect_err("a permanently-failed index cannot be reported");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_restore_failed");
@@ -275,12 +256,9 @@ async fn chunks_and_status_agree_on_a_cold_parked_index() {
     let params: super::files::ChunksParams =
         serde_json::from_value(serde_json::json!({})).expect("empty ChunksParams");
 
-    let (status_code, axum::Json(status_body)) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-agree".to_string()),
-    )
-    .await
-    .expect_err("cold");
+    let (status_code, status_body) = super::status::index_status_report(&state, "cold-agree")
+        .await
+        .expect_err("cold");
     let (chunks_code, chunks_body) =
         super::files::index_chunks_report(&state, "cold-agree", &params)
             .await
@@ -381,12 +359,9 @@ async fn write_path_unknown_index_is_still_404() {
 #[serial_test::parallel]
 async fn residency_miss_is_404_only_when_absent_everywhere() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let (code, axum::Json(body)) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("never-existed".to_string()),
-    )
-    .await
-    .expect_err("genuinely unknown");
+    let (code, body) = super::status::index_status_report(&state, "never-existed")
+        .await
+        .expect_err("genuinely unknown");
 
     assert_eq!(code, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "unknown index: never-existed");
@@ -426,12 +401,9 @@ async fn status_semantic_coverage_reports_live_vector_count() {
         };
     }
 
-    let axum::Json(body) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("coverage".to_string()),
-    )
-    .await
-    .expect("a resident index reports status");
+    let body = super::status::index_status_report(&state, "coverage")
+        .await
+        .expect("a resident index reports status");
 
     assert_eq!(
         body["stages"]["semantic"]["embedded"], 0,
@@ -463,12 +435,9 @@ async fn status_semantic_coverage_reports_live_vector_count() {
 #[serial_test::parallel]
 async fn status_semantic_coverage_distinguishes_absent_from_unreadable() {
     let state = state_with_handle("no-store", |_| {});
-    let axum::Json(body) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("no-store".to_string()),
-    )
-    .await
-    .expect("resident index reports status");
+    let body = super::status::index_status_report(&state, "no-store")
+        .await
+        .expect("resident index reports status");
 
     assert!(body["semantic_coverage"]["vectors_present"].is_null());
     assert_eq!(
@@ -502,13 +471,9 @@ async fn search_residency_bodies_match_the_shared_contract() {
 
     let query: crate::core::indexer::SearchQuery =
         serde_json::from_value(serde_json::json!({ "text": "anything" })).expect("query");
-    let (code, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&failed)),
-        axum::extract::Path("search-failed".to_string()),
-        axum::Json(query),
-    )
-    .await
-    .expect_err("a permanently-failed index cannot be searched");
+    let (code, body) = super::search_report(&failed, "search-failed", query)
+        .await
+        .expect_err("a permanently-failed index cannot be searched");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_restore_failed");
@@ -522,12 +487,9 @@ async fn search_residency_bodies_match_the_shared_contract() {
     );
 
     // The same body the endpoint that pointed here would have produced.
-    let (status_code, axum::Json(status_body)) = super::status::index_status_handler(
-        State(Arc::clone(&failed)),
-        axum::extract::Path("search-failed".to_string()),
-    )
-    .await
-    .expect_err("failed");
+    let (status_code, status_body) = super::status::index_status_report(&failed, "search-failed")
+        .await
+        .expect_err("failed");
     assert_eq!(code, status_code);
     assert_eq!(body["error"], status_body["error"]);
     assert_eq!(body["retryable"], status_body["retryable"]);
@@ -544,13 +506,9 @@ async fn search_unknown_index_404_carries_index_id() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let query: crate::core::indexer::SearchQuery =
         serde_json::from_value(serde_json::json!({ "text": "anything" })).expect("query");
-    let (code, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("never-existed".to_string()),
-        axum::Json(query),
-    )
-    .await
-    .expect_err("genuinely unknown");
+    let (code, body) = super::search_report(&state, "never-existed", query)
+        .await
+        .expect_err("genuinely unknown");
 
     assert_eq!(code, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "unknown index: never-existed");
@@ -644,23 +602,23 @@ async fn health_counts_a_real_corpus_and_excludes_a_corpus_failed_index() {
     ));
 
     let state = Arc::new(SearchAppState::new(registry));
-    let axum::Json(resp) = super::health::health_handler(State(state)).await;
+    let resp = health_report(state).await;
 
-    assert_eq!(resp.indexes, 3, "all three are registered");
+    assert_eq!(resp["indexes"], 3, "all three are registered");
     assert_eq!(
-        resp.indexes_populated, 1,
+        resp["indexes_populated"], 1,
         "only the index with durable chunks counts as populated"
     );
     assert_eq!(
-        resp.indexes_empty, 1,
+        resp["indexes_empty"], 1,
         "the healthy-but-empty index counts as empty; the corpus-failed one does not"
     );
     assert_eq!(
-        resp.total_chunks, POPULATED as u64,
+        resp["total_chunks"], POPULATED as u64,
         "the fleet total comes from the durable corpus, not the in-memory map"
     );
     assert_eq!(
-        resp.indexes_populated + resp.indexes_empty,
+        resp["indexes_populated"].as_u64().unwrap() + resp["indexes_empty"].as_u64().unwrap(),
         2,
         "an index whose count is UNKNOWN must appear in neither counter — the \
          shortfall against `indexes` is the honest signal"
@@ -690,22 +648,22 @@ async fn health_reports_populated_and_empty_index_counts() {
         ));
     }
     let state = Arc::new(SearchAppState::new(registry));
-    let axum::Json(resp) = super::health::health_handler(State(state)).await;
+    let resp = health_report(state).await;
 
     assert_eq!(
-        resp.indexes, 2,
+        resp["indexes"], 2,
         "registration count is unchanged — it still counts slots"
     );
     assert_eq!(
-        resp.indexes_populated, 0,
+        resp["indexes_populated"], 0,
         "no chunks were ever committed to either index"
     );
     assert_eq!(
-        resp.indexes_empty, 2,
+        resp["indexes_empty"], 2,
         "both are registered but hold nothing"
     );
     assert_eq!(
-        resp.total_chunks, 0,
+        resp["total_chunks"], 0,
         "the fleet-wide corpus size makes a near-zero deployment visible at a glance"
     );
 }

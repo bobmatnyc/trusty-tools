@@ -14,7 +14,6 @@
 //! (`cargo test -p trusty-search --no-fail-fast -- vector_health`).
 
 use super::*;
-use axum::extract::{Query, State};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -99,19 +98,15 @@ async fn state_with(id: &str, chunks: usize, vectors: usize) -> Arc<SearchAppSta
 /// The single entry `GET /indexes?details=true` returns for a one-index state.
 async fn detail_entry(state: Arc<SearchAppState>) -> serde_json::Value {
     use super::indexes::ListIndexesParams;
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: true,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     value["indexes"][0].clone()
 }
 
@@ -210,19 +205,15 @@ async fn list_indexes_details_reports_embed_lag() {
 async fn list_indexes_without_details_is_unchanged() {
     use super::indexes::ListIndexesParams;
     let state = state_with("plain-arm", 17, 0).await;
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: false,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(
         value,
@@ -254,12 +245,9 @@ async fn list_indexes_details_reports_last_indexed() {
     }
     let entry = detail_entry(Arc::clone(&state)).await;
 
-    let axum::Json(status) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("stamped".to_string()),
-    )
-    .await
-    .expect("a resident index reports status");
+    let status = super::status::index_status_report(&state, "stamped")
+        .await
+        .expect("a resident index reports status");
 
     assert_eq!(entry["last_indexed"], "2026-09-07T00:00:00Z");
     assert_eq!(
@@ -283,12 +271,9 @@ async fn list_and_status_agree_on_vector_lane_health() {
     let state = state_with("agreement", 12, 5).await;
     let entry = detail_entry(Arc::clone(&state)).await;
 
-    let axum::Json(status) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("agreement".to_string()),
-    )
-    .await
-    .expect("a resident index reports status");
+    let status = super::status::index_status_report(&state, "agreement")
+        .await
+        .expect("a resident index reports status");
 
     for key in [
         "semantic_coverage",

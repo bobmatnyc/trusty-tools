@@ -214,7 +214,7 @@ async fn both_call_sites_dispatch_to_the_same_pool_instance() {
 /// must route through the pool, and every call after THAT must use the
 /// self-healed fast-path cache.
 ///
-/// Why: `restore_one_index` / `create_index_handler` / etc. call
+/// Why: `restore_one_index` / `create_index_report` / etc. call
 /// `set_embed_pool_source` with the daemon's OWN `Arc<RwLock<..>>` slot
 /// (`SearchAppState::embed_pool`), not a one-time snapshot. This test
 /// reproduces that shape directly: build the slot empty, attach it, prove

@@ -279,7 +279,7 @@ pub(crate) async fn index_chunks_report(
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     // #4715: 404 must mean "no such index anywhere", not "not resident" —
-    // see `index_status_handler` for why the MCP layer depends on that.
+    // see `index_status_report` for why the MCP layer depends on that.
     // #5061: the miss now carries a body, via the builder all three
     // non-reloading endpoints share.
     let handle = match state.registry.get(&index_id) {
@@ -496,7 +496,7 @@ pub(crate) async fn grep_report(
         )
     })?;
     let index_id = IndexId::new(id.to_string());
-    // #4715: same rule as `index_status_handler` — a cold-parked index exists.
+    // #4715: same rule as `index_status_report` — a cold-parked index exists.
     // #5061: the three-way verdict (and the `restore_via` hint that tells a
     // caller a plain `search` reloads a cold-parked index) now lives in one
     // builder, so this handler cannot drift from its two neighbours.
