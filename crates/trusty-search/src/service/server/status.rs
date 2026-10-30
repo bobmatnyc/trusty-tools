@@ -482,6 +482,7 @@ pub(crate) async fn index_status_report(
         "window": embed_window.window(),
         "truncated": embed_window.truncated(),
         "unmeasured": embed_window.unmeasured(),
+        "chunks_split": embed_window.chunks_split(),
     });
     Ok(body)
 }

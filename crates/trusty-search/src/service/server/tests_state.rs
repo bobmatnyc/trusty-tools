@@ -610,7 +610,7 @@ async fn index_status_reports_the_embed_window_counters() {
         virtual_terms: Vec::new(),
     };
     indexer
-        .embed_chunks_in_batches(&[long], None, None)
+        .embed_chunks_in_batches(&[long], None, None, None)
         .await
         .expect("embed pass");
 
@@ -628,4 +628,48 @@ async fn index_status_reports_the_embed_window_counters() {
     assert_eq!(window["window"], 8);
     assert_eq!(window["truncated"], 1);
     assert_eq!(window["unmeasured"], 0);
+}
+
+/// #10481: a new long file embeds as windows, so `truncated` stays flat and
+/// `chunks_split` rises in `GET /indexes/:id/status`.
+///
+/// Why: before the split every long chunk embedded cut and raised `truncated`.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn index_status_truncated_stays_flat_for_a_new_long_file() {
+    use crate::core::{
+        embed::MockEmbedder,
+        indexer::CodeIndexer,
+        registry::{IndexHandle, IndexId},
+        store::{UsearchStore, VectorStore},
+    };
+    use tokio::sync::RwLock;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(32).with_chunking(20));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(32).expect("usearch"));
+    let indexer = CodeIndexer::new("window-split", tmp.path()).with_components(embedder, store);
+    let body: Vec<String> = (0..40).map(|i| format!("    let v{i} = {i};")).collect();
+    let source = format!("fn long_one() {{\n{}\n}}\n", body.join("\n"));
+    indexer
+        .index_file("src/a.rs", &source)
+        .await
+        .expect("index the long file");
+
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("window-split"),
+        Arc::new(RwLock::new(indexer)),
+        tmp.path().to_path_buf(),
+    ));
+    let state = Arc::new(SearchAppState::new(registry));
+    let body = super::status::index_status_report(&state, "window-split")
+        .await
+        .expect("status 200");
+    let window = &body["embed_window"];
+    assert_eq!(window["window"], 20);
+    assert_eq!(window["truncated"], 0, "windows fit: {window}");
+    assert_eq!(window["unmeasured"], 0, "{window}");
+    assert_eq!(window["chunks_split"], 1, "{window}");
 }
