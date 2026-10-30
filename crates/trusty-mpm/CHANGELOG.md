@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.11.0] — 2026-10-30
+
+### Added
+
+- The bundled skill set gains `prototype-then-port`, registered in the framework manifest so it deploys to every project.
+
+### Fixed
+
+- A start replays at most half its push buffer from the spool, and sends the replay to trusty-events at once instead of one flush interval later. Hooks that arrive before that first flush no longer evict replayed events, so a replayed spool file retires and the files deferred behind it replay on the next start (Refs [#10467](https://github.com/bobmatnyc/trusty-tools/issues/10467))
+- The log line for spool files left on disk (held by another process, or deferred past the replay budget) is now a warning
+- Action-event spool replay no longer deletes a spool file before its events reach the bus. A replayed file stays on disk, locked, until its events are written to trusty-events or spooled again at stop, so a process SIGKILLed between the take and the flush loses none of the backlog (Refs [#10467](https://github.com/bobmatnyc/trusty-tools/issues/10467))
+- A start replays no more spool files than its push buffer holds; newer files stay on disk for a later start. A file whose replayed events the buffer may have evicted is kept, never deleted
+- Delivery is at-least-once: a file is retired whole, so a crash after part of it was sent replays all of it, and a kept file replays in full. trusty-events drops a repeated event id only while the first copy is still in its in-memory ring (8192 entries, not reloaded after a trusty-events restart); exactly-once across a crash needs bus acknowledgements and is out of scope
+
+### Changed
+
+- The shipped-skill history records the earlier `architect-strategy` text, so a deployed copy of it is recognised and upgraded.
+
+### Security
+
+- The Architect session registers its PM guard in exec form (`<tm>` with `args: ["hook", "--pm-guard"]`, no `sh -c`) with `onFailure: "block"`, so a guard that cannot start, crashes or times out denies the tool call. The prompt hooks (`UserPromptSubmit`, `UserPromptExpansion` matcher `tm-run`) are registered only when `[architect] direct_commands = true` (default `false`). PM and agent sessions keep their hooks unchanged (#10459).
+- Every seam that starts an Architect `claude` refuses Claude Code older than v2.1.295, and a `claude --version` that cannot be read or parsed, before it writes anything: the shared session prep (`tm fleet init`/`relaunch`, `tm launch`, `tm connect`, `tm session start`, the HTTP connect client, daemon managed and in-project prep, `tm meta`, standalone load, repair), the resume hook merge (daemon resume, in-place relaunch, control-plane worker), the daemon adapter's spawn, resume and in-place relaunch, and the GUI spawn line (#10459).
+
+### Documentation
+
+- The action-event settle doc now states that under load the 200 ms signal budget can end before the spool write lands; the signal path then reports an upper-bound `lost` count while the settle still spools the events (#10412).
+
 ## [1.10.0] — 2026-10-30
 
 ### Added

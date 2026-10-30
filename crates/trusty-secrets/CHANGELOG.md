@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.0] — 2026-10-30
+
+### Added
+
+- `secrets.ticket.mint`, `secrets.ticket.void` and `secrets.ticket.pending`: in-memory, one-use main-thread tickets with a 60 s TTL, bound to the session, prompt and tool-use ids, the redeemer's argv hash, the Architect `claude` (pid and start time), the op, the project and the key. A mint comes only from the installed `tm` running `tm hook --pm-guard` as a fresh direct child of the launched Architect's `claude`; every refusal is `ticket_refused`. Every void cause a hook sends (`pre_tool_use`, `subagent_pre_tool_use`, `stop`) removes the session's tickets. A restart drops every ticket (#10459).
+- Audit records `secrets.ticket.mint`, `secrets.ticket.void` and `secrets.ticket.redeem` with a `ticket` object (event, ids, argv hash, `reason_arm`, `void_cause`). Mint and redeem records are written first; a void removes the ticket, then records it. No value and no argv (#10459).
+
+### Changed
+
+- `secrets.set` and a local one-key `secrets.copy` accept any key, including one the operator denied to agents, from a caller whose nearest Claude Code process is the `claude` that `tm fleet init` or `tm fleet relaunch` launched as the Architect, and only when that caller also redeems a main-thread ticket minted for that exact call. The launch-record check reads `~/.trusty-mpm/architect-launch/<pid>.architect` and requires its PID, start time and project directory to match the live process. A missing, unreadable, stale or mismatched record, or no matching ticket, keeps the agent rules (#10459).
+- Minting is off in this release (`mint_enabled` defaults to `false` and nothing turns it on), so every caller under Claude Code keeps today's agent rules (#10459).
+- Audit records of a write the Architect exemption allowed carry `architect: true`; when an agent caller is refused the exemption, the records name the failed check in `architect_refusal` (for example `start_time_mismatch` or `no_ticket`), with no pid, path or value. `architect: true` is not proof of identity: same-uid code can forge a record or a mint. `delete`, removing a deny and a sync-target copy stay operator-only (#10459).
+
 ## [0.3.0] — 2026-10-30
 
 ### Breaking
