@@ -320,6 +320,16 @@ impl Embedder for SwitchableEmbedder {
     > {
         self.current().chunking_tokenizer()
     }
+
+    // #10504: the installed backend's split window, so a lazy sidecar's assumed one survives.
+    fn split_window(
+        &self,
+    ) -> std::result::Result<
+        Option<(usize, Arc<trusty_common::embedder::ChunkTokenizer>)>,
+        trusty_common::embedder::ChunkError,
+    > {
+        self.current().split_window()
+    }
 }
 
 #[cfg(test)]

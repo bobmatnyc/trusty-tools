@@ -322,7 +322,14 @@ pub(super) async fn prepare_and_parse_batch(
         // lexical-only parse so this batch still commits its chunks instead of
         // waiting on an embedder the process is about to drop.
         let result = if !embeds_inline || embedding_drained {
-            indexer.parse_files_only(to_index).await
+            // #10504: a deferred index splits at the embedder window; lexical-only,
+            // vector-skipping and drained batches keep the plain parse.
+            let split = ctx.defer_embed
+                && !ctx.lexical_only
+                && !ctx.skip_vector
+                && !embedding_drained
+                && crate::core::indexer::deferred_split_enabled();
+            indexer.parse_files_deferred(to_index, split).await
         } else {
             use crate::core::indexer::PROGRESS_CHUNK_INTERVAL;
             use std::sync::atomic::Ordering;
