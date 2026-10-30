@@ -3,17 +3,16 @@
 //! Why: a registration that restored vectors but zero corpus rows reported
 //! `status: "ready"` with `search_capabilities: ["vector"]`, and every search
 //! returned nothing because no row answered a vector hit's id.
-//! What: drives the real `create_index_handler` over a colocated root whose
+//! What: drives the real `create_index_report` over a colocated root whose
 //! HNSW snapshot survived and whose `index.redb` did not, then reads the
 //! status body `GET /indexes/{id}/status` serves.
 //! Test: `cargo test -p trusty-search tests_8134`.
 
+use super::test_support::create_answer;
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::{IndexId, IndexRegistry, StageStatus};
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 
 fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateIndexRequest {
@@ -59,12 +58,8 @@ async fn create_index_vectors_over_an_empty_corpus_is_not_ready() {
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-8134-orphan-");
     let id = IndexId::new("ts-8134-orphan");
 
-    let first = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req(&id.0, root.clone())),
-    )
-    .await;
-    assert_eq!(first.status(), StatusCode::OK, "first create must succeed");
+    let first = create_answer(&state, create_req(&id.0, root.clone())).await;
+    assert_eq!(first.0, StatusCode::OK, "first create must succeed");
     {
         let handle = state.registry.get(&id).expect("registered");
         let indexer = handle.indexer.read().await;
@@ -93,12 +88,8 @@ async fn create_index_vectors_over_an_empty_corpus_is_not_ready() {
         .join("index.redb");
     assert!(!redb.exists(), "precondition: no colocated corpus rows");
 
-    let second = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req(&id.0, root.clone())),
-    )
-    .await;
-    assert_eq!(second.status(), StatusCode::OK, "re-register");
+    let second = create_answer(&state, create_req(&id.0, root.clone())).await;
+    assert_eq!(second.0, StatusCode::OK, "re-register");
 
     let handle = state.registry.get(&id).expect("re-registered");
     assert!(

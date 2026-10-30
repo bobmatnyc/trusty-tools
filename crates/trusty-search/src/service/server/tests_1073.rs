@@ -8,12 +8,11 @@
 //! require a running daemon or a real embedder.
 //! Test: run with `cargo test -p trusty-search tests_1073`.
 
+use super::test_support::{create_answer, relocate_answer};
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 
 // ── Test 1: PATCH /indexes/:id returns 404 for an unknown index id ───────────
@@ -21,32 +20,28 @@ use std::sync::Arc;
 /// `PATCH /indexes/:id` with an unregistered id must return `404 Not Found`.
 ///
 /// Why: ensures the handler's "index not found" guard works and doesn't panic.
-/// What: calls `relocate_index_handler` with a state that has no registered
+/// What: calls `relocate_index_report` with a state that has no registered
 /// indexes; asserts the response status is `404`.
 /// Test: this test (pure in-memory, no network or embedder required).
 #[tokio::test]
 #[serial_test::serial]
 async fn relocate_index_returns_404_for_unknown_id() {
-    use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
-    use axum::body::to_bytes;
-    use axum::extract::Path;
+    use super::indexes_relocate::RelocateIndexRequest;
 
     let state = SearchAppState::new(IndexRegistry::new());
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let resp = relocate_index_handler(
-        State(Arc::clone(&state_arc)),
-        Path("no-such-index-xyz".to_string()),
-        Json(RelocateIndexRequest {
+    let (status, v) = relocate_answer(
+        &state_arc,
+        "no-such-index-xyz",
+        RelocateIndexRequest {
             root_path: std::path::PathBuf::from("/tmp"),
-        }),
+        },
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
-    let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
     assert!(
         err.contains("no-such-index-xyz"),
@@ -67,10 +62,8 @@ async fn relocate_index_returns_404_for_unknown_id() {
 #[tokio::test]
 #[serial_test::serial]
 async fn relocate_index_updates_root_path() {
-    use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
+    use super::indexes_relocate::RelocateIndexRequest;
     use super::router::CreateIndexRequest;
-    use axum::body::to_bytes;
-    use axum::extract::Path;
 
     let state = SearchAppState::new(IndexRegistry::new());
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
@@ -84,9 +77,9 @@ async fn relocate_index_updates_root_path() {
     let (_new_dir, new_root) = super::test_support::allowlisted_index_root("ts-relocate-new-");
 
     // Step 1: register the index at old_root.
-    let create_resp = super::indexes::create_index_handler(
-        State(Arc::clone(&state_arc)),
-        Json(CreateIndexRequest {
+    let create_resp = create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "relocate-test-1073".into(),
             root_path: old_root.clone(),
@@ -106,28 +99,21 @@ async fn relocate_index_updates_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
-        }),
+        },
     )
     .await;
-    assert_eq!(
-        create_resp.status(),
-        StatusCode::OK,
-        "initial create must succeed"
-    );
+    assert_eq!(create_resp.0, StatusCode::OK, "initial create must succeed");
 
     // Step 2: relocate to new_root.
-    let patch_resp = relocate_index_handler(
-        State(Arc::clone(&state_arc)),
-        Path("relocate-test-1073".to_string()),
-        Json(RelocateIndexRequest {
+    let (status, v) = relocate_answer(
+        &state_arc,
+        "relocate-test-1073",
+        RelocateIndexRequest {
             root_path: new_root.clone(),
-        }),
+        },
     )
     .await;
-    assert_eq!(patch_resp.status(), StatusCode::OK, "relocate must succeed");
-
-    let body = to_bytes(patch_resp.into_body(), 4096).await.expect("body");
-    let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(status, StatusCode::OK, "relocate must succeed");
     assert_eq!(
         v.get("relocated").and_then(|x| x.as_bool()),
         Some(true),

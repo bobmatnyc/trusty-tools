@@ -1,7 +1,7 @@
 //! Handler-level regression for #5357 — a FAILED read of either trust-gate
 //! input must refuse the root override, not wave it through.
 //!
-//! Why: `reindex_handler`'s #2178 mirror read both of its inputs with
+//! Why: `reindex_report`'s #2178 mirror read both of its inputs with
 //! `unwrap_or(None)` / `.ok()`, and `root_move_is_trusted(None, _)` is `true`.
 //! So a redb fault on the corpus's `_meta` table skipped the gate entirely, and
 //! an unparseable `indexes.toml` — the exact state #4317/#4871 already found in
@@ -18,14 +18,13 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::reindex_handlers::{reindex_handler, ReindexRequest};
+use super::reindex_handlers::{reindex_report, ReindexRequest};
 use crate::core::corpus::CorpusStore;
 use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::store::{UsearchStore, VectorStore};
 use crate::service::server::state::SearchAppState;
-use axum::extract::{Json, Path, State};
 
 /// Everything the two tests share: a corpus-backed index rooted at `root_old`
 /// with one seeded chunk, plus the sub-root the override will target.
@@ -92,17 +91,17 @@ async fn expect_refusal(
     id: &str,
     context: &str,
 ) -> (axum::http::StatusCode, serde_json::Value) {
-    let result = reindex_handler(
-        State(Arc::clone(&fx.state)),
-        Path(id.to_string()),
-        Some(Json(ReindexRequest {
+    let result = reindex_report(
+        &fx.state,
+        id,
+        Some(ReindexRequest {
             root_path: Some(fx.root_new.clone()),
             force: None,
             background: None,
-        })),
+        }),
     )
     .await;
-    let refused = result.err().map(|(status, Json(body))| (status, body));
+    let refused = result.err();
     refused.unwrap_or_else(|| panic!("{context}"))
 }
 

@@ -134,7 +134,7 @@ pub(super) async fn run_reindex(
     // finish-phase prune pass and the existing corpus is left untouched.
     //
     // #5357: the decision itself lives in `root_gate` so this path and
-    // `reindex_handler`'s request-time mirror of it can never drift, and so a
+    // `reindex_report`'s request-time mirror of it can never drift, and so a
     // FAILED read of either input refuses instead of degrading to "trusted".
     let gate = root_gate::evaluate_root_move(
         &index_id.0,

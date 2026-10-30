@@ -574,7 +574,7 @@ async fn reindex_accepts_root_move_that_matches_persisted_config() {
 /// Why: `reindex_accepts_root_move_that_matches_persisted_config` above builds
 /// its `CodeIndexer` already AT the target root, so the sync call is a no-op
 /// there whether or not it runs — deleting it would leave that test green.
-/// This test instead reproduces `reindex_handlers.rs::reindex_handler`'s real
+/// This test instead reproduces `reindex_handlers.rs::reindex_report`'s real
 /// pre-runner state for an ACCEPTED move: that handler only syncs the indexer
 /// itself on the `!trusted.moved` arm (an untouched corpus, so nothing to
 /// re-relativize); a trusted MOVE is deliberately left for the runner's own

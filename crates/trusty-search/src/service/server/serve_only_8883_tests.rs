@@ -18,7 +18,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use tokio::sync::RwLock;
 
@@ -30,7 +29,7 @@ use crate::service::network_fs::MountKind;
 use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexClaimError, ReindexProgress};
 use crate::service::watcher_manager::WatcherManager;
 
-use super::reindex_handlers::{reindex_handler, start_release_catch_up};
+use super::reindex_handlers::{reindex_report, start_release_catch_up};
 use super::state::SearchAppState;
 
 const DIM: usize = 8;
@@ -79,15 +78,11 @@ async fn reindex_of_a_serve_only_index_is_refused_with_403() {
     let (_, before) = handle_and_chunks(&state, "serve-only-8883").await;
     assert!(before > 0, "precondition: the shipped corpus holds chunks");
 
-    let refused = reindex_handler(
-        State(Arc::clone(&state)),
-        AxumPath("serve-only-8883".to_string()),
-        None,
-    )
-    .await
-    .expect_err("#8883: a serve-only index must not accept a reindex");
+    let refused = reindex_report(&state, "serve-only-8883", None)
+        .await
+        .expect_err("#8883: a serve-only index must not accept a reindex");
 
-    let (status, axum::Json(body)) = refused;
+    let (status, body) = refused;
     assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
     assert_eq!(body["error"], "index_serve_only");
     assert_eq!(body["index_id"], "serve-only-8883");
@@ -119,14 +114,10 @@ async fn reindex_of_a_normal_index_is_still_queued() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = planted("normal-8883", dir.path(), false).await;
 
-    let axum::Json(body) = reindex_handler(
-        State(Arc::clone(&state)),
-        AxumPath("normal-8883".to_string()),
-        None,
-    )
-    .await
-    .map_err(|(status, axum::Json(body))| format!("{status}: {body}"))
-    .expect("a normal index must accept a reindex");
+    let body = reindex_report(&state, "normal-8883", None)
+        .await
+        .map_err(|(status, body)| format!("{status}: {body}"))
+        .expect("a normal index must accept a reindex");
 
     assert_eq!(body["queued"], true, "body: {body}");
     assert!(
@@ -263,7 +254,7 @@ async fn a_create_over_a_cold_serve_only_index_keeps_the_mark() {
         .expect("indexes.toml reads")
         .expect("the entry is still registered");
     let handle = state.registry.get(&IndexId::new(id)).expect("now live");
-    let refused = reindex_handler(State(Arc::clone(&state)), AxumPath(id.to_string()), None).await;
+    let refused = reindex_report(&state, id, None).await;
     remove_index_registry_entry(id).expect("clean up the entry");
 
     assert!(
@@ -271,7 +262,7 @@ async fn a_create_over_a_cold_serve_only_index_keeps_the_mark() {
         "#8883: the create cleared the operator's mark"
     );
     assert!(handle.serve_only, "#8883: the live handle lost the mark");
-    let (status, axum::Json(body)) = refused.expect_err("#8883: the reindex must stay refused");
+    let (status, body) = refused.expect_err("#8883: the reindex must stay refused");
     assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
     assert_eq!(body["error"], "index_serve_only");
 }

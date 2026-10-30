@@ -24,7 +24,6 @@
 
 use super::*;
 use axum::http::StatusCode;
-use axum::Json;
 
 /// Same definition redb keyed the corpus rows under — redb identifies a table
 /// by name, so dropping this one breaks the real reads.
@@ -173,15 +172,9 @@ fn grep_request(pattern: &str) -> crate::service::grep::GrepRequest {
 #[serial_test::serial]
 async fn search_over_an_unreadable_corpus_returns_503_naming_the_index() {
     let fx = Fixture::build("corpus-read-5917").await;
-    let call = |q| {
-        search_handler(
-            axum::extract::State(Arc::clone(&fx.state)),
-            axum::extract::Path("corpus-read-5917".to_string()),
-            axum::extract::Json(q),
-        )
-    };
+    let call = |q| search_report(&fx.state, "corpus-read-5917", q);
 
-    let Json(warm) = call(search_query("authenticate_user"))
+    let warm = call(search_query("authenticate_user"))
         .await
         .expect("the query answers while the corpus reads");
     assert!(
@@ -193,7 +186,7 @@ async fn search_over_an_unreadable_corpus_returns_503_naming_the_index() {
     );
 
     fx.break_corpus_reads().await;
-    let (status, Json(body)) = call(search_query("authenticate_user"))
+    let (status, body) = call(search_query("authenticate_user"))
         .await
         .expect_err("an unreadable corpus must be refused");
     assert_corpus_unavailable(status, &body, "corpus-read-5917", "search");
@@ -297,9 +290,9 @@ async fn global_search_reports_the_index_it_dropped_for_an_unreadable_corpus() {
     let fx = Fixture::build("global-search-5917").await;
     fx.break_corpus_reads().await;
 
-    let Json(body) = super::search_global::global_search_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Json(super::search_global::GlobalSearchRequest {
+    let body = super::global_search_report(
+        &fx.state,
+        super::search_global::GlobalSearchRequest {
             query: "authenticate_user".to_string(),
             top_k: 5,
             full_content: false,
@@ -314,7 +307,7 @@ async fn global_search_reports_the_index_it_dropped_for_an_unreadable_corpus() {
             per_index_deadline_ms: None,
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await
     .expect("the fan-out itself still answers");
@@ -356,9 +349,9 @@ async fn global_search_reports_the_index_it_dropped_for_a_running_migration() {
     let flag = handle.indexer.read().await.migration_flag();
     let _window = crate::core::indexer::MigrationWindow::open(flag);
 
-    let Json(body) = super::search_global::global_search_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Json(super::search_global::GlobalSearchRequest {
+    let body = super::global_search_report(
+        &fx.state,
+        super::search_global::GlobalSearchRequest {
             query: "authenticate_user".to_string(),
             top_k: 5,
             full_content: false,
@@ -373,7 +366,7 @@ async fn global_search_reports_the_index_it_dropped_for_a_running_migration() {
             per_index_deadline_ms: None,
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await
     .expect("the fan-out itself still answers");

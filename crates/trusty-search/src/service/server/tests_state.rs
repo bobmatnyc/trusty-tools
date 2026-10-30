@@ -2,9 +2,7 @@
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 #[tokio::test]
 #[serial_test::parallel]
 async fn install_embedder_error_surfaces_in_health() {
@@ -15,10 +13,10 @@ async fn install_embedder_error_surfaces_in_health() {
         .install_embedder_error("init timed out after 60s")
         .await;
     let state_arc = Arc::new(state);
-    let Json(resp) = health_handler(State(state_arc)).await;
-    assert_eq!(resp.embedder, "error");
+    let resp = health_report(state_arc).await;
+    assert_eq!(resp["embedder"], "error");
     assert_eq!(
-        resp.embedder_error.as_deref(),
+        resp["embedder_error"].as_str(),
         Some("init timed out after 60s"),
     );
 }
@@ -31,7 +29,6 @@ async fn install_embedder_error_surfaces_in_health() {
 #[serial_test::parallel]
 async fn create_index_returns_503_with_error_when_embedder_failed() {
     use crate::core::registry::IndexRegistry;
-    use axum::body::to_bytes;
 
     let state = SearchAppState::new(IndexRegistry::new());
     state
@@ -45,9 +42,9 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
     // the sensitive-root denylist — use `test_support::allowlisted_index_root`
     // instead (issue #3955).
     let (_test_dir, test_root) = super::test_support::allowlisted_index_root("ts-embedder-fail-");
-    let resp = create_index_handler(
-        State(state_arc),
-        Json(CreateIndexRequest {
+    let (status, body) = super::test_support::create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "demo".to_string(),
             root_path: test_root,
@@ -67,14 +64,10 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
-        }),
+        },
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body_bytes = to_bytes(resp.into_body(), 64 * 1024)
-        .await
-        .expect("read body");
-    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid json");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let err_str = body
         .get("error")
         .and_then(|v| v.as_str())
@@ -110,9 +103,9 @@ async fn install_embedder_clears_previous_error() {
     assert!(state.is_embedder_ready());
 
     let state_arc = Arc::new(state);
-    let Json(resp) = health_handler(State(state_arc)).await;
-    assert_eq!(resp.embedder, "ready");
-    assert!(resp.embedder_error.is_none());
+    let resp = health_report(state_arc).await;
+    assert_eq!(resp["embedder"], "ready");
+    assert!(resp.get("embedder_error").is_none());
 }
 
 /// Epic #3524 slice 6 (PR 1/5): `install_switchable_embedder` must make the
@@ -158,7 +151,7 @@ async fn switchable_embedder_installed_alongside_embedder() {
 /// had no content-hash entry yet, pushes RSS over the limit again, and
 /// aborts again.
 /// What: stages an index, records a memory-abort timestamp, calls
-/// `reindex_handler` and asserts the 429 + JSON body shape. Then resets
+/// `reindex_report` and asserts the 429 + JSON body shape. Then resets
 /// the cooldown env to 0 s, removes the entry, and verifies the next
 /// call queues successfully.
 /// Test: this test.
@@ -188,29 +181,20 @@ async fn reindex_handler_rejects_within_cooldown() {
         .insert(id.clone(), std::time::Instant::now());
 
     // Default cooldown is 300 s — handler must refuse with 429.
-    let result = reindex_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cooldown-test".to_string()),
-        None,
-    )
-    .await;
+    let result = reindex_report(&state, "cooldown-test", None).await;
     let err = result.expect_err("expected 429 inside cooldown window");
     assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
-    let body = err.1 .0;
+    let body = err.1;
     assert!(body.get("retry_after_secs").is_some());
     assert!(body.get("hint").is_some());
     assert_eq!(body["index_id"], "cooldown-test");
 
     // Drop the abort entry and verify the next call queues successfully.
     state.last_reindex_aborted_at.remove(&id);
-    let ok = reindex_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cooldown-test".to_string()),
-        None,
-    )
-    .await
-    .expect("queued");
-    assert_eq!(ok.0["queued"], serde_json::Value::Bool(true));
+    let ok = reindex_report(&state, "cooldown-test", None)
+        .await
+        .expect("queued");
+    assert_eq!(ok["queued"], serde_json::Value::Bool(true));
 }
 
 /// Issue #120: the `AbortedMemory` variant must serialize to the
@@ -260,23 +244,17 @@ async fn index_status_reports_indexing_then_ready() {
     let state = Arc::new(SearchAppState::new(registry));
 
     // No progress entry yet → idle index reports "ready".
-    let Json(idle) = index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("status-test".to_string()),
-    )
-    .await
-    .expect("status 200");
+    let idle = super::status::index_status_report(&state, "status-test")
+        .await
+        .expect("status 200");
     assert_eq!(idle["status"], "ready", "idle index must report ready");
 
     // A Running reindex must surface "indexing".
     let progress = Arc::new(ReindexProgress::new()); // defaults to Running
     state.reindex_progress.insert(id.clone(), progress.clone());
-    let Json(running) = index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("status-test".to_string()),
-    )
-    .await
-    .expect("status 200");
+    let running = super::status::index_status_report(&state, "status-test")
+        .await
+        .expect("status 200");
     assert_eq!(
         running["status"], "indexing",
         "running reindex must report indexing"
@@ -284,12 +262,9 @@ async fn index_status_reports_indexing_then_ready() {
 
     // A terminal state maps back to "ready".
     progress.status.store(ReindexStatus::Complete);
-    let Json(done) = index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("status-test".to_string()),
-    )
-    .await
-    .expect("status 200");
+    let done = super::status::index_status_report(&state, "status-test")
+        .await
+        .expect("status 200");
     assert_eq!(
         done["status"], "ready",
         "completed reindex must report ready"
@@ -302,23 +277,29 @@ async fn index_status_reports_indexing_then_ready() {
 /// Why: external probes and the admin UI render these; the JSON contract
 /// must remain stable. `rss_mb` is sampled live so it is asserted only
 /// for presence, not an exact value.
-/// What: builds a bare `SearchAppState`, calls `health_handler`, and
+/// What: builds a bare `SearchAppState`, calls `health_report`, and
 /// asserts every new field deserialises with a plausible value.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::parallel]
 async fn health_includes_resource_fields() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     // rss_mb is sampled from the live test process; tolerate 0 only in
     // sandboxes where /proc is restricted, but it must be a sane unit.
-    assert!(resp.rss_mb < 1024 * 1024, "rss_mb unit must be MB");
+    assert!(
+        resp["rss_mb"].as_u64().expect("rss_mb is a u64") < 1024 * 1024,
+        "rss_mb unit must be MB"
+    );
     // cpu_pct is a non-negative percentage (first sample may be 0.0).
-    assert!(resp.cpu_pct >= 0.0, "cpu_pct must be non-negative");
+    assert!(
+        resp["cpu_pct"].as_f64().expect("cpu_pct is a number") >= 0.0,
+        "cpu_pct must be non-negative"
+    );
     // disk_bytes / rss_limit_mb are u64 — presence is the contract here;
     // the disk ticker has not run yet so disk_bytes is 0.
-    assert_eq!(resp.disk_bytes, 0, "disk ticker has not ticked yet");
-    let _ = resp.rss_limit_mb;
+    assert_eq!(resp["disk_bytes"], 0, "disk ticker has not ticked yet");
+    let _ = resp["rss_limit_mb"];
 }
 
 // ---------------------------------------------------------------------------
@@ -353,16 +334,16 @@ async fn health_non_blocking_when_embedder_slot_write_locked() {
         "try_current_embedder must return None when write lock is held"
     );
 
-    // Verify health_handler also completes without deadlock while
+    // Verify health_report also completes without deadlock while
     // the write lock is held (embedder_info block will be absent / None).
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
     assert_eq!(
-        resp.status, "ok",
+        resp["status"], "ok",
         "health must return ok even when embedder slot is write-locked"
     );
     // embedder_info is None because try_current_embedder returned None.
     assert!(
-        resp.embedder_info.is_none(),
+        resp.get("embedder_info").is_none(),
         "embedder_info must be absent when slot is write-locked (non-blocking fallback)",
     );
 }
@@ -370,7 +351,7 @@ async fn health_non_blocking_when_embedder_slot_write_locked() {
 /// Issue #1006 — Option B: once an embedder is installed, `/health`
 /// surfaces the embedder_info block via the non-blocking `try_current_embedder()`.
 ///
-/// Why: `health_handler` must still provide `embedder_info` when the
+/// Why: `health_report` must still provide `embedder_info` when the
 /// embedder slot is available (the common steady-state path). This test
 /// guards against accidentally always returning `None`.
 /// What: installs a `MockEmbedder` (384-dim), calls `/health`, and asserts
@@ -386,10 +367,10 @@ async fn health_includes_embedder_info_when_ready() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let Json(resp) = health_handler(State(state_arc)).await;
-    assert_eq!(resp.embedder, "ready");
+    let resp = health_report(state_arc).await;
+    assert_eq!(resp["embedder"], "ready");
     assert!(
-        resp.embedder_info.is_some(),
+        resp.get("embedder_info").is_some(),
         "embedder_info must be present when embedder is installed and slot is uncontended"
     );
 }
@@ -440,7 +421,7 @@ async fn health_prefers_real_provider_readback_over_prediction() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let Json(resp) = health_handler(State(state_arc)).await;
+    let resp = health_report(state_arc).await;
     // `EmbedderInfo`'s fields are `pub(super)` to the `health` module, not
     // visible from this sibling test module — round-trip through JSON
     // (the wire format external callers actually observe) instead.
@@ -470,7 +451,7 @@ async fn health_falls_back_to_predicted_provider_when_no_readback() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let Json(resp) = health_handler(State(state_arc)).await;
+    let resp = health_report(state_arc).await;
     let value = serde_json::to_value(&resp).expect("HealthResponse must serialize");
     let provider = value["embedder_info"]["provider"]
         .as_str()
@@ -640,12 +621,9 @@ async fn index_status_reports_the_embed_window_counters() {
         tmp.path().to_path_buf(),
     ));
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(body) = index_status_handler(
-        State(state),
-        axum::extract::Path("window-status".to_string()),
-    )
-    .await
-    .expect("status 200");
+    let body = super::status::index_status_report(&state, "window-status")
+        .await
+        .expect("status 200");
     let window = &body["embed_window"];
     assert_eq!(window["window"], 8);
     assert_eq!(window["truncated"], 1);

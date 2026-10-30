@@ -242,7 +242,7 @@ pub(super) async fn apply_component_transition(
 /// [`apply_component_transition`]); the actual KG reload/rebuild and/or
 /// vector backfill run in the background and flip the stage to
 /// `Ready`/`Failed` on completion. `permit` was acquired by the caller
-/// (`patch_index_config_handler`) via `try_acquire` BEFORE any state mutated,
+/// (`patch_index_config_report`) via `try_acquire` BEFORE any state mutated,
 /// so a concurrent reindex or another catch-up on this index always sees a
 /// busy semaphore and the caller returns `409` — moving it into this task
 /// (rather than re-acquiring here) avoids a nested-acquire deadlock against

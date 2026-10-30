@@ -331,7 +331,7 @@ pub(super) fn file_is_within_any_root(
 /// `root_path` collides with `candidate`, excluding `exclude_id` (issue
 /// #2336, widened for #3993 — see below).
 ///
-/// Why: `create_index_handler` and `relocate_index_handler` previously
+/// Why: `create_index_report` and `relocate_index_report` previously
 /// guarded only *id* collisions, never *root_path* collisions. Two live
 /// registrations sharing one colocated root resolve to the SAME on-disk
 /// `<root>/.trusty-search/index.redb` — redb is a single-open database, so
@@ -342,7 +342,7 @@ pub(super) fn file_is_within_any_root(
 /// dedup fixed only for the boot path. This guard rejects the registration
 /// up front instead of building a broken indexer first.
 ///
-/// Issue #3993: also called from `reindex_handlers::reindex_handler`
+/// Issue #3993: also called from `reindex_handlers::reindex_report`
 /// (Gap E — a `root_path` override previously had no collision check at
 /// all) and from `service::lazy_restore::restore_index_on_demand` (Gap F —
 /// a cold/unloaded entry's on-demand restore previously opened its redb
@@ -395,7 +395,7 @@ pub(super) fn file_is_within_any_root(
 /// handles are checked first, purely because that is the hot/common case —
 /// there is no first-claimant meaning to the scan ORDER itself, only to
 /// which entries are considered candidates at all), skipping `exclude_id`
-/// (used by `relocate_index_handler` so an index is never compared against
+/// (used by `relocate_index_report` so an index is never compared against
 /// itself, and by `restore_index_on_demand` so a cold entry is never
 /// compared against its own not-yet-removed cold-store record).
 /// Test: `create_index_rejects_duplicate_root_path`,

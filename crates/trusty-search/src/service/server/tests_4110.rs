@@ -1,6 +1,6 @@
 //! Regression tests for restore-derived stage status on `POST /indexes` (#4110).
 //!
-//! Why: `create_index_handler` doubles as the "adopt an existing colocated
+//! Why: `create_index_report` doubles as the "adopt an existing colocated
 //! corpus" door — `build_indexer_from_entry` synchronously restores the redb
 //! corpus, the HNSW snapshot and the symbol graph — but the handler then
 //! asserted `lexical: pending(), semantic: pending()` unconditionally,
@@ -11,7 +11,7 @@
 //! `match_reason="bm25"` — indistinguishable from a genuinely dead lane. Only
 //! a daemon restart cleared it, because the warm-boot path already classified
 //! correctly from the same signals.
-//! What: both tests drive the REAL `create_index_handler` through a
+//! What: both tests drive the REAL `create_index_report` through a
 //! create → index content → unregister → re-register cycle, so the second
 //! registration performs a genuine colocated restore. The pair differs in ONE
 //! input — whether an HNSW snapshot was persisted before the re-register — so
@@ -21,12 +21,11 @@
 //! `Pending` for every stage regardless of what restored.
 //! Test: this module. Run with `cargo test -p trusty-search tests_4110`.
 
+use super::test_support::create_answer;
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::{IndexId, IndexRegistry, StageStatus};
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 
 /// A `CreateIndexRequest` with every optional field defaulted.
@@ -59,7 +58,7 @@ fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateI
 }
 
 /// Fresh registry with a mock embedder installed — enough for
-/// `create_index_handler` to run without a live daemon or network. The mock's
+/// `create_index_report` to run without a live daemon or network. The mock's
 /// 8 dimensions are used for BOTH registrations in a test, so a persisted
 /// snapshot always reloads at a matching dimension (a mismatch would set
 /// `hnsw_load_failed` and defeat the scenario under test).
@@ -73,7 +72,7 @@ async fn mock_state() -> Arc<SearchAppState> {
 /// Run the create → index-content → (optionally persist HNSW) → unregister →
 /// re-register cycle and return the stages the SECOND registration produced.
 ///
-/// Why: the second `create_index_handler` call is the code path under test —
+/// Why: the second `create_index_report` call is the code path under test —
 /// the first exists only to lay down a real colocated corpus for it to
 /// restore. Sharing the driver between both tests is what makes the pair a
 /// controlled experiment: `persist_hnsw` is the single differing input.
@@ -91,12 +90,8 @@ async fn stages_after_restore(
     let (_dir, root) = super::test_support::allowlisted_index_root(prefix);
     let id = IndexId::new(format!("{}restore", prefix));
 
-    let first = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req(&id.0, root.clone())),
-    )
-    .await;
-    assert_eq!(first.status(), StatusCode::OK, "first create must succeed");
+    let first = create_answer(&state, create_req(&id.0, root.clone())).await;
+    assert_eq!(first.0, StatusCode::OK, "first create must succeed");
 
     {
         let handle = state
@@ -142,13 +137,9 @@ async fn stages_after_restore(
         "index must have been registered to unregister"
     );
 
-    let second = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req(&id.0, root.clone())),
-    )
-    .await;
+    let second = create_answer(&state, create_req(&id.0, root.clone())).await;
     assert_eq!(
-        second.status(),
+        second.0,
         StatusCode::OK,
         "re-register over the existing colocated corpus must succeed"
     );
@@ -170,7 +161,7 @@ async fn stages_after_restore(
 /// against a fully-intact index until the daemon was restarted.
 /// Test: this test.
 ///
-/// `#[serial]` because `create_index_handler` persists to `indexes.toml` under
+/// `#[serial]` because `create_index_report` persists to `indexes.toml` under
 /// whatever `TRUSTY_DATA_DIR` resolves to at that instant. Several suites in
 /// this binary (e.g. `tests_components::IsolatedDataDir`) redirect that env var
 /// for the duration of a serial test, so running unserialised would write this

@@ -5,7 +5,7 @@
 //! field to opt out. On a root-owned root that adoption answered `500 corpus
 //! open failed …; refusing to register a broken index handle`, so an index
 //! deliberately kept in the data-dir store could not be registered.
-//! What: drives the real `create_index_handler` against roots holding a
+//! What: drives the real `create_index_report` against roots holding a
 //! read-only or writable colocated corpus, a read-only root with none, a
 //! colocated registration (resident and row-only), and an unreadable registry.
 //! Unix-only (permission bits); the read-only cases skip under euid 0, where
@@ -19,9 +19,7 @@ use crate::core::registry::{IndexId, IndexRegistry};
 use crate::service::colocated_storage::COLOCATED_DIR_NAME;
 use crate::service::persistence::{find_index_registry_entry, PersistedIndex};
 use crate::service::storage_layout::{layout_of, StorageLayout};
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -62,20 +60,14 @@ async fn mock_state() -> Arc<SearchAppState> {
     Arc::new(state)
 }
 
-/// POST a create through the real handler; returns status and JSON body.
+/// POST a create through the real create core; returns status and JSON body.
 async fn create(
     state: &Arc<SearchAppState>,
     id: &str,
     root: &Path,
     colocated: Option<bool>,
 ) -> (StatusCode, serde_json::Value) {
-    let resp = super::indexes::create_index_handler(
-        State(Arc::clone(state)),
-        Json(create_req(id, root.to_path_buf(), colocated)),
-    )
-    .await;
-    let status = resp.status();
-    (status, super::tests_components::body_json(resp).await)
+    super::test_support::create_answer(state, create_req(id, root.to_path_buf(), colocated)).await
 }
 
 /// Seed `<root>/.trusty-search/index.redb`: the corpus a pre-#8499

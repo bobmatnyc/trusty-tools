@@ -86,7 +86,7 @@ impl ReindexProgress {
     /// buffer and a fresh broadcast channel.
     /// What: initialises all counters to zero, status to `Running`, and
     /// creates a broadcast channel with `BROADCAST_CAPACITY`.
-    /// Test: covered by reindex integration tests via `reindex_handler`.
+    /// Test: covered by reindex integration tests via `reindex_report`.
     pub fn new() -> Self {
         let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {

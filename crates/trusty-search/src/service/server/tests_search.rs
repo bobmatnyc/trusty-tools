@@ -1,14 +1,14 @@
 //! Tests for `file_is_within_root` and the search handler.
 use super::helpers::file_is_within_root;
 use super::*;
-use axum::{http::StatusCode, Json};
+use axum::http::StatusCode;
 
 // ── Issue #882: empty / whitespace-only query validation ──────────────────────
 
 /// Why: an empty query must be rejected before touching the index so callers
 /// get an actionable error instead of arbitrary top-k results from a pure
 /// k-NN fallback.
-/// What: builds a minimal bare index and asserts search_handler returns HTTP
+/// What: builds a minimal bare index and asserts search_report returns HTTP
 /// 400 with `{"error": "query must not be empty"}` for both `""` and `"   "`.
 /// Test: this test.
 #[tokio::test]
@@ -37,10 +37,10 @@ async fn search_handler_rejects_empty_query() {
     state.install_embedder(embedder).await;
 
     for text in ["", "   ", "\t\n"] {
-        let resp = search_handler(
-            axum::extract::State(Arc::clone(&state)),
-            axum::extract::Path("empty-q-idx".to_string()),
-            axum::extract::Json(SearchQuery {
+        let resp = search_report(
+            &state,
+            "empty-q-idx",
+            SearchQuery {
                 text: text.to_string(),
                 top_k: 5,
                 expand_graph: false,
@@ -56,11 +56,11 @@ async fn search_handler_rejects_empty_query() {
                 repos: Vec::new(),
                 ripgrep_fallback: None,
                 lexical_limit: None,
-            }),
+            },
         )
         .await;
 
-        let (status, Json(body)) = resp.expect_err("empty query must return Err");
+        let (status, body) = resp.expect_err("empty query must return Err");
         assert_eq!(
             status,
             StatusCode::BAD_REQUEST,
@@ -182,7 +182,7 @@ fn file_is_within_root_outside_root_still_rejected_after_canonicalize() {
     );
 }
 
-/// PR #1103: `search_handler` must consult `last_queried_write_cache` instead
+/// PR #1103: `search_report` must consult `last_queried_write_cache` instead
 /// of reading indexes.toml on the hot path, and must update the cache after
 /// spawning the background write so subsequent queries within the rate-limit
 /// window do NOT spawn another write task.
@@ -190,7 +190,7 @@ fn file_is_within_root_outside_root_still_rejected_after_canonicalize() {
 /// Why: the previous code called `persistence::read_last_queried_unix` (opens +
 /// parses indexes.toml) synchronously on every warm query. The in-memory cache
 /// eliminates that disk I/O.
-/// What: call `search_handler` twice in rapid succession and assert that
+/// What: call `search_report` twice in rapid succession and assert that
 /// `last_queried_write_cache` is populated after the first call and that the
 /// cached timestamp is the same after the second call (no second write within
 /// the interval).
@@ -245,12 +245,7 @@ async fn last_queried_cache_rate_limits_disk_writes() {
         ripgrep_fallback: None,
         lexical_limit: None,
     };
-    let _ = search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("cache-rate-idx".to_string()),
-        axum::extract::Json(query.clone()),
-    )
-    .await;
+    let _ = search_report(&state, "cache-rate-idx", query.clone()).await;
 
     let ts_after_first = *state
         .last_queried_write_cache
@@ -258,12 +253,7 @@ async fn last_queried_cache_rate_limits_disk_writes() {
         .expect("cache must be populated after first search");
 
     // Second call immediately — cache timestamp must stay the same (rate-limited).
-    let _ = search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("cache-rate-idx".to_string()),
-        axum::extract::Json(query),
-    )
-    .await;
+    let _ = search_report(&state, "cache-rate-idx", query).await;
 
     let ts_after_second = *state
         .last_queried_write_cache
@@ -276,12 +266,12 @@ async fn last_queried_cache_rate_limits_disk_writes() {
     );
 }
 
-/// Issue #541: `search_handler` must always include `stale_index_root` in
+/// Issue #541: `search_report` must always include `stale_index_root` in
 /// the response `meta` block (as a boolean). When no results are dropped by
 /// the out-of-root filter the field is `false`; we verify its presence and
 /// type because the BM25 / MockEmbedder may return 0 results on a minimal
 /// test index, making it hard to guarantee `true` without complex setup.
-/// What: builds a minimal bare index, calls `search_handler`, and asserts the
+/// What: builds a minimal bare index, calls `search_report`, and asserts the
 /// `stale_index_root` field is present and boolean in the `meta` block.
 /// Test: this test.
 #[tokio::test]
@@ -311,10 +301,10 @@ async fn search_handler_meta_includes_stale_index_root_field() {
     let state = Arc::new(SearchAppState::new(registry));
     state.install_embedder(embedder).await;
 
-    let resp = search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("stale-meta-idx".to_string()),
-        axum::extract::Json(crate::core::indexer::SearchQuery {
+    let resp = search_report(
+        &state,
+        "stale-meta-idx",
+        crate::core::indexer::SearchQuery {
             text: "hello".to_string(),
             top_k: 5,
             expand_graph: false,
@@ -330,11 +320,11 @@ async fn search_handler_meta_includes_stale_index_root_field() {
             repos: Vec::new(),
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await;
 
-    let Json(body) = resp.expect("handler must succeed");
+    let body = resp.expect("handler must succeed");
     let meta = body.get("meta").expect("meta block present");
 
     assert!(
@@ -374,7 +364,6 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
     use crate::core::store::{UsearchStore, VectorStore};
     use crate::service::lazy_loader::ColdIndexStore;
     use crate::service::persistence::PersistedIndex;
-    use axum::extract::{Json, State};
     use tempfile::tempdir;
 
     let dim = 16;
@@ -407,9 +396,9 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
     let state = Arc::new(state);
     state.install_embedder(embedder).await;
 
-    let resp = global_search_handler(
-        State(Arc::clone(&state)),
-        Json(super::search_global::GlobalSearchRequest {
+    let resp = global_search_report(
+        &state,
+        super::search_global::GlobalSearchRequest {
             query: "hello".to_string(),
             top_k: 5,
             full_content: false,
@@ -424,11 +413,11 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
             per_index_deadline_ms: None,
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await;
 
-    let Json(body) = resp.expect("global search must succeed");
+    let body = resp.expect("global search must succeed");
     let cold_skipped = body
         .get("cold_indexes_skipped")
         .and_then(|v| v.as_u64())
@@ -447,7 +436,7 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
 /// Why: `IndexHandle::root_path` and `CodeIndexer::root_path` are two copies of
 /// one fact. The indexer's copy is the base every stored root-relative chunk
 /// path is joined against to build the absolute `CodeChunk::file`
-/// (`raw_to_code_chunk`); the handle's copy is what `search_handler` post-filters
+/// (`raw_to_code_chunk`); the handle's copy is what `search_report` post-filters
 /// those absolute paths against (`file_is_within_root`, added for #64/#541). The
 /// override rebuilds the handle around the SAME indexer `Arc`, so leaving the
 /// indexer on the old root made every materialized `file` fall outside the new
@@ -550,20 +539,20 @@ async fn search_handler_reports_a_bare_word_as_the_keyword_wire_string() {
     ));
     let state = Arc::new(SearchAppState::new(registry));
 
-    let resp = search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("keyword-wire-9027".to_string()),
-        axum::extract::Json(crate::core::indexer::SearchQuery {
+    let resp = search_report(
+        &state,
+        "keyword-wire-9027",
+        crate::core::indexer::SearchQuery {
             text: "authentication".to_string(),
             top_k: 5,
             expand_graph: false,
             compact: false,
             stage: Some(crate::core::indexer::SearchStage::Lexical),
             ..Default::default()
-        }),
+        },
     )
     .await;
 
-    let Json(body) = resp.expect("handler must succeed");
+    let body = resp.expect("handler must succeed");
     assert_eq!(body["intent"], "Keyword", "{body}");
 }

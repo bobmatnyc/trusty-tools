@@ -14,7 +14,6 @@
 //! (`cargo test -p trusty-search -- last_used`).
 
 use super::*;
-use axum::extract::{Query, State};
 
 /// Build a registry + state over `entries`, registering one bare handle per
 /// seeded row. Returns the tempdirs so the caller can keep them alive.
@@ -73,19 +72,15 @@ async fn last_used_map(
     state: std::sync::Arc<SearchAppState>,
 ) -> std::collections::HashMap<String, Option<u64>> {
     use super::indexes::ListIndexesParams;
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: true,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     value["indexes"]
         .as_array()
         .unwrap()
@@ -143,19 +138,15 @@ async fn list_indexes_details_last_used_absent_when_never_used() {
     let (_roots, _data, state) = state_over(vec![("never-touched", None, None)]);
 
     use super::indexes::ListIndexesParams;
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: true,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let entry = &value["indexes"][0];
     assert_eq!(entry["id"].as_str(), Some("never-touched"));
     assert!(

@@ -7,7 +7,6 @@
 //! What: three test groups — one per bug.
 //! Test: `cargo test -p trusty-search -- tests_829` runs all tests in this file.
 use super::*;
-use axum::extract::State;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -77,7 +76,7 @@ async fn pid_slot_forwarder_does_not_leak_tasks() {
 /// which can corrupt the on-disk corpus. Using a `watch` channel lets
 /// `run_daemon` handle the stop via the same drain-and-flush path as SIGTERM.
 ///
-/// What: calls `admin_stop_handler` and asserts (a) the response is `200 ok`,
+/// What: calls `admin_stop_report` and asserts (a) the report is `ok`,
 /// (b) `shutdown_tx` has been triggered (the receiver sees the updated value).
 ///
 /// Test: this test (tokio).
@@ -87,15 +86,10 @@ async fn admin_stop_triggers_graceful_shutdown() {
     use crate::core::registry::IndexRegistry;
 
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    // Subscribe to the shutdown channel BEFORE calling the handler.
+    // Subscribe to the shutdown channel BEFORE calling the report.
     let mut shutdown_rx = state.shutdown_tx.subscribe();
 
-    let resp = admin_stop_handler(State(Arc::clone(&state))).await;
-    assert_eq!(resp.status(), axum::http::StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-        .await
-        .expect("read the body");
-    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    let body = admin_stop_report(&state).expect("a subscribed driver accepts the stop");
     assert_eq!(
         body.get("ok"),
         Some(&serde_json::json!(true)),
@@ -103,7 +97,7 @@ async fn admin_stop_triggers_graceful_shutdown() {
     );
 
     // The channel must have been signalled. `changed()` resolves immediately
-    // because the value was already updated by the handler before we poll.
+    // because the value was already updated by the report before we poll.
     let changed =
         tokio::time::timeout(std::time::Duration::from_millis(500), shutdown_rx.changed()).await;
     assert!(

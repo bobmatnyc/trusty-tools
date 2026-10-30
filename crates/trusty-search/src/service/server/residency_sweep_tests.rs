@@ -269,7 +269,7 @@ async fn sweep_aborts_park_when_a_reindex_starts_inside_the_park_window() {
 
     let hook_state = Arc::clone(&state);
     run_residency_sweep_tick_inner(&state, move |id| {
-        // What `reindex_handler` does at the moment it accepts the request.
+        // What `reindex_report` does at the moment it accepts the request.
         let running = Arc::new(ReindexProgress::new());
         running.status.store(ReindexStatus::Running);
         hook_state.reindex_progress.insert(id.clone(), running);

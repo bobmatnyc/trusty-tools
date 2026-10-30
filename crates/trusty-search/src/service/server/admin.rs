@@ -2,8 +2,7 @@
 //!
 //! Why: Groups operational endpoints (log tailing, live config, graceful stop)
 //! separately from domain search logic.
-//! What: `logs_tail_handler`, `admin_stop_handler` (test-only), and
-//! `collect_status_counts`, and the transport-free cores — `config_report`,
+//! What: `collect_status_counts` and the transport-free cores — `config_report`,
 //! `logs_tail_report`, `patch_config_report` and `admin_stop_report`, which
 //! `service::rpc` serves over the socket (#6285 slices 5.5 and 5.6).
 //! Test: `logs_tail_returns_recent_lines`, `admin_stop_returns_ok`, and
@@ -12,13 +11,6 @@
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Query, State},
-    response::{IntoResponse, Response},
-    Json,
-};
 
 use super::state::SearchAppState;
 
@@ -63,25 +55,6 @@ impl Default for LogsTailParams {
     }
 }
 
-/// `GET /logs/tail?n=200` — return the most recent N tracing log lines.
-///
-/// Why (issue #35): operators debugging a running daemon want recent logs
-/// over HTTP without SSHing to the box or restarting with a different
-/// `RUST_LOG`. The in-memory ring buffer (fed by the `LogBufferLayer` wired
-/// into the subscriber at startup) makes this near-free.
-/// What: clamps `n` to `[1, MAX_LOGS_TAIL_N]`, drains the tail of
-/// `state.log_buffer`, and returns `{ "lines": [...], "total": <buffered> }`
-/// where `total` is the number of lines currently buffered (so callers can
-/// tell whether the ring has wrapped).
-/// Test: `logs_tail_returns_recent_lines` and `logs_tail_clamps_n`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn logs_tail_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Query(params): Query<LogsTailParams>,
-) -> Json<serde_json::Value> {
-    Json(logs_tail_report(&state, &params))
-}
-
 /// The page `GET /logs/tail` serves, without the transport (#6285 slice 5.5).
 ///
 /// Why: `search.logs.tail` reads the same ring buffer over the socket — it is
@@ -91,7 +64,8 @@ pub(super) async fn logs_tail_handler(
 /// than the HTTP route reports for the same request.
 /// What: clamps `n` to `[1, MAX_LOGS_TAIL_N]` and returns the same
 /// `{lines, total}` document the handler wraps in `Json`.
-/// Test: `logs_tail_over_the_socket_matches_the_http_body`,
+/// Test: `logs_tail_returns_recent_lines`, `logs_tail_clamps_n`,
+/// `logs_tail_over_the_socket_matches_the_http_body`,
 /// `logs_tail_clamps_n_on_the_socket_too`.
 pub(crate) fn logs_tail_report(
     state: &Arc<SearchAppState>,
@@ -103,34 +77,6 @@ pub(crate) fn logs_tail_report(
         "lines": lines,
         "total": state.log_buffer.len(),
     })
-}
-
-/// `POST /admin/stop` — request a graceful shutdown of the daemon.
-///
-/// Why (issue #35): the admin UI and operators want a one-call way to stop
-/// the daemon without resolving its PID and sending a signal. The daemon is
-/// localhost-only and trusts every caller, so no auth is required.
-///
-/// Issue #829 (ungraceful admin_stop): the previous implementation called
-/// `std::process::exit(0)` from a detached task. `process::exit` bypasses all
-/// Rust destructors and the redb flush performed by `flush_all_indexes_on_shutdown`
-/// in `run_daemon`, which means an in-progress redb transaction can be left in an
-/// inconsistent state — corrupting the on-disk corpus. The fix: signal the
-/// in-process `watch` channel stored in `SearchAppState::shutdown_tx`; `run_daemon`
-/// polls that channel alongside the OS signal handler and initiates the same clean
-/// shutdown path (drain in-flight requests → flush indexes → delete port file →
-/// release lock) that SIGTERM normally triggers.
-///
-/// What: delegates to [`admin_stop_report`] and renders its verdict, so the
-/// socket's `search.admin.stop` cannot answer a different thing.
-/// Test: `admin_stop_triggers_graceful_shutdown` in `tests_829.rs` verifies
-/// that the channel fires without calling `process::exit`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn admin_stop_handler(State(state): State<Arc<SearchAppState>>) -> Response {
-    match admin_stop_report(&state) {
-        Ok(body) => Json(body).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
 }
 
 /// The shutdown `POST /admin/stop` requests, without the transport (#6285).
@@ -152,7 +98,12 @@ pub(super) async fn admin_stop_handler(State(state): State<Arc<SearchAppState>>)
 /// because a receiver is subscribed once at boot and never re-subscribed —
 /// retrying answers identically forever, and only a restart clears it.
 ///
-/// Test: `admin_stop_over_the_socket_matches_the_http_body`,
+/// Graceful shutdown (#829): the stop signals the `shutdown_tx` watch channel
+/// instead of calling `process::exit`, so `run_daemon` drains requests, flushes
+/// the indexes and releases the lock on the same path SIGTERM takes.
+///
+/// Test: `admin_stop_returns_ok`, `admin_stop_triggers_graceful_shutdown`,
+/// `admin_stop_over_the_socket_matches_the_http_body`,
 /// `admin_stop_is_refused_on_both_transports_when_nothing_drives_shutdown`.
 pub(crate) fn admin_stop_report(
     state: &Arc<SearchAppState>,

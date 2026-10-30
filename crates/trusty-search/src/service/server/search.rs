@@ -3,17 +3,11 @@
 //! Why: Groups the per-index search and delete paths together. Global fan-out
 //! search lives in `search_global.rs` (extracted to keep both files under the
 //! 500-line cap after issue #993 added cold-store lazy-load logic here).
-//! What: `delete_index_handler`, `search_handler`. Routing helpers
+//! What: `delete_index_report`, `search_report`. Routing helpers
 //! (`RoutingMode`, `compute_context_weights`) and `search_similar_report`
 //! live in `routing.rs`. Global fan-out lives in `search_global.rs`.
 //! Test: `search_handler_meta_includes_stale_index_root_field` and related.
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, Query, State},
-    Json,
-};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -59,37 +53,6 @@ pub(crate) struct DeleteIndexParams {
     pub(crate) expected_root_path: Option<String>,
 }
 
-/// `DELETE /indexes/{id}` — deregister an index, optionally destroying its data.
-///
-/// Why: see [`DeleteIndexParams`]. BREAKING (issue #4123): a bare `DELETE` no
-/// longer deletes on-disk data. Callers that genuinely want the disk reclaimed
-/// must now pass `?delete_data=true`.
-///
-/// #6363: the response also carries the two verdicts the body could not express
-/// before. An id that exists in NO store and no `indexes.toml` row answers
-/// `404`, where it used to answer `200 {"removed": false}` — indistinguishable
-/// from a delete that found the index and declined to remove it. And a delete
-/// whose durable cleanup FAILED (the `indexes.toml` rewrite, or the data-dir
-/// removal) answers `500` with `ok: false` and an `error` string, so no caller
-/// records a removal that did not happen.
-/// What: delegates to [`unregister_index`] — the same function the
-/// orphan-reaper already drives with `delete_data=false` — and echoes
-/// `data_deleted` so a caller can confirm which of the two semantics ran
-/// instead of inferring it from the request it sent.
-/// Test: `deleted_cold_parked_index_is_404_not_a_permanent_503`; the verdicts
-/// themselves are pinned on [`delete_index_report`].
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn delete_index_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<DeleteIndexParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    delete_index_report(&state, &id, params)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `DELETE /indexes/{id}` serves, without the transport (#6285 slice 4).
 ///
 /// Why: `search.index.delete` is the most destructive method on the socket, and
@@ -98,11 +61,16 @@ pub(super) async fn delete_index_handler(
 /// before either store sees it) still deletes, and a delete whose durable
 /// cleanup failed answers `500 ok:false` rather than a `200` that records a
 /// removal which did not happen. One core is what makes both true on the socket
-/// by construction.
-/// What: [`delete_index_handler`]'s whole former body, taking the already-parsed
-/// [`DeleteIndexParams`] so the destructive `delete_data` toggle is decoded once
-/// and never guessed at.
-/// Test: `a_delete_of_an_id_in_no_store_is_not_found_on_either_transport`,
+/// by construction. Issue #4123: a bare delete does NOT destroy on-disk data;
+/// callers pass `delete_data=true` for that (see [`DeleteIndexParams`]).
+/// #6363: an id in NO store and no `indexes.toml` row answers `404`, not
+/// `200 {"removed": false}`.
+/// What: delegates to [`unregister_index`] — the function the orphan-reaper
+/// drives with `delete_data=false` — and echoes `data_deleted` so a caller can
+/// confirm which semantics ran. Takes the already-parsed [`DeleteIndexParams`]
+/// so the destructive `delete_data` toggle is decoded once, never guessed at.
+/// Test: `deleted_cold_parked_index_is_404_not_a_permanent_503`,
+/// `a_delete_of_an_id_in_no_store_is_not_found_on_either_transport`,
 /// `an_allowlist_excluded_registration_deletes_over_the_socket_too`,
 /// `a_failed_delete_reports_the_failure_and_keeps_the_row_on_either_transport`
 /// in `crate::service::rpc::writes`; `delete_index_without_param_preserves_data`,
@@ -665,18 +633,6 @@ pub(super) async fn unregister_index(
     }
 }
 
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn search_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Json(query): Json<SearchQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    search_report(&state, &id, query)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `POST /indexes/{id}/search` serves, without the transport
 /// (#6285 slice 3).
 ///
@@ -684,7 +640,7 @@ pub(super) async fn search_handler(
 /// the daemon's most-read body — the lazy cold-load, the facet routing (#5069),
 /// the lane down-shift, the five drop counters and the whole `meta` block. Two
 /// implementations of it would diverge on the first change to any of them.
-/// What: [`search_handler`]'s whole former body. A refusal keeps its HTTP status
+/// What: the whole single-index search path. A refusal keeps its HTTP status
 /// beside its body, because that status is what
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code — so `vector_unavailable`'s `retryable` split reaches a socket caller as

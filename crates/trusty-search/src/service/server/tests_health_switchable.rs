@@ -15,8 +15,6 @@ use crate::core::registry::IndexRegistry;
 use crate::service::embedder_supervisor::{
     ActiveBackend, BackendKind, BootstrapState, SwitchableEmbedder,
 };
-use axum::extract::State;
-use axum::Json;
 use serde_json::Value;
 
 /// With a Python/MPS `ActiveBackend` installed via `SwitchableEmbedder`,
@@ -44,9 +42,9 @@ async fn health_reports_switchable_python_backend_info() {
     state.install_switchable_embedder(Arc::clone(&switchable));
 
     let state_arc = Arc::new(state);
-    let Json(resp) = health_handler(State(state_arc)).await;
+    let resp = health_report(state_arc).await;
     assert_eq!(
-        resp.embedder_bootstrap, "ready",
+        resp["embedder_bootstrap"], "ready",
         "embedder_bootstrap must mirror ActiveBackend::bootstrap"
     );
 
@@ -83,8 +81,8 @@ async fn health_reports_switchable_ort_backend_info() {
         state.install_switchable_embedder(Arc::clone(&switchable));
 
         let state_arc = Arc::new(state);
-        let Json(resp) = health_handler(State(state_arc)).await;
-        assert_eq!(resp.embedder_bootstrap, "n/a");
+        let resp = health_report(state_arc).await;
+        assert_eq!(resp["embedder_bootstrap"], "n/a");
 
         let json: Value = serde_json::to_value(&resp).expect("serialize");
         let info = json
@@ -132,9 +130,9 @@ async fn health_reports_embedder_bootstrap_state() {
         state.install_switchable_embedder(Arc::clone(&switchable));
 
         let state_arc = Arc::new(state);
-        let Json(resp) = health_handler(State(state_arc)).await;
+        let resp = health_report(state_arc).await;
         assert_eq!(
-            resp.embedder_bootstrap, expected,
+            resp["embedder_bootstrap"], expected,
             "BootstrapState::{bootstrap:?} must report {expected:?}"
         );
     }
@@ -182,20 +180,20 @@ async fn health_is_degraded_when_the_embedder_backend_permanently_downgraded() {
         state.install_switchable_embedder(Arc::clone(&switchable));
 
         let state_arc = Arc::new(state);
-        let Json(resp) = health_handler(State(state_arc)).await;
+        let resp = health_report(state_arc).await;
         assert_eq!(
-            resp.status, expected_status,
+            resp["status"], expected_status,
             "BootstrapState::{bootstrap:?} must drive status {expected_status:?}, \
              got {:?} (embedder_bootstrap={:?})",
-            resp.status, resp.embedder_bootstrap
+            resp["status"], resp["embedder_bootstrap"]
         );
     }
 
     // No switchable handle installed at all — the `"n/a"` branch must stay ok.
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let Json(resp) = health_handler(State(state)).await;
-    assert_eq!(resp.embedder_bootstrap, "n/a");
-    assert_eq!(resp.status, "ok");
+    let resp = health_report(state).await;
+    assert_eq!(resp["embedder_bootstrap"], "n/a");
+    assert_eq!(resp["status"], "ok");
 }
 
 /// #9949: while the python bootstrap retries in the background, `/health`
@@ -227,8 +225,8 @@ async fn health_reports_the_python_bootstrap_retry_detail() {
     });
     state.install_switchable_embedder(Arc::clone(&switchable));
 
-    let Json(resp) = health_handler(State(Arc::new(state))).await;
-    assert_eq!(resp.embedder_bootstrap, "retrying");
+    let resp = health_report(Arc::new(state)).await;
+    assert_eq!(resp["embedder_bootstrap"], "retrying");
     let json: Value = serde_json::to_value(&resp).expect("serialize");
     let py = json
         .get("python_bootstrap")
@@ -257,7 +255,7 @@ async fn health_reports_the_python_bootstrap_retry_detail() {
         bootstrap: BootstrapState::NotApplicable,
     };
     state.install_switchable_embedder(Arc::new(SwitchableEmbedder::new(inner, active)));
-    let Json(resp) = health_handler(State(Arc::new(state))).await;
+    let resp = health_report(Arc::new(state)).await;
     let json: Value = serde_json::to_value(&resp).expect("serialize");
     assert!(json.get("python_bootstrap").is_none());
 }

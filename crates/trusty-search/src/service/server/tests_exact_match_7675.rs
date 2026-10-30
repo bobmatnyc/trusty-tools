@@ -11,7 +11,6 @@
 //! Test: this module.
 
 use super::*;
-use axum::Json;
 
 /// Build a single-index daemon state holding `chunks`, ready for the handler.
 async fn state_with(
@@ -62,17 +61,17 @@ async fn state_with(
 }
 
 async fn meta_for(state: &Arc<SearchAppState>, text: &str) -> serde_json::Value {
-    let resp = search_handler(
-        axum::extract::State(Arc::clone(state)),
-        axum::extract::Path("exact-7675".to_string()),
-        axum::extract::Json(super::tests_dropped_results::drop_test_query(
+    let resp = search_report(
+        state,
+        "exact-7675",
+        super::tests_dropped_results::drop_test_query(
             text,
             crate::core::indexer::SearchMode::All,
             None,
-        )),
+        ),
     )
     .await;
-    let Json(body) = resp.expect("handler must succeed");
+    let body = resp.expect("handler must succeed");
     body.get("meta").cloned().expect("meta block present")
 }
 

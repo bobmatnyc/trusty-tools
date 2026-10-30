@@ -415,7 +415,7 @@ impl ColdIndexStore {
 
     /// Count how many cold entries are in the provided id set.
     ///
-    /// Why: `global_search_handler` (PR #1103) needs to count cold indexes
+    /// Why: `global_search_report` (PR #1103) needs to count cold indexes
     /// that a restricted fan-out caller requested but that were skipped because
     /// they are not yet hot. Providing a method here keeps the caller from
     /// iterating `entries` directly and coupling to the internal DashMap type.
@@ -435,7 +435,7 @@ impl ColdIndexStore {
     ///
     /// Why (issue #3993 second round — adversarial BLOCK): the write-side
     /// `root_path` collision guard (`find_root_path_collision`, shared by
-    /// `create_index_handler`, `relocate_index_handler`, and the reindex
+    /// `create_index_report`, `relocate_index_report`, and the reindex
     /// `root_path` override) must treat a cold/unloaded entry's root_path as
     /// already claimed, exactly like a live handle's — otherwise a new
     /// registration can silently steal a pre-existing but not-yet-restored
@@ -554,7 +554,7 @@ impl ColdIndexStore {
     /// hot registry by a concurrent `cold_park_index`, then its freshly
     /// parked cold entry reaped right back out from under it by this call) in
     /// 2 of 10 possible interleavings between this method's callers
-    /// (`create_index_handler` / `relocate_index_handler` / `reindex_handler`'s
+    /// (`create_index_report` / `relocate_index_report` / `reindex_report`'s
     /// override) and the residency-sweep park. Only call this UNGUARDED when
     /// the caller can prove no concurrent writer can be racing this exact
     /// `id` (e.g. `get_or_load_index`'s call is protected by the per-index

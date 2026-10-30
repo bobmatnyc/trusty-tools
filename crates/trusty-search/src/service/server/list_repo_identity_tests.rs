@@ -28,7 +28,6 @@
 //! Test: this module IS the tests (`cargo test -p trusty-search -- repo_identity`).
 
 use super::*;
-use axum::extract::{Query, State};
 
 /// Write `entries` to an `indexes.toml` inside a fresh tempdir and return
 /// `(tempdir, toml_path)`. Issue #2717: seeds via the path-injectable
@@ -102,19 +101,15 @@ async fn list_indexes_repo_identity_details_and_filter() {
     let state = Arc::new(SearchAppState::new(registry).with_registry_path(toml_path));
 
     // details=true → each entry carries its PERSISTED repo_identity.
-    let resp = list_indexes_handler(
-        State(state.clone()),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state.clone(),
+        &ListIndexesParams {
             format: None,
             details: true,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let entries = value["indexes"].as_array().unwrap();
     let identity_for = |id: &str| -> Option<String> {
         entries
@@ -128,19 +123,15 @@ async fn list_indexes_repo_identity_details_and_filter() {
 
     // ?repo_identity=Acme/Alpha (mixed case) → flat list contains only idx-a,
     // proving the filter normalises to canonical form before comparing.
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: false,
             repo_identity: Some("Acme/Alpha".to_string()),
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let ids: Vec<&str> = value["indexes"]
         .as_array()
         .unwrap()
@@ -217,19 +208,15 @@ async fn list_indexes_repo_identity_tree_filter() {
     }
     let state = Arc::new(SearchAppState::new(registry).with_registry_path(toml_path));
 
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: Some("tree".to_string()),
             details: false,
             repo_identity: Some("acme/widget".to_string()),
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = value["indexes"].as_array().expect("indexes array");
     let mut ids: Vec<&str> = arr.iter().filter_map(|e| e["id"].as_str()).collect();
     ids.sort_unstable();

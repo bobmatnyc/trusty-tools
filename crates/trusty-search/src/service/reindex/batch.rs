@@ -204,7 +204,7 @@ pub(super) struct BatchPayload {
 /// Retained as `#[allow(dead_code)]` for tests and non-pipelined callers that
 /// prefer a simpler one-shot API.
 /// What: delegates to `prepare_and_parse_batch` + `commit_parsed_and_finalize`.
-/// Test: covered indirectly by integration tests via `reindex_handler`.
+/// Test: covered indirectly by integration tests via `reindex_report`.
 #[allow(dead_code)]
 pub(super) async fn process_one_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> BatchOutcome {
     let Some(parsed) = prepare_and_parse_batch(ctx, batch).await else {

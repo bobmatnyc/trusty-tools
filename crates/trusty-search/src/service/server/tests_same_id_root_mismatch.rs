@@ -4,7 +4,7 @@
 //! Why: `find_root_path_collision` (#2336, #2519, #3993) closed one direction
 //! three times over — a second id claiming a registered tree is rejected with
 //! `409`, and the `(dev, ino)` comparison even catches a case-variant spelling
-//! on APFS. The mirror was never checked. `create_index_handler` canonicalized
+//! on APFS. The mirror was never checked. `create_index_report` canonicalized
 //! the supplied `root_path` and then compared only the ID, so a request naming
 //! a DIFFERENT tree under an already-registered id returned
 //! `200 {created: false, reason: "already exists"}` while the previously
@@ -27,14 +27,12 @@
 //!
 //! Test: run with `cargo test -p trusty-search tests_same_id_root_mismatch`.
 
+use super::test_support::create_answer;
 use super::*;
 use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::registry::{IndexId, IndexRegistry};
 use crate::service::persistence::PersistedIndex;
-use axum::body::to_bytes;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 
 /// Build a `CreateIndexRequest` with every optional field defaulted, varying
@@ -71,14 +69,6 @@ async fn mock_state_async() -> Arc<SearchAppState> {
     Arc::new(state)
 }
 
-/// Read a handler response body as JSON.
-async fn json_body(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read response body");
-    serde_json::from_slice(&bytes).expect("response body is JSON")
-}
-
 /// THE regression. Registering an id at tree A and then re-registering the same
 /// id at tree B must be refused.
 ///
@@ -93,26 +83,18 @@ async fn create_index_same_id_different_root_is_refused() {
     let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-mismatch-a-");
     let (_dir_b, root_b) = super::test_support::allowlisted_index_root("ts-mismatch-b-");
 
-    let first = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("api-mismatch", root_a.clone())),
-    )
-    .await;
-    assert_eq!(first.status(), StatusCode::OK, "first create must succeed");
+    let first = create_answer(&state, create_req("api-mismatch", root_a.clone())).await;
+    assert_eq!(first.0, StatusCode::OK, "first create must succeed");
 
-    let second = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("api-mismatch", root_b.clone())),
-    )
-    .await;
+    let second = create_answer(&state, create_req("api-mismatch", root_b.clone())).await;
     assert_eq!(
-        second.status(),
+        second.0,
         StatusCode::CONFLICT,
         "re-registering an id onto a different tree must be refused, not \
          answered 200 while the old tree keeps serving"
     );
 
-    let body = json_body(second).await;
+    let body = second.1;
     assert_eq!(body["index_id"], "api-mismatch");
     assert_eq!(
         body["registered_root_path"],
@@ -149,25 +131,17 @@ async fn create_index_same_id_same_root_still_reports_already_exists() {
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-mismatch-same-");
 
-    let first = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("api-mismatch", root.clone())),
-    )
-    .await;
-    assert_eq!(first.status(), StatusCode::OK);
+    let first = create_answer(&state, create_req("api-mismatch", root.clone())).await;
+    assert_eq!(first.0, StatusCode::OK);
 
-    let second = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("api-mismatch", root.clone())),
-    )
-    .await;
+    let second = create_answer(&state, create_req("api-mismatch", root.clone())).await;
     assert_eq!(
-        second.status(),
+        second.0,
         StatusCode::OK,
         "re-registering the same tree under the same id is still idempotent"
     );
 
-    let body = json_body(second).await;
+    let body = second.1;
     assert_eq!(body["created"], serde_json::json!(false));
     assert_eq!(body["reason"], "already exists");
     assert_eq!(
@@ -189,12 +163,8 @@ async fn create_index_same_id_case_variant_root_is_not_a_mismatch() {
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("TS-Mismatch-Case-");
 
-    let first = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("api-mismatch", root.clone())),
-    )
-    .await;
-    assert_eq!(first.status(), StatusCode::OK);
+    let first = create_answer(&state, create_req("api-mismatch", root.clone())).await;
+    assert_eq!(first.0, StatusCode::OK);
 
     let name = root
         .file_name()
@@ -214,13 +184,9 @@ async fn create_index_same_id_case_variant_root_is_not_a_mismatch() {
     let variant = root.with_file_name(flipped);
     assert_ne!(variant, root, "the two spellings must differ as strings");
 
-    let second = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("api-mismatch", variant)),
-    )
-    .await;
+    let second = create_answer(&state, create_req("api-mismatch", variant)).await;
     assert_eq!(
-        second.status(),
+        second.0,
         StatusCode::OK,
         "a differently-cased spelling of one inode is the SAME tree and must \
          not be refused as a mismatch"
@@ -257,13 +223,9 @@ async fn create_index_same_id_different_root_still_reaps_a_cold_entry() {
         "the entry must be cold, not resident, for this test to mean anything"
     );
 
-    let resp = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("api-mismatch", root_b.clone())),
-    )
-    .await;
+    let resp = create_answer(&state, create_req("api-mismatch", root_b.clone())).await;
     assert_eq!(
-        resp.status(),
+        resp.0,
         StatusCode::OK,
         "recreating an id whose only claim is a stale COLD record must still \
          succeed at the new tree — that is #3993 round 3's reap path"

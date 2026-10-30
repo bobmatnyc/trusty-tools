@@ -13,7 +13,6 @@ use crate::core::embed::Embedder;
 use crate::core::indexer::{CodeIndexer, ParsedBatch};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
 use crate::core::store::{UsearchStore, VectorStore};
-use axum::extract::State;
 use axum::http::StatusCode;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -95,22 +94,20 @@ fn query(body: serde_json::Value) -> crate::core::indexer::SearchQuery {
 /// An unpinned query answers 200 with the lexical hit, flags the vector lane
 /// unavailable with the embedder's error, and `/health` stops saying `ready`.
 ///
-/// Pre-fix the `search_handler` call returned `Err((500, …))`.
+/// Pre-fix the `search_report` call returned `Err((500, …))`.
 /// Test: this test.
 #[tokio::test]
 // #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
 #[serial_test::parallel]
 async fn a_failed_query_embed_degrades_to_lexical_hits_flagged_vector_unavailable() {
     let (state, _tmp) = state_with_failing_embedder("fail-embed-8348").await;
-    let axum::Json(body) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("fail-embed-8348".to_string()),
-        axum::Json(query(
-            serde_json::json!({ "text": "authenticate session token" }),
-        )),
+    let body = super::search_report(
+        &state,
+        "fail-embed-8348",
+        query(serde_json::json!({ "text": "authenticate session token" })),
     )
     .await
-    .unwrap_or_else(|(status, axum::Json(body))| panic!("expected 200, got {status}: {body}"));
+    .unwrap_or_else(|(status, body)| panic!("expected 200, got {status}: {body}"));
 
     let results = body["results"].as_array().expect("results array");
     assert!(
@@ -125,9 +122,9 @@ async fn a_failed_query_embed_degrades_to_lexical_hits_flagged_vector_unavailabl
         "the degraded response names the embedder failure: {body}"
     );
 
-    let axum::Json(health) = super::health::health_handler(State(Arc::clone(&state))).await;
+    let health = health_report(Arc::clone(&state)).await;
     assert_eq!(
-        health.embedder, "stalled",
+        health["embedder"], "stalled",
         "a failing embedder must not read as ready on /health"
     );
 }
@@ -141,13 +138,13 @@ async fn a_failed_query_embed_degrades_to_lexical_hits_flagged_vector_unavailabl
 #[serial_test::parallel]
 async fn a_pinned_semantic_query_with_a_failed_embed_is_503_not_500() {
     let (state, _tmp) = state_with_failing_embedder("fail-embed-pinned-8348").await;
-    let (status, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("fail-embed-pinned-8348".to_string()),
-        axum::Json(query(serde_json::json!({
+    let (status, body) = super::search_report(
+        &state,
+        "fail-embed-pinned-8348",
+        query(serde_json::json!({
             "text": "authenticate session token",
             "stage": "semantic",
-        }))),
+        })),
     )
     .await
     .expect_err("a pinned semantic query cannot be answered lexically");
@@ -176,15 +173,13 @@ async fn one_failed_query_embed_counts_once_against_the_embedder() {
     handle.indexer.write().await.set_embed_pool(Some(pool));
     let before = state.embedder_stall_tracker.recent_timeout_count();
 
-    let axum::Json(body) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path(id.to_string()),
-        axum::Json(query(
-            serde_json::json!({ "text": "authenticate session token" }),
-        )),
+    let body = super::search_report(
+        &state,
+        id,
+        query(serde_json::json!({ "text": "authenticate session token" })),
     )
     .await
-    .unwrap_or_else(|(status, axum::Json(body))| panic!("expected 200, got {status}: {body}"));
+    .unwrap_or_else(|(status, body)| panic!("expected 200, got {status}: {body}"));
     assert_eq!(body["meta"]["vector_unavailable"], true, "{body}");
 
     assert_eq!(

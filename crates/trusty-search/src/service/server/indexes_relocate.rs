@@ -6,7 +6,7 @@
 //! registry and `indexes.toml` to the new path WITHOUT clearing the hash cache,
 //! so a subsequent incremental reindex skips all unchanged files (zero re-embeds
 //! for a pure directory move).
-//! What: `RelocateIndexRequest` + `relocate_index_handler` — the handler
+//! What: `RelocateIndexRequest` + `relocate_index_report` — the core
 //! validates the new path, rebuilds the `IndexHandle`, persists the change, and
 //! updates `indexed_root` in the corpus `_meta` table.
 //!
@@ -25,7 +25,7 @@
 //! Issue #1088: colocated-flag flips wiped central-store data. Root cause is
 //! the same `colocated: true` hardcode — when a user manually edited
 //! `indexes.toml` to set `colocated = false` (to match reality) and the daemon
-//! restarted, `create_index_handler` or this PATCH handler would restore
+//! restarted, `create_index_report` or this PATCH handler would restore
 //! `colocated = true`, and `build_indexer_from_entry` would create a fresh
 //! `.trusty-search/` dir that shadowed the real central-store data. Fix: read
 //! the persisted `colocated` value and refuse to silently toggle it — see
@@ -41,12 +41,6 @@
 //!       `relocate_preserves_lru_timestamps` in `tests_index.rs`.
 
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, State},
-    response::{IntoResponse, Json, Response},
-};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -71,14 +65,19 @@ pub(crate) struct RelocateIndexRequest {
     pub root_path: std::path::PathBuf,
 }
 
-/// `PATCH /indexes/:id` — rebind an existing index to a new root path (#1073).
+/// The body `PATCH /indexes/{id}` serves, without the transport (#6285 slice 4):
+/// rebind an existing index to a new root path (#1073).
 ///
 /// Why: when a project directory moves (volume remount, machine migration,
 /// worktree relocation) the colocated `.trusty-search/` data (HNSW snapshot +
-/// redb corpus + persisted file-hash cache) moves with it. This endpoint
-/// updates the in-memory registry and `indexes.toml` to reflect the new path
-/// WITHOUT clearing the hash cache, so a subsequent reindex skips all
-/// unchanged files (zero re-embeds for a pure move).
+/// redb corpus + persisted file-hash cache) moves with it. This updates the
+/// in-memory registry and `indexes.toml` to reflect the new path WITHOUT
+/// clearing the hash cache, so a subsequent reindex skips all unchanged files
+/// (zero re-embeds for a pure move). `search.index.relocate` rebinds an index
+/// over the socket. Relocation swaps a live handle and rewrites
+/// `indexes.toml`, so each refusal below is a point where the rebind must NOT
+/// happen — a socket that classified any of them differently could rebind an
+/// id the HTTP route refuses.
 ///
 /// What: (1) validates the new path is absolute, exists, and is a directory;
 /// (2) rebuilds the `IndexHandle` from the updated `PersistedIndex` entry (so
@@ -93,31 +92,12 @@ pub(crate) struct RelocateIndexRequest {
 /// Returns 404 when `id` is not in the registry, 400 for an invalid path, 409
 /// while a reindex holds the index's permit or when the new root would contain
 /// a data-dir store (#8499), 500 on internal rebuild failure. On success returns
-/// `{ "id": "…", "relocated": true, "new_root_path": "…" }`.
-///
-/// Test: `relocate_index_updates_root_path` in `tests_index.rs`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn relocate_index_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<RelocateIndexRequest>,
-) -> Response {
-    match relocate_index_report(&state, &id, req).await {
-        Ok(body) => Json(body).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
-}
-
-/// The body `PATCH /indexes/{id}` serves, without the transport (#6285 slice 4).
-///
-/// Why: `search.index.relocate` rebinds an index over the socket. Relocation
-/// swaps a live handle and rewrites `indexes.toml`, so each refusal below is a
-/// point where the rebind must NOT happen — a socket that classified any of
-/// them differently could rebind an id the HTTP route refuses.
-/// What: [`relocate_index_handler`]'s whole former body, with each refusal as
+/// `{ "id": "…", "relocated": true, "new_root_path": "…" }`. Each refusal is
 /// its HTTP status beside its body — the pair
 /// [`crate::service::rpc::error::rpc_error_from_http`] reads.
-/// Test: `relocate_over_the_socket_matches_the_http_body`,
+///
+/// Test: `relocate_index_updates_root_path` in `tests_1073.rs`;
+/// `relocate_over_the_socket_matches_the_http_body`,
 /// `a_refused_relocate_leaves_the_root_where_it_was_on_either_transport` in
 /// `crate::service::rpc::writes`.
 pub(crate) async fn relocate_index_report(
@@ -181,14 +161,14 @@ pub(crate) async fn relocate_index_report(
     let _holder = crate::service::reindex::mark_index_permit_holder(&index_id, "relocate");
 
     // Issue #2336: reject relocating onto a root_path already owned by a
-    // DIFFERENT registered index. Same hazard as `create_index_handler`: two
+    // DIFFERENT registered index. Same hazard as `create_index_report`: two
     // live registrations sharing one colocated root resolve to the SAME
     // on-disk redb corpus. (This index's own root is handled by the no-op
     // short-circuit above, so `exclude_id` here is defense-in-depth only.)
     //
     // Issue #3993 second round (adversarial BLOCK): also check
     // `state.cold_store` — relocating onto a cold entry's parked root is the
-    // same root-theft as `create_index_handler`'s cold blind spot, just via
+    // same root-theft as `create_index_report`'s cold blind spot, just via
     // the PATCH path instead. One shared primitive, one shared fix.
     //
     // #8499: held to the registry swap, so a create or relocate into an equal
@@ -457,7 +437,7 @@ pub(crate) async fn relocate_index_report(
     // Issue #3995 round 5 (CRITICAL): snapshot the cold-store entry (if any)
     // parked under `index_id` BEFORE registering the replacement handle below
     // — the "expected" half of the identity guard, mirrored from
-    // `create_index_handler`. See `mark_loaded_if` below for why.
+    // `create_index_report`. See `mark_loaded_if` below for why.
     let cold_entry_before_register = state.cold_store.entry_token(&index_id);
 
     // Atomically replace the in-memory registry entry.
@@ -472,7 +452,7 @@ pub(crate) async fn relocate_index_report(
     // promotion always goes through `get_or_load_index`, which calls
     // `cold_store.mark_loaded` itself). This call exists purely as
     // defense-in-depth against residual corruption predating this fix (e.g.
-    // an id that was created — before `create_index_handler`'s fix above
+    // an id that was created — before `create_index_report`'s fix above
     // shipped — while a stale cold record for it already existed, so it went
     // live without ever being reaped): relocating that id is a natural,
     // cheap point to self-heal the invariant rather than leaving the old
@@ -480,7 +460,7 @@ pub(crate) async fn relocate_index_report(
     // touch this id's own record.
     //
     // Issue #3995 round 5 (CRITICAL): identity-guarded against
-    // `cold_entry_before_register` — see `create_index_handler`'s identical
+    // `cold_entry_before_register` — see `create_index_report`'s identical
     // comment and `ColdIndexStore::mark_loaded_if` for the race this closes
     // (a concurrent residency-sweep park inserting a fresh cold entry for
     // this same id in the window between the snapshot above and here).

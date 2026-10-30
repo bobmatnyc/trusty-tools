@@ -11,19 +11,17 @@
 //! Every test here fails against the pre-fix commit: `create_index_handler`
 //! answered `200 {"created": true}` for an un-allowlisted root.
 //!
-//! What: drives `create_index_handler` and `relocate_index_handler` directly
+//! What: drives `create_index_report` and `relocate_index_report` directly
 //! with `AllowlistPaths` pointed at tempdir fixtures, so the verdict never
 //! depends on the developer's real config or `tm` registry.
 //! Test: `cargo test -p trusty-search tests_allowlist_gate_767`.
 
+use super::test_support::{create_answer, relocate_answer};
 use super::*;
 use crate::allowlist::{AllowlistConfig, AllowlistEntry, AllowlistPaths};
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
-use axum::body::to_bytes;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -95,15 +93,6 @@ async fn state_with(paths: AllowlistPaths) -> Arc<SearchAppState> {
     Arc::new(state)
 }
 
-async fn body_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
-    let status = resp.status();
-    let bytes = to_bytes(resp.into_body(), 65536).await.expect("body");
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
-    )
-}
-
 /// THE fail-open regression: an un-allowlisted root must be refused.
 ///
 /// Why: before this fix the same call returned `200 {"created": true}` and the
@@ -119,12 +108,8 @@ async fn create_index_refuses_unlisted_root() {
     let root = safe_root("unlisted");
     let state = state_with(fixture(fx.path(), &[])).await;
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("unlisted", root.clone())),
-    )
-    .await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, create_req("unlisted", root.clone())).await;
+    let (status, json) = resp;
 
     assert_eq!(
         status,
@@ -163,12 +148,8 @@ async fn create_index_accepts_allowlisted_root() {
     let root = safe_root("approved");
     let state = state_with(fixture(fx.path(), &[&root])).await;
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("approved", root.clone())),
-    )
-    .await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, create_req("approved", root.clone())).await;
+    let (status, json) = resp;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -192,12 +173,8 @@ async fn create_index_accepts_registered_project_root() {
     .expect("write projects");
     let state = state_with(paths).await;
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("project", root.clone())),
-    )
-    .await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, create_req("project", root.clone())).await;
+    let (status, json) = resp;
     assert_eq!(status, StatusCode::OK, "project root must register: {json}");
 }
 
@@ -212,12 +189,8 @@ async fn create_index_accepts_provisioned_worktree() {
     std::fs::create_dir_all(&wt).expect("mkdir worktree");
     let state = state_with(fixture(fx.path(), &[&root])).await;
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("wt", wt.clone())),
-    )
-    .await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, create_req("wt", wt.clone())).await;
+    let (status, json) = resp;
     assert_eq!(status, StatusCode::OK, "worktree must register: {json}");
 }
 
@@ -232,9 +205,8 @@ async fn create_index_refuses_sibling_of_approved_root() {
     let sibling = safe_root("sibling-parent-scratch");
     let state = state_with(fixture(fx.path(), &[&root])).await;
 
-    let resp =
-        create_index_handler(State(Arc::clone(&state)), Json(create_req("sib", sibling))).await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, create_req("sib", sibling)).await;
+    let (status, json) = resp;
     assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
 }
 
@@ -250,8 +222,8 @@ async fn create_index_accepts_subdirectory_of_approved_root() {
     std::fs::create_dir_all(&sub).expect("mkdir");
     let state = state_with(fixture(fx.path(), &[&root])).await;
 
-    let resp = create_index_handler(State(Arc::clone(&state)), Json(create_req("sub", sub))).await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, create_req("sub", sub)).await;
+    let (status, json) = resp;
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
@@ -269,12 +241,8 @@ async fn denylist_still_wins_over_an_allowlist_entry() {
     let fx = tempfile::tempdir().expect("tempdir");
     let state = state_with(fixture(fx.path(), &[&ssh])).await;
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("ssh", ssh.clone())),
-    )
-    .await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, create_req("ssh", ssh.clone())).await;
+    let (status, json) = resp;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -303,15 +271,15 @@ async fn allow_sensitive_path_does_not_bypass_the_allowlist() {
 
     let mut req = create_req("sensitive-optin", root);
     req.allow_sensitive_path = true;
-    let resp = create_index_handler(State(Arc::clone(&state)), Json(req)).await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, req).await;
+    let (status, json) = resp;
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
         "opting past the temp-dir prefix must not opt past the allowlist: {json}"
     );
 
-    // Reaching `create_index_handler`'s body at all is the leak: it calls
+    // Reaching `create_index_report`'s body at all is the leak: it calls
     // `roots_registry::upsert_root` and the store builder. Assert none of it
     // happened.
     assert!(
@@ -338,19 +306,15 @@ async fn allow_sensitive_path_relaxes_only_the_prefix_denylist() {
     let state = state_with(fixture(fx.path(), &[&root])).await;
 
     // Approved but no opt-in → the prefix denylist refuses it (400).
-    let resp = create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("no-optin", root.clone())),
-    )
-    .await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, create_req("no-optin", root.clone())).await;
+    let (status, json) = resp;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
 
     // Approved AND opted in → registers.
     let mut req = create_req("with-optin", root);
     req.allow_sensitive_path = true;
-    let resp = create_index_handler(State(Arc::clone(&state)), Json(req)).await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, req).await;
+    let (status, json) = resp;
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
@@ -369,8 +333,8 @@ async fn allow_sensitive_path_still_obeys_the_credential_denylist() {
 
     let mut req = create_req("ssh-optin", ssh);
     req.allow_sensitive_path = true;
-    let resp = create_index_handler(State(Arc::clone(&state)), Json(req)).await;
-    let (status, json) = body_json(resp).await;
+    let resp = create_answer(&state, req).await;
+    let (status, json) = resp;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -388,22 +352,18 @@ async fn relocate_refuses_unlisted_root() {
     let elsewhere = safe_root("reloc-elsewhere");
     let state = state_with(fixture(fx.path(), &[&approved])).await;
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("reloc", approved.clone())),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK, "setup: create must succeed");
+    let resp = create_answer(&state, create_req("reloc", approved.clone())).await;
+    assert_eq!(resp.0, StatusCode::OK, "setup: create must succeed");
 
-    let resp = super::indexes_relocate::relocate_index_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("reloc".to_string()),
-        Json(super::indexes_relocate::RelocateIndexRequest {
+    let resp = relocate_answer(
+        &state,
+        "reloc",
+        RelocateIndexRequest {
             root_path: elsewhere.clone(),
-        }),
+        },
     )
     .await;
-    let (status, json) = body_json(resp).await;
+    let (status, json) = resp;
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,

@@ -10,8 +10,6 @@
 //! durable corpus failed to open on warm-boot, plus the healthy-path guard.
 //! Test: these tests.
 use super::*;
-use axum::extract::State;
-use axum::Json;
 
 /// Why (issue #1870): the daemon used to report `status: "ok"` even when a
 /// registered index's durable redb corpus failed to open on warm-boot — a
@@ -83,10 +81,10 @@ async fn health_reports_degraded_when_corpus_open_failed() {
     }
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
 
     assert_eq!(
-        resp.status, "degraded",
+        resp["status"], "degraded",
         "#1870: /health must NOT report 'ok' when a registered corpus failed to open"
     );
 
@@ -130,9 +128,9 @@ async fn health_stays_ok_when_no_corpus_failed() {
     ));
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
 
-    assert_eq!(resp.status, "ok");
+    assert_eq!(resp["status"], "ok");
     let json: Value = serde_json::to_value(&resp).expect("serialize");
     let summary = &json["warmboot_summary"];
     assert_eq!(summary["indexes_corpus_failed"].as_u64(), Some(0));
@@ -341,10 +339,10 @@ async fn health_reports_degraded_when_tcc_skip_recorded() {
         summary.warm_boot_degraded = true;
     }
 
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
 
     assert_eq!(
-        resp.status, "degraded",
+        resp["status"], "degraded",
         "#3706: /health must report 'degraded' when warm_boot_degraded is true \
          from a TCC skip alone, even though indexes_corpus_failed is 0"
     );
@@ -397,15 +395,15 @@ async fn health_reports_degraded_when_scan_timeout_recorded() {
         summary.warm_boot_degraded = true;
     }
 
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
 
     assert_eq!(
-        resp.status, "degraded",
+        resp["status"], "degraded",
         "#3706: /health must report 'degraded' when warm_boot_degraded is true \
          from a scan timeout alone, even though indexes_corpus_failed is 0"
     );
     assert_eq!(
-        resp.warmboot_summary.indexes_skipped_timeout, 1,
+        resp["warmboot_summary"]["indexes_skipped_timeout"], 1,
         "#4250: the reported count must be the live cohort, so it falls as \
          indexes are recovered instead of staying frozen at the boot value"
     );
@@ -448,10 +446,10 @@ async fn health_reports_degraded_on_mass_index_loss() {
         summary.warm_boot_degraded = true;
     }
 
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
 
     assert_eq!(
-        resp.status, "degraded",
+        resp["status"], "degraded",
         "#3706: /health must report 'degraded' on mass index loss (loaded < 80% \
          of prior), even though indexes_corpus_failed is 0"
     );
@@ -482,10 +480,10 @@ async fn health_status_stays_ok_when_no_warm_boot_degraded_condition_holds() {
 
     let state = Arc::new(SearchAppState::new(registry));
 
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
 
     assert_eq!(
-        resp.status, "ok",
+        resp["status"], "ok",
         "#3706: folding warm_boot_degraded into overall_status must not report \
          'degraded' when none of its inputs are set"
     );
@@ -532,14 +530,14 @@ async fn health_reports_degraded_for_a_stuck_never_walked_index() {
 
     let state = Arc::new(SearchAppState::new(registry));
 
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
 
     assert_eq!(
-        resp.indexes_stuck_empty, 1,
+        resp["indexes_stuck_empty"], 1,
         "#4680: an index claiming 'walking' with no walk ever driven must be counted"
     );
     assert_eq!(
-        resp.status, "degraded",
+        resp["status"], "degraded",
         "#4680: /health must not self-certify as healthy while an index is \
          stuck at zero chunks with a frozen stage surface"
     );
@@ -594,14 +592,14 @@ async fn health_does_not_flag_a_walked_index_as_stuck() {
 
     let state = Arc::new(SearchAppState::new(registry));
 
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
 
     assert_eq!(
-        resp.indexes_stuck_empty, 0,
+        resp["indexes_stuck_empty"], 0,
         "#4680: a genuinely in-flight walk is not a stuck index"
     );
     assert_eq!(
-        resp.status, "ok",
+        resp["status"], "ok",
         "#4680: an in-flight reindex must not degrade the daemon's status"
     );
 }
@@ -655,22 +653,22 @@ async fn health_does_not_flag_an_in_flight_reindex_as_stuck_mid_walk() {
         .acquire_owned()
         .await
         .expect("per-index semaphore is never closed");
-    let Json(running) = health_handler(State(Arc::clone(&state))).await;
+    let running = health_report(Arc::clone(&state)).await;
     assert_eq!(
-        running.indexes_stuck_mid_walk, 0,
+        running["indexes_stuck_mid_walk"], 0,
         "#5336: a reindex holding this index's permit is doing the work the \
          stage claims — it must never be counted as stuck"
     );
     assert_eq!(
-        running.status, "ok",
+        running["status"], "ok",
         "#5336: a live multi-minute reindex must not pin /health at degraded"
     );
 
     // Same registry, same stages, same walk timestamp — only the driver is gone.
     drop(driver);
-    let Json(abandoned) = health_handler(State(Arc::clone(&state))).await;
+    let abandoned = health_report(Arc::clone(&state)).await;
     assert_eq!(
-        abandoned.indexes_stuck_mid_walk, 1,
+        abandoned["indexes_stuck_mid_walk"], 1,
         "#5336: with no task holding the permit, the identical stage surface is \
          an abandoned walk — proving the detector keys on driver liveness"
     );
@@ -724,19 +722,19 @@ async fn health_reports_degraded_for_an_abandoned_mid_walk_index() {
 
     let state = Arc::new(SearchAppState::new(registry));
 
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
 
     assert_eq!(
-        resp.indexes_stuck_mid_walk, 1,
+        resp["indexes_stuck_mid_walk"], 1,
         "#5336: a walk that started and has no driver left must be counted"
     );
     assert_eq!(
-        resp.indexes_stuck_empty, 0,
+        resp["indexes_stuck_empty"], 0,
         "#5336: the two stuck predicates partition on walk_started — a started \
          walk belongs to exactly one of them"
     );
     assert_eq!(
-        resp.status, "degraded",
+        resp["status"], "degraded",
         "#5336: /health must not self-certify as healthy while an index is \
          frozen at 'walking' with nothing driving it"
     );

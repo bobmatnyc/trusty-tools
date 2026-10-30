@@ -16,8 +16,8 @@
 //! component OFF is instantaneous (soft-disable); turning one ON spawns a
 //! background catch-up job (issue #2984 Phase 1, see `super::components`).
 //!
-//! What: `index_config_handler` (GET), `patch_index_config_handler` (PATCH),
-//! their transport-free cores `index_config_report` / `patch_index_config_report`
+//! What: the transport-free cores `index_config_report` (GET) /
+//! `patch_index_config_report` (PATCH)
 //! — which `service::rpc` serves as `search.index.config.get` and
 //! `search.index.config.set` (#6285 slices 2 and 5.5) — and the serde
 //! request/response types. The component-toggle decision logic and catch-up
@@ -28,13 +28,6 @@
 //! the socket halves in `service::rpc::admin`'s `admin_tests.rs`.
 
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, State},
-    response::{IntoResponse, Response},
-    Json,
-};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -143,25 +136,6 @@ pub struct PatchIndexConfigRequest {
     pub vector: Option<bool>,
 }
 
-/// `GET /indexes/:id/config` — return the index's current hygiene config.
-///
-/// Why: lets the CLI / dashboard show the active hygiene settings before
-/// editing them.
-/// What: looks up the handle, projects its hygiene fields into
-/// `IndexConfigView`, returns `200` with the JSON body or `404` for an unknown
-/// id.
-/// Test: `get_returns_current_config`, `get_unknown_index_404`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn index_config_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-) -> Response {
-    match index_config_report(&state, &id) {
-        Ok(view) => Json(view).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
-}
-
 /// The view `GET /indexes/{id}/config` serves, without the transport
 /// (#6285 slice 2).
 ///
@@ -170,7 +144,8 @@ pub(super) async fn index_config_handler(
 /// that shares [`IndexConfigView`].
 /// What: the handle lookup plus [`IndexConfigView::from_handle`]. Returns the
 /// typed view rather than a `Value` so both transports serialise one struct.
-/// Test: `index_config_over_the_socket_matches_the_http_body`.
+/// Test: `get_returns_current_config`, `get_unknown_index_404`,
+/// `index_config_over_the_socket_matches_the_http_body`.
 pub(crate) fn index_config_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -185,50 +160,6 @@ pub(crate) fn index_config_report(
         ));
     };
     Ok(IndexConfigView::from_handle(&handle))
-}
-
-/// `PATCH /indexes/:id/config` — update the index's hygiene config and/or
-/// runtime component (KG/vector) state.
-///
-/// Why: applies an operator's hygiene edit to the running daemon and persists
-/// it so the change survives a restart. Hygiene fields don't auto-reindex —
-/// the response's `reindex_required: true` hint tells the caller a reindex is
-/// needed for the new filters to take effect on already-indexed files.
-/// Issue #2984 Phase 1: `kg`/`vector` toggle the KG and vector/semantic
-/// components at runtime without a full reindex or index recreation — turning
-/// a component OFF is instantaneous (soft-disable, on-disk data untouched);
-/// turning one ON spawns a background catch-up job (`components` field in the
-/// response reports `catch_up_started`).
-/// What: validates inputs (rejects `data_file_max_bytes == 0`), resolves the
-/// component transition and — when a catch-up is needed — acquires THIS
-/// index's per-index mutual-exclusion semaphore up front so a concurrent
-/// reindex or another catch-up ON THE SAME INDEX returns `409 Conflict`
-/// before ANY state is mutated (issue #2984 Phase 1 CRITICAL finding 2; see
-/// `service::reindex::index_semaphore`).
-/// Rebuilds the in-memory handle with the merged fields (preserving the live
-/// indexer and all Arc-shared state), re-registers it, applies the immediate
-/// component side effects (stage flip + in-memory KG drop on disable), then
-/// upserts the matching `indexes.toml` entry and spawns the catch-up task (if
-/// any; an embed-only re-arm is queued behind the background permit, #8148).
-/// A persistence failure returns **500** with a clear error body so the
-/// UI never claims success while `indexes.toml` silently went stale.
-/// #9059: a PATCH that releases a held index starts a catch-up reindex and
-/// reports it as `catch_up_reindex`.
-/// Test: `a_valid_patch_catches_up_what_the_hold_refused`,
-/// `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
-/// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
-/// `patch_unknown_index_404` (hygiene); `service::server::tests_components`
-/// for the component-toggle paths.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn patch_index_config_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<PatchIndexConfigRequest>,
-) -> Response {
-    match patch_index_config_report(&state, &id, req).await {
-        Ok(body) => Json(body).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
 }
 
 /// Refuse an `exclude_globs` list holding a pattern that does not parse (#8922).
@@ -270,7 +201,18 @@ pub(crate) fn reject_invalid_globs(
 /// catch-up the PATCH asked for starts even when the persist fails, because the
 /// in-memory config it serves is live (#8148 review).
 ///
-/// Test: `index_config_set_over_the_socket_matches_the_http_body`,
+/// Hygiene fields do not auto-reindex: the body's `reindex_required: true`
+/// tells the caller a reindex is needed for the new filters to reach files
+/// already indexed. `kg`/`vector` toggle the components at runtime (#2984
+/// Phase 1): off is instantaneous, on spawns a catch-up (`catch_up_started`),
+/// and a PATCH that releases a held index starts a catch-up reindex (#9059).
+///
+/// Test: `a_valid_patch_catches_up_what_the_hold_refused`,
+/// `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
+/// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
+/// `patch_unknown_index_404` (hygiene); `service::server::tests_components`
+/// for the component-toggle paths;
+/// `index_config_set_over_the_socket_matches_the_http_body`,
 /// `service::server::tests_8148::a_persist_failure_still_runs_the_rearm_and_a_retry_succeeds`,
 /// `a_zero_data_cap_is_refused_and_changes_no_config_on_either_transport`,
 /// `a_config_set_against_an_unknown_index_is_refused_and_registers_nothing`.

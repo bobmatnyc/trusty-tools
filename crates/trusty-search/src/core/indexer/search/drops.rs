@@ -41,7 +41,7 @@ pub struct SearchDrops {
     /// strong archive signal.
     pub archived: usize,
     /// Chunks deleted by the HTTP layer's out-of-root post-filter (#541).
-    /// Filled in by `service::server::search::search_handler`, which owns that
+    /// Filled in by `service::server::search::search_report`, which owns that
     /// filter; always `0` on the indexer's own return. Non-zero also sets the
     /// existing `meta.stale_index_root` boolean, which this counts.
     pub out_of_root: usize,

@@ -404,7 +404,7 @@ impl CodeIndexer {
     /// itself, so they read their own writes. Status and the search KG lane
     /// use [`Self::snapshot_symbol_graph`] / [`Self::symbol_graph`], which
     /// never wait on a rebuild.
-    /// Test: `graph_handler_exports_nodes_and_edges` (export after
+    /// Test: `graph_report_exports_nodes_and_edges` (export after
     /// `index_file` with no ticker running).
     pub async fn fresh_symbol_graph(&self) -> Arc<SymbolGraph> {
         self.flush_symbol_graph().await;

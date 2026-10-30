@@ -4,7 +4,7 @@
 //! previously invisible — `/health` reported `embedder:ready` even while
 //! embed calls timed out for 42 minutes. These tests verify that:
 //!   1. `EmbedderStallTracker` correctly records and clears stall state.
-//!   2. `health_handler` reports `embedder:"stalled"` when the tracker has
+//!   2. `health_report` reports `embedder:"stalled"` when the tracker has
 //!      recent timeouts, and `embedder:"ready"` after recovery.
 //!   3. The new health fields (`embedder_last_ok_secs_ago`,
 //!      `embedder_recent_timeout_count`) are present in the response.
@@ -12,8 +12,6 @@
 use super::*;
 use crate::core::registry::IndexRegistry;
 use crate::service::stall_tracker::EmbedderStallTracker;
-use axum::extract::State;
-use axum::Json;
 use std::sync::Arc;
 
 /// Build a minimal `SearchAppState` with an embedder in "ready" state
@@ -27,37 +25,37 @@ fn ready_state_with_tracker() -> (Arc<SearchAppState>, Arc<EmbedderStallTracker>
     (state, tracker)
 }
 
-/// `health_handler` must report `embedder:"ready"` and
+/// `health_report` must report `embedder:"ready"` and
 /// `embedder_recent_timeout_count:0` when no embed errors have been recorded.
 ///
 /// Why: baseline correctness — a newly-started daemon with a live embedder
 /// must not falsely report degraded state.
-/// What: build a ready state, call health_handler, assert fields.
+/// What: build a ready state, call health_report, assert fields.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::parallel]
 async fn health_reports_ready_when_no_timeouts() {
     let (state, _tracker) = ready_state_with_tracker();
-    let Json(resp) = health_handler(State(state)).await;
-    assert_eq!(resp.embedder, "ready", "no timeouts → must be ready");
+    let resp = health_report(state).await;
+    assert_eq!(resp["embedder"], "ready", "no timeouts → must be ready");
     assert_eq!(
-        resp.embedder_recent_timeout_count, 0,
+        resp["embedder_recent_timeout_count"], 0,
         "zero timeouts expected"
     );
     // Before any embed call, last_ok_secs_ago is absent.
     assert!(
-        resp.embedder_last_ok_secs_ago.is_none(),
+        resp.get("embedder_last_ok_secs_ago").is_none(),
         "no embed call yet → last_ok_secs_ago must be absent"
     );
 }
 
-/// `health_handler` must report `embedder:"stalled"` when the tracker has
+/// `health_report` must report `embedder:"stalled"` when the tracker has
 /// recorded one or more recent timeouts.
 ///
 /// Why: the primary fix for issue #1003 — the stall must be visible on
 /// `/health` so operators can detect the degraded BM25-only fallback without
 /// tailing logs.
-/// What: record two timeouts, call health_handler, assert `"stalled"`.
+/// What: record two timeouts, call health_report, assert `"stalled"`.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::parallel]
@@ -68,24 +66,24 @@ async fn health_reports_stalled_after_embed_timeouts() {
     tracker.record_timeout();
     tracker.record_timeout();
 
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     assert_eq!(
-        resp.embedder, "stalled",
+        resp["embedder"], "stalled",
         "recent timeouts → embedder must be \"stalled\"; got {:?}",
-        resp.embedder
+        resp["embedder"]
     );
     assert_eq!(
-        resp.embedder_recent_timeout_count, 2,
+        resp["embedder_recent_timeout_count"], 2,
         "two timeouts must be reflected in the count"
     );
     // No successful embed → last_ok_secs_ago absent.
     assert!(
-        resp.embedder_last_ok_secs_ago.is_none(),
+        resp.get("embedder_last_ok_secs_ago").is_none(),
         "no success yet → last_ok_secs_ago must be absent"
     );
 }
 
-/// After a stall self-clears (embedder responds again), `health_handler`
+/// After a stall self-clears (embedder responds again), `health_report`
 /// must flip back to `embedder:"ready"`.
 ///
 /// Why: the ANE stall self-heals once fresh requests kick the backend; the
@@ -105,19 +103,19 @@ async fn health_recovers_to_ready_after_stall_clears() {
     // Stall self-heals — next embed succeeds.
     tracker.record_success();
 
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     assert_eq!(
-        resp.embedder, "ready",
+        resp["embedder"], "ready",
         "after success the stall must clear; got {:?}",
-        resp.embedder
+        resp["embedder"]
     );
     assert_eq!(
-        resp.embedder_recent_timeout_count, 0,
+        resp["embedder_recent_timeout_count"], 0,
         "success must reset timeout count to 0"
     );
     // After a success, last_ok_secs_ago should be present and near-zero.
-    let ago = resp
-        .embedder_last_ok_secs_ago
+    let ago = resp["embedder_last_ok_secs_ago"]
+        .as_u64()
         .expect("last_ok_secs_ago must be present after a success");
     assert!(
         ago < 5,
@@ -269,7 +267,7 @@ fn health_response_omits_last_ok_when_none() {
 /// `health_response_omits_last_ok_when_none` above both build a
 /// `HealthResponse` literal with `deferred_embed_queue_depth: 0` and assert
 /// nothing about that field — that proves serde serializes the field, not
-/// that `health_handler` reads the live
+/// that `health_report` reads the live
 /// `reindex::deferred_embed_queue::QUEUE_DEPTH` gauge. #5546 caught this: the
 /// doc comment on the field (`health.rs`) cited a test,
 /// `health_reports_the_deferred_embed_queue_depth`, that was never written.
@@ -303,8 +301,10 @@ async fn health_reports_the_deferred_embed_queue_depth_end_to_end() {
     }
     let (state, _tracker) = ready_state_with_tracker();
 
-    let Json(baseline_resp) = health_handler(State(Arc::clone(&state))).await;
-    let baseline = baseline_resp.deferred_embed_queue_depth;
+    let baseline_resp = health_report(Arc::clone(&state)).await;
+    let baseline = baseline_resp["deferred_embed_queue_depth"]
+        .as_u64()
+        .expect("queue depth is a u64");
 
     // Hold the ONE background-reindex permit ourselves so the job we are
     // about to enqueue is counted (QUEUE_DEPTH is incremented synchronously
@@ -327,9 +327,9 @@ async fn health_reports_the_deferred_embed_queue_depth_end_to_end() {
     let progress = Arc::new(crate::service::reindex::ReindexProgress::new());
     crate::service::reindex::spawn_deferred_embed_pass(handle, progress, 0);
 
-    let Json(during_resp) = health_handler(State(Arc::clone(&state))).await;
+    let during_resp = health_report(Arc::clone(&state)).await;
     assert_eq!(
-        during_resp.deferred_embed_queue_depth,
+        during_resp["deferred_embed_queue_depth"],
         baseline + 1,
         "/health must report the real queued job while it is pending — not a value \
          frozen at whatever a fixture happened to hardcode"
@@ -339,10 +339,14 @@ async fn health_reports_the_deferred_embed_queue_depth_end_to_end() {
     // reflects the drain too — the round trip a fixture round-trip cannot
     // prove.
     drop(permit);
-    let mut drained = during_resp.deferred_embed_queue_depth;
+    let mut drained = during_resp["deferred_embed_queue_depth"]
+        .as_u64()
+        .expect("queue depth is a u64");
     for _ in 0..500 {
-        let Json(resp) = health_handler(State(Arc::clone(&state))).await;
-        drained = resp.deferred_embed_queue_depth;
+        let resp = health_report(Arc::clone(&state)).await;
+        drained = resp["deferred_embed_queue_depth"]
+            .as_u64()
+            .expect("queue depth is a u64");
         if drained == baseline {
             break;
         }

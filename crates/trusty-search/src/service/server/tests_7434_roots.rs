@@ -3,16 +3,13 @@
 //! Why: a root supplied at creation must pass exactly the gate a root added
 //! later passes, and `roots` on an already-registered id must never be
 //! silently dropped.
-//! What: drives `create_index_handler` directly with a mock embedder.
+//! What: drives `create_index_report` directly with a mock embedder.
 //! Test: this file.
 
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::{IndexId, IndexRegistry};
-use axum::body::to_bytes;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -55,12 +52,7 @@ async fn create(
     state: &Arc<SearchAppState>,
     req: super::router::CreateIndexRequest,
 ) -> (StatusCode, serde_json::Value) {
-    let response = super::indexes::create_index_handler(State(Arc::clone(state)), Json(req)).await;
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    (status, serde_json::from_slice(&bytes).expect("json body"))
+    super::test_support::create_answer(state, req).await
 }
 
 /// Why: the first reindex must walk the whole table, so the table must be

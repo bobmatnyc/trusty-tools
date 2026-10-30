@@ -2,9 +2,7 @@
 use super::routing::RoutingMode;
 use super::status::GraphQueryParams;
 use super::*;
-use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 
 /// Shared base for `GlobalSearchRequest` test literals — every field except
 /// `query` / `top_k` at its neutral no-op value. Keeps each test's `Json(...)`
@@ -56,18 +54,18 @@ async fn health_handler_reports_indexes_and_uptime() {
         "/tmp/health-test".into(),
     ));
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = health_handler(State(state)).await;
-    assert_eq!(resp.status, "ok");
-    assert_eq!(resp.version, env!("CARGO_PKG_VERSION"));
-    assert_eq!(resp.indexes, 1);
+    let resp = health_report(state).await;
+    assert_eq!(resp["status"], "ok");
+    assert_eq!(resp["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(resp["indexes"], 1);
     // uptime_secs is u64 — always >= 0 by type; just exercise the path.
-    let _ = resp.uptime_secs;
+    let _ = resp["uptime_secs"];
     // No embedder attached in this test. With the deferred-init flow,
     // a fresh `SearchAppState::new()` reports "initializing" (the
     // background task hasn't installed an embedder yet) rather than
     // "unavailable". "unavailable" is reserved for the post-failure
     // case where the init task explicitly errored.
-    assert_eq!(resp.embedder, "initializing");
+    assert_eq!(resp["embedder"], "initializing");
 }
 
 /// #9030: a state no listener was stamped onto reports both transport fields
@@ -127,13 +125,13 @@ async fn health_surfaces_watcher_network_degraded_count() {
         .spawn_for_index_with_mount_kind(&handle, MountKind::Network)
         .await;
 
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
     assert_eq!(
-        resp.indexes_watcher_network_degraded, 1,
+        resp["indexes_watcher_network_degraded"], 1,
         "the network-mount refusal must be counted on /health"
     );
     assert_eq!(
-        resp.status, "degraded",
+        resp["status"], "degraded",
         "top-level status must flip to degraded, matching the indexes_corpus_failed convention"
     );
 }
@@ -144,7 +142,7 @@ async fn health_surfaces_watcher_network_degraded_count() {
 /// and a 1-hour `Cache-Control` header.
 #[tokio::test]
 #[serial_test::parallel]
-async fn graph_handler_exports_nodes_and_edges() {
+async fn graph_report_exports_nodes_and_edges() {
     use crate::core::{
         indexer::CodeIndexer,
         registry::{IndexHandle, IndexId, IndexRegistry},
@@ -171,27 +169,9 @@ async fn graph_handler_exports_nodes_and_edges() {
     ));
     let state = Arc::new(SearchAppState::new(registry));
 
-    let response = graph_handler(
-        State(state),
-        Path("graph-test".to_string()),
-        Query(GraphQueryParams::default()),
-    )
-    .await
-    .expect("handler ok");
-
-    // 1-hour cache header is present.
-    assert_eq!(
-        response
-            .headers()
-            .get(axum::http::header::CACHE_CONTROL)
-            .and_then(|v| v.to_str().ok()),
-        Some("max-age=3600"),
-    );
-
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+    let value = graph_report(&state, "graph-test", &GraphQueryParams::default())
         .await
-        .expect("body bytes");
-    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        .expect("report ok");
 
     let nodes = value["nodes"].as_array().expect("nodes array");
     assert_eq!(nodes.len(), 2, "two function symbols expected");
@@ -214,26 +194,22 @@ async fn graph_handler_exports_nodes_and_edges() {
     assert!(value["generated_at"].is_string());
 }
 
-/// Issue #128 — unknown index id returns 404 from `graph_handler`.
+/// Issue #128 — unknown index id returns 404 from `graph_report`.
 #[tokio::test]
 #[serial_test::parallel]
-async fn graph_handler_unknown_index_returns_404() {
+async fn graph_report_unknown_index_returns_404() {
     use crate::core::registry::IndexRegistry;
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let err = graph_handler(
-        State(state),
-        Path("does-not-exist".to_string()),
-        Query(GraphQueryParams::default()),
-    )
-    .await
-    .expect_err("missing index must 404");
-    assert_eq!(err, StatusCode::NOT_FOUND);
+    let err = graph_report(&state, "does-not-exist", &GraphQueryParams::default())
+        .await
+        .expect_err("missing index must 404");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
 }
 
 /// Issue #128 — `edge_types` filter drops edges of other kinds.
 #[tokio::test]
 #[serial_test::parallel]
-async fn graph_handler_filters_by_edge_type() {
+async fn graph_report_filters_by_edge_type() {
     use crate::core::{
         indexer::CodeIndexer,
         registry::{IndexHandle, IndexId, IndexRegistry},
@@ -259,21 +235,17 @@ async fn graph_handler_filters_by_edge_type() {
     let state = Arc::new(SearchAppState::new(registry));
 
     // Filter to Implements only — the lone CallsFunction edge must drop.
-    let response = graph_handler(
-        State(state),
-        Path("graph-filter".to_string()),
-        Query(GraphQueryParams {
+    let value = graph_report(
+        &state,
+        "graph-filter",
+        &GraphQueryParams {
             types: None,
             edge_types: Some("Implements".to_string()),
             min_weight: None,
-        }),
+        },
     )
     .await
-    .expect("handler ok");
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    .expect("report ok");
     assert!(
         value["edges"].as_array().expect("edges").is_empty(),
         "CallsFunction edge must be filtered out",
@@ -317,10 +289,9 @@ async fn global_search_fans_out_and_merges() {
     }
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(value) =
-        global_search_handler(State(state), Json(base_global_search_request("alpha", 10)))
-            .await
-            .expect("handler ok");
+    let value = global_search_report(&state, base_global_search_request("alpha", 10))
+        .await
+        .expect("handler ok");
 
     let total = value["total_indexes"].as_u64().expect("total_indexes");
     assert_eq!(total, 2, "both indexes counted");
@@ -366,12 +337,9 @@ async fn global_search_fans_out_and_merges() {
 async fn global_search_empty_registry_returns_empty_results() {
     use crate::core::registry::IndexRegistry;
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let Json(value) = global_search_handler(
-        State(state),
-        Json(base_global_search_request("anything", 5)),
-    )
-    .await
-    .expect("handler ok");
+    let value = global_search_report(&state, base_global_search_request("anything", 5))
+        .await
+        .expect("handler ok");
     assert_eq!(value["total_indexes"].as_u64(), Some(0));
     assert!(value["results"].as_array().unwrap().is_empty());
     assert!(value["indexes_searched"].as_array().unwrap().is_empty());
@@ -409,12 +377,12 @@ async fn global_search_restricts_to_named_indexes() {
         ));
     }
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(value) = global_search_handler(
-        State(state),
-        Json(GlobalSearchRequest {
+    let value = global_search_report(
+        &state,
+        GlobalSearchRequest {
             indexes: Some(vec!["proj-a".into(), "proj-c".into()]),
             ..base_global_search_request("alpha", 10)
-        }),
+        },
     )
     .await
     .expect("handler ok");
@@ -477,7 +445,7 @@ fn routing_mode_from_request_resolves_strategy() {
 /// Why: issue #1672 adds `boot_reconcile` to `/health`. This test verifies that
 /// (a) the field is absent when reconcile has not started, (b) it appears once
 /// the summary is populated, and (c) `in_progress` and counts are correct.
-/// What: directly mutate `state.reconcile_summary`, call `health_handler`,
+/// What: directly mutate `state.reconcile_summary`, call `health_report`,
 /// deserialize to JSON and assert field presence and values.
 /// Test: this test.
 #[tokio::test]
@@ -490,7 +458,7 @@ async fn health_includes_reconcile_summary_when_started() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
 
     // Before any reconcile: boot_reconcile must be absent from JSON.
-    let Json(resp_before) = health_handler(State(Arc::clone(&state))).await;
+    let resp_before = health_report(Arc::clone(&state)).await;
     let json_before: Value = serde_json::to_value(&resp_before).expect("serialize");
     assert!(
         json_before.get("boot_reconcile").is_none(),
@@ -513,7 +481,7 @@ async fn health_includes_reconcile_summary_when_started() {
         };
     }
 
-    let Json(resp_after) = health_handler(State(Arc::clone(&state))).await;
+    let resp_after = health_report(Arc::clone(&state)).await;
     let json_after: Value = serde_json::to_value(&resp_after).expect("serialize");
 
     let reconcile = json_after
@@ -529,7 +497,7 @@ async fn health_includes_reconcile_summary_when_started() {
 
 /// Why: when `in_progress = true`, `boot_reconcile` must still appear in JSON
 /// (it only hides when the summary has never been touched at all).
-/// Test: set `in_progress = true`, call health_handler, assert field present.
+/// Test: set `in_progress = true`, call health_report, assert field present.
 #[tokio::test]
 #[serial_test::parallel]
 async fn health_includes_reconcile_summary_when_in_progress() {
@@ -547,7 +515,7 @@ async fn health_includes_reconcile_summary_when_in_progress() {
         };
     }
 
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
     let json: Value = serde_json::to_value(&resp).expect("serialize");
 
     let reconcile = json

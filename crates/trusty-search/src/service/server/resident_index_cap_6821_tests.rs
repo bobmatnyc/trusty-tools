@@ -5,7 +5,7 @@
 //! #6821 gave it a machine-tier default, which makes the acting value something
 //! an operator has to be able to read back — a shrinking `indexes` count and an
 //! `index_not_resident` refusal are otherwise unexplained.
-//! What: drives `health_handler` on a state pinned to a known tier across the
+//! What: drives `health_report` on a state pinned to a known tier across the
 //! three resolutions — env unset, an explicit number, and `off`.
 //!
 //! Isolation: `#[serial_test::serial]` because `TRUSTY_MAX_RESIDENT_INDEXES` is
@@ -15,8 +15,6 @@
 
 use super::*;
 use crate::core::registry::IndexRegistry;
-use axum::extract::State;
-use axum::Json;
 use trusty_common::machine_tier::MemoryTier;
 
 fn clear_cap_env() {
@@ -36,29 +34,30 @@ async fn health_reports_the_resident_index_cap_and_its_source() {
     let state = Arc::new(state);
 
     clear_cap_env();
-    let Json(resp) = health_handler(State(state.clone())).await;
+    let resp = health_report(state.clone()).await;
     assert_eq!(
-        resp.resident_index_cap,
-        Some(crate::service::lazy_loader::default_max_resident_indexes(
+        resp["resident_index_cap"],
+        serde_json::json!(crate::service::lazy_loader::default_max_resident_indexes(
             MemoryTier::Medium
         )),
         "an unset env var must report the Medium tier default, not `null` — \
          before #6821 there was no cap to report at all"
     );
-    assert_eq!(resp.resident_index_cap_source, "tier default");
+    assert_eq!(resp["resident_index_cap_source"], "tier default");
 
     unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "7") };
-    let Json(resp) = health_handler(State(state.clone())).await;
-    assert_eq!(resp.resident_index_cap, Some(7));
-    assert_eq!(resp.resident_index_cap_source, "env");
+    let resp = health_report(state.clone()).await;
+    assert_eq!(resp["resident_index_cap"], 7);
+    assert_eq!(resp["resident_index_cap_source"], "env");
 
     unsafe { std::env::set_var("TRUSTY_MAX_RESIDENT_INDEXES", "off") };
-    let Json(resp) = health_handler(State(state.clone())).await;
+    let resp = health_report(state.clone()).await;
     assert_eq!(
-        resp.resident_index_cap, None,
+        resp["resident_index_cap"],
+        serde_json::Value::Null,
         "`off` must report as null — the disabled signal"
     );
-    assert_eq!(resp.resident_index_cap_source, "env (off)");
+    assert_eq!(resp["resident_index_cap_source"], "env (off)");
 
     clear_cap_env();
 }

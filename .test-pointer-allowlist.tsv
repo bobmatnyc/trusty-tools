@@ -949,7 +949,6 @@ crates/trusty-search/src/service/server/state.rs	status_changed
 crates/trusty-search/src/service/server/state_impl.rs	chat_provider_endpoint_returns_payload
 crates/trusty-search/src/service/server/state_impl.rs	health_includes_embedderd_rss_field
 crates/trusty-search/src/service/server/state_impl.rs	start_brings_pool_online
-crates/trusty-search/src/service/server/status.rs	test_graph_handler_filters
 crates/trusty-search/src/service/server/tickers.rs	status_changed
 crates/trusty-search/src/service/shutdown_flush.rs	shutdown_flush_skips_external_volume_index
 #
@@ -976,4 +975,3 @@ crates/trusty-search/src/commands/start/embedder.rs	resolve_expected_python_prov
 crates/trusty-search/src/core/indexer/archive.rs	archive_downranking_*
 crates/trusty-search/src/core/indexer/docs_penalty.rs	test_doc_score_penalty_*
 crates/trusty-search/src/mcp/tools/search.rs	search_*_tool_routes_to_*_stage
-crates/trusty-search/src/service/server/status.rs	test_graph_handler_*

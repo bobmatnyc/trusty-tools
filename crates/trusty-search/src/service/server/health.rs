@@ -2,13 +2,11 @@
 //!
 //! Why: Health probes are polled at 2s intervals by external orchestrators;
 //! keeping them in a focused module makes response-shape changes easy to review.
-//! What: `health_handler` returns daemon liveness + embedder status + resource
+//! What: `health_report` returns daemon liveness + embedder status + resource
 //! metrics. `POST /upgrade` moved to `super::upgrade` in #6688, when this file
 //! crossed the 500-SLOC production cap.
 //! Test: `health_handler_reports_indexes_and_uptime` and related tests in
 //! `super::tests`.
-use axum::extract::State;
-use axum::Json;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -424,9 +422,7 @@ pub(super) struct EmbedderInfo {
     backend: String,
 }
 
-pub(super) async fn health_handler(
-    State(state): State<Arc<SearchAppState>>,
-) -> Json<HealthResponse> {
+async fn health_response(state: Arc<SearchAppState>) -> HealthResponse {
     // Why: trusty-agents (and other external integrators) probe `/health` to detect
     // a running trusty-search daemon before spawning their own. Including
     // `indexes` count lets the caller verify the daemon is not only alive but
@@ -977,7 +973,7 @@ pub(super) async fn health_handler(
         "ok"
     };
 
-    Json(HealthResponse {
+    HealthResponse {
         status: overall_status,
         version: env!("CARGO_PKG_VERSION"),
         indexes: state.registry.list().len(),
@@ -1025,7 +1021,7 @@ pub(super) async fn health_handler(
         // #9030: the same provider resolution `search.chat` decides on.
         chat_available: resolve_chat_available(state.chat_provider_available(), CHAT_PROBE_BUDGET)
             .await,
-    })
+    }
 }
 
 /// Recompute the persisted `warmboot_summary.warm_boot_degraded` flag when
@@ -1173,21 +1169,21 @@ pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) -> bool {
     conclusive
 }
 
-/// The `/health` body, for a caller that is not an axum route (#6285).
+/// The `/health` body (#6285), the one probe implementation.
 ///
-/// Why: `search.health` over the UDS socket and `GET /health` must never be
-/// able to disagree. Both call [`health_handler`], so there is one probe
-/// implementation and one report; this only strips the `Json` wrapper the
-/// socket has no use for and serialises the result the socket's frame carries.
-/// `HealthResponse` itself stays `pub(super)` — the socket needs the bytes,
-/// not the type.
-/// What: `health_handler(State(state))`, unwrapped and serialised.
+/// Why: `search.health` over the UDS socket and the health tests must never be
+/// able to disagree. Both call this function, so there is one probe
+/// implementation and one report. No HTTP route serves it since #9214; the
+/// `Json`-returning `health_handler` shim was deleted in #9939.
+/// What: builds the `HealthResponse` and serialises it. `HealthResponse`
+/// itself stays `pub(super)` — the socket needs the bytes, not the type.
 /// Serialisation cannot fail for this type (no map with non-string keys, no
 /// non-finite float), so the impossible branch reports itself rather than
 /// panicking.
-/// Test: `health_over_the_socket_matches_the_http_body`.
+/// Test: `health_over_the_socket_matches_the_http_body`,
+/// `health_handler_reports_indexes_and_uptime`.
 pub(crate) async fn health_report(state: Arc<SearchAppState>) -> serde_json::Value {
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_response(state).await;
     serde_json::to_value(resp).unwrap_or_else(
         |e| serde_json::json!({ "status": "error", "error": format!("serialize health: {e}") }),
     )

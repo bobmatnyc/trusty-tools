@@ -14,7 +14,6 @@ use crate::core::embed::Embedder;
 use crate::core::indexer::{CodeIndexer, ParsedBatch};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
 use crate::core::store::{UsearchStore, VectorStore};
-use axum::extract::State;
 use axum::http::StatusCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -149,14 +148,7 @@ type SearchReply = Result<serde_json::Value, (StatusCode, serde_json::Value)>;
 
 async fn search(state: &Arc<SearchAppState>, id: &str, body: serde_json::Value) -> SearchReply {
     let query = serde_json::from_value(body).expect("SearchQuery");
-    super::search::search_handler(
-        State(Arc::clone(state)),
-        axum::extract::Path(id.to_string()),
-        axum::Json(query),
-    )
-    .await
-    .map(|axum::Json(b)| b)
-    .map_err(|(s, axum::Json(b))| (s, b))
+    super::search_report(state, id, query).await
 }
 
 /// A cold query answers 200 with the lexical hit inside the deadline, flagged
