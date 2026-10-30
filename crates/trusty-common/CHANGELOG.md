@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.67.3] — 2026-10-30
+
+### Fixed
+
+- `build_session_name` strips a leaf's own leading `tm-` and trailing `-NN` before adding the prefix, so a hint of `tm-mpm-bugs-01` gives `tm-mpm-bugs`, not `tm-tm-mpm-bugs-01-01`. `leaf_slug_from_hint` applies the same strip, so the picker preview matches the daemon (#10478).
+- The first session for a leaf is bare `tm-<leaf>`. A `-02`, `-03`, … counter is added only when a taken name already holds `tm-<leaf>` or `tm-<leaf>-NN`; an existing `-01` counts as holding the base. Existing sessions keep their names (#10478).
+
+## [0.67.2] — 2026-10-30
+
+### Added
+
+- `EmbedderClient::last_reported_window`, read by `StdioEmbedderClient` from the optional `result.window` field of the first success frame that carries it; an earlier error or orphan frame no longer blocks it (#9284).
+- `PushClient::drain_buffered` removes and returns every buffered frame, oldest first, so a producer can hand undelivered events to a fallback store at shutdown (#10412).
+
+### Fixed
+
+- A child process no longer inherits the parent's sockets on macOS. `mio` sets close-on-exec on a new socket in a second step, so a child forked in that window kept a dropped connection open (511 of 20,000 in the issue's model). The new `child_fds::seal_inherited` hook marks every inherited descriptor close-on-exec before `exec`, and `git::command*`, `GhCommand`, `daemon_guard` detached spawns and the UDS supervisor child use it (#10083).
+
 ## [0.67.1] — 2026-10-29
 
 ### Security

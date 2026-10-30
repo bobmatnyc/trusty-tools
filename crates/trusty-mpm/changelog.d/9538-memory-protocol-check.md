@@ -1,2 +1,0 @@
-Fixed
-- Every trusty-memory socket call in trusty-mpm now checks the daemon's `memory.protocol` first: `tm memory` verbs, the memory import and refresh paths, the pause resume slot and the resume verify pass refuse a daemon from another release with the named protocol error. The doctor `memory` and `auto_memory` rows and the startup banner report the mismatch as degraded with the reason instead of "down"; the TUI health panel shows the named protocol error (#9538).
