@@ -32,10 +32,7 @@ mod stdout_piped;
 
 pub(crate) use capture::spawn_capture_disclaimed;
 pub(crate) use piped::spawn_piped_disclaimed;
-pub(crate) use status::{
-    spawn_detached_disclaimed, spawn_status_inherit_disclaimed,
-    spawn_status_inherit_disclaimed_then,
-};
+pub(crate) use status::{spawn_detached_disclaimed, spawn_status_inherit_disclaimed};
 pub(crate) use stderr_piped::spawn_stderr_piped_disclaimed;
 pub(crate) use stdout_piped::spawn_stdout_piped_disclaimed;
 

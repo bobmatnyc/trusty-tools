@@ -163,37 +163,6 @@ pub fn disclaimed_status(
     cmd.status()
 }
 
-/// [`disclaimed_status`], running `then` on the child's PID before the wait
-/// (#9092).
-///
-/// Why: the launch-spec shim must record the Architect's `claude` by PID, which
-/// exists only after the spawn, and must never leave that `claude` running
-/// unbound.
-/// What: the same disclaimed spawn (or `Command::spawn` off macOS or with
-/// [`DISABLE_ENV`] set); an `Err` from `then` kills and reaps the child and is
-/// returned as an `io::Error` carrying its text. Otherwise waits as
-/// [`disclaimed_status`] does.
-/// Test: `disclaimed_status_then_passes_the_child_pid`,
-/// `disclaimed_status_then_kills_the_child_when_then_fails`.
-pub fn disclaimed_status_then(
-    cmd: &mut std::process::Command,
-    then: impl FnOnce(u32) -> Result<(), String>,
-) -> std::io::Result<std::process::ExitStatus> {
-    #[cfg(target_os = "macos")]
-    {
-        if std::env::var_os(DISABLE_ENV).is_none() {
-            return macos::spawn_status_inherit_disclaimed_then(cmd, then);
-        }
-    }
-    let mut child = cmd.spawn()?;
-    if let Err(why) = then(child.id()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(std::io::Error::other(why));
-    }
-    child.wait()
-}
-
 /// Spawn `program` with `args` detached from the current process — a
 /// fire-and-forget spawn, matching `Command::spawn()`'s semantics of
 /// returning immediately without waiting for the child — and, on macOS,
@@ -637,47 +606,6 @@ mod tests {
             err.kind(),
             std::io::ErrorKind::NotFound | std::io::ErrorKind::Other
         ));
-    }
-
-    /// #9092: `then` sees the PID of the process that runs, while it runs.
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_status_then_passes_the_child_pid() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let out = dir.path().join("pid");
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", &format!("echo $$ > '{}'; sleep 1", out.display())]);
-        let mut seen = 0;
-        let status = disclaimed_status_then(&mut cmd, |pid| {
-            seen = pid;
-            crate::core::twin_arming::process_facts(pid).map(drop)
-        })
-        .expect("spawn");
-        assert!(status.success());
-        let written: u32 = std::fs::read_to_string(&out)
-            .expect("pid file")
-            .trim()
-            .parse()
-            .expect("pid");
-        assert_eq!(seen, written);
-    }
-
-    /// #9092: a failed `then` stops the child before it can act and returns
-    /// the reason; the child's marker is never written.
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_status_then_kills_the_child_when_then_fails() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let marker = dir.path().join("ran");
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", &format!("sleep 2; touch '{}'", marker.display())]);
-        let started = std::time::Instant::now();
-        let err = disclaimed_status_then(&mut cmd, |_| Err("no record".to_owned()))
-            .expect_err("a failed bind fails the spawn");
-        assert!(err.to_string().contains("no record"), "{err}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
-        std::thread::sleep(std::time::Duration::from_millis(2500));
-        assert!(!marker.exists(), "the child was not stopped");
     }
 
     #[test]

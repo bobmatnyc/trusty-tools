@@ -201,27 +201,6 @@ pub(crate) fn spawn_status_inherit_disclaimed(cmd: &mut Command) -> io::Result<E
     wait_for(pid)
 }
 
-/// [`spawn_status_inherit_disclaimed`], running `then` on the child's PID
-/// before the wait (#9092).
-///
-/// What: an `Err` from `then` SIGKILLs and reaps the child and is returned as
-/// an `io::Error`, so a caller that cannot bind the child never leaves it
-/// running.
-/// Test: `super::super::tests::disclaimed_status_then_*`.
-pub(crate) fn spawn_status_inherit_disclaimed_then(
-    cmd: &mut Command,
-    then: impl FnOnce(u32) -> Result<(), String>,
-) -> io::Result<ExitStatus> {
-    let pid = spawn_pid_inherit_disclaimed(cmd)?;
-    if let Err(why) = then(pid.unsigned_abs()) {
-        // SAFETY: `pid` is our own unreaped child, so it cannot be reused yet.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-        let _ = wait_for(pid);
-        return Err(io::Error::other(why));
-    }
-    wait_for(pid)
-}
-
 /// Spawn `cmd` with stdio inherited and TCC responsibility disclaimed,
 /// WITHOUT waiting for the child to exit (fire-and-forget) — the macOS
 /// implementation behind [`super::super::disclaimed_spawn_detached`].

@@ -15,8 +15,8 @@
 //! and the shim survives to reap and propagate the child's real exit status —
 //! the standard wrapper convention. Non-macOS is a plain pass-through spawn (no
 //! TCC there, and the shim is never emitted into a pane off macOS).
-//! #9092: a launch spec naming the supervisor session records the Architect
-//! launch record for the `claude` it spawns, or does not start it
+//! #9092: a launch spec naming the supervisor session is refused before
+//! anything spawns; an Architect starts only via `tm fleet init|relaunch`
 //! ([`launch_from_spec`]).
 //! Test: `run_rejects_empty_argv`; the disclaim/spawn behaviour is covered by
 //! `trusty_mpm::core::spawn_disclaim`'s `disclaimed_status_*` tests, and the
@@ -76,7 +76,7 @@ pub(crate) fn run(argv: Vec<String>) -> anyhow::Result<()> {
     let rest: Vec<String> = it.collect();
     let mut cmd = std::process::Command::new(&program);
     cmd.args(&rest);
-    let status = spawn_and_wait(&mut cmd, &program, |_| Ok(()))?.0;
+    let status = spawn_and_wait(&mut cmd, &program)?.0;
     // Mirror a shell: propagate the child's exit code; use 127 when it was
     // terminated by a signal (no exit code available).
     std::process::exit(status);
@@ -114,12 +114,10 @@ pub(crate) fn run(argv: Vec<String>) -> anyhow::Result<()> {
 /// `run_launch_spec_reports_a_program_that_cannot_be_spawned`,
 /// `run_launch_spec_marks_started_before_it_spawns`.
 pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
-    // #9092: the root the daemon's session store and the launch records share.
-    let root = dirs::home_dir()
-        .context("managed launch aborted: the home directory cannot be resolved")?
-        .join(".trusty-mpm");
+    // #9092: the root of the daemon's session store.
+    let root = dirs::home_dir().map(|home| home.join(".trusty-mpm"));
     let started = std::time::Instant::now();
-    let (status, code) = launch_from_spec(path, &root, |name| std::env::var_os(name))?;
+    let (status, code) = launch_from_spec(path, root.as_deref())?;
     println!(
         "{}",
         trusty_mpm::runtime::launch_report::report_exit(code, started.elapsed())
@@ -128,26 +126,24 @@ pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 /// [`run_launch_spec`] up to the child's exit, under the `~/.trusty-mpm`
-/// `root` and the environment `env`.
+/// `root` (`None` when the home directory cannot be resolved).
 ///
-/// Why: #9092 — a launch of the supervisor session must write the Architect
-/// launch record for the `claude` it spawns, and a test must drive that
-/// against a scratch root without `process::exit`.
-/// What: consumes the spec and marks it started (#8233). #9092: when
-/// [`binding_for`](trusty_mpm::session_manager::architect_spawn::binding_for)
-/// names the supervisor session, it refuses under a Claude Code session
-/// marker in `env`, runs the record-dir preflight, and records the spawned
-/// PID before waiting; any of those failing is `Err`, with no `claude`
-/// started or the spawned one killed. Returns `(exit status, raw code)` as
+/// Why: #9092 — the spec arrives from any path, so a spec naming the
+/// supervisor session must not start an Architect outside `tm fleet
+/// init|relaunch`; a test drives that against a scratch root without
+/// `process::exit`.
+/// What: consumes the spec and marks it started (#8233). #9092: a spec with a
+/// non-empty `session_id` is refused before the spawn when
+/// [`claims_supervisor`](trusty_mpm::session_manager::architect_spawn::claims_supervisor)
+/// says it names a `supervisor` record, or cannot say (unreadable store, no
+/// home). Otherwise spawns as before and returns `(exit status, raw code)` as
 /// [`spawn_and_wait`] does.
-/// Test: `a_supervisor_launch_records_the_claude_it_spawned_9092`,
-/// `a_supervisor_launch_with_an_unwritable_record_dir_spawns_nothing_9092`,
-/// `an_ordinary_launch_writes_no_launch_record_9092`,
-/// `a_supervisor_launch_inside_claude_code_spawns_nothing_9092`.
+/// Test: `a_supervisor_spec_with_markers_stripped_writes_no_record_and_spawns_nothing_9092`,
+/// `ordinary_unknown_and_unlisted_specs_still_launch_9092`,
+/// `an_unreadable_store_refuses_a_spec_that_names_a_session_9092`.
 pub(crate) fn launch_from_spec(
     path: &std::path::Path,
-    root: &std::path::Path,
-    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    root: Option<&std::path::Path>,
 ) -> anyhow::Result<(i32, Option<i32>)> {
     let spec = trusty_mpm::runtime::launch_spec::LaunchSpec::consume(path)
         .with_context(|| "managed launch aborted: its launch spec could not be used")?;
@@ -157,51 +153,31 @@ pub(crate) fn launch_from_spec(
     // #8233 review round 2: keyed on the LAUNCH, so a marker from an earlier
     // launch of this same session can never satisfy this one.
     trusty_mpm::runtime::launch_spec::LaunchSpec::mark_started(path, &spec.launch_id);
-    // #9092: a supervisor launch records its claude or does not start it.
-    let binding = trusty_mpm::session_manager::architect_spawn::binding_for(
-        root,
-        &spec.session_id,
-        &spec.cwd,
-    )
+    // #9092: an Architect starts only via `tm fleet init|relaunch`. Fails
+    // closed when a spec names a session whose kind cannot be read.
+    let claims = match root {
+        Some(root) => {
+            trusty_mpm::session_manager::architect_spawn::claims_supervisor(root, &spec.session_id)
+        }
+        None if spec.session_id.trim().is_empty() => Ok(false),
+        None => Err("the home directory cannot be resolved".to_owned()),
+    }
     .map_err(|why| {
-        anyhow::anyhow!("managed launch aborted: cannot tell whether it is the Architect's: {why}")
+        anyhow::anyhow!(
+            "managed launch of session {} aborted: cannot tell whether it is the Architect's: \
+             {why}",
+            spec.session_id
+        )
     })?;
-    if let Some(binding) = &binding {
-        refuse_inside_claude_code(binding.session(), &env)?;
-        binding.preflight().map_err(|why| {
-            anyhow::anyhow!(
-                "managed launch of supervisor session {} aborted before claude started: the \
-                 Architect launch record cannot be written: {why}",
-                binding.session()
-            )
-        })?;
+    if claims {
+        anyhow::bail!(
+            "managed launch of session {} refused: it is the supervisor (Architect) session, \
+             which starts only through `tm fleet init` or `tm fleet relaunch`",
+            spec.session_id
+        );
     }
     let mut cmd = spec.to_command();
-    spawn_and_wait(&mut cmd, &spec.program, |pid| match &binding {
-        Some(binding) => binding.record(pid).map(drop),
-        None => Ok(()),
-    })
-}
-
-/// `Err` when `env` carries a Claude Code session marker (#9092).
-///
-/// Why: a supervisor launch writes an Architect launch record; a hooked
-/// Claude session running this shim by hand must not mint one, as
-/// `tm fleet relaunch` refuses there (#10033).
-fn refuse_inside_claude_code(
-    session: &str,
-    env: &impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> anyhow::Result<()> {
-    let present = super::fleet::inside_claude::present_markers(env);
-    if present.is_empty() {
-        return Ok(());
-    }
-    let names: Vec<&str> = present.iter().map(|(name, _)| *name).collect();
-    anyhow::bail!(
-        "managed launch of supervisor session {session} refused: it runs inside a Claude Code \
-         session ({} set), and only an operator pane may launch the Architect",
-        names.join(", ")
-    )
+    spawn_and_wait(&mut cmd, &spec.program)
 }
 
 /// Spawn `cmd` disclaimed, wait, and report its status two ways.
@@ -211,14 +187,11 @@ fn refuse_inside_claude_code(
 /// What: returns `(exit_code_for_process_exit, raw_exit_code)` — the first is
 /// 127 for a signal death (mirroring a shell), the second is `None` there so
 /// [`trusty_mpm::runtime::launch_report::report_exit`] can tell the cases apart.
-/// #9092: `then` runs on the child's PID before the wait; its `Err` kills the
-/// child and fails the call.
 /// Test: exercised by both `run` forms; the disclaim behaviour by
 /// `trusty_mpm::core::spawn_disclaim`'s `disclaimed_status_*` tests.
 fn spawn_and_wait(
     cmd: &mut std::process::Command,
     program: &str,
-    then: impl FnOnce(u32) -> Result<(), String>,
 ) -> anyhow::Result<(i32, Option<i32>)> {
     // #2997 review: ignore SIGINT/SIGQUIT in the shim so a pane Ctrl-C (or
     // Ctrl-\) reaches only `claude` — which the disclaimed spawn resets to
@@ -238,7 +211,7 @@ fn spawn_and_wait(
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
     }
 
-    let status = trusty_mpm::core::spawn_disclaim::disclaimed_status_then(cmd, then)
+    let status = trusty_mpm::core::spawn_disclaim::disclaimed_status(cmd)
         .with_context(|| format!("failed to spawn `{program}` (disclaimed)"))?;
 
     Ok((status.code().unwrap_or(127), status.code()))
@@ -252,13 +225,13 @@ mod tests {
     /// session, so a marker from an earlier launch cannot satisfy a later one.
     const TEST_LAUNCH_ID: &str = "aaaabbbbccccddddeeeeffff00001111";
 
-    /// [`launch_from_spec`] under a scratch `~/.trusty-mpm` in `home` and an
-    /// operator environment, so no test reads the real session store (#9092).
+    /// [`launch_from_spec`] under a scratch `~/.trusty-mpm` in `home`, so no
+    /// test reads the real session store (#9092).
     fn launch_in(
         home: &std::path::Path,
         spec: &std::path::Path,
     ) -> anyhow::Result<(i32, Option<i32>)> {
-        launch_from_spec(spec, &home.join(".trusty-mpm"), |_| None)
+        launch_from_spec(spec, Some(&home.join(".trusty-mpm")))
     }
 
     /// Write a spec naming `program` into `dir`, and return its path.
