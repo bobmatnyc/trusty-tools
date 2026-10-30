@@ -242,10 +242,15 @@ release, and this release's `## [<version>]` section must not list them.
 The changelog gates ignore those fragments. The PR gate
 (`scripts/check-pr-changelog-assembled.sh`) and preflight CHECK 9 run
 `scripts/check-changelog-assembled.sh --base origin/main`. That option skips a
-fragment only when all three hold: it was absent at the cut, it matches
-`main`'s copy byte for byte, and none of its bullets is in the new section.
+fragment only when all four hold: it was absent at the cut, it matches
+`main`'s copy byte for byte, no non-merge commit of the release branch touched
+it, and none of its bullets is in the new section.
 A fragment present at the cut, one the release branch added or edited, and one
 already folded into the section still fail as `STRANDED-FRAGMENTS`. A fragment
+the release branch brings in through its own commit, such as a cherry-pick or
+backport of a `main` commit, also still fails, because the release ships that
+change. If `main` edits a fragment after you merged it, the two copies differ
+and the gate fails; merge `main` into the release branch again. A fragment
 the release branch adds itself follows the
 [release-window rule](changelog-fragments.md#the-release-window---merge-in-the-same-pr):
 fold it in with `assemble-changelog.sh <crate> <version> --merge`. A rebase
