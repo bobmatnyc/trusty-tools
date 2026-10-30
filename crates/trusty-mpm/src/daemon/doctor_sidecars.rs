@@ -417,7 +417,7 @@ pub(super) async fn check_search(_home: &Path, project_dir: Option<&Path>) -> Do
     // id is DERIVED from the project (same rule `session_launch` and
     // `trusty-search`'s own `detect_project` use), not a hardcoded literal —
     // see `expected_search_index_id`.
-    let expected_index = expected_search_index_id(project_dir);
+    let accepted = accepted_search_index_ids(project_dir);
     match search_rpc::call_at(
         &socket,
         search_rpc::METHOD_INDEXES_LIST,
@@ -426,15 +426,24 @@ pub(super) async fn check_search(_home: &Path, project_dir: Option<&Path>) -> Do
     )
     .await
     {
-        Ok(body) if index_present(&body, &expected_index) => DoctorCheck::new(
-            "search",
-            CheckStatus::Ok,
-            format!("trusty-search healthy at {at}, `{expected_index}` index present"),
-        ),
+        Ok(body) if accepted.iter().any(|id| index_present(&body, id)) => {
+            let found = accepted
+                .iter()
+                .find(|id| index_present(&body, id))
+                .unwrap_or(&accepted[0]);
+            DoctorCheck::new(
+                "search",
+                CheckStatus::Ok,
+                format!("trusty-search healthy at {at}, `{found}` index present"),
+            )
+        }
         Ok(_) => DoctorCheck::new(
             "search",
             CheckStatus::Warn,
-            format!("trusty-search healthy at {at} but the `{expected_index}` index is missing"),
+            format!(
+                "trusty-search healthy at {at} but the `{}` index is missing",
+                accepted[0]
+            ),
         ),
         Err(e) => DoctorCheck::new(
             "search",
@@ -459,13 +468,27 @@ pub(super) async fn check_search(_home: &Path, project_dir: Option<&Path>) -> Do
 /// trusty-search's own `detect_project` uses to resolve a bare `search`
 /// call, so all three agree on one id per project (#1373).
 /// Test: `expected_search_index_id_derives_from_project_dir_not_hardcoded`.
+#[cfg(test)]
 pub(super) fn expected_search_index_id(project_dir: Option<&Path>) -> String {
+    accepted_search_index_ids(project_dir).swap_remove(0)
+}
+
+/// Every index id the doctor accepts as this project's index (#10530).
+///
+/// Why: until index naming adopts the registry id (D7), an index may exist under
+/// the legacy basename or, once adopted, the registry id; both are healthy.
+/// What: the current id first (the one the miss message names), then the
+/// registry id for a registered project and the legacy basename, deduplicated.
+/// Test: `accepted_ids_include_legacy_and_registry_forms`.
+pub(super) fn accepted_search_index_ids(project_dir: Option<&Path>) -> Vec<String> {
     let start = match project_dir {
         Some(dir) => dir.to_path_buf(),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
-    // #10530: registry-derived when the project is registered.
-    crate::project::index_id_for_registered_root(&start)
+    let root = trusty_common::resolve_project_root(&start);
+    let registered =
+        crate::project::registered_project_for_root_in(&crate::project::registry_data_dir(), &root);
+    crate::project::accepted_index_ids_for(&root, registered.as_ref())
 }
 
 /// True when `body` mentions an index named `name`.

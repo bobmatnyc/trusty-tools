@@ -75,7 +75,8 @@ pub(crate) fn register_project_index(project_root: &Path) -> Option<String> {
             trusty_common::resolve_project_root(project_root),
         );
     }
-    // #10530: a registry project's index id derives from its stored key.
+    // #10530: pass the registry project; the id is the legacy basename until
+    // `REGISTRY_IDS_ADOPTED` flips, so this names the index trusty-code names.
     let registered = registered_project_for(project_root, &crate::project::registry_data_dir());
     trusty_common::search_index::ensure_project_indexed_with_as(
         project_root,

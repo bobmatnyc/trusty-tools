@@ -9,9 +9,9 @@
 //! What: [`RegisteredProject`] is the `(name, project_key)` pair tm stores once
 //! at register. [`derive_registry_index_id`] turns it into
 //! `<slug(name)>-<8 hex of sha256("v2:" + project_key)>`. [`index_id_for_root`]
-//! is the single choice every caller routes through: the registry-derived id
-//! when the project is registered, else the legacy basename that
-//! [`crate::derive_index_id`] returns. Pure; no I/O.
+//! is the single choice every caller routes through. It returns the legacy
+//! basename until [`REGISTRY_IDS_ADOPTED`] flips (D7), because trusty-code cannot
+//! yet look up a registry key and the two must name one index. Pure; no I/O.
 //! Test: `registry_index_id_tests.rs`.
 
 use std::path::Path;
@@ -88,23 +88,48 @@ pub fn derive_registry_index_id(name: &str, project_key: &str) -> String {
     format!("{label}-{}", &hex[..DIGEST_HEX])
 }
 
-/// The index id for `root`, given the registry project that owns it, if any.
+/// Whether index NAMING has switched to the registry-derived id (#10530).
 ///
-/// Why: registration, tm's published active set and the doctor probe must name
-/// one index per project. Routing all of them through this function makes
-/// "the id tm publishes equals the id registration creates" true by
-/// construction.
-/// What: `Some(project)` yields [`derive_registry_index_id`]; `None` yields the
-/// legacy [`crate::derive_index_id`] basename of `root`, so an unregistered
-/// root keeps the id it always had. `root` must already be the resolved project
-/// root ([`crate::resolve_project_root`]).
-/// Test: `index_id_for_root_prefers_the_registered_identity`,
-/// `index_id_for_root_falls_back_to_the_legacy_basename`.
+/// Why: tm and trusty-code share one daemon index per root. trusty-code has no
+/// registry access, so if tm alone named indexes by registry id, each tm project
+/// would get two indexes (a pile-up D1 itself would cause). Both sides switch in
+/// the same change (D7); until then every caller keeps the legacy basename.
+/// What: `false`. Flip it only in the change that also gives trusty-code the
+/// registry lookup, and update the tests that pin the legacy behaviour.
+/// Test: `index_id_for_root_stays_legacy_until_adoption`.
+pub const REGISTRY_IDS_ADOPTED: bool = false;
+
+/// The registry-derived id for `root` when `registered` owns it, else the
+/// legacy basename. Ignores [`REGISTRY_IDS_ADOPTED`].
+///
+/// Why: the adopted behaviour must be testable, and callers that must accept
+/// either form (the doctor) need the registry id by name.
+/// Test: `registry_id_for_root_prefers_the_registered_identity`,
+/// `registry_id_for_root_falls_back_to_the_legacy_basename`.
 #[must_use]
-pub fn index_id_for_root(root: &Path, registered: Option<&RegisteredProject>) -> String {
+pub fn registry_id_for_root(root: &Path, registered: Option<&RegisteredProject>) -> String {
     match registered {
         Some(p) => derive_registry_index_id(&p.name, &p.project_key),
         None => crate::derive_index_id(root),
+    }
+}
+
+/// The index id every caller names `root`'s index by.
+///
+/// Why: registration, tm's published active set and the doctor probe must name
+/// one index per project, and trusty-code must name the same one. Routing all
+/// of them through this function makes that true by construction.
+/// What: the legacy [`crate::derive_index_id`] basename while
+/// [`REGISTRY_IDS_ADOPTED`] is `false`; [`registry_id_for_root`] once it is
+/// `true`. `root` must already be the resolved project root
+/// ([`crate::resolve_project_root`]).
+/// Test: `index_id_for_root_stays_legacy_until_adoption`.
+#[must_use]
+pub fn index_id_for_root(root: &Path, registered: Option<&RegisteredProject>) -> String {
+    if REGISTRY_IDS_ADOPTED {
+        registry_id_for_root(root, registered)
+    } else {
+        crate::derive_index_id(root)
     }
 }
 

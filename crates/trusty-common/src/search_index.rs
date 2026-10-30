@@ -311,7 +311,7 @@ pub fn ensure_project_indexed_with(project_root: &Path, opts: IndexOptions) -> O
 ///
 /// Why: session launch pins the id this returns; it must be the registry id.
 /// What: [`pinnable_index_id`] over [`ensure_project_indexed_reporting_as`].
-/// Test: `registered_project_registers_under_its_registry_id`.
+/// Test: `registered_and_plain_entry_points_register_the_same_id`.
 pub fn ensure_project_indexed_with_as(
     project_root: &Path,
     registered: Option<&crate::RegisteredProject>,
@@ -398,9 +398,10 @@ pub fn ensure_project_indexed_reporting(
 /// rename. `trusty-common` cannot read tm's registry, so the caller passes the
 /// project it resolved.
 /// What: identical to [`ensure_project_indexed_reporting`] except the id is
-/// [`crate::index_id_for_root`]`(root, registered)`. `None` keeps the legacy
-/// basename, so a root with no registry project registers as before.
-/// Test: `registered_project_registers_under_its_registry_id`,
+/// [`crate::index_id_for_root`]`(root, registered)`, which is the legacy
+/// basename until the registry id is adopted (`REGISTRY_IDS_ADOPTED`), so tm and
+/// trusty-code name one index.
+/// Test: `registered_and_plain_entry_points_register_the_same_id`,
 /// `unregistered_root_keeps_the_legacy_basename_id` in `search_index_tests.rs`.
 pub fn ensure_project_indexed_reporting_as(
     project_root: &Path,

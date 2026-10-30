@@ -40,7 +40,7 @@ pub mod worktree_adoption;
 pub mod worktree_policy;
 
 pub use project_key::{
-    assign_project_key, index_id_for_registered_root, index_id_for_root_in,
+    accepted_index_ids_for, assign_project_key, index_id_for_registered_root, index_id_for_root_in,
     project_key_from_repo_url, registered_project_for_root, registered_project_for_root_in,
 };
 pub use record::{Project, derive_name_from_url};

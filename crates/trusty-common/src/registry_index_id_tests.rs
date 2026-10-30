@@ -17,8 +17,8 @@ fn derivation_is_pinned_for_a_known_input() {
 #[test]
 fn same_key_gives_same_id_whatever_the_name_spelling_of_the_path() {
     let reg = RegisteredProject::new("trusty-tools", "bobmatnyc/trusty-tools");
-    let a = index_id_for_root(Path::new("/work/a/trusty-tools"), Some(&reg));
-    let b = index_id_for_root(Path::new("/elsewhere/moved"), Some(&reg));
+    let a = registry_id_for_root(Path::new("/work/a/trusty-tools"), Some(&reg));
+    let b = registry_id_for_root(Path::new("/elsewhere/moved"), Some(&reg));
     assert_eq!(a, b);
 }
 
@@ -46,18 +46,32 @@ fn id_is_one_url_safe_segment() {
     }
 }
 
-/// Why: a registered root must use the registry identity.
+/// Why: a registered root must use the registry identity once adopted.
 /// Test: itself.
 #[test]
-fn index_id_for_root_prefers_the_registered_identity() {
+fn registry_id_for_root_prefers_the_registered_identity() {
     let reg = RegisteredProject::new("widget", "acme/widget");
-    let id = index_id_for_root(Path::new("/x/widget"), Some(&reg));
+    let id = registry_id_for_root(Path::new("/x/widget"), Some(&reg));
     assert_eq!(id, derive_registry_index_id("widget", "acme/widget"));
 }
 
 /// Why: an unregistered root keeps the id registration always created.
 /// Test: itself.
 #[test]
-fn index_id_for_root_falls_back_to_the_legacy_basename() {
+fn registry_id_for_root_falls_back_to_the_legacy_basename() {
+    assert_eq!(registry_id_for_root(Path::new("/x/widget"), None), "widget");
+}
+
+/// Why: until trusty-code can look up a key, tm must not name an index that
+/// trusty-code would not (a duplicate per project). Flip with the adoption.
+/// Test: itself.
+#[test]
+fn index_id_for_root_stays_legacy_until_adoption() {
+    assert!(!REGISTRY_IDS_ADOPTED);
+    let reg = RegisteredProject::new("renamed", "acme/widget");
+    assert_eq!(
+        index_id_for_root(Path::new("/x/widget"), Some(&reg)),
+        "widget"
+    );
     assert_eq!(index_id_for_root(Path::new("/x/widget"), None), "widget");
 }

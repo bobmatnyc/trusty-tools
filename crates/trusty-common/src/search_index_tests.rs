@@ -2174,27 +2174,24 @@ fn a_create_the_daemon_hung_up_on_is_confirmed_by_polling_the_registry() {
     );
 }
 
-/// Why (#10530): registration for a registry project must create the id the
-/// registry derives, whatever the checkout directory is called, so tm's
-/// published id and the created id are one.
+/// Why (#10530): tm (which knows the registry project) and trusty-code (which
+/// calls the plain entry point) must register the SAME id for one root, or each
+/// tm project gets two indexes.
 /// Test: this test.
 #[test]
-fn registered_project_registers_under_its_registry_id() {
+fn registered_and_plain_entry_points_register_the_same_id() {
     let project = scratch_dir("registered");
     fs::create_dir_all(project.join(".git")).unwrap();
-    let registered = crate::RegisteredProject::new("widget", "acme/widget");
+    let registered = crate::RegisteredProject::new("renamed-in-registry", "acme/widget");
+    let opts = IndexOptions::default().with_allow_sensitive_path(true);
 
-    let report = ensure_project_indexed_reporting_as(
-        &project,
-        Some(&registered),
-        IndexOptions::default().with_allow_sensitive_path(true),
-    );
+    let tm = ensure_project_indexed_reporting_as(&project, Some(&registered), opts);
+    let code = ensure_project_indexed_reporting(&project, opts);
+    let expected = crate::derive_index_id(&project);
     let _ = fs::remove_dir_all(&project);
 
-    assert_eq!(
-        report.index_id,
-        Some(crate::derive_registry_index_id("widget", "acme/widget"))
-    );
+    assert_eq!(tm.index_id, code.index_id);
+    assert_eq!(tm.index_id, Some(expected));
 }
 
 /// Why (#10530): a root no registry project owns keeps the basename id.

@@ -466,3 +466,32 @@ async fn upsert_refuses_a_second_project_with_the_same_key() {
         Err(ProjectStoreError::NotFound(_))
     ));
 }
+
+/// Why (#10530 review): two legacy records for one repo must both stay
+/// updatable; only a NEW name is ever refused.
+/// Test: this test.
+#[tokio::test]
+async fn two_legacy_records_for_one_repo_can_both_be_reregistered() {
+    let dir = TempDir::new().expect("tempdir");
+    let legacy = serde_json::json!({ "projects": {
+        "a": { "name": "a", "repo_url": "https://github.com/owner/shared", "default_branch": "main" },
+        "b": { "name": "b", "repo_url": "https://github.com/owner/shared", "default_branch": "main" },
+    }});
+    std::fs::write(dir.path().join("projects.json"), legacy.to_string()).unwrap();
+    let mut store = ProjectStore::load(dir.path()).await.expect("load");
+    for name in ["a", "b"] {
+        let mut p = make_project(name);
+        p.repo_url = "https://github.com/owner/shared".into();
+        store
+            .upsert(p)
+            .await
+            .expect("an existing record is never refused");
+    }
+    // A third, NEW name for the same repo is still refused.
+    let mut c = make_project("c");
+    c.repo_url = "https://github.com/owner/shared".into();
+    assert!(matches!(
+        store.upsert(c).await,
+        Err(ProjectStoreError::DuplicateProjectKey { .. })
+    ));
+}

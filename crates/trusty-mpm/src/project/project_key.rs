@@ -3,7 +3,8 @@
 //! Why: the trusty-search index id must derive from a value stored once in the
 //! registry record, not from the checkout path or live git state, so `mv`, a
 //! repo rename and `git remote remove` cannot move it. See the index-hygiene
-//! design brief, section 1.
+//! design brief, section 1. The KEY is stable now; index NAMING keeps the legacy
+//! basename until trusty-code can look the key up too (`REGISTRY_IDS_ADOPTED`).
 //! What: [`project_key_from_repo_url`] and [`assign_project_key`] mint the key
 //! the store writes at first register; [`registered_project_for_root`] finds the
 //! registry project whose checkout is a given root; [`index_id_for_registered_root`]
@@ -106,6 +107,22 @@ pub fn index_id_for_root_in(registry_dir: &Path, root: &Path) -> String {
 /// Test: `index_id_matches_between_registration_and_publication`.
 pub fn index_id_for_registered_root(root: &Path) -> String {
     index_id_for_root_in(&super::registry_data_dir(), root)
+}
+
+/// Every index id accepted as `root`'s index until naming adopts the registry id.
+///
+/// Why: the doctor must report healthy for the legacy basename and the registry
+/// id alike (#10530).
+/// What: the current naming id first, then the registry id and the legacy
+/// basename, deduplicated.
+/// Test: `accepted_ids_include_legacy_and_registry_forms` (doctor_tests.rs).
+pub fn accepted_index_ids_for(root: &Path, registered: Option<&RegisteredProject>) -> Vec<String> {
+    let mut ids = vec![trusty_common::index_id_for_root(root, registered)];
+    ids.push(trusty_common::registry_id_for_root(root, registered));
+    ids.push(trusty_common::derive_index_id(root));
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| !id.trim().is_empty() && seen.insert(id.clone()));
+    ids
 }
 
 #[cfg(test)]

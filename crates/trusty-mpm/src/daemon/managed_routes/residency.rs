@@ -158,7 +158,7 @@ async fn derive_for_group(
 
     // #10530: the same function registration uses, so the published id is the
     // registered id (it used to be `derive_project_index_id`, which matched no
-    // registered index).
+    // registered index). A legacy record keeps the same id after re-register.
     let mut index_ids = vec![crate::project::index_id_for_root_in(
         registry_dir,
         &accum.root,

@@ -965,7 +965,10 @@ pub use slug::slugify_string;
 #[cfg(feature = "registry-index-id")]
 pub mod registry_index_id;
 #[cfg(feature = "registry-index-id")]
-pub use registry_index_id::{RegisteredProject, derive_registry_index_id, index_id_for_root};
+pub use registry_index_id::{
+    REGISTRY_IDS_ADOPTED, RegisteredProject, derive_registry_index_id, index_id_for_root,
+    registry_id_for_root,
+};
 
 /// Canonical trusty-search index-id derivation from a project path (issue #1373).
 ///

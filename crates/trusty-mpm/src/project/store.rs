@@ -80,6 +80,7 @@ pub enum ProjectStoreError {
     #[error("project store lock error: {0}")]
     Lock(String),
 
+    /// A NEW project name carried a key another record already holds.
     #[error("project key {key} already belongs to project {existing}; refusing to register {name}")]
     DuplicateProjectKey {
         key: String,
@@ -305,29 +306,28 @@ impl ProjectStore {
     /// What: inserts or replaces the record keyed by `name` inside a single
     /// [`Self::mutate`] critical section. The stored record's key always wins
     /// over the incoming one; a record with none gets the incoming key or a
-    /// freshly minted one. Another record already holding the key refuses the
-    /// write with [`ProjectStoreError::DuplicateProjectKey`].
+    /// freshly minted one. A NEW name whose key another record already holds is
+    /// refused with [`ProjectStoreError::DuplicateProjectKey`]; updating an
+    /// existing record never is.
     /// Test: `store_upsert_idempotent`, `upsert_assigns_a_key_once_and_keeps_it`,
     /// `upsert_refuses_a_second_project_with_the_same_key`.
     pub async fn upsert(&mut self, mut project: Project) -> Result<(), ProjectStoreError> {
-        // Minted before the lock: an absolute-path `repo_url` shells out to git.
-        let url = project.repo_url.clone();
-        let minted =
-            tokio::task::spawn_blocking(move || super::project_key::assign_project_key(&url))
-                .await
-                .map_err(|e| {
-                    ProjectStoreError::Io(std::io::Error::other(format!(
-                        "project key task failed: {e}"
-                    )))
-                })?;
         self.mutate(move |projects| {
+            let is_new = !projects.contains_key(&project.name);
             let stored = projects
                 .get(&project.name)
                 .and_then(|p| p.project_key.clone());
-            let key = stored.or(project.project_key.take()).unwrap_or(minted);
-            if let Some(other) = projects
-                .values()
-                .find(|p| p.name != project.name && p.project_key.as_deref() == Some(key.as_str()))
+            // Lazy: an absolute-path `repo_url` shells out to git, so mint only
+            // when neither the store nor the caller supplied a key.
+            let key = stored
+                .or(project.project_key.take())
+                .unwrap_or_else(|| super::project_key::assign_project_key(&project.repo_url));
+            // #10530: only a NEW name can be refused; an existing record
+            // (including a legacy one sharing a repo) is always updatable.
+            if is_new
+                && let Some(other) = projects
+                    .values()
+                    .find(|p| p.project_key.as_deref() == Some(key.as_str()))
             {
                 return Err(ProjectStoreError::DuplicateProjectKey {
                     key,
@@ -410,8 +410,11 @@ impl ProjectStore {
 /// so a caller falls back to the legacy id rather than failing.
 /// Test: `index_id_matches_between_registration_and_publication`.
 pub(super) fn read_projects_blocking(data_dir: &Path) -> Option<Vec<Project>> {
-    let bytes = std::fs::read(data_dir.join("projects.json")).ok()?;
-    let data: StoredData = serde_json::from_slice(&bytes).ok()?;
+    let path = data_dir.join("projects.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let data: StoredData = serde_json::from_slice(&bytes)
+        .inspect_err(|e| tracing::warn!(path = %path.display(), "projects.json unparseable: {e}"))
+        .ok()?;
     Some(data.projects.into_values().collect())
 }
 
