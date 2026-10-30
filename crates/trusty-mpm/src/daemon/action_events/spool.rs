@@ -5,11 +5,14 @@
 //! restart). A drain alone cannot help when the bus is absent.
 //! What: [`persist`] writes one complete NDJSON file per stop (a locked temp
 //! file, then a rename). [`take_all`] takes each file under an exclusive
-//! file lock, reads it, and deletes it. A lock is the kernel's, released
-//! when its holder exits or dies, so liveness needs no pid and pid reuse
-//! cannot fool it: a locked file has a live taker and is left alone; an
-//! unlocked one, including one a dead taker read but never deleted, is
-//! replayed. A temp file is swept once it is past [`TMP_GRACE`] and unlocked.
+//! file lock and reads it; the file stays on disk, still locked, as a
+//! [`Claim`]. #10467: [`retire`] deletes it only once its events reached the
+//! bus or were spooled again, so a taker killed in between loses nothing.
+//! A lock is the kernel's, released when its holder exits or dies, so
+//! liveness needs no pid and pid reuse cannot fool it: a locked file has a
+//! live taker and is left alone; an unlocked one, including one a dead taker
+//! read but never retired, is replayed. A temp file is swept once it is past
+//! [`TMP_GRACE`] and unlocked.
 //! Test: `spool_tests.rs`.
 
 use std::fs::{File, TryLockError};
@@ -55,6 +58,48 @@ pub struct Replay {
     pub held: usize,
     /// Abandoned temp files removed.
     pub swept_tmp: usize,
+    /// The taken files, oldest first, each still locked (#10467).
+    pub claims: Vec<Claim>,
+}
+
+/// A taken spool file: still on disk, locked until [`retire`]d or dropped.
+///
+/// Why: #10467: deleting a file at take lost its events when the taker died
+/// before delivering them.
+/// What: holds the open, locked file. Dropping a claim releases the lock and
+/// leaves the file for the next taker; only [`retire`] deletes it.
+#[derive(Debug)]
+pub struct Claim {
+    path: PathBuf,
+    file: File,
+    events: usize,
+}
+
+impl Claim {
+    /// How many events this file replayed (torn lines excluded).
+    pub fn events(&self) -> usize {
+        self.events
+    }
+}
+
+/// Delete a claimed file whose events were delivered or spooled again.
+///
+/// Why: #10467: the delete is the last step, never the first.
+/// What: removes the file; if that fails, empties it under the lock, so no
+/// later start replays it twice. The lock goes when the claim drops.
+/// Test: `a_failed_bus_flush_keeps_the_replayed_file_and_a_delivery_removes_it_10467`.
+///
+/// # Errors
+///
+/// The remove error, when the file could be neither removed nor emptied;
+/// its events may then replay again.
+pub fn retire(claim: Claim) -> std::io::Result<()> {
+    let Err(e) = std::fs::remove_file(&claim.path) else {
+        return Ok(());
+    };
+    claim.file.set_len(0).map_err(|_| e)?;
+    tracing::warn!(file = %claim.path.display(), "action events: delivered spool file not removed; emptied");
+    Ok(())
 }
 
 /// Write `events` to a new file in `dir`; returns how many were written.
@@ -136,9 +181,10 @@ pub fn take_all(dir: &Path) -> std::io::Result<Replay> {
 ///
 /// What: a missing `dir` is an empty replay. Files go oldest first (names
 /// start with a zero-padded timestamp). A file locked by a live process is
-/// counted in [`Replay::held`] and left. A taken file is deleted; if the
-/// delete fails it is emptied, so no later start replays it twice. A temp
-/// file older than [`TMP_GRACE`] at `now` and unlocked is removed and logged.
+/// counted in [`Replay::held`] and left. #10467: a taken file stays on disk,
+/// locked, in [`Replay::claims`]; the caller [`retire`]s it after delivery.
+/// A temp file older than [`TMP_GRACE`] at `now` and unlocked is removed and
+/// logged.
 ///
 /// # Errors
 ///
@@ -194,7 +240,7 @@ fn sweep_tmp(path: &Path, now: SystemTime) -> bool {
     }
 }
 
-/// Take one complete spool file under its lock into `replay`.
+/// Take one complete spool file under its lock into `replay`, as a [`Claim`].
 fn take_one(path: &Path, replay: &mut Replay) {
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
@@ -224,16 +270,19 @@ fn take_one(path: &Path, replay: &mut Replay) {
         replay.failed_files += 1;
         return;
     }
+    let before = replay.events.len();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         match serde_json::from_str(line) {
             Ok(event) => replay.events.push(event),
             Err(_) => replay.skipped += 1,
         }
     }
-    if let Err(e) = std::fs::remove_file(path) {
-        let emptied = file.set_len(0);
-        tracing::warn!(error = %e, emptied = emptied.is_ok(), file = %path.display(), "action events: replayed spool file not removed");
-    }
+    // #10467: kept, locked, until its events are delivered or spooled again.
+    replay.claims.push(Claim {
+        path: path.to_path_buf(),
+        file,
+        events: replay.events.len() - before,
+    });
 }
 
 /// Whether `path` still names the file `file` has open.

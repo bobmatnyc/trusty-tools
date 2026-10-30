@@ -45,6 +45,7 @@ pub mod message;
 pub mod projection;
 // #9167 PR2: the receiving side of a cross-session message.
 pub mod received;
+mod replayed;
 // #10412: the once-only settle at stop.
 mod settle;
 pub use settle::Settled;
@@ -194,6 +195,8 @@ pub struct ActionPublisher {
     spool: Option<PathBuf>,
     /// #10412: the once-only settle and the closed buffer ([`settle`]).
     settle: settle::SettleState,
+    /// #10467: replayed spool files, held until their events are written.
+    replayed: replayed::Replayed,
 }
 
 impl ActionPublisher {
@@ -208,6 +211,7 @@ impl ActionPublisher {
             scanning: parking_lot::Mutex::new(()),
             spool: None,
             settle: settle::SettleState::default(),
+            replayed: replayed::Replayed::default(),
         }
     }
 
@@ -215,52 +219,6 @@ impl ActionPublisher {
     pub fn with_spool(mut self, dir: Option<PathBuf>) -> Self {
         self.spool = dir;
         self
-    }
-
-    /// Buffer every event a previous run spooled; returns how many.
-    ///
-    /// Why: events spooled at shutdown reach the bus only if a later start
-    /// sends them (#10412).
-    /// What: [`spool::take_all`] takes each file under a lock and deletes it, so a file is
-    /// replayed once; its events join the buffer ahead of any new hook.
-    /// Overflow is counted in [`Self::dropped`], and logged here too.
-    /// Test: `spooled_events_replay_on_the_next_start_exactly_once_10412`.
-    pub fn replay_spool(&self) -> usize {
-        let Some(dir) = &self.spool else { return 0 };
-        let replay = match spool::take_all(dir) {
-            Ok(replay) => replay,
-            Err(e) => {
-                tracing::warn!(error = %e, dir = %dir.display(), "action events: spool unreadable; nothing replayed");
-                return 0;
-            }
-        };
-        if replay.skipped > 0 || replay.failed_files > 0 {
-            tracing::warn!(
-                skipped = replay.skipped,
-                failed_files = replay.failed_files,
-                "action events: part of the spool was unreadable"
-            );
-        }
-        if replay.held > 0 {
-            tracing::info!(
-                held = replay.held,
-                "action events: spool files held by a live process; left to it"
-            );
-        }
-        let dropped_before = self.client.dropped();
-        let count = replay.events.len();
-        for event in replay.events {
-            self.buffer(event);
-        }
-        let overflowed = self.client.dropped().saturating_sub(dropped_before);
-        if count > 0 {
-            tracing::info!(
-                replayed = count,
-                overflowed,
-                "action events: replayed the spool from the last stop"
-            );
-        }
-        count
     }
 
     /// Show paths outside a session's `cwd` relative to `home`.
@@ -404,8 +362,11 @@ impl ActionPublisher {
     }
 
     /// Drain the buffer to the bus once (the only call that does I/O).
+    ///
+    /// #10467: through [`Self::flush_counted`], so a replayed spool file
+    /// goes only once its events are written.
     pub async fn flush(&self) -> PushFlushOutcome {
-        self.client.flush().await
+        self.flush_counted().await
     }
 
     /// Events waiting for a flush.
@@ -431,7 +392,8 @@ impl ActionPublisher {
                 tick.tick().await;
                 // #9167: received messages ride the same flush.
                 me.collect_received().await;
-                let outcome = me.client.flush().await;
+                // #10467: counted, so delivered replay files are retired.
+                let outcome = me.flush_counted().await;
                 health.report(&outcome, me.client.dropped(), Instant::now());
             }
         })

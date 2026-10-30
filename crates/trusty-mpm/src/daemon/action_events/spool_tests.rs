@@ -160,7 +160,8 @@ async fn spooled_events_replay_on_the_next_start_exactly_once_10412() {
         buf
     });
     let second = started(&sock, &spool);
-    assert!(spooled(&spool).is_empty(), "the replay took the spool");
+    // #10467: the file stays, held, until its events are written.
+    assert_eq!(ids(&spooled(&spool)), expected, "deleted before delivery");
     // A hook in the new run goes out after the replayed events.
     second.push_hook_event(hook(SessionId::new(), "t2"));
     let settled = second.action_events().shutdown().await;
