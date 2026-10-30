@@ -1,2 +1,0 @@
-Added
-- The host ceiling accepts `channels.slack_read_allowlist`, a list of `{project, name, tools}` entries read strictly (#10387). `tools` may hold only `slack_read_channel` and `slack_read_thread`; a wildcard, another tool, a relative or `..` project, a project listed twice, or an unsafe `name` refuses the whole host. `read_host_ceiling` reads and parses the host file alone, under the same symlink and canonical-path rules as the full load.
