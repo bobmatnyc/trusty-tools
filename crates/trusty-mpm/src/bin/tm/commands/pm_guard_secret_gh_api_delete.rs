@@ -132,21 +132,29 @@ fn judge(command: &str, depth: usize) -> bool {
         return true;
     }
     let secrets_named = names_secrets(command);
+    // #10548: a command that may redefine a listed program trusts no operand list.
+    let trusted = !redefines_a_never_run_program(command);
     split_shell_segments(command)
         .iter()
-        .any(|segment| segment_deletes_a_secret(segment, secrets_named, depth))
+        .any(|segment| segment_deletes_a_secret(segment, secrets_named, trusted, depth))
 }
 
 /// Whether one segment runs a call the guard must refuse.
-fn segment_deletes_a_secret(segment: &str, secrets_named: bool, depth: usize) -> bool {
+fn segment_deletes_a_secret(
+    segment: &str,
+    secrets_named: bool,
+    trusted: bool,
+    depth: usize,
+) -> bool {
     let Ok(argv) = tokenize(segment) else {
         // #8875 round 3 (owner ruling): an unlexable call is refused outright.
         return starts_a_watched_call(segment);
     };
+    let calls = |sub| gh_calls(&argv, sub, trusted);
     reruns_a_refused_command(&argv, depth)
-        || gh_calls(&argv, "api").any(|(_, tail)| gh_api_deletes(tail, secrets_named))
-        || gh_calls(&argv, "secret").any(|(sub, tail)| secret_subcommand_deletes(sub, tail))
-        || gh_calls(&argv, "alias").any(|(sub, tail)| alias_defines_a_delete(sub, tail, depth))
+        || calls("api").any(|(_, tail)| gh_api_deletes(tail, secrets_named))
+        || calls("secret").any(|(sub, tail)| secret_subcommand_deletes(sub, tail))
+        || calls("alias").any(|(sub, tail)| alias_defines_a_delete(sub, tail, depth))
         || argv
             .iter()
             .enumerate()
@@ -200,11 +208,61 @@ fn reruns_a_refused_command(argv: &[String], depth: usize) -> bool {
 }
 
 /// The subcommand word and the argv tail after each `gh <sub>` pair in `argv`.
-fn gh_calls<'a>(argv: &'a [String], sub: &'a str) -> impl Iterator<Item = (&'a str, &'a [String])> {
+/// #10548: with `trusted`, a pair among the operands of a
+/// [`NEVER_RUNS_OPERANDS`] program is no call.
+fn gh_calls<'a>(
+    argv: &'a [String],
+    sub: &'a str,
+    trusted: bool,
+) -> impl Iterator<Item = (&'a str, &'a [String])> {
+    let operands_from = operands_never_run_from(argv).filter(|_| trusted);
     argv.windows(2)
         .enumerate()
+        .filter(move |(at, _)| operands_from.is_none_or(|from| *at < from))
         .filter(move |(_, w)| possibly_named(&w[0], "gh") && possibly_sub(&w[1], sub))
         .map(move |(at, w)| (w[1].as_str(), &argv[at + 2..]))
+}
+
+/// Programs that never execute an operand as a command (#10548).
+const NEVER_RUNS_OPERANDS: &[&str] = &["cargo", "rsync", "cp", "mv", "ln", "mkdir", "touch"];
+
+/// Shell words that may precede a segment's command word.
+const LEADING_KEYWORDS: &[&str] = &["do", "then", "else", "elif", "!", "{", "("];
+
+/// The index of the first operand when the segment's command word is a
+/// literal [`NEVER_RUNS_OPERANDS`] program, else `None`.
+///
+/// Why: #10548 P7 — `cargo test -p "$c" "$t" --no-fail-fast` read `"$c" "$t"`
+/// as a rewritten `gh api` call and refused it as a secret DELETE. Those
+/// operands reach cargo as arguments; nothing runs them.
+/// What: skips leading `NAME=value` assignments and [`LEADING_KEYWORDS`]; a
+/// command word the shell rewrites, or any other program (a wrapper such as
+/// `xargs`, `env` or `sudo` that runs its operands), answers `None`, so every
+/// pair is still judged.
+/// Test: `adjacent_expansions_are_no_gh_api_call_10548`,
+/// `a_rewritten_gh_api_pair_in_command_position_still_denies_10548`.
+fn operands_never_run_from(argv: &[String]) -> Option<usize> {
+    let at = argv.iter().position(|w| {
+        let assignment = w.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        !assignment && !LEADING_KEYWORDS.contains(&w.as_str())
+    })?;
+    let program = argv.get(at)?;
+    (!is_rewritten(program) && NEVER_RUNS_OPERANDS.contains(&program.as_str())).then_some(at + 1)
+}
+
+/// Whether `command` may define a function or alias named for one of
+/// [`NEVER_RUNS_OPERANDS`] (`cargo() { gh "$@"; }`, `alias cp=gh`): the word
+/// then runs something else, so its operands are judged as before.
+fn redefines_a_never_run_program(command: &str) -> bool {
+    NEVER_RUNS_OPERANDS.iter().any(|name| {
+        command.contains(&format!("alias {name}"))
+            || command.contains(&format!("function {name}"))
+            || command
+                .match_indices(name)
+                .any(|(at, _)| command[at + name.len()..].trim_start().starts_with('('))
+    })
 }
 
 /// Whether a program word could run `name`: by basename, or a word the shell

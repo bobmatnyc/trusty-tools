@@ -394,6 +394,7 @@ use crate::commands::pm_guard_secret_positions::{
 use crate::commands::pm_guard_secret_env_files::names_a_process_manager_dump;
 // #8756 round 2: the dump rules, and every rule on each substitution body.
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
+use crate::commands::pm_guard_secret_script_case::mask_method_calls;
 // #8869: a key consumer and a GET secret listing are granted beside the verbs.
 use crate::commands::pm_guard_secret_consumers::{key_only_consumed, listed_or_searched};
 use crate::commands::pm_guard_secret_substitution_read::evaluate_substitution_read_command;
@@ -902,7 +903,8 @@ fn push_program_text_words(text: &str, out: &mut Vec<String>) {
             spellings.extend(tokens);
         }
         for spelling in spellings {
-            for word in secret_files_named_in(&spelling, Scan::ProgramText) {
+            // #10548: `token.strip()` is a method call, not a file.
+            for word in secret_files_named_in(&mask_method_calls(&spelling), Scan::ProgramText) {
                 if !out.contains(&word) {
                     out.push(word);
                 }
