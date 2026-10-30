@@ -300,9 +300,12 @@ pub(crate) fn parse_switch(raw: Option<&str>) -> bool {
     )
 }
 
-/// Whether the deferred parse splits, read from `TRUSTY_DEFERRED_WINDOW_SPLIT` (#10504).
+/// Whether #10504's behaviour is on, read from `TRUSTY_DEFERRED_WINDOW_SPLIT`.
+///
+/// What: off turns off the deferred split, the catch-up headers and the assumed
+/// (MiniLM) window fallback, so every path behaves as #10481 did.
 /// Test: `a_kill_switch_off_parses_deferred_unsplit`.
-pub(crate) fn deferred_split_enabled() -> bool {
+pub fn deferred_split_enabled() -> bool {
     parse_switch(std::env::var(DEFERRED_SPLIT_ENV).ok().as_deref())
 }
 
@@ -481,10 +484,25 @@ impl CodeIndexer {
     /// Why: the catch-up embedded stored text bare, so a window past the first of a
     /// long function carried no file or symbol. The header goes to the embedded
     /// text only; stored text and BM25 never carry it.
-    /// What: `None` with no embedder, a vector-skipping index, or no split window.
-    /// Otherwise [`header_if_fits`] per chunk, on a blocking thread.
-    /// Test: `the_catch_up_embeds_each_window_with_the_header_and_stores_none`.
+    /// What: `None` with the kill switch off, no embedder, a vector-skipping index,
+    /// or no split window. Otherwise [`header_if_fits`] per chunk, on a blocking
+    /// thread.
+    /// Test: `the_catch_up_embeds_each_window_with_the_header_and_stores_none`,
+    /// `with_the_switch_off_the_catch_up_adds_no_header`.
     pub(crate) async fn catch_up_headers(&self, chunks: &[RawChunk]) -> Option<Vec<String>> {
+        self.catch_up_headers_if(deferred_split_enabled(), chunks)
+            .await
+    }
+
+    /// [`Self::catch_up_headers`] with the switch value given, so a test sets none.
+    pub(crate) async fn catch_up_headers_if(
+        &self,
+        enabled: bool,
+        chunks: &[RawChunk],
+    ) -> Option<Vec<String>> {
+        if !enabled {
+            return None;
+        }
         let embedder = Arc::clone(self.embedder.as_ref()?);
         if self.skip_vector || chunks.is_empty() {
             return None;

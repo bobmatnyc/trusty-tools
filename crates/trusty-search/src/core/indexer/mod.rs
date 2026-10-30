@@ -54,7 +54,7 @@ pub use idle_evict::WriteCooldownPersist;
 mod ingest;
 // #9284: named in `embed_window_stats`, read by the status report.
 pub(crate) use ingest::truncation::EmbedWindowStats;
-pub(crate) use ingest::window_split::deferred_split_enabled;
+pub use ingest::window_split::deferred_split_enabled;
 pub(crate) mod migration_state;
 pub(crate) mod migrations;
 mod persist;

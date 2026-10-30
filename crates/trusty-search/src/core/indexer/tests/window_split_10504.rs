@@ -346,3 +346,65 @@ async fn a_pre_upgrade_oversize_chunk_keeps_its_id_and_is_not_split() {
     assert_eq!(bare, 1, "only the old oversize chunk embeds bare");
     assert_eq!(r.indexer.embed_window_stats().chunks_split(), 1);
 }
+
+/// Switch off: the catch-up adds no header, switch on it does.
+#[tokio::test]
+async fn with_the_switch_off_the_catch_up_adds_no_header() {
+    let r = rig(Some(WINDOW));
+    let short = long_chunk("s", &text(2));
+    assert!(r
+        .indexer
+        .catch_up_headers_if(false, std::slice::from_ref(&short))
+        .await
+        .is_none());
+    let on = r.indexer.catch_up_headers_if(true, &[short]).await;
+    assert_eq!(on, Some(vec!["// path: src/a.rs\n".to_string()]));
+}
+
+/// With no reported window (the assumed fallback is off or unavailable),
+/// `index_file` stores the function whole.
+#[tokio::test]
+async fn an_index_file_with_no_reported_window_does_not_split() {
+    let indexer = assumed(Ok(None));
+    indexer
+        .index_file("src/a.rs", &long_fn("zebracrossing"))
+        .await
+        .expect("index");
+    assert_eq!(
+        indexer.raw_chunks_snapshot().await.expect("chunks").len(),
+        1
+    );
+    assert_eq!(indexer.embed_window_stats().chunks_split(), 0);
+}
+
+/// The `index_file` reply counts the windows committed, not the parse's chunks.
+#[tokio::test]
+async fn an_index_file_reply_counts_the_windows_it_committed() {
+    let r = rig(Some(WINDOW));
+    let outcome = r
+        .indexer
+        .index_file_outcome("src/a.rs", &long_fn("zebracrossing"))
+        .await
+        .expect("index");
+    let stored = r.indexer.raw_chunks_snapshot().await.expect("chunks").len();
+    assert!(stored > 1, "the function split");
+    assert_eq!(
+        outcome,
+        crate::core::indexer::IndexFileOutcome::Indexed { chunks: stored }
+    );
+}
+
+/// A window of 0 to 4 tokens neither panics nor loops: the chunk stays whole or splits.
+/// Guard: green before and after, there is no code change behind it.
+#[test]
+fn a_tiny_window_neither_panics_nor_loops() {
+    let tok = tokenizer();
+    for window in 0..=4 {
+        let parent = long_chunk("p", &text(10));
+        let (out, headers, _) = split_at_window(&tok, window, &roots(), vec![parent]);
+        assert!(
+            !out.is_empty() && out.len() == headers.len(),
+            "window {window}"
+        );
+    }
+}

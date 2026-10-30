@@ -478,6 +478,13 @@ impl CodeIndexer {
         // of the superseded-id snapshot, so the ids kept are the windows' own.
         let (windowed, headers) = self.split_for_embed(chunks).await?;
         let chunks = windowed;
+        // #10504: the reply counts the chunks committed, the windows, not the parse.
+        let outcome = match outcome {
+            IndexFileOutcome::Indexed { .. } => IndexFileOutcome::Indexed {
+                chunks: chunks.len(),
+            },
+            other => other,
+        };
         // #8959: ids this file held whose content the new text no longer has.
         // Chunk ids embed line spans and symbol names, so an upsert alone
         // left them searchable beside the new content.

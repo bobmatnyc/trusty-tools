@@ -29,18 +29,32 @@ pub(super) fn minilm_tokenizer() -> Result<Arc<ChunkTokenizer>, ChunkError> {
     Ok(Arc::clone(TOKENIZER.get_or_init(|| loaded)))
 }
 
-/// The window to split at: `reported` when the sidecar has one, else the
-/// tokenizer's `max_length()`, else no split (`Ok(None)`).
-/// Test: `a_lazy_adapter_assumes_the_minilm_window_before_the_sidecar_reports`.
+/// The window to split at: `reported` when the sidecar has one, else (switch on)
+/// the tokenizer's `max_length()`, else no split (`Ok(None)`).
+///
+/// What: `TRUSTY_DEFERRED_WINDOW_SPLIT` off drops the assumed fallback, so a split
+/// uses the reported window only, as #10481 did (#10504). A tokenizer is loaded
+/// only when there is a window to split at.
+/// Test: `a_lazy_adapter_assumes_the_minilm_window_before_the_sidecar_reports`,
+/// `with_the_switch_off_the_assumed_window_is_not_used`.
 pub(super) fn split_window(reported: Option<usize>) -> Result<SplitWindow, ChunkError> {
+    let assume = crate::core::indexer::deferred_split_enabled();
+    if reported.is_none() && !assume {
+        return Ok(None);
+    }
     let tokenizer = minilm_tokenizer()?;
-    Ok(pick_window(reported, tokenizer.max_length()).map(|window| (window, tokenizer)))
+    Ok(pick_window(reported, tokenizer.max_length(), assume).map(|window| (window, tokenizer)))
 }
 
-/// A reported window wins; else the tokenizer's maximum length (#10504).
-/// Test: `a_reported_window_overrides_the_assumed_one`.
-fn pick_window(reported: Option<usize>, tokenizer_max: Option<usize>) -> Option<usize> {
-    reported.or(tokenizer_max)
+/// A reported window wins; else, when `assume`, the tokenizer's maximum length (#10504).
+/// Test: `a_reported_window_overrides_the_assumed_one`,
+/// `with_the_switch_off_the_assumed_window_is_not_used`.
+fn pick_window(
+    reported: Option<usize>,
+    tokenizer_max: Option<usize>,
+    assume: bool,
+) -> Option<usize> {
+    reported.or(tokenizer_max.filter(|_| assume))
 }
 
 #[cfg(test)]
@@ -50,9 +64,16 @@ mod tests {
     /// The reported window overrides the tokenizer's; absent both, no split.
     #[test]
     fn a_reported_window_overrides_the_assumed_one() {
-        assert_eq!(pick_window(Some(128), Some(256)), Some(128));
-        assert_eq!(pick_window(None, Some(256)), Some(256));
-        assert_eq!(pick_window(None, None), None);
+        assert_eq!(pick_window(Some(128), Some(256), true), Some(128));
+        assert_eq!(pick_window(None, Some(256), true), Some(256));
+        assert_eq!(pick_window(None, None, true), None);
+    }
+
+    /// Switch off: only a reported window splits, as before #10504.
+    #[test]
+    fn with_the_switch_off_the_assumed_window_is_not_used() {
+        assert_eq!(pick_window(None, Some(256), false), None);
+        assert_eq!(pick_window(Some(128), Some(256), false), Some(128));
     }
 
     /// With the MiniLM tokenizer in the cache, an unreported window is 256 and a
