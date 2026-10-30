@@ -1,9 +1,9 @@
 ---
 name: architect-improvements
-description: Architect skill. Load for an improvement finding, a framework or Architect change, or a question about the improvement pipeline - when a session sends an IMPROVEMENT REPORT, when a captured pane shows a Prompt feedback or Improvement recommendations block, once a day for consolidation, and after a filed change merges or releases. Covers intake into the ledger, consolidation by a research agent, filing, and observing whether each change worked. Architect only.
+description: Architect skill. Load for an improvement finding, a framework or Architect change, or a question about the improvement pipeline - when a session sends an IMPROVEMENT REPORT, when a captured pane shows a Prompt feedback or Improvement recommendations block, once a day for consolidation and the routine check, and after a filed change merges or releases. Covers intake into the ledger, consolidation by a research agent, the daily scheduled-routine check, filing, and observing whether each change worked. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 category: monitoring
 tags: [architect, self-improvement, ledger]
 effort: medium
@@ -100,6 +100,16 @@ owning PM), clearer error text, an instruction or skill line, or caller error
 with no tool change. It writes `runs/<date>-tool-failures.md`. Each fix goes
 into the ledger as a report and follows sections 4-5. A tool change goes to
 the owning PM as a relay.
+
+**Routine check (r-192, standard daily task).** Run it with the 06:30
+owner-model run and the daily consolidation. Confirm that each scheduled
+routine ran in the last 24 h: heartbeat, poller, morning brief, owner-model
+run when scheduled, and ID retirement. Read each routine's own last-run record (its log or
+state file), not a summary. A routine with no run in its window is a finding:
+record one `report` line with `kind: routine`, the routine's name and last
+run time as the symptom, the scheduler or script gap as the cause, and the
+fix as the change. Name each missed routine in the morning brief, with the
+fix taken.
 
 ## 4. Filing
 
