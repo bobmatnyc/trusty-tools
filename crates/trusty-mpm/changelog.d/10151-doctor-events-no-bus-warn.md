@@ -1,0 +1,2 @@
+Fixed
+- `tm doctor`'s `events` row warns, instead of failing, on a host without the trusty-events bus: no socket and no trusty-events LaunchAgent plist. The row says the bus is optional and needs no action, and names no command (#10151). A missing socket beside an installed plist, a stale socket, and a bus that answers without a frame still fail. The not-running remedy now names only `tctl start trusty-events`; it no longer names `tctl install trusty-events`, which exits 3 because the bus is internal (#10130).

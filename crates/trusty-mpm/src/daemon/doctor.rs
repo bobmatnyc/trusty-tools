@@ -643,7 +643,7 @@ pub(crate) async fn run_doctor_with_claims(
     // checkouts, and whether the daemon can read the map at all.
     checks.extend(check_search_project(project_dir).await);
     // #10042: the trusty-events bus socket — one UDS connect, never TCP.
-    checks.push(super::doctor_events::check_events().await);
+    checks.push(super::doctor_events::check_events(&home).await);
     checks.push(check_worktrees(repos_root, worktree_counts).await);
     // #2919: `check_worktrees` above counts ORPHANS and has never reported a
     // byte, so it read identically whether the worktree store held 4 GiB or the
