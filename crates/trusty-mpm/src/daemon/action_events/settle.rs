@@ -163,6 +163,8 @@ impl ActionPublisher {
     /// spool write lands (inside the blocking task, so a write that outlives
     /// the budget still retires them when it lands). If it fails, they are
     /// dropped and stay on disk, and their events count as spooled, not lost.
+    /// After an eviction since the replay, no claim comes back to retire
+    /// (`take_claims`), so those files stay and replay again.
     /// Test: `events_buffered_at_shutdown_with_the_bus_down_are_spooled_10412`,
     /// `a_hung_bus_and_an_unwritable_spool_stop_in_bound_and_count_the_loss_10412`,
     /// `an_unwritable_spool_at_stop_keeps_the_replayed_files_10467`.

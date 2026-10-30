@@ -60,6 +60,40 @@ pub struct Replay {
     pub swept_tmp: usize,
     /// The taken files, oldest first, each still locked (#10467).
     pub claims: Vec<Claim>,
+    /// Complete files left untaken because the [`Budget`] was full; a later
+    /// start takes them (#10467).
+    pub deferred: usize,
+}
+
+/// How much one take may claim: the replaying buffer's frame and byte room.
+///
+/// Why: #10467: a replay larger than the buffer evicts its own oldest events
+/// at once, and a claimed file must never lose events that way.
+/// What: [`take_within`] stops claiming at the first file that would pass
+/// either limit, except the first file, which is always taken. A spool line
+/// is the exact frame the buffer counts (JSON plus a newline).
+#[derive(Debug, Clone, Copy)]
+pub struct Budget {
+    /// Events the buffer holds.
+    pub events: usize,
+    /// Serialized bytes the buffer holds.
+    pub bytes: u64,
+}
+
+impl Budget {
+    /// No limit: every complete file is taken.
+    pub const UNLIMITED: Self = Self {
+        events: usize::MAX,
+        bytes: u64::MAX,
+    };
+}
+
+/// What a take has claimed so far, against its [`Budget`].
+#[derive(Default)]
+struct Used {
+    events: usize,
+    bytes: u64,
+    full: bool,
 }
 
 /// A taken spool file: still on disk, locked until [`retire`]d or dropped.
@@ -177,19 +211,40 @@ pub fn take_all(dir: &Path) -> std::io::Result<Replay> {
     take_all_at(dir, SystemTime::now())
 }
 
+/// [`take_at`] at the current time, claiming no more than `budget`.
+///
+/// Test: `a_replay_larger_than_the_buffer_loses_no_event_at_stop_10467`.
+///
+/// # Errors
+///
+/// When `dir` exists but cannot be listed.
+pub fn take_within(dir: &Path, budget: Budget) -> std::io::Result<Replay> {
+    take_at(dir, SystemTime::now(), budget)
+}
+
+/// [`take_at`] with no budget.
+///
+/// # Errors
+///
+/// When `dir` exists but cannot be listed.
+pub fn take_all_at(dir: &Path, now: SystemTime) -> std::io::Result<Replay> {
+    take_at(dir, now, Budget::UNLIMITED)
+}
+
 /// Sweep abandoned temp files, then take every complete spool file in `dir`.
 ///
 /// What: a missing `dir` is an empty replay. Files go oldest first (names
 /// start with a zero-padded timestamp). A file locked by a live process is
 /// counted in [`Replay::held`] and left. #10467: a taken file stays on disk,
 /// locked, in [`Replay::claims`]; the caller [`retire`]s it after delivery.
-/// A temp file older than [`TMP_GRACE`] at `now` and unlocked is removed and
-/// logged.
+/// Once `budget` is full the remaining files are left, counted in
+/// [`Replay::deferred`]. A temp file older than [`TMP_GRACE`] at `now` and
+/// unlocked is removed and logged.
 ///
 /// # Errors
 ///
 /// When `dir` exists but cannot be listed.
-pub fn take_all_at(dir: &Path, now: SystemTime) -> std::io::Result<Replay> {
+pub fn take_at(dir: &Path, now: SystemTime, budget: Budget) -> std::io::Result<Replay> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Replay::default()),
@@ -200,12 +255,18 @@ pub fn take_all_at(dir: &Path, now: SystemTime) -> std::io::Result<Replay> {
         .collect();
     names.sort();
     let mut replay = Replay::default();
+    let mut used = Used::default();
     for name in names {
         let path = dir.join(&name);
         if name.starts_with('.') && name.ends_with(TMP_SUFFIX) {
             replay.swept_tmp += usize::from(sweep_tmp(&path, now));
         } else if !name.starts_with('.') && name.ends_with(SPOOL_SUFFIX) {
-            take_one(&path, &mut replay);
+            // #10467: once full, newer files wait, so order is kept.
+            if used.full {
+                replay.deferred += 1;
+            } else {
+                take_one(&path, &mut replay, &mut used, budget);
+            }
         }
     }
     Ok(replay)
@@ -240,8 +301,10 @@ fn sweep_tmp(path: &Path, now: SystemTime) -> bool {
     }
 }
 
-/// Take one complete spool file under its lock into `replay`, as a [`Claim`].
-fn take_one(path: &Path, replay: &mut Replay) {
+/// Take one complete spool file under its lock into `replay`, as a [`Claim`];
+/// a file that would overrun `budget` (and is not the first) is released,
+/// deferred, and marks `used` full.
+fn take_one(path: &Path, replay: &mut Replay, used: &mut Used, budget: Budget) {
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -270,19 +333,36 @@ fn take_one(path: &Path, replay: &mut Replay) {
         replay.failed_files += 1;
         return;
     }
-    let before = replay.events.len();
+    let mut events = Vec::new();
+    let mut bytes = 0u64;
+    let mut skipped = 0;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         match serde_json::from_str(line) {
-            Ok(event) => replay.events.push(event),
-            Err(_) => replay.skipped += 1,
+            Ok(event) => {
+                events.push(event);
+                bytes += line.len() as u64 + 1;
+            }
+            Err(_) => skipped += 1,
         }
     }
+    let over = used.events.saturating_add(events.len()) > budget.events
+        || used.bytes.saturating_add(bytes) > budget.bytes;
+    if over && !replay.claims.is_empty() {
+        // #10467: dropping `file` releases it, intact, for a later start.
+        used.full = true;
+        replay.deferred += 1;
+        return;
+    }
+    used.events += events.len();
+    used.bytes += bytes;
+    replay.skipped += skipped;
     // #10467: kept, locked, until its events are delivered or spooled again.
     replay.claims.push(Claim {
         path: path.to_path_buf(),
         file,
-        events: replay.events.len() - before,
+        events: events.len(),
     });
+    replay.events.extend(events);
 }
 
 /// Whether `path` still names the file `file` has open.

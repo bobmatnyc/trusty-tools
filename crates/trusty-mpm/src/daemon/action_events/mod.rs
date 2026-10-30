@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use trusty_common::control_bus::{PushClient, PushFlushOutcome};
+use trusty_common::control_bus::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
 
 use crate::core::hook::HookEventRecord;
 use crate::daemon::DaemonState;
@@ -175,6 +175,12 @@ impl ActionEvents {
     }
 }
 
+/// The push buffer's byte budget: 8 MiB, the `PushClient` default.
+///
+/// #10467: named here because the replay claims no more than the buffer
+/// holds ([`spool::Budget`]), and trusty-common does not export its default.
+const BUFFER_BYTES: u64 = 8 * 1024 * 1024;
+
 /// One buffered `PushClient` plus the projection state.
 ///
 /// Why: one per daemon, shared behind an `Arc` by the hook path and the flush
@@ -197,13 +203,22 @@ pub struct ActionPublisher {
     settle: settle::SettleState,
     /// #10467: replayed spool files, held until their events are written.
     replayed: replayed::Replayed,
+    /// #10467: the buffer's room, which bounds what a replay claims.
+    budget: spool::Budget,
 }
 
 impl ActionPublisher {
     /// A publisher dialling `socket`, showing paths relative to `$HOME`.
     pub fn new(socket: impl Into<PathBuf>) -> Self {
+        Self::with_buffer(socket, DEFAULT_PUSH_BUFFER_CAPACITY, BUFFER_BYTES)
+    }
+
+    /// A publisher whose buffer holds `events` frames and `bytes` bytes.
+    ///
+    /// #10467: the replay budget follows the same two limits.
+    pub fn with_buffer(socket: impl Into<PathBuf>, events: usize, bytes: u64) -> Self {
         Self {
-            client: PushClient::new(socket),
+            client: PushClient::with_limits(socket, events, bytes),
             threader: parking_lot::Mutex::new(projection::Threader::new(dirs::home_dir())),
             seq: AtomicU64::new(0),
             flush_interval: DEFAULT_FLUSH_INTERVAL,
@@ -212,6 +227,10 @@ impl ActionPublisher {
             spool: None,
             settle: settle::SettleState::default(),
             replayed: replayed::Replayed::default(),
+            budget: spool::Budget {
+                events: events.max(1),
+                bytes,
+            },
         }
     }
 
@@ -632,6 +651,8 @@ pub fn start_with_spool(
 mod message_tests;
 #[cfg(test)]
 mod received_tests;
+#[cfg(test)]
+mod replayed_tests;
 #[cfg(test)]
 mod spool_tests;
 #[cfg(test)]
