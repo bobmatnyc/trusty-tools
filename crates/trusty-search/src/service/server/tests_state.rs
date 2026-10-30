@@ -610,7 +610,7 @@ async fn index_status_reports_the_embed_window_counters() {
         virtual_terms: Vec::new(),
     };
     indexer
-        .embed_chunks_in_batches(&[long], None, None, false)
+        .embed_chunks_in_batches(&[long], None, None, None)
         .await
         .expect("embed pass");
 

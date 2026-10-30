@@ -163,9 +163,9 @@ impl WindowProbe {
     /// Start measuring `chunks`; tokenizing runs on a blocking thread so it
     /// overlaps the embed call and never stalls the runtime.
     ///
-    /// `headed` measures the text the embedder receives: the header
-    /// [`super::window_split::embed_header`] prepends, when the pass adds it (#10481).
-    pub(crate) fn start(&self, chunks: &[RawChunk], headed: bool) -> PendingMeasure {
+    /// `headers` (1:1 with `chunks`) measure the text the embedder receives: the
+    /// header each chunk is sent with, when the pass adds one (#10481).
+    pub(crate) fn start(&self, chunks: &[RawChunk], headers: Option<&[String]>) -> PendingMeasure {
         match self {
             Self::Unknown => PendingMeasure::Skip,
             Self::Blind { reason, .. } => PendingMeasure::Ready(vec![
@@ -178,7 +178,10 @@ impl WindowProbe {
                 let (window, tokenizer) = (*window, Arc::clone(tokenizer));
                 let texts: Vec<String> = chunks
                     .iter()
-                    .map(|c| super::window_split::embed_text(c, headed))
+                    .enumerate()
+                    .map(|(i, c)| {
+                        super::window_split::embed_text(c, headers.map(|h| h[i].as_str()))
+                    })
                     .collect();
                 let n = texts.len();
                 let task = tokio::task::spawn_blocking(move || {

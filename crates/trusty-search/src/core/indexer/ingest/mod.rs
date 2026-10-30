@@ -476,7 +476,7 @@ impl CodeIndexer {
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
         // #10481: replace over-window chunks with windows before they embed. Ahead
         // of the superseded-id snapshot, so the ids kept are the windows' own.
-        let (windowed, headed) = self.split_for_embed(chunks).await?;
+        let (windowed, headers) = self.split_for_embed(chunks).await?;
         let chunks = windowed;
         // #8959: ids this file held whose content the new text no longer has.
         // Chunk ids embed line spans and symbol names, so an upsert alone
@@ -494,7 +494,7 @@ impl CodeIndexer {
             Some(vec![None; chunks.len()])
         } else {
             Some(
-                self.embed_chunks_in_batches(&chunks, None, None, headed)
+                self.embed_chunks_in_batches(&chunks, None, None, headers.as_deref())
                     .await?,
             )
         };
@@ -751,12 +751,17 @@ impl CodeIndexer {
         let (embeddings, embed_ms, vector_count) = if embed {
             let embed_start = std::time::Instant::now();
             // #10481: replace over-window chunks with windows before they embed.
-            let (windowed, headed) = self
+            let (windowed, headers) = self
                 .split_for_embed(std::mem::take(&mut all_chunks))
                 .await?;
             all_chunks = windowed;
             let embeddings = self
-                .embed_chunks_in_batches(&all_chunks, progress_tx.as_ref(), None, headed)
+                .embed_chunks_in_batches(
+                    &all_chunks,
+                    progress_tx.as_ref(),
+                    None,
+                    headers.as_deref(),
+                )
                 .await?;
             let embed_ms = embed_start.elapsed().as_millis() as u64;
             let vector_count = embeddings.iter().filter(|e| e.is_some()).count();

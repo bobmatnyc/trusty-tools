@@ -28,7 +28,7 @@ fn chunking_indexer() -> CodeIndexer {
 
 async fn embed(indexer: &CodeIndexer, chunks: &[RawChunk]) {
     let out = indexer
-        .embed_chunks_in_batches(chunks, None, None, false)
+        .embed_chunks_in_batches(chunks, None, None, None)
         .await
         .expect("embed pass");
     assert!(out.iter().all(Option::is_some), "every chunk must embed");
@@ -226,7 +226,7 @@ async fn counting_leaves_the_vectors_unchanged() {
     let expected = Embedder::embed(&mock, &text).await.expect("direct embed");
     let indexer = indexer_with(Arc::new(mock));
     let out = indexer
-        .embed_chunks_in_batches(&[raw("a", "src/a.rs", &text)], None, None, false)
+        .embed_chunks_in_batches(&[raw("a", "src/a.rs", &text)], None, None, None)
         .await
         .expect("embed pass");
     assert_eq!(out[0].as_deref(), Some(expected.as_slice()));

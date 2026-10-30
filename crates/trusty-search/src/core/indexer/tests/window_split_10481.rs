@@ -6,9 +6,10 @@
 //! words, so a word past the window is invisible to the vector lane unless the
 //! chunk was split.
 
-use super::super::ingest::window_split::{embed_header, split_at_window};
+use super::super::ingest::window_split::{embed_header, header_path, split_at_window};
 use super::*;
 use crate::core::chunker::ChunkType;
+use crate::core::index_roots::IndexRoots;
 use std::sync::Mutex;
 use trusty_common::embedder::CHUNK_OVERLAP_PERCENT;
 
@@ -35,6 +36,10 @@ fn long_chunk(id: &str, content: &str) -> RawChunk {
     c.start_line = 1;
     c.end_line = content.lines().count();
     c
+}
+
+fn roots() -> IndexRoots {
+    IndexRoots::new(std::path::PathBuf::from("/tmp/test"), Vec::new())
 }
 
 fn tokenizer() -> Arc<trusty_common::embedder::ChunkTokenizer> {
@@ -123,9 +128,9 @@ fn long_fn(marker: &str) -> String {
 fn a_chunk_over_the_window_splits_into_windows_that_each_fit() {
     let tok = tokenizer();
     let parent = long_chunk("p", &text(10));
-    let header = embed_header(&parent);
+    let header = embed_header(&parent, &parent.file);
     let header_tokens = tok.count_tokens(&header).expect("count");
-    let (out, report) = split_at_window(&tok, WINDOW, vec![parent.clone()]);
+    let (out, _h, report) = split_at_window(&tok, WINDOW, &roots(), vec![parent.clone()]);
     assert_eq!(report.parents_split, 1);
     assert!(out.len() > 1, "50 words cannot fit {WINDOW} tokens");
     for w in &out {
@@ -152,10 +157,12 @@ fn a_chunk_over_the_window_splits_into_windows_that_each_fit() {
 fn consecutive_windows_overlap_by_the_common_chunker_constant() {
     let tok = tokenizer();
     let parent = long_chunk("p", &text(10));
-    let header_tokens = tok.count_tokens(&embed_header(&parent)).expect("count");
+    let header_tokens = tok
+        .count_tokens(&embed_header(&parent, &parent.file))
+        .expect("count");
     let budget = WINDOW - header_tokens - OVERHEAD;
     let overlap = budget * CHUNK_OVERLAP_PERCENT / 100;
-    let (out, _) = split_at_window(&tok, WINDOW, vec![parent]);
+    let (out, _h, _) = split_at_window(&tok, WINDOW, &roots(), vec![parent]);
     assert!(overlap >= 1, "the fixture must exercise an overlap");
     for pair in out.windows(2) {
         let (a, b) = (words(&pair[0].content), words(&pair[1].content));
@@ -172,7 +179,7 @@ fn consecutive_windows_overlap_by_the_common_chunker_constant() {
 fn a_chunk_within_the_window_keeps_its_id_and_content() {
     let tok = tokenizer();
     let short = long_chunk("short-id", &text(2));
-    let (out, report) = split_at_window(&tok, WINDOW, vec![short.clone()]);
+    let (out, _h, report) = split_at_window(&tok, WINDOW, &roots(), vec![short.clone()]);
     assert_eq!(report.parents_split, 0);
     assert_eq!(out.len(), 1);
     assert_eq!(
@@ -186,7 +193,7 @@ fn a_chunk_within_the_window_keeps_its_id_and_content() {
 fn a_window_that_cannot_be_split_keeps_the_chunk_whole() {
     let tok = tokenizer();
     let parent = long_chunk("p", &text(10));
-    let (out, report) = split_at_window(&tok, 5, vec![parent.clone()]);
+    let (out, _h, report) = split_at_window(&tok, 5, &roots(), vec![parent.clone()]);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].id, "p");
     assert_eq!(report.kept_whole, 1);
@@ -203,7 +210,7 @@ fn windows_of_a_one_line_chunk_get_distinct_ids() {
         .join(" ");
     let mut parent = long_chunk("p", &one_line);
     parent.end_line = 1;
-    let (out, _) = split_at_window(&tok, WINDOW, vec![parent]);
+    let (out, _h, _) = split_at_window(&tok, WINDOW, &roots(), vec![parent]);
     assert!(out.len() > 2);
     let ids: std::collections::HashSet<&str> = out.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids.len(), out.len());
@@ -223,7 +230,7 @@ fn edges_go_to_window_zero_and_identity_to_all() {
     parent.chunk_type = ChunkType::Function;
     parent.calls = vec!["callee".into()];
     parent.virtual_terms = vec!["term".into()];
-    let (out, _) = split_at_window(&tok, WINDOW, vec![parent]);
+    let (out, _h, _) = split_at_window(&tok, WINDOW, &roots(), vec![parent]);
     assert_eq!(out[0].calls, vec!["callee"]);
     assert!(out[1..]
         .iter()
@@ -239,11 +246,11 @@ fn edges_go_to_window_zero_and_identity_to_all() {
 #[test]
 fn the_header_names_the_path_and_symbol() {
     let mut c = long_chunk("p", "x");
-    assert_eq!(embed_header(&c), "// path: src/a.rs\n");
+    assert_eq!(embed_header(&c, &c.file), "// path: src/a.rs\n");
     c.function_name = Some("Type::method".into());
     c.chunk_type = ChunkType::Method;
     assert_eq!(
-        embed_header(&c),
+        embed_header(&c, &c.file),
         "// path: src/a.rs :: Method Type::method\n"
     );
 }
@@ -253,8 +260,8 @@ fn the_header_names_the_path_and_symbol() {
 async fn an_embedder_with_no_window_does_not_split() {
     let r = rig(None);
     let chunks = vec![long_chunk("p", &text(10))];
-    let (out, headed) = r.indexer.split_for_embed(chunks).await.expect("split");
-    assert!(!headed);
+    let (out, headers) = r.indexer.split_for_embed(chunks).await.expect("split");
+    assert!(headers.is_none());
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].id, "p");
     assert_eq!(r.indexer.embed_window_stats().chunks_split(), 0);
@@ -455,19 +462,139 @@ async fn an_unknown_window_does_not_split_until_the_embedder_reports_it() {
     let embedder: Arc<dyn Embedder> = lazy.clone();
     let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch new"));
     let indexer = CodeIndexer::new("w10481-lazy", "/tmp/test").with_components(embedder, store);
-    let (out, headed) = indexer
+    let (out, headers) = indexer
         .split_for_embed(vec![long_chunk("p", &text(10))])
         .await
         .expect("split");
-    assert!(!headed && out.len() == 1, "no window yet, so no split");
+    assert!(
+        headers.is_none() && out.len() == 1,
+        "no window yet, so no split"
+    );
     assert!(
         !lazy.answered.load(std::sync::atomic::Ordering::SeqCst),
         "the split sent the embedder no probe"
     );
     indexer.warm_embedder().await;
-    let (out, headed) = indexer
+    let (out, headers) = indexer
         .split_for_embed(vec![long_chunk("p", &text(10))])
         .await
         .expect("split");
-    assert!(headed && out.len() > 1, "the window is known now");
+    assert!(
+        headers.is_some() && out.len() > 1,
+        "the window is known now"
+    );
+}
+
+/// An absolute path is made root-relative in the header, so a home directory
+/// never reaches the embedded text and one chunk has one header.
+#[test]
+fn an_absolute_path_is_made_root_relative_in_the_header() {
+    assert_eq!(header_path("/tmp/test/src/a.rs", &roots()), "src/a.rs");
+    assert_eq!(header_path("src/a.rs", &roots()), "src/a.rs");
+    let extra = IndexRoots::new(
+        std::path::PathBuf::from("/tmp/test"),
+        vec![std::path::PathBuf::from("/other/extra")],
+    );
+    assert_eq!(header_path("/other/extra/x.rs", &extra), "@root1/x.rs");
+}
+
+/// Under no root only the file name is kept.
+#[test]
+fn an_absolute_path_under_no_root_keeps_only_its_file_name() {
+    assert_eq!(
+        header_path("/Users/someone/private/dir/b.rs", &roots()),
+        "b.rs"
+    );
+}
+
+/// `index_file` with an absolute path embeds the same header as the relative one.
+#[tokio::test]
+async fn index_file_embeds_the_same_header_for_an_absolute_path() {
+    let r = rig(Some(WINDOW));
+    r.indexer
+        .index_file("/tmp/test/src/a.rs", &long_fn("zebracrossing"))
+        .await
+        .expect("index");
+    let seen = r.seen.lock().expect("seen").clone();
+    let embedded: Vec<&String> = seen.iter().filter(|t| t.as_str() != "warm").collect();
+    assert!(!embedded.is_empty());
+    for t in embedded {
+        assert!(
+            t.starts_with("// path: src/a.rs :: Function long_one\n"),
+            "{t}"
+        );
+        assert!(!t.contains("/tmp/test"), "an absolute root leaked: {t}");
+    }
+}
+
+/// A header that leaves under half the window is dropped for that chunk, and the
+/// content is cut at the full window instead.
+#[test]
+fn a_header_that_leaves_too_little_room_is_dropped() {
+    let tok = tokenizer();
+    let mut parent = long_chunk("p", &text(10));
+    parent.function_name = Some("a b c d e f g h i j".into());
+    parent.chunk_type = ChunkType::Function;
+    // Header: 5 words + 10 name words = 15 tokens, leaving 5 of 20.
+    let (out, headers, _) = split_at_window(&tok, WINDOW, &roots(), vec![parent]);
+    assert!(out.len() > 1);
+    assert!(headers.iter().all(String::is_empty), "{headers:?}");
+    assert_eq!(headers.len(), out.len());
+    for w in &out {
+        let n = tok.count_tokens(&w.content).expect("count") + OVERHEAD;
+        assert!(n <= WINDOW, "window of {n} tokens exceeds {WINDOW}");
+    }
+    assert!(
+        out.iter()
+            .any(|w| tok.count_tokens(&w.content).expect("count") > WINDOW - 8),
+        "windows use the full window, not the room the header left"
+    );
+}
+
+/// Re-indexing a file that shrank from several windows to one chunk leaves no
+/// trace of the old windows in the vector store, BM25 or the corpus.
+#[tokio::test]
+async fn a_shrinking_file_leaves_no_old_window_behind() {
+    let r = rig(Some(WINDOW));
+    r.indexer
+        .index_file("src/a.rs", &long_fn("oldtailmarker"))
+        .await
+        .expect("long version");
+    let old_ids = r.indexer.chunk_ids_for_file("src/a.rs").await;
+    assert!(
+        old_ids.len() >= 3,
+        "the long version has 3+ windows: {}",
+        old_ids.len()
+    );
+    assert!(
+        r.store.contains_many(&old_ids).await.iter().all(|&h| h),
+        "the old windows have vectors"
+    );
+    assert!(!r
+        .indexer
+        .bm25_search("oldtailmarker", 5, None)
+        .await
+        .expect("bm25")
+        .is_empty());
+
+    r.indexer
+        .index_file("src/a.rs", "fn long_one() {}\n")
+        .await
+        .expect("short version");
+    assert!(
+        r.store.contains_many(&old_ids).await.iter().all(|&h| !h),
+        "an old window id still has a vector"
+    );
+    let hits = r
+        .indexer
+        .bm25_search("oldtailmarker", 5, None)
+        .await
+        .expect("bm25");
+    assert!(
+        hits.is_empty(),
+        "BM25 still finds the old windows: {hits:?}"
+    );
+    let chunks = r.indexer.raw_chunks_snapshot().await.expect("chunks");
+    assert_eq!(chunks.len(), 1, "only the new chunk remains");
+    assert!(chunks[0].content.contains("fn long_one() {}"));
 }

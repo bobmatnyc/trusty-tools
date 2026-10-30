@@ -15,6 +15,7 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use trusty_common::embedder::{chunk_text, ChunkError, ChunkTokenizer};
@@ -22,6 +23,7 @@ use trusty_common::embedder::{chunk_text, ChunkError, ChunkTokenizer};
 use super::super::CodeIndexer;
 use super::truncation::WindowProbe;
 use crate::core::chunker::RawChunk;
+use crate::core::index_roots::IndexRoots;
 
 /// Longest path, in bytes, a header carries; a longer path keeps its tail.
 const HEADER_PATH_MAX: usize = 96;
@@ -37,18 +39,40 @@ fn clip(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// The path/symbol header for `chunk`, ending in a newline (#10481).
+/// The path a header names for `file`: root-relative, never absolute (#10481).
+///
+/// Why: `index_file` may be handed an absolute path, which would put a home
+/// directory into the embedded text and give one chunk two different headers.
+/// What: a relative path is kept as stored. An absolute one is made relative to
+/// the root that owns it ([`crate::core::index_roots::IndexRoots::relative_path`]);
+/// under no root, only the file name is kept.
+/// Test: `an_absolute_path_is_made_root_relative_in_the_header`,
+/// `an_absolute_path_under_no_root_keeps_only_its_file_name`.
+pub(crate) fn header_path(file: &str, roots: &IndexRoots) -> String {
+    let path = Path::new(file);
+    if !path.is_absolute() {
+        return file.to_string();
+    }
+    let rel = roots.relative_path(path);
+    if Path::new(&rel).is_absolute() {
+        return path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    }
+    rel
+}
+
+/// The path/symbol header for `chunk` at `file`, ending in a newline (#10481).
 ///
 /// Why: the code-search brief (recommendation 2) adds file and symbol context
 /// to what the vector lane sees; a window past the first has no declaration
 /// line of its own.
 /// What: `// path: <file>` plus ` :: <Kind> <name>` for a named chunk. A path
 /// over [`HEADER_PATH_MAX`] keeps its tail, from a `/` boundary when one
-/// exists. Derived from the chunk alone, so every window of one parent gets
-/// the same header and the text is reproducible.
+/// exists. `file` comes from [`header_path`]. Every window of one parent gets
+/// the same header, and the text is reproducible.
 /// Test: `the_header_names_the_path_and_symbol`.
-pub(crate) fn embed_header(chunk: &RawChunk) -> String {
-    let file = chunk.file.as_str();
+pub(crate) fn embed_header(chunk: &RawChunk, file: &str) -> String {
     let path = if file.len() > HEADER_PATH_MAX {
         let mut start = file.len() - HEADER_PATH_MAX;
         while !file.is_char_boundary(start) {
@@ -71,14 +95,13 @@ pub(crate) fn embed_header(chunk: &RawChunk) -> String {
     }
 }
 
-/// The text the embedder receives for `chunk`: the header plus the content
-/// when `headed`, else the stored content unchanged (#10481).
+/// The text the embedder receives for `chunk`: `header` plus the content, or
+/// the stored content alone when there is no header (#10481).
 /// Test: `the_header_is_embedded_but_never_stored`.
-pub(crate) fn embed_text(chunk: &RawChunk, headed: bool) -> String {
-    if headed {
-        format!("{}{}", embed_header(chunk), chunk.content)
-    } else {
-        chunk.content.clone()
+pub(crate) fn embed_text(chunk: &RawChunk, header: Option<&str>) -> String {
+    match header {
+        Some(h) if !h.is_empty() => format!("{h}{}", chunk.content),
+        _ => chunk.content.clone(),
     }
 }
 
@@ -93,27 +116,41 @@ pub(crate) struct SplitReport {
     pub first_error: Option<String>,
 }
 
-/// Byte ranges of the windows of `chunk` when header plus content exceed
-/// `window`; `None` when the chunk fits whole.
+/// How one chunk goes to the embedder: its header (empty: none) and its
+/// window ranges (`None`: the chunk fits whole).
+struct Plan {
+    header: String,
+    ranges: Option<Vec<Range<usize>>>,
+}
+
+/// Plan `chunk`: header, and windows when header plus content exceed `window`.
 ///
 /// What: a byte prefilter first (a token is at least one byte), so a short
 /// chunk is never tokenized. Otherwise the content is cut for
-/// `window - header_tokens`, the header counting against the budget.
+/// `window - header_tokens`, the header counting against the budget. A header
+/// that leaves less than half the window drops out for this chunk, which is cut
+/// at the full window, rather than costing the content most of its room.
 fn plan(
     tokenizer: &ChunkTokenizer,
     window: usize,
     chunk: &RawChunk,
-) -> Result<Option<Vec<Range<usize>>>, ChunkError> {
-    let header = embed_header(chunk);
+    file: &str,
+) -> Result<Plan, ChunkError> {
+    let mut header = embed_header(chunk, file);
     if header.len() + chunk.content.len() + tokenizer.special_overhead() <= window {
-        return Ok(None);
+        return Ok(Plan {
+            header,
+            ranges: None,
+        });
     }
-    let room = window.saturating_sub(tokenizer.count_tokens(&header)?);
+    let mut room = window.saturating_sub(tokenizer.count_tokens(&header)?);
+    if room < window / 2 {
+        header.clear();
+        room = window;
+    }
     let pieces = chunk_text(tokenizer, &chunk.content, room)?;
-    if pieces.len() <= 1 {
-        return Ok(None);
-    }
-    Ok(Some(pieces.into_iter().map(|p| p.byte_range).collect()))
+    let ranges = (pieces.len() > 1).then(|| pieces.into_iter().map(|p| p.byte_range).collect());
+    Ok(Plan { header, ranges })
 }
 
 /// Build window `n` of `src`: ranges are byte ranges of `src.content`.
@@ -171,39 +208,46 @@ fn window_chunk(src: &RawChunk, newlines: &[usize], range: Range<usize>, first: 
 /// a kept chunk or an earlier window gets the existing `::dup::{n}` tail, so no
 /// new id shape exists. A chunk the tokenizer cannot split stays whole and is
 /// counted in the report. A chunk within the window is returned untouched.
+/// The returned headers are 1:1 with the chunks; an empty one means none.
 /// Test: `a_chunk_over_the_window_splits_into_windows_that_each_fit`,
 /// `consecutive_windows_overlap_by_the_common_chunker_constant`,
 /// `a_chunk_within_the_window_keeps_its_id_and_content`,
 /// `a_window_that_cannot_be_split_keeps_the_chunk_whole`,
-/// `windows_of_a_one_line_chunk_get_distinct_ids`.
+/// `windows_of_a_one_line_chunk_get_distinct_ids`,
+/// `a_header_that_leaves_too_little_room_is_dropped`.
 pub(crate) fn split_at_window(
     tokenizer: &ChunkTokenizer,
     window: usize,
+    roots: &IndexRoots,
     chunks: Vec<RawChunk>,
-) -> (Vec<RawChunk>, SplitReport) {
+) -> (Vec<RawChunk>, Vec<String>, SplitReport) {
     let mut report = SplitReport::default();
-    let mut planned: Vec<(RawChunk, Option<Vec<Range<usize>>>)> = Vec::with_capacity(chunks.len());
+    let mut planned: Vec<(RawChunk, Plan)> = Vec::with_capacity(chunks.len());
     for chunk in chunks {
-        let ranges = match plan(tokenizer, window, &chunk) {
-            Ok(ranges) => ranges,
-            Err(e) => {
-                report.kept_whole += 1;
-                report.first_error.get_or_insert_with(|| e.to_string());
-                None
+        let file = header_path(&chunk.file, roots);
+        let plan = plan(tokenizer, window, &chunk, &file).unwrap_or_else(|e| {
+            report.kept_whole += 1;
+            report.first_error.get_or_insert_with(|| e.to_string());
+            // Unsplit and unheaded: the embed is cut as it was before this change.
+            Plan {
+                header: String::new(),
+                ranges: None,
             }
-        };
-        planned.push((chunk, ranges));
+        });
+        planned.push((chunk, plan));
     }
     // Ids of chunks that stay: a window must not take one of them.
     let mut used: HashSet<String> = planned
         .iter()
-        .filter(|(_, ranges)| ranges.is_none())
+        .filter(|(_, p)| p.ranges.is_none())
         .map(|(c, _)| c.id.clone())
         .collect();
     let mut out = Vec::with_capacity(planned.len());
-    for (chunk, ranges) in planned {
+    let mut headers = Vec::with_capacity(planned.len());
+    for (chunk, Plan { header, ranges }) in planned {
         let Some(ranges) = ranges else {
             out.push(chunk);
+            headers.push(header);
             continue;
         };
         report.parents_split += 1;
@@ -226,9 +270,10 @@ pub(crate) fn split_at_window(
             }
             w.id = id;
             out.push(w);
+            headers.push(header.clone());
         }
     }
-    (out, report)
+    (out, headers, report)
 }
 
 impl CodeIndexer {
@@ -236,37 +281,40 @@ impl CodeIndexer {
     ///
     /// Why: both inline embed paths (`index_file` and the full-pipeline parse)
     /// hand new or changed chunks straight to the embedder, which cuts them.
-    /// What: returns `(chunks, headed)`. With no embedder or store, a
+    /// What: returns `(chunks, headers)`, `headers` 1:1 with the chunks (an
+    /// empty string means no header for that chunk). With no embedder or store, a
     /// vector-skipping index, or a window or tokenizer the embedder does not
-    /// report, the chunks come back as they went in and `headed` is false: no
+    /// report, the chunks come back as they went in and `headers` is `None`: no
     /// split, no header, today's behaviour. A lazy sidecar reports its window
     /// only after its first answer, so a write before that answer goes unsplit;
     /// this method never sends a probe of its own, since an embedder that never
     /// reports a window would then pay one extra call per write.
     /// [`CodeIndexer::warm_embedder`] runs at the start of a full reindex.
-    /// `headed` is true only when the window and a tokenizer are known, the case
-    /// the header budget was computed in. A task panic fails the call, as the
+    /// `headers` is `Some` only when the window and a tokenizer are known, the
+    /// case the header budget was computed in. A task panic fails the call, as the
     /// batch parse does.
     /// Test: `an_embedder_with_no_window_does_not_split`,
     /// `an_unknown_window_does_not_split_until_the_embedder_reports_it`.
     pub(crate) async fn split_for_embed(
         &self,
         chunks: Vec<RawChunk>,
-    ) -> Result<(Vec<RawChunk>, bool)> {
+    ) -> Result<(Vec<RawChunk>, Option<Vec<String>>)> {
         let (Some(embedder), Some(_store)) = (&self.embedder, &self.store) else {
-            return Ok((chunks, false));
+            return Ok((chunks, None));
         };
         if self.skip_vector || chunks.is_empty() {
-            return Ok((chunks, false));
+            return Ok((chunks, None));
         }
         let probe = WindowProbe::from_embedder(embedder.as_ref());
         let WindowProbe::Counting { window, tokenizer } = probe else {
-            return Ok((chunks, false));
+            return Ok((chunks, None));
         };
-        let (split, report) =
-            tokio::task::spawn_blocking(move || split_at_window(&tokenizer, window, chunks))
-                .await
-                .context("window split task panicked")?;
+        let roots = self.chunk_roots();
+        let (split, headers, report) = tokio::task::spawn_blocking(move || {
+            split_at_window(&tokenizer, window, &roots, chunks)
+        })
+        .await
+        .context("window split task panicked")?;
         self.embed_window.add_split(report.parents_split as u64);
         if report.kept_whole > 0 {
             tracing::warn!(
@@ -277,6 +325,6 @@ impl CodeIndexer {
                 "chunks the tokenizer could not split stay whole and embed cut (#10481)",
             );
         }
-        Ok((split, true))
+        Ok((split, Some(headers)))
     }
 }
