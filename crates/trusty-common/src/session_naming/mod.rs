@@ -23,6 +23,10 @@
 //! `tm-<project-leaf>-NN`: a per-project two-digit serial that reuses gaps left
 //! by decommissioned sessions, so `tmux ls` stays short and glanceable for a
 //! daily-driver workflow instead of growing an ever-larger opaque hex suffix.
+//! Issue #10478 made the first session for a leaf bare `tm-<leaf>` (the `-NN`
+//! counter, from `-02`, appears only on a duplicate) and strips a leaf's own
+//! leading `tm-` and trailing `-NN`, so `tm-x-01` as a hint gives `tm-x`, not
+//! `tm-tm-x-01-01`.
 //! What: two embedded wordlists and [`name_from_uuid`]; folder-basename
 //! derivation via [`name_from_dir`]/[`leaf_slug_from_dir`]; and the
 //! serial-numbered [`build_managed_session_name`]/[`build_session_name`] pair
@@ -229,7 +233,7 @@ const MAX_FOLDER_LEN: usize = 20;
 
 /// Maximum length of the leaf-slug portion inside a project-derived session name.
 ///
-/// Why: the full name is `tm-<slug>-NN` (3 + slug + 1 + 2 chars). Capping the
+/// Why: the longest name is `tm-<slug>-NN` (3 + slug + 1 + 2 chars). Capping the
 /// slug at 24 keeps the total under 30 chars — well within tmux's practical
 /// limit — while still being uniquely identifiable.
 const MAX_REPO_SLUG_LEN: usize = 24;
@@ -249,8 +253,37 @@ const LOCAL_LEAF_FALLBACK: &str = "local";
 /// Why: `NN` is a fixed two-digit field by design (issue #1955) — allowing a
 /// third digit would break the glanceable fixed-width convention the ticket
 /// asked for. 99 concurrent/undecommissioned sessions for ONE project is
-/// already an extreme edge case in daily-driver usage.
+/// already an extreme edge case in daily-driver usage. Serial 1 is the bare
+/// `tm-<leaf>` name (#10478); a suffix starts at `-02`.
 const MAX_SERIAL: u8 = 99;
+
+/// Strip a leaf's own leading `tm-` and trailing two-digit `-NN`, repeatedly
+/// (#10478).
+///
+/// Why: a hint that is already a session name (`tm-mpm-bugs-01`) was prefixed
+/// and numbered a second time, giving `tm-tm-mpm-bugs-01-01`. The builder adds
+/// both pieces itself, so the leaf must carry neither.
+/// What: loops until neither strip applies, so `tm-tm-x-01-01` gives `x`. A
+/// strip never empties the leaf: `tm-` is removed only when text follows it,
+/// and `-NN` only when a stem precedes it. Expects an already-sanitized slug.
+/// Test: `normalize_leaf_strips_prefix_and_counter`,
+/// `build_session_name_strips_prefix_and_counter`.
+fn normalize_leaf(slug: &str) -> &str {
+    let mut leaf = slug;
+    loop {
+        if let Some(rest) = leaf.strip_prefix(PREFIX).filter(|r| !r.is_empty()) {
+            leaf = rest;
+        } else if let Some((stem, digits)) = leaf.rsplit_once('-')
+            && !stem.is_empty()
+            && digits.len() == 2
+            && digits.bytes().all(|b| b.is_ascii_digit())
+        {
+            leaf = stem;
+        } else {
+            return leaf;
+        }
+    }
+}
 
 /// Lowercase `input`, collapsing every run of non-alphanumeric characters to a
 /// single `-`, stripping leading/trailing dashes, and capping the result at
@@ -340,15 +373,20 @@ pub fn leaf_slug_from_dir(path: &Path) -> String {
 /// kebab-case within the cap, feeding it back through [`leaf_slug_from_dir`]
 /// daemon-side is a provable no-op — the CLI's chosen leaf is the leaf the
 /// session gets.
-/// What: delegates to [`sanitize_slug`] with [`MAX_FOLDER_LEN`]. Returns an
+/// What: delegates to [`sanitize_slug`] with [`MAX_FOLDER_LEN`], then strips
+/// a leading `tm-` and trailing `-NN` via [`normalize_leaf`] — the same strip
+/// [`build_session_name`] applies, so the preview equals the daemon's stem.
+/// Returns an
 /// empty string when nothing alphanumeric survives — the caller decides
 /// whether that is a fallback (`build_managed_session_name`'s `"local"`) or a
 /// refusal (the picker's `n <name>`, which will not spawn an unusable name).
 /// Test: `leaf_slug_from_hint_keeps_path_like_segments`,
 /// `leaf_slug_from_hint_matches_leaf_slug_from_dir_for_plain_names`,
-/// `leaf_slug_from_hint_is_a_fixed_point_for_its_own_output`.
+/// `leaf_slug_from_hint_is_a_fixed_point_for_its_own_output`,
+/// `leaf_slug_from_hint_strips_session_name_shape`.
 pub fn leaf_slug_from_hint(hint: &str) -> String {
-    sanitize_slug(hint, MAX_FOLDER_LEN)
+    // #10478: strip so the picker preview matches the daemon's name.
+    normalize_leaf(&sanitize_slug(hint, MAX_FOLDER_LEN)).to_string()
 }
 
 /// Derive a session name from a project directory's basename (no serial).
@@ -376,7 +414,7 @@ pub fn name_from_dir(path: &Path) -> String {
 
 /// Errors from allocating a serial-numbered managed session name (issue #1955).
 ///
-/// Why: the `tm-<leaf>-NN` scheme caps the serial at two digits (01-99); when
+/// Why: the `tm-<leaf>[-NN]` scheme caps the serial at two digits (02-99); when
 /// every slot for a project is in use, allocation must fail loudly with an
 /// actionable message rather than silently overflowing to three digits
 /// (breaking the fixed-width convention) or colliding with an existing name.
@@ -385,21 +423,23 @@ pub fn name_from_dir(path: &Path) -> String {
 /// Test: `allocate_serial_exhausted_errors`, `build_session_name_exhausted`.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionNameError {
-    /// All 99 serials (`01`-`99`) for this leaf are currently in use.
+    /// The bare name and all 98 suffixes (`-02`-`-99`) for this leaf are in use.
     #[error(
-        "no free session-name serial (01-99) for project '{0}' — decommission or stop an \
-         existing `tm-{0}-NN` session before creating another"
+        "no free session-name serial (02-99) for project '{0}' — decommission or stop an \
+         existing `tm-{0}` or `tm-{0}-NN` session before creating another"
     )]
     SerialExhausted(String),
 }
 
-/// Parse the `NN` serial suffix from `name` if it is a `tm-<leaf>-NN` name for
-/// exactly this `leaf`.
+/// Parse the serial `name` holds for exactly this `leaf`: 1 for bare
+/// `tm-<leaf>`, `NN` for `tm-<leaf>-NN`.
 ///
 /// Why: allocating the next free serial requires knowing which serials are
 /// already taken FOR THIS PROJECT specifically — a `tm-other-project-01`
-/// session must never block `tm-trusty-tools-01` from being assigned.
-/// What: strips the [`PREFIX`] and the `<leaf>-` segment; if what remains is
+/// session must never block `tm-trusty-tools` from being assigned.
+/// What: strips the [`PREFIX`] and `<leaf>`; nothing left is the bare name,
+/// serial 1 (#10478 — a legacy `tm-<leaf>-01` is serial 1 too). Otherwise it
+/// strips the `-`; if what remains is
 /// exactly two ASCII digits in `01`-`99` (`00` is rejected — [`allocate_serial`]
 /// never hands one out, so a `tm-<leaf>-00` name is foreign/hand-crafted, not
 /// one of ours), parses and returns them. Any other shape (wrong leaf,
@@ -407,10 +447,15 @@ pub enum SessionNameError {
 /// legacy `tmpm-<repo>-<8hex>` name) returns `None`, so legacy/foreign names
 /// never collide with the new serial space.
 /// Test: `parse_serial_matches_own_leaf`, `parse_serial_rejects_other_leaf`,
-/// `parse_serial_rejects_legacy_hex_suffix`, `parse_serial_rejects_serial_00`.
+/// `parse_serial_rejects_legacy_hex_suffix`, `parse_serial_rejects_serial_00`,
+/// `parse_serial_bare_name_is_serial_one`.
 fn parse_serial_for_leaf(name: &str, leaf: &str) -> Option<u8> {
     let rest = name.strip_prefix(PREFIX)?;
     let rest = rest.strip_prefix(leaf)?;
+    if rest.is_empty() {
+        // #10478: the bare first name occupies serial 1.
+        return Some(1);
+    }
     let digits = rest.strip_prefix('-')?;
     if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -419,42 +464,58 @@ fn parse_serial_for_leaf(name: &str, leaf: &str) -> Option<u8> {
     if serial == 0 { None } else { Some(serial) }
 }
 
-/// Find the lowest unused two-digit serial (01-99) for `leaf`.
+/// Find the serial for the next session of `leaf`: 1 (the bare name) when no
+/// name holds the leaf, else the lowest unused serial in 02-99.
 ///
 /// Why (#1955): operators run several concurrent/historical sessions per
 /// project; the serial must be stable, glanceable, and REUSE gaps left by
-/// decommissioned sessions — e.g. if `01`, `02`, `03` exist and `02` is
-/// decommissioned, the NEXT session created for that project gets `02` again,
-/// not `04`. This keeps `tmux ls` readable for a daily-driver workflow instead
-/// of counting up indefinitely after many short-lived sessions.
+/// decommissioned sessions — e.g. if `tm-x`, `-02`, `-03` exist and `-02` is
+/// decommissioned, the NEXT session created for that project gets `-02` again,
+/// not `-04`. This keeps `tmux ls` readable for a daily-driver workflow instead
+/// of counting up indefinitely after many short-lived sessions. #10478: the
+/// first session needs no counter, so serial 1 means the bare `tm-<leaf>`.
 /// What: collects the serials already in use for `leaf` from `existing_names`
-/// (via [`parse_serial_for_leaf`]), then scans `1..=99` and returns the first
-/// serial NOT in that set. Returns [`SessionNameError::SerialExhausted`] if
-/// all 99 are taken. Callers decide what counts as "existing" — the session
+/// (via [`parse_serial_for_leaf`]; the bare name and a legacy `-01` are both
+/// serial 1). An empty set returns 1. Otherwise it scans `2..=99` and returns
+/// the first serial NOT in that set, so any live sibling — even `-03` alone —
+/// makes the bare name a duplicate. Returns
+/// [`SessionNameError::SerialExhausted`] if all of `2..=99` are taken.
+/// Callers decide what counts as "existing" — the session
 /// manager unions live tmux names with non-decommissioned store records so a
 /// decommissioned session's serial is immediately reusable.
 /// Test: `allocate_serial_starts_at_one`, `allocate_serial_reuses_gap`,
-/// `allocate_serial_ignores_other_leaf`, `allocate_serial_exhausted_errors`.
+/// `allocate_serial_ignores_other_leaf`, `allocate_serial_exhausted_errors`,
+/// `allocate_serial_any_sibling_blocks_the_bare_name`.
 pub fn allocate_serial(leaf: &str, existing_names: &[String]) -> Result<u8, SessionNameError> {
     let taken: HashSet<u8> = existing_names
         .iter()
         .filter_map(|n| parse_serial_for_leaf(n, leaf))
         .collect();
-    (1..=MAX_SERIAL)
+    if taken.is_empty() {
+        return Ok(1);
+    }
+    // #10478: a duplicate never reuses serial 1 — the bare name or `-01`.
+    (2..=MAX_SERIAL)
         .find(|n| !taken.contains(n))
         .ok_or_else(|| SessionNameError::SerialExhausted(leaf.to_string()))
 }
 
-/// Build a `tm-<leaf>-NN` managed session name from an already-chosen leaf.
+/// Build a `tm-<leaf>` managed session name, or `tm-<leaf>-NN` on a
+/// duplicate, from an already-chosen leaf.
 ///
 /// Why: separating "what is the leaf" (a priority decision made by
 /// [`build_managed_session_name`]) from "what is the next free serial for that
-/// leaf" (this function) keeps each piece independently testable.
+/// leaf" (this function) keeps each piece independently testable. #10478: a
+/// leaf that is itself a session name (`tm-x-01`) must not be prefixed and
+/// numbered twice.
 /// What: sanitizes `leaf` (idempotent — safe to pass an already-sanitized
-/// slug), substituting [`LOCAL_LEAF_FALLBACK`] when sanitization yields
-/// nothing, allocates the lowest free serial via [`allocate_serial`], and
-/// returns `tm-<leaf>-NN`.
-/// Test: `build_session_name_first_serial`, `build_session_name_gap_reuse`,
+/// slug), strips its own leading `tm-` and trailing `-NN` via
+/// [`normalize_leaf`], substitutes [`LOCAL_LEAF_FALLBACK`] when nothing is
+/// left, and allocates via [`allocate_serial`]. Serial 1 returns bare
+/// `tm-<leaf>`; any other returns `tm-<leaf>-NN`.
+/// Test: `build_session_name_first_is_bare`, `build_session_name_gap_reuse`,
+/// `build_session_name_strips_prefix_and_counter`,
+/// `build_session_name_duplicate_gets_02`,
 /// `build_session_name_empty_leaf_falls_back_to_local`,
 /// `build_session_name_exhausted`.
 pub fn build_session_name(
@@ -462,16 +523,18 @@ pub fn build_session_name(
     existing_names: &[String],
 ) -> Result<String, SessionNameError> {
     let slug = slug_project(leaf);
-    let slug = if slug.is_empty() {
-        LOCAL_LEAF_FALLBACK.to_string()
-    } else {
-        slug
+    // #10478: drop the leaf's own `tm-` and `-NN` before adding ours.
+    let slug = match normalize_leaf(&slug) {
+        "" => LOCAL_LEAF_FALLBACK,
+        s => s,
     };
-    let serial = allocate_serial(&slug, existing_names)?;
-    Ok(format!("{PREFIX}{slug}-{serial:02}"))
+    match allocate_serial(slug, existing_names)? {
+        1 => Ok(format!("{PREFIX}{slug}")),
+        serial => Ok(format!("{PREFIX}{slug}-{serial:02}")),
+    }
 }
 
-/// Derive the `tm-<leaf>-NN` name for a new managed session (issue #1955).
+/// Derive the `tm-<leaf>[-NN]` name for a new managed session (issue #1955).
 ///
 /// Why: `SessionManager::create_with_id` must turn "what do we know about this
 /// session" — an optional GitHub-parsed project name, and the directory the
@@ -796,6 +859,8 @@ mod tests {
             "  ---weird---  ",
             "a-very-long-name-that-exceeds-the-folder-cap",
             "v1.2.3",
+            "tm-mpm-bugs-01",
+            "tm-tm-x-01-01",
         ] {
             let once = leaf_slug_from_hint(raw);
             assert_eq!(leaf_slug_from_hint(&once), once, "hint {raw:?}");
@@ -804,6 +869,25 @@ mod tests {
                 once,
                 "the daemon's own sanitization must be a no-op for {raw:?}"
             );
+        }
+    }
+
+    /// Why (#10478): the picker previews `tm-<leaf_slug_from_hint>`; for a hint
+    /// shaped like a session name that must equal what the daemon builds from
+    /// the same hint, not `tm-tm-…-01`.
+    /// Test: itself.
+    #[test]
+    fn leaf_slug_from_hint_strips_session_name_shape() {
+        assert_eq!(leaf_slug_from_hint("tm-mpm-bugs-01"), "mpm-bugs");
+        assert_eq!(leaf_slug_from_hint("bugs"), "bugs");
+        for hint in ["tm-mpm-bugs-01", "bugs", "tm-tm-x-03", "Feature/Auth-02"] {
+            let preview = format!("{PREFIX}{}", leaf_slug_from_hint(hint));
+            let daemon = build_session_name(&leaf_slug_from_dir(Path::new(hint)), &[]).unwrap();
+            let sent = build_session_name(&leaf_slug_from_hint(hint), &[]).unwrap();
+            assert_eq!(sent, preview, "hint {hint:?}");
+            if !hint.contains('/') {
+                assert_eq!(daemon, preview, "hint {hint:?}");
+            }
         }
     }
 
@@ -958,12 +1042,97 @@ mod tests {
         );
     }
 
+    /// Why (#10478): the first session for a leaf carries no counter.
+    /// Test: itself.
     #[test]
-    fn build_session_name_first_serial() {
+    fn build_session_name_first_is_bare() {
         assert_eq!(
             build_session_name("trusty-tools", &[]).unwrap(),
-            "tm-trusty-tools-01"
+            "tm-trusty-tools"
         );
+    }
+
+    /// Why (#10478): a hint that is already a session name was prefixed and
+    /// numbered twice (`tm-tm-mpm-bugs-01-01`).
+    /// Test: itself.
+    #[test]
+    fn build_session_name_strips_prefix_and_counter() {
+        for (leaf, want) in [
+            ("tm-mpm-bugs-01", "tm-mpm-bugs"),
+            ("bugs", "tm-bugs"),
+            ("tm-tm-x-03", "tm-x"),
+            ("TM_Foo_07", "tm-foo"),
+            ("tm-tm-mpm-bugs-01-01", "tm-mpm-bugs"),
+        ] {
+            let name = build_session_name(leaf, &[]).unwrap();
+            assert_eq!(name, want, "leaf {leaf:?}");
+            assert!(!name.starts_with("tm-tm-"), "leaf {leaf:?} gave {name}");
+        }
+    }
+
+    /// Why (#10478): a counter appears only on a duplicate, and starts at
+    /// `-02` whether the base is held by a bare name or a legacy `-01`.
+    /// Test: itself.
+    #[test]
+    fn build_session_name_duplicate_gets_02() {
+        for held in ["tm-trusty-tools", "tm-trusty-tools-01"] {
+            assert_eq!(
+                build_session_name("trusty-tools", &[held.to_string()]).unwrap(),
+                "tm-trusty-tools-02",
+                "held {held:?}"
+            );
+        }
+        let both = vec![
+            "tm-trusty-tools".to_string(),
+            "tm-trusty-tools-02".to_string(),
+        ];
+        assert_eq!(
+            build_session_name("trusty-tools", &both).unwrap(),
+            "tm-trusty-tools-03"
+        );
+        // A duplicate hint resolves to the same stem and gets the counter.
+        assert_eq!(
+            build_session_name("tm-trusty-tools-01", &both).unwrap(),
+            "tm-trusty-tools-03"
+        );
+    }
+
+    /// Why (#10478): any live sibling makes the bare name a duplicate, so a
+    /// new session never reads as a rename of an older one.
+    /// Test: itself.
+    #[test]
+    fn allocate_serial_any_sibling_blocks_the_bare_name() {
+        let existing = vec!["tm-x-03".to_string()];
+        assert_eq!(allocate_serial("x", &existing).unwrap(), 2);
+        assert_eq!(build_session_name("x", &existing).unwrap(), "tm-x-02");
+    }
+
+    /// Why (#10478): the bare name and a legacy `-01` both hold serial 1.
+    /// Test: itself.
+    #[test]
+    fn parse_serial_bare_name_is_serial_one() {
+        assert_eq!(parse_serial_for_leaf("tm-x", "x"), Some(1));
+        assert_eq!(parse_serial_for_leaf("tm-x-01", "x"), Some(1));
+        // A longer leaf sharing the prefix is not this leaf.
+        assert_eq!(parse_serial_for_leaf("tm-xy", "x"), None);
+    }
+
+    /// Why (#10478): pins the strip itself, including the never-empty rule.
+    /// Test: itself.
+    #[test]
+    fn normalize_leaf_strips_prefix_and_counter() {
+        for (slug, want) in [
+            ("tm-mpm-bugs-01", "mpm-bugs"),
+            ("tm-tm-x-01-02", "x"),
+            ("trusty-tools", "trusty-tools"),
+            ("my-repo-v2", "my-repo-v2"),
+            ("rust-2021", "rust-2021"),
+            ("tm", "tm"),
+            ("tm-01", "01"),
+            ("01", "01"),
+        ] {
+            assert_eq!(normalize_leaf(slug), want, "slug {slug:?}");
+        }
     }
 
     #[test]
@@ -980,7 +1149,7 @@ mod tests {
 
     #[test]
     fn build_session_name_empty_leaf_falls_back_to_local() {
-        assert_eq!(build_session_name("...", &[]).unwrap(), "tm-local-01");
+        assert_eq!(build_session_name("...", &[]).unwrap(), "tm-local");
     }
 
     #[test]
@@ -995,34 +1164,34 @@ mod tests {
     // ── build_managed_session_name ───────────────────────────────────────────
 
     /// Why: the primary use-case is a GitHub-sourced session where the repo name
-    /// is known; the resulting name must be `tm-<repo>-01` on the first call.
+    /// is known; the resulting name must be bare `tm-<repo>` on the first call.
     /// Test: itself.
     #[test]
     fn build_managed_session_name_github_project() {
         let name =
             build_managed_session_name(Some("trusty-tools"), Path::new("/tmp/x"), &[]).unwrap();
-        assert_eq!(name, "tm-trusty-tools-01");
+        assert_eq!(name, "tm-trusty-tools");
     }
 
     /// Why (#1955): the ticket's worked example — a project checked out at
     /// `/Users/masa/Projects/trusty-tools` with no repo_url known — must derive
-    /// its leaf from the directory basename, giving `tm-trusty-tools-01`.
+    /// its leaf from the directory basename, giving `tm-trusty-tools` (#10478).
     /// Test: itself.
     #[test]
     fn build_managed_session_name_dir_fallback() {
         let name =
             build_managed_session_name(None, Path::new("/Users/masa/Projects/trusty-tools"), &[])
                 .unwrap();
-        assert_eq!(name, "tm-trusty-tools-01");
+        assert_eq!(name, "tm-trusty-tools");
     }
 
     /// Why: when neither a project name nor a usable directory basename is
-    /// available (e.g. cwd is `/`), the name must fall back to `tm-local-NN`.
+    /// available (e.g. cwd is `/`), the name must fall back to `tm-local`.
     /// Test: itself.
     #[test]
     fn build_managed_session_name_local_fallback() {
         let name = build_managed_session_name(None, Path::new("/"), &[]).unwrap();
-        assert_eq!(name, "tm-local-01");
+        assert_eq!(name, "tm-local");
     }
 
     /// Why: repo names from GitHub may contain dots (`.`), colons (`:`),
@@ -1033,19 +1202,19 @@ mod tests {
     fn build_managed_session_name_sanitized_repo() {
         let name =
             build_managed_session_name(Some("My.Repo:v2"), Path::new("/tmp/x"), &[]).unwrap();
-        assert_eq!(name, "tm-my-repo-v2-01");
+        assert_eq!(name, "tm-my-repo-v2");
     }
 
     /// Why (#1955 worked example): the SAME project spawning three concurrent
-    /// sessions must get `-01`, `-02`, `-03` in order, each aware of the ones
-    /// allocated before it.
+    /// sessions must get bare, `-02`, `-03` in order (#10478), each aware of
+    /// the ones allocated before it.
     /// Test: itself.
     #[test]
     fn build_managed_session_name_concurrent_sessions_increment() {
         let mut existing: Vec<String> = vec![];
         let n1 = build_managed_session_name(Some("trusty-tools"), Path::new("/tmp/x"), &existing)
             .unwrap();
-        assert_eq!(n1, "tm-trusty-tools-01");
+        assert_eq!(n1, "tm-trusty-tools");
         existing.push(n1);
         let n2 = build_managed_session_name(Some("trusty-tools"), Path::new("/tmp/x"), &existing)
             .unwrap();

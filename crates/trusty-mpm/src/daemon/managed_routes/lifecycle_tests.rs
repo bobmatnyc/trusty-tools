@@ -389,7 +389,7 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
 }
 
 /// Issue #2032: [`reserve_inproject_worktree`] must name the per-session
-/// worktree/branch after the SEMANTIC tmux name (`tm-<repo>-NN`), not the
+/// worktree/branch after the SEMANTIC tmux name (`tm-<repo>[-NN]`), not the
 /// raw session UUID — and the returned name must be the exact name used
 /// for both the worktree directory and (via `create_session_worktree`)
 /// the `session/<name>` branch.
@@ -483,8 +483,9 @@ async fn reserve_inproject_worktree_uses_semantic_name_not_uuid() {
     .expect("reserve_inproject_worktree must succeed against a real git repo");
 
     assert_eq!(
-        reserved_name, "tm-trusty-tools-01",
-        "the resolved name must be the SEMANTIC tm-<repo>-NN form, not the raw session UUID"
+        reserved_name, "tm-trusty-tools",
+        "the resolved name must be the SEMANTIC tm-<repo> form (#10478: bare first name), \
+         not the raw session UUID"
     );
     assert!(
         worktree.ends_with(&reserved_name),
@@ -597,7 +598,8 @@ async fn reserve_inproject_worktree_records_the_created_tree() {
     let entry = &state.live[&ledger_key(&worktree)];
     assert_eq!(entry.origin, Origin::TmDaemon);
     assert_eq!(entry.repo, ledger_key(base.path()));
-    assert_eq!(entry.branch.as_deref(), Some("session/tm-trusty-tools-01"));
+    // #10478: the first session name is bare.
+    assert_eq!(entry.branch.as_deref(), Some("session/tm-trusty-tools"));
 }
 
 /// Why (#2158): the adopted-session sentinel `/unknown` (and any

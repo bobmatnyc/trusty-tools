@@ -47,9 +47,9 @@ impl SessionManager {
     /// from the other's naming behaviour.
     /// What: name selection priority —
     ///   1. Explicit `name_hint` → leaf = sanitized hint (treated as a
-    ///      directory-like basename) → `tm-<hint-slug>-NN`.
+    ///      directory-like basename) → `tm-<hint-slug>[-NN]`.
     ///   2. GitHub-parseable `github_project` (a bare repo name, already
-    ///      extracted by the caller from `repo_url`) → `tm-<repo>-NN`.
+    ///      extracted by the caller from `repo_url`) → `tm-<repo>[-NN]`.
     ///   3. Otherwise → leaf = basename(`cwd`), or `"local"` if that sanitizes
     ///      to empty.
     ///
@@ -123,7 +123,7 @@ impl SessionManager {
             return Ok(candidate);
         }
         Err(ManagedError::NameCollision(format!(
-            "no free `tm-<leaf>-NN` name after {MAX_NAME_ALLOCATION_ATTEMPTS} attempts \
+            "no free `tm-<leaf>[-NN]` name after {MAX_NAME_ALLOCATION_ATTEMPTS} attempts \
              (sustained concurrent creates for the same project)"
         )))
     }
@@ -202,7 +202,7 @@ impl SessionManager {
     /// ambiguous and the picker show duplicate rows).
     ///
     /// Why: [`Self::resolve_session_name`] already guarantees a fresh,
-    /// collision-free `tm-<leaf>-NN` name for the derive-from-scratch create
+    /// collision-free `tm-<leaf>[-NN]` name for the derive-from-scratch create
     /// path via its own per-project serial allocator — but its snapshot and
     /// the eventual `tmux new-session` are separated by real work (clone,
     /// worktree provisioning), the documented TOCTOU window. This method is

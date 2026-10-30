@@ -217,10 +217,10 @@ fn test_default_startup_command_falls_back_to_bash() {
 
 /// Why (SPEC-ONESM-01): since the naming moved to the shared
 /// `trusty_common::session_naming::build_session_name`, a new session's tmux
-/// name is now the lifecycle-MANAGED `tm-<project>-<harness>-NN` (was the
+/// name is now the lifecycle-MANAGED `tm-<project>-<harness>[-NN]` (was the
 /// unprefixed `<project>-<harness>-<serial>`), so trusty-mpm's reconcile/
-/// prune/adopt recognise it. The serial is a zero-padded two-digit field that
-/// REUSES gaps left by decommissioned sessions (matching trusty-mpm's
+/// prune/adopt recognise it. The first name is bare (#10478); a duplicate
+/// gets a zero-padded two-digit counter from `-02` that REUSES gaps left by decommissioned sessions (matching trusty-mpm's
 /// canonical `SessionManager` behaviour), whereas the old scheme always
 /// counted `max+1`.
 /// What: pins the managed prefix, the `(project, harness)` leaf, per-pair
@@ -228,10 +228,20 @@ fn test_default_startup_command_falls_back_to_bash() {
 /// Test: itself.
 #[test]
 fn test_next_session_name() {
-    // No existing → managed `tm-` prefix, zero-padded first serial `01`.
+    // #10478: no existing → managed `tm-` prefix, no counter.
     assert_eq!(
         next_session_name("trusty-agents", "repl", &[]).unwrap(),
-        "tm-trusty-agents-repl-01"
+        "tm-trusty-agents-repl"
+    );
+    // A bare name already held → the first counter is `-02`.
+    assert_eq!(
+        next_session_name(
+            "trusty-agents",
+            "repl",
+            &["tm-trusty-agents-repl".to_string()]
+        )
+        .unwrap(),
+        "tm-trusty-agents-repl-02"
     );
     // Every generated name is recognised as lifecycle-managed by trusty-mpm.
     assert!(trusty_common::session_naming::is_managed_session_name(
@@ -259,5 +269,16 @@ fn test_next_session_name() {
     assert_eq!(
         next_session_name("trusty-agents", "repl", &with_gap).unwrap(),
         "tm-trusty-agents-repl-02"
+    );
+}
+
+/// Why (#10478): a project already named `tm-…` must not give a doubled
+/// `tm-tm-…-01` name; trusty-agents shares the trusty-common rule.
+/// Test: itself.
+#[test]
+fn test_next_session_name_strips_tm_prefix() {
+    assert_eq!(
+        next_session_name("tm-foo", "repl", &[]).unwrap(),
+        "tm-foo-repl"
     );
 }

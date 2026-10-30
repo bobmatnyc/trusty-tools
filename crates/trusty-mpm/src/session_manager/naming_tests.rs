@@ -1,4 +1,4 @@
-//! Integration tests for the `tm-<leaf>-NN` naming scheme (issue #1955).
+//! Integration tests for the `tm-<leaf>[-NN]` naming scheme (issue #1955).
 //!
 //! Why: `session_manager/tests.rs` is at the 1500-SLOC test cap; the
 //! #1955 serial-allocation and backward-compat-reconciliation coverage lives
@@ -66,15 +66,16 @@ fn set_home(home: &std::path::Path) -> HomeGuard {
     HomeGuard(prior, prior_ccd)
 }
 
-/// The full `tm-<leaf>-NN` naming convention (issue #1955): a `tm-` prefix
-/// AND a trailing two-digit numeric serial.
+/// The full `tm-<leaf>[-NN]` naming convention (issue #1955, #10478): a `tm-`
+/// prefix, a bare first name, and a trailing two-digit serial on a duplicate.
 ///
 /// Why (#1966 review follow-up, moved from `tests.rs` to keep that file under
 /// its 1500-SLOC test cap): checking only the `tm-` prefix would not catch a
 /// regression that dropped the `-NN` suffix entirely (e.g. a future change
 /// that regressed to the pre-#1955 `tm-<leaf>` form with no serial).
-/// What: creates one session and asserts its `tmux_name` has the `tm-` prefix
-/// AND that the segment after the last dash is exactly two ASCII digits.
+/// What: creates two sessions in one directory. The first must be the bare
+/// `tm-wt1`; the second's segment after the last dash must be exactly two
+/// ASCII digits in 02-99.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_naming_convention() {
@@ -95,6 +96,19 @@ async fn manager_naming_convention() {
         .expect("create");
 
     assert!(record.tmux_name.starts_with("tm-"), "has tm- prefix");
+    // #10478: the first session carries no counter.
+    assert_eq!(record.tmux_name, "tm-wt1");
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt1")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create the duplicate");
     let suffix = record
         .tmux_name
         .rsplit('-')
@@ -111,17 +125,17 @@ async fn manager_naming_convention() {
         "serial suffix is numeric: {}",
         record.tmux_name
     );
-    // `01`-`99`, never `00` (#1966 review follow-up: a bare length+digit-ness
-    // check would also accept "00", which `allocate_serial` never hands out).
+    // `02`-`99`, never `00` or `01` (#1966 review follow-up; #10478: the
+    // bare name holds serial 1, so a duplicate starts at `02`).
     let serial: u8 = suffix.parse().expect("suffix is numeric (checked above)");
     assert!(
-        (1..=99).contains(&serial),
-        "serial is in 01-99: {}",
+        (2..=99).contains(&serial),
+        "serial is in 02-99: {}",
         record.tmux_name
     );
 }
 
-/// Serial reuse end-to-end (issue #1955 worked example): sessions `-01`,
+/// Serial reuse end-to-end (issue #1955 worked example): sessions `tm-x`,
 /// `-02`, `-03` exist for a project; `-02` is decommissioned; the NEXT session
 /// created for that project must reuse `-02`, not jump to `-04`.
 ///
@@ -175,7 +189,8 @@ async fn manager_serial_reuses_decommissioned_gap() {
         .await
         .expect("create r3");
 
-    assert_eq!(r1.tmux_name, "tm-gap-test-01");
+    // #10478: the first session is bare; duplicates count from `-02`.
+    assert_eq!(r1.tmux_name, "tm-gap-test");
     assert_eq!(r2.tmux_name, "tm-gap-test-02");
     assert_eq!(r3.tmux_name, "tm-gap-test-03");
 
@@ -207,9 +222,35 @@ async fn manager_serial_reuses_decommissioned_gap() {
     );
 }
 
+/// #10478 end to end: a hint shaped like a session name is not prefixed and
+/// numbered twice, and a second session for it gets `-02`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn name_hint_with_session_shape_is_bare_then_02() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+    let mut names = Vec::new();
+    for wt in ["/tmp/h1", "/tmp/h2"] {
+        let record = mgr
+            .create(
+                "task".into(),
+                Some(PathBuf::from(wt)),
+                Some("tm-mpm-bugs-01".into()),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        names.push(record.tmux_name);
+    }
+    assert_eq!(names, ["tm-mpm-bugs", "tm-mpm-bugs-02"]);
+}
+
 /// Live tmux sessions created under the NEW `tm-` prefix (#1955) must be
 /// recognized and adopted by boot reconciliation exactly like the legacy
-/// `tmpm-` prefix — the daemon must never treat a `tm-<leaf>-NN` session as
+/// `tmpm-` prefix — the daemon must never treat a `tm-<leaf>[-NN]` session as
 /// foreign just because the prefix changed.
 ///
 /// Why: `reconcile_on_boot` used to hardcode `starts_with("tmpm-")`; after
@@ -1000,7 +1041,7 @@ async fn repeated_reconcile_of_one_resolvable_pane_keeps_one_record() {
 /// worktree provisioning ran; that window is the create path's documented
 /// TOCTOU. Pre-fix, this scenario produced two live sessions sharing one
 /// name — the literal #3692 defect, via the create path.
-/// What: registers a live tmux session + Active record under `tm-stale-01`,
+/// What: registers a live tmux session + Active record under `tm-stale`,
 /// then calls `create_with_reserved_name` with that same (now stale) reserved
 /// name and asserts the created session/record landed on `tm-stale-02`.
 /// Test: this function IS the test.
@@ -1010,7 +1051,7 @@ async fn create_with_reserved_name_suffixes_stale_reservation() {
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
-    // The reservation went stale: someone else now LIVES at tm-stale-01.
+    // The reservation went stale: someone else now LIVES at tm-stale.
     let first = mgr
         .create(
             "squatter".into(),
@@ -1022,12 +1063,13 @@ async fn create_with_reserved_name_suffixes_stale_reservation() {
         )
         .await
         .expect("first create");
-    assert_eq!(first.tmux_name, "tm-stale-01");
+    // #10478: the first session for a leaf is bare.
+    assert_eq!(first.tmux_name, "tm-stale");
 
     let second = mgr
         .create_with_reserved_name(
             super::record::ManagedSessionId::new(),
-            "tm-stale-01".into(),
+            "tm-stale".into(),
             "stale reservation".into(),
             Some(PathBuf::from("/tmp/wt2")),
             None,
@@ -1051,7 +1093,7 @@ async fn create_with_reserved_name_suffixes_stale_reservation() {
     // The squatter is untouched.
     assert_eq!(
         mgr.get(&first.id).await.expect("get first").tmux_name,
-        "tm-stale-01"
+        "tm-stale"
     );
 }
 

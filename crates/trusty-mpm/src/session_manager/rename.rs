@@ -33,7 +33,7 @@ use super::runtime_identity::{RuntimeOwnership, runtime_ownership};
 /// with an actionable message beats a confusing downstream tmux failure.
 /// What: trims `name`, then rejects an empty value, one over 64 chars, or any
 /// character outside `[A-Za-z0-9_-]` (the alphabet the existing
-/// `tm-<leaf>-NN`/`tm-<adjective>-<noun>` names already use). Returns the
+/// `tm-<leaf>[-NN]`/`tm-<adjective>-<noun>` names already use). Returns the
 /// trimmed, validated name on success.
 ///
 /// `pub` rather than `pub(crate)` since #7224: the `tm ls` session TUI renames
