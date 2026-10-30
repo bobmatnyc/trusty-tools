@@ -20,35 +20,30 @@
 //! exercised by launching the TUI.
 
 pub mod actions;
+mod drive;
 pub mod events;
 pub mod layout;
 pub mod panes;
 pub mod poll;
 pub mod state;
+mod trace;
 
 #[cfg(test)]
 mod tests;
 
 use std::io::Stdout;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::client::DaemonClient;
-use events::handle_key;
 use poll::project_ctl_poll_daemon;
 use state::ProjectCtlState;
+use trace::TuiTrace;
 
 // #7224: the panic-safe terminal guard moved to `tui::terminal`, shared with
 // the coordinator screen and the `tm ls` session TUI.
 use crate::tui::terminal::TerminalGuard;
-
-/// How long [`run_loop`] blocks waiting for a key before redrawing.
-///
-/// Why: matches the coordinator/dashboard screens' input cadence — short
-/// enough to feel responsive, independent of the daemon refresh cadence.
-const KEY_POLL: Duration = Duration::from_millis(50);
 
 /// Launch the `tm projects` 4-pane TUI against `url`, polling every `interval_ms`.
 ///
@@ -139,45 +134,30 @@ pub(crate) async fn run_in_terminal(
 /// The live render + poll + input loop.
 ///
 /// Why: kept separate from [`run`] so terminal setup/teardown wraps it
-/// cleanly and the loop body stays focused on draw → poll-key → dispatch →
-/// maybe-repoll.
-/// What: each iteration draws the frame, polls the keyboard for [`KEY_POLL`]
-/// and routes any key through [`handle_key`], awaiting
-/// [`actions::dispatch`] for any returned [`events::PendingAction`]. Re-polls
-/// the daemon immediately after a successful mutating action (via
-/// [`ProjectCtlState::take_repoll`]) or once at least `interval_ms` has
-/// elapsed since the last poll. Exits once `should_exit` is set (`q` /
-/// Ctrl-C).
+/// cleanly; the loop itself lives in [`drive::drive`] so a test can drive it
+/// without a terminal.
+/// What: binds [`drive::drive`] to this terminal's draw, the crossterm event
+/// source, the off-loop [`poll::tick::fetch_tick`] (#10476) and the
+/// `TM_TUI_TRACE` trace.
+/// Test: `keypress_redraws_while_poll_in_flight_10476` drives the same loop.
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     client: &mut DaemonClient,
-    mut state: ProjectCtlState,
+    state: ProjectCtlState,
     interval_ms: u64,
 ) -> anyhow::Result<()> {
-    let interval = Duration::from_millis(interval_ms);
-    let mut last_poll = Instant::now();
-
-    loop {
-        terminal.draw(|frame| layout::render(frame, &mut state))?;
-
-        if event::poll(KEY_POLL)?
-            && let Event::Key(key) = event::read()?
-        {
-            if let Some(action) = handle_key(&mut state, key) {
-                actions::dispatch(&mut state, client, action).await;
-            }
-            if state.should_exit {
-                return Ok(());
-            }
-        }
-
-        // A requested repoll (post-mutation) or the timer elapsing both mean
-        // the same thing: refresh now and restart the interval clock. Merged
-        // into one branch (rather than an if/else-if with duplicate bodies)
-        // to satisfy clippy::if_same_then_else.
-        if state.take_repoll() || last_poll.elapsed() >= interval {
-            project_ctl_poll_daemon(&mut state, client).await;
-            last_poll = Instant::now();
-        }
-    }
+    let mut draw = |state: &mut ProjectCtlState| -> anyhow::Result<()> {
+        terminal.draw(|frame| layout::render(frame, state))?;
+        Ok(())
+    };
+    drive::drive(
+        &mut draw,
+        &mut drive::TerminalEvents,
+        poll::tick::fetch_tick,
+        client,
+        state,
+        Duration::from_millis(interval_ms),
+        &mut TuiTrace::from_env(),
+    )
+    .await
 }
