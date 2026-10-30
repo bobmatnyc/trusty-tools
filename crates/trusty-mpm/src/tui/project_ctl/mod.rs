@@ -117,6 +117,25 @@ pub(crate) async fn run_focused_with_client(
     // `_guard` drops here (or during an unwind), restoring the terminal.
 }
 
+/// Run the projects view inside a terminal the caller already owns.
+///
+/// Why (#10491): the console home screen opens this view on Enter and gets
+/// the terminal back when the operator leaves it, so it must not enter or
+/// restore the terminal itself.
+/// What: the priming poll [`run_focused_with_client`] does, then [`run_loop`]
+/// until `q` / Ctrl-C.
+/// Test: exercised by the home-screen smoke run; the loop is unchanged.
+pub(crate) async fn run_in_terminal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    client: &mut DaemonClient,
+    interval_ms: u64,
+) -> anyhow::Result<()> {
+    let mut state = ProjectCtlState::default();
+    project_ctl_poll_daemon(&mut state, client).await;
+    terminal.clear()?;
+    run_loop(terminal, client, state, interval_ms).await
+}
+
 /// The live render + poll + input loop.
 ///
 /// Why: kept separate from [`run`] so terminal setup/teardown wraps it

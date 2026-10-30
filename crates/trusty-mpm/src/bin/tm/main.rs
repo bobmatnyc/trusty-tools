@@ -515,9 +515,10 @@ async fn main() -> anyhow::Result<()> {
             interval_ms,
             single_pane,
         }) => {
-            // #9556: an explicit `--url` is pinned; #6483: multipane by default.
+            // #9556: an explicit `--url` is pinned. #10491: `tm tui` opens on the
+            // console home screen; Enter on the MPM tile opens the projects view.
             let client = trusty_mpm::tui::client_for(tui_url.as_deref())?;
-            trusty_mpm::tui::run_initial_view_with(client, interval_ms, None, single_pane).await
+            trusty_mpm::tui::home::run_tui_entry(client, interval_ms, single_pane).await
         }
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
