@@ -25,6 +25,12 @@
 #   one guarantee a real assemble run always keeps: every fragment it folded in
 #   is gone in the same commit.
 #
+#   A release branch that merges main after its cut picks up main's newer
+#   fragments, which belong to the NEXT release. The helper runs with
+#   `--base <base>` so those are not charged to this section; a fragment
+#   present at the cut, added or edited by the branch, or already folded into
+#   the section still fails (#10497; see the helper's --base note).
+#
 # SCOPE, DELIBERATELY NARROW. This does NOT fire merely because a crate's
 #   `Cargo.toml` version changed. `scripts/bump-version.sh --no-changelog`
 #   bumps the manifest and deliberately leaves `changelog.d/` fragments pending
@@ -54,7 +60,9 @@
 #
 # Test: scripts/check-pr-changelog-assembled-selftest.sh builds synthetic
 #   repos with a real assemble commit (clean) and a hand-authored section that
-#   left a fragment behind (stranded), and asserts both outcomes.
+#   left a fragment behind (stranded), and asserts both outcomes. It also
+#   builds the #10497 release-branch-merged-main topology (and CI's merge-ref
+#   form of it) plus every strand the --base exclusion must still catch.
 #
 # Portability: POSIX tools only, bash 3.2 (macOS) and bash 5 (Linux CI).
 
@@ -145,7 +153,9 @@ while IFS= read -r path; do
       "section in this PR — verifying it was assembled, not hand-written."
     out=""
     rc=0
-    out="$(bash "${REPO_ROOT}/scripts/check-changelog-assembled.sh" "${crate}" "${version}" 2>&1)" || rc=$?
+    # #10497: --base so a release branch that merged main is not charged with
+    # the fragments main gained after the cut — those are the next release's.
+    out="$(bash "${REPO_ROOT}/scripts/check-changelog-assembled.sh" --base "${BASE}" "${crate}" "${version}" 2>&1)" || rc=$?
     if [[ "$rc" -ne 0 ]] && printf '%s' "$out" | grep -q 'STRANDED-FRAGMENTS'; then
       echo "FAIL ${crate} ${version}: new CHANGELOG.md section, but changelog.d/ still" >&2
       echo "     holds fragment(s) it should have consumed:" >&2
@@ -161,6 +171,7 @@ while IFS= read -r path; do
       FAIL=1
     else
       echo "OK   ${crate} ${version}: assembled cleanly, no stranded fragments."
+      printf '%s\n' "$out" | awk '/^NOTE:/ { n = 1; print "     " $0; next } n && /^ / { print "     " $0; next } { n = 0 }'
     fi
   done <<<"$new_headings"
 done <<<"$CHANGED"
