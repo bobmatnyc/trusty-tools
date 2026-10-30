@@ -384,19 +384,86 @@ fn audit_unwritable_at_mint_refuses() {
     assert!(!pending(&state), "no record, no ticket");
 }
 
-/// Why: DOC-86 §6 — the redeem record precedes the write it allows; with
-/// the log unwritable the set writes nothing and the ticket is spent.
+/// Why: DOC-86 §6 — the redeem record precedes the write it allows. Only
+/// the `secrets.ticket.redeem` append fails, so the gate's own admission
+/// (which would also refuse) still opens the log: the refusal is the
+/// redeem record's. The set writes nothing and the ticket is spent. Red
+/// when the redeem write's `?` is dropped: the set succeeds.
 /// Test: itself.
 #[test]
 fn audit_unwritable_at_redeem_refuses() {
     let fx = fixture();
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
     let (state, _clock) = architect(&fx).ticketed(&fx, "set", "API_KEY");
-    let restore = break_audit(&fx);
+    state.audit.fail_appends_of(AuditMethod::TicketRedeem);
     assert_eq!(set_denied(&fx, &state), Err(ErrorKind::AuditUnavailable));
-    drop(restore);
     assert!(stored(&fx, "API_KEY", SENTINEL_VALUE), "unchanged");
     assert!(!pending(&state), "spent, fail closed");
+    assert!(records_of(&fx, AuditMethod::TicketRedeem).is_empty());
+    assert!(records(&fx).iter().all(|r| r.architect.is_none()));
+}
+
+/// Why: DOC-86 §2 — a ticket names one key, so a copy of several keys or
+/// of every key never redeems it: the attempt voids the ticket
+/// (`mismatch`), the copy keeps the agent rules, and the denied key fails.
+/// Test: itself.
+#[test]
+fn multi_key_copy_never_redeems() {
+    for (name, keys) in [
+        ("two keys", json!(["API_KEY", "OPEN_KEY"])),
+        ("all keys", json!([])),
+    ] {
+        let fx = fixture();
+        seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+        seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
+        let (state, _clock) = architect(&fx).ticketed(&fx, "copy", "API_KEY");
+        let params = json!({"project": fx.project(), "from_backend": "keychain",
+            "to_backend": "spare", "keys": keys});
+        let answer = methods::copy(&state, Caller::new(Some(me())), params).expect(name);
+        let failed = answer["failed"].as_array().expect("failed list").clone();
+        assert!(failed.contains(&json!("API_KEY")), "{name}: {answer}");
+        assert_eq!(void_causes(&fx), [Some(VoidCause::Mismatch)], "{name}");
+        assert!(!pending(&state), "{name}");
+        let all = records(&fx);
+        assert!(all.iter().all(|r| r.architect.is_none()), "{name}: {all:?}");
+    }
+}
+
+/// Why: a void from a newer hook that sends an extra field must still void;
+/// a refused void would leave the ticket live.
+/// Test: itself.
+#[test]
+fn void_with_an_extra_field_still_voids() {
+    let fx = fixture();
+    let (state, _clock) = architect(&fx).ticketed(&fx, "set", "API_KEY");
+    let voided = ticket_methods::void(
+        &state,
+        Caller::new(Some(HOOK)),
+        json!({"session_id": SESSION, "cause": "pre_tool_use", "agent_id": "a1"}),
+    );
+    assert_eq!(voided, Ok(json!({"voided": 1})));
+    assert!(!pending(&state));
+}
+
+/// Why: DOC-86 §6 — a mint request carrying `agent_id` (a subagent's hook)
+/// is refused as malformed, audited, and stores no ticket.
+/// Test: itself.
+#[test]
+fn mint_with_an_agent_id_is_invalid() {
+    let fx = fixture();
+    let (state, _clock) = architect(&fx).minting(&fx);
+    let mut params = mint_params(&fx, "set", "API_KEY", &CALL_ARGV);
+    params["agent_id"] = json!("a1");
+    let minted = ticket_methods::mint(&state, Caller::new(Some(HOOK)), params);
+    assert_eq!(minted, Err(ErrorKind::InvalidParams));
+    let mints = records_of(&fx, AuditMethod::TicketMint);
+    assert_eq!(mints.len(), 1, "{mints:?}");
+    assert_eq!(mints[0].decision, AuditDecision::Deny);
+    assert_eq!(
+        mints[0].ticket.as_ref().map(|t| t.event),
+        Some(TicketEvent::Refuse)
+    );
+    assert!(!pending(&state));
 }
 
 /// Why: DOC-86 §5, §6 — "no ticket" is the closed state, so a void whose

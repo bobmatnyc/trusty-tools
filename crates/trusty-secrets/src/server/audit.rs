@@ -303,12 +303,17 @@ pub(crate) struct AuditSink {
     path: PathBuf,
     max_bytes: u64,
     opening: Mutex<()>,
+    /// Fail every append of this method's records; tests only (#10459).
+    #[cfg(test)]
+    fail_method: Mutex<Option<AuditMethod>>,
 }
 
 /// An open, checked audit file that records can be appended to.
 #[derive(Debug)]
 pub(crate) struct AuditFile {
     file: File,
+    #[cfg(test)]
+    fail_method: Option<AuditMethod>,
 }
 
 impl AuditSink {
@@ -317,7 +322,19 @@ impl AuditSink {
             path,
             max_bytes,
             opening: Mutex::new(()),
+            #[cfg(test)]
+            fail_method: Mutex::new(None),
         }
+    }
+
+    /// Make every later append of a `method` record fail, so one record
+    /// can fail while the others land (#10459 PR1 fix round).
+    #[cfg(test)]
+    pub(crate) fn fail_appends_of(&self, method: AuditMethod) {
+        *self
+            .fail_method
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(method);
     }
 
     /// Create or check the directory, rotate a full log, and open it.
@@ -377,7 +394,14 @@ impl AuditSink {
                 handle.write_all(b"\n").map_err(io)?;
             }
         }
-        Ok(AuditFile { file: handle })
+        Ok(AuditFile {
+            file: handle,
+            #[cfg(test)]
+            fail_method: *self
+                .fail_method
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        })
     }
 
     /// Rename a log at or past the cap to `<log>.1`, replacing the old one.
@@ -416,6 +440,10 @@ impl AuditFile {
     /// Any serialization, write or sync failure; the caller decides what a
     /// failure means (see `gate`).
     pub(crate) fn append(&mut self, record: &AuditRecord) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.fail_method == Some(record.method) {
+            return Err(std::io::Error::other("injected append failure"));
+        }
         let mut line = serde_json::to_vec(record).map_err(std::io::Error::other)?;
         line.push(b'\n');
         self.file.write_all(&line)?;

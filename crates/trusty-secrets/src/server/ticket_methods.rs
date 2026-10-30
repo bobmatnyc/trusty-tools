@@ -62,8 +62,9 @@ struct MintResponse {
 }
 
 /// `secrets.ticket.void` params.
+// #10459 PR1 fix round: no `deny_unknown_fields` here, unlike the mint, so
+// an extra field from a newer hook never leaves a ticket live.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct VoidRequest {
     session_id: String,
     cause: VoidCause,
@@ -204,7 +205,8 @@ enum Stop {
 /// Test: `mint_refused_while_mint_disabled`, `mint_from_a_non_tm_exe_is_refused`,
 /// `mint_from_a_grandchild_is_refused`, `mint_from_an_old_process_is_refused`,
 /// `second_mint_voids_both`, `audit_unwritable_at_mint_refuses`,
-/// `process_table_error_at_mint_refuses`, `clock_error_refuses`.
+/// `process_table_error_at_mint_refuses`, `clock_error_refuses`,
+/// `mint_with_an_agent_id_is_invalid`.
 pub(crate) fn mint(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     let log = TicketLog::new(state, caller);
     let mut entry = Entry {
@@ -329,15 +331,16 @@ pub(crate) fn mint(state: &State, caller: Caller, params: Value) -> Result<Value
 /// Why: DOC-86 §2 — every PreToolUse in the session (subagents and
 /// teammates included) and its Stop void a pending ticket, so it can be
 /// redeemed only by the call it was minted for.
-/// What: params are [`VoidRequest`]; a malformed session id, or a cause a
-/// hook may not send, is [`ErrorKind::InvalidParams`]. Expired tickets are
+/// What: params are [`VoidRequest`], extra fields ignored; a malformed
+/// session id, or a cause a hook may not send, is
+/// [`ErrorKind::InvalidParams`]. Expired tickets are
 /// voided (`ttl`) when the clock reads; the session's tickets are removed
 /// whatever the clock says, each with a `void` record. The reply is the
 /// count; a record that failed makes it [`ErrorKind::AuditUnavailable`],
 /// the tickets already gone. Any caller may void.
 /// Test: `next_event_voids_a_pending_ticket`,
 /// `subagent_pretooluse_voids_pending_ticket`, `decline_then_stop_voids`,
-/// `audit_unwritable_at_void_refuses`.
+/// `audit_unwritable_at_void_refuses`, `void_with_an_extra_field_still_voids`.
 pub(crate) fn void(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     let request: VoidRequest = decode_object(params)?;
     if !valid_id(&request.session_id) || !request.cause.hook_may_send() {

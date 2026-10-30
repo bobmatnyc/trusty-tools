@@ -156,7 +156,8 @@ pub(crate) struct TicketCall<'a> {
 /// A read error is [`ArchitectRefusal::ProcessLookup`]. The caller already
 /// matched the `claude` (pid, start time) and removed the ticket.
 /// Test: `ticket_argv_mismatch_is_refused`,
-/// `ticket_peer_started_before_mint_is_refused`, `ticket_for_another_key_is_refused`.
+/// `ticket_peer_started_before_mint_is_refused`, `ticket_for_another_key_is_refused`,
+/// `multi_key_copy_never_redeems`.
 pub(crate) fn check_redeemer(
     table: &dyn ProcessTable,
     ticket: &Ticket,
