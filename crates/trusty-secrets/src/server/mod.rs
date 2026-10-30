@@ -45,6 +45,8 @@ mod agents_flag;
 // #9070: S8 — exec grants; #9066: the walk moved to the `ancestry` feature,
 // re-exported here so every `server::ancestry` path holds.
 pub use crate::ancestry;
+// #10459 P1: the Architect launch-record check for `set` and a local `copy`.
+mod architect;
 pub mod audit;
 // #9066: S3a, the console bridge's verdict.
 mod bridge;
@@ -72,12 +74,17 @@ pub mod settings;
 mod test_support;
 // #9069: `copy` to a write-only sync target.
 mod sync_target;
+// #10459 PR1: main-thread tickets for the Architect (DOC-86 §2).
+mod ticket;
+mod ticket_checks;
+mod ticket_methods;
 mod tools;
 
 pub use ancestry::{
     OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
     is_self_or_descendant,
 };
+pub use architect::ArchitectRefusal;
 pub use audit::{
     AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
 };
@@ -106,6 +113,10 @@ pub use settings::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::{serve_with_agent_callers, serve_without_agent_callers};
+pub use ticket::{
+    TICKET_TTL, TicketAudit, TicketEvent, TicketKind, TicketOp, TicketRefusal, TicketStore,
+    VoidCause,
+};
 pub use tools::DetectedTool;
 
 #[cfg(test)]

@@ -51,7 +51,7 @@ const FAIL_CLOSED_ON_ALLOW: bool = true;
 /// `post_success_append_failure_is_audit_unavailable_and_the_change_stands`,
 /// `copy_stops_after_a_key_whose_record_cannot_be_appended`,
 /// `copy_stops_before_the_next_key_after_a_failed_deny_append`.
-fn unaudited_allow() -> Result<(), ErrorKind> {
+pub(crate) fn unaudited_allow() -> Result<(), ErrorKind> {
     if FAIL_CLOSED_ON_ALLOW {
         Err(ErrorKind::AuditUnavailable)
     } else {
@@ -113,6 +113,10 @@ pub(crate) struct Gate<'a> {
     agent_parent: Option<bool>,
     // #10386: an agent allowed by the absence of a deny.
     default_policy: bool,
+    // #10459 P1: the caller passed the Architect launch-record check.
+    architect: bool,
+    // #10459: why the Architect check refused an agent caller.
+    architect_refusal: Option<super::architect::ArchitectRefusal>,
     admitted: Option<Admitted>,
 }
 
@@ -150,6 +154,8 @@ pub(crate) fn audited(
         agents_allowed: None,
         agent_parent: None,
         default_policy: false,
+        architect: false,
+        architect_refusal: None,
         admitted: None,
     };
     let result = body(&mut gate);
@@ -225,6 +231,19 @@ impl Gate<'_> {
     /// never carry it.
     pub(crate) fn default_policy(&mut self) {
         self.default_policy = true;
+    }
+
+    /// Mark every record of this call `architect: true` (#10459 P1).
+    ///
+    /// What: set by `set` and a local `copy` once the caller passed
+    /// `architect::check_architect`; allow and deny records both carry it.
+    pub(crate) fn architect(&mut self) {
+        self.architect = true;
+    }
+
+    /// Record why the Architect check refused this agent caller (#10459).
+    pub(crate) fn architect_refusal(&mut self, refusal: super::architect::ArchitectRefusal) {
+        self.architect_refusal = Some(refusal);
     }
 
     /// A store hook that appends one write-ahead `secrets.set_agents_may_use`
@@ -348,6 +367,9 @@ impl Gate<'_> {
         if denied.is_none() && self.default_policy {
             record.default_policy = Some(true);
         }
+        // #10459 P1: the Architect exemption is visible on every record.
+        record.architect = self.architect.then_some(true);
+        record.architect_refusal = self.architect_refusal;
         // #9066: a bridge call names the console's assertion on every record.
         if let Some(verdict) = self.caller.bridge() {
             record.agent_parent = record.agent_parent.or(verdict.agent_parent());
@@ -422,7 +444,7 @@ fn allow_recorded(recording: Recording, admitted: Option<&Admitted>) -> bool {
 /// What: only `secrets.audit: false` suppresses. A machine config that is
 /// missing or does not parse leaves the audit on.
 /// Test: `audit_machine_suppression_lets_set_succeed_with_an_unwritable_sink`.
-fn suppressed_by_machine(state: &State) -> bool {
+pub(crate) fn suppressed_by_machine(state: &State) -> bool {
     matches!(
         load_machine_at(&state.settings.machine_config),
         Ok(Some(machine)) if machine.audit == Some(false)

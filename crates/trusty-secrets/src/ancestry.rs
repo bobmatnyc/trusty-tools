@@ -112,6 +112,39 @@ pub trait ProcessTable: Send + Sync {
     fn executable(&self, pid: u32) -> Result<PathBuf, ProcessError> {
         Err(ProcessError::Unreadable { pid })
     }
+
+    /// The start time of `pid` in whole Unix seconds (#10459).
+    ///
+    /// Why: tm's Architect launch record stores `sysinfo`'s start time,
+    /// whole seconds since the epoch, and [`StartTime`] is opaque.
+    /// What: macOS `pbi_start_tvsec`; Linux `btime` plus field 22 divided by
+    /// `CLK_TCK`, as `sysinfo` computes it. The default refuses, so a table
+    /// that does not implement it never matches a record.
+    /// Test: `os_table_reads_its_own_unix_start_and_cwd`.
+    fn start_unix_secs(&self, pid: u32) -> Result<u64, ProcessError> {
+        Err(ProcessError::StartTimeUnreadable { pid })
+    }
+
+    /// The current working directory of `pid` (#10459).
+    ///
+    /// What: macOS `PROC_PIDVNODEPATHINFO` (same uid only); Linux
+    /// `/proc/<pid>/cwd`. The default refuses, like [`Self::is_agent`].
+    /// Test: `os_table_reads_its_own_unix_start_and_cwd`.
+    fn cwd(&self, pid: u32) -> Result<PathBuf, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
+
+    /// The argv of `pid` (#10459 PR1).
+    ///
+    /// Why: a main-thread ticket is minted only by the registered hook argv
+    /// and redeemed only by the argv the hook hashed.
+    /// What: Linux `/proc/<pid>/cmdline`; macOS `KERN_PROCARGS2` (same uid
+    /// only). The default refuses, so a table that does not read it never
+    /// mints or redeems a ticket.
+    /// Test: `os_table_reads_its_own_argv`.
+    fn argv(&self, pid: u32) -> Result<Vec<String>, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
 }
 
 /// Whether `pid`, or any process above it, is a Claude Code process.
@@ -128,17 +161,29 @@ pub trait ProcessTable: Send + Sync {
 /// Test: `agent_ancestor_is_found_above_a_shell`,
 /// `agent_ancestor_check_fails_closed_on_unreadable_table`.
 pub fn has_agent_ancestor(table: &dyn ProcessTable, pid: u32) -> Result<bool, ProcessError> {
+    nearest_agent(table, pid).map(|agent| agent.is_some())
+}
+
+/// The first Claude Code process at or above `pid`, if any (#10459).
+///
+/// Why: the Architect check binds the caller to the one `claude` it belongs
+/// to: the nearest, so a session nested under the Architect's `claude` is
+/// judged as itself, never as the Architect.
+/// What: [`has_agent_ancestor`]'s walk, answering the agent's pid. Every
+/// read error is returned; a loop is [`ProcessError::ChainTooDeep`].
+/// Test: `nearest_agent_stops_at_the_first_claude`.
+pub fn nearest_agent(table: &dyn ProcessTable, pid: u32) -> Result<Option<u32>, ProcessError> {
     let mut current = pid;
     for _ in 0..MAX_CHAIN_DEPTH {
         if current <= 1 {
-            return Ok(false);
+            return Ok(None);
         }
         if table.is_agent(current)? {
-            return Ok(true);
+            return Ok(Some(current));
         }
         let parent = table.parent(current)?;
         if parent == current {
-            return Ok(false);
+            return Ok(None);
         }
         current = parent;
     }
@@ -399,7 +444,24 @@ impl ProcessTable for OsProcessTable {
     fn executable(&self, pid: u32) -> Result<PathBuf, ProcessError> {
         os::executable(pid)
     }
+
+    fn start_unix_secs(&self, pid: u32) -> Result<u64, ProcessError> {
+        launch::start_unix_secs(pid)
+    }
+
+    fn cwd(&self, pid: u32) -> Result<PathBuf, ProcessError> {
+        launch::cwd(pid)
+    }
+
+    fn argv(&self, pid: u32) -> Result<Vec<String>, ProcessError> {
+        os::argv(pid)
+    }
 }
+
+// #10459: the two reads the Architect launch-record check adds; split out
+// for the SLOC cap.
+#[path = "ancestry_launch.rs"]
+mod launch;
 
 /// The fields of a `/proc/<pid>/stat` line after the `comm` field.
 ///
@@ -742,6 +804,10 @@ mod os {
     }
 
     pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
+
+    pub(super) fn argv(pid: u32) -> Result<Vec<String>, ProcessError> {
         Err(ProcessError::Unreadable { pid })
     }
 }

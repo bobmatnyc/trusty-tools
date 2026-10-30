@@ -316,9 +316,89 @@ fn procargs2_parser_reads_argc_arguments() {
     assert_eq!(parse_procargs2(b"\x01\0"), None, "no argc");
 }
 
+/// Why: #10459 P1 — the Architect check binds the caller to its NEAREST
+/// Claude Code process, so a session nested under the Architect's `claude`
+/// is judged as itself; an unreadable link is an error, never "none".
+/// Test: itself.
+#[test]
+fn nearest_agent_stops_at_the_first_claude() {
+    let procs = tree();
+    procs.set_agent(10);
+    assert_eq!(nearest_agent(&procs, 30), Ok(Some(10)));
+    procs.set_agent(20);
+    assert_eq!(nearest_agent(&procs, 30), Ok(Some(20)), "nested claude");
+    assert_eq!(nearest_agent(&procs, 21), Ok(Some(10)));
+    assert_eq!(nearest_agent(&procs, 50), Ok(None));
+    procs.set_unreadable();
+    assert_eq!(
+        nearest_agent(&procs, 30),
+        Err(ProcessError::Unreadable { pid: 30 })
+    );
+}
+
+/// Test: itself.
+#[test]
+fn boot_time_parser_reads_the_btime_line() {
+    let stat = "cpu  1 2 3\nbtime 1790000000\nprocesses 9\n";
+    assert_eq!(launch::boot_time(stat), Some(1_790_000_000));
+    assert_eq!(launch::boot_time("cpu 1\n"), None);
+    assert_eq!(launch::boot_time("btime x\n"), None);
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod os_table {
     use super::super::*;
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+    }
+
+    /// Why: #10459 P1 — tm's launch record holds `sysinfo` whole Unix
+    /// seconds and the launch directory; the host table must answer in the
+    /// same units, or every Architect check fails (closed).
+    /// Test: itself.
+    #[test]
+    fn os_table_reads_its_own_unix_start_and_cwd() {
+        let before = now_secs();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let started = OsProcessTable.start_unix_secs(child.id());
+        let after = now_secs();
+        let _ = child.kill();
+        let _ = child.wait();
+        let started = started.expect("child start");
+        assert!(
+            started + 1 >= before && started <= after,
+            "{before} <= {started} <= {after}"
+        );
+        let me = std::process::id();
+        let cwd = OsProcessTable.cwd(me).expect("own cwd");
+        let expected = std::env::current_dir().expect("current_dir");
+        assert_eq!(
+            std::fs::canonicalize(cwd).ok(),
+            std::fs::canonicalize(expected).ok()
+        );
+        let gone = u32::MAX - 1;
+        assert!(OsProcessTable.start_unix_secs(gone).is_err());
+        assert!(OsProcessTable.cwd(gone).is_err());
+    }
+
+    /// Why: #10459 PR1 — a ticket binds the redeemer's argv, so the host
+    /// table must read a live process's argv exactly and refuse a gone pid.
+    /// What: this process's own argv, so no child can exit mid-read.
+    /// Test: itself.
+    #[test]
+    fn os_table_reads_its_own_argv() {
+        let argv = OsProcessTable.argv(std::process::id()).expect("own argv");
+        let expected: Vec<String> = std::env::args().collect();
+        assert_eq!(argv, expected);
+        assert!(OsProcessTable.argv(u32::MAX - 1).is_err());
+    }
 
     #[test]
     fn os_table_reads_this_process() {

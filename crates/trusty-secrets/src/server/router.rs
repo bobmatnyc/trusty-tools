@@ -40,6 +40,8 @@ use super::grant::GrantRegistry;
 use super::methods::{self, Caller, MethodFn};
 use super::sandbox::{self, SandboxEnv};
 use super::settings::ServerSettings;
+use super::ticket::TicketStore;
+use super::ticket_methods;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MachineSecretsConfig, load_machine_at};
@@ -275,6 +277,18 @@ pub struct State {
     pub(crate) sandbox_override: bool,
     /// Replaces the account-config sync-target opener; tests only (#9069).
     pub(crate) sync_targets: Option<super::sync_target::SyncTargetFactory>,
+    /// The Architect launch-record directory under the account's home;
+    /// `None` grants no Architect exemption.
+    // #10459 P1: from the password database, never `$HOME`, so a spawner
+    // cannot point the check at records it wrote; tests aim it at a temp dir.
+    pub(crate) architect_records: Option<PathBuf>,
+    /// The main-thread tickets `secrets.ticket.mint` stores (#10459 PR1).
+    // Memory only (DOC-86 §2); tests give it a fake clock.
+    pub(crate) tickets: Arc<TicketStore>,
+    /// The cargo bin directory a minting `tm` must run from; `None` mints
+    /// nothing. #10459 PR1: from the password database, like
+    /// `architect_records`.
+    pub(crate) tm_bin_dir: Option<PathBuf>,
 }
 
 impl State {
@@ -353,6 +367,9 @@ impl State {
             sandboxed: sandbox.flag_set(),
             sandbox_override: sandbox::sandbox_consent_config(sandbox, account_home).is_some(),
             sync_targets: None,
+            architect_records: super::architect::records_dir(account_home),
+            tickets: Arc::new(TicketStore::os_default()),
+            tm_bin_dir: super::ticket_checks::tm_bin_dir(account_home),
         }
     }
 
@@ -415,7 +432,7 @@ impl fmt::Debug for State {
 pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
-pub(crate) const METHODS: [(&str, MethodFn); 10] = [
+pub(crate) const METHODS: [(&str, MethodFn); 13] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
@@ -428,6 +445,10 @@ pub(crate) const METHODS: [(&str, MethodFn); 10] = [
     (method::REVOKE, exec::revoke),
     // #9070: S8 slice 3, the agents flag.
     (method::SET_AGENTS_MAY_USE, agents_flag::set_agents_may_use),
+    // #10459 PR1: main-thread tickets (DOC-86 §2).
+    (method::TICKET_MINT, ticket_methods::mint),
+    (method::TICKET_VOID, ticket_methods::void),
+    (method::TICKET_PENDING, ticket_methods::pending),
 ];
 
 /// The `secrets.*` router over `state`.
