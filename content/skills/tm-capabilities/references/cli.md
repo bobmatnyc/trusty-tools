@@ -288,7 +288,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `status` — Show Telegram bot pairing status
   - `stop` — Stop the Telegram bot process if running
 - `ticket` — One-shot issue → branch → PR → close workflow (#1237)
-- `tui` — Launch the ratatui multipane TUI dashboard (projects / sessions / activity / actions)
+- `tui` — Launch the ratatui TUI on the console home screen (one tile per service; Enter on MPM opens the projects dashboard)
 - `update` — Refresh a loaded alias — pull latest and re-deploy managed config (DOC-24)
 - `validate` — Validate a workspace's deployed `.claude/{agents,skills}` payload and `settings.json` against the canonical bundled roster (issue #2158)
 - `wait` — Wait for a condition, in-turn, without blocking past the harness ceiling

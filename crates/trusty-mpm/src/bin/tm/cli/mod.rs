@@ -440,13 +440,12 @@ pub(crate) enum Command {
     },
     /// Report daemon health: reachability, catalog freshness, and a fleet summary.
     Health,
-    /// Launch the ratatui multipane TUI dashboard (projects / sessions /
-    /// activity / actions).
+    /// Launch the ratatui TUI on the console home screen (one tile per service; Enter on MPM opens the projects dashboard).
     ///
-    /// Why: #6483 — this used to open the single-pane coordinator chat, which
-    /// is now behind `--single-pane`. The multipane `project_ctl` dashboard is
-    /// the default surface.
-    /// What: routes through `trusty_mpm::tui::initial_view`.
+    /// Why: #10491 — `tm tui` starts at the console's service roster; the
+    /// multipane `project_ctl` dashboard (#6483) is one Enter away. The
+    /// single-pane coordinator chat stays behind `--single-pane`.
+    /// What: routes through `trusty_mpm::tui::home::tui_entry`.
     /// Test: `cli_parses_tui_defaults`, `cli_parses_tui_single_pane_opt_in`.
     Tui {
         /// Base URL of the trusty-mpm daemon. `Option<String>`, no
