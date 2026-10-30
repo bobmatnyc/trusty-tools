@@ -207,7 +207,8 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
             &[],
             &Default::default(),
             None,
-        );
+        )
+        .expect("a PM spec builds");
         crate::test_support::spec_text(&spec)
     };
     let fallback = spec(None);
@@ -284,7 +285,7 @@ fn cli_parses_sm_serve_stdio() {
     }
 }
 
-/// #6288 S3a (owner ruling Q1): `--addr` still parses — any value, never a
+/// #6288 S3a: `--addr` still parses — any value, never a
 /// parse error that would crash-loop a launchd plist passing it — and is only
 /// carried to `run_daemon`'s deprecation line.
 #[test]
@@ -1292,6 +1293,16 @@ async fn guided_fallback_blocks_non_github_git_checkout() {
         err_msg.contains("auto-managed clones require a GitHub remote")
             || err_msg.contains("live git checkout"),
         "#1724: error message must explain the protection; got: {err_msg}"
+    );
+    // #10255: the error names the manual route for THIS repo root.
+    let root_name = project.file_name().unwrap().to_string_lossy();
+    assert!(
+        err_msg.contains("`tm connect ") && err_msg.contains(root_name.as_ref()),
+        "#10255: error must name `tm connect <git_root>`; got: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("not in an isolated managed clone"),
+        "#10255: error must say `tm connect` runs in the live checkout; got: {err_msg}"
     );
 }
 
@@ -2436,7 +2447,8 @@ fn connect_claude_spec_follows_the_configured_renderer() {
             &[],
             &Default::default(),
             Some(root.path()),
-        );
+        )
+        .expect("a PM spec builds");
         let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");
@@ -2457,7 +2469,8 @@ fn launch_claude_spec_follows_the_configured_renderer() {
             None,
             &[],
             &Default::default(),
-        );
+        )
+        .expect("a PM spec builds");
         let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");

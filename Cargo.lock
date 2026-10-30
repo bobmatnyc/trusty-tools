@@ -346,13 +346,13 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2099,9 +2099,9 @@ checksum = "52560adf09603e58c9a7ee1fe1dcb95a16927b17c127f0ac02d6e768a0e25bc1"
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -4550,7 +4550,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -5451,9 +5451,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.28"
+version = "1.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc3a226e576f50782b3305c5ccf458698f92798987f551c6a02efe8276721e22"
+checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
 dependencies = [
  "cc",
  "libc",
@@ -8194,7 +8194,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -8500,9 +8500,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -9482,6 +9482,17 @@ name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -11047,7 +11058,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11150,7 +11161,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-architect"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde",
@@ -11163,7 +11174,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-channels"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -11196,7 +11207,6 @@ version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
  "chrono",
  "clap",
  "dirs 5.0.1",
@@ -11216,7 +11226,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml 0.8.23",
- "tower",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -11264,7 +11273,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.64.0"
+version = "0.67.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11417,7 +11426,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -11435,7 +11444,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd-py"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "flate2",
@@ -11499,7 +11508,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.15.1"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11517,6 +11526,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
  "trusty-common",
@@ -11565,7 +11575,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.36.0"
+version = "0.36.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11740,7 +11750,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.61.0"
+version = "0.62.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -11830,12 +11840,12 @@ dependencies = [
  "uuid",
  "walkdir",
  "which 6.0.3",
- "zip 9.0.4",
+ "zip 9.0.5",
 ]
 
 [[package]]
 name = "trusty-secrets"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",
@@ -12178,7 +12188,7 @@ dependencies = [
  "ureq-proto",
  "utf8-zero",
  "webpki-root-certs",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -12631,9 +12641,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.7"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -12644,14 +12654,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.7"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -13835,9 +13845,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.0.4"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",

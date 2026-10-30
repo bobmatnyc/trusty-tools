@@ -5,7 +5,8 @@
 //! `scripts/`, keeps its records in `local/` (#9997, superseding ruling C),
 //! and runs the Architect-only skills (`tm-fleet-check`, `tm-context-refresh`
 //! and, since #9997, the `architect-*` skills its manual indexes; rulings D,
-//! E). Without them a fresh Architect has instructions that point at files
+//! E), and reads its instance settings from `local/architect.json` (#10161).
+//! Without them a fresh Architect has instructions that point at files
 //! that do not exist.
 //! What: [`files`] lists each file in write order. The `CLAUDE.md` template
 //! and the skills come from an [`ArchitectSeed`] read from content at
@@ -21,11 +22,13 @@
 //! overwritten. The skills' bytes are the ones every Architect launch also
 //! deploys (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
-//! `every_template_asset_is_seeded`,
+//! `every_template_asset_is_seeded`, `every_script_asset_is_seeded`,
+//! `every_schema_asset_is_seeded`, `every_dashboard_asset_is_seeded`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
 //! `every_path_a_ported_skill_names_exists_after_init`,
 //! `the_relay_scripts_and_the_voice_guide_are_seeded`,
 //! `every_script_a_seeded_script_loads_by_path_is_seeded`,
+//! `the_architect_config_loader_and_seed_are_seeded`,
 //! `a_seed_that_does_not_resolve_writes_nothing`.
 
 use std::path::Path;
@@ -71,6 +74,34 @@ macro_rules! template {
     };
 }
 
+/// Build one [`EMBEDDED`] row for a dashboard schema seeded at
+/// `schemas/dashboard/<name>`, its path under `src/assets/architect/` (#10161).
+macro_rules! schema {
+    ($name:literal) => {
+        (
+            concat!("schemas/dashboard/", $name),
+            include_str!(concat!(
+                "../../../../assets/architect/schemas/dashboard/",
+                $name
+            )),
+            false,
+        )
+    };
+}
+
+/// Build one [`EMBEDDED`] row for a dashboard page file seeded at
+/// `templates/dashboard/<rel>`, its path under `src/assets/architect/dashboard/`
+/// (#10161).
+macro_rules! page {
+    ($rel:literal) => {
+        (
+            concat!("templates/dashboard/", $rel),
+            include_str!(concat!("../../../../assets/architect/dashboard/", $rel)),
+            false,
+        )
+    };
+}
+
 /// The files still compiled in, in write order, after `CLAUDE.md`.
 const EMBEDDED: &[Embedded] = &[
     embedded!(".gitignore", "templates/gitignore", false),
@@ -91,6 +122,8 @@ const EMBEDDED: &[Embedded] = &[
     template!("local/owner/dream-log.md"),
     template!("local/mandates/README.md"),
     template!("local/mandates/example.toml"),
+    // See #10161: the instance config `scripts/architect_config.py` reads.
+    template!("local/architect.json"),
     embedded!("scripts/fleet-poll.py", "scripts/fleet-poll.py", true),
     // #8891: fleet-poll.py loads this sibling by path; it must ship beside it.
     embedded!(
@@ -105,6 +138,140 @@ const EMBEDDED: &[Embedded] = &[
         false
     ),
     embedded!("scripts/self-ctx.py", "scripts/self-ctx.py", false),
+    // See #10161: the poller's alert triage and Architect watchdog (P1b-0).
+    embedded!("scripts/alert_triage.py", "scripts/alert_triage.py", false),
+    embedded!(
+        "scripts/architect-watchdog.py",
+        "scripts/architect-watchdog.py",
+        false
+    ),
+    // See #10161: PM intake, its digest and the Notification hook pair (P2).
+    embedded!("scripts/pm_intake.py", "scripts/pm_intake.py", false),
+    embedded!("scripts/pm-digest.py", "scripts/pm-digest.py", true),
+    embedded!("scripts/pm-notify.sh", "scripts/pm-notify.sh", true),
+    embedded!(
+        "scripts/notify-supervisor.sh",
+        "scripts/notify-supervisor.sh",
+        true
+    ),
+    // See #10161: the Intent Ledger set (P3). datg.py imports its four
+    // datg_* modules from its own directory, so all five ship together.
+    embedded!("scripts/datg.py", "scripts/datg.py", true),
+    embedded!("scripts/datg_store.py", "scripts/datg_store.py", false),
+    embedded!("scripts/datg_ops.py", "scripts/datg_ops.py", false),
+    embedded!("scripts/datg_log.py", "scripts/datg_log.py", false),
+    embedded!("scripts/datg_read.py", "scripts/datg_read.py", false),
+    embedded!("scripts/datg-hook.sh", "scripts/datg-hook.sh", true),
+    embedded!("scripts/ctx-watch.py", "scripts/ctx-watch.py", false),
+    embedded!("scripts/il-cron.py", "scripts/il-cron.py", false),
+    embedded!("scripts/self-clear.sh", "scripts/self-clear.sh", true),
+    embedded!("scripts/state-archive.py", "scripts/state-archive.py", true),
+    embedded!(
+        "scripts/architect-idle.py",
+        "scripts/architect-idle.py",
+        true
+    ),
+    // See #10161: the dashboard store set (P4a-1). Each module imports its
+    // siblings from its own directory, and dashboard_schema.py reads
+    // `schemas/dashboard/` beside `scripts/`, so all of them ship together.
+    embedded!(
+        "scripts/dashboard_store.py",
+        "scripts/dashboard_store.py",
+        true
+    ),
+    embedded!(
+        "scripts/dashboard_jsonl.py",
+        "scripts/dashboard_jsonl.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_schema.py",
+        "scripts/dashboard_schema.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_derive.py",
+        "scripts/dashboard_derive.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_ids.py",
+        "scripts/dashboard_ids.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_qual.py",
+        "scripts/dashboard_qual.py",
+        false
+    ),
+    embedded!(
+        "scripts/owner_answers.py",
+        "scripts/owner_answers.py",
+        false
+    ),
+    embedded!("scripts/dashboard-db.py", "scripts/dashboard-db.py", true),
+    embedded!("scripts/il-archive.py", "scripts/il-archive.py", false),
+    embedded!("scripts/stale-tasks.py", "scripts/stale-tasks.py", true),
+    // See #10161: the dashboard server (D3b), split into a facade and three
+    // modules it imports by name, and the read-only views it serves. The page,
+    // the Live view and the reader libraries sit where the server reads them.
+    embedded!(
+        "scripts/dashboard-serve.py",
+        "scripts/dashboard-serve.py",
+        true
+    ),
+    embedded!(
+        "scripts/dashboard_http.py",
+        "scripts/dashboard_http.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_page.py",
+        "scripts/dashboard_page.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_docs.py",
+        "scripts/dashboard_docs.py",
+        false
+    ),
+    embedded!("scripts/dashboard_il.py", "scripts/dashboard_il.py", false),
+    embedded!(
+        "scripts/dashboard_media.py",
+        "scripts/dashboard_media.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_viz.py",
+        "scripts/dashboard_viz.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_harness.py",
+        "scripts/dashboard_harness.py",
+        false
+    ),
+    page!("index.html"),
+    page!("live.html"),
+    page!("vendor/marked.umd.js"),
+    page!("vendor/purify.min.js"),
+    page!("vendor/VERSIONS.md"),
+    schema!("accounts.schema.json"),
+    schema!("briefs.schema.json"),
+    schema!("effort_tunes.schema.json"),
+    schema!("goal_removals.schema.json"),
+    schema!("goal_reorders.schema.json"),
+    schema!("goals.schema.json"),
+    schema!("il_steers.schema.json"),
+    schema!("items.schema.json"),
+    schema!("media.schema.json"),
+    schema!("meta-gh_track.schema.json"),
+    schema!("meta-seen.schema.json"),
+    schema!("meta-settings.schema.json"),
+    schema!("meta-state.schema.json"),
+    schema!("questions.schema.json"),
+    schema!("sessions.schema.json"),
+    schema!("step_progress.schema.json"),
     embedded!(
         "scripts/start-fleet-poll.sh",
         "scripts/start-fleet-poll.sh",
@@ -115,6 +282,12 @@ const EMBEDDED: &[Embedded] = &[
     embedded!("scripts/posted.sh", "scripts/posted.sh", true),
     // posted.sh runs this sibling by path.
     embedded!("scripts/relay-marker.py", "scripts/relay-marker.py", false),
+    // See #10161: the `local/architect.json` loader; a module, not a command.
+    embedded!(
+        "scripts/architect_config.py",
+        "scripts/architect_config.py",
+        false
+    ),
     // #9997: the voice guide the manual and `architect-operating-rules` cite.
     embedded!("docs/architect/voice.md", "docs/voice.md", false),
 ];
@@ -152,7 +325,13 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
 /// Directories `tm fleet init` guarantees, created when absent.
 // #9997: per-project records live in `local/projects/`; the skills write
 // other users' profiles to `local/users/` and briefs to `local/briefs/`.
-pub(crate) const DIRS: &[&str] = &["local/projects", "local/users", "local/briefs"];
+// #10161: `architect-improvements` keeps its ledger in `local/improvements/`.
+pub(crate) const DIRS: &[&str] = &[
+    "local/projects",
+    "local/users",
+    "local/briefs",
+    "local/improvements",
+];
 
 /// Write every [`files`] entry and [`DIRS`] entry under `dir`; one step each.
 ///

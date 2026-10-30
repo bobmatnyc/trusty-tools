@@ -131,6 +131,7 @@ impl SocketEnv for TestEnv {
         match &self.inbound {
             Some(fake) => match decide(&**fake, &ev) {
                 Verdict::Resolved(_) => "resolved".to_owned(),
+                Verdict::Held(h) => h.reason().code().to_owned(),
                 Verdict::Dropped(d) => d.code.to_owned(),
             },
             None => "acted".to_owned(),
@@ -1007,7 +1008,13 @@ fn no_user_token_loaded_anywhere_in_channels_path() {
         for needle in forbidden {
             assert!(!text.contains(needle), "{} names {needle}", file.display());
         }
-        let door = text.contains("resolve_bounded_gated");
+        // #9936: the Slack refs use the store-first door, never env-first.
+        assert!(
+            !text.contains("resolve_bounded_gated"),
+            "{}: names the env-first door",
+            file.display()
+        );
+        let door = text.contains("resolve_store_first_gated");
         assert_eq!(
             door,
             file.ends_with("socket_mode/token.rs"),
@@ -1015,6 +1022,10 @@ fn no_user_token_loaded_anywhere_in_channels_path() {
             file.display()
         );
     }
+    // #9936: parity — `bot_ref` reads through the same door as `app_ref`.
+    let bot = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/channels/slack_bot.rs");
+    let bot = std::fs::read_to_string(bot).expect("read slack_bot.rs");
+    assert!(bot.contains("resolve_store_first_gated") && !bot.contains("resolve_bounded_gated"));
 }
 
 /// 🔴 #9923 Q3: the claim log is named under the home, beside the question

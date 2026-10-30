@@ -695,3 +695,220 @@ async fn remove_file_fails_closed_on_a_refused_redb_delete() {
         "the clean remove left {ids:?} {rows:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #10159: a quiet rebuild must not fire while a write is still embedding.
+// ---------------------------------------------------------------------------
+
+/// An indexer over `embedder` and an 8-dim vector store.
+fn indexer_with(
+    id: &str,
+    embedder: std::sync::Arc<dyn crate::core::embed::Embedder>,
+) -> std::sync::Arc<crate::core::indexer::CodeIndexer> {
+    let store: std::sync::Arc<dyn crate::core::store::VectorStore> =
+        std::sync::Arc::new(crate::core::store::UsearchStore::new(8).expect("usearch new"));
+    std::sync::Arc::new(
+        crate::core::indexer::CodeIndexer::new(id, "/tmp/lifecycle-10159")
+            .with_components(embedder, store),
+    )
+}
+
+/// #10159: a write parked in its embed phase holds back the quiet rebuild.
+/// Fails at f1a833c75f: the guard was taken only after the embed, so the
+/// seed write's quiet window looked elapsed and the ticker rebuilt mid-write.
+#[tokio::test(start_paused = true)]
+async fn a_quiet_rebuild_waits_while_a_write_is_embedding() {
+    use std::sync::Arc;
+
+    use crate::core::indexer::graph_refresh::{GRAPH_REFRESH_MAX_WAIT, GRAPH_REFRESH_QUIET};
+
+    let embedder = Arc::new(GatedEmbedder {
+        gate: tokio::sync::Semaphore::new(0),
+        started: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let idx = indexer_with("lifecycle-10159-gate", embedder.clone());
+
+    embedder.gate.add_permits(1);
+    idx.index_file(PATH, OLD).await.expect("seed write");
+    assert!(idx.symbol_graph_is_stale(), "the seed write is deferred");
+    tokio::time::advance(GRAPH_REFRESH_QUIET + std::time::Duration::from_secs(1)).await;
+
+    let second = tokio::spawn({
+        let idx = Arc::clone(&idx);
+        async move { idx.index_file("src/second.rs", NEW).await }
+    });
+    wait_started(&embedder, 2).await; // the second write is parked at its embed
+    assert!(
+        !idx.refresh_symbol_graph_if_due(GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT)
+            .await,
+        "a write still embedding must hold back the quiet rebuild"
+    );
+
+    embedder.gate.add_permits(1);
+    second.await.expect("join").expect("second write");
+    tokio::time::advance(GRAPH_REFRESH_QUIET).await;
+    assert!(
+        idx.refresh_symbol_graph_if_due(GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT)
+            .await,
+        "the quiet window after the last write elapsed"
+    );
+    assert!(!idx.symbol_graph_is_stale());
+}
+
+/// An embedder whose every batch takes `delay` of tokio time.
+struct SlowEmbedder {
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl crate::core::embed::Embedder for SlowEmbedder {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        unimplemented!("index_file embeds through embed_batch")
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        tokio::time::sleep(self.delay).await;
+        Ok(texts.iter().map(|_| vec![0.5f32; 8]).collect())
+    }
+    fn dimension(&self) -> usize {
+        8
+    }
+}
+
+/// #10159: 40 serial writes, each embedding for 3 s, under a 1 s ticker.
+/// Only the max-wait cap may rebuild during the burst; the quiet window then
+/// rebuilds exactly once. Fails at f1a833c75f: every embed outlasted the 2 s
+/// quiet window, so the ticker rebuilt about once per write.
+#[tokio::test(start_paused = true)]
+async fn a_serial_burst_of_slow_writes_rebuilds_at_most_once_per_max_wait() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::core::indexer::graph_refresh::{GRAPH_REFRESH_MAX_WAIT, GRAPH_REFRESH_QUIET};
+
+    const WRITES: usize = 40;
+    let tick = Duration::from_secs(1);
+    let idx = indexer_with(
+        "lifecycle-10159-burst",
+        Arc::new(SlowEmbedder {
+            delay: Duration::from_secs(3),
+        }),
+    );
+    let base = idx.symbol_graph_full_rebuilds();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let ticker = tokio::spawn({
+        let idx = Arc::clone(&idx);
+        let stop = Arc::clone(&stop);
+        async move {
+            let mut interval = tokio::time::interval(tick);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            while !stop.load(Ordering::SeqCst) {
+                interval.tick().await;
+                idx.refresh_symbol_graph_if_due(GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT)
+                    .await;
+            }
+        }
+    });
+
+    let started = tokio::time::Instant::now();
+    for i in 0..WRITES {
+        let content = format!("fn burst_{i}() {{\n    let marker = {i};\n}}\n");
+        idx.index_file(&format!("src/burst_{i}.rs"), &content)
+            .await
+            .expect("burst write");
+    }
+    let burst = started.elapsed();
+    let during = idx.symbol_graph_full_rebuilds() - base;
+    let bound = burst.as_secs().div_ceil(GRAPH_REFRESH_MAX_WAIT.as_secs()) + 1;
+    assert!(
+        during <= bound,
+        "{during} rebuilds during a {}s burst; at most {bound} allowed",
+        burst.as_secs()
+    );
+    // #10159: a 120 s burst outlasts two max-wait periods, so the max-wait
+    // rule must still force at least one rebuild; suppressing all fails here.
+    assert!(
+        during >= 1,
+        "0 rebuilds during a {}s burst; the {}s max-wait rule must force at least one",
+        burst.as_secs(),
+        GRAPH_REFRESH_MAX_WAIT.as_secs()
+    );
+
+    tokio::time::sleep(GRAPH_REFRESH_QUIET + tick * 2).await;
+    assert_eq!(
+        idx.symbol_graph_full_rebuilds() - base,
+        during + 1,
+        "the quiet window after the burst rebuilds exactly once"
+    );
+    tokio::time::sleep(GRAPH_REFRESH_QUIET * 3).await;
+    assert_eq!(idx.symbol_graph_full_rebuilds() - base, during + 1);
+    assert!(!idx.symbol_graph_is_stale());
+
+    stop.store(true, Ordering::SeqCst);
+    ticker.await.expect("ticker");
+}
+
+/// An embedder whose every batch fails, by error or by panic.
+struct FailingEmbedder {
+    panic: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::core::embed::Embedder for FailingEmbedder {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        unimplemented!("index_file embeds through embed_batch")
+    }
+    async fn embed_batch(&self, _texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        if self.panic {
+            panic!("injected embed panic (#10159)");
+        }
+        anyhow::bail!("injected embed failure (#10159)")
+    }
+    fn dimension(&self) -> usize {
+        8
+    }
+}
+
+/// #10159: a write that errors or panics in its embed releases its hold on
+/// the quiet rebuild. Fails with the active-write guard's decrement removed:
+/// the count stays above zero and the quiet rebuild never fires again.
+#[tokio::test(start_paused = true)]
+async fn a_failed_or_panicked_write_does_not_hold_back_the_quiet_rebuild() {
+    use std::sync::Arc;
+
+    use crate::core::indexer::graph_refresh::{GRAPH_REFRESH_MAX_WAIT, GRAPH_REFRESH_QUIET};
+
+    for panic in [false, true] {
+        let idx = indexer_with("lifecycle-10159-fail", Arc::new(FailingEmbedder { panic }));
+        idx.mark_symbol_graph_stale();
+        let write = tokio::spawn({
+            let idx = Arc::clone(&idx);
+            async move { idx.index_file(PATH, OLD).await }
+        })
+        .await;
+        assert!(
+            !matches!(write, Ok(Ok(_))),
+            "panic={panic}: the write must fail"
+        );
+        tokio::time::advance(GRAPH_REFRESH_QUIET).await;
+        assert!(
+            idx.refresh_symbol_graph_if_due(GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT)
+                .await,
+            "panic={panic}: the failed write must not block the quiet rebuild"
+        );
+    }
+}
+
+/// #10159: a `skip_kg` write never counts as active, since it never marks
+/// the graph; every other write does.
+#[test]
+fn a_skip_kg_write_is_not_counted_active() {
+    let mut idx = crate::core::indexer::CodeIndexer::new("lifecycle-10159-skip", "/tmp/l-10159");
+    assert!(
+        idx.begin_active_write().is_some(),
+        "a KG index counts the write"
+    );
+    idx.set_skip_kg(true);
+    assert!(idx.begin_active_write().is_none(), "skip_kg counts nothing");
+}

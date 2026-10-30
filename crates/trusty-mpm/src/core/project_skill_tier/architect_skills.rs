@@ -95,7 +95,59 @@ pub const CONTEXT_REFRESH: ShippedSkill = ShippedSkill {
         "e71d8d57bdafae52f954fce12a3edc0e9367cd05fad9c2978b627f32a6808240",
         // #9997 U1b: the 50% text, before the 250k-token bar.
         "de6c0d83f2432fd4016c59ec3522e5b03a145db5474a58e4b8ed2bb98c78471d",
+        // #10161: the U1b text, before the Intent Ledger handoff.
+        "eebce72992c84b3e7cc25356cf9b94bc0001b1e67947a668cd94e14fddd04c12",
     ],
+};
+
+/// `architect-operating-rules`, edited since its first release.
+const OPERATING_RULES: ShippedSkill = ShippedSkill {
+    stem: "architect-operating-rules",
+    // #10161: the U1b text, before the Asks-to-Actions rename.
+    previous: &["fa119b43da0dd7275659d652eea2448472743920f33e5d5da68a4e953d06b4c3"],
+};
+
+/// `architect-workflow`, edited since its first release.
+const WORKFLOW: ShippedSkill = ShippedSkill {
+    stem: "architect-workflow",
+    // #10161: the U1b text, before the Intent Ledger handoff.
+    previous: &["bcc47e5103279f23c1af085d2d36e90fbf90d06fc1ec1f9e7d6fb65bb7c0f755"],
+};
+
+/// `architect-strategy`, edited since its first release.
+const STRATEGY: ShippedSkill = ShippedSkill {
+    stem: "architect-strategy",
+    // #10161: the U1b text, before the factory issue-tracking rule.
+    // The text before the daily factory status-update rule.
+    previous: &[
+        "2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77",
+        "5388a82b3a5bcab32b10486084d185da24770620aa825099b19327d7a8203dd9",
+    ],
+};
+
+/// `architect-project-provision`, edited since its first release.
+const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
+    stem: "architect-project-provision",
+    // #10263: the D2 text, before hook commands named an interpreter (D73).
+    // #10277: the D73 text, before the board step moved to `tm issue board add`.
+    previous: &[
+        "102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8",
+        "a1059ba1af14510618d08bd6f99bc46861052f3418ce3bb21fa2c627c908860b",
+    ],
+};
+
+/// `architect-improvements`, edited since its first release.
+const IMPROVEMENTS: ShippedSkill = ShippedSkill {
+    stem: "architect-improvements",
+    // R-192/R-193: the D2 text, before the owner-asks rules.
+    previous: &["bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0"],
+};
+
+/// `architect-dashboard`, edited since its first release.
+const DASHBOARD: ShippedSkill = ShippedSkill {
+    stem: "architect-dashboard",
+    // R-192/R-193: the D3b text, before the owner-asks rules.
+    previous: &["c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a"],
 };
 
 /// A skill on its first release: no earlier shipped text to recognise.
@@ -113,13 +165,23 @@ pub const SHIPPED: &[ShippedSkill] = &[
     CONTEXT_REFRESH,
     // #9997 U1b: the skills the operating manual indexes, first shipped here.
     first_release("architect-tmux-ops"),
-    first_release("architect-operating-rules"),
-    first_release("architect-workflow"),
+    OPERATING_RULES,
+    WORKFLOW,
     first_release("architect-search-memory"),
     first_release("architect-github"),
-    first_release("architect-strategy"),
+    STRATEGY,
     first_release("architect-completion-standard"),
     first_release("architect-owner-model"),
+    // #10161 D2: the review, drift, provisioning, macOS, improvement and
+    // host-administration skills, rewritten into trusty-tools form.
+    first_release("architect-drift-check"),
+    first_release("architect-review"),
+    PROJECT_PROVISION,
+    first_release("architect-macos"),
+    IMPROVEMENTS,
+    first_release("architect-host-admin"),
+    // #10161 D3b: the dashboard skill, with the served page it describes.
+    DASHBOARD,
 ];
 
 /// The deploy record, beside the skills in the project tier.

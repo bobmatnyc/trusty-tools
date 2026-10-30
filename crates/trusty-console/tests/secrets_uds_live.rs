@@ -4,7 +4,8 @@
 //! Why: the stub-socket tests prove what the console sends; only a real
 //! server proves what it then decides and records. The server believes a
 //! bridge assertion only from a peer whose executable is `trusty-console`
-//! with no Claude Code above it, and judges `set_agents_may_use` on the
+//! with no Claude Code above it, and judges `set`, `delete` and a deny
+//! removal (`set_agents_may_use` with `allowed: true`, #10386) on the
 //! console's verdict.
 //! What: [`live_bridge_is_judged_by_the_real_server`] re-runs this test
 //! binary in roles chosen by [`ROLE`]:
@@ -37,6 +38,10 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+#[path = "support/self_copy.rs"]
+mod self_copy;
+use self_copy::self_copy;
+
 const TEST: &str = "live_bridge_is_judged_by_the_real_server";
 const ROLE: &str = "TC_LIVE_ROLE";
 const SOCKET: &str = "TC_LIVE_SOCKET";
@@ -65,7 +70,8 @@ fn server_binary() -> PathBuf {
     )
 }
 
-/// One temp root: the project checkout, the server and the copies.
+/// One temp root: the project checkout and the server. The named copies are
+/// per process, from [`self_copy`] (#10212).
 struct Live {
     root: TempDir,
     children: Vec<Child>,
@@ -104,10 +110,6 @@ impl Live {
         // #9067: the console dials only for a project the tm registry lists.
         let rows = json!([{ "alias": "web", "path": repo }]);
         std::fs::write(live.path("registry.json"), rows.to_string()).expect("registry");
-        let exe = std::env::current_exe().expect("exe");
-        for name in ["trusty-console", "claude", "notclaude"] {
-            std::fs::copy(&exe, live.path(name)).expect("copy test binary");
-        }
         live
     }
 
@@ -151,7 +153,7 @@ impl Live {
     /// Start the `trusty-console` copy on `socket`; its bound address.
     fn console(&mut self, tag: &str, socket: &Path) -> SocketAddr {
         let out = self.path(tag).join("addr");
-        let console = role(&self.path("trusty-console"), "console")
+        let console = role(&self_copy("trusty-console"), "console")
             .env(SOCKET, socket)
             .env(REGISTRY, self.path("registry.json"))
             .env(OUT, &out)
@@ -166,7 +168,7 @@ impl Live {
     /// Run the client under a parent copy named `parent`; its report.
     fn client(&self, parent: &str, addr: SocketAddr) -> Value {
         let out = self.path(&format!("{parent}-{}.json", addr.port()));
-        let status = role(&self.path(parent), "parent")
+        let status = role(&self_copy(parent), "parent")
             .env(CLIENT, std::env::current_exe().expect("exe"))
             .env(ADDR, addr.to_string())
             .env(PROJECT, self.path("repo"))
@@ -349,14 +351,22 @@ fn live_bridge_is_judged_by_the_real_server() {
         let agent = live.client("claude", addr);
         eprintln!("audit {tag}: notclaude {human} claude {agent}");
         assert_eq!(human["set"], 200, "{tag}: {human}");
-        // The file backend holds no ON flag (`unsupported`, 422), so the
-        // non-agent's call fails after the agent check an agent's fails (403).
-        assert_eq!(human["flag_on"], 422, "{tag}: not refused as an agent");
+        // #10386 Q5: the file backend holds the deny, so a person may both
+        // remove and write it.
+        assert_eq!(human["flag_on"], 200, "{tag}: not refused as an agent");
+        assert_eq!(human["flag_off"], 200, "{tag}: {human}");
+        // #10459: an agent may set a key with no deny (the person's client
+        // deleted the key first, clearing its deny); `delete` and removing a
+        // deny stay operator-only.
+        assert_eq!(agent["set"], 200, "{tag}: an agent may set an undenied key");
+        assert_eq!(agent["delete"], 403, "{tag}: an agent may not delete");
         assert_eq!(
             agent["flag_on"], 403,
-            "{tag}: an agent may not allow agents"
+            "{tag}: an agent may not remove a deny"
         );
-        assert_eq!(agent["flag_off"], 200, "{tag}: an agent may withdraw it");
+        // Writing a deny passes the agent check, and the agent's own set
+        // created the row, so it lands.
+        assert_eq!(agent["flag_off"], 200, "{tag}: an agent may write a deny");
         let records = records(&audit_log);
         if audit {
             let methods: std::collections::HashSet<&str> = records

@@ -1,0 +1,171 @@
+# architect_export_manifest.txt — the allow-list scripts/architect_export.py stages (#9171).
+#
+# Line: SRC_REL[<TAB>DEST_REL]. SRC_REL is relative to --source (the Architect
+# checkout), DEST_REL to --staging, laid out like python/trusty-architect/.
+# DEST_REL defaults to SRC_REL. A SRC_REL ending in /** copies every file under
+# that directory, and DEST_REL is then a directory. Lines starting with # and
+# blank lines are skipped.
+#
+# Starter set: exactly what python/trusty-architect/ ships today. Each later
+# export PR adds the rows it ships, reviewed with its content. A skill shipped
+# in trusty-tools form (its frontmatter and wording rewritten by hand, #10161)
+# is never overwritten by a later export: re-export it to a scratch staging
+# directory, diff it against the shipped copy and run the leak pass, then
+# hand-merge the delta. Instance paths
+# (local/, owner/, records/, inbox/, docs/briefs/, .env*, .mcp.json, ...) are
+# refused by the tool even when listed here. Never add an instance-* skill or
+# any path that names an account, host or person.
+
+# Poller and pane helpers.
+scripts/architect_config.py
+scripts/alert_triage.py
+scripts/architect-watchdog.py
+scripts/fleet-poll.py
+scripts/input-state.py
+scripts/posted.sh
+scripts/quiet-sessions.py
+scripts/relay-marker.py
+scripts/relay.sh
+scripts/self-ctx.py
+scripts/start-fleet-poll.sh
+
+# PM intake, its digest and the Notification hook pair.
+scripts/notify-supervisor.sh
+scripts/pm-digest.py
+scripts/pm-notify.sh
+scripts/pm_intake.py
+
+# Intent Ledger set (P3). datg.py stages whole; the subproject splits it into
+# datg_store/ops/log/read.py behind a datg.py facade (500-SLOC cap).
+scripts/architect-idle.py
+scripts/ctx-watch.py
+scripts/datg-hook.sh
+scripts/datg.py
+scripts/il-cron.py
+scripts/self-clear.sh
+scripts/state-archive.py
+docs/specs/SPEC-IL-01.md
+
+# Skills: .claude/skills/<name>/SKILL.md -> skills/<name>.md.
+.claude/skills/architect-completion-standard/SKILL.md	skills/architect-completion-standard.md
+.claude/skills/architect-drift-check/SKILL.md	skills/architect-drift-check.md
+.claude/skills/architect-github/SKILL.md	skills/architect-github.md
+.claude/skills/architect-host-admin/SKILL.md	skills/architect-host-admin.md
+.claude/skills/architect-improvements/SKILL.md	skills/architect-improvements.md
+.claude/skills/architect-macos/SKILL.md	skills/architect-macos.md
+.claude/skills/architect-operating-rules/SKILL.md	skills/architect-operating-rules.md
+.claude/skills/architect-owner-model/SKILL.md	skills/architect-owner-model.md
+.claude/skills/architect-project-provision/SKILL.md	skills/architect-project-provision.md
+.claude/skills/architect-review/SKILL.md	skills/architect-review.md
+.claude/skills/architect-search-memory/SKILL.md	skills/architect-search-memory.md
+.claude/skills/architect-strategy/SKILL.md	skills/architect-strategy.md
+.claude/skills/architect-tmux-ops/SKILL.md	skills/architect-tmux-ops.md
+.claude/skills/architect-workflow/SKILL.md	skills/architect-workflow.md
+# Live sources are the trusty-* dirs; the Architect's tm-* dirs are stale copies (#10161).
+.claude/skills/trusty-context-refresh/SKILL.md	skills/tm-context-refresh.md
+.claude/skills/trusty-fleet-check/SKILL.md	skills/tm-fleet-check.md
+
+# Voice guide.
+docs/architect/voice.md	docs/voice.md
+
+# Instance templates: templates/<f> -> templates/local/<f>.
+templates/actions.md	templates/local/actions.md
+templates/goals.md	templates/local/goals.md
+templates/state.md	templates/local/state.md
+templates/user.md	templates/local/user.md
+templates/mandates/**	templates/local/mandates
+templates/owner/**	templates/local/owner
+templates/projects/**	templates/local/projects
+
+# Dashboard store set (P4a-1).
+scripts/dashboard_store.py
+scripts/dashboard_jsonl.py
+scripts/dashboard_schema.py
+scripts/dashboard_derive.py
+scripts/dashboard_ids.py
+scripts/dashboard_qual.py
+scripts/owner_answers.py
+scripts/dashboard-db.py
+scripts/il-archive.py
+scripts/stale-tasks.py
+schemas/dashboard/**	schemas/dashboard
+scripts/test_dashboard_derive.py	tests/test_dashboard_derive.py
+scripts/test_dashboard_footer.py	tests/test_dashboard_footer.py
+scripts/test_dashboard_ids.py	tests/test_dashboard_ids.py
+scripts/test_dashboard_run.py	tests/test_dashboard_run.py
+scripts/test_dashboard_schema.py	tests/test_dashboard_schema.py
+scripts/test_dashboard_specs_links.py	tests/test_dashboard_specs_links.py
+scripts/test_dashboard_summary.py	tests/test_dashboard_summary.py
+scripts/test_dashboard_tally.py	tests/test_dashboard_tally.py
+scripts/test_il_archive.py	tests/test_il_archive.py
+scripts/test_stale_tasks.py	tests/test_stale_tasks.py
+scripts/fixtures/dashboard/golden/**	tests/fixtures/dashboard/golden
+
+# Dashboard serve set, read-only views, page, Live and vendor (D3b). dashboard-serve.py
+# stages whole; the subproject splits it into dashboard-serve.py (facade) and
+# dashboard_http/page/docs.py (500-SLOC cap), so re-export to scratch and hand-merge.
+# mermaid.min.js and templates/dashboard/preview-live.html are not shipped.
+scripts/dashboard-serve.py
+scripts/dashboard_il.py
+scripts/dashboard_media.py
+scripts/dashboard_viz.py
+scripts/dashboard_harness.py
+templates/dashboard/index.html
+templates/dashboard/live.html
+templates/dashboard/vendor/marked.umd.js
+templates/dashboard/vendor/purify.min.js
+templates/dashboard/vendor/VERSIONS.md
+scripts/conftest.py	tests/conftest.py
+scripts/shim_harness.js	tests/shim_harness.js
+scripts/test_dashboard_3pane.py	tests/test_dashboard_3pane.py
+scripts/test_dashboard_action_layout.py	tests/test_dashboard_action_layout.py
+scripts/test_dashboard_autocollapse.py	tests/test_dashboard_autocollapse.py
+scripts/test_dashboard_beep.py	tests/test_dashboard_beep.py
+scripts/test_dashboard_busy.py	tests/test_dashboard_busy.py
+scripts/test_dashboard_clarify.py	tests/test_dashboard_clarify.py
+scripts/test_dashboard_crosslink.py	tests/test_dashboard_crosslink.py
+scripts/test_dashboard_decision_order.py	tests/test_dashboard_decision_order.py
+scripts/test_dashboard_discovery.py	tests/test_dashboard_discovery.py
+scripts/test_dashboard_doc.py	tests/test_dashboard_doc.py
+scripts/test_dashboard_doc_links.py	tests/test_dashboard_doc_links.py
+scripts/test_dashboard_factory_goal.py	tests/test_dashboard_factory_goal.py
+scripts/test_dashboard_feedback.py	tests/test_dashboard_feedback.py
+scripts/test_dashboard_files.py	tests/test_dashboard_files.py
+scripts/test_dashboard_goal_done.py	tests/test_dashboard_goal_done.py
+scripts/test_dashboard_goal_park.py	tests/test_dashboard_goal_park.py
+scripts/test_dashboard_goalprogress.py	tests/test_dashboard_goalprogress.py
+scripts/test_dashboard_harness.py	tests/test_dashboard_harness.py
+scripts/test_dashboard_header_cache.py	tests/test_dashboard_header_cache.py
+scripts/test_dashboard_il.py	tests/test_dashboard_il.py
+scripts/test_dashboard_input_hold.py	tests/test_dashboard_input_hold.py
+scripts/test_dashboard_item_brief.py	tests/test_dashboard_item_brief.py
+scripts/test_dashboard_jsonl.py	tests/test_dashboard_jsonl.py
+scripts/test_dashboard_localtime.py	tests/test_dashboard_localtime.py
+scripts/test_dashboard_media.py	tests/test_dashboard_media.py
+scripts/test_dashboard_media_controls.py	tests/test_dashboard_media_controls.py
+scripts/test_dashboard_media_ids.py	tests/test_dashboard_media_ids.py
+scripts/test_dashboard_meters.py	tests/test_dashboard_meters.py
+scripts/test_dashboard_mobile.py	tests/test_dashboard_mobile.py
+scripts/test_dashboard_mode.py	tests/test_dashboard_mode.py
+scripts/test_dashboard_progress.py	tests/test_dashboard_progress.py
+scripts/test_dashboard_pruned.py	tests/test_dashboard_pruned.py
+scripts/test_dashboard_qualified.py	tests/test_dashboard_qualified.py
+scripts/test_dashboard_questions.py	tests/test_dashboard_questions.py
+scripts/test_dashboard_reload.py	tests/test_dashboard_reload.py
+scripts/test_dashboard_reminder.py	tests/test_dashboard_reminder.py
+scripts/test_dashboard_reset_clock.py	tests/test_dashboard_reset_clock.py
+scripts/test_dashboard_resume_steer.py	tests/test_dashboard_resume_steer.py
+scripts/test_dashboard_seen.py	tests/test_dashboard_seen.py
+scripts/test_dashboard_session_cmd.py	tests/test_dashboard_session_cmd.py
+scripts/test_dashboard_sessionbars.py	tests/test_dashboard_sessionbars.py
+scripts/test_dashboard_settings.py	tests/test_dashboard_settings.py
+scripts/test_dashboard_store.py	tests/test_dashboard_store.py
+scripts/test_dashboard_summary_wrap.py	tests/test_dashboard_summary_wrap.py
+scripts/test_dashboard_tailnet.py	tests/test_dashboard_tailnet.py
+scripts/test_dashboard_task_notes.py	tests/test_dashboard_task_notes.py
+scripts/test_dashboard_task_tabs.py	tests/test_dashboard_task_tabs.py
+scripts/test_dashboard_viz.py	tests/test_dashboard_viz.py
+scripts/test_dashboard_wontdo.py	tests/test_dashboard_wontdo.py
+# Hand-merged into trusty-tools form (see the note at the top): re-export to
+# scratch, diff against the shipped copy, hand-merge the delta.
+.claude/skills/architect-dashboard/SKILL.md	skills/architect-dashboard.md

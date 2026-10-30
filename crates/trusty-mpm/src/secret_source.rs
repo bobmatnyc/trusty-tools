@@ -17,6 +17,14 @@
 //! **Precedence changed, deliberately.** The old order put `.env.local` and
 //! `.env` AHEAD of the process environment, so a stale committed `.env` beat an
 //! explicit `export`. The shipped resolver puts the process environment first.
+//!
+//! **Except the Slack refs, which read the store first (#9936).** The Slack
+//! `bot_ref` and `app_ref` tokens resolve through [`resolve_store_first_gated`]:
+//! the credential store, then the process env, then `.env.local`. A daemon
+//! autostarted from a session inherits that session's env and cwd, so with env
+//! first a session chose which Slack app the daemon connects as. A store read
+//! that FAILS is an error, never a fall-through to env. Every other reader here
+//! keeps env first (owner ruling D1d, 2026-10-17).
 //! The one tier the resolver does not cover is `.env` itself, and it is not
 //! reinstated here: `.env` is a committed, non-gitignored file, and a
 //! credential in one is the same defect as a credential in a plist. An operator
@@ -30,14 +38,15 @@
 //!
 //! **The one credential door (#9121).** Every daemon read of `.env.local`, the
 //! credential store or the Keychain goes through this file: [`resolve_secret`],
-//! [`resolve_bounded_gated`] and [`credential_store`], all behind the sandbox
-//! latch. The source scan in `secret_source_scan_tests.rs` fails on a direct
+//! [`resolve_bounded_gated`], [`resolve_store_first_gated`] and
+//! [`credential_store`], all behind the sandbox latch. The source scan in `secret_source_scan_tests.rs` fails on a direct
 //! read anywhere else in the crate.
 //!
 //! Test: `secret_source_tests.rs`.
 //!
 //! [`resolve_secret`]: crate::secret_source::resolve_secret
 //! [`resolve_bounded_gated`]: crate::secret_source::resolve_bounded_gated
+//! [`resolve_store_first_gated`]: crate::secret_source::resolve_store_first_gated
 //! [`credential_store`]: crate::secret_source::credential_store
 
 #[cfg(test)]
@@ -53,7 +62,7 @@ use trusty_common::credential_registry::provider_for_env_var;
 use trusty_common::credentials::resolve_provider_bounded_with;
 use trusty_common::credentials::{
     KeyStore, MemoryKeyStore, SecretResolveError, default_store, load_env_local_once,
-    resolve_env_var_bounded,
+    resolve_env_var_bounded, resolve_env_var_bounded_store_first,
 };
 
 /// Resolve `var` through the shipped resolver, logging any failure by kind.
@@ -179,6 +188,22 @@ fn store_gated(sandbox: bool, real: impl FnOnce() -> Box<dyn KeyStore>) -> Box<d
 /// `outside_sandbox_mode_the_bounded_resolver_runs`.
 pub fn resolve_bounded_gated(var: &str) -> Result<String, SecretResolveError> {
     bounded_gated(sandboxed(), var, resolve_env_var_bounded)
+}
+
+/// The bounded, non-logging resolver behind the latch, STORE FIRST (#9936).
+///
+/// Why (#9936): the Slack `bot_ref` and `app_ref` tokens choose which Slack app
+/// the daemon connects as, and a daemon autostarted from a session inherits
+/// that session's env and cwd. The host owner's store must decide, not them.
+/// What: in sandbox mode, `Absent` and no tier is read; otherwise
+/// `resolve_env_var_bounded_store_first(var)` — the store, then the process
+/// env, then `.env.local`. A store read error is returned as the error, never
+/// answered from env. Logs nothing. Both Slack refs call this and nothing else
+/// does; every other credential keeps [`resolve_bounded_gated`]'s env-first
+/// order.
+/// Test: `slack_refs_resolve_the_store_before_the_environment_9936`.
+pub fn resolve_store_first_gated(var: &str) -> Result<String, SecretResolveError> {
+    bounded_gated(sandboxed(), var, resolve_env_var_bounded_store_first)
 }
 
 /// [`resolve_bounded_gated`] with the latch and the resolver as parameters.

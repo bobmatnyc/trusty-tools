@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/goal_reorders.schema.json",
+  "title": "goal reorder (owner drag)",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"},
+    "gid": {"type": "string", "pattern": "^G[0-9a-f]{2}$"}
+  },
+  "required": ["at", "kind", "order", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "at": {"$ref": "#/$defs/iso"},
+    "kind": {"enum": ["standing", "directed", "factory"]},
+    "order": {"type": "array", "items": {"$ref": "#/$defs/gid"}},
+    "status": {"enum": ["new", "handled"]},
+    "moved": {"type": "object", "required": ["from", "to", "goal"], "additionalProperties": false,
+              "properties": {"from": {"enum": ["standing", "directed", "factory"]}, "to": {"enum": ["standing", "directed", "factory"]}, "goal": {"$ref": "#/$defs/gid"}}}
+  }
+}

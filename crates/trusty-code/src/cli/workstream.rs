@@ -7,12 +7,11 @@
 //!
 //! Why: the CLI-layer half of DOC-48 §5.4's `tcode workstream` family —
 //! `create`/`get`/`list`/`activate`/`deactivate`/`close`, all thin JSON-RPC
-//! clients over an ephemeral `tcode serve --stdio` child, matching every
-//! other handler in this directory (`cli::session`/`attach`/`cancel`/
-//! `transcript`). Unlike sessions, workstreams are DAEMON-PERSISTED (flat
-//! JSON per project, `crate::workstreams::path`) — so, unlike
-//! `cli::session::list`'s "only sees sessions from THIS invocation's daemon"
-//! caveat, two SEPARATE `tcode workstream` invocations against the same
+//! clients over an ephemeral `tcode serve --stdio` child (`cli::session`/
+//! `attach`/`cancel`/`transcript` dial the running daemon's socket since
+//! #10169). Workstreams are DAEMON-PERSISTED (flat
+//! JSON per project, `crate::workstreams::path`), so
+//! two SEPARATE `tcode workstream` invocations against the same
 //! `--project` see the SAME workstreams, because the store file survives
 //! between ephemeral daemon spawns.
 //!

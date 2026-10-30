@@ -24,6 +24,11 @@ use super::usearch_store::{
 
 #[async_trait]
 impl VectorStore for UsearchStore {
+    // #10195: the promote count the search timings compare.
+    fn promotions(&self) -> u64 {
+        self.promotions.load(Ordering::Relaxed)
+    }
+
     async fn upsert(&self, id: &str, embedding: Vec<f32>) -> Result<()> {
         let _mutation_guard = self.save_lock.lock().await;
         self.refuse_if_closed("upsert")?;
@@ -251,6 +256,15 @@ impl VectorStore for UsearchStore {
     async fn contains_many(&self, ids: &[String]) -> Vec<bool> {
         let id_to_key = self.id_to_key.read().await;
         ids.iter().map(|id| id_to_key.contains_key(id)).collect()
+    }
+
+    // #10110: lets a batch-removal retry find vectors whose rows are gone.
+    async fn ids_where(
+        &self,
+        keep: &(dyn for<'a> Fn(&'a str) -> bool + Send + Sync),
+    ) -> Result<Vec<String>> {
+        let id_to_key = self.id_to_key.read().await;
+        Ok(id_to_key.keys().filter(|id| keep(id)).cloned().collect())
     }
 
     async fn save_to(&self, path: &Path) -> Result<()> {

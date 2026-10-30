@@ -9,6 +9,25 @@ History goes in `local/actions.md`.
 - last full poll: never
 - observation channel: tmux CLI
 
+## Heartbeat
+
+- monitoring: PAUSED (set ACTIVE, with the cron job id and the Monitor task
+  id, once started)
+- tmux socket: <from `tmux display-message -p '#{socket_path}'`>
+
+## Watch set
+
+The sessions you manage are listed in `CLAUDE.md`. Everything else is
+observed only when it signals. Note here a session added or dropped this pass
+until `CLAUDE.md` carries it.
+
+None.
+
+## Dashboard
+
+| Project | tmux session / pane | Context | Current observation / next action |
+| --- | --- | --- | --- |
+
 ## Pending questions
 
 None.

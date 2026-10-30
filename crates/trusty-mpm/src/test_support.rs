@@ -237,6 +237,24 @@ pub(crate) const TEST_DIR_PREFIX: &str = "tm-test-";
 /// `resolve_stable_hook_exe_with_refuses_an_ephemeral_exe` and siblings.
 pub(crate) const STABLE_HOOK_EXE: &str = "/usr/local/bin/tm";
 
+/// Would Claude Code run `tm hook` for `event` under tm's own hook block?
+///
+/// Why (#10095): Claude Code fires a hook only for an event the settings file
+/// registers a group under, so a daemon arm for an event tm never registers is
+/// dead in production however well a direct call to it tests. A test that
+/// routes its events through this gate proves the live path, not the branch.
+/// What: `true` when [`crate::core::standalone::hooks::mpm_hook_additions_with_exe`],
+/// pinned to [`STABLE_HOOK_EXE`], carries a group under `event`'s wire name.
+/// Test: `failed_agent_dispatch_wire_shape_marks_errored_10095`,
+/// `failed_tool_call_closes_started_with_errored_10095`.
+pub(crate) fn tm_registers_hook(event: crate::core::hook::HookEvent) -> bool {
+    let block = crate::core::standalone::hooks::mpm_hook_additions_with_exe(Some(
+        std::path::Path::new(STABLE_HOOK_EXE),
+    ))
+    .expect("the pinned installed-looking exe always resolves");
+    block["hooks"].get(event.wire_name()).is_some()
+}
+
 /// How long a `tm-test-*` directory may sit in the hermetic root before
 /// [`sweep_stale_test_dirs`] treats it as leaked and removes it.
 const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
@@ -454,12 +472,11 @@ pub(crate) fn isolated_daemon_home(allow_production: bool) -> (TempDir, DaemonHo
 /// Test: `daemon::managed_routes::resume_claim_tests::the_claim_is_still_held_when_the_route_types_into_the_pane`.
 #[cfg(unix)]
 pub(crate) fn fake_claude_on_path() -> FakeClaudeOnPath {
-    use std::os::unix::fs::PermissionsExt;
     let dir = hermetic_temp_dir();
     let exe = dir.path().join("claude");
-    std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").expect("write the fake claude");
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod the fake claude");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&exe, b"#!/bin/sh\nexit 0\n")
+        .expect("write the fake claude");
     let prev = std::env::var_os("PATH");
     let mut entries = vec![dir.path().to_path_buf()];
     if let Some(ref p) = prev {

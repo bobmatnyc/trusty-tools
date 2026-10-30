@@ -26,7 +26,7 @@ use std::sync::Mutex;
 /// The durable corpus opened, then failed a read (#5917).
 ///
 /// Why: the search path must raise something the HTTP layer can recognise. A
-/// bare `anyhow::Error` reached `search_handler` as `500 internal search
+/// bare `anyhow::Error` reached `search_report` as `500 internal search
 /// error`, which names neither the index nor the fault; a typed error lets the
 /// handler downcast and answer with the same `503 index_corpus_unavailable`
 /// contract `GET /indexes/:id/chunks` already uses for this state.

@@ -1,0 +1,18 @@
+{
+  "at": "lorem ipsum dolor sit am",
+  "kind": "standing",
+  "moved": {
+    "from": "lorem ip",
+    "goal": "G03",
+    "to": "lorem ip"
+  },
+  "order": [
+    "lor",
+    "lor",
+    "lor",
+    "lor",
+    "lor"
+  ],
+  "status": "new",
+  "version": 1
+}

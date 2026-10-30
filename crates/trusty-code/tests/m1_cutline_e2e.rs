@@ -22,8 +22,8 @@
 //! sequence, turn count/roles, tool-call set, and priced usage/cost for the
 //! standard `TCODE_MOCK_LLM=echo` scripted task) pinned inline so a future
 //! change to event ordering, turn count, or pricing fails this test loudly.
-//! [`m1_cutline_full_scenario_over_http`] proves the SAME narrative works
-//! over the HTTP + SSE transport ("cover both stdio and http" — §9
+//! [`m1_cutline_full_scenario_over_the_socket`] proves the SAME narrative works
+//! over the daemon's Unix socket ("cover both transports" — §9
 //! Requirement 2's own two-transport mandate, applied at the milestone
 //! level). [`m1_cutline_cancel_path`] exercises `session.cancel`
 //! (cooperative cancellation, #2056/#2059) as its own scenario — a session
@@ -46,13 +46,12 @@
 use crate::support;
 
 use std::collections::HashSet;
-use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::{Value, json};
 use support::{
-    StdioSession, assert_envelopes_contiguous, find_session_event, open_sse, parse_sse_frames,
-    project_with_agents, read_sse_until,
+    StdioSession, assert_envelopes_contiguous, find_session_event, kind_is, project_with_agents,
+    read_stream_until,
 };
 use trusty_code::events::{Event, SessionEventEnvelope};
 
@@ -61,7 +60,7 @@ use trusty_code::events::{Event, SessionEventEnvelope};
 /// the terminal `session_done` — THE regression baseline (#2062).
 ///
 /// Why: pinned once, here, as the single source of truth both stdio and
-/// HTTP scenario tests assert against, so the two transports can never
+/// socket scenario tests assert against, so the two transports can never
 /// silently drift in what they report for the identical underlying run.
 /// What: `session_started`/`session_status_changed` are `session.create`'s
 /// own two events; the PM's `delegate_to_agent` call and the delegated
@@ -197,7 +196,7 @@ fn filter_async_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Vec<&'a s
 /// is where `Event::Log` puts them; `kind` is the only field
 /// `SessionEventEnvelope` lifts to the top level (#5911).
 /// Test: called by `m1_cutline_full_scenario_over_stdio` and
-/// `m1_cutline_full_scenario_over_http`, and pinned without a daemon by
+/// `m1_cutline_full_scenario_over_the_socket`, and pinned without a daemon by
 /// `degradation_log_events_never_move_the_ordered_baseline`.
 fn assert_memory_degradation_logs_well_formed(envelopes: &[Value]) {
     for envelope in envelopes.iter().filter(|e| e["kind"] == "log") {
@@ -477,85 +476,57 @@ async fn m1_cutline_full_scenario_over_stdio() {
     daemon.shutdown_via_eof_and_assert_clean_exit().await;
 }
 
-/// The SAME §13 narrative (steps 1-6), driven over `tcode serve --http` +
-/// `GET /sessions/{id}/events` SSE instead of STDIO.
+/// The SAME §13 narrative (steps 1-6), driven over the persistent daemon's
+/// Unix socket + a `session.events` stream instead of STDIO.
 ///
 /// Why: §9 Requirement 2 mandates BOTH transports be exercised; applying
 /// that at the milestone level (not just per-issue) proves the cut line
 /// itself — not merely one transport's framing of it — is transport-agnostic.
-/// What: `POST /rpc` for `session.create`/`task.run`/`session.status`/
-/// `session.get_transcript`; a single SSE connection read in stages
+/// #6637: ported from `m1_cutline_full_scenario_over_http` when the HTTP
+/// transport retired; the socket is the daemon's other transport now.
+/// What: socket calls for `session.create`/`task.run`/`session.status`/
+/// `session.get_transcript`; a single `session.events` stream read in stages
 /// (replay, then live events) for step 4, reusing
 /// `assert_envelopes_contiguous` for the #2055 seq-contiguity guarantee.
 /// Re-asserts the SAME [`BASELINE_EVENT_KINDS`]/[`BASELINE_TRANSCRIPT_ROLES`]
 /// baseline so the two transports are proven to agree on it.
 /// Test: this test.
 #[tokio::test]
-async fn m1_cutline_full_scenario_over_http() {
+async fn m1_cutline_full_scenario_over_the_socket() {
     let project = project_with_agents();
     let daemon =
-        support::spawn_http_daemon_with_env(project.path(), &[("TCODE_MOCK_LLM", "echo")]).await;
-    let client = daemon.client();
-    let rpc_url = format!("{}/rpc", daemon.base_url);
+        support::spawn_socket_daemon_with_env(project.path(), &[("TCODE_MOCK_LLM", "echo")]).await;
 
-    let post = |id: i64, method: &'static str, params: serde_json::Value| {
-        let client = client.clone();
-        let rpc_url = rpc_url.clone();
-        async move {
-            client
-                .post(&rpc_url)
-                .json(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-                .send()
-                .await
-                .expect("POST /rpc")
-                .json::<serde_json::Value>()
-                .await
-                .expect("parse JSON response")
-        }
-    };
-
-    let create_resp = post(
-        1,
-        "session.create",
-        // #8184: same as the stdio scenario above — the baseline is the
-        // delegating taxonomy, which is now an explicit opt-in.
-        json!({"task": "M1 cut-line http task", "delegate": true}),
-    )
-    .await;
+    let create_resp = daemon
+        .call(
+            1,
+            "session.create",
+            // #8184: same as the stdio scenario above — the baseline is the
+            // delegating taxonomy, which is now an explicit opt-in.
+            json!({"task": "M1 cut-line socket task", "delegate": true}),
+        )
+        .await;
     assert!(
         create_resp["error"].is_null(),
         "session.create failed: {create_resp}"
     );
     let session_id = create_resp["result"]["id"].as_str().unwrap().to_string();
 
-    let events_url = format!("{}/sessions/{session_id}/events", daemon.base_url);
-    let mut sse = open_sse(&client, &events_url).await;
-    let mut buffer = Vec::new();
-    read_sse_until(
-        &mut sse,
-        &mut buffer,
-        "session_status_changed",
-        Duration::from_secs(5),
-    )
-    .await;
+    let mut stream = daemon.open_events(&session_id).await;
+    let mut frames = Vec::new();
+    read_stream_until(&mut stream, &mut frames, kind_is("session_status_changed")).await;
 
-    let run_resp = post(
-        2,
-        "task.run",
-        json!({"task_description": "say hi", "session_id": session_id}),
-    )
-    .await;
+    let run_resp = daemon
+        .call(
+            2,
+            "task.run",
+            json!({"task_description": "say hi", "session_id": session_id}),
+        )
+        .await;
     assert!(run_resp["error"].is_null(), "task.run failed: {run_resp}");
     assert_eq!(run_resp["result"]["mode"], "daily-driver");
 
-    read_sse_until(
-        &mut sse,
-        &mut buffer,
-        "session_done",
-        Duration::from_secs(10),
-    )
-    .await;
-    let frames = parse_sse_frames(&String::from_utf8_lossy(&buffer));
+    read_stream_until(&mut stream, &mut frames, kind_is("session_done")).await;
     let (first_seq, last_seq) = assert_envelopes_contiguous(&frames);
     assert_eq!(first_seq, 1);
     // `seq` is assigned to EVERY recorded event, including any async
@@ -570,26 +541,29 @@ async fn m1_cutline_full_scenario_over_http() {
     let kinds = filter_async_kinds(frames.iter().map(|f| f["kind"].as_str().unwrap()));
     assert_eq!(
         kinds, BASELINE_EVENT_KINDS,
-        "HTTP transport's event-kind sequence must match the SAME baseline as STDIO"
+        "the socket transport's event-kind sequence must match the SAME baseline as STDIO"
     );
     // The `log` events the baseline filters out still owe their content (#5895).
     assert_memory_degradation_logs_well_formed(&frames);
-    drop(sse);
+    drop(stream);
 
-    let status_resp = post(3, "session.status", json!({"session_id": session_id})).await;
+    let status_resp = daemon
+        .call(3, "session.status", json!({"session_id": session_id}))
+        .await;
     assert_eq!(status_resp["result"]["status"], "finished");
 
-    let transcript_resp = post(
-        4,
-        "session.get_transcript",
-        json!({"session_id": session_id}),
-    )
-    .await;
+    let transcript_resp = daemon
+        .call(
+            4,
+            "session.get_transcript",
+            json!({"session_id": session_id}),
+        )
+        .await;
     let turns = transcript_resp["result"]["turns"].as_array().unwrap();
     let roles: Vec<&str> = turns.iter().map(|t| t["role"].as_str().unwrap()).collect();
     assert_eq!(
         roles, BASELINE_TRANSCRIPT_ROLES,
-        "HTTP transport's transcript roles must match the SAME baseline as STDIO"
+        "the socket transport's transcript roles must match the SAME baseline as STDIO"
     );
 
     daemon.shutdown_via_sigterm_and_assert_clean_exit().await;

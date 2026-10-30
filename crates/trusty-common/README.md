@@ -10,8 +10,8 @@ following have all been absorbed here behind feature flags: `trusty-mcp-core`
 `trusty-embedder-client` (`embedder-client`), `trusty-symgraph` (`symgraph` /
 `symgraph-parser`), `trusty-memory-core` (`memory-core`), `trusty-tickets`
 (`tickets`), and `trusty-monitor-tui` (`monitor-tui`). The memory engine has
-since moved to `trusty-memory` as `trusty_memory::engine` (#9271); the
-`memory-core` feature remains as a no-op.
+since moved to `trusty-memory` as `trusty_memory::engine` (#9271), and the
+`memory-core` feature was removed in 0.67.0 (#9272, #10334).
 
 Each subsystem is feature-gated so consumers only pay for what they use.
 
@@ -46,7 +46,6 @@ trusty-common = { version = "0.8", features = ["axum-server", "mcp", "rpc", "emb
 | `symgraph` | Contracts surface only: `EntityType`, `RawEntity`, `EdgeKind` — no tree-sitter |
 | `symgraph-parser` | Full symbol graph: tree-sitter grammars, `SymbolGraph`, emitter, editor |
 | `bm25` | Zero-dependency BM25 lexical index + code-aware tokenizer (issue #156) |
-| `memory-core` | No-op since #9271. The Memory Palace engine it enabled moved to `trusty-memory` as `trusty_memory::engine`; depend on trusty-memory instead. It implies nothing, so name `embedder`, `credentials`, `redb-open` or `chat-attachments` directly if you relied on it. |
 | `tickets` | Unified ticketing MCP server (GitHub / JIRA / Linear backends; formerly `trusty-tickets`) |
 | `monitor-tui` | ratatui + crossterm dashboard TUI for the trusty-search/trusty-memory daemons (formerly `trusty-monitor-tui`) |
 | `cli-help` | Declarative help-config parsing (serde_yaml + strsim + indexmap) |

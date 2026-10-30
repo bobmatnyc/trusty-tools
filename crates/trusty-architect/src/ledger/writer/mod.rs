@@ -10,17 +10,18 @@
 //! its `log.jsonl` record, refuses secret-shaped input (logged without the
 //! value), checks `if_v`, applies every op to a copy, archives what closed,
 //! prunes once when the result would pass the 16 KB bar, and commits:
-//! journal (fsync), `v` re-read (a change logs `tamper`), archive lines, log
-//! lines, `state.json` replace and directory fsync, journal removed
+//! journal (fsync), `v` re-read (a change logs `tamper`), archive lines,
+//! outbox lines (LDG-4.4), log lines, `state.json` replace and directory fsync, journal removed
 //! (LDG-2.8.2). Only a missing file reads as empty (#9758). [`show`] reads.
 //! Test: `tests/ledger_writer.rs`, `ledger_writer_matches_prototype_bytes`.
 //!
 //! # Spec References
 //! - [`SPEC-LEDGER-02~draft`](docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md#SPEC-LEDGER-02~draft)
 
-// #9758: the journal and the read-only side are split out to keep each file
-// under the SLOC cap.
+// #9758: the journal, the outbox lines and the read-only side are split out
+// to keep each file under the SLOC cap.
 mod journal;
+mod outbox;
 mod show;
 
 use std::collections::BTreeMap;
@@ -31,6 +32,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use outbox::OutboxLine;
 pub use show::{minute, render_ids, render_prune, show};
 
 use self::journal::{
@@ -39,13 +41,13 @@ use self::journal::{
 };
 use crate::clock::Clock;
 use crate::error::LedgerError;
-use crate::ledger::ids::LedgerId;
 use crate::ledger::limits::{SIZE_REFUSE, SIZE_WARN, SizeVerdict, check_writable, size_verdict};
 use crate::ledger::model::{ArchiveLine, Archived, Extra, LogLine, State};
 use crate::ledger::ops::{self, Context, Now};
 use crate::ledger::rpc::{BatchEvent, BatchRequest, BatchResponse, Op};
 use crate::ledger::store::{StorePaths, lock, write_atomic};
 use crate::pyjson::to_python_json;
+use crate::secret::scan_strings;
 
 /// How long a writer waits for the store lock before it reports exit 3.
 pub const LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -81,9 +83,9 @@ impl Faults for NoFaults {
     }
 }
 
-/// A secret-shape scanner: a redacted shape name (never the value) for a
-/// secret-shaped text.
-pub type SecretScan<'a> = &'a dyn Fn(&str) -> Option<String>;
+// #10063 PR 2: the scan type and walk moved to `crate::secret`, shared with
+// the dashboard store.
+pub use crate::secret::SecretScan;
 
 /// Writes batches to PM ledger stores.
 pub struct Writer<'a> {
@@ -103,6 +105,11 @@ struct Journal {
     v: u64,
     archive_at: u64,
     archive: String,
+    // #9758 F3: absent in a journal a PR A writer left.
+    #[serde(default)]
+    outbox_at: u64,
+    #[serde(default)]
+    outbox: String,
     log_at: u64,
     log: String,
     state: String,
@@ -183,10 +190,8 @@ impl<'a> Writer<'a> {
                 st.v
             )));
         }
-        let archived = archived_ids(&paths)?;
         let answered = answered_times(&paths)?;
         let cx = Context {
-            archived: &archived,
             answered: &answered,
             now: &now,
         };
@@ -327,6 +332,12 @@ impl Commit<'_> {
             log += &(notice(now, self.session, "size_warning", &warning)? + "\n");
             warnings.push(warning);
         }
+        let rev = outbox::Rev {
+            code: st.code.as_str(),
+            v: st.v,
+            now,
+        };
+        let outbox = outbox::lines(self.paths, &rev, &events, &gone)?;
         let archived = gone.iter().map(|a| archived_id(a).to_owned()).collect();
         let result = BatchResponse {
             v: st.v,
@@ -351,6 +362,8 @@ impl Commit<'_> {
             v: st.v,
             archive_at: file_len(&self.paths.archive),
             archive,
+            outbox_at: file_len(&self.paths.outbox),
+            outbox,
             log_at: file_len(&self.paths.log),
             log,
             state: text,
@@ -375,30 +388,6 @@ impl Commit<'_> {
         complete(self.paths, &journal, faults)?;
         Ok(result)
     }
-}
-
-/// The first string in `v` (object keys included) that `scan` flags.
-fn scan_strings(v: &Value, scan: SecretScan<'_>) -> Option<String> {
-    match v {
-        Value::String(s) => scan(s),
-        Value::Array(a) => a.iter().find_map(|x| scan_strings(x, scan)),
-        Value::Object(o) => o
-            .iter()
-            .find_map(|(k, x)| scan(k).or_else(|| scan_strings(x, scan))),
-        _ => None,
-    }
-}
-
-/// Ids in `archive.jsonl` (LDG-2.2.3: an archived id is never reissued).
-/// #9758: a read error refuses the batch; only a missing file is empty.
-/// Test: `ledger_writer_never_reissues_an_archived_id_past_a_non_utf8_archive_line`.
-fn archived_ids(paths: &StorePaths) -> Result<Vec<LedgerId>, LedgerError> {
-    let text = read_lossy(&paths.archive)?.unwrap_or_default();
-    let id = |l: &str| {
-        let v: Value = serde_json::from_str(l).ok()?;
-        LedgerId::parse(v["item"]["id"].as_str()?).ok()
-    };
-    Ok(text.lines().filter_map(id).collect())
 }
 
 /// The last `answered` time per id in `log.jsonl`, either log shape.

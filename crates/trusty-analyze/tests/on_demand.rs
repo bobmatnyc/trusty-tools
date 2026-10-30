@@ -781,7 +781,8 @@ async fn an_mcp_session_flushes_lsp_events_when_stdin_closes() {
     // script re-executes this test binary as the fake server.
     let exe = std::env::current_exe().expect("current_exe");
     let script = tmp.path().join("fake-ra.sh");
-    std::fs::write(
+    // See #10248
+    trusty_common::exec_stub::write_executable(
         &script,
         format!(
             "#!/bin/sh\n{}=normal exec \"{}\" --exact fake_lsp_server_entry --nocapture \
@@ -791,7 +792,6 @@ async fn an_mcp_session_flushes_lsp_events_when_stdin_closes() {
         ),
     )
     .expect("script");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
     // A committed Rust file for the call to name.
     let ws = tmp.path().join("ws");

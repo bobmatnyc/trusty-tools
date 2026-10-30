@@ -20,9 +20,11 @@
 
 use serde::Serialize;
 
+use crate::commands::bundles::keywords_hint;
 use crate::commands::content_step::{CommandRunner, ContentStepOutcome};
+use crate::commands::dependency_graph::describe_added;
 use crate::commands::progress_ui::narrator;
-use crate::commands::stable_set::{ManageStrategy, StableMember};
+use crate::commands::stable_set::{ManageStrategy, StableMember, TransitiveSelection};
 use crate::commands::verify_tail::VerifyTailReport;
 use crate::output::render_json;
 
@@ -626,4 +628,75 @@ pub(super) fn print_human_summary(report: &InstallReport) {
     for line in &lines.skipped {
         let _ = narr.info(line);
     }
+}
+
+/// The operator-facing text for a request naming something the stable set does
+/// not contain.
+///
+/// Why (#4714): the message used to be just the offending names, so a mistyped
+/// `cores` gave the operator nothing to correct it with — the bundle keywords
+/// were undiscoverable from the failure. Naming them here, off
+/// [`crate::commands::bundles::BUNDLE_KEYWORDS`], means the hint cannot go
+/// stale as keywords are added.
+///
+/// What: `"unknown member(s): <names> (bundle keywords: agents, core)"`. The
+/// exit code and the JSON envelope's shape are unchanged — only the `error`
+/// string grows.
+///
+/// Test: `tests::unknown_members_message_names_bundle_keywords`.
+// #10130: moved from `install.rs` to keep that file under the 500-SLOC cap.
+pub(super) fn unknown_members_message(unknown: &[String]) -> String {
+    format!(
+        "unknown member(s): {} ({})",
+        unknown.join(", "),
+        keywords_hint()
+    )
+}
+
+/// The reason `tctl install` refuses a resolved request with exit 3, if any.
+///
+/// Why (#10130): an unknown name and a name that resolves to an internal,
+/// unpublished member are both requests `tctl` cannot carry out. Refusing the
+/// internal case keeps a typed name from becoming a silent no-op under exit 0.
+/// What: the [`unknown_members_message`] text when any name is unknown (it
+/// wins), else one plain sentence per `unavailable` name, else `None`.
+/// Test: `tests::explicit_install_of_internal_member_exits_3_with_reason`,
+/// `tests::unknown_members_message_names_bundle_keywords`.
+pub(super) fn selection_error(resolved: &TransitiveSelection) -> Option<String> {
+    if !resolved.unknown.is_empty() {
+        return Some(unknown_members_message(&resolved.unknown));
+    }
+    if resolved.unavailable.is_empty() {
+        return None;
+    }
+    let reasons: Vec<String> = resolved
+        .unavailable
+        .iter()
+        .map(|n| {
+            format!(
+                "{n} is internal and not published to crates.io; tctl cannot install it. \
+                 Build it from a checkout."
+            )
+        })
+        .collect();
+    Some(reasons.join(" "))
+}
+
+/// The info lines `tctl install` prints about how the selection grew or shrank.
+///
+/// Why: #2036 tells the operator which members a dependency pulled in; #10130
+/// adds one line per internal member the selection dropped, so a producer's
+/// skipped bus is named once instead of fetched and reported "skipped".
+/// What: [`describe_added`] over `added`, then
+/// `"<name>: internal (not published), not installed"` per `internal_skipped`.
+/// Test: `tests::install_of_a_producer_attempts_no_fetch_for_internal_bus`.
+pub(super) fn selection_notes(resolved: &TransitiveSelection) -> Vec<String> {
+    let mut lines = describe_added(&resolved.added);
+    lines.extend(
+        resolved
+            .internal_skipped
+            .iter()
+            .map(|n| format!("{n}: internal (not published), not installed")),
+    );
+    lines
 }

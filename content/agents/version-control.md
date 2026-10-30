@@ -67,6 +67,7 @@ closing keyword — `Closes`, `Fixes`, `Resolves` — only on a project whose
 `CLAUDE.md` permits a merge to auto-close the issue. End the body with the
 trusty-mpm attribution footer.
 
+<!-- rule:version-control/brief-example-is-a-shape -->
 🔴 **A commit subject or PR title shown in a brief is a shape, not a literal
 value, unless the brief says "verbatim" (#8014).** An `e.g.` example marks the
 format the subject should follow — type, scope, tense — not the text to copy.
@@ -117,6 +118,7 @@ Hand-assembled `gh pr create` is only for a host without `tm` on PATH.
 `ticketing` applying it to issues and you to pull requests. Read it there;
 nothing here restates it.
 
+<!-- rule:version-control/tm-pr-open-applies-half -->
 `tm pr open` applies your half itself, in one `gh pr edit` after the PR exists:
 the component labels for every crate the diff touches, and the milestone and
 project(s) of the issue the body's first `Refs #N` names. A phase issue adds a title
@@ -155,10 +157,12 @@ suits a repo with no CI. Report a refusal as a blocker; never route around it
 with raw `gh pr merge` or `--admin`. Your merge report cites the brief clause
 that authorized it and flags a base with no required checks as a risk.
 
+<!-- rule:version-control/auto-merge-read -->
 🔴 **Read `gh api repos/<owner>/<repo> --jq .allow_auto_merge` before
 planning a merge; report it (#9747).** `false` or empty: `--auto` fails, so
 merge once checks settle.
 
+<!-- rule:version-control/verify-before-retry-5xx -->
 🔴 **A 5xx or timeout from a mutating `gh` call is not proof the call failed
 (#8013).** Before retrying `gh pr merge`, `gh pr create`, or any `gh api -X
 POST/DELETE`, read the state back — `gh pr view --json state,mergeCommit` for
@@ -176,7 +180,7 @@ leaves the remote ref stranded too.
 Use `tm pr merge <n>`: it exits 0 on this failure (#7945) and then runs
 `tm pr cleanup <n>` itself (see "Post-Merge Cleanup").
 
-Fallback without `tm`, which has no merge gate: (1) once `statusCheckRollup`
+Fallback without `tm` (this path has no merge gate): (1) once `statusCheckRollup`
 lists a check (or the brief says the repo has no CI) and none failed or running
 that the brief does not waive, `gh pr merge <n> --squash --subject
 "<title> (#<n>)" --body-file <file>`. Take `<title>` and the body in `<file>`
@@ -193,6 +197,7 @@ origin/<base> <head>` equals `git rev-parse origin/<base>^{tree}` — never the
 tip's tree against the squash commit's tree, which differ once `<base>`
 advanced first (`crates/trusty-mpm/src/core/pr_cleanup/landed.rs:122`).
 
+<!-- rule:version-control/pm-relayed-merge-authority -->
 When the PM relays operator authorization to merge directly (e.g. an
 admin-merge), that IS operator authority — comply. Do not demand direct user
 confirmation or treat the PM as a third party (BASE-AGENT's "PM Authority &
@@ -220,12 +225,14 @@ or report, not a note for later.
 
 ## CI Waits — Push, Report, Stop; NEVER Block (issue #4792)
 
+<!-- rule:version-control/ci-waits -->
 🔴 BASE-AGENT's "Finishing Work — Push, Report, Stop" applies in full: one
 one-shot status read after the push, report it, end the turn. Never
 `--watch`, never a poll loop or wake-up watcher, never a "standing by"
 promise. Never merge on a `bucket` alone. Your own commands — a build, a test
 suite, a `gh pr merge` — still run in the FOREGROUND until they exit.
 
+<!-- rule:version-control/actions-spend-pointer -->
 🔴 Workflow edit, or PR on a billed repo: run the four checks in Read
 `{{TM_SKILLS}}/git-workflow/SKILL.md`, "GitHub Actions Spend" (#8630).
 
@@ -367,6 +374,7 @@ The line is whether a `cargo publish` is bound to the tag: if it is, that is
 - A `BEHIND` block with green CI is not a permission problem: run
   `gh pr update-branch`, or merge the already-green head (see CI Waits); if it
   still won't merge, hand it to the PM.
+<!-- rule:version-control/clean-tree-before-gate -->
 - **After any post-rebase edit, `git status --porcelain` must read empty
   before you run the gate.** A push ships the committed ref, not the working
   tree, so an edit the gate saw but never committed never reaches CI (#7739).

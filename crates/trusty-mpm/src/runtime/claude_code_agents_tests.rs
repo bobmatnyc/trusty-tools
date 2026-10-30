@@ -140,12 +140,7 @@ fn relaunch_command(
     effective_id: Option<&str>,
     probe: impl FnOnce() -> Result<String, String>,
 ) -> String {
-    argv(&relaunch_spec(
-        launch,
-        claude_session_id,
-        effective_id,
-        probe,
-    ))
+    argv(&relaunch_spec(launch, claude_session_id, effective_id, probe).expect("spec"))
 }
 
 /// Why (#6863): this is the whole defect. A `claude_session_id` Claude Code is
@@ -400,13 +395,12 @@ fn recorded_probe_pid(pidfile: &Path) -> Option<libc::pid_t> {
 #[test]
 #[cfg(unix)]
 fn query_registry_kills_and_reaps_a_wedged_probe() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let dir = tempfile::tempdir().expect("tempdir");
     let pidfile = dir.path().join("pid");
     let script = dir.path().join("wedged-claude");
     // `exec` so the recorded pid IS the long sleep, not a shell wrapper.
-    std::fs::write(
+    // See #10248
+    trusty_common::exec_stub::write_executable(
         &script,
         format!(
             "#!/bin/sh\necho $$ > {}\nexec sleep 300\n",
@@ -414,7 +408,6 @@ fn query_registry_kills_and_reaps_a_wedged_probe() {
         ),
     )
     .expect("write stand-in claude");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
     let started = std::time::Instant::now();
     let err = super::query_registry(script.to_str().expect("utf-8 tempdir path"), None)
@@ -459,7 +452,8 @@ fn attach_command_carries_the_resume_prefixes() {
     let cwd = Path::new(TEST_CWD);
     let launch = inputs(cwd);
     let attach = attach_spec(&launch, LIVE_SHORT);
-    let resume = super::super::super::managed_launch::resume_spec(&launch, Some(LIVE_UUID));
+    let resume =
+        super::super::super::managed_launch::resume_spec(&launch, Some(LIVE_UUID)).expect("spec");
 
     assert_eq!(attach.cwd, cwd, "rooted at the workspace");
     assert_eq!(attach.session_id, TEST_SESSION_ID);

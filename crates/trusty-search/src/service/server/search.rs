@@ -3,20 +3,15 @@
 //! Why: Groups the per-index search and delete paths together. Global fan-out
 //! search lives in `search_global.rs` (extracted to keep both files under the
 //! 500-line cap after issue #993 added cold-store lazy-load logic here).
-//! What: `delete_index_handler`, `search_handler`. Routing helpers
+//! What: `delete_index_report`, `search_report`. Routing helpers
 //! (`RoutingMode`, `compute_context_weights`) and `search_similar_report`
 //! live in `routing.rs`. Global fan-out lives in `search_global.rs`.
 //! Test: `search_handler_meta_includes_stale_index_root_field` and related.
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, Query, State},
-    Json,
-};
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::core::indexer::{query_timings, QueryPhase};
 use crate::core::{classifier::QueryClassifier, indexer::SearchQuery, registry::IndexId};
 use crate::service::lazy_loader::LAST_QUERIED_WRITE_INTERVAL_SECS;
 
@@ -58,37 +53,6 @@ pub(crate) struct DeleteIndexParams {
     pub(crate) expected_root_path: Option<String>,
 }
 
-/// `DELETE /indexes/{id}` — deregister an index, optionally destroying its data.
-///
-/// Why: see [`DeleteIndexParams`]. BREAKING (issue #4123): a bare `DELETE` no
-/// longer deletes on-disk data. Callers that genuinely want the disk reclaimed
-/// must now pass `?delete_data=true`.
-///
-/// #6363: the response also carries the two verdicts the body could not express
-/// before. An id that exists in NO store and no `indexes.toml` row answers
-/// `404`, where it used to answer `200 {"removed": false}` — indistinguishable
-/// from a delete that found the index and declined to remove it. And a delete
-/// whose durable cleanup FAILED (the `indexes.toml` rewrite, or the data-dir
-/// removal) answers `500` with `ok: false` and an `error` string, so no caller
-/// records a removal that did not happen.
-/// What: delegates to [`unregister_index`] — the same function the
-/// orphan-reaper already drives with `delete_data=false` — and echoes
-/// `data_deleted` so a caller can confirm which of the two semantics ran
-/// instead of inferring it from the request it sent.
-/// Test: `deleted_cold_parked_index_is_404_not_a_permanent_503`; the verdicts
-/// themselves are pinned on [`delete_index_report`].
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn delete_index_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<DeleteIndexParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    delete_index_report(&state, &id, params)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `DELETE /indexes/{id}` serves, without the transport (#6285 slice 4).
 ///
 /// Why: `search.index.delete` is the most destructive method on the socket, and
@@ -97,11 +61,16 @@ pub(super) async fn delete_index_handler(
 /// before either store sees it) still deletes, and a delete whose durable
 /// cleanup failed answers `500 ok:false` rather than a `200` that records a
 /// removal which did not happen. One core is what makes both true on the socket
-/// by construction.
-/// What: [`delete_index_handler`]'s whole former body, taking the already-parsed
-/// [`DeleteIndexParams`] so the destructive `delete_data` toggle is decoded once
-/// and never guessed at.
-/// Test: `a_delete_of_an_id_in_no_store_is_not_found_on_either_transport`,
+/// by construction. Issue #4123: a bare delete does NOT destroy on-disk data;
+/// callers pass `delete_data=true` for that (see [`DeleteIndexParams`]).
+/// #6363: an id in NO store and no `indexes.toml` row answers `404`, not
+/// `200 {"removed": false}`.
+/// What: delegates to [`unregister_index`] — the function the orphan-reaper
+/// drives with `delete_data=false` — and echoes `data_deleted` so a caller can
+/// confirm which semantics ran. Takes the already-parsed [`DeleteIndexParams`]
+/// so the destructive `delete_data` toggle is decoded once, never guessed at.
+/// Test: `deleted_cold_parked_index_is_404_not_a_permanent_503`,
+/// `a_delete_of_an_id_in_no_store_is_not_found_on_either_transport`,
 /// `an_allowlist_excluded_registration_deletes_over_the_socket_too`,
 /// `a_failed_delete_reports_the_failure_and_keeps_the_row_on_either_transport`
 /// in `crate::service::rpc::writes`; `delete_index_without_param_preserves_data`,
@@ -363,7 +332,7 @@ pub(super) async fn unregister_index(
     // path holds its SHARED side for the span of its write, so acquiring it means
     // no writer of any kind is in flight. Round 1 of this fix waited on
     // `index_semaphore` instead, which covers only the three long-running
-    // writers — `index_file_handler`, `remove_file_handler`, `ingest_graph_handler`,
+    // writers — `index_file_report`, `remove_file_report`, `ingest_graph_report`,
     // the watch loop, boot reconcile, and relocate hold no permit, so that wait
     // returned instantly and reported a false `quiesced: true`. Held across teardown.
     let quiesce_permit = tokio::time::timeout(
@@ -664,18 +633,6 @@ pub(super) async fn unregister_index(
     }
 }
 
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn search_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Json(query): Json<SearchQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    search_report(&state, &id, query)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `POST /indexes/{id}/search` serves, without the transport
 /// (#6285 slice 3).
 ///
@@ -683,7 +640,7 @@ pub(super) async fn search_handler(
 /// the daemon's most-read body — the lazy cold-load, the facet routing (#5069),
 /// the lane down-shift, the five drop counters and the whole `meta` block. Two
 /// implementations of it would diverge on the first change to any of them.
-/// What: [`search_handler`]'s whole former body. A refusal keeps its HTTP status
+/// What: the whole single-index search path. A refusal keeps its HTTP status
 /// beside its body, because that status is what
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code — so `vector_unavailable`'s `retryable` split reaches a socket caller as
@@ -696,6 +653,8 @@ pub(crate) async fn search_report(
     id: &str,
     mut query: SearchQuery,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    // #10195: the full span starts here, so a cold lazy load counts in `latency_ms`.
+    let started = std::time::Instant::now();
     // Issue #882: reject empty / whitespace-only queries before touching the
     // index. An empty query falls through to a pure k-NN vector search that
     // returns arbitrary top-k results — not useful and potentially expensive.
@@ -707,13 +666,19 @@ pub(crate) async fn search_report(
     }
     // #9258: config fills an unset lexical-lane field; a bad limit is a 400.
     super::lexical_lane::resolve(state, &mut query)?;
+    // #10195: a search the deadline drops logs its index, query and stage.
+    let cancel_guard = super::search_log::CancelGuard::new(id, &query.text, started);
     let index_id = IndexId::new(id.to_string());
+    query_timings::mark(QueryPhase::Resolve);
     // Issue #993: hot registry first, then the cold-store lazy load. #5349 moved
     // that flow into `index_resolve` so the write endpoints drive the identical
     // load instead of 503-ing against the same daemon state.
     let handle = super::index_resolve::resolve_or_load_index(state, &index_id)
         .await
         .map_err(|(status, body)| (status, body.0))?;
+    let resolve_ms = super::search_log::ms_since(started);
+    // #10195: from here until the search holds its read lock, the stage is `lock`.
+    query_timings::mark(QueryPhase::Lock);
     // #4087: a registered index whose durable corpus failed to open holds no
     // chunks at all, so every search against it returned HTTP 200 with
     // `results: []` — a total outage presented as "no matches". Fail loudly
@@ -846,8 +811,9 @@ pub(crate) async fn search_report(
     // notifier so the background Stage-2 task briefly yields. The notifier
     // is a hint — the embedder loop waits at most 100 ms.
     handle.search_pressure.notify_one();
-    let started = std::time::Instant::now();
+    let lock_started = std::time::Instant::now();
     let indexer = handle.indexer.read().await;
+    let lock_ms = super::search_log::ms_since(lock_started);
     // #2203: `search_with_drops`, not `search` — the tally is what lets a
     // caller tell "3 results because 3 matched" from "3 results because 7 were
     // dropped". Published as `meta.dropped` below.
@@ -898,6 +864,7 @@ pub(crate) async fn search_report(
         mut dropped,
         exact_match,
         vector_lane_error,
+        timings,
         ..
     } = outcome;
     // #8348: a failed query embed counts against the embedder on `/health`, so
@@ -961,14 +928,16 @@ pub(crate) async fn search_report(
     drop(indexer);
 
     let latency_ms = started.elapsed().as_millis() as u64;
-    tracing::info!(
-        index_id = %index_id,
-        intent = %format!("{intent:?}"),
-        latency_ms = latency_ms,
-        results = results.len(),
-        query = %crate::truncate_at_char_boundary(&query.text, 80),
-        "search"
-    );
+    // #10195: per-stage timings in the log line and in `meta.timings`.
+    let request_timings = super::search_log::RequestTimings {
+        resolve_ms,
+        lock_ms,
+        search: timings,
+        total_ms: latency_ms,
+    };
+    let intent_label = format!("{intent:?}");
+    let n = results.len();
+    super::search_log::log_search(&index_id, &intent_label, n, &query.text, &request_timings);
 
     // Issue #75: surface index freshness in the response `meta` block so
     // callers can show staleness banners without a follow-up status call.
@@ -1007,10 +976,11 @@ pub(crate) async fn search_report(
     };
     let mut body = serde_json::json!({
         "results": results,
-        "intent": format!("{:?}", intent),
+        "intent": intent_label,
         "latency_ms": latency_ms,
         "meta": meta.into_json(state),
     });
+    request_timings.attach(&mut body);
     // #5069: a routed query's results belong to the SERVING facet's tree, which
     // sits on a different commit than the worktree the caller asked about — so
     // name both indexes and the root the paths are relative to. Added only when
@@ -1026,5 +996,6 @@ pub(crate) async fn search_report(
             );
         }
     }
+    cancel_guard.done();
     Ok(body)
 }

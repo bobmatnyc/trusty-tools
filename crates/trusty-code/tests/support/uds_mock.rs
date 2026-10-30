@@ -73,6 +73,13 @@ where
     F: Fn(&str, Value) -> MockFuture + Send + Sync + 'static,
 {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        // #9538: every memory call asks `memory.protocol` first; the handler
+        // is for the test's own methods, so answer the check here.
+        if method == trusty_common::memory_rpc::METHOD_PROTOCOL {
+            return Ok(serde_json::json!({
+                "protocol_version": *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end()
+            }));
+        }
         (self.handler)(method, params).await
     }
 }
@@ -88,7 +95,28 @@ where
 {
     let dir = TempDir::new().expect("tempdir for the mock socket");
     let socket = dir.path().join("memory.sock");
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the mock socket");
+    let shutdown = serve_at(&socket, handler);
+    MockMemoryDaemon {
+        socket,
+        _dir: dir,
+        shutdown: Some(shutdown),
+    }
+}
+
+/// Serve `handler` on the exact path `socket` until the returned sender fires
+/// or drops.
+///
+/// Why (#10169): a rig standing in for the tcode daemon must answer on the
+/// path the code under test derives, not a temp name of the mock's choosing.
+///
+/// # Panics
+///
+/// When the socket cannot be bound — a test-only failure with no recovery.
+pub fn serve_at<F>(socket: &Path, handler: F) -> tokio::sync::oneshot::Sender<()>
+where
+    F: Fn(&str, Value) -> MockFuture + Send + Sync + 'static,
+{
+    let listener = trusty_common::uds::bind_hardened(socket).expect("bind the mock socket");
 
     let router = Arc::new(RpcRouter::new().fallback(MockFallback { handler }));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -98,12 +126,7 @@ where
         })
         .await;
     });
-
-    MockMemoryDaemon {
-        socket,
-        _dir: dir,
-        shutdown: Some(tx),
-    }
+    tx
 }
 
 /// Wrap `inner` the way the daemon's `tools/call` arm answers.

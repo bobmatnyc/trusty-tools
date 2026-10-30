@@ -1,0 +1,2 @@
+Changed
+- `mask_secret`, the one-time `secrets.set` confirmation, follows the owner ruling of 2026-10-28 (#10394): a value of 16 characters or more shows its first 4 and last 5 characters and its length, a value of 10 to 15 characters shows its last 5 and its length, and a shorter value shows only its length. It replaced a format that showed the first 8 characters. `MASK_HEAD_CHARS` is now 4. The console bridge uses the same function.

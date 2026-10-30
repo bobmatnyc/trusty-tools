@@ -6,6 +6,104 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.67.1] — 2026-10-29
+
+### Security
+
+- The workspace lockfile moves libz-sys from 1.1.28 to 1.1.31, fixing RUSTSEC-2026-0418 (libz-sys build script leaks environment variables in the build directory), which failed the pre-publish `cargo audit` and `cargo deny` gates.
+- 0.67.0 was tagged (`trusty-common-v0.67.0`) but never published to crates.io, and its tag cannot move. 0.67.1 carries the 0.67.0 changes and is the first published release of that line.
+
+## [0.67.0] — 2026-10-29
+
+### Breaking
+
+- The `memory-core` feature, a no-op since the Memory Palace engine moved to trusty-memory in 0.64.0, is removed. A manifest that still names `trusty-common/memory-core` no longer resolves: drop it, depend on `trusty-memory` for the engine, and name `embedder`, `credentials`, `redb-open` or `chat-attachments` directly for what it used to imply ([#9272](https://github.com/bobmatnyc/trusty-tools/issues/9272))
+
+### Added
+
+- `credentials::resolve_env_var_bounded_store_first` and its hermetic core `resolve_provider_bounded_store_first_with` resolve a credential from the bounded store first, then the process environment (which reflects `.env.local`). A store read failure is returned as `Timeout` or `Store`, never answered from the environment. `resolve_env_var_bounded` keeps its env-first order (#9936).
+- `exec_stub::write_executable(path, contents)` writes a mode-0755 executable through a `/bin/cp` child, so this process never holds a write fd to it and a sibling fork cannot make the later exec fail with ETXTBSY. Every test that writes and then execs a stub uses it (#10248).
+- `stdio_mcp_client::capped_line::read_capped_line`, the cancel-safe 16 MiB-capped line reader, is public, with `MAX_LINE_BYTES` and `log_field`, so other stdio JSON-RPC clients share the same framing rules (#10360).
+
+### Fixed
+
+- `memory_rpc::call_memory_tool_at_with_timeout` (and so `call_memory_tool`, `call_memory_tool_at`, the monitor memory client and catch-up `fetch_recent_palace_drawers`) now runs the cached `memory.protocol` check before every call and refuses a daemon from another release with a downcastable `MemoryProtocolError` instead of misreading its replies. The check costs at most one extra round trip per socket per ten seconds; on a cache miss the handshake and the call each get the full timeout, so the worst case is twice the budget. Added `call_memory_tool_at_raw_with_timeout`, the explicit unchecked call for the handshake itself and for a probe that must report rather than refuse (#9538).
+- `claude_config::write_json_atomic` keeps an existing file's permission bits, creates a new file at 0600, and creates its staging file at 0600 before any byte is written. It used to publish every rewrite at the umask default, so a `.claude.json` tightened to 0600 went back to 0644 on the next write (#10041).
+- `StdioMcpClient` keeps the partial bytes of a stdout line when a call times out mid-line, so the next call resumes that line instead of failing with "parsing JSON-RPC frame" on its tail. A skipped frame that carries the awaited id now logs at `warn` with its id and method (#10360).
+- `stdio_mcp_client::is_response_to` is now public, so other stdio JSON-RPC clients apply the same response rule (#10360).
+- `StdioMcpClient` caps a buffered stdout line at 16 MiB. A longer line fails the call with an error naming the cap, and its remaining bytes are discarded up to the next newline. Logged frame ids, methods and unparsable lines are cut to 64 characters (#10360).
+- `StdioMcpClient` returns a frame as a call's result only when it is a response (`result` or `error`, no `method`) to the in-flight request id. A server request such as `roots/list` that reused the id was returned as the result, and `respawn` restarted ids at 1, so a frame carrying an id from the earlier process lifetime matched a request of the new one. Ids now keep counting across a respawn (#10360).
+
+## [0.66.0] — 2026-10-26
+
+### Breaking
+
+- `embedder_client::RecycleTrigger` gains the `HardFootprint` variant and `RecycleSnapshot` gains the `hard_footprint_kills` field (#10207); an exhaustive `match` on the enum or a struct literal of the snapshot outside this crate no longer compiles. `RecycleConfig` gains `hard_footprint_mb` and `startup_load_scale_max` (it is `#[non_exhaustive]`, so no caller breaks).
+
+### Added
+
+- `uds::send_framed_stream_request_with(path, request, open_timeout, frame_timeout)` takes separate budgets for the dial and request write and for each frame read. `send_framed_stream_request` and `send_framed_stream_request_capped` keep their signatures and pass their one figure to both (#7216).
+- `uds::test_support::bind_hardened_stub(dir)`, behind the new `uds-test-support` feature, binds a test stub at `dir/stub.sock` with `dir` at `0700` and the socket at `0600`, so `connect_hardened` accepts it. It returns `Result<(UnixListener, PathBuf), UdsSecurityError>` (#7215).
+- `embedder_client::SupervisorConfig::first_spawn_probe_timeout(load_per_cpu)` returns the load-scaled first-spawn startup-probe timeout, for a caller that wraps the first spawn in its own timeout (#10207).
+- `claude_config::discover_claude_settings_with(home, depth, on_home_device)` runs the settings walk with the device check supplied as a predicate; `HOME_SKIP_DIRS` and `same_device` are public alongside it ([#10267](https://github.com/bobmatnyc/trusty-tools/issues/10267))
+
+### Fixed
+
+- `EmbedderSupervisor` bounds the sidecar footprint when a footprint recycle cannot start its replacement (#10207). A hard limit, `TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB` (default twice the recycle ceiling, `0` disables, a value not above the ceiling is ignored with a WARN), is checked on every recycle tick, during a recycle back-off hold, and while a replacement is starting. Over it, the sidecar is killed through the crash path and respawned with no back-off delay; the kill counts toward `TRUSTY_EMBEDDERD_MAX_RESTARTS` (not as a wedge restart), and `/health` `embedder_recycle.hard_footprint_kills` counts it.
+- The sidecar startup probe scales with host load: the timeout is multiplied by `1 + load1/ncpu`, capped by `TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX` (default 4), and a recycle replacement or crash respawn gets at least 120 s before scaling (#10207).
+- New `sys_metrics::load_per_cpu()` returns the one-minute load average per CPU.
+- Every failed sidecar footprint read counts in `/health` `embedder_recycle.footprint_read_errors`, including reads during a recycle back-off hold, on a generation's first tick, and while a replacement is starting, so a hard limit that cannot read the sidecar is visible (#10207). A startup timeout too large to scale (for example a huge `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`) is used unscaled instead of panicking.
+- `discover_claude_settings` and `discover_claude_projects` no longer enter `~/Documents`, `~/Desktop`, `~/Downloads`, `~/Pictures`, `~/Movies` or `~/Music`, and never cross onto another device; a directory whose device cannot be read is skipped. A read in an iCloud-synced folder could freeze the walk ([#10267](https://github.com/bobmatnyc/trusty-tools/issues/10267))
+
+### Documentation
+
+- `daemon_token`'s module docs describe `trusty-code serve --http` as retired rather than as a running listener ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+
+## [0.65.0] — 2026-10-22
+
+### Breaking
+
+- A `message` event says which end recorded it: `MessageEvent` has a new `direction` field (`sent` or `received`, the new `MessageDirection`). A frame written without one reads as `sent`. Code that builds a `MessageEvent` with a struct literal must set the field (#9167).
+
+## [0.64.0] — 2026-10-21
+
+### Breaking
+
+- `control_bus::ActionMeta` gains `attrs: BTreeMap<String, serde_json::Value>`, the producer's own metadata for a row (counts, durations, versions, outcome codes). On the wire it is additive: omitted when empty, and a payload without it deserializes. A struct literal of `ActionMeta` outside trusty-common must add `attrs: Default::default()` (#9078).
+- `control_bus::HarnessSource` is `#[non_exhaustive]`: a `match` on it outside trusty-common needs a wildcard arm. Later producers can then be added without another breaking release (#9078).
+- The `memory_core` module is removed: the Memory Palace engine now lives in trusty-memory as `trusty_memory::engine`, so import it from there. The `memory-core` feature stays as a no-op that enables nothing, so a consumer that relied on it for `embedder`, `embedder-bundled-ort`, `credentials`, `redb-open` or `chat-attachments` must name those features itself. `memory-core-test-support` is removed (its fixtures are trusty-memory's `memory-core-test-support` now). `hnsw_rs`, `git2`, `postcard`, `dashmap` and `unicode-normalization` leave this crate's dependency graph, and `palace_alias::try_alias_target_if_absent` becomes public so the engine can keep calling it ([#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271))
+- `embedder_client::SupervisorConfig` gains a public `recycle: RecycleConfig` field, so a struct literal that names every field no longer compiles; add `recycle: RecycleConfig::from_env()` or end the literal with `..SupervisorConfig::default()` (#9828).
+- `daemon_guard::DaemonAddrLayout` is removed, with its only layout `TRUSTY_SEARCH`, that layout's `default_port: 7878`, and the `discovery_file_path`, `port_file_path` and `resolve_base_url` methods. trusty-search binds no TCP port since #9214, and no workspace crate read the layout. A daemon client resolves trusty-search through its Unix socket instead. `daemon_guard::write_addr_file_atomic` stays ([#9957](https://github.com/bobmatnyc/trusty-tools/issues/9957))
+
+### Added
+
+- `control_bus` carries the subscribe half of the event-bus wire contract (ADR-0065): `events_socket_path()` resolves `<data dir>/trusty-events/trusty-events.sock`, `METHOD_EVENTS_SUBSCRIBE` names the streaming `events.subscribe` method, and `SubscribeParams`, `SubscribeFilter` (with `kind` and `actor` axes) and `SubscribeItem` are its serde frames. Behind `uds`, `SubscribeRequest` builds and decodes the request line and `SubscribeFrameError` names each reason one is refused; an unknown params or filter field is an error (#9075).
+- `control_bus::SubscribeParams::since_id`: the id of the event a reader holds at `since_seq`. The bus refuses a resume from a non-zero `since_seq` without it, or when the event now at that `seq` has a different id, so a `seq` reassigned after a crash cannot make a reader skip events silently. Omitted from the frame when absent (#9075).
+- `control_bus::HarnessSource::Analyze` (wire value `"analyze"`) names trusty-analyze as an event producer, so a `Filter` or `SubscribeFilter` with `source: analyze` selects its LSP events. A reader built before this variant rejects an event carrying `"analyze"` with a decode error (#9078).
+- `catchup::session_refs::hydrate_session_cache_with_env` sets a caller-supplied env (for example a pinned gh token and a `GIT_CONFIG_*` credential-helper pin) on the hydration's one network call, the `git fetch`. `hydrate_session_cache` is unchanged and delegates with no env (#9160).
+- New test-only `test-support` feature exposes `log_buffer::capture_logs`, `atomic_file::test_support::ReadOnlyDir` and, with `credentials`, `credentials::env_guard::EnvVarGuard` to another crate's tests; the engine's tests in trusty-memory use them. It implies nothing and belongs in `[dev-dependencies]` only ([#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271))
+- `PalaceHandle::snapshot` takes a consistent backup of a live palace into `<data root>/backups/manual/<palace>/<UTC>/`: `kg.redb` and `chat_sessions.redb` are each copied from one redb read transaction (writers are not paused), journals up to their last complete line, with a manifest of per-table row counts and a SHA-256 per file. `restore_palace_snapshot` verifies that manifest before it writes anything, and writes only into an empty palace root (#9282).
+- The chunk backfill (`PalaceHandle::reembed_slice`) now splits a stored drawer whose text needs more than 4096 chunks, instead of recording it as a failure and retrying it once a day (#9735). The head drawer keeps its id, `fact_key` and KG triples and shrinks to the first part; the other parts are new drawers with deterministic ids. Every part carries `split-of:<head id>` and `split-part:k/N` tags and the head's room, importance, type, tags, creation time, access history and expiry (a Tier C head's parts carry no expiry, so a sweep never reaps them). Parts hold at most 1024 chunks and embed in later slices. The original content hash is journalled under the new `DeletionReason::SplitOversized`. Forgetting the head forgets every part and journals each one. Dream dedup never merges a split part. Remember, import and rebuild still refuse such text.
+- The embed sidecar supervisor recycles the sidecar gracefully when its footprint passes a ceiling (`TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB`, default 4096), its age passes a maximum (`TRUSTY_EMBEDDERD_RECYCLE_MAX_AGE_SECS`, default 21600) or its embed-call count passes a maximum (`TRUSTY_EMBEDDERD_RECYCLE_MAX_CALLS`, default 100000). The replacement starts and takes new calls before the old sidecar is stopped; calls that still reach the old client forward to the replacement. The old sidecar is stopped once no call is in flight on it, or once no call on it has finished for `max(TRUSTY_EMBEDDERD_RECYCLE_DRAIN_SECS, per-call timeout + 5 s)` (default 60 s); a call that is still inside its own per-call timeout is not cut off. A recycle never counts toward `TRUSTY_EMBEDDERD_MAX_RESTARTS`. Recycles that fire on a fresh sidecar's first check, and replacements that fail to start, back off exponentially (twice the check interval, doubling, at most 1 h), and `RecycleSnapshot` reports `backoff_level`, `backoff_cause` and `backoff_until_unix_secs`. An old sidecar that crashes while its replacement is starting goes down the normal crash-restart path. A check interval below 10 ms, zero included, runs at 10 ms. Three failed footprint reads recycle once, then the footprint trigger stays off until a read succeeds. New public API: `RecycleConfig` (`#[non_exhaustive]`; the `SupervisorConfig::recycle` field), `RecycleHooks`, `RecycleStats`, `RecycleSnapshot`, `RecycleTrigger`, `process_recycle_stats` and `EmbedderSupervisor::with_recycle_hooks` (#9828).
+- `catchup::json::snapshot_json` maps one native session snapshot file to its `PausedSessionJson` record with the parser the digest uses, so the lean `session_context_catchup` default can return the resolved snapshot without scanning the store (#9883).
+- `update::perform_upgrade_with_force` and `update::perform_upgrade_captured_with_force` run `cargo install <crate> --locked --force` under the same #5777 ownership guard as `perform_upgrade` / `perform_upgrade_captured`; with `force = false` the command is unchanged. trusty-installer uses them to take the `trusty-embedderd-py` launcher over from a standalone install (#9974).
+- `StdioMcpClient::call_tool_with_timeout` calls one MCP tool under a caller-chosen timeout, so a tool that legitimately runs past the 30 s default (a long chat turn) is not cut off. `call_tool` and every other request keep the 30 s default (#9979).
+- `events.subscribe` gains opt-in liveness: `SubscribeParams::heartbeat_ms` asks the bus for a `SubscribeItem::Heartbeat { head }` at once and then on that interval. A request without it is unchanged on the wire, and the bus never sends a heartbeat to it. `HEARTBEAT_MS_MIN` (100) and `HEARTBEAT_MS_MAX` (3,600,000) are the bounds the bus accepts. `SubscribeParams` has a new public field, so a struct literal must set it (#10071).
+- The trusty-events wire contract has a `message` domain: `HarnessPayload::Message(MessageEvent)` records one inter-session message with its channel (`sendmessage`, `tmux`, `hook_push`, `poll_wake`), sender session, recipient, relay marker, byte count and sha256. The body is optional and absent by default. The six-kind `ActionEvent` taxonomy is unchanged, and a subscriber that matches on `domain` skips a `message` frame (#9167).
+
+### Fixed
+
+- `control_bus::PushClient::flush` no longer loses a frame when the flush future is dropped mid-write (a flush task aborted at shutdown, or an outer timeout): the frame goes back to the front of the buffer, as it already did on a write error or the per-frame timeout (#9078).
+- A legal `UsearchStore::upsert_chunks` group no longer trips the sticky HNSW op breaker because its total time exceeds the op budget (`TRUSTY_HNSW_OP_BUDGET_SECS`, default 60 s). The budget for a group write is now a stall watchdog: it restarts after the redb commit and after each indexed point, so a 4096-chunk group on a large palace completes, and only a group with no point indexed for one whole budget trips the breaker. Every other bounded operation keeps the wall-clock budget, and a trip still refuses every operation until the palace reopens ([#9728](https://github.com/bobmatnyc/trusty-tools/issues/9728))
+- `UsearchStore::chunk_shapes` returns the `Wedged` error once the op breaker has tripped, so chunk health never counts a tripped group's committed but unindexed tail as complete ([#9728](https://github.com/bobmatnyc/trusty-tools/issues/9728))
+- A progressing `upsert_chunks` group no longer reads as a wedged `hnsw` lock on trusty-memory `/health`: `HnswStore::oldest_op` now ages a group write from its latest indexed point, not from the start of the call, so a legal group that outlasts the op budget stays under the wedge threshold. A stalled group still ages from its last progress and reads as wedged as before ([#9728](https://github.com/bobmatnyc/trusty-tools/issues/9728))
+
+### Changed
+
+- `control_bus::PushClient` and the `control_bus` module docs now name the trusty-events socket (`events_socket_path()`) as the one producers push to, since the bus moved from trusty-console to the `trusty-events` daemon (ADR-0065). Documentation only; no API or behaviour change (#9075).
+- `PalaceHandle::snapshot`'s `dest` is now a name relative to the palace's backup root, `<backup data root>/backups/manual/` (`<data root>/.trusty-memory/backups/manual/` in the flat layout, `<data root>/backups/manual/` when palaces live under `<data root>/palaces`); the default is `<palace>/<UTC>`. An absolute path, `..`, `.`, an empty segment and a NUL byte are refused before any I/O (`SnapshotError::InvalidBackupName`); a symlinked or non-directory segment of the root (`BackupRootUnsafe`) or of the name (`UnsafeBackupComponent`) is also refused, and no backup is written. A backup can no longer land in the palace registry directory, where it was listed as a palace, or create `<data root>/palaces`, which switched the daemon's registry on the next start; `palaceſ`, which case-folds to `palaces` on APFS, is a plain name under the root. The new public `check_backup_name` runs the name rules for callers that do I/O before the snapshot (#9282).
+- `bin_resolve::installed_binaries("trusty-search")` now lists `trusty-embedderd-py` as well, so the cargo ownership guard and tctl's tarball allowlist cover the launcher trusty-search ships (#9468).
+
 ## [0.63.0] — 2026-10-12
 
 ### Breaking

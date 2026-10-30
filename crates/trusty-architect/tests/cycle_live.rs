@@ -105,6 +105,7 @@ fn live_cycle_renames_exactly_and_sends_nothing() -> TestResult {
         usage_probe: &RecordingProbe::default(),
         notifier: &RecordingNotifier::default(),
         dry_run: false,
+        messages: &trusty_architect::poller::NoMessages,
     };
     let mut session = PollSession::new(PollState::default());
     let summary = runner.run_once(&mut session)?;

@@ -692,6 +692,8 @@ pub async fn run_daemon(
     tokio::spawn(async move {
         tokio::select! {
             _ = shutdown_signal() => {}
+            // #10358: a stop that landed before this listener existed.
+            () = super::early_stop::wait() => {}
             _ = shutdown_rx.changed() => {
                 tracing::warn!("daemon: in-process stop via admin_stop");
             }

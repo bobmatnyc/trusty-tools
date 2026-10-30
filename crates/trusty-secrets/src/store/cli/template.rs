@@ -107,6 +107,46 @@ impl Drop for TemplateFile {
     }
 }
 
+/// An empty owner-only directory a CLI runs in, removed on drop (#9069).
+///
+/// Why: V4 — the Vercel CLI links a command to the project named by a
+/// `.vercel/project.json` in its working directory. Running it with `--cwd`
+/// on a fresh empty directory leaves a checkout's file nothing to say.
+/// What: a `tpl.<pid>.<nanos>.<seq>/` directory (0700, never an existing
+/// one) under `root`, which is checked as [`TemplateFile::create`] checks
+/// it, so the startup sweep removes a crashed process's leftover. Drop
+/// removes the directory and anything the CLI wrote in it.
+/// Test: `work_dir_is_an_empty_0700_dir_removed_on_drop`.
+#[derive(Debug)]
+pub struct WorkDir {
+    dir: PathBuf,
+}
+
+impl WorkDir {
+    /// Create a fresh empty directory under `root`.
+    pub fn create(root: &Path) -> Result<Self, SecretsError> {
+        file::create_dir(root, true)?;
+        let dir = root.join(unique_name());
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(io_err(&dir))?;
+        Ok(Self { dir })
+    }
+
+    /// The directory to hand the CLI.
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        // A leftover holds no value; the startup sweep may remove it.
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// Remove the guard directories under `root` whose creating process is gone.
 ///
 /// Why: a crash or `SIGKILL` skips [`TemplateFile`]'s drop and leaves a

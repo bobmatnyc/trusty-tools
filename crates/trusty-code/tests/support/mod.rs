@@ -2,32 +2,29 @@
 //! `tests/task_e2e.rs`, (#2060) `tests/cli_e2e.rs`, and (#2062)
 //! `tests/m1_cutline_e2e.rs`.
 //!
-//! Why: driving the REAL `tcode` binary over its real stdio/HTTP surface
+//! Why: driving the REAL `tcode` binary over its real stdio/socket surface
 //! needs a bit of scaffolding (spawn, NDJSON line I/O with timeouts, parse
-//! helpers for responses vs. server-initiated notifications, SSE body
-//! reading) that has nothing to do with the session-lifecycle assertions
+//! helpers for responses vs. server-initiated notifications, stream reading)
+//! that has nothing to do with the session-lifecycle assertions
 //! themselves. Keeping it in `tests/support/mod.rs` (not a top-level
 //! `tests/*.rs` file, so cargo does not treat it as its own test binary)
 //! keeps every `*_e2e.rs` file readable as a pure black-box script.
 //! What: [`StdioSession`] (spawn + NDJSON request/response/notification
 //! I/O over real pipes — [`StdioSession::spawn_with_mock_llm`] additionally
 //! roots the daemon at a given project dir and sets `TCODE_MOCK_LLM=echo`
-//! for #2056's offline task-execution coverage), [`HttpDaemon`]/
-//! [`spawn_http_daemon`]/[`spawn_http_daemon_with_env`] (#2062: the general
-//! form taking a project root + extra env vars, e.g. the SAME mock-LLM
-//! determinism over HTTP that STDIO already had) (spawn + discover the
-//! bound HTTP address from stderr), [`find_response`]/[`find_session_event`]
-//! (classify a raw NDJSON line), [`open_sse`]/[`read_sse_until`] (read one
-//! never-terminating SSE connection in stages), [`parse_sse_frames`] (split
-//! an SSE body into its JSON `data:` frames), and
-//! [`assert_envelopes_contiguous`] (#2055: the shared seq/field-presence
-//! check both the STDIO and HTTP/SSE e2e scenarios run against the SAME
-//! `SessionEventEnvelope` shape).
+//! for #2056's offline task-execution coverage), [`SocketDaemon`]/
+//! [`spawn_socket_daemon`]/[`spawn_socket_daemon_with_env`] (#2062, #6637:
+//! the persistent daemon on its Unix socket, with the SAME mock-LLM
+//! determinism STDIO has), [`find_response`]/[`find_session_event`]
+//! (classify a raw NDJSON line), [`read_stream_until`] (read one
+//! `session.events` stream in stages), and [`assert_envelopes_contiguous`]
+//! (#2055: the shared seq/field-presence check both the STDIO and socket e2e
+//! scenarios run against the SAME `SessionEventEnvelope` shape).
 //!
 //! `#![allow(dead_code)]`: each `tests/*.rs` file compiles `mod support;` as
 //! its OWN independent crate (cargo's per-integration-test-binary model), so
 //! any helper one file doesn't use (e.g. `task_e2e.rs` never touches the
-//! HTTP/SSE helpers `session_e2e.rs` needs) is flagged dead in THAT binary —
+//! socket helpers `session_e2e.rs` needs) is flagged dead in THAT binary —
 //! a false positive from splitting one shared file across two consumers,
 //! not a real unused-code issue.
 #![allow(dead_code)]
@@ -71,7 +68,7 @@ const WIRE_TIMEOUT: Duration = Duration::from_secs(5);
 /// thread and the daemon walks the tree asynchronously — so they corrupt
 /// whichever `run_task` before/after diff assertion happens to be open,
 /// which is why a different test failed each run and why `--test-threads=1`
-/// looked green. `spawn_inner`/`spawn_http_daemon_with_env` already set this
+/// looked green. `spawn_inner`/`spawn_socket_daemon_with_env` already set this
 /// on the two children they own; the 28 call sites across 24 test functions
 /// that built their own `Command` did not, and that residue is #3036/#3195.
 /// What: a [`TcodeCommand`] for the binary whose environment is cleared and
@@ -513,170 +510,147 @@ impl StdioSession {
     }
 }
 
-/// A running `tcode serve --http` subprocess plus its discovered base URL and
-/// the credential every request to it must carry.
-pub struct HttpDaemon {
+/// A running `tcode serve` subprocess — the persistent daemon on its Unix
+/// socket (#6637 slice 2c replaced the `tcode serve --http` `HttpDaemon`).
+pub struct SocketDaemon {
     child: Child,
-    pub base_url: String,
-    /// #5439: the daemon's local-client credential, read from the `0600` file
-    /// `run_http` wrote into [`Self::data_dir`] before binding. Every route but
-    /// `/health` requires it.
-    pub token: String,
-    /// The daemon's own isolated data directory. Held so it outlives the
-    /// daemon; dropping it removes the tree.
-    pub data_dir: tempfile::TempDir,
+    /// The socket the daemon binds: `<data>/trusty-code/trusty-code.sock`
+    /// inside this daemon's own isolated data directory.
+    pub socket: std::path::PathBuf,
     /// Kept alive so a daemon that owns its project root (see
-    /// [`spawn_http_daemon`]) removes that root on drop. `None` when the caller
-    /// supplied the root.
+    /// [`spawn_socket_daemon`]) removes that root on drop. `None` when the
+    /// caller supplied the root.
     _project: Option<tempfile::TempDir>,
-    /// #9139: the child's private `HOME` and memory socket.
-    _isolation: ChildIsolation,
+    /// #9139: the child's private `HOME`, data root and memory socket.
+    isolation: ChildIsolation,
 }
 
-/// Spawn `tcode serve --http --port 0` and discover its ephemeral bound
-/// address from stderr.
+/// How long a spawned daemon may take to answer on its socket.
+const SOCKET_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Per-frame budget for reading a `session.events` stream — a live event can
+/// trail its trigger by a `task.run`'s whole mock execution.
+const STREAM_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Spawn `tcode serve` rooted at a throwaway tempdir the returned daemon
+/// owns, and wait until its socket answers.
 ///
-/// Why: `--port 0` avoids test-suite port collisions; the daemon logs the
-/// real bound `host:port` to stderr (never stdout) on startup, which this
-/// helper parses.
-/// What: thin wrapper over [`spawn_http_daemon_with_env`] rooted at a throwaway
-/// tempdir the returned daemon owns, with no extra env vars — the shape every
-/// pre-#2062 caller (`tests/session_e2e.rs`) needs.
-///
-/// #2074: this used to root at `.`, which is the CRATE directory when a test
-/// binary runs. `tcode serve` now materializes the agent roster into its
-/// project's `.trusty-code/agents/`, so `.` wrote 33 agent files and a manifest
-/// into the repository on every run.
-pub async fn spawn_http_daemon() -> HttpDaemon {
+/// #2074: rooted at a tempdir, never `.` — `tcode serve` materializes the
+/// agent roster into its project's `.trusty-code/agents/`.
+pub async fn spawn_socket_daemon() -> SocketDaemon {
     let project = tempfile::tempdir().expect("throwaway project root");
-    let mut daemon = spawn_http_daemon_with_env(project.path(), &[]).await;
+    let mut daemon = spawn_socket_daemon_with_env(project.path(), &[]).await;
     daemon._project = Some(project);
     daemon
 }
 
-/// Spawn `tcode serve --http --port 0` rooted at `project`, with `envs` set
-/// in the child's environment, discovering its ephemeral bound address from
-/// stderr.
+/// Spawn `tcode serve --project <project>` with `envs` set in the child's
+/// environment, and wait until its socket answers.
 ///
-/// Why: (#2062) the M1 milestone suite's HTTP scenario needs the SAME
+/// Why: (#2062) the M1 milestone suite's socket scenario needs the SAME
 /// `TCODE_MOCK_LLM=echo` offline determinism the STDIO scenario gets from
-/// `StdioSession::spawn_with_mock_llm` — `spawn_http_daemon`'s original
-/// zero-argument form couldn't express that, so this is the general form
-/// both now share.
-/// What: `--project` argument path and `env(...)`-set every `(key, value)`
-/// pair in `envs`; otherwise identical to `spawn_http_daemon`'s original
-/// stderr address-discovery + drain-for-life behaviour.
-pub async fn spawn_http_daemon_with_env(
+/// `StdioSession::spawn_with_mock_llm`.
+/// What: the child runs with [`ChildIsolation`]'s environment, so its socket
+/// lands in its own data directory; stderr goes to `<home>/daemon.stderr`,
+/// quoted if the daemon exits before answering. `kill_on_drop` stops it if a
+/// test panics before [`SocketDaemon::shutdown_via_sigterm_and_assert_clean_exit`].
+pub async fn spawn_socket_daemon_with_env(
     project: &std::path::Path,
     envs: &[(&str, &str)],
-) -> HttpDaemon {
+) -> SocketDaemon {
+    let isolation = ChildIsolation::new();
+    let socket = isolation
+        .data_dir()
+        .join("trusty-code")
+        .join("trusty-code.sock");
+    let log = isolation.home().join("daemon.stderr");
+    let stderr = std::fs::File::create(&log).expect("daemon stderr log");
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
-    cmd.arg("serve")
-        .arg("--project")
-        .arg(project)
-        .args(["--http", "--port", "0"]);
+    cmd.arg("serve").arg("--project").arg(project);
     // #4255, #9139: same reason as `spawn_inner` — the spawned `tcode` cannot
     // detect the test harness from its own path, and inherited the operator's
     // daemons and palace.
-    let isolation = ChildIsolation::new();
     cmd.env_clear().envs(isolation.env());
-    // #5439: give every spawned daemon its OWN data directory. Without this
-    // they all mint into the operator's real `~/…/trusty-code/auth_token`, so
-    // a test run rewrites a live daemon's credential and two concurrent test
-    // daemons race each other for it. The isolated tree is also where this
-    // helper reads the token from below, which is what makes the read
-    // deterministic rather than a lookup in whatever the parent process
-    // happens to see.
-    let data_dir = tempfile::tempdir().expect("daemon data dir");
-    cmd.env(
-        trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV,
-        data_dir.path(),
-    );
-    // A caller's own env wins — `cli_e2e` sets its own override for tests that
-    // assert on the discovery file's location.
     for (key, value) in envs {
         cmd.env(key, value);
     }
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(stderr))
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn `tcode serve --http`");
+        .expect("spawn `tcode serve`");
 
-    let stderr = child.stderr.take().expect("child stderr");
-    let mut lines = BufReader::new(stderr).lines();
-
-    let base_url = timeout(WIRE_TIMEOUT, async {
-        loop {
-            let line = lines
-                .next_line()
-                .await
-                .expect("read stderr")
-                .expect("tcode serve --http closed stderr before reporting its address");
-            if let Some(addr) = line.split("listening on http://").nth(1) {
-                return format!("http://{}", addr.trim());
-            }
+    let started = std::time::Instant::now();
+    while !trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(200)).await {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            panic!(
+                "`tcode serve` exited ({status}) before answering on {}\nstderr:\n{}",
+                socket.display(),
+                std::fs::read_to_string(&log).unwrap_or_default()
+            );
         }
-    })
-    .await
-    .expect("timed out waiting for the daemon to report its bound address");
+        assert!(
+            started.elapsed() < SOCKET_READY_TIMEOUT,
+            "`tcode serve` never answered on {}\nstderr:\n{}",
+            socket.display(),
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-    // Keep draining stderr for the rest of the daemon's life so the pipe
-    // never fills and blocks it; log content isn't asserted on beyond the
-    // startup line already consumed above.
-    tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
-
-    // #5439: the daemon established this before it printed the line above, so
-    // by now the file exists — in the isolated tree, not the operator's. Read
-    // through the same entry point a real client uses, so a test can never
-    // authenticate by a path production does not have.
-    let token_path = data_dir
-        .path()
-        .join(trusty_code::serve::http::TOKEN_APP_NAME)
-        .join(trusty_common::daemon_token::TOKEN_FILENAME);
-    let token = trusty_common::daemon_token::read_token_at(&token_path).unwrap_or_else(|| {
-        panic!(
-            "`tcode serve --http` must write its credential to {} before it binds",
-            token_path.display()
-        )
-    });
-
-    HttpDaemon {
+    SocketDaemon {
         child,
-        base_url,
-        token,
-        data_dir,
+        socket,
         _project: None,
-        _isolation: isolation,
+        isolation,
     }
 }
 
-impl HttpDaemon {
-    /// A `reqwest::Client` that carries this daemon's credential on every
-    /// request.
-    ///
-    /// Why (#5439): every route but `/health` requires the credential, so a
-    /// bare `reqwest::Client::new()` now gets `401` and the test reports a
-    /// decode failure rather than the behaviour it meant to assert. Attaching
-    /// it as a DEFAULT header means an added request site cannot forget it.
-    pub fn client(&self) -> reqwest::Client {
-        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.token))
-            .expect("credential is header-safe");
-        auth.set_sensitive(true);
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::AUTHORIZATION, auth);
-        reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .expect("build credentialed test client")
+impl SocketDaemon {
+    /// One JSON-RPC call over the socket, returning the whole response frame
+    /// (`{"jsonrpc","id","result"|"error"}`) as JSON — the shape the HTTP
+    /// `POST /rpc` body had, so `resp["error"].is_null()` reads the same.
+    pub async fn call(&self, id: i64, method: &str, params: Value) -> Value {
+        let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        trusty_common::uds::send_framed_request::<Value, Value>(
+            &self.socket,
+            &request,
+            STREAM_FRAME_TIMEOUT,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{method} must answer over the socket: {e}"))
     }
 
-    /// Send SIGTERM and assert the daemon exits cleanly (issue #534
-    /// connection-safe daemon-restart convention, exercised here against
-    /// the real process rather than only `trusty_common::shutdown_signal`'s
-    /// offline unit tests).
+    /// Open one `session.events` stream: the session's ring-buffer replay,
+    /// then its live events, on ONE connection (#2055, #6637).
+    pub async fn open_events(&self, session_id: &str) -> trusty_common::uds::FramedStream<Value> {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "session.events",
+            "params": {"session_id": session_id},
+            "stream": true,
+        });
+        trusty_common::uds::send_framed_stream_request(&self.socket, &request, STREAM_FRAME_TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("session.events must open over the socket: {e}"))
+    }
+
+    /// The daemon's `TRUSTY_DATA_DIR_OVERRIDE` — a CLI given the same one
+    /// resolves this daemon's socket (#10169).
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self.isolation.data_dir()
+    }
+
+    /// The daemon's own stderr so far, for a failure message.
+    pub fn stderr(&self) -> String {
+        std::fs::read_to_string(self.isolation.home().join("daemon.stderr")).unwrap_or_default()
+    }
+
+    /// Send SIGTERM and assert the daemon exits cleanly and unlinks its
+    /// socket (issue #534 connection-safe restart, against the real process).
     pub async fn shutdown_via_sigterm_and_assert_clean_exit(mut self) {
         let pid = self.child.id().expect("child has a pid") as i32;
         // Safety: `kill(2)` with a valid pid and the standard termination
@@ -684,15 +658,58 @@ impl HttpDaemon {
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
-        let status = timeout(WIRE_TIMEOUT, self.child.wait())
+        let status = timeout(Duration::from_secs(20), self.child.wait())
             .await
             .expect("timed out waiting for the daemon to exit after SIGTERM")
             .expect("wait() failed");
         assert!(
             status.success(),
-            "daemon must exit 0 after graceful SIGTERM shutdown, got {status:?}"
+            "daemon must exit 0 after graceful SIGTERM shutdown, got {status:?}\nstderr:\n{}",
+            self.stderr()
+        );
+        assert!(
+            !self.socket.exists(),
+            "a clean stop must unlink {}",
+            self.socket.display()
         );
     }
+}
+
+/// Read frames from `stream` into `frames` until one satisfies `until`.
+///
+/// Why: the #2055 replay -> live continuity check reads ONE stream in stages
+/// (the replay burst, then live events published while still connected), so
+/// each stage appends to the same `frames` and the contiguity check runs over
+/// the whole of it. A frame already read that satisfies `until` returns at
+/// once.
+/// What: panics on a stream error, a stream that ends first, or a frame
+/// timeout ([`STREAM_FRAME_TIMEOUT`] per frame, set when the stream opened).
+pub async fn read_stream_until(
+    stream: &mut trusty_common::uds::FramedStream<Value>,
+    frames: &mut Vec<Value>,
+    until: impl Fn(&Value) -> bool,
+) {
+    if frames.iter().any(&until) {
+        return;
+    }
+    loop {
+        match stream.next_frame().await {
+            Some(Ok(frame)) => {
+                let done = until(&frame);
+                frames.push(frame);
+                if done {
+                    return;
+                }
+            }
+            Some(Err(e)) => panic!("session.events failed after {frames:?}: {e}"),
+            None => panic!("session.events ended before the awaited frame: {frames:?}"),
+        }
+    }
+}
+
+/// A predicate for [`read_stream_until`]: the envelope's `kind` is `kind`.
+pub fn kind_is(kind: &'static str) -> impl Fn(&Value) -> bool {
+    move |frame| frame["kind"] == kind
 }
 
 /// Parse `line` as JSON and return it if it's a response whose `id` matches.
@@ -801,83 +818,12 @@ pub async fn run_task_to_completion(daemon: &mut StdioSession, task_description:
     session_id
 }
 
-/// Open `url` as a Server-Sent Events GET, asserting a successful status.
-///
-/// Why: the #2055 replay->live continuity check needs to read ONE SSE
-/// connection in two stages (first the replay burst, then a live event
-/// published while still connected) — unlike [`http_get_prefix`], which
-/// opens a fresh connection per call and only proves replay content, not
-/// continuity within a single stream.
-/// What: returns the live `reqwest::Response`; pair with
-/// [`read_sse_until`] to pull further chunks from the SAME connection.
-pub async fn open_sse(client: &reqwest::Client, url: &str) -> reqwest::Response {
-    let resp = client.get(url).send().await.expect("GET request");
-    assert!(
-        resp.status().is_success(),
-        "GET {url} returned {}",
-        resp.status()
-    );
-    resp
-}
-
-/// Read more chunks from `resp` into `buffer` until it contains
-/// `until_substr` or `total_timeout` elapses.
-///
-/// Why: paired with [`open_sse`] so a test can read a SINGLE SSE connection
-/// in stages (replay, then a later live event) instead of opening a fresh
-/// GET per stage — which is what actually proves replay -> live continuity
-/// on one stream, per the #2055 requirement.
-/// What: appends to `buffer` in place (so a second call continues from
-/// where the first left off) via `Response::chunk()` — no `Stream`/`Bytes`
-/// naming needed at the call site.
-pub async fn read_sse_until(
-    resp: &mut reqwest::Response,
-    buffer: &mut Vec<u8>,
-    until_substr: &str,
-    total_timeout: Duration,
-) {
-    if String::from_utf8_lossy(buffer).contains(until_substr) {
-        return;
-    }
-    let read = timeout(total_timeout, async {
-        while !String::from_utf8_lossy(buffer).contains(until_substr) {
-            match resp.chunk().await {
-                Ok(Some(chunk)) => buffer.extend_from_slice(&chunk),
-                _ => break,
-            }
-        }
-    })
-    .await;
-    assert!(
-        read.is_ok(),
-        "timed out waiting for {until_substr:?} in the SSE stream"
-    );
-}
-
-/// Parse an SSE body (one or more `data: {...}` lines, possibly interleaved
-/// with blank lines or `:`-comment keep-alives) into the JSON objects it
-/// carries.
-///
-/// Why: the #2055 envelope assertions need to inspect individual event
-/// objects (`seq`, `kind`, `session_id`, ...), not just substring-match the
-/// raw SSE text the way [`http_get_prefix`]'s callers otherwise would.
-/// What: for each line starting with `data:`, strips the prefix and parses
-/// the remainder as JSON; lines that aren't `data:` or don't parse are
-/// skipped (SSE comment lines, a partially-read trailing frame at the
-/// prefix's read boundary).
-pub fn parse_sse_frames(text: &str) -> Vec<Value> {
-    text.lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .filter_map(|rest| serde_json::from_str::<Value>(rest.trim()).ok())
-        .collect()
-}
-
 /// Assert that `envelopes` (in receipt order) each carry every
 /// `SessionEventEnvelope` field and form ONE gap-free, strictly increasing
 /// `seq` sequence; returns `(first_seq, last_seq)`.
 ///
 /// Why: the #2055 correctness property this whole e2e suite exists to
-/// prove — factored out so the STDIO and HTTP/SSE scenarios run the exact
+/// prove — factored out so the STDIO and socket scenarios run the exact
 /// same check against their respective wire representations of the same
 /// envelope shape.
 /// What: panics with the offending envelope on the first missing field or

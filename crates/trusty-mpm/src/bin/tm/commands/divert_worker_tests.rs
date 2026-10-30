@@ -204,31 +204,19 @@ async fn spawn_worker_at_reports_an_unstartable_binary() {
 /// cancel.
 /// What: a stand-in that never exits is killed and reported as a timeout — not
 /// as a generic spawn failure, which would send the operator looking for the
-/// wrong cause. A child `cp` installs the stand-in, so this process never
-/// holds a write fd to the file it execs.
+/// wrong cause. The shared writer installs the stand-in, so this process
+/// never holds a write fd to the file it execs.
 #[cfg(unix)]
 #[tokio::test]
 async fn spawn_worker_at_times_out() {
     let tmp = tempfile::tempdir().unwrap();
-    let staged = tmp.path().join("slow-claude.src");
     let fake = tmp.path().join("slow-claude");
     // An absolute `sleep`: the child inherits this process's PATH, which the
     // test must not touch.
-    std::fs::write(&staged, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
-    // #9718: never exec a file this process wrote. A sibling test's fork
-    // inherits the open write fd and holds it until that child execs, so the
-    // exec below failed with ETXTBSY under full-suite load. Same pattern as
-    // `secrets::paste_tests` (#7524).
-    let installed = std::process::Command::new("/bin/sh")
-        .args(["-c", "cp \"$1\" \"$2\" && chmod 755 \"$2\"", "sh"])
-        .arg(&staged)
-        .arg(&fake)
-        .status()
+    // #9718, #10248: never exec a file this process wrote; a sibling test's
+    // fork would inherit the write fd and fail the exec with ETXTBSY.
+    trusty_common::exec_stub::write_executable(&fake, "#!/bin/sh\nexec /bin/sleep 30\n")
         .expect("install the stand-in worker");
-    assert!(
-        installed.success(),
-        "install the stand-in worker: {installed}"
-    );
 
     let err = spawn_worker_at(&fake, "m", "payload", std::time::Duration::from_millis(300))
         .await

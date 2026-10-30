@@ -197,6 +197,47 @@ fn repair_writes_a_nested_reference_key_to_its_own_path() {
     );
 }
 
+/// #10211: a repaired `<stem>/scripts/<file>` key lands `0o755`, as the
+/// deployer writes it. Fails on the pre-fix code, which wrote it `0644`.
+#[cfg(unix)]
+#[test]
+fn repair_writes_a_script_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let dest = paths.claude_skills_dir();
+    let src = TempDir::new().unwrap();
+    fs::write(src.path().join("tm-adr.md"), "entry v1").unwrap();
+    let scripts = src.path().join("tm-adr").join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("check_adr.sh"), "script v1").unwrap();
+    deploy_skills(src.path(), &dest).unwrap();
+    let deployed = deployed_path(&dest, "tm-adr/scripts/check_adr.sh");
+    // The copy on disk lost its bit (an older deployer wrote it).
+    fs::set_permissions(&deployed, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let outcomes = repair_skills(
+        &reference_of(&[
+            ("tm-adr", "entry v1"),
+            ("tm-adr/scripts/check_adr.sh", "script v2"),
+        ]),
+        &paths,
+        None,
+        false,
+        backups.path(),
+    );
+
+    let repaired: Vec<&RepairOutcome> = outcomes.iter().filter(|o| o.changed()).collect();
+    assert_eq!(repaired.len(), 1, "outcomes: {outcomes:?}");
+    assert_eq!(repaired[0].stem, "tm-adr/scripts/check_adr.sh");
+    assert_eq!(fs::read_to_string(&deployed).unwrap(), "script v2");
+    assert_eq!(
+        fs::metadata(&deployed).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
 /// #4622 review: a tier whose ownership ledger cannot be parsed is never
 /// written to.
 ///

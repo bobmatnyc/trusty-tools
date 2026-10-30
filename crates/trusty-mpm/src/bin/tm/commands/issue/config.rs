@@ -55,8 +55,8 @@ pub(crate) const SUPPORTED_VERSION: u32 = 1;
 /// Why: the single deserialization target for the whole contract; everything
 /// `tm issue` does is driven by these fields, never by hardcoded label strings.
 /// What: schema `version`, the `label_config` family prefixes, the ordered
-/// `states`, the non-state `extra_labels`, the `transitions` graph, and the
-/// `assignee_model`.
+/// `states`, the non-state `extra_labels`, the `transitions` graph, the
+/// `assignee_model`, and the optional `project:` board block (#10275).
 /// Test: `embedded_default_parses` deserializes the full factory model.
 ///
 /// `Eq` is intentionally NOT derived: `AssigneeModel` carries opaque
@@ -76,6 +76,12 @@ pub(crate) struct StateModel {
     pub(crate) transitions: Vec<Transition>,
     /// Per-state assignee / identity model.
     pub(crate) assignee_model: AssigneeModel,
+    /// The repo's own GitHub Projects board, if it names one.
+    // #10275: the attach target and the repo's departures from board-v1.yaml;
+    // an unknown key in the block fails the load. #10276: read only from the
+    // repo's own model, and checked against the board spec at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) project: Option<super::board::project::ProjectBlock>,
 }
 
 /// Configurable label-family prefixes.
@@ -526,10 +532,14 @@ pub(crate) fn load_model_with_source(
 /// What: resolves the path (flag > upward walk from `start` > `configured` >
 /// user > embedded), reads and parses the YAML (or the embedded default when no
 /// file is found), then runs [`super::validate::validate_model`], returning the
-/// validated model and its [`ModelSource`].
+/// validated model and its [`ModelSource`]. A `project:` block survives only
+/// from a flag or the repo's own file, and is checked against the board spec
+/// (#10276).
 /// Test: `load_in_finds_the_repo_root_model_from_a_crate_subdirectory_7580`,
 /// `load_in_reports_the_embedded_default_source_7580`,
-/// `load_explicit_missing_errors`.
+/// `load_explicit_missing_errors`,
+/// `a_host_level_project_block_is_not_inherited_10276`,
+/// `a_project_block_is_validated_at_load_10276`.
 pub(crate) fn load_model_in(
     start: &Path,
     flag: Option<&Path>,
@@ -541,6 +551,9 @@ pub(crate) fn load_model_in(
     } else {
         discover_upward(start)
     };
+    // #10276: only the repo's own model, or one named by --config, may name
+    // the repo's board.
+    let repo_owned = flag.is_some() || discovered.is_some();
     let chosen = resolve_config_path(flag, discovered, configured, user.as_deref());
 
     let yaml = match &chosen {
@@ -553,7 +566,7 @@ pub(crate) fn load_model_in(
         None => DEFAULT_MODEL_YAML.to_string(),
     };
 
-    let model: StateModel = serde_yaml::from_str(&yaml).map_err(|e| {
+    let mut model: StateModel = serde_yaml::from_str(&yaml).map_err(|e| {
         let src = chosen
             .as_ref()
             .map(|p| p.display().to_string())
@@ -561,6 +574,18 @@ pub(crate) fn load_model_in(
         anyhow::anyhow!("failed to parse issue-state model ({src}): {e}")
     })?;
     super::validate::validate_model(&model)?;
+    // #10276 (PR #10287 review): a `project:` block in the user-level or the
+    // configured host model is not this repo's board; a repo without its own
+    // block must not inherit another repo's attach target.
+    if !repo_owned {
+        model.project = None;
+    }
+    // #10276 (PR #10287 review): the block is checked against the board spec
+    // when it is loaded, not first when a verb acts on it.
+    if let Some(block) = &model.project {
+        let spec = super::board::spec::embedded_spec()?;
+        super::board::project::validate_project(block, &spec)?;
+    }
     let source = match chosen {
         Some(path) => ModelSource::File(path),
         None => ModelSource::EmbeddedDefault {

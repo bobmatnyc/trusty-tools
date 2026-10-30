@@ -13,8 +13,8 @@
 //!
 //! Test: `cargo test -p trusty-common --features unconditional-only` covers
 //! `mcp_server_entry` shape, `merge_hook_entries` idempotency, and
-//! `discover_claude_settings` skip-dir behaviour. Filesystem-touching tests are
-//! `#[ignore]`.
+//! `discover_claude_settings` skip-dir and device-guard behaviour, on temp
+//! directories.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +45,23 @@ pub const SCAN_SKIP_DIRS: &[&str] = &[
     ".cargo",
 ];
 
+/// Top-level `$HOME` folders a home walk never enters.
+///
+/// Why (#10267): macOS syncs these to iCloud Drive or the media libraries, and
+/// a `read_dir` there can block on a network fetch; one froze a session.
+/// What: base-names matched only as the first component below `home`, so
+/// `<home>/code/Documents/proj` is still walked.
+/// Test: `discover_claude_settings_skips_synced_home_folders_only_at_the_top_level`,
+/// `discover_claude_projects_skips_synced_home_folders`.
+pub const HOME_SKIP_DIRS: &[&str] = &[
+    "Documents",
+    "Desktop",
+    "Downloads",
+    "Pictures",
+    "Movies",
+    "Music",
+];
+
 /// Default recursion depth for [`discover_claude_settings`].
 const DEFAULT_SETTINGS_MAX_DEPTH: usize = 8;
 
@@ -72,22 +89,115 @@ pub const CLAUDE_MPM_SUB_AGENT_ENV_VAR: &str = "CLAUDE_MPM_SUB_AGENT";
 /// a choice of where to install an MCP server. Each sibling project reinvented
 /// this walk; centralising it fixes the skip-list once.
 /// What: recursively walks `home` up to `max_depth` directories deep, skipping
-/// any directory whose base-name is in [`SCAN_SKIP_DIRS`]. For every `.claude`
-/// directory found, checks for `settings.json` and `settings.local.json` and
-/// collects the ones that exist. A `max_depth` of 0 inspects only `home`
-/// itself. Use [`DEFAULT_SETTINGS_MAX_DEPTH`] (8) as a sensible default.
-/// Returns paths sorted for deterministic output.
-/// Test: `discover_claude_settings_skips_blacklisted_dirs` (`#[ignore]`, real
-/// filesystem) verifies both discovery and skip behaviour.
+/// any directory whose base-name is in [`SCAN_SKIP_DIRS`], the synced folders
+/// in [`HOME_SKIP_DIRS`] directly under `home`, any symlink, and any directory
+/// whose device (`st_dev`) differs from `home`'s. A directory whose device
+/// cannot be read is skipped, and an unreadable `home` device enters nothing.
+/// For every `.claude` directory found, checks for `settings.json` and
+/// `settings.local.json` and collects the ones that exist. A `max_depth` of 0
+/// inspects only `home` itself. Use [`DEFAULT_SETTINGS_MAX_DEPTH`] (8) as a
+/// sensible default. Returns paths sorted for deterministic output.
+/// Test: `discover_claude_settings_skips_blacklisted_dirs`,
+/// `discover_claude_settings_skips_synced_home_folders_only_at_the_top_level`,
+/// `walk_skips_a_directory_whose_device_cannot_be_read`.
 pub fn discover_claude_settings(home: &Path, max_depth: usize) -> Vec<PathBuf> {
+    // #10267: the device guard is fail-closed; see `device_guard`.
+    discover_claude_settings_with(home, max_depth, &device_guard(home, &device_of))
+}
+
+/// [`discover_claude_settings`] with the device check injected.
+///
+/// Why (#10267): a test cannot create a mount point, so it supplies the
+/// predicate instead; a caller with its own notion of "local" can too.
+/// What: the same walk and the same name skips, but `on_home_device(dir)` is
+/// asked before entering each directory below `home`; `false` skips it and
+/// its subtree. Returns sorted paths.
+/// Test: `walk_never_enters_a_directory_on_another_device`.
+pub fn discover_claude_settings_with(
+    home: &Path,
+    max_depth: usize,
+    on_home_device: &dyn Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    collect_claude_settings(home, max_depth, &mut found);
+    collect_claude_settings(home, home, max_depth, on_home_device, &mut found);
     found.sort();
     found
 }
 
-/// Recursive worker for [`discover_claude_settings`].
-fn collect_claude_settings(dir: &Path, depth_remaining: usize, out: &mut Vec<PathBuf>) {
+/// `true` only when both devices are known and equal.
+///
+/// Why (#10267): an unknown device cannot be shown to be local, so a walk does
+/// not enter it (fail closed).
+/// Test: `same_device_requires_two_known_equal_devices`.
+pub fn same_device(home_dev: Option<u64>, dir_dev: Option<u64>) -> bool {
+    matches!((home_dev, dir_dev), (Some(h), Some(d)) if h == d)
+}
+
+/// The production device predicate: `dir` is entered only when `dev_of`
+/// reads a device for both `home` and `dir` and the two are equal.
+///
+/// Why (#10267): split from [`device_of`] so a test can make one path's device
+/// unreadable and see the walk skip it.
+/// Test: `walk_skips_a_directory_whose_device_cannot_be_read`,
+/// `walk_enters_nothing_when_the_home_device_cannot_be_read`.
+pub(crate) fn device_guard<'a>(
+    home: &Path,
+    dev_of: &'a dyn Fn(&Path) -> Option<u64>,
+) -> impl Fn(&Path) -> bool + 'a {
+    let home_dev = dev_of(home);
+    move |dir| same_device(home_dev, dev_of(dir))
+}
+
+/// The `st_dev` of `path`; `None` on error.
+///
+/// Follows a symlink, so a symlinked `home` or search root reports the device
+/// it resolves to. Walk entries that are symlinks are skipped before this runs.
+#[cfg(unix)]
+pub(crate) fn device_of(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.dev())
+}
+
+/// No `st_dev` off Unix: every readable path reports one device, so only the
+/// name skip lists guard the walk there.
+#[cfg(not(unix))]
+pub(crate) fn device_of(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|_| 0)
+}
+
+/// Whether a home walk may enter `dir`.
+///
+/// Why (#10267): the settings walk and the project walk share one rule.
+/// What: `false` when the first component of `dir` below `home` is in
+/// [`HOME_SKIP_DIRS`], or when `on_home_device(dir)` is `false`. A `dir`
+/// outside `home` gets the device check only.
+/// Test: `discover_claude_projects_skips_synced_home_folders`,
+/// `discover_claude_projects_skips_other_device`.
+pub(crate) fn home_walk_enters(
+    home: &Path,
+    dir: &Path,
+    on_home_device: &dyn Fn(&Path) -> bool,
+) -> bool {
+    let synced = dir
+        .strip_prefix(home)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .and_then(|first| match first {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .is_some_and(|name| HOME_SKIP_DIRS.contains(&name));
+    !synced && on_home_device(dir)
+}
+
+/// Recursive worker for [`discover_claude_settings_with`].
+fn collect_claude_settings(
+    home: &Path,
+    dir: &Path,
+    depth_remaining: usize,
+    on_home_device: &dyn Fn(&Path) -> bool,
+    out: &mut Vec<PathBuf>,
+) {
     // If this directory is a `.claude` dir, harvest its settings files.
     if dir.file_name().and_then(|n| n.to_str()) == Some(".claude") {
         for name in ["settings.json", "settings.local.json"] {
@@ -111,6 +221,7 @@ fn collect_claude_settings(dir: &Path, depth_remaining: usize, out: &mut Vec<Pat
 
     for entry in entries.flatten() {
         let path = entry.path();
+        // `DirEntry::file_type` does not follow symlinks, so a link is skipped.
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
@@ -124,7 +235,17 @@ fn collect_claude_settings(dir: &Path, depth_remaining: usize, out: &mut Vec<Pat
         if name != ".claude" && SCAN_SKIP_DIRS.contains(&name) {
             continue;
         }
-        collect_claude_settings(&path, depth_remaining.saturating_sub(1), out);
+        // #10267: no synced top-level home folder, no other device.
+        if !home_walk_enters(home, &path, on_home_device) {
+            continue;
+        }
+        collect_claude_settings(
+            home,
+            &path,
+            depth_remaining.saturating_sub(1),
+            on_home_device,
+            out,
+        );
     }
 }
 
@@ -182,8 +303,12 @@ pub fn mcp_server_entry(command: &str, args: &[&str]) -> Value {
 /// serialising a read-modify-write cycle is the caller's job (`trusty-mpm`'s
 /// `core::claude_json_guard` does it in-process) — but they can no longer
 /// corrupt. A staged file is removed if its own write or rename fails, so a
-/// failed call leaves `path` byte-for-byte as it was and drops no litter.
+/// failed call leaves `path` byte-for-byte as it was and drops no litter. An
+/// existing target's permission bits carry over to the new file, and a new
+/// target is 0600; the staged file is 0600 from its creation (#10041).
 /// Test: `write_json_atomic_creates_and_backs_up` (`#[ignore]`, real fs),
+/// `write_json_atomic_keeps_the_targets_mode` (#10041),
+/// `write_json_atomic_creates_a_new_target_owner_only` (#10041),
 /// `concurrent_writers_never_publish_a_torn_file` (#4077),
 /// `concurrent_writers_never_tear_the_backup` (#4077),
 /// `failed_rename_leaves_destination_and_no_staging_file`,
@@ -211,11 +336,47 @@ pub fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
         .with_context(|| format!("back up {} to {}", path.display(), backup.display()))?;
     }
 
+    // #10041: the staged file is owner-only before it holds a byte; a rewrite
+    // then keeps the target's mode, and a new target stays 0600.
+    let prior_mode = std::fs::metadata(path).ok().map(|m| m.permissions());
     let staged = append_extension(path, &format!("tmp.{stamp}"));
     stage_then_publish(&staged, path, |dest| {
-        std::fs::write(dest, serialized.as_bytes())
+        write_owner_only(dest, serialized.as_bytes())?;
+        match prior_mode {
+            Some(perms) => std::fs::set_permissions(dest, perms),
+            None => Ok(()),
+        }
     })
     .with_context(|| format!("atomically write {}", path.display()))
+}
+
+/// Write `bytes` to `dest` through a handle that is mode 0600 before any byte
+/// lands.
+///
+/// Why (#10041): `std::fs::write` creates at the umask default (0644), so the
+/// staged copy of a credential-bearing `.claude.json` was readable by every
+/// local user until the later chmod — and stayed so for a new target.
+/// What: opens with create + truncate at 0600 and re-applies 0600 on the open
+/// handle, which also narrows a leftover staging file from a crashed writer
+/// (see [`staging_stamp`]), then writes `bytes`.
+/// Test: `write_json_atomic_creates_a_new_target_owner_only`,
+/// `write_json_atomic_keeps_the_targets_mode`.
+fn write_owner_only(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        let mut file = options.open(dest)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        options.open(dest)?.write_all(bytes)
+    }
 }
 
 /// Fill `staged` via `fill`, then rename it onto `dest`, removing `staged` if
@@ -958,6 +1119,56 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #10041: a 0600 `.claude.json` stays 0600 across a rewrite.
+    #[cfg(unix)]
+    #[test]
+    fn write_json_atomic_keeps_the_targets_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("atomic-mode");
+        let path = dir.join(".claude.json");
+        write_json_atomic(&path, &json!({ "v": 1 })).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_json_atomic(&path, &json!({ "v": 2 })).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the rewrite widened the file to {mode:04o}");
+        // #10041: a prior mode wider than the 0600 staging mode is restored too.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_json_atomic(&path, &json!({ "v": 3 })).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o640,
+            "the rewrite dropped the prior mode: {mode:04o}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #10041: a new target, and the staging file that becomes it, are 0600
+    /// whatever the umask grants.
+    #[cfg(unix)]
+    #[test]
+    fn write_json_atomic_creates_a_new_target_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("atomic-new-mode");
+        let path = dir.join(".claude.json");
+
+        write_json_atomic(&path, &json!({ "v": 1 })).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a new target was created {mode:04o}");
+
+        // The staging write itself: a leftover wide staging file is narrowed
+        // before the payload lands.
+        let staged = dir.join("staged.tmp");
+        std::fs::write(&staged, b"").unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_owner_only(&staged, b"{}").unwrap();
+        let mode = std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the staging file was {mode:04o}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn patch_mcp_server_is_idempotent() {
         let dir = scratch_dir("patch");
@@ -1022,5 +1233,107 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Plants `<root>/<rel>/.claude/settings.json` and returns its path.
+    fn plant(root: &Path, rel: &str) -> PathBuf {
+        let dir = root.join(rel).join(".claude");
+        std::fs::create_dir_all(&dir).expect("create .claude");
+        let file = dir.join("settings.json");
+        std::fs::write(&file, "{}").expect("write settings");
+        file
+    }
+
+    // #10267: the default walk entered iCloud-synced home folders.
+    #[test]
+    fn discover_claude_settings_skips_synced_home_folders_only_at_the_top_level() {
+        let home = tempfile::tempdir().expect("temp home");
+        let documents = plant(home.path(), "Documents/proj");
+        let desktop = plant(home.path(), "Desktop/scratch/proj");
+        let downloads = plant(home.path(), "Downloads/proj");
+        let nested = plant(home.path(), "code/Documents/proj");
+        let plain = plant(home.path(), "code/proj");
+
+        let files = discover_claude_settings(home.path(), default_settings_max_depth());
+
+        for skipped in [&documents, &desktop, &downloads] {
+            assert!(!files.contains(skipped), "{skipped:?} returned: {files:?}");
+        }
+        for kept in [&nested, &plain] {
+            assert!(files.contains(kept), "{kept:?} missing: {files:?}");
+        }
+    }
+
+    #[test]
+    fn walk_never_enters_a_directory_on_another_device() {
+        let home = tempfile::tempdir().expect("temp home");
+        let mounted = plant(home.path(), "mnt/remote/proj");
+        let local = plant(home.path(), "code/proj");
+        let mount_point = home.path().join("mnt").join("remote");
+
+        let files = discover_claude_settings_with(home.path(), 8, &|dir: &Path| {
+            dir != mount_point.as_path()
+        });
+
+        assert!(!files.contains(&mounted), "{mounted:?} returned: {files:?}");
+        assert!(files.contains(&local), "{local:?} missing: {files:?}");
+    }
+
+    // #10267: fail closed — an entry whose device cannot be read is skipped,
+    // and only that subtree.
+    #[test]
+    fn walk_skips_a_directory_whose_device_cannot_be_read() {
+        let home = tempfile::tempdir().expect("temp home");
+        let unreadable = plant(home.path(), "code/stuck/proj");
+        let sibling = plant(home.path(), "code/proj");
+        let stuck = home.path().join("code").join("stuck");
+        let dev_of = |p: &Path| (p != stuck.as_path()).then_some(1);
+
+        let files =
+            discover_claude_settings_with(home.path(), 8, &device_guard(home.path(), &dev_of));
+
+        assert!(
+            !files.contains(&unreadable),
+            "{unreadable:?} returned: {files:?}"
+        );
+        assert!(files.contains(&sibling), "{sibling:?} missing: {files:?}");
+    }
+
+    #[test]
+    fn walk_enters_nothing_when_the_home_device_cannot_be_read() {
+        let home = tempfile::tempdir().expect("temp home");
+        plant(home.path(), "code/proj");
+        let root = home.path().to_path_buf();
+        let dev_of = |p: &Path| (p != root.as_path()).then_some(1);
+
+        let files =
+            discover_claude_settings_with(home.path(), 8, &device_guard(home.path(), &dev_of));
+
+        assert!(
+            files.is_empty(),
+            "walked below an unknown home device: {files:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_does_not_follow_a_symlinked_directory() {
+        let home = tempfile::tempdir().expect("temp home");
+        let elsewhere = tempfile::tempdir().expect("link target");
+        plant(elsewhere.path(), "proj");
+        std::os::unix::fs::symlink(elsewhere.path(), home.path().join("link")).expect("symlink");
+
+        let files = discover_claude_settings(home.path(), 8);
+
+        assert!(files.is_empty(), "a symlinked tree was walked: {files:?}");
+    }
+
+    #[test]
+    fn same_device_requires_two_known_equal_devices() {
+        assert!(same_device(Some(7), Some(7)));
+        assert!(!same_device(Some(7), Some(8)));
+        assert!(!same_device(None, Some(7)));
+        assert!(!same_device(Some(7), None));
+        assert!(!same_device(None, None));
     }
 }

@@ -204,7 +204,7 @@ pub(super) struct BatchPayload {
 /// Retained as `#[allow(dead_code)]` for tests and non-pipelined callers that
 /// prefer a simpler one-shot API.
 /// What: delegates to `prepare_and_parse_batch` + `commit_parsed_and_finalize`.
-/// Test: covered indirectly by integration tests via `reindex_handler`.
+/// Test: covered indirectly by integration tests via `reindex_report`.
 #[allow(dead_code)]
 pub(super) async fn process_one_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> BatchOutcome {
     let Some(parsed) = prepare_and_parse_batch(ctx, batch).await else {
@@ -322,7 +322,14 @@ pub(super) async fn prepare_and_parse_batch(
         // lexical-only parse so this batch still commits its chunks instead of
         // waiting on an embedder the process is about to drop.
         let result = if !embeds_inline || embedding_drained {
-            indexer.parse_files_only(to_index).await
+            // #10504: a deferred index splits at the embedder window; lexical-only,
+            // vector-skipping and drained batches keep the plain parse.
+            let split = ctx.defer_embed
+                && !ctx.lexical_only
+                && !ctx.skip_vector
+                && !embedding_drained
+                && crate::core::indexer::deferred_split_enabled();
+            indexer.parse_files_deferred(to_index, split).await
         } else {
             use crate::core::indexer::PROGRESS_CHUNK_INTERVAL;
             use std::sync::atomic::Ordering;

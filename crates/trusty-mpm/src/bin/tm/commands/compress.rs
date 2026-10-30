@@ -1030,30 +1030,42 @@ mod tests {
         }
     }
 
-    /// Path of this process's stub rtk. See [`empty_rtk`].
+    /// A fresh stub-rtk path, unique per call within this process. See [`empty_rtk`].
     #[cfg(unix)]
     fn empty_rtk_stub_path() -> PathBuf {
-        std::env::temp_dir().join(format!("tm-compress-empty-rtk-{}.sh", std::process::id()))
+        // #10232: pid alone named ONE path per process, so a second caller
+        // could truncate or remove the stub another test was about to exec.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "tm-compress-empty-rtk-{}-{n}.sh",
+            std::process::id()
+        ))
     }
 
     /// An [`RtkResolver`] naming a stub rtk that prints nothing.
     ///
     /// Why: [`RtkResolver`] is a plain `fn` pointer, so it cannot close over a
-    /// `TempDir` — the stub is written by the resolver itself, at a path keyed
-    /// on this process's pid so two test binaries never share one.
+    /// `TempDir` — the stub is written by the resolver itself, at a path unique
+    /// to this call (pid + counter), so no two callers ever share one.
     /// What: an `/bin/sh` script that drains stdin (otherwise the writer in
     /// `compress_via_rtk_binary` takes `EPIPE`, the rtk arm reports failure,
-    /// and the native chain would answer instead) and exits zero having
-    /// written nothing — exactly the #7377 shape.
+    /// and the native chain would answer instead), deletes itself, and exits
+    /// zero having written nothing — exactly the #7377 shape. The shared
+    /// writer has a child write the stub, so this test process never holds a
+    /// writable fd on it (#10232, #10248).
     /// Test: `rtk_returning_nothing_falls_back_to_the_raw_output_and_warns_once`.
     #[cfg(unix)]
     fn empty_rtk(_name: &str) -> Option<PathBuf> {
-        use std::os::unix::fs::PermissionsExt;
+        // #10232: an in-process write fd, inherited by a sibling test's fork,
+        // fails the stub's execve with ETXTBSY and the native chain answers.
+        // See #10248
         let path = empty_rtk_stub_path();
-        std::fs::write(&path, "#!/bin/sh\ncat >/dev/null\nexit 0\n").ok()?;
-        let mut perms = std::fs::metadata(&path).ok()?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).ok()?;
+        trusty_common::exec_stub::write_executable(
+            &path,
+            b"#!/bin/sh\ncat >/dev/null\nrm -f -- \"$0\"\nexit 0\n",
+        )
+        .ok()?;
         Some(path)
     }
 
@@ -1098,7 +1110,6 @@ mod tests {
         let ((compressed, path), logged) = with_captured_warnings(|| {
             runtime.block_on(compress_with_raw_fallback(empty_rtk, "git diff", &input))
         });
-        let _ = std::fs::remove_file(empty_rtk_stub_path());
 
         assert_eq!(
             path.as_str(),

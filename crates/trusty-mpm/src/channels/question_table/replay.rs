@@ -5,6 +5,9 @@
 //! correct table never writes fails the open (#8433 r6 G5).
 //! What: [`Record`] and its line wrappers, [`Book`] (the replayed questions)
 //! with [`Book::apply`], [`decode`], [`validate`] and the served-channel serde.
+//! #10127 adds the `unparsed` op. A log holding one cannot be opened by a
+//! pre-P2 daemon (an unknown `op` fails its decode); `FORMAT_VERSION` stays 1
+//! (Architect ruling Q7).
 //! Test: `question_table_tests.rs`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,7 +16,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use trusty_channels::policy::{Channel, QuestionId};
 
-use super::{Answer, Ask, FORMAT_VERSION, Question, QuestionTableError};
+use super::{
+    Answer, Ask, FORMAT_VERSION, Question, QuestionTableError, Unparsed, validate_options,
+};
 
 /// The channels the daemon serves (gchat-mcp serves gchat); same set as the
 /// policy snapshot's.
@@ -22,9 +27,24 @@ pub(super) const SERVED: [Channel; 2] = [Channel::Slack, Channel::Telegram];
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(super) enum Record {
-    Reserve { id: QuestionId, ts: String },
-    Open { question: Question },
-    Resolve { id: QuestionId, answer: Answer },
+    Reserve {
+        id: QuestionId,
+        ts: String,
+    },
+    Open {
+        question: Question,
+    },
+    Resolve {
+        id: QuestionId,
+        answer: Answer,
+    },
+    // #10127: a reply that matched no option; digest and length only (Q4).
+    Unparsed {
+        id: QuestionId,
+        ts: String,
+        text_sha256: String,
+        text_len: usize,
+    },
 }
 
 /// One log line as written.
@@ -55,6 +75,8 @@ pub(super) struct Book {
 pub(super) struct Entry {
     pub(super) question: Question,
     pub(super) answer: Option<Answer>,
+    /// #10127: unmatched replies, oldest first; never an answer (Q1).
+    pub(super) unparsed: Vec<Unparsed>,
 }
 
 impl Book {
@@ -73,7 +95,8 @@ impl Book {
     /// is tampering or a bug; it fails the open rather than being skipped.
     /// What: the same checks run live and on replay.
     /// Test: `resolve_for_unknown_id_in_log_fails_the_open`,
-    /// `unknown_channel_or_gchat_row_fails_the_open`.
+    /// `unknown_channel_or_gchat_row_fails_the_open`,
+    /// `unparsed_for_unknown_id_fails_the_open`.
     pub(super) fn apply(&mut self, record: Record) -> Result<(), &'static str> {
         match record {
             Record::Reserve { id, .. } => {
@@ -91,6 +114,7 @@ impl Book {
                 let entry = Entry {
                     question,
                     answer: None,
+                    unparsed: Vec::new(),
                 };
                 self.questions.insert(entry.question.id, entry);
             }
@@ -100,6 +124,23 @@ impl Book {
                     return Err("second resolve for one question");
                 }
                 Some(entry) => entry.answer = Some(answer),
+            },
+            // #10127: live `mark_unparsed` refuses the same two cases.
+            Record::Unparsed {
+                id,
+                ts,
+                text_sha256,
+                text_len,
+            } => match self.questions.get_mut(&id) {
+                None => return Err("unparsed for an unknown question"),
+                Some(entry) if entry.answer.is_some() => {
+                    return Err("unparsed for an answered question");
+                }
+                Some(entry) => entry.unparsed.push(Unparsed {
+                    ts,
+                    text_sha256,
+                    text_len,
+                }),
             },
         }
         Ok(())
@@ -122,8 +163,9 @@ pub(super) fn replay_line(
         })
 }
 
-/// A question the daemon may hold: a served channel, no empty field, and a
-/// managed session id P5 can build a taint path from.
+/// A question the daemon may hold: a served channel, no empty field, a
+/// managed session id P5 can build a taint path from, and no options or an
+/// option set [`validate_options`] accepts (#10127).
 pub(super) fn validate(ask: &Ask) -> Result<(), &'static str> {
     if !SERVED.contains(&ask.channel) {
         return Err("channel not served by the daemon");
@@ -140,6 +182,9 @@ pub(super) fn validate(ask: &Ask) -> Result<(), &'static str> {
     }
     crate::core::channels_taint::sanitize_id(&ask.asker_managed_session)
         .map_err(|_| "asker managed session id is not a plain id")?;
+    if !ask.options.is_empty() {
+        validate_options(&ask.options)?;
+    }
     Ok(())
 }
 

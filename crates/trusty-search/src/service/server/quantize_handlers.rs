@@ -18,18 +18,12 @@
 //! published, #1717 / #3970), and `UsearchStore::save`'s own #1711
 //! empty-over-populated and #1717 shrink guards on the durable write.
 //!
-//! What: [`quantize_handler`] renders one [`crate::core::store::RequantizeReport`]
+//! What: [`quantize_report`] renders one [`crate::core::store::RequantizeReport`]
 //! — the same record for a dry run and an applied run, so the confirmation an
 //! operator reads is the report of the work.
 //! Test: `super::tests_quantize_6822`.
 
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, State},
-    Json,
-};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -56,23 +50,11 @@ pub struct QuantizeRequest {
     pub dry_run: Option<bool>,
 }
 
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn quantize_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    body: Option<Json<QuantizeRequest>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    quantize_report(&state, &id, body.map(|Json(req)| req))
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `POST /indexes/{id}/quantize` serves, without the transport.
 ///
-/// Why split from the axum handler: mirrors `reindex_report` so the route can be
-/// exercised directly from tests (and, later, over the socket transport) without
-/// standing up a server.
+/// Why split from the transport: mirrors `reindex_report` so the route can be
+/// exercised directly from tests and over the socket without standing up a
+/// server.
 /// What: resolves the index, refuses while a reindex is running, parses the
 /// target precision, then delegates to
 /// `CodeIndexer::requantize_vectors`. A `None` report means the index has no

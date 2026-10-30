@@ -533,7 +533,25 @@ fn embedded_default() -> (StateModel, ModelSource) {
 fn status_lifecycle_matches_the_repo_model_8609() {
     let embedded: StateModel =
         serde_yaml::from_str(STATUS_LIFECYCLE_YAML).expect("embedded lifecycle parses");
-    assert_eq!(embedded, project_model());
+    // #10275: the repo-root `project:` block names trusty-tools' own board. A
+    // repo with no model must never inherit it, so the copy carries none and
+    // the lifecycle is compared without it.
+    assert_eq!(
+        embedded.project, None,
+        "the built-in lifecycle names no board"
+    );
+    let repo = project_model();
+    assert!(
+        repo.project.is_some(),
+        "the repo-root model names its board"
+    );
+    assert_eq!(
+        embedded,
+        StateModel {
+            project: None,
+            ..repo
+        }
+    );
 }
 
 /// Why (#8609): apex-companion has no `issue-state.yaml`, and

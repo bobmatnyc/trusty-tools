@@ -1,5 +1,5 @@
-//! The `tcode` daemon's Unix-socket transport — the one every client but the
-//! GUI webview now dials (#6637, ADR-0032).
+//! The `tcode` daemon's Unix-socket transport — the only door into the
+//! persistent daemon (#6637, ADR-0032).
 //!
 //! Why: a loopback TCP port is reachable by any process on the machine,
 //! including a page running in the operator's browser, which is what forced
@@ -8,15 +8,13 @@
 //! boundary instead of a convention, so none of that machinery is ported here
 //! — [`trusty_common::uds::server`]'s module docs state why re-adding it would
 //! guard nothing. The owner ruling of 2026-09-08 makes UDS this daemon's
-//! native transport: `tcode tui` dials the socket directly, and the HTTP the
-//! GUI webview needs moves into `trusty-code-gui` in PR 2.
+//! native transport; `tcode tui` dials it and `trusty-code-gui` bridges it.
 //!
 //! What: [`run_daemon`] is the persistent daemon's whole body. It binds the
-//! socket FIRST and treats a bind failure as fatal — a daemon that silently
-//! served HTTP only would leave every socket client reporting "no daemon"
-//! while one is plainly running — then builds the router ONCE and serves it
-//! over both transports, so a session created over the socket is the same
-//! session the GUI's HTTP call sees.
+//! socket and treats a bind failure as fatal, builds the router ONCE, and
+//! serves it until SIGTERM/SIGINT. A serve loop that ends without that signal
+//! is an error too ([`join_serve_task`]), so the process exits non-zero for
+//! whoever restarts it rather than lingering as a daemon nobody can reach.
 //!
 //! The method surface is mounted, not restated. Exactly one of the 34
 //! registered JSON-RPC methods (`session.attach`) uses
@@ -30,16 +28,17 @@
 //! [`crate::session::events_stream`], and the workstream fan-out by
 //! [`crate::workstreams::events_stream`]; both are registered as STREAM
 //! methods, which the router checks before the fallback, so the names win over
-//! the pass-through.
+//! the pass-through. `session.attach` itself is refused by name on the socket
+//! ([`attach_refusal`]); it stays served over `tcode serve --stdio`.
 //!
-//! **HTTP is a transient here, not an end state.** It stays bound only because
-//! `trusty-code-gui`'s webview still `fetch`es it; PR 2 moves that bridge into
-//! the GUI crate and this daemon binds the socket alone.
+//! #6637 slice 2c retired the loopback HTTP/SSE listener that used to run
+//! beside the socket; nothing in this daemon binds a TCP port.
 //!
 //! Test: `uds_tests`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -50,7 +49,7 @@ use trusty_common::uds::{bind_singleton_hardened, server::RpcStreamItems};
 use trusty_mcp::Request;
 
 use crate::binding::ProjectBinding;
-use crate::jsonrpc::Router;
+use crate::jsonrpc::{ConnectionContext, Router};
 use crate::session::SessionRegistry;
 use crate::session::events_stream::{self, SessionEventsParams};
 use crate::workstreams::SharedWorkstreamStore;
@@ -107,6 +106,16 @@ pub fn project_socket_path(shared: &Path, project: Option<&Path>) -> PathBuf {
     shared.with_file_name(format!("{stem}-{key}.sock"))
 }
 
+/// A [`ConnectionContext`] whose notification receiver is already dropped.
+///
+/// Why (#6637): moved here from the retired REST bridge, its only
+/// other caller. A handler that queues a notification onto it stops on its
+/// next send, which is right for a connection that cannot carry one.
+fn throwaway_ctx() -> ConnectionContext {
+    let (notify_tx, _notify_rx) = tokio::sync::mpsc::unbounded_channel();
+    ConnectionContext::new(notify_tx)
+}
+
 /// Mounts [`crate::jsonrpc::Router`] as the socket router's catch-all.
 ///
 /// Why: see the module docs — the dispatcher already owns the method surface,
@@ -115,10 +124,10 @@ pub fn project_socket_path(shared: &Path, project: Option<&Path>) -> PathBuf {
 /// either half of its [`trusty_mcp::Response`]. The id is `0` on the way in
 /// and discarded on the way out — [`RpcRouter`] stamps the caller's real id
 /// onto the response frame, so the one supplied here would only be
-/// overwritten. The context is the same throwaway
-/// `crate::serve::rest::throwaway_ctx` builds, because a one-frame-in,
+/// overwritten. The context is [`throwaway_ctx`]'s, because a one-frame-in,
 /// one-frame-out connection has nowhere to push a notification to; the one
-/// handler that would try is served as a stream instead.
+/// handler that would try is refused before it reaches here
+/// ([`attach_refusal`]).
 /// Test: `uds_tests::fallback_dispatches_every_jsonrpc_router_method`,
 /// `uds_tests::fallback_reports_an_unknown_method`.
 pub struct JsonRpcFallback {
@@ -134,10 +143,7 @@ impl RpcFallback for JsonRpcFallback {
             method: method.to_string(),
             params: Some(params),
         };
-        let response = self
-            .router
-            .dispatch(request, &crate::serve::rest::throwaway_ctx())
-            .await;
+        let response = self.router.dispatch(request, &throwaway_ctx()).await;
         match (response.result, response.error) {
             (Some(result), _) => Ok(result),
             (None, Some(error)) => Err(RpcError::new(i64::from(error.code), error.message)),
@@ -150,23 +156,61 @@ impl RpcFallback for JsonRpcFallback {
     }
 }
 
-/// Assemble the socket router: two stream methods plus the whole JSON-RPC
-/// table behind them.
+/// The method [`attach_refusal`] answers for on the socket.
+const ATTACH_METHOD: &str = "session.attach";
+
+/// The socket's answer to `session.attach`: a refusal naming `session.events`.
+///
+/// Why (#6637): through the fallback, `session.attach` answered success with
+/// the replay burst and a `stream_url` for the retired HTTP route, then pushed
+/// nothing — its forwarder writes to [`throwaway_ctx`]'s dropped channel. A
+/// caller read that as attached and waited for events that never came.
+/// What: `-32601`, which JSON-RPC 2.0 defines as "method does not exist / is
+/// not available", with a message and `data` naming the stream method to open
+/// instead. Answered for every params value, before any session lookup, so a
+/// bad id never hides where the live path is. `tcode serve --stdio` still
+/// serves `session.attach`; its connection can carry notifications.
+/// Test: `uds_tests::session_attach_over_the_socket_is_refused_naming_session_events`.
+fn attach_refusal() -> RpcError {
+    RpcError::new(
+        trusty_common::uds::server::CODE_METHOD_NOT_FOUND,
+        format!(
+            "{ATTACH_METHOD} is not available on the socket: a socket connection cannot carry \
+             its live notifications. Open {} with \"stream\": true for the replay and the live \
+             tail; {ATTACH_METHOD} remains on `tcode serve --stdio`.",
+            events_stream::METHOD
+        ),
+    )
+    .with_data(serde_json::json!({
+        "error_type": "transport_unsupported",
+        "use_stream": events_stream::METHOD,
+    }))
+}
+
+/// Assemble the socket router: two stream methods, one refusal, and the whole
+/// JSON-RPC table behind them.
 ///
 /// Why: kept separate from [`run_daemon_on`] so a test can dispatch against it
 /// without binding a socket.
 /// What: registers [`crate::session::events_stream::METHOD`] and
 /// [`crate::workstreams::events_stream::METHOD`] with
-/// [`RpcRouter::typed_stream`], then mounts [`JsonRpcFallback`]. Neither
-/// stream is marked with `RpcRouter::mark_liveness`: an open tail is real work
-/// and must hold the connection, not be discounted as a monitor's poll.
-/// Test: `uds_tests::stream_names_win_over_the_fallback`.
+/// [`RpcRouter::typed_stream`], registers `session.attach` as
+/// [`attach_refusal`], then mounts [`JsonRpcFallback`]. A registered name wins
+/// over the fallback. Neither stream is marked with
+/// `RpcRouter::mark_liveness`: an open tail is real work and must hold the
+/// connection, not be discounted as a monitor's poll.
+/// Test: `uds_tests::stream_names_win_over_the_fallback`,
+/// `uds_tests::session_attach_over_the_socket_is_refused_naming_session_events`.
 pub fn build_rpc_router(
     router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
     workstreams: SharedWorkstreamStore,
 ) -> RpcRouter {
     RpcRouter::new()
+        // #6637: refused by name, so the fallback never answers it.
+        .typed(ATTACH_METHOD, |_params: Value| async {
+            Err::<Value, _>(attach_refusal())
+        })
         .typed_stream(events_stream::METHOD, move |params: SessionEventsParams| {
             let sessions = sessions.clone();
             async move { events_stream::open(sessions, params).await }
@@ -190,31 +234,22 @@ async fn open_workstream(
     workstream_events::open(workstreams, params).await
 }
 
-/// Run the persistent `tcode` daemon: bind the socket, optionally bind HTTP,
-/// and serve both until SIGTERM/SIGINT.
+/// Run the persistent `tcode` daemon: bind the socket and serve it until
+/// SIGTERM/SIGINT.
 ///
-/// Why/What: see module docs. `http_port` is `Some` for as long as
-/// `trusty-code-gui`'s webview still dials the TCP listener; PR 2 makes it
-/// `None` and deletes the parameter.
+/// Why/What: see module docs. #6637 slice 2c removed the `http_port`
+/// parameter with the TCP listener it selected.
 ///
 /// # Errors
 ///
-/// The socket could not be bound or hardened (fatal — there is deliberately no
-/// HTTP-only degrade), the router could not be assembled, or the HTTP listener
-/// failed.
+/// The socket could not be bound or hardened (fatal), the router could not be
+/// assembled, or the serve loop ended without a shutdown signal.
 ///
 /// Test: `uds_tests::run_uds_socket_bind_failure_is_fatal`,
-/// `uds_tests::session_events_stream_stays_open_under_idle_window`.
-pub async fn run_daemon(binding: ProjectBinding, http_port: Option<u16>) -> Result<()> {
+/// `tests/daemon_no_tcp_6637.rs` (the real binary, every command line).
+pub async fn run_daemon(binding: ProjectBinding) -> Result<()> {
     let socket = socket_path()?;
-    run_daemon_on(
-        binding,
-        &socket,
-        None,
-        http_port,
-        trusty_common::shutdown_signal(),
-    )
-    .await
+    run_daemon_on(binding, &socket, None, trusty_common::shutdown_signal()).await
 }
 
 /// [`run_daemon`] on this binding's own socket, [`project_socket_path`],
@@ -232,45 +267,38 @@ pub async fn run_daemon(binding: ProjectBinding, http_port: Option<u16>) -> Resu
 /// Test: `uds_tests::project_socket_path_is_per_project_and_stable` (the path);
 /// `tests/cli_e2e.rs::tui_starts_its_own_daemon_beside_another_projects` (the
 /// real daemon binding it).
-pub async fn run_project_daemon(binding: ProjectBinding, http_port: Option<u16>) -> Result<()> {
+pub async fn run_project_daemon(binding: ProjectBinding) -> Result<()> {
     let socket = project_socket_path(&socket_path()?, binding.root());
-    run_daemon_on(
-        binding,
-        &socket,
-        None,
-        http_port,
-        trusty_common::shutdown_signal(),
-    )
-    .await
+    run_daemon_on(binding, &socket, None, trusty_common::shutdown_signal()).await
 }
 
 /// [`run_daemon`] with the socket path, the workstream data directory and the
 /// shutdown trigger injected.
 ///
-/// Why: the same seam [`crate::serve::build_router_at`] has, and `pub` for
-/// the same reason [`crate::serve::http::build_axum_router`] is — an
-/// integration test outside this crate needs it to stand a real daemon up on a
-/// throwaway socket. Why: — a test drives
-/// the real bind/serve/unlink machinery against a tempdir socket and its own
-/// shutdown signal, without touching the operator's data directory or waiting
-/// on a real one.
+/// Why: the same seam [`crate::serve::build_router_at`] has, and `pub` so an
+/// integration test outside this crate can stand a real daemon up on a
+/// throwaway socket with its own shutdown signal, without touching the
+/// operator's data directory.
 /// What: `data_dir` of `None` is production — `crate::serve::build_router`,
 /// which resolves the real `~/.trusty-code` and starts the log-drain
 /// scheduler. `Some(dir)` routes through `build_router_at` instead, which does
-/// neither.
+/// neither. The serve loop runs in its own task so a panic in it surfaces here
+/// as an error rather than vanishing with the handle.
+///
+/// # Errors
+///
+/// As [`run_daemon`].
 pub async fn run_daemon_on(
     binding: ProjectBinding,
     socket: &Path,
     data_dir: Option<&Path>,
-    http_port: Option<u16>,
-    shutdown: impl std::future::Future<Output = ()> + Send,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    // Bound FIRST, and fatally: a daemon that could not take the socket must
-    // not come up serving HTTP alone, because every socket client would then
-    // report "no daemon" against a process that is plainly running.
-    // `bind_singleton_hardened` (not `bind_hardened`) because this daemon is
-    // restart-prone and has to take over the socket file a killed predecessor
-    // left behind; a LIVE owner is still refused.
+    // Bound FIRST, and fatally: a daemon that could not take the socket has no
+    // door at all. `bind_singleton_hardened` (not `bind_hardened`) because this
+    // daemon is restart-prone and has to take over the socket file a killed
+    // predecessor left behind; a LIVE owner is still refused, which is the
+    // only duplicate guard now that no TCP port exists (#6637).
     let listener = bind_singleton_hardened(socket).await.with_context(|| {
         format!(
             "tcode serve: bind the daemon socket at {}",
@@ -289,49 +317,73 @@ pub async fn run_daemon_on(
     );
     eprintln!("tcode serve: listening on {}", socket.display());
 
-    // #4512: `GET /health` reports this binding, so keep a handle before
-    // `build_router` consumes it.
-    let published_binding = Arc::new(binding.clone());
     let (router, sessions, workstreams) = match data_dir {
         Some(dir) => super::build_router_at(binding, dir).await?,
         None => super::build_router(binding).await?,
     };
-    let router = Arc::new(router);
     let rpc_router = Arc::new(build_rpc_router(
-        router.clone(),
+        Arc::new(router),
         sessions.clone(),
-        workstreams.clone(),
+        workstreams,
     ));
 
-    let serve_socket = async {
+    // #6637: set when the shutdown signal fires, so a loop that returns
+    // without it reads as the failure it is.
+    let requested = Arc::new(AtomicBool::new(false));
+    let flag = requested.clone();
+    let shutdown = async move {
+        shutdown.await;
+        flag.store(true, Ordering::SeqCst);
+    };
+    let owned_socket = socket.to_path_buf();
+    let serve = tokio::spawn(async move {
         serve_until(&listener, rpc_router, RpcServeOptions::default(), shutdown).await;
         // Unlink BEFORE dropping the listener — `RpcServer::run` records why:
         // with the order reversed a successor that rebinds in the gap has its
         // fresh socket deleted by this process.
-        if let Err(e) = std::fs::remove_file(socket) {
-            tracing::debug!(socket = %socket.display(), error = %e, "socket already gone");
+        if let Err(e) = std::fs::remove_file(&owned_socket) {
+            tracing::debug!(socket = %owned_socket.display(), error = %e, "socket already gone");
         }
         drop(listener);
-        Ok::<(), anyhow::Error>(())
-    };
-
-    match http_port {
-        Some(port) => {
-            let serve_http = super::http::run_http(
-                router,
-                sessions.clone(),
-                workstreams,
-                port,
-                published_binding,
-            );
-            tokio::try_join!(serve_socket, serve_http)?;
-        }
-        None => serve_socket.await?,
-    }
+    });
+    let served = join_serve_task(serve, &requested).await;
 
     sessions.shutdown_executions(super::SHUTDOWN_GRACE).await;
+    served?;
     info!("tcode serve: stopped");
     Ok(())
+}
+
+/// Wait for the serve task, and fail when it ended without a shutdown request.
+///
+/// Why (#6637, the Fail-Open Check): the socket is the daemon's only door. A
+/// loop that dies or returns on its own leaves a process that runs and answers
+/// nobody, so it must end the daemon with an error and a non-zero exit for its
+/// supervisor to see. Mirrors `trusty-mpm`'s `daemon::socket::join_serve_task`
+/// (#6288 S3a).
+/// What: `Ok` only when the task returned AND `requested` was set first; a
+/// panic, a cancelled task, or an unrequested return is an `Err` naming why.
+///
+/// # Errors
+///
+/// As above.
+///
+/// Test: `uds_tests::join_serve_task_errors_when_the_loop_panics`,
+/// `uds_tests::join_serve_task_errors_when_the_loop_ends_without_a_shutdown`,
+/// `uds_tests::join_serve_task_is_ok_after_a_requested_shutdown`.
+pub async fn join_serve_task(
+    task: tokio::task::JoinHandle<()>,
+    requested: &AtomicBool,
+) -> Result<()> {
+    match task.await {
+        Err(join) => Err(anyhow::anyhow!(
+            "tcode serve: the socket accept loop died: {join}"
+        )),
+        Ok(()) if !requested.load(Ordering::SeqCst) => Err(anyhow::anyhow!(
+            "tcode serve: the socket accept loop ended without a shutdown signal"
+        )),
+        Ok(()) => Ok(()),
+    }
 }
 
 #[cfg(test)]

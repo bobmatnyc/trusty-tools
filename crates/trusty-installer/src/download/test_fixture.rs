@@ -89,16 +89,26 @@ pub(crate) async fn serve_fixture(routes: Routes) -> String {
 /// without it the suite was green while a multi-tool set collided on
 /// `tools/LICENSE` and could never install).
 pub(crate) fn fake_tarball(binary: &str, version_line: &str) -> Vec<u8> {
+    fake_tarball_bins(&[binary], version_line)
+}
+
+/// [`fake_tarball`] with one 0755 script per name in `binaries`.
+///
+/// Why: `trusty-search` ships three binaries (#9468), so its release asset
+/// fixture must carry all three.
+pub(crate) fn fake_tarball_bins(binaries: &[&str], version_line: &str) -> Vec<u8> {
     use flate2::{write::GzEncoder, Compression};
     let script = format!("#!/bin/sh\necho '{version_line}'\n");
     let data = script.as_bytes();
     let enc = GzEncoder::new(Vec::new(), Compression::fast());
     let mut ar = tar::Builder::new(enc);
-    let mut header = tar::Header::new_gnu();
-    header.set_size(data.len() as u64);
-    header.set_mode(0o755);
-    header.set_cksum();
-    ar.append_data(&mut header, binary, data).unwrap();
+    for binary in binaries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        ar.append_data(&mut header, binary, data).unwrap();
+    }
 
     let license = b"MIT\n";
     let mut doc = tar::Header::new_gnu();

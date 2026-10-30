@@ -17,6 +17,7 @@ pub(crate) mod commit;
 // #9230: an incremental commit stamps the corpus's reindex stamp.
 pub(crate) mod commit_stamp;
 pub(crate) mod deferred;
+pub(crate) mod deferred_stream;
 pub(crate) mod embed;
 // #8976: what one `index_file` write did, so zero chunks never read as success.
 pub(crate) mod outcome;
@@ -24,6 +25,10 @@ pub(crate) mod outcome;
 pub(crate) mod refusals;
 // #8959: replacing a file's prior chunks — fail-closed delete, per-path lock.
 pub(crate) mod supersede;
+// #9284: count and warn on chunks cut at the embedder's input window.
+pub(crate) mod truncation;
+// #10481: split new chunks at the embedder window; header on the embedded text.
+pub(crate) mod window_split;
 
 use anyhow::{Context, Result};
 
@@ -92,8 +97,12 @@ impl CodeIndexer {
     /// it to the corpus if wired, and installs it — unless the
     /// contributed-overlay merge failed, in which case the previous serving
     /// graph is kept and the failure is returned (#5505).
+    /// While the corpus is still evicted after the bounded rehydrate wait it
+    /// builds nothing and returns a `merge_error` outcome (#10110).
     /// Test: `test_symbol_graph_rebuilds_after_indexing`;
-    /// `contrib_load_failure_installs_nothing` covers the not-installed arm.
+    /// `contrib_load_failure_installs_nothing` covers the not-installed arm;
+    /// `a_rebuild_that_outlasts_the_rehydrate_wait_persists_nothing_and_retries_10110`
+    /// covers the deferred arm.
     pub(super) async fn rebuild_symbol_graph(&self) -> ContribMergeOutcome {
         // Issue #2162 follow-up: this function reads `self.chunks` and
         // `self.entities` directly below, but several call paths
@@ -109,6 +118,23 @@ impl CodeIndexer {
         // nothing was evicted.
         self.ensure_chunks_loaded().await;
         self.ensure_bm25_entities_loaded().await;
+        // #10110: the two waits above are bounded, so a cold scan can outlast
+        // them and leave the maps empty. Building now would persist an empty
+        // graph and clear the durable dirty mark. Keep the mark and the
+        // serving graph, make sure a scan is running, and let the caller
+        // retry (the ticker does, on a later tick).
+        if self.corpus_evicted() {
+            drop(self.begin_corpus_rehydrate());
+            tracing::warn!(
+                index_id = %self.index_id,
+                "kg: corpus still rehydrating after the bounded wait; \
+                 symbol-graph rebuild deferred (#10110)"
+            );
+            return ContribMergeOutcome {
+                merge_error: Some("corpus still rehydrating; rebuild deferred".to_string()),
+                ..ContribMergeOutcome::default()
+            };
+        }
         // #8959: the snapshot below covers every write marked before this.
         let ticket = self.graph_refresh.begin_full_rebuild();
 
@@ -277,6 +303,7 @@ impl CodeIndexer {
         }
 
         let bm25_text = Self::bm25_doc_text(&chunk);
+        let _fence = self.rehydrate_write_fence().await; // #10209
         self.bm25.write().await.upsert_document(&id, &bm25_text);
 
         self.chunks.write().await.insert(id, chunk);
@@ -388,6 +415,9 @@ impl CodeIndexer {
                 self.index_id
             );
         }
+        // #10159: active from here, embed included, so the ticker's quiet
+        // rebuild cannot fire mid-write. Declared first, so it drops last.
+        let _active_write = self.begin_active_write();
         // #8959: one write per path at a time, from the superseded-id snapshot
         // below through the commit; otherwise two writes each removed only
         // the ids they saw and both versions stayed indexed.
@@ -444,10 +474,21 @@ impl CodeIndexer {
         populate_virtual_terms(&mut chunks, &entities);
 
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        // #10481: replace over-window chunks with windows before they embed. Ahead
+        // of the superseded-id snapshot, so the ids kept are the windows' own.
+        let (windowed, headers) = self.split_for_embed(chunks).await?;
+        let chunks = windowed;
+        // #10504: the reply counts the chunks committed, the windows, not the parse.
+        let outcome = match outcome {
+            IndexFileOutcome::Indexed { .. } => IndexFileOutcome::Indexed {
+                chunks: chunks.len(),
+            },
+            other => other,
+        };
         // #8959: ids this file held whose content the new text no longer has.
         // Chunk ids embed line spans and symbol names, so an upsert alone
         // left them searchable beside the new content.
-        let superseded = self.superseded_chunk_ids(file_path, &chunks).await;
+        let superseded = self.superseded_chunk_ids(file_path, &chunks).await?;
 
         // #3048: a vector-disabled index must not embed on the incremental
         // path either. All-`None` embeddings are exactly what
@@ -459,7 +500,10 @@ impl CodeIndexer {
         } else if self.skip_vector {
             Some(vec![None; chunks.len()])
         } else {
-            Some(self.embed_chunks_in_batches(&chunks, None, None).await?)
+            Some(
+                self.embed_chunks_in_batches(&chunks, None, None, headers.as_deref())
+                    .await?,
+            )
         };
         // #8959: durable stale mark before anything below mutates the corpus;
         // the guard sets the in-memory mark when the write ends.
@@ -500,10 +544,14 @@ impl CodeIndexer {
             .enrich_with_nlp_entities(file_path, content, &chunk_contents, entities)
             .await;
 
-        self.entities
-            .write()
-            .await
-            .insert(file_path.to_string(), all_entities);
+        {
+            // #10209: a rehydrate must not overwrite this list with its scan.
+            let _fence = self.rehydrate_write_fence().await;
+            self.entities
+                .write()
+                .await
+                .insert(file_path.to_string(), all_entities);
+        }
         // #3048: skip_kg parity — `_graph_write` is `None` for a skip_kg
         // index, so this path never marks (or later rebuilds) its graph. Gated
         // here rather than inside `rebuild_symbol_graph`, the shared choke
@@ -709,8 +757,18 @@ impl CodeIndexer {
 
         let (embeddings, embed_ms, vector_count) = if embed {
             let embed_start = std::time::Instant::now();
+            // #10481: replace over-window chunks with windows before they embed.
+            let (windowed, headers) = self
+                .split_for_embed(std::mem::take(&mut all_chunks))
+                .await?;
+            all_chunks = windowed;
             let embeddings = self
-                .embed_chunks_in_batches(&all_chunks, progress_tx.as_ref(), None)
+                .embed_chunks_in_batches(
+                    &all_chunks,
+                    progress_tx.as_ref(),
+                    None,
+                    headers.as_deref(),
+                )
                 .await?;
             let embed_ms = embed_start.elapsed().as_millis() as u64;
             let vector_count = embeddings.iter().filter(|e| e.is_some()).count();
@@ -826,6 +884,8 @@ impl CodeIndexer {
     /// What: threads `pause` into `embed_chunks_in_batches`, which stops at the
     /// next wave and leaves the tail `None`. Only the embedded PREFIX is
     /// committed, so those vectors are durable and the next pass skips them.
+    /// #10294: each wave is committed before the next starts, and the vector
+    /// snapshot is written on a cadence and on exit (`deferred_stream`).
     /// `paused` in the returned [`EmbedCatchUp`] tells the caller the pass owes
     /// more work — it must not be reported as a completed stage. `pause: None`
     /// is the un-pausable form every caller used before #6524.
@@ -842,11 +902,9 @@ impl CodeIndexer {
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
     ) -> anyhow::Result<EmbedCatchUp> {
-        // #8600: the three phases `run_embed_catch_up` runs with the indexer
-        // guard dropped between them, here under one borrow.
-        let plan = self.plan_deferred_embed().await;
-        let run = plan.embed(progress_tx, pause).await?;
-        self.commit_deferred_embed(plan, run).await
+        // #10294: the per-wave driver `run_embed_catch_up` uses, here under
+        // one borrow instead of a read guard per phase.
+        deferred_stream::run_deferred_embed(|| std::future::ready(self), progress_tx, pause).await
     }
 
     /// Count corpus chunks NOT yet embedded (issue #3748 slice A, review

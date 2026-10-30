@@ -35,7 +35,8 @@ use super::types::DispatchError;
 /// `start_line`, `end_line`, `compact_snippet`, `score`, and `match_reason`
 /// survive — plus `index_id`, which is the only way to tell which project a
 /// fan-out hit came from.
-pub(super) const DROPPED_FIELDS: [&str; 10] = [
+pub(super) const DROPPED_FIELDS: [&str; 11] = [
+    "bm25_raw",
     "calls",
     "chunk_depth",
     "chunk_type",

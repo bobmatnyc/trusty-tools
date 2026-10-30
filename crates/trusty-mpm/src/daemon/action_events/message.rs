@@ -24,7 +24,8 @@ use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use trusty_common::control_bus::{
-    EventId, HarnessEvent, HarnessPayload, HarnessSource, MessageChannel, MessageEvent,
+    EventId, HarnessEvent, HarnessPayload, HarnessSource, MessageChannel, MessageDirection,
+    MessageEvent,
 };
 
 use super::tmux_send::send_keys_calls;
@@ -39,7 +40,7 @@ pub const MESSAGE_BODY_ENV: &str = "TRUSTY_MPM_EVENTS_MESSAGE_BODY";
 pub const MAX_BODY_BYTES: usize = 4096;
 
 /// Longest `to` carried, in characters.
-const MAX_TO_CHARS: usize = 256;
+pub(crate) const MAX_TO_CHARS: usize = 256;
 
 /// The harness tool that sends a cross-session message.
 const SEND_MESSAGE_TOOL: &str = "SendMessage";
@@ -131,6 +132,8 @@ pub fn message_event(
     MessageEvent {
         at,
         channel,
+        // #9167 PR2: the receiving side overrides this (`received.rs`).
+        direction: MessageDirection::Sent,
         from: from.to_string(),
         to: scrub_credentials(to).chars().take(MAX_TO_CHARS).collect(),
         // #9167: the raw text, so the scan cannot rewrite the marker.

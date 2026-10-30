@@ -147,6 +147,10 @@ pub mod content_source;
 pub mod context_usage;
 // #9012: skills, instructions, output styles and SM instructions from content.
 pub mod daemon_identity;
+// #9758: the `mpm.dbatg.*` bodies the daemon, the MCP tool and `tm dbatg` share.
+pub mod dbatg;
+// #10063: the `mpm.architect.dashboard.*` host facts and verb routing.
+pub mod architect_dashboard;
 pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;
@@ -184,6 +188,8 @@ pub(crate) mod gh_account_registry;
 pub mod gh_identity;
 // #9091: asks gh about a login in the daemon's env and in tm's account dirs.
 pub(crate) mod gh_login_probe;
+// #10037: a proven gh token goes to gh's keyring entry, never `hosts.yml`.
+pub(crate) mod gh_keyring_token;
 // #9750: the launch-time keyring login check for a pinned project (D6e).
 pub mod gh_login_verify;
 // #9091: `[accounts]` org → gh account map and the one account resolver.
@@ -206,6 +212,9 @@ pub mod home_trust_seed;
 // #8545: a test binary's fence around the operator's home config paths.
 pub mod home_write_fence;
 pub mod hook;
+// #10263: bare-script hook commands — detect, and add the interpreter.
+pub mod hook_interpreter;
+pub mod hook_interpreter_doctor;
 pub mod host_state_gate;
 pub mod idle_nudge;
 pub mod idle_parking;
@@ -240,6 +249,8 @@ pub mod local_repo_url;
 pub mod managed_config;
 pub mod manifest;
 pub mod mcp_config;
+// #10041: credential values in a `tm mcp add -e` pair go to the store, not the file.
+pub mod mcp_credential_env;
 pub mod mcp_provenance;
 // #4181: per-project MCP pins now travel as spawn environment variables, not as
 // arguments injected into a workspace `.mcp.json` (ADR-0042).
@@ -260,6 +271,10 @@ pub mod memory_verbs;
 pub mod memory_forget;
 // #9544: `tm memory rename` — trusty-memory's `palace_rename` over the socket.
 pub mod memory_rename;
+// #9538: the protocol-checked door to the memory socket.
+pub mod memory_checked;
+#[cfg(test)]
+mod memory_protocol_gate_tests;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;
@@ -276,6 +291,10 @@ pub mod overseer_config;
 // #4058: single canonical source for the crate's own `[[bin]]` names, so
 // discovery/hooks/statusline/daemon-PID lists can't drift out of sync again.
 pub mod own_binary_names;
+// #10136: whether a pane's harness holds its tty foreground — the pane write gate.
+pub mod pane_foreground;
+#[cfg(test)]
+pub(crate) mod pane_foreground_tests;
 pub mod paths;
 pub mod pid_registry;
 // #8992: the built-in tools a tm-launched PM does not load.
@@ -434,9 +453,13 @@ pub mod trusty_tools_config;
 pub mod twin_arming;
 // #8878 ruling A: the Architect is bound to the `claude` tm launched for it.
 pub mod architect_compat;
+// #10459: the Claude Code version an Architect launch requires (`onFailure`).
+pub mod architect_claude_version;
 // #8436: the Architect's fixed core and its composed prompt.
 pub mod architect_core;
 pub mod architect_launch;
+// #10127: the Architect's own `--settings` deny and chat-token env scrub.
+pub mod architect_lockdown;
 pub mod architect_prompt;
 // #8878 R1: the Architect's tmux session name, recorded at launch.
 pub mod architect_session;

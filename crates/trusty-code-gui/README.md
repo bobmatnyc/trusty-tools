@@ -15,16 +15,20 @@ REST gateway (#2983) lands.
 
 ## Architecture — thin client (DOC-39 §2.1)
 
-The `tcode serve --http` daemon owns all logic. The GUI does no client-side
+The `tcode serve` daemon owns all logic. It serves JSON-RPC on its Unix
+socket only and binds no TCP port (#6637). The GUI does no client-side
 computation and no Tauri-native filesystem/privileged access — web and Tauri
 builds must be behaviorally identical:
 
-- **Data fetching**: the Svelte frontend calls the daemon's HTTP API directly
-  via `fetch()` (currently `GET /health`), whether it runs inside Tauri's
-  webview or a plain browser tab.
-- **Tauri IPC**: exactly one command, `get_daemon_url`, which echoes the
-  configured daemon base URL. It exists only because a plain web page cannot
-  read the `TRUSTY_CODE_URL` environment variable — the native process can.
+- **Bridge**: a webview cannot dial a Unix socket, so this app's Rust side runs
+  an HTTP+SSE bridge (`src/bridge/`). It dials the daemon's socket and serves
+  the webview on an ephemeral loopback port, `127.0.0.1:0`, with a credential
+  minted per launch (`src/bridge/serve.rs`). #10166 tracks replacing this
+  remaining loopback listener with a non-TCP transport.
+- **Data fetching**: the Svelte frontend calls the bridge via `fetch()` and
+  `EventSource`, whether it runs inside Tauri's webview or a plain browser tab.
+- **Tauri IPC**: `get_daemon_url` and `get_daemon_token` hand the webview the
+  bridge's URL and credential. Only the native process knows them.
 
 ### Tech Stack
 
@@ -33,10 +37,12 @@ builds must be behaviorally identical:
 
 ## Daemon connection
 
-Default base URL: `http://127.0.0.1:7882`, matching
-`trusty_code::serve::DEFAULT_HTTP_PORT` (`crates/trusty-code/src/serve/mod.rs`).
-Override with the `TRUSTY_CODE_URL` environment variable (Tauri mode) or the
-`trusty-code.daemonUrl` `localStorage` key (web mode).
+The bridge dials the daemon's socket, `trusty-code.sock` in the daemon data
+directory (`trusty_common::daemon_addr::daemon_socket_path("trusty-code")`).
+`TRUSTY_DATA_DIR_OVERRIDE` moves that directory. There is no fixed port: the
+bridge picks a free loopback port at launch and logs it. In web mode, set the
+`trusty-code.daemonUrl` `localStorage` key to that bridge URL and
+`trusty-code.daemonToken` to the bridge credential.
 
 ## Building
 

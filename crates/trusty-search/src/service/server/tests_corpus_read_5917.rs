@@ -24,7 +24,6 @@
 
 use super::*;
 use axum::http::StatusCode;
-use axum::Json;
 
 /// Same definition redb keyed the corpus rows under — redb identifies a table
 /// by name, so dropping this one breaks the real reads.
@@ -173,15 +172,9 @@ fn grep_request(pattern: &str) -> crate::service::grep::GrepRequest {
 #[serial_test::serial]
 async fn search_over_an_unreadable_corpus_returns_503_naming_the_index() {
     let fx = Fixture::build("corpus-read-5917").await;
-    let call = |q| {
-        search_handler(
-            axum::extract::State(Arc::clone(&fx.state)),
-            axum::extract::Path("corpus-read-5917".to_string()),
-            axum::extract::Json(q),
-        )
-    };
+    let call = |q| search_report(&fx.state, "corpus-read-5917", q);
 
-    let Json(warm) = call(search_query("authenticate_user"))
+    let warm = call(search_query("authenticate_user"))
         .await
         .expect("the query answers while the corpus reads");
     assert!(
@@ -193,7 +186,7 @@ async fn search_over_an_unreadable_corpus_returns_503_naming_the_index() {
     );
 
     fx.break_corpus_reads().await;
-    let (status, Json(body)) = call(search_query("authenticate_user"))
+    let (status, body) = call(search_query("authenticate_user"))
         .await
         .expect_err("an unreadable corpus must be refused");
     assert_corpus_unavailable(status, &body, "corpus-read-5917", "search");
@@ -212,21 +205,21 @@ async fn search_over_an_unreadable_corpus_returns_503_naming_the_index() {
 async fn grep_over_an_unreadable_corpus_returns_503_naming_the_index() {
     let fx = Fixture::build("grep-read-5917").await;
     let call = || {
-        super::files::grep_handler(
-            axum::extract::State(Arc::clone(&fx.state)),
-            axum::extract::Path("grep-read-5917".to_string()),
-            axum::extract::Json(grep_request("authenticate_user")),
+        super::files::grep_report(
+            &fx.state,
+            "grep-read-5917",
+            grep_request("authenticate_user"),
         )
     };
 
-    let Json(warm) = call().await.expect("grep answers while the corpus reads");
+    let warm = call().await.expect("grep answers while the corpus reads");
     assert!(
         !warm.matches.is_empty(),
         "the pattern matches before the corpus breaks"
     );
 
     fx.break_corpus_reads().await;
-    let (status, Json(body)) = call()
+    let (status, body) = call()
         .await
         .expect_err("an unreadable corpus must be refused, not reported as zero matches");
     assert_corpus_unavailable(status, &body, "grep-read-5917", "grep");
@@ -245,12 +238,10 @@ async fn global_grep_over_an_unreadable_corpus_returns_503() {
     let fx = Fixture::build("global-grep-5917").await;
     fx.break_corpus_reads().await;
 
-    let (status, Json(body)) = super::files::global_grep_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Json(grep_request("authenticate_user")),
-    )
-    .await
-    .expect_err("a fan-out over an unreadable corpus must be refused");
+    let (status, body) =
+        super::files::global_grep_report(&fx.state, grep_request("authenticate_user"))
+            .await
+            .expect_err("a fan-out over an unreadable corpus must be refused");
     assert_corpus_unavailable(status, &body, "global-grep-5917", "global grep");
 }
 
@@ -272,13 +263,9 @@ async fn call_chain_over_an_unreadable_corpus_is_503_not_404() {
     let params: super::files::CallChainParams =
         serde_json::from_value(serde_json::json!({ "entry_point": "authenticate_user" }))
             .expect("call chain params");
-    let (status, Json(body)) = super::files::call_chain_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Path("callchain-read-5917".to_string()),
-        axum::extract::Query(params),
-    )
-    .await
-    .expect_err("an unreadable corpus must not render as 'entry point not found'");
+    let (status, body) = super::files::call_chain_report(&fx.state, "callchain-read-5917", params)
+        .await
+        .expect_err("an unreadable corpus must not render as 'entry point not found'");
     assert_ne!(
         status,
         StatusCode::NOT_FOUND,
@@ -303,9 +290,9 @@ async fn global_search_reports_the_index_it_dropped_for_an_unreadable_corpus() {
     let fx = Fixture::build("global-search-5917").await;
     fx.break_corpus_reads().await;
 
-    let Json(body) = super::search_global::global_search_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Json(super::search_global::GlobalSearchRequest {
+    let body = super::global_search_report(
+        &fx.state,
+        super::search_global::GlobalSearchRequest {
             query: "authenticate_user".to_string(),
             top_k: 5,
             full_content: false,
@@ -320,7 +307,7 @@ async fn global_search_reports_the_index_it_dropped_for_an_unreadable_corpus() {
             per_index_deadline_ms: None,
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await
     .expect("the fan-out itself still answers");
@@ -362,9 +349,9 @@ async fn global_search_reports_the_index_it_dropped_for_a_running_migration() {
     let flag = handle.indexer.read().await.migration_flag();
     let _window = crate::core::indexer::MigrationWindow::open(flag);
 
-    let Json(body) = super::search_global::global_search_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Json(super::search_global::GlobalSearchRequest {
+    let body = super::global_search_report(
+        &fx.state,
+        super::search_global::GlobalSearchRequest {
             query: "authenticate_user".to_string(),
             top_k: 5,
             full_content: false,
@@ -379,7 +366,7 @@ async fn global_search_reports_the_index_it_dropped_for_a_running_migration() {
             per_index_deadline_ms: None,
             ripgrep_fallback: None,
             lexical_limit: None,
-        }),
+        },
     )
     .await
     .expect("the fan-out itself still answers");
@@ -469,22 +456,17 @@ fn chunks_params() -> super::files::ChunksParams {
 #[serial_test::serial]
 async fn chunks_during_a_migration_is_503_not_a_partial_page() {
     let fx = Fixture::build("chunks-migrating-6581").await;
-    let call = || {
-        super::files::get_index_chunks_handler(
-            axum::extract::State(Arc::clone(&fx.state)),
-            axum::extract::Path("chunks-migrating-6581".to_string()),
-            axum::extract::Query(chunks_params()),
-        )
-    };
+    let params = chunks_params();
+    let call = || super::files::index_chunks_report(&fx.state, "chunks-migrating-6581", &params);
 
-    let Json(warm) = call().await.expect("the page answers outside the window");
+    let warm = call().await.expect("the page answers outside the window");
     assert!(
         warm["total"].as_u64().expect("total is a number") > 0,
         "the fixture holds chunks before the window opens; body={warm:?}"
     );
 
     let _window = open_migration_window(&fx).await;
-    let (status, Json(body)) = call()
+    let (status, body) = call()
         .await
         .expect_err("a mid-rebuild corpus must not be paged as the whole one");
     assert_migration_in_progress(status, &body, "chunks-migrating-6581", "chunks");
@@ -507,13 +489,10 @@ async fn call_chain_during_a_migration_is_503_not_404() {
     let params: super::files::CallChainParams =
         serde_json::from_value(serde_json::json!({ "entry_point": "authenticate_user" }))
             .expect("call chain params");
-    let (status, Json(body)) = super::files::call_chain_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Path("callchain-migrating-6581".to_string()),
-        axum::extract::Query(params),
-    )
-    .await
-    .expect_err("a migrating index must not render as 'entry point not found'");
+    let (status, body) =
+        super::files::call_chain_report(&fx.state, "callchain-migrating-6581", params)
+            .await
+            .expect_err("a migrating index must not render as 'entry point not found'");
     assert_ne!(
         status,
         StatusCode::NOT_FOUND,
@@ -535,21 +514,21 @@ async fn call_chain_during_a_migration_is_503_not_404() {
 async fn grep_during_a_migration_is_503_not_zero_matches() {
     let fx = Fixture::build("grep-migrating-6581").await;
     let call = || {
-        super::files::grep_handler(
-            axum::extract::State(Arc::clone(&fx.state)),
-            axum::extract::Path("grep-migrating-6581".to_string()),
-            axum::extract::Json(grep_request("authenticate_user")),
+        super::files::grep_report(
+            &fx.state,
+            "grep-migrating-6581",
+            grep_request("authenticate_user"),
         )
     };
 
-    let Json(warm) = call().await.expect("grep answers outside the window");
+    let warm = call().await.expect("grep answers outside the window");
     assert!(
         !warm.matches.is_empty(),
         "the pattern matches before the window opens"
     );
 
     let _window = open_migration_window(&fx).await;
-    let (status, Json(body)) = call()
+    let (status, body) = call()
         .await
         .expect_err("a migrating index must not be reported as zero matches");
     assert_migration_in_progress(status, &body, "grep-migrating-6581", "grep");
@@ -568,12 +547,10 @@ async fn global_grep_during_a_migration_is_503() {
     let fx = Fixture::build("global-grep-migrating-6581").await;
     let _window = open_migration_window(&fx).await;
 
-    let (status, Json(body)) = super::files::global_grep_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Json(grep_request("authenticate_user")),
-    )
-    .await
-    .expect_err("a fan-out across a migrating index must be refused");
+    let (status, body) =
+        super::files::global_grep_report(&fx.state, grep_request("authenticate_user"))
+            .await
+            .expect_err("a fan-out across a migrating index must be refused");
     assert_migration_in_progress(status, &body, "global-grep-migrating-6581", "global grep");
 }
 
@@ -594,15 +571,15 @@ async fn graph_neighbors_during_a_migration_is_503_not_count_zero() {
     let fx = Fixture::build("neighbors-migrating-6581").await;
     let _window = open_migration_window(&fx).await;
 
-    let (status, Json(body)) = super::contrib_graph::graph_neighbors_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Path("neighbors-migrating-6581".to_string()),
-        axum::extract::Query(super::contrib_graph::NeighborsParams {
+    let (status, body) = super::contrib_graph::graph_neighbors_report(
+        &fx.state,
+        "neighbors-migrating-6581",
+        &super::contrib_graph::NeighborsParams {
             node: "authenticate_user".to_string(),
             direction: None,
             edge_kinds: None,
             max_hops: None,
-        }),
+        },
     )
     .await
     .expect_err("a migrating index must not answer an empty neighbour list");
@@ -626,10 +603,10 @@ async fn graph_ingest_during_a_migration_is_503_and_stores_nothing() {
     let fx = Fixture::build("ingest-migrating-6581").await;
     let _window = open_migration_window(&fx).await;
 
-    let (status, Json(body)) = super::contrib_graph::ingest_graph_handler(
-        axum::extract::State(Arc::clone(&fx.state)),
-        axum::extract::Path("ingest-migrating-6581".to_string()),
-        axum::extract::Json(super::contrib_graph::IngestGraphRequest {
+    let (status, body) = super::contrib_graph::ingest_graph_report(
+        &fx.state,
+        "ingest-migrating-6581",
+        super::contrib_graph::IngestGraphRequest {
             schema: Some("navigatsql/kggraph@1".into()),
             producer: "navigatsql".into(),
             producer_version: None,
@@ -639,7 +616,7 @@ async fn graph_ingest_during_a_migration_is_503_and_stores_nothing() {
                 kind: "table".into(),
             }],
             edges: Vec::new(),
-        }),
+        },
     )
     .await
     .expect_err("an ingest during a migration must be refused, not merged");

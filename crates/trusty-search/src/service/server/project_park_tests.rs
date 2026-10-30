@@ -22,6 +22,9 @@ use crate::service::rpc::{project_map, queries, reads};
 const REPO: &str = "bobmatnyc/apex";
 const MAIN: &str = "apex-main";
 const WT: &str = "apex-wt";
+// #10307: the reindex claim slot is process-global and keyed by index id, so a
+// test that asserts a reindex is queued owns an id no sibling test queries.
+const WT_OWN: &str = "apex-wt-10307";
 
 struct Fixture {
     tmp: tempfile::TempDir,
@@ -59,6 +62,11 @@ impl Fixture {
 /// A main checkout (unloaded) and a linked worktree of one repo, the worktree
 /// loaded with one indexed file so its colocated corpus exists on disk.
 async fn fixture() -> Fixture {
+    fixture_with_wt_id(WT).await
+}
+
+/// [`fixture`] with the worktree registered under `wt_id`.
+async fn fixture_with_wt_id(wt_id: &str) -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
     let main = tmp.path().join("apex");
     std::fs::create_dir_all(main.join(".git")).expect("main checkout");
@@ -69,7 +77,7 @@ async fn fixture() -> Fixture {
         repo_identity: Some(REPO.to_string()),
         ..PersistedIndex::new(id, root)
     };
-    let wt_row = row(WT, &wt);
+    let wt_row = row(wt_id, &wt);
     let registry = tmp.path().join("indexes.toml");
     crate::service::persistence::save_index_registry_at(
         &registry,
@@ -86,7 +94,7 @@ async fn fixture() -> Fixture {
         "path": "src/a.rs", "content": "fn authenticate() -> bool { true }",
     }))
     .expect("IndexFileRequest");
-    super::files::index_file_report(&state, WT, req)
+    super::files::index_file_report(&state, wt_id, req)
         .await
         .expect("the write loads the worktree index");
     let router = reads::register(RpcRouter::new(), &state);
@@ -147,18 +155,22 @@ async fn the_map_method_lists_pins_and_parks() {
 
 /// Why: parking keeps the corpus and the registration and unloads the index;
 /// unparking reloads it and queues its reindex.
+/// What: runs under its own index id (`WT_OWN`, #10307): the reindex claim is
+/// process-global per id, and `a_request_by_id_is_served_while_the_map_is_corrupt`
+/// queries `WT`, whose watcher resync starts a reconcile reindex that would
+/// make the unpark's own reindex answer `reindex_already_running`.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn park_and_unpark_keep_the_corpus_and_queue_a_reindex() {
-    let fx = fixture().await;
-    let id = IndexId::new(WT);
+    let fx = fixture_with_wt_id(WT_OWN).await;
+    let id = IndexId::new(WT_OWN);
     assert!(fx.corpus().exists(), "the fixture wrote a corpus");
 
     let parked = fx
         .ok(
             project_map::METHOD_PROJECT_PARK,
-            serde_json::json!({ "index_id": WT }),
+            serde_json::json!({ "index_id": WT_OWN }),
         )
         .await;
     assert_eq!(parked["parked"], true);
@@ -169,7 +181,10 @@ async fn park_and_unpark_keep_the_corpus_and_queue_a_reindex() {
     assert!(!fx.state.cold_store.contains(&id), "never lazy-loaded");
     assert!(fx.corpus().exists(), "the corpus is kept");
     let rows = crate::service::persistence::load_index_registry_at(&fx.registry()).expect("rows");
-    assert!(rows.iter().any(|e| e.id == WT), "the registration is kept");
+    assert!(
+        rows.iter().any(|e| e.id == WT_OWN),
+        "the registration is kept"
+    );
 
     let listed = fx
         .ok(
@@ -179,7 +194,7 @@ async fn park_and_unpark_keep_the_corpus_and_queue_a_reindex() {
         .await;
     let row = listed["parked"]
         .as_array()
-        .and_then(|rows| rows.iter().find(|r| r["id"] == WT))
+        .and_then(|rows| rows.iter().find(|r| r["id"] == WT_OWN))
         .unwrap_or_else(|| panic!("a parked index is listed: {listed}"));
     assert_eq!(row["parked"], true);
     assert_eq!(row["canonical_index_id"], MAIN);
@@ -187,7 +202,7 @@ async fn park_and_unpark_keep_the_corpus_and_queue_a_reindex() {
     let unparked = fx
         .ok(
             project_map::METHOD_PROJECT_UNPARK,
-            serde_json::json!({ "index_id": WT }),
+            serde_json::json!({ "index_id": WT_OWN }),
         )
         .await;
     assert_eq!(unparked["unparked"], true);

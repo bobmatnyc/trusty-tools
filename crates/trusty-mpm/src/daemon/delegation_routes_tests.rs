@@ -1127,9 +1127,9 @@ fn launch(state: &Arc<DaemonState>, session: SessionId, tool_use_id: &str, agent
 ///
 /// `outcome` is the `tool_response` the hook projection carries — the REAL wire
 /// discrimination between a stop that took and one that did not (#7511 review).
-/// `HookEvent::PostToolUseFailure` is deliberately not used: no hook block `tm`
-/// writes registers that name, so a test driving it would prove the branch and
-/// not the production path.
+/// A stop that failed outright arrives as `HookEvent::PostToolUseFailure`
+/// instead, registered since #10095 — see
+/// `a_task_stop_failure_event_releases_nothing_10095`.
 fn task_stop(state: &Arc<DaemonState>, session: SessionId, task_id: &str, outcome: Option<Value>) {
     let mut payload = serde_json::json!({
         "cwd": "/repo",
@@ -1220,6 +1220,52 @@ async fn a_failed_task_stop_releases_nothing() {
     launch(&state, session, "toolu_qa", "agent-qa-1");
 
     task_stop(&state, session, "agent-qa-1", stop_failed());
+
+    let after = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_a")),
+    )
+    .await;
+    assert_eq!(after.total, 1, "a failed stop must not release the tree");
+    assert!(!after.claimed);
+}
+
+/// A failed `TaskStop` delivered as `PostToolUseFailure` releases nothing (#10095).
+///
+/// Why: tm now registers that event, so Claude Code delivers a stop that did not
+/// take under it. The agent the stop missed is still in the tree, so the
+/// tracker must keep ignoring the event for `TaskStop`.
+/// What: asserts the event is delivered, sends the failure, and asserts a second
+/// unisolated writer is still refused.
+/// Test: itself.
+#[tokio::test]
+async fn a_task_stop_failure_event_releases_nothing_10095() {
+    let (state, _dir, session) = hermetic();
+    call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_qa")),
+    )
+    .await;
+    launch(&state, session, "toolu_qa", "agent-qa-1");
+
+    let event = crate::core::hook::HookEvent::PostToolUseFailure;
+    assert!(
+        crate::test_support::tm_registers_hook(event),
+        "Claude Code must deliver a failed TaskStop to tm"
+    );
+    crate::daemon::services::delegation_tracker::observe(
+        &state,
+        session,
+        event,
+        &serde_json::json!({
+            "cwd": "/repo",
+            "tool": "TaskStop",
+            "tool_use_id": "toolu_stop",
+            "input": {"task_id": "agent-qa-1"},
+        }),
+    );
 
     let after = call(
         &state,
@@ -1684,6 +1730,29 @@ async fn shared_tree_dispatch_route_names_each_blocking_record_8257() {
     assert_eq!(
         r.repair_command,
         format!("tm repair delegation --delegation-id {}", d.id.0)
+    );
+}
+
+// #6556: a documents-only commit's answer carries the records behind its names,
+// scoped as the names are — the caller's own record is not one of them.
+#[tokio::test]
+async fn commit_query_names_each_blocking_record_6556() {
+    let (state, _dir, other) = hermetic();
+    let caller = SessionId::new();
+    for (session, agent_id) in [(other, "a5fc57c090963f0ee"), (caller, "aown0000000000000")] {
+        let mut d = Delegation::observed(session, "version-control", "task", None);
+        d.cwd = Some(PathBuf::from("/repo"));
+        d.agent_id = Some(agent_id.to_string());
+        state.upsert_delegation(d);
+    }
+
+    let body = call(&state, caller, commit_query("/repo")).await;
+
+    assert_eq!(writer_names(&body), vec!["version-control"], "{body:?}");
+    assert_eq!(body.records.len(), 1, "{body:?}");
+    assert_eq!(
+        body.records[0].agent_id.as_deref(),
+        Some("a5fc57c090963f0ee")
     );
 }
 

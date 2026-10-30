@@ -3,7 +3,7 @@ name: architect-strategy
 description: Architect skill. Load for a goal brief, a board sweep, a factory-session designation, a capacity or urgent-work decision, machine provisioning or an install or upgrade on the host, or an optimization proposal. Holds the working procedures of the directed and standing goals, drive-not-wait and the never-block-the-loop rule. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 category: monitoring
 tags: [architect, goals, capacity, strategy]
 effort: high
@@ -93,6 +93,21 @@ changes go to an engineer or the owning PM. Record what you find in
   works it without asking. Any uncertainty: the session raises it to you, and
   you answer at high confidence or bring it to the owner as a decision.
   Issues the session filed itself skip the review.
+- **Issue tracking is a core factory principle.** Every issue a factory
+  session files or works carries a milestone, its relationships (parent and
+  sub-issue, blocked-by, linked PR) and its current state (the project Status
+  or a status label), updated at every transition. Backfill existing open
+  issues at a steady pace; where a repository has no usable milestone set,
+  the session proposes one to you before any bulk write. Board sweeps check
+  it.
+- **Daily board status update.** Each factory board gets one GitHub Projects
+  v2 status update per day, posted with `gh api graphql` and the
+  `createProjectV2StatusUpdate` mutation. Status is `ON_TRACK`, `AT_RISK`,
+  `OFF_TRACK`, `COMPLETE` or `INACTIVE`; the body is short: moved, blocked,
+  next. When several sessions share a board, one session owns the daily update
+  and covers all lanes from the board itself; the others do not post. Before
+  posting, a sweep reads the date of the board's latest status update and
+  posts nothing if one exists for the day. (Owner ruling 2026-10-30 03:18Z.)
 
 ## Board sweeps
 

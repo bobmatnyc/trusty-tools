@@ -66,7 +66,13 @@ fn project_managed_hook_additions_combines_all_three_sources() {
 
     // Lifecycle-triad-only events (no trusty-memory / PM-guard overlap) must
     // still be present.
-    for event in ["PostToolUse", "Stop", "SubagentStop", "SessionEnd"] {
+    for event in [
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+        "SubagentStop",
+        "SessionEnd",
+    ] {
         assert!(
             hooks
                 .get(event)
@@ -101,7 +107,7 @@ fn project_managed_hook_additions_is_stable_across_calls() {
 /// toggle that also takes out `SessionStart` — the other `TRUSTY_MEMORY_HOOKS`
 /// key, sharing the same constant and the same `trusty-memory ` command prefix.
 /// What: builds the additions with the toggle off and asserts `UserPromptSubmit`
-/// is absent while `SessionStart`, the PM guard, and all six lifecycle-triad
+/// is absent while `SessionStart`, the PM guard, and all seven lifecycle-triad
 /// events are byte-identical to the enabled build.
 #[test]
 fn project_managed_hook_additions_omits_prompt_context_when_disabled() {
@@ -130,6 +136,7 @@ fn project_managed_hook_additions_omits_prompt_context_when_disabled() {
         "SessionStart",
         "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "SubagentStop",
         "SessionEnd",
@@ -204,7 +211,7 @@ fn is_project_managed_hook_command_recognises_all_three_sources() {
 /// end up with the lifecycle triad in the PROJECT-tier settings file, since
 /// `--setting-sources project,local` never loads the user-tier file
 /// `ensure_managed_hooks` provisions.
-/// What: calls `write_project_hooks` and asserts all six triad events are
+/// What: calls `write_project_hooks` and asserts all seven triad events are
 /// present with a `... hook` command.
 #[test]
 fn write_project_hooks_writes_lifecycle_triad() {
@@ -227,6 +234,7 @@ fn write_project_hooks_writes_lifecycle_triad() {
     for event in [
         "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "SubagentStop",
         "SessionStart",
@@ -426,7 +434,7 @@ fn write_project_hooks_writes_via_atomic_path() {
 /// What: writes with the toggle off into a fresh project and asserts
 /// `UserPromptSubmit` is absent, `SessionStart` still carries the
 /// `trusty-memory inbox-check` group, `PreToolUse` still carries the PM guard,
-/// and all six lifecycle-triad events are present.
+/// and all seven lifecycle-triad events are present.
 #[test]
 fn write_project_hooks_omits_prompt_context_when_disabled() {
     let tmp = TempDir::new().unwrap();
@@ -481,6 +489,7 @@ fn write_project_hooks_omits_prompt_context_when_disabled() {
     for event in [
         "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "SubagentStop",
         "SessionStart",
@@ -644,6 +653,12 @@ fn write_project_hooks_enabled_output_is_unchanged_by_the_toggle() {
         .cloned()
         .collect();
     let mut owned = project_managed_hook_events();
+    // #10459: the strip domain also owns the Architect-only
+    // `UserPromptExpansion` key; a PM file carries no tm entry there, so
+    // stripping it is still a no-op for every PM write.
+    let architect_only = owned.iter().position(|e| e == "UserPromptExpansion");
+    assert!(architect_only.is_some(), "{owned:?}");
+    owned.retain(|e| e != "UserPromptExpansion");
     from_additions.sort();
     owned.sort();
     assert_eq!(

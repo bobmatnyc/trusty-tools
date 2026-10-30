@@ -147,7 +147,9 @@ pub enum PaneClaude {
     Present,
     /// Proven: no process in the pane is named `claude`.
     Absent,
-    /// The pane pid, a child list or a process name could not be read.
+    /// The pane pid, a child list or a process name could not be read; from
+    /// [`super::pane_foreground::harness_holds_pane`], also a harness that is
+    /// stopped or does not hold the pane's tty foreground (#10136).
     Unknown,
 }
 
@@ -163,17 +165,44 @@ pub enum PaneClaude {
 /// Test: `a_helper_whose_pane_process_is_claude_is_not_registered`,
 /// `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`.
 pub fn pane_claude(session_name: &str) -> PaneClaude {
-    let Some(pane_pid) = tmux_pane_pid(session_name) else {
-        return PaneClaude::Unknown;
-    };
+    match tmux_pane_pid(session_name) {
+        Some(pane_pid) => harness_under_pane(pane_pid, "claude"),
+        None => PaneClaude::Unknown,
+    }
+}
+
+/// Whether a process named `harness` runs under pane process `pane_pid`
+/// (#10127: the tree walk [`pane_claude`] does, for any harness binary).
+///
+/// What: the pane process, its children, and a #2997 disclaim wrapper's
+/// children; a case-insensitive substring match on the process name.
+/// `Present` on any match; `Unknown` when a name or child list cannot be
+/// read; else `Absent`. Existence only: a stopped or background harness reads
+/// `Present`, so a pane write gate uses
+/// [`super::pane_foreground::harness_holds_pane`] instead (#10136).
+/// Test: `a_helper_whose_pane_process_is_claude_is_not_registered`,
+/// `a_pane_running_no_harness_reads_absent`.
+pub fn harness_under_pane(pane_pid: u32, harness: &str) -> PaneClaude {
+    match harness_pids_under_pane(pane_pid, harness) {
+        (pids, _) if !pids.is_empty() => PaneClaude::Present,
+        (_, true) => PaneClaude::Unknown,
+        (_, false) => PaneClaude::Absent,
+    }
+}
+
+/// Every process named `harness` in [`harness_under_pane`]'s walk, plus
+/// whether any name or child list could not be read (#10136: the foreground
+/// probe needs the pids, not only the verdict).
+pub(crate) fn harness_pids_under_pane(pane_pid: u32, harness: &str) -> (Vec<u32>, bool) {
     let mut level = vec![pane_pid];
+    let mut found = Vec::new();
     let mut unknown = false;
     // Depth 0: the pane process; 1: its children; 2: a wrapper's children.
     for depth in 0..3 {
         let mut next = Vec::new();
         for pid in level {
-            match process_name_checked(pid) {
-                Some(true) => return PaneClaude::Present,
+            match process_name_matches(pid, harness) {
+                Some(true) => found.push(pid),
                 Some(false) => {}
                 None => unknown = true,
             }
@@ -186,11 +215,7 @@ pub fn pane_claude(session_name: &str) -> PaneClaude {
         }
         level = next;
     }
-    if unknown {
-        PaneClaude::Unknown
-    } else {
-        PaneClaude::Absent
-    }
+    (found, unknown)
 }
 
 /// The direct children of `pid`, read from the process table (#8938).
@@ -280,16 +305,18 @@ fn process_args(pid: u32) -> Option<String> {
 /// substring match accepts both `claude` and `claude-code`.
 /// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
 fn process_name_contains_claude(pid: u32) -> bool {
-    process_name_checked(pid).unwrap_or(false)
+    process_name_matches(pid, "claude").unwrap_or(false)
 }
 
-/// [`process_name_contains_claude`], with `None` when the name cannot be read
-/// (#8942: [`pane_claude`] must tell a failed lookup from "not claude").
-fn process_name_checked(pid: u32) -> Option<bool> {
+/// Whether process `pid`'s name contains `needle`, case-insensitively, with
+/// `None` when the name cannot be read (#8942: [`pane_claude`] must tell a
+/// failed lookup from "not claude"; #10127: any harness name).
+fn process_name_matches(pid: u32, needle: &str) -> Option<bool> {
+    let needle = needle.to_ascii_lowercase();
     #[cfg(target_os = "linux")]
     {
         if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-            return Some(comm.to_ascii_lowercase().contains("claude"));
+            return Some(comm.to_ascii_lowercase().contains(&needle));
         }
     }
     let output = Command::new("ps")
@@ -299,7 +326,7 @@ fn process_name_checked(pid: u32) -> Option<bool> {
         Ok(out) if out.status.success() => Some(
             String::from_utf8_lossy(&out.stdout)
                 .to_ascii_lowercase()
-                .contains("claude"),
+                .contains(&needle),
         ),
         _ => None,
     }
@@ -434,6 +461,67 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// Block until the freshly spawned child `pid` has finished its exec.
+    ///
+    /// Why (#10144): on Linux, `Command::spawn` returns once the child has
+    /// swapped in its new address space, but the kernel sets
+    /// `/proc/<pid>/comm` a few steps later in the same `execve`. A name read
+    /// in that window returns the spawning test thread's name
+    /// (`core::process::`), so a walk looking for `sleep` reads `Absent`.
+    /// What: polls `/proc/<pid>/maps` until it maps the file
+    /// `/proc/<pid>/exe` names, other than this test binary. The kernel maps
+    /// the new image only after it has set the name, so the name is final.
+    /// macOS `posix_spawn` finishes the exec before it returns: no wait.
+    /// Test: `a_pane_running_no_harness_reads_absent`.
+    fn wait_for_exec(pid: u32) {
+        #[cfg(target_os = "linux")]
+        {
+            let me = std::env::current_exe().expect("test binary path");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let exe = std::fs::read_link(format!("/proc/{pid}/exe")).expect("read exe");
+                let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).expect("maps");
+                let image = exe.to_string_lossy();
+                if exe != me && maps.lines().any(|line| line.ends_with(image.as_ref())) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "pid {pid} never finished its exec"
+                );
+                sleep(Duration::from_millis(1));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = pid;
+    }
+
+    /// #10127: the harness walk tells a running harness, a pane running none,
+    /// and an unreadable pane apart; a dead pane process is never `Absent`.
+    #[test]
+    fn a_pane_running_no_harness_reads_absent() {
+        use std::process::Stdio;
+        let mut pane = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = pane.id();
+        // #10144: `spawn()` returns before Linux renames the child; wait for
+        // the exec to finish so the name read below is `sleep`'s own.
+        wait_for_exec(pid);
+        assert_eq!(harness_under_pane(pid, "sleep"), PaneClaude::Present);
+        assert_eq!(
+            harness_under_pane(pid, "no-such-harness"),
+            PaneClaude::Absent
+        );
+        let _ = pane.kill();
+        let _ = pane.wait();
+        assert_eq!(harness_under_pane(u32::MAX, "claude"), PaneClaude::Unknown);
     }
 
     /// #8938: a child listing run by a descendant still sees that descendant's
@@ -613,7 +701,8 @@ mod tests {
         // private server's socket dir is pinned into the shim it runs.
         let tmpdir = std::env::var("TMUX_TMPDIR").unwrap_or_default();
         let shim = dir.join("tmux-pinned");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &shim,
             format!(
                 "#!/bin/sh\nTMUX_TMPDIR='{tmpdir}' exec '{}' \"$@\"\n",
@@ -621,8 +710,6 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
         // inner.sh runs as the fake claude; the probe is its child. The
         // trailing sleep keeps `claude` alive for the name check below.
         let inner = dir.join("inner.sh");

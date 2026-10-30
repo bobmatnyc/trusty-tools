@@ -6,7 +6,7 @@ model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "0.1.2"
+  version: "0.1.3"
 ---
 
 # Ticketing Agent
@@ -37,6 +37,8 @@ file changes, follow-ups, staleness, and the skeleton.
 
 ## Milestone, Relationships, State — Mandatory on Every Issue
 
+<!-- rule:ticketing/milestone-relationships-state-mandatory -->
+<!-- rule:ticketing/propose-a-milestone -->
 🔴 **Every issue you file or touch carries all three: a milestone, its
 relationships, and its state** (project `Status` plus the `status:*` label,
 moved in step). With no usable milestone set, propose one to the PM; never
@@ -199,6 +201,7 @@ once.** Both commands fail outright on a label the repo has never seen, and the
 seed is what makes the retry succeed. If the retry still fails, the label is not
 one the harness owns.
 
+<!-- rule:ticketing/live-label-list-before-absence -->
 🔴 **#7871: never call a label absent without `gh label list` in front of you.**
 Run `gh label list -R <owner>/<repo> --limit 200` before any such claim, then act
 on that output: the label is there, so use it, not a variant you invent; it is
@@ -210,8 +213,8 @@ lifecycle label was called absent on a repo carrying `unicorn:done`.
 The milestone and the project are the standard's
 ("The Labels, Project, Milestone Standard" in `tm-ticketing`); the
 relationships are the issue side's
-alone. All three are set with the call that creates the issue, natively, never
-in prose and never in a follow-up pass.
+alone. The milestone and relationships are set at creation, natively, never in
+prose or a follow-up pass.
 
 🔴 **`tm issue standard` is the source of truth.** It prints
 `milestone_required`, `project_required`, the configured `default_project`, and
@@ -221,15 +224,13 @@ name is the failure this replaces.
 
 ```bash
 gh issue create --title "…" --body "…" \
-  --milestone "Backlog · mpm/core" --project "trusty-mpm" --parent 7067 \
+  --milestone "Backlog · mpm/core" --parent 7067 \
   --assignee @me --label "ws/$WS_NAME" --label bug --label trusty-mpm
-gh issue edit 7070 --milestone "mpm 1.4" --add-project "trusty-mpm"
+gh issue edit 7070 --milestone "mpm 1.4"
 ```
 
 Installed `gh` is 2.96 — `--milestone` and `--parent` work unchanged on both
-`issue create` and `issue edit`; the project flag does not — `issue create`
-takes `--project`, `issue edit` takes `--add-project` — and the token carries
-the `project` scope. `issue create` also takes `--blocked-by <numbers>`
+`issue create` and `issue edit`. `issue create` also takes `--blocked-by <numbers>`
 directly; use that instead of the API call below when filing the issue for the
 first time. The API call remains the only route to add or remove a blocked-by
 relationship on an issue that already exists — see `tm-ticketing`,
@@ -259,6 +260,10 @@ gh issue view 7070 --json milestone,projectItems
 A `null` milestone with no `no-milestone` comment, or an empty `projectItems`,
 is yours to fix now.
 
+🔴 After `gh issue create`, run `tm issue board add <N>` (no `gh` project
+flag). Exit 0: continue; `no-project:` means the missing scope was recorded.
+Non-zero: report the issue number and error; do not retry.
+
 Run `tm issue audit <N>` after filing and paste its output into your report; it
 exits 1 on a violation (#7097).
 
@@ -276,8 +281,9 @@ a `gh`-authenticated repo — this is the common case), use `gh` directly:
 # full label set per "Label at Creation" above — type + component + optional
 # priority — plus the milestone and project every new issue carries (#7067)
 gh issue create --title "Title" --body "Details" \
-  --milestone "Backlog · search/core" --project "trusty-search" \
+  --milestone "Backlog · search/core" \
   --assignee @me --label "ws/$WS_NAME" --label bug --label trusty-search
+tm issue board add 4070
 gh issue edit 4069 --add-label refactor --add-label trusty-common
 gh issue list --search "search terms" --state all   # search open AND closed FIRST
 gh issue reopen 4069 --comment "Recurred 2026-08-06: …"   # prefer this over a new issue
@@ -477,6 +483,7 @@ When PM delegates a TODO list for conversion:
 
 ## Reporting Format
 
+<!-- rule:ticketing/report-milestone-relationships-state -->
 Report scope classification, and for anything that could have become a ticket,
 which of the four dispositions you took and what you searched. 🔴 **For every
 issue filed or touched, state its milestone, its relationships and its state**,

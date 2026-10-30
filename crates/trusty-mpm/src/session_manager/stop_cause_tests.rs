@@ -328,11 +328,11 @@ async fn boot_reconcile_still_auto_resumes_a_session_lost_with_the_daemon() {
     assert_eq!(
         mgr.get(&id).await.expect("reload").state,
         ManagedSessionState::Stopped,
-        "the record is handed to the supervisor as Stopped, never left Active"
+        "the record is handed to the auto-resume sweep as Stopped, never left Active"
     );
 
-    // Half two: the supervisor sweep, with the runtime relauncher the daemon
-    // installs, actually brings it back.
+    // Half two: the daemon's auto-resume sweep (#10356), with the runtime
+    // relauncher the daemon installs, actually brings it back.
     let relauncher = Arc::new(CountingRelauncher::default());
     assert!(mgr.install_relauncher(relauncher.clone()));
     let cfg = crate::supervisor::SupervisorConfig {
@@ -340,12 +340,12 @@ async fn boot_reconcile_still_auto_resumes_a_session_lost_with_the_daemon() {
         classify_idle: false,
         ..Default::default()
     };
-    let tick = crate::supervisor::run_tick::<NeverClassifies>(&mgr, &cfg, None).await;
+    let tick = crate::supervisor::resume_sweep(&mgr, &cfg).await;
 
     assert_eq!(
         tick.resumed,
         vec![id.to_string()],
-        "the supervisor must pick up what boot reconcile deferred to it"
+        "the daemon's sweep must pick up what boot reconcile deferred to it"
     );
     assert_eq!(
         relauncher.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -380,18 +380,5 @@ impl crate::session_manager::relaunch::RuntimeRelauncher for CountingRelauncher 
     async fn relaunch(&self, _record: &SessionRecord) -> Result<(), String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
-    }
-}
-
-/// `run_tick` is generic over a classifier even when handed `None`; this names
-/// the type without ever being called (`classify_idle` is false here).
-pub(super) struct NeverClassifies;
-
-impl crate::activity::monitor::LlmClassifier for NeverClassifies {
-    async fn classify(
-        &self,
-        _pane_text: &str,
-    ) -> Result<(crate::activity::ActivityVerdict, u32, u32), crate::activity::ActivityError> {
-        unreachable!("classify_idle is false in every test that names this type")
     }
 }

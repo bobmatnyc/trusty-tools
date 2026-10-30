@@ -1,0 +1,9 @@
+running 2 tests
+recall-eval [mechanisms on] q01 rank=Some(0) expected=d01 top=["d01"]
+recall-eval [mechanisms on] hit@1 27/32; superseded-above-current 0/12 []
+recall-eval-summary {"mode":"mechanisms on","n":32,"k":5,"hit_at_1":27,"hit_at_3":31,"hit_at_5":31,"mrr":0.9062,"recall_at_k":0.9688,"superseded_above_current":0,"superseded_groups":12,"group_ranks":[]}
+recall-eval-summary {"mode":"demotion off","n":32,"k":5,"hit_at_1":20,"hit_at_3":30,"hit_at_5":31,"mrr":0.8,"recall_at_k":0.9688,"superseded_above_current":3,"superseded_groups":12,"group_ranks":[]}
+test recall_eval_goes_red_with_demotion_or_retirement_off ... ok
+test recall_eval_holds_the_recorded_baseline ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.20s

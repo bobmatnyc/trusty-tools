@@ -375,6 +375,28 @@ pub mod supervision;
 /// Test: `cargo test -p trusty-common --features unconditional-only spawn_retry`.
 pub mod spawn_retry;
 
+/// Write an executable this process will exec, with no `ETXTBSY` window (#10248).
+///
+/// Why: a test that writes a stub with `std::fs::write` and then execs it races
+/// every sibling test thread that forks while the write fd is open; four such
+/// tests turned CI red on unrelated PRs (#9718, #10176, #10232, #10248).
+/// What: [`exec_stub::write_executable`] has a `/bin/cp` child write the file,
+/// so no fork of this process can inherit a write fd to it. Ungated and std-only,
+/// so every crate that already depends on `trusty-common` can call it from its
+/// tests without a new dependency edge. Unix only.
+/// Test: `cargo test -p trusty-common --features unconditional-only exec_stub`.
+#[cfg(unix)]
+pub mod exec_stub;
+
+/// Keep a spawned child from inheriting the parent's sockets (#10083).
+///
+/// Why: macOS sets `FD_CLOEXEC` on a new socket in a second step, so a child
+/// forked in between holds a dropped connection open.
+/// What: `child_fds::seal_inherited` installs a `pre_exec` hook that marks
+/// every inherited descriptor close-on-exec. macOS only; a no-op elsewhere.
+/// Test: `cargo test -p trusty-common --features unconditional-only child_fds`.
+pub mod child_fds;
+
 /// Parent-death linkage for spawned processes (#7085, #3734).
 ///
 /// Why: a `Child` handle reaps only in `Drop`, which a SIGKILL of the parent
@@ -579,8 +601,8 @@ pub mod migrations;
 #[cfg(feature = "symgraph")]
 pub mod symgraph;
 
-// #9271: the Memory Palace engine moved to `trusty_memory::engine`; the
-// `memory-core` feature is a no-op kept for compatibility.
+// #9271: the Memory Palace engine moved to `trusty_memory::engine`.
+// #9272: its no-op `memory-core` feature is removed.
 
 /// Unified ticketing MCP server (formerly the `trusty-tickets` crate).
 ///
@@ -887,9 +909,9 @@ pub mod inference;
 /// Why: five crates each carried a byte-identical copy of the four-arm `match`
 /// that decides whether an unopenable redb file may be quarantined, so a safety
 /// change to that decision had to land five times. The classifier previously
-/// lived under `memory-core`, which pulls in usearch, git2 and a bundled ORT
-/// embedder — a cost no consumer would pay for a predicate, which is why the
-/// copies existed. This module is gated behind the light `redb-open` feature
+/// lived in the Memory Palace engine, which pulled in usearch, git2 and a
+/// bundled ORT embedder — a cost no consumer would pay for a predicate, which
+/// is why the copies existed. This module is gated behind the light `redb-open` feature
 /// (`dep:redb` only) so every store can route through it.
 /// What: [`redb_open::is_incompatible_format`] plus the quarantine-path helpers
 /// two of those crates also duplicated. Each store's recovery POLICY stays in
@@ -904,8 +926,8 @@ pub mod redb_open;
 /// grows into it. Three redb files per palace times 64 resident palaces is a
 /// 192 GiB ceiling nothing was bounding, which is how a 233 MB daemon reached
 /// 11–23 GB of heap. Gated behind the same light `redb-open` feature as the
-/// classifier so every store can route through it without paying for
-/// `memory-core`.
+/// classifier so every store can route through it without paying for the
+/// Memory Palace engine.
 /// What: [`redb_cache::create_palace_db`] and [`redb_cache::palace_db_builder`],
 /// plus the `TRUSTY_MEMORY_REDB_CACHE_MB` override and its fail-open warning.
 /// Test: `cargo test -p trusty-common --features redb-open -- redb_cache::`.
@@ -1109,7 +1131,7 @@ pub use palace_resolve::{
 /// [`palace_alias::LiveAliasError`] (#9544), plus
 /// [`palace_alias::default_palace_registry_dir`] and
 /// [`palace_alias::palace_registry_dir_from`] for locating the registry dir. This
-/// module is always compiled (no `memory-core` gate) so trusty-mpm's always-on
+/// module is always compiled (no feature gate) so trusty-mpm's always-on
 /// session-launch path can register aliases without pulling the storage engine.
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// palace_alias::tests`.

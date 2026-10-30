@@ -1,0 +1,2 @@
+Fixed
+- `session.attach` over the daemon's Unix socket is refused with JSON-RPC `-32601` and a message naming `session.events`, with `data.use_stream = "session.events"`. It used to answer success with the replay and then push nothing, because a socket connection is one frame in, one frame out. Open `session.events` with `"stream": true` for the replay and the live tail. `session.attach` over `tcode serve --stdio` is unchanged ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))

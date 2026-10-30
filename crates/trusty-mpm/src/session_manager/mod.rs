@@ -26,11 +26,15 @@ pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
+// #10127: the no-live-harness refusal every pane write runs.
+mod harness_gate;
 // #8663 critic round 1: what tm's provisioning wrote, kept in the git admin dir.
 pub(crate) mod provisioning_ledger;
 // #4743: the single capability every destructive index DELETE must hold.
 mod index_delete_guard;
 pub mod injection_status;
+// #9167 AC5: the inject path's `message` record.
+pub mod inject_record;
 /// The cross-process JSON-file mechanism `sessions.json` and its siblings share.
 pub(crate) mod json_file;
 #[cfg(test)]
@@ -44,6 +48,8 @@ pub mod pane_identity;
 // #9313: re-bind a record to its live pane after a tmux server replacement.
 pub mod pane_rebind;
 pub mod prune;
+// #7619: the stop signal both destructive prune loops read between candidates.
+pub mod prune_progress;
 pub mod reactivate;
 mod reconcile;
 pub mod record;

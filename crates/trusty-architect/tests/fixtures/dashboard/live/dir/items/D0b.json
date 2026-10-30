@@ -1,0 +1,68 @@
+{
+  "answer": "lorem ipsum dolor sit amet elit sed tempor über magna l",
+  "answer_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-12T11:38:38Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+  "due": "2026-10-13T06:00:00Z",
+  "goal": "G10",
+  "kind": "question",
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed te",
+      "label": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ",
+      "markers": {
+        "risk": -1,
+        "scope": 0,
+        "work": -2
+      },
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempo",
+      "label": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor ",
+      "markers": {
+        "risk": 0,
+        "scope": 0,
+        "work": -1
+      },
+      "recommended": false
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit",
+      "label": "lorem ipsum dolor sit amet elit sed te",
+      "markers": {
+        "risk": 1,
+        "scope": 1,
+        "work": 2
+      },
+      "recommended": false
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit a",
+      "label": "lorem ipsum dolor sit amet elit sed tempor über magna l",
+      "markers": {
+        "risk": 1,
+        "scope": 0,
+        "work": -3
+      },
+      "recommended": false
+    }
+  ],
+  "rank": 8,
+  "session": "pm-14",
+  "specs": [
+    {
+      "label": "lorem ipsum dolor sit ",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna lor"
+    },
+    {
+      "label": "lorem ipsum dolor sit ",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna l"
+    }
+  ],
+  "status": "answered",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ip",
+  "updated": "2026-10-12T11:50:14Z",
+  "version": 1
+}

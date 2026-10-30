@@ -79,6 +79,12 @@ TAB="$(printf '\t')"
 # one per line. P4 added what `tm fleet init` writes into the Architect;
 # #9997 moved the records templates to local/ and added the rest of local/,
 # then the architect-* skills, the relay scripts and the voice guide.
+# #10161: the config loader and its local/architect.json seed, then the
+# poller's alert triage and Architect watchdog (P1b-0), then PM intake, its
+# digest and the Notification hook pair (P2), then the Intent Ledger set (P3),
+# then the six D2 skills (review, drift, provisioning, macOS, improvements,
+# host administration), then the dashboard store set and its schemas (P4a-1),
+# then the serve set, the read-only views, the page, Live and vendor (D3b).
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -91,15 +97,79 @@ skills/architect-github.md|content/instructions/architect/skills/architect-githu
 skills/architect-strategy.md|content/instructions/architect/skills/architect-strategy.md
 skills/architect-completion-standard.md|content/instructions/architect/skills/architect-completion-standard.md
 skills/architect-owner-model.md|content/instructions/architect/skills/architect-owner-model.md
+skills/architect-drift-check.md|content/instructions/architect/skills/architect-drift-check.md
+skills/architect-review.md|content/instructions/architect/skills/architect-review.md
+skills/architect-project-provision.md|content/instructions/architect/skills/architect-project-provision.md
+skills/architect-macos.md|content/instructions/architect/skills/architect-macos.md
+skills/architect-improvements.md|content/instructions/architect/skills/architect-improvements.md
+skills/architect-host-admin.md|content/instructions/architect/skills/architect-host-admin.md
+skills/architect-dashboard.md|content/instructions/architect/skills/architect-dashboard.md
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
 scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
 scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py
 scripts/quiet-sessions.py|crates/trusty-mpm/src/assets/architect/scripts/quiet-sessions.py
 scripts/self-ctx.py|crates/trusty-mpm/src/assets/architect/scripts/self-ctx.py
+scripts/alert_triage.py|crates/trusty-mpm/src/assets/architect/scripts/alert_triage.py
+scripts/architect-watchdog.py|crates/trusty-mpm/src/assets/architect/scripts/architect-watchdog.py
+scripts/pm_intake.py|crates/trusty-mpm/src/assets/architect/scripts/pm_intake.py
+scripts/pm-digest.py|crates/trusty-mpm/src/assets/architect/scripts/pm-digest.py
+scripts/pm-notify.sh|crates/trusty-mpm/src/assets/architect/scripts/pm-notify.sh
+scripts/notify-supervisor.sh|crates/trusty-mpm/src/assets/architect/scripts/notify-supervisor.sh
+scripts/datg.py|crates/trusty-mpm/src/assets/architect/scripts/datg.py
+scripts/datg_store.py|crates/trusty-mpm/src/assets/architect/scripts/datg_store.py
+scripts/datg_ops.py|crates/trusty-mpm/src/assets/architect/scripts/datg_ops.py
+scripts/datg_log.py|crates/trusty-mpm/src/assets/architect/scripts/datg_log.py
+scripts/datg_read.py|crates/trusty-mpm/src/assets/architect/scripts/datg_read.py
+scripts/datg-hook.sh|crates/trusty-mpm/src/assets/architect/scripts/datg-hook.sh
+scripts/ctx-watch.py|crates/trusty-mpm/src/assets/architect/scripts/ctx-watch.py
+scripts/il-cron.py|crates/trusty-mpm/src/assets/architect/scripts/il-cron.py
+scripts/self-clear.sh|crates/trusty-mpm/src/assets/architect/scripts/self-clear.sh
+scripts/state-archive.py|crates/trusty-mpm/src/assets/architect/scripts/state-archive.py
+scripts/architect-idle.py|crates/trusty-mpm/src/assets/architect/scripts/architect-idle.py
+scripts/dashboard_store.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_store.py
+scripts/dashboard_jsonl.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_jsonl.py
+scripts/dashboard_schema.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_schema.py
+scripts/dashboard_derive.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_derive.py
+scripts/dashboard_ids.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_ids.py
+scripts/dashboard_qual.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_qual.py
+scripts/owner_answers.py|crates/trusty-mpm/src/assets/architect/scripts/owner_answers.py
+scripts/dashboard-db.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard-db.py
+scripts/il-archive.py|crates/trusty-mpm/src/assets/architect/scripts/il-archive.py
+scripts/stale-tasks.py|crates/trusty-mpm/src/assets/architect/scripts/stale-tasks.py
+scripts/dashboard-serve.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard-serve.py
+scripts/dashboard_http.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_http.py
+scripts/dashboard_page.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_page.py
+scripts/dashboard_docs.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_docs.py
+scripts/dashboard_il.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_il.py
+scripts/dashboard_media.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_media.py
+scripts/dashboard_viz.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_viz.py
+scripts/dashboard_harness.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_harness.py
+templates/dashboard/index.html|crates/trusty-mpm/src/assets/architect/dashboard/index.html
+templates/dashboard/live.html|crates/trusty-mpm/src/assets/architect/dashboard/live.html
+templates/dashboard/vendor/marked.umd.js|crates/trusty-mpm/src/assets/architect/dashboard/vendor/marked.umd.js
+templates/dashboard/vendor/purify.min.js|crates/trusty-mpm/src/assets/architect/dashboard/vendor/purify.min.js
+templates/dashboard/vendor/VERSIONS.md|crates/trusty-mpm/src/assets/architect/dashboard/vendor/VERSIONS.md
+schemas/dashboard/accounts.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/accounts.schema.json
+schemas/dashboard/briefs.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/briefs.schema.json
+schemas/dashboard/effort_tunes.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/effort_tunes.schema.json
+schemas/dashboard/goal_removals.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/goal_removals.schema.json
+schemas/dashboard/goal_reorders.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/goal_reorders.schema.json
+schemas/dashboard/goals.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/goals.schema.json
+schemas/dashboard/il_steers.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/il_steers.schema.json
+schemas/dashboard/items.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/items.schema.json
+schemas/dashboard/media.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/media.schema.json
+schemas/dashboard/meta-gh_track.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/meta-gh_track.schema.json
+schemas/dashboard/meta-seen.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/meta-seen.schema.json
+schemas/dashboard/meta-settings.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/meta-settings.schema.json
+schemas/dashboard/meta-state.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/meta-state.schema.json
+schemas/dashboard/questions.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/questions.schema.json
+schemas/dashboard/sessions.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/sessions.schema.json
+schemas/dashboard/step_progress.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/step_progress.schema.json
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
 scripts/relay.sh|crates/trusty-mpm/src/assets/architect/scripts/relay.sh
 scripts/posted.sh|crates/trusty-mpm/src/assets/architect/scripts/posted.sh
 scripts/relay-marker.py|crates/trusty-mpm/src/assets/architect/scripts/relay-marker.py
+scripts/architect_config.py|crates/trusty-mpm/src/assets/architect/scripts/architect_config.py
 docs/voice.md|crates/trusty-mpm/src/assets/architect/docs/voice.md
 templates/CLAUDE.md|content/instructions/architect/templates/CLAUDE.md
 templates/gitignore|crates/trusty-mpm/src/assets/architect/templates/gitignore
@@ -119,6 +189,7 @@ templates/local/owner/contradictions.md|crates/trusty-mpm/src/assets/architect/t
 templates/local/owner/dream-log.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/dream-log.md
 templates/local/mandates/README.md|crates/trusty-mpm/src/assets/architect/templates/local/mandates/README.md
 templates/local/mandates/example.toml|crates/trusty-mpm/src/assets/architect/templates/local/mandates/example.toml
+templates/local/architect.json|crates/trusty-mpm/src/assets/architect/templates/local/architect.json
 "
 if [ "$LIST_PAIRS" -eq 1 ]; then
   for pair in $PAIRS; do echo "$pair"; done

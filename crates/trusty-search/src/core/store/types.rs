@@ -194,6 +194,15 @@ pub trait VectorStore: Send + Sync {
     async fn remove(&self, id: &str) -> Result<()>;
     async fn len(&self) -> Result<usize>;
 
+    /// How many times this store promoted an mmap view to a heap copy (#10195).
+    ///
+    /// Why: a search that ran while a write promoted the graph paid for it,
+    /// and the search log reports that. What: a monotonic count; `0` for a
+    /// store with no view mode. Test: `search_reports_per_stage_timings_in_log_and_meta`.
+    fn promotions(&self) -> u64 {
+        0
+    }
+
     /// Predicate-scoped nearest-neighbour search (issue #3401).
     ///
     /// Why: a caller-supplied path/repo filter must not lose recall to
@@ -487,6 +496,20 @@ pub trait VectorStore: Send + Sync {
             out.push(self.contains(id).await);
         }
         out
+    }
+
+    /// Ids this store holds that `keep` accepts (#10110).
+    ///
+    /// Why: a batch removal whose vector delete failed after its redb rows
+    /// went has no row left to name those ids; the retry finds them here.
+    /// What: default `Ok(vec![])` for a store that cannot list its ids;
+    /// `UsearchStore` overrides with one read-lock pass over `id_to_key`.
+    /// Test: `a_failed_vector_removal_is_an_error_and_a_retry_removes_the_orphans`.
+    async fn ids_where(
+        &self,
+        _keep: &(dyn for<'a> Fn(&'a str) -> bool + Send + Sync),
+    ) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
 
     /// Scalar-precision label the LIVE store actually holds (issue #6822).

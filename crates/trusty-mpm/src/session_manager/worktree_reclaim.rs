@@ -1209,6 +1209,9 @@ pub(crate) struct ReclaimOutcome {
     /// Candidates git failed on after deleting some or all of their content,
     /// each as `"<path>: <report>"` (#8782). Never counted as kept.
     pub partially_removed: Vec<String>,
+    /// Approved candidates a cancelled pass never started (#7619): tree,
+    /// branch and registry row untouched. Disjoint from every list above.
+    pub cancelled_unstarted: Vec<PathBuf>,
 }
 
 #[cfg(test)]

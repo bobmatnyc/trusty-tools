@@ -1,0 +1,17 @@
+{
+  "kind": "standing",
+  "lifecycle": "active",
+  "rank": 3,
+  "rank_set_at": "lorem ipsum dolor sit am",
+  "rank_set_by": "lorem",
+  "sessions": [
+    "lorem ",
+    "lorem ipsum do",
+    "lorem ipsum dolor si",
+    "lorem ips"
+  ],
+  "status_line": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempo",
+  "title": "lorem ipsum dolor sit amet elit sed ",
+  "updated": "2026-10-08T13:26:00Z",
+  "version": 1
+}

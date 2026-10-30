@@ -99,8 +99,7 @@ pub(super) fn rare_id_tokens<'a>(id_tokens: &[&'a str], contents: &[&str]) -> Ve
 ///
 /// What: normalizes each whitespace-delimited word the way the closet index
 /// does, so `#42`, `E1:` and `(v2)` match `42`, `e1` and `v2`. Reads the
-/// content, not the closet index, because closets start empty when a palace
-/// opens and fill only on the next write or dream cycle.
+/// content directly: the closet index holds extracted keywords, not raw words.
 fn holds_any(content: &str, ids: &[&str]) -> bool {
     if ids.is_empty() {
         return false;

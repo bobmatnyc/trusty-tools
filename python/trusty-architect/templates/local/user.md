@@ -4,6 +4,9 @@ Rewrite in place. Label each entry **stated** (the user said it) or
 **observed** (a pattern seen three or more times). The latest statement wins:
 correct the profile as soon as the user contradicts it.
 
+This file is the primary user's profile. Each other user gets
+`local/users/<name>.md`, started from this template.
+
 ## Identity
 
 - Call them: <name>

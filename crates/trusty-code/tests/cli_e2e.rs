@@ -25,25 +25,15 @@
 //! `HarnessMode` precedence — env var > `--mode` flag > `.claude/settings.json`
 //! > default — end to end via the REAL CLI binary and its `--json` response.
 //!
-//! `session_list_on_fresh_project_reports_no_sessions`,
-//! `transcript_unknown_session_errors_cleanly`,
-//! `attach_unknown_session_errors_cleanly`, and
-//! `cancel_unknown_session_errors_cleanly` prove the remaining subcommands
-//! are wired and that daemon errors surface as clear CLI errors and a
-//! nonzero exit (per the ticket's explicit requirement) — see those
-//! subcommands' own module docs (`crate::cli::session`/`attach`/`cancel`/
-//! `transcript` in `src/cli/`) for why a MEANINGFUL cross-invocation
-//! inspection test (attach to a session a DIFFERENT process created) isn't
-//! possible yet: M1 sessions are in-memory, one per ephemeral spawned
-//! daemon, and this ticket's required path is spawn-stdio, not a shared
-//! daemon.
+//! The `session`/`attach`/`cancel`/`transcript` cases moved to
+//! `thin_clients_uds_10169` (#10169): those commands now dial the running
+//! daemon's socket, so each case needs a daemon to dial.
 //!
 //! `workstream_list_on_fresh_project_reports_no_workstreams` through
 //! `workstream_close_hides_from_default_list_but_include_closed_shows_it`
 //! (#3296, DOC-48 §5.4) prove the `tcode workstream`/`tcode ws` family end
 //! to end. UNLIKE sessions, workstreams are persisted to a flat file keyed
-//! on `--project` (`crate::workstreams::path`), so — unlike every
-//! session/attach/cancel/transcript case above — these tests spawn the CLI
+//! on `--project` (`crate::workstreams::path`), so these tests spawn the CLI
 //! TWICE against the same `--project` and prove the SECOND invocation's
 //! ephemeral daemon sees what the FIRST one persisted (create, then a
 //! separate list; close, then a separate list). Each test pins `HOME` to
@@ -276,103 +266,6 @@ fn run_task_mode_precedence_over_the_wire() {
     assert_eq!(
         run_task_resolved_mode(project.path(), Some("daily-driver"), Some("parity")),
         "parity"
-    );
-}
-
-/// `tcode session list` on a project with no prior activity must report no
-/// sessions and exit 0 — proving the `session.list` wiring even though this
-/// ephemeral-spawn CLI invocation's daemon has an empty registry.
-#[test]
-fn session_list_on_fresh_project_reports_no_sessions() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let output = support::tcode_command()
-        .args([
-            "session",
-            "list",
-            "--project",
-            &project.path().display().to_string(),
-        ])
-        .output()
-        .expect("spawn tcode session list");
-
-    assert!(output.status.success(), "must exit 0: {output:?}");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("no sessions"),
-        "expected an empty-list message: {stdout}"
-    );
-}
-
-/// `tcode transcript <unknown-id>` must surface the daemon's
-/// `session_not_found` error as a clean CLI error on stderr and exit
-/// nonzero.
-#[test]
-fn transcript_unknown_session_errors_cleanly() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let output = support::tcode_command()
-        .args([
-            "transcript",
-            "nonexistent-id",
-            "--project",
-            &project.path().display().to_string(),
-        ])
-        .output()
-        .expect("spawn tcode transcript");
-
-    assert!(
-        !output.status.success(),
-        "must exit nonzero on session_not_found"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("session not found") || stderr.contains("-32007"),
-        "expected a clear session_not_found error on stderr: {stderr}"
-    );
-}
-
-/// `tcode attach <unknown-id>` must likewise surface a clean error and exit
-/// nonzero rather than hanging.
-#[test]
-fn attach_unknown_session_errors_cleanly() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let output = support::tcode_command()
-        .args([
-            "attach",
-            "nonexistent-id",
-            "--project",
-            &project.path().display().to_string(),
-        ])
-        .output()
-        .expect("spawn tcode attach");
-
-    assert!(!output.status.success(), "must exit nonzero");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("session not found") || stderr.contains("-32007"),
-        "expected a clear session_not_found error on stderr: {stderr}"
-    );
-}
-
-/// `tcode cancel <unknown-id>` must likewise surface a clean error and exit
-/// nonzero.
-#[test]
-fn cancel_unknown_session_errors_cleanly() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let output = support::tcode_command()
-        .args([
-            "cancel",
-            "nonexistent-id",
-            "--project",
-            &project.path().display().to_string(),
-        ])
-        .output()
-        .expect("spawn tcode cancel");
-
-    assert!(!output.status.success(), "must exit nonzero");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("session not found") || stderr.contains("-32007"),
-        "expected a clear session_not_found error on stderr: {stderr}"
     );
 }
 
@@ -695,22 +588,19 @@ fn tui_help_documents_the_projectless_opt_out() {
 /// start one by hand — and that daemon must OUTLIVE the TUI, because it owns
 /// PM lifecycle and agent dispatch (owner directive, 2026-08-01).
 ///
-/// `TRUSTY_DATA_DIR_OVERRIDE` isolates the `http_addr` discovery file (and
-/// the spawned daemon's log) into a temp directory, so this stays a genuine
-/// "no daemon known" case on a developer machine that has one running.
-/// Evidence of the spawn is the daemon log file the auto-spawn path opens
-/// for the child. The launch itself still fails afterwards, because a test
-/// harness has no TTY for the alternate screen — that is expected and
-/// unrelated, and it is precisely the "the TUI exited" moment a teardown
-/// would have fired at.
+/// `TRUSTY_DATA_DIR_OVERRIDE` isolates the daemon's socket (and the spawned
+/// daemon's log) into a temp directory, so this stays a genuine "no daemon
+/// known" case on a developer machine that has one running. Evidence of the
+/// spawn is the daemon log file the auto-spawn path opens for the child. The
+/// launch itself still fails afterwards, because a test harness has no TTY for
+/// the alternate screen — that is expected and unrelated, and it is precisely
+/// the "the TUI exited" moment a teardown would have fired at.
 ///
-/// The survival half is CONDITIONAL on the child writing its `http_addr`.
-/// Before #4600 the spawned daemon took the fixed default port, so a foreign
-/// daemon holding it made ours die on bind; it now binds an OS-assigned port,
-/// and the guard stays only for an unwritable data directory. The isolated
-/// `http_addr` file is written only by OUR child, so its presence is the
-/// exact "our daemon came up" signal. This test kills the daemon it caused to
-/// start; nothing else will.
+/// Survival is read off the socket (#6637): the isolated socket is bound only
+/// by OUR child, so a `health` answer there after the TUI exited is the exact
+/// "our daemon came up and outlived it" signal. This test kills the daemon it
+/// caused to start; nothing else will. `daemon_no_tcp_6637` checks the same
+/// daemon holds no TCP listener.
 ///
 /// `--projectless` is passed explicitly since #8205: a bare `tcode tui` now
 /// homes on the repository enclosing its launch directory, which here is the
@@ -741,43 +631,20 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
         "must never bail with the old start-one-yourself message: {stderr}"
     );
 
-    let Some(addr) = std::fs::read_to_string(data_dir.path().join("trusty-code/http_addr"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    else {
-        // No discovery file was written; see this test's docs.
-        return;
-    };
-
-    // #5439/#6472: an anonymous `/health` answers liveness alone, so this
-    // probe reads the credential the daemon wrote into the same isolated data
-    // directory. That the file is THERE, under the app data dir a client looks
-    // in, is itself part of what this asserts — a daemon that guarded its
-    // routes but stored the token somewhere else would lock every client out.
-    let token = std::fs::read_to_string(data_dir.path().join("trusty-code/auth_token"))
-        .expect("the daemon must write its credential where clients look")
-        .trim()
-        .to_string();
-    assert!(token.len() >= 32, "credential looks too weak: {token:?}");
-
-    let anonymous: serde_json::Value = reqwest::get(format!("http://{addr}/health"))
+    // #6637: the daemon answers on its socket only — there is no address file,
+    // credential file or TCP port left to probe.
+    let socket = data_dir.path().join("trusty-code/trusty-code.sock");
+    let health = trusty_code::tui_client::uds_rpc::UdsRpcClient::new(&socket)
+        .call("health", serde_json::json!({}))
         .await
-        .expect("the spawned daemon must still be serving /health after the TUI exited")
-        .json()
-        .await
-        .expect("/health must return JSON");
-    assert_eq!(anonymous, serde_json::json!({"status": "ok"}));
-
-    let health: serde_json::Value = reqwest::Client::new()
-        .get(format!("http://{addr}/health"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .expect("credentialed /health must answer")
-        .json()
-        .await
-        .expect("/health must return JSON");
+        .expect("the spawned daemon must still answer on its socket after the TUI exited");
+    let pid = health["pid"].as_u64().expect("health must report a pid") as libc::pid_t;
+    // Stop the daemon before any assertion can strand it.
+    // SAFETY: `pid` was just reported by a live daemon this test caused to
+    // start; `kill` has no memory-safety effects.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
     assert_eq!(health["status"], "ok");
     assert_eq!(
         health["binding"]["state"], "projectless",
@@ -788,15 +655,8 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
     assert_eq!(
         health["build"],
         trusty_code::build_info::GIT_HASH,
-        "/health must report the daemon's build sha: {health}"
+        "health must report the daemon's build sha: {health}"
     );
-
-    let pid = health["pid"].as_u64().expect("/health must report a pid") as libc::pid_t;
-    // SAFETY: `pid` was just reported by a live daemon this test caused to
-    // start; `kill` has no memory-safety effects.
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
-    }
 }
 
 /// A second project runs beside the first (#4600): `tcode tui --project B`
@@ -822,7 +682,7 @@ async fn tui_starts_its_own_daemon_beside_another_projects() {
     // #9139: bound so its isolation tree outlives the spawned daemon.
     let mut daemon_cmd = support::tcode_command();
     let mut daemon = daemon_cmd
-        .args(["serve", "--http", "--port", "0", "--project"])
+        .args(["serve", "--project"])
         .arg(their_project.path())
         .env("TRUSTY_DATA_DIR_OVERRIDE", shared_data.path())
         .stdout(std::process::Stdio::null())

@@ -23,7 +23,11 @@ use crate::transport::rpc::{JsonRpcResponse, error_codes};
 use crate::{AppState, DaemonEvent};
 
 /// Bound on any single rename in these tests; a deadlock trips it.
-const RENAME_BOUND: Duration = Duration::from_secs(10);
+///
+/// #10111: 60 s, not 10 s. A rename drops the palace's HNSW graph, and
+/// `hnsw_rs` clears it on the global rayon pool; a sibling test's parallel
+/// graph build holds that pool for ~10 s per build on a loaded CI runner.
+const RENAME_BOUND: Duration = Duration::from_secs(60);
 
 fn fixture() -> (AppState, tempfile::TempDir) {
     crate::engine::retrieval::seed_shared_embedder_with_mock();

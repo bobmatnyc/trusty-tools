@@ -137,6 +137,7 @@ fn wake_matches_python_goldens() -> TestResult {
             clock: &clock,
             alerts: Path::new(&alerts),
             dry_run: case["dry_run"].as_bool().unwrap_or_default(),
+            messages: &trusty_architect::poller::NoMessages,
         };
         let out = waker.wake(
             &panes(case)?,

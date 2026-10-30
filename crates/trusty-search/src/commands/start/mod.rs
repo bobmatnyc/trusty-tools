@@ -25,6 +25,7 @@ pub(crate) mod args;
 mod daemon;
 mod embedder;
 mod embedder_fallback;
+mod embedder_split;
 mod graceful_bootstrap;
 // #8149 / #8176: the two isolation decisions `handle_start` used to make as
 // inline branches no test could reach — which data dir every per-instance path
@@ -37,8 +38,12 @@ mod python_intent;
 // #8686: `service restart` scopes its kill set with the same plan.
 pub(crate) mod reap_orphans;
 mod restore;
+// #10358: a launchd copy that loses the lock to a healthy peer stands by.
+mod standby;
 mod swap_back_watchdog;
 
+#[cfg(test)]
+mod standby_tests;
 #[cfg(test)]
 mod tests;
 

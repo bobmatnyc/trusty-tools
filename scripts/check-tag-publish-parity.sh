@@ -77,7 +77,9 @@
 #     --vcs-info <path|auto>  additionally compare the sha1 recorded in a
 #                             .cargo_vcs_info.json against the tag's commit.
 #                             `auto` resolves
-#                             target/package/<pkg>-<version>/.cargo_vcs_info.json
+#                             <target>/package/<pkg>-<version>/.cargo_vcs_info.json
+#                             where <target> is $CARGO_TARGET_DIR if set, else
+#                             `cargo metadata`'s target_directory, else <repo>/target
 #                             and FAILS if it is absent or unreadable — an
 #                             explicit request to verify cannot degrade into a
 #                             skip. Run this immediately after `cargo publish`.
@@ -311,9 +313,32 @@ echo "PASS: ${MATCHED_TAG} names ${TAG_SHA}, which is the commit this publish sh
 # ---------------------------------------------------------------------------
 # --vcs-info: compare against what cargo actually recorded.
 # ---------------------------------------------------------------------------
+# cargo_target_dir — where `cargo package` / `cargo publish` wrote package/.
+# #10372: the repo `.envrc` exports CARGO_TARGET_DIR, so the artifact is NOT
+# under <repo>/target. Order: CARGO_TARGET_DIR, then `cargo metadata`'s
+# target_directory (honours .cargo/config.toml build.target-dir), then
+# <repo>/target. A failed metadata call only falls through to the next source;
+# a missing file is still VCS-INFO-MISSING below.
+cargo_target_dir() {
+  local meta dir
+  if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    echo "$CARGO_TARGET_DIR"
+    return 0
+  fi
+  if command -v cargo >/dev/null 2>&1; then
+    meta="$(cargo metadata --no-deps --format-version 1 2>/dev/null || true)"
+    dir="$(printf '%s' "$meta" | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -1)"
+    if [ -n "$dir" ]; then
+      echo "$dir"
+      return 0
+    fi
+  fi
+  echo "${REPO_ROOT}/target"
+}
+
 if [ -n "$VCS_INFO" ]; then
   if [ "$VCS_INFO" = "auto" ]; then
-    VCS_INFO="${REPO_ROOT}/target/package/${PKG_NAME}-${VERSION}/.cargo_vcs_info.json"
+    VCS_INFO="$(cargo_target_dir)/package/${PKG_NAME}-${VERSION}/.cargo_vcs_info.json"
   fi
   if [ ! -f "$VCS_INFO" ]; then
     echo "FAIL: VCS-INFO-MISSING — no .cargo_vcs_info.json at ${VCS_INFO}." >&2

@@ -10,6 +10,7 @@
 //! Test: covered by every `test_search_*` and `test_kg_*` integration test
 //! in `indexer::tests`.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use anyhow::{Context, Result};
 use crate::core::classifier::QueryIntent;
 use crate::core::embed::Embedder;
 use crate::core::entity::EdgeKind;
+use crate::core::search::rrf::RRF_K;
 use crate::service::embed_pool::RequestPriority;
 
 use super::super::{hash_query, CodeIndexer, SearchQuery};
@@ -59,7 +61,7 @@ use super::path_filter;
 /// request-timeout ceiling. PROVIDED the degrade is observable: see
 /// [`CodeIndexer::lane_degraded`] and the `trusty_bm25_lane_degraded` gauge
 /// it drives (surfaced in the search HTTP response as
-/// `meta.bm25_lane_degraded` — `service::server::search::search_handler`),
+/// `meta.bm25_lane_degraded` — `service::server::search::search_report`),
 /// plus the `trusty_bm25_lane_degraded_total` / `trusty_grep_fallback_lane_degraded_total`
 /// counters, at the bottom of `bm25_search` / `grep_fallback_search`. These
 /// are the load-bearing signals distinguishing "degraded, rehydrate still
@@ -188,15 +190,7 @@ impl CodeIndexer {
         embedder: &Arc<dyn Embedder>,
         text: &str,
     ) -> Result<Vec<f32>> {
-        if let Some(pool) = self.resolve_embed_pool().await {
-            let mut out = pool
-                .embed(vec![text.to_string()], RequestPriority::Interactive)
-                .await?;
-            return out
-                .pop()
-                .context("embed pool returned no vector for interactive request");
-        }
-        embedder.embed(text).await
+        embed_one(self.resolve_embed_pool().await, embedder, text).await
     }
 
     /// Embed an arbitrary text using the wired embedder, bypassing the
@@ -297,8 +291,12 @@ impl CodeIndexer {
     /// ranked outside the unscoped top `want` would already be gone by the
     /// time this function returns). Retries up to [`REHYDRATE_RACE_RETRIES`]
     /// times only when the race is detected; a genuinely empty BM25 index
-    /// returns `Ok(vec![])` on the first pass with no retry.
+    /// returns `Ok(vec![])` on the first pass with no retry. #10193: each wait
+    /// is the query's short shared budget (`await_corpus_for_query`); a
+    /// rehydrate still running past it degrades the lane at once.
     /// Test: BM25 results are covered by every search integration test;
+    /// `a_query_during_a_slow_bm25_build_answers_degraded_within_the_wait`
+    /// pins the #10193 bound;
     /// `bm25_search_survives_reclaim_race_between_ensure_and_read` in
     /// `indexer::tests_idle_evict` pins the race-detection retry itself;
     /// `test_path_prefix_filter_recovers_bm25_match_beyond_want` in
@@ -314,7 +312,11 @@ impl CodeIndexer {
         filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
     ) -> Result<Vec<(String, f32)>> {
         for _ in 0..REHYDRATE_RACE_RETRIES {
-            self.ensure_bm25_entities_loaded().await;
+            // #10193: wait only the query's short budget; a rehydrate still
+            // running past it degrades this lane now, not after 3 x 9 s.
+            if !self.await_corpus_for_query().await {
+                break;
+            }
             let bm25 = self.bm25.read().await;
             if !bm25.is_empty() {
                 return Ok(match filter {
@@ -348,7 +350,7 @@ impl CodeIndexer {
         // genuinely-empty corpus at the HTTP layer. Finding 3(a): flip the
         // sticky per-index flag AND set the gauge —
         // together these are `meta.bm25_lane_degraded` in the search HTTP
-        // response (`service::server::search::search_handler`) and the
+        // response (`service::server::search::search_report`) and the
         // `trusty_bm25_lane_degraded` Prometheus signal, so both a single
         // caller and a dashboard can tell this apart from a true empty
         // result without tailing logs. Reset (finding 5) happens in
@@ -359,9 +361,9 @@ impl CodeIndexer {
         metrics::counter!("trusty_bm25_lane_degraded_total", "index" => self.index_id.clone())
             .increment(1);
         tracing::warn!(
-            "index '{}': BM25 rehydrate still not ready after {REHYDRATE_RACE_RETRIES} bounded \
-             waits — returning empty lexical lane for this query (degraded, not a true empty \
-             result; issue #3683)",
+            "index '{}': BM25 rehydrate still not ready within the query's rehydrate wait — \
+             returning empty lexical lane for this query (degraded, not a true empty result; \
+             issues #3683, #10193)",
             self.index_id
         );
         Ok(Vec::new())
@@ -389,7 +391,8 @@ impl CodeIndexer {
     /// query / `want` / regex-build failure short-circuits to `Vec::new()`.
     /// Retries up to [`REHYDRATE_RACE_RETRIES`] times only when the race is
     /// detected (mirrors `bm25_search`'s flag-under-guard check); a
-    /// genuinely-empty map returns immediately.
+    /// genuinely-empty map returns immediately. #10193: waits only the
+    /// query's short shared budget, as `bm25_search` does.
     ///
     /// Issue #3401: when `filter` is set, a chunk must ALSO pass it to count
     /// toward the `out.len() >= want` early-exit. Counting an out-of-scope
@@ -414,7 +417,10 @@ impl CodeIndexer {
             return Vec::new();
         };
         for _ in 0..REHYDRATE_RACE_RETRIES {
-            self.ensure_chunks_loaded().await;
+            // #10193: same short query wait as `bm25_search`.
+            if !self.await_corpus_for_query().await {
+                break;
+            }
             let chunks = self.chunks.read().await;
             if chunks.is_empty() && self.chunks_evicted.load(Ordering::Relaxed) {
                 // A reclaim raced us since `ensure()` returned — drop the read
@@ -453,9 +459,9 @@ impl CodeIndexer {
         metrics::counter!("trusty_grep_fallback_lane_degraded_total", "index" => self.index_id.clone())
             .increment(1);
         tracing::warn!(
-            "index '{}': chunk rehydrate still not ready after {REHYDRATE_RACE_RETRIES} bounded \
-             waits — returning empty grep-fallback lane for this query (degraded, not a true \
-             empty result; issue #3683)",
+            "index '{}': chunk rehydrate still not ready within the query's rehydrate wait — \
+             returning empty grep-fallback lane for this query (degraded, not a true empty \
+             result; issues #3683, #10193)",
             self.index_id
         );
         Vec::new()
@@ -567,4 +573,57 @@ impl CodeIndexer {
             }
         }
     }
+}
+
+/// Embed one text on `pool`'s Interactive lane, else directly on `embedder`.
+///
+/// Why: the routing of [`CodeIndexer::embed_interactive`], with no `&self`,
+/// so the #10194 detached query embed can run it on a `'static` task.
+/// Test: `embed_pool_routing::query_embeds_route_through_interactive_lane_when_pool_installed`.
+pub(super) async fn embed_one(
+    pool: Option<Arc<crate::service::embed_pool::EmbedPool>>,
+    embedder: &Arc<dyn Embedder>,
+    text: &str,
+) -> Result<Vec<f32>> {
+    if let Some(pool) = pool {
+        let mut out = pool
+            .embed(vec![text.to_string()], RequestPriority::Interactive)
+            .await?;
+        return out
+            .pop()
+            .context("embed pool returned no vector for interactive request");
+    }
+    embedder.embed(text).await
+}
+
+/// Merge a grep lane into an already-RRF-fused list (issue #75).
+///
+/// Why: `rrf_fuse` is hard-coded to two lanes (HNSW + BM25). Rather than
+/// reshape its signature, we fold the grep lane in via the same reciprocal
+/// rank formula and re-truncate to `top_k`.
+/// What: walks `grep_lane` (ordered best-first), adds `weight * 1/(k+rank)`
+/// to each id's score, re-sorts by score desc with id as tie-break, truncates.
+/// Test: `test_merge_grep_lane_appends_new_ids` in `indexer::tests`.
+pub(crate) fn merge_grep_lane(
+    fused: Vec<(String, f32)>,
+    grep_lane: &[(String, f32)],
+    weight: f32,
+    top_k: usize,
+) -> Vec<(String, f32)> {
+    if grep_lane.is_empty() {
+        return fused;
+    }
+    let mut accum: HashMap<String, f32> = fused.into_iter().collect();
+    for (rank0, (id, _)) in grep_lane.iter().enumerate() {
+        let rank = (rank0 + 1) as f32;
+        *accum.entry(id.clone()).or_insert(0.0) += weight * (1.0 / (RRF_K + rank));
+    }
+    let mut out: Vec<(String, f32)> = accum.into_iter().collect();
+    out.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    out.truncate(top_k);
+    out
 }

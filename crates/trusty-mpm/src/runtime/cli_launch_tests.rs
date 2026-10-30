@@ -21,15 +21,14 @@ fn env_words(spec: &LaunchSpec) -> Vec<String> {
 
 /// A fake `tmux` that appends its argv to `<dir>/argv.log` and exits `exit`.
 fn fake_tmux(dir: &Path, exit: u8) -> (String, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let log = dir.join("argv.log");
     let bin = dir.join("fake-tmux");
     let script = format!(
         "#!/bin/sh\necho \"$*\" >> '{}'\necho 'fake failure' >&2\nexit {exit}\n",
         log.display()
     );
-    std::fs::write(&bin, script).expect("fake tmux");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
     (bin.display().to_string(), log)
 }
 
@@ -56,7 +55,9 @@ fn isolated_spec_carries_the_owner_settings_after_the_mcp_config() {
         settings: Some(Path::new("/h/with space/s.json")),
         alternate_screen: false,
     };
-    let args = super::isolated_spec(Path::new("/work"), &launch).args;
+    let args = super::isolated_spec(Path::new("/work"), &launch)
+        .expect("spec")
+        .args;
     let at = args.iter().position(|a| a == "--mcp-config").expect("mcp");
     assert_eq!(
         args[at + 2..at + 4],
@@ -80,7 +81,7 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
         settings: None,
         alternate_screen: false,
     };
-    let spec = super::isolated_spec(Path::new("/work"), &launch);
+    let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
     let line = crate::core::model_inject::build_claude_command_with_configured(
         launch.model,
         launch.prompt_file,
@@ -149,7 +150,7 @@ fn only_an_architect_stamp_value_skips_the_pm_trim() {
             settings: None,
             alternate_screen: false,
         };
-        let spec = super::isolated_spec(Path::new("/work"), &launch);
+        let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
         assert!(
             !spec.args.iter().any(|a| a == "--disallowedTools"),
             "stamp {value:?}: {:?}",
@@ -171,7 +172,7 @@ fn only_an_architect_stamp_value_skips_the_pm_trim() {
             settings: None,
             alternate_screen: false,
         };
-        let spec = super::isolated_spec(Path::new("/work"), &launch);
+        let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
         assert!(
             env_words(&spec).contains(&"CLAUDE_CODE_DISABLE_ARTIFACT=1".to_owned()),
             "stamp {value:?}: {:?}",
@@ -203,7 +204,7 @@ fn an_architect_isolated_spec_keeps_every_tool() {
         settings: None,
         alternate_screen: false,
     };
-    let spec = super::isolated_spec(Path::new("/work"), &launch);
+    let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
     assert!(!spec.args.iter().any(|a| a == "--disallowedTools"));
     assert!(
         !env_words(&spec)
@@ -290,7 +291,7 @@ fn worst_case_cli_launch_line_is_short_and_carries_no_token() {
         settings: None,
         alternate_screen: false,
     };
-    let spec = super::isolated_spec(&managed, &launch);
+    let spec = super::isolated_spec(&managed, &launch).expect("spec");
     assert!(env_words(&spec).contains(&format!("CLAUDE_CODE_OAUTH_TOKEN={token}")));
 
     let spec_dir = super::spec_dir(Some(home)).expect("a named home always resolves");
@@ -351,11 +352,37 @@ fn send_spec_launch_types_a_short_line_naming_a_readable_spec() {
 
     let written = entries(&spec_dir);
     assert_eq!(written.len(), 1, "one spec: {written:?}");
-    assert_eq!(LaunchSpec::verify(&written[0]).expect("readable"), spec);
+    // #9025: what is written is the spec named after its session.
+    let named = crate::runtime::remote_name::named_after_session(&spec, "tm-sess");
+    assert_eq!(LaunchSpec::verify(&written[0]).expect("readable"), named);
     let argv = std::fs::read_to_string(&log).expect("tmux ran");
     let want = super::pane_line("/w/tm", &written[0]);
     assert!(argv.contains(&want), "want {want:?} in: {argv}");
     assert!(argv.contains("Enter"), "{argv}");
+}
+
+/// #9025: `tm launch`, `tm connect` and `tm session start` all deliver through
+/// `send_spec_launch`; the spec it writes names the session after its tmux
+/// session, ahead of every other flag.
+#[serial_test::serial]
+#[test]
+fn a_cli_launch_is_named_after_its_tmux_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (bin, _) = fake_tmux(tmp.path(), 0);
+    let spec_dir = tmp.path().join("specs");
+    let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
+
+    super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-dogfood", &spec, &spec_dir)
+        .expect("a short line is typed");
+
+    let written = LaunchSpec::verify(&entries(&spec_dir)[0]).expect("readable");
+    assert_eq!(
+        written.args[..2],
+        ["--name", "tm-dogfood"],
+        "{:?}",
+        written.args
+    );
+    assert_eq!(written.args[2..], spec.args[..], "{:?}", written.args);
 }
 
 /// #8308: when tmux cannot type the line, nothing will consume the spec, so

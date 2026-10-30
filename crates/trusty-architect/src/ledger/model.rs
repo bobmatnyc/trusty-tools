@@ -405,27 +405,21 @@ impl State {
     }
 
     /// Takes the next free id of `prefix` and advances `next` (LDG-2.2.3):
-    /// the first number at or after `next` that is neither live nor in
-    /// `archived`, wrapping to the lowest such number. The caller passes the
-    /// ids of the store's `archive.jsonl` (critic round 1: an archived id is
-    /// never reissued); ids of another code or prefix in it are ignored.
+    /// the first number at or after `next` that is not live, wrapping to the
+    /// lowest such number. Ids are ephemeral, so an archived id is free again
+    /// and is reissued (#10235, Bob ruling 2026-10-24).
     ///
     /// # Errors
     /// [`LedgerError::Invalid`] when `next` is not `01`..`ff`;
-    /// [`LedgerError::NoFreeId`] when every number is live or archived.
-    /// `next` is unchanged on error.
-    pub fn allocate(
-        &mut self,
-        prefix: Prefix,
-        archived: &[LedgerId],
-    ) -> Result<LedgerId, LedgerError> {
+    /// [`LedgerError::NoFreeId`] when every number is live. `next` is
+    /// unchanged on error.
+    pub fn allocate(&mut self, prefix: Prefix) -> Result<LedgerId, LedgerError> {
         let ids = self.goals.iter().map(|g| &g.id);
         let ids = ids.chain(self.items.iter().map(|i| &i.id));
         let live = ids
             .chain(self.tasks.iter().map(|t| &t.id))
             .filter_map(|id| LedgerId::parse(id).ok());
         let used: Vec<u8> = live
-            .chain(archived.iter().cloned())
             .filter(|id| id.code() == &self.code && id.prefix() == prefix)
             .map(|id| id.number())
             .collect();

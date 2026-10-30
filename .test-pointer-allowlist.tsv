@@ -161,7 +161,6 @@ crates/trusty-analyze/src/service/handlers/analysis.rs	diagnostics_pagination_*
 crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_*
 crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_default_strips_content
 crates/trusty-analyze/src/types/complexity.rs	custom_thresholds_change_detection_results
-crates/trusty-analyze/tests/stdio_harness.rs	precheck_search_up
 crates/trusty-code/src/agent_loop/cadence.rs	stays_under_budget_every_turn
 crates/trusty-code/src/agent_loop/mod.rs	sink_receives_tool_error_for_fatal_failures
 crates/trusty-code/src/agent_loop/transcript.rs	compact_span_tagged_*
@@ -185,7 +184,6 @@ crates/trusty-code/src/rbac/mod.rs	default_is_local_cli_all
 crates/trusty-code/src/run_task/mod.rs	diff_reflects_engineer_file_change
 crates/trusty-code/src/run_task/recorder.rs	recorder_flags_ran_test_command_on_matching_bash_call
 crates/trusty-code/src/runner/in_process.rs	with_timeout_secs_overrides_only_timeout
-crates/trusty-code/src/serve/http.rs	http_session_events_sse_streams_replay_then_live_event
 crates/trusty-code/src/session/registry.rs	cancel_is_idempotent_on_terminal_session
 crates/trusty-code/src/session/registry.rs	detach_stops_the_forwarder
 crates/trusty-code/src/session/registry_transcript.rs	get_transcript_returns_stored_record
@@ -576,7 +574,6 @@ crates/trusty-mpm/src/session_manager/tests.rs	graceful_stop_sends_sigterm_then_
 crates/trusty-mpm/src/session_manager/tests.rs	graceful_stop_skips_sigterm_when_no_pid
 crates/trusty-mpm/src/slack/commands.rs	all_names_parse_back
 crates/trusty-mpm/src/supervisor/metrics.rs	metrics_run_stats_accumulate
-crates/trusty-mpm/src/supervisor/mod.rs	supervisor_fleet_resume_e2e
 crates/trusty-mpm/src/telegram/focus.rs	handle_unfocus_clears_and_reports
 crates/trusty-mpm/src/telegram/focus.rs	render_focus_current_none
 crates/trusty-mpm/src/telegram/focus.rs	render_focus_focused
@@ -848,8 +845,6 @@ crates/trusty-analyze/src/service/events.rs	deep_endpoint_requires_api_key
 crates/trusty-analyze/src/service/handlers/deep.rs	deep_endpoint_requires_api_key
 crates/trusty-analyze/src/service/rpc_tests.rs	a_daemon_side_deadline_is_a_timeout_not_a_rejection
 crates/trusty-analyze/src/webhook_listener.rs	listener_serves_a_delivery_and_cleans_up_its_socket
-crates/trusty-analyze/tests/stdio_harness.rs	binary_path_exists
-crates/trusty-analyze/tests/stdio_harness.rs	spawn_child
 crates/trusty-code/src/agent_loop/mod.rs	config_max_tokens_reaches_chat_request
 crates/trusty-code/src/intent/mod.rs	submit_task
 crates/trusty-code/src/perf/mod.rs	update_skill_usage
@@ -954,7 +949,6 @@ crates/trusty-search/src/service/server/state.rs	status_changed
 crates/trusty-search/src/service/server/state_impl.rs	chat_provider_endpoint_returns_payload
 crates/trusty-search/src/service/server/state_impl.rs	health_includes_embedderd_rss_field
 crates/trusty-search/src/service/server/state_impl.rs	start_brings_pool_online
-crates/trusty-search/src/service/server/status.rs	test_graph_handler_filters
 crates/trusty-search/src/service/server/tickers.rs	status_changed
 crates/trusty-search/src/service/shutdown_flush.rs	shutdown_flush_skips_external_volume_index
 #
@@ -981,5 +975,3 @@ crates/trusty-search/src/commands/start/embedder.rs	resolve_expected_python_prov
 crates/trusty-search/src/core/indexer/archive.rs	archive_downranking_*
 crates/trusty-search/src/core/indexer/docs_penalty.rs	test_doc_score_penalty_*
 crates/trusty-search/src/mcp/tools/search.rs	search_*_tool_routes_to_*_stage
-crates/trusty-search/src/service/server/files.rs	test_call_chain_handler_*
-crates/trusty-search/src/service/server/status.rs	test_graph_handler_*

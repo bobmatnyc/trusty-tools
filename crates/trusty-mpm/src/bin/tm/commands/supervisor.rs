@@ -1,9 +1,10 @@
 //! `supervisor` subcommand — run the unattended 24/7 fleet supervisor (#1206).
 //!
 //! Why: for overnight / unattended operation the managed-session fleet needs an
-//! always-on process that auto-resumes `stopped` sessions, observes health
-//! without a live caller, surfaces pending decisions, and publishes fleet metrics —
-//! all while making NO autonomy decisions. This handler is the operator entry
+//! always-on process that observes health without a live caller, surfaces
+//! pending decisions, and publishes fleet metrics — all while making NO autonomy
+//! decisions. #10356 (owner ruling D74): it no longer auto-resumes `stopped`
+//! sessions. This process installs no runtime relauncher, so the daemon does. This handler is the operator entry
 //! point (`tm supervisor`) that wires the real session manager + activity monitor
 //! and runs the loop until the process is signalled to stop.
 //! What: builds a [`SessionManager`] over the real tmux driver (falling back to a
@@ -60,7 +61,8 @@ pub(crate) fn apply_interval_override(
 /// builds the activity monitor unless `--no-classify` (or the env toggle) disables
 /// it, and runs [`Supervisor::run`], which publishes each sweep's snapshot to
 /// `~/.trusty-mpm/supervisor-metrics.json`. CLI flags take precedence over
-/// `TRUSTY_MPM_SUPERVISOR_*` / `TRUSTY_MPM_AUTO_RESUME`.
+/// `TRUSTY_MPM_SUPERVISOR_*`. #10356: `--auto-resume` and
+/// `TRUSTY_MPM_AUTO_RESUME` are ignored here and logged as such.
 /// Test: `cli_parses_supervisor`; loop behavior in `supervisor::tests`.
 pub(crate) async fn run_supervisor(
     interval: Option<u64>,
@@ -72,8 +74,14 @@ pub(crate) async fn run_supervisor(
     // A zero interval is rejected outright (immediate feedback) rather than
     // silently falling back to the default.
     apply_interval_override(&mut cfg, interval)?;
-    if auto_resume {
-        cfg.auto_resume = true;
+    // #10356 (owner ruling D74): the daemon owns auto-resume. Say so once,
+    // rather than leave an operator thinking this flag still does something.
+    if auto_resume || cfg.auto_resume {
+        tracing::warn!(
+            "tm supervisor: auto-resume is ignored here since #10356; the daemon resumes \
+             stopped sessions. Set TRUSTY_MPM_AUTO_RESUME on the daemon or use the \
+             console toggle"
+        );
     }
     if no_classify {
         cfg.classify_idle = false;
@@ -109,12 +117,11 @@ pub(crate) async fn run_supervisor(
     // daemon reads, so there is no port to collide on and no server task to race
     // the loop against.
     let interval_secs = cfg.interval.as_secs();
-    let (auto_resume_flag, classify_idle) = (cfg.auto_resume, cfg.classify_idle);
+    let classify_idle = cfg.classify_idle;
     let supervisor = Supervisor::new(mgr, cfg, monitor);
     tracing::info!(
         metrics_path = %supervisor.metrics_path().display(),
         interval_secs,
-        auto_resume = auto_resume_flag,
         classify_idle,
         "starting unattended supervisor"
     );

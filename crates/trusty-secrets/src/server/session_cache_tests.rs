@@ -80,16 +80,25 @@ impl SecretBackend for Counting {
     fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         self.inner.delete(vault, key)
     }
-    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        self.inner.agents_may_use(vault, key)
+    fn holds_agent_controls(&self) -> bool {
+        self.inner.holds_agent_controls()
     }
-    fn set_agents_may_use(
+    fn control_item(
         &self,
+        item: ControlItem,
         vault: &VaultName,
-        key: &SecretKey,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        self.inner.control_item(item, vault, key)
+    }
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
         allowed: bool,
     ) -> Result<(), SecretsError> {
-        self.inner.set_agents_may_use(vault, key, allowed)
+        self.inner.set_control_item(item, vault, key, allowed)
     }
 }
 
@@ -345,7 +354,7 @@ fn set_delete_copy_evict_cached_value() {
 /// Red while nothing is cached (the warm-up reads twice).
 /// Test: itself.
 #[test]
-fn warm_cache_still_refuses_unflagged_key_for_agent() {
+fn warm_cache_still_refuses_denied_key_for_agent() {
     let fx = fixture();
     let op = Counting::new(BackendId::onepassword());
     put(&fx, &op, PROJECT_VAULT, "API_KEY", SENTINEL_VALUE);
@@ -360,7 +369,7 @@ fn warm_cache_still_refuses_unflagged_key_for_agent() {
 
     flag(&fx, &op, "API_KEY", false);
     let refused = resolve_in(&state, &token, "API_KEY");
-    assert_eq!(refused, Err(ErrorKind::AgentUseRefused));
+    assert_eq!(refused, Err(ErrorKind::AgentKeyDenied));
 }
 
 /// Why: #7520 — a hit skips only the backend read. With the cache warm, a

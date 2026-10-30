@@ -5,7 +5,7 @@
 //! SLOC cap; this file is itself capped at 1500 SLOC as a test file).
 //!
 //! Why: mirrors `tests_behavior_2903_skills_tests.rs`'s rationale exactly —
-//! a skill asset file existing under `src/assets/skills/` is NOT sufficient
+//! a skill asset file existing under `content/skills/` is NOT sufficient
 //! for it to ship; only `ALL` (`bundle_all.rs`) registration makes
 //! `deploy_all_skill_tiers` see it, and the multi-file skill-directory
 //! extension (epic #2902 constraint #2, reused here) adds a SECOND failure

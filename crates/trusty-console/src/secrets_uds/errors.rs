@@ -139,7 +139,7 @@ const TIMEOUT: &str = "the secrets server ran out of time";
 /// What: one row per kind, in the server's declaration order.
 /// Test: `console_kind_table_matches_the_server_error_kinds` pins it to the
 /// server's `ErrorKind::as_str`.
-pub const UPSTREAM_KINDS: [(&str, StatusCode, &str); 37] = [
+pub const UPSTREAM_KINDS: [(&str, StatusCode, &str); 39] = [
     ("invalid_params", StatusCode::BAD_REQUEST, BAD_REQUEST),
     ("project_invalid", StatusCode::BAD_REQUEST, BAD_REQUEST),
     (
@@ -228,6 +228,11 @@ pub const UPSTREAM_KINDS: [(&str, StatusCode, &str); 37] = [
         TOO_MANY,
     ),
     ("bridge_refused", StatusCode::FORBIDDEN, FORBIDDEN),
+    // #10459: a per-key deny, split from `agent_use_refused`.
+    ("agent_key_denied", StatusCode::FORBIDDEN, FORBIDDEN),
+    // #10459 PR1: a refused main-thread ticket mint; the bridge never
+    // forwards a ticket method, so this row only keeps the table closed.
+    ("ticket_refused", StatusCode::FORBIDDEN, FORBIDDEN),
     ("internal", StatusCode::INTERNAL_SERVER_ERROR, INTERNAL),
 ];
 

@@ -50,8 +50,14 @@ pub mod method {
     pub const RESOLVE: &str = "secrets.resolve";
     /// Remove an exec grant.
     pub const REVOKE: &str = "secrets.revoke";
-    /// Turn one key's "agents may use" flag on or off (DOC-74 §15.8, #9070).
+    /// Write or remove one key's agent deny (DOC-74 §15.8, #9070, #10386).
     pub const SET_AGENTS_MAY_USE: &str = "secrets.set_agents_may_use";
+    /// Mint a main-thread ticket for one Architect call (#10459, DOC-86 §2).
+    pub const TICKET_MINT: &str = "secrets.ticket.mint";
+    /// Void a session's pending tickets (#10459, DOC-86 §2).
+    pub const TICKET_VOID: &str = "secrets.ticket.void";
+    /// Whether a ticket is pending (#10459, DOC-86 §4).
+    pub const TICKET_PENDING: &str = "secrets.ticket.pending";
 }
 
 /// Which kind of scope a vault serves (DOC-74 §15.3).
@@ -99,8 +105,8 @@ pub struct KeyMeta {
     /// Last write, in seconds since the Unix epoch.
     pub updated_at: u64,
     /// Whether `exec` may inject this key into a Claude Code process tree
-    /// (DOC-74 §15.8). Default OFF. #9070: taken from the backend's own
-    /// flag item, never from the index row; the index never reports it ON.
+    /// (DOC-74 §15.8). #10386: `true` unless the backend holds the key's
+    /// agent deny item; default `true`. Never taken from the index row (#9070).
     pub agents_may_use: bool,
 }
 

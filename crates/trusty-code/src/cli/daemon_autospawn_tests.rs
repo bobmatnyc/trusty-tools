@@ -27,12 +27,10 @@
 //! env var itself. `TRUSTY_DATA_DIR_OVERRIDE` is still set, for the
 //! spawned-daemon log path alone.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 
 use super::*;
 
@@ -108,17 +106,13 @@ fn stub_daemon_full(
     version: &'static str,
     fail_health: bool,
 ) {
-    let dir = socket.parent().expect("a socket path has a parent");
-    // `connect_hardened` refuses a socket whose containing directory is wider
-    // than `0700`, and `tempfile` creates one at the process umask.
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .expect("harden the stub socket directory");
     if socket.exists() {
         std::fs::remove_file(socket).expect("clear the stale stub socket");
     }
-    let listener = UnixListener::bind(socket).expect("bind the stub socket");
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
-        .expect("harden the stub socket");
+    // `connect_hardened` refuses anything but a 0700 dir and a 0600 socket.
+    // #7215: the code under test names this path, so the stub binds it through
+    // the production `bind_hardened` rather than `bind_hardened_stub`.
+    let listener = trusty_common::uds::bind_hardened(socket).expect("bind the stub socket");
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let binding = binding.clone();
@@ -195,22 +189,100 @@ fn binding_json(root: Option<&Path>) -> serde_json::Value {
 /// `the_spawned_daemon_leads_its_own_session`.
 fn stub_binary(dir: &Path, name: &str, body: &str) -> PathBuf {
     let staging = dir.join(format!(".{name}.tmp"));
-    let status = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(r#"printf '%s\n' "$2" > "$1" && chmod 755 "$1""#)
-        .arg("sh")
-        .arg(&staging)
-        .arg(format!("#!/bin/sh\n{body}"))
-        .stdin(std::process::Stdio::null())
-        .status()
-        .expect("run the stub writer");
-    assert!(
-        status.success(),
-        "stub writer failed for {staging:?}: {status}"
-    );
+    write_stub(&staging, body);
     let script = dir.join(name);
     std::fs::rename(&staging, &script).expect("move the stub into place");
     script
+}
+
+/// Write `#!/bin/sh\n<body>\n` to `staging` from a reaped child (#6231).
+fn write_stub(staging: &Path, body: &str) {
+    // See #10248
+    trusty_common::exec_stub::write_executable(staging, format!("#!/bin/sh\n{body}\n"))
+        .unwrap_or_else(|e| panic!("stub writer failed for {staging:?}: {e}"));
+}
+
+/// The per-user root that [`stable_stub`] keys its stubs under.
+fn stable_stub_root() -> PathBuf {
+    // SAFETY: `getuid` takes no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    std::env::temp_dir().join(format!("trusty-test-stubs-{uid}"))
+}
+
+/// Return an executable `sh` stub for a FIXED `body`, written once per machine.
+///
+/// Why (#10212): macOS syspolicyd scans every new executable file on its
+/// first launch, and a fresh stub per test is one more scan per test. A body
+/// that names no per-test path is the same file for every test and every run.
+/// What: the path is `<temp>/trusty-test-stubs-<uid>/<sha256(name, body)>/<name>`.
+/// An existing file there is reused untouched. Otherwise [`write_stub`] fills
+/// a staging name unique to this process and call, and a `rename` publishes it.
+/// Two racing writers each rename a complete file of the same content, so the
+/// path only ever names a closed executable (#6231). On EVERY call, reuse
+/// included, the root, the key dir and the stub must be this user's, no
+/// symlink, and not group- or world-writable, and the stub must hold exactly
+/// this body; anything else panics (#10212: on Linux the root sits in the
+/// shared `/tmp`, so another user could plant it). A body with a per-test path
+/// must use [`stub_binary`] instead, or this root grows by one file per test.
+/// Test: `a_stable_stub_is_written_once_and_reused`,
+/// `racing_stable_stub_writers_both_get_an_executable`,
+/// `a_planted_stable_stub_is_refused_not_reused`.
+fn stable_stub(name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let script = stable_stub_path(name, body);
+    let dir = script.parent().expect("stub dir").to_path_buf();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .expect("create the stable stub dir");
+    assert_private(&stable_stub_root());
+    assert_private(&dir);
+    if std::fs::symlink_metadata(&script).is_err() {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let staging = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
+        write_stub(&staging, body);
+        std::fs::rename(&staging, &script).expect("publish the stable stub");
+    }
+    assert_private(&script);
+    let text = std::fs::read_to_string(&script).expect("read the stable stub");
+    assert_eq!(
+        text,
+        format!("#!/bin/sh\n{body}\n"),
+        "{script:?} does not hold the stub body; refusing to run it"
+    );
+    script
+}
+
+/// Where [`stable_stub`] keeps `name` with `body`.
+fn stable_stub_path(name: &str, body: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::new()
+        .chain_update(name)
+        .chain_update([0u8])
+        .chain_update(body)
+        .finalize();
+    let key: String = digest[..12].iter().map(|b| format!("{b:02x}")).collect();
+    stable_stub_root().join(key).join(name)
+}
+
+/// Panic unless `path` is this user's, not a symlink, and not group- or
+/// world-writable (#10212).
+fn assert_private(path: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).expect("stat a stable stub path");
+    // SAFETY: `getuid` takes no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    assert!(!meta.file_type().is_symlink(), "{path:?} is a symlink");
+    assert_eq!(meta.uid(), uid, "{path:?} belongs to another user");
+    assert_eq!(
+        meta.mode() & 0o022,
+        0,
+        "{path:?} is group- or world-writable"
+    );
 }
 
 /// A stub that records its own pid and the argv it was called with, then
@@ -368,22 +440,28 @@ fn bind_once_argv_has(
 /// A daemon whose `health` fails: it accepts each connection and drops it, so
 /// `socket_is_serving` sees it live but the `health` call reads EOF (#4600).
 fn mute_daemon_at(socket: &Path) {
-    let dir = socket.parent().expect("a socket path has a parent");
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .expect("harden the stub socket directory");
-    let listener = UnixListener::bind(socket).expect("bind the mute socket");
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
-        .expect("harden the mute socket");
+    // #7215: hardened by the production bind, as `stub_daemon_full` is.
+    let listener = trusty_common::uds::bind_hardened(socket).expect("bind the mute socket");
     tokio::spawn(async move { while listener.accept().await.is_ok() {} });
 }
 
 /// A stub that touches `marker` — used to PROVE a branch never spawned it.
+///
+/// Why (#10212): a body naming the per-test marker made a new executable file
+/// per test. What: one [`stable_stub`] that touches `spawned` beside the path
+/// it was run as (`${0%/*}`), reached through a per-test symlink in `dir`, so
+/// `marker` must be `dir/spawned`.
+/// Test: `a_linked_marker_stub_marks_its_own_dir`.
 fn marker_stub(dir: &Path, marker: &Path) -> PathBuf {
-    stub_binary(
-        dir,
-        "tcode-marker",
-        &format!("touch {}\nsleep 300", marker.display()),
-    )
+    assert_eq!(
+        marker,
+        dir.join("spawned"),
+        "the marker sits beside the link"
+    );
+    let script = stable_stub("tcode-marker", "touch \"${0%/*}/spawned\"\nsleep 300");
+    let link = dir.join("tcode-marker");
+    std::os::unix::fs::symlink(&script, &link).expect("link the marker stub");
+    link
 }
 
 fn is_alive(pid: u32) -> bool {
@@ -602,8 +680,10 @@ async fn a_second_project_starts_its_own_daemon_beside_the_first() {
         );
         let argv = stub.argv().await;
         assert!(
-            argv.contains("--project-socket") && argv.contains("--port 0"),
-            "the second project's daemon must bind its own socket and no fixed port: {argv}"
+            argv.contains("--project-socket")
+                && !argv.contains("--port")
+                && !argv.contains("--http"),
+            "the second project's daemon must bind its own socket and no TCP port: {argv}"
         );
         assert_eq!(
             argv.contains("--project "),
@@ -1110,14 +1190,11 @@ async fn spawns_a_daemon_when_none_is_running() {
     // #6231: the stub is a real child, and readiness came from the socket
     // rather than from it — so its argv has to be waited for, not assumed.
     let argv = stub.argv().await;
+    assert!(argv.contains("serve"), "must spawn `serve`: {argv}");
+    // #6637: no TCP listener of any kind, and the shared socket when it is free.
     assert!(
-        argv.contains("serve") && argv.contains("--http"),
-        "must spawn `serve --http`: {argv}"
-    );
-    // #4600: no fixed port, and the shared socket when it is free.
-    assert!(
-        argv.contains("--port 0") && !argv.contains("--project-socket"),
-        "must spawn on an OS-assigned port and the shared socket: {argv}"
+        !argv.contains("--http") && !argv.contains("--port") && !argv.contains("--project-socket"),
+        "must spawn the socket-only daemon on the shared socket: {argv}"
     );
     assert!(
         argv.contains("--project") && argv.contains(canonical.to_str().expect("utf8")),
@@ -1312,8 +1389,7 @@ async fn reports_a_daemon_that_dies_on_startup() {
     let _lock = ENV_LOCK.lock().await;
     let _env = EnvGuard::isolated();
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let stub = stub_binary(dir.path(), "tcode-dies", "exit 3");
+    let stub = stable_stub("tcode-dies", "exit 3");
     let sock_dir = tempfile::tempdir().expect("socket dir");
     // Nothing is bound here, so readiness can only ever come from the child
     // — which exits at once.
@@ -1341,8 +1417,7 @@ async fn reports_a_daemon_that_dies_on_startup() {
 /// Test: this test.
 #[tokio::test]
 async fn the_spawned_daemon_leads_its_own_session() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let stub = stub_binary(dir.path(), "tcode-session", "exec sleep 300");
+    let stub = stable_stub("tcode-session", "exec sleep 300");
     let mut child = spawn_daemon(&stub, None, false, None).expect("spawn the stub daemon");
     let pid = child.id().expect("a live child has a pid") as libc::pid_t;
     // SAFETY: `getsid` only reads the session of our own unreaped child.
@@ -1353,4 +1428,150 @@ async fn the_spawned_daemon_leads_its_own_session() {
         sid, pid,
         "the daemon `tcode tui` starts must lead its own session (#8783)"
     );
+}
+
+/// A body no earlier run wrote, so the first [`stable_stub`] call must create
+/// it; the caller removes its directory afterwards.
+fn fresh_body(tag: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after the epoch")
+        .as_nanos();
+    format!("# {tag} {} {nanos}\nexit 0", std::process::id())
+}
+
+/// Why (#10212): a stable stub is only a saving if a second call reuses the
+/// first call's file instead of writing a new one.
+/// What: two calls with one fixed body return one path, and the inode and
+/// mtime are unchanged by the second call. A helper that wrote a fresh file
+/// per call would publish a new inode by `rename`. The body is fixed, so after
+/// the first run on a machine this test creates no file at all.
+/// Test: this test.
+#[test]
+fn a_stable_stub_is_written_once_and_reused() {
+    use std::os::unix::fs::MetadataExt;
+    let first = stable_stub("tcode-stable", "exit 0");
+    let before = std::fs::metadata(&first).expect("stat the first stub");
+    let second = stable_stub("tcode-stable", "exit 0");
+    let after = std::fs::metadata(&second).expect("stat the second stub");
+    assert_eq!(first, second, "one body must map to one path");
+    assert!(first.starts_with(stable_stub_root()), "{first:?}");
+    assert_eq!(
+        before.ino(),
+        after.ino(),
+        "the second call rewrote the stub"
+    );
+    assert_eq!(
+        before.modified().expect("mtime"),
+        after.modified().expect("mtime"),
+        "the second call touched the stub"
+    );
+}
+
+/// Why (#10212): parallel tests share one stable stub, so two first callers
+/// can write the same body at once.
+/// What: per round, two threads released by a barrier call [`stable_stub`]
+/// with a body no run has written. Both must get the same path, holding the
+/// whole script with every execute bit set, and no staging file may remain.
+/// Round 0 also runs the stub to exit 0; the other rounds do not, since each
+/// launch of a new file is one more macOS first-launch scan.
+/// Test: this test.
+#[test]
+fn racing_stable_stub_writers_both_get_an_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    for round in 0..3 {
+        let body = fresh_body(&format!("race-{round}"));
+        let barrier = std::sync::Barrier::new(2);
+        let paths: Vec<PathBuf> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        stable_stub("tcode-race", &body)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("writer thread"))
+                .collect()
+        });
+        let dir = paths[0].parent().expect("stub dir").to_path_buf();
+        let seen: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let mode = std::fs::metadata(path).expect("stat").permissions().mode();
+                (mode, std::fs::read_to_string(path).expect("read the stub"))
+            })
+            .collect();
+        let ran = (round == 0).then(|| {
+            std::process::Command::new(&paths[0])
+                .status()
+                .expect("run the stub")
+        });
+        let leftovers = std::fs::read_dir(&dir).expect("list stub dir").count();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(paths[0], paths[1], "round {round}: one body, one path");
+        for (mode, text) in seen {
+            assert_eq!(mode & 0o111, 0o111, "round {round}: not executable");
+            assert_eq!(text, format!("#!/bin/sh\n{body}\n"), "round {round}");
+        }
+        if let Some(status) = ran {
+            assert!(status.success(), "round {round}: stub failed: {status}");
+        }
+        assert_eq!(leftovers, 1, "round {round}: a staging file was left");
+    }
+}
+
+/// Why (#10212): the stable path is predictable, so a file already there may
+/// not be this suite's stub; reusing it would run someone else's script.
+/// What: plants a file at the hashed path, once with another body and once
+/// with the right body but world-writable, and requires [`stable_stub`] to
+/// panic rather than return it. Another uid cannot be faked here; the owner
+/// check shares the code path.
+/// Test: this test.
+#[test]
+fn a_planted_stable_stub_is_refused_not_reused() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    for (case, wrong_body, mode) in [("body", true, 0o755), ("mode", false, 0o777)] {
+        let body = fresh_body(&format!("planted-{case}"));
+        let script = stable_stub_path("tcode-planted", &body);
+        let dir = script.parent().expect("stub dir").to_path_buf();
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .expect("create the planted dir");
+        let planted = if wrong_body { "exit 7" } else { body.as_str() };
+        std::fs::write(&script, format!("#!/bin/sh\n{planted}\n")).expect("plant");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode))
+            .expect("chmod the planted stub");
+        let reused = std::panic::catch_unwind(|| stable_stub("tcode-planted", &body));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(reused.is_err(), "{case}: a planted stub was reused");
+    }
+}
+
+/// Why (#10212): every "never spawned" case asserts `!marker.exists()`, which
+/// passes vacuously if a run stub would mark some other directory.
+/// What: spawns the linked [`marker_stub`] through [`spawn_daemon`], the
+/// production spawn, and requires `dir/spawned` to appear.
+/// Test: this test.
+#[tokio::test]
+async fn a_linked_marker_stub_marks_its_own_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("spawned");
+    let stub = marker_stub(dir.path(), &marker);
+    let mut child = spawn_daemon(&stub, None, false, None).expect("spawn the marker stub");
+    let mut seen = false;
+    for _ in 0..200 {
+        if marker.exists() {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    child.start_kill().expect("signal the marker stub");
+    child.wait().await.expect("reap the marker stub");
+    assert!(seen, "a run marker stub must touch {marker:?}");
 }

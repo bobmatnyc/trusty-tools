@@ -17,6 +17,7 @@ use tokio::sync::{RwLock, watch};
 use super::{RecycleHooks, RecycleTrigger, TrackedClient};
 use crate::embedder_client::EmbedderClient;
 use crate::embedder_client::supervisor::SupervisorConfig;
+use crate::embedder_client::supervisor::supervisor_hard_limit::SpawnKind;
 
 /// Drain poll cadence.
 const DRAIN_POLL: Duration = Duration::from_millis(20);
@@ -43,6 +44,10 @@ pub(crate) enum RecycleOutcome {
     /// #9828: the old sidecar exited while the replacement was starting; its
     /// exit is still in `child_slot` for the crash path to observe.
     OldExited(Arc<TrackedClient>),
+    /// #10207: the old sidecar crossed the hard footprint limit while the
+    /// replacement was starting; the replacement was abandoned and the
+    /// caller kills the old sidecar through the crash path.
+    HardLimit(Arc<TrackedClient>),
 }
 
 /// Replace the live sidecar with a fresh one, then drain and stop the old.
@@ -51,7 +56,9 @@ pub(crate) enum RecycleOutcome {
 /// never count as a crash. Spawning first means there is never a moment with
 /// no sidecar; draining before the kill means no in-flight call is lost.
 /// What: spawns and probes the replacement while it watches the old child; if
-/// the old child exits first, abandons the spawn (`OldExited`). On a spawn
+/// the old child exits first, abandons the spawn (`OldExited`); if the old
+/// child crosses the hard footprint limit first (#10207), abandons the spawn
+/// (`HardLimit`) so the caller can kill it. On a spawn
 /// failure logs WARN, counts a `spawn_failure`, and leaves the old sidecar
 /// serving (`SpawnFailed`). On success swaps `client_slot`, retires the old
 /// client so later calls forward to the new one, moves the new child into
@@ -61,7 +68,8 @@ pub(crate) enum RecycleOutcome {
 /// timeout + 5 s)`; then kills and reaps the old child.
 /// Test: `recycle_on_footprint_ceiling_keeps_inflight_call_and_counts_no_failure`,
 /// `recycle_drain_waits_for_calls_slower_than_drain_secs`,
-/// `old_sidecar_crash_during_a_blocked_respawn_is_handled`.
+/// `old_sidecar_crash_during_a_blocked_respawn_is_handled`,
+/// `hard_limit_abandons_a_hanging_replacement_spawn`.
 pub(crate) async fn perform_recycle(
     ctx: RecycleCtx<'_>,
     trigger: RecycleTrigger,
@@ -75,7 +83,17 @@ pub(crate) async fn perform_recycle(
     // #9828: a crash of the old sidecar is not left unseen behind a slow or
     // failing replacement spawn.
     let spawned = tokio::select! {
-        r = super::super::spawn_child(ctx.binary_path, ctx.config) => r,
+        r = super::super::spawn_child(ctx.binary_path, ctx.config, SpawnKind::Respawn) => r,
+        mb = hard_breach(&ctx, old_pid) => {
+            tracing::warn!(
+                trigger = trigger.as_str(),
+                old_pid,
+                footprint_mb = mb,
+                "EmbedderSupervisor: sidecar crossed its hard footprint limit while its \
+                 recycle replacement was starting — abandoning the replacement"
+            );
+            return RecycleOutcome::HardLimit(old);
+        }
         _ = old_child.wait() => {
             tracing::warn!(
                 trigger = trigger.as_str(),
@@ -131,6 +149,32 @@ pub(crate) async fn perform_recycle(
         let _ = child.wait().await;
     }
     RecycleOutcome::Swapped(tracked)
+}
+
+/// #10207: resolve with the footprint once `pid` reads over the hard limit,
+/// checked every check interval; never resolves when the limit is off. A
+/// failed read counts in `footprint_read_errors`.
+/// Test: `hard_limit_abandons_a_hanging_replacement_spawn`,
+/// `failed_footprint_read_during_a_hanging_replacement_is_counted`.
+async fn hard_breach(ctx: &RecycleCtx<'_>, pid: u32) -> u64 {
+    let limit = ctx.config.recycle.effective_hard_footprint_mb();
+    let Some(limit) = limit.filter(|_| pid != 0) else {
+        return std::future::pending().await;
+    };
+    let mut tick = tokio::time::interval(ctx.config.recycle.effective_check_interval());
+    loop {
+        tick.tick().await;
+        match (ctx.hooks.sampler)(pid) {
+            Some(mb) if mb > limit => return mb,
+            Some(_) => {}
+            None => {
+                ctx.hooks
+                    .stats
+                    .footprint_read_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// Wait until no call is in flight on the retired `old` client.

@@ -22,7 +22,7 @@ mod agents_e2e;
 mod bakeoff_gate_e2e;
 mod cli_e2e;
 mod config_mount;
-mod connector_e2e;
+mod daemon_no_tcp_6637;
 mod inference_shared_adapter_e2e;
 mod m1_cutline_e2e;
 mod mcp_loader_e2e;
@@ -35,6 +35,7 @@ mod roster_deploy_e2e;
 mod search_hits_e2e;
 mod session_e2e;
 mod task_e2e;
+mod thin_clients_uds_10169;
 mod tui_client_engine;
 
 /// Why: `autotests = false` (#9302) means a new `tests/*.rs` file compiles

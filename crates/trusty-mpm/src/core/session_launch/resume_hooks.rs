@@ -86,6 +86,11 @@ pub(crate) fn ensure_project_hooks_with(
     if !settings_is_writable_object(project_dir) {
         return Ok(());
     }
+    // #10459: an Architect's resume, relaunch or worker spawn refuses here,
+    // before the exec-form guard is written, on a Claude Code below v2.1.295.
+    let config = crate::core::config::MpmConfig::load(&fw.root);
+    let profile = crate::core::session_profile::resolve(project_dir, &config);
+    crate::core::architect_claude_version::require_for_profile(profile)?;
     // #7849: the toggles now resolve in ONE place, shared with the read-only
     // diff `tm validate --repair` and `tm doctor` report from. This call used
     // to hard-code the #7688 capture off, so every resume STRIPPED the two
@@ -148,8 +153,9 @@ fn settings_is_writable_object(project_dir: &Path) -> bool {
 /// a project that does not run tm sessions owes no hook group, and adding one
 /// would undo what `hooks_contamination`'s repair just removed. Otherwise
 /// every [`MPM_LIFECYCLE_HOOK_EVENTS`] entry whose array carries no tm-owned
-/// command, in the canonical six-event order.
+/// command, in the canonical seven-event order.
 /// Test: `missing_events_names_a_sessionstart_gap`,
+/// `missing_events_names_a_post_tool_use_failure_gap_10095`,
 /// `missing_events_is_empty_for_a_complete_file`,
 /// `missing_events_is_empty_for_a_file_tm_never_provisioned`.
 pub fn missing_lifecycle_hook_events(val: &Value) -> Vec<String> {

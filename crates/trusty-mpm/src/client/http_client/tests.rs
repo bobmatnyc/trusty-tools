@@ -108,7 +108,6 @@ async fn launch_session_writes_nothing_when_daemon_unreachable() {
 #[tokio::test]
 async fn launch_session_prepares_under_the_pinned_home_before_tmux() {
     use std::future::IntoFuture as _;
-    use std::os::unix::fs::PermissionsExt as _;
 
     let router = axum::Router::new()
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -124,8 +123,12 @@ async fn launch_session_prepares_under_the_pinned_home_before_tmux() {
 
     let bin_dir = tempfile::tempdir().unwrap();
     let tmux = bin_dir.path().join("fake-tmux");
-    std::fs::write(&tmux, "#!/bin/sh\necho 'fake tmux refuses' >&2\nexit 1\n").unwrap();
-    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // See #10248
+    trusty_common::exec_stub::write_executable(
+        &tmux,
+        "#!/bin/sh\necho 'fake tmux refuses' >&2\nexit 1\n",
+    )
+    .unwrap();
 
     let home = crate::test_support::hermetic_temp_dir();
     let project = crate::test_support::hermetic_temp_dir();
@@ -153,7 +156,6 @@ async fn launch_session_prepares_under_the_pinned_home_before_tmux() {
 #[tokio::test]
 async fn launch_session_writes_the_user_tier_under_the_config_dir_9999() {
     use std::future::IntoFuture as _;
-    use std::os::unix::fs::PermissionsExt as _;
 
     let router = axum::Router::new()
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -168,8 +170,8 @@ async fn launch_session_writes_the_user_tier_under_the_config_dir_9999() {
     tokio::spawn(axum::serve(listener, router).into_future());
     let bin_dir = tempfile::tempdir().unwrap();
     let tmux = bin_dir.path().join("fake-tmux");
-    std::fs::write(&tmux, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // See #10248
+    trusty_common::exec_stub::write_executable(&tmux, "#!/bin/sh\nexit 1\n").unwrap();
 
     let home = crate::test_support::hermetic_temp_dir();
     let config_dir = crate::test_support::hermetic_temp_dir();

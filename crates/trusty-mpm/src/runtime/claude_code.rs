@@ -37,6 +37,19 @@ use super::managed_launch::{self, ManagedLaunch};
 #[path = "claude_code_agents.rs"]
 mod claude_code_agents;
 
+/// Claude Code's live-session registry, for the remote-name check (#9025).
+///
+/// What: `claude agents --json` through the resolved binary under the
+/// managed config dir, by the bounded [`claude_code_agents::query_registry`].
+/// `Err` when no `claude` resolves or the read fails.
+/// Test: the parse is pinned by `a_renamed_tmux_session_is_a_remote_name_drift`.
+pub(crate) fn read_agent_registry() -> Result<String, String> {
+    let bin = ClaudeCodeAdapter::resolve_claude()
+        .ok_or_else(|| "no `claude` binary resolves".to_owned())?;
+    let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir();
+    claude_code_agents::query_registry(&bin, config_dir.as_deref())
+}
+
 // #7568: the prompt-file writer and its named-root seam live in
 // `super::prompt_file`; `claude_code.rs` was at the 500-SLOC production cap.
 // #8233: the daemon launch takes the named-root seam; the bare-`tm` in-place
@@ -429,6 +442,21 @@ pub struct InPlaceResumeCommand {
     pub profile: crate::core::session_profile::SessionProfile,
 }
 
+impl InPlaceResumeCommand {
+    /// This command with `--name <session>` leading its argv (#9025).
+    ///
+    /// Why: the bare-`tm` relaunch execs `claude` directly, past both delivery
+    /// choke points that name a launch, so it must apply the rule itself.
+    /// What: [`super::remote_name::ensure_name_arg`] over `args`, the one rule
+    /// [`super::remote_name::named_after_session`] also uses.
+    /// Test: `an_inplace_relaunch_is_named_after_its_session` in the `tm` binary.
+    #[must_use]
+    pub fn named_after_session(mut self, session: &str) -> Self {
+        super::remote_name::ensure_name_arg(&mut self.args, session);
+        self
+    }
+}
+
 /// Pure argv composition shared by [`build_inplace_resume_command`] (#2023 C).
 ///
 /// Why: separating the resume/fresh SELECTION from claude-binary
@@ -516,9 +544,12 @@ fn compose_inplace_args(
 /// alone; #8286: a write failure is `Err`, never a flag-less relaunch), then
 /// delegates argv composition to [`compose_inplace_args`], then appends the
 /// #8992 [`crate::core::pm_tool_trim::trim_args`] for the resolved profile.
+/// #10127: an Architect relaunch carries the [`crate::core::architect_lockdown`]
+/// deny; its error refuses the relaunch.
 /// Test: `build_inplace_resume_command_resolves_claude_binary`,
 /// `build_inplace_resume_command_carries_prompt_file`,
-/// `inplace_pm_relaunch_trims_the_unused_tools`.
+/// `inplace_pm_relaunch_trims_the_unused_tools`,
+/// `an_architect_inplace_relaunch_carries_the_lockdown`.
 pub fn build_inplace_resume_command(
     cwd: &Path,
     claude_session_id: Option<&str>,
@@ -584,9 +615,8 @@ fn build_inplace_resume_command_with(
         Some(prompt_file.as_path()),
     );
     // #8988: the owner MCP policy provisioned for this relaunch under `fw`.
-    args.extend(owner_settings(fw, cwd, &config_dir, profile).argv());
-    // #8992: a relaunched PM drops the unused tools; the exec seam sets the env.
-    args.extend(crate::core::pm_tool_trim::trim_args(profile));
+    let owner = owner_settings(fw, cwd, &config_dir, profile);
+    args.extend(inplace_tail_args(profile, owner.file.as_deref())?);
     let oauth_token = crate::core::oauth_token::resolve_oauth_token();
     // #4181: same per-project MCP pins the tmux-pane paths export.
     let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
@@ -598,6 +628,30 @@ fn build_inplace_resume_command_with(
         mcp_env,
         profile,
     })
+}
+
+/// The in-place relaunch argv after [`compose_inplace_args`]: the owner
+/// `--settings` and the #8992 tool trim for `profile`.
+///
+/// What: #10127 — an Architect's deny joins the owner file as ONE
+/// `--settings` ([`crate::core::architect_lockdown::Lockdown::settings_argv`]);
+/// its error refuses the relaunch. The exec seam
+/// (`build_inplace_exec_command`) drops the chat tokens and sets the trim env.
+/// Test: `an_architect_inplace_relaunch_carries_the_lockdown`.
+fn inplace_tail_args(
+    profile: crate::core::session_profile::SessionProfile,
+    carrier: Option<&Path>,
+) -> Result<Vec<String>, RuntimeError> {
+    let mut args = crate::core::architect_lockdown::Lockdown::PRODUCTION
+        .settings_argv(profile, carrier)
+        .map_err(lockdown_refusal)?;
+    args.extend(crate::core::pm_tool_trim::trim_args(profile));
+    Ok(args)
+}
+
+/// A #10127 Architect lockdown error as the launch's refusal.
+fn lockdown_refusal(err: crate::core::architect_lockdown::LockdownError) -> RuntimeError {
+    RuntimeError::Spawn(err.to_string())
 }
 
 /// Runtime adapter that launches Claude Code CLI inside a tmux session.
@@ -852,12 +906,14 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // Best-effort: `None` from a driver with no pane-id support keeps the
         // previous session-scoped behaviour exactly.
         let spawn_pane = self.tmux.get_pane_id(tmux_name);
+        // #10127: an Architect lockdown error refuses the spawn.
+        let spec = managed_launch::spawn_spec(&launch).map_err(lockdown_refusal)?;
         // #8233: spec files land under the named state home, not `$HOME`.
         managed_launch::deliver_in(
             self.tmux.as_ref(),
             tmux_name,
             spawn_pane.as_deref(),
-            &managed_launch::spawn_spec(&launch),
+            &spec,
             &self.spec_dir(),
         )?;
         // #2157 item 1: durable publish, belt-and-suspenders alongside the
@@ -1023,10 +1079,12 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // registry falls back to the pre-#6863 `--resume`/fresh-launch choice.
         // The probe is passed unevaluated: a launch with no stored id has
         // nothing to look up and must not spawn `claude` at all.
+        // #10127: an Architect lockdown error refuses the resume.
         let spec =
             claude_code_agents::relaunch_spec(&launch, claude_session_id, effective_id, || {
                 claude_code_agents::query_registry(&claude_bin, Some(&config_dir))
-            });
+            })
+            .map_err(lockdown_refusal)?;
         // Sibling-window hijack fix (follow-up to #2456): when the caller
         // supplies the record's own `pane_id`, target it directly — tmux's
         // session-scoped send resolves to whichever pane/window is currently

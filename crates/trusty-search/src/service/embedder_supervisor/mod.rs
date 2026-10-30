@@ -385,6 +385,22 @@ impl LazyEmbedderHandle {
         client.last_reported_device()
     }
 
+    /// Non-blocking readback of the live client's reported input window, in
+    /// tokens (#9284). `None` before the first spawn, while a lock is
+    /// contended, or when the sidecar sends no window (an older sidecar).
+    ///
+    /// Why: `index_status`'s `embed_window.window` was always `null` on the
+    /// sidecar path because no window crossed the wire.
+    /// What: the same `try_lock`/`try_read` walk as `last_reported_device`,
+    /// forwarding to `EmbedderClient::last_reported_window`.
+    /// Test: `lazy_handle_last_reported_window_reflects_client`.
+    pub fn last_reported_window(&self) -> Option<usize> {
+        let guard = self.state.try_lock().ok()?;
+        let spawned = guard.as_ref()?;
+        let client = spawned.client_slot.try_read().ok()?.clone();
+        client.last_reported_window()
+    }
+
     /// Non-blocking readback: has the supervisor for the currently (or most
     /// recently) spawned sidecar permanently given up respawning it? (Review
     /// finding, PR #3560 HIGH fix.)
@@ -983,3 +999,6 @@ fn parse_env_u32(var: &str, default: u32) -> u32 {
 
 #[cfg(test)]
 mod tests;
+// #10194: the query-embed deadline against a real child process.
+#[cfg(all(test, unix))]
+mod deadline_tests;

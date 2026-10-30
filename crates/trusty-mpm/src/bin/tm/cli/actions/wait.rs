@@ -86,7 +86,10 @@ pub(crate) struct WaitArgs {
     #[arg(long)]
     pub(crate) allow_empty_checks: bool,
 
-    /// Hard timeout in seconds, spanning every re-run (default 1800, max 86400).
+    /// Total budget in seconds across ALL re-runs, not per call (default 1800,
+    /// max 86400). Each call returns after at most one `--slice`; re-run the
+    /// printed `rerun=` command until the condition is met or this budget ends.
+    // #10339: the timeout is the total budget; the slice bounds one call.
     #[arg(long, default_value_t = 1800)]
     pub(crate) timeout: u64,
 
@@ -95,8 +98,10 @@ pub(crate) struct WaitArgs {
     #[arg(long)]
     pub(crate) interval: Option<u64>,
 
-    /// Seconds ONE invocation may block before returning `pending`
-    /// (default 100, clamped to 5..=500 to stay under the harness ceiling).
+    /// Seconds ONE call may block before it returns `pending` (exit 75) with
+    /// budget left: not a timeout and not a failure (default 100, clamped to
+    /// 5..=500 to stay under the harness ceiling). Re-run to keep waiting.
+    // #10339: keep the default; the pending line explains the slice.
     #[arg(long, default_value_t = 100)]
     pub(crate) slice: u64,
 

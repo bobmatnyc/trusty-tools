@@ -1,5 +1,6 @@
 # What Is trusty-mpm?
 
+<!-- rule:what-is-trusty-mpm/not-claude-mpm -->
 trusty-mpm is a **Rust** crate at `crates/trusty-mpm/`, distributed as a single
 binary — **`tm`** (also installable as `trusty-mpm`) — whose subcommands
 provide the background daemon, the CLI, the TUI dashboard, and the Telegram

@@ -36,18 +36,17 @@
 //! deliberately left out) — [`protocol`], the full `workstream.*`
 //! JSON-RPC surface (`create`/`get`/`list`/`close` from #3295 plus
 //! `activate`/`deactivate` from #3294, built on [`activation`]); and (issue
-//! #3297) [`sse`] — the `GET /workstreams/{id}/events` fan-out aggregation
-//! route, built directly on [`store::WorkstreamStore`] (bypassing the
-//! JSON-RPC router, mirroring `crate::serve::http::session_events_sse`'s
-//! per-session precedent).
+//! #3297) [`sse`] — the workstream fan-out aggregation, built directly on
+//! [`store::WorkstreamStore`] (bypassing the JSON-RPC router) and served as
+//! the socket's `workstream.events` stream since #6637.
 //!
 //! **Scope note (Phase 1A):** #3293 built ONLY the domain model and
 //! persistence layer (this module's `model`/`path`/`store` submodules);
 //! #3294 added the activation-lock RPC semantics (`activation`, plus
 //! `activate`/`deactivate` in [`protocol`]); #3295 added the rest of
-//! `protocol`'s surface (`create`/`get`/`list`/`close`) and the REST wrappers
-//! (`crate::serve::rest::workstreams`); #3297 (this ticket) adds [`sse`] —
-//! the `GET /workstreams/{id}/events` aggregation route — plus
+//! `protocol`'s surface (`create`/`get`/`list`/`close`) and REST wrappers
+//! (retired with the HTTP listener, #6637); #3297 adds [`sse`] —
+//! the workstream aggregation — plus
 //! `activation`'s new role as the sole publisher of
 //! `crate::events::Event::WorkstreamActivationChanged`. The CLI (#3296) and
 //! the `trusty-agents-common` extraction of [`sse`]'s aggregation layer
@@ -69,7 +68,7 @@
 
 pub mod activation;
 /// (#6637) `workstream.events`: the socket transport's live fan-out, a bridge
-/// onto the same `sse::aggregate_live` combinator the HTTP route uses.
+/// onto the `sse::aggregate_live` combinator.
 pub mod events_stream;
 pub mod model;
 mod path;

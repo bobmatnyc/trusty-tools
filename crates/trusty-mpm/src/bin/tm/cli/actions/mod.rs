@@ -18,11 +18,15 @@
 mod agent;
 // #9822: `tm architect` — the Rust stand-ins for the Architect's scripts.
 mod architect;
+// #10063: `tm architect dashboard` — the dashboard store's verbs.
+mod architect_dashboard;
 mod auth;
 mod catalog;
 // #8378 PR-C: `tm content install|update|status` (ADR-0064).
 mod content;
 mod coordinator;
+// #9758: `tm dbatg` — the PM ledger writer.
+mod dbatg;
 mod deliverables;
 // #6887: `tm divert` — the bulk-read worker.
 mod divert;
@@ -57,10 +61,12 @@ mod watch;
 
 pub(crate) use agent::AgentAction;
 pub(crate) use architect::ArchitectAction;
+pub(crate) use architect_dashboard::{DashboardArgs, DashboardVerb};
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
 pub(crate) use content::ContentAction;
 pub(crate) use coordinator::CoordinatorAction;
+pub(crate) use dbatg::{DbatgArgs, DbatgVerb};
 pub(crate) use deliverables::{
     DeliverableKindArg, DeliverableStatusArg, DeliverablesAction, EstimationTierArg,
     MilestonesAction,
@@ -70,7 +76,7 @@ pub(crate) use env::EnvAction;
 pub(crate) use fleet::FleetAction;
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
-pub(crate) use issue::{EpicCmd, IssueCmd};
+pub(crate) use issue::{BoardCmd, EpicCmd, IssueCmd};
 pub(crate) use mcp::{McpCmd, McpTransportArg};
 pub(crate) use memory::MemoryAction;
 pub(crate) use meta::MetaAction;

@@ -6,11 +6,12 @@
 //! `git reset --hard` reverted it, the following `git clean -fd` deleted the
 //! colocated index directory, and a daemon with those files mmapped died with
 //! SIGBUS (duettoresearch/code-intelligence#5217).
-//! What: every test drives the real `create_index_handler` and a real reindex
+//! What: every test drives the real `create_index_report` and a real reindex
 //! against a committed temp git repo, with `TRUSTY_DATA_DIR` pinned to a
 //! private tempdir (`IsolatedDataDir`) and the root on the test allowlist.
 //! Test: this module. Run with `cargo test -p trusty-search tests_8499`.
 
+use super::test_support::create_answer;
 use super::tests_components::IsolatedDataDir;
 use super::*;
 use crate::core::embed::Embedder;
@@ -18,9 +19,7 @@ use crate::core::indexer::{SearchQuery, SearchStage};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::colocated_storage::COLOCATED_DIR_NAME;
 use crate::service::reindex::{spawn_reindex_awaitable, ReindexProgress, ReindexStatus};
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -122,9 +121,7 @@ async fn register_and_index(
 ) -> Arc<IndexHandle> {
     let mut req = create_req(id, root.to_path_buf());
     req.defer_embed = Some(false);
-    let resp = super::indexes::create_index_handler(State(Arc::clone(state)), Json(req)).await;
-    let status = resp.status();
-    let body = super::tests_components::body_json(resp).await;
+    let (status, body) = create_answer(state, req).await;
     assert_eq!(status, StatusCode::OK, "create must succeed: {body}");
     let handle = state
         .registry
@@ -213,12 +210,8 @@ async fn register_and_index_no_reindex(
     id: &str,
     root: &Path,
 ) -> Arc<IndexHandle> {
-    let resp = super::indexes::create_index_handler(
-        State(Arc::clone(state)),
-        Json(create_req(id, root.to_path_buf())),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK, "re-register must succeed");
+    let resp = create_answer(state, create_req(id, root.to_path_buf())).await;
+    assert_eq!(resp.0, StatusCode::OK, "re-register must succeed");
     state
         .registry
         .get(&IndexId::new(id))
@@ -356,13 +349,8 @@ async fn create_refuses_when_the_store_would_land_in_the_work_tree() {
     // SAFETY: #[serial]; `IsolatedDataDir`'s drop clears the variable.
     unsafe { std::env::set_var("TRUSTY_DATA_DIR", &in_repo) };
 
-    let resp = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req("failclosed-8499", root.clone())),
-    )
-    .await;
-    let status = resp.status();
-    let body = super::tests_components::body_json(resp).await;
+    let resp = create_answer(&state, create_req("failclosed-8499", root.clone())).await;
+    let (status, body) = resp;
 
     assert_eq!(status, StatusCode::CONFLICT, "#8499: must refuse: {body}");
     assert!(

@@ -18,8 +18,9 @@ use serde_json::{Value, json};
 use crate::commands::pm_guard_protected_paths::{ProtectedEnv, normalize};
 use crate::commands::pm_guard_trust_anchor_paths::{Resolved, eq_fold, resolve};
 
-/// Programs that run the next word as the program (`env FOO=1 prog`).
-const WRAPPERS: [&str; 6] = ["env", "exec", "command", "nohup", "nice", "time"];
+/// The characters that end a shell word, so `true&&prog` names `prog`
+/// (#10107).
+const SHELL_OPERATORS: [char; 8] = [';', '&', '|', '(', ')', '<', '>', '\n'];
 
 /// Every path a hook or `statusLine` command runs.
 ///
@@ -27,10 +28,13 @@ const WRAPPERS: [&str; 6] = ["env", "exec", "command", "nohup", "nice", "time"];
 /// root's `.claude/` and in each user config directory, and the frontmatter
 /// `hooks:` of skill and agent Markdown there (#8928 fix round). Each command
 /// is located by [`command_paths`]. A missing file names nothing;
-/// `Err(file)` when one cannot be read or does not parse (fail-closed).
+/// `Err(file)` when one cannot be read or does not parse, and (#10107)
+/// `Err(entry)` when a `PATH` entry cannot be placed (fail-closed).
 /// Test: `hook_and_status_line_paths_are_listed`,
 /// `every_fail_closed_arm_denies`, `relative_hook_paths_resolve_against_the_project`,
-/// `frontmatter_hook_commands_are_protected`, `a_bare_hook_program_is_resolved_on_path`.
+/// `frontmatter_hook_commands_are_protected`, `a_bare_hook_program_is_resolved_on_path`,
+/// `a_hook_program_cannot_be_shadowed_earlier_on_path`,
+/// `an_unresolvable_path_entry_is_an_error`.
 pub(crate) fn hook_named_paths(
     env: &ProtectedEnv,
     cwd: Option<&Path>,
@@ -49,7 +53,7 @@ pub(crate) fn hook_named_paths(
         }
     }
     let mut out = Vec::new();
-    let locate = |command: &str, project: Option<&Path>| {
+    let paths = |command: &str, project: Option<&Path>| {
         command_paths(command, env.home.as_deref(), project, env.path.as_deref())
     };
     for (file, project) in files {
@@ -57,7 +61,7 @@ pub(crate) fn hook_named_paths(
             continue;
         };
         for command in commands(&settings) {
-            out.extend(locate(command, project));
+            out.extend(paths(command, project)?);
         }
     }
     // #8928 fix round: skill and agent frontmatter `hooks:` run commands too.
@@ -70,7 +74,7 @@ pub(crate) fn hook_named_paths(
         for hooks in frontmatter_hook_values(&base)? {
             let wrapped = json!({ "hooks": hooks });
             for command in commands(&wrapped) {
-                out.extend(locate(command, project));
+                out.extend(paths(command, project)?);
             }
         }
     }
@@ -118,80 +122,117 @@ fn commands(settings: &Value) -> Vec<&str> {
 
 /// The paths one command runs, as spelled and resolved.
 ///
-/// What: the command is split as a shell would. Each word, and the value of a
-/// `NAME=value` word, is located: `~`, `$HOME` and `$CLAUDE_PROJECT_DIR` are
-/// expanded and an absolute path is kept; a relative path with a `/` joins the
-/// project root; a bare word in program position (first, after `&&`, `||`,
-/// `;`, `|`, or after `env`/`exec`-style wrappers) is resolved on `PATH`; any
-/// other bare argument that names a file in the project root is kept (#8928
-/// fix round).
+/// What: the command is split as a shell would, and each word again at the
+/// shell operators in [`SHELL_OPERATORS`] (#10107: `true&&prog`). Each word,
+/// each operator-split piece, and the value of a `NAME=value` word is located
+/// by [`locate`]. `Err(entry)` when a `PATH` entry cannot be placed
+/// (fail-closed).
+/// Test: `hook_and_status_line_paths_are_listed`,
+/// `a_hook_program_cannot_be_shadowed_earlier_on_path`,
+/// `an_unresolvable_path_entry_is_an_error`.
 fn command_paths(
     command: &str,
     home: Option<&Path>,
     project: Option<&Path>,
     path_env: Option<&OsStr>,
-) -> Vec<PathBuf> {
+) -> Result<Vec<PathBuf>, PathBuf> {
     let words = shlex::split(command)
         .unwrap_or_else(|| command.split_whitespace().map(str::to_owned).collect());
     let mut out = Vec::new();
-    let mut program = true;
     for word in &words {
-        if matches!(word.as_str(), "&&" | "||" | ";" | "|" | "&") {
-            program = true;
-            continue;
-        }
-        let assignment = word.split_once('=').filter(|(name, _)| {
-            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        });
-        let value = word.split_once('=').map(|(_, v)| v);
-        let as_program = program && assignment.is_none();
-        for (spelling, is_word) in [(word.as_str(), true)]
-            .into_iter()
-            .chain(value.map(|v| (v, false)))
-        {
-            let Some(path) = locate(spelling, home, project, path_env, as_program && is_word)
-            else {
-                continue;
-            };
-            let path = normalize(&path);
-            if let Resolved::Path(resolved) = resolve(&path) {
-                out.push(resolved);
+        // #10107: the whole word too, so a quoted path holding `(` is kept.
+        let pieces = std::iter::once(word.as_str()).chain(word.split(SHELL_OPERATORS));
+        for piece in pieces.filter(|p| !p.is_empty()) {
+            let value = piece.split_once('=').map(|(_, v)| v);
+            for spelling in std::iter::once(piece).chain(value) {
+                for path in locate(spelling, home, project, path_env)? {
+                    let path = normalize(&path);
+                    if let Resolved::Path(resolved) = resolve(&path) {
+                        out.push(resolved);
+                    }
+                    out.push(path);
+                }
             }
-            out.push(path);
-        }
-        if assignment.is_none() {
-            let base = word.rsplit('/').next().unwrap_or(word);
-            program = WRAPPERS.iter().any(|w| eq_fold(w, base));
         }
     }
-    out
+    Ok(out)
 }
 
-/// Where one command word points, or `None` (see [`command_paths`]).
+/// Where one command word may point (see [`command_paths`]).
+///
+/// Why: #10107 — the program position is lost after `env -i`, `nice -n 10`,
+/// `timeout 5` or a newline, so every bare word is a program candidate.
+/// What: `~`, `$HOME` and `$CLAUDE_PROJECT_DIR` are expanded and an absolute
+/// path is kept; a flag names nothing; a relative path with a `/` joins the
+/// project root; a bare word is the project-root file of that name when one
+/// exists, plus its [`path_candidates`].
+/// Test: `a_hook_program_cannot_be_shadowed_earlier_on_path`,
+/// `relative_hook_paths_resolve_against_the_project`.
 fn locate(
     word: &str,
     home: Option<&Path>,
     project: Option<&Path>,
     path_env: Option<&OsStr>,
-    program: bool,
-) -> Option<PathBuf> {
+) -> Result<Vec<PathBuf>, PathBuf> {
     if let Some(path) = expand(word, home, project) {
-        return Some(path);
+        return Ok(vec![path]);
     }
     if word.is_empty() || word.starts_with('-') {
-        return None;
+        return Ok(Vec::new());
     }
     if word.contains('/') {
-        return project.map(|root| root.join(word));
+        return Ok(project.map(|root| root.join(word)).into_iter().collect());
     }
-    if program {
-        return std::env::split_paths(path_env?)
-            .map(|dir| dir.join(word))
-            .find(|candidate| candidate.is_file());
-    }
-    project
+    let mut out: Vec<PathBuf> = project
         .map(|root| root.join(word))
         .filter(|candidate| candidate.is_file())
+        .into_iter()
+        .collect();
+    out.extend(path_candidates(word, project, path_env)?);
+    Ok(out)
+}
+
+/// `dir/word` for each `PATH` dir up to and including the first one holding
+/// an executable `word`, or for every dir when none does.
+///
+/// Why: #10107 — protecting only the first existing match let a new file in
+/// an earlier `PATH` dir shadow the hook program, and a program found nowhere
+/// be planted anywhere.
+/// What: a relative entry (an empty one included) joins the project root, as
+/// the hook runs there. Fail-closed: `Err` for a relative entry with no
+/// project root, and for an unset `PATH`, whose search the shell does not
+/// define here.
+/// Test: `a_hook_program_cannot_be_shadowed_earlier_on_path`,
+/// `an_unresolvable_path_entry_is_an_error`.
+fn path_candidates(
+    word: &str,
+    project: Option<&Path>,
+    path_env: Option<&OsStr>,
+) -> Result<Vec<PathBuf>, PathBuf> {
+    let Some(path_env) = path_env else {
+        return Err(PathBuf::from("$PATH"));
+    };
+    let mut out = Vec::new();
+    for dir in std::env::split_paths(path_env) {
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            project.ok_or_else(|| dir.clone())?.join(dir)
+        };
+        let candidate = dir.join(word);
+        let found = is_executable(&candidate);
+        out.push(candidate);
+        if found {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `path` is a file with an execute bit, as `PATH` lookup requires.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// The frontmatter `hooks` values of the skill and agent Markdown under

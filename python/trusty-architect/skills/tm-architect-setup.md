@@ -3,7 +3,7 @@ name: tm-architect-setup
 description: Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 category: pm-reference
 tags: [architect, fleet, setup, pm-recommended]
 effort: medium
@@ -73,7 +73,8 @@ project's hook only and leaves every other watched project unchanged.
 `tm fleet status [--dir <path>] [--json]` reports four checks, read-only:
 the allowlist entry, the profile request, the running `tm-architect` session
 in that directory, and its Architect launch stamp. It exits 1 when any check
-fails. Its `skills` row also warns when an Architect set up before `local/`
+fails, and when its `binding` row is `UNBOUND`: the session's `claude` has no
+Architect launch record, so every trust-anchor write is denied (#10448). Its `skills` row also warns when an Architect set up before `local/`
 still keeps its records in the old directory; move them into `local/`
 yourself, because `tm` moves nothing. The watched set joins the report in P3.
 

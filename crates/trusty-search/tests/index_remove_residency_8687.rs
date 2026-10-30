@@ -80,14 +80,10 @@ async fn spawn_daemon_with(
     (daemon, state)
 }
 
-/// The allowlist file the subprocess resolves under `fake_home`.
+/// The allowlist file the subprocess resolves: `cli` points `TRUSTY_DATA_DIR`
+/// at `fake_home`, and since #10366 that directory holds `allowlist.toml`.
 fn fake_allowlist(fake_home: &Path) -> PathBuf {
-    let config = if cfg!(target_os = "macos") {
-        fake_home.join("Library").join("Application Support")
-    } else {
-        fake_home.to_path_buf()
-    };
-    config.join("trusty-search").join("allowlist.toml")
+    fake_home.join("allowlist.toml")
 }
 
 fn seed_allowlist(file: &Path, roots: &[&Path]) {
@@ -114,14 +110,13 @@ fn remove(daemon: &LoggedDaemon, root: &Path, fake_home: &Path) -> (i32, String)
 /// Run `trusty-search <args>` against `daemon`'s socket; returns exit code and
 /// output.
 fn cli(daemon: &LoggedDaemon, args: &[&str], fake_home: &Path) -> (i32, String) {
-    let data_dir = tempfile::tempdir().expect("cli data dir");
     let cwd = tempfile::tempdir().expect("cli cwd");
     // #8900: stamped and bounded, so a daemon the CLI auto-starts can neither
     // outlive the run nor hold this call open.
     let mut cmd = test_daemon::command();
     cmd.args(args)
         .current_dir(cwd.path())
-        .env("TRUSTY_DATA_DIR", data_dir.path())
+        .env("TRUSTY_DATA_DIR", fake_home)
         .env("TRUSTY_SEARCH_SOCKET", &daemon.socket)
         .env("HOME", fake_home)
         .env("XDG_CONFIG_HOME", fake_home)
@@ -137,7 +132,12 @@ fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn real_allowlist_bytes() -> Option<Vec<u8>> {
-    std::fs::read(AllowlistConfig::default_path()).ok()
+    // #10366: the operator's file, not the scratch `TRUSTY_DATA_DIR` one.
+    let path = dirs::config_dir()
+        .expect("config dir")
+        .join("trusty-search")
+        .join("allowlist.toml");
+    std::fs::read(path).ok()
 }
 
 fn allowlisted(file: &Path, root: &Path) -> bool {

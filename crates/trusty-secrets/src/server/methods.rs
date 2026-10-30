@@ -24,6 +24,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
+use super::agents_flag::{Writer, judge_agent_caller, writer_for};
 use super::audit::AuditMethod;
 use super::bridge::BridgeVerdict;
 use super::errors::ErrorKind;
@@ -31,6 +32,8 @@ use super::gate::{Gate, Recording, audited};
 use super::project::ProjectContext;
 use super::router::State;
 use super::sandbox;
+use super::ticket::TicketOp;
+use super::ticket_checks::TicketCall;
 use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
@@ -150,14 +153,15 @@ pub(crate) fn scopes(state: &State, caller: Caller, params: Value) -> Result<Val
     }
 }
 
-/// `secrets.list`: names, lengths, `updated_at`, and the agents flag.
+/// `secrets.list`: names, lengths, `updated_at`, and `agents_may_use`.
 ///
-/// What: names, lengths and times from the names-only index. #9070: each
-/// key's agents flag comes from the project's backend through
-/// [`SecretStore::list`], never from the index file. When that backend does
-/// not open — not in this build, not enabled, its CLI missing, `$HOME`
-/// unknown — the index listing is returned with every flag OFF. A failed
-/// flag lookup on an opened backend is an error. Never reads a value. A
+/// What: names, lengths and times from the names-only index. #9070,
+/// #10386: each key's `agents_may_use` is the absence of its agent deny in
+/// the project's backend, through [`SecretStore::list`], never the index
+/// file. When that backend does not open — not in this build, not enabled,
+/// its CLI missing, `$HOME` unknown — the index listing is returned with
+/// every `agents_may_use` false. A failed deny lookup on an opened backend
+/// is an error. Never reads a value. A
 /// denied call leaves one audit record; an allowed one leaves none (#4567).
 /// #9066: a console bridge call is audited like `set` instead — admitted
 /// fail-closed before the listing, one record per call.
@@ -187,7 +191,9 @@ pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value
         // vouches for no flag, so the index listing stands with every flag
         // OFF; a list that worked before the flag moved keeps working.
         let keys = match project.backend(state) {
-            Ok(backend) => SecretStore::new(backend, state.index.clone()).list(&request.vault)?,
+            Ok(backend) => SecretStore::new(backend, state.index.clone())
+                .with_deny_audit(gate.deny_audit())
+                .list(&request.vault)?,
             Err(_) => state.index.list(&request.vault)?,
         };
         to_json(&ListResponse {
@@ -204,8 +210,22 @@ pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value
 /// logged or formatted here. #4567: one audit record per call; the audit log
 /// is opened before the backend is touched (see `gate`). #7524 H1: the
 /// backend opens through [`ProjectContext::open_for_write`]. #7520: after
-/// the write, the key is evicted from the session cache.
+/// the write, the key is evicted from the session cache. #10459 (reverses
+/// #10386 Q2 for `set`): after the scope check the caller is judged
+/// ([`judge_agent_caller`]); no peer pid or an unreadable ancestry is
+/// [`ErrorKind::GrantRefused`]. A caller under Claude Code writes through
+/// [`SecretStore::set_for_agent`] (a denied key is
+/// [`ErrorKind::AgentKeyDenied`], checked under the index lock), its allow
+/// record carries `default_policy`, and its confirmation is length only.
+/// #10459 P1: a caller under the `claude` tm launched as the Architect
+/// that redeems a main-thread ticket for this call (#10459 PR1,
+/// [`writer_for`]) writes any key through [`SecretStore::set_for_architect`]
+/// (no deny check, length-only confirmation), its record `architect: true`.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `architect_with_a_valid_record_sets_a_denied_key`,
+/// `architect_refusals_each_keep_the_agent_rules`,
+/// `set_by_agent_ancestor_of_an_undenied_key_succeeds`,
+/// `set_by_agent_of_a_denied_key_is_refused`,
 /// `set_delete_copy_evict_cached_value`,
 /// `server_malformed_set_never_echoes_its_value`,
 /// `audit_set_and_delete_write_one_record_per_call`,
@@ -219,11 +239,33 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
         let project = ProjectContext::resolve(state, &dir)?;
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
+        // #10459: an agent may write a key with no deny; judged before any backend.
+        let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
+        let agent = judge_agent_caller(state, caller, peer, gate)?;
+        // #10459 P1: the launched Architect writes any key; every other
+        // agent, or a failed Architect check, keeps the agent rules.
+        // #10459 PR1: and only for the one call a main-thread ticket names.
+        let call = TicketCall {
+            op: TicketOp::Set,
+            project: project.root(),
+            key: Some(&request.key),
+        };
+        let writer = writer_for(state, caller, peer, gate, agent, &call)?;
+        if writer == Writer::Agent {
+            gate.default_policy();
+        }
         // #7524: the `file` posture check every value write passes.
         let backend = project.open_for_write(state, &project.resolved_config().backend)?;
-        let store = SecretStore::new(backend, state.index.clone());
+        let store =
+            SecretStore::new(backend, state.index.clone()).with_deny_audit(gate.deny_audit());
         gate.admit()?;
-        let response = store.set(&request.vault, &request.key, &request.value);
+        let response = match writer {
+            Writer::Agent => store.set_for_agent(&request.vault, &request.key, &request.value),
+            Writer::Architect => {
+                store.set_for_architect(&request.vault, &request.key, &request.value)
+            }
+            Writer::Person => store.set(&request.vault, &request.key, &request.value),
+        };
         // #7520: after the write, success or not, so no read that raced it
         // keeps the old value.
         state.cache.evict(&request.vault, &request.key);
@@ -239,7 +281,11 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
 /// (#7519). The key is then deleted from the configured backend and from
 /// [`other_backends`] through [`SecretStore::delete_across`] (#7519).
 /// #4567 — audited like [`set`]. #7520: evicts the key like [`set`].
+/// #10386 Q2: refuses a caller under Claude Code
+/// ([`super::agents_flag::refuse_agent_caller`]) before the account config
+/// is read; #10459 keeps `delete` operator-only.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `delete_by_agent_ancestor_is_refused_before_the_backend`,
 /// `set_delete_copy_evict_cached_value`,
 /// `server_delete_after_a_backend_switch_clears_the_old_backend`,
 /// `server_delete_failure_in_an_old_backend_is_an_error_and_keeps_the_row`,
@@ -259,10 +305,14 @@ pub(crate) fn delete(state: &State, caller: Caller, params: Value) -> Result<Val
             let project = ProjectContext::resolve(state, &dir)?;
             gate.project(&project);
             project.require_in_scope(&request.vault)?;
+            // #10386 Q2: an irreversible loss is operator-only.
+            let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
+            super::agents_flag::refuse_agent_caller(state, caller, peer, gate)?;
             // #7519: a missing account file skips 1Password; an unreadable one
             // refuses, since a 1Password copy from when it was readable may remain.
             let account = sweep_machine(state)?;
-            let store = SecretStore::new(project.backend(state)?, state.index.clone());
+            let store = SecretStore::new(project.backend(state)?, state.index.clone())
+                .with_deny_audit(gate.deny_audit());
             // #7519: a backend switch or a copy leaves values in other backends.
             // Ruling 74: the CLI backends swept are the ones the factory opens,
             // so enablement comes from the account's file, not the spawner's.
@@ -385,7 +435,23 @@ impl CopySelection {
 /// `audit_copy_writes_one_record_per_key`,
 /// `server_copy_past_its_deadline_starts_no_further_key`,
 /// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
-/// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
+/// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
+/// `copy_by_agent_of_undenied_keys_copies_them`,
+/// `copy_by_agent_of_a_denied_source_or_destination_key_writes_nothing`,
+/// `server_copy_of_a_denied_key_into_a_no_controls_backend_is_refused`,
+/// `server_copy_of_a_denied_key_carries_the_deny`.
+/// #10459: after the project resolves the caller is judged
+/// ([`judge_agent_caller`]). For a caller under Claude Code a key denied in
+/// the source fails with [`ErrorKind::AgentKeyDenied`] before its value is
+/// read, the destination write goes through [`SecretStore::set_for_agent`],
+/// and a sync-target push stays refused. Each key's deny in the source is
+/// carried before its value: into a backend that cannot hold a deny the key
+/// fails with [`ErrorKind::Unsupported`] and nothing is written.
+/// #10459 P1: after the sync-target branch, the launched Architect holding
+/// a ticket for this one-key copy (#10459 PR1, [`writer_for`]) copies as a
+/// person, every record `architect: true`
+/// (`architect_copies_a_denied_key_locally`); a push stays refused
+/// (`architect_delete_deny_removal_and_sync_push_stay_operator_only`).
 /// #9069: a sync-target destination goes to `sync_target::push` after the
 /// project resolves; a sync-target source is [`ErrorKind::Unsupported`]
 /// (`server_copy_from_a_sync_target_is_unsupported`).
@@ -404,6 +470,9 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             }
             let project = ProjectContext::resolve(state, &dir)?;
             gate.project(&project);
+            // #10459: a local copy by an agent moves only keys with no deny.
+            let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
+            let agent = judge_agent_caller(state, caller, peer, gate)?;
             let vault = project.scopes().project().clone();
             gate.name(&vault, None);
             // #9069: a sync target is never read back, so never a source.
@@ -413,6 +482,23 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             // #9069: a push has its own refusals and no index row.
             if request.to_backend.is_sync_target() {
                 return super::sync_target::push(state, caller, gate, &request, &project);
+            }
+            // #10459 P1: judged after the sync-target branch, so a push stays
+            // operator-only and never carries the Architect mark.
+            // #10459 PR1: a ticket names one key, so a copy of several or
+            // of all keys never redeems one.
+            let single = match CopySelection::of(&request) {
+                CopySelection::Keys(keys) if keys.len() == 1 => keys.into_iter().next(),
+                _ => None,
+            };
+            let call = TicketCall {
+                op: TicketOp::Copy,
+                project: project.root(),
+                key: single.as_ref(),
+            };
+            let writer = writer_for(state, caller, peer, gate, agent, &call)?;
+            if writer == Writer::Agent {
+                gate.default_policy();
             }
             // #7524 H1: the destination's posture check runs before any backend
             // opens; `tm secrets copy --to file` moved Keychain values to files.
@@ -433,7 +519,11 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
                     .collect(),
             };
             // #9065: write through `set`'s index lock and compensation, never around it.
-            let store = SecretStore::new(destination, state.index.clone());
+            let store = SecretStore::new(destination, state.index.clone())
+                .with_deny_audit(gate.deny_audit());
+            // #10386: the source's deny travels with each key it denies.
+            let source_store = SecretStore::new(Arc::clone(&source), state.index.clone())
+                .with_deny_audit(gate.deny_audit());
             let mut response = CopyResponse {
                 copied: Vec::new(),
                 failed: Vec::new(),
@@ -446,11 +536,29 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
                 let outcome = if crate::store::deadline::passed() {
                     Err(ErrorKind::DeadlineExceeded)
                 } else {
-                    let written = match source.get(&vault, &key) {
-                        Ok(Some(value)) => store
-                            .set(&vault, &key, &value)
-                            .map(drop)
-                            .map_err(ErrorKind::from),
+                    // #10459: a denied source key is a denied read; no deny is
+                    // carried for it. A failed lookup fails the key.
+                    let admitted = match writer == Writer::Agent {
+                        true => match source_store.agents_may_use(&vault, &key) {
+                            Ok(true) => Ok(()),
+                            Ok(false) => Err(SecretsError::AgentUseRefused {
+                                key: key.to_string(),
+                                vault: vault.to_string(),
+                            }),
+                            Err(e) => Err(e),
+                        },
+                        false => Ok(()),
+                    };
+                    // #10386: the deny lands before the value, or nothing does.
+                    let carried =
+                        admitted.and_then(|()| store.carry_deny_from(&source_store, &vault, &key));
+                    let written = match carried.and_then(|()| source.get(&vault, &key)) {
+                        Ok(Some(value)) => match writer {
+                            Writer::Agent => store.set_for_agent(&vault, &key, &value),
+                            Writer::Architect | Writer::Person => store.set(&vault, &key, &value),
+                        }
+                        .map(drop)
+                        .map_err(ErrorKind::from),
                         Ok(None) => Err(ErrorKind::NotFound),
                         Err(e) => Err(ErrorKind::from(e)),
                     };

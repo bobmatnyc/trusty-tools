@@ -256,6 +256,36 @@ impl Embedder for FallbackEmbedderAdapter {
             .unwrap_or_else(|| Arc::clone(&self.primary))
             .resolved_provider_label()
     }
+
+    // #9284: the active backend's window, so the sidecar's reaches the embed pass.
+    fn input_window(&self) -> Option<usize> {
+        self.active_fallback()
+            .unwrap_or_else(|| Arc::clone(&self.primary))
+            .input_window()
+    }
+
+    fn chunking_tokenizer(
+        &self,
+    ) -> std::result::Result<
+        Option<Arc<trusty_common::embedder::ChunkTokenizer>>,
+        trusty_common::embedder::ChunkError,
+    > {
+        self.active_fallback()
+            .unwrap_or_else(|| Arc::clone(&self.primary))
+            .chunking_tokenizer()
+    }
+
+    // #10504: the active backend's split window.
+    fn split_window(
+        &self,
+    ) -> std::result::Result<
+        Option<(usize, Arc<trusty_common::embedder::ChunkTokenizer>)>,
+        trusty_common::embedder::ChunkError,
+    > {
+        self.active_fallback()
+            .unwrap_or_else(|| Arc::clone(&self.primary))
+            .split_window()
+    }
 }
 
 #[cfg(test)]
@@ -756,14 +786,14 @@ mod tests {
     async fn fallback_does_not_trip_on_concurrent_failures_before_supervisor_gives_up() {
         use crate::commands::start::embedder::LazySlotEmbedderAdapter;
         use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
-        use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().expect("create tempdir");
         let script_path = dir.path().join("mock-embedderd-two-cycles.sh");
         let counter_path = dir.path().join("spawns");
         let release_path = dir.path().join("release-cycle-2");
         let _release_on_drop = ReleaseOnDrop(release_path.clone());
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &script_path,
             format!(
                 r#"#!/bin/sh
@@ -790,9 +820,6 @@ exit 1
             ),
         )
         .expect("write mock script");
-        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script_path, perms).expect("chmod +x");
         warm_mock(&script_path).await;
         assert_eq!(mock_spawns(&counter_path), 0, "the warm-up is not counted");
 

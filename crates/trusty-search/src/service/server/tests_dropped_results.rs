@@ -12,7 +12,6 @@
 //! Test: this module.
 
 use super::*;
-use axum::Json;
 
 /// `RawChunk` builder for the drop-reporting tests below.
 ///
@@ -136,18 +135,14 @@ async fn search_handler_meta_reports_rows_dropped_when_the_corpus_has_no_matchin
     let state = Arc::new(SearchAppState::new(registry));
     state.install_embedder(embedder).await;
 
-    let resp = search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("drop-corpus-idx".to_string()),
-        axum::extract::Json(drop_test_query(
-            "alpha_qwerty",
-            crate::core::indexer::SearchMode::All,
-            None,
-        )),
+    let resp = search_report(
+        &state,
+        "drop-corpus-idx",
+        drop_test_query("alpha_qwerty", crate::core::indexer::SearchMode::All, None),
     )
     .await;
 
-    let Json(body) = resp.expect("handler must succeed");
+    let body = resp.expect("handler must succeed");
     let meta = body.get("meta").expect("meta block present");
     assert_eq!(
         meta["dropped"]["unresolved_corpus"],
@@ -224,20 +219,20 @@ async fn search_handler_meta_reports_rows_dropped_by_the_mode_and_docstring_filt
     let state = Arc::new(SearchAppState::new(registry));
     state.install_embedder(embedder).await;
 
-    let resp = search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("drop-mode-idx".to_string()),
-        axum::extract::Json(drop_test_query(
+    let resp = search_report(
+        &state,
+        "drop-mode-idx",
+        drop_test_query(
             // Classifies as `BugDebt` — the intent that keeps `Code` mode's
             // hard file-type filter.
             "bug in alpha_qwerty",
             crate::core::indexer::SearchMode::Code,
             Some(crate::core::indexer::SearchStage::Lexical),
-        )),
+        ),
     )
     .await;
 
-    let Json(body) = resp.expect("handler must succeed");
+    let body = resp.expect("handler must succeed");
     let meta = body.get("meta").expect("meta block present");
     assert_eq!(
         meta["dropped"]["mode_filtered"],

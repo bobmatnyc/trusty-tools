@@ -289,6 +289,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Secrets { action }) => return commands::secrets::run(action).await,
         Some(Command::Content { action }) => return commands::content::run(action).await,
+        Some(Command::Dbatg(args)) => std::process::exit(commands::dbatg::run(args).await), // #9758
         // #8994: `tm worktrees` reads and appends the worktree ledger only.
         Some(Command::Worktrees(args)) => return commands::worktrees::run(args).await,
         _ => {}
@@ -514,9 +515,10 @@ async fn main() -> anyhow::Result<()> {
             interval_ms,
             single_pane,
         }) => {
-            // #9556: an explicit `--url` is pinned; #6483: multipane by default.
+            // #9556: an explicit `--url` is pinned. #10491: `tm tui` opens on the
+            // console home screen; Enter on the MPM tile opens the projects view.
             let client = trusty_mpm::tui::client_for(tui_url.as_deref())?;
-            trusty_mpm::tui::run_initial_view_with(client, interval_ms, None, single_pane).await
+            trusty_mpm::tui::home::run_tui_entry(client, interval_ms, single_pane).await
         }
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
@@ -610,6 +612,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Env { action }) => commands::env_file::run(action),
         Some(Command::Secrets { action }) => commands::secrets::run(action).await,
         Some(Command::Content { action }) => commands::content::run(action).await,
+        Some(Command::Dbatg(args)) => std::process::exit(commands::dbatg::run(args).await),
         Some(Command::Worktrees(args)) => commands::worktrees::run(args).await, // #8994
         Some(Command::Coordinator { message, action }) => {
             // DOC-14 SM-STDIO (#1291): `tm sm serve --stdio` runs the JSON-RPC

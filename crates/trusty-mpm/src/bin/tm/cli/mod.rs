@@ -43,7 +43,7 @@ pub(crate) use crate::cli_manager::ManagerAction;
 pub(crate) const DEFAULT_URL: &str = trusty_mpm::core::DEFAULT_DAEMON_URL;
 
 // #6288 S3a: `DEFAULT_ADDR`, the `daemon --addr` bind default, went with the
-// bind; the flag is accepted and ignored (owner ruling Q1).
+// bind; the flag is accepted and ignored (#6288).
 
 /// trusty-mpm command-line interface.
 ///
@@ -148,10 +148,11 @@ pub(crate) struct Cli {
     /// Read a token for `--account` from stdin (#8914).
     ///
     /// Why: when this machine's own gh cannot yield the account's token, a
-    /// token on stdin is the setup that touches no keyring. `gh auth login`
-    /// activates the account in the machine-wide keyring slot.
-    /// What: tm proves the token with `GET /user` and stores it in its 0600
-    /// per-account `hosts.yml` before any session starts.
+    /// token on stdin is the setup that never activates the account in the
+    /// machine-wide keyring slot, as `gh auth login` does.
+    /// What: tm proves the token with `GET /user` and stores it in gh's
+    /// keyring entry for the account before any session starts. #10037: its
+    /// per-account `hosts.yml` names the account and holds no token.
     /// Test: `cli_account_token_stdin_requires_an_account`.
     #[arg(long, global = true, requires = "account")]
     pub(crate) account_token_stdin: bool,
@@ -439,13 +440,12 @@ pub(crate) enum Command {
     },
     /// Report daemon health: reachability, catalog freshness, and a fleet summary.
     Health,
-    /// Launch the ratatui multipane TUI dashboard (projects / sessions /
-    /// activity / actions).
+    /// Launch the ratatui TUI on the console home screen (one tile per service; Enter on MPM opens the projects dashboard).
     ///
-    /// Why: #6483 — this used to open the single-pane coordinator chat, which
-    /// is now behind `--single-pane`. The multipane `project_ctl` dashboard is
-    /// the default surface.
-    /// What: routes through `trusty_mpm::tui::initial_view`.
+    /// Why: #10491 — `tm tui` starts at the console's service roster; the
+    /// multipane `project_ctl` dashboard (#6483) is one Enter away. The
+    /// single-pane coordinator chat stays behind `--single-pane`.
+    /// What: routes through `trusty_mpm::tui::home::tui_entry`.
     /// Test: `cli_parses_tui_defaults`, `cli_parses_tui_single_pane_opt_in`.
     Tui {
         /// Base URL of the trusty-mpm daemon. `Option<String>`, no
@@ -764,14 +764,14 @@ pub(crate) enum Command {
         #[arg(long)]
         sandbox: bool,
     },
-    /// Run the unattended fleet supervisor (24/7 observer + auto-resumer, #1206).
+    /// Run the unattended fleet supervisor (24/7 observer, #1206).
     ///
     /// Why: for overnight / unattended operation the fleet needs an always-on
-    /// process that auto-resumes `stopped` sessions, observes session health
-    /// without a live caller, surfaces pending decisions, and exposes fleet
-    /// metrics — all while making NO autonomy decisions itself.
+    /// process that observes session health without a live caller, surfaces
+    /// pending decisions, and exposes fleet metrics — all while making NO
+    /// autonomy decisions itself.
     /// What: runs the supervisor loop, polling the managed-session store on an
-    /// interval. Auto-resume is gated by `TRUSTY_MPM_AUTO_RESUME=1`; the poll
+    /// interval. #10356: it no longer auto-resumes; the daemon does. The poll
     /// cadence and classification toggle are read from env
     /// (`TRUSTY_MPM_SUPERVISOR_*`) but may be overridden by these flags. #6288:
     /// it binds no listener — each sweep's snapshot is published to
@@ -781,9 +781,9 @@ pub(crate) enum Command {
         /// Poll interval in seconds (overrides `TRUSTY_MPM_SUPERVISOR_INTERVAL`).
         #[arg(long)]
         interval: Option<u64>,
-        /// Force auto-resume of `stopped` sessions on (overrides
-        /// `TRUSTY_MPM_AUTO_RESUME`). Without this flag (and without the env
-        /// var) the supervisor runs observe-only.
+        /// Ignored since #10356: the daemon owns auto-resume. Set
+        /// `TRUSTY_MPM_AUTO_RESUME` on the daemon or use the console toggle.
+        /// Still accepted so an existing launchd plist keeps starting.
         #[arg(long)]
         auto_resume: bool,
         /// Disable idle-session activity classification (no LLM calls).
@@ -890,6 +890,12 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: ArchitectAction,
     },
+    /// The PM ledger: `init`, `add`, `update`, `close`, `batch`, `prune`, `show`.
+    ///
+    /// Writes go through the daemon; when it is down, this session's own
+    /// store is written in-process under the same lock.
+    // #9758. Test: `cli_parses_every_dbatg_verb`.
+    Dbatg(DbatgArgs),
     /// Edit a dotenv file without printing a value: `set` and `keys`.
     ///
     /// Only the bound Architect may run either verb.
@@ -1671,7 +1677,7 @@ pub(crate) enum Command {
 /// `--include-frozen` can require either one without duplicating the check.
 /// The `writes` group holds the flags whose destructive half DEFAULTS TO A
 /// PREVIEW (`--fix`, `--fix-skills`, `--fix-agents`, `--fix-launchd-secrets`,
-/// `--quarantine-mcp`) so `--yes` can promote any of them without naming each.
+/// `--rotate-deps`, `--quarantine-mcp`) so `--yes` can promote any of them without naming each.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
 /// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`,
 /// `cli_parses_doctor_quarantine_mcp`,
@@ -1685,7 +1691,7 @@ pub(crate) enum Command {
 ))]
 #[command(group(
     clap::ArgGroup::new("writes")
-        .args(["fix", "fix_skills", "fix_agents", "fix_launchd_secrets", "quarantine_mcp"])
+        .args(["fix", "fix_skills", "fix_agents", "fix_launchd_secrets", "rotate_deps", "quarantine_mcp"])
         .multiple(true)
         .required(false)
 ))]
@@ -1794,6 +1800,23 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix_launchd_secrets: bool,
 
+    /// Rotate every oversized cargo `debug/` aside. DRY RUN unless `--yes`.
+    ///
+    /// Why (#10212): builds outside `tm build-lease` grow the shared target's
+    /// `debug/deps` with nothing to bound it, and an 844,490-entry one stalled
+    /// syspolicyd on every exec. Only an explicit operator act rotates the
+    /// shared dir (Architect ruling Q3a).
+    /// What: for each shared target and builder slot the `deps_budget` row
+    /// warns on, renames `debug/` aside while no build holds a cargo lock in
+    /// that target, and waits while the old tree is deleted; a held lock is
+    /// refused and named. A builder slot is also rotated only while this pass
+    /// holds its `tm build-lease` lease. A shared target has no lease, so only
+    /// its cargo locks guard it: run this when no unleased build is between
+    /// two cargo commands there. Cargo rebuilds the profile cold. No other
+    /// repair runs.
+    #[arg(long)]
+    pub rotate_deps: bool,
+
     /// Repair every finding tm can prove it owns. DRY RUN unless `--yes`.
     ///
     /// Why (#4948): doctor checks were pull-only, so findings persisted
@@ -1830,8 +1853,8 @@ pub struct DoctorFlags {
     /// `--fix-skills` REDEPLOY behind it too — one command previewing half of
     /// itself while writing the other half made the printed "dry run" untrue.
     /// What: promotes `--fix`, BOTH `--fix-skills` halves, `--fix-agents`
-    /// (#6649), `--fix-launchd-secrets` (#8236) and `--quarantine-mcp` from a
-    /// dry run to an applied run.
+    /// (#6649), `--fix-launchd-secrets` (#8236), `--rotate-deps` (#10212) and
+    /// `--quarantine-mcp` from a dry run to an applied run.
     #[arg(long, requires = "writes")]
     pub yes: bool,
 

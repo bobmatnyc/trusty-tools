@@ -30,6 +30,7 @@ Requires MCP server installation. Good for isolated testing scenarios and unauth
 Best for comprehensive cross-browser testing (Chrome, Firefox, Safari). Heaviest resource usage.
 
 ### Tab Group Recovery (#8022)
+<!-- rule:web-qa/tab-group-recovery -->
 Never close the last other tab in the MCP tab group mid-task — that drops the
 group, and the next `computer` call on a still-open tab fails with a stale
 cross-extension error. On the first unexpected tool error, call

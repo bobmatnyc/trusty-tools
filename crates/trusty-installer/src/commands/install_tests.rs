@@ -18,7 +18,7 @@ use super::*;
 // Not re-exported by `install.rs` itself (only used internally by
 // `install_report.rs`'s own `print_dry_run`), so pulled in directly here.
 use super::install_report::build_dry_run_report;
-use crate::commands::stable_set::ManageStrategy;
+use crate::commands::stable_set::{stable_set, ManageStrategy, TransitiveSelection};
 
 /// Build an `InstallOutcome` with the pre-#2566 default service state
 /// (not attempted — `service_ok: true`, empty detail) and the pre-#3554
@@ -141,12 +141,14 @@ fn report_all_ok() {
 /// trusty-analyze selection both stay `all_ok`, every other member reads
 /// installed, the footer has no error line and lists the bus as skipped; the
 /// bus named explicitly on its own still fails the run.
+/// #10130: trusty-events is internal and never reaches the install loop, so
+/// the soft row here is a synthetic `soft-bus` that failed for a real reason.
 /// Test: This is the test.
 #[test]
 fn a_failed_soft_bus_install_leaves_the_run_all_ok() {
     let bus = || InstallOutcome {
         soft: true,
-        ..optional_outcome("trusty-events", false, "no prebuilt for this platform")
+        ..optional_outcome("soft-bus", false, "no prebuilt for this platform")
     };
     let mpm = InstallReport::build(vec![
         outcome("trusty-search", true, "installed"),
@@ -161,14 +163,14 @@ fn a_failed_soft_bus_install_leaves_the_run_all_ok() {
     assert!(
         mpm.members
             .iter()
-            .filter(|m| m.member != "trusty-events")
+            .filter(|m| m.member != "soft-bus")
             .all(|m| m.ok),
         "every other member installed"
     );
     let lines = install_report::summary_lines(&mpm);
     assert!(lines.errors.is_empty(), "{lines:?}");
     assert!(
-        lines.skipped.iter().any(|l| l.starts_with("trusty-events")),
+        lines.skipped.iter().any(|l| l.starts_with("soft-bus")),
         "{lines:?}"
     );
 
@@ -183,7 +185,7 @@ fn a_failed_soft_bus_install_leaves_the_run_all_ok() {
     assert!(install_report::summary_lines(&analyze).errors.is_empty());
 
     let named = InstallReport::build(vec![optional_outcome(
-        "trusty-events",
+        "soft-bus",
         false,
         "no prebuilt for this platform",
     )]);
@@ -939,13 +941,14 @@ fn dry_run_report_shape() {
 /// this pins the composition `run()` itself uses:
 /// `select_members_transitive(&[])` (what an empty `members` slice
 /// resolves to) fed into `build_dry_run_report`.
-/// What: Resolving `&[]` yields every [`stable_set`] member, in order,
-/// and the dry-run report carries them all.
+/// What: Resolving `&[]` yields every [`stable_set`] member tctl can
+/// install (#10130: internal members excluded), in order, and the dry-run
+/// report carries them all.
 /// Test: This is the test.
 #[test]
 fn dry_run_full_set_when_no_members_named() {
     let resolved = select_members_transitive(&[]);
-    let all = super::super::stable_set::stable_set();
+    let all: Vec<StableMember> = stable_set().into_iter().filter(|m| !m.internal).collect();
     assert_eq!(
         resolved.members.len(),
         all.len(),
@@ -1063,6 +1066,7 @@ fn stable_member_for_test(crate_name: &str, binary: &str, manage: ManageStrategy
         manage,
         required: true,
         soft: false,
+        internal: false,
     }
 }
 
@@ -1235,17 +1239,14 @@ fn bundle_agents_resolves_transitively_in_topological_order() {
             "trusty-memory",
             "trusty-analyze",
             "trusty-review",
-            // #10042: mpm and analyze are producers, so the bus joins softly.
-            "trusty-events",
             "trusty-mpm",
         ]
     );
-    assert!(
-        resolved
-            .members
-            .iter()
-            .any(|m| m.crate_name == "trusty-events" && m.soft && !m.required),
-        "the bus joins the agents bundle as a soft, optional member"
+    // #10130: mpm and analyze softly use the bus, which is internal.
+    assert_eq!(
+        resolved.internal_skipped,
+        vec!["trusty-events".to_owned()],
+        "the agents bundle skips the internal bus"
     );
     assert!(
         resolved
@@ -1274,7 +1275,7 @@ fn run_dry_run_accepts_bundle_keywords() {
 /// Test: This is the test.
 #[test]
 fn unknown_members_message_names_bundle_keywords() {
-    let msg = unknown_members_message(&["cores".to_owned()]);
+    let msg = install_report::unknown_members_message(&["cores".to_owned()]);
     assert!(
         msg.starts_with("unknown member(s): cores"),
         "the pre-#4714 prefix must be unchanged: {msg}"
@@ -1423,63 +1424,197 @@ fn dry_run_reports_the_content_step_without_running_it() {
 /// Resolve a picker selection the way `install::run` does: the picker's
 /// expansion (`select_members_transitive` over the chosen names), flattened by
 /// `picker::override_names`, resolved again.
-fn picker_round_trip(chosen: &[&str]) -> Vec<StableMember> {
+fn picker_round_trip(chosen: &[&str]) -> TransitiveSelection {
     let names: Vec<String> = chosen.iter().map(|n| (*n).to_owned()).collect();
     let expanded = select_members_transitive(&names).members;
     let override_names = crate::commands::picker::override_names(&expanded);
-    select_members_transitive(&override_names).members
+    select_members_transitive(&override_names)
 }
 
-/// Why (#10042): `install::run` flattened the picker's expanded list to names
-/// and resolved it again, so the soft bus came back as an explicitly named
-/// member, `soft: false`. Picking only trusty-analyze (no REQUIRED member)
-/// then made a failed bus gate the run and exit 2.
-/// What: after the round trip from `[trusty-analyze]` the bus is still
-/// `soft: true, required: false`, and an install report over that selection
-/// with the bus failed is `all_ok`.
+/// Why (#10042, #10130): `install::run` flattens the picker's expanded list
+/// to names and resolves it again. Had the internal bus survived the first
+/// pass, the second would name it explicitly and exit 3 for a member the
+/// operator never picked.
+/// What: the round trip from `[trusty-analyze]` resolves cleanly, selects no
+/// bus, and still reports it once as an internal skip.
 /// Test: This is the test.
 #[test]
-fn the_picker_round_trip_keeps_the_bus_soft() {
-    let members = picker_round_trip(&["trusty-analyze"]);
-    let bus = members
+fn the_picker_round_trip_never_names_the_internal_bus() {
+    let sel = picker_round_trip(&["trusty-analyze"]);
+    assert!(sel.unavailable.is_empty(), "{sel:?}");
+    assert!(sel.unknown.is_empty(), "{sel:?}");
+    assert!(
+        sel.members.iter().all(|m| m.crate_name != "trusty-events"),
+        "{sel:?}"
+    );
+    assert_eq!(sel.internal_skipped, vec!["trusty-events".to_owned()]);
+}
+
+/// Why (#10042): `override_names` must hand a soft member back to the
+/// resolver as an implicit pull, not a name. Named, the bus would turn
+/// `soft: false` and gate an optional producer's run.
+/// What: with the bus published, the round trip from `[trusty-mpm]` keeps
+/// trusty-events soft and not required, and `override_names` omits it while
+/// keeping a member that is not soft.
+/// Test: This is the test.
+#[test]
+fn the_picker_round_trip_keeps_a_soft_member_soft() {
+    let first = crate::commands::stable_set::select_members_transitive_in(
+        crate::commands::stable_set::stable_set_with_published_bus(),
+        &["trusty-mpm".to_owned()],
+    );
+    let names = crate::commands::picker::override_names(&first.members);
+    assert!(!names.contains(&"trusty-events".to_owned()), "{names:?}");
+    assert!(names.contains(&"trusty-mpm".to_owned()), "{names:?}");
+    let second = crate::commands::stable_set::select_members_transitive_in(
+        crate::commands::stable_set::stable_set_with_published_bus(),
+        &names,
+    );
+    let bus = second
+        .members
         .iter()
         .find(|m| m.crate_name == "trusty-events")
-        .expect("the bus joins a producer's selection");
+        .expect("the bus is pulled in again");
     assert!(
-        bus.soft,
-        "the round trip must keep the bus soft: {members:?}"
+        bus.soft && !bus.required,
+        "promoted to a named member: {bus:?}"
     );
-    assert!(!bus.required);
+}
 
+/// Why (#10130): a producer's install fetched the internal bus from the
+/// registry and printed "skipped (optional, no prebuilt for this platform)".
+/// `install_all` attempts exactly the members `run` hands it, so the bus must
+/// be out of that list before the loop.
+/// What: for each producer, the attempted set has no bus, no `adding
+/// trusty-events` line, and exactly one info line naming it internal; the
+/// resolution is not an error.
+/// Test: This is the test.
+#[test]
+fn install_of_a_producer_attempts_no_fetch_for_internal_bus() {
+    for producer in ["trusty-mpm", "trusty-analyze"] {
+        let sel = select_members_transitive(&[producer.to_owned()]);
+        assert_eq!(selection_error(&sel), None);
+        assert!(
+            sel.members.iter().all(|m| m.crate_name != "trusty-events"),
+            "{producer}: the bus must never reach install_all: {sel:?}"
+        );
+        let notes = selection_notes(&sel);
+        let bus_lines: Vec<&String> = notes
+            .iter()
+            .filter(|l| l.contains("trusty-events"))
+            .collect();
+        assert_eq!(
+            bus_lines,
+            vec!["trusty-events: internal (not published), not installed"],
+            "{producer}: {notes:?}"
+        );
+    }
+}
+
+/// Why (#10130): `tctl install trusty-events` must not be a silent no-op
+/// under exit 0, and must not reach the network.
+/// What: `--dry-run --json` exits 3 (the unknown-member code) where it used
+/// to exit 0, and the refusal names the member and says why.
+/// Test: This is the test.
+#[test]
+fn explicit_install_of_internal_member_exits_3_with_reason() {
+    let code = run(
+        &["trusty-events".to_owned()],
+        false,
+        true,
+        false,
+        true,
+        false,
+        true,
+    );
+    assert_eq!(code, 3, "naming the internal bus must exit 3");
+    let msg = selection_error(&select_members_transitive(&["trusty-events".to_owned()]))
+        .expect("an explicit internal member is a selection error");
+    assert!(
+        msg.starts_with("trusty-events is internal and not published to crates.io"),
+        "{msg}"
+    );
+    assert!(msg.contains("Build it from a checkout"), "{msg}");
+}
+
+/// Why (#10130): the dry-run preview must list what a real install would
+/// attempt, and that no longer includes the internal bus.
+/// What: neither a producer's preview nor the full-set preview lists
+/// trusty-events; the full set still lists every other member.
+/// Test: This is the test.
+#[test]
+fn install_dry_run_omits_internal_bus() {
+    let dir = std::path::Path::new("/tmp/tctl-test-bin");
+    for names in [vec!["trusty-mpm".to_owned()], Vec::new()] {
+        let sel = select_members_transitive(&names);
+        let report = build_dry_run_report(&sel.members, true, dir);
+        assert!(
+            report.members.iter().all(|m| m.member != "trusty-events"),
+            "{names:?}: {:?}",
+            report.members
+        );
+    }
+    let full = build_dry_run_report(&select_members_transitive(&[]).members, true, dir);
+    assert_eq!(full.members.len(), stable_set().len() - 1);
+}
+
+/// Why (#10130): the skip must read only the static flag. A crates.io probe
+/// answers `None` for a network error and a 404 alike, so a filter that read
+/// a probe or an install `Outcome` would drop a PUBLISHED member on a flaky
+/// network.
+/// What: no lookup runs. It pins the filter's signature to take nothing but
+/// the members, then feeds connect-error rows through the report: a failed
+/// required member (trusty-search) is an error, a failed optional one
+/// (trusty-analyze) is a "no prebuilt" skip, never an internal skip.
+/// Test: This is the test; the subset property is
+/// `stable_set::tests::only_the_internal_flag_removes_a_member_from_any_selection`.
+#[test]
+fn network_failure_never_skips_a_published_member() {
+    // Pinned signature: no probe, no Outcome, no I/O argument.
+    type Split = (Vec<StableMember>, Vec<String>);
+    let filter: fn(Vec<StableMember>) -> Split = crate::commands::stable_set::split_internal;
+    let (kept, skipped) = filter(stable_set());
+    assert_eq!(skipped, vec!["trusty-events".to_owned()]);
+    assert_eq!(kept.len(), stable_set().len() - 1);
+
+    let sel = select_members_transitive(&["trusty-mpm".to_owned(), "trusty-analyze".to_owned()]);
+    for published in ["trusty-search", "trusty-analyze"] {
+        assert!(
+            sel.members.iter().any(|m| m.crate_name == published),
+            "{published} must still be attempted: {sel:?}"
+        );
+    }
+    assert_eq!(sel.internal_skipped, vec!["trusty-events".to_owned()]);
+
+    let connect_error = "error sending request: tcp connect error: Connection refused";
     let report = InstallReport::build(
-        members
+        sel.members
             .iter()
             .map(|m| InstallOutcome {
                 required: m.required,
                 soft: m.soft,
                 ..outcome(
                     &m.crate_name,
-                    m.crate_name != "trusty-events",
-                    "no prebuilt for this platform",
+                    !matches!(m.crate_name.as_str(), "trusty-search" | "trusty-analyze"),
+                    connect_error,
                 )
             })
             .collect(),
     );
-    assert!(report.all_ok, "a failed soft bus must not fail the run");
-    assert_eq!(report.exit_code(), 0);
-}
-
-/// Why (#10042): naming the bus in the picker is the operator's request, so
-/// it must gate like any other named member.
-/// What: picking trusty-analyze and trusty-events keeps the bus `soft: false`
-/// through the round trip.
-/// Test: This is the test.
-#[test]
-fn a_picked_bus_stays_explicit_through_the_round_trip() {
-    let members = picker_round_trip(&["trusty-analyze", "trusty-events"]);
-    let bus = members
-        .iter()
-        .find(|m| m.crate_name == "trusty-events")
-        .expect("the picked bus is selected");
-    assert!(!bus.soft, "a picked bus is explicit: {members:?}");
+    let lines = install_report::summary_lines(&report);
+    assert!(
+        lines.errors.iter().any(|l| l.contains("trusty-search")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .skipped
+            .iter()
+            .any(|l| l == "trusty-analyze: skipped (no prebuilt for this platform)"),
+        "{lines:?}"
+    );
+    assert!(
+        !report.all_ok,
+        "a failed REQUIRED member still fails the run"
+    );
 }

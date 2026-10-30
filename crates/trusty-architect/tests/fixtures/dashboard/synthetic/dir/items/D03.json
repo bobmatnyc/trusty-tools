@@ -1,0 +1,22 @@
+{
+  "created": "2026-10-11T04:00:00Z",
+  "due": "lorem ipsu",
+  "goal": "",
+  "kind": "question",
+  "parked": {
+    "at": "2026-10-11T04:00:00Z",
+    "by": "lor",
+    "choice": "clarify",
+    "clarify": {
+      "dimension": "lore",
+      "option": null
+    },
+    "until": null
+  },
+  "rank": 3,
+  "session": "pm-2",
+  "status": "open",
+  "title": "lorem i",
+  "updated": "2026-10-11T04:00:00Z",
+  "version": 1
+}

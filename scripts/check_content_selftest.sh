@@ -44,6 +44,8 @@
 #     probe-conditional-not      FAIL, "If … not merged, run `tm pr merge`"
 #     probe-semicolon-negation   FAIL, "Do not idle; run `tm wait`"
 #     probe-fenced-after-and     FAIL, `cd repo && tm doctor`
+#     probe-span-wrapped         FAIL, a `tm pr open …` span wrapped over two lines (#10104)
+#     probe-span-wrapped-negated-ok  OK, a wrapped span a "Never run" governs
 #     probe-harness-owned-ok     OK, tm's own instructions name tm freely
 #   bump (scripts/check_content.py bump):
 #     bump-released-unchanged    FAIL, member changed under a released version
@@ -257,6 +259,12 @@ new_repo p-semi && engineer 'Do not idle; run `tm wait --for run --pid 1`.'
 tree probe-semicolon-negation 1 "content/agents/engineer.md:6: runs \`tm wait --for run --pid 1\`"
 new_repo p-and && engineer '```bash' 'cd repo && tm doctor' '```'
 tree probe-fenced-after-and 1 "content/agents/engineer.md:7: runs \`tm doctor\`"
+# #10104: an inline span that wraps across lines is still a command, reported at
+# the line of its opening backtick; a governing negation still excuses it.
+new_repo p-wrap && engineer 'Intro line.' 'Open with `tm pr open --title x' '[--rung 1]` then stop.'
+tree probe-span-wrapped 1 "content/agents/engineer.md:7: runs \`tm pr open --title x [--rung 1]\`"
+new_repo p-wrap-neg && engineer 'Never run `tm secrets' '--list` on the live host.'
+tree probe-span-wrapped-negated-ok 0 "OK"
 # tm's own instructions are read only by tm, so they name tm commands freely.
 new_repo p-owned && w content/instructions/sections/identity.md '# section' 'Run `tm doctor` now.'
 tree probe-harness-owned-ok 0 "OK"
@@ -367,10 +375,32 @@ w "$leak" 'clone github.com/realcorp/widgets'
 leaks leaks-org 1 "FAIL ORG: $leak:1"
 w "$leak" 'ssh studio.local'
 leaks leaks-host 1 "FAIL HOSTNAME: $leak:1"
+# #10161: a host needs a boundary after it; `.local`/`.lan` inside an
+# identifier is not one, and a <name>.local mid-line still is.
+w "$leak" 'curl http://studio.local:8080/'
+leaks leaks-host-port 1 "FAIL HOSTNAME: $leak:1"
+w "$leak" 'see _studio.local_ for builds'
+leaks leaks-host-emphasis 1 "FAIL HOSTNAME: $leak:1"
+w "$leak" 'ssh myhost.localdomain'
+leaks leaks-host-localdomain 1 "FAIL HOSTNAME: $leak:1"
+w "$leak" 'window.localStorage a.localeCompare(b) code.language-mermaid db.LOCAL_URL' \
+  'threading.local() self.local.cache = 1' \
+  'self.local_cache = {} os.environ.local_settings cfg.internal_api() pre.language-python' \
+  '.claude/settings.local.json'
+leaks leaks-host-identifier-near-miss 0 "OK"
 w "$leak" 'notify U01ABC23DEF'
 leaks leaks-slack 1 "FAIL SLACK_ID: $leak:1"
 w "$leak" 'mail someone@corp.io'
 leaks leaks-email 1 "FAIL EMAIL: $leak:1"
+# #9171: a gh account config dir and a tailnet (CGNAT 100.64/10) address.
+w "$leak" 'cat ~/.config/gh-realacct/hosts.yml'
+leaks leaks-gh-config 1 "FAIL GH_CONFIG_DIR: $leak:1"
+w "$leak" 'ssh 100.101.102.103'
+leaks leaks-tailnet-ip 1 "FAIL TAILNET_IP: $leak:1"
+w "$leak" 'cat ~/.config/gh-acmecorp-realname/hosts.yml'
+leaks leaks-gh-config-allowed-prefix 1 "FAIL GH_CONFIG_DIR: $leak:1"
+w "$leak" '~/.config/gh-<account> gh-example ~/.config/gh-example/hosts.yml ~/.config/gh-acme 100.20.1.1 1.100.64.1 100.128.0.1'
+leaks leaks-gh-tailnet-near-miss 0 "OK"
 for kind in 'gh pr view 1 --repo realcorp/widgets' 'gh pr list -R realcorp/widgets' \
   'docs at realcorp.github.io' 'clone gitlab.com/realcorp/widgets'; do
   w "$leak" "$kind"

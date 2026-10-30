@@ -277,7 +277,8 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
     let spec = tracing::subscriber::with_default(subscriber, || {
-        super::inplace_session_spec(target.path(), &state, &probe_prompt("/probe/p.txt"))
+        super::inplace_session_spec(target.path(), &state, &probe_prompt("/probe/p.txt"), None)
+            .expect("a PM spec builds")
     });
     let line = crate::test_support::spec_text(&spec);
     let tmux_option = trusty_mpm::core::trusty_tools_config::resolve_tmux_options(
@@ -663,7 +664,9 @@ fn inplace_session_spec_follows_the_configured_renderer() {
             std::path::Path::new("/w"),
             root.path(),
             &probe_prompt("/probe/p.txt"),
-        );
+            None,
+        )
+        .expect("a PM spec builds");
         let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");
@@ -696,7 +699,9 @@ fn inplace_session_spec_carries_the_prompt_file() {
         std::path::Path::new("/w"),
         root.path(),
         &probe_prompt("/probe/pm-prompt.txt"),
-    );
+        None,
+    )
+    .expect("a PM spec builds");
     assert_eq!(
         spec.args,
         [
@@ -722,7 +727,9 @@ fn inplace_pm_session_spec_trims_the_unused_tools() {
         std::path::Path::new("/w"),
         root.path(),
         &probe_prompt("/p.txt"),
-    );
+        None,
+    )
+    .expect("a PM spec builds");
     assert!(pm.env_set.contains(&artifact_off), "{:?}", pm.env_set);
     assert!(
         pm.args
@@ -734,7 +741,8 @@ fn inplace_pm_session_spec_trims_the_unused_tools() {
 
     let mut prompt = probe_prompt("/p.txt");
     prompt.stamp = launch_env(SessionProfile::Architect);
-    let sup = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt);
+    let sup = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None)
+        .expect("an Architect spec builds");
     assert!(!sup.env_set.contains(&artifact_off));
     assert!(!sup.args.iter().any(|a| a == "--disallowedTools"));
 }
@@ -795,7 +803,8 @@ fn inplace_session_spec_carries_the_profile_stamp() {
     prompt.stamp = trusty_mpm::core::session_profile::launch_env(
         trusty_mpm::core::session_profile::SessionProfile::Architect,
     );
-    let spec = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt);
+    let spec = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None)
+        .expect("an Architect spec builds");
     assert!(
         spec.env_set.contains(&prompt.stamp),
         "the in-place spec must assign {:?}: {:?}",
@@ -829,4 +838,58 @@ fn manual_launch_hint_names_the_prompt_file() {
         hint.contains("`claude --append-system-prompt-file '/t/p.txt'`") && hint.contains("/w"),
         "{hint}"
     );
+}
+
+/// #10127: `tm session start` of an Architect carries the production deny as
+/// ONE `--settings` merged into the owner file, and unsets every chat token;
+/// a PM keeps the owner file argv. An owner file the deny cannot merge into
+/// refuses the launch. Before the fix the Architect spec carried the bare
+/// owner file and inherited the tokens.
+#[test]
+fn an_architect_inplace_session_spec_carries_the_lockdown() {
+    use trusty_mpm::core::architect_lockdown::{
+        ARCHITECT_DENY_GLOBS, ARCHITECT_ENV_UNSET, capitalised,
+    };
+    use trusty_mpm::core::session_profile::{SessionProfile, launch_env};
+    let root = tempfile::TempDir::new().expect("tmp config root");
+    let carrier = root.path().join("owner.json");
+    std::fs::write(&carrier, r#"{"deniedMcpServers":[{"serverName":"x"}]}"#).expect("carrier");
+    let mut prompt = probe_prompt("/p.txt");
+    prompt.stamp = launch_env(SessionProfile::Architect);
+    let cwd = std::path::Path::new("/w");
+    let spec = super::inplace_session_spec(cwd, root.path(), &prompt, Some(&carrier))
+        .expect("the Architect spec builds");
+    let values: Vec<&String> = spec
+        .args
+        .windows(2)
+        .filter(|w| w[0] == "--settings")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(values.len(), 1, "{:?}", spec.args);
+    let body: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
+    assert_eq!(body["deniedMcpServers"][0]["serverName"], "x");
+    assert_eq!(body["disableClaudeAiConnectors"], true);
+    let deny = body["permissions"]["deny"].as_array().expect("deny");
+    for glob in ARCHITECT_DENY_GLOBS {
+        for rule in [(*glob).to_owned(), capitalised(glob)] {
+            assert!(
+                deny.contains(&serde_json::Value::String(rule.clone())),
+                "{rule}"
+            );
+        }
+    }
+    for name in ARCHITECT_ENV_UNSET {
+        assert!(spec.env_unset.iter().any(|n| n == name), "{name}");
+    }
+
+    let pm = super::inplace_session_spec(cwd, root.path(), &probe_prompt("/p.txt"), Some(&carrier))
+        .expect("a PM spec builds");
+    assert!(
+        pm.args
+            .ends_with(&["--settings".to_owned(), carrier.display().to_string()])
+    );
+    assert!(!pm.env_unset.iter().any(|n| n == "SLACK_BOT_TOKEN"));
+
+    let missing = root.path().join("gone.json");
+    assert!(super::inplace_session_spec(cwd, root.path(), &prompt, Some(&missing)).is_err());
 }

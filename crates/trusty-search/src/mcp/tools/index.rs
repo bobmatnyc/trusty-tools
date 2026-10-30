@@ -19,8 +19,8 @@ use super::{
 };
 use crate::service::rpc::reads::{METHOD_CHUNKS_LIST, METHOD_INDEXES_LIST, METHOD_INDEX_STATUS};
 use crate::service::rpc::writes::{
-    METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_FILE_PUT, METHOD_INDEX_FILE_REMOVE,
-    METHOD_INDEX_REINDEX, METHOD_INDEX_ROOTS_ADD,
+    METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_FILES_REMOVE, METHOD_INDEX_FILE_PUT,
+    METHOD_INDEX_FILE_REMOVE, METHOD_INDEX_REINDEX, METHOD_INDEX_ROOTS_ADD,
 };
 
 /// The `add_root` tool's descriptor (#7434), appended by `tool_descriptors`.
@@ -40,6 +40,39 @@ pub(super) fn add_root_descriptor() -> Value {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Absolute directory paths to add."
+                }
+            }
+        }
+    })
+}
+
+/// The `remove_files` tool's descriptor (#10110), appended by `tool_descriptors`.
+///
+/// Why: kept beside its dispatch arm, out of `descriptors.rs`, which sits
+/// near the line cap. The description states the two ways removed files come
+/// back, because the tool cannot prevent either.
+pub(super) fn remove_files_descriptor() -> Value {
+    serde_json::json!({
+        "name": "remove_files",
+        "description": "Remove every file under a path prefix, or in a file list, from an index in one call. It removes chunks, vectors, entity rows and content hashes, and the symbol graph rebuilds once. Send exactly one of path_prefix or paths (at most 10000). An empty prefix, `.`, a `..` segment and the index root itself are refused. dry_run: true reports matched_files and matched_chunks and changes nothing. The removal does not exclude the files: the next reindex adds them back unless exclude_globs excludes them, and a reindex that is already running and has already scanned them can add them back too. Allowed while a reindex runs. Memory: the call promotes the vector index to the heap, so the host needs free memory for one copy of the vector index (once per call, released at the write-cooldown demote). Refused with remove_files_busy (retryable) while the index rehydrates its corpus; a failed call reports partial and the counts removed so far, and a retry finishes it.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["index_id"],
+            "properties": {
+                "index_id": { "type": "string" },
+                "path_prefix": {
+                    "type": "string",
+                    "description": "Index-relative or absolute in-root directory or file prefix, matched at a path-segment boundary."
+                },
+                "paths": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Index-relative or absolute in-root file paths, removed exactly."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Report the counts only; change nothing."
                 }
             }
         }
@@ -161,6 +194,44 @@ pub(super) async fn dispatch_index_tool(
             };
             let params = serde_json::json!({ "index_id": index_id, "body": { "path": path } });
             Some(server.call(METHOD_INDEX_FILE_REMOVE, params).await)
+        }
+        // #10110: the batch removal; the daemon validates the selection.
+        "remove_files" => {
+            let index_id = match required_index_id(server, args) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let mut body = serde_json::json!({});
+            if let Some(prefix) = args.get("path_prefix") {
+                let Some(prefix) = prefix.as_str() else {
+                    return Some(Err(DispatchError::InvalidParams(
+                        "path_prefix must be a string".into(),
+                    )));
+                };
+                body["path_prefix"] = Value::String(prefix.to_string());
+            }
+            if let Some(paths) = args.get("paths") {
+                if !paths
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(Value::is_string))
+                {
+                    return Some(Err(DispatchError::InvalidParams(
+                        "paths must be an array of path strings".into(),
+                    )));
+                }
+                body["paths"] = paths.clone();
+            }
+            match optional_bool(
+                args,
+                "dry_run",
+                "true reports the counts and removes nothing",
+            ) {
+                Ok(Some(dry_run)) => body["dry_run"] = Value::Bool(dry_run),
+                Ok(None) => {}
+                Err(e) => return Some(Err(e)),
+            }
+            let params = serde_json::json!({ "index_id": index_id, "body": body });
+            Some(server.call(METHOD_INDEX_FILES_REMOVE, params).await)
         }
         // Issue #312: request details=true so the response includes
         // per-index size_bytes in addition to the id list.

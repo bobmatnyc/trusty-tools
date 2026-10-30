@@ -16,6 +16,7 @@ section names: before your final report.
 
 ## Self-Analysis and Improvement Reporting
 
+<!-- rule:self-improvement-loop/reporting-section -->
 Every task ends with an analysis of your own run. This is a core property of
 every agent, not a step reserved for runs that went badly.
 
@@ -27,11 +28,13 @@ Three questions, and a finding answers all three:
 
 A symptom with no named cause and no proposed change files nothing.
 
+<!-- rule:self-improvement-loop/fixed-destination -->
 **The destination is fixed: `bobmatnyc/trusty-tools`.** That holds
 whatever project you ran in. A recommendation about a bundled skill, a bundled
 agent, the delivery workflow, or the framework goes to trusty-tools, never to
 the target project's own repository.
 
+<!-- rule:self-improvement-loop/return-a-block-not-a-filing -->
 **Routing depends on what you are.** A dispatched subagent never files the
 issue itself — "No Subagent Fan-Out" forbids reaching for `ticketing`. End
 your report with an **Improvement recommendations** block instead, one entry
@@ -42,6 +45,7 @@ per finding:
 - **Change** — the concrete edit that prevents it.
 - **Evidence** — command output, `file:line`, or elapsed time.
 
+<!-- rule:self-improvement-loop/dedup-by-label -->
 **Never a new issue (owner ruling 2026-09-27).** The PM posts that block to
 the rollup issue #8021, or as a comment on the parent issue when the finding
 traces back to one — whether the reporting agent is a dispatched subagent or
@@ -49,16 +53,20 @@ the PM itself running top-level. Search open trusty-tools issues carrying the
 `self-improvement` label first only to confirm which parent issue applies; a
 match still gets a comment, never a second issue.
 
+<!-- rule:self-improvement-loop/clean-run-reports-nothing -->
 **A clean run reports nothing.** No findings means no block and no issue.
 Never emit an empty block, and never file an issue to show that you looked.
 
+<!-- rule:self-improvement-loop/post-mortem-tracker -->
 These recommendations feed the recurring harness post-mortem in #6933 (#6935).
 
 ## Continuous Self-Improvement — the Fast Loop
 
+<!-- rule:self-improvement-loop/fast-loop-section -->
 The section above reports upward on the post-mortem's schedule. This one runs
 on every task and changes your behavior now. See #6937.
 
+<!-- rule:self-improvement-loop/detection-heuristics -->
 **Detection heuristics.** Check these at the end of every task. Each is
 observable from your own transcript or a tool result:
 
@@ -77,6 +85,8 @@ A run that trips none of them records nothing. A run that trips one where you
 cannot name a different way to try records nothing either: a symptom with no
 alternative is a report, not an experiment.
 
+<!-- rule:self-improvement-loop/post-mortem-query -->
+<!-- rule:self-improvement-loop/hypothesis-tag -->
 **The tag is `self-improvement-hypothesis`.** One tag, in the project's memory
 palace, and it is the contract the post-mortem queries by —
 `memory_list(tag: "self-improvement-hypothesis")`. Add descriptive tags beside

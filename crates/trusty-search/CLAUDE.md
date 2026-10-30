@@ -655,6 +655,23 @@ Per-index stats.
     cannot be read, all three are `null` and
     `bm25_truncation_unavailable_reason` is `"corpus_count_unreadable"`; it
     is `null` otherwise. The search `meta` block carries the same four fields.
+  - `embed_window` (#9284): `{window, truncated, unmeasured}`, cumulative
+    counts of embed events since this indexer was built (in memory; a restart
+    resets it). They are not distinct chunks: a forced reindex, or a retry
+    after a stall, embeds a chunk again and counts it again. `truncated`:
+    embed events whose chunk token count, special tokens included, exceeds the
+    embedder's input window, so the vector misses the tail. Counted with the
+    tokenizer the embedder truncates with. `unmeasured`: embed events the
+    window applies to whose length could not be counted (no tokenizer, a
+    tokenizer error, or a failed count task). `window: null` means either no
+    embed pass has run since the daemon started, or the embedder reports no
+    window (a sidecar that predates the optional `result.window` field, #9284);
+    in the second case nothing is counted, and `0` does not mean nothing was
+    cut. A sidecar reports its window on its first answer, so a lazy sidecar's
+    first pass learns it after its first wave and counts from there. Counts
+    need the MiniLM tokenizer in the fastembed cache; without it the chunks
+    are `unmeasured`, not `truncated`. Each embed pass logs one WARN per affected file for at most 8 files,
+    then one summary.
 - **Response 404 / 503**: see the index-scoped error contract above.
 
 ##### `POST /indexes/:id/search`
@@ -746,8 +763,8 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     quoted string; a single identifier carrying an underscore, `::` or a
     camelCase boundary (optionally behind `fn`/`struct`/`const`); a bare
     filename or path-shaped suffix (`session_mcp_scope.rs`,
-    `indexer/search/exact.rs`), matched against each chunk's path rather than
-    its content; and an issue reference (`#7675`), matched verbatim. An
+    `indexer/search/exact.rs`), matched against each chunk's path and then
+    against content; and an issue reference (`#7675`), matched verbatim. An
     UNQUOTED multi-word phrase earns nothing — it is a conceptual query, and
     flooring one let a prose sentence occurring verbatim in a single doc line
     take the top slot from every semantically-relevant chunk. A bare word and
@@ -758,13 +775,19 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     Ordering inside the floored group is lane-independent (declaration, then
     live-before-archived, then the caller's `on_branch` preference, then
     occurrence count, then chunk id), which is what makes `search` and
-    `search_lexical` agree on top-1 for an identifier. For the filename shape,
+    `search_lexical` agree on top-1 for an identifier. For every shape but
+    the filename one, that order is then interleaved by file: each file's
+    best hit precedes any file's second hit, so overlapping chunks of one file
+    cannot push another carrying file off the page (#7675, #10203). For the filename shape,
     "declaration" is repurposed as "exact path-suffix match" (a chunk whose
     whole path ends with the query) outranking a same-basename-only match
     (#7675 round 3), and a single query's floor contribution from this shape
     is capped at a small constant (`FILENAME_HIT_CAP`, 8) so a basename as
     common as `mod.rs` cannot flood the page with an arbitrary subset of
-    unrelated files.
+    unrelated files. A filename query also floors the chunks whose content
+    names the file (owner ruling 2026-10-26, #7675): they rank below every
+    path hit, are interleaved by file, and take their own cap
+    (`FILENAME_CONTENT_HIT_CAP`, 8), which never changes the path-hit count.
   - `meta.exact_match_degraded` / `meta.exact_match_full_scan` (#7675): the
     lane's own honesty bits. `exact_match_degraded` is `true` when the lane
     could not read the corpus at all (the same bounded-rehydrate exhaustion
@@ -773,9 +796,9 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     `exact_match_full_scan` is `true` when the BM25 postings prefilter was
     unavailable — an evicted or corpus-capped lexical index, where
     `bm25.len() < chunks.len()` means the postings can miss a chunk — and the
-    lane matched the literal against every chunk's content instead. A filename
-    query compares path basenames and never scans content, so it reports
-    `false`.
+    lane matched the literal against every chunk's content instead. For a
+    filename query it describes the content pass; path matching always reads
+    every chunk's path.
   - `meta.embedder` (#9970): `{active, intended, bootstrap, note}`. `active`
     is the backend that embedded this query (`ort`, `python`, ...);
     `intended` is the one the host is configured or defaulted to (`python`
@@ -787,6 +810,18 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     installs its embedder. The `search.query.all` fan-out carries the same
     object as a top-level `embedder`. Whether the index's own vectors are
     built is a separate signal: `vector_unavailable` and `search_capabilities`.
+  - `meta.timings` (#10195): milliseconds per stage — `resolve_ms` (index
+    lookup, including a cold lazy load), `lock_ms` (the index read lock),
+    `embed_ms` (query and `refine_query` embeds), `vector_ms`, `lexical_ms`,
+    `ripgrep_ms` (grep lane, grep fallback, exact-match lane), `fusion_ms` (RRF,
+    MMR, KG, score adjustments, materialisation), `rehydrate_wait_ms` (inside
+    `lexical_ms` and `ripgrep_ms`) and `total_ms`, equal to `latency_ms`, which now starts
+    before the index is resolved. `rehydrate_ran` / `hnsw_promoted` say
+    whether the query started a corpus rehydrate or ran while the vector index
+    promoted its mmap view. The `search` log line carries the same fields. A
+    search the query deadline cancels logs one `query_timeout` line at WARN
+    with `index_id`, `query`, `stage` and `elapsed_ms`; `search_all` logs one
+    `info` line naming its target indexes.
   - `meta.dropped` / `meta.dropped_total` (#2203): how many candidates this
     query retrieved and then discarded, per site. Without it a short `results`
     array was indistinguishable from a small match set. Sites:
@@ -1021,11 +1056,53 @@ graph stale; the daemon rebuilds it once the index has been quiet for 2 s, or
 after 60 s under a continuous write stream. Search reads the last built graph
 in the meantime; `GET /graph`, `call_chain` and `graph/neighbors` flush pending
 writes first. There is
-currently no HTTP/MCP-exposed batch variant (the internal
+currently no HTTP/MCP-exposed batch variant of `index-file` (the internal
 `index_files_batch_no_rebuild` fast path is only used by the full-reindex
-pipeline); a consumer that needs to apply a LARGE batch of per-file changes at
+pipeline); removal has one, `search.index.files.remove` below (#10110). A consumer that needs to apply a LARGE batch of per-file changes at
 once (e.g. after pulling hundreds of commits) should prefer
 `POST /indexes/:id/reindex` over looping many single-file `index-file` calls.
+
+##### `search.index.files.remove` (#10110)
+
+Remove every file under a path prefix, or every file in a list, in one call.
+Socket-only (no HTTP twin); MCP tool `remove_files`. `remove-file` is
+unchanged.
+
+- **Request body**: exactly one of `path_prefix` (string) or `paths` (array of
+  at most 10,000 strings), plus `dry_run` (bool, default `false`). Each path is
+  index-relative or absolute under a root, mapped with the `remove-file` rules
+  (#9236). A prefix matches at a path-segment boundary: `vendor/foo` never
+  selects `vendor/foobar/`.
+- **Response 200**: `{ "index_id", "dry_run", "matched_files",
+  "matched_chunks", "removed_files", "removed_chunks" }`. A dry run answers the
+  counts with `removed_*: 0` and changes nothing; the real run then removes
+  what it counted.
+- **Memory bound**: peak memory is baseline plus ONE copy of the vector
+  index per batch call, not per file. The copy comes from a view-mode HNSW
+  index promoted to the heap (`UsearchStore::remove` calls `ensure_mutable`)
+  and is released at the write-cooldown demote. The host needs free memory
+  for one copy of the vector index. The selected rows are read by redb key
+  range, so the removal path itself rehydrates no chunks; the one scheduled
+  graph rebuild rehydrates the corpus, and if the scan outlasts its bounded
+  wait the rebuild is deferred, the durable mark stays set and the ticker
+  retries (#10110). Chunk and entity rows leave in one write transaction per slice of
+  500 ids; the call stamps one durable graph-dirty mark, so the symbol graph
+  rebuilds once. A committed delete stamps `reindexed_unix` (#9230); the
+  selected content hashes are forgotten, so the next reindex indexes the files
+  again unless `exclude_globs` excludes them. A reindex that is already
+  running and has already scanned a file can add it back. The call is allowed
+  while a reindex runs.
+- **Response 400** `remove_files_invalid_request`: neither or both selectors,
+  an empty list, or more than 10,000 paths. `remove_files_path_outside_root`:
+  a path that is empty, `.`, the root (or a whole `@root<n>` root), outside the
+  roots, or holds a `..` segment. Nothing is removed.
+- **Response 503** `remove_files_busy` (`retryable: true`): a corpus
+  rehydrate or another batch removal holds the index. Nothing changed.
+- **Response 500** `remove_files_failed` / `hash_forget_failed`
+  (`retryable: true`): carries `partial` and the `matched_*` / `removed_*`
+  counts committed before the failure. The socket error's `data` is this body.
+  A retry finishes the job, including vectors whose rows the failed call
+  already deleted and hashes it did not forget.
 
 ##### `POST /indexes/:id/reindex`
 
@@ -1198,7 +1275,7 @@ server or `OPENROUTER_API_KEY` in the daemon's environment.
 ### MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **22 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -1216,6 +1293,7 @@ this table is generated from it, not maintained by hand.
 | `list_indexes` | — | List all registered indexes on this daemon |
 | `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
+| `remove_files` | `index_id`, `dry_run?`, `path_prefix?`, `paths?` | Remove every file under a path prefix, or in a file list, from an index in one call. |
 | `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
 | `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `serial?`, `top_k?` | When in doubt, use this. |
 | `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |
@@ -1386,13 +1464,16 @@ Silicon hosts are completely unaffected (unchanged ort default).
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `TRUSTY_EMBEDDERD_BIN` | — | Explicit path to the `trusty-embedderd` binary. Overrides PATH search. Must point to an existing file if set. |
-| `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` | `30` | How long to wait for the sidecar's readiness probe. |
+| `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` | `30` | How long to wait for the sidecar's readiness probe. The supervisor multiplies it by `1 + load1/ncpu` (capped by `TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX`); a recycle replacement or crash respawn gets at least 120 s before that scaling (#10207). |
+| `TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX` | `4` | **Load-aware startup probe (#10207).** Ceiling on the host-load multiplier applied to the sidecar startup timeout. `0` or `1` turns load scaling off. |
+| `TRUSTY_QUERY_EMBED_DEADLINE_MS` | `5000` | **Query-embed deadline (#10194).** How long a per-index query waits for its query embed on a cache miss. Past it, whether the sidecar is cold or warm but busy, an unpinned query answers from the lexical lane (`meta.vector_unavailable: true`, `meta.embedder_error` names this variable). A query pinned to `stage: semantic` takes no deadline and does not consult the gate: it waits for the embed up to the query budget (`TRUSTY_QUERY_TIMEOUT_SECS`), so a cold spawn that finishes inside it answers hybrid; a failed embed is still `503 vector_unavailable`. The embed (and any sidecar spawn under it) keeps running detached, so later queries are hybrid; while an abandoned embed runs, later unpinned cache misses on that index degrade at once, for at most 60 s. `0` disables the deadline. The all-index fan-out uses `TRUSTY_SEARCH_FANOUT_EMBED_TIMEOUT_MS` instead. |
 | `TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS` | `60` | Exponential back-off ceiling between crash restarts. |
 | `TRUSTY_EMBEDDERD_MAX_RESTARTS` | `5` | Maximum restarts before the supervisor gives up. |
 | `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` | `300` | **Idle shutdown (issue #315; default flipped to 300s in #2315).** After this many seconds with no embed request the sidecar is SIGTERM/SIGKILLed and the spawn gate is reset so the next request triggers a fresh spawn. Defaults to `300` (5 min): an idle `trusty-embedderd` was measured pinning ~2.9 GB RSS indefinitely, so it is now reclaimed at rest; the cold-respawn cost on the next request is ~2–15 s. The watchdog never kills a request mid-flight — an in-flight counter defers eviction until the request completes. Set `0` to explicitly disable idle-shutdown (old always-resident behaviour). |
 | `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` | `120` | **Per-call deadline (fix: reindex-stall).** Maximum seconds to wait for a single `embed_batch` response from the sidecar. Under memory pressure (Apple Silicon unified memory) the sidecar can stall mid-batch; this deadline converts an indefinite hang into a fast error so the reindex task can emit a terminal SSE event and the supervisor can notice a stalled child. Increase only on machines with very large batches or extremely slow model init. |
 | `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` | `60` | Overall timeout for the initial embedder init (all modes). |
 | `TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB` | `4096` | **Recycle by footprint (#9828).** When the sidecar's footprint (macOS physical footprint, Linux `VmRSS`) exceeds this many MB, the supervisor starts a replacement, swaps it in, drains the old sidecar's in-flight calls, then stops it. A recycle is never counted toward `TRUSTY_EMBEDDERD_MAX_RESTARTS`. Three consecutive failed footprint reads recycle once (`footprint_unreadable`); further failures recycle nothing until a read succeeds (max age still applies). `0` disables. |
+| `TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB` | 2x `TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB` | **Hard footprint limit (#10207).** Bounds the sidecar when a recycle cannot start its replacement. Checked on every recycle check, during a recycle back-off hold, and while a replacement is starting. Over it, the sidecar is killed like a crash and respawned at once; each kill counts toward `TRUSTY_EMBEDDERD_MAX_RESTARTS` (`/health` `embedder_recycle.hard_footprint_kills`). A value not above the recycle ceiling is ignored with a WARN. `0` disables. |
 | `TRUSTY_EMBEDDERD_RECYCLE_MAX_AGE_SECS` | `21600` | **Recycle by age (#9828).** Same graceful recycle once the sidecar is this many seconds old (6 h). `0` disables. |
 | `TRUSTY_EMBEDDERD_RECYCLE_MAX_CALLS` | `100000` | **Recycle by call count (#9828).** Same graceful recycle once the sidecar has served this many embed calls (the startup probe is not counted). `0` disables. |
 | `TRUSTY_EMBEDDERD_RECYCLE_CHECK_SECS` | `30` | How often the three recycle triggers are evaluated (minimum 1). A sidecar is never judged before its second check. A recycle on a fresh sidecar's first judged check, or a replacement that fails to start, holds the next recycle for twice this interval, doubling per repeat up to 1 h; `/health` `embedder_recycle.backoff_*` shows the hold. |
@@ -1503,7 +1584,7 @@ daemon assumes 8 GB — the `Degraded` tier — with a `tracing::warn!`.
 | `TRUSTY_MEMORY_ENFORCE_MEASURE` | Which RSS reading the memory-pressure enforcement gate above (`over_high_water`, its hysteresis baseline, and the sweep's `target_freed_mb` budget) compares against `TRUSTY_MEMORY_LIMIT_MB` (issue #3683 slice 3 — Defect 3). `anon` reads `/proc/<pid>/status`'s `RssAnon` (Linux only — anonymous heap/stack pages, excluding file-backed mmap pages the kernel can reclaim on its own). `total` reads the same total-RSS figure `/health` reports. Default `anon` on Linux, `total` on macOS (macOS's total-RSS reading already goes through `phys_footprint`, which already excludes reclaimable file-backed pages — see `core::memguard::anon_rss_mb_for_pid`'s doc comment). Case-insensitive; unset or any other value falls back to the platform default with a `tracing::warn!`. If `anon` is selected but `RssAnon` is permanently unavailable on this host (pre-4.5 kernel, hardened/restricted container), enforcement degrades to `total` automatically (once, with a `tracing::warn!`) rather than silently disabling the enforcement ticker forever. Total RSS is always still sampled and stays visible in `/health` and this ticker's log lines for operator context regardless of which measure gates enforcement — this only changes the ENFORCEMENT decision. Gated on the #3683 RCA finding that total RSS on a large NFS/EFS-backed index reads as permanently over the ceiling (file-backed redb mmap pages dominate it) even when a reclaim sweep frees almost nothing durable. **Upgrade note:** anon RSS is always `<=` total RSS, so on a Linux host upgrading into this default, the SAME `TRUSTY_MEMORY_LIMIT_MB` now trips the pressure sweep — and, more importantly, the `TRUSTY_MEMORY_RESTART_ON_LIMIT` hard-limit restart — LATER (at a higher real memory footprint) than it did pre-slice-3. If that limit was tuned as an OOM backstop under total-RSS semantics, re-validate (and likely lower) it after upgrading, or set `TRUSTY_MEMORY_ENFORCE_MEASURE=total` explicitly to preserve the exact prior trip point. |
 | `TRUSTY_MEMORY_RESTART_ON_LIMIT` | Opt-in last resort (issue #2846). When `1`/`true`/`yes`/`on` AND RSS is still at/over the hard `TRUSTY_MEMORY_LIMIT_MB` after a reclaim sweep (i.e. the growth is un-evictable — allocator fragmentation, native ONNX/usearch arenas, or a true leak), the daemon gracefully drains in-flight requests and exits so a supervisor (launchd/systemd) respawns it; warm-boot reloads every index from disk, so no data is lost. **Defaults OFF** — only safe under a supervisor; an unsupervised daemon would not restart. |
 | `TRUSTY_CHUNKS_IDLE_EVICT_SECS` | BASE idle window (seconds) after which a durably-backed index's in-memory `chunks` map (raw `RawChunk` text), BM25 corpus (`doc_terms` — a full tokenized second copy of every chunk's text), and per-file entity map are all evicted to reclaim heap (issue #2162 extended BM25 + entities onto the same window). Default `300` (5 min, raised from a 60s default in issue #3683 slice 2 — the 60s default from issue #2166 thrash-evicted large/expensive-to-rehydrate indexes on essentially every idle tick; see `DEFAULT_CHUNKS_IDLE_EVICT_SECS`). This is only the FLOOR: the actual per-index window is this value scaled up by that index's own measured/estimated rehydrate cost — see `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS` below. The query hot path materialises results from the mmap-backed redb corpus, so the in-memory copies are only a convenience cache once a durable corpus is wired; evicting them on idle shrinks a quiet daemon to its durable baseline and every in-memory reader (`grep` fallback, `list_chunks`, `get_call_chain`, BM25 search, entity-exact-match) lazily rehydrates from redb on next access. Set `0` to disable eviction entirely (no scaling is applied in this case either). The symbol graph stays hot regardless (rebuilding it is far more expensive than a redb read). A background ticker drives both evictions every 60 s, oldest-idle-first. Indexes without a durable corpus (BM25-only / tests) are never evicted. |
-| `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS` | Cost-scaling unit (milliseconds) for the idle-eviction window above (issue #3683 slice 2). Formula: `scaled_secs = TRUSTY_CHUNKS_IDLE_EVICT_SECS × (1 + rehydrate_cost_ms / this_value)`, capped at 6h. `rehydrate_cost_ms` is that specific index's own MEASURED last rehydrate-scan duration once it has rehydrated at least once in this process's lifetime, otherwise an ESTIMATE from its on-disk chunk count (`CorpusStore::chunk_count`, calibrated so a 315K-chunk corpus estimates ≈31.5s, inside the #3683 incident's observed 27-40s band). Default `1000` (1s of cost earns one extra base-window multiple — e.g. a 30s-to-rehydrate index idles ≈31× longer than a sub-millisecond one at the same base). `0` disables cost-scaling entirely: every index reverts to the flat `TRUSTY_CHUNKS_IDLE_EVICT_SECS` window regardless of size. |
+| `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS` | Cost-scaling unit (milliseconds) for the idle-eviction window above (issue #3683 slice 2). Formula: `scaled_secs = TRUSTY_CHUNKS_IDLE_EVICT_SECS × (1 + rehydrate_cost_ms / this_value)`, capped at 6h. `rehydrate_cost_ms` is that specific index's own MEASURED last rehydrate duration (scan through commit, #10192) once it has rehydrated at least once in this process's lifetime, otherwise an ESTIMATE from its on-disk chunk count (`CorpusStore::chunk_count`, calibrated so a 315K-chunk corpus estimates ≈31.5s, inside the #3683 incident's observed 27-40s band). Default `1000` (1s of cost earns one extra base-window multiple — e.g. a 30s-to-rehydrate index idles ≈31× longer than a sub-millisecond one at the same base). `0` disables cost-scaling entirely: every index reverts to the flat `TRUSTY_CHUNKS_IDLE_EVICT_SECS` window regardless of size. |
 | `TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS` | Recency-exemption floor (seconds) for the memory-pressure sweep (issue #3683 slice 2 — distinct ticker/mechanism from the idle-eviction window above; see `TRUSTY_MEMORY_ENFORCE_SECS`/`TRUSTY_MEMORY_HIGH_WATER_PCT`). An index idle LESS than this is exempt from the sweep's first pass — a hot, actively-queried index is never the first thing cleared just because RSS crossed the high-water mark. Default `30`. If the exemption-respecting pass can't free enough to get back under the high-water mark (genuine memory pressure, not just cold caches), a second "desperation" pass clears exempt (hot) indexes too, oldest-idle-first among them — avoiding an OOM kill outweighs a hot index's warm cache. `0` disables the exemption (every index is a pass-1 candidate, matching pre-#3683-slice-2 behaviour). The sweep also now stops once it has (estimatedly) freed enough to reach the high-water mark, rather than unconditionally clearing every registered index. |
 | `TRUSTY_MAX_RESIDENT_INDEXES` | Usage-based resident-index cap (issue #2161; **defaults ON, tier-scaled, since #6822's sibling #6821**). A periodic sweep (`TRUSTY_RESIDENCY_SWEEP_SECS`) ranks every currently-**resident** index by the same recency key used at boot-time selective warm-boot (`max(last_queried_unix, last_indexed_unix)`, issue #993) and cold-parks everything beyond the top `N` — a **non-destructive** detach that only removes the in-memory `IndexHandle` from the registry; `indexes.toml`, `roots.toml`, and every on-disk artifact (redb corpus, HNSW snapshot) are left untouched. The next query against a parked index reloads it lazily via the same cold-load path a never-yet-warm-booted index uses (subject to `TRUSTY_INDEX_COLD_RELOAD_TIMEOUT_SECS`). An index with an in-flight reindex is never parked. **Unset resolves to the machine tier's default** (see the table below), NOT to disabled — before #6821 the feature shipped built and tested but off, so an index queried even once stayed resident for the daemon's whole lifetime (56 indexes / 15 GB on a 128 GB reporting host, 35 of them never queried). **`off` (any case) is the one spelling that disables it** and restores the pre-#6821 posture. A number is honoured verbatim: `0` still parks every resident index on the next sweep (the #2161 meaning — which is exactly why `off` had to be a separate spelling). An unparseable value warns and falls back to the tier default, not to disabled. The resolved cap and its source are logged once at startup and reported on `GET /health` as `resident_index_cap` / `resident_index_cap_source` (`"env"` \| `"env (off)"` \| `"tier default"`). |
 | `TRUSTY_RESIDENCY_SWEEP_SECS` | Interval (seconds) between residency-cap sweeps (issue #2161). Default `120`. `0` disables the sweep ticker outright (it never spawns), independent of `TRUSTY_MAX_RESIDENT_INDEXES`. Since #6821 the cap defaults on, so a tick is no longer a no-op unless `TRUSTY_MAX_RESIDENT_INDEXES=off`. |

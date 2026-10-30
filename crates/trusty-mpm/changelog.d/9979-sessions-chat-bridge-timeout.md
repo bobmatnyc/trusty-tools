@@ -1,2 +1,0 @@
-Changed
-- `tm serve --stdio` waits up to 20 minutes for a `sessions_chat` call instead of 60 s, so a long action-capable chat turn is not cut off. Every other request keeps the 60 s bound. A turn holds the bridge until it ends, and a forward that times out is reported as a timeout (the daemon may still be running the call) rather than "daemon unreachable". The tool is opt-in per bridge: without `--allow-chat`, `tm serve --stdio` hides `sessions_chat` from `tools/list` and answers a call locally with a tool error, so the shared bridge in `.mcp.json` never exposes it (#9979).

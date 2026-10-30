@@ -147,7 +147,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_recall",
-                "description": "Recall memories using L0+L1+L2 progressive retrieval. Pass `room` to scope the search to one room, or `wing` to scope it to one owner's rooms (ADR-0027). #6318: with no `palace` and no server default this succeeds with a palace index — ids, drawer/room/wing counts, rooms, and a `hint` — instead of erroring, so call it to find out which palace to name.",
+                "description": "Recall memories using L0+L1+L2 progressive retrieval. Pass `room` to scope the search to one room, or `wing` to scope it to one owner's rooms (ADR-0027). #6318: with no `palace` and no server default this succeeds with a palace index — ids, drawer/room/wing counts, rooms, and a `hint` — instead of erroring, so call it to find out which palace to name. #9881: each drawer row carries `access_count`, `accumulated_boost` (the rank boost the count earns) and `last_accessed_at` (RFC 3339, or null); a recall row shows the count as of before its own access.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -278,7 +278,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_list",
-                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error. #9340: each drawer carries a read-only `fact_key`, always present: the ADR-0028 Tier C slot the drawer currently holds, or null when it holds none. A drawer displaced by a later write to its slot reads null. #9390: each drawer also carries `verify`, always present: the command that re-reads its slot's fact, or null when it has none. A drawer displaced from its slot reads null.",
+                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error. #9340: each drawer carries a read-only `fact_key`, always present: the ADR-0028 Tier C slot the drawer currently holds, or null when it holds none. A drawer displaced by a later write to its slot reads null. #9390: each drawer also carries `verify`, always present: the command that re-reads its slot's fact, or null when it has none. A drawer displaced from its slot reads null. #9881: each drawer row carries `access_count`, `accumulated_boost` (the rank boost the count earns) and `last_accessed_at` (RFC 3339, or null).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -432,7 +432,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_recall_all",
-                "description": "Semantic search across palaces: by default (`scope: \"resident\"`) only the palaces already loaded in memory, opening none; with `scope: \"all\"`, every non-empty palace on disk, opened as needed, which is slower. Every response reports `coverage`: `\"complete\"` when every palace on disk was searched or skipped as empty, `\"partial\"` otherwise, with `palaces_total`, `palaces_searched`, `palaces_skipped`, `palaces_not_searched`, `not_searched_by_reason`, `open_failed` and `search_failed`. Each result includes a `palace_id` field identifying its source.",
+                "description": "Semantic search across palaces: by default (`scope: \"resident\"`) only the palaces already loaded in memory, opening none; with `scope: \"all\"`, every non-empty palace on disk, opened as needed, which is slower. Every response reports `coverage`: `\"complete\"` when every palace on disk was searched or skipped as empty, `\"partial\"` otherwise, with `palaces_total`, `palaces_searched`, `palaces_skipped`, `palaces_not_searched`, `not_searched_by_reason`, `open_failed` and `search_failed`. Each result includes a `palace_id` field identifying its source. #9881: each drawer row carries `access_count`, `accumulated_boost` (the rank boost the count earns) and `last_accessed_at` (RFC 3339, or null); a recall row shows the count as of before its own access.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

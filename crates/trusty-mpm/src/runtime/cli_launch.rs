@@ -108,10 +108,36 @@ fn base(cwd: &Path, alternate_screen: bool) -> LaunchSpec {
 /// [--append-system-prompt-file p] --setting-sources … [--mcp-config f]
 /// [--settings s] [--disallowedTools …] --dangerously-skip-permissions`, every token unquoted
 /// because no shell parses it. The profile is the one `mcp_env`'s stamp names.
+/// #10127: the shipped [`crate::core::architect_lockdown::Lockdown::PRODUCTION`]
+/// applies ([`isolated_spec_with`]); its error refuses the launch.
 /// Test: `isolated_spec_matches_the_shell_line_it_replaces`,
 /// `worst_case_cli_launch_line_is_short_and_carries_no_token`,
 /// `an_architect_isolated_spec_keeps_every_tool`.
-pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
+pub fn isolated_spec(
+    cwd: &Path,
+    launch: &CliLaunch<'_>,
+) -> Result<LaunchSpec, crate::core::architect_lockdown::LockdownError> {
+    isolated_spec_with(
+        cwd,
+        launch,
+        &crate::core::architect_lockdown::Lockdown::PRODUCTION,
+    )
+}
+
+/// [`isolated_spec`] under the named `lockdown` (#10127).
+///
+/// What: an Architect's `--settings` pair is
+/// [`crate::core::architect_lockdown::Lockdown::settings_argv`] (the owner
+/// file and the deny as one payload), and its env loses the lockdown's
+/// variables — unset, and dropped from `env_set`. A PM launch is unchanged.
+/// Test: `architect_launch_carries_every_glob_and_its_capitalised_variant`,
+/// `architect_launch_unsets_the_env_list_and_a_pm_launch_does_not`,
+/// `a_carrier_file_that_cannot_be_read_refuses_the_architect_launch`.
+pub(crate) fn isolated_spec_with(
+    cwd: &Path,
+    launch: &CliLaunch<'_>,
+    lockdown: &crate::core::architect_lockdown::Lockdown<'_>,
+) -> Result<LaunchSpec, crate::core::architect_lockdown::LockdownError> {
     let mut spec = base(cwd, launch.alternate_screen);
     if let Some(dir) = launch.config_dir {
         spec.env_set
@@ -141,15 +167,16 @@ pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
             launch.scoped_mcp,
         ));
     // #8988: the owner MCP policy, right after the file it filters.
+    // #10127: an Architect's deny joins it as ONE `--settings` (last one wins).
     spec.args
-        .extend(crate::core::launch_policy::carrier::settings_argv(
-            launch.settings,
-        ));
+        .extend(lockdown.settings_argv(profile, launch.settings)?);
     spec.args
         .extend(crate::core::pm_tool_trim::trim_args(profile));
     spec.args
         .extend(split(crate::core::model_inject::PERMISSION_MODE_FLAG));
-    spec
+    // #10127: an Architect child inherits none of the lockdown's variables.
+    lockdown.scrub_spec_env(profile, &mut spec);
+    Ok(spec)
 }
 
 /// The spec for the in-place `tm session start`.
@@ -249,14 +276,16 @@ pub fn send_spec_launch(
 
 /// [`send_spec_launch`] with the tmux binary and the wrapper named (test seam).
 ///
-/// What: writes the spec (mode 0600), reads it back ([`LaunchSpec::verify`]),
+/// What: names the spec after `session`
+/// ([`super::remote_name::named_after_session`], #9025), writes it (mode 0600), reads it back ([`LaunchSpec::verify`]),
 /// then types the line via [`crate::core::tmux::send_launch_line`], which
 /// refuses a line over `MAX_PANE_COMMAND_BYTES` before tmux runs (#8308). On
 /// any failure after the write it removes the spec, since it carries
 /// credentials and no shim will consume it.
 /// Test: `send_spec_launch_types_a_short_line_naming_a_readable_spec`,
 /// `send_spec_launch_removes_the_spec_when_tmux_fails`,
-/// `cli_launch_paths_type_through_the_guard`.
+/// `cli_launch_paths_type_through_the_guard`,
+/// `a_cli_launch_is_named_after_its_tmux_session`.
 pub(crate) fn send_spec_launch_with(
     tmux_bin: Option<&str>,
     wrapper: &str,
@@ -264,6 +293,8 @@ pub(crate) fn send_spec_launch_with(
     spec: &LaunchSpec,
     spec_dir: &Path,
 ) -> Result<(), CliLaunchError> {
+    // #9025: every CLI and fleet launch names itself after its tmux session.
+    let spec = &super::remote_name::named_after_session(spec, session);
     let path = spec.write_in(spec_dir)?;
     let result = LaunchSpec::verify(&path)
         .map_err(CliLaunchError::from)

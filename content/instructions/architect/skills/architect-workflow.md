@@ -40,9 +40,12 @@ project's `CLAUDE.md`, the skills in `.claude/skills/`, and your records in
 `local/`. Nothing essential lives only in a conversation. To continue from any
 account or after a context reset: open this directory, read `AGENTS.md`,
 `CLAUDE.md`, `local/instance.md`, `local/user.md`, `local/owner/`,
-`local/goals.md`, `local/state.md` and the recent entries of
-`local/actions.md`, then run `tm-fleet-check`. Read `local/state.md` with
-`head -60` (the latest handoff is on top) and `local/actions.md` with
+`local/goals.md`, the Intent Ledger digest (the handoff:
+`python3 scripts/datg.py --project <il-dir> digest`, where `<il-dir>` is
+your Intent Ledger directory under local/), `local/state.md` and the recent
+entries of `local/actions.md`, then run `tm-fleet-check`. Read
+`local/state.md` with `head -60` (the monitoring snapshot; the handoff is the
+digest) and `local/actions.md` with
 `tail -c 3000`, never whole. Take the time from one `date -u` per pass, and
 read alerts only from the poller's wake line, never by pairing `date -u` with
 a tail of the alerts file.
@@ -112,8 +115,8 @@ neither do you.
 - `local/state.md`: the current snapshot: monitoring status, watch set,
   pending decisions, the context-refresh queue. Rewrite in place; it is not a
   history. Keep it under 0.4 MB: at the end of a pass, if
-  `wc -c local/state.md` exceeds 400000, move superseded handoff and watch
-  sections to an archive file beside it in `local/`.
+  `wc -c local/state.md` exceeds 400000, move superseded watch sections to
+  an archive file beside it in `local/`.
 - `local/actions.md`: the append-only dated log of what you did and sent.
 - `local/projects/<project>.md`: one durable record per watched project,
   started from `local/projects/_template.md`. Read it before responding to

@@ -17,13 +17,14 @@
 //! subcommand body except `run_serve`.
 //!
 //! What: thin clap CLI. `serve` (#2053) delegates to
-//! `trusty_code::serve::{run_stdio, run_http}` for its two transports.
+//! `trusty_code::serve::run_stdio` or `trusty_code::serve::uds::run_daemon`
+//! (the persistent socket daemon, the only one since #6637).
 //! `run-workflow` remains a stub. `workstream` (`ws` alias, #3296, DOC-48
 //! §5.4) is the same thin-client shape over `workstream.*` — see
 //! [`WorkstreamCommand`] and `crate::cli::workstream`. `tui` (#4424, DOC-50
 //! §4.1/AC-2.4) is the odd one out: instead of spawning its own ephemeral
-//! `--stdio` child, it attaches to an ALREADY-RUNNING `tcode serve --http`
-//! daemon and hands `trusty_code::tui_client::CodeEngine` to
+//! `--stdio` child, it attaches to an ALREADY-RUNNING `tcode serve` daemon
+//! over its socket and hands `trusty_code::tui_client::CodeEngine` to
 //! `trusty_code_tui::run::run` — see `crate::cli::tui`.
 //!
 //! Test: `cargo run -p trusty-code -- --version` must exit 0 and print the
@@ -80,9 +81,9 @@ enum Command {
     /// Start the per-project orchestration server.
     ///
     /// Accepts JSON-RPC 2.0 task requests from CLI clients, TUI frontends,
-    /// and MCP callers. One instance per project. Exactly one transport must
-    /// be selected: `--stdio` XOR `--http` (they are independent modes, not
-    /// simultaneous — see `trusty_code::serve` module docs).
+    /// and MCP callers. One instance per project. With no transport flag it
+    /// is the persistent daemon on its owner-only Unix socket; `--stdio`
+    /// serves one client over stdin/stdout instead.
     Serve {
         // #6999: same stale `.claude/`-only wording as `run-task` carried.
         /// Path to the project root. Its configuration is read from
@@ -101,24 +102,16 @@ enum Command {
 
         /// Serve JSON-RPC 2.0 over stdio (NDJSON on stdin/stdout), matching
         /// the trusty-memory/trusty-search MCP stdio convention.
-        #[arg(long, conflicts_with = "http")]
+        #[arg(long)]
         stdio: bool,
 
-        /// Serve JSON-RPC 2.0 over HTTP: `POST /rpc` + `GET /health`,
-        /// matching the trusty-memory/trusty-search axum daemon convention.
-        #[arg(long, conflicts_with = "stdio")]
+        // #6637: the HTTP transport is gone. Both flags still parse, hidden,
+        // so a script passing them gets an error naming the socket rather
+        // than clap's bare "unexpected argument" (supervisor ruling Q4).
+        #[arg(long, hide = true)]
         http: bool,
 
-        /// TCP port for `--http`. `0` binds an OS-assigned ephemeral port.
-        /// Defaults to `trusty_code::serve::DEFAULT_HTTP_PORT`.
-        ///
-        /// Requires `--http` AND conflicts with `--stdio` — both are needed:
-        /// `requires = "http"` alone does not fire when `--stdio` is also
-        /// present, because clap evaluates `--stdio`'s `conflicts_with =
-        /// "http"` first and short-circuits before the requires-graph check,
-        /// so `--stdio --port N` would otherwise be silently accepted with
-        /// the port discarded.
-        #[arg(long, value_name = "PORT", requires = "http", conflicts_with = "stdio")]
+        #[arg(long, hide = true, value_name = "PORT")]
         port: Option<u16>,
 
         /// Bind this project's own socket instead of the shared one (#4600).
@@ -127,7 +120,7 @@ enum Command {
         /// socket, keyed by the project root), so a second project can run a
         /// daemon while another project's daemon holds the shared socket.
         /// `tcode tui` passes this itself; there is no path to supply.
-        #[arg(long, requires = "http", conflicts_with = "stdio")]
+        #[arg(long, conflicts_with = "stdio")]
         project_socket: bool,
     },
 
@@ -310,9 +303,8 @@ enum Command {
     /// Attach to a live session and stream its events to the terminal until
     /// it reaches a terminal state or you press Ctrl-C (#2060).
     ///
-    /// Spawns its OWN ephemeral daemon (see `crate::cli::attach`'s docs) —
-    /// only useful against a session created within THIS same invocation
-    /// today; M1 sessions are in-memory, per daemon process.
+    /// Dials the running daemon for `--project` on its Unix socket, starting
+    /// one if none answers (#10169).
     Attach {
         /// The session id to attach to.
         session_id: String,
@@ -833,30 +825,25 @@ async fn run_thin_client(
     Ok(())
 }
 
-/// Execute `tcode serve`: dispatches to whichever transport was selected.
+/// Execute `tcode serve`: the persistent socket daemon, or `--stdio`.
 ///
 /// Why: keeps `main`'s match arm a one-liner, matching the shape of the
 /// `cli::*` subcommand wrappers. The binary layer owns only the CLI-shaped
-/// concern (which transport was requested, and the port); `trusty_code::serve`
-/// owns router assembly and both transport loops, all fully unit-tested
-/// offline. clap's `conflicts_with`/`requires` on the `Serve` variant already
-/// reject `--stdio --http` together and `--port` without `--http` before this
-/// function ever runs.
-/// What: `--http` delegates to `trusty_code::serve::run_http` (port defaults
-/// to `serve::DEFAULT_HTTP_PORT` when `--port` is omitted), or to
-/// `serve::uds::run_project_daemon` under `--project-socket` (#4600); `--stdio`
-/// delegates to `trusty_code::serve::run_stdio`. Both run until shutdown
-/// (SIGTERM/SIGINT, or stdin EOF for `--stdio`), logging to stderr only.
-/// Neither flag given prints actionable usage and exits 1 rather than
-/// silently doing nothing.
+/// concern (which transport was requested); `trusty_code::serve` owns router
+/// assembly and both transport loops.
+/// What: `--http`/`--port` are refused first with [`http_removed_message`]
+/// and exit code 2 (#6637), before the project is resolved or anything binds.
+/// `--stdio` delegates to `trusty_code::serve::run_stdio`; otherwise
+/// `serve::uds::run_daemon`, or `serve::uds::run_project_daemon` under
+/// `--project-socket` (#4600). Both run until shutdown (SIGTERM/SIGINT, or
+/// stdin EOF for `--stdio`), logging to stderr only, and a fatal error exits 1.
 /// `project` is optional: `None` serves PROJECTLESS. It is resolved into a
 /// typed `ProjectBinding` HERE, at the boundary, so an unusable `--project`
 /// (missing, or not a directory) fails fast with an actionable message rather
 /// than surfacing later as a confusing per-task error.
-/// Test: exercised manually (`tcode serve --project . --stdio` /
-/// `tcode serve --stdio` projectless / `--http [--port N]`);
-/// `trusty_code::serve::tests`, `serve::transport::tests`, and
-/// `serve::http::tests` cover the router/transport logic this delegates to.
+/// Test: `tests/daemon_no_tcp_6637.rs` (every command line, the real binary);
+/// `trusty_code::serve::tests` and `serve::uds::uds_tests` cover what this
+/// delegates to.
 async fn run_serve(
     project: Option<PathBuf>,
     stdio: bool,
@@ -864,6 +851,14 @@ async fn run_serve(
     port: Option<u16>,
     project_socket: bool,
 ) -> Result<()> {
+    // #6637: a hard error, never a silent no-op (supervisor ruling Q4).
+    if http || port.is_some() {
+        eprintln!(
+            "{}",
+            http_removed_message(project.as_deref(), project_socket)
+        );
+        process::exit(2);
+    }
     let binding = match trusty_code::binding::ProjectBinding::resolve(project) {
         Ok(b) => b,
         Err(e) => {
@@ -875,22 +870,6 @@ async fn run_serve(
             process::exit(1);
         }
     };
-    if http {
-        let port = port.unwrap_or(trusty_code::serve::DEFAULT_HTTP_PORT);
-        // #4600: `--project-socket` moves only the socket; an explicit
-        // `--port` is honoured either way.
-        let served = if project_socket {
-            trusty_code::serve::uds::run_project_daemon(binding, Some(port)).await
-        } else {
-            trusty_code::serve::run_http(binding, port).await
-        };
-        if let Err(e) = served {
-            eprintln!("tcode serve --http: fatal error: {e:#}");
-            process::exit(1);
-        }
-        return Ok(());
-    }
-
     if stdio {
         if let Err(e) = trusty_code::serve::run_stdio(binding).await {
             eprintln!("tcode serve --stdio: fatal error: {e:#}");
@@ -899,10 +878,41 @@ async fn run_serve(
         return Ok(());
     }
 
-    eprintln!(
-        "tcode serve: pick a transport — `--stdio` (NDJSON on stdin/stdout) or \
-         `--http [--port N]` (POST /rpc + GET /health) [project={}]",
-        binding.label().unwrap_or_else(|| "<projectless>".into())
-    );
-    process::exit(1);
+    let served = if project_socket {
+        trusty_code::serve::uds::run_project_daemon(binding).await
+    } else {
+        trusty_code::serve::uds::run_daemon(binding).await
+    };
+    if let Err(e) = served {
+        eprintln!("tcode serve: fatal error: {e:#}");
+        process::exit(1);
+    }
+    Ok(())
+}
+
+/// The error `tcode serve --http` / `--port` prints (#6637).
+///
+/// Why: the flags selected a loopback TCP listener that no longer exists. A
+/// caller still passing them needs to learn where the daemon answers now, so
+/// the message names the socket path this invocation would have bound.
+/// What: resolves the shared socket path (or, under `--project-socket`, the
+/// project's own sibling of it); a path that cannot be resolved is described
+/// instead of failing a second time.
+/// Test: `tests/daemon_no_tcp_6637.rs::serve_http_and_port_exit_non_zero_naming_the_socket`.
+fn http_removed_message(project: Option<&Path>, project_socket: bool) -> String {
+    let socket = match trusty_code::serve::uds::socket_path() {
+        Ok(shared) if project_socket => {
+            let root = project.and_then(|p| p.canonicalize().ok());
+            trusty_code::serve::uds::project_socket_path(&shared, root.as_deref())
+                .display()
+                .to_string()
+        }
+        Ok(shared) => shared.display().to_string(),
+        Err(e) => format!("<the trusty-code data directory>/trusty-code.sock ({e:#})"),
+    };
+    format!(
+        "tcode serve: --http and --port were removed (#6637). The daemon serves only its \
+         owner-only Unix socket, at {socket}. Run `tcode serve` with no transport flag; \
+         clients (`tcode tui`, trusty-code-gui) dial the socket themselves."
+    )
 }

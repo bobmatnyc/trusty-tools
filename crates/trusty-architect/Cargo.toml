@@ -3,7 +3,7 @@
 # `tests/dependency_boundary.rs` fails the build if one appears here.
 [package]
 name = "trusty-architect"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -25,7 +25,9 @@ include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
 # statvfs and the CPU count the host sensors read.
 libc = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# #10063: `float_roundtrip` parses every float exactly, so a dashboard
+# document re-renders to the prototype's bytes (no new dependency).
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

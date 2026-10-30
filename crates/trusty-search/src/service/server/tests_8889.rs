@@ -14,7 +14,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use tokio::sync::RwLock;
 
@@ -24,7 +23,7 @@ use crate::service::persistence::PersistedIndex;
 use crate::service::persistence_loader::build_indexer_from_entry;
 use crate::service::reindex::{index_semaphore, ReindexProgress, ReindexStatus};
 
-use super::reindex_handlers::reindex_handler;
+use super::reindex_handlers::reindex_report;
 use super::state::SearchAppState;
 
 /// Register one colocated index rooted at `root`, built by the production loader.
@@ -49,10 +48,7 @@ async fn request(
     state: &Arc<SearchAppState>,
     id: &str,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-    reindex_handler(State(Arc::clone(state)), AxumPath(id.to_string()), None)
-        .await
-        .map(|axum::Json(body)| body)
-        .map_err(|(status, axum::Json(body))| (status, body))
+    reindex_report(state, id, None).await
 }
 
 /// The progress entry the accepted run published.

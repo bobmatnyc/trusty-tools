@@ -20,6 +20,7 @@ use tracing::warn;
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::prune::OrphanSweepOutcome;
+use crate::session_manager::prune_progress::PruneCancel;
 use crate::session_manager::worktree_reclaim::ReclaimMode;
 use crate::session_manager::worktree_reclaim_preview::preview_rows;
 use crate::session_manager::worktree_scope::PruneScope;
@@ -193,6 +194,11 @@ pub struct PruneWorktreesRequest {
     /// kept, even under `discard_dirty`.
     #[serde(default)]
     pub only_discard_paths: Option<Vec<String>>,
+    /// Keep running after the client leaves (#7619, `--detach`). Read by the
+    /// streaming method only: without it a departed client cancels the pass
+    /// at its next candidate. The unary method ignores it.
+    #[serde(default)]
+    pub detach: bool,
 }
 
 fn default_dry_run() -> bool {
@@ -248,15 +254,61 @@ pub(crate) async fn prune_worktrees_core(
 /// [`try_manual_permit`](crate::daemon::services::merged_pr_reclaim::try_manual_permit)
 /// before any work and moves it into the task that runs the pass, so the lane
 /// stays held until the pass ends even when the caller's future is dropped.
-/// Busy is a 409 and a closed lane a 500; neither runs a pass.
+/// Busy is a 409 and a closed lane a 500; neither runs a pass. #7619: dropping
+/// this future cancels the pass at its next candidate boundary; a removal in
+/// flight finishes and the unstarted candidates are left untouched.
 /// Test: `a_merged_prs_prune_is_refused_while_the_timer_sweep_holds_the_lane`,
 /// `a_merged_prs_prune_fails_closed_on_a_closed_lane`,
-/// `a_dropped_prune_request_keeps_the_lane_until_the_pass_ends`.
+/// `a_dropped_prune_request_keeps_the_lane_until_the_pass_ends`,
+/// `worktree_7619_a_dropped_prune_request_removes_nothing_further`.
 pub(crate) async fn prune_worktrees_core_in(
     state: &Arc<DaemonState>,
     req: PruneWorktreesRequest,
     lane: &'static tokio::sync::Semaphore,
 ) -> RouteOutcome {
+    let (scope, permit) = match admit_prune(&req, lane) {
+        Ok(admitted) => admitted,
+        Err(refusal) => return refusal,
+    };
+    // See #8994: the pass runs in its own task that OWNS the permit. The
+    // reclaim and orphan loops run in `spawn_blocking`, which a dropped
+    // handler future (client disconnect) does not stop; a permit held by the
+    // handler would free the lane while those loops still remove worktrees,
+    // letting the timer sweep start a second pass. A dropped handler now only
+    // detaches the task, and the permit drops when the pass ends (#8451).
+    // #7619: a dropped handler future also cancels the pass. The guard lives in
+    // this future, so its drop — client gone, deadline, or unwind alike, never
+    // told apart — stops both loops at their next candidate; the permit then
+    // drops with the task.
+    let token = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = token.clone().drop_guard();
+    let cancel = PruneCancel::from_probe(move || Some(token.is_cancelled()));
+    let state = Arc::clone(state);
+    match tokio::spawn(async move {
+        let _permit = permit;
+        prune_worktrees_pass(&state, req, scope, cancel).await
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            warn!("prune-worktrees route: the prune task failed: {e}");
+            RouteOutcome::text(500, format!("the prune task failed: {e}"))
+        }
+    }
+}
+
+/// Every refusal a prune-worktrees request can meet before any work (#6806,
+/// #8782, #8994), shared by the unary and streaming methods (#7619).
+///
+/// What: the caller id must parse, the scope must resolve, and a
+/// `merged_prs` pass must take the maintenance permit. `Err` is the reply.
+/// Test: `prune_route_rejects_an_unparseable_invoking_session`,
+/// `a_merged_prs_prune_is_refused_while_the_timer_sweep_holds_the_lane`.
+pub(crate) fn admit_prune(
+    req: &PruneWorktreesRequest,
+    lane: &'static tokio::sync::Semaphore,
+) -> Result<(PruneScope, Option<tokio::sync::SemaphorePermit<'static>>), RouteOutcome> {
     // #6806: reject a present-but-unparseable caller id before any work, for
     // the reason #6118 gives — dropping it would run the sweep with the
     // self-attribution the caller asked for silently switched off, and report
@@ -268,7 +320,7 @@ pub(crate) async fn prune_worktrees_core_in(
                    running it without the requested caller attribution (#6806)"
             .to_string();
         warn!("prune-worktrees route: {msg}");
-        return RouteOutcome::text(400, msg);
+        return Err(RouteOutcome::text(400, msg));
     }
     // #8782: resolved before any work, and a project root that does not
     // resolve is a 400 rather than a daemon-global sweep.
@@ -281,7 +333,7 @@ pub(crate) async fn prune_worktrees_core_in(
         Ok(scope) => scope,
         Err(msg) => {
             warn!("prune-worktrees route: {msg}");
-            return RouteOutcome::text(400, msg);
+            return Err(RouteOutcome::text(400, msg));
         }
     };
     // #8994: one maintenance permit for manual and timer reclaim, taken before
@@ -289,40 +341,23 @@ pub(crate) async fn prune_worktrees_core_in(
     let permit = if req.merged_prs {
         match crate::daemon::services::merged_pr_reclaim::try_manual_permit(lane) {
             Ok(permit) => Some(permit),
-            Err(refusal) => return merged_prs_refusal(refusal),
+            Err(refusal) => return Err(merged_prs_refusal(refusal)),
         }
     } else {
         None
     };
-    // See #8994: the pass runs in its own task that OWNS the permit. The
-    // reclaim and orphan loops run in `spawn_blocking`, which a dropped
-    // handler future (client disconnect) does not stop; a permit held by the
-    // handler would free the lane while those loops still remove worktrees,
-    // letting the timer sweep start a second pass. A dropped handler now only
-    // detaches the task, and the permit drops when the pass ends (#8451).
-    let state = Arc::clone(state);
-    match tokio::spawn(async move {
-        let _permit = permit;
-        prune_worktrees_pass(&state, req, scope).await
-    })
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            warn!("prune-worktrees route: the prune task failed: {e}");
-            RouteOutcome::text(500, format!("the prune task failed: {e}"))
-        }
-    }
+    Ok((scope, permit))
 }
 
 /// The prune pass itself, run by [`prune_worktrees_core_in`] in a task that holds the permit (#8994).
 ///
 /// Test: `prune_spares_a_stopped_records_workspace`,
 /// `a_dropped_prune_request_keeps_the_lane_until_the_pass_ends`.
-async fn prune_worktrees_pass(
+pub(crate) async fn prune_worktrees_pass(
     state: &Arc<DaemonState>,
     req: PruneWorktreesRequest,
     scope: PruneScope,
+    cancel: PruneCancel,
 ) -> RouteOutcome {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
@@ -377,13 +412,14 @@ async fn prune_worktrees_pass(
     // #8782: a checkout the scan never reaches finds nothing; say so.
     let project_known = scope.orphan.project_known(&repos_root, &adopted);
     match mgr
-        .prune_orphaned_worktrees_in(
+        .prune_orphaned_worktrees_in_with_cancel(
             &repos_root,
             &in_use_workspace_paths,
             req.dry_run,
             policy,
             &adopted,
             &scope.orphan,
+            &cancel,
         )
         .await
     {
@@ -432,6 +468,7 @@ async fn prune_worktrees_pass(
                     mode,
                     req.invoking_session.clone(),
                     scope.merged.clone(),
+                    cancel,
                 )
                 .await
                 {
@@ -449,6 +486,8 @@ async fn prune_worktrees_pass(
                             "removal_failed": o.removal_failed,
                             // #8782: git failed after deleting content.
                             "partially_removed": o.partially_removed,
+                            // #7619: approved, never started, untouched.
+                            "cancelled_unstarted": o.cancelled_unstarted,
                             // #5829: the agent-ownership gate has spared these
                             // since #5661, but reported nothing — so a run that
                             // protected a live agent's tree was indistinguishable
@@ -497,6 +536,8 @@ async fn prune_worktrees_pass(
                 "skipped_dirty": outcome.skipped_dirty,
                 // #8782: git failed after deleting content.
                 "partially_removed": outcome.partially_removed,
+                // #7619: never started by a cancelled pass, untouched.
+                "cancelled_unstarted": outcome.cancelled_unstarted,
                 "merged_prs": merged,
             }))
         }
@@ -710,6 +751,7 @@ mod tests {
                 only_orphan_paths: None,
                 only_merged_paths: None,
                 only_discard_paths: None,
+                detach: false,
             }),
         )
         .await
@@ -732,6 +774,7 @@ mod tests {
                 only_orphan_paths: None,
                 only_merged_paths: None,
                 only_discard_paths: None,
+                detach: false,
             }),
         )
         .await
@@ -765,6 +808,7 @@ mod tests {
                 only_orphan_paths: None,
                 only_merged_paths: None,
                 only_discard_paths: None,
+                detach: false,
             }),
         )
         .await
@@ -783,6 +827,7 @@ mod tests {
             only_orphan_paths: None,
             only_merged_paths: None,
             only_discard_paths: None,
+            detach: false,
         }
     }
 
@@ -906,6 +951,61 @@ mod tests {
         drop(gate);
         let freed = tokio::time::timeout(std::time::Duration::from_secs(30), lane.acquire()).await;
         assert!(freed.is_ok(), "the lane must free once the pass ends");
+    }
+
+    /// 🔴 #7619: a dropped HTTP request cancels its pass — the orphans it
+    /// would have removed are still on disk when the pass ends, and the lane
+    /// it held is released.
+    ///
+    /// The pass is parked on the store's write lock, as in the test above,
+    /// and the route future is dropped there. Fails with the drop guard
+    /// removed (the pre-#7619 shape): the detached pass removes the orphans.
+    #[allow(clippy::await_holding_lock)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn worktree_7619_a_dropped_prune_request_removes_nothing_further() {
+        use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+        let fx = GitWorktreeFixture::new();
+        let trees: Vec<std::path::PathBuf> = (0..3)
+            .map(|i| {
+                let wt = fx.add_worktree(&format!("dropped-7619-{i}"));
+                GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+                wt
+            })
+            .collect();
+        let root = crate::test_support::hermetic_temp_dir();
+        let _env = crate::core::trusty_tools_config::WorkspaceRootEnv::pin(&fx.repos_root);
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let lane = leaked_lane();
+        let mgr = state.session_manager().await;
+        let gate = mgr.store.write().await;
+        // A real removal with the merged-PR pass, so the lane marks the end.
+        let req = PruneWorktreesRequest {
+            dry_run: false,
+            ..merged_prs_preview()
+        };
+
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            prune_worktrees_core_in(&state, req, lane),
+        )
+        .await;
+        assert!(dropped.is_err(), "the pass must be parked at the gate");
+
+        drop(gate);
+        let freed = tokio::time::timeout(std::time::Duration::from_secs(60), lane.acquire()).await;
+        assert!(
+            freed.is_ok(),
+            "the lane must free once the cancelled pass stops"
+        );
+        for wt in &trees {
+            assert!(
+                wt.exists(),
+                "the pass kept deleting after its request was dropped: {}",
+                wt.display()
+            );
+        }
     }
 
     /// Test: this function IS the test.
@@ -1117,6 +1217,7 @@ mod tests {
                     only_orphan_paths: None,
                     only_merged_paths: None,
                     only_discard_paths: None,
+                    detach: false,
                 }),
             )
             .await

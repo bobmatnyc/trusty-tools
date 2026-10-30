@@ -14,13 +14,15 @@
 //! re-spawn itself as `tcode serve --stdio`), [`session::list`]/
 //! [`session::status`], [`run_task::run`] (create + `task.run` + attach +
 //! stream — the M1 cut-line "replay via thin CLI" verb), [`attach::run`],
-//! [`cancel::run`], [`transcript::run`], and (#3296)
+//! [`cancel::run`], [`transcript::run`] — since #10169 the session, attach,
+//! cancel and transcript handlers dial the running daemon's socket through
+//! [`daemon_client::connect`] instead of a `serve --stdio` child — and (#3296)
 //! [`workstream::list`]/[`workstream::get`]/[`workstream::create`]/
 //! [`workstream::activate`]/[`workstream::deactivate`]/[`workstream::close`].
 //! (#4424) [`tui::run`] is one of two members that are NOT
 //! JSON-RPC-over-stdio translators: it is the launch point for the
-//! interactive TUI REPL, which talks to a long-lived `tcode serve --http`
-//! daemon instead. It lives here anyway because it is the same KIND of thing
+//! interactive TUI REPL, which talks to a long-lived `tcode serve` daemon
+//! over its Unix socket instead (#6637). It lives here anyway because it is the same KIND of thing
 //! — argument-shaped setup plus a handoff, with every decision made
 //! elsewhere (see its module docs) — with the one exception of
 //! [`daemon_autospawn`] (#4512), the policy module `tui::run` delegates to
@@ -52,6 +54,7 @@ pub mod attach;
 pub mod bakeoff;
 pub mod cancel;
 pub mod daemon_autospawn;
+pub mod daemon_client;
 pub mod legacy_run_task;
 pub mod paths;
 pub mod run_task;

@@ -9,15 +9,14 @@
 //! with a different call signature.
 //! What: [`ConnectionContext`] carries a `connection_id` (identifies which
 //! connection/subscriber this call came from — one per STDIO process
-//! lifetime, one per HTTP `POST /rpc` call) and a [`NotifySender`] the
+//! lifetime, one per socket call) and a [`NotifySender`] the
 //! connection's transport drains and writes to the wire. Over STDIO, the
 //! transport loop keeps one long-lived receiver for the whole process and
 //! interleaves notifications with request/response lines on stdout. Over
-//! HTTP, each `POST /rpc` call gets a throwaway channel — any queued
-//! notification vanishes once the response is written, because HTTP's real
-//! streaming path for `session.attach` is the dedicated `GET
-//! /sessions/{id}/events` SSE route (see `crate::serve::http`), not this
-//! channel. A handler that spawns a background forwarder using `notify`
+//! the socket, each call gets a throwaway channel — any queued
+//! notification vanishes once the response is written, because the socket's
+//! streaming path for a session is the `session.events` stream method
+//! (`crate::session::events_stream`, #6637), not this channel. A handler that spawns a background forwarder using `notify`
 //! (like `session.attach`) must treat a failed `send` as "the connection is
 //! gone" and stop.
 //! Test: `context::tests::connection_context_is_constructible`.

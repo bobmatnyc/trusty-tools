@@ -2,8 +2,8 @@
 //!
 //! Why: the Rust side holds the two facts only it knows — where this launch's
 //! HTTP bridge listens and what opens it. Before #6637 both were guesses about
-//! ANOTHER process: a hardcoded `127.0.0.1:7882` mirroring the daemon's default
-//! port, and a `0600` token file the daemon wrote and this shell read. Both
+//! ANOTHER process: a hardcoded loopback URL mirroring the daemon's retired
+//! default port, and a `0600` token file the daemon wrote and this shell read. Both
 //! needed cross-crate pinning tests because nothing tied the two literals
 //! together at compile time. Now the shell mints the credential and binds the
 //! port itself, so there is one source for each and nothing to pin.

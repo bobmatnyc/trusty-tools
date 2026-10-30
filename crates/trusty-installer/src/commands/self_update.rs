@@ -249,6 +249,8 @@ fn next_step(outcome: Outcome) -> Next {
         }
         // #5518: a failed checksum is terminal — no cargo fallback, nonzero exit.
         Outcome::ChecksumMismatch(mismatch) => Next::Abort(mismatch.to_string()),
+        // #9974: unreachable for tctl itself (it ships no launcher), but terminal.
+        Outcome::CargoRecord(e) => Next::Abort(e.to_string()),
     }
 }
 

@@ -913,7 +913,8 @@ impl DaemonState {
     /// Test: `managed_routes` handler tests drive this via the router;
     /// `session_manager_refuses_tmux_on_a_scratch_framework_root`.
     pub async fn session_manager(&self) -> std::sync::Arc<crate::session_manager::SessionManager> {
-        self.managed_sessions
+        let mgr = self
+            .managed_sessions
             .get_or_init(|| async {
                 let data_dir = self.framework_root.join("session-manager");
                 // Use the real tmux-backed driver when available; fall back to a
@@ -1014,7 +1015,10 @@ impl DaemonState {
                 std::sync::Arc::new(mgr)
             })
             .await
-            .clone()
+            .clone();
+        // #9167: the recorder is kept until a manager exists; see `take_inject_recorder`.
+        self.take_inject_recorder(&mgr);
+        mgr
     }
 
     /// Inject a pre-built session manager into the OnceCell for testing.

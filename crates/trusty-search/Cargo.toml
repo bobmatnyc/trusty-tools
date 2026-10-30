@@ -60,7 +60,11 @@ name = "trusty-search"
 # public `DEFAULT_PORT`, `HttpListener`, `run_daemon_with`, `http_addr_path`,
 # `write_http_addr_file` and `DaemonHandle` are removed. crates.io is at
 # 0.57.3; 0.58.0 is unpublished on main and the Architect set 0.59.0.
-version = "0.61.0"
+# 0.61.1 (Refs #10159): patch — 0.61.0 is live on crates.io and this change
+# touches src/** (quiet graph-refresh rebuild).
+# 0.62.0 (Refs #10110): minor — adds the search.index.files.remove verb and the
+# remove_files MCP tool; the Architect ruled the bump at 13:26Z 2026-10-22.
+version = "0.62.2"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
@@ -163,6 +167,10 @@ path = "tests/index_budget_env.rs"
 [[test]]
 name = "index_remove_residency_8687"
 path = "tests/index_remove_residency_8687.rs"
+
+[[test]]
+name = "launchd_standby_10358"
+path = "tests/launchd_standby_10358.rs"
 
 [[test]]
 name = "log_reopen_8270"

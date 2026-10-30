@@ -30,6 +30,7 @@ on:
       - ".doc-number-allowlist.tsv"
       - "scripts/check_doc_numbers.sh"
       - "scripts/check_adr.sh"
+      - "content/skills/tm-adr/**"
       - "scripts/check_trusty_code_specs.sh"
       - "scripts/check_scan_floor_selftest.sh"
       - ".github/workflows/doc-numbers.yml"
@@ -49,6 +50,7 @@ on:
       - ".doc-number-allowlist.tsv"
       - "scripts/check_doc_numbers.sh"
       - "scripts/check_adr.sh"
+      - "content/skills/tm-adr/**"
       - "scripts/check_trusty_code_specs.sh"
       - "scripts/check_scan_floor_selftest.sh"
       - ".github/workflows/doc-numbers.yml"
@@ -67,7 +69,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # fetch-depth: 0 — the tm-adr drift step below needs `git merge-base`
+      # against the base branch, which a shallow checkout cannot resolve.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       # Gate on the parser's own fixtures first: the label/filename/catalog
       # extraction is the part that can silently rot into "0 violations", so a
@@ -87,11 +93,101 @@ jobs:
       - name: Enforce DOC-N / ADR number allocation (ratcheted allowlist)
         run: bash scripts/check_doc_numbers.sh
 
+      # #10081: the repo gate runs the tm-adr skill's check_adr.sh byte for
+      # byte. Prove the copy matches the content source, prove the script's
+      # own fixtures and header hash, then run the gate. ADR-0001..0013
+      # predate the metadata block; --extra-dirs checks each per-crate
+      # decisions directory's README listing (docs/adr/README.md).
+      - name: Repo check_adr.sh is the tm-adr content copy
+        run: cmp scripts/check_adr.sh content/skills/tm-adr/scripts/check_adr.sh
+
       - name: Test ADR consistency checker
-        run: scripts/check_adr.sh --self-test
+        run: bash scripts/check_adr.sh --self-test
+
+      - name: Repo check_adr.sh header matches its body hash
+        run: bash scripts/check_adr.sh --verify-self
 
       - name: Check ADR corpus consistency
-        run: bash scripts/check_adr.sh
+        run: bash scripts/check_adr.sh --require-metadata-from 0014 --extra-dirs 'docs/*/decisions'
 
       - name: Check Trusty Code architecture reconciliation
         run: bash scripts/check_trusty_code_specs.sh
+
+      # tm-adr generic skill (#10080, decisions D13 and D14). The three scripts
+      # under content/skills/tm-adr/scripts/ ship into every repository the
+      # skill bootstraps, so their self-tests run here; the two managed copies
+      # (check_adr.sh, adr-check.yml) also prove their body-sha256 header.
+      - name: tm-adr check_adr.sh self-test
+        run: bash content/skills/tm-adr/scripts/check_adr.sh --self-test
+
+      - name: tm-adr adr_init.sh self-test
+        run: bash content/skills/tm-adr/scripts/adr_init.sh --self-test
+
+      - name: tm-adr adr_status.sh self-test
+        run: bash content/skills/tm-adr/scripts/adr_status.sh --self-test
+
+      - name: tm-adr managed-copy headers match their body hash
+        run: |
+          bash content/skills/tm-adr/scripts/check_adr.sh --verify-self
+          bash content/skills/tm-adr/scripts/check_adr.sh --verify-self \
+            content/skills/tm-adr/references/adr-check.yml
+
+      # #4688: diff against the base branch AS IT IS NOW, not the frozen
+      # `base.sha` snapshot, so the merge base cannot lag behind the merge
+      # ref's own first parent. Same shape as version-parity.yml.
+      - name: Refresh the base branch ref
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+
+      # D14: a managed copy's body may change only together with its
+      # `adr-check-version`, because `adr_status.sh` decides "update available"
+      # from that version alone. Compares each file at HEAD against the merge
+      # base with the base branch. Skips (exit 0, one `skipped (<reason>)`
+      # line) on a push run and when the base has no such file; any other git
+      # failure fails the step (set -e).
+      - name: tm-adr managed-copy version drift (D14)
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]; then
+            echo "drift check: skipped (event '${GITHUB_EVENT_NAME:-}' is not pull_request)"
+            exit 0
+          fi
+          check=content/skills/tm-adr/scripts/check_adr.sh
+          base="$(git merge-base "origin/${BASE_REF}" HEAD)"
+          echo "drift check: base ${base} = merge-base origin/${BASE_REF} HEAD"
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+          header_version() {
+            awk '/^# adr-check-version: / { sub(/\r$/, ""); print $3; exit }' "$1"
+          }
+          fail=0
+          for file in content/skills/tm-adr/scripts/check_adr.sh \
+                      content/skills/tm-adr/references/adr-check.yml; do
+            in_base="$(git ls-tree --name-only "$base" -- "$file")"
+            if [ -z "$in_base" ]; then
+              echo "drift check: skipped (${file} is absent from base ${base})"
+              continue
+            fi
+            git show "${base}:${file}" >"$tmp"
+            old_version="$(header_version "$tmp")"
+            new_version="$(header_version "$file")"
+            old_hash="$(bash "$check" --body-sha256 "$tmp")"
+            new_hash="$(bash "$check" --body-sha256 "$file")"
+            if [ "$old_hash" = "$new_hash" ]; then
+              echo "drift check: ${file}: body unchanged (adr-check-version ${new_version})"
+            elif [ "$old_version" != "$new_version" ]; then
+              echo "drift check: ${file}: body changed, adr-check-version ${old_version} -> ${new_version}"
+            else
+              echo "drift check: FAIL ${file}: body changed (${old_hash} -> ${new_hash})" \
+                "but adr-check-version is still '${new_version}'; bump it and restamp body-sha256" >&2
+              fail=1
+            fi
+          done
+          exit "$fail"

@@ -453,27 +453,37 @@ pub fn granted_worktree_op(
         );
     }
     let mut response = writers_response(&names, claimed);
-    response.records = blocking_records(state, &cwd, exclude, &names);
+    let question = SharedTreeQuestion::Dispatch;
+    response.records = blocking_records(state, &cwd, exclude, &names, question);
     Ok(response)
 }
 
-/// The records behind a non-empty dispatch answer, for the deny text (#8257).
+/// The records behind a non-empty answer, for the deny text (#8257, #6556).
 ///
 /// Why: the names alone left a denied PM nothing to act on. Read after the
 /// claim rather than inside it: the text is advisory, the deny is decided by
 /// the names, and a record that changed in between is at worst named stale.
+/// What: `question` scopes the records exactly as it scopes the names — a
+/// dispatch hears occupants, a HEAD write the live writers minus its caller's.
+/// Test: `shared_tree_dispatch_route_names_each_blocking_record_8257`,
+/// `commit_query_names_each_blocking_record_6556`.
 fn blocking_records(
     state: &DaemonState,
     cwd: &std::path::Path,
     exclude: Option<&str>,
     names: &[String],
+    question: SharedTreeQuestion,
 ) -> Vec<crate::daemon::services::delegation_records::DelegationRecordView> {
     if names.is_empty() {
         return Vec::new();
     }
+    let (reconciled, caller) = match question {
+        SharedTreeQuestion::Dispatch => (true, None),
+        SharedTreeQuestion::HeadWrite { caller } => (false, caller),
+    };
     let now = chrono::Utc::now();
     state
-        .shared_tree_records(cwd, exclude, true, None)
+        .shared_tree_records(cwd, exclude, reconciled, caller)
         .iter()
         .map(|d| {
             crate::daemon::services::delegation_records::DelegationRecordView::of(
@@ -599,11 +609,9 @@ pub fn shared_tree_dispatch_op(
 
     let mut response = writers_response(&names, claimed);
     response.tree_holders = tree_holders;
-    // #8257: only a dispatch's deny names records; a HEAD-write answer is
-    // scoped differently and keeps its own text.
-    if question == SharedTreeQuestion::Dispatch {
-        response.records = blocking_records(state, &cwd, exclude, &names);
-    }
+    // #6556: a HEAD write's answer carries its records too, so the docs-commit
+    // deny can name the record that blocks it.
+    response.records = blocking_records(state, &cwd, exclude, &names, question);
     Ok(response)
 }
 

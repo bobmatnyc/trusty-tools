@@ -52,12 +52,38 @@ fn assert_no_token_value(vars: &[(String, String)]) {
 }
 
 /// Write an executable script.
+///
+/// #10176, #10248: the shared writer has a child write the file, so no thread
+/// of this process ever holds it open for writing.
 #[cfg(unix)]
 fn write_script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
-    std::fs::write(path, body).expect("script");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let parent = path.parent().expect("parent");
+    std::fs::create_dir_all(parent).expect("dir");
+    // See #10248
+    trusty_common::exec_stub::write_executable(path, body).expect("install the script");
+}
+
+/// `cmd.output()`, retried while the exec fails with ETXTBSY: every 20 ms, at
+/// most 100 times.
+///
+/// Why: `write_gh_shim` writes the shim in this process. A sibling test
+/// thread that forks during that write hands its child a copy of the write fd,
+/// and the kernel refuses to exec the shim until that child execs or exits.
+/// No test can stop that fork, so the exec is retried within a bound.
+#[cfg(unix)]
+fn output_past_etxtbsy(cmd: &mut std::process::Command) -> std::process::Output {
+    for _ in 0..100 {
+        match cmd.output() {
+            // #10176: a sibling test's forked child holds the shim's write fd
+            // only until it execs; ETXTBSY comes from the exec alone, so a
+            // retry never re-runs a command that started.
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other.expect("the shim runs"),
+        }
+    }
+    panic!("the shim stayed busy (ETXTBSY) for 2 s");
 }
 
 /// #9750: a shim credential sets no token variable — only the shim dir — and
@@ -239,12 +265,12 @@ fn fake_gh(path: &Path, dir: &Path, token_step: &str) {
 /// Run `<shim_dir>/gh api user` with a stale inherited token.
 #[cfg(unix)]
 fn run_shim(shim_dir: &Path) -> std::process::Output {
-    std::process::Command::new(shim_dir.join("gh"))
-        .args(["api", "user"])
+    let mut cmd = std::process::Command::new(shim_dir.join("gh"));
+    cmd.args(["api", "user"])
         .env("GH_TOKEN", "stale-inherited")
-        .env("GITHUB_TOKEN", "stale-inherited")
-        .output()
-        .expect("the shim runs")
+        .env("GITHUB_TOKEN", "stale-inherited");
+    // #10176: the shim is written in this process; see `output_past_etxtbsy`.
+    output_past_etxtbsy(&mut cmd)
 }
 
 /// 🔴 #9750: run for real against a fake gh, the shim asks for the pinned
@@ -306,6 +332,111 @@ fn a_hung_token_lookup_is_killed_and_refused() {
         started.elapsed() < std::time::Duration::from_secs(15),
         "the bound did not hold: {:?}",
         started.elapsed()
+    );
+}
+
+/// A forked child holding a write fd to one file, as a sibling test thread's
+/// child holds an inherited fd between its fork and its exec (#10176).
+#[cfg(unix)]
+struct ForkedWriter(libc::pid_t);
+
+#[cfg(unix)]
+impl ForkedWriter {
+    /// Open `path` for writing, fork a child that keeps the fd for 300 ms and
+    /// exits, then close this process's copy.
+    fn hold(path: &Path) -> Self {
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open for writing");
+        let pause = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 300_000_000,
+        };
+        // SAFETY: the child calls only `nanosleep` and `_exit`, both
+        // async-signal-safe, so forking a multi-threaded process is sound.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            // SAFETY: as above.
+            unsafe {
+                libc::nanosleep(&pause, std::ptr::null_mut());
+                libc::_exit(0);
+            }
+        }
+        assert!(pid > 0, "fork: {}", std::io::Error::last_os_error());
+        drop(file);
+        Self(pid)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ForkedWriter {
+    fn drop(&mut self) {
+        let mut status = 0;
+        // SAFETY: reaps the one child `hold` forked.
+        unsafe { libc::waitpid(self.0, &mut status, 0) };
+    }
+}
+
+/// 🔴 #10176: a sibling test thread that forks while `write_gh_shim` holds the
+/// shim open for writing gives its child a copy of that write fd, which the
+/// child keeps until it execs or exits. Exec'ing the shim in that window
+/// failed with ETXTBSY. This forces the window — a forked child holds the
+/// shim's write fd for 300 ms — and the shim must still run.
+///
+/// The body runs in a single-threaded child process of this test binary, so
+/// the fork copies no sibling test's write fd and cannot make it busy.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn a_shim_held_busy_by_a_forked_writer_still_runs() {
+    const CHILD_RUN: &str = "TM_TEST_10176_FORKED_WRITER";
+    if std::env::var_os(CHILD_RUN).is_none() {
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        let name = format!("{module}::a_shim_held_busy_by_a_forked_writer_still_runs");
+        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                name.as_str(),
+                "--exact",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .env(CHILD_RUN, "1")
+            .output()
+            .expect("re-run this test as a child process");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "child run failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let gh_dir = tmp.path().join("gh-config");
+    let real = tmp.path().join("bin").join("gh");
+    fake_gh(&real, &gh_dir, "echo \"tok-for-$4-$6\"; exit 0");
+    let dir =
+        write_gh_shim(tmp.path(), &verified("github.com", &gh_dir), &real, 5).expect("written");
+    let writer = ForkedWriter::hold(&dir.join("gh"));
+    // Linux refuses the exec while the child holds the fd; the window is armed.
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        std::process::Command::new(dir.join("gh"))
+            .output()
+            .err()
+            .and_then(|e| e.raw_os_error()),
+        Some(libc::ETXTBSY),
+        "the forked writer must make the shim busy"
+    );
+    let out = run_shim(&dir);
+    drop(writer);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "GH_TOKEN=tok-for-github.com-octo GITHUB_TOKEN= ARGS=api user\n"
     );
 }
 
@@ -569,7 +700,8 @@ fn a_global_tier_gh_call_in_a_pinned_session_resolves_through_the_shim() {
         shim_root: shim_root(tmp.path()),
     };
     apply_gh_path_with(&mut cmd, tiered.vars(), tiered.unset_vars(), &session);
-    let out = cmd.output().expect("gh runs");
+    // #10176: PATH resolves `gh` to the shim this process wrote.
+    let out = output_past_etxtbsy(&mut cmd);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),

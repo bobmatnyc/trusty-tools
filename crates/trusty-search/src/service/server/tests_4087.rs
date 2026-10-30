@@ -11,7 +11,6 @@
 //! Test: these tests.
 use super::*;
 use axum::http::StatusCode;
-use axum::Json;
 
 use crate::core::corpus::CorpusOpenFailure;
 use crate::core::embed::{Embedder, MockEmbedder};
@@ -90,14 +89,9 @@ async fn search_against_corpus_failed_index_returns_503_not_empty_200() {
     let (state, embedder) = build_state_with(&[("broken", Some(CorpusOpenFailure::OpenTimeout))]);
     state.install_embedder(embedder).await;
 
-    let resp = search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("broken".to_string()),
-        axum::extract::Json(probe_query()),
-    )
-    .await;
+    let resp = search_report(&state, "broken", probe_query()).await;
 
-    let (status, Json(body)) = resp
+    let (status, body) = resp
         .expect_err("a corpus-failed index must NOT answer 200-with-empty-results (issue #4087)");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_corpus_unavailable");
@@ -126,13 +120,9 @@ async fn corpus_failure_response_distinguishes_permanent_from_transient() {
         build_state_with(&[("rotten", Some(CorpusOpenFailure::FormatIncompatible))]);
     state.install_embedder(embedder).await;
 
-    let (status, Json(body)) = search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("rotten".to_string()),
-        axum::extract::Json(probe_query()),
-    )
-    .await
-    .expect_err("corpus-failed index must fail loudly");
+    let (status, body) = search_report(&state, "rotten", probe_query())
+        .await
+        .expect_err("corpus-failed index must fail loudly");
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["failure_kind"], "format_incompatible");
@@ -153,12 +143,7 @@ async fn healthy_index_is_unaffected_by_the_corpus_failure_guard() {
     let (state, embedder) = build_state_with(&[("healthy", None)]);
     state.install_embedder(embedder).await;
 
-    let result = search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("healthy".to_string()),
-        axum::extract::Json(probe_query()),
-    )
-    .await;
+    let result = search_report(&state, "healthy", probe_query()).await;
 
     assert!(
         result.is_ok(),
@@ -185,14 +170,12 @@ async fn global_search_excludes_and_counts_corpus_failed_indexes() {
     ]);
     state.install_embedder(embedder).await;
 
-    let Json(body) = global_search_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Json(
-            serde_json::from_value::<super::search_global::GlobalSearchRequest>(
-                serde_json::json!({ "query": "anything", "top_k": 5 }),
-            )
-            .expect("request body"),
-        ),
+    let body = global_search_report(
+        &state,
+        serde_json::from_value::<super::search_global::GlobalSearchRequest>(
+            serde_json::json!({ "query": "anything", "top_k": 5 }),
+        )
+        .expect("request body"),
     )
     .await
     .expect("fan-out must succeed over the healthy index");

@@ -106,10 +106,21 @@ pub const SKILL_FLOOR_EXACT: &[&str] = &[
     "architect-strategy",
     "architect-tmux-ops",
     "architect-workflow",
+    // #10161 D2: the second set of seeded Architect skills.
+    "architect-drift-check",
+    "architect-host-admin",
+    "architect-improvements",
+    "architect-macos",
+    "architect-project-provision",
+    "architect-review",
+    // #10161 D3b: the dashboard skill.
+    "architect-dashboard",
     "cargo-publish",
     "git-workflow",
     "code-review-standards",
     "contract-driven-testing",
+    // #10401: the data-designer agent preloads it.
+    "data-design",
     "documentation-style",
     "rust-build-performance",
     "rust-delivery-workflow",

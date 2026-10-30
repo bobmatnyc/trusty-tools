@@ -16,6 +16,7 @@
 //! | `mpm.managed.prune` | `POST /api/v1/sessions/managed/prune` |
 //! | `mpm.managed.decommission_ephemeral` | `POST /api/v1/sessions/managed/decommission-ephemeral` |
 //! | `mpm.managed.prune_worktrees` | `POST /api/v1/sessions/managed/prune-worktrees` |
+//! | `mpm.managed.prune_worktrees_stream` | none — socket-only frame stream (#7619) |
 //! | `mpm.managed.reconcile_worktrees` | `GET /api/v1/sessions/managed/reconcile-worktrees` |
 //! | `mpm.managed.fleet` | `GET /api/v1/sessions/managed/fleet` |
 //! | `mpm.managed.register_supervisor` | `POST /api/v1/sessions/managed/supervisor` |
@@ -55,7 +56,7 @@ use crate::daemon::managed_routes::prune::{PruneRequest, PruneWorktreesRequest};
 use crate::daemon::managed_routes::{
     AdoptExistingRequest, AnswerRequest, ReactivateQuery, RenameRequest, SendInputRequest,
     SpawnRequest, activity, architect, cores, delete, fleet, output, provision_status, prune,
-    reactivate, rebind, reconcile, rename, residency, sync_assets,
+    prune_stream, reactivate, rebind, reconcile, rename, residency, sync_assets,
 };
 use crate::daemon::state::DaemonState;
 
@@ -232,7 +233,7 @@ fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter
     }
     let (spawn_s, list_s, adopt_s, prune_s, eph_s) = (st!(), st!(), st!(), st!(), st!());
     let (pw_s, rw_s, fleet_s, sa_s) = (st!(), st!(), st!(), st!());
-    let residency_s = st!();
+    let (residency_s, pws_s) = (st!(), st!());
 
     // #8942: the same body as `POST .../managed/supervisor`; #9755 serves it
     // under the D07 name and the legacy name the client still calls.
@@ -288,11 +289,24 @@ fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter
                 }
             },
         )
+        // #7619: RUNS TO COMPLETION after its client is gone. Unary dispatch
+        // (`trusty_common::uds::server::handle_connection`) awaits the handler
+        // without watching the peer, so the drop guard in
+        // `prune_worktrees_core_in` never fires for a killed caller. Only a
+        // dropped HTTP request cancels it. The MCP tool keeps this method.
         .typed(
             "mpm.managed.prune_worktrees",
             move |req: PruneWorktreesRequest| {
                 let state = Arc::clone(&pw_s);
                 async move { prune::prune_worktrees_core(&state, req).await.into_rpc() }
+            },
+        )
+        // #7619: the streamed form the CLI uses; a departed client cancels.
+        .typed_stream(
+            prune_stream::PRUNE_STREAM_METHOD,
+            move |req: PruneWorktreesRequest| {
+                let state = Arc::clone(&pws_s);
+                async move { prune_stream::open_prune_stream(state, req).await }
             },
         )
         .typed("mpm.managed.reconcile_worktrees", move |_: NoParams| {

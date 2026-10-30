@@ -7,7 +7,9 @@
 //! (`TMUX_SOCKET`), calls `trusty_architect::verbs`, prints the verb's stdout
 //! as-is, and on an error prints `tm architect: <reason>` to stderr and
 //! returns the exit code: 2 for a bad argument, 1 for input it cannot read,
-//! a tmux it cannot reach, or state it cannot parse.
+//! a tmux it cannot reach, or state it cannot parse. #9167: `poll` records
+//! each wake it submits on the trusty-events bus
+//! (`super::architect_messages`).
 //! Test: `cli_parses_architect_verbs`; the binary in
 //! `tests/tm_architect_verbs.rs`.
 
@@ -21,6 +23,10 @@ use crate::cli::ArchitectAction;
 
 /// Runs `action` against this process's environment; returns the exit code.
 pub(crate) fn run(action: ArchitectAction) -> i32 {
+    // #10063: the dashboard verbs keep the store's exit classes (1, 2, 3).
+    if let ArchitectAction::Dashboard(args) = action {
+        return super::architect_dashboard::run(args);
+    }
     let get = |name: &str| std::env::var(name).ok();
     let out = execute(action, &get, &mut io::stdin().lock());
     let mut stdout = io::stdout().lock();
@@ -57,7 +63,9 @@ fn execute(
                 interval,
                 dry_run,
             };
-            verbs::poll(&args, &config).map(|()| String::new())
+            // #9167: each submitted wake becomes a `poll_wake` message event.
+            let messages = super::architect_messages::poll_sink(&config.poll_session);
+            verbs::poll(&args, &config, messages.as_ref()).map(|()| String::new())
         }),
         ArchitectAction::Classify { file } => {
             read_capture(file.as_deref(), stdin).and_then(|bytes| verbs::classify(&bytes))
@@ -77,6 +85,9 @@ fn execute(
             };
             dir.and_then(|d| verbs::self_ctx(&d))
         }
+        ArchitectAction::Dashboard(_) => Err(VerbError::Usage(
+            "dashboard runs through `run`, never `execute`".to_owned(),
+        )),
     };
     match result {
         Ok(stdout) => Output {
@@ -192,6 +203,66 @@ mod tests {
             &["architect", "input-state"],
         ] {
             let mut argv = vec!["tm"];
+            argv.extend_from_slice(bad);
+            let err = Cli::try_parse_from(argv).expect_err("refused");
+            assert_eq!(err.exit_code(), 2, "{bad:?}");
+        }
+    }
+
+    /// #10063: every `dashboard` verb parses with the prototype's
+    /// arguments; a missing argument is clap's exit-2 refusal.
+    #[test]
+    fn cli_parses_architect_dashboard_verbs() {
+        let ok: &[&[&str]] = &[
+            &["dashboard", "get", "items", "D01"],
+            &["dashboard", "list", "items", "--status", "open"],
+            &[
+                "dashboard",
+                "set",
+                "items",
+                "D01",
+                "--json",
+                "{}",
+                "--if-version",
+                "0",
+            ],
+            &["dashboard", "update", "items", "D01", "--json", "-"],
+            &["dashboard", "delete", "items", "D01", "--if-version", "2"],
+            &["dashboard", "batch", "ops.json"],
+            &[
+                "dashboard",
+                "pruned",
+                "--id",
+                "D01",
+                "--collection",
+                "items",
+            ],
+            &["dashboard", "validate", "--schemas", "/s"],
+            &["dashboard", "fsck"],
+            &["dashboard", "tally", "--json"],
+            &["dashboard", "footer", "--tailnet", "https://t/"],
+            &["dashboard", "ids", "D"],
+            &[
+                "dashboard",
+                "--root",
+                "/r",
+                "--format",
+                "jsonl",
+                "--actor",
+                "a",
+                "fsck",
+            ],
+        ];
+        for args in ok {
+            let mut argv = vec!["tm", "architect"];
+            argv.extend_from_slice(args);
+            assert!(Cli::try_parse_from(&argv).is_ok(), "{args:?}");
+        }
+        for bad in [
+            &["dashboard", "get", "items"][..],
+            &["dashboard", "set", "items", "D01"],
+        ] {
+            let mut argv = vec!["tm", "architect"];
             argv.extend_from_slice(bad);
             let err = Cli::try_parse_from(argv).expect_err("refused");
             assert_eq!(err.exit_code(), 2, "{bad:?}");

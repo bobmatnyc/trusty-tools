@@ -97,16 +97,24 @@ fn make_indexer_with_corpus(redb_path: &std::path::Path) -> CodeIndexer {
     idx
 }
 
+// #10110: batch removal by path prefix or file list.
+mod batch_remove_10110;
+// #10498: raw BM25 score per hit, and ranking identity.
+mod bm25_raw_10498;
 mod branch_and_corpus;
 mod chunk_cap;
 mod corpus_fault;
 mod deferred_commit_8761;
 mod embed_pool_routing;
+// #9284: chunks cut at the embedder window are counted and warned on.
+mod embed_window_9284;
 mod eviction_kg_paths;
 mod exact_match_floor;
 mod exact_match_perf;
 mod file_lifecycle_8959;
 pub(super) mod incremental_stamp_9230;
+// #10301: a sidecar ahead of the graph is reconciled on load.
+mod load_reconcile_10301;
 mod path_filter_search;
 // #9450: the persister compacts a churned graph before it saves.
 mod persist_compact_9450;
@@ -115,4 +123,8 @@ mod persistence_and_search;
 mod ranking_and_modes;
 mod snapshot_guard_7920;
 mod sops_8922;
+// #10195: rehydrate stage timings and the search's rehydrate flag.
+mod stage_timings_10195;
+mod window_split_10481;
+mod window_split_10504;
 mod zero_chunk_8976;

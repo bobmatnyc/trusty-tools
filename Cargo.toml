@@ -115,17 +115,17 @@ trusty-code = { path = "crates/trusty-code", version = "0.7" }
 # is the first upload. Bumped to 0.2 by #7940's delegation seam (a required
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9" }
-trusty-common = { path = "crates/trusty-common", version = "0.64" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9.4" }
+trusty-common = { path = "crates/trusty-common", version = "0.67" }
 # #7521: secret storage and its on-demand socket (DOC-74 §15.2). Defaults off
 # here so each member names the features it needs (#5466 pattern).
-trusty-secrets = { path = "crates/trusty-secrets", version = "0.2.0", default-features = false }
+trusty-secrets = { path = "crates/trusty-secrets", version = "0.3.0", default-features = false }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }
 # #8454 S2c: the deny-by-default channel route policy; trusty-mpm reads it
 # for `tm doctor`.
-trusty-channels = { path = "crates/trusty-channels", version = "0.1" }
+trusty-channels = { path = "crates/trusty-channels", version = "0.2.0" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors
@@ -175,11 +175,11 @@ trusty-console = { path = "crates/trusty-console", version = "0.13" }
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-architect: the Architect's poller library behind `tm architect` (#9171, #9822).
 # A leaf: it never depends on trusty-mpm or on any crate that does.
-trusty-architect = { path = "crates/trusty-architect", version = "0.1" }
+trusty-architect = { path = "crates/trusty-architect", version = "0.2" }
 # trusty-installer: the pinned, fail-closed prebuilt download entry point
 # (#5491, #5495) is also consumed as a library by trusty-audit, which now
 # builds from bobmatnyc/trusty-git-analytics against the crates.io release.
-trusty-installer = { path = "crates/trusty-installer", version = "0.15" }
+trusty-installer = { path = "crates/trusty-installer", version = "0.17" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"
@@ -260,7 +260,7 @@ uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 # url: WHATWG URL parsing. #5439 needs it to answer "does this URL target
 # loopback" the way the HTTP client that will dial it answers — an Origin-header
 # parser splits the authority at the first `:` and reads
-# `http://127.0.0.1:7882@attacker.example` as loopback. Already in the lock via
+# `http://127.0.0.1:1234@attacker.example` as loopback. Already in the lock via
 # reqwest, so this adds no new tree.
 url = "2"
 sha2 = "0.10"

@@ -15,7 +15,7 @@
 //! completed).
 //!
 //! The HTTP-shaped variants are gone with the transport. `Discovery` went with
-//! `TCODE_DAEMON_URL` and the `http_addr` file — the socket path is derived,
+//! `TCODE_DAEMON_URL` and the address discovery file — the socket path is derived,
 //! not discovered. `Status` went with HTTP status codes, which a framed
 //! JSON-RPC response does not have: every daemon-side refusal now arrives as
 //! [`EngineError::Rpc`] carrying a code, and every transport failure as

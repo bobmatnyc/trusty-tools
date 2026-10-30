@@ -44,6 +44,7 @@ pub use types::{PruneAction, PruneFilter, PruneOutcome, PrunedSession};
 // #8782: the orphan-scan half, split out so this file stays under the cap.
 #[path = "prune_orphan_scan.rs"]
 mod orphan_scan;
+use super::prune_progress::{PruneCancel, log_cancelled};
 use super::worktree_scope::WorktreeScope;
 pub use orphan_scan::OrphanSweepOutcome;
 use orphan_scan::SweepClassification;
@@ -673,6 +674,41 @@ impl SessionManager {
         adopted: &[std::path::PathBuf],
         scope: &WorktreeScope,
     ) -> Result<OrphanSweepOutcome, anyhow::Error> {
+        let never = PruneCancel::never();
+        self.prune_orphaned_worktrees_in_with_cancel(
+            repos_root,
+            in_use_workspace_paths,
+            dry_run,
+            policy,
+            adopted,
+            scope,
+            &never,
+        )
+        .await
+    }
+
+    /// [`Self::prune_orphaned_worktrees_in`], stopped by `cancel` (#7619).
+    ///
+    /// Why: the pass outlived the client that asked for it, so a killed
+    /// `tm session prune-worktrees` kept deleting to the end of its list.
+    /// What: `cancel` is read before each candidate in the classification loop
+    /// and in the removal loop, never inside a removal, so a removal in flight
+    /// finishes. Every candidate the pass did not start lands in
+    /// [`OrphanSweepOutcome::cancelled_unstarted`], tree untouched. An
+    /// unreadable cancel state stops the pass ([`PruneCancel::stop_requested`]).
+    /// Test: `worktree_7619_a_cancelled_orphan_sweep_stops_after_the_first_removal`,
+    /// `worktree_7619_an_unreadable_or_early_cancel_removes_nothing`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prune_orphaned_worktrees_in_with_cancel(
+        &self,
+        repos_root: &std::path::Path,
+        in_use_workspace_paths: &[std::path::PathBuf],
+        dry_run: bool,
+        policy: DirtyWorktreePolicy,
+        adopted: &[std::path::PathBuf],
+        scope: &WorktreeScope,
+        cancel: &PruneCancel,
+    ) -> Result<OrphanSweepOutcome, anyhow::Error> {
         use super::worktree_ownership::SentinelOwner;
         use std::collections::HashSet;
 
@@ -719,7 +755,23 @@ impl SessionManager {
         // #4323: counted, not logged per path — see `SweepClassification`.
         let mut skipped_live = 0usize;
         let total_candidates = candidates.len();
-        for candidate in candidates {
+        // #7619: unstarted candidates of a cancelled pass, never touched.
+        let mut cancelled_unstarted = Vec::new();
+        let mut queue = candidates.into_iter();
+        for (n, candidate) in queue.by_ref().enumerate() {
+            // #7619: a cancelled pass stops reading too, between candidates.
+            if cancel.stop_requested() {
+                cancelled_unstarted.push(candidate);
+                break;
+            }
+            // #7619: one progress line per candidate for the streaming method.
+            cancel.progress(|| {
+                let path = candidate.display();
+                format!(
+                    "orphan sweep: inspecting {}/{total_candidates} {path}",
+                    n + 1
+                )
+            });
             match super::worktree_ownership::read_sentinel_owner(&candidate) {
                 SentinelOwner::Unknown => {
                     // #4323: `debug!`, not `info!`. This arm fires once per
@@ -790,6 +842,7 @@ impl SessionManager {
                 }
             }
         }
+        cancelled_unstarted.extend(queue);
 
         // #4323: ONE line per sweep carrying every classification count,
         // replacing the per-path `info!`s above. Suppressed entirely when the
@@ -810,6 +863,7 @@ impl SessionManager {
             for p in &reclaimable {
                 info!(path = %p.display(), "prune-worktrees (dry-run): would remove orphaned worktree");
             }
+            log_cancelled("orphan sweep (dry-run)", cancelled_unstarted.len());
             return Ok(OrphanSweepOutcome {
                 removed: reclaimable,
                 owner_unknown,
@@ -818,6 +872,7 @@ impl SessionManager {
                 registry_roots,
                 discarded_dirty,
                 partially_removed: Vec::new(),
+                cancelled_unstarted,
             });
         }
 
@@ -829,7 +884,19 @@ impl SessionManager {
         let mut partially_removed = Vec::new();
         // #8782: a real run reports what the pre-removal re-check discarded.
         discarded_dirty.clear();
-        for candidate in reclaimable {
+        let to_remove = reclaimable.len();
+        let mut queue = reclaimable.into_iter();
+        for (n, candidate) in queue.by_ref().enumerate() {
+            // #7619: asked BEFORE each candidate and never inside
+            // `remove_candidate`, so a removal in flight finishes.
+            if cancel.stop_requested() {
+                cancelled_unstarted.push(candidate);
+                break;
+            }
+            cancel.progress(|| {
+                let path = candidate.display();
+                format!("orphan sweep: removing {}/{to_remove} {path}", n + 1)
+            });
             match remove_candidate(&candidate, &fresh_in_use, policy, scope, ceiling).await {
                 CandidateRemoval::Removed(discard) => {
                     removed.push(candidate);
@@ -842,6 +909,8 @@ impl SessionManager {
                 }
             }
         }
+        cancelled_unstarted.extend(queue);
+        log_cancelled("orphan sweep", cancelled_unstarted.len());
         Ok(OrphanSweepOutcome {
             removed,
             owner_unknown,
@@ -850,6 +919,7 @@ impl SessionManager {
             registry_roots,
             discarded_dirty,
             partially_removed,
+            cancelled_unstarted,
         })
     }
 

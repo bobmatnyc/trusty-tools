@@ -30,7 +30,7 @@
 
 use std::path::Path;
 
-use crate::agents::manifest::{Result, atomic_write, checksum};
+use crate::agents::manifest::{Result, atomic_write, atomic_write_executable, checksum};
 use crate::skills::manifest::{
     SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
 };
@@ -89,6 +89,41 @@ pub fn is_skill_file(name: &str) -> bool {
 /// it via the shared helper.
 pub fn skill_stem(filename: &str) -> &str {
     filename.strip_suffix(".md").unwrap_or(filename)
+}
+
+/// Whether a skill's carried file deploys executable (`0o755`), by its path.
+///
+/// Why: #10211 — the content tarball pins every entry to mode `0644`
+/// (`scripts/package_content.sh`), so a script's exec bit cannot travel through
+/// the bundle; the path below the skill directory is the one contract every
+/// writer (the deployer, trusty-mpm's source materializer and its drift repair)
+/// can read. A reference file never earns the bit by this rule.
+/// What: `true` when `rel` (the `/`-joined path below `<stem>/`, e.g.
+/// `scripts/check.sh`) has `scripts` as its first segment.
+/// Test: `scripts_are_executable_by_path`, `deploy_scripts_carry_the_exec_bit`.
+pub fn is_executable_skill_file(rel: &str) -> bool {
+    rel.split_once('/')
+        .is_some_and(|(first, rest)| first == "scripts" && !rest.is_empty())
+}
+
+/// Whether the source copy of a carried file is itself executable.
+///
+/// Why: #10211 — a dev checkout or a user's own skill source can carry the bit
+/// outside `scripts/`; a deploy keeps it rather than quietly dropping it.
+/// What: any exec bit in the source file's mode. Unreadable metadata, or a
+/// non-Unix host, reads as `false`.
+/// Test: `deploy_keeps_a_source_exec_bit_outside_scripts`.
+fn source_is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 /// Deploy all skills from `source` to `dest`.
@@ -299,7 +334,7 @@ fn deploy_selected(
         let skill_dir = dest.join(&stem);
         let target_path = skill_dir.join("SKILL.md");
 
-        deploy_one_file(manifest, &stem, &target_path, &content, now, stats)?;
+        deploy_one_file(manifest, &stem, &target_path, &content, false, now, stats)?;
 
         // Mirror every file the skill carries alongside its entry point — the
         // `references/*.md` subtree a progressive-disclosure skill ships (issue
@@ -331,7 +366,19 @@ fn deploy_selected(
             for segment in extra.rel.split('/') {
                 extra_target.push(segment);
             }
-            deploy_one_file(manifest, &key, &extra_target, &extra_content, now, stats)?;
+            // #10211: a `scripts/*` file, or one executable at its source,
+            // lands `0o755`; the tarball's `0644` cannot say which.
+            let executable =
+                is_executable_skill_file(&extra.rel) || source_is_executable(&extra.path);
+            deploy_one_file(
+                manifest,
+                &key,
+                &extra_target,
+                &extra_content,
+                executable,
+                now,
+                stats,
+            )?;
         }
     }
 
@@ -348,22 +395,27 @@ fn deploy_selected(
 /// #2903, ported from `trusty-mpm` PR #2915) — factoring it out here is what
 /// keeps those two call sites from silently diverging on the ownership rule.
 /// What: writes `content` to `target_path` (creating parent directories as
-/// needed) via [`atomic_write`] and records `key` in `manifest` UNLESS the
+/// needed) via [`atomic_write`] — [`atomic_write_executable`] when
+/// `executable` (#10211) — and records `key` in `manifest` UNLESS the
 /// target exists and is either unmanaged (user-owned — skip) or managed with
 /// a checksum mismatch (user-modified — skip), or is managed with a matching
-/// checksum and `content` is unchanged (unchanged — no-op). Every outcome is
+/// checksum and `content` is unchanged (unchanged — no-op, except that a
+/// managed script missing its exec bit gets the bit back). Every outcome is
 /// pushed to the matching `stats` vector under `key`.
 /// Test: `deploy_new_skill`, `deploy_skips_user_modified`,
 /// `deploy_unchanged_no_write`, `deploy_user_owned_skipped`, plus the
 /// reference-file tests in `deployer_tests.rs`
 /// (`deploy_reference_files_land_alongside_skill`,
 /// `deploy_reference_files_skip_user_modified`,
-/// `deploy_reference_files_sync_even_when_entry_unchanged`).
+/// `deploy_reference_files_sync_even_when_entry_unchanged`,
+/// `deploy_scripts_carry_the_exec_bit`,
+/// `redeploy_restores_a_lost_exec_bit_on_an_unchanged_script`).
 fn deploy_one_file(
     manifest: &mut SkillManifest,
     key: &str,
     target_path: &Path,
     content: &str,
+    executable: bool,
     now: &str,
     stats: &mut DeployStats,
 ) -> Result<()> {
@@ -376,7 +428,11 @@ fn deploy_one_file(
         let current = std::fs::read_to_string(target_path)?;
         if manifest.checksum_matches(key, &current) {
             if checksum(content) == checksum(&current) {
-                // Deployed copy is already the latest content.
+                // Deployed copy is already the latest content. #10211: a copy
+                // an older deployer wrote `0644` still owes the exec bit.
+                if executable && !source_is_executable(target_path) {
+                    atomic_write_executable(target_path, content)?;
+                }
                 stats.unchanged.push(key.to_string());
                 return Ok(());
             }
@@ -395,7 +451,11 @@ fn deploy_one_file(
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    atomic_write(target_path, content)?;
+    if executable {
+        atomic_write_executable(target_path, content)?;
+    } else {
+        atomic_write(target_path, content)?;
+    }
     manifest.managed.insert(
         key.to_string(),
         SkillManifestEntry {

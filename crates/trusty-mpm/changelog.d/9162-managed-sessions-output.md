@@ -1,2 +1,0 @@
-Fixed
-- `tm sessions output <name>` reads a managed session's pane instead of reporting `session '<name>' not found`; the name may be an id, an exact name or a unique prefix, an ambiguous prefix names its candidates, a managed session with no owned pane fails with the daemon's reason, and a failure to list managed sessions is reported as that failure. The daemon serves the read as `GET /api/v1/sessions/managed/{id}/output` and the socket method `mpm.managed.output`; the project route is unchanged ([#9162](https://github.com/bobmatnyc/trusty-tools/issues/9162))

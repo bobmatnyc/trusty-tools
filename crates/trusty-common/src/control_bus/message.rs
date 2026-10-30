@@ -9,6 +9,8 @@
 //! What: [`MessageChannel`] names how the text travelled; [`MessageEvent`]
 //!       records who sent it, where to, its byte count and sha256, an optional
 //!       relay marker, and a body only when the producer was told to carry one.
+//!       #9167 PR2: [`MessageDirection`] says which end recorded it, so one
+//!       physical message is one `sent` plus one `received` event.
 //! Test: `super::tests::message_event_round_trips_with_a_snake_case_channel_9167`,
 //!       `super::tests::message_event_omits_an_absent_body_and_relay_9167`,
 //!       `super::tests::a_domain_matching_subscriber_skips_a_message_frame_9167`.
@@ -39,14 +41,36 @@ pub enum MessageChannel {
     PollWake,
 }
 
+/// Which end of a message recorded the event (#9167 PR2).
+///
+/// Why: a `SendMessage` relay is recorded by its sender's hook and again by
+///      the receiving session when it arrives; a reader counting relays must
+///      tell the two apart without inferring it from `from` and `to`.
+/// What: `sent` or `received` on the wire. `#[serde(default)]` on the field
+///       reads a frame written before this field (PR1) as `sent`, which is
+///       what every PR1 producer recorded.
+/// Test: `super::tests::a_frame_without_a_direction_reads_as_sent_9167`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MessageDirection {
+    /// Recorded by the sender as it sent the text.
+    #[default]
+    Sent,
+    /// Recorded by the receiving session when the text arrived.
+    Received,
+}
+
 /// One inter-session message, recorded by reference.
 ///
 /// Why: the bus must show that a message went from one session to another
 ///      without becoming a second copy of what was said. The digest lets a
 ///      reader match a recorded event to the text a receiver saw.
-/// What: `at` is when the sender's hook saw it; `from` is the sending session;
-///       `to` is the recipient session, agent or pane as the sender named it
-///       (empty when the sender named none, e.g. tmux's current pane); `relay`
+/// What: `at` is when the producer saw it (the sender's hook, or the
+///       arrival); `direction` says which end that was; `from` is the
+///       sending session, as the producer names it; `to` is the recipient
+///       session, agent or pane (empty when the sender named none, e.g.
+///       tmux's current pane); `relay`
 ///       is the relay marker found in the text; `bytes` and `sha256` describe
 ///       the text as sent onto the bus, after the producer's credential scan.
 ///       `body` is that same text, carried only when the producer is
@@ -61,10 +85,13 @@ pub enum MessageChannel {
 /// Test: `super::tests::message_event_omits_an_absent_body_and_relay_9167`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MessageEvent {
-    /// When the sender's hook observed the message.
+    /// When the producer observed the message.
     pub at: DateTime<Utc>,
     /// How the message travelled.
     pub channel: MessageChannel,
+    /// Which end recorded this event; absent on the wire reads as `sent`.
+    #[serde(default)]
+    pub direction: MessageDirection,
     /// The sending session.
     pub from: String,
     /// The recipient: a session, agent or pane, as the sender named it.

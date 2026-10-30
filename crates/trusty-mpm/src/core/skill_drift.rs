@@ -142,7 +142,8 @@ pub struct SkillReference {
 /// reference. Otherwise every skill file of `content` (#9012: the verified
 /// runtime content, no longer the compiled-in table) is —
 /// keyed EXACTLY as the deploy manifest keys them: a bare `<stem>` for an entry
-/// point, and `<stem>/references/<file>.md` for each reference sibling
+/// point, and `<stem>/<rel>` for each carried file — `references/<file>.md`,
+/// and since #10211 any extension under `references/` or `scripts/`
 /// (#4622 review, HIGH-1 — dropping the nested entries made all 80 of this
 /// machine's 132 manifest keys unverifiable, pinning `skill_staleness` to
 /// Unknown on every real install). A submodule directory that cannot be read, or
@@ -188,8 +189,9 @@ pub fn skill_reference(
         .filter_map(|(rel_path, contents)| {
             let rel = rel_path.strip_prefix("skills/")?;
             // A bare `<stem>.md` entry point is keyed by its stem; a nested
-            // `<stem>/references/<file>.md` sibling is keyed by that exact
-            // relative path, because that is what `skills::deployer` records.
+            // `<stem>/<rel>` carried file (any extension, #10211) is keyed by
+            // that exact relative path, because that is what
+            // `skills::deployer` records.
             let key = if rel.contains('/') {
                 rel.to_string()
             } else {
@@ -207,12 +209,13 @@ pub fn skill_reference(
 /// Walk a checked-out `agents/skills` submodule into manifest-keyed assets.
 ///
 /// Why: the submodule mirrors the bundled layout — flat `<stem>.md` entry points
-/// beside `<stem>/references/<file>.md` subtrees — so it must produce the same
-/// key shapes the embedded table does, or the submodule path would reintroduce
-/// the #4622 HIGH-1 defect on dev checkouts only.
-/// What: recurses from `root`, keying each `.md` file by its path relative to
-/// `root` (with `.md` stripped for a top-level entry point). Hidden files and
-/// unreadable entries are skipped, never guessed at.
+/// beside `<stem>/references/*` and `<stem>/scripts/*` subtrees — so it must
+/// produce the same key shapes the embedded table does, or the submodule path
+/// would reintroduce the #4622 HIGH-1 defect on dev checkouts only.
+/// What: recurses from `root`, keying each top-level `.md` entry point by its
+/// stem and each nested file, whatever its extension (#10211), by its path
+/// relative to `root`. Hidden files and unreadable entries are skipped, never
+/// guessed at.
 /// Test: `reference_prefers_the_submodule`.
 fn collect_submodule_assets(root: &Path, dir: &Path, assets: &mut BTreeMap<String, String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -229,7 +232,9 @@ fn collect_submodule_assets(root: &Path, dir: &Path, assets: &mut BTreeMap<Strin
             collect_submodule_assets(root, &path, assets);
             continue;
         }
-        if !name.ends_with(".md") {
+        // #10211: only a top-level entry point must be `.md`; a carried file
+        // (`scripts/check.sh`, `references/adr-check.yml`) is keyed as is.
+        if dir == root && !name.ends_with(".md") {
             continue;
         }
         let Ok(rel) = path.strip_prefix(root) else {

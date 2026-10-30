@@ -304,6 +304,32 @@ impl Embedder for SwitchableEmbedder {
     fn resolved_provider_label(&self) -> Option<String> {
         self.current().resolved_provider_label()
     }
+
+    // #9284: the installed backend's window, so the embed pass can count
+    // truncation through this wrapper. Test:
+    // `switchable_forwards_the_backend_window_and_tokenizer`.
+    fn input_window(&self) -> Option<usize> {
+        self.current().input_window()
+    }
+
+    fn chunking_tokenizer(
+        &self,
+    ) -> std::result::Result<
+        Option<Arc<trusty_common::embedder::ChunkTokenizer>>,
+        trusty_common::embedder::ChunkError,
+    > {
+        self.current().chunking_tokenizer()
+    }
+
+    // #10504: the installed backend's split window, so a lazy sidecar's assumed one survives.
+    fn split_window(
+        &self,
+    ) -> std::result::Result<
+        Option<(usize, Arc<trusty_common::embedder::ChunkTokenizer>)>,
+        trusty_common::embedder::ChunkError,
+    > {
+        self.current().split_window()
+    }
 }
 
 #[cfg(test)]
@@ -580,5 +606,22 @@ mod tests {
             "the last set_bootstrap_state call (necessarily after swap_to) \
              must still be observable, layered on top of the new backend"
         );
+    }
+
+    /// #9284: the embed pass reads the window through this wrapper, so it
+    /// must forward the installed backend's window and tokenizer.
+    #[tokio::test]
+    async fn switchable_forwards_the_backend_window_and_tokenizer() {
+        let backend: Arc<dyn Embedder> = Arc::new(
+            crate::core::embed::MockEmbedder::new(trusty_common::embedder::EMBED_DIM)
+                .with_chunking(16),
+        );
+        let sw = SwitchableEmbedder::new(backend, test_active(BackendKind::Ort));
+        assert_eq!(sw.input_window(), Some(16));
+        assert!(matches!(sw.chunking_tokenizer(), Ok(Some(_))));
+
+        let windowless: Arc<dyn Embedder> = Arc::new(FakeEmbedder::new());
+        sw.swap_to(windowless, test_active(BackendKind::Python));
+        assert_eq!(sw.input_window(), None, "a swap installs the new window");
     }
 }

@@ -85,16 +85,17 @@ the value.
 ## User Stories / Jobs-to-be-Done
 
 1. **As a developer**, I open `/tools/secrets/`, pick `bobmatnyc/trusty-tools`,
-   and save `OPENAI_API_KEY`. The page confirms with the first 8 characters and
-   the length, once. No agent sees any of it.
+   and save `OPENAI_API_KEY`. The page confirms once with the masked value and
+   its length (first 4 and last 5 characters for a long value). No agent sees any of it.
 2. **As a developer**, I save `NPM_TOKEN` at owner scope `bobmatnyc`. Every
    repo under that owner resolves it, unless a repo sets its own.
 3. **As an agent**, I run `tm secrets exec --env GH_TOKEN=GH_TOKEN -- gh pr list`.
    I know the key name. I never see the token.
 4. **As a developer**, I commit a `.env` that holds `secret://` references, and
    run my server with `tm secrets exec --dotenv .env -- npm run dev`.
-5. **As a developer**, I tick "agents may use" on one key. Only that key can be
-   injected into a process that an agent started.
+5. **As a developer**, I tick "Denied to agents" on one key. Every other key in
+   my scope can be injected into a process that an agent started; that key
+   cannot (#10386).
 6. **As a developer**, I push a project secret to Vercel's production and
    preview targets from the same page.
 7. **As a developer on my laptop**, I manage secrets on my desktop's console
@@ -113,8 +114,9 @@ the value.
 
 trusty-console serves a secrets page at `/tools/secrets/`. It lists scopes and
 key names, and sets, deletes and copies keys. The list shows each key's length
-and last-updated time. The first 8 characters appear once, in the set
-confirmation. A value of 8 characters or fewer shows only its length. The
+and last-updated time. The set confirmation shows, once, the first 4 and
+last 5 characters of a value of 16 or more, the last 5 of a value of 10 to
+15, and only the length of a shorter one. The
 console never reads a store and never receives a value back.
 
 **Why:** Value entry outside any session is what removes the transcript path.
@@ -172,12 +174,15 @@ Vercel etc."
 **Status:** Draft  
 **Priority:** Must  
 
-Each key carries an "agents may use" flag, set in the console, default OFF. A
-key without the flag is never injected into a process whose parent chain
-includes Claude Code.
+Agents may use every key in the caller's scope by default, as with
+`.env.local` (owner ruling 2026-10-28, #10386). Each key carries an optional
+agent deny, an operator opt-out set in the console ("Denied to agents",
+default OFF). A denied key is never injected into a process whose parent
+chain includes Claude Code. 1Password and Keeper cannot hold a deny; a deny
+there is refused.
 
-**Why:** A developer decides per key what an agent-started process may hold.
-The default keeps new keys away from agents.
+**Why:** A developer decides per key what an agent-started process may not
+hold. The default lets agents use the keys their project needs.
 
 ---
 
@@ -266,7 +271,7 @@ the console.
 
 **PRD-SECRETS-02 (Console service page)**
 - [ ] `/tools/secrets/` lists scopes and key names with length and last-updated.
-- [ ] Set confirmation shows the first 8 characters and length once; a value of ≤8 characters shows only its length.
+- [ ] Set confirmation shows once: first 4 + last 5 characters and length at 16+; last 5 and length at 10–15; length only under 10 (#10394).
 - [ ] No console response body contains a stored value.
 
 **PRD-SECRETS-03 (Scopes)**
@@ -350,6 +355,8 @@ All rulings are the owner's, dated, and recorded on
 | 2026-10-01 | "It should have integrations with keychain, 1P, keeper, Vercel etc." / "It should also have integrations with programming languages." |
 | 2026-10-01 | List shows length and updated_at only; first 8 characters once on set. Owner scope = GitHub owner from the git remote; no machine scope; project > owner. Remote: "Local or Tailscale." Order: Keychain through the console page first, then one PR per integration. Default taken: Vercel development target opt-in per key. |
 | 2026-10-01 | Per-key "agents may use" flag, default OFF. All three language tiers are in scope. |
+| 2026-10-28 | Bob D69/Af9, D6a: "Security model is exactly like .env.local. If it's in the scope (user/owner/project), then it's usable by the agent." Supersedes the 2026-10-01 default: agents may use in-scope keys; the per-key deny is an operator opt-out; existing vaults migrate open-all ([#10386](https://github.com/bobmatnyc/trusty-tools/issues/10386)). |
+| 2026-10-28 | Set confirmation mask (#10394): first 4 + last 5 characters at 16+; last 5 at 10–15; length only under 10. Supersedes the first-8 confirmation of 2026-09-17 and 2026-10-01. |
 | 2026-10-06 | f5 "Keychain default": trusty-secrets 0.1.0 stores credentials in the macOS Keychain by default; the 0600 file is only a fallback where no Keychain exists. [#4570](https://github.com/bobmatnyc/trusty-tools/issues/4570) is in 0.1.0; this supersedes the 2026-09-21 "500 file" reading. |
 | 2026-10-06 | f6 "Both out": Doppler/AWS timing and the Go client are out of 0.1.0. |
 
@@ -365,7 +372,7 @@ DOC-74 §15.9 holds the slice table with test-ladder rungs.
 
 1. **Keychain through the console** — S0 docs, S1 crate, S2 secrets socket and tm client,
    S3a console bridge and hardening, S3b tailnet gate, S4 UI (with the
-   "agents may use" toggle), S5 agent/skill text.
+   per-key agent toggle, "Denied to agents" since #10386), S5 agent/skill text.
 2. **Integrations** — S6+, one PR each: 1Password, Vercel, GitHub Actions,
    Keeper.
 3. **Language integrations** — S7 `exec --dotenv`, S8 `secrets.resolve` with
@@ -378,7 +385,7 @@ DOC-74 §15.9 holds the slice table with test-ladder rungs.
 
 | Risk | Mitigation | Status |
 |------|-----------|--------|
-| An agent with shell access and an exec grant writes a value to a file and reads it back | The "agents may use" flag keeps unflagged keys out of agent-started processes; tier 3 must not widen what tier 1 already allows | Accepted limit; [#8879](https://github.com/bobmatnyc/trusty-tools/issues/8879) is one instance |
+| An agent with shell access and an exec grant writes a value to a file and reads it back | The per-key agent deny keeps denied keys out of agent-started processes (#10386); every other in-scope key is readable by an agent by design; tier 3 must not widen what tier 1 already allows | Accepted limit; [#8879](https://github.com/bobmatnyc/trusty-tools/issues/8879) is one instance |
 | The console's tailnet listener serves every route with no peer authentication | S3b tailnet gate; secrets routes answer 403 on the tailnet until it merges | Open — [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) |
 | A browser page on another origin reads or writes secrets routes | S3a: same-origin CORS, exact Origin, Host check, anti-CSRF header | Planned (S3a) |
 | The UDS router echoes request content in decode errors | Fixed error text for `secrets.*` | Planned (S3a) |

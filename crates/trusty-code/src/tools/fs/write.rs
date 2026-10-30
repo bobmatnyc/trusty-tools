@@ -29,7 +29,7 @@ use crate::tools::traits::{ToolExecutor, ToolResult};
 /// closure that records its arguments and observe that `execute` actually
 /// invokes it, WITHOUT depending on trusty-search's real, process-global
 /// daemon-discovery mechanism (`TRUSTY_DATA_DIR_OVERRIDE` + the on-disk
-/// `http_addr` file). That mechanism is unsafe to mutate from a single test in
+/// discovery state under it). That mechanism is unsafe to mutate from a single test in
 /// this crate's parallel suite: once this hook is wired into `execute`, EVERY
 /// concurrently-running write-tool test would also attempt to resolve and
 /// notify whatever daemon address a test-under-observation happened to have

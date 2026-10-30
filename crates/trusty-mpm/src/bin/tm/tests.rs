@@ -178,6 +178,7 @@ fn cli_parses_mcp_add() {
                 root,
                 project: _,
                 share_with_projects: _,
+                replace,
             },
     }) = cli.command
     else {
@@ -187,6 +188,7 @@ fn cli_parses_mcp_add() {
     assert_eq!(transport, McpTransportArg::Stdio);
     assert!(env.is_empty() && header.is_empty() && root.is_none());
     assert_eq!(command_and_args, vec!["echo", "hi"]);
+    assert!(!replace, "--replace defaults off (#10041)");
 }
 
 #[test]
@@ -442,6 +444,7 @@ fn cli_parses_doctor() {
                 fix_skills: false,
                 fix_agents: false,
                 fix_launchd_secrets: false,
+                rotate_deps: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
@@ -494,6 +497,7 @@ fn cli_parses_doctor_prune_stale_skills() {
                 fix_skills: false,
                 fix_agents: false,
                 fix_launchd_secrets: false,
+                rotate_deps: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
@@ -523,6 +527,7 @@ fn cli_parses_doctor_fix_skills() {
                 fix_skills: true,
                 fix_agents: false,
                 fix_launchd_secrets: false,
+                rotate_deps: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,

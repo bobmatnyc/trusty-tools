@@ -1,0 +1,189 @@
+# board-v1.yaml — the standard GitHub Projects board for a trusty-mpm repo (#10275).
+#
+# Why this file exists: each repo that adopts the trusty-mpm workflow gets a
+# board in one standard format, created from nothing through the API. This
+# file is that format. It is compiled into `tm` (see
+# crates/trusty-mpm/src/bin/tm/commands/issue/board/spec.rs) and is the single
+# source of field and option names (epic #10274, decision D1). Option names,
+# not option ids, are the stable keys.
+#
+# Where the values come from: the GraphQL capture of the reference board,
+# Project #45, in docs/research/project-board/project-45-capture.md. Nothing
+# here is copied from #45 at run time, and #45 is never changed (D5).
+#
+# What is standard (D6): Status, Hold and four date fields. Crate, Agents and
+# any component field are NOT standard. A repo declares them as extras in the
+# `project:` block of its own issue-state.yaml.
+#
+# Hold is declared and switched off (D4). #9401 turns it on. A board that has a
+# field declared off still conforms.
+#
+# Status mapping: each Status option either names the issue-state.yaml state
+# whose label it stands for (`state:`), or declares `label: none`. The states
+# are those of the built-in `status:*` lifecycle (status-lifecycle.yaml). Each
+# labelled state is reached by exactly one option. The mapping follows the
+# Lifecycle table in TICKETING.md.
+#
+# No `tm` command reads this file yet; `tm issue board` (#10274 Phase 2) is the
+# first reader.
+
+version: 1
+
+# Custom fields, in the order Project #45 shows them (Crate omitted, D6).
+# Colors are GitHub's ProjectV2 single-select option colors.
+fields:
+  - name: Status
+    type: single_select
+    options:
+      - name: Backlog
+        color: GRAY
+        description: Issue created
+        label: none
+      - name: Ready for Development
+        color: BLUE
+        description: Selected for work
+        label: none
+      - name: In Development
+        color: YELLOW
+        description: Engineer session claimed it
+        state: "status:in-progress"
+      - name: In PR
+        color: ORANGE
+        description: "PR open, Refs #N"
+        state: "status:coded"
+      - name: On Preview
+        color: YELLOW
+        description: Per-PR preview deploy is up and checked
+        label: none
+      - name: Merged
+        color: GREEN
+        description: PR squash-merged
+        state: "status:merged"
+      - name: On Prod
+        color: PINK
+        description: Runs in production or as the installed binary, with live evidence
+        state: "status:tested"
+      - name: Published
+        color: PURPLE
+        description: Version on crates.io
+        label: none
+      - name: Won't Do
+        color: GRAY
+        description: Not planned, duplicate or superseded, with a link
+        label: none
+
+  - name: Start date
+    type: date
+
+  - name: Target date
+    type: date
+
+  - name: Deployed on
+    type: date
+
+  - name: Published on
+    type: date
+
+  - name: Hold
+    type: single_select
+    enabled: false
+    options:
+      - name: Blocked
+        color: RED
+        description: External wait; blocker named
+      - name: Needs decision
+        color: ORANGE
+        description: Waits on a named decision-maker
+
+# Fields GitHub provides on every board. `tm` creates none of them; a view may
+# show them.
+builtin_fields:
+  - Title
+  - Assignees
+  - Labels
+  - Linked pull requests
+  - Milestone
+  - Repository
+  - Reviewers
+  - Parent issue
+  - Sub-issues progress
+  - Created
+  - Updated
+  - Closed
+
+# Project #45's three views. Each has an empty filter, no row group-by and no
+# sort. A view shows only standard and built-in fields, so #45's List view
+# loses its Crate column here. The Roadmap's date mapping and zoom were not
+# captured.
+views:
+  - name: List
+    layout: table
+    fields:
+      - Title
+      - Assignees
+      - Status
+      - Linked pull requests
+      - Sub-issues progress
+      - Milestone
+      - Created
+      - Start date
+      - Target date
+      - Deployed on
+      - Published on
+
+  - name: Swimlanes
+    layout: board
+    vertical_group_by: Status
+    fields:
+      - Title
+      - Assignees
+      - Status
+      - Linked pull requests
+      - Sub-issues progress
+
+  - name: Roadmap
+    layout: roadmap
+    fields:
+      - Title
+      - Assignees
+      - Status
+      - Linked pull requests
+      - Sub-issues progress
+
+# Built-in workflow intents, as Project #45 sets them. GitHub's API can read
+# and delete a workflow but cannot create or enable one: the UI or the
+# `actions/add-to-project` Action turns auto-add on.
+workflows:
+  - name: Auto-add to project
+    enabled: true
+    description: Add each new issue in the linked repository; it starts at Backlog. Pull requests are not board items.
+  - name: Auto-add sub-issues to project
+    enabled: true
+    description: Add each sub-issue of an issue already on the board.
+  - name: Item closed
+    enabled: false
+  - name: Pull request merged
+    enabled: false
+  - name: Auto-close issue
+    enabled: false
+  - name: Pull request linked to issue
+    enabled: false
+  - name: Item added to project
+    enabled: false
+
+# The board README. `{{repo}}` is the linked `owner/repo`; `{{status_table}}`
+# is a table of the Status options and their descriptions, rendered from the
+# Status field above. No other placeholder is defined.
+readme: |
+  This board tracks every open issue in `{{repo}}`. New issues are added
+  automatically and start at Backlog. Pull requests are not tracked.
+
+  ## Status
+
+  {{status_table}}
+
+  ## Conventions
+
+  - Status holds the furthest stage an issue has reached.
+  - Hold is switched off until the workflow sets it.
+  - Deployed on and Published on record the date of those stages.

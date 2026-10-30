@@ -107,6 +107,14 @@ impl Store {
             .collect()
     }
 
+    /// The parsed `outbox.jsonl` lines (LDG-4.4).
+    fn outbox(&self) -> Vec<Value> {
+        read(&self.paths.outbox)
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
     /// `state.json`, `log.jsonl` and `archive.jsonl` bytes.
     fn files(&self) -> [String; 3] {
         [
@@ -195,7 +203,7 @@ fn ledger_writer_refuses_a_malformed_store_and_leaves_it() -> R {
 }
 
 #[test]
-fn ledger_writer_refuses_id_collisions_live_and_archived() -> R {
+fn ledger_writer_refuses_a_live_id_and_reuses_an_archived_one() -> R {
     let s = Store::new()?;
     let err = s
         .run(json!([{"op": "add", "kind": "G", "title": "dup", "id": "th-G01"}]))
@@ -205,12 +213,9 @@ fn ledger_writer_refuses_id_collisions_live_and_archived() -> R {
     s.ok(json!([task("t2")]))?;
     assert_eq!(s.ids("tasks"), ["th-T01", "th-T02"]);
     s.ok(json!([{"op": "close", "id": "th-T01", "outcome": "merged"}]))?;
-    let err =
-        s.run(json!([{"op": "add", "kind": "T", "title": "t", "goal": "th-G01", "id": "th-T01"}]));
-    assert!(
-        err.is_err_and(|e| e.to_string().contains("archived")),
-        "an archived id was reissued"
-    );
+    // #10235: the archived id is free again, an explicit add may take it.
+    s.ok(json!([{"op": "add", "kind": "T", "title": "t", "goal": "th-G01", "id": "th-T01"}]))?;
+    assert_eq!(s.ids("tasks"), ["th-T02", "th-T01"]);
     Ok(())
 }
 
@@ -344,6 +349,22 @@ fn ledger_writer_prune_archives_done_and_old_answered() -> R {
     assert_eq!(s.ids("items"), ["th-D03", "th-D04"]);
     let archive = read(&s.paths.archive);
     assert!(archive.contains("\"id\":\"th-D01\"") && archive.contains("\"id\":\"th-D02\""));
+    // LDG-4.4: each pruned record is named in the outbox; the prune pseudo-id is not.
+    let outbox = s.outbox();
+    let tail: Vec<_> = outbox
+        .iter()
+        .rev()
+        .take(2)
+        .map(|l| (l["id"].clone(), l["op"].clone()))
+        .collect();
+    assert_eq!(
+        tail,
+        vec![
+            (json!("th-D02"), json!("archived")),
+            (json!("th-D01"), json!("archived"))
+        ]
+    );
+    assert!(outbox.iter().all(|l| l["id"] != "th-prune"), "{outbox:?}");
     let again = s.ok(json!([{"op": "prune"}]))?;
     assert_eq!(
         writer::render_prune(&again, false, 0, 0),
@@ -723,17 +744,17 @@ fn ledger_writer_replays_a_request_id_past_a_non_utf8_log_line() -> R {
     Ok(())
 }
 
+// #10235: an unreadable archive line no longer matters; ids are not read from it.
 #[test]
-fn ledger_writer_never_reissues_an_archived_id_past_a_non_utf8_archive_line() -> R {
+fn ledger_writer_reuses_an_archived_id_past_a_non_utf8_archive_line() -> R {
     let s = Store::new()?;
     s.ok(json!([task("t")]))?;
     s.ok(json!([{"op": "close", "id": "th-T01", "outcome": "merged"}]))?;
     append(&s.paths.archive, &not_utf8())?;
     let mut reuse = task("u");
     reuse["id"] = json!("th-T01");
-    let err = s.run(json!([reuse])).err().ok_or("archived id reissued")?;
-    assert!(err.to_string().contains("is archived"), "{err}");
-    assert_eq!(s.ids("tasks"), Vec::<String>::new());
+    s.ok(json!([reuse]))?;
+    assert_eq!(s.ids("tasks"), ["th-T01"]);
     Ok(())
 }
 
@@ -867,5 +888,117 @@ fn ledger_writer_kill_after_the_state_replace_replays_without_reapplying() -> R 
     assert_eq!(s.ids("tasks"), ["th-T01"]);
     assert_eq!(read(&s.paths.log).matches("crash me").count(), 2);
     assert!(!s.paths.journal.exists());
+    Ok(())
+}
+
+/// `(seq, id, rev, op)` of each outbox line.
+fn outbox_keys(s: &Store) -> Vec<(Value, Value, Value, Value)> {
+    s.outbox()
+        .iter()
+        .map(|l| {
+            let f = |k: &str| l[k].clone();
+            (f("seq"), f("id"), f("rev"), f("op"))
+        })
+        .collect()
+}
+
+/// LDG-4.4 and LDG-2.8.2: a commit appends one outbox line per record it
+/// changed, `{seq, epoch, code, id, rev, op, at}`: `seq` gapless across
+/// commits, one `epoch` per store, `rev` the commit's `v`, `op` the record's
+/// last event, and a closed record named once as `archived`.
+#[test]
+fn ledger_writer_appends_one_outbox_line_per_changed_record() -> R {
+    let s = Store::new()?;
+    let v = s.state()["v"].as_u64().ok_or("v")?;
+    s.ok(json!([
+        task("a"),
+        task("b"),
+        {"op": "update", "id": "th-T01", "status": "running"}
+    ]))?;
+    s.ok(json!([{"op": "close", "id": "th-T02", "outcome": "merged"}]))?;
+    assert_eq!(
+        outbox_keys(&s),
+        vec![
+            (json!(1), json!("th-G01"), json!(v), json!("open")),
+            (json!(2), json!("th-T01"), json!(v + 1), json!("update")),
+            (json!(3), json!("th-T02"), json!(v + 1), json!("open")),
+            (json!(4), json!("th-T02"), json!(v + 2), json!("archived")),
+        ]
+    );
+    let lines = s.outbox();
+    let epoch = lines[0]["epoch"].as_str().ok_or("epoch")?;
+    assert!(!epoch.is_empty());
+    for l in &lines {
+        let keys: Vec<&str> = l
+            .as_object()
+            .ok_or("object")?
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys.len(), 7, "{l}");
+        assert_eq!(
+            (&l["epoch"], &l["code"], &l["at"]),
+            (&json!(epoch), &json!("th"), &json!("2026-10-21T10:00Z")),
+            "{l}"
+        );
+    }
+    Ok(())
+}
+
+/// AC3 for the outbox: a writer killed after the appends leaves its outbox
+/// line; the replayed commit does not append it again and the next commit
+/// continues `seq` with no gap.
+#[test]
+fn ledger_writer_kill_after_the_outbox_append_keeps_one_outbox_line() -> R {
+    let s = Store::new()?;
+    let req = s.req(json!([task("crash me")]), "req-o")?;
+    assert!(s.run_with(&KillAt(CommitStep::Logged), &req).is_err());
+    assert_eq!(
+        s.outbox().len(),
+        2,
+        "outbox not appended before the replace"
+    );
+    s.run_with(&writer::NoFaults, &req)?;
+    s.ok(json!([task("next")]))?;
+    let ids: Vec<_> = outbox_keys(&s).into_iter().map(|k| (k.0, k.1)).collect();
+    assert_eq!(
+        ids,
+        vec![
+            (json!(1), json!("th-G01")),
+            (json!(2), json!("th-T01")),
+            (json!(3), json!("th-T02"))
+        ]
+    );
+    Ok(())
+}
+
+/// A batch that commits nothing — refused, a no-op or dry-run prune, a
+/// tamper, a replayed `request_id` — appends no outbox line.
+#[test]
+fn ledger_writer_appends_no_outbox_line_when_nothing_commits() -> R {
+    let s = Store::new()?;
+    let before = read(&s.paths.outbox);
+    let secret = task("token ghp_abcdefghijklmnop0123456789");
+    assert!(s.run(json!([secret])).is_err(), "secret written");
+    assert!(
+        s.run(json!([task("t"), {"op": "close", "id": "th-T09", "outcome": "x"}]))
+            .is_err()
+    );
+    s.ok(json!([{"op": "prune"}]))?;
+    s.ok(json!([{"op": "prune", "dry_run": true}]))?;
+    assert!(
+        s.run_with(&LocklessWrite, &s.req(json!([task("t")]), "")?)
+            .is_err()
+    );
+    assert_eq!(read(&s.paths.outbox), before);
+    let req = s.req(json!([task("once")]), "r-1")?;
+    s.run_with(&writer::NoFaults, &req)?;
+    let after = read(&s.paths.outbox);
+    s.run_with(&writer::NoFaults, &req)?;
+    assert_eq!(
+        read(&s.paths.outbox),
+        after,
+        "a replayed request appended again"
+    );
     Ok(())
 }

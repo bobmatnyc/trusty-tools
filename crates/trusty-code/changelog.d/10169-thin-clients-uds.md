@@ -1,0 +1,2 @@
+Fixed
+- `tcode session list|status`, `tcode attach`, `tcode cancel` and `tcode transcript` talk to the running daemon on its Unix socket, starting one if none answers, the same way `tcode tui` does. They no longer spawn a `serve --stdio` child, which knew no session but its own, so `session list` against a live daemon now lists that daemon's sessions. A daemon whose project cannot be verified is an error, not an empty listing. `attach` tails `session.events` and also ends on a cancelled session (#10169).

@@ -21,8 +21,12 @@ const BRIDGE_FLAG: &str = "secrets.bridge.set_agents_may_use";
 const BRIDGE_SET: &str = "secrets.bridge.set";
 /// The bridged `secrets.list`.
 const BRIDGE_LIST: &str = "secrets.bridge.list";
+/// The bridged `secrets.delete`.
+const BRIDGE_DELETE: &str = "secrets.bridge.delete";
 /// An executable path whose file name is the console's.
 const CONSOLE_EXE: &str = "/opt/trusty/bin/trusty-console";
+/// #10394: `SENTINEL_VALUE` under the ruled mask — first 4, last 5, length.
+const BRIDGE_MASK: &str = "SENT…w2Pn6 [32 chars]";
 
 /// `procs_with_me`, with this process running the console's executable.
 fn console_procs() -> Arc<FakeProcs> {
@@ -59,10 +63,14 @@ fn set_params(fx: &Fixture, name: &str, value: &str) -> Value {
     json!({"project": fx.project(), "vault": PROJECT_VAULT, "key": name, "value": value})
 }
 
-/// The flag as the fixture's project backend holds it.
+/// Whether agents may use `name`: no deny in the project backend (#10386).
 fn flag_on(fx: &Fixture, name: &str) -> bool {
-    fx.keychain
-        .agents_may_use(&vault(PROJECT_VAULT), &key(name))
+    !fx.keychain
+        .control_item(
+            ControlItem::AgentDeny,
+            &vault(PROJECT_VAULT),
+            Some(&key(name)),
+        )
         .unwrap()
 }
 
@@ -111,7 +119,7 @@ fn common(record: &Value) -> Value {
     })
 }
 
-/// A started server over `procs`, with `name` seeded unflagged.
+/// A started server over `procs`, with `name` seeded and denied to agents.
 async fn serve(fx: &Fixture, procs: Arc<FakeProcs>, name: &str) -> Running {
     seed(fx, name, SENTINEL_VALUE, false);
     let (state, _grants) = state_with(fx, procs);
@@ -178,7 +186,8 @@ async fn bridge_call_is_audited_allow_and_deny() {
 /// with the console asserting the same verdict. The wire error, the result
 /// and the records must match; the bridge records add `source` and
 /// `agent_parent`. #9067 Architect Q5: `unmappable` (no pid) is an agent, so
-/// ON is `agent_use_refused` and OFF is allowed, as for an agent tree.
+/// removing a deny (`allowed: true`) is `agent_use_refused` and writing one
+/// is allowed, as for an agent tree (#10386).
 /// Red until the bridge method exists.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -269,6 +278,75 @@ async fn bridge_verdict_parity_with_direct_socket_table() {
         direct_records.iter().map(common).collect::<Vec<_>>()
     );
     assert_eq!(bridge_records[0]["source"], "mapped");
+}
+
+/// Why: #10386 Q2 — `set` and `delete` judge the caller as a deny removal
+/// does, so a bridge call must get the direct socket's answer for each
+/// verdict: an agent's `delete` (mapped or unmappable) is
+/// `agent_use_refused`, a person is allowed. #10459: an agent's `set` of a
+/// key with no deny is allowed on both paths. The wire reply, the stored state and the shared record fields
+/// must match. Red when either method skips the bridge verdict.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_set_and_delete_parity_with_direct_socket_table() {
+    // (agent ancestor, source, expected kind)
+    let rows: [(bool, &str, Option<&str>); 3] = [
+        (true, "mapped", Some("agent_use_refused")),
+        (false, "mapped", None),
+        (true, "unmappable", Some("agent_use_refused")),
+    ];
+    let target =
+        |fx: &Fixture| json!({"project": fx.project(), "vault": PROJECT_VAULT, "key": "API_KEY"});
+    for (agent, source, expected) in rows {
+        for (direct_method, bridge_method) in
+            [(method::SET, BRIDGE_SET), (method::DELETE, BRIDGE_DELETE)]
+        {
+            let params = |fx: &Fixture| match direct_method {
+                method::SET => set_params(fx, "NEW_KEY", OPEN_VALUE),
+                _ => target(fx),
+            };
+            let direct_fx = fixture();
+            let tree = if agent { agent_tree() } else { procs_with_me() };
+            let server = serve(&direct_fx, tree, "API_KEY").await;
+            let direct = call(
+                &direct_fx.settings.socket,
+                direct_method,
+                params(&direct_fx),
+            )
+            .await;
+            server.stop().await;
+
+            let bridge_fx = fixture();
+            let server = serve(&bridge_fx, console_procs(), "API_KEY").await;
+            let via_bridge = call(
+                &bridge_fx.settings.socket,
+                bridge_method,
+                bridged(params(&bridge_fx), assertion(agent, source)),
+            )
+            .await;
+            server.stop().await;
+
+            let row = format!("{direct_method} agent={agent} source={source}");
+            // #10459: `NEW_KEY` has no deny, so an agent's `set` is allowed.
+            let expected = if direct_method == method::SET {
+                None
+            } else {
+                expected
+            };
+            assert_eq!(kind(&via_bridge).as_deref(), expected, "{row}");
+            assert_eq!(error_json(&via_bridge), error_json(&direct), "{row}");
+            assert_eq!(via_bridge.result, direct.result, "{row}");
+            for name in ["API_KEY", "NEW_KEY"] {
+                assert_eq!(
+                    holds(&bridge_fx, name),
+                    holds(&direct_fx, name),
+                    "{row} {name}"
+                );
+            }
+            let shapes = |fx: &Fixture| raw_records(fx).iter().map(common).collect::<Vec<_>>();
+            assert_eq!(shapes(&bridge_fx), shapes(&direct_fx), "{row}");
+        }
+    }
 }
 
 /// Why: the server takes the console's verdict only from the verified
@@ -698,7 +776,8 @@ async fn bridge_errors_and_masked_set_never_carry_the_specimen_value() {
     server.stop().await;
 
     assert!(!wire(&stored).contains(SENTINEL_VALUE));
-    assert_eq!(ok(stored)["masked"], mask_secret(SENTINEL_VALUE));
+    // #10394: the bridge returns the ruled mask, pinned as a literal.
+    assert_eq!(ok(stored)["masked"], BRIDGE_MASK);
     for refused in [&malformed, &out_of_scope] {
         assert!(refused.result.is_none());
         assert!(kind(refused).is_some(), "{:?}", refused.error);
@@ -709,21 +788,19 @@ async fn bridge_errors_and_masked_set_never_carry_the_specimen_value() {
     assert!(!captured().contains(SENTINEL_VALUE));
 }
 
-/// Why: DOC-74 §15.6 — `mask_secret` on a specimen shows its first 8
-/// characters and its length, never the whole value; a short one shows its
-/// length only.
+/// Why: DOC-74 §15.6, #10394 — `mask_secret` on a specimen shows its first
+/// 4 and last 5 characters and its length, never the middle; a value under
+/// 10 characters shows its length only.
 /// Test: itself.
 #[test]
 fn mask_secret_never_shows_a_specimen_value_whole() {
     // #9066: the `api` path the console bridge links.
     use crate::api::mask_secret;
     let masked = mask_secret(SENTINEL_VALUE);
-    assert!(!masked.contains(SENTINEL_VALUE), "{masked}");
-    assert_eq!(
-        masked,
-        format!("SENTINEL… [{} chars]", SENTINEL_VALUE.len())
-    );
+    assert!(!masked.contains("INEL-VALUE-9070-zq4Rk8L"), "{masked}");
+    assert_eq!(masked, BRIDGE_MASK);
     assert_eq!(mask_secret("hunter2!"), "[8 chars]");
+    assert_eq!(mask_secret("hunter22!"), "[9 chars]");
 }
 
 /// Why: the Fail-Open Check — a bridge call whose peer pid the kernel did
@@ -1021,7 +1098,7 @@ async fn bridge_backends_match_doctor_and_are_audited_once() {
         .expect("doctor rows")
         .iter()
         // #9069: D15 — doctor lists sync targets; the copy dialog does not.
-        .filter(|row| row["id"] != "github-actions")
+        .filter(|row| row["id"] != "github-actions" && row["id"] != "vercel")
         .map(|row| json!({"id": row["id"], "available": row["available"]}))
         .collect();
     assert_eq!(

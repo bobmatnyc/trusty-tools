@@ -890,6 +890,51 @@ impl crate::core::Embedder for LazySlotEmbedderAdapter {
         self.handle.last_reported_device()
     }
 
+    /// The window the sidecar reported over the wire (#9284).
+    ///
+    /// Why: `index_status`'s `embed_window.window` was `null` on the default
+    /// sidecar path; no window crossed the wire.
+    /// What: forwards `LazyEmbedderHandle::last_reported_window()`; `None`
+    /// before the first embed and for a sidecar that sends none.
+    /// Test: `lazy_handle_last_reported_window_reflects_client`.
+    fn input_window(&self) -> Option<usize> {
+        self.handle.last_reported_window()
+    }
+
+    /// Tokenizer that counts the way the sidecar truncates (#9284).
+    ///
+    /// Why: a window with no tokenizer leaves every chunk unmeasured.
+    /// What: with no reported window, `Ok(None)`. Otherwise the MiniLM
+    /// tokenizer from the fastembed cache, which both sidecars truncate with.
+    /// A cache miss is `Err`, which the embed pass counts as unmeasured.
+    /// Test: `lazy_adapter_without_a_window_has_no_tokenizer`.
+    fn chunking_tokenizer(
+        &self,
+    ) -> std::result::Result<
+        Option<Arc<trusty_common::embedder::ChunkTokenizer>>,
+        trusty_common::embedder::ChunkError,
+    > {
+        if self.handle.last_reported_window().is_none() {
+            return Ok(None);
+        }
+        super::embedder_split::minilm_tokenizer().map(Some)
+    }
+
+    /// The window and tokenizer a chunk is split against (#10504).
+    ///
+    /// Why: the window is reported only after the first answer, which a deferred
+    /// first index parses before.
+    /// What: the reported window, else the MiniLM tokenizer's `max_length()`.
+    /// Test: `a_lazy_adapter_assumes_the_minilm_window_before_the_sidecar_reports`.
+    fn split_window(
+        &self,
+    ) -> std::result::Result<
+        Option<(usize, Arc<trusty_common::embedder::ChunkTokenizer>)>,
+        trusty_common::embedder::ChunkError,
+    > {
+        super::embedder_split::split_window(self.handle.last_reported_window())
+    }
+
     /// Real give-up-signal override (review finding, PR #3560 HIGH fix).
     ///
     /// Why: `FallbackEmbedderAdapter` needs the SAME supervisor's actual

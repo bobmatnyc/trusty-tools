@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to the content's `skills/` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-59 bundled skills.
+62 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -14,6 +14,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `code-review-standards` | agent-reference | no | Adversarial code review rubric — severity taxonomy, the 80% confidence filter, and the APPROVE/WARN/BLOCK verdict protocol. Loaded by the code-critic agent as its primary review reference. |
 | `condition-based-waiting` | agent-reference | no | Replace arbitrary timeouts with condition polling for reliable async tests |
 | `contract-driven-testing` | agent-reference | no | Derive a three-level test pyramid directly from a function's Code Contracts (preconditions, postconditions, invariants) — contract-targeted unit tests, property-based tests, precondition-violation tests, plus the no-contracts fallback and the contract review checklist. Loaded by the code-critic agent. |
+| `data-design` | agent-reference | no | Maps data type and question to chart form, encoding, colour scale, labels and interaction, with accessibility and dark-mode rules. Use when designing or reviewing any chart, dashboard, treemap, legend or table. |
 | `database-migration` | agent-reference | no | Safe patterns for evolving database schemas in production with decision trees and troubleshooting guidance. |
 | `documentation-style` | agent-reference | no | SLD-grounded per-artifact-type documentation style guide: the four-axis Why/What/Test + Spec-References inline model, plus focused conventions for specs, READMEs, files, classes, methods/functions, and block comments. Use when writing or reviewing any documentation artifact. |
 | `env-manager` | agent-reference | no | Environment variable validation, security scanning, and management for Next.js, Vite, React, and Node.js applications |
@@ -21,6 +22,8 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `internal-comms` | agent-reference | no | Framework for writing concise 3P (Progress, Plans, Problems) team updates for executives and stakeholders |
 | `json-data-handling` | agent-reference | no | Working effectively with JSON data structures. |
 | `model-context-builder` | agent-reference | no | MCP (Model Context Protocol) server build and evaluation guide, including local conventions for tool surfaces, config, and testing |
+| `neon-postgres` | agent-reference | no | Neon Postgres on Vercel. Use for any Neon database, any Vercel Postgres or database env var (DATABASE_URL, DATABASE_URL_UNPOOLED, PG*, POSTGRES_*), any Neon preview-branch database, and any drizzle migration, push or baseline run against Neon. |
+| `prototype-then-port` | agent-reference | no | Prototype in Python while the shape changes, then port the settled parts to Rust. Use when starting a tool or script whose behaviour is not settled, when deciding whether a Python prototype should become Rust, or when doing the port. Gives the port trigger, the step path and the checklist; mappings, idioms, parity and pitfalls live in references/. |
 | `requesting-code-review` | agent-reference | no | Dispatch code-reviewer subagent to review implementation against plan or requirements before proceeding |
 | `root-cause-tracing` | agent-reference | no | Systematically trace bugs backward through call stack to find original trigger |
 | `rust-build-performance` | agent-reference | no | Rust build performance: scoped checks, timings, dependency hygiene, shared caches, bounded output, and Apple Silicon scheduling. Use for slow builds or excessive logs. |
@@ -34,7 +37,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `test-quality-inspector` | agent-reference | no | Test quality inspection framework for reviewing test coverage, identifying gaps, and ensuring comprehensive validation |
 | `testing-anti-patterns` | agent-reference | no | Never test mock behavior. Never add test-only methods to production classes. Understand dependencies before mocking. Language-agnostic principles with TypeScript/Jest and Python/pytest examples. |
 | `tm` | pm-reference | yes | trusty-mpm orchestration model overview — agents, skills, delegation |
-| `tm-adr` | documentation | yes | Architecture Decision Records (ADRs) — formal first-class documentation artifact for significant, hard-to-reverse architectural decisions with consistency vetting |
+| `tm-adr` | documentation | yes | Architecture Decision Records (ADRs) — create, supersede and amend decision records under docs/adr/ with consistency vetting; bootstrap a project's ADR setup (init) and report whether its check-script copy matches the deployed skill (status) |
 | `tm-agent-architecture` | pm-workflow | no | Official vs custom agent workflow — how to safely update trusty-mpm's compose-chain agent catalog |
 | `tm-architect-setup` | pm-reference | yes | Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect. |
 | `tm-bug-reporting` | pm-workflow | no | Bug reporting protocol for the PM and agents — routes through the MCP-native list_recent_errors / preview_bug_report / report_bug pipeline |
@@ -50,7 +53,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-memory-import` | pm-workflow | yes | Run a kuzu-memory import into trusty-memory with the refused-row review — the deterministic `trusty-memory import kuzu` runbook, the masked `--dry-run --export-refusals` export, the `import kuzu review` record, status and finish loop, and the `--review-ledger` apply, behind the READY FOR IMPORT / GO gate. The reviewer reads masked rows only. |
 | `tm-postmortem` | pm-workflow | yes | Analyze session errors captured across trusty-* daemons and route them through the bug-reporting pipeline |
 | `tm-prose-style` | pm-workflow | yes | Worked examples and banned-phrase inventories behind the Write Plainly voice rules — the BEFORE/AFTER embellishment example, the "instances observed so far" lists, and the ASD-STE-100 spirit adoption. The rules themselves are resident in the output style and in BASE-AGENT.md; this is the evidence behind them. |
-| `tm-secrets` | pm-reference | yes | Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. The tm secrets CLI does not ship yet. |
+| `tm-secrets` | pm-reference | yes | Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. Which tm secrets verbs ship in which release. |
 | `tm-session-management` | pm-workflow | yes | PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration |
 | `tm-session-pause` | pm-workflow | yes | Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path |
 | `tm-session-resume` | pm-workflow | yes | Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context |

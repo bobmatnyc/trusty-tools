@@ -20,6 +20,10 @@ pub(crate) mod adopt_worktree;
 pub(crate) mod agent;
 // #9822: `tm architect <verb>`, daemon-less.
 pub(crate) mod architect;
+// #10063: `tm architect dashboard <verb>`, in-process under the store lock.
+pub(crate) mod architect_dashboard;
+// #9167: the poller's wakes as trusty-events `message` events.
+pub(crate) mod architect_messages;
 pub(crate) mod auth;
 // #6274: `tm` in a plain directory initializes a repository there instead of
 // refusing; both the guided default and `tm launch` call it before detection.
@@ -35,6 +39,8 @@ pub(crate) mod daemon_sandbox;
 // #9695: an address whose connect fails in the kernel, on every host.
 #[cfg(test)]
 pub(crate) mod dead_addr;
+// #9758: `tm dbatg` — the PM ledger writer, daemon first, in-process fallback.
+pub(crate) mod dbatg;
 // #6288: one-connection daemon-socket mocks for the transport tests.
 pub(crate) mod delete;
 #[cfg(test)]
@@ -45,9 +51,12 @@ pub(crate) mod divert_check;
 pub(crate) mod divert_worker;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 pub(crate) mod egress_guard;
+// #10447: the Architect main-thread allow arm.
+pub(crate) mod egress_guard_architect;
 // #8454 S3: the Bash arm — a family host or program in a Bash command.
 pub(crate) mod egress_guard_bash;
 pub(crate) mod egress_guard_families;
+pub(crate) mod egress_guard_slack_read;
 // #8433 P0: the channel-taint arm of the egress guard.
 pub(crate) mod egress_guard_taint;
 // #8454 VC: the egress guard's daemon verdict client.
@@ -59,6 +68,7 @@ pub(crate) mod egress_verdict_client;
 pub(crate) mod build_lease;
 // #9239: the read-only `status` and `--census` views of `tm build-lease`.
 pub(crate) mod build_lease_status;
+pub(crate) mod build_lease_target;
 pub(crate) mod doctor_builder_cap;
 // #8454 S2c: the read-only channel route policy rows.
 pub(crate) mod doctor_channels;
@@ -66,6 +76,11 @@ pub(crate) mod doctor_channels;
 pub(crate) mod doctor_channels_egress;
 // #8451: the slot pool's volume against its eviction threshold.
 pub(crate) mod doctor_slot_pool;
+// #10212: a bounded entry count of each shared target's and slot's debug/deps.
+pub(crate) mod doctor_deps_budget;
+pub(crate) mod doctor_session_target_dir;
+// #10212: `tm doctor --rotate-deps`, the operator rotation of an oversized `debug/`.
+pub(crate) mod doctor_rotate_deps;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
 // daemon is one appended reachability row, never a precondition.
 pub(crate) mod doctor_daemon_row;
@@ -147,6 +162,8 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 // #8782: the per-project prune-worktrees preview and its scope checks.
 pub(crate) mod prune_preview;
+// #7619: the streamed prune-worktrees reader.
+pub(crate) mod prune_stream_client;
 // #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
 pub(crate) mod memory_auto_import;
 // #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their

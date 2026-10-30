@@ -358,6 +358,22 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         crate::core::process::pane_claude(name)
     }
 
+    /// #10127: the owned pane's pid through this driver's tmux, then the
+    /// tri-state walk; an unreadable pid is `Unknown`.
+    /// Test: `a_harness_in_a_pane_holds_it_only_in_the_foreground`.
+    fn pane_harness(
+        &self,
+        _name: &str,
+        pane_id: &str,
+        harness: &str,
+    ) -> crate::core::process::PaneClaude {
+        match self.driver.pane_pid(pane_id) {
+            // #10136: a stopped or background harness does not hold the pane.
+            Ok(pid) => crate::core::pane_foreground::harness_holds_pane(pid, harness),
+            Err(_) => crate::core::process::PaneClaude::Unknown,
+        }
+    }
+
     /// Overrides the no-op trait default so the production path actually calls
     /// `tmux set-environment` (#2157 item 1).
     fn set_environment(&self, name: &str, key: &str, value: &str) -> Result<(), ManagedError> {
@@ -522,6 +538,11 @@ impl ManagedTmuxDriver for FakeNoopTmuxDriver {
 
     fn capture_pane(&self, _n: &str, _p: &str, _lines: usize) -> Result<String, ManagedError> {
         Ok(String::new())
+    }
+
+    /// #10127: every pane this driver mints runs its harness.
+    fn pane_harness(&self, _n: &str, _p: &str, _h: &str) -> crate::core::process::PaneClaude {
+        crate::core::process::PaneClaude::Present
     }
 }
 

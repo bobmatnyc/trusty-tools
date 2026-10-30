@@ -903,11 +903,10 @@ fn find_claude_json_files(root: &Path) -> Vec<String> {
 /// the spawn path is actually entered on every platform.
 #[cfg(unix)]
 fn plant_fake_claude(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("claude");
-    std::fs::write(&bin, b"#!/bin/sh\nexit 0\n").expect("write fake claude");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod fake claude");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin, b"#!/bin/sh\nexit 0\n")
+        .expect("write fake claude");
 }
 
 // Issue #4206 TEST 1 — THE ISOLATION INVARIANT, locked at the REAL call chain
@@ -1457,6 +1456,61 @@ fn spawn_errors_when_the_line_is_refused() {
     assert!(
         err.to_string().contains("refusing to launch into pane"),
         "the refusal must name the pane it declined: {err}"
+    );
+}
+
+/// #9025: the daemon's launch names the session after its tmux session.
+#[test]
+#[serial_test::serial]
+fn spawn_names_the_remote_session_after_its_tmux_session() {
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    adapter
+        .spawn("tm-dogfood", home.home(), "task", TEST_SESSION_ID, &[])
+        .expect("spawn must succeed with claude on PATH");
+    let spec = sent_spec(&only_line(&fake));
+    assert!(
+        has_flag_pair(&spec, "--name", "tm-dogfood"),
+        "{:?}",
+        spec.args
+    );
+}
+
+/// #9025: a resume names the session after the tmux session it runs in.
+#[test]
+#[serial_test::serial]
+fn spawn_resume_names_the_remote_session_after_its_tmux_session() {
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let cwd = home.home().join("ws");
+    std::fs::create_dir_all(&cwd).expect("mkdir ws");
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    adapter
+        .spawn_resume(
+            "tm-dogfood",
+            Some("%3"),
+            &cwd,
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect("resume must succeed");
+    let pane_sends = fake.pane_sends.lock().expect("pane send log").clone();
+    let spec = sent_spec(&pane_sends[0].2);
+    assert!(
+        has_flag_pair(&spec, "--name", "tm-dogfood"),
+        "{:?}",
+        spec.args
     );
 }
 
@@ -2129,4 +2183,33 @@ fn inplace_resume_command_refuses_when_the_prompt_file_cannot_be_written() {
         .map(|_| ())
         .expect_err("an in-place PM relaunch without its prompt must be refused");
     assert_refused(err, &not_a_dir, &fake);
+}
+
+/// #10127: the in-place relaunch of an Architect carries the production deny
+/// as ONE `--settings`, merged into the owner file; a PM relaunch keeps the
+/// owner file argv and its trim. Before the fix the Architect argv was the
+/// bare owner file.
+#[test]
+fn an_architect_inplace_relaunch_carries_the_lockdown() {
+    use crate::core::architect_lockdown::assert_production_deny;
+    use crate::core::session_profile::SessionProfile;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let carrier = tmp.path().join("owner.json");
+    std::fs::write(&carrier, r#"{"deniedMcpServers":[{"serverName":"x"}]}"#).expect("carrier");
+    for owner in [None, Some(carrier.as_path())] {
+        let args = super::inplace_tail_args(SessionProfile::Architect, owner).expect("argv");
+        assert_production_deny(&args);
+    }
+    let pm = super::inplace_tail_args(SessionProfile::Pm, Some(&carrier)).expect("argv");
+    assert_eq!(
+        pm,
+        [
+            "--settings",
+            &carrier.display().to_string(),
+            "--disallowedTools",
+            "Workflow,DesignSync"
+        ]
+    );
+    let missing = tmp.path().join("gone.json");
+    assert!(super::inplace_tail_args(SessionProfile::Architect, Some(&missing)).is_err());
 }

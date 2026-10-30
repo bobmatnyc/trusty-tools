@@ -201,7 +201,7 @@ pub(crate) async fn deny_main_checkout_head_move(
         Some(Err(reason)) => reason,
         Some(Ok((verb, target, root))) => {
             let keys = [root.as_path(), target.as_path()];
-            let live =
+            let (live, _) =
                 pm_guard_dispatch::live_shared_tree_writers_in(url, session_id, &keys, payload)
                     .await;
             if live.is_empty() {

@@ -7,8 +7,8 @@
 //! it calls, with what params, and how it turns the daemon's answers into
 //! `trusty_code_tui::ReplEvent`s — but that contract is now framed JSON-RPC
 //! over a `0600` Unix socket, so the fixture is a REAL daemon
-//! (`trusty_code::serve::uds::run_daemon_on`) with its HTTP listener switched
-//! off, plus a hand-rolled stub socket for the two scenarios that need a
+//! (`trusty_code::serve::uds::run_daemon_on`), which binds no TCP listener,
+//! plus a hand-rolled stub socket for the two scenarios that need a
 //! failure the real daemon never produces on purpose.
 //!
 //! What: `tui_engine_end_to_end_with_http_port_closed` is the load-bearing one
@@ -18,14 +18,12 @@
 //! reconnect-exhaustion failure surface, and the workstream-activation wire
 //! field names.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -66,9 +64,8 @@ impl RealDaemon {
                 binding,
                 &serve_socket,
                 Some(&serve_data),
-                // The whole point: no TCP listener exists for anything to fall
-                // back to.
-                None,
+                // The whole point: the daemon binds no TCP listener (#6637), so
+                // nothing exists for a client to fall back to.
                 async move {
                     let _ = stopped.await;
                 },
@@ -174,9 +171,9 @@ fn drain(rx: &mut UnboundedReceiver<ReplEvent>) -> Vec<ReplEvent> {
 
 /// **The proof that no TUI path falls back to HTTP.**
 ///
-/// The daemon binds its socket and nothing else — `run_daemon_on` is called
-/// with `http_port: None`, so there is no loopback port in this process for a
-/// client to reach even by accident. The engine then drives a full session
+/// The daemon binds its socket and nothing else — `run_daemon_on` has no TCP
+/// listener at all since #6637, so there is no loopback port in this process
+/// for a client to reach even by accident. The engine then drives a full session
 /// through: `setup` creates one, a `session.send` writes into it, and the
 /// engine's own `session.events` stream tails it back with the ring-buffer
 /// replay. A regression that reintroduced an HTTP call anywhere on this path
@@ -355,14 +352,10 @@ impl StubDaemon {
 
     fn start_inner(answers: Value, stream_frames: Vec<Value>, serve_claim: bool) -> Self {
         let dir = tempfile::tempdir().expect("socket tempdir");
-        let socket = dir.path().join("stub.sock");
-        // `connect_hardened` refuses a socket whose containing directory is
-        // wider than `0700`, and `tempfile` creates one at the process umask.
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("harden the stub socket directory");
-        let listener = UnixListener::bind(&socket).expect("bind the stub socket");
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-            .expect("harden the stub socket");
+        // #7215: `connect_hardened` refuses anything but a 0700 dir and a 0600
+        // socket; the shared stub bind produces exactly that.
+        let (listener, socket) = trusty_common::uds::test_support::bind_hardened_stub(dir.path())
+            .expect("bind the hardened stub socket");
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = seen.clone();
         let requests: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));

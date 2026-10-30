@@ -199,7 +199,7 @@ fn tcp_listeners(pid: u32) -> Vec<String> {
 /// Why `--addr 127.0.0.1:0`: before S3a that asked for an ephemeral TCP port,
 /// so the pre-S3a binary fails on the listener assertion rather than on the
 /// host's own daemon answering 7880. After S3a the flag is accepted and
-/// ignored (owner ruling Q1).
+/// ignored (#6288).
 /// Test: this function IS the test.
 #[test]
 fn a_sandbox_daemon_holds_no_tcp_listener_and_publishes_no_address() {
@@ -247,7 +247,7 @@ fn a_sandbox_daemon_holds_no_tcp_listener_and_publishes_no_address() {
 /// Why: a daemon that kept the bind without the `AddrInUse` fallback would fail
 /// to start here; one that kept the fallback would listen on an ephemeral port.
 /// The launchd plist on the host still passes `--addr 127.0.0.1:7880`, so the
-/// flag must parse and be ignored, never be an error (owner ruling Q1).
+/// flag must parse and be ignored, never be an error (#6288).
 /// Test: this function IS the test.
 #[test]
 fn a_busy_addr_flag_is_ignored_and_logged_once() {

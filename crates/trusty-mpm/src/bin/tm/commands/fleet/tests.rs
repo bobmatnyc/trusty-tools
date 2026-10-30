@@ -563,6 +563,8 @@ const LOCAL_TEMPLATES: &[&str] = &[
     "local/owner/dream-log.md",
     "local/mandates/README.md",
     "local/mandates/example.toml",
+    // See #10161: the instance config seed.
+    "local/architect.json",
 ];
 
 /// The checkout's Architect seed, read from content once (#9132).
@@ -817,9 +819,36 @@ fn the_relay_scripts_and_the_voice_guide_are_seeded() {
         let meta = std::fs::metadata(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert_eq!(meta.permissions().mode() & 0o111 != 0, executable, "{rel}");
     }
-    for rel in ["local/users", "local/briefs"] {
+    for rel in ["local/users", "local/briefs", "local/improvements"] {
         assert!(dir.join(rel).is_dir(), "{rel} is not created");
     }
+}
+
+/// #10161: `tm fleet init` seeds the config loader beside the scripts and the
+/// `local/architect.json` seed, which parses and carries no owner values.
+#[test]
+fn the_architect_config_loader_and_seed_are_seeded() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let loader = std::fs::read_to_string(dir.join("scripts/architect_config.py"))
+        .expect("scripts/architect_config.py is seeded");
+    assert!(loader.contains("def load("), "not the config loader");
+    let meta = std::fs::metadata(dir.join("scripts/architect_config.py")).unwrap();
+    assert_eq!(
+        meta.permissions().mode() & 0o111,
+        0,
+        "a module, not a command"
+    );
+    let text = std::fs::read_to_string(dir.join("local/architect.json"))
+        .expect("local/architect.json is seeded");
+    let seed: serde_json::Value = serde_json::from_str(&text).expect("the seed is JSON");
+    assert_eq!(seed["owner_name"], "", "{text}");
+    assert_eq!(seed["memory_palace"], "", "{text}");
+    assert_eq!(seed["dashboard_port"], 7890, "{text}");
+    assert_eq!(seed["repos"], serde_json::json!({}), "{text}");
+    assert_eq!(seed["caps"], serde_json::json!({}), "{text}");
 }
 
 /// Acceptance 3: with no `events.jsonl` the pass is a full poll, and the
@@ -874,6 +903,43 @@ fn the_seeded_instructions_never_hard_code_the_poller_session() {
         seeded(".claude/skills/tm-fleet-check/SKILL.md")
             .contains(r#"has-session -t "=$(tmux display-message -p '#S')-poll""#)
     );
+}
+
+/// #10263 (D73): the seeded provision skill tells the PM to write each hook
+/// command as an explicit interpreter plus a quoted absolute path, and the
+/// seeded `notify-supervisor.sh` re-runs itself through `/bin/bash`, never by
+/// a direct `#!` exec of `$0`.
+#[test]
+fn seeded_hook_commands_run_through_an_explicit_interpreter() {
+    let seeded = |dest: &str| {
+        seeded_files()
+            .into_iter()
+            .find(|f| f.dest == dest)
+            .unwrap_or_else(|| panic!("{dest} is not seeded"))
+            .contents
+    };
+    let skill = seeded(".claude/skills/architect-project-provision/SKILL.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        r#"`/bin/bash "<abs>/scripts/notify-supervisor.sh"`"#,
+        r#"`/bin/sh "<abs>/scripts/datg-hook.sh" <session>`"#,
+    ] {
+        assert!(skill.contains(needle), "provision skill lacks {needle}");
+    }
+    assert!(!skill.contains("command is the absolute path"), "{skill}");
+    let notify = seeded("scripts/notify-supervisor.sh");
+    for needle in [
+        r#"  timeout 4 /bin/bash "$0" "$@""#,
+        r#"  gtimeout 4 /bin/bash "$0" "$@""#,
+    ] {
+        assert!(
+            notify.contains(needle),
+            "notify-supervisor.sh lacks {needle}"
+        );
+    }
+    assert!(!notify.contains(r#"timeout 4 "$0" "$@""#), "{notify}");
 }
 
 /// The fail-closed arm: a start script that fails is an error naming its
@@ -1098,23 +1164,24 @@ fn every_architect_skill_asset_is_seeded() {
     }
 }
 
-/// #8981: the Architect line selects its conversation and ends in a bare
-/// `--remote-control`, for a resume and for a fresh start alike.
+/// #8981: the Architect line selects its conversation and ends in
+/// `--remote-control`, for a resume and for a fresh start alike. #9025: the
+/// Remote Control session carries the tmux session's name.
 #[test]
 fn the_architect_line_resumes_and_enables_remote_control() {
     use trusty_mpm::core::architect_conversation::ConversationStart;
     let id = "3f2b8c1e-5d4a-4b6f-9e2d-1a7c0b9e8f61".to_owned();
     assert_eq!(
-        launch::architect_args(&ConversationStart::Resume(id.clone())),
-        ["--resume", id.as_str(), "--remote-control"]
+        launch::architect_args(&ConversationStart::Resume(id.clone()), "tm-arch"),
+        ["--resume", id.as_str(), "--remote-control", "tm-arch"]
     );
     let fresh = ConversationStart::Fresh {
         id: id.clone(),
         reason: Some("corrupt".to_owned()),
     };
     assert_eq!(
-        launch::architect_args(&fresh),
-        ["--session-id", id.as_str(), "--remote-control"]
+        launch::architect_args(&fresh, "tm-arch"),
+        ["--session-id", id.as_str(), "--remote-control", "tm-arch"]
     );
 }
 
@@ -1130,7 +1197,9 @@ fn a_resume_fails_only_on_a_proven_absent_claude() {
         project_dir: PathBuf::from("/arch"),
         armed_at: String::new(),
     });
-    let unbound = Err("no `claude` process appeared".to_owned());
+    let unbound = Err(launch::Unbound::NoClaude(
+        "no `claude` process appeared".to_owned(),
+    ));
     let exited = || {
         let secs = RESUME_SETTLE.as_secs();
         ResumeCheck::Failed(format!("`claude` exited within {secs} s of starting"))
@@ -1375,6 +1444,126 @@ fn every_template_asset_is_seeded() {
         checked,
         LOCAL_TEMPLATES.len() + 1,
         "templates found: {checked}"
+    );
+}
+
+/// #10161: every script asset is seeded byte-equal at `scripts/<name>`, so a
+/// script added under `src/assets/architect/scripts/` without an `embedded!`
+/// row fails, and every seeded script row has an asset.
+#[test]
+fn every_script_asset_is_seeded() {
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("crates/trusty-mpm/src/assets/architect/scripts");
+    let files = seeded_files();
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        // Finder metadata and a local `__pycache__/`, skipped like the drift gate skips them.
+        if path.is_dir() || name == ".DS_Store" {
+            continue;
+        }
+        let dest = format!("scripts/{name}");
+        let seeded = files
+            .iter()
+            .find(|f| f.dest == dest)
+            .unwrap_or_else(|| panic!("{dest}: a script asset tm fleet init does not seed"));
+        assert_eq!(
+            seeded.contents,
+            std::fs::read_to_string(&path).unwrap(),
+            "{dest}"
+        );
+        checked += 1;
+    }
+    let rows = files
+        .iter()
+        .filter(|f| f.dest.starts_with("scripts/"))
+        .count();
+    assert_eq!(checked, rows, "script assets {checked}, seeded rows {rows}");
+}
+
+/// #10161: every dashboard schema asset is seeded byte-equal at
+/// `schemas/dashboard/<name>`, where `dashboard_schema.py` reads it, and every
+/// seeded schema row has an asset.
+#[test]
+fn every_schema_asset_is_seeded() {
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("crates/trusty-mpm/src/assets/architect/schemas/dashboard");
+    let files = seeded_files();
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if path.is_dir() || name == ".DS_Store" {
+            continue;
+        }
+        let dest = format!("schemas/dashboard/{name}");
+        let seeded = files
+            .iter()
+            .find(|f| f.dest == dest)
+            .unwrap_or_else(|| panic!("{dest}: a schema asset tm fleet init does not seed"));
+        assert!(!seeded.executable, "{dest}: a schema is not executable");
+        assert_eq!(
+            seeded.contents,
+            std::fs::read_to_string(&path).unwrap(),
+            "{dest}"
+        );
+        checked += 1;
+    }
+    let rows = files
+        .iter()
+        .filter(|f| f.dest.starts_with("schemas/"))
+        .count();
+    assert!(checked > 0, "no schema assets under {}", root.display());
+    assert_eq!(checked, rows, "schema assets {checked}, seeded rows {rows}");
+}
+
+/// #10161: every dashboard page asset (the page, the Live view and the reader
+/// libraries) is seeded byte-equal at `templates/dashboard/<rel>`, where
+/// `dashboard-serve.py` reads it, and every seeded page row has an asset.
+#[test]
+fn every_dashboard_asset_is_seeded() {
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("crates/trusty-mpm/src/assets/architect/dashboard");
+    let files = seeded_files();
+    let mut stack = vec![root.clone()];
+    let mut checked = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.file_name().is_some_and(|n| n == ".DS_Store") {
+                continue;
+            }
+            let rel = path.strip_prefix(&root).unwrap().to_string_lossy();
+            let dest = format!("templates/dashboard/{rel}");
+            let seeded = files
+                .iter()
+                .find(|f| f.dest == dest)
+                .unwrap_or_else(|| panic!("{dest}: a dashboard asset tm fleet init does not seed"));
+            assert!(!seeded.executable, "{dest}: a page file is not executable");
+            assert_eq!(
+                seeded.contents,
+                std::fs::read_to_string(&path).unwrap(),
+                "{dest}"
+            );
+            checked += 1;
+        }
+    }
+    let rows = files
+        .iter()
+        .filter(|f| f.dest.starts_with("templates/dashboard/"))
+        .count();
+    assert!(checked > 0, "no dashboard assets under {}", root.display());
+    assert_eq!(
+        checked, rows,
+        "dashboard assets {checked}, seeded rows {rows}"
     );
 }
 

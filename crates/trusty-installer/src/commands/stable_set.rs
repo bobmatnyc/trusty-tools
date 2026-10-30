@@ -104,6 +104,20 @@ pub struct StableMember {
     /// named explicitly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub soft: bool,
+    /// Why (#10130): trusty-events is internal and is not published to
+    /// crates.io (owner ruling 2026-10-02). `tctl` cannot fetch it, so a soft
+    /// pull-in only produced a doomed registry fetch, a misleading "skipped"
+    /// line and a permanent `incomplete` status.
+    /// What: a static, compile-time marker. An implicit selection drops the
+    /// member ([`split_internal`]), naming it explicitly is refused, `tctl
+    /// status` does not count it missing, `tctl upgrade` makes no lookup for it
+    /// and the picker hides it. No probe or network result ever sets it.
+    /// Removing the one `.mark_internal()` call in [`stable_set`] ships the
+    /// member like any other.
+    /// Test: `tests::internal_flag_is_only_trusty_events`,
+    /// `tests::soft_internal_member_is_dropped_from_the_selection`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub internal: bool,
 }
 
 impl StableMember {
@@ -132,7 +146,14 @@ impl StableMember {
             manage: manage_strategy_for(binary, daemon),
             required,
             soft: false,
+            internal: false,
         }
+    }
+
+    /// Mark this member internal — see [`StableMember::internal`] (#10130).
+    fn mark_internal(mut self) -> Self {
+        self.internal = true;
+        self
     }
 
     /// Every binary `cargo install <crate_name>` puts in the bin dir.
@@ -401,6 +422,10 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 /// still installs every other member. It sorts before trusty-console,
 /// which reads it, so the console finds the bus already running.
 ///
+/// #10130 — trusty-events is also INTERNAL ([`StableMember::internal`]): it
+/// stays in this list so `status`, `doctor` and the lifecycle verbs still see a
+/// locally built bus, but `tctl` never installs or upgrades it.
+///
 /// NOTE for future editors: a separate lane may add `trusty-agents` to this
 /// set as REQUIRED — insert it with `required: true` in topological position;
 /// no other code needs to change (`install`/`verify_tail`'s all_ok/verified
@@ -409,7 +434,7 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 /// Test: `tests::stable_set_is_pinned`, `tests::tga_crate_and_binary_names`,
 /// `tests::daemon_flags_match_spec`, `tests::mpm_uses_own_verb`,
 /// `tests::required_vs_optional_classification`,
-/// `tests::selecting_a_producer_softly_selects_trusty_events`.
+/// `tests::internal_flag_is_only_trusty_events`.
 pub fn stable_set() -> Vec<StableMember> {
     vec![
         StableMember::new("trusty-search", "trusty-search", true, true),
@@ -418,7 +443,9 @@ pub fn stable_set() -> Vec<StableMember> {
         StableMember::new("trusty-review", "trusty-review", true, true),
         StableMember::new("tga", "tga", false, false),
         // #10042: the event bus — a launchd daemon, OPTIONAL, no hard edge.
-        StableMember::new("trusty-events", "trusty-events", true, false),
+        // #10130: internal, not published to crates.io (owner ruling
+        // 2026-10-02). Drop `.mark_internal()` once it publishes.
+        StableMember::new("trusty-events", "trusty-events", true, false).mark_internal(),
         StableMember::new("trusty-console", "trusty-console", true, false),
         StableMember::new("trusty-mpm", "trusty-mpm", true, true),
         // #5805: the control plane installs itself. Last, non-daemon, OPTIONAL
@@ -501,6 +528,30 @@ pub struct TransitiveSelection {
     pub unknown: Vec<String>,
     /// Members pulled in because something explicitly requested requires them.
     pub added: Vec<super::dependency_graph::AddedMember>,
+    /// #10130: internal members an implicit selection dropped (a producer's
+    /// soft bus, or the full set). `tctl install` names each in one info line.
+    pub internal_skipped: Vec<String>,
+    /// #10130: requested names that resolve to an internal member. Like
+    /// `unknown`, a non-empty list leaves `members`/`added` empty.
+    pub unavailable: Vec<String>,
+}
+
+/// Split internal members out of an implicit selection.
+///
+/// Why (#10130): `tctl` cannot install an unpublished member, so a selection
+/// that only pulled one in must drop it before any fetch. The decision reads
+/// the static [`StableMember::internal`] flag and nothing else: a crates.io
+/// probe fails open (`check_crates_io` answers `None` for a 404 and for a
+/// network error alike), so reading a probe would skip a published member on a
+/// flaky network.
+/// What: partitions `members` on `internal`, keeping order; returns the kept
+/// members and the crate names of the dropped ones. It takes no probe,
+/// `Outcome` or I/O argument, so no error arm can reach it.
+/// Test: `tests::soft_internal_member_is_dropped_from_the_selection`,
+/// `install::tests::network_failure_never_skips_a_published_member`.
+pub fn split_internal(members: Vec<StableMember>) -> (Vec<StableMember>, Vec<String>) {
+    let (internal, kept): (Vec<_>, Vec<_>) = members.into_iter().partition(|m| m.internal);
+    (kept, internal.into_iter().map(|m| m.crate_name).collect())
 }
 
 /// Resolve a caller-named subset AND expand it to the transitive closure of
@@ -528,18 +579,41 @@ pub struct TransitiveSelection {
 /// `unknown` short-circuits: when any name is unrecognised, `members`/`added`
 /// are left empty (mirrors [`select_members`]'s existing "unknown wins"
 /// caller contract used by `install.rs`).
+/// #10130: a name that resolves to an internal member short-circuits the same
+/// way, into `unavailable`. An internal member reached implicitly (soft edge or
+/// the empty-names full set) is dropped by [`split_internal`] and listed in
+/// `internal_skipped`, never in `members` or `added`.
 ///
 /// Test: `tests::select_transitive_expands_mpm`,
 /// `tests::select_transitive_reports_unknown`,
 /// `tests::select_transitive_preserves_order_with_explicit_deps`,
-/// `tests::selecting_a_producer_softly_selects_trusty_events`.
+/// `tests::soft_internal_member_is_dropped_from_the_selection`,
+/// `tests::explicit_internal_member_is_reported_unavailable`.
 pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
-    let all = stable_set();
+    select_members_transitive_in(stable_set(), names)
+}
+
+/// [`select_members_transitive`] over a caller-supplied member list.
+///
+/// Why (#10130): the only soft target in the shipped set is internal, so no
+/// test through the public entry point can observe a soft, kept member. Tests
+/// pass the shipped set with the internal flag cleared.
+/// What: the whole body of the public function; it takes `all` where that
+/// function passes [`stable_set`].
+/// Test: `tests::a_softly_pulled_member_is_soft_and_a_named_one_is_not`.
+pub(crate) fn select_members_transitive_in(
+    all: Vec<StableMember>,
+    names: &[String],
+) -> TransitiveSelection {
     if names.is_empty() {
+        // #10130: the full set never fetches an internal member either.
+        let (members, internal_skipped) = split_internal(all);
         return TransitiveSelection {
-            members: all,
+            members,
             unknown: Vec::new(),
             added: Vec::new(),
+            internal_skipped,
+            unavailable: Vec::new(),
         };
     }
 
@@ -557,18 +631,27 @@ pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
         .cloned()
         .collect();
 
-    if !unknown.is_empty() {
+    // #10130: naming an internal member is refused, never silently skipped.
+    let unavailable: Vec<String> = names
+        .iter()
+        .filter(|n| all.iter().any(|m| m.internal && m.matches_name(n)))
+        .cloned()
+        .collect();
+
+    if !unknown.is_empty() || !unavailable.is_empty() {
         return TransitiveSelection {
             members: Vec::new(),
             unknown,
             added: Vec::new(),
+            internal_skipped: Vec::new(),
+            unavailable,
         };
     }
 
     let closure = super::dependency_graph::transitive_closure(&explicit);
     // #10042: a producer's bus joins as a SOFT, optional member.
     let soft = super::dependency_graph::soft_additions(&closure);
-    let members: Vec<StableMember> = all
+    let selected: Vec<StableMember> = all
         .into_iter()
         .filter(|m| closure.contains(&m.crate_name) || soft.contains(&m.crate_name))
         .map(|mut m| {
@@ -579,16 +662,36 @@ pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
             m
         })
         .collect();
+    // #10130: an internal member reached here was pulled in, not named.
+    let (members, internal_skipped) = split_internal(selected);
     let mut added = super::dependency_graph::added_members(&explicit, &closure);
     added.extend(super::dependency_graph::soft_added_members(
         &explicit, &closure, &soft,
     ));
+    added.retain(|a| !internal_skipped.contains(&a.crate_name));
 
     TransitiveSelection {
         members,
         unknown: Vec::new(),
         added,
+        internal_skipped,
+        unavailable: Vec::new(),
     }
+}
+
+/// The shipped set with trusty-events published (`internal` cleared).
+///
+/// Why (#10130): gives tests a soft member that survives [`split_internal`],
+/// so the #10042 soft handling is observable again.
+/// What: [`stable_set`] with the one `internal` flag cleared; nothing else.
+/// Test: `tests::a_softly_pulled_member_is_soft_and_a_named_one_is_not`.
+#[cfg(test)]
+pub(crate) fn stable_set_with_published_bus() -> Vec<StableMember> {
+    let mut set = stable_set();
+    for m in set.iter_mut().filter(|m| m.internal) {
+        m.internal = false;
+    }
+    set
 }
 
 #[cfg(test)]
@@ -618,44 +721,171 @@ mod tests {
         );
     }
 
-    /// Why (#10042, ADR-0065 decision 4): `tctl` installs trusty-events WITH
-    /// each producer as a SOFT member. With no edge at all, `tctl install
-    /// trusty-mpm` never installed the bus its producers push to; with a hard
-    /// edge, a host that cannot install the bus would fail the producer's
-    /// install.
-    /// What: selecting a producer (trusty-mpm, trusty-analyze) also selects
-    /// trusty-events, as an OPTIONAL daemon, and a non-producer (tga) does not.
+    /// Why (#10130): a producer still softly uses trusty-events (#10042), but
+    /// the bus is internal and unpublished, so `tctl` must not fetch it. It was
+    /// added as a member row, fetched from the registry, and reported
+    /// "skipped (optional, no prebuilt for this platform)".
+    /// What: selecting a producer (trusty-mpm, trusty-analyze) puts the bus in
+    /// neither `members` nor `added`, lists it once in `internal_skipped`, and
+    /// leaves `unavailable` empty; a non-producer (tga) skips nothing. A soft
+    /// member that is NOT internal survives [`split_internal`] unchanged.
     /// Test: This is the test.
     #[test]
-    fn selecting_a_producer_softly_selects_trusty_events() {
+    fn soft_internal_member_is_dropped_from_the_selection() {
         for producer in ["trusty-mpm", "trusty-analyze"] {
             let sel = select_members_transitive(&[producer.to_owned()]);
-            let events = sel
-                .members
-                .iter()
-                .find(|m| m.crate_name == "trusty-events")
-                .unwrap_or_else(|| {
-                    panic!("`tctl install {producer}` must also select trusty-events: {sel:?}")
-                });
-            assert!(!events.required, "a soft member is never REQUIRED");
-            assert!(events.daemon, "trusty-events is a supervised daemon");
-            assert!(events.soft, "selected through a soft edge");
             assert!(
-                sel.added
-                    .iter()
-                    .any(|a| a.crate_name == "trusty-events" && a.soft),
-                "the bus is reported as a soft addition: {sel:?}"
+                sel.members.iter().all(|m| m.crate_name != "trusty-events"),
+                "`tctl install {producer}` must not select the internal bus: {sel:?}"
             );
+            assert!(
+                sel.added.iter().all(|a| a.crate_name != "trusty-events"),
+                "no `adding trusty-events` line: {sel:?}"
+            );
+            assert_eq!(sel.internal_skipped, vec!["trusty-events".to_owned()]);
+            assert!(sel.unavailable.is_empty(), "{sel:?}");
         }
-        // Named explicitly, the bus is the operator's request, not soft.
-        let named =
-            select_members_transitive(&["trusty-mpm".to_owned(), "trusty-events".to_owned()]);
-        assert!(named.members.iter().all(|m| !m.soft), "{named:?}");
         let tga = select_members_transitive(&["tga".to_owned()]);
         assert!(
-            tga.members.iter().all(|m| m.crate_name != "trusty-events"),
+            tga.internal_skipped.is_empty(),
             "a non-producer pulls nothing in: {tga:?}"
         );
+
+        let mut published_soft = StableMember::new("soft-bus", "soft-bus", true, false);
+        published_soft.soft = true;
+        let (kept, skipped) = split_internal(vec![published_soft.clone()]);
+        assert_eq!(kept, vec![published_soft], "only `internal` drops a member");
+        assert!(skipped.is_empty());
+    }
+
+    /// Why (#10042): a producer's bus is the operator's optional extra, so the
+    /// resolver marks it soft and not required, while a bus the operator
+    /// named is an ordinary member. The shipped bus is internal and dropped,
+    /// so this runs on the set with the bus published.
+    /// What: selecting trusty-mpm keeps trusty-events with `soft: true` and
+    /// `required: false`; selecting trusty-events itself keeps it `soft:
+    /// false`; no other member is ever soft.
+    /// Test: This is the test.
+    #[test]
+    fn a_softly_pulled_member_is_soft_and_a_named_one_is_not() {
+        let via_producer = select_members_transitive_in(
+            stable_set_with_published_bus(),
+            &["trusty-mpm".to_owned()],
+        );
+        let bus = via_producer
+            .members
+            .iter()
+            .find(|m| m.crate_name == "trusty-events")
+            .expect("a published soft bus is kept");
+        assert!(bus.soft && !bus.required, "{bus:?}");
+        assert!(via_producer.internal_skipped.is_empty());
+        assert!(
+            via_producer
+                .members
+                .iter()
+                .filter(|m| m.crate_name != "trusty-events")
+                .all(|m| !m.soft),
+            "only the soft edge's target is soft: {via_producer:?}"
+        );
+
+        let named = select_members_transitive_in(
+            stable_set_with_published_bus(),
+            &["trusty-events".to_owned()],
+        );
+        let bus = named
+            .members
+            .iter()
+            .find(|m| m.crate_name == "trusty-events")
+            .expect("a named bus is selected");
+        assert!(!bus.soft, "a named member is never soft: {bus:?}");
+    }
+
+    /// Why (#10130): the skip must come from the static `internal` flag and
+    /// nothing else, so no input can drop a published member.
+    /// What: for every subset of the stable set (2^n names; a subset naming an
+    /// internal member is refused and skipped here): `internal_skipped` is a
+    /// subset of the internal members, and `members` plus `internal_skipped`
+    /// equals the hard closure plus the soft additions. The empty subset is
+    /// the full set.
+    /// Test: This is the test.
+    #[test]
+    fn only_the_internal_flag_removes_a_member_from_any_selection() {
+        let all = stable_set();
+        let internal: Vec<String> = all
+            .iter()
+            .filter(|m| m.internal)
+            .map(|m| m.crate_name.clone())
+            .collect();
+        let n = all.len();
+        for mask in 0u32..(1 << n) {
+            let names: Vec<String> = (0..n)
+                .filter(|i| mask & (1 << i) != 0)
+                .map(|i| all[i].crate_name.clone())
+                .collect();
+            if names.iter().any(|x| internal.contains(x)) {
+                continue;
+            }
+            let sel = select_members_transitive(&names);
+            assert!(
+                sel.internal_skipped.iter().all(|s| internal.contains(s)),
+                "{names:?}: {sel:?}"
+            );
+            let mut got: Vec<String> = sel
+                .members
+                .iter()
+                .map(|m| m.crate_name.clone())
+                .chain(sel.internal_skipped.iter().cloned())
+                .collect();
+            got.sort();
+            let want: Vec<String> = if names.is_empty() {
+                all.iter().map(|m| m.crate_name.clone()).collect()
+            } else {
+                let closure = super::super::dependency_graph::transitive_closure(&names);
+                let soft = super::super::dependency_graph::soft_additions(&closure);
+                closure.union(&soft).cloned().collect()
+            };
+            let mut want = want;
+            want.sort();
+            assert_eq!(got, want, "{names:?}");
+        }
+    }
+
+    /// Why (#10130): the flag is a hand-set constant. Pin which members carry
+    /// it so marking a second one, or unmarking trusty-events when it
+    /// publishes, is a reviewed change.
+    /// What: the only internal stable-set member is trusty-events, and it is
+    /// still a member of the set.
+    /// Test: This is the test.
+    #[test]
+    fn internal_flag_is_only_trusty_events() {
+        let internal: Vec<String> = stable_set()
+            .into_iter()
+            .filter(|m| m.internal)
+            .map(|m| m.crate_name)
+            .collect();
+        assert_eq!(internal, vec!["trusty-events".to_owned()]);
+    }
+
+    /// Why (#10130): a typed name must not become a silent no-op under exit
+    /// 0, so an explicit request for an internal member is refused.
+    /// What: naming trusty-events, alone or beside a producer, lands it in
+    /// `unavailable` with nothing selected; an unknown name still wins as
+    /// `unknown`.
+    /// Test: This is the test.
+    #[test]
+    fn explicit_internal_member_is_reported_unavailable() {
+        for names in [vec!["trusty-events"], vec!["trusty-mpm", "trusty-events"]] {
+            let names: Vec<String> = names.into_iter().map(str::to_owned).collect();
+            let sel = select_members_transitive(&names);
+            assert_eq!(sel.unavailable, vec!["trusty-events".to_owned()], "{sel:?}");
+            assert!(sel.members.is_empty(), "{sel:?}");
+            assert!(sel.added.is_empty(), "{sel:?}");
+            assert!(sel.unknown.is_empty(), "{sel:?}");
+        }
+        let both =
+            select_members_transitive(&["not-a-tool".to_owned(), "trusty-events".to_owned()]);
+        assert_eq!(both.unknown, vec!["not-a-tool".to_owned()]);
+        assert!(both.members.is_empty());
     }
 
     /// Why (#5805): the whole point — `tctl install trusty-installer` used to
@@ -1272,23 +1502,12 @@ mod tests {
     fn select_transitive_expands_mpm() {
         let sel = select_members_transitive(&["trusty-mpm".to_owned()]);
         let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
-        // #10042: plus the bus, softly.
-        assert_eq!(
-            names,
-            vec![
-                "trusty-search",
-                "trusty-memory",
-                "trusty-events",
-                "trusty-mpm"
-            ]
-        );
+        // #10130: the soft bus is internal, so it is skipped, not selected.
+        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
         assert!(sel.unknown.is_empty());
         let mut added_names: Vec<String> = sel.added.iter().map(|a| a.crate_name.clone()).collect();
         added_names.sort();
-        assert_eq!(
-            added_names,
-            vec!["trusty-events", "trusty-memory", "trusty-search"]
-        );
+        assert_eq!(added_names, vec!["trusty-memory", "trusty-search"]);
         for a in &sel.added {
             assert_eq!(a.required_by, vec!["trusty-mpm".to_owned()]);
         }
@@ -1305,22 +1524,14 @@ mod tests {
     fn select_transitive_expands_review() {
         let sel = select_members_transitive(&["trusty-review".to_owned()]);
         let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
-        // #10042: trusty-analyze is a producer, so the bus joins softly.
+        // #10130: trusty-analyze softly uses the bus, which is internal.
         assert_eq!(
             names,
-            vec![
-                "trusty-search",
-                "trusty-analyze",
-                "trusty-review",
-                "trusty-events"
-            ]
+            vec!["trusty-search", "trusty-analyze", "trusty-review"]
         );
         let mut added_names: Vec<String> = sel.added.iter().map(|a| a.crate_name.clone()).collect();
         added_names.sort();
-        assert_eq!(
-            added_names,
-            vec!["trusty-analyze", "trusty-events", "trusty-search"]
-        );
+        assert_eq!(added_names, vec!["trusty-analyze", "trusty-search"]);
     }
 
     /// Why: A leaf crate (no dependents) must not pull in anything extra.
@@ -1346,18 +1557,10 @@ mod tests {
     fn select_transitive_preserves_order_with_explicit_deps() {
         let sel = select_members_transitive(&["trusty-mpm".to_owned(), "trusty-memory".to_owned()]);
         let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "trusty-search",
-                "trusty-memory",
-                "trusty-events",
-                "trusty-mpm"
-            ]
-        );
+        // #10130: the internal bus is skipped, so only the hard addition.
+        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
         let added_names: Vec<String> = sel.added.iter().map(|a| a.crate_name.clone()).collect();
-        // #10042: hard additions first, then the soft bus.
-        assert_eq!(added_names, vec!["trusty-search", "trusty-events"]);
+        assert_eq!(added_names, vec!["trusty-search"]);
     }
 
     /// Why: Unknown names must still be surfaced (not silently dropped) even
@@ -1374,14 +1577,17 @@ mod tests {
     }
 
     /// Why: An empty selection means "the whole platform" — same contract as
-    /// `select_members`.
-    /// What: Asserts `select_members_transitive(&[])` returns the full set, no
-    /// unknowns, no added.
+    /// `select_members`, minus the members `tctl` cannot install (#10130).
+    /// What: Asserts `select_members_transitive(&[])` returns every
+    /// non-internal member, skips trusty-events, and has no unknowns or added.
     /// Test: This is the test.
     #[test]
     fn select_transitive_empty_returns_all() {
         let sel = select_members_transitive(&[]);
-        assert_eq!(sel.members.len(), stable_set().len());
+        let expected: Vec<StableMember> =
+            stable_set().into_iter().filter(|m| !m.internal).collect();
+        assert_eq!(sel.members, expected);
+        assert_eq!(sel.internal_skipped, vec!["trusty-events".to_owned()]);
         assert!(sel.unknown.is_empty());
         assert!(sel.added.is_empty());
     }

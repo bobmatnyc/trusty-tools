@@ -15,7 +15,6 @@
 //! Test: this module.
 
 use super::*;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -23,12 +22,13 @@ use std::time::Duration;
 fn write_mock() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("create tempdir");
     let path = dir.path().join("mock-embedderd-recycle.sh");
-    std::fs::write(
+    // See #10248
+    crate::exec_stub::write_executable(
         &path,
         r#"#!/bin/sh
 here=$(dirname "$0")
 [ -e "$here/fail" ] && exit 1
-[ -e "$here/hang" ] && exec sleep 600
+[ -e "$here/hang" ] && { echo $$ >> "$here/hang.pids"; exec sleep 600; }
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   [ -n "$id" ] || id=1
@@ -38,9 +38,6 @@ done
 "#,
     )
     .expect("write mock script");
-    let mut perms = std::fs::metadata(&path).expect("stat").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod +x");
     (dir, path)
 }
 
@@ -63,6 +60,9 @@ fn quiet_recycle() -> RecycleConfig {
         max_calls: 0,
         check_interval: Duration::from_millis(50),
         drain_secs: 10,
+        // #10207: the production defaults — twice the soft ceiling, 4x load.
+        hard_footprint_mb: None,
+        startup_load_scale_max: 4,
     }
 }
 
@@ -304,8 +304,10 @@ async fn footprint_read_failure_recycles_once_then_latches() {
 #[test]
 #[serial_test::serial]
 fn recycle_config_from_env_defaults_and_overrides() {
-    const VARS: [&str; 5] = [
+    const VARS: [&str; 7] = [
         "TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB",
+        "TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB",
+        "TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX",
         "TRUSTY_EMBEDDERD_RECYCLE_MAX_AGE_SECS",
         "TRUSTY_EMBEDDERD_RECYCLE_MAX_CALLS",
         "TRUSTY_EMBEDDERD_RECYCLE_CHECK_SECS",
@@ -328,6 +330,10 @@ fn recycle_config_from_env_defaults_and_overrides() {
     assert_eq!(def.max_calls, 100_000);
     assert_eq!(def.check_interval, Duration::from_secs(30));
     assert_eq!(def.drain_secs, 60);
+    // #10207: the hard limit defaults to twice the soft ceiling.
+    assert_eq!(def.hard_footprint_mb, None);
+    assert_eq!(def.effective_hard_footprint_mb(), Some(8192));
+    assert_eq!(def.startup_load_scale_max, 4);
     assert_eq!(SupervisorConfig::from_env().recycle.max_age_secs, 21_600);
 
     unsafe {
@@ -340,6 +346,33 @@ fn recycle_config_from_env_defaults_and_overrides() {
     assert_eq!(over.max_calls, 7);
     // A zero check interval would spin; it is clamped to one second.
     assert_eq!(over.check_interval, Duration::from_secs(1));
+    // With the soft ceiling off, an explicit hard limit stands alone.
+    unsafe {
+        std::env::set_var("TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB", "500");
+        std::env::set_var("TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX", "2");
+    }
+    let alone = RecycleConfig::from_env();
+    assert_eq!(alone.effective_hard_footprint_mb(), Some(500));
+    assert!(alone.enabled());
+    assert_eq!(alone.startup_load_scale_max, 2);
+    // #10207: a hard limit not above the soft ceiling is ignored.
+    unsafe {
+        std::env::set_var("TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB", "1000");
+        std::env::set_var("TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB", "1000");
+    }
+    let low = RecycleConfig::from_env();
+    assert_eq!(low.hard_footprint_mb, None);
+    assert_eq!(low.effective_hard_footprint_mb(), Some(2000));
+    unsafe { std::env::set_var("TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB", "1500") };
+    assert_eq!(
+        RecycleConfig::from_env().effective_hard_footprint_mb(),
+        Some(1500)
+    );
+    unsafe { std::env::set_var("TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB", "0") };
+    assert_eq!(
+        RecycleConfig::from_env().effective_hard_footprint_mb(),
+        None
+    );
 
     unsafe {
         for (v, old) in VARS.iter().zip(saved) {
@@ -584,4 +617,368 @@ fn backoff_delay_doubles_and_caps() {
         supervisor_recycle::backoff_delay(base, 40),
         Duration::from_secs(3600)
     );
+}
+
+/// #10207: how the configured hard limit resolves against the soft ceiling.
+#[test]
+fn hard_footprint_limit_resolution() {
+    let with = |soft, hard| RecycleConfig {
+        footprint_ceiling_mb: soft,
+        hard_footprint_mb: hard,
+        ..quiet_recycle()
+    };
+    assert_eq!(with(100, None).effective_hard_footprint_mb(), Some(200));
+    assert_eq!(with(100, Some(0)).effective_hard_footprint_mb(), None);
+    assert_eq!(
+        with(100, Some(150)).effective_hard_footprint_mb(),
+        Some(150)
+    );
+    // Not above the soft ceiling: ignored, the default applies.
+    assert_eq!(
+        with(100, Some(100)).effective_hard_footprint_mb(),
+        Some(200)
+    );
+    assert_eq!(with(100, Some(60)).effective_hard_footprint_mb(), Some(200));
+    assert_eq!(with(0, None).effective_hard_footprint_mb(), None);
+    assert_eq!(with(0, Some(300)).effective_hard_footprint_mb(), Some(300));
+    assert!(with(0, Some(300)).enabled());
+    assert!(!with(0, None).enabled());
+}
+
+/// #10207: the startup probe scales with `1 + load1/ncpu` up to the cap, and
+/// a respawn never gets less than the 120 s floor.
+#[test]
+fn startup_timeout_scales_with_load_and_floors_respawns() {
+    use supervisor_hard_limit::{SpawnKind, scaled_startup_timeout};
+    let base = Duration::from_secs(90);
+    let secs = |kind, load, cap| scaled_startup_timeout(base, kind, load, cap).as_secs_f64();
+    // Idle, unreadable, or nonsense load: no scaling.
+    assert_eq!(secs(SpawnKind::First, Some(0.0), 4), 90.0);
+    assert_eq!(secs(SpawnKind::First, None, 4), 90.0);
+    assert_eq!(secs(SpawnKind::First, Some(f64::NAN), 4), 90.0);
+    assert_eq!(secs(SpawnKind::First, Some(-1.0), 4), 90.0);
+    // The failing host: load 8.8 on 16 CPUs.
+    assert!((secs(SpawnKind::First, Some(0.55), 4) - 139.5).abs() < 1e-6);
+    // Capped, and the cap can turn scaling off.
+    assert_eq!(secs(SpawnKind::First, Some(9.0), 4), 360.0);
+    assert_eq!(secs(SpawnKind::First, Some(9.0), 1), 90.0);
+    assert_eq!(secs(SpawnKind::First, Some(9.0), 0), 90.0);
+    // A respawn is floored at 120 s before scaling; a larger base wins.
+    assert_eq!(secs(SpawnKind::Respawn, Some(0.0), 4), 120.0);
+    assert_eq!(secs(SpawnKind::Respawn, Some(1.0), 4), 240.0);
+    let long = scaled_startup_timeout(Duration::from_secs(180), SpawnKind::Respawn, None, 4);
+    assert_eq!(long, Duration::from_secs(180));
+}
+
+/// #10207: a base too large to scale is returned unscaled, never a panic.
+#[test]
+fn startup_timeout_with_an_extreme_base_does_not_panic() {
+    use supervisor_hard_limit::{SpawnKind, scaled_startup_timeout};
+    for base in [Duration::MAX, Duration::from_secs(u64::MAX)] {
+        for kind in [SpawnKind::First, SpawnKind::Respawn] {
+            assert_eq!(scaled_startup_timeout(base, kind, Some(3.0), 4), base);
+        }
+    }
+    // The first-spawn helper callers outside the crate use agrees.
+    let cfg = SupervisorConfig {
+        startup_timeout_secs: u64::MAX,
+        ..SupervisorConfig::default()
+    };
+    assert_eq!(
+        cfg.first_spawn_probe_timeout(Some(3.0)),
+        Duration::from_secs(u64::MAX)
+    );
+    let cfg = SupervisorConfig {
+        startup_timeout_secs: 90,
+        ..SupervisorConfig::default()
+    };
+    assert_eq!(
+        cfg.first_spawn_probe_timeout(Some(0.5)),
+        Duration::from_secs(135)
+    );
+}
+
+/// A `cat` child wrapped as a tracked client, so `RecycleWatch::due` can be
+/// judged without a mock sidecar. The child is killed on drop.
+fn cat_tracked() -> (tokio::process::Child, Arc<TrackedClient>) {
+    let mut child = tokio::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn cat");
+    let stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    (
+        child,
+        TrackedClient::new(StdioEmbedderClient::new(stdin, stdout)),
+    )
+}
+
+/// #10207 error arm: while a spawn-failure back-off hold runs, a footprint
+/// over the soft ceiling is not judged, but one over the hard limit is.
+#[tokio::test]
+async fn hard_limit_fires_during_a_backoff_hold() {
+    let (child, tracked) = cat_tracked();
+    let pid = child.id().expect("cat pid");
+    let mut cfg = quiet_recycle();
+    cfg.footprint_ceiling_mb = 100;
+    // A 30 s check interval makes the first hold 60 s.
+    cfg.check_interval = Duration::from_secs(30);
+    let footprint = Arc::new(AtomicU64::new(150));
+    let read = Arc::clone(&footprint);
+    let (_now, clock) = manual_clock();
+    let hooks = RecycleHooks {
+        sampler: Arc::new(move |_| Some(read.load(Ordering::Acquire))),
+        clock,
+        stats: Arc::new(RecycleStats::new()),
+    };
+    let mut watch = supervisor_recycle::RecycleWatch::new(&hooks);
+    watch.after_spawn_failure(&cfg, &hooks);
+    assert!(hooks.stats.snapshot().backoff_level >= 1);
+    for _ in 0..3 {
+        assert_eq!(watch.due(&cfg, &hooks, pid, &tracked), None, "held");
+    }
+    footprint.store(201, Ordering::Release);
+    assert_eq!(
+        watch.due(&cfg, &hooks, pid, &tracked),
+        Some(RecycleTrigger::HardFootprint)
+    );
+    // Off, the same breach is held like any other trigger.
+    cfg.hard_footprint_mb = Some(0);
+    assert_eq!(watch.due(&cfg, &hooks, pid, &tracked), None);
+    drop(child);
+}
+
+/// #10207 error arm: a footprint read that fails during a back-off hold is
+/// counted, so a hard limit that cannot see the sidecar shows in `/health`.
+#[tokio::test]
+async fn failed_footprint_read_during_a_hold_is_counted() {
+    let (child, tracked) = cat_tracked();
+    let pid = child.id().expect("cat pid");
+    let mut cfg = quiet_recycle();
+    cfg.footprint_ceiling_mb = 100;
+    cfg.check_interval = Duration::from_secs(30);
+    let (_now, clock) = manual_clock();
+    let hooks = RecycleHooks {
+        sampler: Arc::new(|_| None),
+        clock,
+        stats: Arc::new(RecycleStats::new()),
+    };
+    let mut watch = supervisor_recycle::RecycleWatch::new(&hooks);
+    watch.after_spawn_failure(&cfg, &hooks);
+    for _ in 0..3 {
+        assert_eq!(watch.due(&cfg, &hooks, pid, &tracked), None, "held");
+    }
+    assert_eq!(hooks.stats.snapshot().footprint_read_errors, 3);
+    drop(child);
+}
+
+/// #10207 regression: the replacement can never start, so every footprint
+/// recycle keeps the old sidecar; its footprint then crosses the hard limit
+/// (twice the 100 MB ceiling). The old sidecar is killed, no live sidecar
+/// stays over the limit, and one serves again once spawning works.
+#[tokio::test]
+async fn hard_limit_kills_a_sidecar_whose_replacement_cannot_start() {
+    let (dir, binary) = write_mock();
+    let mut recycle = quiet_recycle();
+    recycle.footprint_ceiling_mb = 100;
+    let cfg = SupervisorConfig {
+        max_restarts: 5,
+        ..config(recycle)
+    };
+    let (supervisor, client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+        .await
+        .expect("spawn_stdio");
+    let first_pid = pid_slot.load(Ordering::Acquire);
+    let fail = dir.path().join("fail");
+    std::fs::write(&fail, b"").expect("write fail marker");
+    let stats = Arc::new(RecycleStats::new());
+    let old_mb = Arc::new(AtomicU64::new(150));
+    let read = Arc::clone(&old_mb);
+    let (_now, clock) = manual_clock();
+    let handle = supervisor
+        .with_recycle_hooks(RecycleHooks {
+            sampler: Arc::new(move |pid| {
+                Some(if pid == first_pid {
+                    read.load(Ordering::Acquire)
+                } else {
+                    50
+                })
+            }),
+            clock,
+            stats: Arc::clone(&stats),
+        })
+        .start_supervisor_task();
+
+    assert!(
+        wait_until(5, || stats.snapshot().spawn_failures >= 2).await,
+        "replacement spawns never failed: {:?}",
+        stats.snapshot()
+    );
+    assert!(
+        process_alive(first_pid),
+        "old sidecar died before the breach"
+    );
+    old_mb.store(250, Ordering::Release);
+    assert!(
+        wait_until(3, || !process_alive(first_pid)).await,
+        "a sidecar over the hard limit was kept: {:?}",
+        stats.snapshot()
+    );
+    std::fs::remove_file(&fail).expect("remove fail marker");
+    assert!(
+        wait_until(10, || {
+            let pid = pid_slot.load(Ordering::Acquire);
+            pid != 0 && pid != first_pid && process_alive(pid)
+        })
+        .await,
+        "no sidecar came back once spawning worked"
+    );
+    let client = client_slot.read().await.clone();
+    assert!(client.embed_batch(vec!["back".into()]).await.is_ok());
+    let snap = stats.snapshot();
+    assert_eq!(snap.hard_footprint_kills, 1, "{snap:?}");
+    assert_eq!(snap.recycles_total, 0, "{snap:?}");
+    assert!(!handle.has_given_up());
+    handle.shutdown().await;
+}
+
+/// #10207: the old sidecar crosses the hard limit while its replacement
+/// hangs on the startup probe (floored at 120 s). The replacement is
+/// abandoned and the old sidecar killed within a few check intervals.
+#[tokio::test]
+async fn hard_limit_abandons_a_hanging_replacement_spawn() {
+    let (dir, binary) = write_mock();
+    let mut recycle = quiet_recycle();
+    recycle.footprint_ceiling_mb = 100;
+    let cfg = SupervisorConfig {
+        max_restarts: 5,
+        ..config(recycle)
+    };
+    let (supervisor, client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+        .await
+        .expect("spawn_stdio");
+    let first_pid = pid_slot.load(Ordering::Acquire);
+    let hang = dir.path().join("hang");
+    std::fs::write(&hang, b"").expect("write hang marker");
+    let stats = Arc::new(RecycleStats::new());
+    let old_mb = Arc::new(AtomicU64::new(150));
+    let read = Arc::clone(&old_mb);
+    let (_now, clock) = manual_clock();
+    let handle = supervisor
+        .with_recycle_hooks(RecycleHooks {
+            sampler: Arc::new(move |pid| {
+                Some(if pid == first_pid {
+                    read.load(Ordering::Acquire)
+                } else {
+                    50
+                })
+            }),
+            clock,
+            stats: Arc::clone(&stats),
+        })
+        .start_supervisor_task();
+    // The first judged check (~100 ms) starts a replacement that never answers.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    std::fs::remove_file(&hang).expect("remove hang marker");
+    old_mb.store(250, Ordering::Release);
+    assert!(
+        wait_until(3, || !process_alive(first_pid)).await,
+        "the hard limit waited behind a hanging replacement: {:?}",
+        stats.snapshot()
+    );
+    // The abandoned replacement is gone too, not left running.
+    let pids = std::fs::read_to_string(dir.path().join("hang.pids")).expect("replacement pid");
+    let pids: Vec<u32> = pids.lines().map(|l| l.parse().expect("pid")).collect();
+    assert!(!pids.is_empty());
+    assert!(
+        wait_until(3, || pids.iter().all(|&p| !process_alive(p))).await,
+        "an abandoned replacement is still running: {pids:?}"
+    );
+    assert!(
+        wait_until(5, || {
+            let pid = pid_slot.load(Ordering::Acquire);
+            pid != 0 && pid != first_pid && process_alive(pid)
+        })
+        .await,
+        "no sidecar came back after the hard kill"
+    );
+    let client = client_slot.read().await.clone();
+    assert!(client.embed_batch(vec!["back".into()]).await.is_ok());
+    assert_eq!(stats.snapshot().hard_footprint_kills, 1);
+    assert!(!handle.has_given_up());
+    handle.shutdown().await;
+}
+
+/// #10207 error arm: while a replacement spawn hangs, failed footprint reads
+/// of the old sidecar are counted rather than read as "under the limit".
+#[tokio::test]
+async fn failed_footprint_read_during_a_hanging_replacement_is_counted() {
+    let (dir, binary) = write_mock();
+    let mut recycle = quiet_recycle();
+    recycle.footprint_ceiling_mb = 100;
+    let (supervisor, _client_slot, _pid_slot) =
+        EmbedderSupervisor::spawn_stdio(binary, config(recycle))
+            .await
+            .expect("spawn_stdio");
+    let hang = dir.path().join("hang");
+    std::fs::write(&hang, b"").expect("write hang marker");
+    let stats = Arc::new(RecycleStats::new());
+    // 0 = the read fails.
+    let footprint = Arc::new(AtomicU64::new(150));
+    let read = Arc::clone(&footprint);
+    let (_now, clock) = manual_clock();
+    let handle = supervisor
+        .with_recycle_hooks(RecycleHooks {
+            sampler: Arc::new(move |_| Some(read.load(Ordering::Acquire)).filter(|&mb| mb > 0)),
+            clock,
+            stats: Arc::clone(&stats),
+        })
+        .start_supervisor_task();
+    // The first judged check (~100 ms) starts a replacement that never answers.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    footprint.store(0, Ordering::Release);
+    assert!(
+        wait_until(3, || stats.snapshot().footprint_read_errors >= 3).await,
+        "failed reads behind a hanging replacement were not counted: {:?}",
+        stats.snapshot()
+    );
+    assert_eq!(stats.snapshot().spawn_failures, 0, "the spawn still hangs");
+    // Free the loop: a hard breach abandons the hanging replacement.
+    std::fs::remove_file(&hang).expect("remove hang marker");
+    footprint.store(250, Ordering::Release);
+    assert!(
+        wait_until(3, || stats.snapshot().hard_footprint_kills == 1).await,
+        "{:?}",
+        stats.snapshot()
+    );
+    handle.shutdown().await;
+}
+
+/// #10207 ruling D: a sidecar that crosses the hard limit after every
+/// respawn trips `max_restarts` instead of looping.
+#[tokio::test]
+async fn repeated_hard_limit_breaches_give_up() {
+    let (_dir, binary) = write_mock();
+    let mut recycle = quiet_recycle();
+    recycle.footprint_ceiling_mb = 100;
+    let cfg = SupervisorConfig {
+        max_restarts: 2,
+        ..config(recycle)
+    };
+    let (supervisor, _client_slot, _pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+        .await
+        .expect("spawn_stdio");
+    let stats = Arc::new(RecycleStats::new());
+    let handle = supervisor
+        .with_recycle_hooks(hooks_reading(250, &stats))
+        .start_supervisor_task();
+    assert!(
+        wait_until(10, || handle.has_given_up()).await,
+        "repeated hard-limit kills never gave up: {:?}",
+        stats.snapshot()
+    );
+    assert_eq!(stats.snapshot().hard_footprint_kills, 3);
+    handle.shutdown().await;
 }

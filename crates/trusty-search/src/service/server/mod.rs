@@ -36,9 +36,6 @@ mod fanout_deadline;
 // #9029: `search.file.get`, one indexed file and its diff.
 mod file_get;
 mod files;
-// #9214 (D1): the `files` handlers, test-only; tests call them directly.
-#[cfg(test)]
-mod files_http;
 // #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
 mod graph_refresh_ticker;
 mod health;
@@ -59,6 +56,10 @@ mod project_park;
 mod project_park_tests;
 mod quantize_handlers;
 mod reindex_handlers;
+// #10110: `search.index.files.remove`, the batch removal by prefix or list.
+mod remove_files;
+#[cfg(test)]
+mod remove_files_tests;
 // #9236: maps a remove-file path onto the stored index-relative key.
 mod remove_path;
 mod residency_sweep;
@@ -68,6 +69,8 @@ mod router;
 mod routing;
 mod search;
 mod search_global;
+// #10195: per-stage timings, the fan-out line and the cancelled-search log.
+mod search_log;
 // #9970: the per-index search `meta` block, `embedder` included.
 mod search_meta;
 mod state;
@@ -255,6 +258,12 @@ mod tests_index_routing;
 // #8348: a failed query embed degrades to lexical instead of a 500.
 #[cfg(test)]
 mod tests_8348;
+// #10194: a cold embedder waits at most the query-embed deadline.
+#[cfg(test)]
+mod tests_10194;
+// #10195: stage timings, logged deadline cancellations, the search_all line.
+#[cfg(test)]
+mod tests_10195;
 // #9027: the all-index fan-out's per-index deadline and one query embed.
 #[cfg(test)]
 mod tests_9027;
@@ -282,24 +291,6 @@ pub use state::{DaemonEvent, DaemonTransport, ReconcileSummary, SearchAppState, 
 
 use std::sync::Arc;
 
-// #9214 (ruling D1): the handlers are test-only; tests reach them through
-// `super::*`.
-#[cfg(test)]
-use admin::{admin_stop_handler, logs_tail_handler};
-#[cfg(test)]
-use files::{get_index_chunks_handler, global_grep_handler, grep_handler};
-#[cfg(test)]
-use health::health_handler;
-#[cfg(test)]
-use indexes::{create_index_handler, list_indexes_handler};
-#[cfg(test)]
-use reindex_handlers::reindex_handler;
-#[cfg(test)]
-use search::search_handler;
-#[cfg(test)]
-use search_global::global_search_handler;
-#[cfg(test)]
-use status::{graph_handler, index_status_handler};
 use tickers::{
     spawn_disk_size_ticker, spawn_idle_chunk_eviction_ticker, spawn_memory_pressure_ticker,
     spawn_orphan_reaper_ticker, spawn_residency_sweep_ticker, spawn_status_ticker,
@@ -339,6 +330,7 @@ pub(crate) use embedding_pause::{pause_embedding_report, resume_embedding_report
 pub(crate) use files::{index_file_report, remove_file_report};
 pub(crate) use indexes::create_index_report;
 pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
+pub(crate) use remove_files::{remove_files_report, RemoveFilesRequest};
 // #7434: the `search.index.roots.add` socket method.
 pub(crate) use indexes_roots::{add_index_roots_report, AddRootsRequest};
 // #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.

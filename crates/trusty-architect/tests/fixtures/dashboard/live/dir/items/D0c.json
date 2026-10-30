@@ -1,0 +1,43 @@
+{
+  "answer": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolo",
+  "answer_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über ",
+  "answered_at": "lorem ipsum dolor sit am",
+  "blocks_session": false,
+  "created": "2026-10-09T01:51:03Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit ",
+  "due": null,
+  "goal": null,
+  "goal_legacy": "lorem ipsum dolor",
+  "kind": "question",
+  "links": [
+    {
+      "item": "lor",
+      "label": "lor"
+    },
+    {
+      "label": "lorem ipsu",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+    }
+  ],
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magn",
+      "label": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolo",
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magn",
+      "label": "lorem ipsum dolor sit amet elit "
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit se",
+      "label": "lorem ipsum dolor sit amet"
+    }
+  ],
+  "rank": 5,
+  "session": "pm-5",
+  "status": "answered",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolo",
+  "updated": "2026-10-09T02:17:17Z",
+  "version": 1
+}

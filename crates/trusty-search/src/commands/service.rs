@@ -367,6 +367,17 @@ fn build_launchd_config(
 /// `stop::tests::launchd_restart_notice_*`.
 #[cfg(target_os = "macos")]
 pub(crate) fn launchd_agent_loaded() -> bool {
+    label_only_config().is_loaded()
+}
+
+/// A label-only [`trusty_common::launchd::LaunchdConfig`] for the search unit.
+///
+/// Why: #10413 — the daemon guard reads `launchctl print` through the config's
+/// `launchctl_print`, and every other field is inert for a read.
+/// Test: side-effecting; its callers are `launchd_agent_loaded` and
+/// `daemon_guard_launchd::read_state_blocking`.
+#[cfg(target_os = "macos")]
+pub(crate) fn label_only_config() -> trusty_common::launchd::LaunchdConfig {
     use trusty_common::launchd::{KeepAlive, LaunchdConfig};
     LaunchdConfig {
         label: LAUNCHD_LABEL.to_string(),
@@ -379,7 +390,6 @@ pub(crate) fn launchd_agent_loaded() -> bool {
         fd_limit: None,
         working_directory: None,
     }
-    .is_loaded()
 }
 
 /// Generate, write, and load the LaunchAgent.

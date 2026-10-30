@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "tool": "trusty-memory",
+  "version": "0.36.0",
+  "commit": "fixture",
+  "label": "evo",
+  "date": "2026-10-24",
+  "fixture": "baseline.json with rulings-off p95 x1.24: ok",
+  "results": [
+    {
+      "dimension": "effectiveness",
+      "metric": "hit@1",
+      "unit": "queries/32",
+      "n": 32,
+      "k": 1,
+      "p50": null,
+      "p95": null,
+      "max": null,
+      "value": 27,
+      "threshold": "<27/32 fails the gate"
+    },
+    {
+      "dimension": "speed",
+      "metric": "memory_recall_latency_rulings-off",
+      "unit": "us",
+      "n": 300,
+      "k": null,
+      "p50": 14639.0,
+      "p95": 20314.92,
+      "max": 20986.0,
+      "value": 20314.92,
+      "threshold": "alert if median-of-5 p95 up >10% over pinned baseline; HIGH at >2x or E12 +5ms at 20k rows"
+    },
+    {
+      "dimension": "speed",
+      "metric": "memory_recall_latency_rulings-on",
+      "unit": "us",
+      "n": 300,
+      "k": null,
+      "p50": 14736.0,
+      "p95": 16437.0,
+      "max": 28120.0,
+      "value": 16437.0,
+      "threshold": "alert if median-of-5 p95 up >10% over pinned baseline; HIGH at >2x or E12 +5ms at 20k rows"
+    },
+    {
+      "dimension": "indexing",
+      "metric": "seeded_in",
+      "unit": "s",
+      "n": 5,
+      "k": null,
+      "p50": null,
+      "p95": null,
+      "max": 463.438072176,
+      "value": 429.7,
+      "threshold": "alert if up >25% over pinned baseline"
+    },
+    {
+      "dimension": "speed",
+      "metric": "concurrent_perf test_concurrent_reads",
+      "unit": "ms (latency); ops/s (value)",
+      "n": 3,
+      "k": null,
+      "p50": 1.982,
+      "p95": 168.449,
+      "max": 182.514,
+      "value": 603.9,
+      "threshold": "HIGH if error count >0; alert p95 up >10%"
+    },
+    {
+      "dimension": "speed",
+      "metric": "concurrent_perf test_concurrent_rw WRITE",
+      "unit": "ms (latency); ops/s (value)",
+      "n": 3,
+      "k": null,
+      "p50": 1324.948,
+      "p95": 1347.473,
+      "max": 1350.184,
+      "value": null,
+      "threshold": "HIGH if error count >0; alert p95 up >10%"
+    },
+    {
+      "dimension": "indexing",
+      "metric": "embed_per_chunk",
+      "unit": "ms",
+      "n": 3,
+      "k": null,
+      "p50": null,
+      "p95": null,
+      "max": null,
+      "value": 19.474,
+      "threshold": "alert if up >25% over pinned baseline"
+    }
+  ]
+}

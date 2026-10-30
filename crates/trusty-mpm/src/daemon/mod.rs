@@ -43,6 +43,10 @@ pub mod doctor_launchd_secrets;
 // #8236: the repair half, split from the row so neither file approaches the
 // 500-SLOC cap. `pub` for the same reason.
 pub mod doctor_launchd_secrets_repair;
+// #10041: credentials and loose modes in the managed `.claude.json`. `pub`
+// because `tm doctor --fix` calls the repair from the `tm` binary.
+pub mod doctor_claude_json_secrets;
+pub mod doctor_claude_json_secrets_repair;
 // #8236: `tm doctor --fix-launchd-secrets` — that repair alone, plus the chmod.
 pub mod doctor_launchd_secrets_scoped;
 // #8236 item 8: can the DAEMON's own resolver reach each credential it needs?
@@ -66,6 +70,8 @@ mod doctor_events;
 mod doctor_content;
 // #8390: assets whose advisory `requires:` this binary does not satisfy.
 mod doctor_content_requires;
+// #10356 (owner ruling D74): the daemon owns auto-resume.
+pub mod auto_resume_loop;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;
@@ -245,8 +251,8 @@ pub async fn serve_with_shutdown(
     // Each spawned loop receives a child token; the parent is cancelled after
     // the socket drains its in-flight requests (#6288 S3a).
     let cancel = tokio_util::sync::CancellationToken::new();
-    // #6849: hook records reach the trusty-events bus; never blocks a hook.
-    action_events::start(&state);
+    // #6849, #9167 AC5: hook records and delivered injects reach the bus.
+    action_events::inject::start_with_injects(&state);
 
     // Spawn the multi-session file watcher as a background task.
     // Pass a child cancel token so the watcher exits cleanly on daemon shutdown.
@@ -258,8 +264,11 @@ pub async fn serve_with_shutdown(
     // this is installed `resume_auto` prepares a pane and marks the record
     // `Active` with nothing in it — the fleet state a daemon restart produced.
     // The boot reconcile inside `session_manager()` defers its own auto-resume
-    // to the supervisor for exactly that reason; see `session_manager::reconcile`.
+    // for exactly that reason; see `session_manager::reconcile`.
     managed_routes::auto_relaunch::install_auto_relauncher(&state).await;
+    // #10356 (owner ruling D74): the daemon owns auto-resume, and its first
+    // sweep runs now, with the relauncher above already installed.
+    auto_resume_loop::spawn(&state, cancel.child_token()).await;
     // #8433 (Dfc): a stop or decommission retires the session's channel taint
     // from the same tree the SessionStart re-apply writes.
     if let Some(home) = state.user_home() {
@@ -377,8 +386,8 @@ pub async fn serve_with_shutdown(
     // Signal all background loops to stop before we walk the session list.
     cancel.cancel();
     // #6849: the bounded final flush runs on both exit arms below.
-    state.action_events().shutdown().await;
-    if let Err(e) = served {
+    // #10464: the error arm logs the late total there too.
+    if let Err(e) = action_events::settle_serve_exit(&state, served).await {
         // #6288 S3a: a dead accept loop is a crash, not a stop; the managed
         // sessions are left running as a SIGKILLed daemon leaves them.
         tracing::error!("trusty-mpm socket stopped serving: {e:#}");
@@ -392,6 +401,8 @@ pub async fn serve_with_shutdown(
     // name, which proves no ownership.
     let mgr = state.session_manager().await;
     mgr.shutdown().await;
+    // #10412: hooks from the sessions just stopped arrive after the settle.
+    state.action_events().report_late();
     reap_all_live_sessions(state).await;
     Ok(())
 }

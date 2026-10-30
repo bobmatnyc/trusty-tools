@@ -603,6 +603,49 @@ async fn lazy_handle_last_reported_device_reflects_client() {
     );
 }
 
+/// Stub client that reports an input window over the wire (#9284).
+struct WindowReportingStubClient;
+
+#[async_trait::async_trait]
+impl trusty_common::embedder_client::EmbedderClient for WindowReportingStubClient {
+    async fn embed_batch(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, trusty_common::embedder_client::EmbedderError> {
+        Ok(texts.into_iter().map(|_| vec![0.0_f32; 384]).collect())
+    }
+
+    fn last_reported_window(&self) -> Option<usize> {
+        Some(256)
+    }
+}
+
+/// `LazyEmbedderHandle::last_reported_window()` is `None` before a spawn and
+/// forwards the live client's window after (#9284).
+/// Test: this test.
+#[tokio::test]
+async fn lazy_handle_last_reported_window_reflects_client() {
+    use tokio::sync::RwLock;
+
+    let handle = LazyEmbedderHandle::new(
+        PathBuf::from("/nonexistent/trusty-embedderd"),
+        SupervisorConfig::default(),
+    );
+    assert_eq!(handle.last_reported_window(), None, "None before any spawn");
+
+    let client: Arc<dyn trusty_common::embedder_client::EmbedderClient> =
+        Arc::new(WindowReportingStubClient);
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    *handle.state.lock().await = Some(SpawnedState {
+        client_slot: Arc::new(RwLock::new(client)),
+        supervisor_handle: None,
+        shutdown_tx,
+        pid_slot: Arc::new(AtomicU32::new(0)),
+        terminated: None,
+    });
+    assert_eq!(handle.last_reported_window(), Some(256));
+}
+
 /// The idle watchdog must NOT evict the sidecar while a request is in flight,
 /// and MUST reclaim it once the request completes and the idle window is past.
 ///
@@ -852,7 +895,6 @@ impl Drop for EnvGuard {
 #[cfg(unix)]
 mod shutdown_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// Write a minimal stdio JSON-RPC mock of `trusty-embedderd --stdio` to a
     /// temp file; returns the path plus the guarding `TempDir`.
@@ -862,7 +904,8 @@ mod shutdown_tests {
     fn write_mock_embedderd() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mock-embedderd.sh");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &path,
             r#"#!/bin/sh
 while IFS= read -r line; do
@@ -873,9 +916,6 @@ done
 "#,
         )
         .expect("write mock script");
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod +x");
         (dir, path)
     }
 
@@ -889,7 +929,8 @@ done
     fn write_mock_embedderd_crash_once() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mock-embedderd-crash-once.sh");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &path,
             r#"#!/bin/sh
 IFS= read -r line
@@ -900,9 +941,6 @@ exit 1
 "#,
         )
         .expect("write mock script");
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod +x");
         (dir, path)
     }
 

@@ -68,10 +68,9 @@ fn feature_graph(manifest: &Value) -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
-/// Why: a lane names only its roots — `memory-core` already pulls in
-/// `credentials`, `embedder`, `embedder-bundled-ort` and `redb-open`, and
-/// listing those again would make the manifest a second place to keep the
-/// feature graph correct.
+/// Why: a lane names only its roots — `embedder-client` already pulls in
+/// `embedder` and `uds`, and listing those again would make the manifest a
+/// second place to keep the feature graph correct.
 /// What: walks `graph` from `seeds` and returns every feature reachable,
 /// `seeds` included.
 /// Test: `every_declared_feature_is_covered_by_a_lane_or_exempted`.

@@ -27,6 +27,8 @@ const CODING_SKILLS: &[&str] = &[
     "database-migration",
     "env-manager",
     "model-context-builder",
+    // Owner ruling 2026-10-30: engineer-only Python-to-Rust port guidance.
+    "prototype-then-port",
     "requesting-code-review",
     "root-cause-tracing",
     "rust-build-performance",
@@ -106,6 +108,12 @@ const PENDING_OWNER_RULING: &[&str] = &[
     // #8625 (Architect Q4): it drives a kuzu import that writes palaces, so it
     // stays off the floor until the owner widens it.
     "tm-memory-import",
+    // #10401: non-coding chart-design reference like `documentation-style`
+    // (on the floor), but it ships a runnable checker; off until the owner rules.
+    "data-design",
+    // Neon/Vercel database operations reference; touches production data
+    // guidance, so off the floor until the owner rules.
+    "neon-postgres",
 ];
 
 /// Skills trusty-mpm ships for the Architect's project only (#8436 rulings D
@@ -126,6 +134,15 @@ const ARCHITECT_ONLY_SKILLS: &[&str] = &[
     "architect-strategy",
     "architect-tmux-ops",
     "architect-workflow",
+    // #10161 D2: the second set of seeded Architect skills.
+    "architect-drift-check",
+    "architect-host-admin",
+    "architect-improvements",
+    "architect-macos",
+    "architect-project-provision",
+    "architect-review",
+    // #10161 D3b: the dashboard skill.
+    "architect-dashboard",
     "tm-context-refresh",
     "tm-fleet-check",
 ];

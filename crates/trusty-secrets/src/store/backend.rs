@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::config::MachineSecretsConfig;
-use super::{KeychainBackend, RemoteIdentity};
+use super::{ControlItem, KeychainBackend, RemoteIdentity};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 /// What a backend can do.
@@ -121,42 +121,58 @@ pub trait SecretBackend: Send + Sync + fmt::Debug {
         })
     }
 
-    /// Whether `key` in `vault` is flagged "agents may use" (DOC-74 §15.8).
+    /// Whether this backend stores agent-control items (#10386).
     ///
-    /// Why: #9070 — the flag sat in the 0600 index JSON, which any same-uid
-    /// process can edit. The backend holds it now, as its own item per key.
-    /// What: `Ok(true)` only when the backend holds the flag item for this
-    /// key. A missing item is `Ok(false)`; a failed lookup is an `Err`, never
-    /// `Ok(true)`. The default holds no flag, so every key reads OFF.
-    /// Test: `store_default_agent_flag_reads_off_and_refuses_on`,
-    /// `resolve_agent_gate_fails_closed_when_the_flag_read_fails`.
-    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        let _ = (vault, key);
-        Ok(false)
+    /// Why: a deny that cannot be stored must not read as stored; the
+    /// caller then applies the migration mode's default instead.
+    /// What: `false` by default. A backend returning `true` implements
+    /// [`Self::control_item`] and [`Self::set_control_item`] for every
+    /// [`ControlItem`].
+    /// Test: `agent_denied_without_controls_follows_the_mode`.
+    fn holds_agent_controls(&self) -> bool {
+        false
     }
 
-    /// Create (`allowed`) or remove (`!allowed`) `key`'s flag item.
+    /// Whether the control `item` is present for `key` in `vault`; `key` is
+    /// `None` for a per-vault item.
     ///
-    /// What: removing a flag that is not there succeeds. The default holds
-    /// no flag: `false` succeeds with nothing to remove, and `true` is
-    /// [`SecretsError::Unsupported`] for operation `agents_may_use`.
-    /// Test: `store_default_agent_flag_reads_off_and_refuses_on`.
-    fn set_agents_may_use(
+    /// Why: #9070 — the agent rule lives in the backend, never in the 0600
+    /// index JSON any same-uid process can edit. #10386: present means deny.
+    /// What: `Ok(true)` only when the backend holds the item. A missing item
+    /// is `Ok(false)`; a failed lookup is an `Err`, never a guess. The
+    /// default is [`SecretsError::Unsupported`].
+    /// Test: `store_default_backend_holds_no_agent_controls`,
+    /// `agent_denied_fails_closed_when_the_lookup_fails`.
+    fn control_item(
         &self,
+        item: ControlItem,
         vault: &VaultName,
-        key: &SecretKey,
-        allowed: bool,
-    ) -> Result<(), SecretsError> {
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
         let _ = (vault, key);
-        if allowed {
-            // #9070: a backend with no flag item can never hold the flag ON.
-            Err(SecretsError::Unsupported {
-                backend: self.id().to_string(),
-                operation: "agents_may_use",
-            })
-        } else {
-            Ok(())
-        }
+        Err(SecretsError::Unsupported {
+            backend: self.id().to_string(),
+            operation: item.operation(),
+        })
+    }
+
+    /// Create (`present`) or remove (`!present`) the control `item`.
+    ///
+    /// What: removing an item that is not there succeeds. The default is
+    /// [`SecretsError::Unsupported`].
+    /// Test: `store_default_backend_holds_no_agent_controls`.
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+        present: bool,
+    ) -> Result<(), SecretsError> {
+        let _ = (vault, key, present);
+        Err(SecretsError::Unsupported {
+            backend: self.id().to_string(),
+            operation: item.operation(),
+        })
     }
 }
 
@@ -232,12 +248,13 @@ pub fn cli_backends() -> Vec<BackendId> {
 ///
 /// Why: D12 — a sync target is never swept by `delete` and never a store,
 /// so it stays out of [`cli_backends`], which drives the delete sweep.
-/// What: `github-actions` on a build that links the CLI backends; empty
-/// otherwise.
-/// Test: `server_doctor_lists_sync_targets_without_spawning`.
+/// What: `github-actions` and `vercel` on a build that links the CLI
+/// backends; empty otherwise.
+/// Test: `server_doctor_lists_sync_targets_without_spawning`,
+/// `server_doctor_lists_the_vercel_target_without_spawning`.
 pub fn sync_targets() -> Vec<BackendId> {
     if CLI_BACKENDS_COMPILED {
-        vec![BackendId::github_actions()]
+        vec![BackendId::github_actions(), BackendId::vercel()]
     } else {
         Vec::new()
     }
@@ -253,16 +270,21 @@ pub fn sync_targets() -> Vec<BackendId> {
 /// `secrets.github_actions:` section is present, else
 /// [`SecretsError::BackendNotEnabled`]; `gh` comes from the section's
 /// `program` pin or the first of the fixed system directories that holds
-/// one, never a `PATH`, else [`SecretsError::CliNotInstalled`]. Any other
-/// id, and every id on a build without `cli-backends`, is
+/// one, never a `PATH`, else [`SecretsError::CliNotInstalled`]. `vercel`
+/// opens only when its `secrets.vercel:` section maps the checkout's
+/// `<owner>/<repo>` to a project and pins `program`; each push runs in an
+/// empty directory under `work_root` (#9069 PR 2). Any other id, and every
+/// id on a build without `cli-backends`, is
 /// [`SecretsError::UnknownBackend`]. Opening spawns nothing.
-/// Test: `github_open_requires_the_machine_section`.
+/// Test: `github_open_requires_the_machine_section`,
+/// `vercel_without_a_mapping_is_refused_before_any_spawn`.
 pub fn open_sync_target_at(
     id: &BackendId,
     machine_config: &Path,
     identity: &RemoteIdentity,
+    work_root: &Path,
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
-    open_sync_target_at_in(id, machine_config, identity, &onepassword_dirs())
+    open_sync_target_at_in(id, machine_config, identity, work_root, &onepassword_dirs())
 }
 
 /// [`open_sync_target_at`], searching `dirs` for the CLI.
@@ -273,10 +295,12 @@ pub(crate) fn open_sync_target_at_in(
     id: &BackendId,
     machine_config: &Path,
     identity: &RemoteIdentity,
+    work_root: &Path,
     dirs: &[PathBuf],
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     match id.as_str() {
         BackendId::GITHUB_ACTIONS => open_github_actions(machine_config, identity, dirs),
+        BackendId::VERCEL => open_vercel(machine_config, identity, work_root),
         _ => Err(SecretsError::UnknownBackend {
             backend: id.to_string(),
         }),
@@ -301,6 +325,8 @@ pub(crate) fn sync_target_ready(
         BackendId::GITHUB_ACTIONS => {
             super::github_actions::ready(machine_config, &onepassword_dirs())
         }
+        #[cfg(all(unix, feature = "cli-backends"))]
+        BackendId::VERCEL => super::vercel::ready(machine_config),
         _ => {
             let _ = machine_config;
             Err(SecretsError::UnknownBackend {
@@ -329,6 +355,29 @@ fn open_github_actions(
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     Err(SecretsError::UnknownBackend {
         backend: BackendId::GITHUB_ACTIONS.to_string(),
+    })
+}
+
+/// The Vercel sync target, when this machine enables it and maps the
+/// checkout (#9069 PR 2).
+#[cfg(all(unix, feature = "cli-backends"))]
+fn open_vercel(
+    machine_config: &Path,
+    identity: &RemoteIdentity,
+    work_root: &Path,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    super::vercel::open_in(machine_config, identity, work_root)
+}
+
+/// No Vercel sync target without `cli-backends`.
+#[cfg(not(all(unix, feature = "cli-backends")))]
+fn open_vercel(
+    _machine_config: &Path,
+    _identity: &RemoteIdentity,
+    _work_root: &Path,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    Err(SecretsError::UnknownBackend {
+        backend: BackendId::VERCEL.to_string(),
     })
 }
 

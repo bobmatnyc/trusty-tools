@@ -28,9 +28,9 @@
 //!     the wire error verbatim, `data` included.
 //!   - `-32700 Parse error` is produced by [`Router::dispatch_json`], not
 //!     [`Router::dispatch`] — the STDIO transport (`crate::serve::transport`,
-//!     one JSON object per line) and the HTTP transport
-//!     (`crate::serve::http`, one JSON object per `POST /rpc` body) both
-//!     receive raw bytes rather than an already-parsed `Request`, and both
+//!     one JSON object per line) and the retired HTTP transport (one JSON
+//!     object per `POST /rpc` body, #6637) both
+//!     received raw bytes rather than an already-parsed `Request`, and both
 //!     need the exact same "parse or -32700" behaviour. Centralising it here
 //!     means the error message and code can never drift between the two
 //!     wire formats.

@@ -1,16 +1,18 @@
-//! One fleet sweep: detect `stopped` → auto-resume, classify idle `active` sessions.
+//! The fleet sweeps: auto-resume `stopped` sessions, classify idle `active` ones.
 //!
-//! Why: the supervisor's behavior per tick must be a single, testable unit so we
-//! can assert "N stopped sessions get resumed" without spinning real timers. This
-//! module is that unit — a pure-ish async function over the [`SessionManager`] and
-//! an optional classifier, returning a [`TickReport`] of what it did.
-//! What: defines [`TickReport`] and [`run_tick`], which (1) lists all sessions,
-//! (2) auto-resumes each `stopped` session whose stop nobody asked for when
-//! `auto_resume` is set — a session an operator stopped or killed is left down
-//! (#6194) — and (3) classifies idle `active` sessions through the activity
-//! monitor when a classifier is supplied, mirroring a confident
-//! `blocked_on_permission` verdict into the record's `blocked_prompt` (#8393).
-//! It never answers or clears a `pending_decision`.
+//! Why: each sweep must be a single, testable unit so we can assert "N stopped
+//! sessions get resumed" without spinning real timers. This module holds those
+//! units — pure-ish async functions over the [`SessionManager`], returning a
+//! [`TickReport`] of what they did.
+//! What: [`resume_sweep`] auto-resumes each `stopped` session whose stop nobody
+//! asked for — a session an operator stopped or killed is left down (#6194).
+//! #10356 (owner ruling D74): the DAEMON runs it
+//! (`crate::daemon::auto_resume_loop`), because only the daemon installs the
+//! runtime relauncher. [`run_tick`] is the `tm supervisor` sweep: it classifies
+//! idle `active` sessions through the activity monitor when a classifier is
+//! supplied, mirroring a confident `blocked_on_permission` verdict into the
+//! record's `blocked_prompt` (#8393). It no longer resumes anything. Neither
+//! sweep answers or clears a `pending_decision`.
 //! Test: `tick_auto_resumes_stopped`, `tick_skips_resume_when_disabled`,
 //! `tick_fleet_of_n_resumed`, `tick_classifies_active`,
 //! `tick_never_answers_pending_decision`,
@@ -49,32 +51,114 @@ pub struct TickReport {
     pub classified: usize,
 }
 
-/// Run a single fleet sweep against the session manager.
+/// Run one auto-resume sweep against the session manager.
+///
+/// Why: #10356 (owner ruling D74) — the daemon owns auto-resume, because only
+/// the daemon installs the runtime relauncher a resume needs. This is the unit
+/// its loop runs, kept free of timers so tests drive it directly.
+/// What: lists all sessions; for each `Stopped` one, resumes it when
+/// `cfg.auto_resume` is true AND
+/// [`SessionRecord::is_auto_resumable`](crate::session_manager::SessionRecord::is_auto_resumable)
+/// agrees the stop was not asked for (#6194). See [`resume_one`] for how each
+/// outcome is settled. Returns a [`TickReport`] with nothing classified.
+/// Test: `tick_auto_resumes_stopped`, `tick_skips_resume_when_disabled`,
+/// `tick_fleet_of_n_resumed`, `tick_never_resumes_a_deliberately_stopped_session`,
+/// `tick_still_resumes_a_session_whose_runtime_exited` (#6194),
+/// `one_failed_auto_resume_appends_exactly_one_error_note`.
+pub async fn resume_sweep(mgr: &Arc<SessionManager>, cfg: &SupervisorConfig) -> TickReport {
+    // #8233 review round 2 (finding 4): the launch specs this sweep's relaunches
+    // write are reaped on the daemon's own heartbeat too.
+    crate::runtime::launch_spec::reap_orphans();
+    let records = mgr.list().await;
+    let mut report = TickReport {
+        observed: records.len(),
+        ..Default::default()
+    };
+    if !cfg.auto_resume {
+        return report;
+    }
+    for record in records {
+        if record.state == ManagedSessionState::Stopped && record.is_auto_resumable() {
+            resume_one(mgr, cfg, &record, &mut report).await;
+        }
+    }
+    debug!(
+        observed = report.observed,
+        resumed = report.resumed.len(),
+        resume_failures = report.resume_failures,
+        "auto-resume: sweep complete"
+    );
+    report
+}
+
+/// Auto-resume one eligible `Stopped` session and settle the outcome.
+///
+/// What: calls `resume_auto` (#6568: the automatic path stamps the breaker),
+/// bounded by `cfg.step_timeout` (#8335; an expired resume counts as a failure
+/// and is retried next sweep). `Ok` counts a resume. `ResumeInFlight` (#8233)
+/// is skipped without a failure. `AutoResumeRecorded` is counted but not
+/// re-marked. Any other error goes to [`settle_failed_resume`].
+/// Test: as [`resume_sweep`].
+async fn resume_one(
+    mgr: &Arc<SessionManager>,
+    cfg: &SupervisorConfig,
+    record: &SessionRecord,
+    report: &mut TickReport,
+) {
+    let resume = mgr.resume_auto(&record.id);
+    let Some(outcome) = step_bounded(cfg, "resume_auto", record, resume).await else {
+        report.resume_failures += 1;
+        return;
+    };
+    match outcome {
+        Ok(_) => {
+            info!(
+                id = %record.id,
+                name = %record.tmux_name,
+                "auto-resume: resumed stopped session; launch verified"
+            );
+            report.resumed.push(record.id.to_string());
+        }
+        // #8233 item 4: another path is mid-resume on this session.
+        // Nothing failed, so the sweep neither errors the record nor counts a
+        // failure — it leaves the session to the writer that holds it.
+        Err(ManagedError::ResumeInFlight(_)) => {
+            info!(
+                id = %record.id,
+                name = %record.tmux_name,
+                "auto-resume: another path is resuming this session; skipping this sweep"
+            );
+        }
+        // #8233 round 3, finding 3: `resume_auto` already marked the record
+        // errored with this very message. Counting the failure is right;
+        // appending a SECOND `[error: …]` note to the task is not.
+        Err(ManagedError::AutoResumeRecorded(msg)) => {
+            error!(
+                id = %record.id,
+                name = %record.tmux_name,
+                "auto-resume: failed (already recorded on the record): {msg}"
+            );
+            report.resume_failures += 1;
+        }
+        Err(e) => settle_failed_resume(mgr, record, e, report).await,
+    }
+}
+
+/// Run a single `tm supervisor` sweep against the session manager.
 ///
 /// Why: this is the supervisor's heartbeat. Factoring it out of the timer loop
-/// makes the consequential logic (auto-resume gating, classification) unit-
-/// testable with a `crate::session_manager::tests`-style fake tmux driver and a
-/// mock classifier, with zero real time elapsed.
-/// What: lists all sessions via `mgr.list()`; for each `Stopped` session, resumes
-/// it when `cfg.auto_resume` is true AND
-/// [`SessionRecord::is_auto_resumable`](crate::session_manager::SessionRecord::is_auto_resumable)
-/// agrees the stop was not asked for (#6194 — a deliberately stopped or killed
-/// session is left down), counting successes and — on failure —
-/// marking the session `Errored` so the fleet snapshot shows it (#5208); for each
-/// `Active` session, classifies its pane through `monitor` when `cfg.classify_idle`
-/// is true and a `monitor` is supplied. Never answers or clears a
-/// `pending_decision`; it mirrors the classifier's verdict into `blocked_prompt`
-/// (#8393, [`record_blocked_prompt`]), which the metrics surface. Returns a
-/// [`TickReport`]. #8335: each `resume_auto` and classification is bounded by
-/// `cfg.step_timeout` ([`step_bounded`]); an expired resume counts as a
-/// failure but is not marked errored, so the next sweep retries it.
-/// Test: `tick_auto_resumes_stopped`, `tick_skips_resume_when_disabled`,
-/// `tick_fleet_of_n_resumed`, `tick_classifies_active`,
-/// `tick_never_answers_pending_decision`;
-/// `tick_never_resumes_a_deliberately_stopped_session`,
-/// `tick_still_resumes_a_session_whose_runtime_exited` (#6194);
-/// `an_already_active_session_is_not_marked_errored_by_a_stale_resume` (#8396,
-/// via [`settle_failed_resume`]).
+/// makes classification unit-testable with a fake tmux driver and a mock
+/// classifier, with zero real time elapsed.
+/// What: lists all sessions via `mgr.list()`; for each `Active` session,
+/// classifies its pane through `monitor` when `cfg.classify_idle` is true and a
+/// `monitor` is supplied. #10356 (owner ruling D74): it no longer resumes a
+/// `Stopped` session — [`resume_sweep`] in the daemon does. Never answers or
+/// clears a `pending_decision`; it mirrors the classifier's verdict into
+/// `blocked_prompt` (#8393, [`record_blocked_prompt`]), which the metrics
+/// surface. Returns a [`TickReport`]. #8335: each classification is bounded by
+/// `cfg.step_timeout` ([`step_bounded`]).
+/// Test: `tick_classifies_active`, `tick_never_answers_pending_decision`,
+/// `the_supervisor_tick_no_longer_resumes`.
 pub async fn run_tick<C: LlmClassifier>(
     mgr: &Arc<SessionManager>,
     cfg: &SupervisorConfig,
@@ -93,74 +177,20 @@ pub async fn run_tick<C: LlmClassifier>(
     };
 
     for record in records {
-        match record.state {
-            // #6194: state alone made every `Stopped` record a relaunch
-            // candidate, which respawned sessions the operator had just killed.
-            // `is_auto_resumable` reads the recorded stop cause.
-            ManagedSessionState::Stopped if cfg.auto_resume && record.is_auto_resumable() => {
-                // #6568: `resume_auto`, not `resume` — the automatic path stamps
-                // the attempt so the next runtime exit can be attributed to it.
-                // `resume` is the operator's entry point and forgives the streak.
-                // #8335: bounded per session, so one hung resume cannot use up
-                // the whole sweep's bound.
-                let resume = mgr.resume_auto(&record.id);
-                let Some(outcome) = step_bounded(cfg, "resume_auto", &record, resume).await else {
-                    report.resume_failures += 1;
-                    continue;
-                };
-                match outcome {
-                    Ok(_) => {
-                        info!(
-                            id = %record.id,
-                            name = %record.tmux_name,
-                            "supervisor: auto-resumed stopped session"
-                        );
-                        report.resumed.push(record.id.to_string());
-                    }
-                    // #8233 item 4: another path is mid-resume on this session.
-                    // Nothing failed, so the tick neither errors the record nor
-                    // counts a failure — it leaves the session to the writer
-                    // that holds it and looks again next tick.
-                    Err(ManagedError::ResumeInFlight(_)) => {
-                        info!(
-                            id = %record.id,
-                            name = %record.tmux_name,
-                            "supervisor: another path is resuming this session; skipping this tick"
-                        );
-                    }
-                    // #8233 round 3, finding 3: `resume_auto` already marked the
-                    // record errored with this very message. Counting the
-                    // failure is right; appending a SECOND `[error: …]` note to
-                    // the task is not — `auto_relaunch` hands that task to the
-                    // next relaunch.
-                    Err(ManagedError::AutoResumeRecorded(msg)) => {
-                        error!(
-                            id = %record.id,
-                            name = %record.tmux_name,
-                            "supervisor: auto-resume failed (already recorded on the record): {msg}"
-                        );
-                        report.resume_failures += 1;
-                    }
-                    Err(e) => settle_failed_resume(mgr, &record, e, &mut report).await,
-                }
+        if record.state == ManagedSessionState::Active
+            && cfg.classify_idle
+            && let Some(monitor) = monitor
+        {
+            // #8335: bounded per session, like `resume_auto` in `resume_one`.
+            let classify = classify_active(mgr, monitor, &record.id, &record.tmux_name);
+            if step_bounded(cfg, "classify", &record, classify).await == Some(true) {
+                report.classified += 1;
             }
-            ManagedSessionState::Active if cfg.classify_idle => {
-                if let Some(monitor) = monitor {
-                    // #8335: bounded per session, like `resume_auto` above.
-                    let classify = classify_active(mgr, monitor, &record.id, &record.tmux_name);
-                    if step_bounded(cfg, "classify", &record, classify).await == Some(true) {
-                        report.classified += 1;
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
     debug!(
         observed = report.observed,
-        resumed = report.resumed.len(),
-        resume_failures = report.resume_failures,
         classified = report.classified,
         "supervisor: sweep complete"
     );
@@ -190,7 +220,7 @@ async fn step_bounded<F: std::future::Future>(
             name = %record.tmux_name,
             step,
             limit_secs = cfg.step_timeout.as_secs(),
-            "supervisor: sweep step did not finish within its bound; abandoned it and \
+            "sweep step did not finish within its bound; abandoned it and \
              moved to the next session (#8335)"
         );
     }
@@ -229,14 +259,14 @@ pub(super) async fn settle_failed_resume(
         info!(
             id = %record.id,
             name = %record.tmux_name,
-            "supervisor: session is already active; nothing to resume"
+            "auto-resume: session is already active; nothing to resume"
         );
         return;
     }
     error!(
         id = %record.id,
         name = %record.tmux_name,
-        "supervisor: auto-resume failed: {e}"
+        "auto-resume: failed: {e}"
     );
     // #5208: a failed auto-resume must not degrade to a log line while the
     // session stays dead and `Stopped`. Marking it `Errored` puts it in
@@ -250,7 +280,7 @@ pub(super) async fn settle_failed_resume(
         error!(
             id = %record.id,
             name = %record.tmux_name,
-            "supervisor: could not mark failed auto-resume as errored: {mark_err}"
+            "auto-resume: could not mark a failed resume as errored: {mark_err}"
         );
     }
     report.resume_failures += 1;

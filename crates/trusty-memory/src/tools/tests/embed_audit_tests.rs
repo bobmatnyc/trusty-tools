@@ -222,6 +222,14 @@ async fn embed_sweep_reports_a_palace_with_an_unembedded_drawer() {
     );
     assert_eq!(out["palaces"][0]["missing"], 1, "{out}");
     assert_eq!(out["palaces"][0]["healthy"], false, "{out}");
+    // #9735: the backfill's progress is in the sweep, derived from health.
+    let progress = &out["palaces"][0]["chunk_backfill"];
+    assert_eq!(
+        (&progress["total"], &progress["pending"]),
+        (&json!(1), &json!(1)),
+        "{out}"
+    );
+    assert_eq!(progress["done"], 0, "{out}");
 }
 
 /// Why (#5000, #4786): a palace whose bytes are on disk but cannot be opened is

@@ -1,0 +1,56 @@
+{
+  "answer": "lorem ipsum dolor sit amet eli",
+  "answer_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed temp",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-13T18:16:00Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum d",
+  "due": null,
+  "goal": "G0d",
+  "kind": "question",
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über mag",
+      "label": "lorem ipsum dolor sit amet eli",
+      "markers": {
+        "risk": 1,
+        "scope": 1,
+        "work": 2
+      },
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed ",
+      "label": "lorem ipsum dolor sit am",
+      "markers": {
+        "risk": 0,
+        "scope": 0,
+        "work": 0
+      }
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+      "label": "lorem ipsum do",
+      "markers": {
+        "risk": -1,
+        "scope": 0,
+        "work": 1
+      }
+    }
+  ],
+  "rank": 1,
+  "session": "pm-9",
+  "specs": [
+    {
+      "label": "lorem ipsum dolor sit ",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über mag"
+    },
+    {
+      "label": "lorem ipsum do",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über mag"
+    }
+  ],
+  "status": "answered",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lo",
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1
+}

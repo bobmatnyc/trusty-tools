@@ -18,10 +18,15 @@
 //! stamp once its graph is saved, and a boot that finds the stamp schedules a
 //! rebuild. A restart, park or crash inside the debounce window therefore
 //! never serves the old persisted graph as current.
+//! A write counts as active from its start, embed included, and the quiet
+//! window never elapses while one is active (#10159); only the max-wait bound
+//! can fire mid-write.
 //! Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`,
 //! `a_deferred_rebuild_survives_a_reopen`,
-//! `rebuild_due_waits_for_quiet_or_max_wait` and
-//! `continuous_writes_still_rebuild_at_the_max_wait_cap` in
+//! `rebuild_due_waits_for_quiet_or_max_wait`,
+//! `continuous_writes_still_rebuild_at_the_max_wait_cap`,
+//! `a_quiet_rebuild_waits_while_a_write_is_embedding` and
+//! `a_serial_burst_of_slow_writes_rebuilds_at_most_once_per_max_wait` in
 //! `indexer::tests::file_lifecycle_8959`; the ticker by
 //! `graph_refresh_tick_rebuilds_a_stale_index_once`.
 
@@ -33,6 +38,12 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::core::symbol_graph::SymbolGraph;
+
+/// #10110 test seam: the durable dirty-mark stamp fails for each index id
+/// listed here, so a caller's fail-before-mutation path can be proven.
+#[cfg(test)]
+pub(crate) static TEST_FAIL_DIRTY_MARK: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
 
 use super::CodeIndexer;
 
@@ -69,6 +80,10 @@ pub(crate) struct GraphRefresh {
     /// in-memory mark. A rebuild that starts while one is in flight may miss
     /// it, so it leaves the durable mark in place.
     inflight: AtomicU64,
+    /// #10159: single-file writes running now, embed phase included. Holds
+    /// back only the quiet rebuild; separate from `inflight`, so the #8959
+    /// clear rules do not change.
+    active_writes: AtomicU64,
 }
 
 /// What a full rebuild may clear once its graph is persisted (#8959).
@@ -94,6 +109,30 @@ impl Drop for GraphWriteGuard<'_> {
     }
 }
 
+/// A single-file write in progress, embed phase included (#10159).
+///
+/// Why: `index_file` embeds before it takes [`GraphWriteGuard`], so an embed
+/// longer than [`GRAPH_REFRESH_QUIET`] looked like a quiet index, and a serial
+/// burst of slow writes paid one full rebuild per write.
+/// What: the write counts as active until the guard drops. The drop, on
+/// success, error, panic or cancellation alike, restamps the last write and
+/// then uncounts the write, so the quiet window runs from the write's end.
+/// Test: `a_quiet_rebuild_waits_while_a_write_is_embedding`,
+/// `a_failed_or_panicked_write_does_not_hold_back_the_quiet_rebuild`.
+pub(crate) struct ActiveWriteGuard<'a> {
+    refresh: &'a GraphRefresh,
+}
+
+impl Drop for ActiveWriteGuard<'_> {
+    fn drop(&mut self) {
+        // #10159: stamp before the decrement, so a ticker that reads zero
+        // active writes also reads this write's stamp.
+        let now = self.refresh.now_ms();
+        self.refresh.last_write_ms.store(now, Ordering::Release);
+        self.refresh.active_writes.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Default for GraphRefresh {
     fn default() -> Self {
         Self {
@@ -104,6 +143,7 @@ impl Default for GraphRefresh {
             full_rebuilds: AtomicU64::new(0),
             write_gen: AtomicU64::new(0),
             inflight: AtomicU64::new(0),
+            active_writes: AtomicU64::new(0),
         }
     }
 }
@@ -145,11 +185,18 @@ impl GraphRefresh {
     }
 
     fn is_due(&self, quiet: Duration, max_wait: Duration) -> bool {
+        // #10159: an active write means the index is not quiet, however long
+        // its embed runs; the max-wait bound still applies.
+        let quiet_ms = if self.active_writes.load(Ordering::SeqCst) > 0 {
+            u64::MAX
+        } else {
+            duration_ms(quiet)
+        };
         rebuild_due(
             self.stale_since_ms.load(Ordering::Acquire),
             self.last_write_ms.load(Ordering::Acquire),
             self.now_ms(),
-            duration_ms(quiet),
+            quiet_ms,
             duration_ms(max_wait),
         )
     }
@@ -188,6 +235,20 @@ impl CodeIndexer {
         self.graph_refresh.mark_stale();
     }
 
+    /// Count a single-file write as active for its whole run (#10159).
+    ///
+    /// What: `None` on a `skip_kg` index, whose graph a write never marks;
+    /// otherwise an [`ActiveWriteGuard`] the caller holds until the write ends.
+    /// Test: `a_skip_kg_write_is_not_counted_active`.
+    pub(crate) fn begin_active_write(&self) -> Option<ActiveWriteGuard<'_>> {
+        if self.skip_kg {
+            return None;
+        }
+        let refresh = &self.graph_refresh;
+        refresh.active_writes.fetch_add(1, Ordering::SeqCst);
+        Some(ActiveWriteGuard { refresh })
+    }
+
     /// Start a single-file write that leaves the symbol graph stale (#8959).
     ///
     /// Why: the in-memory stale mark dies with the process, and the persisted
@@ -204,6 +265,13 @@ impl CodeIndexer {
         refresh.inflight.fetch_add(1, Ordering::SeqCst);
         let guard = GraphWriteGuard { refresh };
         let generation = refresh.write_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        #[cfg(test)]
+        if TEST_FAIL_DIRTY_MARK
+            .lock()
+            .is_ok_and(|f| f.contains(&self.index_id))
+        {
+            anyhow::bail!("injected symbol-graph dirty mark failure (#10110 test seam)");
+        }
         if let Some(corpus) = self.corpus.clone() {
             tokio::task::spawn_blocking(move || corpus.mark_kg_graph_dirty(generation))
                 .await
@@ -222,7 +290,7 @@ impl CodeIndexer {
         file_path: &str,
     ) -> anyhow::Result<Option<GraphWriteGuard<'_>>> {
         if self.skip_kg
-            || (self.chunk_ids_for_file(file_path).await.is_empty()
+            || (self.file_chunk_ids(file_path).await?.is_empty()
                 && !self.entities.read().await.contains_key(file_path))
         {
             return Ok(None);
@@ -297,8 +365,10 @@ impl CodeIndexer {
     /// What: returns `false` with no work when the graph is fresh or the index
     /// is deleted. Otherwise takes the flush lock, re-checks, and runs one
     /// full `rebuild_symbol_graph`, which clears the stale mark. Returns
-    /// whether it rebuilt.
-    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`.
+    /// whether it rebuilt; `false` when the rebuild was deferred or installed
+    /// nothing, with the stale mark kept (#10110).
+    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`,
+    /// `a_rebuild_that_outlasts_the_rehydrate_wait_persists_nothing_and_retries_10110`.
     pub async fn flush_symbol_graph(&self) -> bool {
         if !self.graph_refresh.is_stale() || self.refuse_if_deleted().is_err() {
             return false;
@@ -307,8 +377,9 @@ impl CodeIndexer {
         if !self.graph_refresh.is_stale() {
             return false; // a concurrent flusher already rebuilt
         }
-        self.rebuild_symbol_graph().await;
-        true
+        // #10110: a rebuild deferred behind a still-running rehydrate leaves
+        // the mark set, so it reports `false` and the ticker retries.
+        self.rebuild_symbol_graph().await.merge_error.is_none()
     }
 
     /// The ticker's entry point: flush when the debounce window says so.
@@ -333,7 +404,7 @@ impl CodeIndexer {
     /// itself, so they read their own writes. Status and the search KG lane
     /// use [`Self::snapshot_symbol_graph`] / [`Self::symbol_graph`], which
     /// never wait on a rebuild.
-    /// Test: `graph_handler_exports_nodes_and_edges` (export after
+    /// Test: `graph_report_exports_nodes_and_edges` (export after
     /// `index_file` with no ticker running).
     pub async fn fresh_symbol_graph(&self) -> Arc<SymbolGraph> {
         self.flush_symbol_graph().await;

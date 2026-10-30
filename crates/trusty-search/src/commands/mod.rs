@@ -37,6 +37,10 @@ pub mod cleanup;
 pub mod config;
 pub mod convert;
 pub mod daemon_guard;
+// #10413: launchd-aware branch of the daemon guard.
+pub(crate) mod daemon_guard_launchd;
+#[cfg(test)]
+mod daemon_guard_launchd_tests;
 pub mod dashboard;
 pub mod discover;
 pub mod doctor;

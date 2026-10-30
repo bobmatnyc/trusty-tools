@@ -9,6 +9,7 @@
 //! touchpoint sits in the private `platform` module.
 //! Test: the `*_tests.rs` files beside this module.
 
+pub mod agent_deny;
 mod backend;
 // #7520: the server's per-session cache of CLI-backed values; only the
 // server builds one, so without `server` it is never constructed.
@@ -29,10 +30,15 @@ mod dotenv;
 // #9069: the GitHub Actions sync target; spawns `gh` through `cli`.
 #[cfg(all(unix, feature = "cli-backends"))]
 pub mod github_actions;
+// #9069 PR 2: the Vercel sync target; spawns `vercel` through `cli`.
+#[cfg(all(unix, feature = "cli-backends"))]
+pub mod vercel;
 // #9326: the 0600 value-file backend needs Unix modes and owners. #4567: the
 // audit sink reuses its mode, owner and symlink checks, so it is crate-visible.
 #[cfg(unix)]
 pub(crate) mod file;
+#[cfg(unix)]
+mod file_controls;
 mod index;
 // #7519 P3: the Keeper Commander backend; spawns `keeper` through `cli`.
 #[cfg(all(unix, feature = "cli-backends"))]
@@ -54,6 +60,7 @@ mod secret_store;
 // #7524 P2-L7: the time limit on every Keychain call.
 mod time_limit;
 
+pub use agent_deny::{AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION, DenyAudit};
 // #7524: only the server's `State` reads it; unused without `server`.
 #[cfg(feature = "server")]
 pub(crate) use backend::KEYCHAIN_COMPILED;
@@ -74,7 +81,7 @@ pub use file::{FileBackend, VALUES_SUBDIR};
 pub use index::{DEFAULT_LOCK_TIMEOUT, INDEX_SUBDIR, NamesIndex};
 pub use keychain::{KEYCHAIN_CALL_TIMEOUT, KeychainBackend};
 // #9066: `mask_secret` moved to `api` for the console bridge; same path here.
-pub use crate::api::{MASK_HEAD_CHARS, mask_secret};
+pub use crate::api::{MASK_HEAD_CHARS, mask_length_only, mask_secret};
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::MemoryBackend;
 pub use platform::{GIT_ENV_REDIRECTS, git_redirect_vars};

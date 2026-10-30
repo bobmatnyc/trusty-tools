@@ -4,7 +4,10 @@
 //! path from a tm-launched session, so every MCP tool that can reach Slack,
 //! Gmail, Notion or Google Chat is denied — read, search and list tools too
 //! (Bob ruling 4). The table is built into the code (Architect Q6): a config
-//! file the session can write must never be able to drop a family.
+//! file the session can write must never be able to drop a family. The one
+//! narrowing is per call, not per family: `egress_guard_slack_read` (#10387)
+//! lifts two exact Slack read tools for a project the host `config.yaml`
+//! names, and that file is a trust anchor no session may write.
 //! What: [`FamilyTable`] holds the server-segment patterns;
 //! [`FamilyTable::classify`] maps a tool name to a [`Classification`]. Claude
 //! Code names an MCP tool `mcp__<server>__<tool>`. The server segment is
@@ -187,5 +190,26 @@ impl FamilyTable {
             return Classification::Family(GWORKSPACE.to_owned());
         }
         Classification::Unrelated
+    }
+}
+
+#[cfg(test)]
+mod lockdown_tests {
+    use super::{GWORKSPACE, GWORKSPACE_MESSAGING, SERVER_FAMILIES};
+    use trusty_mpm::core::architect_lockdown::ARCHITECT_DENY_GLOBS;
+
+    /// #10127: the Architect's launch deny names every family this hook
+    /// denies, so a family added here and not there fails. The hook's
+    /// separator-blind spellings (`google_workspace`, `gsuite`) are hook-only.
+    #[test]
+    fn the_architect_deny_covers_every_egress_family() {
+        for family in SERVER_FAMILIES {
+            let glob = format!("mcp__*{family}*");
+            assert!(ARCHITECT_DENY_GLOBS.contains(&glob.as_str()), "{glob}");
+        }
+        for word in GWORKSPACE_MESSAGING {
+            let glob = format!("mcp__*{GWORKSPACE}*__*{word}*");
+            assert!(ARCHITECT_DENY_GLOBS.contains(&glob.as_str()), "{glob}");
+        }
     }
 }

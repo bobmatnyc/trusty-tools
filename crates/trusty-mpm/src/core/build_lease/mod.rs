@@ -92,6 +92,12 @@ pub mod admission;
 pub mod census;
 pub mod census_detail;
 pub mod config;
+// #10212: a bounded entry count for a profile's `deps/`, never a full readdir.
+pub mod deps_budget;
+// #10212: rotate an over-line `debug/` aside, never while a build holds it.
+pub mod deps_rotate;
+// #10212: `tm doctor --rotate-deps` and the daemon reclaim of aside trees.
+pub mod deps_repair;
 // #8451: the daemon's percent-of-volume sweep over the slot pool.
 pub mod evict;
 pub mod orphan;

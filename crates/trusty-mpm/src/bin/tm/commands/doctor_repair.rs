@@ -41,7 +41,9 @@ use crate::cli::DoctorFlags;
 /// Test: `cli_parses_doctor_fix`, `cli_parses_doctor_fix_skills` pin the flags;
 /// `the_scoped_launchd_flag_selects_exactly_one_repair` pins the dispatch; the
 /// actions' own modules carry the behaviour tests.
-pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
+/// `Err` (after every action has run) when `--rotate-deps` printed a FAIL row.
+pub(crate) fn run_post_report_actions(flags: &DoctorFlags) -> anyhow::Result<()> {
+    let mut failed = Ok(());
     for action in post_report_actions(flags) {
         match action {
             PostReportAction::PruneStaleSkills => prune_stale_skills_locally(),
@@ -55,6 +57,10 @@ pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
             PostReportAction::FixLaunchdSecrets => {
                 super::doctor_fix_launchd_secrets::fix_launchd_secrets_locally(flags.yes);
             }
+            // #10212: the oversized-deps rotation alone; `--fix` never runs it.
+            PostReportAction::RotateDeps => {
+                failed = super::doctor_rotate_deps::rotate_deps_locally(flags.yes);
+            }
             PostReportAction::Fix => run_repairs(flags.yes, flags.include_frozen),
             PostReportAction::QuarantineMcp => {
                 if let Some(target) = &flags.quarantine_mcp {
@@ -63,6 +69,7 @@ pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
             }
         }
     }
+    failed
 }
 
 /// One post-report action `tm doctor` can run.
@@ -76,6 +83,8 @@ enum PostReportAction {
     FixAgents,
     /// `--fix-launchd-secrets` (#8236).
     FixLaunchdSecrets,
+    /// `--rotate-deps` (#10212).
+    RotateDeps,
     /// `--fix` — every repair class.
     Fix,
     /// `--quarantine-mcp <PATH>`.
@@ -97,6 +106,7 @@ fn post_report_actions(flags: &DoctorFlags) -> Vec<PostReportAction> {
             flags.fix_launchd_secrets,
             PostReportAction::FixLaunchdSecrets,
         ),
+        (flags.rotate_deps, PostReportAction::RotateDeps),
         (flags.fix, PostReportAction::Fix),
         (
             flags.quarantine_mcp.is_some(),
@@ -169,7 +179,8 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// What: runs, in order, the skill redeploy (`skill_staleness`), the
 /// machine-wide build-tree repoint (`hooks_build_tree_binary`, #7262 — first,
 /// so the strip below cannot delete a PM guard the repoint would have fixed),
-/// the project hook cleanup (`hooks_contamination`), the lifecycle-group
+/// the machine-wide interpreter prefix for bare seeded `.sh` hook commands
+/// (`hook-interpreter`, #10263), the project hook cleanup (`hooks_contamination`), the lifecycle-group
 /// re-merge (`hooks_missing_tm_group`, #7490 — after that cleanup, so it
 /// restores what a managed launch would write), the push-guard retrofit
 /// (`push_guard`), the session-scope re-apply (`session_scope`, #7678 — the
@@ -205,14 +216,18 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     let mut steps = skill_steps(include_frozen, mode);
 
     let project_dir = std::env::current_dir().ok();
+    // #9293: the home root is the caller's, so a test can supply a temp one.
+    let machine_files =
+        machine_wide_settings_files(project_dir.as_deref(), dirs::home_dir().as_deref());
     // #7262: the repoint runs BEFORE the contamination strip. A build-tree
     // command is tm-owned by `is_mpm_hook_command`, so a strip that ran first
     // would delete the PM guard this pass repairs in place.
-    steps.extend(repair_build_tree_binary(
-        // #9293: the home root is the caller's, so a test can supply a temp one.
-        &machine_wide_settings_files(project_dir.as_deref(), dirs::home_dir().as_deref()),
-        mode,
-    ));
+    steps.extend(repair_build_tree_binary(&machine_files, mode));
+    // #10263: add the interpreter to bare seeded `.sh` hook commands, over the
+    // same machine-wide list the `hook-interpreter` row reads.
+    steps.extend(
+        trusty_mpm::core::hook_interpreter_doctor::repair_hook_interpreter(&machine_files, mode),
+    );
     // #7617: AFTER the repoint, so a build-tree `statusLine` command is fixed by
     // the pass that owns that damage class and this one only seeds what is
     // missing. Scoped to the two tiers the `statusline` check reads — the cwd
@@ -319,6 +334,16 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         );
     }
 
+    // #10041: move plaintext credentials out of the managed `.claude.json`
+    // env blocks into the credential store, and tighten it and its copies to 0600.
+    if let Some(dir) = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir() {
+        steps.extend(
+            trusty_mpm::daemon::doctor_claude_json_secrets_repair::repair_claude_json_secrets(
+                &dir, mode,
+            ),
+        );
+    }
+
     // #8392: bring tm's opt-in `Notification` entry in the managed settings in
     // line with `[notification_hook] enabled`; silent when it already matches.
     if let Some(dir) = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir() {
@@ -405,25 +430,25 @@ fn rust_build_env_steps(
 /// whichever project that session was pointed at — on 2026-09-10 that was eight
 /// projects, none of them the cwd of the operator who ran `tm doctor`. A
 /// cwd-scoped repair leaves seven of them broken and reports success, which is
-/// why the fix had to be done by hand with `sed`. The sweep therefore uses the
-/// same `$HOME`-wide discovery `tm hooks clean` (no `--path`) already owns
-/// rather than a second enumerator, plus the cwd, which a `$HOME` walk misses
-/// when the project lives outside the home directory.
+/// why the fix had to be done by hand with `sed`. The sweep therefore walks
+/// `$HOME`, plus the cwd, which a `$HOME` walk misses when the project lives
+/// outside the home directory.
 /// What: the deduplicated union of `<cwd>/.claude/{settings.json,
 /// settings.local.json}` and
-/// [`trusty_common::claude_config::discover_claude_settings`] under the resolved
-/// home. Existence is not checked here — [`repair_build_tree_binary`] treats a
-/// missing file as nothing to do. An unresolvable home contributes nothing
+/// [`trusty_common::claude_config::discover_claude_settings`] under the
+/// resolved home, which never enters a top-level synced folder or another
+/// device. Existence is not checked here — [`repair_build_tree_binary`] treats
+/// a missing file as nothing to do. An unresolvable home contributes nothing
 /// rather than aborting the repair.
 ///
-/// This walk is the reason it belongs to `--fix` and not to `tm doctor` itself:
-/// the diagnostic must stay fast, so its `hooks_build_tree_binary` probe stays
-/// scoped to the projects the daemon tracks (see
-/// `daemon::doctor_hooks_hygiene::candidate_settings_files`), while the repair
-/// the operator explicitly asked for pays the cost once.
+/// Plain `tm doctor` walks it too: the `hook-interpreter` row reads this list,
+/// so the diagnostic pays the machine-wide walk on every run. The
+/// `hooks_build_tree_binary` probe still stays scoped to the projects the
+/// daemon tracks (see `daemon::doctor_hooks_hygiene::candidate_settings_files`).
 /// `home` is the walk root (`None` contributes nothing).
 /// Test: `machine_wide_settings_files_includes_the_cwd_project`.
-fn machine_wide_settings_files(
+// #10263: plain `tm doctor` now walks this list for the `hook-interpreter` row.
+pub(crate) fn machine_wide_settings_files(
     project_dir: Option<&std::path::Path>,
     home: Option<&std::path::Path>,
 ) -> Vec<std::path::PathBuf> {
@@ -435,6 +460,8 @@ fn machine_wide_settings_files(
     }
     // #9293: `home` is supplied, never resolved here, so the walk root is the
     // caller's; production passes `dirs::home_dir()`, a test passes a temp dir.
+    // #10267: the shared trusty-common walk, which never enters iCloud-synced
+    // home folders or another device — a read there froze a session.
     if let Some(home) = home {
         set.extend(trusty_common::claude_config::discover_claude_settings(
             home,
@@ -731,6 +758,24 @@ mod tests {
         );
     }
 
+    /// #10212: `--rotate-deps` selects the rotation alone, and `--fix` never
+    /// gains it.
+    #[test]
+    fn the_rotate_deps_flag_selects_exactly_one_repair() {
+        for args in [&["--rotate-deps"][..], &["--rotate-deps", "--yes"][..]] {
+            let flags = doctor_flags(args);
+            assert_eq!(
+                post_report_actions(&flags),
+                vec![PostReportAction::RotateDeps],
+                "{args:?}"
+            );
+            assert_eq!(flags.yes, args.contains(&"--yes"));
+        }
+        assert!(
+            !post_report_actions(&doctor_flags(&["--fix"])).contains(&PostReportAction::RotateDeps)
+        );
+    }
+
     #[test]
     fn fix_hint_names_the_fix_command() {
         assert_eq!(FIX_APPLY_HINT, "tm doctor --fix --yes");
@@ -750,9 +795,19 @@ mod tests {
         std::fs::create_dir_all(&home_project).expect("plant project");
         let planted = home_project.join("settings.json");
         std::fs::write(&planted, "{}").expect("plant settings");
+        // #10263: an iCloud-synced top-level folder is never walked.
+        let synced = home.path().join("Documents").join("proj").join(".claude");
+        std::fs::create_dir_all(&synced).expect("plant synced project");
+        std::fs::write(synced.join("settings.json"), "{}").expect("plant synced settings");
 
         let project = std::path::Path::new("/srv/projects/acme");
         let files = machine_wide_settings_files(Some(project), Some(home.path()));
+        assert!(
+            files
+                .iter()
+                .all(|f| !f.starts_with(home.path().join("Documents"))),
+            "a file under <home>/Documents was returned: {files:?}"
+        );
 
         for name in ["settings.json", "settings.local.json"] {
             let expected = project.join(".claude").join(name);

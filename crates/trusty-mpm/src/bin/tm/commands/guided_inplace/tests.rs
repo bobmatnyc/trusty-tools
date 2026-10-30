@@ -1352,6 +1352,34 @@ fn inplace_exec_command_for_follows_the_configured_renderer() {
     }
 }
 
+/// #9025: the bare-`tm` relaunch execs `claude` past both spec delivery
+/// points, so the argv that reaches `exec` leads with `--name <tmux session>`,
+/// and an argv that already names itself is kept. The resume goes through
+/// `named_inplace_resume`, the step `run_inplace_relaunch` runs, so removing
+/// its `.named_after_session` call fails this test.
+/// Test: this test.
+#[test]
+fn an_inplace_relaunch_is_named_after_its_session() {
+    let exec_args = |resume: &trusty_mpm::runtime::InPlaceResumeCommand| -> Vec<String> {
+        build_inplace_exec_command(resume, std::path::Path::new("/fake/cwd"), &no_gh(), false)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    };
+    let unnamed = synthetic_resume(&["--append-system-prompt-file", "/p"]);
+    let args = exec_args(&named_inplace_resume(Ok(unnamed), "tm-dogfood").expect("named"));
+    assert_eq!(
+        args,
+        ["--name", "tm-dogfood", "--append-system-prompt-file", "/p"]
+    );
+
+    let named = synthetic_resume(&["--name", "mine", "--resume", "abc"]);
+    assert_eq!(
+        exec_args(&named_inplace_resume(Ok(named), "tm-dogfood").expect("named")),
+        ["--name", "mine", "--resume", "abc"]
+    );
+}
+
 /// #8992: the bare-`tm` in-place relaunch is a PM resume, so it carries
 /// `CLAUDE_CODE_DISABLE_ARTIFACT=1` and the `--disallowedTools` value; a
 /// supervisor relaunch keeps every tool. Before the fix the exec seam set no
@@ -1392,4 +1420,26 @@ fn inplace_pm_relaunch_trims_the_unused_tools() {
         "{:?}",
         real.args
     );
+}
+
+/// #10127: the in-place exec of an Architect removes every chat token, even
+/// one its MCP pins assigned; a PM exec keeps an assigned one. Before the fix
+/// the Architect child inherited them.
+#[test]
+fn an_architect_inplace_exec_drops_the_chat_tokens() {
+    use trusty_mpm::core::architect_lockdown::ARCHITECT_ENV_UNSET;
+    use trusty_mpm::core::session_profile::SessionProfile;
+    let cwd = std::path::Path::new("/fake/cwd");
+    let mut resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    resume.mcp_env = vec![("SLACK_BOT_TOKEN".to_owned(), "xoxb-test".to_owned())];
+    let pm = env_of(&build_inplace_exec_command(&resume, cwd, &no_gh(), false));
+    assert!(
+        pm.contains(&("SLACK_BOT_TOKEN".to_owned(), Some("xoxb-test".to_owned()))),
+        "{pm:?}"
+    );
+    resume.profile = SessionProfile::Architect;
+    let env = env_of(&build_inplace_exec_command(&resume, cwd, &no_gh(), false));
+    for name in ARCHITECT_ENV_UNSET {
+        assert!(env.contains(&((*name).to_owned(), None)), "{name}: {env:?}");
+    }
 }

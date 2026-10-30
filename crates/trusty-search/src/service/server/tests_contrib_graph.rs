@@ -5,14 +5,13 @@
 //! contract (404 unknown index, 400 validation, 503 no corpus).
 
 use super::contrib_graph::{
-    graph_neighbors_handler, ingest_graph_handler, IngestGraphRequest, NeighborsParams,
+    graph_neighbors_report, ingest_graph_report, IngestGraphRequest, NeighborsParams,
 };
 use super::state::SearchAppState;
 use crate::core::corpus::contrib::{ContribEdge, ContribNode};
 use crate::core::corpus::CorpusStore;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
-use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use std::sync::Arc;
@@ -104,13 +103,9 @@ fn neighbors_params(
 async fn ingest_then_neighbors_round_trip() {
     let (_dir, state) = state_with_corpus("contrib-rt");
 
-    let Json(resp) = ingest_graph_handler(
-        State(Arc::clone(&state)),
-        Path("contrib-rt".into()),
-        Json(request("navigatsql")),
-    )
-    .await
-    .expect("ingest ok");
+    let resp = ingest_graph_report(&state, "contrib-rt", request("navigatsql"))
+        .await
+        .expect("ingest ok");
     assert!(!resp.replaced);
     assert_eq!(resp.nodes_received, 3);
     assert_eq!(resp.edges_received, 2);
@@ -119,10 +114,10 @@ async fn ingest_then_neighbors_round_trip() {
     assert_eq!(resp.unknown_edge_tags_dropped, 0);
 
     // "What writes dbo.orders?" — inbound, 2 hops reaches the C# method.
-    let Json(body) = graph_neighbors_handler(
-        State(Arc::clone(&state)),
-        Path("contrib-rt".into()),
-        Query(neighbors_params("dbo.orders", Some("in"), None, Some(2))),
+    let body = graph_neighbors_report(
+        &state,
+        "contrib-rt",
+        &neighbors_params("dbo.orders", Some("in"), None, Some(2)),
     )
     .await
     .expect("neighbors ok");
@@ -138,15 +133,10 @@ async fn ingest_then_neighbors_round_trip() {
     assert!(symbols.contains(&"m.Save"));
 
     // Kind filter: only Writes edges out of the proc.
-    let Json(body) = graph_neighbors_handler(
-        State(Arc::clone(&state)),
-        Path("contrib-rt".into()),
-        Query(neighbors_params(
-            "dbo.usp_x",
-            Some("out"),
-            Some("writes"),
-            Some(1),
-        )),
+    let body = graph_neighbors_report(
+        &state,
+        "contrib-rt",
+        &neighbors_params("dbo.usp_x", Some("out"), Some("writes"), Some(1)),
     )
     .await
     .expect("neighbors ok");
@@ -161,13 +151,9 @@ async fn ingest_then_neighbors_round_trip() {
 async fn ingest_twice_replaces_per_producer() {
     let (_dir, state) = state_with_corpus("contrib-replace");
 
-    let Json(first) = ingest_graph_handler(
-        State(Arc::clone(&state)),
-        Path("contrib-replace".into()),
-        Json(request("navigatsql")),
-    )
-    .await
-    .expect("ingest v1 ok");
+    let first = ingest_graph_report(&state, "contrib-replace", request("navigatsql"))
+        .await
+        .expect("ingest v1 ok");
     assert!(!first.replaced);
 
     // v2 drops the method node/edge: graph must shrink, not accrete.
@@ -176,13 +162,9 @@ async fn ingest_twice_replaces_per_producer() {
         edges: vec![edge("dbo.usp_x", "dbo.orders", "writes")],
         ..request("navigatsql")
     };
-    let Json(second) = ingest_graph_handler(
-        State(Arc::clone(&state)),
-        Path("contrib-replace".into()),
-        Json(v2),
-    )
-    .await
-    .expect("ingest v2 ok");
+    let second = ingest_graph_report(&state, "contrib-replace", v2)
+        .await
+        .expect("ingest v2 ok");
     assert!(second.replaced);
     assert_eq!(second.graph_nodes, 2, "v1's m.Save must be gone");
     assert_eq!(second.graph_edges, 1);
@@ -192,13 +174,9 @@ async fn ingest_twice_replaces_per_producer() {
 #[serial_test::parallel]
 async fn ingest_survives_derived_rebuild() {
     let (_dir, state) = state_with_corpus("contrib-rebuild");
-    let _ = ingest_graph_handler(
-        State(Arc::clone(&state)),
-        Path("contrib-rebuild".into()),
-        Json(request("navigatsql")),
-    )
-    .await
-    .expect("ingest ok");
+    let _ = ingest_graph_report(&state, "contrib-rebuild", request("navigatsql"))
+        .await
+        .expect("ingest ok");
 
     // Simulate the reindex seam: a fresh derived rebuild must re-merge the
     // stored contribution rather than evicting it from the serving graph.
@@ -211,10 +189,10 @@ async fn ingest_survives_derived_rebuild() {
         indexer.rebuild_symbol_graph_now().await;
     }
 
-    let Json(body) = graph_neighbors_handler(
-        State(Arc::clone(&state)),
-        Path("contrib-rebuild".into()),
-        Query(neighbors_params("dbo.orders", Some("in"), None, Some(2))),
+    let body = graph_neighbors_report(
+        &state,
+        "contrib-rebuild",
+        &neighbors_params("dbo.orders", Some("in"), None, Some(2)),
     )
     .await
     .expect("neighbors ok");
@@ -225,13 +203,9 @@ async fn ingest_survives_derived_rebuild() {
 #[serial_test::parallel]
 async fn ingest_unknown_index_404() {
     let (_dir, state) = state_with_corpus("contrib-404");
-    let err = ingest_graph_handler(
-        State(state),
-        Path("nope".into()),
-        Json(request("navigatsql")),
-    )
-    .await
-    .expect_err("must fail");
+    let err = ingest_graph_report(&state, "nope", request("navigatsql"))
+        .await
+        .expect_err("must fail");
     assert_eq!(err.0, StatusCode::NOT_FOUND);
 }
 
@@ -239,13 +213,9 @@ async fn ingest_unknown_index_404() {
 #[serial_test::parallel]
 async fn ingest_empty_producer_400() {
     let (_dir, state) = state_with_corpus("contrib-400");
-    let err = ingest_graph_handler(
-        State(state),
-        Path("contrib-400".into()),
-        Json(request("  ")),
-    )
-    .await
-    .expect_err("must fail");
+    let err = ingest_graph_report(&state, "contrib-400", request("  "))
+        .await
+        .expect_err("must fail");
     assert_eq!(err.0, StatusCode::BAD_REQUEST);
 }
 
@@ -260,13 +230,9 @@ async fn ingest_without_corpus_503() {
         "/tmp/no-corpus".into(),
     ));
     let state = Arc::new(SearchAppState::new(registry));
-    let err = ingest_graph_handler(
-        State(state),
-        Path("no-corpus".into()),
-        Json(request("navigatsql")),
-    )
-    .await
-    .expect_err("must fail");
+    let err = ingest_graph_report(&state, "no-corpus", request("navigatsql"))
+        .await
+        .expect_err("must fail");
     assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -286,20 +252,15 @@ async fn ingest_reports_503_when_the_contributed_overlay_cannot_be_merged() {
     crate::core::corpus::test_support::corrupt_contrib_row(&corpus, "stale-producer")
         .expect("plant corrupt contrib row");
 
-    let (code, Json(body)) = match ingest_graph_handler(
-        State(Arc::clone(&state)),
-        Path("contrib-merge-fail".into()),
-        Json(request("navigatsql")),
-    )
-    .await
-    {
-        Err(e) => e,
-        Ok(Json(resp)) => panic!(
-            "#5505: ingest reported success (replaced={}, graph_nodes={}, graph_edges={}) \
+    let (code, body) =
+        match ingest_graph_report(&state, "contrib-merge-fail", request("navigatsql")).await {
+            Err(e) => e,
+            Ok(resp) => panic!(
+                "#5505: ingest reported success (replaced={}, graph_nodes={}, graph_edges={}) \
              while the contribution is absent from the serving graph",
-            resp.replaced, resp.graph_nodes, resp.graph_edges
-        ),
-    };
+                resp.replaced, resp.graph_nodes, resp.graph_edges
+            ),
+        };
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "contrib_not_merged");
     assert_eq!(body["index_id"], "contrib-merge-fail");
@@ -317,10 +278,10 @@ async fn ingest_reports_503_when_the_contributed_overlay_cannot_be_merged() {
     );
 
     // Corroboration: the verdict matches what a query can actually see.
-    let Json(neighbors) = graph_neighbors_handler(
-        State(state),
-        Path("contrib-merge-fail".into()),
-        Query(neighbors_params("dbo.orders", Some("in"), None, Some(2))),
+    let neighbors = graph_neighbors_report(
+        &state,
+        "contrib-merge-fail",
+        &neighbors_params("dbo.orders", Some("in"), None, Some(2)),
     )
     .await
     .expect("neighbors ok");
@@ -344,10 +305,10 @@ async fn ingest_503_is_retryable_when_the_blocking_row_is_this_producers_own() {
     // Ingesting as the SAME producer replaces the unreadable row, so the load
     // that follows succeeds — the end-to-end proof that `retryable: true` for
     // this case is a promise the daemon actually keeps.
-    let Json(resp) = ingest_graph_handler(
-        State(Arc::new(state)),
-        Path("contrib-self-blocked".into()),
-        Json(request("navigatsql")),
+    let resp = ingest_graph_report(
+        &Arc::new(state),
+        "contrib-self-blocked",
+        request("navigatsql"),
     )
     .await
     .expect("re-sending the blocked producer's own document must clear the fault");
@@ -377,10 +338,10 @@ async fn ingest_succeeds_but_flags_a_derived_kg_persist_failure() {
     let (_dir, corpus, state) = state_and_corpus("contrib-persist-degraded");
     crate::core::corpus::test_support::break_kg_nodes_table(&corpus).expect("break kg_nodes");
 
-    let Json(resp) = ingest_graph_handler(
-        State(Arc::new(state)),
-        Path("contrib-persist-degraded".into()),
-        Json(request("navigatsql")),
+    let resp = ingest_graph_report(
+        &Arc::new(state),
+        "contrib-persist-degraded",
+        request("navigatsql"),
     )
     .await
     .expect("the contribution is queryable — this is not a 503");
@@ -399,10 +360,10 @@ async fn ingest_succeeds_but_flags_a_derived_kg_persist_failure() {
 #[serial_test::parallel]
 async fn neighbors_rejects_unknown_edge_kind() {
     let (_dir, state) = state_with_corpus("contrib-badkind");
-    let err = graph_neighbors_handler(
-        State(state),
-        Path("contrib-badkind".into()),
-        Query(neighbors_params("x", None, Some("bogus_kind"), None)),
+    let err = graph_neighbors_report(
+        &state,
+        "contrib-badkind",
+        &neighbors_params("x", None, Some("bogus_kind"), None),
     )
     .await
     .expect_err("must fail");
@@ -413,10 +374,10 @@ async fn neighbors_rejects_unknown_edge_kind() {
 #[serial_test::parallel]
 async fn neighbors_unknown_node_is_empty() {
     let (_dir, state) = state_with_corpus("contrib-empty");
-    let Json(body) = graph_neighbors_handler(
-        State(state),
-        Path("contrib-empty".into()),
-        Query(neighbors_params("does.not.exist", None, None, None)),
+    let body = graph_neighbors_report(
+        &state,
+        "contrib-empty",
+        &neighbors_params("does.not.exist", None, None, None),
     )
     .await
     .expect("ok");

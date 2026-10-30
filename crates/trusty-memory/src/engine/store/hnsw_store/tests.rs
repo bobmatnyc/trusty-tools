@@ -1830,9 +1830,9 @@ fn in_edges(index: &Hnsw<'static, f32, DistCosine>, id: u64) -> Vec<u64> {
 /// `count` unit vectors at cosine distance about `delta^2 / 2` from `centre`,
 /// along `+-` an orthonormal basis of the complement of `centre` and `avoid`.
 /// Each is nearer `centre` than `centre`'s existing neighbours are, and
-/// farther from `avoid` than `centre` is, so an insert of one picks `centre`
-/// and prunes `avoid` (`hnsw.rs:1361-1363`).
-fn around(centre: &[f32], avoid: &[f32], delta: f32, count: usize) -> Vec<Vec<f32>> {
+/// farther from every `avoid` vector than `centre` is, so an insert of one
+/// picks `centre` and prunes each `avoid` vector (`hnsw.rs:1361-1363`).
+fn around(centre: &[f32], avoid: &[&[f32]], delta: f32, count: usize) -> Vec<Vec<f32>> {
     let dim = centre.len();
     let mut span: Vec<Vec<f32>> = Vec::new();
     let mut excluded = 0;
@@ -1841,8 +1841,8 @@ fn around(centre: &[f32], avoid: &[f32], delta: f32, count: usize) -> Vec<Vec<f3
         v[axis] = 1.0;
         v
     });
-    for (i, mut v) in [centre.to_vec(), avoid.to_vec()]
-        .into_iter()
+    for (i, mut v) in std::iter::once(centre.to_vec())
+        .chain(avoid.iter().map(|a| a.to_vec()))
         .chain(axes)
         .enumerate()
     {
@@ -1853,7 +1853,7 @@ fn around(centre: &[f32], avoid: &[f32], delta: f32, count: usize) -> Vec<Vec<f3
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 1e-3 {
             span.push(v.into_iter().map(|x| x / norm).collect());
-            if i < 2 {
+            if i <= avoid.len() {
                 excluded += 1;
             }
         }
@@ -1872,6 +1872,16 @@ fn around(centre: &[f32], avoid: &[f32], delta: f32, count: usize) -> Vec<Vec<f3
             raw.into_iter().map(|x| x / norm).collect()
         })
         .collect()
+}
+
+/// Whether the graph alone, with no stranded-point scan, puts `id` in the top
+/// 10 for `v`.
+fn graph_reaches(store: &HnswStore, id: u64, v: &[f32]) -> bool {
+    let live = store.keys.get(&store.db).expect("keys").reverse.len();
+    let index = store.index.read();
+    graph_nearest(&index, v, &Default::default(), 10, live)
+        .iter()
+        .any(|(hit, _)| *hit == id)
 }
 
 /// Whether `store` records `id` for the exact scan.
@@ -1918,13 +1928,7 @@ fn an_upsert_that_strands_an_existing_drawer_still_finds_it() {
     let (_dir, store) = open_store(dim);
     seed_rows(&store.db, &pool);
     let reopened = HnswStore::open(Arc::clone(&store.db), dim).expect("reopen");
-    let graph_finds = |id: u64, v: &[f32]| {
-        let live = reopened.keys.get(&reopened.db).expect("keys").reverse.len();
-        let index = reopened.index.read();
-        graph_nearest(&index, v, &Default::default(), 10, live)
-            .iter()
-            .any(|(hit, _)| *hit == id)
-    };
+    let graph_finds = |id: u64, v: &[f32]| graph_reaches(&reopened, id, v);
 
     let mut probe = entry.clone();
     probe[dim - 1] = 0.1;
@@ -1942,7 +1946,7 @@ fn an_upsert_that_strands_an_existing_drawer_still_finds_it() {
         vec![1],
         "precondition: row 0, the entry point, is the probe's one in-neighbour"
     );
-    for (j, v) in around(&entry, &probe, 0.02, 2 * HNSW_MAX_NB_CONNECTION)
+    for (j, v) in around(&entry, &[&probe], 0.02, 2 * HNSW_MAX_NB_CONNECTION)
         .iter()
         .enumerate()
     {
@@ -1959,6 +1963,268 @@ fn an_upsert_that_strands_an_existing_drawer_still_finds_it() {
         hit_uuids(&reopened, &probe, 10).contains(&uuid),
         "{uuid}, stranded by a later upsert, is missing from its own top 10 \
          with no reopen"
+    );
+}
+
+/// `from` moved 0.1 along `axis`, where it is 0, and re-normalised.
+fn step_off(from: &[f32], axis: usize) -> Vec<f32> {
+    let mut v = from.to_vec();
+    v[axis] = 0.1;
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    v.into_iter().map(|x| x / norm).collect()
+}
+
+/// Why (#10186): an upsert re-tested the points it evicted from a neighbour
+/// list, but not the points reachable only through one of them. Those stayed
+/// unscanned until the next open, so a drawer went missing from its own search
+/// after an upsert elsewhere in the graph.
+/// What: the graph is built by the parallel replay (#10186: a serial build of
+/// 24.7k points took over a minute). Every row has two zero trailing
+/// coordinates and a non-negative cosine to row 0, the entry point. `first`
+/// sits one step off row 0 along the last axis and `behind` one step off
+/// `first` along the second-last, so each insert keeps one out-edge — row 0,
+/// then `first` — and `first` holds `behind`'s only in-edge, whatever order the
+/// replay built the rest in (the preconditions assert it). Then 32 drawers
+/// around row 0 evict `first` from row 0's list. Asserts the graph alone
+/// reaches neither, that `first` is recorded as stranded and `behind` still has
+/// its one in-edge (the transitive case), and that `behind` is in its own top
+/// 10 with no reopen.
+/// Test: this test itself is the verification.
+#[test]
+fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
+    transitive_strand(false);
+}
+
+/// Why (#10186, #10204): a self-search with `ef` 64 can record a point the
+/// graph still reaches, and a record is never re-checked. A walk that stopped
+/// at, or skipped past, a recorded point would leave the points behind it
+/// unscanned.
+/// What: [`transitive_strand`] with `first` recorded as stranded before the
+/// upserts that evict it, while the graph still reaches it and `behind`.
+/// Test: this test itself is the verification.
+#[test]
+fn a_drawer_behind_a_recorded_but_reachable_one_is_still_found() {
+    transitive_strand(true);
+}
+
+/// The #10186 scenario: 32 upserts evict `first`, the only path to `behind`.
+/// `pre_record` records `first` as stranded before those upserts.
+fn transitive_strand(pre_record: bool) {
+    let dim = 20;
+    let flat = |seed: u64| {
+        let mut v = spread_vec(dim - 2, seed);
+        v.extend([0.0, 0.0]);
+        v
+    };
+    let entry = flat(424_242);
+    let mut pool = vec![entry.clone()];
+    // #9280: sized from the threshold so the graph arm stays selected.
+    pool.extend((0..exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 160).map(|i| {
+        let v = flat(700_000 + i as u64);
+        let dot: f32 = v.iter().zip(&entry).map(|(a, b)| a * b).sum();
+        let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+        v.into_iter().map(|x| sign * x).collect()
+    }));
+    let (_dir, seeded) = open_store(dim);
+    seed_rows(&seeded.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seeded.db), dim).expect("reopen");
+
+    let first = step_off(&entry, dim - 1);
+    let behind = step_off(&first, dim - 2);
+    let first_id = store.upsert("first", &first).expect("upsert first");
+    let behind_id = store.upsert("behind", &behind).expect("upsert behind");
+    assert_eq!(
+        (
+            in_edges(&store.index.read(), first_id),
+            in_edges(&store.index.read(), behind_id)
+        ),
+        (vec![1, behind_id], vec![first_id]),
+        "precondition: row 0 -> first -> behind is the only path to behind"
+    );
+    assert!(
+        graph_reaches(&store, behind_id, &behind) && !is_stranded(&store, behind_id),
+        "precondition: the graph reaches behind and the store did not record it"
+    );
+    if pre_record {
+        // #10204: recorded yet reachable, so the walk must still pass through it.
+        assert!(
+            graph_reaches(&store, first_id, &first),
+            "precondition: the graph reaches first before it is recorded"
+        );
+        stranded::add_stranded(&mut store.stranded.write(), &first, first_id);
+    }
+    for (j, v) in around(&entry, &[&first, &behind], 0.02, 2 * HNSW_MAX_NB_CONNECTION)
+        .iter()
+        .enumerate()
+    {
+        store.upsert(&format!("near-{j}"), v).expect("upsert");
+    }
+
+    assert!(
+        in_edges(&store.index.read(), first_id)
+            .iter()
+            .all(|e| *e == behind_id)
+            && in_edges(&store.index.read(), behind_id) == vec![first_id],
+        "precondition: the upserts must evict first from row 0's list and leave \
+         behind's one in-edge; first's in-neighbours: {:?}",
+        in_edges(&store.index.read(), first_id)
+    );
+    assert!(
+        !graph_reaches(&store, first_id, &first)
+            && !graph_reaches(&store, behind_id, &behind)
+            && is_stranded(&store, first_id),
+        "precondition: the graph reaches neither, and the evicted first is stranded"
+    );
+    assert!(
+        hit_uuids(&store, &behind, 10).contains(&"behind".to_string()),
+        "behind, stranded transitively by a later upsert, is missing from its \
+         own top 10 with no reopen"
+    );
+}
+
+/// #10271: a store whose graph holds exactly the threshold, filled by upserts
+/// that must skip stranded upkeep, the last of which strand `probe` unrecorded.
+///
+/// What: the #9174 geometry of
+/// `an_upsert_that_strands_an_existing_drawer_still_finds_it`, seeded short of
+/// the threshold by the probe and the 32 drawers that evict it. Asserts those
+/// upserts ran no stranded search, and that the graph alone no longer reaches
+/// the probe while the set does not record it. Returns the seeded store (kept
+/// alive), the reopened store, and the probe's vector and id.
+fn strand_below_threshold() -> (tempfile::TempDir, HnswStore, HnswStore, Vec<f32>, u64) {
+    let dim = 20;
+    let near = 2 * HNSW_MAX_NB_CONNECTION;
+    let flat = |seed: u64| {
+        let mut v = spread_vec(dim - 1, seed);
+        v.push(0.0);
+        v
+    };
+    let entry = flat(424_242);
+    let mut pool = vec![entry.clone()];
+    pool.extend(
+        (0..exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS - 2 - near).map(|i| {
+            let v = flat(700_000 + i as u64);
+            let dot: f32 = v.iter().zip(&entry).map(|(a, b)| a * b).sum();
+            let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+            v.into_iter().map(|x| sign * x).collect()
+        }),
+    );
+    let (dir, seeded) = open_store(dim);
+    seed_rows(&seeded.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seeded.db), dim).expect("reopen");
+
+    let searches = || stranded::UPKEEP_SEARCHES.with(|c| c.get());
+    let at_start = searches();
+    let probe = step_off(&entry, dim - 1);
+    let probe_id = store.upsert("probe", &probe).expect("upsert probe");
+    for (j, v) in around(&entry, &[&probe], 0.02, near).iter().enumerate() {
+        store.upsert(&format!("near-{j}"), v).expect("upsert");
+    }
+    assert_eq!(
+        store.index.read().get_nb_point(),
+        exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
+        "precondition: the graph sits exactly at the threshold"
+    );
+    assert_eq!(
+        searches() - at_start,
+        0,
+        "upserts at or below the threshold ran stranded searches"
+    );
+    assert!(
+        !graph_reaches(&store, probe_id, &probe) && !is_stranded(&store, probe_id),
+        "precondition: the upserts strand the probe and record it nowhere; \
+         in-neighbours left: {:?}",
+        in_edges(&store.index.read(), probe_id)
+    );
+    (dir, seeded, store, probe, probe_id)
+}
+
+/// Why (#10271): each upsert re-tested stranded points at 3.5-4.5x the cost of
+/// the insert, yet only the graph arm, above the exhaustive threshold, reads
+/// the stranded set.
+/// What: [`strand_below_threshold`] proves the upserts up to the threshold
+/// skip the upkeep and strand a real point. A record planted before the
+/// crossing upsert must be gone after it, the set must equal what open
+/// computes and hold the probe, and the probe must be in its own top 10. The
+/// next upsert, above the threshold, must run the per-upsert searches again.
+/// Test: this test itself is the verification.
+#[test]
+fn upsert_skips_stranded_upkeep_until_the_graph_crosses_the_threshold() {
+    let (_dir, _seeded, store, probe, probe_id) = strand_below_threshold();
+    let dim = probe.len();
+    let searches = || stranded::UPKEEP_SEARCHES.with(|c| c.get());
+
+    // A record no search would make: the crossing rebuild must drop it.
+    stranded::add_stranded(
+        &mut store.stranded.write(),
+        &spread_vec(dim, 990_000),
+        u64::MAX,
+    );
+    store
+        .upsert("crossing", &far_from(&probe, 950_000))
+        .expect("upsert");
+    let expected = stranded::stranded_points(&store.index.read());
+    assert!(
+        is_stranded(&store, probe_id) && *store.stranded.read() == expected,
+        "the crossing upsert left a stranded set unlike the one open computes, \
+         or one without the stranded probe"
+    );
+    assert!(
+        hit_uuids(&store, &probe, 10).contains(&"probe".to_string()),
+        "the stranded probe is missing from its own top 10 after the crossing"
+    );
+
+    let above = searches();
+    store
+        .upsert("above", &far_from(&probe, 950_001))
+        .expect("upsert");
+    assert!(
+        searches() > above,
+        "an upsert above the threshold skipped its stranded searches"
+    );
+}
+
+/// Why (#10271): `ranked` picked the graph arm on the live row count, but
+/// upserts keep the stranded set only once the graph passes the threshold. A
+/// committed row ahead of its graph insert (a group mid-loop, a failed insert)
+/// put the live count over while the graph sat at the threshold, and the graph
+/// arm then read a set missing every point stranded since open.
+/// What: [`strand_below_threshold`], then an upsert parked on the insert gate
+/// after its row commits, so the live count is one over the threshold and the
+/// graph is at it. A search for the probe in that state must find it.
+/// Test: this test itself is the verification.
+#[test]
+fn a_row_committed_ahead_of_the_graph_never_hides_a_stranded_drawer() {
+    let (_dir, _seeded, store, probe, _) = strand_below_threshold();
+    // Wide enough that the parked upsert never trips the breaker.
+    store
+        .op_breaker()
+        .set_budget_for_test(std::time::Duration::from_secs(120));
+    let live = || store.keys.get(&store.db).expect("keys").reverse.len();
+    let gate = store.park_insert_gate_for_test();
+    let found = std::thread::scope(|s| {
+        let pending = s.spawn(|| store.upsert("pending", &far_from(&probe, 960_000)));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while live() <= exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pending row never committed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            store.index.read().get_nb_point(),
+            exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
+            "precondition: the parked upsert has not reached the graph"
+        );
+        let found = hit_uuids(&store, &probe, 10).contains(&"probe".to_string());
+        drop(gate);
+        pending.join().expect("join").expect("pending upsert");
+        found
+    });
+    assert!(
+        found,
+        "a row committed ahead of the graph hid the stranded probe from its own top 10"
     );
 }
 

@@ -50,6 +50,7 @@ pub mod repoint;
 
 pub use build_tree::{is_build_tree_hook_command, is_build_tree_statusline_command};
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// Why no stable hook binary could be resolved (#7244).
@@ -252,7 +253,7 @@ fn hash_stripped_stem(name: &str) -> &str {
     }
 }
 
-/// The six lifecycle events [`mpm_hook_additions_with_exe`] writes a group for.
+/// The seven lifecycle events [`mpm_hook_additions_with_exe`] writes a group for.
 ///
 /// Why (#7490): `tm doctor`'s `hooks_missing_tm_group` check has to name the
 /// events a settings file is MISSING, and a missing event has no group to read
@@ -263,16 +264,18 @@ fn hash_stripped_stem(name: &str) -> &str {
 /// What: the event keys of `mpm_hook_additions_with_exe`'s `hooks` object, in
 /// the order that function writes them.
 /// Test: `lifecycle_event_names_match_the_written_block`.
-pub const MPM_LIFECYCLE_HOOK_EVENTS: [&str; 6] = [
+pub const MPM_LIFECYCLE_HOOK_EVENTS: [&str; 7] = [
     "PreToolUse",
     "PostToolUse",
+    // #10095: a failed, denied or interrupted call closes its `Tool::Started`.
+    "PostToolUseFailure",
     "Stop",
     "SubagentStop",
     "SessionStart",
     "SessionEnd",
 ];
 
-/// Build the MPM lifecycle hook additions JSON block (six events).
+/// Build the MPM lifecycle hook additions JSON block (seven events).
 ///
 /// Why: every call site — the managed global config writer AND `tm install` — must
 /// use the exact same shape so [`trusty_common::claude_config::merge_hook_entries`]
@@ -286,16 +289,20 @@ pub const MPM_LIFECYCLE_HOOK_EVENTS: [&str; 6] = [
 /// The `merge_hook_entries` dedup logic preserves any existing `SessionStart` entry
 /// (e.g. `trusty-memory inbox-check` from the project-level config) — adding the
 /// `trusty-mpm hook` entry alongside it does NOT clobber the memory hook.
-/// What: returns a JSON object with six `hooks` arrays:
-/// `PreToolUse`, `PostToolUse` (async), `Stop`, `SubagentStop`, `SessionStart`,
-/// `SessionEnd`. `SubagentStop` (#2610) fires when a delegated Task-tool
+/// `PostToolUseFailure` (#10095) closes a failed, denied or interrupted call's
+/// `Tool::Started` span as `Tool::Errored`, and ends a failed subagent dispatch.
+/// What: returns a JSON object with seven `hooks` arrays:
+/// `PreToolUse`, `PostToolUse` (async), `PostToolUseFailure` (async), `Stop`,
+/// `SubagentStop`, `SessionStart`, `SessionEnd`. `SubagentStop` (#2610) fires when a delegated Task-tool
 /// subagent ends its turn, letting the hook handler flag an idle-parking final
 /// message (see `commands::misc::hook` / `core::idle_parking`).
-/// `PostToolUse` is marked `async: true` so Claude Code does not block waiting for
-/// the daemon to ingest tool results; the other five use short synchronous timeouts.
+/// `PostToolUse` and `PostToolUseFailure` are marked `async: true` so Claude Code
+/// does not block waiting for the daemon to ingest tool results; the other five
+/// use short synchronous timeouts.
 /// `exe_override` pins the binary path for the hook command; pass `None` to resolve
 /// via `mpm_hook_command(None)`.
-/// Test: `test_mpm_hook_additions_has_six_events`,
+/// Test: `test_mpm_hook_additions_has_seven_events`,
+/// `mpm_hook_additions_registers_post_tool_use_failure_async_10095`,
 /// covered by `test_ensure_managed_hooks_writes_triad`.
 pub fn mpm_hook_additions_with_exe(
     exe_override: Option<&Path>,
@@ -314,6 +321,17 @@ pub fn mpm_hook_additions_with_exe(
                 }]
             }],
             "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": cmd,
+                    "timeout": 60,
+                    "async": true
+                }]
+            }],
+            // #10095: async like `PostToolUse` — a sync group would hold the
+            // failure path for its timeout.
+            "PostToolUseFailure": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
@@ -363,7 +381,7 @@ pub fn mpm_hook_additions_with_exe(
 /// Why: convenience wrapper that calls `mpm_hook_additions_with_exe(None)` so
 /// existing call sites that do not need to pin the exe path stay concise.
 /// What: delegates to [`mpm_hook_additions_with_exe`] with `None`.
-/// Test: covered by `test_mpm_hook_additions_has_six_events`.
+/// Test: covered by `test_mpm_hook_additions_has_seven_events`.
 pub fn mpm_hook_additions() -> Result<serde_json::Value, StableHookExeError> {
     mpm_hook_additions_with_exe(None)
 }
@@ -798,6 +816,27 @@ fn strip_mpm_hook_entries_for_events(
     strip_hook_entries_matching_for_events(val, events, is_mpm_hook_command)
 }
 
+/// The command line one hook entry runs, as the identity predicates read it.
+///
+/// Why (#10459): an exec-form entry keeps its argv in `args`, so its `command`
+/// is the bare executable and no ` hook --pm-guard` suffix predicate sees it.
+/// What: `command` alone for a shell-form entry (no `args`), byte for byte;
+/// for an exec-form entry, `command` and every string `args` element joined
+/// by one space. `None` when `command` is missing or not a string.
+/// Test: `an_exec_form_entry_reads_as_its_joined_argv`.
+pub(crate) fn hook_entry_command_line(entry: &serde_json::Value) -> Option<Cow<'_, str>> {
+    let command = entry.get("command")?.as_str()?;
+    let Some(args) = entry.get("args").and_then(serde_json::Value::as_array) else {
+        return Some(Cow::Borrowed(command));
+    };
+    let mut line = command.to_owned();
+    for arg in args.iter().filter_map(serde_json::Value::as_str) {
+        line.push(' ');
+        line.push_str(arg);
+    }
+    Some(Cow::Owned(line))
+}
+
 /// Remove hook group ENTRIES matching `matches_cmd` for the given events (or
 /// all events) in-place, at PER-ENTRY (not per-group) granularity.
 ///
@@ -857,11 +896,9 @@ pub(crate) fn strip_hook_entries_matching_for_events(
                 continue; // unknown shape: leave entirely untouched
             };
             let before_inner_len = inner_hooks.len();
+            // #10459: an exec-form entry is matched on its joined argv.
             inner_hooks.retain(|entry| {
-                !entry
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(&matches_cmd)
+                !hook_entry_command_line(entry).is_some_and(|line| matches_cmd(&line))
             });
             if inner_hooks.len() != before_inner_len {
                 event_changed = true;

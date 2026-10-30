@@ -1,0 +1,50 @@
+{
+  "answer": "lorem ipsum dolor sit amet elit sed tempor ü",
+  "answer_note": "lorem ipsum dolor sit a",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-22T05:08:22Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor ü",
+  "done_at": "2026-10-22T05:12:29Z",
+  "due": null,
+  "goal": "G03",
+  "kind": "question",
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit ",
+      "label": "lorem ipsum dolor sit amet elit sed tempor ü",
+      "markers": {
+        "risk": 0,
+        "scope": -1,
+        "work": 0
+      },
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit",
+      "label": "lorem ipsum dolor sit amet ",
+      "markers": {
+        "risk": 0,
+        "scope": 0,
+        "work": 0
+      }
+    }
+  ],
+  "outcome": "lorem ipsum dolor sit amet elit sed tempor",
+  "rank": 3,
+  "relayed_at": "2026-10-22T05:10:00Z",
+  "session": "pm-7",
+  "specs": [
+    {
+      "label": "lorem ipsu",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über ma"
+    },
+    {
+      "label": "lorem ipsu",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über ma"
+    }
+  ],
+  "status": "done",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lo",
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1
+}

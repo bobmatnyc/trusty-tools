@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/sessions.schema.json",
+  "title": "session (tmux session row)",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"}
+  },
+  "required": ["name", "state", "status", "summary", "updated"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {"type": "string", "minLength": 1},
+    "order": {"type": "integer"},
+    "state": {"enum": ["idle", "working", "exited", "parked"]},
+    "status": {"type": "string"},
+    "summary": {"type": "string"},
+    "goal": {"type": "string"},
+    "project": {"type": "string"},
+    "doc": {"type": "string", "pattern": "^[^/]+/docs/briefs/.+[.]md$"},
+    "progress": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 100}]},
+    "updated": {"$ref": "#/$defs/iso"},
+    "details": {"type": "object",
+                "properties": {"current": {"type": "string"}, "next": {"type": "string"}, "last_relay": {"type": "string"},
+                               "notes": {"type": "string"}, "waiting_on": {"type": "string"}, "ctx_k": {"type": "number"},
+                               "gh_at": {"$ref": "#/$defs/iso"}, "issues": {"type": "object"},
+                               "prs": {"type": "array", "items": {"type": "object", "required": ["n"], "additionalProperties": false,
+                                                                  "properties": {"n": {"type": "integer"}, "state": {"type": "string"}, "url": {"type": "string"}}}}}},
+    "usage": {"type": "object", "additionalProperties": false,
+              "properties": {"agents_active": {"type": "integer"}, "agents_parked": {"type": "integer"}, "ctx_k": {"type": "number"},
+                             "idle_min": {"type": "integer"}, "live_state": {"type": "string"}, "measured_at": {"$ref": "#/$defs/iso"},
+                             "out_tokens_1h": {"type": "integer"}, "out_tokens_24h": {"type": "integer"}, "units_24h": {"type": "number"}}},
+    "command": {"type": "object", "required": ["type", "status", "at"], "additionalProperties": false,
+                "properties": {"type": {"enum": ["activate", "prioritize", "park", "restart"]},
+                               "status": {"enum": ["new", "applied"]},
+                               "at": {"$ref": "#/$defs/iso"}, "by": {"type": "string"},
+                               "text": {"type": "string"}, "note": {"type": "string"}, "goal": {"type": "string"},
+                               "reply": {"type": "string"}}}
+  }
+}

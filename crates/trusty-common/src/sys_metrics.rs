@@ -141,6 +141,23 @@ pub fn process_rss_mb(pid: u32) -> Option<u64> {
     }
 }
 
+/// The host's one-minute load average divided by its CPU count.
+///
+/// Why (#10207): a sidecar cold start that takes 47 s on a quiet host missed
+/// a 90 s startup probe at load 6.6-8.8, so the probe has to know how busy
+/// the host is.
+/// What: `sysinfo`'s one-minute load average over
+/// `std::thread::available_parallelism`. `None` when either is unavailable
+/// or the load reads negative or non-finite; callers treat `None` as an idle
+/// host.
+/// Test: `load_per_cpu_is_finite_and_non_negative`.
+#[must_use]
+pub fn load_per_cpu() -> Option<f64> {
+    let cpus = std::thread::available_parallelism().ok()?.get();
+    let one = System::load_average().one;
+    (one.is_finite() && one >= 0.0).then(|| one / cpus as f64)
+}
+
 /// Per-process RSS + CPU sampler bound to the current process.
 ///
 /// Why: holding the `System` between calls is required for CPU measurement —
@@ -726,6 +743,18 @@ mod tests {
         // pid 0 is the kernel scheduler on Linux and not addressable via
         // proc_pid_rusage on macOS; either way it must not yield a figure.
         assert_eq!(process_rss_mb(0), None);
+    }
+
+    /// #10207: the load reading feeds a timeout multiplier, so it must never
+    /// be negative or NaN. Unix hosts always report a load average.
+    #[test]
+    fn load_per_cpu_is_finite_and_non_negative() {
+        let load = load_per_cpu();
+        #[cfg(unix)]
+        assert!(load.is_some(), "no load average on a unix host");
+        if let Some(l) = load {
+            assert!(l.is_finite() && l >= 0.0, "implausible load per cpu {l}");
+        }
     }
 
     /// Spawn a child that sleeps, so a test has a real pid it owns.

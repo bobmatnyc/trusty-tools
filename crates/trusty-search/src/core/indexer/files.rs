@@ -501,8 +501,11 @@ impl CodeIndexer {
             // Multi-word queries are not symbol names; skip the exact-match path.
             return None;
         }
-        self.ensure_chunks_loaded().await;
-        self.ensure_bm25_entities_loaded().await;
+        // #10193: a query lane — the short query wait, not the 9 s writer
+        // wait. A cold index injects nothing this query.
+        if !self.await_corpus_for_query().await {
+            return None;
+        }
         let entities = self.entities.read().await;
         let chunks = self.chunks.read().await;
         for (file, ents) in entities.iter() {
@@ -548,31 +551,6 @@ impl CodeIndexer {
         chunks.get(chunk_id).map(|c| c.content.clone())
     }
 
-    /// Chunk ids the corpus currently holds for `file_path`.
-    ///
-    /// Why: the corpus is the authority on which of a file's chunks exist, and
-    /// three callers need that answer — the two removal paths below, and
-    /// `service::watch_loop`'s error arm after a partial commit (#100), where
-    /// the set the watcher computed from the file's text and the set that
-    /// actually landed can differ. Deriving it from the corpus means a caller
-    /// cleaning up cannot miss a chunk that is really there.
-    /// What: rehydrates an idle-evicted map, then scans the corpus for chunks
-    /// whose `file` field equals `file_path`. Linear in corpus size, same as
-    /// the removal paths it replaces.
-    /// Test: `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` and
-    /// `partial_commit_at_cap_then_edit_replaces_the_landed_chunk` in
-    /// `tests/watcher_chunk_cap_orphans_100.rs`; the removal paths by
-    /// `prune_deleted_files_cleans_staging_corpus` in `service::reindex::tests`.
-    pub(crate) async fn chunk_ids_for_file(&self, file_path: &str) -> Vec<String> {
-        self.ensure_chunks_loaded().await;
-        let chunks = self.chunks.read().await;
-        chunks
-            .values()
-            .filter(|c| c.file == file_path)
-            .map(|c| c.id.clone())
-            .collect()
-    }
-
     /// Remove every chunk belonging to a file and its entity list WITHOUT
     /// triggering a symbol-graph rebuild (issue #848 prune pass).
     ///
@@ -610,11 +588,10 @@ impl CodeIndexer {
         {
             anyhow::bail!("injected remove failure for {file_path} (#8976 test seam)");
         }
-        let ids = self.chunk_ids_for_file(file_path).await;
+        let ids = self.file_chunk_ids(file_path).await?;
         let removed = ids.len();
         self.remove_chunks_from_stores(&ids, mode).await?;
-        self.entities.write().await.remove(file_path);
-        self.delete_entities_from_redb(file_path).await;
+        self.remove_file_entities(file_path).await;
         // NOTE: deliberately omits `self.rebuild_symbol_graph().await` —
         // the caller (prune pass) handles the rebuild once after all files.
         Ok(removed)
@@ -645,9 +622,9 @@ impl CodeIndexer {
         file_path: &str,
         mode: RedbChunkDelete,
     ) -> Result<usize> {
-        // `chunk_ids_for_file` rehydrates an idle-evicted map first, so the
-        // redb delete below still sees the ids it is keyed by.
-        let ids = self.chunk_ids_for_file(file_path).await;
+        // #10209: `file_chunk_ids` reads redb when the map is still evicted,
+        // so a removal during a long rehydrate still finds the file's ids.
+        let ids = self.file_chunk_ids(file_path).await?;
         let removed = ids.len();
         // #9179: was a whole-corpus `rebuild_symbol_graph` per call (60 s and
         // ~1.2 GB on a 315K-chunk index); the ticker now rebuilds once per
@@ -658,11 +635,17 @@ impl CodeIndexer {
             None
         };
         self.remove_chunks_from_stores(&ids, mode).await?;
-        self.entities.write().await.remove(file_path);
-        // Issue #28: evict the file's entity list from the durable redb store
-        // too, or a restart would resurrect it into the symbol graph.
-        self.delete_entities_from_redb(file_path).await;
+        self.remove_file_entities(file_path).await;
         Ok(removed)
+    }
+
+    /// Drop `file_path`'s entity list from memory and redb (issue #28: a
+    /// restart would otherwise resurrect it into the symbol graph).
+    /// #10209: under the fence, so a rehydrate cannot publish it back.
+    async fn remove_file_entities(&self, file_path: &str) {
+        let _fence = self.rehydrate_write_fence().await;
+        self.entities.write().await.remove(file_path);
+        self.delete_entities_from_redb(file_path).await;
     }
 
     /// Delete a file's entity list from the durable redb corpus (issue #28).
@@ -839,6 +822,8 @@ impl CodeIndexer {
     pub(crate) async fn clear_corpus_for_rechunk(&self) -> Result<usize> {
         self.ensure_chunks_loaded().await;
         self.ensure_bm25_entities_loaded().await;
+        // #10209: a rehydrate must not republish the rows cleared below.
+        let _fence = self.rehydrate_write_fence().await;
         // The DURABLE corpus is the authority on what exists. The in-memory map
         // can legitimately be empty on an index that has never served a query,
         // so deriving the id list from it would delete nothing and leave the old

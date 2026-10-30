@@ -2,9 +2,10 @@
 //!
 //! Why: `exec` resolves in-process, so a value never crosses a socket (§9.4).
 //! It resolves one reference, or a whole env map built from `--env` (tier 1)
-//! or `--dotenv` (tier 2). Under a Claude Code parent it may inject only keys
-//! flagged "agents may use" (§15.8). The caller decides whether the parent
-//! chain includes Claude Code; this module only enforces the flag.
+//! or `--dotenv` (tier 2). Under a Claude Code parent it may inject any key
+//! the operator has not denied to agents (§15.8, #10386). The caller decides
+//! whether the parent chain includes Claude Code; this module only enforces
+//! the deny.
 //! What: [`resolve_reference`] and [`resolve_env`], with [`EnvEntry`] as
 //! input and [`ResolvedVar`] as output. Lookup is [`SecretStore::read`]'s own
 //! path: project vault, then owner vault, an explicit reference pins one of
@@ -27,29 +28,30 @@ const UNPARSABLE: &str = "an unparsable `secret://` reference";
 
 /// Resolve one reference to its value.
 ///
-/// Why: the single choke point every `exec` path goes through, so the agents
-/// flag is enforced in one place (DOC-74 §15.8).
+/// Why: the single choke point every `exec` path goes through, so the agent
+/// deny is enforced in one place (DOC-74 §15.8).
 /// What: locates the key in the names-only index (project vault, then owner
 /// vault; an explicit `<owner>/KEY` or `<owner>/<repo>/KEY` searches only
 /// that vault, which must be one of `scopes`, else
 /// [`SecretsError::VaultOutOfScope`] before any read — #9328). With
-/// `agent_parent`, a key whose "agents may use" flag is OFF is
+/// `agent_parent`, a key denied to agents (#10386) is
 /// [`SecretsError::AgentUseRefused`], raised before the value is read. #9070:
-/// the flag is the backend's flag item, never the index row's field; a
-/// failed flag lookup is an error, never ON. Without `agent_parent` the
-/// flag is not looked up. A key with no index row is [`SecretsError::NotFound`] in either
+/// the deny is the backend's item, never the index row's field; a failed
+/// deny lookup is an error, never "allowed". Without `agent_parent` the deny
+/// is not looked up. A key with no index row is [`SecretsError::NotFound`] in either
 /// mode, and the backend is not read. Otherwise the value read, which a
 /// store built with a session cache may answer from it (#7520; the cache is
-/// consulted only after the flag gate above).
+/// consulted only after the deny gate above).
 /// Test: `resolve_unscoped_prefers_project_over_owner`,
 /// `resolve_explicit_reference_reads_only_its_vault`,
 /// `resolve_pinned_reference_outside_the_scopes_is_refused`,
 /// `resolve_miss_is_not_found`,
-/// `resolve_agent_gate_refuses_flag_off_before_any_read`,
+/// `resolve_agent_gate_allows_an_undenied_key`,
+/// `resolve_agent_gate_refuses_a_denied_key_before_any_read`,
 /// `resolve_agent_gate_refuses_a_key_with_no_row_without_reading`,
-/// `resolve_agent_gate_allows_a_flagged_key`,
+/// `resolve_agent_gate_judges_the_vault_the_lookup_chose`,
 /// `resolve_agent_gate_ignores_a_hand_edited_index_flag`,
-/// `resolve_agent_gate_fails_closed_when_the_flag_read_fails`.
+/// `resolve_agent_gate_fails_closed_when_the_deny_read_fails`.
 pub fn resolve_reference(
     store: &SecretStore,
     scopes: &ScopeSet,
@@ -65,17 +67,17 @@ pub fn resolve_reference(
     store.read_admitted(reference, scopes, admit_for_agent)
 }
 
-/// Refuse a reference whose key is not flagged "agents may use", reading
+/// Refuse a reference whose key is denied to agents (#10386), reading
 /// no value.
 ///
 /// Why: DOC-74 §15.8 — the flag rule covers grant contents (tier 3), so
 /// `secrets.grant` refuses such a key when its registrar runs under Claude
 /// Code (#9070), by the same rule [`resolve_reference`] applies to a read.
 /// What: locates the key as [`resolve_reference`] does and reads its flag
-/// from the backend; flag OFF is [`SecretsError::AgentUseRefused`]. A key
+/// from the backend; a deny is [`SecretsError::AgentUseRefused`]. A key
 /// with no index row is [`SecretsError::NotFound`]; a failed flag lookup
 /// is its error, never ON.
-/// Test: `grant_by_agent_ancestor_cannot_name_unflagged_key`.
+/// Test: `grant_by_agent_ancestor_cannot_name_denied_key`.
 // Only the `server` feature's `secrets.grant` calls it.
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) fn require_agent_use(
@@ -87,7 +89,7 @@ pub(crate) fn require_agent_use(
     admit_for_agent(&vault, &row)
 }
 
-/// The agents gate on a located row: flag OFF is a refusal.
+/// The agents gate on a located row: a denied key is a refusal.
 fn admit_for_agent(vault: &VaultName, row: &KeyMeta) -> Result<(), SecretsError> {
     if !row.agents_may_use {
         return Err(SecretsError::AgentUseRefused {

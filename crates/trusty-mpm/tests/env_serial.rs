@@ -23,6 +23,8 @@ mod auth_cost;
 mod daemon_serve_drain;
 // #9121: a test daemon's environment carries no inherited secret.
 mod architect_floor_host;
+// #10459: every Architect launch seam refuses an old Claude Code before any write.
+mod architect_version_refusal_10459;
 mod daemon_env_isolation;
 mod inproject_cold_start;
 mod inproject_git_failure;

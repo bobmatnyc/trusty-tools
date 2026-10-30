@@ -11,8 +11,10 @@
 //! `CodeIndexer`-level wiring (measured-cost precedence, on-disk chunk-count
 //! fallback, and the end-to-end threshold scaling) against a real
 //! corpus-backed indexer.
+//! #10192 adds the whole-rehydrate costing tests at the end of the file.
 //! Test: `cargo test -p trusty-search -- cost_scaled`
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::CodeIndexer;
@@ -146,4 +148,147 @@ async fn cost_scaled_idle_threshold_scales_with_rehydrate_cost() {
             None => std::env::remove_var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS"),
         }
     }
+}
+
+// ── #10192: the stored cost covers the whole rehydrate ────────────────────
+
+/// Delay injected after the BM25/chunk/entity publish, before the commit.
+/// Above the default 1000 ms scale unit, so it earns exactly one extra
+/// base-window multiple; the slack to 2000 ms absorbs scan noise.
+const SLOW_COMMIT_MS: u64 = 1_200;
+
+/// Index two files into a corpus-backed indexer and evict both lanes.
+async fn indexed_and_evicted(redb_path: &std::path::Path) -> CodeIndexer {
+    let idx = make_indexer_with_corpus(redb_path);
+    idx.index_files_batch(&[
+        ("src/auth.rs".into(), "fn authenticate() {}".into()),
+        ("src/token.rs".into(), "fn verify_token() {}".into()),
+    ])
+    .await
+    .expect("index batch");
+    evict_both_lanes(&idx).await;
+    idx
+}
+
+/// Evict the chunk map and the BM25/entity maps, so the next access rehydrates.
+async fn evict_both_lanes(idx: &CodeIndexer) {
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    idx.evict_bm25_entities_if_idle(Duration::from_nanos(1))
+        .await;
+    idx.evict_chunks_if_idle(Duration::from_nanos(1)).await;
+    assert!(idx.corpus_evicted(), "precondition: both lanes evicted");
+}
+
+/// Run one rehydrate with the post-scan phases slowed by [`SLOW_COMMIT_MS`]
+/// and return once it has committed.
+async fn slow_rehydrate(idx: &CodeIndexer) {
+    super::idle_evict::TEST_DELAY_BEFORE_COMMIT_MS.store(SLOW_COMMIT_MS, Ordering::Relaxed);
+    idx.ensure_bm25_entities_loaded().await;
+    super::idle_evict::TEST_DELAY_BEFORE_COMMIT_MS.store(0, Ordering::Relaxed);
+    assert!(
+        !idx.corpus_evicted(),
+        "precondition: the slowed rehydrate committed within the wait budget"
+    );
+}
+
+/// Remove `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS` for the test, restoring it on drop.
+struct DefaultScaleUnit(Option<String>);
+
+impl DefaultScaleUnit {
+    fn set() -> Self {
+        let prior = std::env::var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS").ok();
+        // SAFETY: callers are #[serial_test::serial] with the other test that
+        // touches this env var.
+        unsafe { std::env::remove_var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS") };
+        Self(prior)
+    }
+}
+
+impl Drop for DefaultScaleUnit {
+    fn drop(&mut self) {
+        if let Some(v) = self.0.take() {
+            // SAFETY: see `set`.
+            unsafe { std::env::set_var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS", v) };
+        }
+    }
+}
+
+/// #10192: a fast scan followed by slow post-scan phases (BM25, maps,
+/// commit) must raise the next threshold. Before the fix only the scan was
+/// timed, so the stored cost stayed near zero and the window stayed at base.
+#[tokio::test]
+#[serial_test::serial]
+async fn rehydrate_cost_covers_post_scan_phases_and_raises_threshold() {
+    let _unit = DefaultScaleUnit::set();
+    let dir = tempfile::tempdir().unwrap();
+    let idx = indexed_and_evicted(&dir.path().join("index.redb")).await;
+    assert_eq!(
+        idx.cost_scaled_idle_threshold(300),
+        Duration::from_secs(300)
+    );
+
+    slow_rehydrate(&idx).await;
+
+    let cost = idx.rehydrate_cost_estimate_ms();
+    assert!(
+        cost >= SLOW_COMMIT_MS,
+        "stored rehydrate cost {cost} ms must cover the {SLOW_COMMIT_MS} ms spent \
+         after the scan (#10192)"
+    );
+    assert_eq!(
+        idx.cost_scaled_idle_threshold(300),
+        Duration::from_secs(600),
+        "a 1.2 s rehydrate earns one extra base-window multiple"
+    );
+}
+
+/// #10192: a second rehydrate of the same total cost must not give a lower
+/// threshold than the first.
+#[tokio::test]
+#[serial_test::serial]
+async fn second_equal_cost_rehydrate_does_not_lower_threshold() {
+    let _unit = DefaultScaleUnit::set();
+    let dir = tempfile::tempdir().unwrap();
+    let idx = indexed_and_evicted(&dir.path().join("index.redb")).await;
+
+    slow_rehydrate(&idx).await;
+    let first = idx.cost_scaled_idle_threshold(300);
+    evict_both_lanes(&idx).await;
+    slow_rehydrate(&idx).await;
+    let second = idx.cost_scaled_idle_threshold(300);
+
+    assert_eq!(
+        first,
+        Duration::from_secs(600),
+        "first rehydrate is costed in full"
+    );
+    assert!(
+        second >= first,
+        "second threshold {second:?} must not fall below the first {first:?}"
+    );
+}
+
+/// #10192 fail-open check: a rehydrate that panics after its scan stores no
+/// cost, so a failed attempt cannot lower the window.
+#[tokio::test]
+#[serial_test::serial]
+async fn panicked_rehydrate_keeps_the_prior_cost() {
+    let dir = tempfile::tempdir().unwrap();
+    let idx = indexed_and_evicted(&dir.path().join("index.redb")).await;
+    idx.set_rehydrate_cost_ms_for_test(5_000);
+
+    let armed = super::idle_evict::CommitPhasePanicArmed::arm(&idx);
+    idx.ensure_bm25_entities_loaded().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(armed);
+
+    assert!(
+        idx.corpus_evicted(),
+        "the panicked rehydrate did not commit"
+    );
+    assert_eq!(
+        idx.rehydrate_cost_estimate_ms(),
+        5_000,
+        "a panicked rehydrate must leave the prior measured cost in place"
+    );
 }

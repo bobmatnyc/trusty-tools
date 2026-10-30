@@ -127,6 +127,13 @@ pub(crate) fn render_standard(
             .as_deref()
             .unwrap_or("(none — pick one from the live list below)")
     );
+    // #10276 (epic #10274, D8): the repo's `project:` block is the single
+    // attach target; default_project is only the fallback for a repo without.
+    let _ = writeln!(
+        out,
+        "  attach_target:       {}",
+        attach_target(model, ticketing)
+    );
     let _ = writeln!(
         out,
         "  milestone_required:  {} (exactly one; unset needs a `no-milestone: <reason>` comment)",
@@ -168,6 +175,30 @@ pub(crate) fn render_standard(
     }
 
     out
+}
+
+/// The attach-target line (#10276, D8).
+///
+/// Why: an agent filing an issue needs ONE board, and the block wins over
+/// `default_project` and TICKETING.md.
+/// What: the block's owner and number with the `tm issue board add` call; with
+/// no block, the `default_project` fallback, or the `init` hint.
+/// Test: `standard_prints_the_project_block_as_the_attach_target_10276`.
+fn attach_target(model: &StateModel, ticketing: &ResolvedTicketing) -> String {
+    match (&model.project, ticketing.default_project.as_deref()) {
+        (Some(block), _) => format!(
+            "project #{} of `{}` (issue-state.yaml `project:` block) — attach with \
+             `tm issue board add <N>`; default_project is not used",
+            block.number, block.owner
+        ),
+        (None, Some(title)) => format!(
+            "no `project:` block — fallback: default_project `{title}` (`tm issue board add <N>`)"
+        ),
+        (None, None) => {
+            "no `project:` block and no default_project — create one with `tm issue board init`"
+                .to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +373,34 @@ mod tests {
         assert!(
             text.contains("MISSING — `gh label create`"),
             "a crate the repo has no label for is flagged: {text}"
+        );
+    }
+
+    /// #10276 AC6: the block is printed as the single attach target, and wins
+    /// over a configured default_project.
+    #[test]
+    fn standard_prints_the_project_block_as_the_attach_target_10276() {
+        let cfg = ResolvedTicketing::default().with_default_project("trusty-mpm");
+        let mut with_block = model();
+        with_block.project = Some(crate::commands::issue::board::project::ProjectBlock {
+            owner: "bobmatnyc".to_string(),
+            number: 45,
+            drop_options: Vec::new(),
+            extra_fields: Vec::new(),
+        });
+        let text = render_standard(&cfg, &with_block, &healthy_gh(), None);
+        assert!(
+            text.contains("attach_target:       project #45 of `bobmatnyc`"),
+            "{text}"
+        );
+        assert!(text.contains("default_project is not used"), "{text}");
+
+        let text = render_standard(&cfg, &model(), &healthy_gh(), None);
+        assert!(
+            text.contains(
+                "attach_target:       no `project:` block — fallback: default_project `trusty-mpm`"
+            ),
+            "{text}"
         );
     }
 

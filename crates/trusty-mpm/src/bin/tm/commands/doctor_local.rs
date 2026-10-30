@@ -38,7 +38,9 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// What: runs the check battery in-process via [`local_report`], prints one
 /// status-tagged line per check, appends the daemon rows from
 /// [`daemon_rows`] and the `gcloud_auth` row (#8371, which spawns `gcloud`
-/// only under `--network`), and folds every status into one overall verdict. When
+/// only under `--network`), the `hook-interpreter` and `notify-supervisor-asset`
+/// rows over the machine-wide settings list (#10263), and folds every status
+/// into one overall verdict. When
 /// `prune_stale_skills` is set (hidden `--prune-stale-skills` flag), also runs
 /// `prune_stale_skills_locally` as a manual troubleshooting escape hatch —
 /// normal operation cleans up pre-rename `mpm-*` skill directories
@@ -67,10 +69,24 @@ pub(crate) async fn doctor(
         overall = overall.worst(check.status);
         print_check(&check);
     }
+    // #10215: where this session's builds land, read from its own environment.
+    let session_target =
+        super::doctor_session_target_dir::session_target_dir_row(project_dir.as_deref());
+    overall = overall.worst(session_target.status);
+    print_check(&session_target);
     // #8371: opt-in; without `--network` this spawns nothing.
     let gcloud = super::doctor_gcloud::gcloud_auth_row(flags.network).await;
     overall = overall.worst(gcloud.status);
     print_check(&gcloud);
+    // #10263: bare-script hook commands, over the list `--fix` repairs.
+    let settings_files = super::doctor_repair::machine_wide_settings_files(
+        project_dir.as_deref(),
+        dirs::home_dir().as_deref(),
+    );
+    for check in trusty_mpm::core::hook_interpreter_doctor::hook_interpreter_rows(&settings_files) {
+        overall = overall.worst(check.status);
+        print_check(&check);
+    }
 
     println!(
         "\noverall: {} {}",
@@ -89,9 +105,8 @@ pub(crate) async fn doctor(
     // #4948: every opt-in local action the report can be followed by lives in
     // `doctor_repair`, so this file stays the report and the actions stay
     // together.
-    super::doctor_repair::run_post_report_actions(flags);
-
-    Ok(())
+    // #10212: a `--rotate-deps` FAIL row makes the command exit non-zero.
+    super::doctor_repair::run_post_report_actions(flags)
 }
 
 /// Run the daemon's own check battery in this process.
@@ -178,6 +193,8 @@ async fn daemon_rows(daemon: &trusty_mpm::client::DaemonClient) -> Vec<DoctorChe
     rows.push(super::doctor_builder_cap::builder_cap_row());
     // #8451: the slot pool's volume against the daemon's eviction threshold.
     rows.push(super::doctor_slot_pool::slot_pool_budget_row());
+    // #10212: debug/deps entry counts, bounded so the check never stalls the host.
+    rows.push(super::doctor_deps_budget::deps_budget_row());
     // #8454 S2c: read-only channel route policy rows, each load bounded.
     rows.extend(super::doctor_channels::channel_rows().await);
     rows

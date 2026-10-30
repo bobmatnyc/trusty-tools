@@ -1,9 +1,9 @@
 ---
 name: tm-secrets
-description: Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. The tm secrets CLI does not ship yet.
+description: Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. Which tm secrets verbs ship in which release.
 user-invocable: true
 metadata:
-  version: "1.3.0"
+  version: "1.5.0"
 category: pm-reference
 tags: [secrets, credentials, keychain, doctor, pm-recommended]
 effort: medium
@@ -11,21 +11,17 @@ effort: medium
 
 # tm secrets — Credential Handling
 
-🔴 **No agent-callable secrets client ships.** These are designed in
-[DOC-74](../../docs/specs/DOC-74-secrets-integration.md) §15 and are not in
-any binary yet: the `tm secrets` CLI
-([#7521](https://github.com/bobmatnyc/trusty-tools/issues/7521)), `tm secrets
-exec` ([#7525](https://github.com/bobmatnyc/trusty-tools/issues/7525)), the
+🔴 **Which `tm secrets` verbs ship depends on the release.** In trusty-mpm
+1.8.x: `set`, `list`, `remove`, `import`, `copy` and `doctor`. `exec` and
+`resolve` land in trusty-mpm 1.9.0 ([DOC-74](../../docs/specs/DOC-74-secrets-integration.md)
+§15.8). Run `tm secrets --help` before you plan around either.
+
+These are designed in DOC-74 §15 and are not in any binary yet: the
 `secrets_get_ref` MCP tool
 ([#7522](https://github.com/bobmatnyc/trusty-tools/issues/7522)), the console
 secrets page, the file backend
-([#9326](https://github.com/bobmatnyc/trusty-tools/issues/9326)), the audit
-trail ([#4567](https://github.com/bobmatnyc/trusty-tools/issues/4567)),
-`secrets.resolve` and exec grants
-([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)), and the
-language clients ([#9071](https://github.com/bobmatnyc/trusty-tools/issues/9071),
-[#9072](https://github.com/bobmatnyc/trusty-tools/issues/9072)). Run `tm --help`
-before you plan around any of them.
+([#9326](https://github.com/bobmatnyc/trusty-tools/issues/9326)) and the audit
+trail ([#4567](https://github.com/bobmatnyc/trusty-tools/issues/4567)).
 
 What ships: the `trusty-common` credential store the daemon reads, and the
 `trusty-secrets` 0.1.0 crate — a Keychain backend, a names-only index and an
@@ -108,8 +104,21 @@ goes to the OS; nothing is cached. On any other OS there is no store and every
 call fails with `unknown_backend`; it never falls back to a file.
 
 **Names-only index.** `~/.trusty-tools/trusty-secrets/index/` holds key names,
-value lengths, update times and the "agents may use" flag (default off). It
-holds no value. Do not edit it.
+value lengths and update times. It holds no value and no agent rule. Do not
+edit it.
+
+**Agents use keys by default (#10386).** The model is `.env.local`'s: a key in
+the caller's scope (project or owner vault) is usable by an agent through
+`tm secrets exec`, a grant and `tm secrets resolve`, unless the operator
+denied that key to agents. The deny is an item the backend holds beside the
+value (a Keychain item, or a 0600 file on the file backend), never an index
+field. An agent may write a deny; only a person may remove one. An agent
+may `set` (and so `import`) or locally `copy` a key that has no deny, in its
+own project or owner scope, when the owner asked for it (#10459); its `set`
+confirmation shows only `[N chars]`, and the audit record names its pid and
+project. `delete`, removing a deny, and a copy to a sync target such as
+GitHub Actions stay operator-only. A copy carries a key's deny; a denied key
+cannot be copied into 1Password or Keeper, which cannot hold a deny.
 
 **Socket.** `trusty-secrets serve` answers on
 `~/.trusty-tools/trusty-secrets/secrets.sock`, started by a client on first
@@ -119,16 +128,18 @@ server derives the vaults from that checkout's remote.
 | Method | Returns |
 |---|---|
 | `secrets.scopes` | The project and owner vaults |
-| `secrets.list` | Name, length, update time and agents flag per key — never a value |
-| `secrets.set` | `new` or `updated`, and the first 8 characters plus length once. Its request carries the value. |
-| `secrets.delete` | Whether a key was removed |
-| `secrets.copy` | Names copied and failed. Keychain is the only backend, so no copy has a destination. |
+| `secrets.list` | Name, length, update time and `agents_may_use` (no deny) per key — never a value |
+| `secrets.set` | `new` or `updated`, and a one-time mask: `[N chars]` only for an agent. Its request carries the value. An agent is refused a denied key (`agent_key_denied`). |
+| `secrets.delete` | Whether a key was removed. Operator-only. |
+| `secrets.set_agents_may_use` | `allowed: false` writes the key's agent deny (an agent may); `allowed: true` removes it (a person only) |
+| `secrets.copy` | Names copied and failed; a key's deny travels with it. An agent copies only keys with no deny, never to a sync target. |
 | `secrets.doctor` | Backend availability and paths |
 
-Only `secrets.set` echoes any part of a value: its one-time confirmation
-shows the first 8 characters and the length, or only the length for a value
-of 8 characters or fewer (owner ruling 2026-10-01). That is one reason agents
-never call it. No other method returns any part of a value.
+Only `secrets.set` echoes any part of a value, and only to a person: its
+one-time confirmation shows at most a 4-character head and 5-character tail
+plus the length (#10394). An agent's confirmation is the length only
+(#10459). No other method returns any part of a value. Pass a value to
+`tm secrets set` on stdin (`--value -`), never on the command line.
 
 ## Refusals
 
@@ -140,7 +151,8 @@ kind and the key or reference to the PM. Do not retry under another name.
 | `vault_out_of_scope` | The reference or vault is not the project's or its owner's. Cross-project access does not ship. Do not widen a config file. |
 | `remote_host_unsupported` | `origin` is not a github.com URL in an accepted form. Do not change the remote. |
 | `project_unresolved`, `project_invalid` | No usable checkout or remote. Report the directory. |
-| `agent_use_refused` | The key's "agents may use" flag is off. Only the operator changes it. |
+| `agent_key_denied` | The operator denied this key to agents (per-key deny). Report the key to the PM; only a person removes a deny. |
+| `agent_use_refused` | The method is operator-only for agents (`delete`, removing a deny, a copy to a sync target). Report the method to the PM. |
 | `not_found` | Neither vault indexes the key. Tell the PM the vault and key; the operator enters the value outside every session. |
 | `unknown_backend`, `same_backend` | No such backend on this build or OS, or a copy onto itself. |
 | `backend_failed`, `index_busy`, `index_corrupt`, `storage_unavailable`, `orphaned_backend_entry` | Store fault. Report it; do not touch the Keychain or the index by hand. |
@@ -177,9 +189,10 @@ dialog once from a terminal.
 
 ## Handing a Secret to a Subprocess
 
-Nothing injects a vault value into a child process yet. A credential reaches a
-child the way it reaches the daemon: through the environment the operator set,
-or the store. Do not invent a substitute: `export KEY=$(something)` parks the
+In trusty-mpm 1.9.0 and later, `tm secrets exec` injects granted vault values
+into a child process. Before that, nothing does: a credential reaches a child
+the way it reaches the daemon, through the environment the operator set, or
+the store. Do not invent a substitute: `export KEY=$(something)` parks the
 value where your turn can echo it.
 
 A credential CLI's output (`security … -w`, `gcloud auth print-access-token`)
@@ -188,3 +201,22 @@ is consumed inside the command that needs it: pipe it to a stdin reader
 read stdin, `$(…)` in the one argument that needs it. The expanded value is
 visible to `ps` while that command runs, so prefer a short-lived token. Never
 assign it to a variable first (#8596, #8248).
+
+### `tm secrets resolve <key>`
+
+Ships in trusty-mpm 1.9.0. It is the only `tm secrets` verb that prints a
+value, and only inside an `exec` grant. A program that `tm secrets exec`
+started, in any language, reads one granted value with `tm secrets resolve <key>`. It reads the grant token from the fd
+named by `TRUSTY_SECRETS_TOKEN_FD`, which `exec` sets, and asks the running
+trusty-secrets server for `<key>`. Stdout holds the value and nothing else,
+with no trailing newline. It never starts a server and never grants.
+
+```sh
+tm secrets resolve <key> | some-cli --token-stdin   # inside the exec grant only
+```
+
+Failure exits 1 with one fixed line on stderr and nothing on stdout. The line
+carries no key, value or path. The cases: no grant (not under `exec`), an
+unreadable or malformed token, a key the server refuses, an invalid key name,
+and a server that is not running or does not answer. Never run it as a bare
+command: the value would print into the transcript (rule 9).

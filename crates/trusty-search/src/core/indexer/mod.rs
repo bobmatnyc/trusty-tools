@@ -35,6 +35,8 @@ use crate::core::store::VectorStore;
 use crate::core::symbol_graph::SymbolGraph;
 
 pub(crate) mod archive;
+// #10110: batch removal by path prefix or file list.
+mod batch_remove;
 pub(crate) mod corpus_fault;
 // #8167/#8232: closing an index's files when it is deleted.
 mod delete_close;
@@ -50,6 +52,9 @@ mod idle_evict;
 // #9450: the idle persist, detached from the indexer lock.
 pub use idle_evict::WriteCooldownPersist;
 mod ingest;
+// #9284: named in `embed_window_stats`, read by the status report.
+pub(crate) use ingest::truncation::EmbedWindowStats;
+pub use ingest::window_split::deferred_split_enabled;
 pub(crate) mod migration_state;
 pub(crate) mod migrations;
 mod persist;
@@ -59,6 +64,8 @@ pub(crate) mod promotion_state;
 pub use promotion_state::PromotionDeferred;
 mod persist_hnsw;
 mod quarantine;
+// #10209: writes and a rehydrate's scan-then-publish never interleave.
+mod rehydrate_fence;
 mod search;
 // #9459: a corpus closed for a normal stop refuses later writes.
 mod shutdown_detach;
@@ -72,6 +79,8 @@ mod warm;
 pub(crate) use warm::warm_corpus;
 
 pub(crate) use ingest::deferred::VectorCoverage;
+/// #10294: the per-wave deferred-embed driver `service::reindex` runs.
+pub(crate) use ingest::deferred_stream::run_deferred_embed;
 /// Re-export for `EmbedPool::with_autotune`'s inflight-aware worker floor
 /// (issue #3748 PR #3784 review finding 3) — see
 /// `ingest::embed::resolve_embed_inflight`'s doc comment.
@@ -88,6 +97,8 @@ mod bm25_truncation_tests;
 mod cost_scaled_threshold_tests;
 #[cfg(test)]
 mod rehydrate_tests;
+#[cfg(test)]
+mod rehydrate_writes_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -122,6 +133,12 @@ pub use ingest::outcome::IndexFileOutcome;
 // #8976: the failed-remove fault seam for `service::reindex::hash_withhold_tests`.
 #[cfg(test)]
 pub(crate) use files::TEST_FAIL_REMOVE;
+// #10110: batch removal by path prefix or file list.
+#[cfg(test)]
+pub(crate) use batch_remove::TEST_FAIL_SLICE_FROM;
+#[cfg(test)]
+pub(crate) use batch_remove::TEST_VANISH_ROW;
+pub(crate) use batch_remove::{BatchRemoveCounts, BatchRemoveError};
 // #8959: the failed-redb-delete fault seam for `tests::file_lifecycle_8959`.
 #[cfg(test)]
 pub(crate) use ingest::supersede::TEST_FAIL_CHUNK_DELETE;
@@ -131,6 +148,9 @@ pub(crate) use tests::incremental_stamp_9230::break_chunk_writes;
 // #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
 #[cfg(test)]
 pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;
+// #10110: the batch-removal race test in `service::server::remove_files_tests`.
+#[cfg(test)]
+pub(crate) use idle_evict::RehydrateScanCounter;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
 // #8348: the typed error a pinned semantic query raises when its embed fails.
 pub use search::embed_degrade::{EmbedderUnavailable, PrecomputedQueryVector};
@@ -146,6 +166,9 @@ pub use search::exact::ExactMatchReport;
 pub use search::lexical_lane::{
     check_lexical_limit, LexicalLaneDefaults, LexicalLimitError, MAX_LEXICAL_LIMIT, ORIGIN_CONFIG,
 };
+// #10195: per-stage search timings and the query phase.
+pub(crate) use search::timings as query_timings;
+pub use search::timings::{QueryPhase, SearchTimings};
 pub use search::SearchOutcome;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
@@ -262,6 +285,9 @@ pub struct CodeIndexer {
     /// LRU cache of query → embedding, keyed by `hash_query`.
     pub(super) query_cache: Arc<Mutex<LruCache<u64, Vec<f32>>>>,
 
+    /// #10194: query embeds that missed their deadline and still run.
+    pub(super) query_embed_gate: Arc<search::embed_deadline::QueryEmbedGate>,
+
     /// Call graph derived from the chunk corpus.
     pub(super) symbol_graph: Arc<RwLock<Arc<SymbolGraph>>>,
 
@@ -356,6 +382,14 @@ pub struct CodeIndexer {
     /// itself) in `indexer::rehydrate_tests`.
     pub(super) rehydrate_generation: Arc<Mutex<u64>>,
 
+    /// #10110: a batch removal holds the write side, so a scan never reads
+    /// rows a batch is deleting. See `batch_remove` for the 503 it answers.
+    /// #10209: every scan-then-publish (the detached rehydrate, the redb
+    /// loaders) also holds the write side, and every other write holds the
+    /// read side via `rehydrate_write_fence`, so no write lands between a
+    /// scan and its publish.
+    pub(super) corpus_scan_gate: Arc<tokio::sync::RwLock<()>>,
+
     /// `true` when the most recent `bm25_search` / `grep_fallback_search`
     /// call degraded to an empty lane because the detached rehydrate
     /// (`idle_evict::ensure_corpus_rehydrated`) had not yet converged after
@@ -369,7 +403,7 @@ pub struct CodeIndexer {
     /// see `search::lanes::bm25_search` / `grep_fallback_search`) is the
     /// machine-readable signal that closes that gap, surfaced in the search
     /// HTTP response's `meta.bm25_lane_degraded` field
-    /// (`service::server::search::search_handler`) mirroring how
+    /// (`service::server::search::search_report`) mirroring how
     /// `WarmBootSummary.warm_boot_degraded` is surfaced on `/health`.
     /// What: set `true` by either lane's retry-exhausted tail; reset to
     /// `false` by `idle_evict::spawn_detached_rehydrate`'s commit-success
@@ -449,8 +483,8 @@ pub struct CodeIndexer {
     pub(super) corpus_read_fault: Arc<corpus_fault::CorpusReadFault>,
 
     /// Most recently MEASURED wall-clock cost (milliseconds) of this index's
-    /// corpus rehydrate scan (issue #3683 slice 2 — cost-scaled idle-eviction
-    /// window). `0` until the first rehydrate completes in this process's
+    /// whole corpus rehydrate — scan through commit, #10192 (issue #3683
+    /// slice 2 — cost-scaled idle-eviction window). `0` until the first rehydrate completes in this process's
     /// lifetime; [`Self::rehydrate_cost_estimate_ms`] in `idle_evict.rs` falls
     /// back to an ESTIMATE from the durable corpus's on-disk chunk count
     /// until then.
@@ -461,9 +495,10 @@ pub struct CodeIndexer {
     /// evicting the expensive one on every idle tick. Recording the actual
     /// measured cost lets the idle-eviction window scale to how expensive
     /// THIS index really is to rehydrate, rather than a fixed guess.
-    /// What: set by `idle_evict::spawn_detached_rehydrate` immediately after
-    /// its `spawn_blocking` redb scan completes successfully.
-    /// Test: `rehydrate_cost_estimate_ms_prefers_measured_over_estimated` in
+    /// What: set by `idle_evict::spawn_detached_rehydrate` once, at the end of
+    /// a successful rehydrate; a failed or panicked one leaves it unchanged.
+    /// Test: `rehydrate_cost_estimate_ms_prefers_measured_over_estimated`,
+    /// `rehydrate_cost_covers_post_scan_phases_and_raises_threshold` in
     /// `indexer::cost_scaled_threshold_tests`.
     pub(super) last_rehydrate_cost_ms: Arc<AtomicU64>,
 
@@ -503,6 +538,11 @@ pub struct CodeIndexer {
     /// Test: `corpus_open_failure_kind_tracks_the_flag` in
     /// `service::server::tests_4087`.
     pub corpus_open_failure: Option<crate::core::corpus::CorpusOpenFailure>,
+
+    /// #9284: chunks this indexer's embed passes sent past the embedder's
+    /// input window. In memory only; `GET /indexes/:id/status` reports it.
+    /// `Arc` because an embed pass runs on a detached [`ingest::embed::EmbedContext`].
+    pub(super) embed_window: Arc<EmbedWindowStats>,
 
     /// #7920: `true` once any durable corpus has been wired on this indexer.
     ///
@@ -769,6 +809,7 @@ impl CodeIndexer {
             chunk_embeddings: Arc::new(RwLock::new(LruCache::new(emb_cap))),
             bm25: Arc::new(RwLock::new(CodeBm25Index::new())),
             query_cache: Arc::new(Mutex::new(LruCache::new(cap))),
+            query_embed_gate: Arc::default(),
             symbol_graph: Arc::new(RwLock::new(Arc::new(SymbolGraph::new()))),
             graph_refresh: graph_refresh::GraphRefresh::default(),
             path_write_locks: ingest::supersede::PathWriteLocks::default(),
@@ -781,6 +822,7 @@ impl CodeIndexer {
             bm25_entities_evicted: Arc::new(AtomicBool::new(false)),
             rehydrate_inflight: Arc::new(std::sync::Mutex::new(None)),
             rehydrate_generation: Arc::new(Mutex::new(0)),
+            corpus_scan_gate: Arc::new(tokio::sync::RwLock::new(())),
             lane_degraded: Arc::new(AtomicBool::new(false)),
             legacy_chunk_ids_possible: Arc::new(AtomicBool::new(true)),
             migration_in_progress: Arc::new(AtomicBool::new(false)),
@@ -789,6 +831,7 @@ impl CodeIndexer {
             last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
             corpus_open_failed: false,
             corpus_open_failure: None,
+            embed_window: Arc::default(),
             corpus_ever_wired: false,
             deleted: false,
             closed_for_shutdown: false,
@@ -823,6 +866,12 @@ impl CodeIndexer {
     /// This index's chunk cap. See [`Self::chunk_cap`].
     pub(crate) fn chunk_cap(&self) -> usize {
         self.chunk_cap
+    }
+
+    /// #9284: this index's embed-window truncation counters.
+    /// Test: `a_chunk_over_the_window_counts_exactly_once`.
+    pub(crate) fn embed_window_stats(&self) -> &EmbedWindowStats {
+        &self.embed_window
     }
 
     /// Record that this index was just queried or ingested.
@@ -1121,7 +1170,7 @@ impl CodeIndexer {
     /// Why: the `GET /indexes/{id}/graph` endpoint needs to read the whole
     /// symbol graph without holding a lock.
     /// What: clones the inner `Arc<SymbolGraph>` while holding the read lock.
-    /// Test: covered by the `graph_handler` integration path.
+    /// Test: `graph_report_exports_nodes_and_edges`.
     pub async fn snapshot_symbol_graph(&self) -> Arc<SymbolGraph> {
         Arc::clone(&*self.symbol_graph.read().await)
     }
@@ -1254,7 +1303,7 @@ impl CodeIndexer {
     /// boot-race fix, PR #3784 review finding 1).
     ///
     /// Why: `restore_one_index` / `restore_index_on_demand` /
-    /// `create_index_handler` / the relocate handler all resolve the pool
+    /// `create_index_report` / the relocate handler all resolve the pool
     /// via `state.current_embed_pool()` at construction time — but
     /// `install_embedder` (which unblocks these handlers) completes strictly
     /// BEFORE `install_embed_pool` in `commands/start/daemon.rs`, so a

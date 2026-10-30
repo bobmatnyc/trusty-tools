@@ -3,7 +3,7 @@ name = "trusty-code"
 # #5073/#6231: test-only stabilization of `daemon_autospawn_tests` — no
 # production behavior changed, so this is a PATCH bump. (0.4.0 was the MINOR
 # bump for #6286's socket-path API break, per Cargo's 0.x rule.)
-# 0.5.0 (#5439): minor — `serve::http::build_axum_router` now takes 5
+# 0.5.0 (#5439): minor — the HTTP router builder (removed in #6637) took 5
 # parameters instead of 4 (bearer-auth wiring); cargo-semver-checks reports a
 # function_parameter_count_changed break, so Cargo's 0.x rule puts it in MINOR.
 # 0.5.1 (#6657): patch — `fs_browse::mpm_registry::parse_owner_repo` (a
@@ -149,15 +149,13 @@ globset = { workspace = true }
 # and trusty-search. Those wire types now come from the separate `trusty-mcp`
 # crate (ADR-0040, #5803), declared above; `catchup` still brings
 # `trusty-common/memory-rpc` transitively for the trusty-memory client.
-# `axum-server` enables `trusty_common::server::with_standard_middleware`
-# (CORS/trace/gzip) so `tcode serve --http` matches the trusty-memory/
-# trusty-search middleware stack exactly.
 # `inference-client` (#2406, epic #2400) provides the shared inference adapter
 # layer (`trusty_common::inference`) tcode's OpenRouter/Fireworks transport is
 # built on: the OpenAI-compatible HTTP core, the two-stage credential resolver
-# (env > .env.local > secure store), and the capability registry. It composes
-# with `axum-server` to expose `inference::test_support::MockInferenceServer`
-# for the offline black-box e2e in `tests/inference_shared_adapter_e2e.rs`.
+# (env > .env.local > secure store), and the capability registry. The
+# dev-dependency below adds `axum-server` to expose
+# `inference::test_support::MockInferenceServer` for the offline black-box e2e
+# in `tests/inference_shared_adapter_e2e.rs`.
 # `stdio-mcp-client` provides the shared `StdioMcpClient` (spawn an MCP binary,
 # run the JSON-RPC-over-stdio handshake, call tools) the trusty-search-backed
 # code-discovery tool reuses instead of writing its own MCP transport
@@ -177,10 +175,8 @@ trusty-mcp = { workspace = true, features = ["config"] }  # JSON-RPC / MCP primi
 # project override tier. `toml` is already in this crate's graph through
 # `trusty-mcp/config`, so this adds no new transitive dependency.
 toml = { workspace = true }
-# `daemon-token` (#5439) supplies BOTH halves of the loopback credential: the
-# `0600` token file (`serve::http::run_http` writes it, `tui_client` reads it)
-# and — because `axum-server` is on here too — `server::bearer_auth`, the
-# router-wide guard.
+# #6637 slice 2c: no `axum-server` or daemon-credential feature here. Both served the
+# daemon's retired loopback HTTP listener and its bearer credential.
 # `log-drain` (#6537): `trusty_common::log_drain::{run_once, DrainConfig,
 # ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the
 # drain CORE `tcode serve`'s own scheduler (`crate::log_drain`) calls rather
@@ -190,24 +186,17 @@ toml = { workspace = true }
 # `tcode tui` dials. Named explicitly rather than left to arrive transitively
 # through `catchup` -> `memory-rpc` -> `uds`, so dropping `catchup` later
 # cannot silently take the daemon's own transport with it.
-trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "daemon-token", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config", "log-drain", "uds"] }
+trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config", "log-drain", "uds"] }
 
 # `tui_client::CodeEngine` (#3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3): the
 # shared engine-adapter trait + event vocabulary (`TuiEngine`/`ReplEvent`)
 # both `tcode tui` and tagent's REPL implement against.
 trusty-code-tui = { workspace = true }
 
-# `tcode serve --http`: POST /rpc + GET /health over axum (#2053). Per
-# CLAUDE.md, axum stays feature-gated in *library* crates
-# (`trusty-common`'s `axum-server` flag); trusty-code is a binary crate that
-# actually serves HTTP, so it takes the dependency unconditionally, matching
-# how `trusty-search`/`trusty-memory` depend on it.
-axum = { workspace = true }
-
-# `GET /sessions/{id}/events` SSE route (#2054): wraps the existing
-# `tokio::sync::broadcast`-backed event bus (`crate::events`) as a `Stream`
-# axum's SSE response type can consume, chained after a ring-buffer replay
-# burst built with plain `futures_util::stream::iter`.
+# `session.events` / `workstream.events` socket streams (#2054, #6637): wrap
+# the `tokio::sync::broadcast`-backed event bus (`crate::events`) as a
+# `Stream`, chained after a ring-buffer replay burst built with plain
+# `futures_util::stream::iter`.
 tokio-stream = { workspace = true }
 futures-util = { workspace = true }
 
@@ -232,13 +221,9 @@ tempfile = { workspace = true }
 # `events_connect_hang_is_bounded_by_connect_timeout_not_infinite` to wait out
 # `CONNECT_TIMEOUT` on the virtual clock instead of 10s of real time.
 tokio = { workspace = true, features = ["test-util"] }
-# HTTP router test-only helper (`tower::util::ServiceExt::oneshot`) for
-# driving the `tcode serve --http` axum router without a real socket (#2053).
-tower = { workspace = true }
-# `tests/tui_client_engine.rs` (#3415): a hermetic mock HTTP daemon for
-# `CodeEngine`, mirroring `trusty-channels/tests/client_http.rs`'s pattern —
-# a real bound socket so `reqwest` (SSE included) drives it exactly like a
-# real `tcode serve --http` daemon, without spawning the real binary.
+# `cli::daemon_autospawn_tests::daemon_autospawn_waits_on_socket_not_http`: a
+# healthy HTTP `/health` decoy that must NOT satisfy the socket readiness
+# gate.
 wiremock = { workspace = true }
 # `llm::client::tests` (#4614): the missing-credential tests clear a provider's
 # API-key env var so they assert unconditionally instead of skipping on a
@@ -246,5 +231,7 @@ wiremock = { workspace = true }
 # exclusion group so that mutation cannot race a parallel test thread.
 serial_test = { workspace = true }
 # #9123: the shared credential test sandbox. Dev-only because it mutates the
-# process environment; it must never reach a normal build.
-trusty-common = { workspace = true, features = ["credential-test-sandbox"] }
+# process environment; it must never reach a normal build. #6637: `axum-server`
+# is dev-only too — it now serves only `MockInferenceServer`, a test double.
+# #7215: `uds-test-support` gives the UDS test stubs their hardened bind.
+trusty-common = { workspace = true, features = ["credential-test-sandbox", "axum-server", "uds-test-support"] }

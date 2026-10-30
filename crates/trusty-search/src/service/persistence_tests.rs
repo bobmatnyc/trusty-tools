@@ -50,7 +50,7 @@ fn registry_file_serde_roundtrip() {
 /// Why: production accumulated 60+ "deleted" indexes because the DELETE
 /// path only mutated the in-memory `DashMap`. Each empty entry replayed
 /// from disk pre-allocates an HNSW arena (80–150 MB). The fix wires
-/// `delete_index_handler` to `remove_index_registry_entry`; this test
+/// `delete_index_report` to `remove_index_registry_entry`; this test
 /// pins that behaviour at the persistence boundary by driving the
 /// load/save/remove pipeline against a tempfile and asserting the
 /// deleted id is absent from the rehydrated registry.
@@ -80,7 +80,7 @@ fn remove_index_persists_to_toml() {
     assert_eq!(load_index_registry_at(&path).unwrap().len(), 2);
 
     // Delete the second entry — this is the persistence call that
-    // `delete_index_handler` makes on the DELETE handler path.
+    // `delete_index_report` makes on the DELETE handler path.
     remove_index_registry_entry_at(&path, "drop").unwrap();
 
     // Rehydrate from disk (simulating a daemon restart) and confirm only
@@ -809,7 +809,7 @@ fn corrupt_registry_is_an_error_and_is_never_overwritten() {
 /// another writer's stale snapshot.
 ///
 /// Why: every mutation is load → mutate → whole-file save and nothing ordered
-/// them. A busy daemon runs many concurrently (`search_handler` spawns a
+/// them. A busy daemon runs many concurrently (`search_report` spawns a
 /// fire-and-forget `update_last_queried_unix` per query alongside the
 /// registration handlers), so a write landing between another task's load and
 /// its save was silently erased — the observed 80 → 88 → byte-identical-80
