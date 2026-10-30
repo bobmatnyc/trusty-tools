@@ -9,21 +9,29 @@
 //! row. [`embed_header`] is a deterministic `// path: <file> :: <Kind> <name>`
 //! line, prepended by [`embed_text`] to the text EMBEDDED only: stored chunk
 //! text and BM25 documents never carry it. Only the two inline embed paths call
-//! this, so existing chunks, the deferred catch-up pass and indexes with no
-//! known window keep today's behaviour.
-//! Test: `core::indexer::tests::window_split_10481`.
+//! this, so existing chunks and indexes with no known window keep today's
+//! behaviour.
+//!
+//! #10504: the deferred parse (`parse_files_deferred`) splits the same way, so a
+//! default index no longer stores one over-window chunk per long function, and the
+//! catch-up heads each owed chunk that fits (`catch_up_headers`). Kill switch
+//! `TRUSTY_DEFERRED_WINDOW_SPLIT=0` (`deferred_split_enabled`).
+//! Test: `core::indexer::tests::window_split_10481`,
+//! `core::indexer::tests::window_split_10504`.
 
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use trusty_common::embedder::{chunk_text, ChunkError, ChunkTokenizer};
 
 use super::super::CodeIndexer;
-use super::truncation::WindowProbe;
 use crate::core::chunker::RawChunk;
+use crate::core::embed::Embedder;
 use crate::core::index_roots::IndexRoots;
+use crate::core::indexer::ParsedBatch;
 
 /// Longest path, in bytes, a header carries; a longer path keeps its tail.
 const HEADER_PATH_MAX: usize = 96;
@@ -276,6 +284,105 @@ pub(crate) fn split_at_window(
     (out, headers, report)
 }
 
+/// Env var that turns the deferred-path split off (#10504).
+const DEFERRED_SPLIT_ENV: &str = "TRUSTY_DEFERRED_WINDOW_SPLIT";
+
+/// Read the kill switch value: on unless it is `0`, `false` or `off` (#10504).
+///
+/// Why: the split changes how many chunks every default index stores, and the
+/// effect on the chunk cap and BM25 is not measured; an operator needs a way back.
+/// What: pure, so a test needs no process-env change. Case and padding ignored.
+/// Test: `a_kill_switch_off_parses_deferred_unsplit`.
+pub(crate) fn parse_switch(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "off")
+    )
+}
+
+/// Whether #10504's behaviour is on, read from `TRUSTY_DEFERRED_WINDOW_SPLIT`.
+///
+/// What: off turns off the deferred split, the catch-up headers and the assumed
+/// (MiniLM) window fallback, so every path behaves as #10481 did.
+/// Test: `a_kill_switch_off_parses_deferred_unsplit`.
+pub fn deferred_split_enabled() -> bool {
+    parse_switch(std::env::var(DEFERRED_SPLIT_ENV).ok().as_deref())
+}
+
+/// The header for `chunk` when header plus content fit `window`, else empty (#10504).
+///
+/// Why: the catch-up embeds a stored chunk as it is; a header that pushed it past
+/// the window would cut its tail, the loss the split exists to remove. A chunk cut
+/// without a header (room under window/2) must not gain one here.
+/// What: a byte prefilter first (a token is at least one byte), then a token
+/// count of the headed text plus the special tokens. A count error is no header.
+/// Test: `a_short_owed_chunk_gets_a_header_and_an_oversize_old_one_does_not`,
+/// `a_window_cut_without_a_header_is_embedded_without_one`.
+fn header_if_fits(
+    tokenizer: &ChunkTokenizer,
+    window: usize,
+    chunk: &RawChunk,
+    file: &str,
+) -> String {
+    let header = embed_header(chunk, file);
+    let overhead = tokenizer.special_overhead();
+    if header.len() + chunk.content.len() + overhead <= window {
+        return header;
+    }
+    let headed = embed_text(chunk, Some(&header));
+    match tokenizer.count_tokens(&headed) {
+        Ok(n) if n + overhead <= window => header,
+        _ => String::new(),
+    }
+}
+
+/// Headers for `chunks`, 1:1, each empty when it would not fit `window` (#10504).
+/// Test: `the_catch_up_embeds_each_window_with_the_header_and_stores_none`.
+fn catch_up_headers(
+    tokenizer: &ChunkTokenizer,
+    window: usize,
+    roots: &IndexRoots,
+    chunks: &[RawChunk],
+) -> Vec<String> {
+    chunks
+        .iter()
+        .map(|c| header_if_fits(tokenizer, window, c, &header_path(&c.file, roots)))
+        .collect()
+}
+
+/// What a blocking split attempt found.
+enum SplitOutcome {
+    Split {
+        window: usize,
+        chunks: Vec<RawChunk>,
+        headers: Vec<String>,
+        report: SplitReport,
+    },
+    /// No window or tokenizer: the chunks come back whole; `Some` names a load failure.
+    Whole(Vec<RawChunk>, Option<String>),
+}
+
+/// Ask `embedder` for its split window and split `chunks` (blocking).
+fn split_blocking(
+    embedder: &Arc<dyn Embedder>,
+    roots: &IndexRoots,
+    chunks: Vec<RawChunk>,
+) -> SplitOutcome {
+    match embedder.split_window() {
+        Ok(Some((window, tokenizer))) => {
+            let (chunks, headers, report) = split_at_window(&tokenizer, window, roots, chunks);
+            SplitOutcome::Split {
+                window,
+                chunks,
+                headers,
+                report,
+            }
+        }
+        Ok(None) => SplitOutcome::Whole(chunks, None),
+        Err(e) => SplitOutcome::Whole(chunks, Some(e.to_string())),
+    }
+}
+
 impl CodeIndexer {
     /// Split `chunks` at the embedder's window ahead of an inline embed (#10481).
     ///
@@ -305,16 +412,31 @@ impl CodeIndexer {
         if self.skip_vector || chunks.is_empty() {
             return Ok((chunks, None));
         }
-        let probe = WindowProbe::from_embedder(embedder.as_ref());
-        let WindowProbe::Counting { window, tokenizer } = probe else {
-            return Ok((chunks, None));
-        };
+        let embedder = Arc::clone(embedder);
         let roots = self.chunk_roots();
-        let (split, headers, report) = tokio::task::spawn_blocking(move || {
-            split_at_window(&tokenizer, window, &roots, chunks)
-        })
-        .await
-        .context("window split task panicked")?;
+        let outcome =
+            tokio::task::spawn_blocking(move || split_blocking(&embedder, &roots, chunks))
+                .await
+                .context("window split task panicked")?;
+        let (window, split, headers, report) = match outcome {
+            SplitOutcome::Split {
+                window,
+                chunks,
+                headers,
+                report,
+            } => (window, chunks, headers, report),
+            SplitOutcome::Whole(whole, failure) => {
+                if let Some(reason) = failure {
+                    // #10504: say why a split did not run; the chunks embed cut, as before.
+                    tracing::warn!(
+                        index_id = %self.index_id,
+                        %reason,
+                        "no tokenizer to split chunks with; they stay whole (#10504)",
+                    );
+                }
+                return Ok((whole, None));
+            }
+        };
         self.embed_window.add_split(report.parents_split as u64);
         if report.kept_whole > 0 {
             tracing::warn!(
@@ -326,5 +448,72 @@ impl CodeIndexer {
             );
         }
         Ok((split, Some(headers)))
+    }
+
+    /// Parse `files` for a deferred index, splitting chunks at the embedder window (#10504).
+    ///
+    /// Why: the fast pass stored one chunk per function, so a long function was
+    /// embedded cut by the catch-up. Splitting here puts the windows in BM25, the
+    /// corpus and redb from the first commit, and no stored chunk is ever rewritten.
+    /// What: `parse_files_only`, then, when `split`, [`CodeIndexer::split_for_embed`]
+    /// on the chunks. Embeddings stay `None` and the headers are dropped (the
+    /// catch-up recomputes them). `split` false, no embedder, no window or no
+    /// tokenizer: the chunks come back as `parse_files_only` made them.
+    /// Test: `a_deferred_index_splits_a_new_long_chunk_once_the_window_is_known`,
+    /// `with_no_window_and_no_tokenizer_a_deferred_parse_does_not_split`,
+    /// `a_kill_switch_off_parses_deferred_unsplit`.
+    pub(crate) async fn parse_files_deferred(
+        &self,
+        files: Vec<(String, String)>,
+        split: bool,
+    ) -> Result<ParsedBatch> {
+        let mut batch = self.parse_files_only(files).await?;
+        if !split || batch.chunks.is_empty() {
+            return Ok(batch);
+        }
+        let (chunks, _headers) = self
+            .split_for_embed(std::mem::take(&mut batch.chunks))
+            .await?;
+        batch.embeddings = vec![None; chunks.len()];
+        batch.chunks = chunks;
+        Ok(batch)
+    }
+
+    /// Headers for one wave of owed chunks, 1:1, or `None` when none can be built (#10504).
+    ///
+    /// Why: the catch-up embedded stored text bare, so a window past the first of a
+    /// long function carried no file or symbol. The header goes to the embedded
+    /// text only; stored text and BM25 never carry it.
+    /// What: `None` with the kill switch off, no embedder, a vector-skipping index,
+    /// or no split window. Otherwise [`header_if_fits`] per chunk, on a blocking
+    /// thread.
+    /// Test: `the_catch_up_embeds_each_window_with_the_header_and_stores_none`,
+    /// `with_the_switch_off_the_catch_up_adds_no_header`.
+    pub(crate) async fn catch_up_headers(&self, chunks: &[RawChunk]) -> Option<Vec<String>> {
+        self.catch_up_headers_if(deferred_split_enabled(), chunks)
+            .await
+    }
+
+    /// [`Self::catch_up_headers`] with the switch value given, so a test sets none.
+    pub(crate) async fn catch_up_headers_if(
+        &self,
+        enabled: bool,
+        chunks: &[RawChunk],
+    ) -> Option<Vec<String>> {
+        if !enabled {
+            return None;
+        }
+        let embedder = Arc::clone(self.embedder.as_ref()?);
+        if self.skip_vector || chunks.is_empty() {
+            return None;
+        }
+        let roots = self.chunk_roots();
+        let owned = chunks.to_vec();
+        let built = tokio::task::spawn_blocking(move || {
+            let (window, tokenizer) = embedder.split_window().ok().flatten()?;
+            Some(catch_up_headers(&tokenizer, window, &roots, &owned))
+        })
+        .await;
+        built.ok().flatten()
     }
 }

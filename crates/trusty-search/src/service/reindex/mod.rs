@@ -341,3 +341,6 @@ mod reindex_stamp_tests;
 // #10481: the split on the full-reindex parse path, and the hash skip over it.
 #[cfg(test)]
 mod window_split_10481_tests;
+// #10504: the same, on the default deferred-embed path.
+#[cfg(test)]
+mod window_split_10504_tests;

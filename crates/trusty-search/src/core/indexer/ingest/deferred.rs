@@ -60,6 +60,8 @@ pub(crate) struct DeferredEmbedPass {
 /// Test: `status_answers_during_an_embed_pass_with_a_writer_queued`.
 pub(crate) struct DeferredEmbedPlan {
     to_embed: Vec<RawChunk>,
+    /// Embed-only headers, 1:1 with `to_embed`; an empty one means none (#10504).
+    headers: Option<Vec<String>>,
     embed: EmbedContext,
 }
 
@@ -102,7 +104,13 @@ impl DeferredEmbedPlan {
             });
         }
         self.embed
-            .embed_chunks_in_pass(&self.to_embed, progress_tx, pause, state, None)
+            .embed_chunks_in_pass(
+                &self.to_embed,
+                progress_tx,
+                pause,
+                state,
+                self.headers.as_deref(),
+            )
             .await
     }
 
@@ -155,6 +163,7 @@ impl CodeIndexer {
     /// corpus. An id the corpus no longer holds is skipped. `None` when no id
     /// is left. Errors when the map cannot be read within
     /// [`BACKGROUND_REHYDRATE_CEILING`].
+    /// #10504: also builds the wave's embed headers (see [`CodeIndexer::catch_up_headers`]).
     /// Test: `a_finished_wave_is_searchable_and_on_disk_before_the_next_wave_starts`.
     pub(crate) async fn plan_deferred_group(
         &self,
@@ -173,8 +182,14 @@ impl CodeIndexer {
             }
             pass.next += 1;
         }
-        Ok((!to_embed.is_empty()).then(|| DeferredEmbedPlan {
+        if to_embed.is_empty() {
+            return Ok(None);
+        }
+        // #10504: head each owed chunk that fits; stored text is never touched.
+        let headers = self.catch_up_headers(&to_embed).await;
+        Ok(Some(DeferredEmbedPlan {
             to_embed,
+            headers,
             embed: pass.embed.clone(),
         }))
     }
@@ -210,6 +225,7 @@ impl CodeIndexer {
     ) -> Result<EmbedCatchUp> {
         let DeferredEmbedPlan {
             mut to_embed,
+            headers: _,
             embed: _,
         } = plan;
         // #10294: `total` is this wave; the pass driver reports the corpus.

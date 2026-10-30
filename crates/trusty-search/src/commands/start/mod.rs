@@ -25,6 +25,7 @@ pub(crate) mod args;
 mod daemon;
 mod embedder;
 mod embedder_fallback;
+mod embedder_split;
 mod graceful_bootstrap;
 // #8149 / #8176: the two isolation decisions `handle_start` used to make as
 // inline branches no test could reach — which data dir every per-instance path
