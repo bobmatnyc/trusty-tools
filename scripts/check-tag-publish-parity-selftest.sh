@@ -64,6 +64,8 @@ PASSED=0
 FAILED=0
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tag-parity-selftest.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
+# #10506: no case may reach static.crates.io; one that forgets the seam fails.
+export TAG_PUBLISH_PARITY_CRATES_BASE_URL="file://${WORK}/no-network"
 
 pass_case() { echo "  ok  $1"; PASSED=$((PASSED + 1)); }
 fail_case() {
@@ -318,6 +320,61 @@ rm -rf "${WORK}/ctd-meta/package"
 PATH="${STUBBIN}:${PATH}" \
   run_case "auto with the file missing under cargo metadata target fails closed" \
   1 "${WORK}/ctd-meta/package/trusty-example-1.2.3/.cargo_vcs_info.json" "$repo" trusty-example --vcs-info auto
+
+# ===========================================================================
+# 9c. #10506: a successful `cargo publish` can leave only the .crate, with no
+#     extracted package/<pkg>-<ver>/ directory. `auto` then fetches the served
+#     crate (here via the file:// base-URL seam), requires its sha256 to equal
+#     the local .crate's, and reads the record out of it.
+# ===========================================================================
+write_crate() { # <out .crate> <sha|-> <extra> — a gzipped tar laid out as cargo's; `-` omits the record
+  local stage="${WORK}/crate-stage"
+  rm -rf "$stage"
+  mkdir -p "${stage}/trusty-example-1.2.3"
+  [ "$2" = "-" ] || printf '{"git": {"sha1": "%s"}, "path_in_vcs": "crates/trusty-example"}\n' "$2" \
+    > "${stage}/trusty-example-1.2.3/.cargo_vcs_info.json"
+  printf '[package]\nname = "trusty-example"\n# %s\n' "$3" > "${stage}/trusty-example-1.2.3/Cargo.toml"
+  mkdir -p "$(dirname "$1")"
+  tar -czf "$1" -C "$stage" trusty-example-1.2.3
+}
+SERVED="${WORK}/served/trusty-example"
+repo="$(mkrepo vcs-crate-only trusty-example trusty-example 1.2.3)"
+git -C "$repo" tag trusty-example-v1.2.3
+head_sha="$(git -C "$repo" rev-parse HEAD)"
+write_crate "${WORK}/ctd-crate/package/trusty-example-1.2.3.crate" "$head_sha" local
+mkdir -p "$SERVED"
+cp "${WORK}/ctd-crate/package/trusty-example-1.2.3.crate" "${SERVED}/trusty-example-1.2.3.crate"
+CARGO_TARGET_DIR="${WORK}/ctd-crate" TAG_PUBLISH_PARITY_CRATES_BASE_URL="file://${WORK}/served" \
+  run_case "auto with only the .crate reads the sha256-matched served crate" 0 \
+  "fetching file://${WORK}/served/trusty-example/trusty-example-1.2.3.crate" "$repo" trusty-example --vcs-info auto
+
+# Served bytes differ from the local .crate: its record cannot vouch for it.
+write_crate "${SERVED}/trusty-example-1.2.3.crate" "$head_sha" served-differently
+CARGO_TARGET_DIR="${WORK}/ctd-crate" TAG_PUBLISH_PARITY_CRATES_BASE_URL="file://${WORK}/served" \
+  run_case "auto with a served crate whose sha256 differs fails closed" 1 \
+  "VCS-INFO-CRATE-SHA-MISMATCH" "$repo" trusty-example --vcs-info auto
+
+# Nothing served (fetch fails): still fail closed as VCS-INFO-MISSING.
+rm -f "${SERVED}/trusty-example-1.2.3.crate"
+CARGO_TARGET_DIR="${WORK}/ctd-crate" TAG_PUBLISH_PARITY_CRATES_BASE_URL="file://${WORK}/served" \
+  run_case "auto with a local .crate but no served crate fails closed" 1 \
+  "VCS-INFO-MISSING" "$repo" trusty-example --vcs-info auto
+
+# serve_same <sha|-> — byte-identical local and served .crate, so sha256 matches.
+serve_same() {
+  write_crate "${WORK}/ctd-crate/package/trusty-example-1.2.3.crate" "$1" local
+  cp "${WORK}/ctd-crate/package/trusty-example-1.2.3.crate" "${SERVED}/trusty-example-1.2.3.crate"
+}
+# sha256 matches but the crate has no .cargo_vcs_info.json member (tar arm).
+serve_same -
+CARGO_TARGET_DIR="${WORK}/ctd-crate" TAG_PUBLISH_PARITY_CRATES_BASE_URL="file://${WORK}/served" \
+  run_case "auto with a sha256-matched served crate lacking a record fails closed" 1 \
+  "VCS-INFO-MISSING — no .cargo_vcs_info.json at file://${WORK}/served/" "$repo" trusty-example --vcs-info auto
+# sha256 matches, but the record names another commit: the sha1 check decides.
+serve_same 0123456789abcdef0123456789abcdef01234567
+CARGO_TARGET_DIR="${WORK}/ctd-crate" TAG_PUBLISH_PARITY_CRATES_BASE_URL="file://${WORK}/served" \
+  run_case "auto with a served crate recording another commit" 1 \
+  "VCS-INFO-MISMATCH" "$repo" trusty-example --vcs-info auto
 
 # ===========================================================================
 # 10. An ANNOTATED tag at HEAD. `git ls-remote` and `refs/tags/<t>` resolve to
