@@ -277,7 +277,11 @@ fn settling_on_a_hung_bus(
 
 /// #10412: on SIGTERM the serve drain (1 s) may win the settle; the signal
 /// handler's caller (200 ms) still gets the events to the spool in time.
-#[tokio::test]
+// #10412: paused clock. Under CI load the 100 ms bus timer fired late and the
+// spool write outran the waiter's wall-clock 200 ms. Time now advances only
+// when the runtime is idle, and never while the spool write runs, so the
+// budgets race the settle's own timers, not the host's CPU.
+#[tokio::test(start_paused = true)]
 async fn a_signal_waiter_gets_the_spool_when_a_slower_caller_settles_10412() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (_state, publisher, hold) = settling_on_a_hung_bus(&dir);
@@ -285,7 +289,7 @@ async fn a_signal_waiter_gets_the_spool_when_a_slower_caller_settles_10412() {
     let settling = tokio::spawn(async move { first.final_flush_within(FINAL_FLUSH_BUDGET).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let begun = Instant::now();
+    let begun = tokio::time::Instant::now();
     let waiter = publisher.final_flush_within(SIGNAL_FLUSH_BUDGET).await;
     let took = begun.elapsed();
     assert!(
