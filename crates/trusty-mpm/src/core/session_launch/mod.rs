@@ -29,6 +29,11 @@ pub use entry::{
     prepare_session_with_repo_url_and_exe, prepare_session_with_style,
     prepare_session_with_style_and_native,
 };
+// #10459: the Architect's exec-form PM-guard and prompt-hook groups.
+mod architect_hooks;
+// #10459: `HostInputs`, moved out for the line cap.
+mod host_inputs;
+use host_inputs::HostInputs;
 // #6887: the bulk-read diversion `PreToolUse` groups.
 mod divert_hooks;
 // #7849: the read-only diff between a project's settings file and the hook
@@ -525,6 +530,10 @@ pub enum PrepError {
         /// The content resolution or load failure.
         source: crate::core::content_source::AgentContentError,
     },
+    /// #10459: an Architect launch on a Claude Code below v2.1.295, or one
+    /// whose version cannot be read. Fatal: refused before any write.
+    #[error("{0}")]
+    ClaudeVersion(#[from] crate::core::architect_claude_version::ArchitectVersionError),
 }
 
 impl PrepError {
@@ -540,7 +549,10 @@ impl PrepError {
     /// `deploy_and_io_failures_stay_non_fatal`.
     pub fn is_fatal(&self) -> bool {
         // #9012: no content means no instructions — the same condition.
-        matches!(self, Self::Instructions { .. } | Self::Content { .. })
+        matches!(
+            self,
+            Self::Instructions { .. } | Self::Content { .. } | Self::ClaudeVersion(_)
+        )
     }
 }
 
@@ -566,42 +578,6 @@ impl PrepError {
 /// Test: covered by every `prepare_session_*` test plus
 /// `prepare_session_continues_after_agent_deploy_failure`,
 /// `prepare_session_continues_after_skill_deploy_failure`.
-/// The ambient host inputs [`prepare_session_inner`] would otherwise read from
-/// the process itself.
-///
-/// Why: every field is something production reads from the environment and
-/// tests must pin — `home` since #5544, `hook_exe` since #7244. Grouping them keeps
-/// [`prepare_session_inner`]'s arity where clippy wants it and puts the
-/// injections side by side, so the next one has an obvious home.
-/// What: `home` is the USER-GLOBAL home (not derivable from `FrameworkPaths` —
-/// the managed constructors relocate every `.claude/` path on it onto the
-/// workspace); `hook_exe` is the stable binary the project-tier hooks writer
-/// should bake, `None` meaning "resolve the running one"; `palace_registry` (#8311) is the trusty-memory registry the palace alias is
-/// written to, `None` meaning "the one the trusty-memory daemon reads";
-/// `claude_config_dir` (#9846) relocates the user tier off `home`, as
-/// `CLAUDE_CONFIG_DIR` does for Claude Code, `None` meaning `<home>/.claude`.
-/// Test: `repair_closes_gaps_on_incomplete_workspace`,
-/// `session_prep_writes_the_palace_alias_under_the_named_registry`, plus
-/// every `prepare_session_*` test.
-#[derive(Clone, Copy, Default)]
-pub(super) struct HostInputs<'a> {
-    pub(super) home: Option<&'a Path>,
-    pub(super) hook_exe: Option<&'a Path>,
-    pub(super) palace_registry: Option<&'a Path>,
-    pub(super) claude_config_dir: Option<&'a Path>,
-}
-
-impl<'a> HostInputs<'a> {
-    /// The production shape: a real home, the running binary for hooks, and
-    /// the daemon's own palace registry.
-    pub(super) fn with_home(home: Option<&'a Path>) -> Self {
-        Self {
-            home,
-            ..Self::default()
-        }
-    }
-}
-
 pub(super) fn prepare_session_inner(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -612,13 +588,6 @@ pub(super) fn prepare_session_inner(
     host: HostInputs<'_>,
 ) -> Result<PrepReport, PrepError> {
     let home = host.home;
-    // #8663: before any provisioning write, so `record` below sees tm's edits.
-    let ledger_before = crate::session_manager::provisioning_ledger::snapshot(project_dir);
-    // #7806: opens this launch's stack-detection scope. Every manifest
-    // resolution below — and the five-plus in the call sites it reaches — then
-    // shares ONE nested walk, while a daemon-hosted launch still re-detects a
-    // tree that changed since the last one.
-    crate::core::manifest::invalidate_stack_detection(project_dir);
     // Load the user config ONCE and thread it through both the manifest
     // resolution / catalog-root path AND the style resolution path below. Reading
     // `config.toml` a second time mid-function (the old `MpmConfig::load` just
@@ -627,6 +596,16 @@ pub(super) fn prepare_session_inner(
     // #8453: resolved ONCE per launch; the composer, the style, the model and
     // the settings below all take this value, and it is returned for the stamp.
     let profile = crate::core::session_profile::resolve(project_dir, &config);
+    // #10459: every prep seam that starts an Architect refuses here, before the
+    // ledger snapshot and any write, on a Claude Code without `onFailure`.
+    crate::core::architect_claude_version::require_for_profile(profile)?;
+    // #8663: before any provisioning write, so `record` below sees tm's edits.
+    let ledger_before = crate::session_manager::provisioning_ledger::snapshot(project_dir);
+    // #7806: opens this launch's stack-detection scope. Every manifest
+    // resolution below — and the five-plus in the call sites it reaches — then
+    // shares ONE nested walk, while a daemon-hosted launch still re-detects a
+    // tree that changed since the last one.
+    crate::core::manifest::invalidate_stack_detection(project_dir);
     // #9012: the PM sections, output styles and skills are runtime content,
     // loaded ONCE per launch. With none the launch is refused (fatal), naming
     // `tm content install`, before anything is provisioned.
@@ -1027,7 +1006,7 @@ pub(super) fn prepare_session_inner(
     //
     // #9018: `[pm_guard] enabled = false` leaves the `hook --pm-guard` entry
     // out and strips one a prior launch wrote; every other hook is unchanged.
-    let additions = project_hooks::project_managed_hook_additions_with_pm_guard(
+    let additions = project_hooks::project_managed_hook_additions_for_profile(
         // #7244: `None` resolves the running installed binary. When nothing
         // stable resolves this now returns an error and writes NOTHING, rather
         // than wiring every hook to a build artifact. A test pins a stable path
@@ -1039,6 +1018,8 @@ pub(super) fn prepare_session_inner(
         // is on, so a project with the feature off spawns no process per turn.
         crate::core::prompt_self_improvement::enabled_for(project_dir),
         config.pm_guard.enabled,
+        // #10459: exec form + `onFailure: "block"` for the Architect only.
+        architect_hooks::ArchitectHooks::for_profile(profile, &config),
     );
     let hooks_written = match write_project_hooks_with(project_dir, additions) {
         Ok(()) => true,

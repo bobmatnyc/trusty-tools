@@ -127,6 +127,31 @@ pub trait Embedder: Send + Sync {
     > {
         Ok(None)
     }
+
+    /// The window and tokenizer a chunk is SPLIT against before it embeds (#10504).
+    ///
+    /// Why: [`Self::input_window`] is `None` until a lazy sidecar has answered,
+    /// and the deferred parse runs before that, so a split keyed on it never ran
+    /// on a first default index.
+    /// What: default `input_window()` paired with `chunking_tokenizer()`; `None`
+    /// when either is missing. The lazy sidecar adapter overrides it to fall
+    /// back to the MiniLM tokenizer's own maximum length before a window is
+    /// reported. A tokenizer load failure is `Err`.
+    /// Test: `a_lazy_adapter_assumes_the_minilm_window_before_the_sidecar_reports`.
+    fn split_window(
+        &self,
+    ) -> std::result::Result<
+        Option<(
+            usize,
+            std::sync::Arc<trusty_common::embedder::ChunkTokenizer>,
+        )>,
+        trusty_common::embedder::ChunkError,
+    > {
+        let Some(window) = self.input_window() else {
+            return Ok(None);
+        };
+        Ok(self.chunking_tokenizer()?.map(|t| (window, t)))
+    }
 }
 
 /// Adapter: every shared `trusty_common::embedder::Embedder` automatically implements

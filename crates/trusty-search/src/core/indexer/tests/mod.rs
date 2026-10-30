@@ -99,6 +99,8 @@ fn make_indexer_with_corpus(redb_path: &std::path::Path) -> CodeIndexer {
 
 // #10110: batch removal by path prefix or file list.
 mod batch_remove_10110;
+// #10498: raw BM25 score per hit, and ranking identity.
+mod bm25_raw_10498;
 mod branch_and_corpus;
 mod chunk_cap;
 mod corpus_fault;
@@ -123,4 +125,6 @@ mod snapshot_guard_7920;
 mod sops_8922;
 // #10195: rehydrate stage timings and the search's rehydrate flag.
 mod stage_timings_10195;
+mod window_split_10481;
+mod window_split_10504;
 mod zero_chunk_8976;

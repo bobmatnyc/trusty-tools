@@ -11,6 +11,7 @@
 //! Test: covered by every `test_search_*`, `test_kg_*`, and intent-routing
 //! test in `indexer::tests`.
 
+pub(crate) mod bm25_raw;
 pub(crate) mod drops;
 pub(crate) mod embed_deadline;
 pub(crate) mod embed_degrade;
@@ -380,6 +381,8 @@ impl CodeIndexer {
         };
         clock.enter(QueryPhase::Lexical);
         let mut bm25_results = bm25_fut.await?;
+        // #10498: the engine's scores, before the injection below.
+        let bm25_raw = bm25_raw::snapshot(&bm25_results);
         self.inject_entity_exact_match(&intent, &query.text, beta, &mut bm25_results)
             .await;
         // The entity-exact-match injection above resolves its hit via a
@@ -408,6 +411,13 @@ impl CodeIndexer {
         clock.enter(QueryPhase::Fusion);
         let fused_raw = rrf_fuse(&hnsw_results, &bm25_results, alpha, beta, RRF_K, want);
         let fused_raw = merge_grep_lane(fused_raw, &grep_lane, beta, want);
+        bm25_raw::log_top(
+            &self.index_id,
+            &query.text,
+            &bm25_raw,
+            &bm25_results,
+            &fused_raw,
+        );
 
         // 3a) Issue #75: empty-result fallback — scan chunk corpus for literal
         // substring match.
@@ -528,6 +538,7 @@ impl CodeIndexer {
                 all,
                 &hnsw_results,
                 &bm25_results,
+                &bm25_raw,
                 &kg_ids,
                 branch_set.as_ref(),
                 query,

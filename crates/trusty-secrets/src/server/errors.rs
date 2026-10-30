@@ -141,11 +141,16 @@ pub enum ErrorKind {
     // #10459: split from `AgentUseRefused` (reverses #10386 Q6), so a
     // refusal names which rule applied.
     AgentKeyDenied = 37,
+    /// A main-thread ticket was not minted: minting is off, or a mint check
+    /// failed.
+    // #10459 PR1: the next unused value; ONE kind for every mint refusal,
+    // so a refusal names no check (the audit record's `reason_arm` does).
+    TicketRefused = 38,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 38] = [
+    pub(crate) const ALL: [Self; 39] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -184,6 +189,7 @@ impl ErrorKind {
         Self::GrantLimitReached,
         Self::BridgeRefused,
         Self::AgentKeyDenied,
+        Self::TicketRefused,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -233,6 +239,7 @@ impl ErrorKind {
             Self::GrantLimitReached => "grant_limit_reached",
             Self::BridgeRefused => "bridge_refused",
             Self::AgentKeyDenied => "agent_key_denied",
+            Self::TicketRefused => "ticket_refused",
             Self::Internal => "internal",
         }
     }
@@ -330,6 +337,10 @@ impl ErrorKind {
             Self::BridgeRefused => {
                 "a console bridge call is accepted only from the verified trusty-console process, running outside any Claude Code process tree; this caller was not verified"
             }
+            // #10459 PR1: names no check, as `GrantRefused` names none.
+            Self::TicketRefused => {
+                "no main-thread ticket was minted: minting is off, or the caller is not the Architect's registered hook"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -388,6 +399,8 @@ impl ErrorKind {
             Self::BridgeRefused => -32084,
             // #10459: the next unused code.
             Self::AgentKeyDenied => -32085,
+            // #10459 PR1: the next unused code.
+            Self::TicketRefused => -32086,
         }
     }
 
