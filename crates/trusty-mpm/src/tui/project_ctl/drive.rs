@@ -7,10 +7,12 @@
 //! What: [`drive`] draws, reads at most one event for [`KEY_POLL`], dispatches
 //! a key, then collects a finished poll task and applies it, then starts the
 //! next poll as a spawned task when the interval has passed or a mutation asked
-//! for a repoll. At most one poll is in flight. The draw, the event source and
-//! the poll are parameters, so a test can inject a slow poller.
+//! for a repoll. At most one poll is in flight. A [`HealthCadence`] decides
+//! which polls probe `/health`. The draw, the event source and the poll are
+//! parameters, so a test can inject a slow poller.
 //! Test: `keypress_redraws_while_poll_in_flight_10476`,
-//! `only_one_poll_in_flight_10476` (`super::tests`).
+//! `only_one_poll_in_flight_10476` (`super::tests`);
+//! `health_checked_every_nth_tick` (`poll::cadence_tests`).
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -20,7 +22,7 @@ use tokio::task::JoinHandle;
 
 use super::actions;
 use super::events::handle_key;
-use super::poll::tick::{PollOutcome, PollRequest, apply_tick, request_for};
+use super::poll::tick::{HealthCadence, PollOutcome, PollRequest, apply_tick, request_for};
 use super::state::ProjectCtlState;
 use super::trace::TuiTrace;
 use crate::client::DaemonClient;
@@ -58,9 +60,10 @@ impl EventSource for TerminalEvents {
 /// back with it) and is applied with [`apply_tick`]. The interval restarts when
 /// a poll completes, so the daemon sees the same request rate as before. A
 /// repoll asked for while a poll runs waits for it to finish. A poll still
-/// running at exit is aborted.
+/// running at exit is aborted. The request's `check_health` comes from a
+/// [`HealthCadence`] the loop owns.
 /// Test: `keypress_redraws_while_poll_in_flight_10476`,
-/// `only_one_poll_in_flight_10476`.
+/// `only_one_poll_in_flight_10476`, `health_checked_every_nth_tick`.
 pub(crate) async fn drive<D, E, P, F>(
     draw: &mut D,
     events: &mut E,
@@ -79,6 +82,7 @@ where
     let mut last_poll = Instant::now();
     let mut in_flight: Option<JoinHandle<PollOutcome>> = None;
     let mut key_at: Option<Instant> = None;
+    let mut health = HealthCadence::default();
 
     let result = loop {
         let frame_start = Instant::now();
@@ -122,7 +126,9 @@ where
         // A requested repoll (post-mutation) or the timer elapsing both start
         // a poll; the flag is only taken when no poll is running.
         if in_flight.is_none() && (state.take_repoll() || last_poll.elapsed() >= interval) {
-            let req = request_for(&mut state, Instant::now());
+            let mut req = request_for(&mut state, Instant::now());
+            // #10476: probe `/health` only on the cadence's polls.
+            req.check_health = health.next_due(state.daemon_reachable);
             in_flight = Some(tokio::spawn(poll(client.clone(), req)));
         }
     };

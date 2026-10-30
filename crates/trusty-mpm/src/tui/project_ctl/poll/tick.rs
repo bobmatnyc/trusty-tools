@@ -9,8 +9,12 @@
 //! spawned task, and returns a [`PollOutcome`]. [`apply_tick`] writes the
 //! result into the state. [`activity_target`] asks for `/activity` only when
 //! the selected session has no request younger than [`ACTIVITY_REFRESH`]; other
-//! ticks serve the cached Activity pane.
+//! ticks serve the cached Activity pane. [`HealthCadence`] asks for the
+//! health probe on the first poll and every [`HEALTH_EVERY`]th one after.
 //! Test: `normal_tick_makes_no_activity_call_10476`,
+//! `health_checked_every_nth_tick`,
+//! `fleet_error_without_health_check_marks_unreachable_10476`
+//! (`super::cadence_tests`);
 //! `activity_target_serves_cache_until_refresh_is_due` (`super::tests`);
 //! `keypress_redraws_while_poll_in_flight_10476` (`project_ctl::tests`).
 
@@ -32,6 +36,35 @@ use crate::tui::project_ctl::trace::CallTimings;
 /// Why: the Architect kept the Activity pane on a slower cached refresh, so a
 /// normal 1 s tick makes no tmux call (#10476 Q-A).
 pub(crate) const ACTIVITY_REFRESH: Duration = Duration::from_secs(5);
+
+/// How many polls share one health probe: the first poll and every
+/// `HEALTH_EVERY`th one after it call `/health`.
+///
+/// Why: at the default 1 s interval this probes health every 5 s, the same
+/// cadence as [`ACTIVITY_REFRESH`]; a skipped probe loses nothing, because a
+/// failed fleet call already marks the daemon unreachable (#10476).
+pub(crate) const HEALTH_EVERY: u64 = 5;
+
+/// Counts polls to decide which ones probe `/health`.
+#[derive(Debug, Default)]
+pub(crate) struct HealthCadence {
+    polls: u64,
+}
+
+impl HealthCadence {
+    /// Whether the next poll probes health, and count that poll.
+    ///
+    /// Why: the probe cost one round trip on every tick (#10476).
+    /// What: due on the first poll, every [`HEALTH_EVERY`]th poll, and every
+    /// poll while the daemon reads as unreachable, so re-discovery of a moved
+    /// daemon still runs on each tick until it answers.
+    /// Test: `health_checked_every_nth_tick`.
+    pub(crate) fn next_due(&mut self, daemon_reachable: bool) -> bool {
+        let due = self.polls.is_multiple_of(HEALTH_EVERY) || !daemon_reachable;
+        self.polls += 1;
+        due
+    }
+}
 
 /// The registry projects, the fleet's session rows, and the full records.
 pub(crate) type FleetData = (
@@ -101,6 +134,8 @@ pub(crate) struct PollRequest {
     pub milestones: bool,
     /// The selected session when its Activity pane is due a refresh.
     pub activity_for: Option<String>,
+    /// `true` when this poll probes `/health` first; see [`HealthCadence`].
+    pub check_health: bool,
 }
 
 /// Snapshot the request for the next tick; records an activity request.
@@ -122,6 +157,7 @@ pub(crate) fn request_for_deliverables(state: &ProjectCtlState) -> PollRequest {
         project,
         milestones,
         activity_for: None,
+        check_health: false,
     }
 }
 
@@ -151,7 +187,7 @@ pub(crate) fn activity_target(state: &mut ProjectCtlState, now: Instant) -> Opti
 pub(crate) async fn fetch_tick(mut client: DaemonClient, req: PollRequest) -> PollOutcome {
     let started = Instant::now();
     let mut calls = CallTimings::new();
-    let core = fetch_core(&mut client, &mut calls).await;
+    let core = fetch_core(&mut client, req.check_health, &mut calls).await;
     let mut result = PollResult {
         core,
         ..PollResult::default()
@@ -186,16 +222,24 @@ pub(crate) fn apply_tick(state: &mut ProjectCtlState, result: PollResult) {
     apply_deliverables(state, result.deliverables);
 }
 
-/// Health (with one re-discovery retry), then the project and fleet lists.
-pub(crate) async fn fetch_core(client: &mut DaemonClient, calls: &mut CallTimings) -> CoreFetch {
-    let t = Instant::now();
-    let mut reachable = client.is_healthy().await;
-    if rediscover(client, reachable) {
-        reachable = client.is_healthy().await;
-    }
-    calls.push(("health", t.elapsed()));
-    if !reachable {
-        return CoreFetch::default();
+/// Health (with one re-discovery retry) when `check_health`, then the project
+/// and fleet lists. A failed list call reads as unreachable either way.
+pub(crate) async fn fetch_core(
+    client: &mut DaemonClient,
+    check_health: bool,
+    calls: &mut CallTimings,
+) -> CoreFetch {
+    // #10476: most polls skip the probe and go straight to the fleet calls.
+    if check_health {
+        let t = Instant::now();
+        let mut reachable = client.is_healthy().await;
+        if rediscover(client, reachable) {
+            reachable = client.is_healthy().await;
+        }
+        calls.push(("health", t.elapsed()));
+        if !reachable {
+            return CoreFetch::default();
+        }
     }
     let fleet = fetch_projects_and_sessions(client, calls).await.ok();
     CoreFetch {

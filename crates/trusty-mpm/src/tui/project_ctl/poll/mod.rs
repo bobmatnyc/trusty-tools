@@ -94,7 +94,7 @@ pub(crate) async fn project_ctl_poll_daemon(
     state: &mut ProjectCtlState,
     client: &mut DaemonClient,
 ) {
-    let core = tick::fetch_core(client, &mut CallTimings::new()).await;
+    let core = tick::fetch_core(client, true, &mut CallTimings::new()).await;
     tick::apply_core(state, core);
     // #10476: `/activity` is a tmux capture on the daemon; a cached pane is
     // served until `tick::ACTIVITY_REFRESH` has passed for the selection.
@@ -351,6 +351,6 @@ async fn fetch_projects_and_sessions(
 }
 
 #[cfg(test)]
-mod activity_cadence_tests;
+mod cadence_tests;
 #[cfg(test)]
 mod tests;
