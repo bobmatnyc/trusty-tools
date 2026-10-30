@@ -109,6 +109,7 @@ async fn fixture() -> Fixture {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
         })
         .await
         .expect("register project");

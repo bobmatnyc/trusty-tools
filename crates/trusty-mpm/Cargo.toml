@@ -151,7 +151,7 @@ name = "trusty-mpm"
 # requires the bump. Bug fix, no signature break.
 # 1.9.0 (Refs #9621): minor — 1.8.2 is published on crates.io and this PR adds
 # the `tm secrets exec` subcommand (a feature) under `src/**`.
-version = "1.11.0"
+version = "1.11.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
