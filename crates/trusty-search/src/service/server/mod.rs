@@ -54,6 +54,10 @@ mod lexical_lane;
 mod project_park;
 #[cfg(test)]
 mod project_park_tests;
+// #10551: `search.index.embed_missing`, the embed-only resume of a failed semantic stage.
+mod embed_missing;
+#[cfg(test)]
+mod embed_missing_tests;
 mod quantize_handlers;
 mod reindex_handlers;
 // #10110: `search.index.files.remove`, the batch removal by prefix or list.
@@ -326,6 +330,7 @@ pub(crate) use typeahead::{typeahead_report, TypeaheadParams};
 // the socket renders, so a socket write cannot report a landing that did not
 // happen.
 pub(crate) use contrib_graph::{ingest_graph_report, IngestGraphRequest};
+pub(crate) use embed_missing::{embed_missing_report, EmbedMissingRequest};
 pub(crate) use embedding_pause::{pause_embedding_report, resume_embedding_report};
 pub(crate) use files::{index_file_report, remove_file_report};
 pub(crate) use indexes::create_index_report;
@@ -362,7 +367,7 @@ pub use warm_all::{WarmStartRequest, WarmState, WarmTracker};
 /// the HTTP router. The daemon builds no router, so `run_daemon` starts them
 /// here, or it would serve the socket with no residency sweep, no
 /// memory-pressure enforcement and no status events.
-/// What: the nine `spawn_*` calls the deleted router made inline. Each holds a
+/// What: the ten `spawn_*` calls the deleted router made inline. Each holds a
 /// `Weak`, so the tickers stop once the last `Arc` drops.
 /// Test: `run_daemon_serves_only_the_socket` waits for a `status_changed`
 /// event from a daemon that built no router.
@@ -380,4 +385,6 @@ pub fn spawn_daemon_tickers(state_arc: &Arc<SearchAppState>) {
     // client that discovers indexes by listing never names them, and boot
     // reconcile walks registered handles only.
     crate::service::timeout_recovery::spawn_timeout_recovery_ticker(Arc::clone(state_arc));
+    // #10551: re-run a failed semantic stage once the embedder answers again.
+    crate::service::embed_retry::spawn_embed_retry_ticker(Arc::clone(state_arc));
 }

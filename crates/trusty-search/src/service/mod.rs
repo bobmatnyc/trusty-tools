@@ -70,6 +70,11 @@ pub mod stall_tracker;
 pub(crate) mod storage_layout;
 pub mod timeout_recovery;
 pub mod ui;
+// #10551: embed only the chunks with no vector, by hand or on a backoff.
+pub mod embed_missing;
+#[cfg(test)]
+pub(crate) mod embed_missing_test_support;
+pub mod embed_retry;
 // #8726: demote a `ready` semantic stage short of vectors and queue its backfill.
 pub mod vector_gap;
 pub mod walker;

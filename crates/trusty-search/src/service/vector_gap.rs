@@ -272,7 +272,8 @@ pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
 /// What: `CodeIndexer::refusals_behind_vector_gap`, with a read or parse
 /// fault logged and answered `None`, so the gap is reconciled as real.
 /// Test: `an_unreadable_refusal_record_is_treated_as_a_real_gap`.
-async fn refusals_behind_gap(handle: &IndexHandle) -> Option<usize> {
+/// Shared with the #10551 resume (`service::embed_missing`).
+pub(crate) async fn refusals_behind_gap(handle: &IndexHandle) -> Option<usize> {
     let outcome = handle
         .indexer
         .read()
