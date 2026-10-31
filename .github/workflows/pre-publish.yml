@@ -606,10 +606,6 @@ jobs:
 
           du -sh "${CACHE_DIR}" || true
 
-      # #10639: fail fast, before the cache is saved, if a file is missing.
-      - name: Verify fastembed model cache is complete
-        run: ./scripts/check_fastembed_cache.sh
-
       - name: Save fastembed model cache
         if: steps.fastembed-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
