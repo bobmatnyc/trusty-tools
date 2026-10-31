@@ -92,7 +92,6 @@ pub(crate) fn refuse_protected(
 ///
 /// What: `true`, logged at debug, when [`refuses_verbs`] holds.
 /// Test: `idle_reaper_never_stops_an_architect_record`,
-/// `shutdown_skips_an_architect_session`,
 /// `prune_include_active_never_decommissions_an_architect_record`.
 pub(crate) fn skip_protected(record: &SessionRecord, path: &str) -> bool {
     let skip = refuses_verbs(record.kind, &record.state);

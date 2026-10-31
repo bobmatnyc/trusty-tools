@@ -177,10 +177,10 @@ pub(crate) async fn run_daemon(
         )
         .await;
         // See #6288: this exit almost certainly wins the race against
-        // `serve_with_shutdown`'s graceful drain, so neither the session reap
-        // (#1455) nor the socket unlink is guaranteed to run on a real SIGTERM.
-        // The socket is self-healing — `daemon::socket::bind` reclaims a file
-        // nobody is serving. S3a leaves the race as it was.
+        // `serve_with_shutdown`'s graceful drain, so the socket unlink is not
+        // guaranteed to run on a real SIGTERM. The socket is self-healing —
+        // `daemon::socket::bind` reclaims a file nobody is serving. #10597:
+        // neither path stops a managed session.
         std::process::exit(0);
     });
 

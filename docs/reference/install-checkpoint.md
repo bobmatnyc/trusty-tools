@@ -17,11 +17,11 @@ Origin: [#9032](https://github.com/bobmatnyc/trusty-tools/issues/9032), from the
 
 ## Three facts that shape the order
 
-1. **The daemon restart is not free.** On SIGTERM the daemon's graceful
-   shutdown stops every live managed session (`SessionManager::shutdown` in
-   `crates/trusty-mpm/src/session_manager/restart_ops.rs`). The Architect
-   (`kind` `supervisor`) session is skipped. Checkpoint every session before
-   you stop the daemon.
+1. **The daemon restart leaves sessions running.** Since #10597 (owner
+   ruling D82) a daemon SIGTERM or restart stops no managed session; before
+   it, the graceful shutdown stopped every live one, so the daemon being
+   replaced may still stop them. Checkpoint every session before you stop the
+   daemon; the relaunch in 7.2 also exits each unpaired session's `claude`.
 2. **#9004 pairs a record with its tmux server.** From the build that contains
    #9004 (PR #9094), a record stores the tmux server it was created on
    (`tmux_server`, `<pid>:<start_time>`). Stop, delete and decommission act
@@ -235,7 +235,8 @@ jq -r '.sessions | to_entries[] | .value | select(.state=="active" or .state=="s
 
 - `active` with `NONE`: still live, no server identity. This includes the
   Architect session. Relaunch it (7.2).
-- `stopped`: the shutdown stopped it. Resume it (7.3).
+- `stopped`: its pane ended while the daemon was down — a daemon older than
+  #10597 stopped every session on SIGTERM. Resume it (7.3).
 
 ### 7.2 Relaunch a live, unpaired session
 
