@@ -3,7 +3,7 @@
 # `tests/dependency_boundary.rs` fails the build if one appears here.
 [package]
 name = "trusty-architect"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
