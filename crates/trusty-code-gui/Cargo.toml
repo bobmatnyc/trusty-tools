@@ -3,7 +3,7 @@ name = "trusty-code-gui"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-description = "Tauri desktop shell for trusty-code (tcode) — HTTP+SSE bridge onto the daemon's Unix socket"
+description = "Tauri desktop shell for trusty-code (tcode) — in-process bridge onto the daemon's Unix socket"
 publish = false
 license.workspace = true
 
@@ -33,16 +33,18 @@ axum = { workspace = true }
 # reader, `daemon_socket_path`); `axum-server` supplies the guard stack the
 # daemon's own listener carried plus `uds::sse`, the SSE rendering hoisted out of
 # trusty-console in PR 2a; `daemon-token` supplies `mint_token` and the
-# `DaemonAuth` bearer/ticket guard the webview's `EventSource` needs.
+# `DaemonAuth` bearer/ticket guard the webview's requests carry.
 trusty-common = { workspace = true, features = ["daemon-token", "axum-server", "uds"] }
+# #10166: `ServiceExt::oneshot` runs the router in-process for the custom URI
+# scheme and the stream command; axum already depends on it.
+tower = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
-# Drives the real bridge router without binding a port, the same way
-# trusty-console's `tests/search_uds_bridge.rs` drives its own.
-tower = { workspace = true }
 http-body-util = { workspace = true }
+# Test bodies that stream or never end (`stream::iter`, `stream::pending`).
+futures-util = { workspace = true }
 # Test-only: pins this crate's copies of the daemon's socket name, its two
 # stream method names, and its JSON-RPC-to-HTTP status table against the
 # originals, so the copies cannot drift in the window before #6637's PR 2c
