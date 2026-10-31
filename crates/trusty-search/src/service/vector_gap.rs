@@ -272,13 +272,35 @@ pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
 /// What: `CodeIndexer::refusals_behind_vector_gap`, with a read or parse
 /// fault logged and answered `None`, so the gap is reconciled as real.
 /// Test: `an_unreadable_refusal_record_is_treated_as_a_real_gap`.
-async fn refusals_behind_gap(handle: &IndexHandle) -> Option<usize> {
+/// Shared with the #10551 resume (`service::embed_missing`).
+pub(crate) async fn refusals_behind_gap(handle: &IndexHandle) -> Option<usize> {
     let outcome = handle
         .indexer
         .read()
         .await
         .refusals_behind_vector_gap()
         .await;
+    outcome.unwrap_or_else(|e| {
+        tracing::warn!(
+            "vector_gap[{}]: the vector-refusal record could not be read ({e:#}), so the gap \
+             is treated as real (#8884)",
+            handle.id.0,
+        );
+        None
+    })
+}
+
+/// [`refusals_behind_gap`] over a gap the caller already measured (#10551).
+///
+/// Why: the embed-missing resume holds the `missing` ids from its own coverage
+/// read; calling [`refusals_behind_gap`] would scan every corpus id again.
+/// What: `CodeIndexer::refusals_excusing`, failing closed the same way.
+/// Test: `a_refused_chunk_is_not_a_gap_to_an_embed_missing_resume`.
+pub(crate) async fn refusals_excusing_gap(
+    handle: &IndexHandle,
+    missing: Vec<String>,
+) -> Option<usize> {
+    let outcome = handle.indexer.read().await.refusals_excusing(missing).await;
     outcome.unwrap_or_else(|e| {
         tracing::warn!(
             "vector_gap[{}]: the vector-refusal record could not be read ({e:#}), so the gap \

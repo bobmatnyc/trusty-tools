@@ -78,9 +78,9 @@ use serde::Deserialize;
 use trusty_common::uds::server::{RpcError, RpcRouter};
 
 use crate::service::server::{
-    AddRootsRequest, CreateIndexRequest, DeleteIndexParams, IndexFileRequest, IngestGraphRequest,
-    QuantizeRequest, ReindexRequest, RelocateIndexRequest, RemoveFileRequest, RemoveFilesRequest,
-    SearchAppState,
+    AddRootsRequest, CreateIndexRequest, DeleteIndexParams, EmbedMissingRequest, IndexFileRequest,
+    IngestGraphRequest, QuantizeRequest, ReindexRequest, RelocateIndexRequest, RemoveFileRequest,
+    RemoveFilesRequest, SearchAppState,
 };
 
 use super::as_http_body;
@@ -106,6 +106,9 @@ pub const METHOD_INDEX_FILE_REMOVE: &str = "search.index.file.remove";
 pub const METHOD_INDEX_FILES_REMOVE: &str = "search.index.files.remove";
 /// `POST /indexes/{id}/reindex` — queue a full reindex. The trigger only.
 pub const METHOD_INDEX_REINDEX: &str = "search.index.reindex";
+/// Embed only the chunks with no vector and settle the semantic stage
+/// (#10551). Socket-only — it has no HTTP twin.
+pub const METHOD_INDEX_EMBED_MISSING: &str = "search.index.embed_missing";
 /// `POST /indexes/{id}/graph` — ingest one producer's contributed graph.
 pub const METHOD_GRAPH_INGEST: &str = "search.graph.ingest";
 /// Park this index's embedding stage at its next batch boundary (#6524).
@@ -148,6 +151,8 @@ pub const METHODS: &[&str] = &[
     METHOD_INDEX_QUANTIZE,
     // #7434 — the multi-root mutation.
     METHOD_INDEX_ROOTS_ADD,
+    // #10551 — the embed-only resume of a failed semantic stage.
+    METHOD_INDEX_EMBED_MISSING,
 ];
 
 /// An index-scoped write whose HTTP form takes a request BODY.
@@ -324,9 +329,10 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
 
     use super::reads::IndexRef;
     use crate::service::server::{
-        add_index_roots_report, create_index_report, delete_index_report, index_file_report,
-        ingest_graph_report, pause_embedding_report, quantize_report, reindex_report,
-        relocate_index_report, remove_file_report, remove_files_report, resume_embedding_report,
+        add_index_roots_report, create_index_report, delete_index_report, embed_missing_report,
+        index_file_report, ingest_graph_report, pause_embedding_report, quantize_report,
+        reindex_report, relocate_index_report, remove_file_report, remove_files_report,
+        resume_embedding_report,
     };
 
     let r = router;
@@ -399,6 +405,20 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     let r = bulk_write!(r, METHOD_INDEX_REINDEX, ReindexParams, |s, p| {
         reindex_report(&s, &p.index_id, p.body).await
     });
+
+    // ---- embed-only resume of a failed semantic stage (#10551) ---------------
+    // The refusal body rides as `data`: the MCP tool and CLI read `retryable`.
+    let held = Arc::clone(state);
+    let r = r.typed::<IndexBody<EmbedMissingRequest>, serde_json::Value, _, _>(
+        METHOD_INDEX_EMBED_MISSING,
+        move |p| {
+            let s = Arc::clone(&held);
+            async move {
+                bulk_guarded_with_data(&s, embed_missing_report(&s, &p.index_id, Some(p.body)))
+                    .await
+            }
+        },
+    );
 
     // ---- quantize backfill (#6822), the bulk lane its HTTP route takes -------
     let r = bulk_write!(r, METHOD_INDEX_QUANTIZE, QuantizeParams, |s, p| {

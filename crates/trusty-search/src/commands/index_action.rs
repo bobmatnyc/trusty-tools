@@ -142,4 +142,109 @@ pub(crate) enum IndexAction {
         #[arg(long = "to")]
         to: std::path::PathBuf,
     },
+
+    /// Embed only the chunks that have no vector (issue #10551)
+    ///
+    /// Recovers an index whose semantic stage failed part-way (for example
+    /// `embedder stdio IPC error: child closed stdout`) and reads `degraded`
+    /// with chunks missing vectors. Measures the gap by chunk id, then queues
+    /// the deferred-embed pass for just those chunks; a full reindex is not
+    /// needed. Idempotent: with nothing missing it is a no-op. The daemon also
+    /// retries a failed stage itself, with backoff, once the embedder answers.
+    ///
+    /// The index is resolved with the `-i` / `--index` flag first, then
+    /// auto-detected from CWD.
+    ///
+    /// Examples:
+    ///   trusty-search index embed-missing
+    ///   trusty-search -i cto index embed-missing --dry-run
+    EmbedMissing {
+        /// Report the gap and queue nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+impl IndexAction {
+    /// Run the chosen `index <action>`.
+    ///
+    /// Why: the dispatch used to live in `main.rs`, whose frozen SLOC budget
+    /// (`.line-cap-allowlist.tsv`) left no room for `embed-missing` (#10551).
+    /// What: calls the handler for each variant. `cli_index` is the `-i` flag,
+    /// `index_source` says where it came from (#8737), `json` is the global
+    /// `--json`.
+    /// Test: `embed_missing_parses_with_dry_run` pins the new variant's parse;
+    /// each handler carries its own tests.
+    pub(crate) async fn run(
+        self,
+        cli_index: Option<String>,
+        index_source: Option<super::explicit_target::IndexIdSource>,
+        json: bool,
+    ) -> anyhow::Result<()> {
+        match self {
+            // #6422: the on-disk data goes by default; `--keep-data` opts out.
+            Self::Remove {
+                path,
+                keep_data,
+                yes,
+            } => {
+                super::index_remove::handle_index_remove(
+                    path,
+                    cli_index,
+                    index_source,
+                    keep_data,
+                    yes,
+                )
+                .await
+            }
+            Self::Add {
+                path,
+                name,
+                allow_sensitive_path,
+            } => {
+                super::index_allowlist::handle_allowlist_add(path, name, allow_sensitive_path).await
+            }
+            Self::List { json } => super::index_allowlist::handle_allowlist_list(json).await,
+            Self::Relocate { to } => {
+                super::index_relocate::handle_index_relocate(&cli_index, index_source, to).await
+            }
+            Self::EmbedMissing { dry_run } => {
+                super::index_embed_missing::handle_embed_missing(
+                    &cli_index,
+                    index_source,
+                    dry_run,
+                    json,
+                )
+                .await
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IndexAction;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Harness {
+        #[command(subcommand)]
+        action: IndexAction,
+    }
+
+    /// `index embed-missing [--dry-run]` parses to `EmbedMissing` (#10551).
+    /// Test: this test.
+    #[test]
+    fn embed_missing_parses_with_dry_run() {
+        let plain = Harness::try_parse_from(["t", "embed-missing"]).expect("parses");
+        assert!(matches!(
+            plain.action,
+            IndexAction::EmbedMissing { dry_run: false }
+        ));
+        let dry = Harness::try_parse_from(["t", "embed-missing", "--dry-run"]).expect("parses");
+        assert!(matches!(
+            dry.action,
+            IndexAction::EmbedMissing { dry_run: true }
+        ));
+    }
 }

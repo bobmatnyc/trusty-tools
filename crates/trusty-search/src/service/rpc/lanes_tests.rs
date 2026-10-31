@@ -203,6 +203,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
                 "index_id": INDEX, "body": { "path_prefix": "src", "dry_run": true },
             }),
         ),
+        // #10551: the embed-only resume takes the bulk lane, like the other index writes.
+        (
+            writes::METHOD_INDEX_EMBED_MISSING,
+            Lane::Bulk,
+            serde_json::json!({ "index_id": INDEX, "body": { "dry_run": true } }),
+        ),
         (
             writes::METHOD_INDEX_REINDEX,
             Lane::Bulk,

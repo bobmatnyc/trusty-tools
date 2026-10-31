@@ -248,6 +248,11 @@ pub(crate) use defer_embed::run_embed_catch_up;
 /// Test: `commands::start_restore::markers_tests::restore_rearms_an_interrupted_deferred_embed_pass`.
 pub(crate) use defer_embed::spawn_deferred_embed_pass;
 
+/// The #4707 honesty gate a settle runs before it publishes `Ready`; the
+/// #10551 resume reuses it so it never promotes a stage over a broken store.
+/// Test: `a_failed_stage_with_every_vector_present_is_settled_ready`.
+pub(crate) use stages::semantic_health_reason;
+
 /// Re-export the two public entry points for kicking off a reindex task.
 ///
 /// Why: `reindex_handlers.rs` calls `spawn_reindex_with_cleanup`; a handful of
