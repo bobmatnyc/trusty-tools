@@ -85,7 +85,10 @@ use crate::commands::pm_guard_secret_read::{
     Scan, command_basename, evaluate_secret_file_read_command, secret_files_named_in,
 };
 // #8879: the bounded, fail-closed read lives in its own file (500-SLOC cap).
-pub(crate) use crate::commands::pm_guard_secret_script_read::{Body, Unread, read_script};
+// #10548: so do the rule classes and the refusal text.
+pub(crate) use crate::commands::pm_guard_secret_script_read::{
+    Body, Rule, Unread, deny_reason, read_script,
+};
 use crate::commands::pm_guard_secret_script_self::resolve_self_paths;
 
 /// Script-runs-script nesting the guard follows.
@@ -202,9 +205,9 @@ pub(crate) fn evaluate_script_body_secret_read(command: &str, cwd: &Path) -> Opt
         |word, found, interpreter, seg_bases| {
             let rule = match found {
                 Ok(path) => judge_script(&path, interpreter, seg_bases, 0, &mut seen),
-                Err(why) => Some(Rule::Unread(why)),
+                Err(why) => Some((Rule::Unread(why), None)),
             };
-            rule.map(|rule| deny_reason(word, rule))
+            rule.map(|(rule, inner)| deny_reason(word, inner.as_deref(), rule))
         },
     )
 }
@@ -302,21 +305,6 @@ fn expand(word: &str, bases: &[PathBuf]) -> String {
         .unwrap_or_else(|| word.to_string())
 }
 
-/// The rule class that refused a script body.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Rule {
-    /// The credential-print rule (#8596, #8248).
-    CredentialCommand,
-    /// The secret-bearing file rule (#7266).
-    SecretFile,
-    /// A nested command or a pod/process environment dump (#7648, #8756).
-    NestedOrDump,
-    /// A credential-bearing launchd plist (#8523).
-    LaunchdPlist,
-    /// A body the guard could not read in full; it fails closed (#8879).
-    Unread(Unread),
-}
-
 /// Judge one script: its inline equivalent, then (for a shell body) the
 /// scripts it runs in turn, to [`MAX_SCRIPT_DEPTH`].
 ///
@@ -333,7 +321,7 @@ fn judge_script(
     bases: &[PathBuf],
     depth: usize,
     seen: &mut Vec<PathBuf>,
-) -> Option<Rule> {
+) -> Option<(Rule, Option<String>)> {
     let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if seen.contains(&key) {
         return None;
@@ -343,9 +331,9 @@ fn judge_script(
     let body = match read_script(path) {
         Ok(Body::Script(body)) if depth < MAX_SCRIPT_DEPTH => body,
         // #9037: a script run past the nesting bound is not followed; it refuses.
-        Ok(Body::Script(_)) => return Some(Rule::Unread(Unread::TooDeep)),
+        Ok(Body::Script(_)) => return Some((Rule::Unread(Unread::TooDeep), None)),
         Ok(Body::Executable) => return None,
-        Err(why) => return Some(Rule::Unread(why)),
+        Err(why) => return Some((Rule::Unread(why), None)),
     };
     let interpreter = interpreter
         .map(str::to_string)
@@ -353,7 +341,7 @@ fn judge_script(
     let cwd = bases.first().map_or(Path::new("/"), PathBuf::as_path);
     let plain = without_comment_lines(&body);
     if let Some(rule) = judge_text(&inline_equivalent(&interpreter, &plain), &plain, cwd) {
-        return Some(rule);
+        return Some((rule, None));
     }
     if family_of(&interpreter) != Some(Family::Shell) {
         return None;
@@ -364,9 +352,13 @@ fn judge_script(
         &nested,
         bases,
         true,
-        |_, inner, inner_interp, inner_bases| match inner {
-            Ok(inner) => judge_script(&inner, inner_interp, inner_bases, depth + 1, seen),
-            Err(why) => Some(Rule::Unread(why)),
+        // #10548: a nested refusal names the innermost word it could not judge.
+        |word, inner, inner_interp, inner_bases| {
+            let refused = match inner {
+                Ok(inner) => judge_script(&inner, inner_interp, inner_bases, depth + 1, seen),
+                Err(why) => Some((Rule::Unread(why), None)),
+            };
+            refused.map(|(rule, named)| (rule, named.or_else(|| Some(word.to_string()))))
         },
     )
 }
@@ -653,51 +645,10 @@ fn segment_bases(command: &str, segment: &str, bases: &[PathBuf]) -> Vec<PathBuf
     out
 }
 
-/// The refusal: the script word from the command, the rule class, and the
-/// ruling-263 remedy. No byte of the body is quoted.
-fn deny_reason(word: &str, rule: Rule) -> String {
-    let what = match rule {
-        Rule::CredentialCommand => {
-            "its body, or a script it runs, runs a credential-reading command (a Keychain, \
-             token or secret CLI; #8596, #8248)"
-        }
-        Rule::SecretFile => "its body, or a script it runs, names a secret-bearing file (#7266)",
-        Rule::NestedOrDump => {
-            "its body, or a script it runs, reads a credential through a nested command or an \
-             environment dump (#8756)"
-        }
-        Rule::LaunchdPlist => {
-            "its body, or a script it runs, reads a credential-bearing launchd plist (#8523)"
-        }
-        // #8879: every unread class fails closed and says which it was.
-        Rule::Unread(why) => match why {
-            Unread::Unreadable => "the guard could not read its body, so it fails closed",
-            Unread::NotRegular => "it is not a regular file, so the guard fails closed",
-            Unread::TooDeep => {
-                "it runs scripts nested past the guard's depth bound, so the guard fails closed"
-            }
-            Unread::TooLarge => {
-                "its body is over the guard's 256 KiB read bound, so the guard fails closed"
-            }
-            Unread::NotText => "its body is not UTF-8 text, so the guard fails closed",
-            Unread::Missing => {
-                "it does not exist and nothing else in the command names it, so the guard \
-                 cannot judge its body and fails closed"
-            }
-            Unread::Unresolvable => {
-                "its path is computed at run time (a variable, a substitution or a glob), so \
-                 the guard cannot judge its body and fails closed"
-            }
-        },
-    };
-    format!(
-        "`tm hook --pm-guard` refused running the script `{word}` (#8879): {what}. A script \
-         gets the same credential-read refusal as the command written inline (owner rulings \
-         263 and 268), so moving a refused read into a script does not change the answer. \
-         Stop and report this refusal to the Architect; do not retry the read in another form."
-    )
-}
-
 #[cfg(test)]
 #[path = "pm_guard_secret_script_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pm_guard_secret_fp_10548_tests.rs"]
+mod fp_10548_tests;
