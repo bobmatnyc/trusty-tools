@@ -49,7 +49,8 @@ parse_iso, iso = ctx_watch.parse_iso, ctx_watch.iso
 
 def state_path():
     return os.environ.get("IL_CRON_STATE") or os.path.join(
-        os.environ.get("SUPERVISOR_INBOX_DIR") or os.path.join(ROOT, "inbox"), "il-cron-state.json")
+        os.environ.get("ARCHITECT_INBOX_DIR") or os.environ.get("SUPERVISOR_INBOX_DIR")  # #10571
+        or os.path.join(ROOT, "inbox"), "il-cron-state.json")
 
 
 def datg_cmd():

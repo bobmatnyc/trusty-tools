@@ -216,6 +216,6 @@ scripts/test_dashboard_task_progress.py	tests/test_dashboard_task_progress.py
 scripts/test_dashboard_tokens.py	tests/test_dashboard_tokens.py
 
 # Phase 2 (#10571): fleet-poll.py stages whole and is hand-merged into its split
-# modules (fleet_poll_cfg/io/alerts/wake.py), which have no prototype
+# modules (fleet_poll_cfg/io/alerts/wake/watchdog.py), which have no prototype
 # source. fleet_poll_selfrefresh.py is a stub #10599 fills; fleet-classify.py and
 # tests/test_fleet_poll_idle.py (from scripts/test_fleet_poll_idle.py) are hand-merged too.

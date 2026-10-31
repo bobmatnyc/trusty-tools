@@ -111,6 +111,7 @@ scripts/fleet_poll_cfg.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_p
 scripts/fleet_poll_io.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_io.py
 scripts/fleet_poll_alerts.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_alerts.py
 scripts/fleet_poll_wake.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_wake.py
+scripts/fleet_poll_watchdog.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_watchdog.py
 scripts/fleet_poll_selfrefresh.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_selfrefresh.py
 scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py
 scripts/quiet-sessions.py|crates/trusty-mpm/src/assets/architect/scripts/quiet-sessions.py
