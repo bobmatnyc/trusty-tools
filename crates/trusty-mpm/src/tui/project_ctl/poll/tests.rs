@@ -528,9 +528,10 @@ async fn tui_fleet_fetch_sends_slim_and_other_callers_do_not() {
     tokio::spawn(axum::serve(listener, app).into_future());
     let client = DaemonClient::new(format!("http://{addr}"));
 
-    let (_rows, sessions_by_project, _full) = fetch_projects_and_sessions(&client, &mut CallTimings::new())
-        .await
-        .expect("tui fetch");
+    let (_rows, sessions_by_project, _full) =
+        fetch_projects_and_sessions(&client, &mut CallTimings::new())
+            .await
+            .expect("tui fetch");
     client
         .fleet_managed_sessions()
         .await
