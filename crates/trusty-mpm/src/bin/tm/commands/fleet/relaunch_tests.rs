@@ -26,10 +26,24 @@ thread_local! {
     static PANE: RefCell<PaneState> = const { RefCell::new(PaneState::Absent) };
     static PANE_CLAUDE: RefCell<VecDeque<PaneClaude>> = const { RefCell::new(VecDeque::new()) };
     static CALLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// The poller session's pane; `None` answers [`PANE`] for it too.
+    static POLL_PANE: RefCell<Option<PaneState>> = const { RefCell::new(None) };
 }
 
-fn pane(_: &str) -> PaneState {
-    PANE.with(|p| p.borrow().clone())
+fn pane(name: &str) -> PaneState {
+    let poll = POLL_PANE.with(|p| p.borrow().clone());
+    match poll {
+        Some(state) if name.ends_with("-poll") => state,
+        _ => PANE.with(|p| p.borrow().clone()),
+    }
+}
+
+/// A poller start that runs no script: it logs the session it was asked to
+/// start and leaves that session live in `dir`.
+fn start_poller(dir: &Path, _: Probe, names: &SessionNames) -> anyhow::Result<()> {
+    call(&format!("start-poller {}", names.poll()));
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Live(dir.to_path_buf())));
+    Ok(())
 }
 
 fn no_stamp(_: &str) -> Option<String> {
@@ -104,6 +118,7 @@ const STUB: Ops = Ops {
     pane_claude,
     stop: stop_ok,
     prepare: prepare_bound,
+    start_poller,
 };
 
 /// A scratch home and Architect directory, with the stubs' state planted.
@@ -124,6 +139,7 @@ impl Fixture {
         PANE.with(|p| *p.borrow_mut() = pane);
         PANE_CLAUDE.with(|q| *q.borrow_mut() = pane_claude.iter().copied().collect());
         CALLS.with(|c| c.borrow_mut().clear());
+        POLL_PANE.with(|p| *p.borrow_mut() = None);
         fx
     }
 
@@ -257,6 +273,72 @@ fn relaunch_starts_a_claude_when_none_ran() {
     let report = fx.relaunch(STUB).expect("relaunched");
     assert_eq!(calls(), ["prepare".to_owned(), "send".to_owned()]);
     assert!(matches!(&report.steps[0], Step::Unchanged(t) if t.contains("no `claude` ran")));
+}
+
+/// #10357: after a reboot the poller is gone; a bound relaunch starts it,
+/// and only it, once. A second run finds it running and starts nothing; a
+/// poller session in another directory is a FAILED step, never a second one.
+#[test]
+fn relaunch_restores_a_missing_poller_once() {
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Absent));
+    let first = fx.relaunch(STUB).expect("relaunched");
+    assert!(!first.failed(), "{}", first.render());
+    assert!(
+        first
+            .render()
+            .contains("started poller session tm-architect-poll"),
+        "{}",
+        first.render()
+    );
+    let second = fx.relaunch(STUB).expect("relaunched again");
+    assert!(
+        second
+            .render()
+            .contains("poller session tm-architect-poll is running"),
+        "{}",
+        second.render()
+    );
+    let starts: Vec<String> = calls()
+        .into_iter()
+        .filter(|c| c.starts_with("start-poller"))
+        .collect();
+    assert_eq!(starts, ["start-poller tm-architect-poll"], "{:?}", calls());
+    let reg = second.registration.expect("registered");
+    assert_eq!(reg.poll_session.as_deref(), Some("tm-architect-poll"));
+
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Live("/elsewhere".into())));
+    let report = fx.relaunch(STUB).expect("relaunched");
+    assert!(report.failed(), "{}", report.render());
+    assert!(report.render().contains("already runs in /elsewhere"));
+    assert!(!calls().iter().any(|c| c.starts_with("start-poller")));
+}
+
+/// #10357 fail closed: an unreadable or non-Architect setup, and a new
+/// `claude` that is not recorded, start no poller, and the error says why.
+#[test]
+fn relaunch_never_starts_a_poller_unless_the_architect_is_bound() {
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Absent));
+    let mut ops = STUB;
+    ops.architect = |_, _| anyhow::bail!("cannot read ~/.trusty-mpm/config.toml");
+    let err = fx.relaunch(ops).expect_err("an unreadable config refuses");
+    assert!(format!("{err:#}").contains("cannot read"), "{err:#}");
+    assert!(calls().is_empty(), "{:?}", calls());
+
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Absent));
+    let mut ops = STUB;
+    ops.prepare = prepare_unbound;
+    ops.probe.claude = |_| Some(NEW_PID);
+    let err = fx.relaunch(ops).expect_err("an unrecorded claude fails");
+    assert!(format!("{err:#}").contains("is NOT bound"), "{err:#}");
+    assert!(
+        !calls().iter().any(|c| c.starts_with("start-poller")),
+        "{:?}",
+        calls()
+    );
 }
 
 #[test]
