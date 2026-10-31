@@ -18,6 +18,9 @@
 use clap::{Parser, Subcommand};
 
 mod actions;
+// #10569: guard against a subcommand arg reusing a global arg id.
+#[cfg(test)]
+mod arg_id_tests;
 
 pub(crate) use actions::*;
 
@@ -1147,7 +1150,8 @@ pub(crate) enum Command {
     /// (`.../tree/main`, `.../pull/123`) and relative paths are refused.
     /// Persists `{alias, url}` to `<root>/registry.json` and prints
     /// `registered <alias> → <url>`.
-    /// Test: `register_args_tests.rs`.
+    /// Test: `register_args_tests.rs`; parsing in
+    /// `register_owner_repo_does_not_fill_cli_url`.
     Register {
         /// Repo to register: `<owner>/<repo>` (GitHub assumed), or a full URL
         /// such as `https://github.com/<owner>/<repo>` or
@@ -1155,6 +1159,8 @@ pub(crate) enum Command {
         ///
         /// #4912: this position also accepts the legacy alias-first form; the
         /// repo is detected by shape, so `tm register <alias> <url>` still works.
+        // #10569: own id, so the value never lands in the global `Cli.url`.
+        #[arg(id = "repo_spec", value_name = "URL")]
         url: String,
         /// Short alias identifier (e.g. `my-project`).
         ///
