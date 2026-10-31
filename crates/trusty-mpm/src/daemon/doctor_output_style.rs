@@ -230,14 +230,16 @@ pub(crate) fn check_output_style(project_dir: Option<&Path>, home: &Path) -> Doc
 /// branches in [`check_output_style`] so an unknown id or a missing deployed
 /// file is reported identically regardless of which settings file supplied
 /// it — only the reported scope/path differs.
-/// What: `Fail` when `style_id` matches no [`OUTPUT_STYLES`] entry or its
-/// deployed file under `<home>/.claude/output-styles/` is missing/empty;
-/// `Ok` otherwise. `source` and `source_path` are folded into the message so
+/// What: `Fail` when `style_id` matches no [`OUTPUT_STYLES`] entry or no
+/// [`output_style_tiers`] entry — the managed `$CLAUDE_CONFIG_DIR` first, then
+/// `<home>/.claude` — holds a non-empty copy of its file (#10580); `Ok`,
+/// naming the copy found, otherwise. `source` and `source_path` are folded into the message so
 /// the operator knows which file the effective value came from.
 /// #8533: an id that is not bundled is checked as a project style by
 /// [`evaluate_project_style`] before it is reported unknown.
 /// Test: `output_style_ok_when_style_resolves`, `output_style_fail_when_id_unknown`,
 /// `output_style_fail_when_file_missing`,
+/// `output_style_resolves_in_the_managed_config_tier`,
 /// `output_style_ok_for_a_project_style_and_its_composite`,
 /// `legacy_output_style_id_is_recognised_by_doctor`.
 fn evaluate_style(
@@ -266,10 +268,18 @@ fn evaluate_style(
         );
     };
 
-    let style_path = home
-        .join(".claude")
-        .join("output-styles")
-        .join(style.file_name);
+    // #10580: a tm-launched session reads the managed `$CLAUDE_CONFIG_DIR` as
+    // its user tier, so a style deployed only there is configured; check that
+    // tier first, then the operator's `~/.claude`.
+    let managed = crate::core::trusty_tools_config::managed_claude_config_dir_at(home);
+    let candidates: Vec<PathBuf> = output_style_tiers(home, Some(&managed))
+        .into_iter()
+        .rev()
+        .map(|tier| tier.styles_dir().join(style.file_name))
+        .collect();
+    let found = candidates
+        .iter()
+        .find(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0));
     // #9755: the pre-D07 Architect style id is ok, flagged deprecated.
     let deprecated = if style_id == crate::core::architect_compat::LEGACY_SUPERVISOR_OUTPUT_STYLE_ID
     {
@@ -277,8 +287,13 @@ fn evaluate_style(
     } else {
         ""
     };
-    match std::fs::metadata(&style_path) {
-        Ok(meta) if meta.len() > 0 => DoctorCheck::new(
+    let searched = candidates
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match found {
+        Some(style_path) => DoctorCheck::new(
             "output_style",
             CheckStatus::Ok,
             format!(
@@ -287,15 +302,14 @@ fn evaluate_style(
                 style_path.display()
             ),
         ),
-        _ => DoctorCheck::new(
+        None => DoctorCheck::new(
             "output_style",
             CheckStatus::Fail,
             // #5866: `tm install` never wrote this file; `--fix` does.
             format!(
-                "{source} outputStyle {style_id:?} ({}) is a known id but {} is missing or \
-                 empty — run `{}` to redeploy styles",
+                "{source} outputStyle {style_id:?} ({}) is a known id but no non-empty copy \
+                 exists (searched {searched}) — run `{}` to redeploy styles",
                 source_path.display(),
-                style_path.display(),
                 crate::core::doctor_repair::OUTPUT_STYLE_REMEDY
             ),
         ),
