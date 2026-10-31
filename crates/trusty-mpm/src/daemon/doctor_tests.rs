@@ -639,7 +639,7 @@ fn oauth_token_check_warns_when_relocated_with_no_token_or_key() {
     // Issue #2246: the exact at-risk configuration — CLAUDE_CONFIG_DIR
     // relocated (as every managed spawn does), no stored token, no
     // resolvable OAuth env var — must Warn with an actionable hint.
-    let check = build_oauth_token_check(true, false, false);
+    let check = build_oauth_token_check(true, false, false, None);
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(check.message.contains("tm auth set-token"));
     assert!(check.message.contains("claude setup-token"));
@@ -648,7 +648,7 @@ fn oauth_token_check_warns_when_relocated_with_no_token_or_key() {
 #[test]
 fn oauth_token_check_ok_when_token_stored() {
     // A stored token file resolves for a managed spawn → satisfied.
-    let check = build_oauth_token_check(true, true, false);
+    let check = build_oauth_token_check(true, true, false, None);
     assert_eq!(check.status, CheckStatus::Ok);
 }
 
@@ -657,7 +657,7 @@ fn oauth_token_check_ok_when_env_var_set() {
     // A CLAUDE_CODE_OAUTH_TOKEN env var is the higher-precedence source
     // resolve_oauth_token consults → also satisfies the managed-session
     // auth requirement even without a stored token file.
-    let check = build_oauth_token_check(true, false, true);
+    let check = build_oauth_token_check(true, false, true, None);
     assert_eq!(check.status, CheckStatus::Ok);
 }
 
@@ -671,7 +671,7 @@ fn oauth_token_check_warns_when_only_api_key_set() {
     // even takes the API-key flag as an input; this test pins the behaviour
     // by driving the same relocated/no-token state the api-key-only
     // environment produces.
-    let check = build_oauth_token_check(true, false, false);
+    let check = build_oauth_token_check(true, false, false, None);
     assert_eq!(
         check.status,
         CheckStatus::Warn,
@@ -679,11 +679,51 @@ fn oauth_token_check_warns_when_only_api_key_set() {
     );
 }
 
+// #10581: a supervisor install logs in under the managed CLAUDE_CONFIG_DIR, so
+// no stored token is expected there. A login found in that tier is Ok; a tier
+// with no login evidence must still Warn.
+#[test]
+fn oauth_token_check_ok_when_managed_tier_holds_login() {
+    let managed = tempfile::tempdir().unwrap();
+    let login = managed_tier_login(managed.path());
+    assert_eq!(login, None, "an empty managed tier holds no login");
+    let check = build_oauth_token_check(true, false, false, login.as_deref());
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+
+    let claude_json = managed.path().join(".claude.json");
+    for unproven in ["{not json", r#"{"oauthAccount": null}"#] {
+        std::fs::write(&claude_json, unproven).unwrap();
+        assert_eq!(managed_tier_login(managed.path()), None, "{unproven}");
+    }
+
+    // The macOS login record; the secret itself stays in the Keychain.
+    std::fs::write(&claude_json, r#"{"oauthAccount": {"accountUuid": "u"}}"#).unwrap();
+    let login = managed_tier_login(managed.path());
+    assert!(
+        login.is_some(),
+        "`oauthAccount` is managed-tier login evidence"
+    );
+    let check = build_oauth_token_check(true, false, false, login.as_deref());
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    assert!(
+        check.message.contains("managed CLAUDE_CONFIG_DIR"),
+        "the Ok must name the managed tier: {}",
+        check.message
+    );
+
+    std::fs::remove_file(&claude_json).unwrap();
+    std::fs::write(managed.path().join(".credentials.json"), "{}").unwrap();
+    assert!(
+        managed_tier_login(managed.path()).is_some(),
+        "the Linux store counts"
+    );
+}
+
 #[test]
 fn oauth_token_check_ok_when_not_relocated() {
     // Home unresolved → no managed config dir → the #2246 divergence
     // cannot occur (there is nothing to relocate).
-    let check = build_oauth_token_check(false, false, false);
+    let check = build_oauth_token_check(false, false, false, None);
     assert_eq!(check.status, CheckStatus::Ok);
 }
 
