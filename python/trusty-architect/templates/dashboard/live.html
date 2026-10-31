@@ -5,110 +5,164 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Live - Architect Dashboard</title>
 <!-- Live view (IL ar-Te8). Served at /live by scripts/dashboard-serve.py; polls GET /api/harness (scripts/dashboard_harness.py) every 3 s.
-     Shape = state, size = activity, pulses = new messages (out: dot Architect->PM, in: arrowhead PM->Architect, blocker: big magenta). ?demo=1 plays synthetic data. Click a mark for text. -->
+     Shape = state, size = activity, pulses = new messages (out: dot Architect->PM, in: arrowhead PM->Architect, blocker: big oxblood). ?demo=1 plays synthetic data. Click a mark for text. -->
 <script>(function(){try{var t=localStorage.getItem("architect-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap">
 <style>
-:root{--bg:#f5efe7;--surface:#fffdf9;--fg:#2b1c12;--muted:#6e5843;--line:#d8c9b4;--accent:#b7410e;
---active:#0072b2;--wait:#d55e00;--block:#9a7400;--done:#007a5a;--fail:#c4175e;
---k:#8a2be2;--s:#0b6b3a;--c:#7a6a58;--n:#b45309;
---t-rust:#7b3fa0;--t-ts:#0a7e8c;--t-res:#a06a00;--t-oth:#555;
---mono:ui-monospace,"SF Mono",Menlo,monospace;--body:system-ui,-apple-system,"Segoe UI",sans-serif}
-:root[data-theme="dark"]{--bg:#201612;--surface:#2b1c12;--fg:#f0e7d8;--muted:#cbb69c;--line:#46311f;--accent:#d97742;
---active:#56b4e9;--wait:#e8873a;--block:#e0b84a;--done:#2fc29a;--fail:#ff6fa8;
---t-rust:#c9a0ff;--t-ts:#4cc9d6;--t-res:#e8b84a;--t-oth:#bbb}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#201612;--surface:#2b1c12;--fg:#f0e7d8;--muted:#cbb69c;--line:#46311f;--accent:#d97742;
---active:#56b4e9;--wait:#e8873a;--block:#e0b84a;--done:#2fc29a;--fail:#ff6fa8;
---t-rust:#c9a0ff;--t-ts:#4cc9d6;--t-res:#e8b84a;--t-oth:#bbb}}
+/* Tokens: templates/dashboard/tokens.css (linked first in <head> by dashboard-serve.py). Names used here are the semantic aliases: --sess-* (session state), --task-*, --ctx-*, --msg-*. */
 *{box-sizing:border-box}
-html{background:var(--bg)}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 var(--body);overflow-x:hidden;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}
+html{background:var(--surface-0)}
+body{margin:0;background:var(--surface-0);color:var(--ink-1);font:var(--fs-base)/1.45 var(--font-body);overflow-x:hidden;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}
 button{font:inherit;color:inherit}
-header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:8px 12px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
-h1{font-size:1.05rem;margin:0}
-.tag{font:600 .66rem var(--mono);text-transform:uppercase;letter-spacing:.06em;border:1px dashed var(--muted);color:var(--muted);border-radius:4px;padding:0 5px}
+header{position:sticky;top:0;z-index:5;background:var(--surface-0);border-bottom:1px solid var(--line);padding:8px 12px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+h1{font:700 var(--fs-xl)/1.1 var(--font-display);letter-spacing:.05em;text-transform:uppercase;margin:0}
+.tag{font:600 var(--fs-xs) var(--font-mono);line-height:18px;text-transform:uppercase;letter-spacing:var(--track-eyebrow);border:1px dashed var(--ink-2);color:var(--ink-2);border-radius:var(--r-sm);padding:0 var(--sp-2)}
 nav{display:flex;gap:4px}
-nav button,.ctl{background:transparent;border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer;font:600 .75rem var(--mono)}
 nav button[aria-selected="true"]{border-color:var(--accent);color:var(--accent)}
-.ctl{color:var(--accent);border-color:var(--accent)}
 .sp{flex:1}
-.tag.off{color:var(--fail);border-color:var(--fail)}
-:root{--ok:#00855f;--slow:#d55e00;--stop:#c4175e;--park:#8a8a8a;--out:#0072b2;--in:#7b3fa0;--blk:#d6249f;--hub:#b7410e}
-:root[data-theme="dark"]{--ok:#2fc29a;--slow:#f0903a;--stop:#ff6fa8;--park:#9a9a9a;--out:#56b4e9;--in:#c9a0ff;--blk:#ff5cc8;--hub:#d97742}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--ok:#2fc29a;--slow:#f0903a;--stop:#ff6fa8;--park:#9a9a9a;--out:#56b4e9;--in:#c9a0ff;--blk:#ff5cc8;--hub:#d97742}}
-.s-active{color:var(--active)}.s-wait{color:var(--wait)}.s-idle{color:var(--muted)}.s-blocked{color:var(--fail)}
+.tag.off{border-color:var(--st-stop);border-style:solid;background:color-mix(in srgb,var(--st-stop) var(--st-soft),var(--surface-1))}
+.s-active{color:var(--st-info-ink)}.s-wait{color:var(--st-slow-ink)}.s-idle{color:var(--ink-2)}.s-blocked{color:var(--st-stop-ink)}
 .shape{width:30px;height:30px;flex:none}
 .pulse-ring{fill:none;stroke:currentColor;stroke-width:2}.spin{fill:none;stroke:currentColor;stroke-width:2;stroke-dasharray:4 4}
-.legend{min-width:0;display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;font:.66rem var(--mono);color:var(--muted);padding:6px 12px;border-bottom:1px solid var(--line)}
+.legend{min-width:0;display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;font:var(--fs-xs) var(--font-mono);color:var(--ink-2);padding:6px 12px;border-top:1px solid var(--line);position:static}
 .legend span{display:inline-flex;align-items:center;gap:3px}.legend svg{width:18px;height:18px}
+.legend .lt{flex:none;white-space:nowrap;font:inherit;color:var(--ink-1);background:none;border:1px solid var(--line);border-radius:4px;padding:1px 8px;cursor:pointer}
+.legend .ld{display:none;font-style:normal}.legend.open .ld{display:inline}.legend.open .ls{display:none}
+.legend.open{flex-direction:column;align-items:flex-start;gap:4px}.legend.open span{align-items:flex-start}.legend.open svg{flex:none}
+.legend:not(.open){flex-wrap:nowrap;gap:4px 6px;overflow:hidden}.legend:not(.open) span{flex:none;gap:2px}.legend:not(.open) svg{width:14px;height:14px}.legend .ls{font-weight:400;white-space:nowrap}   /* condensed: one row at desktop width; the phone width wraps below */
+@media (max-width:700px){.legend:not(.open){flex-wrap:wrap}}
 main{flex:1;display:flex;flex-direction:column;min-width:0;padding:0}
 #live{position:relative;flex:1;min-height:340px}
 #scene{position:absolute;inset:0;display:block;width:100%;height:100%;touch-action:manipulation}
 #scene .node{cursor:pointer;outline:none}
-#scene .node:focus-visible .body{stroke:var(--accent);stroke-width:3}
-#scene .lbl{font:600 10px var(--mono);fill:var(--muted);text-anchor:middle;pointer-events:none}
+#scene .node>.body{pointer-events:all}   /* the body is fill:none, so without this only its 2.5px stroke took a click: the whole disc is the target (the owner 2026-10-25) */
+#scene .node:focus-visible .body{stroke:var(--focus);stroke-width:3}
+#scene .lbl{font:600 11px var(--font-mono);fill:var(--ink-2);text-anchor:middle;pointer-events:none}
+#scene .node.inact{opacity:.42;filter:grayscale(1) saturate(0)}
+#scene .node.inact:hover,#scene .node.inact:focus-visible{opacity:.85}
+#scene .lbl.inact{font-size:9px;opacity:.5}
 #scene .link{stroke:var(--line);stroke-width:1}
-#tip{position:fixed;z-index:30;pointer-events:none;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:.72rem var(--mono);max-width:240px;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+#tip{position:fixed;z-index:30;pointer-events:none;background:var(--surface-1);color:var(--ink-1);border:1px solid var(--line);border-radius:var(--r-md);padding:4px 8px;font:var(--fs-xs) var(--font-mono);max-width:240px;box-shadow:var(--shadow)}
 #tip[hidden]{display:none}
-:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.navl{border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:600 .75rem var(--mono);color:var(--fg);text-decoration:none}
-.navl[aria-current="page"]{border-color:var(--accent);color:var(--accent)}
-.srcs{font:.66rem var(--mono);color:var(--muted);padding:2px 12px 10px}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.srcs{font:var(--fs-xs) var(--font-mono);color:var(--ink-2);padding:2px 12px 10px}
 /* drawer */
-.scrim{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:19}
-#drawer{position:fixed;z-index:20;top:0;right:0;bottom:0;width:min(600px,100%);background:var(--bg);color:var(--fg);border-left:1px solid var(--line);display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.25)}
+.scrim{position:fixed;inset:0;background:var(--scrim);z-index:19}
+#drawer{position:fixed;z-index:20;top:0;right:0;bottom:0;width:min(600px,100%);background:var(--surface-0);color:var(--ink-1);border-left:1px solid var(--line);display:flex;flex-direction:column;box-shadow:var(--shadow-lg)}
 #drawer[hidden],.scrim[hidden]{display:none}
-.dhead{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--surface)}
-.dhead .shape{width:26px;height:26px}.dhead h2{margin:0;font:700 .95rem var(--mono);flex:1;min-width:0;overflow-wrap:anywhere}
+.dhead{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--surface-1)}
+.dhead .shape{width:26px;height:26px}.dhead h2{margin:0;font:700 var(--fs-md) var(--font-mono);flex:1;min-width:0;overflow-wrap:anywhere}
 .dbody{overflow-y:auto;overflow-x:hidden;padding:10px 12px 30px;display:grid;gap:12px;align-content:start}
-.back,.close{background:transparent;border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer;font:600 .75rem var(--mono)}
-.status{font-size:.85rem}.chips{display:flex;flex-wrap:wrap;gap:4px 8px;font:.72rem var(--mono);color:var(--muted)}
-h3{font:600 .72rem var(--mono);text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:0 0 4px}
-.msg{display:grid;grid-template-columns:auto 1fr;gap:0 8px;padding:3px 0;border-bottom:1px dotted var(--line);font-size:.8rem}
-.msg time{font:.68rem var(--mono);color:var(--muted)}
-.msg .k{font:700 .62rem var(--mono);text-transform:uppercase;border-radius:3px;padding:0 4px;margin-right:4px;border:1px solid var(--muted)}
-.in .k{color:var(--wait);border-color:var(--wait)}.out .k{color:var(--done);border-color:var(--done)}.out .k.blocker{color:var(--fail);border-color:var(--fail);font-weight:800}
+.status{font-size:var(--fs-sm)}.chips{display:flex;flex-wrap:wrap;gap:4px 8px;font:var(--fs-xs) var(--font-mono);color:var(--ink-2)}
+h3{font:600 var(--fs-xs) var(--font-mono);text-transform:uppercase;letter-spacing:var(--track-eyebrow);color:var(--ink-2);margin:0 0 4px}
+.msg{display:grid;grid-template-columns:auto 1fr;gap:0 8px;padding:3px 0;border-bottom:1px dotted var(--line);font-size:var(--fs-xs)}
+.msg time{font:var(--fs-xs) var(--font-mono);color:var(--ink-2)}
+.msg .k{font:600 var(--fs-xs) var(--font-mono);line-height:18px;text-transform:uppercase;letter-spacing:var(--track-eyebrow);border-radius:var(--r-sm);padding:0 var(--sp-2);margin-right:4px;border:1px solid var(--ink-2);color:var(--ink-1)}
+.in .k{border-color:var(--msg-in)}.out .k{border-color:var(--msg-out)}.out .k.blocker{border-color:var(--msg-blocker);font-weight:800}
 .msg p{margin:0;overflow-wrap:anywhere}
 .alist{display:grid;gap:6px}
-.arow{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:4px 8px;cursor:pointer}
-.arow svg{width:24px;height:24px;flex:none}.arow .ty{font:700 .78rem var(--mono)}.arow .tk{flex:1;min-width:0;font-size:.8rem;overflow-wrap:anywhere}.arow .st{font:.7rem var(--mono);color:var(--muted)}
-.empty{color:var(--muted);font-size:.8rem}
+.arow{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:var(--surface-1);border:1px solid var(--line);border-radius:var(--r-md);padding:4px 8px;cursor:pointer}
+.arow svg{width:24px;height:24px;flex:none}.arow .ty{font:700 var(--fs-xs) var(--font-mono)}.arow .tk{flex:1;min-width:0;font-size:var(--fs-xs);overflow-wrap:anywhere}.arow .st{font:var(--fs-xs) var(--font-mono);color:var(--ink-2)}
+.empty{color:var(--ink-2);font-size:var(--fs-xs)}
 /* side panel (ar-Tea): Events and Docs tabs; right column overlay */
-#side{position:fixed;z-index:10;top:var(--hh,48px);right:0;bottom:0;width:min(340px,92%);background:var(--bg);border-left:1px solid var(--line);display:flex;flex-direction:column;box-shadow:-6px 0 18px rgba(0,0,0,.18)}
+#side{position:fixed;z-index:10;top:var(--hh,48px);right:0;bottom:0;width:min(340px,92%);background:var(--surface-0);border-left:1px solid var(--line);display:flex;flex-direction:column;box-shadow:var(--shadow-lg)}
 #side[hidden]{display:none}
-.tabs{display:flex;border-bottom:1px solid var(--line);background:var(--surface)}
-.tabs .sclose{order:2;flex:0 0 auto;width:36px;font-size:1.2rem;border-bottom-color:transparent}
-.tabs button{flex:1;background:transparent;border:0;border-bottom:3px solid transparent;padding:8px 6px;cursor:pointer;font:600 .75rem var(--mono)}
+.tabs{display:flex;border-bottom:1px solid var(--line);background:var(--surface-1)}
+.tabs .sclose{order:2;flex:0 0 auto;width:36px;font-size:var(--fs-lg);border-bottom-color:transparent}
+.tabs button{flex:1;background:transparent;border:0;border-bottom:3px solid transparent;padding:8px 6px;cursor:pointer;font:600 var(--fs-xs) var(--font-mono)}
 .tabs button[aria-selected="true"]{border-bottom-color:var(--accent);color:var(--accent)}
-#fbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--surface)}
+#fbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--surface-1)}
 #fbar[hidden]{display:none}
-.fchip{display:inline-flex;align-items:center;gap:4px;background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:12px;padding:1px 4px 1px 10px;cursor:pointer;font:600 .72rem var(--mono)}
-.fchip b{font-size:.95rem;line-height:1;padding:0 4px}
-#fbar .fdet{background:transparent;border:1px solid var(--line);border-radius:6px;padding:1px 8px;cursor:pointer;font:600 .68rem var(--mono)}
+.fchip{display:inline-flex;align-items:center;gap:4px;background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:var(--r-pill);padding:1px 4px 1px 10px;cursor:pointer;font:600 var(--fs-xs) var(--font-mono)}
+.fchip b{font-size:var(--fs-md);line-height:1;padding:0 4px}
 #scene .dg{cursor:pointer}#scene .dg .dgh{fill:transparent;stroke:none;pointer-events:all}#scene .dg:focus-visible{outline:2px solid var(--accent)}
-#scene .dg path{fill:var(--surface);stroke:var(--accent);stroke-width:1.3;stroke-linejoin:round;pointer-events:none}
+#scene .dg path{fill:var(--surface-1);stroke:var(--accent);stroke-width:1.3;stroke-linejoin:round;pointer-events:none}
 #sbody{overflow-y:auto;overflow-x:hidden;flex:1;padding:6px 10px 24px}
-.msg .k.arch{color:var(--out);border-color:var(--out)}.msg .k.sess{color:var(--in);border-color:var(--in)}.msg .who{font:600 .68rem var(--mono);color:var(--muted);display:block}
-.dlink{display:block;padding:5px 2px;border-bottom:1px dotted var(--line);font:600 .78rem var(--mono);overflow-wrap:anywhere;color:var(--accent);text-decoration:none}
-a.dlink:hover{text-decoration:underline}span.dlink{color:var(--fg)}
+.msg .k.arch{border-color:var(--msg-out)}.msg .k.sess{border-color:var(--msg-in)}.msg .who{font:600 var(--fs-xs) var(--font-mono);color:var(--ink-2);display:block}
+.dlink{display:block;padding:5px 2px;border-bottom:1px dotted var(--line);font:600 var(--fs-xs) var(--font-mono);overflow-wrap:anywhere;color:var(--accent);text-decoration:none}
+a.dlink:hover{text-decoration:underline}span.dlink{color:var(--ink-1)}
+.drow{display:flex;gap:8px;align-items:baseline;border-bottom:1px dotted var(--line)}.drow .dlink{flex:1;min-width:0;border-bottom:0}
+
+#viewer{position:fixed;inset:0;z-index:40;background:var(--scrim);padding:10px;display:flex}#vbox{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--surface-0);color:var(--ink-1);border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden}#viewer[hidden]{display:none}
+#viewer header{display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)}#viewer header b{flex:1;min-width:0;font:600 var(--fs-sm) var(--font-mono);overflow-wrap:anywhere}
+#vbody{flex:1;min-height:0;overflow:auto}#vbody iframe{display:block;width:100%;height:100%;border:0}#vbody pre.dtext{margin:0;padding:12px}
+pre.dtext{margin:0 0 6px;white-space:pre-wrap;overflow-wrap:anywhere;font:var(--fs-xs)/1.4 var(--font-mono)}pre.dtext .ad{color:var(--st-ok-ink)}pre.dtext .rm{color:var(--st-stop-ink)}pre.dtext .hk{color:var(--ink-2)}
+#sopen{position:absolute;top:8px;right:8px;z-index:5}#sopen[hidden]{display:none}
+/* ctx pie: used share = darker shade, remainder = lighter shade of the node colour (--c); same formula in both themes */
+#scene .pie-used{fill:color-mix(in srgb,var(--c) 60%,var(--mix-dark))}#scene .pie-rest{fill:color-mix(in srgb,var(--c) 50%,var(--mix-light))}
+#scene .pie-edge{fill:none;stroke:var(--ink-1);stroke-opacity:.45;stroke-width:1}
+#scene .alink{stroke:var(--line);stroke-width:1;stroke-dasharray:2 3}
+/* session pie (the owner 2026-10-29): one slice per open task, radial progress fill in the task's palette colour (--pal-N via --pc) */
+#sumcard{position:fixed;z-index:31;left:0;top:0;width:min(300px,calc(100vw - 16px));background:var(--surface-1);color:var(--ink-1);border:1px solid var(--line-strong);border-radius:var(--r-md);padding:8px 10px;font:var(--fs-xs)/1.4 var(--font-mono);box-shadow:var(--shadow-lg);pointer-events:none}
+#sumcard.pin{pointer-events:auto}
+#sumcard[hidden]{display:none}
+#sumcard .sc-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+#sumcard .sc-name{flex:1;min-width:0;font-size:var(--fs-sm);overflow-wrap:anywhere}
+#sumcard .sc-sw{flex:none;width:30px;height:30px;border-radius:50%;border:2px var(--sc-bs,solid) var(--ink-2);display:flex;align-items:center;justify-content:center;font:700 10px var(--font-mono);color:var(--ink-1);background:radial-gradient(circle,color-mix(in srgb,var(--pc) var(--sc-c0),var(--surface-1)),var(--pc))}
+#sumcard dl{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;margin:0}
+#sumcard dt{color:var(--ink-2)}#sumcard dd{margin:0;overflow-wrap:anywhere}
+#sumcard .sc-bar{display:inline-block;vertical-align:middle;width:70px;height:8px;margin-right:6px;border-radius:4px;border:1px solid var(--ink-2);background:color-mix(in srgb,var(--pc) 16%,var(--surface-1));overflow:hidden}
+#sumcard .sc-bar i{display:block;height:100%;background:var(--pc)}
+#sumcard .sc-st{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+#sumcard .sc-open{margin-top:8px;width:100%}
+#scene .lane{fill:none;stroke-width:1.8;stroke-linecap:round;stroke-dasharray:7 6;stroke-opacity:.85;animation:flow 1s linear infinite}
+@keyframes flow{to{stroke-dashoffset:-13}}
+@media (prefers-reduced-motion:reduce){#scene .lane{animation:none}}
+/* first-load state: covers the scene until the first snapshot is drawn; an error replaces the spinner with a retry (never spins forever) */
+#lvload{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--surface-0);color:var(--ink-2);font:var(--fs-sm) var(--font-body)}
+#lvload[hidden],#lvretry[hidden]{display:none}
+.lvspin{flex:none;width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:lvspin .8s linear infinite}
+#lvload.err .lvspin{display:none}#lvload.err{color:var(--st-stop-ink)}
+@keyframes lvspin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.lvspin{animation:none;border-top-color:var(--line)}}
+.drow .k{font:600 var(--fs-xs) var(--font-mono);line-height:18px;border:1px solid var(--ink-2);color:var(--ink-2);border-radius:var(--r-sm);padding:0 var(--sp-2);flex:none}
+.msg .k.tool{color:var(--ink-2)}.msg .k.stat{border-color:var(--st-slow)}
+/* focus mode (the owner 2026-10-24, ar-T07): the selected session takes the centre bubble; the Architect and its active siblings sit in a lower-left cluster; no panel or modal */
+#focusbar{position:absolute;top:8px;left:8px;z-index:5;display:flex;gap:6px}#focusbar[hidden]{display:none}
+#scene .lbl.sib{fill:var(--ink-1)}
+#scene .lbl.hit{pointer-events:auto;cursor:pointer}#scene .lbl.hit:hover{text-decoration:underline}   /* cluster rows: the label is part of the click target */
+/* inactive cluster spread (tap it): readable grey nodes in rows along the bottom */
+#scene.spread .node.inact{opacity:.9}#scene.spread .lbl.inact{font-size:11px;opacity:1}
+html.narrow #scene .lbl{font-size:12px}
+html.narrow #scene .lbl.inact{font-size:10px}
 html.embed header{display:none}html.embed #side{top:0}
 @media (min-width:1000px){body.sideopen{padding-right:340px}}
-@media (max-width:700px){main{padding:8px 6px 40px}#drawer{top:6vh;border-left:0;border-top:1px solid var(--line);border-radius:12px 12px 0 0}}
+@media (max-width:700px){main{padding:8px 6px 40px}#drawer{top:6vh;border-left:0;border-top:1px solid var(--line);border-radius:var(--r-lg) var(--r-lg) 0 0}}
+/* Kiosk (the owner 2026-10-30): the map fills the viewport; the scene is panned and zoomed with a CSS transform so the page's own viewBox re-layout never resets the view. */
+#live{overflow:hidden}
+#scene{transform-origin:0 0}
+#scene.pz{touch-action:none;cursor:grab}#scene.pz.drag{cursor:grabbing}
+#kexit,#kfit,#kfs,#khint{display:none}
+html.kiosk body>header,html.kiosk #legend,html.kiosk #srcs,html.kiosk #sopen,html.kiosk #side,html.kiosk #focusbar{display:none!important}
+html.kiosk body{padding:0!important;min-height:0}
+html.kiosk main{padding:0}
+html.kiosk #live{position:fixed;inset:0;min-height:0!important;height:auto!important;z-index:1}
+html.kiosk #kexit,html.kiosk #kfit,html.kiosk #kfs{display:block;position:fixed;z-index:6;top:8px}
+html.kiosk #kexit{right:8px;opacity:.55}html.kiosk #kfit{right:96px;opacity:.55}html.kiosk #kfs{right:176px;opacity:.55}html.kiosk #kfs:hover,html.kiosk #kfs:focus-visible{opacity:1}
+html.kiosk #kexit:hover,html.kiosk #kexit:focus-visible,html.kiosk #kfit:hover,html.kiosk #kfit:focus-visible{opacity:1}
+html.kiosk #khint{display:block;position:fixed;z-index:6;left:10px;bottom:8px;font:var(--fs-xs) var(--font-mono);color:var(--ink-2);opacity:.6;pointer-events:none}
+@media (max-width:700px){html.kiosk #khint{display:none}}
 </style>
 </head>
 <body>
 <header>
   <h1>Fleet <span class="tag" id="conn">connecting</span></h1>
-  <nav aria-label="Views"><a class="navl" aria-current="page" href="/live">Live</a><a class="navl" href="/">State</a></nav>
+  <nav aria-label="Views"><a class="ctl navl" aria-current="page" href="/live">Live</a><a class="ctl navl" href="/">State</a></nav>
   <span class="sp"></span>
   <button class="ctl" id="sidebtn" aria-pressed="true" title="Show or hide the events and docs panel">Panel</button>
+  <a class="ctl navl" id="kiosk" href="/live/kiosk" target="_blank" rel="noopener" title="Open the full-screen kiosk map in a new tab: wheel or pinch to zoom, drag to pan, click a sphere to zoom to it">Kiosk</a>
   <button class="ctl" id="pause" aria-pressed="false">Pause</button>
 </header>
-<div class="legend" id="legend" aria-label="Legend"></div>
+<button class="ctl" id="kfs" type="button" title="Toggle browser full screen (F)">Full screen</button><button class="ctl" id="kfit" type="button" title="Fit all spheres (0)">Fit all</button><button class="ctl" id="kexit" type="button" title="Leave kiosk (Esc)">Exit kiosk</button><div id="khint" aria-hidden="true">wheel/pinch zoom &middot; drag pan &middot; click sphere to centre &middot; 0 fit &middot; Tab next &middot; Esc exit<span id="ktour"></span></div>
 <main>
-  <div id="live"><svg id="scene" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet" role="group" aria-label="Fleet map: the Architect in the centre, project sessions on a fan: most active at 12, least active toward 6"></svg></div>
+  <div id="live"><button class="ctl" id="sopen" type="button" title="Open the events and docs panel" hidden>Events / Docs</button><div id="focusbar" hidden><button class="ctl" id="fback" type="button" title="Back to the whole fleet (Escape)">&larr; Fleet</button><button class="ctl" id="fdetails" type="button" title="Open this session's details drawer">Details</button></div><div id="lvload" role="status" aria-busy="true"><span class="lvspin" aria-hidden="true"></span><span id="lvmsg">Loading live view…</span><button class="ctl" id="lvretry" type="button" hidden>Retry</button></div><svg id="scene" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet" role="group" aria-label="Fleet map: the Architect in the centre, project sessions on a fan: most active at 12, least active toward 6"></svg></div>
+  <div class="legend" id="legend" aria-label="Legend"></div>
   <div id="srcs" class="srcs" aria-live="polite"></div>
 </main>
 <div id="tip" hidden role="tooltip"></div>
+<div id="sumcard" hidden role="dialog" aria-label="Session task progress"></div>
+<div id="viewer" hidden role="dialog" aria-modal="true" aria-labelledby="vtitle"><div id="vbox"><header><b id="vtitle"></b><button class="ctl dact" id="vdiff" type="button" aria-pressed="false">Diff</button><button class="ctl" id="vclose" type="button">Close</button></header><div id="vbody" tabindex="0"></div></div></div>
 <div class="scrim" id="scrim" hidden></div>
 <aside id="side" aria-label="Events and docs">
   <div class="tabs" role="tablist"><button class="sclose" id="sclose" type="button" aria-label="Close panel" title="Close panel">&times;</button><button role="tab" id="tab-ev" aria-selected="true" data-tab="ev">Events</button><button role="tab" id="tab-docs" aria-selected="false" data-tab="docs">Docs <span id="ndocs"></span></button></div>
@@ -121,9 +175,12 @@ html.embed header{display:none}html.embed #side{top:0}
 /* Live view. Data: GET /api/harness every POLL_MS (scripts/dashboard_harness.py). ?demo=1 feeds a synthetic snapshot instead.
    Model objects (HARNESSES, their agents, PMS) persist across polls so nodes ease instead of jumping. */
 const POLL_MS = 3000, WIN_S = 600;   /* activity window for sizing: messages in the last 10 min */
+const TOUR_HOLD_MS = [10000, 15000], TOUR_ARCH_MS = 5000, TOUR_SETTLE_MS = 700, TOUR_START_MS = 3000, TOUR_IDLE_MS = 60000;   /* kiosk auto-tour (the owner 2026-10-30): dwell on a session (random in range), dwell back on the Architect, pane open delay after the pan, first step, idle before it resumes after input */
 const DEMO = new URLSearchParams(location.search).get("demo") === "1";
+let FOCUS_Q = new URLSearchParams(location.search).get("focus");
 const HARNESSES = [];
 const GOALS = {};   /* id -> title, learned from the snapshot */
+const ARCH = "tm-architect";   /* the session name docs and events carry for the Architect */
 
 /* ---------- helpers ---------- */
 const $ = (id) => document.getElementById(id);
@@ -137,13 +194,111 @@ const agoTxt = (epoch) => { const a = Math.max(0, Math.round(nowS() - epoch)); r
 const findH = (n) => HARNESSES.find((h) => h.name === n);
 const findA = (id) => { for (const h of HARNESSES) { const a = h.agents.find((x) => x.id === id); if (a) return a; } return null; };
 
+/* BEGIN liveProgress: verbatim copies of the State page's functions (templates/dashboard/index.html); scripts/test_dashboard_live_progress.py fails when they drift */
+const ETA_STALE_MS = 24 * 3600 * 1000;
+function txt(v) {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  try { return JSON.stringify(v); } catch (_) { return ""; }
+}
+function clampPct(v) { if (v == null || v === "") return null; const n = Number(v); return isFinite(n) ? Math.max(0, Math.min(100, n)) : null; }
+function taskProgress(it, map) {
+  const steps = Array.isArray(it.steps) ? it.steps.filter((x) => x && typeof x === "object") : [];
+  if (steps.length) {
+    const m = map || {};
+    let done = 0;
+    steps.forEach((x, i) => { const id = x.id != null && x.id !== "" ? String(x.id) : String(i + 1); if (m[id] && m[id].done) done++; });
+    return { done: done, total: steps.length, pct: Math.round(100 * done / steps.length) };
+  }
+  const p = clampPct(it.progress);
+  return p == null ? null : { done: p / 100, total: 1, pct: Math.round(p) };
+}
+function sessionRollup(s, tasks, mapOf) {
+  const own = typeof s.summary === "string" ? s.summary.trim() : "";
+  const summary = own || tasks.map((t) => String(t.title == null || t.title === "" ? t.id : t.title)).join(" · ");
+  let pct = clampPct(s.progress);
+  if (pct == null) {
+    let d = 0, t = 0;
+    tasks.forEach((i) => { const p = taskProgress(i, mapOf(i.id)); if (p) { d += p.done; t += p.total; } });
+    pct = t ? Math.round(100 * d / t) : null;
+  } else pct = Math.round(pct);
+  return { summary: summary, pct: pct };
+}
+function shortDate(iso) {   /* "Oct 14 18:00", local 24-hour; "" when unparseable */
+  const d = new Date(iso || "");
+  if (isNaN(d.getTime())) return "";
+  return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()] + " " + d.getDate() + " " + (d.getHours() < 10 ? "0" : "") + d.getHours() + ":" + (d.getMinutes() < 10 ? "0" : "") + d.getMinutes();
+}
+function agoText(iso, nowMs) {   /* "just now", "12m ago", "5h ago", "3d ago"; "" when unparseable */
+  const t = Date.parse(iso || "");
+  if (isNaN(t)) return "";
+  const m = Math.floor((nowMs - t) / 60000);
+  return m < 1 ? "just now" : m < 60 ? m + "m ago" : m < 1440 ? Math.floor(m / 60) + "h ago" : Math.floor(m / 1440) + "d ago";
+}
+function confClass(c) { c = txt(c).trim().toLowerCase(); return c === "low" || c === "medium" || c === "high" ? "conf-" + c : ""; }
+function taskClosed(it) { return ["done", "cancelled", "wont_do"].indexOf(txt(it && it.status)) >= 0; }
+function etaProgress(it, isTask, nowMs) {
+  const p = it && it.progress;
+  if (!isTask || !p || typeof p !== "object" || Array.isArray(p)) return null;
+  const raw = Number(p.pct);
+  if (p.pct == null || p.pct === "" || !isFinite(raw)) return null;
+  const eta = Date.parse(p.eta || ""), est = Date.parse(p.estimated_at || "");
+  const lo = shortDate(p.eta_low), hi = shortDate(p.eta_high);
+  return { pct: Math.max(0, Math.min(100, Math.round(raw))), etaText: isNaN(eta) ? "" : shortDate(p.eta),
+    range: lo && hi ? lo + " – " + hi : "", confidence: txt(p.confidence), confClass: confClass(p.confidence), basis: txt(p.basis),
+    estText: isNaN(est) ? "" : agoText(p.estimated_at, nowMs), stale: !isNaN(est) && nowMs - est > ETA_STALE_MS,
+    overdue: !isNaN(eta) && eta < nowMs && !taskClosed(it) };
+}
+function isParked(it) { return !!it && it.status === "open" && !!(it.parked && (it.parked.until || it.parked.choice === "clarify" || it.parked.choice === "stale")); }
+/* END liveProgress */
+
 /* ---------- constants ---------- */
 const TYPE_SHAPE = { "rust-engineer": "circle", "python-engineer": "circle", "typescript-engineer": "square", "code-critic": "diamond", research: "diamond", "code-analyzer": "diamond" };
-const TYPE_COLOR = { "rust-engineer": "var(--t-rust)", "python-engineer": "var(--t-rust)", "typescript-engineer": "var(--t-ts)", research: "var(--t-res)", "code-critic": "var(--t-res)", "code-analyzer": "var(--t-res)" };
-const PSL = { ok: "productive", slow: "working slowly", stop: "stalled or blocked", park: "paused or parked" };
-const PSV = { ok: "var(--ok)", slow: "var(--slow)", stop: "var(--stop)", park: "var(--park)" };
-const PS2H = { ok: "active", slow: "active", stop: "wait", park: "idle" };
-const PSW = { ok: 3, slow: 1.5, stop: 0.5, park: 0 };
+const TYPE_COLOR = { "rust-engineer": "var(--series-7)", "python-engineer": "var(--series-7)", "typescript-engineer": "var(--series-3)", research: "var(--series-4)", "code-critic": "var(--series-4)", "code-analyzer": "var(--series-4)" };
+/* agent base classes (the owner 2026-10-24): one icon per class, drawn centred in the subagent circle over the ctx pie. baseClass is pure and tested in node.
+   Icons: Lucide (https://lucide.dev), ISC License, Copyright (c) for Lucide Contributors and Cole Bemis 2013-2022 (Feather, MIT). Paths vendored inline,
+   24x24 viewBox, stroke-only, no runtime fetch (the owner 2026-10-25: ops looked like a light, not a gear).
+   Map: ops=settings, engineer=code, research=search, review=scan-eye, qa=flask-conical, documentation=file-text, ticketing=ticket,
+   version-control=git-branch, security=shield, memory=database, other=bot. */
+const ICONS = {
+  ops: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2zM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
+  engineer: "m16 18 6-6-6-6M8 6l-6 6 6 6",
+  research: "m21 21-4.34-4.34M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0z",
+  review: "M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M13 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0zM18.944 12.33a1 1 0 0 0 0-.66 7.5 7.5 0 0 0-13.888 0 1 1 0 0 0 0 .66 7.5 7.5 0 0 0 13.888 0",
+  qa: "M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2M6.453 15h11.094M8.5 2h7",
+  documentation: "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5M10 9H8M16 13H8M16 17H8",
+  ticketing: "M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2ZM13 5v2M13 17v2M13 11v2",
+  "version-control": "M6 3v12M21 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM18 9a9 9 0 0 1-9 9",
+  security: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
+  memory: "M3 5V19A9 3 0 0 0 21 19V5M3 12A9 3 0 0 0 21 12M21 5a9 3 0 1 1-18 0 9 3 0 0 1 18 0z",
+  other: "M12 8V4H8M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2zM2 14h2M20 14h2M15 13v2M9 13v2"
+};
+function baseClass(type) {
+  const t = String(type || "").toLowerCase();
+  if (t === "ticketing") return "ticketing";
+  if (t === "version-control") return "version-control";
+  if (t === "documentation") return "documentation";
+  if (t === "memory-manager") return "memory";
+  if (t === "security" || t === "secrets-manager") return "security";
+  if (/(^|-)qa$/.test(t)) return "qa";
+  if (/^(code-critic|code-analyzer|drift-guard)$/.test(t) || /(critic|analyzer|reviewer)$/.test(t)) return "review";
+  if (/^(research|explore|plan|improver|curator)$/.test(t) || /(analyst|improver|curator)$/.test(t)) return "research";
+  if (/(^|-)ops$/.test(t) || /^mpm-.*-manager$/.test(t)) return "ops";
+  if (/(^|-)engineer$/.test(t)) return "engineer";
+  return "other";
+}
+/* Four labels only (the owner 2026-10-25): working, waiting, paused, inactive. Shapes keep the finer ok/slow/stop/park cue. */
+const PSL = { ok: "working", slow: "working", stop: "waiting", park: "waiting", done: "inactive" };
+const ST4 = { working: 1, waiting: 1, paused: 1, inactive: 1 };
+const pmLabel = (h) => (ST4[h.st4] ? h.st4 : PSL[h.ps]);   /* a session's label comes from the server's `status`; shape stays from ps */
+const PSV = { ok: "var(--sess-working)", slow: "var(--sess-slow)", stop: "var(--sess-blocked)", park: "var(--sess-parked)", done: "var(--sess-parked)" };
+const PS2H = { ok: "active", slow: "active", stop: "wait", park: "idle", done: "idle" };
+const PSW = { ok: 3, slow: 1.5, stop: 0.5, park: 0, done: 0 };
+const CTX_FULL_K = 250;   /* the dashboard's refresh bar: ctx use = ctx_k / 250 */
+const ctxFrac = (k) => k == null ? null : Math.max(0, Math.min(1, k / CTX_FULL_K));
+const ctxTxt = (k) => k == null ? "ctx n/a (unfilled)" : "ctx " + Math.round(k) + "k of " + CTX_FULL_K + "k (" + Math.round(k / CTX_FULL_K * 100) + "%)";
+const logTo = (o, t, txt) => { (o.log = o.log || []).push({ epoch: t, kind: "status", text: txt }); if (o.log.length > 40) o.log.shift(); };
 const running = (h) => h.agents.filter((a) => !a.leaving && (a.ps === "ok" || a.ps === "slow")).length;
 
 function shapeSvg(st, cls) {
@@ -151,13 +306,13 @@ function shapeSvg(st, cls) {
     active: '<circle cx="15" cy="15" r="9" fill="currentColor"/><circle class="pulse-ring" cx="15" cy="15" r="9"/>',
     wait: '<path d="M15 3 27 15 15 27 3 15Z" fill="currentColor"/><circle class="spin" cx="15" cy="15" r="14"/>',
     idle: '<circle cx="15" cy="15" r="8" fill="none" stroke="currentColor" stroke-width="2.5"/>',
-    blocked: '<rect x="5" y="5" width="20" height="20" rx="2" fill="currentColor"/><path d="M10 10 20 20M20 10 10 20" stroke="var(--surface)" stroke-width="3"/>'
+    blocked: '<rect x="5" y="5" width="20" height="20" rx="2" fill="currentColor"/><path d="M10 10 20 20M20 10 10 20" stroke="var(--surface-1)" stroke-width="3"/>'
   }[st];
   return '<svg class="' + (cls || "shape") + " s-" + st + '" viewBox="0 0 30 30" aria-hidden="true">' + inner + "</svg>";
 }
 function agentShape(a, r, c) {
   const t = TYPE_SHAPE[a.type] || "tri", on = a.ps === "ok" || a.ps === "slow";
-  const col = TYPE_COLOR[a.type] || "var(--t-oth)";
+  const col = TYPE_COLOR[a.type] || "var(--series-other)";
   const paint = on ? 'fill="' + col + '" stroke="none"' : 'fill="none" stroke="' + col + '" stroke-width="2.5"';
   const s = r * 0.9;
   const sh = t === "circle" ? '<circle cx="' + c + '" cy="' + c + '" r="' + r + '" ' + paint + "/>"
@@ -167,7 +322,7 @@ function agentShape(a, r, c) {
   return '<g class="sh">' + sh + "</g>";
 }
 const agentR = (a) => Math.min(15, 4.5 + Math.sqrt(a.tok / 1000) * 0.75);
-const agentRad = (a) => Math.min(11, 3.5 + Math.sqrt(a.tok / 1000) * 0.45);
+const agentRad = (a) => Math.min(12, 6.5 + Math.sqrt(a.tok / 1000) * 0.45);
 const elapsed = (a) => a.el + ((a.ps === "ok" || a.ps === "slow") ? (Date.now() - a.at) / 1000 : 0);
 
 /* ---------- drawer (text lives here) ---------- */
@@ -176,15 +331,15 @@ function msgs(list, cls) {
   return list.length ? list.map((m) => '<div class="msg ' + cls + '"><time title="' + agoTxt(m.epoch) + '">' + clock(m.epoch) + '</time><p><span class="k ' + (m.kind || "") + '">' + esc(m.kind || "asked") + "</span>" + esc(m.text) + "</p></div>").join("") : '<div class="empty">Nothing in the last 30 min.</div>';
 }
 function agentView(h, a) {
-  return '<div class="dhead"><button class="back" data-back="1" data-key="back">&larr; ' + esc(h.name) + '</button><svg class="shape" viewBox="0 0 36 36" aria-hidden="true" style="width:30px;height:30px">' + agentShape(a, agentR(a), 18) + '</svg><h2 id="dt">' + esc(a.type) + '</h2><button class="close" data-close="1" data-key="close" aria-label="Close and return to board">Close</button></div>' +
+  return '<div class="dhead"><button class="ctl back" data-back="1" data-key="back">&larr; ' + esc(h.name) + '</button><svg class="shape" viewBox="0 0 36 36" aria-hidden="true" style="width:30px;height:30px">' + agentShape(a, agentR(a), 18) + '</svg><h2 id="dt">' + esc(a.type) + '</h2><button class="ctl close" data-close="1" data-key="close" aria-label="Close and return to board">Close</button></div>' +
     '<div class="dbody"><div class="status">' + esc(a.task || "(no description)") + '</div><div class="chips"><span>' + PSL[a.ps] + "</span><span>" + mmss(elapsed(a)) + "</span><span>&darr; " + kt(a.tok) + " tokens</span><span>" + esc(a.act || "") + "</span></div>" +
     '<div class="empty">' + (a.branch ? "worktree branch " + esc(a.branch) : "runs in the harness checkout") + " &middot; id " + esc(a.id) + "</div></div>";
 }
 function harnessView(h) {
   const t = GOALS[h.goal];
   const ageTxt = h.idle != null && h.idle > 0 ? " " + h.idle + " min idle" : "";
-  return '<div class="dhead">' + shapeSvg(PS2H[h.ps]) + '<h2 id="dt">' + esc(h.name) + '</h2><button class="close" data-close="1" data-key="close" aria-label="Close and return to board">Close</button></div>' +
-    '<div class="dbody"><div class="status"><b>' + PSL[h.ps] + ageTxt + "</b> &middot; " + esc(h.now || "(no summary)") + "</div>" +
+  return '<div class="dhead">' + shapeSvg(PS2H[h.ps]) + '<h2 id="dt">' + esc(h.name) + '</h2><button class="ctl close" data-close="1" data-key="close" aria-label="Close and return to board">Close</button></div>' +
+    '<div class="dbody"><div class="status"><b>' + pmLabel(h) + ageTxt + "</b> &middot; " + esc(h.now || "(no summary)") + "</div>" +
     '<div class="chips"><span>' + esc(h.goal ? h.goal + " " + (t || "") : "no goal recorded") + "</span><span>" + (h.ctx != null ? "ctx " + h.ctx + "k" : "ctx n/a") + "</span><span>" + kt(h.tok1h) + " out tokens / h</span></div>" +
     "<div><h3>Asked of it (out)</h3>" + msgs(h.asked, "in") + "</div><div><h3>Reported back (in)</h3>" + msgs(h.reported, "out") + "</div>" +
     "<div><h3>Subagents (" + h.agents.filter((a) => !a.leaving).length + ')</h3><div class="alist">' + (h.agents.length ? h.agents.filter((a) => !a.leaving).map((a) => '<button class="arow" data-a="' + esc(a.id) + '" data-h="' + esc(h.name) + '" data-key="r:' + esc(a.id) + '"><svg viewBox="0 0 36 36" aria-hidden="true">' + agentShape(a, Math.min(13, agentR(a)), 18) + '</svg><span class="ty">' + esc(a.type) + '</span><span class="tk">' + esc(a.task) + '</span><span class="st">' + mmss(elapsed(a)) + " &middot; " + kt(a.tok) + "</span></button>").join("") : '<div class="empty">No agents running.</div>') + "</div></div></div>";
@@ -220,16 +375,52 @@ function closeDrawer() {
 const NS = "http://www.w3.org/2000/svg";
 function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
 const svg = $("scene");
-const gL = el("g", {}, svg), gN = el("g", {}, svg), gP = el("g", {}, svg), gS = el("g", {}, svg);
+const defs = el("defs", {}, svg);
+[["out", "var(--msg-out)"], ["in", "var(--msg-in)"], ["blk", "var(--msg-blocker)"]].forEach(([id, c]) => {
+  const m = el("marker", { id: "ah-" + id, viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto", markerUnits: "userSpaceOnUse" }, defs);
+  el("path", { d: "M0 0L10 5L0 10Z", fill: c }, m);
+});
+let clipSeq = 0;
+const gL = el("g", {}, svg), gN = el("g", {}, svg), gS = el("g", {}, svg), gP = el("g", {}, svg);   /* order: links, nodes, labels and file icons, pulses */
 const L = { W: 800, H: 600, cx: 400, cy: 300, rx: 270, ry: 185 };
+const FOC = { name: null, z: 0, view: null };   /* focus mode: the focused session's name; z = eased 0..1 progress; view = this frame's roles and orbit slots */
+const SPREAD = { open: false, z: 0 };   /* inactive cluster: tapped open or packed */
 const REDUCE = matchMedia("(prefers-reduced-motion: reduce)");
 let simT = 0, paused = false;
 
+/* Narrow screens (phone, < 700 px): a stacked list instead of the radial fan. Header row = Architect; then one row per PM (rank order):
+   pie circle at x=70, label left-aligned at x=92 (ellipsized to fit), its subagent pies inline on the lines below the label. 1 SVG unit = 1 CSS px.
+   A lane trunk at x=14 carries each row's out/in arrows. stackPlan is pure (tested in node by scripts/test_dashboard_harness.py). */
+const NARROW = 700, ST = { head: 80, circleX: 70, labelX: 92, trunkX: 14, agentDx: 40, agentDy: 24, agentR: 9, docDx: 19, charW: 7.3 };
+function stackPlan(counts, W, inact) {
+  const per = Math.max(1, Math.floor((W - ST.labelX - 10 - ST.docDx - 8) / ST.agentDx + 1)), maxChars = Math.max(6, Math.floor((W - ST.labelX - 28) / ST.charW));
+  let y = ST.head;
+  const rows = counts.map((n, i) => { const lines = n ? Math.ceil(n / per) : 0, ia = !!(inact && inact[i]), row = ia ? { y: y + 14, per, lines, inact: true } : { y: y + 22, per, lines }; y += (ia ? 28 : 44) + lines * ST.agentDy; return row; });
+  return { rows, H: y + 20, per, maxChars };
+}
+/* a subagent's slot in a phone row: circle centre, plus the doc icon's own centre to its right so a glyph never touches a circle */
+function agentSlot(rowY, per, ix) { const x = ST.labelX + 10 + (ix % per) * ST.agentDx, y = rowY + 26 + Math.floor(ix / per) * ST.agentDy; return { x, y, docX: x + ST.docDx, docY: y }; }
+const ellip = (t, n) => t.length <= n ? t : t.slice(0, Math.max(1, n - 1)) + "\u2026";
+const isNarrow = () => document.documentElement.classList.contains("narrow");
 function layout() {
-  const r = svg.getBoundingClientRect(), portrait = r.height > r.width;
-  L.W = portrait ? 600 : 800; L.H = portrait ? 800 : 600;
+  const live = $("live"), w = live.getBoundingClientRect().width || innerWidth, narrow = w < NARROW;
+  document.documentElement.classList.toggle("narrow", narrow);
+  let r;
+  if (narrow) {
+    const need = FOC.name ? focusH() : Math.max(400, stackPlan(PMS.map((q) => q.h.agents.filter((x) => !x.leaving).length), Math.round(w)).H);
+    live.style.minHeight = need + "px";
+    r = svg.getBoundingClientRect();
+    L.W = Math.round(w); L.H = Math.round(Math.max(need, r.height));
+    L.cx = L.W / 2; L.cy = L.H / 2;
+  } else {
+    live.style.minHeight = "";
+    r = svg.getBoundingClientRect();
+    const portrait = r.height > r.width;
+    L.W = portrait ? 600 : 800; L.H = portrait ? 800 : 600;
+    L.cx = L.W / 2; L.cy = L.H / 2; L.rx = L.W * (portrait ? 0.33 : 0.34); L.ry = L.H * (portrait ? 0.33 : 0.31);
+  }
   svg.setAttribute("viewBox", "0 0 " + L.W + " " + L.H);
-  L.cx = L.W / 2; L.cy = L.H / 2; L.rx = L.W * (portrait ? 0.33 : 0.34); L.ry = L.H * (portrait ? 0.33 : 0.31);
+  svg.setAttribute("preserveAspectRatio", narrow && FOC.name ? "xMidYMin meet" : "xMidYMid meet");   /* phone focus: top-aligned, no blank band above the panel */
 }
 function showTip(txt, x, y) {
   const t = $("tip"); t.textContent = txt; t.hidden = false;
@@ -238,16 +429,34 @@ function showTip(txt, x, y) {
   t.style.top = Math.max(4, Math.min(innerHeight - h - 4, y - h - 8)) + "px";
 }
 function hideTip() { $("tip").hidden = true; }
-function mkNode(onTip, onOpen) {
+function mkNode(onTip, onOpen, onCard) {
   const g = el("g", { class: "node", tabindex: "0", role: "button" }, gN);
   const ring = el("circle", { fill: "none", "stroke-width": "2", stroke: "none" }, g);
+  const cid = "cp" + (++clipSeq), cp = el("clipPath", { id: cid }, defs), cpath = el("path", {}, cp);
+  const pie = el("g", { "clip-path": "url(#" + cid + ")" }, g);
+  const rest = el("circle", { class: "pie-rest", r: 0 }, pie), used = el("path", { class: "pie-used" }, pie);
   const body = el("path", { class: "body" }, g);
   const mark = el("path", { fill: "none", "stroke-linecap": "round", "stroke-width": "2.5" }, g);
-  const n = { g, ring, body, mark, key: "" };
-  const tip = (e) => { const b = g.getBoundingClientRect(); showTip(onTip(), e && e.clientX != null && e.type !== "focus" ? e.clientX : b.left + b.width / 2, e && e.clientY != null && e.type !== "focus" ? e.clientY : b.top); };
+  const ico = el("g", { display: "none", "pointer-events": "none", fill: "none", "stroke-linecap": "round", "stroke-linejoin": "round" }, g);
+  const ih = el("path", { stroke: "var(--surface-1)", "stroke-width": 5 }, ico), im = el("path", { stroke: "var(--ink-1)", "stroke-width": 2.2 }, ico);   /* halo + glyph: readable on dark and light pie shades */
+  const n = { g, ring, body, mark, ico, ih, im, cpath, pie, rest, used, cid, key: "" };
+  /* angle (radians clockwise from 12) of a pointer over the pie, null over the centre zone: picks the slice for the summary card */
+  const angAt = (x, y) => { const r = n.body.getBoundingClientRect(), dx = x - (r.left + r.width / 2), dy = y - (r.top + r.height / 2); if (Math.hypot(dx, dy) < r.width / 2 * PCT_CENTRE) return null; const a = Math.atan2(dx, -dy); return a < 0 ? a + 2 * Math.PI : a; };
+  const tip = (e) => {
+    const b = g.getBoundingClientRect(), fromPtr = e && e.clientX != null && e.type !== "focus";
+    if (onCard) { if (CARD.pin || (e && e.pointerType === "touch")) return; showCard(onCard(), fromPtr ? e.clientX : b.left + b.width / 2, fromPtr ? e.clientY : b.top, false, fromPtr ? angAt(e.clientX, e.clientY) : null); return; }
+    showTip(onTip(), fromPtr ? e.clientX : b.left + b.width / 2, fromPtr ? e.clientY : b.top);
+  };
   g.addEventListener("pointerenter", tip); g.addEventListener("pointermove", tip); g.addEventListener("focus", tip);
-  g.addEventListener("pointerleave", hideTip); g.addEventListener("blur", hideTip);
-  g.addEventListener("click", onOpen);
+  const off = () => { hideTip(); if (onCard) hideCard(false); };
+  g.addEventListener("pointerleave", off); g.addEventListener("blur", off);
+  g.addEventListener("pointerdown", (e) => { n.ptype = e.pointerType; });
+  /* touch: a tap pins the summary card for the slice or centre under the finger (the same spot again closes it; its button opens the session); mouse and pen: click opens as before, hover shows the card */
+  g.addEventListener("click", (e) => {
+    if (!(onCard && n.ptype === "touch")) return onOpen(e);
+    const ang = angAt(e.clientX, e.clientY), p = onCard(), k = p.h.name + "|" + (sliceAt(p, ang) ? sliceAt(p, ang).id : "") + "|true";
+    if (CARD.pin && CARD.key === k) hideCard(true); else { hideTip(); showCard(p, e.clientX, e.clientY, true, ang); }
+  });
   g.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(e); } });
   return n;
 }
@@ -257,32 +466,248 @@ function dShape(t, r) {
   return "M" + -r + " 0a" + r + " " + r + " 0 1 0 " + 2 * r + " 0a" + r + " " + r + " 0 1 0 " + -2 * r + " 0Z";
 }
 /* colour = state; second cue = ring/outline/mark. ok solid; slow dashed spinning ring; stop X + dark outline; park faint + dotted + bars */
-function paint(n, ps, t, r, spin) {
-  const k = ps + t + Math.round(r * 2);
+/* ctx = used share 0..1 of the context bar, or null when unknown (circle left unfilled) */
+function wedge(r, f) {
+  if (f >= 0.999) return "M" + -r + " 0a" + r + " " + r + " 0 1 0 " + 2 * r + " 0a" + r + " " + r + " 0 1 0 " + -2 * r + " 0Z";
+  const a = f * 2 * Math.PI, R = r * 1.5;
+  return "M0 0L0 " + -R + "A" + R + " " + R + " 0 " + (f > 0.5 ? 1 : 0) + " 1 " + (R * Math.sin(a)).toFixed(2) + " " + (-R * Math.cos(a)).toFixed(2) + "Z";
+}
+function paint(n, ps, t, r, spin, ctx) {
+  const known = ctx != null, k = ps + t + Math.round(r * 2) + (known ? ":" + Math.round(ctx * 100) : ":n");
   if (k !== n.key) {
     n.key = k;
     const c = PSV[ps], b = n.body, m = n.mark, g = n.ring;
-    b.setAttribute("d", dShape(t, r)); b.setAttribute("fill", c);
-    b.setAttribute("fill-opacity", ps === "park" ? 0.28 : 1);
-    b.setAttribute("stroke", ps === "park" ? c : ps === "stop" ? "var(--fg)" : "none");
-    b.setAttribute("stroke-width", ps === "park" ? 2 : ps === "stop" ? 2.5 : 0);
+    n.g.style.setProperty("--c", c);
+    n.cpath.setAttribute("d", dShape(t, r));
+    n.pie.setAttribute("display", known ? "inline" : "none"); n.pie.setAttribute("opacity", ps === "park" ? 0.55 : 1);
+    n.rest.setAttribute("r", r * 1.6);
+    n.used.setAttribute("d", known && ctx > 0 ? wedge(r, Math.min(1, ctx)) : "");
+    b.setAttribute("d", dShape(t, r)); b.setAttribute("fill", known ? "none" : "var(--surface-1)");
+    b.setAttribute("fill-opacity", 1);
+    b.setAttribute("stroke", ps === "park" ? c : ps === "stop" ? "var(--ink-1)" : known ? "var(--ink-1)" : c);
+    b.setAttribute("stroke-opacity", ps === "park" || ps === "stop" || !known ? 1 : 0.45);
+    b.setAttribute("stroke-width", ps === "park" ? 2 : ps === "stop" ? 2.5 : known ? 1 : 2.5);
     b.setAttribute("stroke-dasharray", ps === "park" ? "2 3" : "");
     g.setAttribute("r", r + 5); g.setAttribute("stroke", ps === "slow" ? c : "none"); g.setAttribute("stroke-dasharray", "5 4");
     const q = r * 0.4;
-    if (ps === "stop") { m.setAttribute("d", "M" + -q + " " + -q + "L" + q + " " + q + "M" + q + " " + -q + "L" + -q + " " + q); m.setAttribute("stroke", "var(--surface)"); }
-    else if (ps === "park") { m.setAttribute("d", "M" + -q * 0.5 + " " + -q + "V" + q + "M" + q * 0.5 + " " + -q + "V" + q); m.setAttribute("stroke", "var(--fg)"); }
+    if (ps === "stop") { m.setAttribute("d", "M" + -q + " " + -q + "L" + q + " " + q + "M" + q + " " + -q + "L" + -q + " " + q); m.setAttribute("stroke", "var(--surface-1)"); }
+    else if (ps === "park") { m.setAttribute("d", "M" + -q * 0.5 + " " + -q + "V" + q + "M" + q * 0.5 + " " + -q + "V" + q); m.setAttribute("stroke", "var(--ink-1)"); }
     else m.setAttribute("d", "");
   }
   if (ps === "slow") n.ring.setAttribute("transform", "rotate(" + spin + ")");
 }
 
+/* PM bubble (the owner 2026-10-24): fill = pie of the session's tasks (one task = solid), ring = context gauge.
+   Ring: an arc clockwise from 12 o'clock, 100% of the 250k window = one full lap, marked by a tick at 12. Bands 60 / 85 / 100% (--ctx-ok, --ctx-warn, --ctx-hot). Past 100% lap 1 stays --ctx-hot
+   and a second lap draws as a thin ink stripe over it (up to 200%). Unknown context = the grey track only. */
+const TSK_C = { open: "var(--task-open)", blocked: "var(--task-blocked)", done: "var(--task-done)", factory: "var(--task-factory)" }, TSK_ORDER = ["blocked", "open", "factory", "done"], TSK_L = { open: "open", blocked: "blocked", done: "done", factory: "factory (standing)" }, PIE_MAX = 6;
+const ctxRaw = (k) => k == null ? null : Math.max(0, k / CTX_FULL_K);
+const taskTxt = (ts) => { if (!ts || !ts.length) return "no tasks"; const c = {}; ts.forEach((t) => { c[t.state] = (c[t.state] || 0) + 1; }); return ts.length + " task" + (ts.length > 1 ? "s" : "") + ": " + Object.keys(c).sort((x, y) => slotOf(x) - slotOf(y)).map((k) => c[k] + " " + (TSK_L[k] || k)).join(", "); };
+/* pure: pie slices [{st, n}] in the fixed order blocked, open, factory, done (unknown states last, then by arrival): one per task up to PIE_MAX tasks, else one per state */
+const slotOf = (st) => { const i = TSK_ORDER.indexOf(st); return i < 0 ? TSK_ORDER.length : i; };
+function pieSlices(tasks) {
+  const t = tasks || [];
+  let out;
+  if (t.length <= PIE_MAX) out = t.map((x) => ({ st: x.state, n: 1 }));
+  else { const c = {}; t.forEach((x) => { c[x.state] = (c[x.state] || 0) + 1; }); out = Object.keys(c).map((k) => ({ st: k, n: c[k] })); }
+  return out.map((x, i) => [x, i]).sort((p, q) => slotOf(p[0].st) - slotOf(q[0].st) || p[1] - q[1]).map((p) => p[0]);
+}
+function sectorPath(r, a0, a1) { return "M0 0L" + (r * Math.sin(a0)).toFixed(2) + " " + (-r * Math.cos(a0)).toFixed(2) + "A" + r + " " + r + " 0 " + (a1 - a0 > Math.PI ? 1 : 0) + " 1 " + (r * Math.sin(a1)).toFixed(2) + " " + (-r * Math.cos(a1)).toFixed(2) + "Z"; }
+function lapPath(r, f) {
+  if (f <= 0) return "";
+  if (f >= 0.999) return "M" + -r + " 0a" + r + " " + r + " 0 1 0 " + 2 * r + " 0a" + r + " " + r + " 0 1 0 " + -2 * r + " 0Z";
+  const a = f * 2 * Math.PI;
+  return "M0 " + -r + "A" + r + " " + r + " 0 " + (f > 0.5 ? 1 : 0) + " 1 " + (r * Math.sin(a)).toFixed(2) + " " + (-r * Math.cos(a)).toFixed(2);
+}
+/* pure: gauge laps for a raw context fraction: {l1 0..1, l2 0..1, c colour of lap 1} or null when unknown */
+function gaugeLaps(raw) { return raw == null ? null : { l1: Math.min(raw, 1), l2: Math.max(0, Math.min(raw - 1, 1)), c: raw >= 0.85 ? "var(--ctx-hot)" : raw >= 0.6 ? "var(--ctx-warn)" : "var(--ctx-ok)" }; }
+function addGauge(n) {
+  const g = n.g;
+  n.tk = el("g", { "clip-path": "url(#" + n.cid + ")", "pointer-events": "none" }); g.insertBefore(n.tk, n.body);
+  n.rt = el("circle", { class: "gtrack", fill: "none", stroke: "var(--ink-2)", "stroke-opacity": ".35", "pointer-events": "none" }, g);
+  n.r1 = el("path", { fill: "none", "stroke-linecap": "butt", "pointer-events": "none" }, g);
+  n.r2 = el("path", { fill: "none", stroke: "var(--ink-1)", "pointer-events": "none" }, g);
+  n.rk = el("line", { class: "gtick", stroke: "var(--ink-1)", "stroke-width": "2", "pointer-events": "none" }, g);
+}
+/* context ring on a node: raw = ctx / bar (0..2), null = unknown (grey track only); shared by PM bubbles and the Architect hub (the owner 2026-10-24) */
+function paintGauge(n, r, raw) {
+  const gl = gaugeLaps(raw), rr = r + (r < 14 ? 2.5 : 3.5), sw = r < 14 ? 3 : 4.5, k2 = Math.round(rr * 2) + ":" + (raw == null ? "n" : Math.round(raw * 100));
+  if (n.gKey !== k2) {
+    n.gKey = k2;
+    n.rt.setAttribute("r", rr); n.rt.setAttribute("stroke-width", sw);
+    n.r1.setAttribute("d", gl ? lapPath(rr, gl.l1) : ""); n.r1.setAttribute("stroke", gl ? gl.c : "none"); n.r1.setAttribute("stroke-width", sw);
+    n.r2.setAttribute("d", gl ? lapPath(rr, gl.l2) : ""); n.r2.setAttribute("stroke-width", (sw * 0.4).toFixed(1));
+    n.rk.setAttribute("y1", -(rr - sw / 2 - 1.5)); n.rk.setAttribute("y2", -(rr + sw / 2 + 1.5));
+  }
+  n.ring.setAttribute("r", rr + sw / 2 + 3);   /* the slow dashed ring sits outside the gauge */
+}
+/* task pie on a node's body (PM bubbles and the Architect hub share it) */
+function paintPie(n, tasks, r) {
+  const sl = pieSlices(tasks), key = sl.map((s) => s.st + s.n).join() + "|" + Math.round(r * 2);
+  n.body.setAttribute("fill", sl.length ? "none" : "var(--surface-1)");   /* the task pie shows through the body outline */
+  if (n.tkKey !== key) {
+    n.tkKey = key; n.tk.replaceChildren();
+    const R = r * 1.02, tot = sl.reduce((a, s) => a + s.n, 0);
+    if (sl.length === 1) el("circle", { r: R, fill: TSK_C[sl[0].st] || "var(--ink-2)", "fill-opacity": ".9" }, n.tk);   /* one task or one state: a solid bubble */
+    else { let a = 0; sl.forEach((s) => { const b = a + 2 * Math.PI * s.n / tot; el("path", { d: sectorPath(R, a, b), fill: TSK_C[s.st] || "var(--ink-2)", "fill-opacity": ".88", stroke: "var(--surface-0)", "stroke-width": "2" }, n.tk); a = b; }); }
+  }
+}
+function paintPM(p, spin) {
+  const n = p.node, h = p.h, r = p.r;
+  paint(n, h.ps, "circle", r, spin, null);
+  paintProgress(p);
+  paintGauge(n, r, ctxRaw(h.ctx));
+}
+
+/* ---------- task slices, progress width, summary card (the owner 2026-10-29, ar-G01) ----------
+   A session pie has one slice per open task of that session (sorted by task id, clockwise from 12). Each task has one colour of the 12-colour palette (--pal-1..12 in tokens.css),
+   chosen by a hash of the task id; inside one pie no two slices share a colour while the pie has 12 or fewer, and neighbours never do beyond that.
+   Progress is the radial width of the fill: a faint core at 0%, the filled radius growing to the rim near 100%. No number is printed in the pie; the summary card carries it.
+   Data: GET /api/sessions + /api/items?status=open + /api/step_progress (the dashboard store, read-only), reduced with the State page's own functions above
+   (sessionRollup / taskProgress / etaProgress): a task's own steps or progress.pct; a session with no open task but its own progress figure gets one slice. */
+const PAL_N = 12, PROG_MS = 15000, SLICE_MAX = 12;
+function hash32(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+/* pure: palette slot 0..11 per id, in the given order; preferred slot = hash(id) % 12, probed forward to an unused one (all distinct up to 12), then to one that differs from its neighbours */
+function taskSlots(ids) {
+  const out = [], used = new Set();
+  ids.forEach((id, i) => {
+    const s0 = hash32(String(id)) % PAL_N, wrapLast = i === ids.length - 1 && ids.length > 2; let pick = s0;
+    for (let k = 0; k < PAL_N; k++) {
+      const s = (s0 + k) % PAL_N;
+      if (used.size < PAL_N ? !used.has(s) : s !== out[i - 1] && !(wrapLast && s === out[0])) { pick = s; break; }
+    }
+    out.push(pick); used.add(pick);
+  });
+  return out;
+}
+/* pure: per session {pct, tasks, slices:[{id,title,pct,done,total,inherited,note,updated}], note, updated} from store docs; pct null = not tracked (never drawn as 0).
+   A lone task with no figure of its own inherits the session's progress (inherited:true). */
+function buildProgress(sessions, items, stepDocs, nowMs) {
+  const maps = {};
+  stepDocs.forEach((d) => { const s = d && d.data && d.data.steps; maps[d.id] = s && typeof s === "object" && !Array.isArray(s) ? s : {}; });
+  const by = {};
+  sessions.forEach((s) => {
+    const name = txt(s.name); if (!name) return;
+    const tasks = items.filter((i) => i.kind === "task" && i.status === "open" && !isParked(i) && txt(i.session) === name)
+      .sort((a, b) => (txt(a.id) < txt(b.id) ? -1 : txt(a.id) > txt(b.id) ? 1 : 0));
+    const roll = sessionRollup(s, tasks, (id) => maps[id]);
+    const slices = tasks.map((t) => {
+      const tp = taskProgress(t, maps[t.id]), ep = etaProgress(t, true, nowMs), st = Array.isArray(t.steps) && t.steps.length;
+      const stamps = [t.status_at, t.updated].map((x) => Date.parse(x || "")).filter((x) => !isNaN(x));
+      let pct = tp ? tp.pct : ep ? ep.pct : null, inherited = false;
+      if (pct == null && tasks.length === 1 && roll.pct != null) { pct = roll.pct; inherited = true; }
+      return { id: txt(t.id), title: txt(t.title), pct, inherited, done: tp && st ? Math.round(tp.done) : null, total: tp && st ? tp.total : null, note: txt(t.status_note), updated: stamps.length ? new Date(Math.max.apply(null, stamps)).toISOString() : "" };
+    });
+    by[name] = { pct: roll.pct, tasks: tasks.length, slices: slices.slice(0, SLICE_MAX), more: Math.max(0, slices.length - SLICE_MAX), note: txt(s.summary), updated: txt(s.updated) };
+  });
+  return by;
+}
+const PROG = { by: {}, ok: false, err: "" };
+const progOf = (name) => PROG.by[name] || null;
+/* the slices drawn for a session: its open tasks, else one slice for its own progress figure (or one empty track when it has none) */
+function pgSlices(h) {
+  const pr = progOf(h.name);
+  if (pr && pr.slices.length) return pr.slices;
+  return [{ id: "session:" + h.name, title: "", pct: pr ? pr.pct : null, session: true }];
+}
+async function loadProgress() {
+  if (DEMO) { PROG.by = demoProgress(); PROG.ok = true; return; }
+  try {
+    const get = async (p) => { const r = await fetch(p, { cache: "no-store" }); if (!r.ok) throw new Error(p + " HTTP " + r.status); return (await r.json()).docs || []; };
+    const [ss, its, sp] = await Promise.all([get("/api/sessions"), get("/api/items?status=open"), get("/api/step_progress")]);
+    PROG.by = buildProgress(ss.map((d) => d.data || {}), its.map((d) => Object.assign({}, d.data, { id: d.id })), sp, Date.now());
+    PROG.ok = true; PROG.err = "";
+  } catch (e) { PROG.ok = false; PROG.err = String(e && e.message || e); }
+  if (!CARD.el.hidden) cardRender();
+}
+function demoProgress() {
+  const iso = (m) => new Date(Date.now() - m * 60000).toISOString(), sl = (id, title, pct, total, m) => ({ id, title, pct, inherited: false, done: total ? Math.round(pct * total / 100) : null, total: total || null, note: "Demo status for " + title, updated: iso(m) });
+  return { "tm-dogfood": { pct: 40, tasks: 3, slices: [sl("dt-a", "Demo task A (just started)", 5, 10, 4), sl("dt-b", "Demo task B (halfway)", 50, 6, 70), sl("dt-c", "Demo task C (nearly done)", 92, 12, 20)], more: 0, note: "Demo session summary.", updated: iso(3) },
+    "tm-mpm-utils-01": { pct: 35, tasks: 1, slices: [sl("dt-d", "Demo task D", 35, 6, 70)], more: 0, note: "Demo: one task.", updated: iso(70) },
+    "tm-apex-companion": { pct: 62, tasks: 0, slices: [], more: 0, note: "Demo: session progress only, no open task.", updated: iso(300) },
+    "tm-cto-reports": { pct: 94, tasks: 2, slices: [sl("dt-e", "Demo task E", 98, 0, 2), sl("dt-f", "Demo task F", 0, 4, 9)], more: 0, note: "Demo: nearly complete.", updated: iso(2) } };
+}
+
+/* summary card: hover (mouse, keyboard focus) shows it unpinned; a tap (touch) pins it. Over a slice it summarises that task, over the centre the session.
+   Esc or a tap elsewhere closes a pinned card. */
+const CARD = { el: $("sumcard"), pin: false, key: "", p: null, ang: null, x: 0, y: 0 };
+const PCT_CENTRE = 0.25;   /* the centre zone's radius as a share of the pie's */
+function sliceAt(p, ang) {   /* the slice under angle ang (radians clockwise from 12), or null = centre or a lone session slice */
+  const sl = pgSlices(p.h);
+  if (ang == null || (sl.length === 1 && sl[0].session)) return null;
+  return sl[Math.min(sl.length - 1, Math.floor(ang / (2 * Math.PI / sl.length)))];
+}
+const barHtml = (pct) => '<span class="sc-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(pct) + '" aria-label="Progress"><i style="width:' + Math.round(pct) + '%"></i></span>' + Math.round(pct) + "%";
+function cardRender() {
+  const p = CARD.p, h = p.h, pr = progOf(h.name), sl = sliceAt(p, CARD.ang), row = (k, v) => "<dt>" + k + "</dt><dd>" + v + "</dd>";
+  const goal = h.goal ? esc(h.goal) + (GOALS[h.goal] ? " &middot; " + esc(GOALS[h.goal]) : "") : "none";
+  const all = pgSlices(h), slots = taskSlots(all.map((s) => s.id));
+  let head, rows;
+  if (sl) {   /* one task */
+    const prog = sl.pct == null ? "not tracked (no steps or progress set)" : barHtml(sl.pct) + (sl.total ? " &middot; " + sl.done + "/" + sl.total + " steps" : "") + (sl.inherited ? " (session figure)" : "");
+    const note = sl.note || (pr && pr.note) || h.now;
+    CARD.el.style.setProperty("--pc", "var(--pal-" + (slots[all.indexOf(sl)] + 1) + ")");
+    head = esc(ellip(sl.title || sl.id, 120));
+    rows = row("Session", esc(h.name)) + row("Goal", goal) + row("Progress", prog) + row("Status", '<span class="sc-st">' + esc(ellip(note || "no status line", 220)) + "</span>") + row("Updated", (sl.updated && agoText(sl.updated, Date.now())) || "unknown");
+  } else {   /* the session */
+    const pct = pr ? pr.pct : null, n = pr ? pr.tasks : 0;
+    const tasks = n ? n + " open" + (pr.slices.length ? ": " + pr.slices.slice(0, 4).map((s) => esc(ellip(s.title || s.id, 36)) + (s.pct == null ? "" : " " + Math.round(s.pct) + "%")).join("; ") + (n > 4 ? "; &hellip;" : "") : "") : pr ? "no open task item; session figure and summary below" : PROG.ok ? "no task data" : "task data unavailable";
+    CARD.el.style.setProperty("--pc", "var(--ink-2)");
+    head = esc(h.name);
+    rows = row("Goal", goal) + row("Tasks", tasks) + row("Progress", pct == null ? "not tracked (no steps or progress set)" : barHtml(pct)) + row("Status", '<span class="sc-st">' + esc(ellip((pr && pr.note) || h.now || "no status line", 220)) + "</span>") +
+      row("Updated", (pr && pr.updated && agoText(pr.updated, Date.now())) || (h.idle != null ? "idle " + h.idle + " min" : "unknown"));
+  }
+  CARD.el.style.setProperty("--sc-c0", "30%");
+  CARD.el.innerHTML = '<div class="sc-head"><span class="sc-sw" aria-hidden="true"></span><b class="sc-name">' + head + "</b></div><dl>" + rows + "</dl>" +
+    (CARD.pin ? '<button type="button" class="ctl sc-open" id="scopen">Open session</button>' : "");
+  CARD.el.classList.toggle("pin", CARD.pin);
+  cardPlace();
+}
+function cardPlace() {
+  const c = CARD.el, w = c.offsetWidth, ht = c.offsetHeight, vw = document.documentElement.clientWidth || innerWidth;
+  const above = CARD.y - ht - 12 >= 4;
+  c.style.left = Math.max(4, Math.min(vw - w - 4, CARD.x + 12)) + "px";
+  c.style.top = Math.max(4, Math.min(innerHeight - ht - 4, above ? CARD.y - ht - 12 : CARD.y + 16)) + "px";
+}
+function showCard(p, x, y, pin, ang) {
+  const sl = sliceAt(p, ang), key = p.h.name + "|" + (sl ? sl.id : "") + "|" + pin, same = CARD.key === key && !CARD.el.hidden;
+  CARD.p = p; CARD.key = key; CARD.pin = pin; CARD.ang = ang; CARD.x = x; CARD.y = y; CARD.el.hidden = false;
+  if (same) cardPlace(); else cardRender();
+}
+function hideCard(force) { if (CARD.pin && !force) return; CARD.el.hidden = true; CARD.pin = false; CARD.key = ""; CARD.el.classList.remove("pin"); }
+CARD.el.addEventListener("click", (e) => { if (e.target.closest("#scopen") && CARD.p) { const p = CARD.p; hideCard(true); pmClick(p); } });
+document.addEventListener("pointerdown", (e) => { if (CARD.pin && !e.target.closest("#sumcard") && !(CARD.p && CARD.p.node.g.contains(e.target))) hideCard(true); }, true);
+
+/* PM pie: one sector per task. Each sector: a faint track out to the rim, and a progress fill of radius R*(0.2 + 0.8*f) that runs radially from a faint centre to a stronger edge;
+   both ends strengthen with f, so 0 = a faint core and ~100 = nearly solid colour to the rim. Unknown progress = the track only (never drawn as 0). */
+const mixPc = (pct) => "color-mix(in srgb,var(--pc) " + pct + "%,var(--surface-1))";
+function paintProgress(p) {
+  const n = p.node, sl = pgSlices(p.h), N = sl.length, slots = taskSlots(sl.map((s) => s.id)), R = p.r * 1.02;
+  const key = sl.map((s, i) => s.id + ":" + s.pct + ":" + slots[i]).join() + "|" + Math.round(R * 2);
+  n.body.setAttribute("fill", "none");
+  if (n.pgKey === key) return;
+  n.pgKey = key; n.tk.replaceChildren();
+  sl.forEach((s, i) => {
+    const a0 = 2 * Math.PI * i / N, a1 = 2 * Math.PI * (i + 1) / N, g = el("g", {}, n.tk), shape = (r) => N === 1 ? el("circle", { r }, g) : el("path", { d: sectorPath(r, a0, a1) }, g);
+    g.style.setProperty("--pc", "var(--pal-" + (slots[i] + 1) + ")");
+    const tr = shape(R); tr.style.fill = mixPc(16);
+    if (s.pct != null) {
+      const f = Math.max(0, Math.min(1, s.pct / 100)), Rp = R * (0.2 + 0.8 * f), gid = n.cid + "g" + i, gr = el("radialGradient", { id: gid, gradientUnits: "userSpaceOnUse", cx: 0, cy: 0, r: Rp }, g);
+      el("stop", { offset: 0 }, gr).style.stopColor = mixPc(Math.round(12 + 58 * f));
+      el("stop", { offset: 1 }, gr).style.stopColor = mixPc(Math.round(30 + 70 * f));
+      shape(Rp).setAttribute("fill", "url(#" + gid + ")");
+    }
+    if (N > 1) { const sep = el("path", { d: "M0 0L" + (R * Math.sin(a0)).toFixed(2) + " " + (-R * Math.cos(a0)).toFixed(2), fill: "none", "stroke-width": 1.6 }, g); sep.style.stroke = "var(--surface-0)"; }
+  });
+}
+
 /* the Architect hub: counts every message in the window */
-const hub = { r: 40, tr: 40, cnt: 0, out: 0, inn: 0 };
-hub.node = mkNode(() => "The Architect | " + hub.cnt + " messages in last 10 min | out " + hub.out + " | in " + hub.inn, () => selectNode({ name: ARCH, label: "Architect", hub: true }));
-hub.node.g.dataset.key = "hub";
+const trunk = el("line", { class: "alink", display: "none" }, gL);
+const hub = { r: 40, x: 0, y: 0, tr: 40, cnt: 0, out: 0, inn: 0, ctx: null, bar: 250, tasks: [] };
+hub.node = mkNode(() => "The Architect | " + (hub.ctx == null ? "ctx n/a" : "ctx " + Math.round(hub.ctx) + "k of " + Math.round(hub.bar) + "k (" + Math.round(hub.ctx / hub.bar * 100) + "%)") + " | " + hub.cnt + " messages in last 10 min | " + taskTxt(hub.tasks) + " | out " + hub.out + " | in " + hub.inn, () => FOC.name ? exitFocus() : selectNode({ name: ARCH, label: "Architect", hub: true }));
+hub.node.g.dataset.key = "hub"; addGauge(hub.node);
 hub.dg = docMark({ name: ARCH, label: "Architect", hub: true });
-hub.node.ring.setAttribute("stroke", "none");
-hub.lbl = el("text", { class: "lbl" }, gS); hub.lbl.textContent = "Architect";
+hub.lbl = el("text", { class: "lbl" }, gS); hub.lbl.textContent = "Architect"; hub.lbl.addEventListener("click", () => { if (FOC.name && hub.lbl.classList.contains("hit")) exitFocus(); });
 
 /* ---------- model ingest ---------- */
 const PMS = [];
@@ -294,48 +719,63 @@ const msgKey = (m) => m.epoch + "|" + m.dir + "|" + m.session + "|" + m.text.sli
 function mkPm(h) {
   const p = { h, r: 18, tr: 18, x: 0, y: 0, out: 0, inn: 0, cnt: 0, off: null };
   p.link = el("line", { class: "link" }, gL);
-  p.node = mkNode(() => h.name + " | " + PSL[h.ps] + " | " + running(h) + "/" + h.agents.length + " agents running | " + p.cnt + " msgs in 10 min | " + (h.ctx != null ? "ctx " + h.ctx + "k" : "ctx n/a"), () => selectNode({ name: h.name, label: h.name, h: h.name }));
-  p.node.g.dataset.key = "h:" + h.name;
-  p.lbl = el("text", { class: "lbl" }, gS); p.lbl.textContent = h.name; p.dg = docMark({ name: h.name, label: h.name, h: h.name });
+  p.lo = el("line", { class: "lane", stroke: "var(--msg-out)", "marker-end": "url(#ah-out)", display: "none" }, gL);   /* Architect -> PM */
+  p.li = el("line", { class: "lane", stroke: "var(--msg-in)", "marker-end": "url(#ah-in)", display: "none" }, gL);    /* PM -> Architect */
+  p.node = mkNode(() => h.name + " | " + pmLabel(h) + " | " + running(h) + "/" + h.agents.length + " agents running | " + p.cnt + " msgs in 10 min | " + ctxTxt(h.ctx) + " | " + taskTxt(h.tasks), () => pmClick(p), () => p);
+  addGauge(p.node); p.node.g.dataset.key = "h:" + h.name;
+  p.lbl = el("text", { class: "lbl" }, gS); p.lbl.textContent = h.name; p.lbl.addEventListener("click", () => { if (p.lbl.classList.contains("hit")) pmClick(p); }); p.dg = docMark({ name: h.name, label: h.name, h: h.name });
   return p;
 }
 function mkAgent(a) {
-  a.node = mkNode(() => a.type + " | " + (a.task || "") + " | " + PSL[a.ps] + " | " + kt(a.tok) + " tokens | " + mmss(elapsed(a)), () => selectNode({ name: a.h.name, label: a.type + " \u00b7 " + a.h.name, h: a.h.name, a: a.id }));
-  a.node.g.dataset.key = "a:" + a.id; a.p = 0; a.leaving = false; a.off = null;
+  a.node = mkNode(() => a.type + " (" + baseClass(a.type) + ") | " + (a.task || "") + " | " + PSL[a.ps] + " | " + kt(a.tok) + " tokens | " + ctxTxt(a.ctx) + " | " + mmss(elapsed(a)), () => selectNode({ name: a.h.name, label: a.type + " \u00b7 " + a.h.name, h: a.h.name, a: a.id }));
+  a.node.g.dataset.key = "a:" + a.id; a.p = 0; a.leaving = false; a.off = null; a.x = a.y = 0; a.rr = 4;
+  a.link = el("line", { class: "alink" }, gL);
+  a.dg = docMark({ name: a.h.name, label: a.type + " \u00b7 " + a.h.name, h: a.h.name, a: a.id });
 }
-function emitPulse(p, dir, blk) {
-  if (REDUCE.matches) return;
-  const g = el("g", {}, gP);
-  el("line", { x1: -18, x2: 0, y1: 0, y2: 0, stroke: dir === "out" ? "var(--out)" : blk ? "var(--blk)" : "var(--in)", "stroke-width": blk ? 3 : 2, "stroke-linecap": "round", opacity: 0.45 }, g);
-  if (dir === "out") el("circle", { r: 4.5, fill: "var(--out)", stroke: "var(--surface)", "stroke-width": 1 }, g);
-  else el("path", { d: blk ? "M11 0L-7 -8L-7 8Z" : "M7 0L-5 -5L-5 5Z", fill: blk ? "var(--blk)" : "var(--in)", stroke: "var(--surface)", "stroke-width": 1 }, g);
-  pulses.push({ p, dir, blk, t0: simT, dur: blk ? 2400 : 1700, g });
+/* a message in or out: an arrow travels the edge in the message's direction. agent given = PM<->subagent (derived: spawn = out, finish = in) */
+function agentIcon(a, r) {
+  const n = a.node, cls = baseClass(a.type);
+  n.ico.setAttribute("display", r >= 5 ? "inline" : "none");
+  if (n.icls !== cls) { n.icls = cls; n.ih.setAttribute("d", ICONS[cls]); n.im.setAttribute("d", ICONS[cls]); }
+  n.ico.setAttribute("transform", "scale(" + (r / 17).toFixed(3) + ") translate(-12 -12)");
+}
+function emitPulse(p, dir, blk, agent) {
+  if (REDUCE.matches || !p) return;
+  const g = el("g", {}, gP), c = dir === "out" ? "var(--msg-out)" : blk ? "var(--msg-blocker)" : "var(--msg-in)", z = blk ? 1.4 : 1;
+  el("line", { x1: -20 * z, x2: 0, y1: 0, y2: 0, stroke: c, "stroke-width": blk ? 3 : 2, "stroke-linecap": "round", opacity: 0.45 }, g);
+  el("path", { d: "M" + 9 * z + " 0L" + -5 * z + " " + -6 * z + "L" + -5 * z + " " + 6 * z + "Z", fill: c, stroke: "var(--surface-1)", "stroke-width": 1 }, g);
+  pulses.push({ p, a: agent || null, dir, blk, t0: simT, dur: blk ? 2600 : 1900, g });
 }
 function ingest(snap) {
   skew = snap.epoch - Date.now() / 1000;
   const at = Date.now(), names = new Set(snap.sessions.map((s) => s.name));
+  const ar = snap.architect || {}; hub.ctx = ar.ctx_k == null ? null : ar.ctx_k; hub.bar = ar.bar_k || CTX_FULL_K; hub.tasks = ar.tasks || []; hub.st = ar.state || "ok";
   snap.sessions.forEach((s) => {
     let h = findH(s.name);
     if (!h) { h = { name: s.name, agents: [], asked: [], reported: [] }; HARNESSES.push(h); PMS.push(mkPm(h)); }
     if (s.goal && s.goal_title) GOALS[s.goal] = s.goal_title;
-    Object.assign(h, { goal: s.goal, ps: s.state, idle: s.idle_min, ctx: s.ctx_k == null ? null : Math.round(s.ctx_k), now: s.summary, tok1h: s.tokens_1h || 0 });
+    const st4 = ST4[s.status] ? s.status : PSL[s.state];
+    if (h.ps !== undefined && h.st4 !== st4) logTo(h, nowS(), pmLabel(h) + " -> " + st4);
+    Object.assign(h, { st4: st4, goal: s.goal, ps: s.state, idle: s.idle_min, ctx: s.ctx_k == null ? null : Math.round(s.ctx_k), tasks: s.tasks || [], now: s.summary, tok1h: s.tokens_1h || 0 });
     const ids = new Set();
     s.agents.forEach((x) => {
       ids.add(x.id);
       let a = h.agents.find((y) => y.id === x.id);
-      if (!a) { a = { id: x.id, h }; h.agents.push(a); mkAgent(a); }
+      if (!a) { a = { id: x.id, h }; h.agents.push(a); mkAgent(a); logTo(a, nowS(), "seen " + PSL[x.state]); if (!firstPoll) emitPulse(PMS.find((q) => q.h === h), "out", false, a); }
+      else if (a.ps !== x.state) { logTo(a, nowS(), PSL[a.ps] + " -> " + PSL[x.state]); if (x.state === "done" && !firstPoll) emitPulse(PMS.find((q) => q.h === h), "in", false, a); }
       a.leaving = false;
-      Object.assign(a, { type: x.type, task: x.task, act: x.act, ps: x.state, tok: x.tokens, el: x.elapsed_s, at, branch: x.branch });
+      Object.assign(a, { type: x.type, task: x.task, act: x.act, ps: x.state, tok: x.tokens, el: x.elapsed_s, at, branch: x.branch, ctx: x.ctx_k == null ? null : x.ctx_k, tev: x.events || [] });
     });
     h.agents.forEach((a) => { if (!ids.has(a.id)) a.leaving = true; });
   });
   for (let i = HARNESSES.length - 1; i >= 0; i--) {
     if (names.has(HARNESSES[i].name)) continue;
     const h = HARNESSES[i], pi = PMS.findIndex((p) => p.h === h), p = PMS[pi];
-    h.agents.forEach((a) => a.node.g.remove()); p.node.g.remove(); p.lbl.remove(); p.link.remove(); p.dg.remove();
+    h.agents.forEach((a) => { a.node.g.remove(); a.link.remove(); a.dg.remove(); }); p.node.g.remove(); p.lbl.remove(); p.link.remove(); p.lo.remove(); p.li.remove(); p.dg.remove();
     PMS.splice(pi, 1); HARNESSES.splice(i, 1);
     if (ui.h === h.name) { ui.h = ui.a = null; }
   }
+  try { localStorage.setItem("architect-live-pal", JSON.stringify(PALMAP)); } catch (_) {}
   HARNESSES.forEach((h) => { h.asked = []; h.reported = []; });
   snap.messages.forEach((m) => {
     const h = findH(m.session); if (!h) return;
@@ -349,36 +789,46 @@ function ingest(snap) {
   if (seen.size > 2000) { const keep = new Set(snap.messages.map(msgKey)); seen.clear(); keep.forEach((k) => seen.add(k)); }
   HARNESSES.forEach((h) => { h.asked.reverse(); h.reported.reverse(); h.asked = h.asked.slice(0, 8); h.reported = h.reported.slice(0, 8); });
   firstPoll = false;
+  layout();   /* the narrow scene height follows the PM count */
   const miss = Object.entries(snap.sources).filter((x) => x[1] !== "ok").map((x) => x[0] + ": " + (x[1] === "missing" ? "unavailable" : "none in window"));
   $("srcs").textContent = miss.length ? "Sources not live: " + miss.join(" · ") : "All sources live.";
   $("conn").textContent = (DEMO ? "demo · " : "live · ") + clock(snap.epoch).slice(0, 5) + "Z";
   $("conn").classList.remove("off");
   renderAll();
   side.snap = snap; renderSide();
+  loadState(null);
 }
 
 
 /* ---------- side panel: Events and Docs (ar-Tea) ---------- */
-const ARCH = "tm-architect";   /* the session name docs and events carry for the Architect */
 const side = { f: null, tab: "ev", snap: null };
 if (new URLSearchParams(location.search).get("embed") === "1") document.documentElement.classList.add("embed");
 const segsOf = (p) => String(p).split("/").map(encodeURIComponent).join("/");
 /* node filter (click a node): the Architect sees every message and its own docs; a session or agent sees its session's rows */
 const evOf = (snap) => side.f && !side.f.hub ? snap.messages.filter((m) => m.session === side.f.name) : snap.messages;
-const docsOf = (snap) => side.f ? (snap.docs || []).filter((x) => x.session === side.f.name) : (snap.docs || []);
+/* an agent node shows only what that agent changed; a PM shows its session's rows (its agents' too); no filter = newest per file */
+function docsOf(snap) {
+  const all = snap.docs || [];
+  if (!side.f) { const seenP = new Set(); return all.filter((x) => !seenP.has(x.full) && seenP.add(x.full)); }
+  return side.f.a ? all.filter((x) => x.agent === side.f.a) : all.filter((x) => x.session === side.f.name);
+}
+/* ev rows for the selected node: messages (PM/hub), tool events (agent), status changes and agent lifecycle (client log); newest first */
+function nodeEvents(snap) {
+  const f = side.f;
+  if (f && f.a) { const a = findA(f.a); return a ? (a.tev || []).filter((e) => e.epoch).map((e) => ({ epoch: e.epoch, kind: "tool", text: e.tool + (e.file ? " " + e.file : "") })).concat(a.log || []) : []; }
+  const h = f && !f.hub && findH(f.name);
+  const logs = h ? (h.log || []).concat(...h.agents.map((a) => (a.log || []).map((l) => ({ epoch: l.epoch, kind: "status", text: a.type + " " + l.text })))) : [];
+  return evOf(snap).map((m) => ({ epoch: m.epoch, dir: m.dir, session: m.session, kind: m.kind, text: m.text, msg: true })).concat(logs);
+}
 function docCounts(snap) { const c = {}; (snap.docs || []).forEach((x) => { c[x.session] = (c[x.session] || 0) + 1; }); return c; }
 function setTab(tab) { side.tab = tab; document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === tab))); }
 function renderFbar() {
   const f = side.f, b = $("fbar"); b.hidden = !f;
-  b.innerHTML = f ? '<button class="fchip" data-fclear="1" aria-label="Clear filter ' + esc(f.label) + '">' + esc(f.label) + ' <b aria-hidden="true">&times;</b></button>' + (f.h ? '<button class="fdet" data-fdet="1">Details</button>' : "") : "";
+  b.innerHTML = f ? '<button class="fchip" data-fclear="1" aria-label="Clear filter ' + esc(f.label) + '">' + esc(f.label) + ' <b aria-hidden="true">&times;</b></button>' + (f.h ? '<button class="ctl fdet" data-fdet="1">Details</button>' : "") : "";
 }
 function selectNode(f, tab) {
   side.f = f;
-  if (tab) setTab(tab);   /* the doc glyph opens the Docs tab */
-  else if (side.snap) {
-    const nd = docsOf(side.snap).length, ne = evOf(side.snap).length;
-    setTab(!ne && nd ? "docs" : "ev");
-  }
+  setTab(tab || "ev");   /* a node click opens its events; only the doc icon opens Docs */
   setSide(true); renderFbar(); renderSide(); hideTip();
 }
 function clearFilter() { if (!side.f) return; side.f = null; renderFbar(); renderSide(); }
@@ -391,20 +841,47 @@ function docMark(f) {
   return g;
 }
 function sideEvents(snap) {
-  const rows = evOf(snap).slice().reverse().slice(0, 80);
+  const rows = nodeEvents(snap).sort((x, y) => y.epoch - x.epoch).slice(0, 80);
   return rows.length ? rows.map((m) => {
+    if (!m.msg) return '<div class="msg"><time title="' + agoTxt(m.epoch) + '">' + clock(m.epoch) + '</time><p><span class="k ' + (m.kind === "tool" ? "tool" : "stat") + '">' + esc(m.kind) + "</span>" + esc(m.text) + "</p></div>";
     const arch = m.dir === "out";
     return '<div class="msg"><time title="' + agoTxt(m.epoch) + '">' + clock(m.epoch) + '</time><p><span class="who">' + (arch ? "Architect &rarr; " + esc(m.session) : esc(m.session) + " &rarr; Architect") + '</span><span class="k ' + (arch ? "arch" : "sess") + '">' + (arch ? "Architect" : esc(m.kind || "msg")) + "</span>" + (arch ? '<span class="k">' + esc(m.kind || "relay") + "</span>" : "") + esc(m.text) + "</p></div>";
-  }).join("") : '<div class="empty">' + (side.f ? "No messages for " + esc(side.f.label) + " in the last 30 min." : "No messages in the last 30 min.") + "</div>";
+  }).join("") : '<div class="empty">' + (side.f ? "No events for " + esc(side.f.label) + " yet." : "No messages in the last 30 min.") + "</div>";
 }
+function diffHtml(t) {
+  return t ? t.split("\n").map((l) => '<span class="' + (l.startsWith("+") && !l.startsWith("+++") ? "ad" : l.startsWith("-") && !l.startsWith("---") ? "rm" : l.startsWith("@@") ? "hk" : "") + '">' + esc(l) + "</span>").join("\n") : "(no textual change recorded)";
+}
+/* the owner 2026-10-25: one link per file opens one full-screen viewer (doc or code) with a Diff toggle; the per-row diff toggle is gone */
+const diffs = {};   /* doc id -> {text, err}: the latest change from /api/harness/diff */
+const VW = { id: null, diff: false, ret: null };
 function sideDocs(snap) {
   const d = docsOf(snap);
-  return d.length ? d.map((x) => {
-    const tip = 'title="' + esc(x.full || x.path) + '"';   /* full path only as the hover title */
-    return x.view ? '<a class="dlink" ' + tip + ' href="/#doc/' + encodeURIComponent(x.view.project) + "/" + segsOf(x.view.rel) + '" target="_top">' + esc(x.title || x.rel) + "</a>"
-      : '<span class="dlink" ' + tip + ">" + esc(x.title || x.rel) + "</span>";   /* outside every reader root: no link to break */
-  }).join("") : '<div class="empty">' + (side.f ? "No Markdown docs from " + esc(side.f.label) + " in the last 24 h." : "No Markdown docs modified in the last 24 h.") + "</div>";
+  return d.length ? d.map((x) => '<div class="drow"><a class="dlink" href="#" data-view="' + esc(x.id) + '" title="' + esc(x.full || x.path) + '">' + esc(x.title || x.rel) + "</a>" + '<span class="k loc" title="physical lines in the current file">' + (typeof x.loc === "number" ? x.loc + " LOC" : "\u2014") + "</span>" + (x.kind === "code" ? '<span class="k" title="code file">code</span>' : "") + "</div>").join("")
+    : '<div class="empty">' + (side.f ? "No modified files from " + esc(side.f.label) + " in the last 24 h." : "No files modified in the last 24 h.") + "</div>";
 }
+async function loadDiff(id) {
+  const df = diffs[id] || (diffs[id] = {});
+  if (df.text != null || df.err) return;
+  if (DEMO) { df.text = "@@ -1 +1 @@\n-old line\n+new line"; return; }
+  try { const r = await fetch("/api/harness/diff?id=" + encodeURIComponent(id), { cache: "no-store" }); if (!r.ok) throw new Error("HTTP " + r.status); df.text = (await r.json()).diff || ""; }
+  catch (e) { df.err = "Diff unavailable (server restarted or change aged out)."; }
+}
+const docById = (id) => ((side.snap && side.snap.docs) || []).find((x) => x.id === id);
+async function renderViewer() {
+  const x = docById(VW.id), b = $("vbody"); if (!x) return;
+  $("vtitle").textContent = (x.title || x.rel) + " - " + (x.full || x.path); $("vdiff").setAttribute("aria-pressed", String(VW.diff));
+  const id = VW.id, dm = VW.diff;
+  if (dm || !x.view) {   /* diff, or a code file outside every reader root: the server serves only the change, so code shows the changed lines */
+    b.innerHTML = '<pre class="dtext">Loading...</pre>'; await loadDiff(id); if (VW.id !== id || VW.diff !== dm) return;
+    const df = diffs[id], t = df.text;
+    b.innerHTML = '<pre class="dtext">' + (df.err ? esc(df.err) : dm ? diffHtml(t) : esc(t.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1)).join("\n") || "(no content recorded)")) + "</pre>";
+  } else b.innerHTML = '<iframe title="' + esc(x.title || x.rel) + '" src="/#doc/' + encodeURIComponent(x.view.project) + "/" + segsOf(x.view.rel) + '"></iframe>';   /* the dashboard's own doc renderer */
+}
+function openViewer(id) { VW.id = id; VW.diff = false; VW.ret = document.activeElement; $("viewer").hidden = false; renderViewer(); $("vclose").focus(); }
+function closeViewer() { if ($("viewer").hidden) return; $("viewer").hidden = true; $("vbody").innerHTML = ""; VW.id = null; if (VW.ret && VW.ret.focus) VW.ret.focus({ preventScroll: true }); }
+$("vdiff").addEventListener("click", () => { VW.diff = !VW.diff; renderViewer(); });
+$("vclose").addEventListener("click", closeViewer);
+$("viewer").addEventListener("click", (e) => { if (e.target === $("viewer")) closeViewer(); });   /* a click outside the content closes it */
 function renderSide() {
   const snap = side.snap, b = $("sbody"); if (!snap) return;
   const nd = docsOf(snap).length;
@@ -422,53 +899,180 @@ svg.addEventListener("click", (e) => { if (!e.target.closest(".node")) clearFilt
 $("side").addEventListener("click", (e) => {
   const t = e.target.closest("button,a"); if (!t) return;
   if (t.dataset.tab) { setTab(t.dataset.tab); renderSide(); }
+  else if (t.dataset.view) { e.preventDefault(); openViewer(t.dataset.view); }
 });
-function setSide(open) { $("side").hidden = !open; document.body.classList.toggle("sideopen", open); $("sidebtn").setAttribute("aria-pressed", String(open)); }
+function setSide(open) { $("side").hidden = !open; $("sopen").hidden = open; document.body.classList.toggle("sideopen", open); $("sidebtn").setAttribute("aria-pressed", String(open)); }
 $("sidebtn").addEventListener("click", () => setSide($("side").hidden));
 $("sclose").addEventListener("click", () => setSide(false));
+$("sopen").addEventListener("click", () => setSide(true));
 setSide(false);   /* closed by default (ar-Tf2); a node or doc-glyph click opens it */
 
 /* ---------- polling ---------- */
 let demoSeq = 0;
+const demoTasks = (i) => [[{ state: "factory" }, { state: "open" }, { state: "open" }, { state: "blocked" }], [{ state: "open" }], [{ state: "factory" }], [{ state: "open" }, { state: "done" }], [],
+  ["open", "open", "open", "blocked", "done", "done", "done", "done"].map((state) => ({ state }))][i].map((t, k) => Object.assign({ id: "dt" + k, title: "Demo task " + k }, t));
 function demoSnapshot() {
   const now = Math.floor(Date.now() / 1000), r = (n) => Math.floor(Math.random() * n), st = ["ok", "ok", "slow", "stop", "park"];
   demoSeq++;
   const names = ["tm-dogfood", "tm-mpm-utils-01", "tm-apex-companion", "tm-cto-reports", "tm-code-intelligence", "tm-things-01"];
   const types = ["rust-engineer", "typescript-engineer", "research", "code-critic"];
-  const sessions = names.map((n, i) => ({ name: n, goal: i < 3 ? "G01" : "G02", goal_title: i < 3 ? "Demo goal one" : "Demo goal two", state: st[(i + Math.floor(demoSeq / 4)) % st.length], raw_state: "working", idle_min: i * 7, ctx_k: 60 + i * 30, tokens_1h: 5000 * (6 - i), summary: "Demo data, not real.",
-    agents: i > 3 ? [] : [0, 1, 2].slice(0, 1 + ((i + demoSeq) % 3)).map((k) => ({ id: "d" + i + k, type: types[(i + k) % 4], task: "Demo task " + k, state: k ? "slow" : "ok", elapsed_s: 60 * (k + 1) + demoSeq * 3, tokens: 9000 * (k + 1) + demoSeq * 400, act: "Edit demo.rs", branch: "" })) }));
+  const sessions = names.map((n, i) => ({ name: n, goal: i < 3 ? "G01" : "G02", goal_title: i < 3 ? "Demo goal one" : "Demo goal two", state: st[(i + Math.floor(demoSeq / 4)) % st.length], raw_state: "working", idle_min: i * 7, ctx_k: i === 4 ? 290 : 60 + i * 30, tasks: demoTasks(i), tokens_1h: 5000 * (6 - i), summary: "Demo data, not real.",
+    agents: i > 3 ? [] : [0, 1, 2].slice(0, 1 + ((i + demoSeq) % 3)).map((k) => ({ id: "d" + i + k, type: types[(i + k) % 4], task: "Demo task " + k, state: k ? "slow" : "ok", elapsed_s: 60 * (k + 1) + demoSeq * 3, tokens: 9000 * (k + 1) + demoSeq * 400, act: "Edit demo.rs", branch: "", ctx_k: k === 1 ? null : 40 + 50 * k + i * 10, events: [{ epoch: now - 30, tool: "Edit", file: "demo.rs" }, { epoch: now - 10, tool: "Bash", file: "" }] })) }));
   const messages = [];
   if (demoSeq % 2) { const s = names[r(names.length)], inn = Math.random() < 0.5; messages.push({ ts: "", epoch: now, dir: inn ? "in" : "out", session: s, kind: inn ? (Math.random() < 0.3 ? "blocker" : "progress") : "relay", text: "Demo message " + demoSeq }); }
   demoMsgs.push(...messages); while (demoMsgs.length > 20) demoMsgs.shift();
-  const docs = [{ id: "demo1", path: "docs/briefs/demo.md", project: "demo", rel: "docs/briefs/demo.md", view: null, session: "tm-dogfood", tool: "Edit", ts: "", epoch: now - 120, n: 2 }];
-  return { epoch: now, sessions, messages: demoMsgs.slice(), docs, sources: { live: "ok", relays: "ok" } };
+  const docs = [{ id: "demo1", path: "docs/briefs/demo.md", full: "docs/briefs/demo.md", title: "Demo brief", kind: "doc", agent: "", project: "demo", rel: "docs/briefs/demo.md", view: null, session: "tm-dogfood", tool: "Edit", ts: "", epoch: now - 120, n: 2 },
+    { id: "demo2", path: "src/demo.rs", full: "src/demo.rs", title: "demo.rs", kind: "code", agent: "d00", project: "demo", rel: "src/demo.rs", view: null, session: "tm-dogfood", tool: "Edit", ts: "", epoch: now - 60, n: 1 }];
+  return { epoch: now, architect: { ctx_k: 205 + (demoSeq % 20), approach_k: 220, bar_k: 250, tasks: [{ id: "ar-T01", title: "Demo task one", state: "open" }, { id: "ar-T02", title: "Demo task two", state: "open" }, { id: "ar-T03", title: "Demo task three", state: "open" }] }, sessions, messages: demoMsgs.slice(), docs, sources: { live: "ok", relays: "ok" } };
 }
 const demoMsgs = [];
+/* Loading state (the owner 2026-10-26): shown until the first snapshot is ingested; later failures only flip the conn tag. err = message, null = loaded. */
+let loaded = false;
+function loadState(err) {
+  const el = $("lvload"); if (loaded) return;
+  if (err == null) { loaded = true; el.hidden = true; el.setAttribute("aria-busy", "false"); return; }
+  el.classList.add("err"); el.setAttribute("aria-busy", "false"); $("lvmsg").textContent = "Live view unavailable (" + err + ")."; $("lvretry").hidden = false;
+}
+$("lvretry").addEventListener("click", () => { const el = $("lvload"); el.classList.remove("err"); el.setAttribute("aria-busy", "true"); $("lvmsg").textContent = "Loading live view\u2026"; $("lvretry").hidden = true; poll(); });
+let inflight = false;   /* one fetch at a time: a slow mobile link must not stack polls (11 piled up and dropped together, 2026-10-25) */
+const FETCH_TIMEOUT_MS = 30000;
 async function poll() {
-  if (paused) return;
+  if (paused || inflight) return;
+  inflight = true;
+  const ac = new AbortController(), to = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
   try {
-    const snap = DEMO ? demoSnapshot() : await (await fetch("/api/harness", { cache: "no-store" })).json();
+    const snap = DEMO ? demoSnapshot() : await (await fetch("/api/harness", { cache: "no-store", signal: ac.signal })).json();
     if (!snap || !Array.isArray(snap.sessions)) throw new Error(snap && snap.error || "bad payload");
     ingest(snap);
+    if (FOCUS_Q && !FOC.name && PMS.some((q) => q.h.name === FOCUS_Q)) { enterFocus(FOCUS_Q); FOCUS_Q = null; }   /* ?focus=<session> deep link (also used by the tests) */
   } catch (e) {
-    $("conn").textContent = "offline"; $("conn").classList.add("off");
-  }
+    $("conn").textContent = "offline"; $("conn").classList.add("off");   /* timeout or error: show offline, the next tick retries */
+    loadState(e && e.name === "AbortError" ? "timed out" : e && e.message || "error");
+  } finally { clearTimeout(to); inflight = false; }
 }
 
 /* ---------- step + draw ---------- */
 const ease = (u) => u * u * (3 - 2 * u);
 /* fan placement: rank 0 at "12"; ranks alternate right, left; the last rank lands near "6". Pure function of rank and count. */
-function fanOffset(rank, n) {
+function fanOffset(rank, n, span) {
   if (n < 2) return 0;
-  const kmax = Math.ceil((n - 1) / 2), s = Math.PI / (kmax + 0.5), k = Math.ceil(rank / 2);
+  const kmax = Math.ceil((n - 1) / 2), s = (span || Math.PI) / (kmax + 0.5), k = Math.ceil(rank / 2);
   return (rank % 2 ? 1 : -1) * k * s;
 }
-/* rank by activity score; ties keep the previous order (no flapping) */
+/* active fan (the owner 2026-10-29: "bubbles sorted by token usage, biggest at top"): like fanOffset (rank 0 at 12, ranks alternate right, left) but every rank gets its own
+   angle step, so rank r sits strictly lower on screen than rank r-1: the two sides stagger and the sessions read top to bottom in size order. Same spacing per side as fanOffset. */
+function fanStagger(rank, n, span) {
+  if (n < 2) return 0;
+  const kmax = Math.ceil((n - 1) / 2), s = (span || Math.PI) / (kmax + 0.5);
+  return rank ? (rank % 2 ? 1 : -1) * (rank + 1) * kmax * s / n : 0;   /* rank 0 stays at 12; ranks 1.. step (rank+1) * kmax * s / n, the last at about the span */
+}
+/* active / inactive split. Signal: the state chip (h.ps). working (ok, slow) and waiting (stop) are active; idle, parked, finished are inactive;
+   a session with a running subagent is already forced to working upstream. Active sessions share the fan except a 6 o'clock gap; inactive ones are packed
+   into a tight arc inside that gap (spacing under a circle's width, so they overlap each other), never reaching the active span. */
+const isActive = (h) => h.st4 === "inactive" || h.st4 === "paused" ? false : h.ps === "ok" || h.ps === "slow" || h.ps === "stop" || running(h) > 0;
+const ACT_SPAN = 2.27, INACT_STEP = 0.05, INACT_HALF = 0.3;   /* rad: active fan half-angle (130 deg); inactive step; inactive arc half-width (17 deg) */
+function fanPlan(nA, nI) {
+  const act = [], ina = [];
+  for (let i = 0; i < nA; i++) act.push(fanStagger(i, nA, nI ? ACT_SPAN : Math.PI));
+  const st = nI > 1 ? Math.min(INACT_STEP, 2 * INACT_HALF / (nI - 1)) : 0;
+  for (let j = 0; j < nI; j++) ina.push(Math.PI + (j - (nI - 1) / 2) * st);
+  return { act, ina };
+}
+/* Label box of a PM (circle p at x,y radius r; ndoc = has the modified-files icon) and the push that keeps a subagent (circle rr plus its doc glyph) off it.
+   Pure, tested in node: a subagent whose fan angle lands on the label is moved outward along its ray until its footprint clears the box. */
+const labelBox = (x, y, r, len, ndoc) => ({ x0: x - len * 3.4 - 4, x1: x + len * 3.4 + 4 + (ndoc ? 22 : 0), y0: y + r + 3, y1: y + r + 22 });
+const agentRect = (x, y, rr, nd) => ({ x0: x - rr, x1: x + rr + (nd ? 16 : 0), y0: y - rr - (nd ? 10 : 0), y1: y + rr });
+const hits = (a, b, g) => a.x0 < b.x1 + g && b.x0 < a.x1 + g && a.y0 < b.y1 + g && b.y0 < a.y1 + g;
+function clearLabel(px, py, th, d0, rr, nd, box) {
+  let d = d0;
+  for (let i = 0; i < 60; i++) { if (!hits(agentRect(px + d * Math.cos(th), py + d * Math.sin(th), rr, nd), box, 3)) break; d += 4; }
+  return d;
+}
+/* Layout rule (the owner 2026-10-29: "biggest token usage in center, fan out by token usage"): the fan is ordered by h.tok1h, the snapshot's tokens_1h = output tokens in the last hour
+   (the figure the details drawer prints as "out tokens / h"). The highest-token active session takes rank 0 (12 o'clock, the head of the fan, nearest the Architect at the centre);
+   the rest follow in descending order, alternating right and left. Scores are bucketed in 10% steps and ties keep the previous order, so a pie moves only when its rank really changes. */
+const tokRank = (tok) => Math.round(Math.log((tok || 0) + 1) / Math.log(1.1));
+/* rank by activity score (here the token bucket, see the layout rule); ties keep the previous order (no flapping) */
 function rankBy(list, score) {
   list.forEach((o, i) => { if (o.rk == null) o.rk = i; });
   const sorted = list.slice().sort((a, b) => score(b) - score(a) || a.rk - b.rk);
   sorted.forEach((o, i) => { o.rk = i; });
   return sorted;
+}
+/* ---------- focus mode (the owner 2026-10-24, ar-T07) ----------
+   Click a session: it takes the centre bubble, drawn the way the Architect is in the default view (state ring, size by messages, ctx pie).
+   Its subagents orbit it in place of sessions, circle area ~ tokens (agentSizes); their links, file icons and tool events work as before.
+   The Architect and the other ACTIVE sessions shrink into a cluster at the lower left (click one to jump to it; the Architect returns to the fleet).
+   Inactive sessions are hidden; the centred session shows all its subagents. No panel, no modal. */
+const CL_ROW = 30, CL_COL = 150, FOCUS_TOP = 380, FOC_SPAN = 1.6, FOC_SPAN_NARROW = 2.4, SIB_R = 11, ARCH_R = 14, ORB_RMAX = 30, ORB_RMIN = 8;
+/* pure: n cluster slots, item 0 = the Architect. Columns grow upward from the lower-left corner on desktop and on the phone alike.
+   Phone: CL_PERN rows per column (more columns as the width allows, then taller), under the orbit (FOCUS_TOP), H = focusH(). */
+const CL_PERN = 5;
+const sibSize = (p) => running(p.h) * 6 + p.cnt * 2.2;   /* the bubble-size key of the fleet view */
+const clusterPer = (n, W, H, narrow) => narrow ? Math.max(CL_PERN, Math.ceil(n / Math.max(1, Math.floor((W - 26) / CL_COL)))) : Math.max(3, Math.floor(H * 0.4 / CL_ROW));
+function clusterPlan(n, W, H, narrow, padL) {
+  if (!narrow) return leftStack(n, H, padL || 0);
+  const out = [], per = clusterPer(n, W, H, narrow);
+  for (let i = 0; i < n; i++) out.push({ x: 26 + Math.floor(i / per) * CL_COL, y: H - 26 - (i % per) * CL_ROW });
+  return out;
+}
+/* desktop (the owner 2026-10-25: "all other pms as left as possible, stacked by size, architect at the bottom"): item 0 = the Architect, always the bottom of
+   column 0; items 1.. arrive largest first and stack top-down in size order against the left edge, each column bottom-aligned; a full column spills into the next one to the right. */
+function leftStack(n, H, padL) {   /* padL: scene units of letterbox left of the 800 x 600 viewBox, so the stack reaches the canvas's own left edge */
+  const x0 = 26 - padL, cap = Math.max(3, padL >= 120 ? Math.floor((H - 52) / CL_ROW) + 1 : Math.floor(H * 0.4 / CL_ROW))   /* a stack taller than 40% of the scene only fits left of the orbit when the letterbox leaves room */, out = [{ x: x0, y: H - 26 }];
+  for (let i = 1; i < n; i++) {
+    const j = i - 1, c0 = cap - 1, col = j < c0 ? 0 : 1 + Math.floor((j - c0) / cap), start = col ? c0 + (col - 1) * cap : 0;
+    const inCol = Math.min(col ? cap : c0, n - 1 - start), row = j - start;
+    out.push({ x: x0 + col * CL_COL, y: H - 26 - (col ? inCol - 1 - row : inCol - row) * CL_ROW });
+  }
+  return out;
+}
+/* pure: tasks [{id, tok}] already in rank order -> {id: {x, y, r, noData}} on the ellipse (cx, cy, rx, ry); first rank at 12, then alternating sides, within +-span rad of 12 */
+function orbitPlan(tasks, g, span) {
+  const sz = agentSizes(tasks, ORB_RMAX, ORB_RMIN), o = {};
+  tasks.forEach((t, i) => { const th = -Math.PI / 2 + fanOffset(i, tasks.length, span); o[t.id] = { x: g.cx + g.rx * Math.cos(th), y: g.cy + g.ry * Math.sin(th), r: sz[t.id].r, noData: sz[t.id].noData }; });
+  return o;
+}
+/* subagent shown in focus: every listed one of the centred session, running, parked or done (the owner 2026-10-24: the PM-centred view must show its subagents);
+   a state other than ok/slow/stop is drawn by paint() in its own (muted) colour */
+const isHl = (a) => !a.leaving;
+/* pure: positions for n spread inactive nodes on a W x H scene: rows along the bottom, row-major in rank order, ROW_DY apart so a label never meets the next row's node */
+const SP_DX = 150, SP_DY = 56;
+function spreadPlan(n, W, H) {
+  const per = Math.max(1, Math.floor((W - 40) / SP_DX)), rows = Math.ceil(n / per), out = [];
+  for (let i = 0; i < n; i++) {
+    const row = Math.floor(i / per), inRow = Math.min(per, n - row * per), col = i % per;
+    out.push({ x: W / 2 + (col - (inRow - 1) / 2) * SP_DX, y: H - 40 - (rows - 1 - row) * SP_DY });
+  }
+  return out;
+}
+/* pure: subagent circle radii in focus mode, area proportional to tokens relative to the largest task; no-data or zero = the minimum, flagged */
+function agentSizes(tasks, rmax, rmin) {
+  const mx = Math.max(0, ...tasks.map((t) => t.tok || 0)), o = {};
+  tasks.forEach((t) => { o[t.id] = t.tok > 0 ? { r: Math.max(rmin, rmax * Math.sqrt(t.tok / mx)), noData: false } : { r: rmin, noData: true }; });
+  return o;
+}
+function pmClick(p) {
+  if (!isNarrow() && p.ia && !SPREAD.open && !FOC.name) { SPREAD.open = true; hideTip(); return; }   /* first tap on the packed grey group spreads it */
+  SPREAD.open = false; toggleFocus(p.h.name);   /* in focus: a cluster sibling becomes the selected session; the centre one returns to the fleet */
+}
+function focusGeom() {
+  if (isNarrow()) return { cx: L.W / 2, cy: 215, rx: Math.max(70, L.W / 2 - 48), ry: 125, span: FOC_SPAN_NARROW };
+  return { cx: L.cx, cy: L.cy, rx: L.rx, ry: L.ry, span: FOC_SPAN };
+}
+const focusSibs = () => PMS.filter((q) => q.h.name !== FOC.name && isActive(q.h));
+const focusH = () => { const n = focusSibs().length + 1; return FOCUS_TOP + Math.min(n, clusterPer(n, L.W, 0, true)) * CL_ROW + 24; };   /* phone scene height: orbit above, cluster rows below */
+function toggleFocus(name) { if (FOC.name === name) exitFocus(); else enterFocus(name); }
+function enterFocus(name) {
+  FOC.name = name;
+  side.f = { name, label: name, h: name }; setTab("ev"); renderFbar(); renderSide(); hideTip();
+  layout(); if (isNarrow()) scrollTo(0, 0);
+  $("focusbar").hidden = false; const b = $("fback"); if (b) b.focus({ preventScroll: true });
+}
+function exitFocus() {
+  const n = FOC.name; if (!n) return;
+  FOC.name = null; layout(); $("focusbar").hidden = true; clearFilter();
+  const el0 = document.querySelector('#live [data-key="h:' + n + '"]'); if (el0) el0.focus({ preventScroll: true });
 }
 function step(dt) {
   simT += dt;
@@ -476,7 +1080,7 @@ function step(dt) {
     for (let i = p.h.agents.length - 1; i >= 0; i--) {
       const a = p.h.agents[i];
       a.p = REDUCE.matches ? (a.leaving ? 0 : 1) : Math.max(0, Math.min(1, a.p + (a.leaving ? -dt : dt) / 800));
-      if (a.leaving && a.p <= 0) { a.node.g.remove(); p.h.agents.splice(i, 1); hideTip(); }
+      if (a.leaving && a.p <= 0) { a.node.g.remove(); a.link.remove(); a.dg.remove(); p.h.agents.splice(i, 1); hideTip(); }
     }
   });
 }
@@ -489,87 +1093,163 @@ function draw(dt) {
     p.cnt = p.out + p.inn; tout += p.out; tin += p.inn;
   });
   hub.out = tout; hub.inn = tin; hub.cnt = tout + tin;
-  hub.tr = 24 + Math.min(40, hub.cnt * 1.2);
-  hub.r += (hub.tr - hub.r) * k;
-  const hn = hub.node;
-  hn.g.setAttribute("transform", "translate(" + L.cx + " " + L.cy + ")");
-  hn.body.setAttribute("d", dShape("circle", hub.r)); hn.body.setAttribute("fill", "var(--hub)"); hn.body.setAttribute("fill-opacity", 0.92);
-  hn.body.setAttribute("stroke", "var(--surface)"); hn.body.setAttribute("stroke-width", 2);
-  hub.lbl.setAttribute("x", L.cx); hub.lbl.setAttribute("y", L.cy + hub.r + 14);
+  const nar = isNarrow();
+  if (FOC.name && !PMS.some((q) => q.h.name === FOC.name)) exitFocus();
+  const fg = focusGeom(), fT = FOC.name ? 1 : 0;
+  FOC.z = REDUCE.matches ? fT : Math.abs(fT - FOC.z) < 0.01 ? fT : FOC.z + (fT - FOC.z) * k;
+  const fz = FOC.z, spT = SPREAD.open && !FOC.name && !nar ? 1 : 0;
+  SPREAD.z = REDUCE.matches ? spT : Math.abs(spT - SPREAD.z) < 0.01 ? spT : SPREAD.z + (spT - SPREAD.z) * k;
+  const sz = SPREAD.z; svg.classList.toggle("spread", sz > 0.5);
+  const rk = rankBy(PMS, (p) => tokRank(p.h.tok1h));   /* by tokens, see the layout rule above rankBy */
+  const pa = rk.filter((p) => isActive(p.h)), pi = rk.filter((p) => !isActive(p.h)), pr = pa.concat(pi), fp = fanPlan(pa.length, pi.length);
+  /* focus view V: roles by session name (V.name = centre, V.sib[name] = its lower-left cluster slot, anyone else hidden) and the centre session's orbit slots.
+     Kept while the view eases back out so the nodes glide home. */
+  const V = FOC.name ? (FOC.view = { name: FOC.name, sib: {}, slots: {}, cl: [] }) : fz > 0.02 ? FOC.view : (FOC.view = null);
+  if (FOC.name) { const sb = pa.filter((p) => p.h.name !== FOC.name).sort((a, b) => sibSize(b) - sibSize(a) || b.cnt - a.cnt); const cr = svg.getBoundingClientRect(), pad = nar || !cr.width ? 0 : Math.max(0, (cr.width / Math.min(cr.width / L.W, cr.height / L.H) - L.W) / 2); V.cl = clusterPlan(sb.length + 1, L.W, nar ? focusH() : L.H, nar, pad); sb.forEach((p, i) => { V.sib[p.h.name] = V.cl[i + 1]; }); }
+  hub.tr = FOC.name ? ARCH_R : nar ? 20 : 24 + Math.min(40, hub.cnt * 1.2);
+  hub.r = nar ? hub.tr : hub.r + (hub.tr - hub.r) * k;
+  const hn = hub.node, hx0 = L.cx, hy0 = nar ? 34 : L.cy, hc = V ? V.cl[0] : { x: hx0, y: hy0 };
+  hub.x = hx0 + (hc.x - hx0) * fz; hub.y = hy0 + (hc.y - hy0) * fz;
+  hn.g.setAttribute("transform", "translate(" + hub.x + " " + hub.y + ")");
+  paint(hn, hub.st || "ok", "circle", hub.r, spin, null);   /* the same circle as every PM (the owner 2026-10-24) */
+  paintPie(hn, hub.tasks, hub.r);   /* the same task pie as the PMs */
+  paintGauge(hn, hub.r, hub.ctx == null ? null : Math.max(0, hub.ctx / hub.bar));   /* the Architect's own context band (snap.architect) */
+  const hst = !!(V && fz > 0.5);   /* label beside the circle in the cluster; under it (centred) in the fleet view, phone included */
+  hub.lbl.style.textAnchor = hst ? "start" : "";
+  const hlx = hst ? hub.x + hub.r + 8 : hub.x, hly = hst ? hub.y + 4 : hub.y + hub.r + 14;
+  hub.lbl.classList.toggle("hit", !!(V && fz > 0.5));
+  hub.lbl.setAttribute("x", hlx); hub.lbl.setAttribute("y", hly);
   const dc = side.snap ? docCounts(side.snap) : {};
   const markDoc = (g, lbl, n, x, y) => {
     g.setAttribute("display", n ? "inline" : "none");
-    if (n) { g.setAttribute("transform", "translate(" + (x + lbl.textContent.length * 3 + 8).toFixed(1) + " " + (y - 3).toFixed(1) + ")"); g.setAttribute("aria-label", n + " docs"); }
+    if (n) { g.setAttribute("transform", "translate(" + (x + lbl.textContent.length * (lbl.style.textAnchor === "start" ? ST.charW : 3.4) + (lbl.style.textAnchor === "start" ? 12 : 14)).toFixed(1) + " " + (y - 3).toFixed(1) + ")"); g.setAttribute("aria-label", n + " docs"); }
   };
-  markDoc(hub.dg, hub.lbl, dc[ARCH] || 0, L.cx, L.cy + hub.r + 14);
+  markDoc(hub.dg, hub.lbl, dc[ARCH] || 0, hlx, hly);
   const doAria = simT - lastAria > 1500; if (doAria) lastAria = simT;
   if (doAria) hn.g.setAttribute("aria-label", "The Architect, " + hub.cnt + " messages in the last 10 minutes");
   gS.querySelectorAll(".stat").forEach((e) => e.remove());
-  const pr = rankBy(PMS, (p) => p.cnt + running(p.h) * 2 + PSW[p.h.ps]);
-  pr.forEach((p, i) => { const t = fanOffset(i, pr.length); p.off = p.off == null ? t : p.off + (t - p.off) * k; });
+  pr.forEach((p, i) => {
+    const t = i < pa.length ? fp.act[i] : fp.ina[i - pa.length], ia = i >= pa.length;
+    p.off = p.off == null ? t : p.off + (t - p.off) * k;
+    if (p.ia !== ia) { p.ia = ia; if (ia) gN.insertBefore(p.node.g, gN.firstChild); else gN.appendChild(p.node.g); }
+    const ic = ia && FOC.name !== p.h.name;   /* the selected session is drawn in full colour even when it is inactive */
+    if (p.ic !== ic) { p.ic = ic; p.node.g.classList.toggle("inact", ic); p.lbl.classList.toggle("inact", ic); }
+  });
+  if (nar && !FOC.name) { const last = PMS.length ? Math.max(...PMS.map((q) => q.y)) : hub.y; trunk.setAttribute("display", "inline"); trunk.setAttribute("x1", ST.trunkX); trunk.setAttribute("x2", ST.trunkX); trunk.setAttribute("y1", hub.y); trunk.setAttribute("y2", last); } else trunk.setAttribute("display", "none");
+  const plan = nar ? stackPlan(pr.map((q) => q.h.agents.filter((x) => !x.leaving).length), L.W, pr.map((q) => q.ia)) : null;
+  if (nar) { svg.setAttribute("viewBox", "0 0 " + L.W + " " + (FOC.name ? focusH() : Math.max(L.H, plan.H))); }
+  const spPos = {}; if (!nar) spreadPlan(pi.length, L.W, L.H).forEach((q, i) => { spPos[pi[i].h.name] = q; });
   PMS.forEach((p) => {
     const ang = -Math.PI / 2 + p.off, h = p.h;
-    p.x = L.cx + L.rx * Math.cos(ang); p.y = L.cy + L.ry * Math.sin(ang);
-    p.tr = 14 + Math.min(30, running(h) * 6 + p.cnt * 2.2);
+    if (nar) { const ty = plan.rows[pr.indexOf(p)].y; p.x = ST.circleX; p.by = p.by ? p.by + (ty - p.by) * k : ty; p.y = p.by; p.plan = plan.rows[pr.indexOf(p)]; }
+    else { const f = p.ia ? 1.03 + (pr.indexOf(p) % 2) * 0.04 : 1; p.x = L.cx + L.rx * f * Math.cos(ang); p.y = L.cy + L.ry * f * Math.sin(ang); }
+    if (!nar && p.ia && spPos[p.h.name]) { p.x += (spPos[p.h.name].x - p.x) * sz; p.y += (spPos[p.h.name].y - p.y) * sz; }
+    const isF = !!V && V.name === h.name, slot = V && V.sib[h.name], isSib = !!slot, hidP = !!V && !isF && !isSib, hideP = hidP && fz > 0.5;
+    if (isF) { p.x += (fg.cx - p.x) * fz; p.y += (fg.cy - p.y) * fz; }
+    else if (isSib) { p.x += (slot.x - p.x) * fz; p.y += (slot.y - p.y) * fz; }
+    p.tr = FOC.name === h.name ? Math.min(64, 26 + p.cnt * 1.2) : FOC.name && isSib ? SIB_R : nar ? (p.ia ? 8 : 15) : p.ia ? 9 + 7 * sz : 18 + Math.min(32, running(h) * 6 + p.cnt * 2.2);
     p.r += (p.tr - p.r) * k;
     p.node.g.setAttribute("transform", "translate(" + p.x.toFixed(1) + " " + p.y.toFixed(1) + ")");
-    paint(p.node, h.ps, "circle", p.r, spin);
-    p.lbl.setAttribute("x", p.x); p.lbl.setAttribute("y", p.y + p.r + 15);
-    markDoc(p.dg, p.lbl, dc[h.name] || 0, p.x, p.y + p.r + 15);
-    p.link.setAttribute("x1", L.cx); p.link.setAttribute("y1", L.cy); p.link.setAttribute("x2", p.x); p.link.setAttribute("y2", p.y);
-    if (doAria) p.node.g.setAttribute("aria-label", h.name + ", " + PSL[h.ps] + ", " + running(h) + " agents running, " + p.cnt + " messages in the last 10 minutes. Open details");
+    paintPM(p, spin);
+    const sibA = isSib && fz > 0.5, nl = sibA || (nar && !(isF && fz > 0.5));
+    p.lbl.style.textAnchor = nl ? "start" : "";
+    const lx = sibA ? p.x + p.r + 8 : nl ? ST.labelX : p.x, ly = nl ? p.y + 4 : p.y + p.r + 15;
+    const lt = sibA ? ellip(h.name, nar ? Math.max(8, Math.min(15, Math.floor((L.W - 70) / ST.charW))) : 20) : nar ? ellip(h.name, plan.maxChars) : h.name;
+    if (p.lbl.textContent !== lt) p.lbl.textContent = lt;
+    p.lbl.setAttribute("x", lx); p.lbl.setAttribute("y", ly); p.lbl.classList.toggle("sib", sibA); p.lbl.classList.toggle("hit", sibA);
+    markDoc(p.dg, p.lbl, hideP ? 0 : dc[h.name] || 0, lx, ly);
+    p.link.setAttribute("display", isF ? "inline" : nar || V ? "none" : "inline");
+    const rec = hidP ? 1 - fz : 1;   /* other sessions fade out, then drop out of the tab order and the hit test */
+    p.node.g.setAttribute("opacity", rec.toFixed(2)); p.lbl.setAttribute("opacity", rec.toFixed(2));
+    [p.node.g, p.lbl].forEach((e) => { if (hideP) e.setAttribute("display", "none"); else e.removeAttribute("display"); });
+    p.link.setAttribute("x1", isF ? hub.x : L.cx); p.link.setAttribute("y1", isF ? hub.y : L.cy);   /* the centred session keeps its spoke to the moved Architect */ p.link.setAttribute("x2", p.x); p.link.setAttribute("y2", p.y);
+    if (V && V.name !== h.name) { p.lo.setAttribute("display", "none"); p.li.setAttribute("display", "none"); } else lanes(p, !!V);   /* the centred session keeps its Architect lanes (the owner 2026-10-25) */
+    if (p.ia && !nar) p.node.g.setAttribute("aria-expanded", String(SPREAD.open));
+    if (doAria) p.node.g.setAttribute("aria-label", h.name + ", " + pmLabel(h) + ", " + running(h) + " agents running, " + p.cnt + " messages in the last 10 minutes. Open details");
     /* subagents: same fan around the PM; local "12" is outward, "6" faces the Architect */
     const out = Math.atan2(p.y - L.cy, p.x - L.cx), live = h.agents.filter((a) => !a.leaving);
     const ar = rankBy(live, (a) => PSW[a.ps] + a.tok / 1e7);
     ar.forEach((a, i) => { const t = fanOffset(i, ar.length); a.off = a.off == null ? t : a.off + (t - a.off) * k; });
+    if (isF) V.slots = orbitPlan(ar.filter(isHl).map((a) => ({ id: a.id, tok: a.tok || 0 })), fg, fg.span);   /* the centre session's subagents orbit it, area ~ tokens */
     h.agents.forEach((a) => {
       if (a.off == null) a.off = 0;
       const e = ease(a.p), r = agentRad(a) * Math.max(0.15, e);
-      const th = out + a.off, d = (p.r + agentRad(a) + 8) * e;
-      a.node.g.setAttribute("transform", "translate(" + (p.x + d * Math.cos(th)).toFixed(1) + " " + (p.y + d * Math.sin(th)).toFixed(1) + ")");
-      a.node.g.setAttribute("opacity", Math.min(1, a.p * 2).toFixed(2));
-      paint(a.node, a.ps, TYPE_SHAPE[a.type] || "circle", r, spin);
+      const th = out + a.off, nd0 = (side.snap && !a.leaving) ? (side.snap.docs || []).filter((x) => x.agent === a.id).length : 0;
+      let d = (p.r + agentRad(a) + 8) * e;
+      if (!nar) d = clearLabel(p.x, p.y, th, d, r, nd0, labelBox(p.x, p.y, p.r, p.lbl.textContent.length, dc[h.name] || 0));
+      if (nar) {   /* inline slots under the label, in rank order */
+        const ix = Math.max(0, ar.indexOf(a)), rr = Math.max(7, Math.min(ST.agentR, agentRad(a))), sl = agentSlot(p.y, plan.per, ix), sx = sl.x, sy = sl.y;
+        a.x = sx; a.y = sy; a.dxy = sl; a.rr = rr * Math.max(0.15, e);
+      } else { a.x = p.x + d * Math.cos(th); a.y = p.y + d * Math.sin(th); a.rr = r; }
+      const sl = isF && V.slots[a.id], hidA = !!V && !sl, hideA = hidA && fz > 0.5;   /* in focus only the centre session's highlighted subagents stay */
+      if (sl) { a.x += (sl.x - a.x) * fz; a.y += (sl.y - a.y) * fz; a.rr += (sl.r - a.rr) * fz; }
+      if (hideA) a.node.g.setAttribute("display", "none"); else a.node.g.removeAttribute("display");
+      a.node.g.setAttribute("transform", "translate(" + a.x.toFixed(1) + " " + a.y.toFixed(1) + ")");
+      a.link.setAttribute("display", hideA || (nar && !sl) ? "none" : "inline"); a.link.setAttribute("x1", p.x); a.link.setAttribute("y1", p.y); a.link.setAttribute("x2", a.x.toFixed(1)); a.link.setAttribute("y2", a.y.toFixed(1)); a.link.setAttribute("opacity", Math.min(1, a.p).toFixed(2));
+      const nd = (side.snap && !a.leaving && !hideA) ? (side.snap.docs || []).filter((x) => x.agent === a.id).length : 0;
+      a.dg.setAttribute("display", nd ? "inline" : "none");
+      if (nd) { a.dg.setAttribute("transform", a.dxy && nar && !sl ? "translate(" + a.dxy.docX.toFixed(1) + " " + a.dxy.docY.toFixed(1) + ")" : "translate(" + (a.x + a.rr + 8).toFixed(1) + " " + (a.y - a.rr - 2).toFixed(1) + ")"); a.dg.setAttribute("aria-label", nd + " modified files from " + a.type); }
+      a.node.g.setAttribute("opacity", (Math.min(1, a.p * 2) * (hidA ? 1 - fz : 1)).toFixed(2));
+      paint(a.node, a.ps, "circle", a.rr, spin, ctxFrac(a.ctx));
+      agentIcon(a, a.rr);
       if (doAria) a.node.g.setAttribute("aria-label", a.type + " subagent of " + h.name + ", " + PSL[a.ps] + ", " + kt(a.tok) + " tokens. Open details");
     });
-    if (REDUCE.matches) staticArrows(p, ang);
   });
   for (let i = pulses.length - 1; i >= 0; i--) {
-    const m = pulses[i], u = (simT - m.t0) / m.dur, p = m.p;
-    if (u >= 1 || !PMS.includes(p)) { m.g.remove(); pulses.splice(i, 1); continue; }
-    const dx = p.x - L.cx, dy = p.y - L.cy, d = Math.hypot(dx, dy) || 1, vx = dx / d, vy = dy / d;
-    const sx = L.cx + vx * hub.r, sy = L.cy + vy * hub.r, ex = p.x - vx * p.r, ey = p.y - vy * p.r;
-    const f = m.dir === "out" ? u : 1 - u;
-    const rot = Math.atan2(m.dir === "out" ? vy : -vy, m.dir === "out" ? vx : -vx) * 180 / Math.PI;
+    const m = pulses[i], u = (simT - m.t0) / m.dur, p = m.p, ag = m.a;
+    if (u >= 1 || !PMS.includes(p) || (ag && !p.h.agents.includes(ag))) { m.g.remove(); pulses.splice(i, 1); continue; }
+    m.g.setAttribute("display", V && fz > 0.5 && !(V.name === p.h.name && (!ag || V.slots[ag.id])) ? "none" : "inline");   /* in focus only the centre session's own subagent arrows run */
+    const A = ag ? { x: p.x, y: p.y, r: p.r } : isNarrow() && !V ? { x: ST.trunkX, y: p.y, r: 0 } : V ? { x: hub.x, y: hub.y, r: hub.r } : { x: L.cx, y: L.cy, r: hub.r }, B = ag ? { x: ag.x, y: ag.y, r: ag.rr || 4 } : { x: p.x, y: p.y, r: p.r };
+    const dx = B.x - A.x, dy = B.y - A.y, d = Math.hypot(dx, dy) || 1, vx = dx / d, vy = dy / d;
+    const sx = A.x + vx * A.r, sy = A.y + vy * A.r, ex = B.x - vx * B.r, ey = B.y - vy * B.r;
+    const out = m.dir === "out", f = out ? u : 1 - u;
+    const rot = Math.atan2(out ? vy : -vy, out ? vx : -vx) * 180 / Math.PI;
     m.g.setAttribute("transform", "translate(" + (sx + (ex - sx) * f).toFixed(1) + " " + (sy + (ey - sy) * f).toFixed(1) + ") rotate(" + rot.toFixed(0) + ")");
     m.g.setAttribute("opacity", Math.min(1, u * 8, (1 - u) * 8).toFixed(2));
   }
 }
-/* reduced motion: static arrowheads on the link plus counts, in place of travelling pulses */
-function staticArrows(p, ang) {
-  const g = el("g", { class: "stat" }, gS);
-  const dx = p.x - L.cx, dy = p.y - L.cy, rot = Math.atan2(dy, dx) * 180 / Math.PI, nx = -Math.sin(ang), ny = Math.cos(ang);
-  const at = (f, o) => (L.cx + dx * f + nx * o).toFixed(1) + " " + (L.cy + dy * f + ny * o).toFixed(1);
-  el("circle", { r: 4.5, fill: "var(--out)", transform: "translate(" + at(0.62, -9) + ")" }, g);
-  el("path", { d: "M7 0L-5 -5L-5 5Z", fill: "var(--in)", transform: "translate(" + at(0.45, 9) + ") rotate(" + (rot + 180) + ")" }, g);
-  const t = el("text", { class: "lbl", x: L.cx + dx * 0.53 + nx * 24, y: L.cy + dy * 0.53 + ny * 24 }, g);
-  t.textContent = "out " + p.out + " / in " + p.inn;
+/* edge lanes: while a PM has messages in the 10-min window, one lane per direction carries marching dashes toward its arrowhead
+   (out: Architect -> PM, in: PM -> Architect). prefers-reduced-motion stops the march (CSS); the arrowhead still shows direction. */
+function lanes(p, foc) {   /* foc: draw from the Architect's moved position (hub.x/y) to the centred bubble */
+  const set = (l, on, x1, y1, x2, y2) => {
+    l.setAttribute("display", on ? "inline" : "none");
+    if (on) { l.setAttribute("x1", x1.toFixed(1)); l.setAttribute("y1", y1.toFixed(1)); l.setAttribute("x2", x2.toFixed(1)); l.setAttribute("y2", y2.toFixed(1)); }
+  };
+  const blk = p.h.reported.some((m) => m.kind === "blocker" && m.epoch >= nowS() - WIN_S);
+  if (isNarrow() && !foc) {   /* horizontal lanes from the trunk to the row's circle: out on top pointing right, in below pointing left */
+    const ex = p.x - p.r - 3, y = p.y;
+    set(p.lo, p.out > 0, ST.trunkX, y - 4, ex, y - 4);
+    set(p.li, p.inn > 0, ex, y + 4, ST.trunkX, y + 4);
+  } else {
+    const ox = foc ? hub.x : L.cx, oy = foc ? hub.y : L.cy, dx = p.x - ox, dy = p.y - oy, d = Math.hypot(dx, dy) || 1, vx = dx / d, vy = dy / d, nx = -vy * 4.5, ny = vx * 4.5;
+    const sx = ox + vx * hub.r, sy = oy + vy * hub.r, ex = p.x - vx * (p.r + 2), ey = p.y - vy * (p.r + 2);
+    set(p.lo, p.out > 0, sx + nx, sy + ny, ex + nx, ey + ny);
+    set(p.li, p.inn > 0, ex - nx, ey - ny, sx - nx, sy - ny);
+  }
+  p.li.setAttribute("stroke", blk ? "var(--msg-blocker)" : "var(--msg-in)"); p.li.setAttribute("marker-end", blk ? "url(#ah-blk)" : "url(#ah-in)");
 }
 
 /* ---------- legend ---------- */
+const SH = ["Architect", "session", "out", "in", "blocker", "context pie", "context ring", "task progress", "working", "working, slow", "waiting", "paused", "focus", "inactive", "files", "agent icon"];
 function legendHtml() {
   const sv = (inner) => '<svg viewBox="0 0 30 30" aria-hidden="true">' + inner + "</svg>";
-  const st = (inner, lbl) => "<span>" + sv(inner) + lbl + "</span>";
-  return "<span>" + sv('<circle cx="15" cy="15" r="12" fill="var(--hub)"/>') + "Architect (size = messages / 10 min)</span>" +
-    "<span>" + sv('<circle cx="15" cy="15" r="9" fill="var(--muted)" fill-opacity=".5"/>') + "session (size = agents + messages)</span>" +
-    "<span>" + sv('<circle cx="15" cy="15" r="6" fill="var(--out)"/>') + "out: dot (Architect asks)</span>" +
-    "<span>" + sv('<path d="M26 15 8 6v18Z" fill="var(--in)"/>') + "in: arrowhead (PM reports)</span>" +
-    "<span>" + sv('<path d="M29 15 5 2v26Z" fill="var(--blk)"/>') + "blocker: big magenta</span>" +
-    st('<circle cx="15" cy="15" r="9" fill="var(--ok)"/>', "productive: solid") +
-    st('<circle cx="15" cy="15" r="8" fill="var(--slow)"/><circle cx="15" cy="15" r="13" fill="none" stroke="var(--slow)" stroke-width="2" stroke-dasharray="5 4"/>', "slow: dashed ring") +
-    st('<circle cx="15" cy="15" r="9" fill="var(--stop)" stroke="var(--fg)" stroke-width="2.5"/><path d="M11 11 19 19M19 11 11 19" stroke="var(--surface)" stroke-width="2.5" stroke-linecap="round"/>', "stalled: X") +
-    st('<circle cx="15" cy="15" r="9" fill="var(--park)" fill-opacity=".28" stroke="var(--park)" stroke-width="2" stroke-dasharray="2 3"/><path d="M13 11v8M17 11v8" stroke="var(--fg)" stroke-width="2.5" stroke-linecap="round"/>', "parked: faint, bars") +
-    "<span>" + sv('<path d="M9 5H18L22 9V24H9ZM18 5V9H22" fill="var(--surface)" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>') + "has docs (click a node to filter)</span>" +
-    "<span>" + sv('<circle cx="7" cy="15" r="5" fill="var(--muted)"/><rect x="13" y="10" width="9" height="9" fill="var(--muted)"/><path d="M27 8l5 7-5 7-5-7z" transform="translate(-4 0) scale(.8)" fill="var(--muted)"/>') + "agent shape = type</span>";
+  const st = (inner, sh, full) => "<span>" + sv(inner) + '<b class="ls">' + sh + '</b><em class="ld">' + (full || sh) + "</em></span>";
+  return st('<circle cx="15" cy="15" r="11" fill="var(--surface-1)" stroke="var(--sess-working)" stroke-width="2.5"/>', SH[0], "Architect (size = messages / 10 min)") +
+    st('<circle cx="15" cy="15" r="9" fill="var(--ink-2)" fill-opacity=".5"/>', SH[1], "session (size = agents + messages)") +
+    st('<path d="M2 15H20" stroke="var(--msg-out)" stroke-width="2.5" stroke-dasharray="5 4"/><path d="M28 15 18 9v12Z" fill="var(--msg-out)"/>', SH[2], "out: arrow to the PM (Architect asks)") +
+    st('<path d="M28 15H10" stroke="var(--msg-in)" stroke-width="2.5" stroke-dasharray="5 4"/><path d="M2 15 12 9v12Z" fill="var(--msg-in)"/>', SH[3], "in: arrow to the Architect (PM reports)") +
+    st('<path d="M29 15 5 2v26Z" fill="var(--msg-blocker)"/>', SH[4], "blocker: big oxblood") +
+    st('<circle cx="15" cy="15" r="11" fill="color-mix(in srgb,var(--sess-working) 50%,var(--mix-light))"/><path d="M15 15V2A13 13 0 1 1 3 20Z" fill="color-mix(in srgb,var(--sess-working) 60%,var(--mix-dark))"/>', SH[5], "subagent pie = context use (dark = used of 250k)") +
+    st('<circle cx="15" cy="15" r="9" fill="none" stroke="var(--ink-2)" stroke-opacity=".35" stroke-width="4"/><path d="M15 6A9 9 0 1 1 6 15" fill="none" stroke="var(--ctx-ok)" stroke-width="4"/><path d="M15 2V10" stroke="var(--ink-1)" stroke-width="2"/>', SH[6], "session ring = context used, clockwise from the tick at 12 o'clock (the tick = 100% of 250k; green under 60%, brass to 85%, oxblood above). Over 100% the ring stays oxblood and a thin dark second lap runs over it. Grey ring only = context unknown") +
+    st('<defs><radialGradient id="lg1" gradientUnits="userSpaceOnUse" cx="15" cy="15" r="11"><stop offset="0" style="stop-color:color-mix(in srgb,var(--pal-2) 40%,var(--surface-1))"/><stop offset="1" style="stop-color:var(--pal-2)"/></radialGradient><radialGradient id="lg2" gradientUnits="userSpaceOnUse" cx="15" cy="15" r="5"><stop offset="0" style="stop-color:color-mix(in srgb,var(--pal-6) 15%,var(--surface-1))"/><stop offset="1" style="stop-color:color-mix(in srgb,var(--pal-6) 40%,var(--surface-1))"/></radialGradient></defs><path d="M15 15V3A12 12 0 0 1 25.4 21Z" style="fill:color-mix(in srgb,var(--pal-2) 16%,var(--surface-1))"/><path d="M15 15V4A11 11 0 0 1 24.5 20.5Z" fill="url(#lg1)"/><path d="M15 15 25.4 21A12 12 0 0 1 4.6 21Z" style="fill:color-mix(in srgb,var(--pal-6) 16%,var(--surface-1))"/><path d="M15 15 19.3 17.5A5 5 0 0 1 10.7 17.5Z" fill="url(#lg2)"/><path d="M15 15 4.6 21A12 12 0 0 1 15 3Z" style="fill:color-mix(in srgb,var(--pal-9) 16%,var(--surface-1))"/><path d="M15 15 8.2 12.5A8 8 0 0 1 15 7Z" style="fill:color-mix(in srgb,var(--pal-9) 60%,var(--surface-1))"/>', SH[7], "session pie = one slice per open task, each its own colour; the faint centre grows outward and stronger as that task's steps are done (nearly solid to the rim = nearly done); no number in the pie. Hover or tap a slice for the task, the centre for the session") +
+    st('<circle cx="15" cy="15" r="9" fill="var(--sess-working)"/>', SH[8], "working: solid") +
+    st('<circle cx="15" cy="15" r="8" fill="var(--sess-slow)"/><circle cx="15" cy="15" r="13" fill="none" stroke="var(--sess-slow)" stroke-width="2" stroke-dasharray="5 4"/>', SH[9], "working, slow: dashed ring") +
+    st('<circle cx="15" cy="15" r="9" fill="var(--sess-blocked)" stroke="var(--ink-1)" stroke-width="2.5"/><path d="M11 11 19 19M19 11 11 19" stroke="var(--surface-1)" stroke-width="2.5" stroke-linecap="round"/>', SH[10], "waiting (blocked): X") +
+    st('<circle cx="15" cy="15" r="9" fill="var(--sess-parked)" fill-opacity=".28" stroke="var(--sess-parked)" stroke-width="2" stroke-dasharray="2 3"/><path d="M13 11v8M17 11v8" stroke="var(--ink-1)" stroke-width="2.5" stroke-linecap="round"/>', SH[11], "waiting or paused: faint, bars") +
+    st('<rect x="3" y="3" width="24" height="24" rx="3" fill="none" stroke="var(--msg-out)" stroke-width="3" stroke-dasharray="40 56"/><rect x="3" y="3" width="24" height="24" rx="3" fill="none" stroke="var(--msg-in)" stroke-width="3" stroke-dasharray="56 40" stroke-dashoffset="-40"/>', SH[12], "click a session to centre it: its subagents orbit it (size = tokens); the Architect and the other active sessions sit lower left, click one to jump; click the Architect or press Escape to return") +
+    st('<circle cx="15" cy="15" r="6" fill="var(--ink-2)" fill-opacity=".4"/>', SH[13], "idle, paused, or no live tmux: small, grey, packed at the bottom") +
+    st('<path d="M9 5H18L22 9V24H9ZM18 5V9H22" fill="var(--surface-1)" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>', SH[14], "modified files (click it for docs; click a node for events)") +
+    st('<circle cx="7" cy="15" r="5" fill="var(--ink-2)"/><rect x="13" y="10" width="9" height="9" fill="var(--ink-2)"/><path d="M27 8l5 7-5 7-5-7z" transform="translate(-4 0) scale(.8)" fill="var(--ink-2)"/>', SH[15], "icon = agent class (gear ops, wrench engineer, book research, eye review, check qa, pen docs, ticket, branch, shield, database, dot other)");
 }
 
 /* ---------- wiring ---------- */
@@ -579,7 +1259,187 @@ document.addEventListener("click", (e) => {
   if (b.dataset.back) { ui.a = null; renderAll(); const f = $("drawer").querySelector("[data-close]"); if (f) f.focus(); return; }
   if (b.dataset.a && b.dataset.h) return openDrawer(b.dataset.h, b.dataset.a, null);
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (ui.h) closeDrawer(); else if (!$("side").hidden) setSide(false); } });
+/* Kiosk + pan/zoom. The transform lives on the #scene element (CSS), not in the viewBox, so layout() and the per-frame viewBox writes never undo it. */
+const PZ = { x: 0, y: 0, s: 1, min: 0.3, max: 8, anim: null, drag: null, moved: false, ptrs: new Map(), pinch: null };
+const KIOSK = { on: false, fs: false, escFree: false };
+const pzOn = () => KIOSK.on || !isNarrow();
+function pzApply() {
+  const sc = $("scene"), id = PZ.s === 1 && PZ.x === 0 && PZ.y === 0;
+  sc.style.transform = id ? "" : "translate(" + PZ.x.toFixed(2) + "px," + PZ.y.toFixed(2) + "px) scale(" + PZ.s.toFixed(4) + ")";
+  sc.classList.toggle("pz", pzOn());
+}
+function pzClamp() {   /* keep at least a quarter of the scene on screen */
+  const r = $("live").getBoundingClientRect(), W = r.width, H = r.height;
+  PZ.s = Math.min(PZ.max, Math.max(PZ.min, PZ.s));
+  PZ.x = Math.min(W * 0.75, Math.max(W * 0.25 - W * PZ.s, PZ.x));
+  PZ.y = Math.min(H * 0.75, Math.max(H * 0.25 - H * PZ.s, PZ.y));
+}
+function pzSet(x, y, s, animate) {
+  if (PZ.anim) { cancelAnimationFrame(PZ.anim); PZ.anim = null; }
+  const f = { x: PZ.x, y: PZ.y, s: PZ.s }; PZ.x = x; PZ.y = y; PZ.s = s; pzClamp();
+  const t = { x: PZ.x, y: PZ.y, s: PZ.s };
+  if (!animate || REDUCE.matches) { pzApply(); return; }
+  PZ.x = f.x; PZ.y = f.y; PZ.s = f.s;
+  const t0 = performance.now(), D = 300;
+  const tick = (now) => {
+    const u = Math.min(1, (now - t0) / D), e = 1 - Math.pow(1 - u, 3);
+    PZ.x = f.x + (t.x - f.x) * e; PZ.y = f.y + (t.y - f.y) * e; PZ.s = f.s + (t.s - f.s) * e; pzApply();
+    PZ.anim = u < 1 ? requestAnimationFrame(tick) : null;
+  };
+  PZ.anim = requestAnimationFrame(tick);
+}
+function pzAbout(cx, cy, k, animate) {   /* zoom by factor k keeping the point (cx, cy), in #live pixels, fixed */
+  const s = Math.min(PZ.max, Math.max(PZ.min, PZ.s * k)), r = s / PZ.s;
+  pzSet(cx - (cx - PZ.x) * r, cy - (cy - PZ.y) * r, s, animate);
+}
+function pzFit(animate) { pzSet(0, 0, 1, animate); }
+function pzNodeCentre(g) {   /* node centre in unzoomed #live pixels */
+  const lr = $("live").getBoundingClientRect(), b = g.getBoundingClientRect(), bw = $("live").clientWidth || lr.width;
+  const w = b.width / PZ.s, h = b.height / PZ.s;
+  return { x: (b.left + b.width / 2 - lr.left - PZ.x) / PZ.s, y: (b.top + b.height / 2 - lr.top - PZ.y) / PZ.s, size: Math.max(w, h, 1), bw };
+}
+function pzToNode(g) {
+  const lr = $("live").getBoundingClientRect(), c = pzNodeCentre(g);
+  const s = Math.min(PZ.max, Math.max(1.5, Math.min(lr.width, lr.height) / (c.size * 3.2)));
+  pzSet(lr.width / 2 - c.x * s, lr.height / 2 - c.y * s, s, true);
+}
+function pzNodes() { return Array.from($("scene").querySelectorAll(".node")); }
+function setKiosk(on, viaButton) {
+  if (KIOSK.on === on) return;
+  KIOSK.on = on; document.documentElement.classList.toggle("kiosk", on);
+  $("kiosk").setAttribute("aria-pressed", on); pzFit(false); pzApply();
+  if (!on && document.fullscreenElement && document.exitFullscreen) { KIOSK.fs = false; document.exitFullscreen().catch(() => {}); }
+  layout();
+}
+function toggleFs() {   /* needs a user gesture: the in-kiosk button or the F key */
+  if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
+  if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().then(() => { KIOSK.fs = true; }).catch(() => { KIOSK.fs = false; });
+}
+$("kfs").addEventListener("click", toggleFs);
+$("kexit").addEventListener("click", () => { if (history.length <= 1 && window.opener === null && location.pathname === "/live/kiosk") location.href = "/live"; else setKiosk(false); });
+$("kfit").addEventListener("click", () => pzFit(true));
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && KIOSK.fs) { KIOSK.fs = false; setKiosk(false); } });
+if (new URLSearchParams(location.search).get("kiosk") === "1" || location.pathname === "/live/kiosk") setKiosk(true, false);   /* /live/kiosk opens in a new tab */
+{
+  const sc = $("scene"), lr = () => $("live").getBoundingClientRect();
+  sc.addEventListener("wheel", (e) => {
+    if (!pzOn()) return; e.preventDefault();
+    const r = lr(), k = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : e.deltaMode ? 0.05 : 0.0015));   /* ctrlKey = trackpad pinch */
+    pzAbout(e.clientX - r.left, e.clientY - r.top, k, false);
+  }, { passive: false });
+  sc.addEventListener("pointerdown", (e) => {
+    if (!pzOn() || (e.pointerType === "mouse" && e.button !== 0)) return;
+    PZ.ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (PZ.ptrs.size === 1) { PZ.moved = false; PZ.drag = { x: e.clientX, y: e.clientY, ox: PZ.x, oy: PZ.y }; }
+    else if (PZ.ptrs.size === 2) { const [a, b] = [...PZ.ptrs.values()]; PZ.pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1 }; PZ.moved = true; PZ.drag = null; }
+  });
+  sc.addEventListener("pointermove", (e) => {
+    const p = PZ.ptrs.get(e.pointerId); if (!p) return;
+    p.x = e.clientX; p.y = e.clientY;
+    if (PZ.pinch && PZ.ptrs.size === 2) {
+      const [a, b] = [...PZ.ptrs.values()], d = Math.hypot(a.x - b.x, a.y - b.y) || 1, r = lr();
+      pzAbout((a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top, d / PZ.pinch.d, false); PZ.pinch.d = d; return;
+    }
+    if (!PZ.drag) return;
+    const dx = e.clientX - PZ.drag.x, dy = e.clientY - PZ.drag.y;
+    if (!PZ.moved && Math.hypot(dx, dy) < 5) return;
+    if (!PZ.moved) { PZ.moved = true; sc.classList.add("drag"); try { sc.setPointerCapture(e.pointerId); } catch (_) {} hideTip(); }
+    pzSet(PZ.drag.ox + dx, PZ.drag.oy + dy, PZ.s, false);
+  });
+  const up = (e) => {
+    PZ.ptrs.delete(e.pointerId); if (PZ.ptrs.size < 2) PZ.pinch = null;
+    if (!PZ.ptrs.size) { PZ.drag = null; sc.classList.remove("drag"); }
+  };
+  sc.addEventListener("pointerup", up); sc.addEventListener("pointercancel", up);
+  /* a drag or pinch must not also count as a click on a sphere; in kiosk a click zooms to the sphere instead of opening focus mode */
+  sc.addEventListener("click", (e) => {
+    if (PZ.moved) { PZ.moved = false; e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); return; }
+    if (!KIOSK.on) return;
+    const g = e.target.closest && e.target.closest(".node");
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    if (g) pzToNode(g); else pzFit(true);
+  }, true);
+  document.addEventListener("keydown", (e) => {
+    KIOSK.escFree = false;
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || /^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || ""))) return;
+    if (e.key === "Escape") { KIOSK.escFree = KIOSK.on && $("viewer").hidden && !ui.h && !CARD.pin; return; }
+    if (!pzOn() || (!KIOSK.on && !$("scene").contains(e.target))) return;
+    const r = lr(), cx = r.width / 2, cy = r.height / 2, step = 80;
+    if (e.key === "+" || e.key === "=") pzAbout(cx, cy, 1.25, true);
+    else if (e.key === "-" || e.key === "_") pzAbout(cx, cy, 0.8, true);
+    else if (e.key === "0") pzFit(true);
+    else if ((e.key === "f" || e.key === "F") && KIOSK.on) toggleFs();
+    else if (e.key === "ArrowLeft") pzSet(PZ.x + step, PZ.y, PZ.s, false);
+    else if (e.key === "ArrowRight") pzSet(PZ.x - step, PZ.y, PZ.s, false);
+    else if (e.key === "ArrowUp") pzSet(PZ.x, PZ.y + step, PZ.s, false);
+    else if (e.key === "ArrowDown") pzSet(PZ.x, PZ.y - step, PZ.s, false);
+    else if (e.key === "Tab" && KIOSK.on) {
+      const ns = pzNodes(); if (!ns.length) return;
+      const i = ns.indexOf(document.activeElement), j = (i + (e.shiftKey ? -1 : 1) + ns.length) % ns.length;
+      const n = ns[i < 0 ? (e.shiftKey ? ns.length - 1 : 0) : j]; n.focus({ preventScroll: true }); pzToNode(n);
+    } else return;
+    e.preventDefault();
+  }, true);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && KIOSK.escFree) { KIOSK.escFree = false; setKiosk(false); } });
+}
+/* Kiosk auto-tour (the owner 2026-10-30): centre a random session, open its task card and agent drawer, hold, close, return to the Architect, repeat. Any input pauses it; it resumes after TOUR_IDLE_MS. The t key toggles it. */
+const TOUR = { on: false, paused: false, timer: null, idle: null, last: null, open: null };
+const tourHasData = (p) => { const pr = progOf(p.h.name); return p.h.agents.some((a) => !a.leaving) || !!(pr && (pr.tasks > 0 || pr.slices.length)); };
+const tourVisible = (p) => p.node.g.getAttribute("display") !== "none" && p.node.g.getBoundingClientRect().width > 0;
+function tourNote() { const k = $("ktour"); if (k) k.textContent = " \u00b7 t tour " + (!TOUR.on ? "off" : TOUR.paused ? "paused" : "on"); }
+function tourClosePanes() {   /* close only what the tour opened */
+  const o = TOUR.open; TOUR.open = null; if (!o) return;
+  if (CARD.pin && CARD.p && CARD.p.h.name === o) hideCard(true);
+  if (ui.h === o) closeDrawer();
+}
+function tourWait(ms, fn) { clearTimeout(TOUR.timer); TOUR.timer = setTimeout(() => { TOUR.timer = null; if (TOUR.on && !TOUR.paused && KIOSK.on) fn(); }, ms); }
+function tourArchitect() {
+  tourClosePanes();
+  try { pzToNode(hub.node.g); } catch (_) { pzFit(true); }
+  tourWait(TOUR_ARCH_MS, tourNext);
+}
+function tourNext() {
+  const c = PMS.filter((p) => tourVisible(p) && tourHasData(p) && p.h.name !== TOUR.last);
+  const p = c.length ? c[Math.floor(Math.random() * c.length)] : null;
+  if (!p) { TOUR.last = null; return tourArchitect(); }   /* nothing to show: stay on the Architect and look again */
+  TOUR.last = p.h.name; pzToNode(p.node.g);
+  tourWait(TOUR_SETTLE_MS, () => {
+    const q = PMS.find((x) => x.h.name === p.h.name);
+    if (!q || !tourVisible(q)) return tourNext();   /* the session left between steps */
+    const b = q.node.g.getBoundingClientRect();
+    showCard(q, b.left + b.width / 2, b.top + b.height * 0.2, true, null); openDrawer(q.h.name, null, null); TOUR.open = q.h.name;
+    tourWait(TOUR_HOLD_MS[0] + Math.random() * (TOUR_HOLD_MS[1] - TOUR_HOLD_MS[0]), tourArchitect);
+  });
+}
+function tourStart(delay) { clearTimeout(TOUR.idle); TOUR.on = true; TOUR.paused = false; tourNote(); tourWait(delay, tourArchitect); }
+function tourStop() { clearTimeout(TOUR.timer); clearTimeout(TOUR.idle); TOUR.on = false; TOUR.paused = false; tourNote(); }
+function tourInput() {   /* user input: pause now, resume after TOUR_IDLE_MS of quiet */
+  if (!TOUR.on) return;
+  clearTimeout(TOUR.timer); clearTimeout(TOUR.idle); TOUR.paused = true; TOUR.open = null; tourNote();   /* panes stay as the user left them */
+  TOUR.idle = setTimeout(() => { if (TOUR.on) { TOUR.paused = false; tourNote(); tourClosePanes(); tourWait(0, tourArchitect); } }, TOUR_IDLE_MS);
+}
+["wheel", "pointerdown", "touchstart", "click"].forEach((t) => document.addEventListener(t, (e) => { if (e.isTrusted) tourInput(); }, { capture: true, passive: true }));
+document.addEventListener("keydown", (e) => {
+  if (!e.isTrusted || e.altKey || e.ctrlKey || e.metaKey || /^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || ""))) return;
+  if ((e.key === "t" || e.key === "T") && KIOSK.on) { if (TOUR.on) tourStop(); else tourStart(0); return; }
+  tourInput();
+}, true);
+if (location.pathname === "/live/kiosk") tourStart(TOUR_START_MS);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && CARD.pin) { hideCard(true); e.stopImmediatePropagation(); } }, true);   /* a pinned summary card takes the first Esc */
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (!$("viewer").hidden) closeViewer(); else if (ui.h) closeDrawer(); else if (SPREAD.open) SPREAD.open = false; else if (FOC.name) exitFocus(); else if (!$("side").hidden) setSide(false); } });
+$("fback").addEventListener("click", exitFocus);
+/* outside click closes the Events / Docs panel and the details drawer; that first click is swallowed (capture phase) so it never reaches what is underneath */
+function outsideClose(e) {
+  const t = e.target; if (!t.closest) return;
+  const sideOpen = !$("side").hidden, drawerOpen = !!ui.h;
+  if (!sideOpen && !drawerOpen) return;
+  if (t.closest("#side, #drawer, #sopen, #sidebtn, #tip, #viewer")) return;
+  e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+  if (drawerOpen) closeDrawer(); else setSide(false);
+}
+document.addEventListener("click", outsideClose, true);
+document.addEventListener("click", (e) => { if (SPREAD.open && !e.target.closest(".node.inact")) SPREAD.open = false; });   /* a click anywhere else collapses the spread */
+$("fdetails").addEventListener("click", () => { if (FOC.name) openDrawer(FOC.name, null, "h:" + FOC.name); });
 $("pause").addEventListener("click", (e) => { paused = !paused; e.currentTarget.setAttribute("aria-pressed", paused); e.currentTarget.textContent = paused ? "Resume" : "Pause"; if (!paused) poll(); });
 /* Theme is set only in the dashboard settings panel (the owner 2026-10-23); this page follows the stored choice, also while open in the embed. */
 window.addEventListener("storage", (e) => { if (e.key !== "architect-theme") return; if (e.newValue === "light" || e.newValue === "dark") document.documentElement.setAttribute("data-theme", e.newValue); else document.documentElement.removeAttribute("data-theme"); });
@@ -587,6 +1447,7 @@ addEventListener("resize", layout);
 if (window.ResizeObserver) new ResizeObserver(layout).observe($("live"));   /* the graph re-lays out when the panel opens or the frame resizes */
 setInterval(() => { if (ui.h && !paused) renderAll(); }, POLL_MS);   /* keep an open drawer's elapsed times fresh */
 setInterval(poll, POLL_MS);
+setInterval(loadProgress, PROG_MS);
 
 let last = performance.now(), lastDraw = 0;
 function frame(now) {
@@ -594,9 +1455,13 @@ function frame(now) {
   if (!REDUCE.matches || now - lastDraw > 1000) { step(dt); draw(dt); lastDraw = now; }
   requestAnimationFrame(frame);
 }
-$("legend").innerHTML = legendHtml();
+$("legend").innerHTML = '<button type="button" class="lt" id="ltog" aria-expanded="false" aria-controls="legend">Key \u25B8</button>' + legendHtml();
+{ const lg = $("legend"), tg = $("ltog"), set = (o) => { lg.classList.toggle("open", o); tg.setAttribute("aria-expanded", o); tg.textContent = o ? "Key \u25BE details" : "Key \u25B8"; try { localStorage.setItem("architect-live-key", o ? "1" : "0"); } catch (_) {} };
+  let o0 = false; try { o0 = localStorage.getItem("architect-live-key") === "1"; } catch (_) {}
+  if (o0) set(true); tg.addEventListener("click", () => set(!lg.classList.contains("open"))); }
 layout(); hub.r = hub.tr;
 poll();
+loadProgress();
 requestAnimationFrame(frame);
 </script>
 </body>

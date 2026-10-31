@@ -261,3 +261,16 @@ def test_the_module_imports_only_the_standard_library():
     stdlib = getattr(sys, "stdlib_module_names", None)
     allowed = stdlib or {"__future__", "dataclasses", "json", "os", "types", "typing"}
     assert names and names <= set(allowed), names
+
+
+def test_projects_root_and_claude_config_dir_resolve_absolute_with_env_winning(tmp_path):
+    # #10571: both keys default when blank, come from the file, and lose to their variables
+    _write(tmp_path, json.dumps({"projects_root": str(tmp_path / "pr"), "claude_config_dir": str(tmp_path / "cc")}))
+    cfg = ac.load(root=str(tmp_path), environ={})
+    assert (cfg.projects_root, cfg.claude_config_dir) == (str(tmp_path / "pr"), str(tmp_path / "cc"))
+    cfg = ac.load(root=str(tmp_path), environ={"ARCHITECT_PROJECTS_ROOT": "/srv/p", "CLAUDE_CONFIG_DIR": "/srv/c"})
+    assert (cfg.projects_root, cfg.claude_config_dir) == ("/srv/p", "/srv/c")
+    default = ac.load(root=str(tmp_path / "none"), environ={})
+    assert default.projects_root == os.path.expanduser("~/trusty-mpm-projects")
+    assert default.claude_config_dir == ac.default_claude_config_dir({})
+    assert "projects_root" not in default.unknown and "claude_config_dir" not in default.unknown

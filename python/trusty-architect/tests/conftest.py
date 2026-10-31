@@ -44,3 +44,9 @@ def _no_caller_architect_session(monkeypatch):
 def _wake_alert_in_tmp(tmp_path, monkeypatch):
     """No test writes or clears the live inbox/pm-wake-alert.json (D39)."""
     monkeypatch.setenv("PM_WAKE_ALERT", str(tmp_path / "pm-wake-alert.json"))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_project_registry(tmp_path_factory, monkeypatch):
+    """#10571: the Projects view never reads the operator's live tm registry; a test that wants one writes its own."""
+    monkeypatch.setenv("TRUSTY_MPM_ROOT", str(tmp_path_factory.mktemp("mpmroot")))

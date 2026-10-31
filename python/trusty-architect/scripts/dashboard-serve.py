@@ -14,7 +14,9 @@ API: GET /api/<coll>[?status=&order_by=&dir=&limit=], GET|PUT|PATCH|DELETE /api/
 only real files under local/briefs), GET /usage/<account-slug>, GET /doc/<project>/<rel> and /doc-sync/<project>/<rel>
 (reader; dashboard_docs.py), GET /briefs, GET /media?type=diagram,image and /media-file/<project>/<rel>
 (dashboard_media.py; SVG under a sandbox CSP), GET /vendor/<name> (marked and DOMPurify from templates/dashboard/vendor/;
-mermaid.min.js only from the instance tree when present). Architect mode only, read-only: GET /api/il (every Intent
+mermaid.min.js only from the instance tree when present), GET /static/<design tokens>, POST|GET /api/attach (dashboard_attach.py),
+POST /api/media-archive/<id>. Architect mode only: PUT /doc/<project>/<rel> (compare-and-swap edit, dashboard_routes.py),
+GET /api/fleet, GET /api/projects (dashboard_projects.py). Read-only: GET /api/il (every Intent
 Ledger; dashboard_il.py), GET /api/harness and /api/harness/diff?id= (the Live snapshot, cached 4 s;
 dashboard_harness.py), GET /live (templates/dashboard/live.html), GET /api/viz[?days=1..14] (dashboard_viz.py).
 Guard: a Host other than 127.0.0.1/localhost:<port> or a tailnet guard name, or a write from another Origin, gets 403.
@@ -22,8 +24,11 @@ The guard names are this host's MagicDNS name from `tailscale status --json` (Se
 repeatable --allow-host NAME; if tailscale is missing or fails the server logs one line and stays localhost-only.
 The bind stays 127.0.0.1; `tailscale serve` is the only tailnet path.
 Config (#10161): local/architect.json via architect_config gives `tailnet_url` (served as /config.json tailnet, ""
-when unset) and `owner_name` (the /api/user and meta/state seed name; "the owner" when unset). A config that fails to
-load is named on stderr and the defaults apply. No owner, host or checkout path ships in this file.
+when unset), `owner_name` (the /api/user and meta/state seed name; "the owner" when unset) and, since #10571,
+`dashboard_port` (the default --port) and `claude_config_dir` (whose projects/ the Live view reads). /config.json
+`console` is https://<guard name>/ (the Trusty Console behind `tailscale serve`), "" with no guard name. A config that
+fails to load is named on stderr and the defaults apply. No owner, host or checkout path ships in this file.
+Optional (#10571): the Secrets, project-lifecycle, CLI Profiles and Notion modules are not shipped; their routes are refused.
 Discovery (#9474): after a successful bind the server writes 127.0.0.1:<port> to <data dir>/trusty-architect/http_addr
 (data dir: $TRUSTY_DATA_DIR_OVERRIDE, else ~/Library/Application Support on macOS, else
 ${XDG_DATA_HOME:-~/.local/share}) and removes it on shutdown if still its own.
@@ -36,6 +41,7 @@ tests/test_dashboard_media.py, tests/test_dashboard_media_ids.py, tests/test_das
 tests/test_dashboard_harness.py, tests/test_dashboard_header_cache.py
 """
 import argparse
+import gzip
 import json
 import os
 import re
@@ -44,6 +50,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 from http.server import ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -52,19 +59,19 @@ if HERE not in sys.path:     # python3 -I drops the script directory
 import architect_config  # noqa: E402
 import dashboard_docs  # noqa: E402
 import dashboard_harness  # noqa: E402
+import dashboard_projects  # noqa: E402
 import dashboard_store as ds  # noqa: E402
 from dashboard_docs import ARCHITECT, list_briefs, resolve_doc, usage_samples  # noqa: E402,F401  (re-exported)
 from dashboard_http import Handler, host_allowed, load_nav, origin_allowed  # noqa: E402,F401  (re-exported)
 from dashboard_page import (  # noqa: E402,F401  (re-exported)
-    LIVE_PAGE, PAGE, SHIM, VENDOR, VENDOR_FILES, VENDOR_INSTANCE, inject, page_rev, rev_of)
+    LIVE_PAGE, PAGE, SHIM, STATIC, STATIC_FILES, TOKENS, TOKENS_CSS, VENDOR, VENDOR_FILES, VENDOR_INSTANCE, inject, page_rev, rev_of)
 
 DEFAULT_PORT = 7890
 HOST = "127.0.0.1"
 INBOX = os.path.join(ds.REPO, "inbox")
-CLAUDE_PROJECTS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.trusty-tools/trusty-mpm/claude-config"), "projects")
+CLAUDE_PROJECTS = os.path.join(architect_config.default_claude_config_dir(), "projects")   # main() re-reads local/architect.json
 BRIEFS = os.path.join(ds.REPO, "local", "briefs")
 LEDGER = os.path.join(ds.REPO, "local", "usage", "ledger.jsonl")
-TOKENS = os.path.join(ds.REPO, "local", "usage", "token-hourly.jsonl")
 NAV_FILE = os.path.join(ds.REPO, "local", "il-dashboards.json")
 IL_SCHEDULE = os.path.join(ds.REPO, "local", "il-schedule.json")
 ARCHITECT_IL = os.path.join(ds.REPO, "local", "il")
@@ -115,15 +122,35 @@ def instance_settings():
     return cfg.tailnet_url, cfg.owner_name
 
 
+def instance_server_settings():
+    """(dashboard_port, Claude projects dir) from local/architect.json (#10571); the shipped defaults when it cannot be loaded."""
+    try:
+        cfg = architect_config.load()
+    except architect_config.ConfigError:
+        return DEFAULT_PORT, CLAUDE_PROJECTS   # instance_settings() already named the failure on stderr
+    return cfg.dashboard_port, os.path.join(cfg.claude_config_dir, "projects")
+
+
+def console_origin(names):
+    """The Trusty Console's tailnet origin, https://<name>/ (tailscale serve port 443), or "" with no guard names."""
+    return f"https://{min(names)}/" if names else ""
+
+
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, port, store, page=PAGE, briefs=BRIEFS, tailnet_names=(), projects=None, vendor=VENDOR, ledger=LEDGER,
                  config=None, nav_file=NAV_FILE, il_schedule=IL_SCHEDULE, architect_il=ARCHITECT_IL, tokens=TOKENS,
-                 live_page=LIVE_PAGE, inbox=INBOX, claude_projects=CLAUDE_PROJECTS, tailnet_url="", owner_name=""):
+                 live_page=LIVE_PAGE, inbox=INBOX, claude_projects=CLAUDE_PROJECTS, tailnet_url="", owner_name="",
+                 static=STATIC, projects_view=None, cli_profiles=None, cli_runner=None):
         self.tokens = tokens
+        self.cli_profiles, self.cli_runner = cli_profiles, cli_runner   # CLI Profiles view (optional module)
+        self.static = static
         self.live_page, self.inbox, self.claude_projects = live_page, inbox, claude_projects
-        self.harness_cache = dashboard_harness.HarnessCache()
+        self.harness_cache = dashboard_harness.HarnessCache(swr=True)
+        self._hbody = (None, None, None)   # (snapshot object, json bytes, gzip bytes): serialise and compress once per build
+        self._hbody_lock = threading.Lock()
+        self.fleet_cache = dashboard_harness.HarnessCache()
         self.store, self.page, self.briefs, self.vendor, self.ledger = store, page, briefs, vendor, ledger
         self.config = dict(config or ARCHITECT_CONFIG)
         self.nav_file = nav_file
@@ -133,7 +160,22 @@ class DashboardServer(ThreadingHTTPServer):
         # projects: {name: root} or a callable returning it; default re-reads the server-side allowlist per request
         self.projects = projects if callable(projects) else (load_projects if projects is None else (lambda: projects))
         self.tailnet_names = frozenset(tailnet_names)
+        self.console_url = console_origin(self.tailnet_names)
+        self.projects_view = projects_view or dashboard_projects.ProjectsView(dashboard_projects.registered_projects, self.projects)
         super().__init__((HOST, port), Handler)   # never 0.0.0.0
+
+    def rev(self):
+        """X-Page-Rev: the page file plus the design tokens (when present under self.static); a change to either reloads open tabs."""
+        t = os.path.join(self.static, STATIC_FILES[0])
+        return page_rev(self.page, (t,) if os.path.isfile(t) else ())
+
+    def harness_body(self, snap):
+        """(json bytes, gzip bytes) of a harness snapshot, serialised and compressed once per cache build."""
+        with self._hbody_lock:
+            if self._hbody[0] is not snap:
+                raw = json.dumps(snap).encode("utf-8")
+                self._hbody = (snap, raw, gzip.compress(raw, 6, mtime=0))
+            return self._hbody[1], self._hbody[2]
 
 
 def port_in_use(port):
@@ -193,6 +235,50 @@ def remove_addr_file(addr):
         sys.stderr.write(f"dashboard-serve: cannot remove discovery file: {e}\n")
 
 
+def instance_lock_path(mode, root):
+    """The single-instance lock: <checkout>/inbox/dashboard-serve.lock for the Architect, <root>/.dashboard-serve.lock in session mode."""
+    if mode == "session":
+        return os.path.join(os.path.abspath(root), ".dashboard-serve.lock")
+    return os.path.join(INBOX, "dashboard-serve.lock")
+
+
+def acquire_instance_lock(path, port):
+    """The open, flock-held lock file, or None when another live server holds it (#10571).
+
+    Why: one Architect checkout must never run two dashboards (two writers on one store, a port clash under launchd).
+    What: an exclusive non-blocking flock on `path`, kept for the process lifetime (the kernel drops it at exit, so a
+    crashed server never leaves a stale lock); the holder writes `pid port cwd` into the file for `describe_lock`.
+    Test: tests/test_dashboard_single_instance.py
+    """
+    import fcntl
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    f = open(path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    f.seek(0)
+    f.truncate()
+    f.write(f"{os.getpid()} {port} {os.getcwd()}\n")
+    f.flush()
+    _HELD_LOCKS.append(f)
+    return f
+
+
+def describe_lock(path):
+    """"pid N on port P" from the lock file, or "another copy" when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            pid, port = f.read().split()[:2]
+        return f"pid {pid} on port {port}"
+    except (OSError, ValueError):
+        return "another copy"
+
+
+_HELD_LOCKS = []   # keeps each acquired lock file open (and so flock-held) until the process exits
+
+
 def session_config(title, briefs_base, session=""):
     """Page config for session mode. Title: explicit title, else "<session>: IL Dashboard", else "IL Dashboard". storage_key (localStorage prefix) comes from the session when given, so a title change does not reset viewers; otherwise from the title."""
     title = title or (f"{session}: IL Dashboard" if session else "IL Dashboard")
@@ -206,7 +292,8 @@ def _raise_interrupt(signum, frame):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Serve the Architect dashboard on 127.0.0.1.")
-    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    port, claude_projects = instance_server_settings()
+    ap.add_argument("--port", type=int, default=port, help="default: local/architect.json dashboard_port, else 7890")
     ap.add_argument("--root", default=ds.DEFAULT_ROOT, help="document store directory (default local/owner-queue)")
     ap.add_argument("--page", default=PAGE)
     ap.add_argument("--mode", choices=("architect", "session"), default="architect",
@@ -221,21 +308,28 @@ def main(argv=None):
     if not os.path.isfile(args.page):
         sys.stderr.write(f"dashboard-serve: page not found: {args.page}\n")
         return 2
-    if port_in_use(args.port):
-        sys.stderr.write(f"dashboard-serve: port {args.port} on {HOST} is already in use; "
-                         f"stop the other server or pass --port N\n")
-        return 1
     session = args.mode == "session"
     if session and os.path.realpath(args.root) == os.path.realpath(ds.DEFAULT_ROOT):
         sys.stderr.write("dashboard-serve: session mode needs its own --root, not the Architect store\n")
         return 2
+    lock_path = instance_lock_path(args.mode, args.root)
+    held = acquire_instance_lock(lock_path, args.port)
+    if held is None:
+        # #10571: exit 0, so launchd's KeepAlive (restart on a non-zero exit) never loops on a duplicate.
+        sys.stderr.write(f"dashboard-serve: this dashboard is already running ({describe_lock(lock_path)}); "
+                         f"not starting a second copy\n")
+        return 0
+    if port_in_use(args.port):
+        sys.stderr.write(f"dashboard-serve: port {args.port} on {HOST} is already in use; "
+                         f"stop the other server or pass --port N\n")
+        return 1
     store = ds.Store(args.root, prune_log=os.path.join(os.path.abspath(args.root), ".archive", "pruned.jsonl") if session else None)
     extra = {"config": session_config(args.title, args.briefs_base, args.session), "projects": {},
              "briefs": os.path.join(os.path.abspath(args.root), ".no-briefs")} if session else {}
     tailnet_url, owner_name = instance_settings()
     try:
         srv = DashboardServer(args.port, store, args.page, tailnet_names=allowed_names(args.allow_host), nav_file=args.nav_file,
-                              tailnet_url=tailnet_url, owner_name=owner_name, **extra)
+                              tailnet_url=tailnet_url, owner_name=owner_name, claude_projects=claude_projects, **extra)
     except OSError as e:
         sys.stderr.write(f"dashboard-serve: cannot bind {HOST}:{args.port}: {e}\n")
         return 1

@@ -37,7 +37,8 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/datg.py`, `scripts/datg_store.py`, `scripts/datg_ops.py`, `scripts/datg_log.py`, `scripts/datg_read.py`, `scripts/datg-hook.sh` | The Intent Ledger store (`docs/specs/SPEC-IL-01.md`): a PM's goals, decisions, asks, tasks and session record in `<project>/.trusty-mpm/datg/`, with the resume digest, `fresh` and the Stop-hook `stamp`. `datg.py` is the CLI and imports the four `datg_*` modules from its own directory, so the five ship together. `datg-hook.sh` is the SessionStart, Stop and PreToolUse hook wrapper and always exits 0. The shipped poller does not load them yet (#10161, P1b). |
 | `scripts/ctx-watch.py` | Evaluates the clear signals S1 to S5 per session from `local/il-schedule.json`, the IL session record and the session transcript, and prints the clear candidates. Sends no keys. Loads `self-ctx.py` by path. The shipped poller does not load it yet (#10161, P1b). |
 | `scripts/il-cron.py` | Runs the Intent Ledger cadence jobs in `local/il-schedule.json` when due, retries a failed job up to 3 times, then raises one alert. Loads `ctx-watch.py` by path. Its `prune` job runs `il-archive.py`. The shipped poller does not load it yet (#10161, P1b). |
-| `scripts/self-clear.sh` | The Architect's gated self-refresh: refuses unless `datg.py fresh` passes and the IL session block is recorded, then, with `--live` only, waits for idle and sends `/clear` and a resume prompt. A dry run by default. Its idle test needs `turn-active.py` (P1b). The shipped poller does not load it yet (#10161, P1b). |
+| `scripts/self-clear.sh` | The Architect's gated self-refresh: refuses unless `datg.py ready` passes (#10599 calls it before and after the idle wait), then, with `--live` only, waits for idle and sends `/clear` and a resume prompt. A dry run by default. Its idle test needs `turn-active.py`, which exits 0 for a running turn, 10 for idle and any other code (3 on its own error) for busy. The shipped poller does not load it yet (#10161, P1b). |
+| `scripts/datg_ready.py` | `datg.py ready [--json]`, the clear gate: exit 0 only when the session's task and next are set and not placeholders (`needs owner input:` counts as one), an active goal or open task item exists, `owed` and `crons` are recorded (`none` counts), and the last write is fresh (the `fresh` window); a HOLD alone never passes. 1 = not ready, one plain reason per line; 2 = the ledger is missing or unreadable. `--json` prints `{ready, reasons, written_at, hold}`. |
 | `scripts/state-archive.py` | Moves old handoff sections out of `local/state.md` into `local/state-archive.md`, keeping the newest 3 and the `NEXT IDS` line. `--dry-run` writes nothing. The shipped poller does not load it yet (#10161, P1b). |
 | `scripts/architect-idle.py` | Exits 0 when the Architect's newest transcript ends on a finished assistant turn: the transcript half of `self-clear.sh`'s idle test. Loads `self-ctx.py` by path. The shipped poller does not load it yet (#10161, P1b). |
 | `scripts/dashboard_store.py`, `scripts/dashboard_jsonl.py`, `scripts/dashboard_schema.py` | The dashboard's file-backed document store: one JSON file per document (or one canonical `.jsonl` per collection), versioned writes under one lock, all-or-nothing batches. `dashboard_schema.py` validates documents against `schemas/dashboard/` with a small stdlib validator. Default root `local/owner-queue`; `DASHBOARD_ROOT` overrides it. |
@@ -88,6 +89,8 @@ an empty variable counts as unset.
 | `memory_palace` | string | `""`: derive it from the session or project | `ARCHITECT_MEMORY_PALACE` |
 | `dashboard_port` | integer, 1 to 65535 | `7890` | `DASHBOARD_PORT` |
 | `tailnet_url` | `""` or an `http://` / `https://` origin | `""`: the dashboard footer links localhost only | `DASHBOARD_TAILNET_URL` |
+| `projects_root` | string, a directory | `""`: `~/trusty-mpm-projects` | `ARCHITECT_PROJECTS_ROOT` |
+| `claude_config_dir` | string, a directory | `""`: `~/.trusty-tools/trusty-mpm/claude-config` | `CLAUDE_CONFIG_DIR` |
 | `repos` | `{name: {slug, gh_config_dir, checkout}}`, `slug` required | `{}` | none |
 | `caps` | `{name: number}`; `builder_slots` an integer of 1 or more, `load_factor` above 0 | `{}`: each script's own constant | `LOAD_FACTOR` sets `caps.load_factor` |
 
@@ -96,6 +99,11 @@ defaults. Malformed JSON, a wrong type or an out-of-range value raises
 `ConfigError` naming the file and the key, never the value; nothing falls back
 to the defaults. An unknown key is ignored and listed in `Config.unknown`.
 Session names stay variables only.
+
+Caps the shipped scripts read (#10571): `datg_size_refuse` is the Intent Ledger
+`state.json` size bar in bytes (default `65536`, owner ruling D74) and
+`datg_size_warn` its warning bar (default half of the
+refuse bar).
 
 ## Tests
 
@@ -136,7 +144,17 @@ trusty-mpm ships a byte-identical copy of every file under `scripts/`,
 fails when one differs. `tm fleet init` writes them into the Architect project: `scripts/`, `schemas/dashboard/`, `templates/dashboard/`,
 `.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore`, `local/` and
 `docs/architect/voice.md`.
-It writes a file only when it is absent and reports an edited one as skipped.
+It writes a file when it is absent, and replaces one whose bytes are an earlier
+shipped version (an unedited copy, listed in trusty-mpm's `seed_history.tsv`
+beside the fleet seed table), so a re-run
+of `tm fleet init` is the refresh path for an existing install. Any other bytes
+are an edit: the file is kept and reported as skipped ("custom copy kept").
+`provenance.json`, seeded as `docs/architect/bundle-provenance.json`, records the
+prototype commit, the export manifest's sha256 and each shipped file's sha256;
+`tm fleet init` and `tm fleet status` print it. After changing a shipped file,
+run `scripts/architect_bundle_meta.py provenance` and then
+`scripts/architect_bundle_meta.py history`; the Rust seed tests fail until both
+are current.
 With a launch it starts the poller through `scripts/start-fleet-poll.sh`, and
 a start that fails fails the command.
 
