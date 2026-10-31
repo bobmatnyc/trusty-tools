@@ -230,3 +230,27 @@ async fn a_caller_supplied_marker_tag_is_stripped_and_hides_nothing() {
     assert!(stored.tags.iter().all(|t| !t.starts_with("superseded-by:")));
     assert!(ids(&recall(&state, "rm3", false).await).contains(&id.to_string()));
 }
+
+/// Why: the engine write pipeline strips the marker for every caller that skips
+/// the MCP `parse_tags` strip (#10609); removing it must turn a test red.
+/// What: `remember_with_options` with a marker tag; the stored drawer has no
+/// marker and reports `retired_by() == None`.
+/// Test: this test.
+#[tokio::test]
+async fn the_engine_write_pipeline_strips_a_caller_supplied_marker() {
+    let (state, _tmp) = test_state();
+    let handle = palace(&state, "rm4").await;
+    let id = handle
+        .remember_with_options(
+            NEW.to_string(),
+            RoomType::General,
+            vec![format!("superseded-by:{}", Uuid::new_v4()), "keep".into()],
+            0.5,
+            RememberOptions::forced(),
+        )
+        .await
+        .expect("remember");
+    let stored = mirrored(&handle, id);
+    assert_eq!(stored.retired_by(), None);
+    assert_eq!(stored.tags, vec!["keep".to_string()]);
+}

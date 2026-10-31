@@ -7,3 +7,4 @@ Changed
   - Dream dedup merges no longer copy a retirement marker onto the surviving drawer
   - The in-memory drawer table now carries the marker as well as the stored row, so a running daemon excludes a retired occupant at once rather than after the palace reopens, and a later rewrite of the drawer (chunk split, dream merge) keeps it
   - `superseded-by:*` is a reserved tag namespace: writes (`memory_remember`, `memory_note`, `task_add` and the engine write pipeline) strip a caller-supplied one and log a WARN, and recall and `memory_list` no longer show the marker among a drawer's tags (a historical search reports it as `superseded_by`)
+  - A share-file import that merges into an existing drawer never imports a `superseded-by:*` tag, so a crafted file cannot hide a live drawer
