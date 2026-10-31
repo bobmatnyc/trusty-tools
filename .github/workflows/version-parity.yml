@@ -388,3 +388,38 @@ jobs:
               });
               core.notice(`Filed tracking issue #${created.data.number}`);
             }
+
+      # #10507: close the tracker on green. Runs only when parity SUCCEEDED
+      # (never red, cancelled or skipped) on main (push or the cron, which
+      # always runs on the default branch). Same label lookup as the step
+      # above; no open issue means nothing to do. Lookup errors fail only
+      # this notify job, never the `version-parity` verdict it reports on.
+      - name: Close tracking issue on green
+        if: needs.version-parity.result == 'success' && github.ref == 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = 'version-drift-main';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+            });
+            for (const issue of existing.data) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `Version parity is green again on \`main\` at ${context.sha}. Closing. Run: ${runUrl}`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+              core.notice(`Closed tracking issue #${issue.number}`);
+            }
