@@ -272,6 +272,9 @@ pub(crate) async fn relocate_index_report(
             .filter_map(|p| p.to_str().map(str::to_string))
             .collect(),
         exclude_globs: existing.exclude_globs.clone(),
+        // #10532: relocation keeps the stored profile.
+        profile: on_disk.as_ref().and_then(|e| e.profile.clone()),
+        profile_hash: on_disk.as_ref().and_then(|e| e.profile_hash.clone()),
         extensions: existing.extensions.clone(),
         domain_terms: existing.domain_terms.clone(),
         path_filter: existing.path_filter.clone(),

@@ -50,6 +50,7 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
             root_path: test_root,
             include_paths: None,
             exclude_globs: None,
+            profile: None,
             extensions: None,
             domain_terms: None,
             path_filter: None,
