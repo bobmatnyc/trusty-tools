@@ -84,6 +84,8 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     template!("local/mandates/example.toml"),
     // See #10161: the instance config `scripts/architect_config.py` reads.
     template!("local/architect.json"),
+    // #10571 Phase 2: the IL cadence jobs and clear thresholds il-cron.py and ctx-watch.py read.
+    template!("local/il-schedule.json"),
     embedded!("scripts/fleet-poll.py", "scripts/fleet-poll.py", true),
     // #8891: fleet-poll.py loads this sibling by path; it must ship beside it.
     embedded!(

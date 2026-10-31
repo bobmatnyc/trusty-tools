@@ -219,3 +219,5 @@ scripts/test_dashboard_tokens.py	tests/test_dashboard_tokens.py
 # modules (fleet_poll_cfg/io/alerts/wake/watchdog.py), which have no prototype
 # source. fleet_poll_selfrefresh.py is a stub #10599 fills; fleet-classify.py and
 # tests/test_fleet_poll_idle.py (from scripts/test_fleet_poll_idle.py) are hand-merged too.
+# templates/local/il-schedule.json is written in trusty-tools form: the prototype copy holds
+# instance sessions and names, so only its job and threshold shape is kept.

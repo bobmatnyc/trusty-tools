@@ -566,6 +566,8 @@ const LOCAL_TEMPLATES: &[&str] = &[
     "local/mandates/example.toml",
     // See #10161: the instance config seed.
     "local/architect.json",
+    // #10571 Phase 2: the IL cadence jobs and clear thresholds.
+    "local/il-schedule.json",
 ];
 
 /// The checkout's Architect seed, read from content once (#9132).

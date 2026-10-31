@@ -213,6 +213,7 @@ templates/local/owner/dream-log.md|crates/trusty-mpm/src/assets/architect/templa
 templates/local/mandates/README.md|crates/trusty-mpm/src/assets/architect/templates/local/mandates/README.md
 templates/local/mandates/example.toml|crates/trusty-mpm/src/assets/architect/templates/local/mandates/example.toml
 templates/local/architect.json|crates/trusty-mpm/src/assets/architect/templates/local/architect.json
+templates/local/il-schedule.json|crates/trusty-mpm/src/assets/architect/templates/local/il-schedule.json
 "
 if [ "$LIST_PAIRS" -eq 1 ]; then
   for pair in $PAIRS; do echo "$pair"; done
