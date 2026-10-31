@@ -219,7 +219,7 @@ use credential_print::is_evaluator;
 // #8756: the secret rules read substitution bodies through the same scanner.
 pub(crate) use substitutions::{
     MAX_SUBSTITUTION_DEPTH, Substitution, command_substitutions, segment_substitution_spans,
-    without_inert_heredoc_bodies,
+    uncommented_substitution_spans, without_inert_heredoc_bodies,
 };
 
 /// Deny reason for editing files through a shell tool (sed/awk/patch/git apply/redirection).

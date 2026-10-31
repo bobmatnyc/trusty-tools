@@ -105,6 +105,35 @@ pub(crate) fn segment_substitution_spans(segment: &str) -> Vec<(Range<usize>, Su
     )
 }
 
+/// [`segment_substitution_spans`] without the ones inside a trailing `#`
+/// comment (#10566).
+///
+/// Why: a trailing comment that quotes code in backticks (`# not // here`
+/// with `//` in backticks) holds pairs the shell never runs; the script-body
+/// rule read `//` as a script and refused this repository's own gate scripts.
+/// What: the comment starts at the first `#` that is unquoted, starts a word
+/// and lies in no substitution. Only a segment with balanced quotes is cut;
+/// otherwise every span is kept (the over-reading direction).
+/// Test: `a_substitution_in_a_comment_is_not_run_10566`.
+pub(crate) fn uncommented_substitution_spans(segment: &str) -> Vec<(Range<usize>, Substitution)> {
+    let mut spans = segment_substitution_spans(segment);
+    let scan = QuoteScan::new(segment);
+    if !scan.balanced {
+        return spans;
+    }
+    let bytes = segment.as_bytes();
+    let comment = (0..bytes.len()).find(|&i| {
+        bytes[i] == b'#'
+            && scan.is_unquoted(i)
+            && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+            && !spans.iter().any(|(range, _)| range.contains(&i))
+    });
+    if let Some(at) = comment {
+        spans.retain(|(range, _)| range.start < at);
+    }
+    spans
+}
+
 /// The substitution walk shared by argv text and here-document bodies.
 ///
 /// What: with `honour_escapes`, an opener behind an odd run of backslashes

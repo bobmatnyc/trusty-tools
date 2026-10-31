@@ -24,6 +24,9 @@ pub(crate) enum Unread {
     /// A script run past the `MAX_SCRIPT_DEPTH` nesting bound: its body is
     /// not followed (#9037).
     TooDeep,
+    /// Command substitutions nested past `MAX_SUBSTITUTION_DEPTH`: the
+    /// innermost bodies are not read (#10566).
+    SubstitutionTooDeep,
     /// Larger than [`MAX_SCRIPT_BYTES`].
     TooLarge,
     /// Not UTF-8 text, or carrying a NUL byte.
@@ -139,6 +142,10 @@ pub(crate) fn deny_reason(word: &str, inner: Option<&str>, rule: Rule) -> String
             Unread::NotRegular => "it is not a regular file, so the guard fails closed",
             Unread::TooDeep => {
                 "it runs scripts nested past the guard's depth bound, so the guard fails closed"
+            }
+            Unread::SubstitutionTooDeep => {
+                "it nests command substitutions past the guard's depth bound, so the guard \
+                 fails closed"
             }
             Unread::TooLarge => {
                 "its body is over the guard's 256 KiB read bound, so the guard fails closed"

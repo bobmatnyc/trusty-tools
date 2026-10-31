@@ -1,0 +1,3 @@
+Fixed
+- `tm hook --pm-guard` now refuses a credential-reading script run inside a command substitution (`T="$(bash probe.sh)"`, backticks, nested substitutions, or such a line inside a script) with the same refusal as the plain `bash probe.sh`. Substitutions nested past the guard's depth bound refuse (#10566).
+- `tm hook --pm-guard` now refuses a GitHub secret DELETE run through a name the command rebinds — `hash -p`, `alias`, a function definition, `enable`, `BASH_CMDS`/`BASH_ALIASES` or a zsh command table, or an `eval` of one — as it refuses the plain `gh api -X DELETE`. When it cannot tell which names are rebound (`source`, a `PATH` assignment, an `eval` of an expansion, a computed name), any word in the command counts as rebound (#10566).
