@@ -98,7 +98,11 @@ pub enum ResumeRefusal {
 /// `a_dead_embedder_is_refused_before_the_stage_is_touched`,
 /// `a_failed_stage_with_every_vector_present_is_settled_ready`,
 /// `a_dry_run_reports_the_gap_and_queues_nothing`,
-/// `a_disabled_vector_lane_is_not_applicable`.
+/// `a_disabled_vector_lane_is_not_applicable`,
+/// `a_skipped_stage_set_during_the_window_is_not_overwritten`,
+/// `a_second_call_while_in_progress_reports_already_running`,
+/// `a_held_index_is_refused_as_busy`, `a_skipped_stage_is_not_applicable`,
+/// `a_refused_chunk_is_not_a_gap_to_an_embed_missing_resume`.
 pub async fn resume_semantic(
     handle: &Arc<IndexHandle>,
     dry_run: bool,
@@ -110,14 +114,23 @@ pub async fn resume_semantic(
         ));
     }
     let semantic = handle.stages.read().await.semantic.status;
-    if semantic == StageStatus::InProgress {
-        return Ok(ResumeReport {
-            action: ResumeAction::AlreadyRunning,
-            chunks: None,
-            missing: None,
-            rejected: 0,
-            semantic,
-        });
+    match semantic {
+        StageStatus::InProgress => {
+            return Ok(ResumeReport {
+                action: ResumeAction::AlreadyRunning,
+                chunks: None,
+                missing: None,
+                rejected: 0,
+                semantic,
+            });
+        }
+        // A `PATCH {vector:false}` parks the lane; resuming would undo it.
+        StageStatus::Skipped => {
+            return Err(ResumeRefusal::NotApplicable(
+                "the semantic stage is skipped for this index".into(),
+            ));
+        }
+        _ => {}
     }
     let embedder = handle.indexer.read().await.embedder_arc();
     let Some(embedder) = embedder else {
@@ -130,19 +143,39 @@ pub async fn resume_semantic(
             "a reindex or embed pass holds this index".into(),
         ));
     }
+    // Probe before any scan: a dead embedder must cost one embed call, not two
+    // passes over every corpus id, on every retry.
+    if !dry_run {
+        if let Err(detail) = probe(&embedder).await {
+            tracing::warn!(
+                "embed_missing[{}]: embedder probe failed: {detail}",
+                handle.id.0
+            );
+            return Err(ResumeRefusal::EmbedderDown(
+                "the embedder did not answer a probe embed".into(),
+            ));
+        }
+    }
     let coverage = handle.indexer.read().await.vector_coverage().await;
-    let (chunks, missing) = match coverage {
+    let (chunks, missing_ids) = match coverage {
         VectorCoverage::NotApplicable => {
             return Err(ResumeRefusal::NotApplicable(
                 "no vector store is wired on this index".into(),
             ));
         }
-        VectorCoverage::Unreadable(why) => return Err(ResumeRefusal::Unreadable(why)),
-        VectorCoverage::Measured { chunks, missing } => (chunks, missing.len()),
+        VectorCoverage::Unreadable(why) => {
+            tracing::warn!("embed_missing[{}]: coverage unreadable: {why}", handle.id.0);
+            return Err(ResumeRefusal::Unreadable(
+                "the index vector state could not be read".into(),
+            ));
+        }
+        VectorCoverage::Measured { chunks, missing } => (chunks, missing),
     };
+    let missing = missing_ids.len();
     // #8884: chunks the store durably refused recur on every pass; not owed.
+    // Reuses the measurement above instead of scanning the corpus again.
     let rejected = if missing > 0 {
-        crate::service::vector_gap::refusals_behind_gap(handle)
+        crate::service::vector_gap::refusals_excusing_gap(handle, missing_ids)
             .await
             .unwrap_or(0)
     } else {
@@ -162,15 +195,22 @@ pub async fn resume_semantic(
     if dry_run {
         return Ok(report(ResumeAction::WouldQueue, semantic));
     }
-    if let Err(why) = probe(&embedder).await {
-        return Err(ResumeRefusal::EmbedderDown(why));
-    }
     {
         let mut stages = handle.stages.write().await;
-        if stages.semantic.status == StageStatus::InProgress {
-            return Ok(report(
-                ResumeAction::AlreadyRunning,
-                StageStatus::InProgress,
+        // The stage may have changed during the probe and the scans: proceed
+        // only from the state this call read, and only while no reindex runs.
+        let now = stages.semantic.status;
+        if now == StageStatus::InProgress {
+            return Ok(report(ResumeAction::AlreadyRunning, now));
+        }
+        if now != semantic {
+            return Err(ResumeRefusal::Busy(
+                "the semantic stage changed while the gap was measured".into(),
+            ));
+        }
+        if crate::service::reindex::index_task_in_flight(&handle.id) {
+            return Err(ResumeRefusal::Busy(
+                "a reindex or embed pass holds this index".into(),
             ));
         }
         stages.semantic = crate::core::registry::StageState {

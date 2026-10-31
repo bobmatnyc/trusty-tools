@@ -73,7 +73,7 @@ directories such as `.ssh`, `.aws`, `.gnupg` and `.kube`, paths carrying secret
 markers, and the top level of your home directory. Those are refused with the
 matched pattern named in the error, not silently skipped.
 
-## 22 tools over MCP
+## 23 tools over MCP
 
 The MCP server speaks stdio and HTTP/SSE and exposes each retrieval lane
 separately, so an agent can pick the one that fits the question instead of
@@ -88,6 +88,6 @@ needs, about 63% fewer bytes.
 ```
 search · search_lexical · search_semantic · search_kg · search_all ·
 search_similar · get_call_chain · grep · typeahead · index_file · remove_file ·
-list_indexes · create_index · delete_index · reindex · index_status ·
-list_chunks · search_health · chat · console_metrics · add_root
+remove_files · list_indexes · create_index · delete_index · reindex · index_status ·
+list_chunks · search_health · chat · console_metrics · add_root · embed_missing
 ```

@@ -37,7 +37,7 @@ fn backoff_doubles_from_the_base_and_stops_at_the_cap() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_failed_stage_is_retried_after_its_backoff_and_settles() {
-    let (handle, embedder, store, n, _) = failed_mid_stage("embed-retry-recovers").await;
+    let (handle, embedder, store, n, _, _dir) = failed_mid_stage("embed-retry-recovers").await;
     let handles = vec![Arc::clone(&handle)];
     let mut book = RetryBook::default();
     let t0 = Instant::now();
@@ -84,7 +84,7 @@ async fn a_failed_stage_is_retried_after_its_backoff_and_settles() {
 #[tokio::test]
 #[serial_test::serial]
 async fn repeated_failed_resumes_stop_at_the_cap_but_a_dead_embedder_is_probed_forever() {
-    let (handle, embedder, store, _n, committed) = failed_mid_stage("embed-retry-cap").await;
+    let (handle, embedder, store, _n, committed, _dir) = failed_mid_stage("embed-retry-cap").await;
     let handles = vec![Arc::clone(&handle)];
     let id = "embed-retry-cap".to_string();
     let mut book = RetryBook::default();
@@ -114,4 +114,45 @@ async fn repeated_failed_resumes_stop_at_the_cap_but_a_dead_embedder_is_probed_f
         committed,
         "nothing embedded"
     );
+}
+
+/// A deleted index leaves the book, so a recreated id starts with a fresh budget.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_deleted_index_is_forgotten_and_a_recreated_id_starts_fresh() {
+    let (handle, _embedder, _store, _n, _, _dir) = failed_mid_stage("embed-retry-gone").await;
+    let mut book = RetryBook::default();
+    let t0 = Instant::now();
+    retry_sweep(&[Arc::clone(&handle)], &mut book, t0).await;
+    book.entries
+        .get_mut("embed-retry-gone")
+        .expect("tracked")
+        .resumes = MAX_RESUMES;
+
+    retry_sweep(&[], &mut book, t0 + Duration::from_secs(1)).await;
+    assert!(!book.tracks("embed-retry-gone"), "deleted index forgotten");
+
+    retry_sweep(&[handle], &mut book, t0 + Duration::from_secs(2)).await;
+    assert_eq!(book.resumes("embed-retry-gone"), Some(0), "fresh budget");
+}
+
+/// Nothing to embed on a `Failed` stage is terminal, not a probe failure.
+///
+/// Why: a zero-chunk corpus, or one whose every gap is a refusal, measures the
+/// same on every sweep; counting it a probe failure re-scanned it for ever.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn nothing_to_embed_on_a_failed_stage_is_terminal() {
+    use crate::service::embed_missing_test_support::unembedded_handle;
+    let embedder = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    let (handle, _store, _dir) = unembedded_handle("embed-retry-empty", 0, embedder).await;
+    handle.stages.write().await.semantic.status = StageStatus::Failed;
+    let mut book = RetryBook::default();
+    let t0 = Instant::now();
+
+    retry_sweep(&[Arc::clone(&handle)], &mut book, t0).await;
+    retry_sweep(&[handle], &mut book, t0 + Duration::from_secs(31)).await;
+    assert_eq!(book.resumes("embed-retry-empty"), Some(MAX_RESUMES));
 }

@@ -173,8 +173,8 @@ impl IndexAction {
     /// What: calls the handler for each variant. `cli_index` is the `-i` flag,
     /// `index_source` says where it came from (#8737), `json` is the global
     /// `--json`.
-    /// Test: `cargo run -p trusty-search -- index --help` lists every variant;
-    /// the handlers carry their own tests.
+    /// Test: `embed_missing_parses_with_dry_run` pins the new variant's parse;
+    /// each handler carries its own tests.
     pub(crate) async fn run(
         self,
         cli_index: Option<String>,
@@ -218,5 +218,33 @@ impl IndexAction {
                 .await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IndexAction;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Harness {
+        #[command(subcommand)]
+        action: IndexAction,
+    }
+
+    /// `index embed-missing [--dry-run]` parses to `EmbedMissing` (#10551).
+    /// Test: this test.
+    #[test]
+    fn embed_missing_parses_with_dry_run() {
+        let plain = Harness::try_parse_from(["t", "embed-missing"]).expect("parses");
+        assert!(matches!(
+            plain.action,
+            IndexAction::EmbedMissing { dry_run: false }
+        ));
+        let dry = Harness::try_parse_from(["t", "embed-missing", "--dry-run"]).expect("parses");
+        assert!(matches!(
+            dry.action,
+            IndexAction::EmbedMissing { dry_run: true }
+        ));
     }
 }

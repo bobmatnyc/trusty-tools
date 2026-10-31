@@ -87,8 +87,13 @@ impl RetryBook {
 /// attempt after [`BASE_DELAY`]. A due entry under [`MAX_RESUMES`] calls
 /// `resume_semantic` and records the outcome as the module doc describes.
 /// Test: `a_failed_stage_is_retried_after_its_backoff_and_settles`,
-/// `repeated_failed_resumes_stop_at_the_cap_but_a_dead_embedder_is_probed_forever`.
+/// `repeated_failed_resumes_stop_at_the_cap_but_a_dead_embedder_is_probed_forever`,
+/// `a_deleted_index_is_forgotten_and_a_recreated_id_starts_fresh`,
+/// `nothing_to_embed_on_a_failed_stage_is_terminal`.
 pub async fn retry_sweep(handles: &[Arc<IndexHandle>], book: &mut RetryBook, now: Instant) {
+    // A deleted index is forgotten, so a recreated id starts with a fresh budget.
+    book.entries
+        .retain(|id, _| handles.iter().any(|h| h.id.0 == *id));
     for handle in handles {
         let id = handle.id.0.clone();
         let status = handle.stages.read().await.semantic.status;
@@ -119,9 +124,16 @@ pub async fn retry_sweep(handles: &[Arc<IndexHandle>], book: &mut RetryBook, now
             Ok(r) if r.action == ResumeAction::AlreadyRunning => {
                 entry.next_at = now + BASE_DELAY;
             }
-            Ok(_) => {
-                entry.probe_failures += 1;
-                entry.next_at = now + entry.delay();
+            // Nothing missing on a `Failed` stage the health gate will not
+            // settle (all chunks refused, or an empty corpus): another sweep
+            // would measure the same, so stop.
+            Ok(r) => {
+                tracing::info!(
+                    "embed_retry[{id}]: nothing to embed ({}) and the stage stays failed; \
+                     not retried again",
+                    r.action.label(),
+                );
+                entry.resumes = MAX_RESUMES;
             }
             Err(ResumeRefusal::NotApplicable(_)) => entry.resumes = MAX_RESUMES,
             Err(ResumeRefusal::Busy(_)) => entry.next_at = now + BASE_DELAY,

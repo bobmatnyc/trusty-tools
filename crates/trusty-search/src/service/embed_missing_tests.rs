@@ -7,8 +7,6 @@
 //! (`embed_missing_test_support::failed_mid_stage`), the failure the issue saw.
 //! Test: this file.
 
-use std::sync::atomic::Ordering;
-
 use super::*;
 use crate::service::embed_missing_test_support::{failed_mid_stage, wait_for_stage};
 
@@ -24,7 +22,8 @@ use crate::service::embed_missing_test_support::{failed_mid_stage, wait_for_stag
 #[tokio::test]
 #[serial_test::serial]
 async fn only_the_missing_chunks_are_embedded_and_the_stage_leaves_failed() {
-    let (handle, embedder, store, n, committed) = failed_mid_stage("embed-missing-resume").await;
+    let (handle, embedder, store, n, committed, _dir) =
+        failed_mid_stage("embed-missing-resume").await;
     let missing = n - committed;
 
     embedder.heal();
@@ -45,20 +44,17 @@ async fn only_the_missing_chunks_are_embedded_and_the_stage_leaves_failed() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_repeat_run_with_nothing_missing_is_a_noop() {
-    let (handle, embedder, _store, _n, _) = failed_mid_stage("embed-missing-repeat").await;
+    let (handle, embedder, _store, _n, _, _dir) = failed_mid_stage("embed-missing-repeat").await;
     embedder.heal();
     resume_semantic(&handle, false).await.expect("resume");
     wait_for_stage(&handle, StageStatus::Ready).await;
-    let calls = embedder.calls.load(Ordering::SeqCst);
+    let embedded = embedder.healed_chunk_texts().len();
 
     let again = resume_semantic(&handle, false).await.expect("repeat");
     assert_eq!(again.action, ResumeAction::Noop);
     assert_eq!(again.missing, Some(0));
-    assert_eq!(
-        embedder.calls.load(Ordering::SeqCst),
-        calls,
-        "no embed call"
-    );
+    // The probe is one call; no chunk text is embedded again.
+    assert_eq!(embedder.healed_chunk_texts().len(), embedded, "no chunk");
     assert_eq!(
         handle.stages.read().await.semantic.status,
         StageStatus::Ready
@@ -73,7 +69,8 @@ async fn a_repeat_run_with_nothing_missing_is_a_noop() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_dead_embedder_is_refused_before_the_stage_is_touched() {
-    let (handle, _embedder, store, _n, committed) = failed_mid_stage("embed-missing-dead").await;
+    let (handle, _embedder, store, _n, committed, _dir) =
+        failed_mid_stage("embed-missing-dead").await;
     let before = handle.stages.read().await.semantic.clone();
 
     let refusal = resume_semantic(&handle, false).await.expect_err("down");
@@ -92,7 +89,8 @@ async fn a_dead_embedder_is_refused_before_the_stage_is_touched() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_dry_run_reports_the_gap_and_queues_nothing() {
-    let (handle, embedder, _store, n, committed) = failed_mid_stage("embed-missing-dry").await;
+    let (handle, embedder, _store, n, committed, _dir) =
+        failed_mid_stage("embed-missing-dry").await;
     embedder.heal();
 
     let report = resume_semantic(&handle, true).await.expect("dry run");
@@ -116,7 +114,7 @@ async fn a_dry_run_reports_the_gap_and_queues_nothing() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_failed_stage_with_every_vector_present_is_settled_ready() {
-    let (handle, embedder, store, n, _) = failed_mid_stage("embed-missing-settle").await;
+    let (handle, embedder, store, n, _, _dir) = failed_mid_stage("embed-missing-settle").await;
     for i in 0..n {
         store
             .upsert(
@@ -126,14 +124,14 @@ async fn a_failed_stage_with_every_vector_present_is_settled_ready() {
             .await
             .expect("seed vector");
     }
-    let calls = embedder.calls.load(Ordering::SeqCst);
+    // The probe runs before any scan, so a settle needs a live embedder.
+    embedder.heal();
 
     let report = resume_semantic(&handle, false).await.expect("settle");
     assert_eq!(report.action, ResumeAction::Settled);
-    assert_eq!(
-        embedder.calls.load(Ordering::SeqCst),
-        calls,
-        "no embed call"
+    assert!(
+        embedder.healed_chunk_texts().is_empty(),
+        "no chunk embedded"
     );
     let semantic = handle.stages.read().await.semantic.clone();
     assert_eq!(semantic.status, StageStatus::Ready, "{semantic:?}");
@@ -154,6 +152,111 @@ async fn a_disabled_vector_lane_is_not_applicable() {
         )
     });
     let refusal = resume_semantic(&handle, false).await.expect_err("off");
+    assert!(
+        matches!(refusal, ResumeRefusal::NotApplicable(_)),
+        "{refusal:?}"
+    );
+}
+
+/// An embedder whose probe flips the stage to `Skipped`, as a concurrent
+/// `PATCH {vector:false}` does during the resume's window.
+struct SkipDuringProbe {
+    inner: crate::core::embed::MockEmbedder,
+    stages: std::sync::Mutex<Option<Arc<tokio::sync::RwLock<crate::core::registry::IndexStages>>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::embed::Embedder for SkipDuringProbe {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        self.inner.embed(text).await
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let stages = self.stages.lock().expect("hook lock").clone();
+        if let Some(stages) = stages {
+            stages.write().await.semantic.status = StageStatus::Skipped;
+        }
+        self.inner.embed_batch(texts).await
+    }
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+}
+
+/// A stage set `Skipped` while the resume probes is not overwritten.
+///
+/// Why: the status is read before the probe, which can take 30 s. Pre-fix the
+/// write lock only re-checked `InProgress` and then set `InProgress`
+/// unconditionally, undoing a `PATCH {vector:false}` that landed in between.
+/// What: the embedder's probe flips the stage to `Skipped`. The call is
+/// refused, the stage stays `Skipped`, nothing is queued or embedded.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_skipped_stage_set_during_the_window_is_not_overwritten() {
+    use crate::service::embed_missing_test_support::unembedded_handle;
+    let hook = Arc::new(SkipDuringProbe {
+        inner: crate::core::embed::MockEmbedder::new(8),
+        stages: std::sync::Mutex::new(None),
+    });
+    let (handle, store, _dir) = unembedded_handle("embed-missing-race", 5, hook.clone()).await;
+    handle.stages.write().await.semantic.status = StageStatus::Failed;
+    *hook.stages.lock().expect("hook lock") = Some(Arc::clone(&handle.stages));
+
+    let refusal = resume_semantic(&handle, false).await.expect_err("changed");
+    assert!(matches!(refusal, ResumeRefusal::Busy(_)), "{refusal:?}");
+    assert_eq!(
+        handle.stages.read().await.semantic.status,
+        StageStatus::Skipped,
+        "the concurrent toggle must survive"
+    );
+    assert_eq!(store.len().await.expect("len"), 0, "nothing embedded");
+    assert_eq!(crate::service::reindex::deferred_embed_queue_depth(), 0);
+}
+
+/// A second call while a pass runs reports `already_running` and queues nothing.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_second_call_while_in_progress_reports_already_running() {
+    use crate::service::embed_missing_test_support::unembedded_handle;
+    let embedder = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    let (handle, store, _dir) = unembedded_handle("embed-missing-running", 5, embedder).await;
+    handle.stages.write().await.semantic.status = StageStatus::InProgress;
+
+    let report = resume_semantic(&handle, false).await.expect("running");
+    assert_eq!(report.action, ResumeAction::AlreadyRunning);
+    assert_eq!(store.len().await.expect("len"), 0);
+    assert_eq!(crate::service::reindex::deferred_embed_queue_depth(), 0);
+}
+
+/// An index whose per-index permit is held is refused as busy.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_held_index_is_refused_as_busy() {
+    use crate::service::embed_missing_test_support::unembedded_handle;
+    let embedder = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    let (handle, store, _dir) = unembedded_handle("embed-missing-busy", 5, embedder).await;
+    handle.stages.write().await.semantic.status = StageStatus::Failed;
+    let _permit = crate::service::reindex::index_semaphore(&handle.id)
+        .try_acquire_owned()
+        .expect("the permit is free");
+
+    let refusal = resume_semantic(&handle, false).await.expect_err("held");
+    assert!(matches!(refusal, ResumeRefusal::Busy(_)), "{refusal:?}");
+    assert_eq!(store.len().await.expect("len"), 0);
+}
+
+/// A `Skipped` stage is not resumable.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_skipped_stage_is_not_applicable() {
+    use crate::service::embed_missing_test_support::unembedded_handle;
+    let embedder = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    let (handle, _store, _dir) = unembedded_handle("embed-missing-skipped", 5, embedder).await;
+    handle.stages.write().await.semantic.status = StageStatus::Skipped;
+    let refusal = resume_semantic(&handle, false).await.expect_err("skipped");
     assert!(
         matches!(refusal, ResumeRefusal::NotApplicable(_)),
         "{refusal:?}"

@@ -93,14 +93,17 @@ fn chunk(n: usize) -> RawChunk {
 }
 
 /// A resident index of `n` unembedded chunks over `embedder` and a fresh store.
-async fn unembedded_handle(
+///
+/// The tempdir is the index root; the caller keeps it alive for the test.
+pub(crate) async fn unembedded_handle(
     id: &str,
     n: usize,
     embedder: Arc<dyn Embedder>,
-) -> (Arc<IndexHandle>, Arc<dyn VectorStore>) {
+) -> (Arc<IndexHandle>, Arc<dyn VectorStore>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("index root");
+    let root = dir.path().to_path_buf();
     let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
-    let indexer = CodeIndexer::new(id, "/tmp/embed-missing-10551")
-        .with_components(embedder, Arc::clone(&store));
+    let indexer = CodeIndexer::new(id, &root).with_components(embedder, Arc::clone(&store));
     indexer
         .commit_parsed_batch(
             ParsedBatch {
@@ -118,9 +121,9 @@ async fn unembedded_handle(
     let handle = Arc::new(IndexHandle::bare(
         IndexId::new(id),
         Arc::new(tokio::sync::RwLock::new(indexer)),
-        std::path::PathBuf::from("/tmp/embed-missing-10551"),
+        root,
     ));
-    (handle, store)
+    (handle, store, dir)
 }
 
 /// An index whose embedder died in wave 2 of the semantic stage.
@@ -128,7 +131,8 @@ async fn unembedded_handle(
 /// Returns the handle, the embedder, the store, the chunk count and the number
 /// of chunks the committed waves cover, as measured: the wave size follows the
 /// host's batch tuning, so it is read back, never assumed. The stage is
-/// `Failed` with `0 < committed < n`.
+/// `Failed` with `0 < committed < n`. The last element is the index root's
+/// tempdir, which the test keeps alive.
 pub(crate) async fn failed_mid_stage(
     id: &str,
 ) -> (
@@ -137,6 +141,7 @@ pub(crate) async fn failed_mid_stage(
     Arc<dyn VectorStore>,
     usize,
     usize,
+    tempfile::TempDir,
 ) {
     let inflight = crate::core::indexer::resolve_embed_inflight();
     let n = inflight * 512 + EXTRA;
@@ -146,13 +151,13 @@ pub(crate) async fn failed_mid_stage(
         calls: AtomicUsize::new(0),
         answered_after_heal: Mutex::new(Vec::new()),
     });
-    let (handle, store) = unembedded_handle(id, n, embedder.clone()).await;
+    let (handle, store, dir) = unembedded_handle(id, n, embedder.clone()).await;
     run_embed_catch_up(Arc::clone(&handle), Arc::new(ReindexProgress::new())).await;
     let semantic = handle.stages.read().await.semantic.clone();
     assert_eq!(semantic.status, StageStatus::Failed, "{semantic:?}");
     let committed = store.len().await.expect("len");
     assert!(committed > 0 && committed < n, "{committed} of {n}");
-    (handle, embedder, store, n, committed)
+    (handle, embedder, store, n, committed, dir)
 }
 
 /// Wait until the stage reads `want` and the embed queue is empty.
