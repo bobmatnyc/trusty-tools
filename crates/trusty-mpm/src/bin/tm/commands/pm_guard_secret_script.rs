@@ -93,7 +93,11 @@ use crate::commands::pm_guard_secret_read::{
 pub(crate) use crate::commands::pm_guard_secret_script_read::{
     Body, Rule, Unread, deny_reason, read_script,
 };
+#[cfg(test)]
 use crate::commands::pm_guard_secret_script_self::resolve_self_paths;
+use crate::commands::pm_guard_secret_script_self::{
+    ToplevelRisk, passes_on_git_changes, resolve_self_paths_with,
+};
 use walk::{Walk, each_script, each_script_in};
 
 // #10566: the walk that locates each script, split out for the 500-SLOC cap.
@@ -207,9 +211,12 @@ struct Candidate {
 pub(crate) fn evaluate_script_body_secret_read(command: &str, cwd: &Path) -> Option<String> {
     let mut seen = Vec::new();
     let bases = [cwd.to_path_buf()];
+    // #10622: an env prefix or export on the invoking command reaches every
+    // script it runs; the Bash tool's shell may be zsh, so `path` counts.
+    let git_env = passes_on_git_changes(command, true);
     each_script(command, &bases, |word, found, interpreter, seg_bases| {
         let rule = match found {
-            Ok(path) => judge_script(&path, interpreter, seg_bases, 0, &mut seen),
+            Ok(path) => judge_script(&path, interpreter, seg_bases, (0, git_env), &mut seen),
             Err(why) => Some((Rule::Unread(why), None)),
         };
         rule.map(|(rule, inner)| deny_reason(word, inner.as_deref(), rule))
@@ -277,16 +284,19 @@ fn expand(word: &str, bases: &[PathBuf]) -> String {
 ///
 /// #9037: a nested run is resolved strictly — an unresolvable or missing
 /// nested script refuses — after its self-location idioms resolve
-/// ([`resolve_self_paths`]); a script past the bound refuses
-/// ([`Unread::TooDeep`]) unless it is a compiled executable.
+/// ([`resolve_self_paths_with`]); a script past the bound refuses
+/// ([`Unread::TooDeep`]) unless it is a compiled executable. `(depth,
+/// git_env)`: `git_env` says a parent may have changed git's environment
+/// (#10622), which every nested script inherits.
 /// Test: `refuses_a_read_one_script_deeper`,
 /// `a_nested_unresolvable_script_refuses_9037`,
-/// `a_chain_past_the_depth_bound_refuses_9037`.
+/// `a_chain_past_the_depth_bound_refuses_9037`,
+/// `a_toplevel_inherits_the_invoking_git_environment_10622`.
 fn judge_script(
     path: &Path,
     interpreter: Option<&str>,
     bases: &[PathBuf],
-    depth: usize,
+    (depth, git_env): (usize, bool),
     seen: &mut Vec<PathBuf>,
 ) -> Option<(Rule, Option<String>)> {
     let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -313,15 +323,24 @@ fn judge_script(
     if family_of(&interpreter) != Some(Family::Shell) {
         return None;
     }
+    // #10622: read once per body; a nested script inherits what this one sets.
+    let risk = ToplevelRisk::scan(&body, git_env, interpreter.contains("zsh"));
+    let git_env = risk.passes_on();
     // #9037: nested runs resolve as strictly as the top level.
-    let nested = resolve_self_paths(&body, path);
+    let nested = resolve_self_paths_with(&body, path, risk);
     // #10548: a nested refusal names the innermost word it could not judge.
     let mut refuse = |word: &str,
                       inner: Result<PathBuf, Unread>,
                       inner_interp: Option<&str>,
                       inner_bases: &[PathBuf]| {
         let refused = match inner {
-            Ok(inner) => judge_script(&inner, inner_interp, inner_bases, depth + 1, seen),
+            Ok(inner) => judge_script(
+                &inner,
+                inner_interp,
+                inner_bases,
+                (depth + 1, git_env),
+                seen,
+            ),
             Err(why) => Some((Rule::Unread(why), None)),
         };
         refused.map(|(rule, named)| (rule, named.or_else(|| Some(word.to_string()))))
@@ -337,7 +356,7 @@ fn judge_script(
     // leniently — a literal script word that is missing allows — so a
     // backtick pair quoted in prose or in a here-document the guard cannot
     // split is not a run (residual 10).
-    let substituted = resolve_self_paths(&blank_comment_lines(&body, true), path);
+    let substituted = resolve_self_paths_with(&blank_comment_lines(&body, true), path, risk);
     let subs = Walk {
         strict: false,
         own: false,

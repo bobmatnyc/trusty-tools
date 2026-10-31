@@ -144,3 +144,20 @@ fn a_run_of_evals_is_judged_in_linear_time_10566() {
     let refused = rx.recv_timeout(std::time::Duration::from_secs(5));
     assert_eq!(refused, Ok(true), "must refuse within 5 s");
 }
+
+/// 🔴 REGRESSION (#10622): a name bound through the zsh global or suffix
+/// alias tables, by entry, whole assignment or `alias -s`, refuses as the
+/// plain `gh api` DELETE does.
+#[test]
+fn a_zsh_global_or_suffix_alias_rebinds_10622() {
+    let rows: Vec<String> = [
+        format!("galiases[ls]=gh; ls {TAIL}"),
+        "galiases[ls]='gh api'; ls -X DELETE repos/o/r/actions/secrets/K".to_string(),
+        format!("galiases=(ls gh); ls {TAIL}"),
+        format!("saliases[sh]=gh; ./fake.sh {TAIL}"),
+        format!("saliases=(sh gh); ./fake.sh {TAIL}"),
+        format!("alias -s sh=gh; ./fake.sh {TAIL}"),
+    ]
+    .to_vec();
+    all_refuse(&rows);
+}
