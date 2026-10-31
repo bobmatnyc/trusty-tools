@@ -1,31 +1,30 @@
-//! Graceful-shutdown helpers for the session manager.
+//! Graceful single-session teardown for the session manager.
 //!
 //! Why: `manager.rs` is near the 500-SLOC production cap; placing the
-//! shutdown operation in a sibling file keeps both files well under the limit
-//! while keeping related lifecycle logic co-located in the `session_manager`
-//! module tree.
-//! What: `impl SessionManager { shutdown }` — gracefully stops every live
-//! (non-terminal) managed session the manager proves it owns (#9101). Each
-//! owned pane gets ONE signal — SIGTERM when its `claude` PID is known
-//! (#1595 PR B), else a single Ctrl-C to that pane — then one shared 2 s
-//! `tokio::time::sleep` grace window (never a blocking `std::thread::sleep`),
-//! then a kill by `$N` session id after a second ownership check.
-//! Test: `shutdown_stops_an_owned_active_session` (session_manager/tests.rs),
-//! `a_stale_record_after_a_server_restart_is_never_killed_by_shutdown`.
+//! teardown in a sibling file keeps both files under the limit while keeping
+//! related lifecycle logic co-located in the `session_manager` module tree.
+//! #10597 (owner ruling D82): the daemon-shutdown `shutdown` that stopped
+//! every managed session is deleted; sessions survive a daemon stop.
+//! What: `impl SessionManager { graceful_terminate_runtime,
+//! terminate_proven_runtime }` — one record's pane gets ONE signal — SIGTERM
+//! when its `claude` PID is known (#1595 PR B), else a single Ctrl-C — then a
+//! 2 s async grace window, then a kill by `$N` session id after a second
+//! ownership check (#9101).
+//! Test: `graceful_terminate_runtime_signals_then_kills` (restart_tests.rs).
 
 use std::time::Duration;
 
-use tracing::{info, warn};
+use tracing::warn;
 
 use super::manager::{ManagedError, SessionManager};
-use super::record::{ManagedSessionState, SessionRecord};
+use super::record::SessionRecord;
 use super::runtime_identity::{self, RuntimeOwnership, RuntimeTeardown};
 
 /// Grace window given to each session between signal and tmux kill.
 ///
 /// Why: 2 s is the industry convention (matches systemd's default
 /// `TimeoutStopSec` and launchd's `ExitTimeOut`) and is enough for claude to
-/// flush its in-memory state to disk without stalling the overall shutdown.
+/// flush its in-memory state to disk without stalling the stop.
 /// In test builds, the grace window is 0 s so unit tests are not blocked by
 /// the sleep (eliminating the need for tokio's `test-util` feature).
 #[cfg(not(test))]
@@ -34,102 +33,14 @@ const SIGTERM_GRACE_SECS: u64 = 2;
 const SIGTERM_GRACE_SECS: u64 = 0;
 
 impl SessionManager {
-    /// Gracefully stop every live managed session this manager owns, on
-    /// daemon shutdown.
-    ///
-    /// Why: the graceful-shutdown path in `daemon/mod.rs` needs to give every
-    /// running session a chance to persist its state before the process exits.
-    /// #9101: it used to signal and kill each record's session by NAME, so a
-    /// stale record after a tmux server restart took down whichever session
-    /// now carried the name. It now acts only on a session proven to hold the
-    /// record's own pane on the record's own server, the proof
-    /// [`Self::graceful_terminate_runtime`] uses.
-    /// What: collects all Active/Provisioning records, minus the #8942
-    /// protected kinds and names the kill floor refuses. Each is classified by
-    /// [`runtime_identity::runtime_ownership`]; anything but `Owned` is
-    /// skipped and logged at `warn`, with no signal and no kill. Each owned
-    /// pane gets `signal_terminate_pane` (SIGTERM to its `claude` PID, else
-    /// one Ctrl-C to that pane); then one [`SIGTERM_GRACE_SECS`] async grace
-    /// window for all; then a second ownership check and `kill_session_id` on
-    /// the `$N` id it read. A session gone by then counts as stopped. Fails
-    /// open per session; logs a summary.
-    /// Test: `shutdown_stops_an_owned_active_session` in tests.rs;
-    /// `shutdown_skips_an_architect_session`;
-    /// `a_stale_record_after_a_server_restart_is_never_killed_by_shutdown`,
-    /// `shutdown_skips_a_record_whose_pane_identity_is_unreadable`.
-    pub async fn shutdown(&self) {
-        let records = self.list().await;
-        // Only stop sessions that have a live runtime: Active and Provisioning.
-        // #8942: the Architect's sessions are left out, and so is any name the
-        // floor cannot clear.
-        let live: Vec<_> = records
-            .into_iter()
-            .filter(|r| {
-                matches!(
-                    r.state,
-                    ManagedSessionState::Active | ManagedSessionState::Provisioning
-                ) && !super::architect::skip_protected(r, "shutdown")
-                    && self
-                        .kill_gate(&r.tmux_name, "SessionManager::shutdown")
-                        .is_ok()
-            })
-            .collect();
-        // #9101: signal only a pane proven to be the record's own;
-        // `owned_pane` logs every other verdict.
-        let mut owned: Vec<&SessionRecord> = Vec::new();
-        for record in &live {
-            let (ownership, liveness_known) = self.classify_runtime(record);
-            if let Ok((pane_id, _)) =
-                owned_pane(record, "shutdown", ownership, liveness_known, false)
-            {
-                let name = record.tmux_name.as_str();
-                let pid = crate::core::process::find_claude_pid_in_pane(name, &pane_id);
-                self.tmux.signal_terminate_pane(name, &pane_id, pid);
-                owned.push(record);
-            }
-        }
-        if owned.is_empty() {
-            info!("shutdown: no owned live managed sessions to stop");
-            return;
-        }
-
-        // Single async grace window for ALL sessions — bounds shutdown at O(1)
-        // and lets the claude processes flush state before the kill.
-        tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
-
-        let mut stopped = 0usize;
-        for record in owned {
-            // #9101: the grace window is long enough for the name to change
-            // hands; kill the `$N` session the re-check proves, never the name.
-            let (ownership, liveness_known) = self.classify_runtime(record);
-            let session_id = match owned_pane(record, "shutdown", ownership, liveness_known, true) {
-                Ok((_, session_id)) => session_id,
-                Err(RuntimeTeardown::Absent) => {
-                    stopped += 1;
-                    continue;
-                }
-                Err(_) => continue,
-            };
-            match self.tmux.kill_session_id(&record.tmux_name, &session_id) {
-                Ok(()) => stopped += 1,
-                Err(e) => warn!(
-                    name = %record.tmux_name, session_id = %session_id,
-                    "shutdown: kill by session id failed (may already be gone): {e}"
-                ),
-            }
-        }
-        info!("shutdown: gracefully stopped {stopped} live managed session(s)");
-    }
-
     /// Gracefully terminate ONE record's runtime: signal → grace → kill.
     ///
     /// Why: CLI-initiated `stop`/`decommission` tear down a single session at a
-    /// time (unlike [`Self::shutdown`], which batches one grace window across the
-    /// whole fleet) and were previously abrupt — a bare `kill_session` gave the
-    /// inner `claude` process no chance to flush state (memory snapshot, git
-    /// index, session record) before its pane was reclaimed. This drains one
-    /// session the same way `shutdown` drains the fleet, honouring the repo's
-    /// graceful-shutdown convention (SIGTERM drain, not an abrupt kill).
+    /// time and were previously abrupt — a bare `kill_session` gave the inner
+    /// `claude` process no chance to flush state (memory snapshot, git index,
+    /// session record) before its pane was reclaimed. This drains the session,
+    /// honouring the repo's graceful-shutdown convention (SIGTERM drain, not an
+    /// abrupt kill).
     /// #8935: a tmux name is reusable, so the teardown first proves the live
     /// session holds the record's own `%N` pane
     /// ([`runtime_identity::runtime_ownership`]). A session that does not, or
