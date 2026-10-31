@@ -129,7 +129,7 @@ fn input_state_binary_matches_python_and_fails_closed() {
     assert_eq!(ok.status.code(), Some(0), "{}", text(&ok));
     assert_eq!(
         stdout(&ok),
-        "%3 empty | \n=tm-things-01: suggestion | Pause lifted, start #304\n"
+        "%3 empty | \n=tm-things-01: suggestion | Pause lifted, start #101\n"
     );
 }
 

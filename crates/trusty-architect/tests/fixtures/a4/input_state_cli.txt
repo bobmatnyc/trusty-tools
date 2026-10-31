@@ -14,7 +14,7 @@
 =tm-search-01: empty | 
 %8 empty | 
 =tm-secrets-01: empty | 
-%9 suggestion | Pause lifted, start #304
-=tm-things-01: suggestion | Pause lifted, start #304
+%9 suggestion | Pause lifted, start #101
+=tm-things-01: suggestion | Pause lifted, start #101
 %99 missing |
 =tm-gone: missing |
