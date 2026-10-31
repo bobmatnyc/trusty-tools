@@ -21,6 +21,8 @@ mod event_loop;
 pub mod health;
 // #10491: the console home screen `tm tui` opens on.
 pub mod home;
+// #10476: the Focus key's plan and the bin-registered tmux hook.
+pub mod focus;
 pub mod iterm2;
 pub mod project_ctl;
 pub mod terminal;

@@ -63,6 +63,7 @@
 //! real `tmux` process).
 
 use anyhow::Context as _;
+use trusty_mpm::tui::focus::FocusResult;
 
 /// Outcome of [`tmux_attach`] — tells a looping caller (the guided picker)
 /// whether it may safely read `stdin` again.
@@ -574,6 +575,18 @@ fn switch_decision(
 /// [`AttachOutcome::TargetUnresolved`] WITHOUT invoking tmux at all — never a
 /// bare, unguarded `switch-client`.
 fn switch_client_to(name: &str) -> anyhow::Result<AttachOutcome> {
+    switch_client_to_with(name, false)
+}
+
+/// [`switch_client_to`], with `quiet` silencing every write to the terminal.
+///
+/// Why (#10476): the tui's Focus key runs this guard from inside its
+/// alternate screen, where an `eprintln!` or tmux's inherited output would
+/// tear the frame. The guard itself is unchanged; only output differs.
+/// What: `quiet` skips [`print_fail_closed_hint`] and the "switching" line,
+/// and runs `switch-client` with captured output, folding tmux's stderr into
+/// the error.
+fn switch_client_to_with(name: &str, quiet: bool) -> anyhow::Result<AttachOutcome> {
     let tmux_pane = tmux_pane_id_from_env(std::env::var("TMUX_PANE").ok());
     let pane_tty = tmux_pane.as_deref().and_then(pane_tty_for);
     let own_stdin_tty = own_controlling_tty(libc::STDIN_FILENO);
@@ -589,16 +602,24 @@ fn switch_client_to(name: &str) -> anyhow::Result<AttachOutcome> {
         session.as_deref(),
         client_tty.as_deref(),
     ) else {
-        print_fail_closed_hint(name);
+        if !quiet {
+            print_fail_closed_hint(name);
+        }
         return Ok(AttachOutcome::TargetUnresolved);
     };
 
-    eprintln!("tm: switching client to session '{name}'");
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
-    let status = std::process::Command::new(&tmux_bin)
-        .args(switch_client_argv(name, &client_tty))
-        .status()
-        .context("failed to invoke tmux")?;
+    let mut command = std::process::Command::new(&tmux_bin);
+    command.args(switch_client_argv(name, &client_tty));
+    if quiet {
+        let output = command.output().context("failed to invoke tmux")?;
+        if !output.status.success() {
+            anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+        }
+        return Ok(AttachOutcome::Switched);
+    }
+    eprintln!("tm: switching client to session '{name}'");
+    let status = command.status().context("failed to invoke tmux")?;
     if !status.success() {
         anyhow::bail!(
             "tmux switch-client exited with failure — the target session '{name}' may be \
@@ -653,9 +674,62 @@ pub(crate) fn tmux_attach(name: &str) -> anyhow::Result<AttachOutcome> {
     Ok(AttachOutcome::Attached)
 }
 
+/// The tui's Focus hook: move this terminal's tmux client to session `name`.
+///
+/// Why (#10476): the tui's Focus key must land on the session's existing
+/// window and must not open one (owner, #10476 comment 2). This is the one
+/// guarded switch path (#2678) kept in the binary (Architect Q4), lent to
+/// the lib through `trusty_mpm::tui::focus::set_focus_hook`.
+/// What: outside tmux, [`FocusResult::NotInTmux`] and no tmux call at all —
+/// never the `attach-session` branch of [`tmux_attach`]. Inside tmux, the
+/// quiet [`switch_client_to_with`]: `switch-client -c <tty> -t =<name>`,
+/// which lands on the session's current window.
+/// Test: `focus_outcome_maps_the_guard_result` covers [`focus_outcome`]; the
+/// guard keeps its `switch_decision_*` tests; the real switch is checked in
+/// the sandbox live check.
+pub(crate) fn focus_switch(name: &str) -> FocusResult {
+    if !inside_tmux() {
+        return FocusResult::NotInTmux;
+    }
+    focus_outcome(switch_client_to_with(name, true))
+}
+
+/// Map the guard's outcome onto the tui's [`FocusResult`].
+fn focus_outcome(outcome: anyhow::Result<AttachOutcome>) -> FocusResult {
+    match outcome {
+        Ok(AttachOutcome::Switched) => FocusResult::Switched,
+        Ok(_) => FocusResult::Unresolved,
+        Err(e) => FocusResult::Failed(format!("{e:#}")),
+    }
+}
+
+/// Register [`focus_switch`] as the tui's Focus hook; called once at startup.
+pub(crate) fn install_tui_focus_hook() {
+    trusty_mpm::tui::focus::set_focus_hook(focus_switch);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_outcome_maps_the_guard_result() {
+        // #10476: the hook never reaches `attach-session`; the outcome map is
+        // the only branch after the guard.
+        assert!(!inside_tmux_from_env(None, None));
+        assert_eq!(
+            focus_outcome(Ok(AttachOutcome::Switched)),
+            FocusResult::Switched
+        );
+        assert_eq!(
+            focus_outcome(Ok(AttachOutcome::TargetUnresolved)),
+            FocusResult::Unresolved
+        );
+        assert!(matches!(
+            focus_outcome(Err(anyhow::anyhow!("can't find session"))),
+            FocusResult::Failed(e) if e.contains("can't find session")
+        ));
+    }
 
     /// Outside tmux, attach must use `attach-session` — today's behavior,
     /// unchanged for the non-nested case.

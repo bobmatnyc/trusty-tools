@@ -72,11 +72,10 @@ use super::state::ProjectCtlState;
 /// reachable it pulls `GET /api/v1/projects` and
 /// `GET /api/v1/sessions/managed/fleet`, merges them into `state.projects` /
 /// `state.sessions_by_project`; on a transport error or an unreachable daemon
-/// it clears both and sets `daemon_reachable = false`. Always re-syncs both
-/// navigation models so a shrunk list never leaves a selection past the end;
-/// the Sessions-pane selection is PRESERVED across a refresh (only an
-/// explicit project switch resets it — see
-/// [`ProjectCtlState::on_project_selection_changed`]). Finally refreshes
+/// it clears both and sets `daemon_reachable = false`. Always rebuilds the
+/// tree (#10476, [`ProjectCtlState::rebuild_tree`]), which keeps the
+/// selection and expanded set across a refresh and clamps a vanished
+/// selection to its nearest surviving ancestor. Finally refreshes
 /// [`ProjectCtlState::activity`] for whichever session is selected AFTER the
 /// project/session refresh above (see [`refresh_activity`]).
 /// Test: `poll_marks_unreachable_clears_state` drives the full-poll

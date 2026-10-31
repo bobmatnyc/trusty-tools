@@ -12,9 +12,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::events::{PendingAction, handle_key};
-use super::panes::{actions_bar, projects, sessions};
+use super::panes::{actions_bar, sessions, tree};
 use super::poll::{project_ctl_poll_daemon, project_to_row, session_to_row};
-use super::state::{ConfirmKind, DeliverableLinkState, Pane, ProjectCtlState};
+use super::state::{ConfirmKind, DeliverableLinkState, NodeId, Pane, ProjectCtlState};
 use crate::client::{DaemonClient, FleetProjectGroupWire, ManagedSessionSummary};
 use crate::project::Project;
 
@@ -97,8 +97,11 @@ fn seeded_state() -> ProjectCtlState {
         "trusty-tools".to_string(),
         group.sessions.into_iter().map(session_to_row).collect(),
     );
-    state.projects_nav.sync_len(state.projects.len());
-    state.sessions_nav.sync_len(state.current_sessions().len());
+    // #10476: open on the trusty-tools project node, as the tree would.
+    state.select_node(NodeId::Project {
+        owner: "acme".to_string(),
+        name: "trusty-tools".to_string(),
+    });
     state
 }
 
@@ -109,15 +112,20 @@ fn seeded_state_renders_live_project_and_its_session() {
     assert_eq!(state.selected_project().unwrap().name, "trusty-tools");
     assert_eq!(state.current_sessions().len(), 1);
 
-    let projects_line = projects::project_line(&state.projects[0]);
-    let text: String = projects_line
+    let row = state
+        .tree
+        .rows
+        .iter()
+        .find(|r| r.id.project_name() == Some("trusty-tools"))
+        .expect("the project row");
+    let text: String = tree::row_line(&state, row)
         .spans
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
     assert!(
-        text.starts_with("●1"),
-        "expected a live glyph+count: {text}"
+        text.contains("trusty-tools  1 session, 1 live"),
+        "expected the live counter: {text}"
     );
 
     let session_line = sessions::session_line(
@@ -139,14 +147,20 @@ fn seeded_state_renders_live_project_and_its_session() {
 }
 
 #[test]
-fn drilling_in_then_killing_an_active_session_requires_confirmation() {
+fn expanding_then_killing_an_active_session_requires_confirmation() {
     // The seeded session is "active", so DOC-35 §5.2's confirm gate applies:
-    // `k` alone must not fire — it takes drill-in, `k`, THEN `y` to reach the
-    // real PendingAction.
+    // `k` alone must not fire — it takes expand, select, `k`, THEN `y` to
+    // reach the real PendingAction (#10476: Enter expands the project node).
     let mut state = seeded_state();
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     assert!(handle_key(&mut state, enter).is_none());
-    assert_eq!(state.focus, Pane::Sessions);
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+    assert!(handle_key(&mut state, down).is_none());
+    assert_eq!(state.focus, Pane::Tree);
+    assert_eq!(
+        state.selected_session().map(|s| s.id.as_str()),
+        Some("a1b2c3d4e5f6")
+    );
 
     let kill = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
     assert!(
