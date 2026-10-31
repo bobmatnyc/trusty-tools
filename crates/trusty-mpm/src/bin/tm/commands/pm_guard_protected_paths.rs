@@ -46,8 +46,8 @@ use crate::commands::pm_guard_trust_anchor_paths::{
     Resolved, eq_fold, resolve, same_ci, starts_with_ci,
 };
 
-/// The rule name recorded with each deny.
-pub(crate) const PROTECTED_PATH_RULE: &str = "protected-path-write";
+// #10641: the rule name recorded with each deny is
+// `guard_policy::PROTECTED_PATH_WRITE.rule` (`protected-path-write`), its one source.
 
 /// The project-tier settings names guarded under a `.claude` directory.
 const SETTINGS_NAMES: [&str; 2] = ["settings.json", "settings.local.json"];

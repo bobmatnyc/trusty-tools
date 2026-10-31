@@ -463,7 +463,6 @@ fn every_deny_names_a_policy_id() {
         crate::commands::pm_guard_architect_envfile::SECRET_FILE_READ_RULE,
         crate::commands::pm_guard_kuzu_store::KUZU_STORE_RULE,
         crate::commands::pm_guard_kuzu_exception::KUZU_IMPORT_PYTHON_RULE,
-        crate::commands::pm_guard_protected_paths::PROTECTED_PATH_RULE,
         crate::commands::pm_guard_build_lease::DENY_CHECK,
         egress_guard_bash::BASH_CHECK,
         egress_guard_taint::TAINT_CHECK,
@@ -485,5 +484,11 @@ fn every_deny_names_a_policy_id() {
     assert!(
         missing.is_empty(),
         "labels with no policy entry: {missing:?}"
+    );
+    // The protected-path rule has no constant of its own: the entry is the one
+    // source of its audit label, which must stay `protected-path-write`.
+    assert_eq!(
+        trusty_mpm::core::guard_policy::PROTECTED_PATH_WRITE.rule,
+        "protected-path-write"
     );
 }
