@@ -70,6 +70,8 @@ impl Decision {
     /// What: `true` when this call wrote. The lock is held across the write,
     /// so a second decider waits and then finds the first one's answer. A
     /// write error is ignored: the reader is gone, so no object can reach it.
+    /// #10641: pass an UNLOCKED writer; the one lock order is this mutex,
+    /// then the writer's own lock (`emit` and `spawn_watchdog` both comply).
     pub(crate) fn print_once(&self, out: &mut dyn Write, decision: &dyn Display) -> bool {
         let mut decided = self.lock();
         if *decided {
@@ -108,7 +110,9 @@ pub(crate) fn record_payload(payload: &Value) {
 ///
 /// Test: `emit_marks_the_decision_so_a_later_panic_prints_nothing`.
 pub(crate) fn emit(decision: impl Display) {
-    DECISION.print_once(&mut std::io::stdout().lock(), &decision);
+    // #10641: lock order is DECISION, then stdout, everywhere: an unlocked
+    // handle here, so `print_once` takes DECISION before `writeln!` takes stdout.
+    DECISION.print_once(&mut std::io::stdout(), &decision);
 }
 
 /// Audit a refusal under `policy`'s audit label, then print its deny (#10641).

@@ -88,6 +88,43 @@ fn read_only_tools_pass_unless_they_name_a_secret() {
     )));
 }
 
+/// A plist whose environment carries one credential-keyed fake placeholder.
+const CREDENTIAL_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.fake</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FAKE_API_KEY</key><string>placeholder-not-a-secret</string>
+  </dict>
+</dict>
+</plist>
+"#;
+
+#[test]
+fn a_credential_plist_is_refused_under_failure() {
+    // #10641 delta review CRITICAL: the failure arm runs the normal path's
+    // secret gate, so the #8523 plist content rule holds for Read and for a
+    // Grep over the launchd directory.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let agents = dir.path().join("Library/LaunchAgents");
+    std::fs::create_dir_all(&agents).expect("mkdir");
+    let plist = agents.join("com.example.fake.plist");
+    std::fs::write(&plist, CREDENTIAL_PLIST).expect("write plist");
+    let cwd = dir.path().display().to_string();
+    let at = |tool: &str, input: Value| json!({ "session_id": "s-1", "cwd": cwd, "tool_name": tool, "tool_input": input });
+    let read = at("Read", json!({ "file_path": plist.display().to_string() }));
+    let grep = at(
+        "Grep",
+        json!({ "pattern": "KEY", "path": agents.display().to_string() }),
+    );
+    for payload in [read, grep] {
+        assert!(!recovery_allows(&payload), "{payload}");
+        let deny = failure_verdict(&guard_policy::GUARD_TIMEOUT, "it stalled", Some(&payload));
+        assert!(deny.is_some(), "refused under failure: {payload}");
+    }
+}
+
 #[test]
 fn writes_never_qualify() {
     for (tool, input) in [

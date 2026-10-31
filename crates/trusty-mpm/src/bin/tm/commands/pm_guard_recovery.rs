@@ -6,7 +6,7 @@
 //! would fix it, and locks the session out. Writes must stay refused, so the
 //! escape is a short fixed list that cannot carry another command (ruling 263).
 //! What: [`recovery_allows`] answers for one payload: a read-only tool whose
-//! target is no secret file and no kuzu store, or a Bash command that is
+//! call the normal path's secret gate allows, or a Bash command that is
 //! exactly `tm doctor`, `tm install ...` or `cargo install trusty-mpm ...`
 //! written as one plain command ([`is_recovery_command`]). [`failure_verdict`]
 //! turns a guard failure into `None` (allow) for those and a policy-tagged
@@ -18,14 +18,14 @@ use std::path::PathBuf;
 use serde_json::Value;
 use trusty_mpm::core::guard_policy::GuardPolicy;
 
-use crate::commands::pm_guard_kuzu_store::evaluate_kuzu_store_access;
+use crate::commands::pm_guard_architect_envfile::evaluate_secret_file_read_gated;
+use crate::commands::pm_guard_floor::ArchitectGate;
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
-use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_tool;
 
 /// Tools that print no file the guard protects and change nothing on disk.
 ///
-/// Why: the read-only half of the recovery list. `Read` and `Grep` still pass
-/// the secret-file and kuzu-store path rules, which are pure path checks.
+/// Why: the read-only half of the recovery list. Each call still passes the
+/// normal path's secret gate (`evaluate_secret_file_read_gated`).
 pub(crate) const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead"];
 
 /// The text every failure-arm refusal carries (#10641).
@@ -93,10 +93,13 @@ pub(crate) fn is_recovery_command(command: &str) -> bool {
 
 /// Whether a failing guard may let this call through (#10641).
 ///
-/// What: a [`READ_ONLY_TOOLS`] call that the secret-file and kuzu-store rules
-/// allow, or a Bash call whose `command` [`is_recovery_command`] accepts.
-/// Anything else, a payload with no tool name included, is `false`.
+/// What: a [`READ_ONLY_TOOLS`] call that the normal path's secret gate
+/// (`evaluate_secret_file_read_gated`: file names, the #8523 plist content
+/// rule, kuzu stores) allows, or a Bash call whose `command`
+/// [`is_recovery_command`] accepts. Anything else, a payload with no tool
+/// name included, is `false`.
 /// Test: `read_only_tools_pass_unless_they_name_a_secret`,
+/// `a_credential_plist_is_refused_under_failure`,
 /// `only_plain_recovery_commands_qualify`, `writes_never_qualify`.
 pub(crate) fn recovery_allows(payload: &Value) -> bool {
     let Some(tool) = payload.get("tool_name").and_then(Value::as_str) else {
@@ -110,8 +113,11 @@ pub(crate) fn recovery_allows(payload: &Value) -> bool {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
-        return evaluate_secret_file_read_tool(tool, input).is_none()
-            && evaluate_kuzu_store_access(tool, input, &cwd).is_none();
+        // #10641: the normal path's whole secret gate (file names, the #8523
+        // plist content rule, kuzu stores), so no secret rule drifts out of
+        // this arm. For a read-only tool it never asks the Architect identity.
+        let gate = ArchitectGate::ambient(payload);
+        return evaluate_secret_file_read_gated(tool, input, &cwd, &gate).is_none();
     }
     tool == "Bash"
         && input
