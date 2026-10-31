@@ -228,23 +228,32 @@ Report the returned `snapshot_path` to the user.
 
 ### The Session Ref (ADR-0062, #7830)
 
-Every pause — on a project that tracks `.trusty-mpm/sessions/` or not — also
-appends the snapshot to this session's own append-only git ref,
-`refs/tm/sessions/<user-id>/<session-key>`, and lease-pushes it to `origin`.
-That ref is what a resume from a fresh clone rebuilds its cache from.
+A pause — on a project that tracks `.trusty-mpm/sessions/` or not — appends the
+snapshot to this session's own append-only git ref,
+`refs/tm/sessions/<user-id>/<session-key>`, and lease-pushes it to `origin`
+**only when GitHub confirms `origin` is a private repository**. That ref is what
+a resume from a fresh clone rebuilds its cache from.
 
+- **A public `origin`, a non-GitHub `origin`, or a visibility lookup that fails
+  gets no ref push** (fail closed, #TBD-pause-ref). The snapshot stays in the
+  local `.trusty-mpm/sessions/` cache only, and `ref_error` says which case
+  applied. This is expected; never push the ref yourself, never run
+  `git push origin refs/tm/sessions/...`, and never retry the pause to force it.
+- On a private `origin` the pushed copy is redacted: the home directory reads
+  as `~`, and `<user-id>` is a stable hash (`u` plus 12 hex digits), never your
+  login or `git config user.name`.
 - **`ref_published: false` with a non-null `ref_error` MUST be reported.** The
   local snapshot is the primary write and is already on disk, so the pause
-  succeeded — but the durable copy did not reach `origin` and nothing else will
-  say so. Report the `ref_error` text verbatim; do not retry it yourself.
+  succeeded — but no durable copy reached `origin`. Report the `ref_error` text
+  verbatim; do not retry it yourself.
 - `ref_name` names the ref the pause targeted, even when the push failed.
 - With `[session_refs] enabled = false` in `~/.trusty-mpm/config.toml` no ref is
   written at all: `ref_name` and `ref_error` are both `null` and
   `ref_published` is `false`.
 
-**Operator-visible:** a pause PUSHES your summary, in-progress items and next
-steps to whatever `origin` the project has — a company remote, a fork, a
-third-party host. The only gate before that push is a prefix-based credential
+**Operator-visible:** on a private GitHub `origin`, a pause PUSHES your
+summary, in-progress items and next steps to it. Besides the visibility check
+and the home-path redaction, the only gate before that push is a prefix-based credential
 scan (known provider key shapes such as `ghp_`, `sk-ant-`, `AKIA`, and PEM
 private-key headers); it is not a general secret detector and will not catch a
 password, a customer name, or an internal URL you typed into the summary. Keep

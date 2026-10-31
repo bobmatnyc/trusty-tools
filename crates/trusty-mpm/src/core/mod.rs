@@ -395,6 +395,8 @@ pub mod session_pause_pr;
 // #7830 / ADR-0062: session history is an orphan, append-only commit chain in
 // `refs/tm/sessions/<user>/<key>` — never a commit on a code branch.
 pub mod session_ref_publish;
+// See #TBD-pause-ref: no session ref reaches a public or unconfirmed origin.
+pub mod session_ref_privacy;
 // #9160: the pinned gh identity session-ref git network calls run as.
 pub(crate) mod session_ref_identity;
 // #7422: the plugin half of the same default-deny decision — written into the

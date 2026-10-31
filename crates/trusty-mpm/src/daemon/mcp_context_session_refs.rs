@@ -16,6 +16,7 @@ use std::path::Path;
 use crate::core::session_ref_identity::{
     SessionRefGitEnv, session_ref_git_env, session_ref_publish_git_env,
 };
+use crate::core::session_ref_privacy::RepoVisibility;
 use crate::daemon::catchup_payload::HydrationReceipt;
 
 /// Rebuild `<project>/.trusty-mpm/sessions/` from its session refs (#7830).
@@ -160,11 +161,17 @@ fn session_ref_target(
 /// `enabled` its caller resolved from `[session_refs]`. #9160: the ls-remote,
 /// fetch and push run as the project's pinned gh identity; a pin that cannot
 /// be proven publishes nothing and makes no network call, and the receipt
-/// says why. A join failure is itself a receipt, never a pause failure.
+/// says why. See #TBD-pause-ref: an origin that GitHub does not confirm as
+/// private — public, non-GitHub, or a failed lookup — publishes nothing
+/// either, and the receipt says which. A join failure is itself a receipt,
+/// never a pause failure.
 /// Test: `a_failed_ref_publish_is_reported_and_never_fails_the_pause`,
 /// `core::session_ref_publish::tests::a_disabled_section_publishes_nothing`,
 /// `a_pinned_env_reaches_the_pause_publish`,
-/// `an_unproven_pin_never_publishes_with_the_ambient_credential`.
+/// `an_unproven_pin_never_publishes_with_the_ambient_credential`,
+/// `an_unknown_visibility_skips_the_publish`,
+/// `a_public_origin_skips_the_publish`,
+/// `a_private_origin_publishes_a_redacted_ref`.
 pub(crate) async fn publish_session_ref(
     project_path: &Path,
     session_id: &str,
@@ -177,17 +184,20 @@ pub(crate) async fn publish_session_ref(
         outcome,
         enabled,
         session_ref_publish_git_env,
+        crate::core::session_ref_privacy::origin_visibility,
     )
     .await
 }
 
-/// [`publish_session_ref`] with the identity resolver given (#9160).
+/// [`publish_session_ref`] with the identity and visibility resolvers given
+/// (#9160, #TBD-pause-ref).
 pub(crate) async fn publish_session_ref_with(
     project_path: &Path,
     session_id: &str,
     outcome: &trusty_common::catchup::pause::PauseSnapshotOutcome,
     enabled: bool,
     resolve: impl FnOnce(&Path) -> SessionRefGitEnv + Send + 'static,
+    visibility: impl FnOnce(&Path, &[(String, String)]) -> RepoVisibility + Send + 'static,
 ) -> crate::core::session_ref_publish::SessionRefReceipt {
     use crate::core::session_ref_publish::{
         SessionRefReceipt, SessionRefRequest, publish_receipt, session_ref_for,
@@ -209,6 +219,16 @@ pub(crate) async fn publish_session_ref_with(
                 ref_name: session_ref_for(&repo, &session),
                 published: false,
                 error: Some(reason.to_string()),
+            };
+        }
+        // See #TBD-pause-ref: fail closed — only a confirmed-private origin
+        // receives the ref.
+        if let Some(reason) = visibility(&repo, git_env.vars()).refusal() {
+            tracing::info!(project = %repo.display(), "{reason}");
+            return SessionRefReceipt {
+                ref_name: session_ref_for(&repo, &session),
+                published: false,
+                error: Some(reason),
             };
         }
         let mut receipt = publish_receipt(

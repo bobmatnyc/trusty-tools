@@ -173,7 +173,8 @@ async fn a_pinned_env_reaches_the_pause_publish() {
     let fx = Remote::new();
     let outcome = pause(&fx);
     let env = fx.pinned();
-    let receipt = publish_session_ref_with(&fx.repo, "s-9160", &outcome, true, move |_| env).await;
+    let receipt =
+        publish_session_ref_with(&fx.repo, "s-9160", &outcome, true, move |_| env, private).await;
     assert!(receipt.published, "{receipt:?}");
     let expected = crate::core::session_ref_publish::session_ref_for(&fx.repo, "s-9160");
     assert_eq!(receipt.ref_name, expected, "{receipt:?}");
@@ -194,11 +195,16 @@ async fn an_unproven_pin_never_publishes_with_the_ambient_credential() {
     let fx = Remote::new();
     fx.make_ambient_readable();
     let outcome = pause(&fx);
-    let receipt = publish_session_ref_with(&fx.repo, "s-9160", &outcome, true, |_| {
-        SessionRefGitEnv::Refused {
+    let receipt = publish_session_ref_with(
+        &fx.repo,
+        "s-9160",
+        &outcome,
+        true,
+        |_| SessionRefGitEnv::Refused {
             reason: "fixture: gh account 'octo-fixture' is not proven".to_string(),
-        }
-    })
+        },
+        private,
+    )
     .await;
     assert!(!receipt.published, "{receipt:?}");
     let error = receipt.error.as_deref().unwrap_or_default();
@@ -208,6 +214,96 @@ async fn an_unproven_pin_never_publishes_with_the_ambient_credential() {
         ["refs/tm/sessions/someone/s-9160"],
         "a refused pin pushed a ref"
     );
+}
+
+/// A visibility resolver that confirms the origin is private.
+fn private(_: &Path, _: &[(String, String)]) -> RepoVisibility {
+    RepoVisibility::Private
+}
+
+/// 🔴 See #TBD-pause-ref (fail closed): the PRODUCTION pause path, on an
+/// origin GitHub cannot vouch for, pushes no ref — even though the ambient
+/// credential could. The receipt says why; the local snapshot is untouched.
+/// Test: itself.
+#[tokio::test]
+async fn an_unknown_visibility_skips_the_publish() {
+    let fx = Remote::new();
+    fx.make_ambient_readable();
+    let outcome = pause(&fx);
+    let receipt = publish_session_ref(&fx.repo, "s-9160", &outcome, true).await;
+    assert!(!receipt.published, "{receipt:?}");
+    let error = receipt.error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("could not be confirmed as private"),
+        "{receipt:?}"
+    );
+    assert_eq!(
+        remote_session_refs(&fx),
+        ["refs/tm/sessions/someone/s-9160"],
+        "an unknown-visibility origin received a ref"
+    );
+    assert!(outcome.snapshot_path.exists(), "the local snapshot stays");
+}
+
+/// 🔴 See #TBD-pause-ref: a public origin receives no ref, whatever
+/// credential could push it.
+/// Test: itself.
+#[tokio::test]
+async fn a_public_origin_skips_the_publish() {
+    let fx = Remote::new();
+    let outcome = pause(&fx);
+    let env = fx.pinned();
+    let receipt = publish_session_ref_with(
+        &fx.repo,
+        "s-9160",
+        &outcome,
+        true,
+        move |_| env,
+        |_, _| RepoVisibility::Public("o/r".to_string()),
+    )
+    .await;
+    assert!(!receipt.published, "{receipt:?}");
+    let error = receipt.error.as_deref().unwrap_or_default();
+    assert!(error.contains("o/r is a public repository"), "{receipt:?}");
+    assert_eq!(
+        remote_session_refs(&fx),
+        ["refs/tm/sessions/someone/s-9160"],
+        "a public origin received a ref"
+    );
+}
+
+/// 🔴 See #TBD-pause-ref: a private origin still gets the ref, but the
+/// pushed blob carries `~` for the home directory and the ref's user segment
+/// is the hashed id, never the raw `git config user.name`.
+/// Test: itself.
+#[tokio::test]
+async fn a_private_origin_publishes_a_redacted_ref() {
+    let fx = Remote::new();
+    let home = dirs::home_dir().expect("the test host has a home directory");
+    let outcome = pause(&fx);
+    let leaked = format!("worktree {}/scratch/df-g02\n", home.display());
+    std::fs::write(&outcome.snapshot_path, &leaked).expect("snapshot");
+    let env = fx.pinned();
+    let receipt =
+        publish_session_ref_with(&fx.repo, "s-9160", &outcome, true, move |_| env, private).await;
+    assert!(receipt.published, "{receipt:?}");
+    let ref_name = receipt.ref_name.clone().expect("a ref name");
+    let user = ref_name
+        .strip_prefix("refs/tm/sessions/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_default();
+    assert!(
+        user.starts_with('u') && user.len() == 13 && !user.contains("refs-9160"),
+        "{ref_name}"
+    );
+    let blob = git(
+        &fx.bare,
+        &[
+            "show",
+            &format!("{ref_name}:.trusty-mpm/sessions/s-9160/session-20261013-100000.md"),
+        ],
+    );
+    assert_eq!(blob, "worktree ~/scratch/df-g02", "{blob}");
 }
 
 /// 🔴 #9160: a pinned fetch that fails names the identity it ran as.

@@ -196,11 +196,20 @@ pub fn sanitize_ref_component(raw: &str) -> Option<String> {
 /// containing `@` is rejected outright rather than mangled.
 /// What: `gh`'s active github.com login from its own `hosts.yml` (a file read,
 /// no subprocess — this runs on every pause), else `git config user.name`, each
-/// through [`sanitize_ref_component`]. `None` when neither resolves, which
-/// skips the publish with `ref_error` set and leaves the local snapshot alone.
+/// through [`sanitize_ref_component`] and then hashed by
+/// [`crate::core::session_ref_privacy::anonymous_user_id`] (See #TBD-pause-ref:
+/// a `user.name` put a full personal name into the ref). `None` when neither
+/// resolves, which skips the publish with `ref_error` set and leaves the local
+/// snapshot alone.
 /// Test: `ref_components_are_sanitized_and_rejected`,
-/// `a_missing_user_id_skips_the_publish`.
+/// `a_missing_user_id_skips_the_publish`,
+/// `resolve_user_id_still_reads_the_active_account`.
 pub fn resolve_user_id(repo: &Path) -> Option<String> {
+    resolve_writer_name(repo).map(|raw| crate::core::session_ref_privacy::anonymous_user_id(&raw))
+}
+
+/// The raw writer name [`resolve_user_id`] hashes.
+fn resolve_writer_name(repo: &Path) -> Option<String> {
     if let Some(login) = crate::core::gh_account::gh_account_status_local()
         .and_then(|status| status.active)
         .filter(|login| !login.contains('@'))
@@ -506,7 +515,11 @@ pub fn publish_session_ref_as(
     req: &SessionRefRequest<'_>,
     user_id: Option<&str>,
 ) -> Result<SessionRefOutcome, RefPublishError> {
-    let snapshot = std::fs::read_to_string(req.snapshot_path)?;
+    // See #TBD-pause-ref: the ref carries `~`, never this host's home path.
+    let snapshot = crate::core::session_ref_privacy::redact_home(
+        &std::fs::read_to_string(req.snapshot_path)?,
+        dirs::home_dir().as_deref(),
+    );
     if let Some(hit) = scan_for_credentials(&snapshot) {
         return Err(RefPublishError::CredentialDetected(hit));
     }
@@ -556,6 +569,10 @@ pub fn publish_session_ref_as(
         )?;
     }
 
+    // The blob is the REDACTED text, staged in the per-call scratch dir.
+    let scratch = tempfile::TempDir::new()?;
+    let redacted = scratch.path().join("snapshot.md");
+    std::fs::write(&redacted, &snapshot)?;
     let blob = git(
         req.repo,
         // `--no-filters`, and deliberately NOT `--path` (git rejects the pair):
@@ -567,14 +584,13 @@ pub fn publish_session_ref_as(
             "-w",
             "--no-filters",
             "--",
-            &req.snapshot_path.to_string_lossy(),
+            &redacted.to_string_lossy(),
         ],
         None,
         &[],
         "hash-object",
     )?;
 
-    let scratch = tempfile::TempDir::new()?;
     let index = scratch.path().join("index");
     let idx = Some(index.as_path());
     git(req.repo, &["read-tree", "--empty"], idx, &[], "read-tree")?;
@@ -668,11 +684,12 @@ fn commit_message(req: &SessionRefRequest<'_>, rel: &str) -> String {
 /// pause into a reported ref error for no reason. The ref is machine data, so
 /// naming the resolved writer is both sufficient and more accurate than an
 /// ambient identity.
-/// What: the user id as the name, its GitHub no-reply address as the email, and
-/// the PAUSE timestamp as both dates — so the chain orders by pause time rather
+/// What: the user id as the name, an `.invalid` address built from it as the
+/// email (See #TBD-pause-ref: the id is a hash, not a GitHub login), and the
+/// PAUSE timestamp as both dates — so the chain orders by pause time rather
 /// than by whenever the push happened to succeed.
 fn commit_identity(user: &str, timestamp: DateTime<Utc>) -> Vec<(&'static str, String)> {
-    let email = format!("{user}@users.noreply.github.com");
+    let email = format!("{user}@session-ref.invalid");
     let date = timestamp.to_rfc3339();
     vec![
         ("GIT_AUTHOR_NAME", user.to_string()),
