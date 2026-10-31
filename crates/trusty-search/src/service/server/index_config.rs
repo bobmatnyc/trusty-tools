@@ -117,6 +117,11 @@ pub struct PatchIndexConfigRequest {
     pub extensions: Option<Vec<String>>,
     #[serde(default)]
     pub exclude_globs: Option<Vec<String>>,
+    /// #10532: apply a named exclude profile (`std-v1`) as the whole list.
+    /// Refused together with `exclude_globs`. Files the new list excludes are
+    /// removed from the index in place; nothing is rebuilt.
+    #[serde(default)]
+    pub profile: Option<String>,
     #[serde(default)]
     pub include_docs: Option<bool>,
     #[serde(default)]
@@ -223,6 +228,10 @@ pub(crate) async fn patch_index_config_report(
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     reject_invalid_globs(req.exclude_globs.as_deref())?;
+    // #10532: resolved before anything mutates, so a refusal changes nothing.
+    let sanitized_globs = req.exclude_globs.clone().map(sanitize_dirs);
+    let stamp =
+        super::profile_apply::resolve_patch(sanitized_globs.as_deref(), req.profile.as_deref())?;
 
     // Validate: a zero (or absurd) data cap would prune every data file.
     if matches!(req.data_file_max_bytes, Some(0)) {
@@ -277,7 +286,9 @@ pub(crate) async fn patch_index_config_report(
         components::should_rearm_vector_catch_up(&transition, req.vector, semantic_status);
     // The per-index permit is still the 409 guard for a re-arm: a reindex in
     // flight on this index answers 409 exactly as for a toggle.
-    let permit = if transition.needs_catch_up() || rearm {
+    // #10532: a changed exclude list takes the permit too, so a reindex walking
+    // with the old globs cannot re-add the files the purge below removes.
+    let permit = if transition.needs_catch_up() || rearm || stamp.is_some() {
         match crate::service::reindex::index_semaphore(&index_id).try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => {
@@ -311,9 +322,9 @@ pub(crate) async fn patch_index_config_report(
         .extensions
         .map(sanitize_extensions)
         .unwrap_or_else(|| existing.extensions.clone());
-    let exclude_globs = req
-        .exclude_globs
-        .map(sanitize_dirs)
+    let exclude_globs = stamp
+        .as_ref()
+        .map(|s| s.globs.clone())
         .unwrap_or_else(|| existing.exclude_globs.clone());
     let include_docs = req.include_docs.unwrap_or(existing.include_docs);
     let respect_gitignore = req.respect_gitignore.unwrap_or(existing.respect_gitignore);
@@ -401,7 +412,21 @@ pub(crate) async fn patch_index_config_report(
         transition.new_skip_kg,
         transition.new_skip_vector,
         existing.serve_only,
+        stamp.as_ref(),
     );
+
+    // #10532: files the new globs exclude leave the index now, through the batch removal; no reindex runs. Before the
+    // catch-up below, which takes over the teardown guard.
+    // Whenever the request names the list, not only when it changed: the new
+    // globs are already stored, so a retry after a failed purge sees no change.
+    let purge = if stamp.is_some() {
+        Some(
+            super::profile_apply::purge_newly_excluded(&registered, &index_id, &view.exclude_globs)
+                .await,
+        )
+    } else {
+        None
+    };
 
     // Issue #2984 Phase 1: spawn the background catch-up. `permit` (held since
     // the semaphore acquisition above) moves into the task and is released
@@ -470,6 +495,7 @@ pub(crate) async fn patch_index_config_report(
                 "catch_up_started": catch_up_started,
             },
         });
+        with_profile(&mut body, stamp.as_ref(), purge.as_ref());
         with_catch_up_reindex(&mut body, catch_up_reindex);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, body));
     }
@@ -489,8 +515,31 @@ pub(crate) async fn patch_index_config_report(
             "catch_up_started": catch_up_started,
         },
     });
+    with_profile(&mut body, stamp.as_ref(), purge.as_ref());
     with_catch_up_reindex(&mut body, catch_up_reindex);
     Ok(body)
+}
+
+/// Add `profile` and `profile_purge` to a PATCH body when it changed the excludes (#10532).
+///
+/// What: a PATCH that touched neither leaves the body as it was.
+fn with_profile(
+    body: &mut serde_json::Value,
+    stamp: Option<&crate::core::profile::ResolvedProfile>,
+    purge: Option<&Result<(usize, usize), String>>,
+) {
+    let Some(map) = body.as_object_mut() else {
+        return;
+    };
+    if let Some(stamp) = stamp {
+        map.insert("profile".into(), stamp.label().into());
+    }
+    if let Some(purge) = purge {
+        map.insert(
+            "profile_purge".into(),
+            super::profile_apply::purge_body(purge),
+        );
+    }
 }
 
 /// Add `catch_up_reindex` to a PATCH body when the PATCH released a hold (#9059).
@@ -561,6 +610,7 @@ fn persist_hygiene_update(
     skip_kg: bool,
     skip_vector: bool,
     serve_only: bool,
+    stamp: Option<&crate::core::profile::ResolvedProfile>,
 ) -> anyhow::Result<()> {
     use crate::service::persistence::{
         load_index_registry, upsert_index_registry_entry, PersistedIndex,
@@ -595,5 +645,9 @@ fn persist_hygiene_update(
     entry.respect_gitignore = respect_gitignore;
     entry.skip_kg = skip_kg;
     entry.skip_vector = skip_vector;
+    if let Some(stamp) = stamp {
+        entry.profile = Some(stamp.name.clone());
+        entry.profile_hash = Some(stamp.hash.clone());
+    }
     upsert_index_registry_entry(entry)
 }

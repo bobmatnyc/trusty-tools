@@ -85,6 +85,7 @@ async fn relocate_index_updates_root_path() {
             root_path: old_root.clone(),
             include_paths: None,
             exclude_globs: None,
+            profile: None,
             extensions: None,
             domain_terms: None,
             path_filter: None,

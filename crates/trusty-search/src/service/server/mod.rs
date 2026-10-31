@@ -62,6 +62,9 @@ mod embed_missing_tests;
 mod quantize_handlers;
 mod reindex_handlers;
 // #10110: `search.index.files.remove`, the batch removal by prefix or list.
+#[cfg(test)]
+mod profile_10532_tests;
+mod profile_apply;
 mod remove_files;
 #[cfg(test)]
 mod remove_files_tests;

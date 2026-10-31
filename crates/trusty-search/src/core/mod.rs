@@ -27,6 +27,7 @@ pub mod ner;
 pub(crate) mod path_selection;
 pub mod project_config;
 // #9169: the canonical project→index map, `project-map.toml`.
+pub mod profile;
 pub mod project_map;
 pub mod project_map_io;
 pub mod redb_migrate;

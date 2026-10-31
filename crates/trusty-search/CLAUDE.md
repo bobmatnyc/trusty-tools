@@ -316,8 +316,36 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   `REGISTRY_IDS_ADOPTED` flips), or the registry-derived id when that basename
   is registered at another tree (`project_id_taken` when that is taken too).
   It pins the group (as `search.index.create` does) and queues the first
-  reindex. `profile` is echoed; `profile_applied` is `false` until the
-  `std-v1` profile (#10532) lands.
+  reindex. Excludes (#10532): the checkout's `.trusty-search.yaml`
+  `exclude` list, else the request's `exclude` (the tm registry override), else
+  `profile` (default `std-v1`, the only one defined; another name is
+  `400 unknown_profile`). The response's `profile` is the stored `name@hash`
+  (`std-v1@3fa2c9d1`, or `custom@<hash>` for a caller list),
+  `profile_source` is `Profile`, `Registry` or `RepoConfig`, and
+  `profile_applied` is `true` on the call that created the index.
+  `repo_config_error` reports a `.trusty-search.yaml` that did not parse.
+
+##### Exclude profile `std-v1` (#10532)
+
+`core::profile::STD_V1_GLOBS` is the standard exclude set: record directories
+(`owner-queue`, `owner-queue-archive`), archives, `.worktrees`, `*.db`,
+`*.sqlite*`, `*.lock`, `dashboard*.log`, `logs`, `checkpoints`, `backups`,
+`actions.md`, `local/usage` and `local/dashboard*/**/*.json`. Paths fall into
+the `code`, `docs` (`*.md *.mdx *.rst *.adoc *.txt`) or excluded class
+(`core::profile::classify`).
+
+- `POST /indexes` / `search.index.create`: an empty or absent `exclude_globs`
+  applies `profile` (default `std-v1`); a non-empty list wins and is stored as
+  `custom`. The response carries `profile`.
+- `PATCH /indexes/:id/config`: `profile: "std-v1"` replaces the list with the
+  profile; `exclude_globs` replaces it with exactly that list (`custom`); both
+  together is `400 profile_and_exclude_globs`. Indexed files the new list
+  excludes and the old one did not are removed in place with the
+  `search.index.files.remove` machinery; no reindex runs. The body carries
+  `profile` and `profile_purge` (`files_removed`, `chunks_removed`,
+  `rebuilt: false`, or `error`).
+- `GET /indexes/:id/status`: `profile` is `std-v1@<hash>` or `custom@<hash>`,
+  `null` for an index persisted before profiles existed.
 - `search.index.create` pins a new index's group when it has no pin
   (`pinned_by = create`); a pin that cannot be written is reported as
   `project_map_error` and the index stays registered.
@@ -1335,7 +1363,7 @@ this table is generated from it, not maintained by hand.
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
 | `embed_missing` | `index_id`, `dry_run?` | Embed only the chunks of an index that have no vector, then settle its semantic stage. |
-| `ensure_project` | `project_key`, `name`, `root`, `profile?` | Find or create the one index of a trusty-mpm project and pin it for its group. |
+| `ensure_project` | `project_key`, `name`, `root`, `exclude?`, `profile?` | Find or create the one index of a trusty-mpm project and pin it for its group. |
 | `get_call_chain` | `entry_point`, `direction?`, `full?`, `include_source?`, `index_id?`, `max_bytes?`, `max_depth?`, `project?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `project?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
 | `index_file` | `index_id`, `path`, `content` | Add or update one file in an index. |

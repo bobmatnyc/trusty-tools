@@ -619,7 +619,11 @@ pub(crate) async fn create_index_report(
         .filter(|p| !p.trim().is_empty() && p.trim() != ".")
         .map(|p| req.root_path.join(p.trim()))
         .collect();
-    let exclude_globs: Vec<String> = req.exclude_globs.clone().unwrap_or_default();
+    // #10532: explicit globs win; with none, the named profile (`std-v1` by
+    // default) supplies the list, and its name and hash are stored.
+    let resolved_profile =
+        super::profile_apply::resolve_create(req.exclude_globs.as_deref(), req.profile.as_deref())?;
+    let exclude_globs: Vec<String> = resolved_profile.globs.clone();
     let extensions: Vec<String> = req
         .extensions
         .clone()
@@ -700,6 +704,8 @@ pub(crate) async fn create_index_report(
             additional_roots: additional_roots.clone(),
             include_paths: req.include_paths.clone().unwrap_or_default(),
             exclude_globs: exclude_globs.clone(),
+            profile: Some(resolved_profile.name.clone()),
+            profile_hash: Some(resolved_profile.hash.clone()),
             extensions: extensions.clone(),
             domain_terms: domain_terms.clone(),
             path_filter: path_filter.clone(),
@@ -942,5 +948,7 @@ pub(crate) async fn create_index_report(
         // DOC-37: echo the derived identity so a caller registering an index
         // learns its repo grouping key without a follow-up list round-trip.
         "repo_identity": repo_identity,
+        // #10532: the resolved exclude profile, `name@hash`.
+        "profile": resolved_profile.label(),
     }))
 }

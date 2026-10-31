@@ -52,6 +52,18 @@ pub struct PersistedIndex {
     /// Glob patterns to exclude on top of the built-in ignores.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude_globs: Vec<String>,
+    /// #10532: the resolved exclude profile name (`std-v1` or `custom`).
+    ///
+    /// Why: `index_status` shows `profile: std-v1@<hash>` so drift from the
+    /// standard is visible. `None` is an index persisted before the profile
+    /// existed: it loads unchanged and reports no profile.
+    /// Test: `a_pre_profile_index_loads_with_no_profile` in
+    /// `service::server::profile_10532_tests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// #10532: [`crate::core::profile::hash`] of `exclude_globs` when stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_hash: Option<String>,
     /// Extension allow-list (e.g. `["rs", "py"]`, without leading dot).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
@@ -425,6 +437,8 @@ impl Default for PersistedIndex {
             additional_roots: Vec::new(),
             include_paths: Vec::new(),
             exclude_globs: Vec::new(),
+            profile: None,
+            profile_hash: None,
             extensions: Vec::new(),
             domain_terms: Vec::new(),
             path_filter: Vec::new(),

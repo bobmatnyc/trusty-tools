@@ -87,7 +87,14 @@ async fn ensure_creates_pins_and_queues_one_reindex() {
     let id = out["index_id"].as_str().expect("id").to_string();
     assert_eq!(out["created"], true, "{out}");
     assert_eq!(out["reindex_queued"], true, "{out}");
-    assert_eq!(out["profile_applied"], false);
+    // #10532: a created index runs std-v1 unless something overrides it.
+    assert_eq!(out["profile_applied"], true, "{out}");
+    let label = format!(
+        "std-v1@{}",
+        crate::core::profile::hash(&crate::core::profile::std_v1_globs())
+    );
+    assert_eq!(out["profile"], label.as_str(), "{out}");
+    assert_eq!(out["profile_source"], "Profile", "{out}");
     assert_eq!(id, trusty_common::derive_index_id(&root), "{out}");
     assert!(fx.state.registry.get(&IndexId::new(id.clone())).is_some());
     assert_eq!(pins(&fx), vec![id], "the group is pinned");
@@ -245,4 +252,92 @@ async fn concurrent_ensures_for_one_root_create_and_reindex_once() {
     assert_eq!((created, queued), (1, 1), "{a} / {b}");
     assert_eq!(a["index_id"], b["index_id"]);
     assert_eq!(fx.state.registry.list().len(), 1);
+}
+
+fn globs_of(fx: &Fixture, out: &serde_json::Value) -> Vec<String> {
+    let id = out["index_id"].as_str().expect("id");
+    fx.state
+        .registry
+        .get(&IndexId::new(id))
+        .expect("registered")
+        .exclude_globs
+        .clone()
+}
+
+/// Why: `.trusty-search.yaml`, then the registry override, then `std-v1`
+/// (#10532, design section 2).
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_repo_yaml_exclude_beats_the_registry_override() {
+    let fx = fixture().await;
+    let registry = serde_json::json!(["registry/**"]);
+    let with = |mut p: serde_json::Value| {
+        p["exclude"] = registry.clone();
+        p
+    };
+
+    let (_g1, yaml_root, _) = root_with_child("ts-10532-yaml-", "src");
+    std::fs::write(
+        yaml_root.join(".trusty-search.yaml"),
+        "exclude:\n  - yaml/**\n",
+    )
+    .expect("yaml");
+    let out = rpc_ok(
+        &fx.router,
+        METHOD_PROJECT_ENSURE,
+        with(params("o/y", "y", &yaml_root)),
+    )
+    .await;
+    assert_eq!(globs_of(&fx, &out), vec!["yaml/**".to_string()], "{out}");
+    assert_eq!(out["profile_source"], "RepoConfig", "{out}");
+    assert!(
+        out["profile"].as_str().unwrap_or("").starts_with("custom@"),
+        "{out}"
+    );
+
+    let (_g2, reg_root, _) = root_with_child("ts-10532-reg-", "src");
+    let out = rpc_ok(
+        &fx.router,
+        METHOD_PROJECT_ENSURE,
+        with(params("o/r2", "r2", &reg_root)),
+    )
+    .await;
+    assert_eq!(
+        globs_of(&fx, &out),
+        vec!["registry/**".to_string()],
+        "{out}"
+    );
+    assert_eq!(out["profile_source"], "Registry", "{out}");
+
+    let (_g3, std_root, _) = root_with_child("ts-10532-std-", "src");
+    let out = rpc_ok(
+        &fx.router,
+        METHOD_PROJECT_ENSURE,
+        params("o/s", "s", &std_root),
+    )
+    .await;
+    assert_eq!(
+        globs_of(&fx, &out),
+        crate::core::profile::std_v1_globs(),
+        "{out}"
+    );
+}
+
+/// Why: an unknown profile name is refused before anything registers.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn an_unknown_profile_registers_nothing() {
+    let fx = fixture().await;
+    let (_g, root, _) = root_with_child("ts-10532-unk-", "src");
+    let mut p = params("o/r", "r", &root);
+    p["profile"] = "std-v9".into();
+    let err = rpc_err(&fx.router, METHOD_PROJECT_ENSURE, p).await;
+    assert_eq!(
+        err.data.as_ref().expect("data")["error"],
+        "unknown_profile",
+        "{err:?}"
+    );
+    assert!(fx.state.registry.list().is_empty());
 }
