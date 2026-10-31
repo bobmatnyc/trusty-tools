@@ -14,7 +14,7 @@ use super::tests_8499::{clean_repo, create_req, mock_state};
 use super::tests_components::IsolatedDataDir;
 use super::*;
 use crate::core::profile;
-use crate::core::registry::IndexId;
+use crate::core::registry::{IndexId, StageStatus};
 use crate::service::reindex::{spawn_reindex_awaitable, ReindexProgress};
 use std::path::Path;
 use std::sync::Arc;
@@ -41,24 +41,36 @@ fn tree() -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, root)
 }
 
+/// Reindex `id` and return only once nothing on the index is still in flight.
+///
+/// Why (#10635): the walk's join handle resolves before the deferred embed
+/// pass has taken the per-index permit, so a permit that is free for one poll
+/// can be taken a moment later. A PATCH that changes the excludes needs that
+/// permit and answers 409 otherwise.
+/// What: awaits the walk, then waits (30 s deadline) for the semantic stage to
+/// leave `Pending`/`InProgress`, which only the embed pass moves, and then for
+/// the index's permit to be free. The embed pass releases the permit after it
+/// settles the stage, and nothing queues another pass, so this order is final.
+/// Test: every test in this module that reindexes before a PATCH.
 async fn reindex(state: &Arc<SearchAppState>, id: &str) {
     let handle = state.registry.get(&IndexId::new(id)).expect("registered");
-    spawn_reindex_awaitable(handle, Arc::new(ReindexProgress::new()), false)
+    spawn_reindex_awaitable(Arc::clone(&handle), Arc::new(ReindexProgress::new()), false)
         .await
         .expect("reindex task");
-    // The deferred embed pass keeps the per-index permit after the walk; a
-    // PATCH that changes the excludes needs it (409 otherwise).
     let index = IndexId::new(id);
-    for _ in 0..400 {
-        if crate::service::reindex::index_semaphore(&index)
-            .try_acquire_owned()
-            .is_ok()
-        {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let semantic = handle.stages.read().await.semantic.status;
+        let embedding = matches!(semantic, StageStatus::Pending | StageStatus::InProgress);
+        if !embedding && !crate::service::reindex::index_task_in_flight(&index) {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "index {id} never went idle: semantic={semantic:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    panic!("the index permit was never released");
 }
 
 async fn chunks_of(state: &Arc<SearchAppState>, id: &str, rel: &str) -> usize {
