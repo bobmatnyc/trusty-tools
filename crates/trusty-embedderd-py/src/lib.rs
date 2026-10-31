@@ -55,9 +55,21 @@ use std::process::ExitCode;
 /// forwards every argument after argv\[0\] (notably `--stdio`) to
 /// `python -m trusty_embed_sidecar`, and returns `ExitCode::FAILURE` when the
 /// venv bootstrap or the exec fails. A successful exec never returns.
+/// `--version`/`-V` prints the version and exits before any bootstrap.
 /// Test: the `#[ignore]`d e2e `supervisor_spawns_launcher_and_embeds_batch`
-/// runs it; a trusty-search integration test pins the packaging.
+/// runs it; a trusty-search integration test pins the packaging;
+/// trusty-search's launcher_version_10582 integration test pins `--version`/`-V`.
 pub fn run() -> ExitCode {
+    // #10582: answer --version/-V before ensure_venv, which takes the
+    // bootstrap lock and creates the venv project dir.
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        println!("trusty-embedderd-py {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
