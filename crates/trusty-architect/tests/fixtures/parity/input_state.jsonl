@@ -5,7 +5,7 @@
 ["permission_moved", ["typed", "2. Yes, and don't ask again for rm commands in this project"]]
 ["ask_user", ["typed", "1. Keep (Recommended)"]]
 ["dialog_words_above_box", ["empty", ""]]
-["labeled_rule_fixture", ["suggestion", "Status of trusty?"]]
+["labeled_rule_fixture", ["suggestion", "Status of project?"]]
 ["idle_worked", ["empty", ""]]
 ["idle_suggestion", ["suggestion", "do the next thing"]]
 ["busy_agents_waiting", ["empty", ""]]

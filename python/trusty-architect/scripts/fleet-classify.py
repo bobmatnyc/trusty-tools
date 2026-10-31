@@ -49,7 +49,7 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|
 RULE = re.compile(r"^\s*[─━]{10,}\s*$")
 # The box's own TOP rule only: Claude Code now draws a short label (e.g. a
 # date) before the trailing rule run on days the input hasn't changed
-# ("──…── 9-26/2026 ─"); the bottom rule and every dialog rule stay plain.
+# ("──…── 1-01/2026 ─"); the bottom rule and every dialog rule stay plain.
 BOX_TOP_RULE = re.compile(r"^\s*[─━]{10,}(?:\s.{1,30}[─━]+)?\s*$")
 OPTION = re.compile(r"^\s*❯\s*\d+\.")              # dialog cursor on a numbered option
 SPINNER = re.compile(r"^[·✢✳✶✻✽*∗] ")               # status line glyph, column 0

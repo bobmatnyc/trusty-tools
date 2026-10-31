@@ -17,7 +17,7 @@ fn test_read_quiet_sessions_one_per_line_with_comments_and_blanks() -> std::io::
     let f = dir.path().join("quiet-sessions.txt");
     std::fs::write(
         &f,
-        "# parked by the owner\ntm-hotstats-reporting-01\n\ntm-ai-power-rankings-01  # paused pending #8261\n   \n",
+        "# parked by the owner\ntm-hotstats-reporting-01\n\ntm-ai-power-rankings-01  # paused pending #5678\n   \n",
     )?;
     assert_eq!(
         read_quiet_sessions(&f),

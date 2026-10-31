@@ -115,7 +115,7 @@ CAPTURES = {
     "ctx_47": screen(PM_TURN, agents=["x"], ctx=47),
     "ctx_52": screen(PM_TURN, agents=["x"], ctx=52),
     "ctx_44": screen(PM_TURN, agents=["x"], ctx=44),
-    "ctx_compacted": screen(PM_TURN, agents=["x"]).replace("ctx 30% |", "⤵ 969k→77k (92%) |"),
+    "ctx_compacted": screen(PM_TURN, agents=["x"]).replace("ctx 30% |", "⤵ 500k→77k (92%) |"),
     "ctx_over_200k": screen(PM_TURN, agents=["x"]).replace("ctx 30% |", "ctx>200k |"),
     "plan_limit_text": screen(PM_TURN + ["  ⎿  Claude usage limit reached. Your limit will reset at 5pm."],
                               agents=["x"]),
@@ -242,7 +242,7 @@ CLEAN = [
 
 QUIET = [
     {"case": "one_per_line", "content": "# parked by the owner\ntm-hotstats-reporting-01\n\n"
-                                        "tm-ai-power-rankings-01  # paused pending #8261\n   \n"},
+                                        "tm-ai-power-rankings-01  # paused pending #5678\n   \n"},
     {"case": "missing", "content": None},
     {"case": "all_comments", "content": "# nothing listed yet\n\n"},
     {"case": "crlf_and_tabs", "content": "tm-a\r\n\ttm-b\t# x\r\ntm-c#d\rtm-a\n"},
