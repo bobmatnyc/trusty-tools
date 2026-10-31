@@ -1193,7 +1193,7 @@ fn best_effort_create_index(
 /// `index_is_fresh_false_when_no_chunks`, `index_is_fresh_false_when_stale`,
 /// `index_is_fresh_false_when_last_indexed_missing_or_malformed`,
 /// `a_confirmed_registration_triggers_a_reindex_over_the_socket`.
-fn best_effort_trigger_reindex(socket: &Path, index_id: &str) {
+pub fn best_effort_trigger_reindex(socket: &Path, index_id: &str) {
     let params = serde_json::json!({ "index_id": index_id });
 
     let already_fresh = crate::search_rpc::call_blocking(

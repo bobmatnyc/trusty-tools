@@ -46,6 +46,8 @@ pub mod warm;
 /// Registration for project-to-index resolution (#9169).
 pub mod project;
 
+/// Registration for `search.project.ensure`: find-or-create a project's index (#10531).
+pub mod project_ensure;
 /// Registration for the project map: map, park, unpark, pin (#9169 PR-B1).
 pub mod project_map;
 

@@ -17,6 +17,7 @@ use super::{
     types::{optional_bool, require_str, DispatchError},
     McpServer,
 };
+use crate::service::rpc::project_ensure::METHOD_PROJECT_ENSURE;
 use crate::service::rpc::reads::{METHOD_CHUNKS_LIST, METHOD_INDEXES_LIST, METHOD_INDEX_STATUS};
 use crate::service::rpc::writes::{
     METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_EMBED_MISSING,
@@ -42,6 +43,27 @@ pub(super) fn add_root_descriptor() -> Value {
                     "items": { "type": "string" },
                     "description": "Absolute directory paths to add."
                 }
+            }
+        }
+    })
+}
+
+/// The `ensure_project` tool's descriptor (#10531), appended by `tool_descriptors`.
+///
+/// Why: kept beside its dispatch arm, out of `descriptors.rs`. The description
+/// names the refusal an agent must act on rather than retry.
+pub(super) fn ensure_project_descriptor() -> Value {
+    serde_json::json!({
+        "name": "ensure_project",
+        "description": "Find or create the one index of a trusty-mpm project and pin it for its group. Idempotent: a repeat call for the same root returns the same index_id with created=false and queues no reindex. A new index queues its first reindex (reindex_queued, or reindex_error when it could not be queued). Refused with project_root_overlap (data.overlapping_index_id) when root contains, or sits inside, a root another index already owns: attach to that index instead. Also refused with project_root_unindexable (home or filesystem root) and project_id_taken. profile is accepted and echoed; profile_applied stays false until the std-v1 profile lands.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_key", "name", "root"],
+            "properties": {
+                "project_key": { "type": "string", "description": "owner/repo or local:<uuid>, as tm stored it at register." },
+                "name": { "type": "string", "description": "The tm registry name; labels a registry-derived id." },
+                "root": { "type": "string", "description": "Absolute path of the project checkout." },
+                "profile": { "type": "string", "description": "Exclude profile name (reserved for std-v1)." }
             }
         }
     })
@@ -256,6 +278,20 @@ pub(super) async fn dispatch_index_tool(
             }
             let params = serde_json::json!({ "index_id": index_id, "body": body });
             Some(server.call(METHOD_INDEX_FILES_REMOVE, params).await)
+        }
+        // #10531: find-or-create the index of a tm project.
+        "ensure_project" => {
+            let mut body = serde_json::json!({});
+            for key in ["project_key", "name", "root"] {
+                match require_str(args, key) {
+                    Ok(v) => body[key] = Value::String(v.to_string()),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            if let Some(profile) = args.get("profile").and_then(Value::as_str) {
+                body["profile"] = Value::String(profile.to_string());
+            }
+            Some(server.call(METHOD_PROJECT_ENSURE, body).await)
         }
         // #10551: the embed-only resume of a failed semantic stage.
         "embed_missing" => {

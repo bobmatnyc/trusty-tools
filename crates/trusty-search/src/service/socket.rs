@@ -62,7 +62,7 @@ use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
 use crate::service::rpc::{
-    admin, chat, file, project, project_map, queries, reads, streams, warm, writes,
+    admin, chat, file, project, project_ensure, project_map, queries, reads, streams, warm, writes,
 };
 use crate::service::server::SearchAppState;
 
@@ -158,6 +158,8 @@ pub const METHODS: &[&str] = &[
     project_map::METHOD_PROJECT_PARK,
     project_map::METHOD_PROJECT_UNPARK,
     project_map::METHOD_PROJECT_PIN,
+    // #10531 — find-or-create the index of a tm project. Socket-only, free lane.
+    project_ensure::METHOD_PROJECT_ENSURE,
     // #9029 — one indexed file and its diff. Socket-only and in the free lane.
     file::METHOD_FILE_GET,
 ];
@@ -277,6 +279,7 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = warm::register(router, state);
     let router = project::register(router, state);
     let router = project_map::register(router, state);
+    let router = project_ensure::register(router, state);
     let router = file::register(router, state);
     streams::register(router, state)
 }

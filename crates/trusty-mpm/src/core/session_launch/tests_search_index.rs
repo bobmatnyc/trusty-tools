@@ -166,3 +166,130 @@ fn worktree_skip_vector_false_for_plain_clone() {
         "a primary clone still embeds — skip_vector is a worktree-only decision"
     );
 }
+
+/// Why: a test process must never reach the operator's daemon through the
+/// launch-time `search.project.ensure` (#4255 posture, #10531).
+/// Test: this test.
+#[test]
+fn ensure_via_daemon_is_silent_under_the_test_harness() {
+    let dir = tempdir().expect("tempdir");
+    let registered = trusty_common::RegisteredProject::new("demo", "o/demo");
+    assert_eq!(
+        super::search_index::ensure_via_daemon(dir.path(), &registered),
+        None
+    );
+}
+
+/// The ensure reply for an index that already existed.
+fn found() -> serde_json::Value {
+    serde_json::json!({ "index_id": "demo", "created": false })
+}
+
+/// Run `ensure_and_refresh` against a mock daemon; return the id and the
+/// methods the daemon saw.
+async fn launch_against(
+    ensure: serde_json::Value,
+    status: serde_json::Value,
+) -> (Option<String>, Vec<String>) {
+    use crate::uds_mock::{self, MockFuture};
+    use std::sync::{Arc, Mutex};
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let rec = Arc::clone(&seen);
+    let daemon = uds_mock::spawn(move |method, _| -> MockFuture {
+        rec.lock().expect("lock").push(method.to_string());
+        let answer = match method {
+            "search.project.ensure" => ensure.clone(),
+            "search.index.status" => status.clone(),
+            _ => serde_json::json!({ "queued": true }),
+        };
+        Box::pin(async move { Ok(answer) })
+    })
+    .await;
+    let socket = daemon.socket().to_path_buf();
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    let id = tokio::task::spawn_blocking(move || {
+        let registered = trusty_common::RegisteredProject::new("demo", "o/demo");
+        super::search_index::ensure_and_refresh(&socket, &root, &registered)
+    })
+    .await
+    .expect("worker");
+    let calls = seen.lock().expect("lock").clone();
+    (id, calls)
+}
+
+/// Why: a found index that is empty (or whose first queue failed) must still be
+/// populated by launch, as the older client-side path did (#10531 review).
+/// Test: this test. Before the fix `ensure_and_refresh` returned at once and no
+/// `search.index.reindex` was sent.
+#[tokio::test]
+async fn a_found_but_empty_index_gets_a_reindex_on_launch() {
+    let (id, calls) = launch_against(found(), serde_json::json!({ "chunk_count": 0 })).await;
+    assert_eq!(id.as_deref(), Some("demo"));
+    assert!(
+        calls.contains(&"search.index.reindex".to_string()),
+        "{calls:?}"
+    );
+}
+
+/// Why: a stale found index (indexed over an hour ago) is refreshed on launch.
+/// Test: this test.
+#[tokio::test]
+async fn a_found_stale_index_gets_a_reindex_on_launch() {
+    let stale = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+    let (_, calls) = launch_against(
+        found(),
+        serde_json::json!({ "chunk_count": 9, "last_indexed": stale }),
+    )
+    .await;
+    assert!(
+        calls.contains(&"search.index.reindex".to_string()),
+        "{calls:?}"
+    );
+}
+
+/// Why: a fresh index must not be reindexed on every launch.
+/// Test: this test.
+#[tokio::test]
+async fn a_found_fresh_index_gets_no_reindex_on_launch() {
+    let fresh = chrono::Utc::now().to_rfc3339();
+    let (_, calls) = launch_against(
+        found(),
+        serde_json::json!({ "chunk_count": 9, "last_indexed": fresh }),
+    )
+    .await;
+    assert!(
+        !calls.contains(&"search.index.reindex".to_string()),
+        "{calls:?}"
+    );
+}
+
+/// Why: ensure already queued the first reindex for a created index.
+/// Test: this test.
+#[tokio::test]
+async fn a_created_index_gets_no_second_reindex_on_launch() {
+    let (_, calls) = launch_against(
+        serde_json::json!({ "index_id": "demo", "created": true, "reindex_queued": true }),
+        serde_json::json!({ "chunk_count": 0 }),
+    )
+    .await;
+    assert_eq!(calls, vec!["search.project.ensure".to_string()]);
+}
+
+/// Why: `created: true` with a failed first queue leaves an empty index that no
+/// other path populates (#10531 re-check).
+/// Test: this test. Before the fix the trigger tested `created` alone, so no
+/// `search.index.reindex` was sent.
+#[tokio::test]
+async fn a_created_index_whose_first_queue_failed_gets_a_reindex_on_launch() {
+    let reply = serde_json::json!({
+        "index_id": "demo", "created": true, "reindex_queued": false,
+        "reindex_error": "reindex_already_running",
+    });
+    let (id, calls) = launch_against(reply, serde_json::json!({ "chunk_count": 0 })).await;
+    assert_eq!(id.as_deref(), Some("demo"));
+    assert!(
+        calls.contains(&"search.index.reindex".to_string()),
+        "{calls:?}"
+    );
+}
