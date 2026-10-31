@@ -88,6 +88,12 @@ fn tool_table() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             json!({ "index_id": "demo", "dry_run": true }),
             vec!["search.index.embed_missing"],
         ),
+        // #10531: find-or-create a tm project's index.
+        (
+            "ensure_project",
+            json!({ "project_key": "o/r", "name": "r", "root": "/tmp/r" }),
+            vec!["search.project.ensure"],
+        ),
         ("list_indexes", json!({}), vec!["search.indexes.list"]),
         (
             "create_index",
@@ -176,7 +182,7 @@ async fn every_tool_reaches_its_socket_method() {
     }
     assert_eq!(
         advertised.len(),
-        23,
+        24,
         "the tool count is part of the contract"
     );
 

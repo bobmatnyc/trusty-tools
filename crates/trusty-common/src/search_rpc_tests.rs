@@ -287,3 +287,44 @@ fn call_blocking_reports_a_dead_socket_rather_than_hanging() {
         "a dial failure is a transport error, never a daemon refusal: {err:#}"
     );
 }
+
+/// Why: the params are the wire contract with `search.project.ensure`; an
+/// absent profile must not travel as `null`, which the daemon would refuse.
+/// Test: itself.
+#[test]
+fn ensure_project_params_omit_an_absent_profile() {
+    let bare = ensure_project_params("o/r", "r", Path::new("/work/r"), None);
+    assert_eq!(
+        bare,
+        serde_json::json!({ "project_key": "o/r", "name": "r", "root": "/work/r" })
+    );
+    let with = ensure_project_params("o/r", "r", Path::new("/work/r"), Some("std-v1"));
+    assert_eq!(with["profile"], "std-v1");
+}
+
+/// Why: the blocking wrapper must send the method and params verbatim.
+/// Test: itself.
+#[tokio::test]
+async fn ensure_project_blocking_sends_the_wire_shape() {
+    let daemon = uds_mock::spawn(|method, params| {
+        let answer = serde_json::json!({ "method": method, "params": params });
+        Box::pin(async move { Ok(answer) })
+    })
+    .await;
+    let socket = daemon.socket().to_path_buf();
+    let value = tokio::task::spawn_blocking(move || {
+        ensure_project_blocking(
+            &socket,
+            "o/r",
+            "r",
+            Path::new("/work/r"),
+            None,
+            PROBE_TIMEOUT,
+        )
+    })
+    .await
+    .expect("the blocking worker must not panic")
+    .expect("the daemon answered");
+    assert_eq!(value["method"], METHOD_PROJECT_ENSURE);
+    assert_eq!(value["params"]["project_key"], "o/r");
+}

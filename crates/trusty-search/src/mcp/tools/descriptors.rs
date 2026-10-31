@@ -464,6 +464,8 @@ pub fn tool_descriptors() -> Value {
         list.push(super::index::remove_files_descriptor());
         // #10551: the embed-only resume, likewise beside its arm.
         list.push(super::index::embed_missing_descriptor());
+        // #10531: find-or-create a tm project's index, likewise beside its arm.
+        list.push(super::index::ensure_project_descriptor());
     }
     defs
 }

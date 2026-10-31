@@ -60,7 +60,7 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
 
         // Mutating
         "index_file" | "remove_file" | "remove_files" | "create_index" | "delete_index"
-        | "reindex" | "add_root" | "embed_missing" => &[SEARCH_WRITE],
+        | "reindex" | "add_root" | "embed_missing" | "ensure_project" => &[SEARCH_WRITE],
 
         _ => &[],
     };

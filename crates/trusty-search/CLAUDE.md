@@ -301,6 +301,23 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   under the map (`null` when it has none), never a parked or unregistered id.
 - Deleting an index drops its park row and pins from the map, so an index
   registered again at the same root is not parked.
+- `search.project.ensure {project_key, name, root, profile?}` (#10531) →
+  `{index_id, project_key, created, root_path, reindex_queued, reindex |
+  reindex_error, profile, profile_applied, project_map_error?}`. Find-or-create
+  the one index of a tm project; MCP tool `ensure_project`. Socket-only, free
+  lane. An index already registered at that exact tree is returned
+  (`created: false`, no reindex). Otherwise a root that contains, or sits
+  inside, any registered root (live or parked, additional roots included) is
+  refused `-32009` with `data.error = "project_root_overlap"`, `data.overlap`
+  (`inside_existing_root` or `encloses_existing_root`) and
+  `data.overlapping_index_id`. A home or filesystem root is
+  `project_root_unindexable`. A new index takes the id
+  `trusty_common::index_id_for_root` names (the root basename until
+  `REGISTRY_IDS_ADOPTED` flips), or the registry-derived id when that basename
+  is registered at another tree (`project_id_taken` when that is taken too).
+  It pins the group (as `search.index.create` does) and queues the first
+  reindex. `profile` is echoed; `profile_applied` is `false` until the
+  `std-v1` profile (#10532) lands.
 - `search.index.create` pins a new index's group when it has no pin
   (`pinned_by = create`); a pin that cannot be written is reported as
   `project_map_error` and the index stays registered.
@@ -1307,7 +1324,7 @@ server or `OPENROUTER_API_KEY` in the daemon's environment.
 ### MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **23 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **24 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -1318,6 +1335,7 @@ this table is generated from it, not maintained by hand.
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
 | `embed_missing` | `index_id`, `dry_run?` | Embed only the chunks of an index that have no vector, then settle its semantic stage. |
+| `ensure_project` | `project_key`, `name`, `root`, `profile?` | Find or create the one index of a trusty-mpm project and pin it for its group. |
 | `get_call_chain` | `entry_point`, `direction?`, `full?`, `include_source?`, `index_id?`, `max_bytes?`, `max_depth?`, `project?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `project?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
 | `index_file` | `index_id`, `path`, `content` | Add or update one file in an index. |
