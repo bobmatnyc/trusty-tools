@@ -107,6 +107,11 @@ skills/architect-host-admin.md|content/instructions/architect/skills/architect-h
 skills/architect-dashboard.md|content/instructions/architect/skills/architect-dashboard.md
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
 scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
+scripts/fleet_poll_cfg.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_cfg.py
+scripts/fleet_poll_io.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_io.py
+scripts/fleet_poll_alerts.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_alerts.py
+scripts/fleet_poll_wake.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_wake.py
+scripts/fleet_poll_selfrefresh.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_selfrefresh.py
 scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py
 scripts/quiet-sessions.py|crates/trusty-mpm/src/assets/architect/scripts/quiet-sessions.py
 scripts/self-ctx.py|crates/trusty-mpm/src/assets/architect/scripts/self-ctx.py
