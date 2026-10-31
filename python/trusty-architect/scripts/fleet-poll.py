@@ -24,7 +24,10 @@ session and "exited" for a disposable test-fixture one. The pure parsing and
 alert evaluation live in scripts/fleet-classify.py; the settings, I/O, alert
 steps and wake live in scripts/fleet_poll_{cfg,io,alerts,wake}.py, and the
 self-refresh step in fleet_poll_selfrefresh.py (#10571). This file keeps the
-cycle, the state file and main, and re-exports every moved name.
+cycle, the state file and main, and re-exports every moved name. Each cycle
+also runs the Architect watchdog (fleet_poll_watchdog.py, architect-watchdog.py),
+the Intent Ledger cadence jobs (il-cron.py) and the clear-signal check
+(ctx-watch.py), and appends their findings as alerts.
 Config (env, all optional): ARCHITECT_SESSION (default tm-architect),
 ARCHITECT_POLL_SESSION (default <ARCHITECT_SESSION>-poll),
 ARCHITECT_INBOX_DIR (default <root>/inbox), ARCHITECT_QUIET_SESSIONS_FILE
@@ -79,7 +82,7 @@ STATE, LOG, SOCKET, WORKSPACE_PREFIX = _cfg.STATE, _cfg.LOG, _cfg.SOCKET, _cfg.W
 ARCHITECT, POLL_SESSION, SKIP_SESSIONS = _cfg.ARCHITECT, _cfg.POLL_SESSION, _cfg.SKIP_SESSIONS
 SHELLS, EVENT_TYPES = _cfg.SHELLS, _cfg.EVENT_TYPES
 DISK_HIGH, LOAD_FACTOR_DEFAULT = _cfg.DISK_HIGH, _cfg.LOAD_FACTOR_DEFAULT
-QUIET_SESSIONS_FILE = _cfg.QUIET_SESSIONS_FILE
+QUIET_SESSIONS_FILE, RELAUNCH_SCRIPT = _cfg.QUIET_SESSIONS_FILE, _cfg.RELAUNCH_SCRIPT
 
 # Pure pane parsing and alert evaluation live in fleet-classify.py (#8891).
 # These names stay fleet-poll attributes, as they were before the split.
@@ -93,20 +96,27 @@ fleet_plan_alerts, dedup = fleet_classify.fleet_plan_alerts, fleet_classify.dedu
 
 self_ctx = _load_by_path("self_ctx", "self-ctx.py")
 quiet_sessions = _load_by_path("quiet_sessions", "quiet-sessions.py")
+watchdog = _load_by_path("architect_watchdog", "architect-watchdog.py")
+il_cron = _load_by_path("il_cron", "il-cron.py")
+ctx_watch = il_cron.ctx_watch
 SELF_CTX_DIR = os.environ.get("SELF_CTX_DIR") or self_ctx.default_dir()
 
 # I/O, alert steps, wake and self-refresh (#10571 split), each bound to this module's names.
 _io = _load_by_path("fleet_poll_io", "fleet_poll_io.py")
 _alerts = _load_by_path("fleet_poll_alerts", "fleet_poll_alerts.py")
 _wake = _load_by_path("fleet_poll_wake", "fleet_poll_wake.py")
+_watchdog = _load_by_path("fleet_poll_watchdog", "fleet_poll_watchdog.py")
 _selfrefresh = _load_by_path("fleet_poll_selfrefresh", "fleet_poll_selfrefresh.py")
-for _mod in (_io, _alerts, _wake, _selfrefresh):
+for _mod in (_io, _alerts, _wake, _watchdog, _selfrefresh):
     _mod.bind(_Poller())
 TmuxError, log, tmux, socket_dir = _io.TmuxError, _io.log, _io.tmux, _io.socket_dir
 workspace_servers, list_panes, _rows = _io.workspace_servers, _io.list_panes, _io._rows
 capture, capture_pane, send_to_architect = _io.capture, _io.capture_pane, _io.send_to_architect
 read_events, swap_used_mb, host_alerts = _io.read_events, _io.swap_used_mb, _io.host_alerts
 resolve_context_bar, self_ctx_alerts = _alerts.resolve_context_bar, _alerts.self_ctx_alerts
+il_cron_alerts, ctx_watch_alerts = _alerts.il_cron_alerts, _alerts.ctx_watch_alerts
+run_architect_relaunch, architect_busy = _watchdog.run_architect_relaunch, _watchdog.architect_busy
+architect_transcript_mtime, watchdog_alerts = _watchdog.architect_transcript_mtime, _watchdog.watchdog_alerts
 _norm, _box_full_text, _own_pointer = _wake._norm, _wake._box_full_text, _wake._own_pointer
 wake, dispatch_wake = _wake.wake, _wake.dispatch_wake
 self_refresh_step = _selfrefresh.self_refresh_step
@@ -122,6 +132,7 @@ def cycle(state, dry_run=False, now=None):
         log(f"panes=? ERROR {e}; cycle skipped", dry_run)
         return
     state.setdefault("panes", {})
+    watch_found, watch_phrase = watchdog_alerts(state, panes, now, dry_run)  # #10571 (prototype :1889)
     bar = resolve_context_bar(dry_run)
     watched = [p for p in panes
                if p["session"].startswith("tm-") and p["session"] not in SKIP_SESSIONS]
@@ -157,9 +168,12 @@ def cycle(state, dry_run=False, now=None):
     live = {f"{s}|{pid}" for s, pid in current.items()}
     state["panes"] = {k: v for k, v in state["panes"].items() if k in live}
     candidates += fleet_plan_alerts(infos, now)
+    candidates += il_cron_alerts(now, dry_run)      # #10571 (prototype :1942)
+    candidates += ctx_watch_alerts(now, dry_run)    # #10571 (prototype :1943)
     candidates += read_events(state)
     candidates += host_alerts(now)
     candidates += self_ctx_alerts(now, dry_run)
+    candidates += watch_found
     quiet = quiet_sessions.read_quiet_sessions(QUIET_SESSIONS_FILE)
     candidates = [a for a in candidates if not (a["kind"] == "idle" and a["session"] in quiet)]
     new, suppressed = dedup(state, candidates, now)
@@ -172,8 +186,9 @@ def cycle(state, dry_run=False, now=None):
                 f.write(json.dumps(a, ensure_ascii=False) + "\n")
     result = dispatch_wake(state, panes, len(new), dry_run)
     # #10599 PR-1's slot (prototype :2000): never type into the box twice in a cycle.
-    refresh = "" if result.startswith("sent") else self_refresh_step(state, panes, now, dry_run)
-    log(f"panes={len(watched)} new={len(new)} suppressed={suppressed} wake={result} {refresh}".rstrip(),
+    if not result.startswith("sent"):
+        watch_phrase = f"{watch_phrase} {self_refresh_step(state, panes, now, dry_run)}".rstrip()
+    log(f"panes={len(watched)} new={len(new)} suppressed={suppressed} wake={result} {watch_phrase}".rstrip(),
         dry_run)
 
 

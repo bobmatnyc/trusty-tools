@@ -113,6 +113,11 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         false
     ),
     embedded!(
+        "scripts/fleet_poll_watchdog.py",
+        "scripts/fleet_poll_watchdog.py",
+        false
+    ),
+    embedded!(
         "scripts/fleet_poll_selfrefresh.py",
         "scripts/fleet_poll_selfrefresh.py",
         false

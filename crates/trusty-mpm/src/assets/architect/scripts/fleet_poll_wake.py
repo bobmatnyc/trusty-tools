@@ -121,4 +121,6 @@ def dispatch_wake(state, panes, new_count, dry_run):
         result = f"failed: {e}"
     if result.startswith("sent"):
         state["wake_pending"] = 0
+        if not dry_run:
+            state["wake_sent_at"] = time.time()  # the watchdog's silent clock (prototype :1692)
     return result
