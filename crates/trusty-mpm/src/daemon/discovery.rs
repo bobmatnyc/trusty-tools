@@ -487,8 +487,8 @@ pub async fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
 ///
 /// Scratch-environment gate (#5784): both scans read state that `$HOME` does
 /// not isolate — the tmux server and the host process table — and adopting
-/// what they find makes the operator's real sessions this daemon's to resume,
-/// reap, and kill on shutdown, with the adopted record carrying the real
+/// what they find makes the operator's real sessions this daemon's to resume
+/// and reap, with the adopted record carrying the real
 /// project's working directory. `discover_claude_sessions` is already covered
 /// by [`super::tmux::TmuxDriver::discover`]'s own gate; the `ps`/`lsof` scan
 /// touches no tmux, so the check is repeated here to cover it.

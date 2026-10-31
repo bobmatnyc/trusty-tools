@@ -18,9 +18,9 @@ Origin: [#9032](https://github.com/bobmatnyc/trusty-tools/issues/9032), from the
 ## Three facts that shape the order
 
 1. **The daemon restart leaves sessions running.** Since #10597 (owner
-   ruling D82) a daemon SIGTERM or restart stops no managed session; before
-   it, the graceful shutdown stopped every live one, so the daemon being
-   replaced may still stop them. Checkpoint every session before you stop the
+   ruling D82) a daemon SIGTERM or restart stops no managed session. A daemon
+   older than #10597 stops every managed session when you stop it; a daemon
+   at or after #10597 does not. Checkpoint every session before you stop the
    daemon; the relaunch in 7.2 also exits each unpaired session's `claude`.
 2. **#9004 pairs a record with its tmux server.** From the build that contains
    #9004 (PR #9094), a record stores the tmux server it was created on
