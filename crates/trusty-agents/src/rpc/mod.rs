@@ -105,8 +105,9 @@ mod tests {
         //          #9169 removed the uncalled `upgrade` tool (→20);
         //          #7434 added the `add_root` multi-root tool (→21);
         //          #10110 added the `remove_files` batch removal (→22);
-        //          #10551 added the `embed_missing` resume (→23).
-        assert_eq!(svc.tools().len(), 23);
+        //          #10551 added the `embed_missing` resume (→23);
+        //          #10531 added the `ensure_project` find-or-create (→24).
+        assert_eq!(svc.tools().len(), 24);
     }
 
     #[test]

@@ -51,6 +51,7 @@ mod indexes_roots;
 mod lexical_lane;
 // #6822: the scalar-precision backfill route.
 // #9169 PR-B1: what a parked index answers, and its park/unpark side effects.
+mod project_ensure;
 mod project_park;
 #[cfg(test)]
 mod project_park_tests;
@@ -341,6 +342,7 @@ pub(crate) use indexes_roots::{add_index_roots_report, AddRootsRequest};
 // #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.
 pub(crate) use quantize_handlers::{quantize_report, QuantizeRequest};
 // #9169 PR-B1: the socket's project-map methods drive these.
+pub(crate) use project_ensure::{ensure_project_report, EnsureProjectRequest};
 pub(crate) use project_park::{detach_parked, reindex_after_unpark, with_map_parked};
 pub(crate) use reindex_handlers::reindex_report;
 #[cfg(test)]

@@ -111,6 +111,15 @@ pub const METHOD_INDEX_REINDEX: &str = "search.index.reindex";
 /// which holds that crate's one copy of the `delete_data` opt-in (#4743).
 pub const METHOD_INDEX_DELETE: &str = "search.index.delete";
 
+/// Find or create the one index of a trusty-mpm project (#10531).
+///
+/// Params are `{project_key, name, root, profile?}`, a bare object like
+/// [`METHOD_INDEX_CREATE`]. Idempotent: a repeat call for the same root
+/// returns the same `index_id` and queues no reindex. A root that contains,
+/// or sits inside, another index's root answers [`CODE_CONFLICT`] with
+/// `data.overlapping_index_id`.
+pub const METHOD_PROJECT_ENSURE: &str = "search.project.ensure";
+
 /// The daemon's code for "the thing you asked about does not exist" (HTTP 404).
 ///
 /// A second copy of `trusty_search::service::rpc::error::CODE_NOT_FOUND`, and
@@ -325,4 +334,53 @@ pub fn call_blocking(
     })
     .join()
     .map_err(|_| anyhow!("the trusty-search {method} worker thread panicked"))?
+}
+
+/// The params of [`METHOD_PROJECT_ENSURE`] for one project (#10531).
+///
+/// Why: tm's register path and session launch both call it; one builder keeps
+/// the two from spelling the wire shape twice.
+/// What: `profile` is omitted from the object when `None`.
+/// Test: `ensure_project_params_omit_an_absent_profile`.
+#[must_use]
+pub fn ensure_project_params(
+    project_key: &str,
+    name: &str,
+    root: &Path,
+    profile: Option<&str>,
+) -> Value {
+    let mut params = serde_json::json!({
+        "project_key": project_key,
+        "name": name,
+        "root": root.to_string_lossy(),
+    });
+    if let Some(profile) = profile {
+        params["profile"] = Value::String(profile.to_string());
+    }
+    params
+}
+
+/// [`call_blocking`] of [`METHOD_PROJECT_ENSURE`], answering the daemon's body.
+///
+/// Why: session launch is synchronous and often inside a runtime, like the
+/// other find-or-create callers here.
+/// Test: `ensure_project_blocking_sends_the_wire_shape`.
+///
+/// # Errors
+///
+/// Everything [`call_blocking`] reports; a refusal is a [`SearchRpcError`].
+pub fn ensure_project_blocking(
+    socket: &Path,
+    project_key: &str,
+    name: &str,
+    root: &Path,
+    profile: Option<&str>,
+    timeout: Duration,
+) -> Result<Value> {
+    call_blocking(
+        socket,
+        METHOD_PROJECT_ENSURE,
+        ensure_project_params(project_key, name, root, profile),
+        timeout,
+    )
 }
