@@ -11,12 +11,21 @@ Run: python3 -m pytest deploy/macos/tests/test_tm_login_recover.py -q -p no:cach
 """
 
 import os
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tm-login-recover.sh"
+
+# The managed records the stub daemon holds, as (id, name).
+DEFAULT_RECORDS = [
+    ("sid-rentalist", "tm-rentalist-pro"),
+    ("sid-brave", "tm-brave-summit"),
+    ("sid-eager", "tm-eager-island"),
+]
 
 # Bash stubs. PATH holds only the stub dir, so they use builtins alone.
 TM_STUB = r"""#!/bin/bash
@@ -37,14 +46,20 @@ case "$1 $2" in
     fi
     echo "incomplete: run \`tm fleet init --dir /x\` to finish the setup"; exit 1 ;;
   "fleet init")
+    [[ -f "$S/noop_init" ]] && { echo "Architect set up."; exit 0; }
     : > "$S/live/tm-architect"; : > "$S/bound"; echo "Architect set up."; exit 0 ;;
   "fleet relaunch")
+    [[ -f "$S/noop_relaunch" ]] && { echo "relaunched"; exit 0; }
     : > "$S/bound"; echo "relaunched"; exit 0 ;;
   "sessions resume")
-    : > "$S/live/$3"; echo "resumed $3"; exit 0 ;;
+    # Resumes by record id only; ids/<id> holds the record's session name.
+    [[ -f "$S/ids/$3" ]] || { echo "session '$3' not found" >&2; exit 1; }
+    [[ -f "$S/noop_resume" ]] && { echo "resumed $3"; exit 0; }
+    : > "$S/live/$(<"$S/ids/$3")"; echo "resumed $3"; exit 0 ;;
   "sessions ls")
-    # The legacy rows a real `ls --no-prune` would show as dead.
-    echo "tm-brave-summit   dead"; echo "tm-eager-island   dead"; exit 0 ;;
+    # The daemon's raw `--json` body (ManagedListResponse); plain ls prunes.
+    [[ "$*" == "sessions ls --no-prune --json" ]] || exit 4
+    printf '%s\n' "$(<"$S/records.json")"; exit 0 ;;
 esac
 exit 3
 """
@@ -75,11 +90,29 @@ class Fleet:
             path = self.bin / name
             path.write_text(body)
             path.chmod(0o755)
+        # python3 for the script's JSON parse; the real interpreter, linked in.
+        (self.bin / "python3").symlink_to(sys.executable)
         self.log.write_text("")
+        self.records(DEFAULT_RECORDS)
+
+    def records(self, rows: list[tuple[str, str]]) -> None:
+        """The (id, name) rows `tm sessions ls --no-prune --json` reports."""
+        ids = self.state / "ids"
+        ids.mkdir(exist_ok=True)
+        for old in ids.iterdir():
+            old.unlink()
+        for rid, name in rows:
+            (ids / rid).write_text(name)
+        body = {"sessions": [{"id": rid, "name": name, "state": "stopped"} for rid, name in rows]}
+        (self.state / "records.json").write_text(json.dumps(body))
 
     def live(self, *names: str) -> None:
         for name in names:
             (self.state / "live" / name).write_text("")
+
+    def noop(self, verb: str) -> None:
+        """`verb` (init, relaunch, resume) exits 0 and changes nothing."""
+        (self.state / f"noop_{verb}").write_text("")
 
     def bind(self) -> None:
         (self.state / "bound").write_text("")
@@ -92,6 +125,9 @@ class Fleet:
             "TM_RECOVER_PATH": str(self.bin),
             "TM_RECOVER_HEALTH_TIMEOUT": "5",
             "TM_RECOVER_HEALTH_INTERVAL": "0",
+            "TM_RECOVER_ARCHITECT_VERIFY_TIMEOUT": "1",
+            "TM_RECOVER_RESUME_VERIFY_TIMEOUT": "1",
+            "TM_RECOVER_VERIFY_INTERVAL": "0.1",
             **extra,
         }
         return subprocess.run(
@@ -128,7 +164,7 @@ def test_cold_start_inits_the_architect_and_resumes_the_allowlist(tmp_path: Path
     ALL_CALLS.extend(f.calls())
     assert r.returncode == 0, r.stdout + r.stderr
     assert f.calls().count("tm health") == 3
-    assert f.tm_calls() == ["tm fleet init", "tm sessions resume tm-rentalist-pro"]
+    assert f.tm_calls() == ["tm fleet init", "tm sessions resume sid-rentalist"]
 
 
 def test_second_run_after_cold_start_changes_nothing(fleet: Fleet) -> None:
@@ -163,7 +199,7 @@ def test_a_dead_legacy_session_is_never_resumed(fleet: Fleet) -> None:
     r = fleet.run()
     assert r.returncode == 0, r.stdout + r.stderr
     resumed = [c for c in fleet.calls() if c.startswith("tm sessions resume")]
-    assert resumed == ["tm sessions resume tm-rentalist-pro"]
+    assert resumed == ["tm sessions resume sid-rentalist"]
 
 
 def test_a_wildcard_in_the_allowlist_is_refused(fleet: Fleet) -> None:
@@ -178,10 +214,11 @@ def test_the_allowlist_file_names_the_sessions_to_resume(fleet: Fleet, tmp_path:
     fleet.live("tm-architect", "tm-a")
     fleet.bind()
     listing = tmp_path / "allow.txt"
+    fleet.records([("sid-a", "tm-a"), ("sid-b", "tm-b")])
     listing.write_text("# managed PMs\ntm-a\n\ntm-b\n")
     r = fleet.run(TM_RECOVER_ALLOWLIST_FILE=str(listing))
     assert r.returncode == 0, r.stdout + r.stderr
-    assert fleet.tm_calls() == ["tm sessions resume tm-b"]
+    assert fleet.tm_calls() == ["tm sessions resume sid-b"]
 
 
 def test_an_empty_allowlist_resumes_nothing(fleet: Fleet, tmp_path: Path) -> None:
@@ -192,6 +229,76 @@ def test_an_empty_allowlist_resumes_nothing(fleet: Fleet, tmp_path: Path) -> Non
     r = fleet.run(TM_RECOVER_ALLOWLIST_FILE=str(listing))
     assert r.returncode == 0, r.stdout + r.stderr
     assert fleet.tm_calls() == []
+
+
+def test_a_prefix_only_record_is_never_resumed(fleet: Fleet) -> None:
+    # #10597: `tm sessions resume` also matches an unambiguous name prefix.
+    fleet.live("tm-architect")
+    fleet.bind()
+    fleet.records([("sid-two", "tm-rentalist-pro-2"), ("sid-brave", "tm-brave-summit")])
+    r = fleet.run()
+    assert r.returncode != 0
+    assert not [c for c in fleet.calls() if c.startswith("tm sessions resume")]
+    log = (fleet.home / ".trusty-mpm/logs/login-recover.log").read_text()
+    assert "no exact record for tm-rentalist-pro" in log
+
+
+def test_an_exact_record_is_resumed_by_its_id(fleet: Fleet) -> None:
+    fleet.live("tm-architect")
+    fleet.bind()
+    fleet.records([("sid-two", "tm-rentalist-pro-2"), ("sid-exact", "tm-rentalist-pro")])
+    r = fleet.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert fleet.tm_calls() == ["tm sessions resume sid-exact"]
+
+
+def test_two_exact_records_resume_nothing(fleet: Fleet) -> None:
+    fleet.live("tm-architect")
+    fleet.bind()
+    fleet.records([("sid-1", "tm-rentalist-pro"), ("sid-2", "tm-rentalist-pro")])
+    r = fleet.run()
+    assert r.returncode != 0
+    assert not [c for c in fleet.calls() if c.startswith("tm sessions resume")]
+    log = (fleet.home / ".trusty-mpm/logs/login-recover.log").read_text()
+    assert "ambiguous" in log
+
+
+def log_text(fleet: Fleet) -> str:
+    return (fleet.home / ".trusty-mpm/logs/login-recover.log").read_text()
+
+
+def test_an_init_that_sets_up_nothing_fails_its_postcondition(fleet: Fleet) -> None:
+    fleet.noop("init")
+    r = fleet.run()
+    assert r.returncode != 0
+    assert "postcondition" in log_text(fleet)
+    assert "tm fleet relaunch" not in fleet.calls()
+
+
+def test_a_relaunch_that_never_binds_fails_its_postcondition(fleet: Fleet) -> None:
+    fleet.live("tm-architect", "tm-rentalist-pro")
+    fleet.noop("relaunch")
+    r = fleet.run()
+    assert r.returncode != 0
+    assert "postcondition" in log_text(fleet)
+    assert fleet.tm_calls() == ["tm fleet relaunch"]
+
+
+def test_a_resume_that_starts_nothing_is_reported_not_live(fleet: Fleet) -> None:
+    fleet.live("tm-architect")
+    fleet.bind()
+    fleet.noop("resume")
+    r = fleet.run()
+    assert r.returncode != 0
+    assert "resume exited 0 but tm-rentalist-pro is not live" in log_text(fleet)
+
+
+def test_steps_that_take_effect_pass_their_postconditions(fleet: Fleet) -> None:
+    r = fleet.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    text = log_text(fleet)
+    assert "architect: verified" in text
+    assert "pm: tm-rentalist-pro verified live" in text
 
 
 def test_home_holds_only_the_log(fleet: Fleet) -> None:
@@ -212,6 +319,9 @@ def test_zz_no_forbidden_command_ran_in_any_case() -> None:
             if line.strip() and not line.lstrip().startswith("#")]
     for word in ("launchctl", "pkill", "killall", "osascript", "auto-resume", "worktree"):
         assert not [line for line in code if word in line], word
+    listings = [c for c in ALL_CALLS if c.startswith(("tm sessions ls", "tm ls"))]
+    assert listings, "no case listed sessions"
+    assert set(listings) == {"tm sessions ls --no-prune --json"}, listings
     for call in ALL_CALLS:
         assert not call.startswith("tm stop"), call
         assert "launchctl" not in call, call
