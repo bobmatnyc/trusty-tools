@@ -1,12 +1,15 @@
 """fleet_poll_wake.py — fleet-poll.py's wake: the one-line pointer typed into the Architect (#10571 Phase 2 split).
 
 Why: fleet-poll.py sat at the 500-SLOC cap; its wake half moves here unchanged.
-What: _norm, _box_full_text, _own_pointer, wake and dispatch_wake. Names from the poller (capture,
+What: self_clear_running, _norm, _box_full_text, _own_pointer, wake and dispatch_wake. Names from the poller (capture,
 send_to_architect, parse_pane, ARCHITECT, ...) are read through `P`, the late-bound view fleet-poll.py
 passes to bind(), so rebinding `fleet-poll.capture` or `fleet-poll.wake` still steers them, as before.
 Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports)
 """
+import fcntl
+import os
 import re
+import subprocess
 import time
 from datetime import datetime, timezone
 
@@ -17,6 +20,51 @@ def bind(poller):
     """Point this module at the loaded fleet-poll.py (its `_Poller` view)."""
     global P
     P = poller
+
+
+def _pid_is_self_clear(pid):
+    """True if `pid` is alive and its command line names self-clear.sh (prototype :1446)."""
+    try:
+        out = subprocess.run(["ps", "-p", str(int(pid)), "-o", "command="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return False
+    return "self-clear.sh" in out
+
+
+def self_clear_running(arch_dir):
+    """True while a self-clear.sh run may be typing into the Architect's box (#10571, #10599).
+
+    Why: a wake Enter between self-clear's last idle check and its /clear puts /clear into a live turn.
+    What: `<arch_dir>/inbox/self-clear.pid` held under flock, or naming a live self-clear.sh, is running;
+    a pid file that cannot be opened, locked or read counts as running. With no pid file, any live
+    process whose command line names scripts/self-clear.sh counts (the bundled script writes none yet).
+    Test: test_wake_skips_while_self_clear_holds_its_lock, test_wake_proceeds_when_the_lock_is_free,
+    test_an_unreadable_self_clear_lock_counts_as_held
+    """
+    path = os.path.join(arch_dir, "inbox", "self-clear.pid")
+    if os.path.lexists(path):
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return True
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True                       # self-clear holds it
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            raw = os.read(fd, 64).decode("ascii").strip()
+            return _pid_is_self_clear(int(raw))   # a stale pid file is not a run
+        except (OSError, ValueError, UnicodeDecodeError):
+            return True
+        finally:
+            os.close(fd)
+    try:
+        return subprocess.run(["pgrep", "-f", "scripts/self-clear.sh"], capture_output=True,
+                              timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _norm(text):
@@ -73,6 +121,8 @@ def wake(n, panes, dry_run):
                  key=lambda p: p["active"] != "11")
     if not sup:
         return f"skipped: no {P.ARCHITECT} pane"
+    if P.self_clear_running(P.ROOT):   # #10599: never type while self-clear may send /clear
+        return "skipped: self-clear running"
     target = sup[0]["pane"]
     raw = P.capture(target)
     info = P.parse_pane(raw)
