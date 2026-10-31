@@ -576,6 +576,8 @@ pointed at the wrong drawer.
 
 ### D6. What happens to a superseded fact
 
+> Amended by [ADR-0074](0074-exclude-superseded-drawers-from-default-recall.md): default recall now excludes a superseded drawer; `include_superseded` returns it.
+
 **Demoted, never deleted.** On supersession the prior fact:
 
 1. loses its Tier C privilege (stops being injected),

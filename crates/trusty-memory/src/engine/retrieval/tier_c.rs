@@ -274,19 +274,26 @@ pub(super) fn apply_admission(
 /// state the durable write just avoided. The caller holds the drawer table's
 /// write lock across this and the newcomer's push, so the two changes land
 /// together or not at all.
-/// What: clears `fact_key` and `expires_at` on the retired drawer, matching the
-/// record `persist_with_retirement` committed. No-op when nothing was retired.
+/// What: clears `fact_key` and `expires_at` on the retired drawer and stamps
+/// the `superseded-by:<newcomer>` marker, matching the record
+/// `persist_with_retirement` committed (#10609: every recall lane reads this
+/// mirror, and a later rewrite from it — chunk split, dream merge, share
+/// import — would otherwise drop the durable marker). No-op when nothing was
+/// retired.
 /// The table is not guaranteed to hold every retired id (#6438) — a redb-only
 /// incumbent leaves this call a no-op even though the durable retirement
 /// happened.
-/// Test: `tier_c_retirement_clears_the_displaced_drawers_own_fact_key`.
-pub(super) fn retire_in_memory(drawers: &mut [Drawer], retired_id: Option<Uuid>) {
+/// Test: `tier_c_retirement_clears_the_displaced_drawers_own_fact_key`,
+/// `a_retired_slot_incumbent_carries_a_superseded_by_marker` (mirror half),
+/// `a_retiree_is_marked_in_the_mirror_and_hidden_when_the_edge_write_fails`.
+pub(super) fn retire_in_memory(drawers: &mut [Drawer], retired_id: Option<Uuid>, newcomer: Uuid) {
     let Some(retired_id) = retired_id else {
         return;
     };
     for d in drawers.iter_mut().filter(|d| d.id == retired_id) {
         d.fact_key = None;
         d.expires_at = None;
+        d.mark_retired_by(newcomer);
     }
 }
 
@@ -579,7 +586,7 @@ pub(super) async fn commit_and_mirror(
         // reader never sees the newcomer present while the displaced drawer
         // still claims the slot. No await inside — this is a parking_lot lock.
         let mut drawers = ctx.drawers.write();
-        retire_in_memory(&mut drawers, retired);
+        retire_in_memory(&mut drawers, retired, newcomer);
         drawers.push(drawer);
     }
     // #9433: link the retiree to its replacement only after both committed,

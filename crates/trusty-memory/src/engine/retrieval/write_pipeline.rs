@@ -267,6 +267,8 @@ async fn run_pipeline(
 
     let mut drawer = Drawer::new(room_id, content.clone());
     drawer.tags = tags;
+    // #10609: the retirement marker is not the caller's to set.
+    crate::engine::retired_marker::strip_retirement_tags(&mut drawer.tags, handle.id.as_str());
     drawer.importance = importance.clamp(0.0, 1.0);
     // Apply classification. The caller may pre-pin the type
     // (`memory_note` always pins `UserFact`); otherwise we run the

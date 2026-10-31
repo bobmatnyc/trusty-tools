@@ -13,6 +13,11 @@
 //! this as an ordinary tag. [`Drawer::retired_by`] reads it,
 //! [`Drawer::mark_retired_by`] writes it, [`is_retirement_tag`] names the
 //! namespace so a dedup merge never copies it onto a live survivor.
+//! The namespace is reserved: [`strip_retirement_tags`] removes it from
+//! caller-supplied tags at write time, so only [`Drawer::mark_retired_by`]
+//! ever adds it. Strip, not reject: an agent that re-saves the tags of a
+//! recalled historical row would otherwise see its write fail, and the stripped
+//! tag was never the caller's to set. The strip is logged at WARN.
 //! Test: the inline `tests` module; the commit-time stamp in
 //! `retrieval::tier_c_tests::a_retired_slot_incumbent_carries_a_superseded_by_marker`.
 
@@ -29,6 +34,29 @@ pub(crate) const RETIRED_BY_TAG_PREFIX: &str = "superseded-by:";
 /// Test: `only_the_marker_namespace_is_a_retirement_tag`.
 pub(crate) fn is_retirement_tag(tag: &str) -> bool {
     tag.starts_with(RETIRED_BY_TAG_PREFIX)
+}
+
+/// Remove every retirement-marker tag from caller-supplied `tags`.
+///
+/// Why: the marker hides a drawer from default recall. A caller-supplied
+/// `superseded-by:<uuid>` would hide a live drawer, and re-saving the tags of a
+/// recalled historical row would hide the new memory (#10609 review).
+/// What: drops the tags [`is_retirement_tag`] names, WARNs once with the count
+/// and the palace, and returns the count removed. Nothing else is touched.
+/// Test: `user_supplied_marker_tags_are_stripped`.
+pub(crate) fn strip_retirement_tags(tags: &mut Vec<String>, palace: &str) -> usize {
+    let before = tags.len();
+    tags.retain(|t| !is_retirement_tag(t));
+    let removed = before - tags.len();
+    if removed > 0 {
+        tracing::warn!(
+            palace,
+            removed,
+            "#10609: `{RETIRED_BY_TAG_PREFIX}*` is a reserved tag namespace; \
+             dropped from the supplied tags"
+        );
+    }
+    removed
 }
 
 impl Drawer {
@@ -92,6 +120,18 @@ mod tests {
         let mut d = drawer();
         d.tags.push(format!("{RETIRED_BY_TAG_PREFIX}not-a-uuid"));
         assert_eq!(d.retired_by(), None);
+    }
+
+    #[test]
+    fn user_supplied_marker_tags_are_stripped() {
+        let mut tags = vec![
+            "keep".to_string(),
+            format!("{RETIRED_BY_TAG_PREFIX}{}", Uuid::new_v4()),
+            format!("{RETIRED_BY_TAG_PREFIX}not-a-uuid"),
+        ];
+        assert_eq!(strip_retirement_tags(&mut tags, "p"), 2);
+        assert_eq!(tags, vec!["keep".to_string()]);
+        assert_eq!(strip_retirement_tags(&mut tags, "p"), 0);
     }
 
     #[test]

@@ -895,8 +895,9 @@ async fn a_retired_slot_incumbent_is_linked_to_its_replacement() {
 /// Why (#10609, ADR-0074): default recall excludes a retiree from a marker on
 /// its own row, so the marker must be on the DURABLE row the commit wrote, not
 /// only on an in-memory copy.
-/// What: two writes into one slot; the incumbent's redb row names the newcomer
-/// as its replacement, and the newcomer carries no marker.
+/// What: two writes into one slot; the incumbent's redb row and its in-memory
+/// mirror copy name the newcomer as its replacement, and the newcomer carries
+/// no marker.
 /// Test: this test.
 #[tokio::test]
 async fn a_retired_slot_incumbent_carries_a_superseded_by_marker() {
@@ -918,6 +919,11 @@ async fn a_retired_slot_incumbent_carries_a_superseded_by_marker() {
 
     assert_eq!(stored(&handle, old).retired_by(), Some(new));
     assert_eq!(stored(&handle, new).retired_by(), None);
+    // The mirror is what recall reads, so it carries the marker too.
+    let mirror = handle.drawers.read();
+    let mirrored = |id| mirror.iter().find(|d| d.id == id).expect("mirrored");
+    assert_eq!(mirrored(old).retired_by(), Some(new));
+    assert_eq!(mirrored(new).retired_by(), None);
 }
 
 /// Why (#9433 AC4): each retirement links one retiree to its own successor.
