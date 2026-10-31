@@ -8,7 +8,8 @@
 //! What: [`Rebinds::with_scan`] lists the names a command rebinds — `hash` and
 //! `enable` operands, `alias NAME=VALUE`, `function NAME` and `NAME()`
 //! definitions, and the `BASH_CMDS`, `BASH_ALIASES`, `BASH_FUNC_`, zsh
-//! `commands`, `aliases` and `functions` table entries — reading `eval`
+//! `commands`, `aliases`, `galiases` and `functions` table entries (a zsh
+//! suffix alias, `saliases` or `alias -s`, counts every word) — reading `eval`
 //! operands too. The DELETE rule then judges a call to a rebound name as a
 //! call to `gh`, `gh api` and `curl`, and an alias by its expansion, in the
 //! command and in each `$( … )` or backtick body it carries.
@@ -40,6 +41,8 @@ const REBINDING_WORDS: &[&str] = &[
     "BASH_FUNC",
     "commands",
     "aliases",
+    "galiases",
+    "saliases",
     "functions",
     "PATH",
     "path",
@@ -53,6 +56,8 @@ const TABLES: &[(&str, bool)] = &[
     ("functions[", false),
     ("BASH_ALIASES[", true),
     ("aliases[", true),
+    // #10622: zsh global aliases expand in any word position.
+    ("galiases[", true),
 ];
 
 /// The names one command rebinds.
@@ -157,7 +162,10 @@ impl Rebinds {
             }
             // #10566: a new PATH may resolve any name to any program, and a
             // whole command table may be assigned at once (`BASH_CMDS=(…)`).
+            // #10622: a zsh suffix alias runs for any word with that suffix.
             self.any |= raw.starts_with("path[")
+                || raw.starts_with("saliases[")
+                || (command_word(raw) == "alias" && rest.iter().any(|w| w == "-s"))
                 || WHOLE_ASSIGNMENTS.iter().any(|name| {
                     raw.strip_prefix(name)
                         .is_some_and(|r| r.starts_with('=') || r.starts_with("+="))
@@ -244,6 +252,8 @@ const WHOLE_ASSIGNMENTS: &[&str] = &[
     "BASH_ALIASES",
     "commands",
     "aliases",
+    "galiases",
+    "saliases",
     "functions",
 ];
 
