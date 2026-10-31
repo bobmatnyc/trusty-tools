@@ -68,8 +68,8 @@ pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>)
 /// #2476's own analysis, confirmed here: decommissioned rows were reachable
 /// through [`session_to_row`]/[`crate::tui::project_ctl::panes::sessions::state_glyph`]
 /// but no caller ever dropped them). Filtering here — once, at the
-/// projection step — means every downstream consumer (`sessions_nav`'s
-/// selection model, the Sessions pane render, the `(N)` header) sees only
+/// projection step — means every downstream consumer (the tree's selection
+/// model and session rows, its counters) sees only
 /// live rows and never has to special-case a dead one.
 /// What: keeps every session whose `state` is not TERMINAL (`decommissioned`
 /// OR `deleted`, #2012) and projects each survivor via [`session_to_row`]. The
@@ -111,7 +111,8 @@ pub(crate) fn live_session_rows(sessions: Vec<ManagedSessionSummary>) -> Vec<Ses
 /// gates the `r` resume key).
 /// Test: `session_to_row_derives_short_id_and_copies_fields`,
 /// `session_to_row_carries_deliverable_id`,
-/// `session_to_row_carries_unresumable_flag`.
+/// `session_to_row_carries_unresumable_flag`,
+/// `session_to_row_carries_parent_session_id`.
 pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
     let short_id = session_short_id(&s.id);
     SessionRow {
@@ -125,6 +126,11 @@ pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
         proposed_default: s.proposed_default,
         deliverable_id: s.deliverable_id,
         unresumable: s.unresumable,
+        // #10476: the tree indents workers by this link; the details overlay
+        // shows the other two.
+        parent_session_id: s.parent_session_id,
+        workspace_path: s.workspace_path,
+        last_activity_at: s.last_activity_at,
     }
 }
 
@@ -290,6 +296,22 @@ mod tests {
         assert!(
             !healthy_row.unresumable,
             "a healthy session must copy through as false"
+        );
+    }
+
+    #[test]
+    fn session_to_row_carries_parent_session_id() {
+        // #10476: the tree's worker indentation reads this link.
+        let mut s = summary("child001", "active");
+        s.parent_session_id = Some("parent01".to_string());
+        assert_eq!(
+            session_to_row(s).parent_session_id.as_deref(),
+            Some("parent01")
+        );
+        assert!(
+            session_to_row(summary("solo0001", "active"))
+                .parent_session_id
+                .is_none()
         );
     }
 

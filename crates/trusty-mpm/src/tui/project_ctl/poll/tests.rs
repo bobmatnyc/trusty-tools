@@ -124,8 +124,7 @@ fn seeded_activity_state(session_id: &str) -> ProjectCtlState {
         "widget".to_string(),
         vec![session_to_row(summary(session_id, "active"))],
     );
-    state.projects_nav.sync_len(state.projects.len());
-    state.sessions_nav.sync_len(state.current_sessions().len());
+    state.focus_session(session_id);
     state
 }
 
@@ -374,7 +373,7 @@ fn apply_activity_outcome_session_switch_starts_a_fresh_streak() {
         .get_mut("widget")
         .unwrap()
         .push(session_to_row(summary("s2", "active")));
-    state.sessions_nav.sync_len(state.current_sessions().len());
+    state.rebuild_tree();
     assert_eq!(state.selected_session().unwrap().id, "s1");
 
     apply_activity_outcome(
@@ -393,7 +392,7 @@ fn apply_activity_outcome_session_switch_starts_a_fresh_streak() {
     );
 
     // The operator moves the Sessions-pane selection to "s2".
-    state.sessions_nav.select(1);
+    state.focus_session("s2");
     assert_eq!(state.selected_session().unwrap().id, "s2");
     assert!(
         !state.activity_unavailable_for_selected(),
