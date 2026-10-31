@@ -30,5 +30,8 @@ EVENT_TYPES = {"permission_prompt", "agent_needs_input"}  # idle_prompt is not a
 DISK_HIGH = 90
 LOAD_FACTOR_DEFAULT = 1.5  # x cores, vs. the 5-min load avg; env LOAD_FACTOR overrides
 
+# The watchdog's one relaunch path (fleet_poll_watchdog.py); not shipped yet, so a relaunch reports failed.
+RELAUNCH_SCRIPT = os.path.join(HERE, "session-relaunch.sh")
+
 QUIET_SESSIONS_FILE = (os.environ.get("ARCHITECT_QUIET_SESSIONS_FILE")
                        or os.path.join(ROOT, "quiet-sessions.txt"))

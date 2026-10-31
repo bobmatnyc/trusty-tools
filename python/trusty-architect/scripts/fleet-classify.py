@@ -25,7 +25,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 IDLE_AFTER = 600          # seconds an idle pane waits before it alerts
 REEMIT = {"idle": 1800, "ctx": 1800, "load": 1800, "disk": 1800, "swap": 1800,
-          "self_ctx": 1800}
+          "self_ctx": 1800, "architect_dead": 1800, "architect_silent": 1800,
+          "architect_frozen": 1800}  # #10571: the watchdog's alerts re-emit as the prototype's do
 # #9997: one context bar in tokens; a pane's `ctx N%` is converted against the
 # window. "approaching" fires at 90% of the bar, "bar" at the bar.
 CONTEXT_BAR_DEFAULT = 250_000

@@ -29,6 +29,8 @@ def _triage_log_in_tmp(tmp_path, monkeypatch):
 def _il_scheduler_isolated(tmp_path, monkeypatch):
     """The poller's IL steps (il-cron, ctx-watch) never read the live schedule or write live state."""
     monkeypatch.setenv("IL_SCHEDULE", str(tmp_path / "no-il-schedule.json"))
+    monkeypatch.delenv("ARCHITECT_INBOX_DIR", raising=False)   # ctx-watch's own state lands in tmp too
+    monkeypatch.setenv("SUPERVISOR_INBOX_DIR", str(tmp_path))
     monkeypatch.setenv("IL_CRON_STATE", str(tmp_path / "il-cron-state.json"))
     monkeypatch.setenv("CTX_PROXY_LOG", str(tmp_path / "ctx-proxy.jsonl"))
     monkeypatch.setenv("CTX_CYCLE_JSONL", str(tmp_path / "ctx-cycle.jsonl"))

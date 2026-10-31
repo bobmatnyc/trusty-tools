@@ -608,6 +608,7 @@ def _cycle_env(monkeypatch, tmp_path, panes, quiet_lines=""):
     monkeypatch.setattr(fp, "capture", lambda pid: captures[pid])
     monkeypatch.setattr(fp, "host_alerts", lambda now: [])
     monkeypatch.setattr(fp, "self_ctx_alerts", lambda now, dry_run: [])
+    monkeypatch.setattr(fp, "watchdog_alerts", lambda *a: ([], ""))   # no Architect in these fleets
     events = tmp_path / "events.jsonl"
     events.write_text("")
     monkeypatch.setattr(fp, "EVENTS", str(events))
