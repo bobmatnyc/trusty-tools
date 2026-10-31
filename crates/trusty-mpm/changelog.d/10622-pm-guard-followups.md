@@ -1,0 +1,4 @@
+Fixed
+- `tm hook --pm-guard` reads an ANSI-C `$'…'` string that holds `\'` as the shell does, so a `#` after it no longer hides a command substitution from the script-body rule. When the comment scan loses track of a script's quoting, only the text after the last line where it was in step falls back, and that fallback keeps every `#` line that carries `$(`, a backtick, `<(` or `>(` (#10622).
+- `tm hook --pm-guard` no longer resolves `$(git rev-parse --show-toplevel)` in a script after a directory change (bare form), a `GIT_*` variable, or a redefinition of `git` (function, alias, command table, `hash`, `enable` or `PATH`). The guard treats the path as computed and refuses (#10622).
+- `tm hook --pm-guard` counts the zsh `galiases` table as an alias table for the secret-DELETE rule. A `saliases` entry or `alias -s` makes every word count as rebound (#10622).

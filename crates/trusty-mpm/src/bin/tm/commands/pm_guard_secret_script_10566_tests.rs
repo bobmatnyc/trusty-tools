@@ -3,7 +3,7 @@
 
 use super::*;
 
-use crate::commands::pm_guard_bash::MAX_SUBSTITUTION_DEPTH;
+use crate::commands::pm_guard_bash::{MAX_SUBSTITUTION_DEPTH, blank_shell_comments};
 
 /// A Keychain read that prints its value — refused inline (#8596).
 const KEYCHAIN_READ: &str = "security find-generic-password -s fake-svc -w\n";
@@ -208,4 +208,94 @@ fn an_unquoted_heredoc_substitution_is_judged_10566() {
     );
     let quoted = "cat <<'EOF'\n$(bash probe.sh)\nEOF";
     assert_eq!(evaluate_script_body_secret_read(quoted, dir.path()), None);
+}
+
+/// 🔴 REGRESSION (#10622): an ANSI-C `$'…'` string holding `\'` ends where
+/// the shell ends it, so a `#` inside a later quoted word opens no comment
+/// and the substitution after it is judged.
+#[test]
+fn an_ansi_c_string_keeps_the_comment_scanner_in_step_10622() {
+    let line = "echo $'\\'' 'x #y' $(bash probe.sh)";
+    assert_eq!(blank_shell_comments(line), line);
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "probe.sh", KEYCHAIN_READ);
+    all_name(dir.path(), &[line], "probe.sh");
+    // A real comment after an ANSI-C string is still blanked.
+    assert_eq!(
+        blank_shell_comments("echo $'a\\'b' # `x`"),
+        "echo $'a\\'b'      "
+    );
+}
+
+/// 🔴 REGRESSION (#10622, fail closed): when the comment scan ends inside an
+/// open quote, the text after the last closed line start falls back, and the
+/// fallback keeps every `#` line that carries command-substitution syntax and
+/// blanks a plain one. A comment before that point is still blanked.
+#[test]
+fn the_comment_fallback_keeps_a_line_that_runs_code_10622() {
+    let text = "# head `a`\necho 'open\n# `x`\n# <(y) >(z)\n# plain\n";
+    assert_eq!(
+        blank_shell_comments(text),
+        "          \necho 'open\n# `x`\n# <(y) >(z)\n\n"
+    );
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "probe.sh", KEYCHAIN_READ);
+    script(
+        dir.path(),
+        "open.sh",
+        "echo \"start\n# `bash probe.sh`\nend\"\necho 'open\n",
+    );
+    all_name(dir.path(), &["bash open.sh"], "open.sh");
+}
+
+/// 🔴 REGRESSION (#10622): a bare `$(git rev-parse --show-toplevel)` after a
+/// directory change, and any toplevel idiom after a `GIT_*` override or a
+/// redefinition of `git`, stays unresolved; a script running through it
+/// refuses as computed. A literal `-C` after a `cd` still resolves.
+#[test]
+fn a_toplevel_after_a_cwd_or_git_change_stays_unresolved_10622() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::create_dir_all(dir.path().join(".git")).expect("git dir");
+    let scripts = dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    let root = dir.path().display().to_string();
+    let path = scripts.join("gate.sh");
+    let bare = "R=\"$(git rev-parse --show-toplevel)\"\nT=$(bash \"$R/scripts/x.sh\")\n";
+    let with_c = format!("T=$(bash \"$(git -C {root} rev-parse --show-toplevel)/scripts/x.sh\")\n");
+    let target = format!("{root}/scripts/x.sh");
+    for prefix in [
+        "cd /fake-elsewhere\n",
+        "pushd /fake-elsewhere\n",
+        "export GIT_DIR=/fake-elsewhere/.git\n",
+        "GIT_WORK_TREE=/fake-elsewhere\n",
+        "git() { echo /fake-elsewhere; }\n",
+        "function git { echo /fake-elsewhere; }\n",
+        "alias git=fake-git\n",
+        "PATH=/fake-bin:$PATH\n",
+    ] {
+        let resolved = resolve_self_paths(&format!("{prefix}{bare}"), &path);
+        assert!(!resolved.contains(&target), "{prefix:?}: {resolved}");
+    }
+    for prefix in [
+        "export GIT_DIR=/fake-elsewhere/.git\n",
+        "alias git=fake-git\n",
+    ] {
+        let resolved = resolve_self_paths(&format!("{prefix}{with_c}"), &path);
+        assert!(!resolved.contains(&target), "{prefix:?}: {resolved}");
+    }
+    // No over-deny: a comment naming `cd`, and an absolute `-C` after a `cd`.
+    for body in [
+        format!("# cd first\n{bare}"),
+        format!("cd /fake-elsewhere\n{with_c}"),
+    ] {
+        assert!(resolve_self_paths(&body, &path).contains(&target), "{body}");
+    }
+    std::fs::write(scripts.join("x.sh"), "echo fake-value\n").expect("write x.sh");
+    std::fs::write(&path, format!("cd /fake-elsewhere\n{bare}")).expect("write gate.sh");
+    let reason =
+        evaluate_script_body_secret_read("bash scripts/gate.sh", dir.path()).unwrap_or_default();
+    assert!(
+        reason.contains("computed at run time"),
+        "must deny: {reason}"
+    );
 }

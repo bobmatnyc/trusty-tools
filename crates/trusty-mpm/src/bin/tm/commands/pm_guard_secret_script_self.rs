@@ -48,6 +48,32 @@ static GIT_TOPLEVEL: LazyLock<Regex> = LazyLock::new(|| {
     .expect("toplevel regex")
 });
 
+/// A command word that moves the directory a bare `git` starts from (#10622).
+static MOVES_DIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[\s;&|(`{!])(?:cd|pushd|popd)(?:[\s;&|)`}]|$)").expect("cd word regex")
+});
+
+/// A git environment override, or a redefinition of what `git` runs: a
+/// function, an alias, a command-table entry, `hash`/`enable`, or a new
+/// `PATH` (#10622).
+static REDEFINES_GIT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\bGIT_[A-Z0-9_]*|\bfunction\s+git\b|\bgit\s*\(\s*\)|\balias\b[^\n]*\bgit=|\[git\]|\b(?:hash|enable)\b[^\n]*\bgit\b|\b(?:PATH|path)\+?[=\[]",
+    )
+    .expect("git redefinition regex")
+});
+
+/// Whether the code in `before` (full-line comments skipped) may make a later
+/// `$(git rev-parse --show-toplevel)` answer for another checkout than the
+/// one above the script: `moves` says a directory change counts, as it does
+/// for a bare `git` but not for one with an absolute `-C`.
+fn toplevel_may_differ(before: &str, moves: bool) -> bool {
+    before
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .any(|line| REDEFINES_GIT.is_match(line) || (moves && MOVES_DIR.is_match(line)))
+}
+
 /// The nearest ancestor of `dir` that holds a `.git` entry.
 fn toplevel_of(dir: &Path) -> Option<PathBuf> {
     dir.ancestors()
@@ -117,9 +143,18 @@ pub(crate) fn resolve_self_paths(body: &str, script: &Path) -> String {
 /// `text` with each `$(git rev-parse --show-toplevel)` replaced by the
 /// checkout root above its literal absolute `-C` directory, or above `home`
 /// (the script's directory) when it names none; any other stays (#10566).
+///
+/// #10622: git answers from the run-time directory and environment, so an
+/// idiom after a directory change (bare form only), a `GIT_*` override or a
+/// redefinition of `git` stays unresolved, and the caller refuses it.
+/// Test: `a_toplevel_after_a_cwd_or_git_change_stays_unresolved_10622`.
 fn resolve_toplevel(text: &str, home: &Path) -> String {
     GIT_TOPLEVEL
         .replace_all(text, |c: &Captures<'_>| {
+            let before = c.get(0).map_or("", |m| &text[..m.start()]);
+            if toplevel_may_differ(before, c.get(1).is_none()) {
+                return c[0].to_string();
+            }
             let dir = c.get(1).map_or(home, |m| Path::new(m.as_str()));
             let root = dir.is_absolute().then(|| toplevel_of(dir)).flatten();
             root.filter(|r| plain(&r.display().to_string()))
