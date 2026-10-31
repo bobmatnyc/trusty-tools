@@ -14,6 +14,8 @@
 //! | `search.project.ensure` | free |
 //!
 //! Test: `service/server/project_ensure_tests.rs`; lane pin in `lanes_tests.rs`.
+//!
+//! [`register`]: crate::service::rpc::project_ensure::register
 
 use std::sync::Arc;
 
