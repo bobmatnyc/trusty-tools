@@ -59,7 +59,7 @@ fn cargo_args_ok(args: &[&str]) -> bool {
     while let Some(arg) = rest.next() {
         let ok = match *arg {
             "--locked" | "--force" => true,
-            "--version" => rest.next().is_some_and(|v| version(*v)),
+            "--version" => rest.next().is_some_and(|v| version(v)),
             other => other.strip_prefix("--version=").is_some_and(version),
         };
         if !ok {
