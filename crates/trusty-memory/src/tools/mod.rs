@@ -86,6 +86,8 @@ pub mod recall_rulings;
 #[cfg(feature = "server")]
 pub(crate) mod recall_supersede;
 // #10609 (ADR-0074): default exclusion of superseded drawers, and its opt-in.
+// Server-gated like `recall_supersede`, whose types it consumes.
+#[cfg(feature = "server")]
 pub(crate) mod recall_supersede_view;
 // #9143 AC2: the rank floor that keeps an answering ruling inside `top_k`.
 #[cfg(feature = "server")]
