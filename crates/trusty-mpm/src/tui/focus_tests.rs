@@ -8,16 +8,28 @@ fn env(in_tmux: bool, in_iterm2: bool) -> FocusEnv {
     FocusEnv { in_tmux, in_iterm2 }
 }
 
-fn iterm_found(_: &str) -> Result<bool, String> {
-    Ok(true)
+async fn iterm_found(_: String) -> Result<ItermMatch, String> {
+    Ok(ItermMatch::Selected)
 }
 
-fn iterm_missing(_: &str) -> Result<bool, String> {
-    Ok(false)
+async fn iterm_missing(_: String) -> Result<ItermMatch, String> {
+    Ok(ItermMatch::Missing)
 }
 
-fn iterm_must_not_run(_: &str) -> Result<bool, String> {
+async fn iterm_ambiguous(_: String) -> Result<ItermMatch, String> {
+    Ok(ItermMatch::Ambiguous(2))
+}
+
+async fn iterm_timed_out(_: String) -> Result<ItermMatch, String> {
+    Err("osascript timed out after 5s; nothing selected".to_string())
+}
+
+async fn iterm_must_not_run(_: String) -> Result<ItermMatch, String> {
     panic!("the iTerm2 effect must not run for this plan")
+}
+
+fn hook_must_not_run(_: &str) -> FocusResult {
+    panic!("the tmux hook must not run for this plan")
 }
 
 fn hook_switched(_: &str) -> FocusResult {
@@ -86,8 +98,8 @@ fn no_plan_contains_spawn_class_argv() {
     }
 }
 
-#[test]
-fn focus_outside_tmux_and_iterm2_is_a_notice_only() {
+#[tokio::test]
+async fn focus_outside_tmux_and_iterm2_is_a_notice_only() {
     let env = FocusEnv::from_vars(
         None,
         Some(String::new()),
@@ -97,7 +109,7 @@ fn focus_outside_tmux_and_iterm2_is_a_notice_only() {
     assert_eq!(env, FocusEnv::default());
     let plan = FocusPlan::decide(env, SESSION);
     assert!(plan.argv().is_empty(), "a notice runs nothing");
-    let notice = run_plan(&plan, Some(hook_switched), iterm_must_not_run);
+    let notice = run_plan(&plan, Some(hook_switched), iterm_must_not_run).await;
     assert!(!notice.contains('\n'), "one line: {notice:?}");
     assert!(notice.contains("nothing opened"), "{notice}");
 }
@@ -112,28 +124,59 @@ fn env_detection_reads_tmux_and_iterm_vars() {
     assert!(FocusEnv::from_vars(None, None, None, Some("w0t0p0:abc".into())).in_iterm2);
 }
 
-#[test]
-fn unset_hook_is_a_notice_not_a_panic() {
+#[tokio::test]
+async fn unset_hook_is_a_notice_not_a_panic() {
     let plan = FocusPlan::decide(env(true, false), SESSION);
-    let notice = run_plan(&plan, None, iterm_must_not_run);
+    let notice = run_plan(&plan, None, iterm_must_not_run).await;
     assert!(notice.contains("unavailable"), "{notice}");
 }
 
-#[test]
-fn hook_results_map_to_notices() {
+#[tokio::test]
+async fn hook_results_map_to_notices() {
     let plan = FocusPlan::decide(env(true, false), SESSION);
     assert_eq!(
-        run_plan(&plan, Some(hook_switched), iterm_must_not_run),
+        run_plan(&plan, Some(hook_switched), iterm_must_not_run).await,
         format!("focused '{SESSION}'")
     );
-    assert!(run_plan(&plan, Some(hook_unresolved), iterm_must_not_run).contains("nothing moved"));
-    assert!(run_plan(&plan, Some(hook_failed), iterm_must_not_run).contains("can't find session"));
+    assert!(
+        run_plan(&plan, Some(hook_unresolved), iterm_must_not_run)
+            .await
+            .contains("nothing moved")
+    );
+    assert!(
+        run_plan(&plan, Some(hook_failed), iterm_must_not_run)
+            .await
+            .contains("can't find session")
+    );
 }
 
-#[test]
-fn iterm_tab_not_found_is_a_notice() {
+#[tokio::test]
+async fn iterm_tab_not_found_is_a_notice() {
     let plan = FocusPlan::decide(env(false, true), SESSION);
-    assert!(run_plan(&plan, None, iterm_found).contains("focused the iTerm2 tab"));
-    let missing = run_plan(&plan, None, iterm_missing);
+    assert!(
+        run_plan(&plan, None, iterm_found)
+            .await
+            .contains("focused the iTerm2 tab")
+    );
+    let missing = run_plan(&plan, None, iterm_missing).await;
     assert!(missing.contains("nothing opened"), "{missing}");
+}
+
+#[tokio::test]
+async fn ambiguous_iterm_match_is_a_notice() {
+    let plan = FocusPlan::decide(env(false, true), SESSION);
+    let notice = run_plan(&plan, None, iterm_ambiguous).await;
+    assert!(notice.contains("ambiguous"), "{notice}");
+    assert!(notice.contains("nothing selected"), "{notice}");
+    let timed_out = run_plan(&plan, None, iterm_timed_out).await;
+    assert!(timed_out.contains("timed out"), "{timed_out}");
+}
+
+#[tokio::test]
+async fn empty_session_name_runs_no_effect() {
+    for (tmux, iterm) in [(true, false), (false, true)] {
+        let plan = FocusPlan::decide(env(tmux, iterm), "");
+        let notice = run_plan(&plan, Some(hook_must_not_run), iterm_must_not_run).await;
+        assert!(notice.contains("no tmux name"), "{notice}");
+    }
 }

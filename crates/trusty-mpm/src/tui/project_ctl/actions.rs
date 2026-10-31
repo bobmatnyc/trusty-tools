@@ -94,9 +94,10 @@ pub(crate) async fn dispatch(
             Err(e) => state.set_notice(format!("attach failed: {e}")),
         },
         // #10476: the plan is pure; the tmux branch runs the bin's guarded,
-        // quiet switch. Nothing here can create a session, window or tab.
+        // quiet switch on the blocking pool, the iTerm2 branch a 5 s-bounded
+        // osascript. Nothing here can create a session, window or tab.
         PendingAction::Focus(name) => {
-            state.set_notice(crate::tui::focus::focus_session(&name));
+            state.set_notice(crate::tui::focus::focus_session(&name).await);
         }
         PendingAction::SubmitConfig(name, args) => {
             match client.registry_patch_project(&name, &args).await {
