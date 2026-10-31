@@ -83,7 +83,12 @@ pub(crate) fn walk_roots(handle: &IndexHandle) -> (walker::WalkResult, Vec<PathB
 /// `exclude_globs`, `extensions` and `path_filter`.
 pub(crate) fn configured_file(handle: &IndexHandle, path: &Path) -> bool {
     !tombstone_file(path)
-        && !crate::core::repo_config::path_matches_any_glob(path, &handle.exclude_globs)
+        && !globs_exclude(
+            &handle.root_path,
+            &handle.additional_roots,
+            &handle.exclude_globs,
+            path,
+        )
         && (handle.extensions.is_empty()
             || path
                 .extension()
@@ -95,6 +100,51 @@ pub(crate) fn configured_file(handle: &IndexHandle, path: &Path) -> bool {
                         .any(|e| e.eq_ignore_ascii_case(ext))
                 }))
         && (handle.path_filter.is_empty() || path_filter_admits(handle, path))
+}
+
+/// Does any of `globs` exclude the absolute `path` of an index with these roots?
+///
+/// Why (#10532): globs matched on the canonical absolute path hit directory
+/// names ABOVE the index root, so a checkout at `~/archive/proj` or
+/// `<repo>/.worktrees/feat` indexed nothing under `std-v1`. The walker already
+/// strips the root before it tests skip-dirs (#1554); this does the same for
+/// `exclude_globs`.
+/// What: matches the path relative to the root that owns it (longest raw
+/// prefix, else the canonical form of a root). A glob that starts with `/` is
+/// an absolute pattern and is still matched against the absolute path, so a
+/// pre-#10532 `exclude_globs` entry written that way keeps working. A path
+/// under no root is matched as given.
+/// Test: `an_index_root_under_an_archive_dir_still_indexes_its_source` and
+/// `an_index_root_under_a_worktrees_dir_still_indexes_its_source` in
+/// `service::server::profile_10532_tests`; `live_admission_observes_registry_replacement`.
+pub(crate) fn globs_exclude(
+    root: &Path,
+    additional: &[PathBuf],
+    globs: &[String],
+    path: &Path,
+) -> bool {
+    use crate::core::repo_config::path_matches_any_glob;
+    if globs.is_empty() {
+        return false;
+    }
+    let owning = std::iter::once(root)
+        .chain(additional.iter().map(PathBuf::as_path))
+        .filter_map(|r| path.strip_prefix(r).ok().map(|rel| (r, rel)))
+        .max_by_key(|(r, _)| r.components().count())
+        .map(|(_, rel)| rel.to_path_buf())
+        .or_else(|| crate::core::index_roots::strip_root(root, path));
+    let Some(rel) = owning else {
+        return path_matches_any_glob(path, globs);
+    };
+    if path_matches_any_glob(&rel, globs) {
+        return true;
+    }
+    let absolute: Vec<String> = globs
+        .iter()
+        .filter(|g| g.starts_with('/'))
+        .cloned()
+        .collect();
+    !absolute.is_empty() && path_matches_any_glob(path, &absolute)
 }
 
 /// Issue #111's `path_filter`, evaluated against the root that OWNS `path`.

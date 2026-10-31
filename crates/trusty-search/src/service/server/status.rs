@@ -484,6 +484,10 @@ pub(crate) async fn index_status_report(
         "unmeasured": embed_window.unmeasured(),
         "chunks_split": embed_window.chunks_split(),
     });
+    // #10532: `std-v1@<hash>`, or `null` for an index persisted before profiles.
+    body["profile"] =
+        super::profile_apply::stored_label(state.registry_path_override.as_deref(), &index_id.0)
+            .into();
     Ok(body)
 }
 

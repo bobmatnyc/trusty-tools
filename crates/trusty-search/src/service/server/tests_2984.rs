@@ -50,6 +50,7 @@ fn create_req_with_skip_kg(
         root_path,
         include_paths: None,
         exclude_globs: None,
+        profile: None,
         extensions: None,
         domain_terms: None,
         path_filter: None,
