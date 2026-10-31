@@ -222,3 +222,27 @@ async fn an_unindexable_or_empty_request_is_refused() {
     assert!(missing.error.is_some(), "unknown fields are refused");
     assert!(fx.state.registry.list().is_empty(), "nothing registered");
 }
+
+/// Why: two concurrent first calls for one root must register one index and
+/// queue one reindex (#10531 review).
+/// Test: this test. Before the fix both calls reported `created: true` and
+/// queued a reindex, because the create result was discarded.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn concurrent_ensures_for_one_root_create_and_reindex_once() {
+    let fx = fixture().await;
+    let (_g, root, _) = root_with_child("ts-10531-race-", "src");
+    let p = params("o/r", "r", &root);
+    let (a, b) = tokio::join!(
+        rpc_ok(&fx.router, METHOD_PROJECT_ENSURE, p.clone()),
+        rpc_ok(&fx.router, METHOD_PROJECT_ENSURE, p.clone()),
+    );
+    let created = [&a, &b].iter().filter(|o| o["created"] == true).count();
+    let queued = [&a, &b]
+        .iter()
+        .filter(|o| o["reindex_queued"] == true)
+        .count();
+    assert_eq!((created, queued), (1, 1), "{a} / {b}");
+    assert_eq!(a["index_id"], b["index_id"]);
+    assert_eq!(fx.state.registry.list().len(), 1);
+}

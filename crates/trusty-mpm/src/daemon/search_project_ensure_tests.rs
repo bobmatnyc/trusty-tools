@@ -114,7 +114,7 @@ async fn a_dead_socket_is_unreachable() {
 /// Why: no key or no checkout means nothing to send.
 /// Test: this test.
 #[test]
-fn spawn_sends_nothing_without_a_key_or_a_checkout() {
+fn plan_is_empty_without_a_key_or_a_checkout() {
     let dir = tempfile::tempdir().expect("dir");
     let here = dir.path().to_str().expect("utf8");
     assert_eq!(

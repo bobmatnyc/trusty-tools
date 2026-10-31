@@ -175,8 +175,14 @@ pub(crate) async fn ensure_project_report(
                     serde_json::json!({ "message": e.to_string() }),
                 )
             })?;
-            create_index_report(state, create).await?;
-            (id, true)
+            // #10531: a racer can register the same id and root after the snapshot
+            // above; `created` is the daemon's word on who won, not this branch's.
+            let registered = create_index_report(state, create).await?;
+            let won = registered
+                .get("created")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            (id, won)
         }
     };
     // Idempotent: pins only a group that has no pin yet.

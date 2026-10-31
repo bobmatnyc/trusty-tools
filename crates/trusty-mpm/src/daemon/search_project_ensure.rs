@@ -139,7 +139,7 @@ fn report(project: &str, outcome: &EnsureOutcome) {
 /// harness, the host-state gate refuses this framework root, the record has no
 /// `project_key`, or the project has no checkout on disk. Otherwise spawns one
 /// task that dials the search socket if it exists and calls [`ensure_call`].
-/// Test: `spawn_sends_nothing_without_a_key_or_a_checkout`.
+/// Test: `plan_is_empty_without_a_key_or_a_checkout`.
 pub(crate) fn spawn_ensure_project_index(state: &Arc<DaemonState>, project: &Project) {
     if trusty_common::running_under_test_harness() {
         return;
@@ -169,7 +169,7 @@ pub(crate) fn spawn_ensure_project_index(state: &Arc<DaemonState>, project: &Pro
 
 /// The checkout to ensure, or `None` when there is nothing to send.
 ///
-/// Test: `spawn_sends_nothing_without_a_key_or_a_checkout`.
+/// Test: `plan_is_empty_without_a_key_or_a_checkout`.
 pub(crate) fn plan(project: &Project) -> Option<std::path::PathBuf> {
     project
         .project_key

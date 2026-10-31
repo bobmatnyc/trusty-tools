@@ -113,9 +113,28 @@ pub(super) fn ensure_via_daemon(
     if !socket.exists() {
         return None;
     }
+    ensure_and_refresh(&socket, project_root, registered)
+}
+
+/// Ensure the index over `socket`, then refresh a pre-existing one if stale.
+///
+/// Why: the older launch path also ran a freshness-gated reindex; `ensure`
+/// queues one only for an index it just created, so a found index that is empty,
+/// stale, or whose first queue failed would otherwise never be populated.
+/// What: `created: true` already queued its reindex. For `created: false`,
+/// runs `best_effort_trigger_reindex`, which skips a fresh index (chunks and
+/// indexed within the hour) and otherwise queues `search.index.reindex`.
+/// Test: `a_found_but_empty_index_gets_a_reindex_on_launch`,
+/// `a_found_fresh_index_gets_no_reindex_on_launch`,
+/// `a_created_index_gets_no_second_reindex_on_launch`.
+pub(super) fn ensure_and_refresh(
+    socket: &Path,
+    project_root: &Path,
+    registered: &trusty_common::RegisteredProject,
+) -> Option<String> {
     let root = trusty_common::resolve_project_root(project_root);
     let body = trusty_common::search_rpc::ensure_project_blocking(
-        &socket,
+        socket,
         &registered.project_key,
         &registered.name,
         &root,
@@ -124,7 +143,11 @@ pub(super) fn ensure_via_daemon(
     )
     .inspect_err(|e| tracing::warn!("#10531: search.project.ensure at launch: {e:#}"))
     .ok()?;
-    body.get("index_id")?.as_str().map(str::to_string)
+    let id = body.get("index_id")?.as_str()?.to_string();
+    if body.get("created").and_then(serde_json::Value::as_bool) != Some(true) {
+        trusty_common::search_index::best_effort_trigger_reindex(socket, &id);
+    }
+    Some(id)
 }
 
 /// The registry project whose checkout is `project_root`'s project root (#10530).
