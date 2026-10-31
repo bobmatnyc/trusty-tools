@@ -71,11 +71,11 @@ fn a_substitution_with_no_credential_read_allows_10566() {
     let dir = tempfile::tempdir().expect("dir");
     script(dir.path(), "clean.sh", "echo fake-value\n");
     script(dir.path(), "probe.sh", KEYCHAIN_READ);
-    // Residual 10: in a body, a substitution running no regular file allows.
+    // Residual 10: in a body, a substitution whose literal script is missing.
     script(
         dir.path(),
         "prose.sh",
-        "echo \"run `./never-written.sh` in `/`\"\n",
+        "echo \"run `./never-written.sh` later\"\n",
     );
     for command in [
         "bash prose.sh",
@@ -114,4 +114,98 @@ fn a_substitution_in_a_comment_is_not_run_10566() {
             "`{command}` must deny: {reason}"
         );
     }
+}
+
+/// Every row refuses through the script-body rule from `dir`, naming `word`.
+fn all_name(dir: &Path, rows: &[&str], word: &str) {
+    for command in rows {
+        let reason = evaluate_script_body_secret_read(command, dir).unwrap_or_default();
+        assert!(
+            reason.contains(&format!("`{word}`")),
+            "`{command}` must deny naming `{word}`: {reason}"
+        );
+    }
+}
+
+/// 🔴 REGRESSION (#10566 round 2, critic 3): a `#` inside `${ }` opens no
+/// comment, so the substitution after it is judged.
+#[test]
+fn a_hash_inside_a_parameter_expansion_opens_no_comment_10566() {
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "probe.sh", KEYCHAIN_READ);
+    all_name(dir.path(), &["echo ${x:- #} $(bash probe.sh)"], "probe.sh");
+}
+
+/// 🔴 REGRESSION (#10566 round 2, critic 4): a `#` line inside a multi-line
+/// double-quoted string runs its backticks, so it is judged.
+#[test]
+fn a_backtick_hash_line_in_a_string_is_judged_10566() {
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "probe.sh", KEYCHAIN_READ);
+    script(
+        dir.path(),
+        "ml.sh",
+        "echo \"start\n# `bash probe.sh`\nend\"\n",
+    );
+    all_name(dir.path(), &["bash ml.sh"], "ml.sh");
+}
+
+/// 🔴 REGRESSION (#10566 round 2, critic 5): inside a script body, a
+/// substitution's script word that is computed, a variable the guard
+/// resolved, a `/dev/fd/` pipe or a glob refuses as unresolvable.
+#[test]
+fn a_computed_script_in_a_body_substitution_refuses_10566() {
+    let dir = tempfile::tempdir().expect("dir");
+    for (name, body) in [
+        ("a.sh", "B=./b.sh\nT=$(bash \"$B\")\n"),
+        ("c.sh", "T=$(bash \"$1\")\n"),
+        ("d.sh", "T=$(bash /dev/fd/63)\n"),
+        ("e.sh", "T=$(bash ./gen-*.sh)\n"),
+    ] {
+        script(dir.path(), name, body);
+        let reason = evaluate_script_body_secret_read(&format!("bash {name}"), dir.path())
+            .unwrap_or_default();
+        assert!(
+            reason.contains("computed at run time"),
+            "`bash {name}` must deny as unresolvable: {reason}"
+        );
+    }
+}
+
+/// No over-deny (#10566 round 2): `$(git rev-parse --show-toplevel)`, bare
+/// or with a literal `-C`, resolves to the checkout root above the script,
+/// so a gate script's `$(bash "$REPO_ROOT/scripts/x.sh")` names a file.
+#[test]
+fn a_git_toplevel_idiom_resolves_10566() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::create_dir_all(dir.path().join(".git")).expect("git dir");
+    let scripts = dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    let root = dir.path().display().to_string();
+    let path = scripts.join("gate.sh");
+    for body in [
+        "R=\"$(git rev-parse --show-toplevel)\"\nT=$(bash \"$R/scripts/x.sh\")\n".to_string(),
+        format!("T=$(bash \"$(git -C {root}/scripts rev-parse --show-toplevel)/scripts/x.sh\")\n"),
+    ] {
+        let resolved = resolve_self_paths(&body, &path);
+        assert!(
+            resolved.contains(&format!("{root}/scripts/x.sh")),
+            "{resolved}"
+        );
+    }
+}
+
+/// 🔴 REGRESSION (#10566 round 2, critic 6): an unquoted here-document
+/// expands its substitutions; a quoted one does not.
+#[test]
+fn an_unquoted_heredoc_substitution_is_judged_10566() {
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "probe.sh", KEYCHAIN_READ);
+    all_name(
+        dir.path(),
+        &["cat <<EOF\n$(bash probe.sh)\nEOF"],
+        "probe.sh",
+    );
+    let quoted = "cat <<'EOF'\n$(bash probe.sh)\nEOF";
+    assert_eq!(evaluate_script_body_secret_read(quoted, dir.path()), None);
 }

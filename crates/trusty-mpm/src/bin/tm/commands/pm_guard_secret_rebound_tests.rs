@@ -101,3 +101,46 @@ fn a_rebound_name_with_no_delete_still_allows_10566() {
         );
     }
 }
+
+/// 🔴 REGRESSION (#10566 round 2, critic 1): a function defined with no
+/// space before the brace or a space before the parens rebinds its name.
+#[test]
+fn a_paren_function_definition_rebinds_10566() {
+    let rows: Vec<String> = ["ls(){", "ls (){", "ls ( ) {", "function ls(){"]
+        .iter()
+        .map(|def| format!("{def} gh \"$@\"; }}; ls {TAIL}"))
+        .collect();
+    all_refuse(&rows);
+}
+
+/// 🔴 REGRESSION (#10566 round 2, critic 2): a whole command or alias table
+/// assigned at once, or appended to, may bind any name.
+#[test]
+fn a_whole_table_assignment_rebinds_10566() {
+    let rows: Vec<String> = [
+        "BASH_CMDS=([ls]=/usr/bin/gh)",
+        "declare -A BASH_CMDS=([ls]=/usr/bin/gh)",
+        "BASH_CMDS+=([ls]=/usr/bin/gh)",
+        "BASH_ALIASES=([ls]=gh)",
+        "commands=(ls /usr/bin/gh)",
+        "aliases=(ls gh)",
+        "functions+=(ls 'gh \"$@\"')",
+    ]
+    .iter()
+    .map(|table| format!("{table}; ls {TAIL}"))
+    .collect();
+    all_refuse(&rows);
+}
+
+/// 🔴 REGRESSION (#10566 round 2, critic 7): forty `eval` words are read in
+/// linear time and refuse (the re-judge bound), not hang.
+#[test]
+fn a_run_of_evals_is_judged_in_linear_time_10566() {
+    let command = format!("{}true; ls {TAIL}", "eval ".repeat(40));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(evaluate_gh_api_secret_delete(&command).is_some());
+    });
+    let refused = rx.recv_timeout(std::time::Duration::from_secs(5));
+    assert_eq!(refused, Ok(true), "must refuse within 5 s");
+}

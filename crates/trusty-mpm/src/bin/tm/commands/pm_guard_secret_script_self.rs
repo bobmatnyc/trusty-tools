@@ -39,6 +39,22 @@ static CD_PWD: LazyLock<Regex> = LazyLock::new(|| {
     .expect("cd regex")
 });
 
+/// `$(git rev-parse --show-toplevel)`, with an optional literal `-C <dir>`
+/// (#10566 round 2: the gate scripts run a helper from `$REPO_ROOT`).
+static GIT_TOPLEVEL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"\$\(\s*git\s+(?:-C\s+"?([^"$`'()\s;&|<>\\]+)"?\s+)?rev-parse\s+--show-toplevel\s*\)"#,
+    )
+    .expect("toplevel regex")
+});
+
+/// The nearest ancestor of `dir` that holds a `.git` entry.
+fn toplevel_of(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|a| a.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
 /// A whole-line assignment of a literal: `NAME="value"`, `NAME=value`,
 /// optionally `export`/`readonly`/`local`.
 static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
@@ -75,24 +91,41 @@ fn normalize(path: &Path) -> PathBuf {
 /// Why: see the module doc — strict nested resolution (#9037) must not
 /// refuse a script that sources a helper beside itself.
 /// What: replaces the script's own-path words, then `$(dirname …)` and
-/// `$(cd … && pwd)` over a literal, then each variable assigned exactly once
+/// `$(cd … && pwd)` over a literal, `$(git rev-parse --show-toplevel)`
+/// (#10566), then each variable assigned exactly once
 /// from a literal and never otherwise bound, until nothing changes. A script
 /// path that is not one plain word resolves nothing.
-/// Test: `self_location_idioms_resolve_9037`.
+/// Test: `self_location_idioms_resolve_9037`,
+/// `a_git_toplevel_idiom_resolves_10566`.
 pub(crate) fn resolve_self_paths(body: &str, script: &Path) -> String {
     let own = script.display().to_string();
     if !plain(&own) {
         return body.to_string();
     }
     let mut text = SELF_PATH.replace_all(body, own.as_str()).into_owned();
+    let home = script.parent().unwrap_or(Path::new("."));
     for _ in 0..MAX_ROUNDS {
-        let next = resolve_round(&text);
+        let next = resolve_toplevel(&resolve_round(&text), home);
         if next == text {
             break;
         }
         text = next;
     }
     text
+}
+
+/// `text` with each `$(git rev-parse --show-toplevel)` replaced by the
+/// checkout root above its literal absolute `-C` directory, or above `home`
+/// (the script's directory) when it names none; any other stays (#10566).
+fn resolve_toplevel(text: &str, home: &Path) -> String {
+    GIT_TOPLEVEL
+        .replace_all(text, |c: &Captures<'_>| {
+            let dir = c.get(1).map_or(home, |m| Path::new(m.as_str()));
+            let root = dir.is_absolute().then(|| toplevel_of(dir)).flatten();
+            root.filter(|r| plain(&r.display().to_string()))
+                .map_or_else(|| c[0].to_string(), |r| r.display().to_string())
+        })
+        .into_owned()
 }
 
 /// One rewrite round over `text`.

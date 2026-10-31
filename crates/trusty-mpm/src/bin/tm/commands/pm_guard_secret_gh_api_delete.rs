@@ -130,14 +130,30 @@ const MAX_DEPTH: usize = 8;
 /// `every_gh_api_delete_arm_fails_closed_8875`,
 /// `a_call_through_a_rebound_name_is_refused_10566`.
 pub(crate) fn evaluate_gh_api_secret_delete(command: &str) -> Option<String> {
+    JUDGES.with(|spent| spent.set(0));
     judge(command, 0, &Rebinds::default()).then(deny_reason)
+}
+
+/// Re-judges one command may spend (#10566 round 2): an `eval` run is
+/// unwrapped into a segment per layer, and each layer re-judged, so the walk
+/// would grow as layers to the power of [`MAX_DEPTH`].
+const MAX_JUDGES: usize = 4096;
+
+thread_local! {
+    /// Re-judges the command under evaluation has spent.
+    static JUDGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Whether `command`, reached `depth` re-judges deep under the rebindings
 /// `inherited` from the text around it, deletes a secret.
 fn judge(command: &str, depth: usize, inherited: &Rebinds) -> bool {
-    // #8875 round 3: past the cap the guard cannot see the call.
-    if depth > MAX_DEPTH {
+    let spent = JUDGES.with(|n| {
+        n.set(n.get() + 1);
+        n.get()
+    });
+    // #8875 round 3: past the cap the guard cannot see the call; #10566: nor
+    // past the budget.
+    if depth > MAX_DEPTH || spent > MAX_JUDGES {
         return true;
     }
     let secrets_named = names_secrets(command);

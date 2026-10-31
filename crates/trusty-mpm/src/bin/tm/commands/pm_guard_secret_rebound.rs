@@ -62,12 +62,20 @@ pub(super) struct Rebinds {
     any: bool,
     /// Each rebound name, with its alias expansion when it is an alias.
     names: Vec<(String, Option<String>)>,
+    /// Segment texts the current scan has read (#10566 round 2).
+    steps: usize,
 }
+
+/// Segment texts one scan reads before it fails closed (#10566 round 2): an
+/// `eval` run is unwrapped into one segment per layer, so an unbounded scan
+/// grows as layers to the power of [`MAX_SCAN_DEPTH`].
+const MAX_SCAN_STEPS: usize = 1024;
 
 impl Rebinds {
     /// The rebindings `command` makes, added to `self`'s.
     pub(super) fn with_scan(&self, command: &str) -> Self {
         let mut out = self.clone();
+        out.steps = 0;
         out.scan_into(command, 0);
         out
     }
@@ -117,6 +125,12 @@ impl Rebinds {
             return;
         }
         for segment in split_shell_segments(command) {
+            self.steps += 1;
+            if self.steps > MAX_SCAN_STEPS {
+                // #10566 round 2: fail closed rather than read on.
+                self.any = true;
+                return;
+            }
             match tokenize(&segment) {
                 Ok(argv) => self.scan_argv(&argv, depth),
                 // #10566: an unlexable segment that names a rebinding word.
@@ -129,18 +143,25 @@ impl Rebinds {
     fn scan_argv(&mut self, argv: &[String], depth: usize) {
         for (at, raw) in argv.iter().enumerate() {
             let rest = &argv[at + 1..];
-            if let Some(name) = raw.strip_suffix("()").filter(|n| !n.is_empty()) {
-                self.add(command_word(name), None);
-            } else if rest.first().is_some_and(|w| w == "()") {
-                self.add(command_word(raw), None);
+            let prev = at.checked_sub(1).and_then(|p| argv.get(p));
+            if let Some(name) = function_name(raw, rest.first()) {
+                // #10566 round 2: `ls(){`, `ls (){`, `ls ( ) {` define `ls`.
+                let named = Some(name).filter(|n| !n.is_empty());
+                match named.or(prev.map(String::as_str)) {
+                    Some(name) if is_plain_name(name) => self.add(name, None),
+                    _ => self.any = true,
+                }
             } else if rest.first().is_some_and(|w| w == "{") && is_plain_name(raw) {
                 // `ls() {` read with its parens blanked (`pm_guard_secret_nested`).
                 self.add(raw, None);
             }
-            // #10566: a new PATH may resolve any name to any program.
-            self.any |= ["PATH=", "PATH+=", "path=", "path+=", "path["]
-                .iter()
-                .any(|p| raw.starts_with(p));
+            // #10566: a new PATH may resolve any name to any program, and a
+            // whole command table may be assigned at once (`BASH_CMDS=(…)`).
+            self.any |= raw.starts_with("path[")
+                || WHOLE_ASSIGNMENTS.iter().any(|name| {
+                    raw.strip_prefix(name)
+                        .is_some_and(|r| r.starts_with('=') || r.starts_with("+="))
+                });
             self.scan_table(raw);
             match command_word(raw) {
                 "hash" | "enable" => operands(rest).for_each(|w| self.add(w, None)),
@@ -157,6 +178,9 @@ impl Rebinds {
                 "eval" => {
                     self.any |= rest.iter().any(|w| w.contains(['$', '`']));
                     self.scan_into(&rest.join(" "), depth + 1);
+                    // #10566 round 2: the operands' scan read every later
+                    // word, so a run of N evals stays linear.
+                    return;
                 }
                 "source" => self.any = true,
                 "." if at == 0 => self.any = true,
@@ -191,7 +215,7 @@ impl Rebinds {
     fn add(&mut self, name: &str, expansion: Option<String>) {
         if name.is_empty() || name.contains(['$', '`', '*', '?', '[', '{']) {
             self.any = true;
-        } else {
+        } else if !self.names.iter().any(|(n, e)| n == name && *e == expansion) {
             self.names.push((name.to_string(), expansion));
         }
     }
@@ -209,6 +233,28 @@ fn operands(rest: &[String]) -> impl Iterator<Item = &str> {
 fn command_word(word: &str) -> &str {
     let tail = word.rsplit(['(', '`', '{']).next().unwrap_or(word);
     tail.rsplit('/').next().unwrap_or(tail)
+}
+
+/// Names whose whole assignment (`NAME=…`, `NAME+=…`, `NAME=(…)`) may bind
+/// any program name (#10566 round 2).
+const WHOLE_ASSIGNMENTS: &[&str] = &[
+    "PATH",
+    "path",
+    "BASH_CMDS",
+    "BASH_ALIASES",
+    "commands",
+    "aliases",
+    "functions",
+];
+
+/// `Some(name before the first paren)` when `raw` defines a function
+/// (`ls()`, `ls(){`, `(){` after `ls`, or `(` followed by a `)` word); the
+/// name is empty when it is the previous word.
+fn function_name<'a>(raw: &'a str, next: Option<&String>) -> Option<&'a str> {
+    if let Some(open) = raw.find("()") {
+        return Some(&raw[..open]);
+    }
+    (raw == "(" && next.is_some_and(|n| n.starts_with(')'))).then_some("")
 }
 
 /// Whether `word` is a plain command name (letters, digits, `_`, `-`, `.`).

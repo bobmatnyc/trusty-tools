@@ -66,10 +66,9 @@
 //!    (`cat .en[v]`, `cat {.env,}`): the file rule fails closed on every such
 //!    shape, and shell programs carry them as regexes and awk code, so a body
 //!    refuses only on a secret name written without one ([`judge_text`]).
-//! 10. Inside a script body, a substitution that runs a script which is
-//!     missing, computed or not a regular file (#10566): prose and
-//!     here-documents quote code in backticks, so only an existing regular
-//!     file a body's substitution runs is judged.
+//! 10. Inside a script body, a substitution that runs a script whose literal
+//!     word names no file (#10566): prose and here-documents quote code in
+//!     backticks. A computed, `/dev/fd/` or resolved-variable word refuses.
 //!
 //! Fail-open check: this rule only ADDS refusals and runs after the inline
 //! rules, which still judge the command text. Every [`Unread`] arm refuses.
@@ -329,23 +328,26 @@ fn judge_script(
     };
     let own = Walk {
         root: &nested,
+        written: &body,
         strict: true,
         own: true,
         subs: false,
     };
     // #10566: a body's substitutions are read with comment lines blanked and
-    // leniently — only a script that exists as a regular file is judged — so
-    // a backtick pair quoted in prose or in a here-document the guard cannot
+    // leniently — a literal script word that is missing allows — so a
+    // backtick pair quoted in prose or in a here-document the guard cannot
     // split is not a run (residual 10).
-    let substituted = resolve_self_paths(&blank_comment_lines(&body), path);
+    let substituted = resolve_self_paths(&blank_comment_lines(&body, true), path);
     let subs = Walk {
         strict: false,
         own: false,
         subs: true,
         ..own
     };
-    each_script_in(&nested, bases, own, 0, &mut refuse)
-        .or_else(|| each_script_in(&substituted, bases, subs, 0, &mut refuse))
+    // #10566 round 2: substitutions first, so a body's `$(bash "$B")` is
+    // named as the computed word it was written as.
+    each_script_in(&substituted, bases, subs, 0, &mut refuse)
+        .or_else(|| each_script_in(&nested, bases, own, 0, &mut refuse))
 }
 
 /// Run the inline credential judges over `command`, the inline spelling of
@@ -387,16 +389,19 @@ fn judge_text(command: &str, body: &str, cwd: &Path) -> Option<Rule> {
 /// Test: `without_comment_lines_keeps_a_substitution_8879`,
 /// `the_repo_gate_scripts_allow_8879`.
 fn without_comment_lines(body: &str) -> String {
-    blank_comment_lines(body).replace("\\\n", " ")
+    blank_comment_lines(body, false).replace("\\\n", " ")
 }
 
 /// `body` with each full-line `#` comment blanked (see
 /// [`without_comment_lines`]) and every other byte kept, so a here-document's
-/// delimiter line still closes it (#10566).
-fn blank_comment_lines(body: &str) -> String {
+/// delimiter line still closes it (#10566). With `keep_backticks`, a line
+/// carrying a backtick stays as well: inside a multi-line double-quoted
+/// string it runs, and the substitution walk blanks real comments itself.
+fn blank_comment_lines(body: &str, keep_backticks: bool) -> String {
     body.split_inclusive('\n')
         .map(|line| {
-            let comment = line.trim_start().starts_with('#') && !line.contains("$(");
+            let runs = line.contains("$(") || (keep_backticks && line.contains('`'));
+            let comment = line.trim_start().starts_with('#') && !runs;
             if comment {
                 if line.ends_with('\n') { "\n" } else { "" }
             } else {
