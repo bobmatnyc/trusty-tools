@@ -8,7 +8,7 @@
 //! Test: `every_script_asset_is_seeded`, `every_dashboard_asset_is_seeded`,
 //! `every_schema_asset_is_seeded`, `every_template_asset_is_seeded`.
 
-/// One embedded [`files`] row: destination, bytes, executable.
+/// One embedded row of `files`: destination, bytes, executable.
 pub(super) type Embedded = (&'static str, &'static str, bool);
 
 /// Build one [`EMBEDDED`] row from a path under `src/assets/architect/`.

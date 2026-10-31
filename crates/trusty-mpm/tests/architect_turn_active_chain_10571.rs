@@ -231,12 +231,16 @@ impl Chain {
             self.path("pane.py").display(),
             file.display()
         );
-        let target = format!("={name}:");
+        let target = trusty_common::tmux::exact_window_target(name);
         let exists = self
             .base("tmux")
             .arg("-S")
             .arg(self.tmux_socket())
-            .args(["has-session", "-t", &format!("={name}")])
+            .args([
+                "has-session",
+                "-t",
+                &trusty_common::tmux::exact_session_target(name),
+            ])
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success());
@@ -270,7 +274,13 @@ impl Chain {
     fn capture(&self, name: &str) -> String {
         String::from_utf8_lossy(
             &self
-                .tmux(&["capture-pane", "-p", "-e", "-t", &format!("={name}:")])
+                .tmux(&[
+                    "capture-pane",
+                    "-p",
+                    "-e",
+                    "-t",
+                    &trusty_common::tmux::exact_window_target(name),
+                ])
                 .stdout,
         )
         .into_owned()
