@@ -1,0 +1,26 @@
+# nextest profiles. Only `ci` is defined here; local runs keep nextest's default
+# profile (no timeout), so an interactive debug session is never cut short.
+#
+# #10618: a hung test used to run until the pre-publish shard job hit its 45 m
+# `timeout-minutes`, which reports no test name and leaves the aggregate
+# "inconclusive". `slow-timeout` with `terminate-after` kills the one hung test,
+# marks it TIMEOUT (a failure) and prints its name. No test is skipped.
+#
+# Bounds come from main run 41189740017, shard 3 (whole shard 296 s, 5031
+# tests): ordinary tests finish in under a second; the slowest were the
+# trusty-memory hnsw_store tests (172 s, 228 s) and trusty-code
+# mcp_loader_e2e (84 s). One shard is the evidence, not a cap on the others.
+[profile.ci.slow-timeout]
+# SLOW is logged every 60 s; the test is killed on the 10th period (10 min).
+period = "60s"
+terminate-after = 10
+
+# Legitimately slow suites get a larger bound (20 min) rather than raising the
+# global one. A real hang here still ends well inside the 45 m job limit.
+[[profile.ci.overrides]]
+filter = 'package(trusty-memory) & test(/hnsw_store/)'
+slow-timeout = { period = "60s", terminate-after = 20 }
+
+[[profile.ci.overrides]]
+filter = 'package(trusty-code) & binary(integration) & test(/mcp_loader_e2e/)'
+slow-timeout = { period = "60s", terminate-after = 20 }

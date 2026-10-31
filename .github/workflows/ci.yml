@@ -1393,7 +1393,7 @@ jobs:
       - name: cargo nextest run
         if: needs.changes.outputs.docs_only != 'true'
         run: |
-          cargo nextest run --workspace --exclude trusty-code-gui --exclude trusty-agents-ui --no-fail-fast \
+          cargo nextest run --profile ci --workspace --exclude trusty-code-gui --exclude trusty-agents-ui --no-fail-fast \
             --partition hash:${{ matrix.shard }}/${{ strategy.job-total }} \
             -E 'not test(=update::tests::cache_fresh_returns_some_when_newer)'
 
