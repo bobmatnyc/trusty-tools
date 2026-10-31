@@ -488,9 +488,9 @@ impl FlushHealth {
 
 /// tm's SIGTERM handler steps before `process::exit`, in order.
 ///
-/// Why: the handler's exit races the serve drain, whose `mgr.shutdown()`
-/// stops owned panes (#6288); every millisecond spent here widens that race,
-/// so the flush gets [`SIGNAL_FLUSH_BUDGET`], not [`FINAL_FLUSH_BUDGET`]. The
+/// Why: the handler's exit races the serve drain (#6288); every millisecond
+/// spent here delays the exit, so the flush gets [`SIGNAL_FLUSH_BUDGET`], not
+/// [`FINAL_FLUSH_BUDGET`]. The
 /// lock file names a live daemon until the flush ends, so a spawner never
 /// sees "no daemon" while this one still serves its socket.
 /// What: [`ActionEvents::shutdown_within`] with [`SIGNAL_FLUSH_BUDGET`], then
