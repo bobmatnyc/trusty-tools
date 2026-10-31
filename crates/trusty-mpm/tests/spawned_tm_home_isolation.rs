@@ -269,6 +269,9 @@ const RAW_BIN_BUDGET: &[(&str, usize)] = &[
     // the framework the operator actually installed, so a scratch `$HOME` would
     // make it untestable rather than hermetic. Never run in CI.
     ("tests/meta_demo_e2e.rs", 1),
+    // #10571: `scripts/sandbox_daemon.sh --bin` takes the binary's path; the
+    // isolation goes on the script, which starts the daemon under `env -i`.
+    ("tests/architect_turn_active_chain_10571.rs", 1),
 ];
 
 /// `crates/trusty-mpm/tests`.

@@ -95,15 +95,18 @@ class TestGoalProgress(unittest.TestCase):
         for page in PAGES:
             with open(page, encoding="utf-8") as f:
                 src = f.read()
-            self.assertEqual(len(re.findall(r"--conf-low:", src)), 3, page)
-            self.assertIn(".conf-medium { color: var(--conf-med); }", src)
+            tok = open(os.path.join(os.path.dirname(page), "tokens.css"), encoding="utf-8").read()
+            for name in ("--eta-low", "--eta-med", "--eta-high"):
+                self.assertEqual(len(re.findall(re.escape(name) + r":", tok)), 1, name)   # defined once, from the state ladder (themes follow)
+            self.assertNotIn("--conf-", src)
+            self.assertIn(".conf-medium { color: var(--eta-med); }", src)
 
     def test_collapsed_eta_confidence_rule_outranks_geta(self):
         for page in PAGES:
             with open(page, encoding="utf-8") as f:
                 src = f.read()
             for c, tok in (("low", "low"), ("medium", "med"), ("high", "high")):
-                self.assertIn(".gprog .geta.conf-%s { color: var(--conf-%s); }" % (c, tok), src, page)
+                self.assertIn(".gprog .geta.conf-%s { color: var(--eta-%s); }" % (c, tok), src, page)
 
     def test_goals_ignore_progress_tasks_use_it(self):
         for page in PAGES:

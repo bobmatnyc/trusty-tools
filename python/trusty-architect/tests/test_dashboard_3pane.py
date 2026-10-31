@@ -9,12 +9,12 @@ SRC = open(os.path.join(ROOT, "templates/dashboard/index.html"), encoding="utf-8
 
 class TestThreePane(unittest.TestCase):
     def test_three_panes_exist_in_order(self):
-        self.assertTrue(re.search(r'<div class="shell">\s*<nav id="nav" aria-label="[^"]+"><div id="nav-top"></div><div id="nav-cats"></div></nav>\s*<div id="nav-scrim"[^>]*></div>\s*<main id="main">.*?</main>\s*</div>', SRC, re.S))
+        self.assertTrue(re.search(r'<div class="shell">\s*<aside id="navcol">.*?<nav id="nav" aria-label="[^"]+"><div id="nav-top"></div><div id="nav-cats"></div></nav>\s*</aside>\s*<div id="nav-scrim"[^>]*></div>\s*<div id="pane">.*?<header>.*?</header>\s*<main id="main">.*?</main>\s*</div>\s*</div>', SRC, re.S))
         self.assertIn('root.id = "reader"', SRC)   # right pane is the reader
 
     def test_every_section_belongs_to_a_nav_category(self):
         cats = re.findall(r'<details class="sec" id="(sec-[a-z]+)"[^>]*data-cat="([a-z]+)"', SRC)
-        self.assertEqual({c for _, c in cats}, {"decisions", "questions", "asks", "tasks", "goals", "sessions", "accounts", "visualize"})
+        self.assertEqual({c for _, c in cats}, {"decisions", "questions", "asks", "tasks", "goals", "sessions", "accounts", "visualize", "secrets", "projects", "cliprofiles"})   # secrets: the owner 2026-10-24; projects: the owner 2026-10-27; cliprofiles: the owner 2026-10-28
         nav = re.search(r"const NAV = \[(.*?)\n  \];", SRC, re.S).group(1)
         for key in ("decisions", "questions", "asks", "tasks", "goals", "sessions"):
             self.assertIn('key: "%s"' % key, nav)
@@ -22,7 +22,7 @@ class TestThreePane(unittest.TestCase):
             self.assertIn('"%s"' % sec, nav)
 
     def test_subcategory_blocks_are_tagged(self):
-        for sid, sub in (("sub-qx", "done"), ("sub-ap", "parked"), ("sub-tx", "done"), ("sub-gs", "standing"), ("list-q", "open"), ("list-ques", "open")):
+        for sid, sub in (("sub-qx", "done"), ("sub-ap", "parked"), ("sub-tx", "done"), ("sub-gs", "standing"), ("list-q", "open"), ("list-ques", "answered")):
             self.assertRegex(SRC, r'id="%s"[^>]*data-sub="%s"' % (sid, sub))
         self.assertIn("d.dataset.sub = g.key", SRC)   # session user-state groups
 
@@ -41,7 +41,7 @@ class TestThreePane(unittest.TestCase):
 
     def test_drawer_and_right_pane_breakpoints(self):
         self.assertRegex(SRC, r"@media \(max-width: 840px\) \{\s*\.shell")
-        self.assertIn("body.nav-open #nav", SRC)
+        self.assertIn("body.nav-open #navcol", SRC)
         self.assertIn("(min-width: 1600px)", SRC)                  # right pane pushes only on wide screens, else overlays
         self.assertIn("html.rd-dock .wrap", SRC)
         self.assertRegex(SRC, r"rd-listmode[^}]*width: 380px")      # briefs list width
@@ -66,10 +66,10 @@ class TestThreePane(unittest.TestCase):
         self.assertIn('ev.code !== "KeyL" || !ev.altKey', SRC)                                   # Alt+L
 
     def test_library_tabs_and_sources(self):
-        for tab in ('["brief", "Briefs"]', '["diagram", "Diagrams"]', '["image", "Images"]', '["pr", "PRs"]', '["all", "All"]'):
+        for tab in ('["brief", "Briefs"]', '["diagram", "Diagrams"]', '["image", "Images"]', '["file", "Files"]', '["pr", "PRs"]', '["all", "All"]'):
             self.assertIn(tab, SRC)
         self.assertIn('fetch("/briefs"', SRC)
-        self.assertIn('fetch("/media?type=diagram,image"', SRC)
+        self.assertIn('fetch("/media?type=diagram,image,file"', SRC)
         self.assertIn("github\\.com", SRC)                                                       # PR/issue links parsed from items
         self.assertIn('"/media-file/"', SRC)
 
@@ -89,7 +89,7 @@ class TestThreePane(unittest.TestCase):
         self.assertIn('view = { cat: cat, sub: (cc && cc.def) || "open" }', SRC)                     # the header click resets to Open
         self.assertIn("OPEN_SETS", SRC)                                            # derived Open for Goals and Sessions
         self.assertIn('count: "n-accounts", subs: [["open", "Open", "n-accounts"]]', SRC)
-        self.assertIn('["questions", "Questions"' if False else 'subs: [["open", "Open", "n-questions"]', SRC)
+        self.assertIn('["questions", "Questions"' if False else 'subs: [["pending", "Pending", "n-qpd"], ["answered", "Answered", "n-questions"]', SRC)
         self.assertIn("subs.filter((t) => !t[3])", SRC)                            # All is the true total
 
     def test_nav_search_matches_id_title_body_and_clears(self):
@@ -118,6 +118,39 @@ class TestThreePane(unittest.TestCase):
         self.assertIn('["completed", "Completed", "n-gc"]', SRC)
         self.assertIn("db.batch", SRC)
         self.assertIn("goalIsDone(g)", SRC)
+
+
+
+class TestNavClickCollapsesMain(unittest.TestCase):
+    """the owner 2026-10-25: clicking a nav item collapses every expanded item in the main pane."""
+
+    def test_collapse_helper_skips_sections_and_forced_open_blocks(self):
+        self.assertIn('"#main details[open]:not(.sec):not(.nv-solo)"', SRC)
+
+    def test_nav_link_click_collapses_before_the_route_shows(self):
+        m = re.search(r'\$\("nav"\)\.addEventListener\("click", \(e\) => \{(.*?)\n  \}\);', SRC, re.S)
+        self.assertTrue(m)
+        body = m.group(1)
+        self.assertIn('closest("a.nv-link")', body)
+        self.assertLess(body.index("collapseMain()"), body.index("scrollTo"))
+        self.assertIn("window.scrollTo(0, 0)", body)               # same-route click still scrolls to the top
+
+    def test_category_header_reset_uses_the_same_helper_and_state_stays_persisted(self):
+        self.assertTrue(re.search(r"function resetView\(cat\) \{.*?collapseMain\(\);", SRC, re.S))
+        self.assertIn("openState[key] = d.open; saveOpen();", SRC)   # toggle handler persists the collapse
+
+    def test_category_header_click_collapses_on_toggle_and_on_navigate(self):
+        m = re.search(r'hd\.addEventListener\("click", \(\) => \{(.*?)\n        \}\);', SRC, re.S)
+        self.assertTrue(m)
+        body = m.group(1)
+        self.assertLess(body.index("collapseMain()"), body.index("setOpen(c.key, on)"))   # before the toggle/navigate branch
+
+    def test_collapse_writes_open_state_before_render_rebuilds_cards(self):
+        # The toggle event is async; render() right after resetView rebuilt T13/T02 open from the stale openState.
+        m = re.search(r"function collapseMain\(\) \{(.*?)\n  \}", SRC, re.S)
+        self.assertTrue(m)
+        self.assertIn("openState[d._key] = false", m.group(1))
+        self.assertIn("d._key = key;", SRC)   # bindOpen records the key on the element
 
 
 if __name__ == "__main__":

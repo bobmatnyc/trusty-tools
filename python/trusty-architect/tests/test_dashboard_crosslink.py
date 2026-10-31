@@ -12,7 +12,7 @@ class TestDashboardCrossLink(unittest.TestCase):
         for page in PAGES:
             src = open(page, encoding="utf-8").read()
             with self.subTest(page=os.path.basename(os.path.dirname(page))):
-                tag = re.search(r'<a class="console-link"[^>]*target=[^>]*>', src).group(0)
+                tag = re.search(r'<a class="ctl console-link"[^>]*target=[^>]*>', src).group(0)
                 self.assertIn('target="trusty-console"', tag)
                 self.assertNotIn("rel=", tag)
 

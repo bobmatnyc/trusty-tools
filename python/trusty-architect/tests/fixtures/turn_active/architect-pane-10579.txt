@@ -1,0 +1,65 @@
+
+✻ Sautéed for 27s · done 12:00 AM
+
+❯ [the operator] Rule X: the context bar is a cost threshold, not a hard cap; the window is larger and status is 10%. Save an exact
+  current checkpoint and state with pruning disabled, then stay quiet awaiting the next bundle. No clear/refresh now, no commands or
+  permission question for the operator. Preserve the recurring task-loop registration, rule X and rule Y. Report snapshot
+  path/hash here; at about 100,000 we will revisit supported recovery.
+
+  Called trusty-mpm (ctrl+o to expand)
+
+⏺ Bash(f=.trusty-mpm/sessions/tmux-window-0/session-20000101-000000.md; shasum -a 256 "$f"; wc -c < "$f"; tail -n 1
+      134 -  the records are at a safe boundary; asked the operator 00:00Z for permission to
+      135 -  checkpoint and refresh before automatic compaction.
+      134 +  the records are at a safe boundary. The operator 00:00Z (rule X):
+      135 +  100,000 is a cost threshold, not a hard cap; window is larger. No
+      136 +  clear or refresh now; revisit supported recovery at about 100,000.
+      137 +  Checkpoint saved 00:00:00Z with pruning disabled:
+      138 +  .trusty-mpm/sessions/tmux-window-0/session-20000101-000000.md (sha256
+      139 +  aaaaaaaa...aa, 1000 bytes; pause line in sessions-log.jsonl, verified).
+      140
+      141  ## Improvement candidates
+      142
+
+⏺ Bash(printf '\n## 2000-01-01T00:00:00Z checkpoint (rule X: 100,000 is cost threshold)\n- session_context_pause, prune_worktrees
+      false: .trusty-mpm/sessions/tm…)
+  ⎿  1234567 local: checkpoint 00:00Z
+     0123456789abcdef
+  ⎿  Updated local/actions.md (+4 -0)
+      432
+      433  ## 2000-01-01T00:00:00Z self_ctx alert
+      434  - Poller 00:00:00Z: self ctx 100,000 (bar 100,000). Refresh still deferred per rule X; records at a safe boundary; asked
+           the operator for permission to checkpoint and refresh. Watermark advanced.
+      435 +
+      436 +## 2000-01-01T00:00:00Z checkpoint (rule X: 100,000 is cost threshold)
+      437 +- session_context_pause, prune_worktrees false: .trusty-mpm/sessions/tmux-window-0/session-20000101-000000.md, sha256 aa
+          +aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, 1000 bytes; pause log line present; resume slot stored;
+          +no worktrees pruned; ref not published (no origin, expected) (verified).
+      438 +- No clear or refresh. Task loop deadbeef kept; rule X and rule Y kept. Revisit recovery near 100,000. Staying quiet f
+          +or the next bundle.
+
+⏺ I saved an exact checkpoint and committed the state, with worktree pruning turned off. I did not clear or refresh.
+
+  - Snapshot: ~/example/architect/.trusty-mpm/sessions/tmux-window-0/session-20000101-000000.md
+  - Snapshot SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (1,000 bytes)
+  - Checks: the pause line is in the session log and the resume slot is stored. No worktrees were pruned. The git ref wasn't published
+    because this repo has no remote, as expected.
+  - State: local/state.md (SHA-256 starts 0123456789abcdef) is committed as 1234567. Its task: and next: lines are at the top.
+
+  The recurring task loop deadbeef is still registered. Rule X and rule Y are unchanged. I'll stay quiet until the
+  next bundle arrives and check in again at around 100,000 tokens.
+
+  Dashboard: local · tail
+  0 items open: 0 decisions, 0 actions, 0 tasks.
+
+✻ Cooked for 41s · done 12:00 AM
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── tm-architect ─
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  TM 0.0.0 ● | architect ⎇ tm-architect | @example-org | ✻owner@example.com | Model 1.0 | ctx 10% | $1.00 | ⏳0% 📅0…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+                                                                                                                              /rc active
+
+
+

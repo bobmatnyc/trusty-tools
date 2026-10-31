@@ -34,6 +34,12 @@ def _no_context_bar_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_self_clear(monkeypatch):
+    """#10599: a self-clear.sh running on this host must not change what wake() does here."""
+    monkeypatch.setattr(fp, "self_clear_running", lambda arch_dir: False)
+
+
 def screen(body, box="", dim=False, agents=(), ctx=10, plan=(30, 40), status=None,
            ctx_field=None):
     """A pane capture: transcript, optional status line, input box, footer.
@@ -189,8 +195,12 @@ def test_busy_pane_is_neither_idle_nor_question(agents, status):
 
 
 def test_old_waiting_line_above_a_newer_turn_is_not_busy():
+    # #10579: a WAITING line counts until a finished-turn summary or a submitted ❯ turn follows it
+    # (prototype current_waiting); a newer turn ends with its "· done" summary.
     body = ["✻ Waiting for 1 background agent to finish"] + PM_TURN
-    assert not fp.parse_pane(screen(body))["busy"]
+    info = fp.parse_pane(screen(body, status="✻ Cooked for 23s · done 7:36 AM"))
+    assert not info["busy"] and not info["turn_active"]
+    assert fp.parse_pane(screen(body))["turn_active"]   # no summary yet: the wait is still current
 
 
 def test_question_is_last_pm_line_ending_in_question_mark():
@@ -604,6 +614,7 @@ def _cycle_env(monkeypatch, tmp_path, panes, quiet_lines=""):
     monkeypatch.setattr(fp, "capture", lambda pid: captures[pid])
     monkeypatch.setattr(fp, "host_alerts", lambda now: [])
     monkeypatch.setattr(fp, "self_ctx_alerts", lambda now, dry_run: [])
+    monkeypatch.setattr(fp, "watchdog_alerts", lambda *a: ([], ""))   # no Architect in these fleets
     events = tmp_path / "events.jsonl"
     events.write_text("")
     monkeypatch.setattr(fp, "EVENTS", str(events))
