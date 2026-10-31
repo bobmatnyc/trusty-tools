@@ -1327,6 +1327,12 @@ jobs:
           path: /home/runner/.cache/fastembed
           key: ${{ steps.fastembed-key.outputs.key }}
 
+      # #10639: fail fast on an incomplete model cache, so a missing fp32 file
+      # is named here instead of surfacing as a silent INT8 fallback.
+      - name: Verify fastembed model cache is complete
+        if: needs.changes.outputs.docs_only != 'true' && (steps.fastembed-cache.outputs.cache-hit == 'true' || steps.fastembed-preseed.outputs.seeded == 'true')
+        run: ./scripts/check_fastembed_cache.sh
+
       # Build phase only (no test execution yet): links this shard's test
       # binaries so the intermediate .rcgu.o codegen objects below can be
       # swept once linking is done and before the (disk-heavier) test
@@ -1708,6 +1714,9 @@ jobs:
           path: /home/runner/.cache/fastembed
           key: ${{ steps.fastembed-key.outputs.key }}
 
+      - name: Verify fastembed model cache is complete (#10639)
+        run: ./scripts/check_fastembed_cache.sh
+
       # trusty-common never appears here: the plan hands it to the
       # `trusty-common-lanes` job. Were it ever to, its empty default feature
       # set makes `-p trusty-common` a compile_error (#4901), so the leg fails
@@ -1883,6 +1892,10 @@ jobs:
         with:
           path: /home/runner/.cache/fastembed
           key: ${{ steps.fastembed-key.outputs.key }}
+
+      - name: Verify fastembed model cache is complete (#10639)
+        if: steps.decide.outputs.run == 'true'
+        run: ./scripts/check_fastembed_cache.sh
 
       - name: Run every trusty-common coverage lane
         if: steps.decide.outputs.run == 'true'

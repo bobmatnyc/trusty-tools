@@ -319,6 +319,9 @@ pub struct FastEmbedder {
     /// HuggingFace repo of the loaded model, e.g. `Qdrant/all-MiniLM-L6-v2-onnx`;
     /// names the cached tokenizer the chunker loads (#9275).
     model_code: String,
+    /// #10639: the primary model's init error (`{:#}` chain) when the
+    /// two-model fallback net substituted the other model; `None` otherwise.
+    fallback_reason: Option<String>,
     /// [`Self::chunk_tokenizer`], loaded once on first use (#9275).
     tokenizer: OnceLock<Arc<super::ChunkTokenizer>>,
 }
@@ -386,6 +389,19 @@ impl FastEmbedder {
     /// real ONNX model).
     pub fn model_name(&self) -> &'static str {
         self.model_name
+    }
+
+    /// Why the primary model did not load, when the fallback model did.
+    ///
+    /// Why: #10639 — the fallback is logged at `warn!` only, which a test
+    /// without a subscriber never shows.
+    /// What: the primary's init error as a `{:#}` chain; `None` when the
+    /// primary model loaded.
+    /// Test: `fast_embedder_model_name_reports_fp32_default` (`#[ignore]`)
+    /// asserts `None` on a clean fp32 load; a forced primary failure needs a
+    /// seam the crate lacks. `reference_accuracy_tests` prints it on failure.
+    pub fn fallback_reason(&self) -> Option<&str> {
+        self.fallback_reason.as_deref()
     }
 
     /// Load the tokenizer of the model this embedder actually loaded, for
@@ -677,8 +693,8 @@ impl FastEmbedder {
         let capacity =
             NonZeroUsize::new(capacity.max(1)).expect("capacity.max(1) is always non-zero");
 
-        let (model, provider, resolved_model) = tokio::task::spawn_blocking(
-            || -> Result<(TextEmbedding, ExecutionProvider, EmbeddingModel)> {
+        let (model, provider, resolved_model, fallback_reason) = tokio::task::spawn_blocking(
+            || -> Result<(TextEmbedding, ExecutionProvider, EmbeddingModel, Option<String>)> {
                 // Commit the ORT global thread pool (intra=platform/EP-
                 // conditional, spinning=off by default) BEFORE fastembed
                 // creates any session, so the per-session
@@ -708,9 +724,9 @@ impl FastEmbedder {
                 };
 
                 let (q_opts, q_provider) = Self::init_options(primary_model.clone());
-                let (m, provider, resolved_model) = match Self::try_new_bounded(q_opts, q_provider)
+                let (m, provider, resolved_model, fallback_reason) = match Self::try_new_bounded(q_opts, q_provider)
                 {
-                    Ok(m) => (m, q_provider, primary_model.clone()),
+                    Ok(m) => (m, q_provider, primary_model.clone(), None),
                     Err(q_err) => {
                         if q_provider != ExecutionProvider::Cpu && !require_gpu {
                             tracing::error!(
@@ -734,10 +750,11 @@ impl FastEmbedder {
                             let (cpu_opts, cpu_provider) =
                                 Self::init_options(primary_model.clone());
                             match TextEmbedding::try_new(cpu_opts) {
-                                Ok(m) => (m, cpu_provider, primary_model.clone()),
+                                Ok(m) => (m, cpu_provider, primary_model.clone(), None),
                                 Err(cpu_err) => {
+                                    let reason = format!("{cpu_err:#}");
                                     tracing::warn!(
-                                        "{primary_model:?} init failed on CPU ({cpu_err:#}), \
+                                        "{primary_model:?} init failed on CPU ({reason}), \
                                          falling back to {fallback_model:?}"
                                     );
                                     let (fb_opts, fb_provider) =
@@ -745,7 +762,7 @@ impl FastEmbedder {
                                     let m = TextEmbedding::try_new(fb_opts).context(format!(
                                         "failed to initialise fastembed (tried CUDA→CPU on {primary_model:?}, then {fallback_model:?})"
                                     ))?;
-                                    (m, fb_provider, fallback_model.clone())
+                                    (m, fb_provider, fallback_model.clone(), Some(reason))
                                 }
                             }
                         } else if require_gpu {
@@ -754,14 +771,15 @@ impl FastEmbedder {
                                  failed to initialise: {q_err:#}"
                             ));
                         } else {
+                            let reason = format!("{q_err:#}");
                             tracing::warn!(
-                                "{primary_model:?} init failed ({q_err:#}), falling back to {fallback_model:?}"
+                                "{primary_model:?} init failed ({reason}), falling back to {fallback_model:?}"
                             );
                             let (fb_opts, fb_provider) = Self::init_options(fallback_model.clone());
                             let m = TextEmbedding::try_new(fb_opts).context(format!(
                                 "failed to initialise fastembed (tried {primary_model:?} and {fallback_model:?})"
                             ))?;
-                            (m, fb_provider, fallback_model.clone())
+                            (m, fb_provider, fallback_model.clone(), Some(reason))
                         }
                     }
                 };
@@ -777,7 +795,7 @@ impl FastEmbedder {
                 let _ = m
                     .embed(warmup, None)
                     .context("fastembed warmup batch failed")?;
-                Ok((m, provider, resolved_model))
+                Ok((m, provider, resolved_model, fallback_reason))
             },
         )
         .await
@@ -802,6 +820,7 @@ impl FastEmbedder {
             provider,
             model_name,
             model_code,
+            fallback_reason,
             tokenizer: OnceLock::new(),
         })
     }
