@@ -115,6 +115,31 @@ log() {
   printf '%s\n' "$line"
 }
 
+# Timing config is checked before any tm or tmux command runs.
+for var in TM_RECOVER_HEALTH_TIMEOUT TM_RECOVER_ARCHITECT_VERIFY_TIMEOUT \
+  TM_RECOVER_RESUME_VERIFY_TIMEOUT; do
+  case "$var" in
+    TM_RECOVER_HEALTH_TIMEOUT) value="$HEALTH_TIMEOUT" ;;
+    TM_RECOVER_ARCHITECT_VERIFY_TIMEOUT) value="$ARCHITECT_VERIFY_TIMEOUT" ;;
+    *) value="$RESUME_VERIFY_TIMEOUT" ;;
+  esac
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    log "error: $var='$value' is not whole seconds; nothing done"
+    exit 2
+  fi
+done
+for var in TM_RECOVER_HEALTH_INTERVAL TM_RECOVER_VERIFY_INTERVAL; do
+  if [[ "$var" == TM_RECOVER_HEALTH_INTERVAL ]]; then
+    value="$HEALTH_INTERVAL"
+  else
+    value="$VERIFY_INTERVAL"
+  fi
+  if [[ ! "$value" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    log "error: $var='$value' is not a number of seconds; nothing done"
+    exit 2
+  fi
+done
+
 # Resolve each tool once, to an absolute path.
 TM="$(command -v tm || true)"
 TMUX_BIN="$(command -v tmux || true)"
@@ -164,12 +189,21 @@ architect_up() {
   "$TM" fleet status < /dev/null > /dev/null 2>&1 && live "$ARCHITECT"
 }
 
-# Prints the id of every record whose name EXACTLY equals argv[1], one per line.
+# Prints the id of every record whose name EXACTLY equals argv[1], one per
+# line, skipping tombstones: a decommissioned or deleted record never resumes.
+# persisted_state first, as `state` may be display-reconciled; a slot tombstone
+# has persisted_state "" and state "deleted" (daemon/managed_routes/summary.rs).
 readonly PICK_IDS='import json, sys
+TOMBSTONES = ("decommissioned", "deleted")
 body = json.load(sys.stdin)
 rows = body.get("sessions") if isinstance(body, dict) else None
 for row in rows or []:
-    if isinstance(row, dict) and row.get("name") == sys.argv[1]:
+    if not isinstance(row, dict):
+        continue
+    state = str(row.get("persisted_state") or row.get("state") or "").lower()
+    if state in TOMBSTONES:
+        continue
+    if row.get("name") == sys.argv[1]:
         print(row.get("id") or "")'
 
 failed=0

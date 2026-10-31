@@ -59,6 +59,8 @@ case "$1 $2" in
   "sessions ls")
     # The daemon's raw `--json` body (ManagedListResponse); plain ls prunes.
     [[ "$*" == "sessions ls --no-prune --json" ]] || exit 4
+    [[ -f "$S/ls_fail" ]] && { echo "daemon error" >&2; exit 1; }
+    [[ -f "$S/ls_garbage" ]] && { echo "not json"; exit 0; }
     printf '%s\n' "$(<"$S/records.json")"; exit 0 ;;
 esac
 exit 3
@@ -95,16 +97,24 @@ class Fleet:
         self.log.write_text("")
         self.records(DEFAULT_RECORDS)
 
-    def records(self, rows: list[tuple[str, str]]) -> None:
-        """The (id, name) rows `tm sessions ls --no-prune --json` reports."""
+    def records(self, rows: list[tuple[str, ...]]) -> None:
+        """The rows `tm sessions ls --no-prune --json` reports, as (id, name)
+        or (id, name, state[, persisted_state]); state defaults to stopped."""
         ids = self.state / "ids"
         ids.mkdir(exist_ok=True)
         for old in ids.iterdir():
             old.unlink()
-        for rid, name in rows:
+        sessions = []
+        for rid, name, *rest in rows:
             (ids / rid).write_text(name)
-        body = {"sessions": [{"id": rid, "name": name, "state": "stopped"} for rid, name in rows]}
-        (self.state / "records.json").write_text(json.dumps(body))
+            state = rest[0] if rest else "stopped"
+            persisted = rest[1] if len(rest) > 1 else state
+            sessions.append({"id": rid, "name": name, "state": state,
+                             "persisted_state": persisted})
+        (self.state / "records.json").write_text(json.dumps({"sessions": sessions}))
+
+    def flag(self, name: str) -> None:
+        (self.state / name).write_text("")
 
     def live(self, *names: str) -> None:
         for name in names:
@@ -299,6 +309,59 @@ def test_steps_that_take_effect_pass_their_postconditions(fleet: Fleet) -> None:
     text = log_text(fleet)
     assert "architect: verified" in text
     assert "pm: tm-rentalist-pro verified live" in text
+
+
+def test_tombstoned_exact_records_are_skipped(fleet: Fleet) -> None:
+    # A slot tombstone carries persisted_state "" and state "deleted"; a
+    # display-reconciled row can read state "stopped" over a persisted tombstone.
+    fleet.live("tm-architect")
+    fleet.bind()
+    fleet.records([
+        ("sid-deleted", "tm-rentalist-pro", "deleted", ""),
+        ("sid-decom", "tm-rentalist-pro", "stopped", "Decommissioned"),
+        ("sid-live", "tm-rentalist-pro", "stopped"),
+    ])
+    r = fleet.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert fleet.tm_calls() == ["tm sessions resume sid-live"]
+
+
+def test_two_live_exact_records_beside_a_tombstone_are_ambiguous(fleet: Fleet) -> None:
+    fleet.live("tm-architect")
+    fleet.bind()
+    fleet.records([
+        ("sid-1", "tm-rentalist-pro", "stopped"),
+        ("sid-2", "tm-rentalist-pro", "errored"),
+        ("sid-gone", "tm-rentalist-pro", "DELETED"),
+    ])
+    r = fleet.run()
+    assert r.returncode != 0
+    assert not [c for c in fleet.calls() if c.startswith("tm sessions resume")]
+    assert "ambiguous: 2 records" in log_text(fleet)
+
+
+@pytest.mark.parametrize("var, value", [
+    ("TM_RECOVER_HEALTH_TIMEOUT", "60s"),
+    ("TM_RECOVER_RESUME_VERIFY_TIMEOUT", "abc"),
+    ("TM_RECOVER_ARCHITECT_VERIFY_TIMEOUT", "1.5"),
+    ("TM_RECOVER_VERIFY_INTERVAL", "0.1.2"),
+])
+def test_bad_timing_config_exits_2_before_any_command(fleet: Fleet, var: str, value: str) -> None:
+    r = fleet.run(**{var: value})  # Fleet.run carries a 60 s subprocess timeout.
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert fleet.calls() == []
+    assert var in log_text(fleet)
+
+
+@pytest.mark.parametrize("mode", ["ls_fail", "ls_garbage"])
+def test_a_failed_or_garbled_listing_resumes_nothing(fleet: Fleet, mode: str) -> None:
+    fleet.live("tm-architect")
+    fleet.bind()
+    fleet.flag(mode)
+    r = fleet.run()
+    assert r.returncode != 0
+    assert "tm sessions ls --no-prune --json" in fleet.calls()
+    assert not [c for c in fleet.calls() if c.startswith("tm sessions resume")]
 
 
 def test_home_holds_only_the_log(fleet: Fleet) -> None:
