@@ -140,8 +140,20 @@ def test_dialog_words_in_transcript_above_the_box_are_not_a_dialog():
 # captured 2026-09-27. Claude Code now draws the box's TOP rule with a short
 # date label ("──…── 9-26/2026 ─"); the old plain-rule-only check made
 # find_box() miss it (has_box=False), so the poller could never wake the
-# Architect even while genuinely idle (poll-state.json: wake_pending=239,
-# no wake sent since 2026-09-26T19:15Z).
+# Architect even while genuinely idle (poll-state.json: wake_pending > 0,
+# no wake sent for a day). #10627: its operator figures are synthetic.
+
+def test_idle_pane_fixture_carries_only_synthetic_operator_values():
+    """#10627: every spend, issue ref and UTC time in the captured pane is a
+    fixed synthetic value, so no real owner pane data re-enters the fixture."""
+    import re
+    with open(os.path.join(FIXTURES, "idle-pane-labeled-rule.txt")) as f:
+        cap = f.read()
+    assert set(re.findall(r"\$\d[\d.,]*", cap)) == {"$12.34"}
+    assert set(re.findall(r"#(\d+)", cap)) <= {"1234", "5678"}
+    assert set(re.findall(r"\b\d{1,2}:\d{2}Z\b", cap)) <= {"09:00Z"}
+    assert set(re.findall(r"\b(\d+) alerts\b", cap)) <= {"42"}
+
 
 def test_labeled_top_rule_is_still_recognized_as_the_box():
     with open(os.path.join(FIXTURES, "idle-pane-labeled-rule.txt")) as f:
