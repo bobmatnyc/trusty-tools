@@ -1,0 +1,3 @@
+Fixed
+- `tm hook --pm-guard` no longer refuses one plain `cargo`, `rsync`, `cp`, `mv`, `ln`, `mkdir` or `touch` command whose two adjacent `$`-expansions are followed only by long flags (`rsync -a "$SRC" "$DST" --delete`) as a `gh api` secret DELETE. A command with a second segment, a subshell, a substitution, an assignment, a redefining word (`hash`, `alias`, `source`, `PATH`, `export`, …) or any other tail is judged as before (#10548).
+- A refusal of a script that runs another script now names the inner script it could not judge, instead of saying only that the outer script "does not exist" (#10548).

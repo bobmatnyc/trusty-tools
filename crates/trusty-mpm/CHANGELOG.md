@@ -6,32 +6,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.11.2] — 2026-10-31
-
-### Added
-
-- `tm fleet init` ships the Architect dashboard and Intent Ledger set from prototype `23da8a9`, hand-merged with the bundle's genericized work: datg id recycling and `--ref KEY=none`, the dashboard's doc editing (`PUT /doc`), attachments, the Fleet and Projects views, design tokens, media archiving, brief ids and the pending-answers hook set. The Secrets, project-lifecycle, CLI Profiles and Notion modules stay optional; the server starts without them (#10571).
-- `local/architect.json` gains `projects_root` and `claude_config_dir`; the dashboard reads `dashboard_port` for its default port and footer link, and the Intent Ledger size bar is `caps.datg_size_refuse` (default 65536 bytes, owner ruling D74) with `caps.datg_size_warn` (default 32768) (#10571).
-- A re-run of `tm fleet init` refreshes every seeded file whose bytes are an earlier shipped version and keeps an edited one, reported as "custom copy kept" (#10571).
-- `tm fleet init` and `tm fleet status` print the bundle's provenance: the prototype commit, the export manifest's sha256 and the file count, from the seeded `docs/architect/bundle-provenance.json` (#10571).
-- `tm fleet init` creates the Architect's own Intent Ledger in `local/il` when it is missing and adds its `Stop` and `SessionStart` hooks to the Architect's `.claude/settings.json`, merged with any hooks already there; an upgrade moves a `HOLD:` line from `local/state.md` into the ledger's new `hold` field (`datg.py session set --hold TEXT|none`, shown first in the digest) and replaces only the old checkpoint wording in `local/usage-policy.md` (#10579).
-- A second dashboard on the same Architect store is refused and exits 0, naming the running one (#10571).
-- `tm fleet init` sets the Architect dashboard to start at login and after a crash (a per-user LaunchAgent, `com.trusty.mpm.architect-dashboard`) when nothing else holds its port. A dashboard this Architect already runs by hand is reported and left alone; `--dashboard-takeover` stops it, starts it from launchd, checks it answers, and puts the old one back when that fails. Any other program on the port is refused with a plain-English reason (#10571).
-- `datg.py ready [--json]` says whether the Intent Ledger is ready for a context clear: exit 0 only with a real task and next, an active goal or open task, owed and crons recorded, and a fresh write; 1 with one plain reason per gap; 2 when the ledger is missing or unreadable. A HOLD never counts, and the digest shows the missing-session line whenever task or next is unset (#10579).
-- The Intent Ledger migration reads `- usage state: HOLD ...` with its context lines, skips a recorded builder band, carries `- task:` and `- next:` with the HOLD, and stops with the file and line on hold text it cannot read, or on a HOLD with no task and next (#10579).
-- The Intent Ledger migration reads all of `local/state.md`: a lifted, released, builder-band or answered entry is history and not carried; the active usage HOLD goes to `hold` and a no-merge rule to the new `merge_hold` field (`datg.py session set --merge-hold TEXT|none`); a hold it cannot classify stops it; an unreadable file stops it; a HOLD with no task or next seeds marked placeholders that `datg.py ready` rejects (#10579).
-- `il-cron.py` alarms at the ledger's own warn bar (32 KB by default), and `dashboard-db.py batch` accepts `action` as the verb key and refuses an entry that names both keys (#10571).
-
-### Fixed
-
-- `tm hook --pm-guard` no longer refuses one plain `cargo`, `rsync`, `cp`, `mv`, `ln`, `mkdir` or `touch` command whose two adjacent `$`-expansions are followed only by long flags (`rsync -a "$SRC" "$DST" --delete`) as a `gh api` secret DELETE. A command with a second segment, a subshell, a substitution, an assignment, a redefining word (`hash`, `alias`, `source`, `PATH`, `export`, …) or any other tail is judged as before (#10548).
-- A refusal of a script that runs another script now names the inner script it could not judge, instead of saying only that the outer script "does not exist" (#10548).
-- `tm register` works again in every form — `owner/repo`, a full URL, `owner/repo alias`, and the legacy `alias url` order (#10569). Its repo argument shared clap's arg id with the global `--url`, so the repo landed in `--url` and the #6288 remote-daemon refusal ("names a daemon on another host") failed every registration. The argument now has its own id; an explicit `--url`/`TRUSTY_MPM_URL` passed alongside `register` is kept, and a remote one is still refused on commands that use the daemon.
-
-### Changed
-
-- `tm tui` (the projects view) no longer freezes while it refreshes. The daemon poll runs as a background task, so drawing and key handling never wait on a daemon round trip; one poll is in flight at a time, and the refresh interval restarts when a poll finishes, so the daemon sees the same request rate as before. The Activity pane is served from a cache and re-fetched every 5 s, or at once when the selection moves to another session, so a normal 1 s refresh makes no `/activity` request (a tmux capture on the daemon). A session whose activity fetch keeps failing now shows "activity unavailable" after three failed fetches at that 5 s cadence (about 15 s) rather than three ticks. The `/health` probe runs on the first poll and every fifth poll after it (every 5 s at the default 1 s interval), and on every poll while the daemon reads as down so a moved daemon is still re-discovered; a failed project or fleet call on any poll still marks the daemon unreachable. Set `TM_TUI_TRACE=<file>` to append per-poll call and total times, per-frame draw times and key-to-frame times to that file; it is off when unset (#10476).
-
 ## [1.11.1] — 2026-10-30
 
 ### Added
