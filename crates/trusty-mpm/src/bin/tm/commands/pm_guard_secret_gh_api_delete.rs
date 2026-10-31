@@ -132,21 +132,24 @@ fn judge(command: &str, depth: usize) -> bool {
         return true;
     }
     let secrets_named = names_secrets(command);
+    // #10548 P7: only the top-level command, and only one plain command.
+    let plain = depth == 0 && one_plain_command(command);
     split_shell_segments(command)
         .iter()
-        .any(|segment| segment_deletes_a_secret(segment, secrets_named, depth))
+        .any(|segment| segment_deletes_a_secret(segment, secrets_named, plain, depth))
 }
 
 /// Whether one segment runs a call the guard must refuse.
-fn segment_deletes_a_secret(segment: &str, secrets_named: bool, depth: usize) -> bool {
+fn segment_deletes_a_secret(segment: &str, secrets_named: bool, plain: bool, depth: usize) -> bool {
     let Ok(argv) = tokenize(segment) else {
         // #8875 round 3 (owner ruling): an unlexable call is refused outright.
         return starts_a_watched_call(segment);
     };
+    let calls = |sub| gh_calls(&argv, sub, plain);
     reruns_a_refused_command(&argv, depth)
-        || gh_calls(&argv, "api").any(|(_, tail)| gh_api_deletes(tail, secrets_named))
-        || gh_calls(&argv, "secret").any(|(sub, tail)| secret_subcommand_deletes(sub, tail))
-        || gh_calls(&argv, "alias").any(|(sub, tail)| alias_defines_a_delete(sub, tail, depth))
+        || calls("api").any(|(_, tail)| gh_api_deletes(tail, secrets_named))
+        || calls("secret").any(|(sub, tail)| secret_subcommand_deletes(sub, tail))
+        || calls("alias").any(|(sub, tail)| alias_defines_a_delete(sub, tail, depth))
         || argv
             .iter()
             .enumerate()
@@ -200,11 +203,101 @@ fn reruns_a_refused_command(argv: &[String], depth: usize) -> bool {
 }
 
 /// The subcommand word and the argv tail after each `gh <sub>` pair in `argv`.
-fn gh_calls<'a>(argv: &'a [String], sub: &'a str) -> impl Iterator<Item = (&'a str, &'a [String])> {
+/// #10548 P7: with `plain` ([`one_plain_command`]), an operand pair followed
+/// only by plain long flags ([`flags_only`]) is no call.
+fn gh_calls<'a>(
+    argv: &'a [String],
+    sub: &'a str,
+    plain: bool,
+) -> impl Iterator<Item = (&'a str, &'a [String])> {
     argv.windows(2)
         .enumerate()
+        .filter(move |(at, _)| !(plain && *at > 0 && flags_only(&argv[at + 2..])))
         .filter(move |(_, w)| possibly_named(&w[0], "gh") && possibly_sub(&w[1], sub))
         .map(move |(at, w)| (w[1].as_str(), &argv[at + 2..]))
+}
+
+/// Programs that never execute an operand as a command (#10548).
+const NEVER_RUNS_OPERANDS: &[&str] = &["cargo", "rsync", "cp", "mv", "ln", "mkdir", "touch"];
+
+/// Bytes that end a segment, open a subshell, group or substitution,
+/// assign, escape, redirect or comment (#10548).
+const NOT_ONE_PLAIN_COMMAND: &[char] = &[
+    ';', '&', '|', '\n', '\r', '(', ')', '`', '{', '}', '=', '\\', '#', '<', '>',
+];
+
+/// Words that define, assign, source, re-path or re-run a program (#10548).
+const REDEFINERS: &[&str] = &[
+    "alias",
+    "function",
+    "hash",
+    "PATH",
+    "source",
+    "eval",
+    "enable",
+    "exec",
+    "builtin",
+    "command",
+    "BASH_FUNC",
+    "BASH_ENV",
+    "ENV",
+    "cd",
+    "pushd",
+    "popd",
+    "export",
+    "declare",
+    "typeset",
+    "readonly",
+    "read",
+    "printf",
+    "local",
+    "let",
+    "set",
+    "unset",
+    "shopt",
+    "trap",
+    "BASH_CMDS",
+    "commands",
+    "BASH_ALIASES",
+    "aliases",
+];
+
+/// Whether `command` is one plain command whose program is a literal
+/// [`NEVER_RUNS_OPERANDS`] word.
+///
+/// Why: #10548 P7 — `cargo test -p "$c" "$t" --no-fail-fast` read `"$c" "$t"`
+/// as a rewritten `gh api` call and refused it as a secret DELETE.
+/// What: read on the raw text, with no lexer: the command starts with the
+/// program word and a space, carries none of [`NOT_ONE_PLAIN_COMMAND`], and
+/// no identifier in it is one of [`REDEFINERS`]. So no other segment, no
+/// assignment (`NAME=`, `BASH_CMDS[cp]=`, `PA''TH=`) and no redefinition can
+/// make the program run its operands. Anything else judges every pair.
+/// Test: `a_single_segment_operand_pair_is_no_gh_api_call_10548`,
+/// `every_review_bypass_row_refuses_10548`.
+fn one_plain_command(command: &str) -> bool {
+    let text = command.trim();
+    let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    !text.contains(NOT_ONE_PLAIN_COMMAND)
+        && !text
+            .split(|c: char| !identifier(c))
+            .any(|word| REDEFINERS.contains(&word))
+        && NEVER_RUNS_OPERANDS.iter().any(|p| {
+            text.strip_prefix(p)
+                .is_some_and(|rest| rest.starts_with(' '))
+        })
+}
+
+/// Whether every word of `tail` is a plain long flag (`--no-fail-fast`), so
+/// the tail names no endpoint, method, subcommand or value (#10548).
+fn flags_only(tail: &[String]) -> bool {
+    tail.iter().all(|w| {
+        w.len() > 2
+            && w != "--method"
+            && w.strip_prefix("--").is_some_and(|name| {
+                name.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            })
+    })
 }
 
 /// Whether a program word could run `name`: by basename, or a word the shell
