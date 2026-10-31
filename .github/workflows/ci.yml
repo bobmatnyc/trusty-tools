@@ -861,7 +861,9 @@ jobs:
     # (the `workflow_dispatch` trigger at the top of this file).
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # #10618: 60, not 45 — the nextest `ci` profile's 35 m HNSW bound must fire
+    # (and name the test) before this job cap does.
+    timeout-minutes: 60
     strategy:
       # Every shard runs to completion. Cancelling siblings on the first
       # failure would hide the other shards' results, which is the opposite of
@@ -1393,7 +1395,7 @@ jobs:
       - name: cargo nextest run
         if: needs.changes.outputs.docs_only != 'true'
         run: |
-          cargo nextest run --workspace --exclude trusty-code-gui --exclude trusty-agents-ui --no-fail-fast \
+          cargo nextest run --profile ci --workspace --exclude trusty-code-gui --exclude trusty-agents-ui --no-fail-fast \
             --partition hash:${{ matrix.shard }}/${{ strategy.job-total }} \
             -E 'not test(=update::tests::cache_fresh_returns_some_when_newer)'
 

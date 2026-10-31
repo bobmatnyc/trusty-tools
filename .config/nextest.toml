@@ -1,0 +1,26 @@
+# nextest profiles. Only `ci` is defined here; local runs keep nextest's default
+# profile (no timeout), so an interactive debug session is never cut short.
+#
+# #10618: a hung test used to run until the pre-publish shard job hit its
+# `timeout-minutes`, which reports no test name and leaves the aggregate
+# "inconclusive". `slow-timeout` with `terminate-after` kills the one hung test,
+# marks it TIMEOUT (a failure) and prints its name. No test is skipped.
+#
+# Evidence (green main runs 41189740017, 41179715755, 41169859332):
+# - Every test over 300 s is a trusty-memory hnsw_store test. Multi-run maxima:
+#   1202, 651, 502, 436, 397, 378, 365, 333, 309, 294 s (the 1202 s one is
+#   `replay_leaves_no_point_without_neighbours`, shard 6, which took 36 min).
+# - `engine::retrieval::chunk_split_tests` reaches 130 s on the same HNSW code.
+# - The slowest test outside trusty-memory is 115 s (trusty-mpm
+#   credential_test_scan); trusty-code mcp_loader_e2e peaks at 108 s.
+# So the global bound is 10 min, and only the trusty-memory HNSW tests get a
+# larger one (35 min, 1.75x the worst 1202 s). The shard job cap in ci.yml is
+# 60 min so this bound fires, and names the test, before the job is cancelled.
+[profile.ci.slow-timeout]
+# SLOW is logged every 60 s; the test is killed on the 10th period (10 min).
+period = "60s"
+terminate-after = 10
+
+[[profile.ci.overrides]]
+filter = 'package(trusty-memory) & (test(/hnsw_store/) | test(/chunk_split_tests/))'
+slow-timeout = { period = "60s", terminate-after = 35 }
