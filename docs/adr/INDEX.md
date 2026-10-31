@@ -90,3 +90,4 @@ Crate-specific ADRs have independent sequences and indexes under
 - ADRs 0001–0013 predate DOC-46's mandatory consistency-vetting section.
 - Superseded ADRs remain indexed as historical decisions.
 - An amended ADR remains in force together with every listed amendment.
+| [0074](0074-exclude-retired-tier-c-occupants-from-recall.md) | Exclude retired Tier C occupants from recall | Proposed | Default recall excludes retired Tier C slot occupants, found by a `retired_at` drawer field; other superseded drawers are tagged; `include_superseded` opts in. Amends ADR-0028 D6. Pending D83. | `trusty-memory` |
