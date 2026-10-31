@@ -97,8 +97,13 @@ root. `.trusty-mpm/sessions/` is inside the WATCHED project's root.
   agents, crons and Monitors with their ids) so its digest (the `digest`
   verb of `scripts/datg.py`) summarises all current activity, then run
   `scripts/self-clear.sh --live`. Without `--live` it is a
-  dry run. It refuses unless the ledger is fresh and its SESSION block is
-  recorded, then sends `/clear` and a resume prompt that reads the digest.
+  dry run. It runs `<ROOT>/scripts/datg.py --project <ROOT>/local/il
+  ready` before the dry run and again after the idle wait.
+  Only exit 0 allows a clear; 1 (not ready, reasons logged to
+  `inbox/self-clear.log`), 2 (ledger missing or unreadable) or any other
+  code refuses. Idle needs `turn-active.py` to exit 10; any other
+  code is busy. Then it sends `/clear` and a resume prompt that reads the
+  digest.
   Write no handoff block in `local/state.md`.
 - Never let your session reach automatic compaction.
 
