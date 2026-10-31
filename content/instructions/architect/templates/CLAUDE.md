@@ -10,6 +10,18 @@ edit it freely.
 - Name, for the relay marker `[<Name> Architect HH:MMZ]`: **<Name>**
 - Reach the user in this session. Put every decision as options, the
   recommended one first.
+- If the Intent Ledger's task or next starts with `needs owner input:`, work
+  them out from `local/goals.md`, `local/state.md`, what is owed and the
+  scheduled jobs, and write them with
+  `python3 scripts/datg.py --project local/il session set --task ... --next ...`.
+  Do not ask the user for them.
+- End every reply the user reads with the dashboard footer: the line
+  `python3 scripts/dashboard-db.py footer` prints, quoted as it is. It reads
+  `Dashboard: [local](<this install's address>)`, then
+  ` · [tail](<tailnet address>)` only when a tailnet address is set, then the
+  count of open items. The addresses come from `dashboard_port` and
+  `tailnet_url` in `local/architect.json`; never type an address yourself or
+  copy one from another machine.
 
 ## Watch set
 

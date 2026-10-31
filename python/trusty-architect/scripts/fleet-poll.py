@@ -405,9 +405,9 @@ def cycle(state, dry_run=False, now=None):
     for p in watched:
         s, pid = p["session"], p["pane"]
         current[s] = pid
-        ps = state["panes"].setdefault(f"{s}|{pid}", {})
+        pane_st = state["panes"].setdefault(f"{s}|{pid}", {})
         if p["cmd"] in SHELLS or p["cmd"].startswith("-"):
-            ps["idle_since"] = None
+            pane_st["idle_since"] = None
             if not quiet_sessions.is_test_fixture_session(s):
                 candidates.append(alert("exited", f"shell-{p['cmd']}",
                                         f"pane runs {p['cmd']}, not Claude", s, pid, now))
@@ -418,7 +418,7 @@ def cycle(state, dry_run=False, now=None):
             log(f"{s} {pid} capture ERROR {e}", dry_run)
             continue
         infos.append((s, info))
-        found = evaluate(info, ps, now, s, pid, bar)
+        found = evaluate(info, pane_st, now, s, pid, bar)
         candidates += found
         if dry_run:
             print(f"  {s} {pid} cmd={p['cmd']} box={info['box']} agents={info['agents']} "

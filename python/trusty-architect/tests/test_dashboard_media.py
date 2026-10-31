@@ -2,7 +2,7 @@
 
 Why: the right pane (media library) lists diagrams and images; a file outside the doc roots, a dot or secret path, a
 symlink escape or a non-media extension must be a 404.
-What: listing by type (svg under both), mermaid-block markdown, deny list, symlink escape, content types, SVG sandbox
+What: listing by type (svg under both; .json as type file), mermaid-block markdown, deny list, symlink escape, content types, SVG sandbox
 header, dot-dot, writes refused.
 Test: this file.
 """
@@ -35,6 +35,10 @@ class TestMedia(unittest.TestCase):
         write(os.path.join(proj, "docs", "node_modules", "p", "y.png"), "DENIED")
         write(os.path.join(proj, "src", "outside.png"), "OUTSIDE ROOTS")
         write(os.path.join(proj, "docs", "notes.txt"), "plain")
+        write(os.path.join(proj, "docs", "slack", "manifest.json"), '{"display_information": {"name": "<b>x</b>"}}')
+        write(os.path.join(proj, "docs", ".hidden", "m.json"), "{}")
+        write(os.path.join(proj, "docs", "secret-creds.json"), "{}")
+        write(os.path.join(proj, "src", "outside.json"), "{}")
         write(os.path.join(t, "elsewhere.png"), "ESCAPE")
         os.symlink(os.path.join(t, "elsewhere.png"), os.path.join(proj, "docs", "img", "link.png"))
         write(os.path.join(arch, "local", "briefs", "arch.mmd"), "graph LR; X-->Y")
@@ -72,9 +76,22 @@ class TestMedia(unittest.TestCase):
         md = next(r for r in both if r["path"].endswith("2026-10-20-m.md"))
         self.assertEqual((md["title"], md["date"]), ("Has diagram", "2026-10-20"))
 
+    def test_json_files_list_as_type_file_and_are_served(self):
+        self.assertEqual({r["path"] for r in self.rows("?type=file")}, {"docs/slack/manifest.json"})
+        self.assertNotIn("manifest.json", " ".join(r["path"] for r in self.rows()))   # default types are unchanged
+        self.assertNotIn("manifest.json", " ".join(r["path"] for r in self.rows("?type=diagram,image")))
+        row = self.rows("?type=diagram,image,file")
+        self.assertEqual(next(r for r in row if r["type"] == "file")["title"], "manifest.json")
+        st, h, body = self.get("/media-file/acme/docs/slack/manifest.json")
+        self.assertEqual((st, h["Content-Type"]), (200, "application/json; charset=utf-8"))
+        self.assertEqual(body, b'{"display_information": {"name": "<b>x</b>"}}')
+        self.assertIn("sandbox", h["Content-Security-Policy"])
+        for p in ("acme/docs/.hidden/m.json", "acme/docs/secret-creds.json", "acme/src/outside.json"):
+            self.assertEqual(self.get("/media-file/" + p)[0], 404, p)
+
     def test_listing_excludes_denied_and_escaped(self):
         paths = " ".join(r["path"] for r in self.rows())
-        for bad in ("hidden", "secret", "node_modules", "outside.png", "link.png", "notes.txt", "plain.md"):
+        for bad in ("hidden", "secret", "node_modules", "outside.png", "link.png", "notes.txt", "plain.md", "m.json", "creds", "outside.json"):
             self.assertNotIn(bad, paths)
 
     def test_file_served_with_type_and_svg_sandbox(self):

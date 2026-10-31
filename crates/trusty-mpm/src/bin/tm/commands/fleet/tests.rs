@@ -82,6 +82,7 @@ fn cli_parses_fleet_init() {
                     dir,
                     no_launch,
                     session,
+                    ..
                 },
         } => {
             assert_eq!(dir.as_deref(), Some("/x/a"));
@@ -1586,3 +1587,19 @@ fn a_seed_with_one_more_skill_seeds_it() {
     assert_eq!(row.contents, "---\nname: tm-probe-extra\n---\n");
     assert!(!row.executable);
 }
+
+/// #10571: the refresh of unedited seeds and the bundle provenance.
+#[path = "seed_refresh_tests.rs"]
+mod seed_refresh_tests;
+
+/// #10571: every seeded script passes the pm-guard credential rules.
+#[path = "seed_guard_tests.rs"]
+mod seed_guard_tests;
+
+/// #10571/#10579: the Intent Ledger and its hooks on install and upgrade.
+#[path = "il_init_tests.rs"]
+mod il_init_tests;
+
+/// #10571 P1b: the dashboard LaunchAgent, its guard and the takeover.
+#[path = "dashboard_agent_tests.rs"]
+mod dashboard_agent_tests;

@@ -7,18 +7,19 @@
     "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"},
     "iso_or_empty": {"type": "string", "pattern": "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"}
   },
-  "required": ["asked", "answer", "status", "answered_at", "updated"],
+  "required": ["asked", "answer", "status", "updated"],
   "additionalProperties": false,
   "properties": {
     "asked": {"type": "string", "minLength": 1},
     "asked_at": {"$ref": "#/$defs/iso_or_empty"},
+    "task": {"type": "string", "pattern": "^T[0-9a-f]+$"},
     "answer": {"type": "string"},
     "links": {"type": "array", "items": {"type": "object", "required": ["label", "url"], "additionalProperties": false,
       "properties": {"label": {"type": "string", "minLength": 1}, "url": {"type": "string", "pattern": "^https?://"}}}},
     "brief": {"type": "string", "pattern": "^[^/]+/docs/briefs/.+[.]md$"},
     "session": {"type": "string"},
-    "status": {"enum": ["open", "cleared"]},
-    "answered_at": {"$ref": "#/$defs/iso"},
+    "status": {"enum": ["pending", "answered", "cleared", "open"], "description": "pending = asked, answer not yet given; answered = answer given, not cleared; cleared = owner marked it read (the Read filter; the status name predates the label). open is the legacy spelling of answered, still accepted."},
+    "answered_at": {"$ref": "#/$defs/iso_or_empty"},
     "cleared_at": {"$ref": "#/$defs/iso_or_empty"},
     "updated": {"$ref": "#/$defs/iso"}
   }

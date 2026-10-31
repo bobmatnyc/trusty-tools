@@ -195,7 +195,7 @@ class TestDashboardProgress(unittest.TestCase):
             self.assertTrue(r[4])                                  # an ask keeps its header
             self.assertEqual(r[5], 2)                              # and its step rows
         css = open(PAGES[0], encoding="utf-8").read()
-        self.assertIn(".tstep.done { color: var(--muted); text-decoration: line-through; }", css)
+        self.assertIn(".tstep.done { color: var(--ink-2); text-decoration: line-through; }", css)
 
     def test_rows_show_fill_only_no_count_or_percent_text(self):
         for page in PAGES:
@@ -210,7 +210,7 @@ class TestDashboardProgress(unittest.TestCase):
         for page in PAGES:
             s = open(page, encoding="utf-8").read()
             for needle in ("data-pid", "Cancel task", "Confirm cancel", "cancel_note", "has-pct", "sess-sum", "trackDocs(", "applyPulses();",
-                           "@media (prefers-reduced-motion: reduce) { .pulse::after", "ownerState", "bucketItems(items)"):
+                           "@media (prefers-reduced-motion: reduce) { .pulse::after", "sessionStatus", "bucketItems(items)"):
                 self.assertIn(needle if needle != "data-pid" else "dataset.pid", s, (page, needle))
 
 

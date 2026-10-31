@@ -110,7 +110,7 @@ scripts/dashboard_il.py
 scripts/dashboard_media.py
 scripts/dashboard_viz.py
 scripts/dashboard_harness.py
-templates/dashboard/index.html
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): templates/dashboard/index.html
 templates/dashboard/live.html
 templates/dashboard/vendor/marked.umd.js
 templates/dashboard/vendor/purify.min.js
@@ -134,7 +134,7 @@ scripts/test_dashboard_files.py	tests/test_dashboard_files.py
 scripts/test_dashboard_goal_done.py	tests/test_dashboard_goal_done.py
 scripts/test_dashboard_goal_park.py	tests/test_dashboard_goal_park.py
 scripts/test_dashboard_goalprogress.py	tests/test_dashboard_goalprogress.py
-scripts/test_dashboard_harness.py	tests/test_dashboard_harness.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_dashboard_harness.py	tests/test_dashboard_harness.py
 scripts/test_dashboard_header_cache.py	tests/test_dashboard_header_cache.py
 scripts/test_dashboard_il.py	tests/test_dashboard_il.py
 scripts/test_dashboard_input_hold.py	tests/test_dashboard_input_hold.py
@@ -164,8 +164,53 @@ scripts/test_dashboard_summary_wrap.py	tests/test_dashboard_summary_wrap.py
 scripts/test_dashboard_tailnet.py	tests/test_dashboard_tailnet.py
 scripts/test_dashboard_task_notes.py	tests/test_dashboard_task_notes.py
 scripts/test_dashboard_task_tabs.py	tests/test_dashboard_task_tabs.py
-scripts/test_dashboard_viz.py	tests/test_dashboard_viz.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_dashboard_viz.py	tests/test_dashboard_viz.py
 scripts/test_dashboard_wontdo.py	tests/test_dashboard_wontdo.py
 # Hand-merged into trusty-tools form (see the note at the top): re-export to
 # scratch, diff against the shipped copy, hand-merge the delta.
 .claude/skills/architect-dashboard/SKILL.md	skills/architect-dashboard.md
+
+# P1 dashboard + Intent Ledger (#10571), from prototype 23da8a9. dashboard-serve.py,
+# dashboard_harness.py and datg.py stage whole and are hand-merged into their split
+# modules (dashboard_http/page/docs/routes.py, dashboard_fleet.py and
+# dashboard_harness_base.py, datg_store/ops/log/read.py). Not exported, hand-written
+# in trusty-tools form: scripts/pending-answers-hook.sh (the prototype copy names a
+# checkout path). Left for Phase 2: ctx-cycle.py (needs the poller's turn_active),
+# dashboard_feed.py (needs token_watch.py); Phase 3: the secrets, lifecycle, CLI
+# profile and Notion modules, which dashboard-serve.py imports optionally.
+scripts/dashboard_attach.py
+scripts/dashboard_projects.py
+scripts/dashboard_archctx.py
+scripts/brief_ids.py
+scripts/brief-id.py
+scripts/turn-active.py
+scripts/pm_cursor.py
+scripts/pending-answers.py
+scripts/pending_hook_dedupe.py
+templates/dashboard/tokens.css
+scripts/test_brief_id.py	tests/test_brief_id.py
+scripts/test_ctx_watch.py	tests/test_ctx_watch.py
+scripts/test_datg.py	tests/test_datg.py
+scripts/test_il_cron.py	tests/test_il_cron.py
+scripts/test_pm_cursor.py	tests/test_pm_cursor.py
+scripts/test_pending_answers_hook.py	tests/test_pending_answers_hook.py
+scripts/test_dashboard_act_tools.py	tests/test_dashboard_act_tools.py
+scripts/test_dashboard_attach.py	tests/test_dashboard_attach.py
+scripts/test_dashboard_blocker_prefix.py	tests/test_dashboard_blocker_prefix.py
+scripts/test_dashboard_brief_header_id.py	tests/test_dashboard_brief_header_id.py
+scripts/test_dashboard_brief_pending.py	tests/test_dashboard_brief_pending.py
+scripts/test_dashboard_code_fence.py	tests/test_dashboard_code_fence.py
+scripts/test_dashboard_concurrency.py	tests/test_dashboard_concurrency.py
+scripts/test_dashboard_copy_block.py	tests/test_dashboard_copy_block.py
+scripts/test_dashboard_il_steer.py	tests/test_dashboard_il_steer.py
+scripts/test_dashboard_interactive.py	tests/test_dashboard_interactive.py
+scripts/test_dashboard_live_progress.py	tests/test_dashboard_live_progress.py
+scripts/test_dashboard_media_archive.py	tests/test_dashboard_media_archive.py
+scripts/test_dashboard_pane_filter.py	tests/test_dashboard_pane_filter.py
+scripts/test_dashboard_status.py	tests/test_dashboard_status.py
+scripts/test_dashboard_status_briefs.py	tests/test_dashboard_status_briefs.py
+scripts/test_dashboard_status_update.py	tests/test_dashboard_status_update.py
+scripts/test_dashboard_task_link.py	tests/test_dashboard_task_link.py
+scripts/test_dashboard_task_log.py	tests/test_dashboard_task_log.py
+scripts/test_dashboard_task_progress.py	tests/test_dashboard_task_progress.py
+scripts/test_dashboard_tokens.py	tests/test_dashboard_tokens.py

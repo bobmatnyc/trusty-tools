@@ -50,9 +50,26 @@ class TestDashboardWontDo(unittest.TestCase):
         for page in PAGES:
             src = open(page, encoding="utf-8").read()
             fn = lambda name: re.search(r"  function %s\(it\) \{.*?\n  \}\n" % name, src, re.S).group(0)
-            self.assertIn("wontDoControl(body, it)", fn("renderQuestion"))
-            self.assertIn("wontDoControl(body, it)", fn("renderAction"))
+            self.assertIn("wontDoControl(body, it, tools)", fn("renderQuestion"))
+            self.assertNotIn("wontDoControl", fn("renderAction"))   # actions carry Won't Do on the primary row
             self.assertNotIn("wontDoControl", fn("renderTask"))
+
+    def test_primary_row_wont_do_writes_wont_do_with_note_and_version(self):
+        body = """
+        (async () => {
+          const it = { id: "A55", status: "open" };
+          const ok = await wontDoPrimarySend(it, "not needed");
+          await wontDoPrimarySend(it, "");
+          console.log(JSON.stringify({ ok, w: writes.map((x) => ({ id: x.id, opts: x.opts, status: x.patch.status, wd: x.patch.wont_do })) }));
+        })();"""
+        for r in self.each(body):
+            self.assertTrue(r["ok"])
+            a, b = r["w"]
+            self.assertEqual((a["id"], a["opts"], a["status"]), ("A55", {"if_version": 7}, "wont_do"))
+            self.assertEqual((a["wd"]["note"], a["wd"]["by"], a["wd"]["attempts"]), ("not needed", "owner", 1))
+            self.assertTrue(a["wd"]["at"])
+            self.assertNotIn("reason_missing", a["wd"])
+            self.assertTrue(b["wd"]["reason_missing"])
 
     def test_form_has_prompt_textarea_send_and_back(self):
         body = """

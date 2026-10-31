@@ -41,6 +41,8 @@ DEFAULT_STATE_MD = os.path.join(REPO, "local", "state.md")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 
 
+BATCH_VERB_KEY = "op"   # a batch entry's verb key; dashboard-db.py also accepts "action" (#10571)
+
 class StoreError(Exception):
     """Invalid request (bad id, bad body)."""
     status = 400
@@ -154,6 +156,14 @@ def _refuse_live_write_under_test(root):
     Test: tests/test_dashboard_store_guards.py"""
     if "pytest" in sys.modules and os.path.realpath(root) == os.path.realpath(DEFAULT_ROOT):
         raise StoreError(f"refusing to write the live store {root} under pytest")
+
+
+def _restore_on_brief(data):
+    """An item awaiting a brief (status brief_pending, the owner 2026-10-26) returns to open when a write links the brief."""
+    b = data.get("brief")
+    if data.get("status") == "brief_pending" and isinstance(b, str) and b.strip().endswith(".md") and "/" in b:
+        return {**data, "status": "open"}
+    return data
 
 
 class Store:
@@ -330,6 +340,8 @@ class Store:
             if not cur["exists"]:
                 raise NotFound(f"{coll}/{doc_id} not found")
             data = {**cur["data"], **data}
+        if coll == "items" and cur["exists"] and (cur["data"] or {}).get("status") == "brief_pending":
+            data = _restore_on_brief(data)
         cur.update(exists=True, data=dict(data), dirty=True, version=cur["version"] + 1)
         return {"collection": coll, "id": doc_id, "version": cur["version"]}
 

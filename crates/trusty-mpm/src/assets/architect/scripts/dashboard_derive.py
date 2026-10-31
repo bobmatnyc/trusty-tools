@@ -214,7 +214,7 @@ def pending_items(items, now):
     for doc in sorted(items, key=lambda x: x["id"]):
         data, item_id = _d(doc), doc["id"]
         status, note = data.get("status"), data.get("answer_note")
-        if status in ("answered", "cancelled", "wont_do") and _relayed(data):
+        if status in ("answered", "cancelled", "wont_do", "interactive") and _relayed(data):
             pass
         elif status == "answered" and not _done(note, ("Relayed",)):
             # "Architect Do" on an ask (page button; old stored text "Have Architect Do" still accepted): the Architect carries it out, then sets status done.
@@ -231,6 +231,10 @@ def pending_items(items, now):
             wd = data.get("wont_do") if isinstance(data.get("wont_do"), dict) else {}
             out.append({"id": item_id, "kind": "wont_do", "at": str(wd.get("at", "")),
                         "text": str(wd.get("note", "")).strip() or "no reason given"})
+        elif status == "interactive" and not _done(note, ("Relayed", "Acknowledged")):
+            # "Respond interactively" button: the Architect asks the owner in the terminal chat, records the result, then sets status done.
+            out.append({"id": item_id, "kind": "interactive", "at": str(data.get("answered_at", "")),
+                        "text": str(data.get("title", ""))})
         pk = data.get("parked")
         ups = data.get("updates") if isinstance(data.get("updates"), list) else []
         if status == "open" and isinstance(pk, dict) and pk.get("until") and _due(pk["until"], now):
@@ -249,7 +253,7 @@ def pending_items(items, now):
             if status == "open" and isinstance(req, dict) and req.get("at"):
                 out.append({"id": item_id, "kind": field, "at": str(req["at"]), "text": str(data.get("title", ""))})
         req = data.get("brief_request")
-        if status == "open" and isinstance(req, dict) and req.get("at") and not data.get("brief"):   # "Ask for a brief"; cleared once `brief` is set
+        if status in ("open", "brief_pending") and isinstance(req, dict) and req.get("at") and (not data.get("brief") or req.get("refresh") is True):   # "Ask for a brief"; cleared once `brief` is set; "Refresh briefing" (refresh true) reports until the Architect clears brief_request
             out.append({"id": item_id, "kind": "brief_request", "at": str(req["at"]), "text": str(data.get("title", ""))})
         sr_list = data.get("steer_requests")
         for s in sr_list if isinstance(sr_list, list) else []:
@@ -329,7 +333,18 @@ def pending_goal_done(goals):
     return out
 
 
+def pending_goal_briefs(goals):
+    """"Ask for a brief" / "Refresh briefing" on a goal: brief_request {at} with no brief, or refresh true, until the Architect clears it."""
+    out = []
+    for doc in sorted(goals, key=lambda x: x["id"]):
+        d = _d(doc)
+        req = d.get("brief_request")
+        if isinstance(req, dict) and req.get("at") and (not d.get("brief") or req.get("refresh") is True):
+            out.append({"id": doc["id"], "kind": "brief_request", "at": str(req["at"]), "text": str(d.get("title", ""))})
+    return out
+
+
 def pending(snap, now):
     """Owner events the Architect must act on, from a snapshot with items, sessions, effort_tunes, goals."""
     return (pending_items(snap.get("items", []), now) + pending_commands(snap.get("sessions", []))
-            + pending_efforts(snap.get("effort_tunes", [])) + pending_il_steers(snap.get("il_steers", [])) + pending_goal_parks(snap.get("goals", [])) + pending_goal_done(snap.get("goals", [])))
+            + pending_efforts(snap.get("effort_tunes", [])) + pending_il_steers(snap.get("il_steers", [])) + pending_goal_parks(snap.get("goals", [])) + pending_goal_done(snap.get("goals", [])) + pending_goal_briefs(snap.get("goals", [])))
