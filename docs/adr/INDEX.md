@@ -38,7 +38,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0025](0025-collapse-agent-and-skill-tier-hierarchies.md) | Collapse deployment hierarchies | Proposed | Declared sources deploy to one target with precedence resolved at deployment time. | `trusty-mpm`, `trusty-agents-common` |
 | [0026](0026-credential-grants-do-not-survive-delegation.md) | Credential grants stop at delegation | Accepted | Every delegated agent is a distinct principal and receives no inherited credential grant. | `trusty-common`, `trusty-agents`, `trusty-code` |
 | [0027](0027-rooms-are-real-wings-are-scopes-closets-are-an-index.md) | Rooms, wings, and closets | Proposed | Rooms become persisted entities, wings are scope boundaries, and closets are indexes. | `trusty-common`, `trusty-memory` |
-| [0028](0028-memory-recall-tiers-standing-current-episodic.md) | Three memory-recall tiers | Accepted | Standing, Current, and Episodic memory have distinct lifetimes and Current facts require retirement. | `trusty-common`, `trusty-memory` |
+| [0028](0028-memory-recall-tiers-standing-current-episodic.md) | Three memory-recall tiers | Amended by 0074 | Standing, Current, and Episodic memory have distinct lifetimes and Current facts require retirement. | `trusty-common`, `trusty-memory` |
 | [0029](0029-msrv-1-94-and-edition-policy.md) | MSRV 1.94 and edition policy | Accepted | The workspace MSRV is 1.94 and the per-crate edition policy from ADR-0003 continues. | Workspace |
 | [0030](0030-sessions-own-many-workstreams-from-the-tm-checkout.md) | Sessions own many workstreams | Proposed | A session lives in the tm checkout and may own multiple workstreams. | `trusty-mpm` |
 | [0031](0031-uds-for-inter-crate-transport-http-for-external.md) | Transport by caller purpose | Amended by 0032 | Same-host inter-crate traffic uses UDS; external clients use the shared HTTP surface. | Workspace |
@@ -90,3 +90,4 @@ Crate-specific ADRs have independent sequences and indexes under
 - ADRs 0001–0013 predate DOC-46's mandatory consistency-vetting section.
 - Superseded ADRs remain indexed as historical decisions.
 - An amended ADR remains in force together with every listed amendment.
+| [0074](0074-exclude-superseded-drawers-from-default-recall.md) | Exclude superseded drawers from default recall | Accepted | Default recall leaves out replaced facts (a `superseded-by:` row marker, stamped atomically at slot retirement, plus resolved KG edges); `include_superseded` opts back in with `superseded_by` tags; a KG lookup failure sets `supersession_unverified`. Amends ADR-0028 D6. Owner ruling D83. | `trusty-memory` |

@@ -14,9 +14,10 @@ mod recall_support;
 
 use chrono::Duration;
 use recall_support::{
-    Surface, backdate, fact_key, rank_of, recall, recall_on, remember, remember_typed, state_with,
+    Surface, backdate, fact_key, rank_of, recall, recall_envelope, recall_on, remember,
+    remember_typed, state_with,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// Why (#9142, #8246): the review's Q02/Q11 shape — an old status snapshot
@@ -113,7 +114,19 @@ async fn a_second_write_to_a_fact_key_demotes_the_first_and_another_key_demotes_
     for id in [a, b, c] {
         backdate(&state, "project-a", id, Duration::days(3));
     }
+    // #10609 (ADR-0074): the retired slot occupant is left out of default recall.
     let results = recall(&state, "project-a", a_text, 5).await;
+    assert!(
+        rank_of(&results, a).is_none() && rank_of(&results, b).is_some(),
+        "the retired occupant is excluded, its replacement is not: {results:#?}"
+    );
+    // A historical search brings it back, and the #9142 demotion still holds.
+    let envelope = recall_envelope(
+        &state,
+        json!({ "palace": "project-a", "query": a_text, "top_k": 5, "include_superseded": true }),
+    )
+    .await;
+    let results = envelope["results"].as_array().expect("results").clone();
     let (ra, rb, rc) = (
         rank_of(&results, a),
         rank_of(&results, b),
@@ -121,7 +134,7 @@ async fn a_second_write_to_a_fact_key_demotes_the_first_and_another_key_demotes_
     );
     assert!(
         ra.is_some() && rb.is_some() && rc.is_some(),
-        "all recalled: {results:#?}"
+        "all recalled on a historical search: {results:#?}"
     );
     assert!(
         rb < ra && rc < ra,
