@@ -97,6 +97,8 @@ pub const CONTEXT_REFRESH: ShippedSkill = ShippedSkill {
         "de6c0d83f2432fd4016c59ec3522e5b03a145db5474a58e4b8ed2bb98c78471d",
         // #10161: the U1b text, before the Intent Ledger handoff.
         "eebce72992c84b3e7cc25356cf9b94bc0001b1e67947a668cd94e14fddd04c12",
+        // #10599: the text before the datg-ready self-clear gate.
+        "ea25ebe3f0fee74963bcf4ccb1452535c233c47eb844754392d05e17382242e7",
     ],
 };
 

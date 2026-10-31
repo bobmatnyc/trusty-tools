@@ -160,39 +160,16 @@ const CRED: &str = refusal!(
 );
 /// The body names a secret-bearing file.
 const FILE: &str = refusal!("its body, or a script it runs, names a secret-bearing file (#7266)");
-/// A Python body judged as shell reads as a nested read or an env dump.
-const NESTED: &str = refusal!(
-    "its body, or a script it runs, reads a credential through a nested command or an \
-     environment dump (#8756)"
-);
-/// The script runs the seeded `datg.py`, which [`CRED`] refuses.
-const RUNS_DATG: &str = refusal!(
-    "it runs the script `<ARCH>/scripts/datg.py`: its body, or a script it runs, runs a \
-     credential-reading command (a Keychain, token or secret CLI; #8596, #8248)"
-);
-/// `self-clear.sh` runs `turn-active.py`, which the seed does not ship yet.
-const NO_TURN_ACTIVE: &str = refusal!(
-    "it runs the script `<ARCH>/scripts/turn-active.py`, which does not exist and nothing else \
-     in the command names it, so the guard cannot judge its body and fails closed"
-);
-/// A comment line in `pm-notify.sh` reads as a script run.
-const PM_NOTIFY: &str = refusal!(
-    "it runs the script `ack/progress/fyi`, which does not exist and nothing else in the \
-     command names it, so the guard cannot judge its body and fails closed"
-);
 
-/// Owner of the dashboard and Intent Ledger seed files, which this fix may not edit.
-const FIXED_IN_10571: &str = "fixed in #10571";
-/// The guard judging a Python body as shell, or a `;` inside a comment.
-const GUARD_10598: &str = "#10598";
+/// Owner of the dashboard and Intent Ledger seed files, which this fix may not edit;
+/// each row still refuses on #10571's P1 squash (7bad523a3c).
+const OWNED_BY_10571: &str = "#10571 owns this file";
 
 /// 🔴 REGRESSION (#10599): `self-clear.sh` resolves its root from its own
 /// path, so the guard follows the scripts it runs instead of refusing
 /// `$ROOT/...` as computed from `ARCHITECT_ROOT`. Relative from the default
 /// Architect, absolute in a non-default one, run by path and through `bash`.
-/// The refusals left are both #10571's: the unseeded `turn-active.py`
-/// ([`NO_TURN_ACTIVE`]), then the seeded `datg.py` ([`RUNS_DATG`]); the
-/// ratchet below fails once either changes.
+/// On #10571's seed every script it runs passes too, so each form allows.
 #[test]
 fn self_clear_resolves_its_own_root_at_both_installed_paths_10599() {
     let default = seed(false);
@@ -212,10 +189,7 @@ fn self_clear_resolves_its_own_root_at_both_installed_paths_10599() {
         let word = command.strip_prefix("bash ").unwrap_or(&command);
         let got = judge(arch, &command)
             .map(|r| normalized(arch, &r.replace(&format!("`{word}`"), "`<SCRIPT>`")));
-        assert!(
-            got.is_none() || [Some(NO_TURN_ACTIVE), Some(RUNS_DATG)].contains(&got.as_deref()),
-            "`{command}` must allow, or refuse only on turn-active.py or datg.py: {got:?}"
-        );
+        assert_eq!(got, None, "`{command}` must allow");
     }
 }
 
@@ -254,22 +228,19 @@ const fn residual(script: &'static str, reason: &'static str, issue: &'static st
 /// #10599: the seeded scripts that still refuse, each for a cause outside
 /// this fix. A new refusal, a changed text, or a listed script that starts
 /// passing fails `every_seed_script_passes_pm_guard_or_is_a_listed_residual_10599`.
+// #10599: the verdicts on #10571's P1 squash (7bad523a3c) with #10599 applied.
+// self-clear.sh, datg.py, datg-hook.sh, dashboard-db.py, dashboard-serve.py,
+// dashboard_media.py, fleet-poll.py and pm-notify.sh now pass.
 const RESIDUALS: &[Residual] = &[
-    residual("dashboard-db.py", CRED, FIXED_IN_10571),
-    residual("dashboard-serve.py", FILE, FIXED_IN_10571),
-    residual("dashboard_docs.py", FILE, FIXED_IN_10571),
-    residual("dashboard_harness.py", FILE, FIXED_IN_10571),
-    residual("dashboard_media.py", CRED, FIXED_IN_10571),
-    residual("dashboard_store.py", CRED, FIXED_IN_10571),
-    residual("dashboard_viz.py", FILE, FIXED_IN_10571),
-    residual("datg-hook.sh", RUNS_DATG, FIXED_IN_10571),
-    residual("datg.py", CRED, FIXED_IN_10571),
-    residual("datg_ops.py", CRED, FIXED_IN_10571),
-    residual("datg_store.py", FILE, FIXED_IN_10571),
-    residual("fleet-poll.py", NESTED, GUARD_10598),
-    residual("pm-notify.sh", PM_NOTIFY, GUARD_10598),
-    // #10599: #10571 seeds turn-active.py; then this row becomes RUNS_DATG.
-    residual("self-clear.sh", NO_TURN_ACTIVE, FIXED_IN_10571),
+    residual("dashboard_docs.py", FILE, OWNED_BY_10571),
+    residual("dashboard_harness.py", FILE, OWNED_BY_10571),
+    residual("dashboard_http.py", FILE, OWNED_BY_10571),
+    residual("dashboard_page.py", CRED, OWNED_BY_10571),
+    residual("dashboard_projects.py", FILE, OWNED_BY_10571),
+    residual("dashboard_store.py", CRED, OWNED_BY_10571),
+    residual("dashboard_viz.py", FILE, OWNED_BY_10571),
+    residual("datg_ops.py", CRED, OWNED_BY_10571),
+    residual("datg_store.py", CRED, OWNED_BY_10571),
 ];
 
 /// 🔴 RATCHET (#10599): every seeded script, run relative from the Architect
