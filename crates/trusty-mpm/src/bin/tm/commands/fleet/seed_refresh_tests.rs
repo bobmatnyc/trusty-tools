@@ -132,3 +132,35 @@ fn the_bundle_provenance_matches_the_shipped_content() {
         );
     }
 }
+
+/// #10571 Phase 2: `local/il-schedule.json` is seeded with the cadence jobs and
+/// no session or owner value, and an edited copy survives the next init.
+#[test]
+fn the_il_schedule_is_seeded_and_an_edited_copy_is_kept() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let dest = "local/il-schedule.json";
+    let text = std::fs::read_to_string(dir.join(dest)).expect("the schedule is seeded");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("the seed is JSON");
+    let jobs: Vec<_> = v["jobs"]
+        .as_array()
+        .expect("jobs")
+        .iter()
+        .map(|j| j["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(jobs, ["prune", "rotate", "size-check"], "{text}");
+    assert_eq!(v["sessions"], serde_json::json!([]), "{text}");
+    assert!(v.get("owner_name").is_none(), "{text}");
+    assert_eq!(v["thresholds"]["bar_ctx"], 250_000, "{text}");
+    let edited = "{\"jobs\": [], \"sessions\": [{\"name\": \"tm-mine\"}]}\n";
+    std::fs::write(dir.join(dest), edited).unwrap();
+    let steps = super::super::seed::deploy_with(&dir, seed(), &refresh::shipped_before).unwrap();
+    assert_eq!(std::fs::read_to_string(dir.join(dest)).unwrap(), edited);
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::Skipped(t) if t.starts_with(dest))),
+        "{steps:?}"
+    );
+}

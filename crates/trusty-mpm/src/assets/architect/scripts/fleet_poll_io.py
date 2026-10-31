@@ -2,11 +2,12 @@
 
 Why: fleet-poll.py sat at the 500-SLOC cap; its I/O half moves here unchanged.
 What: TmuxError, log, tmux, socket_dir, workspace_servers, list_panes, capture, capture_pane,
-send_to_architect, read_events, swap_used_mb and host_alerts. Every name these functions use from the
-poller (settings, sibling functions) is read through `P`, the late-bound view fleet-poll.py passes to
+send_to_architect, read_events, swap_used_mb, host_alerts and acquire_poll_lock. Every name these
+functions use from the poller (settings, sibling functions) is read through `P`, the late-bound view fleet-poll.py passes to
 bind(), so rebinding `fleet-poll.tmux` or `fleet-poll.LOG` still steers them, as before the split.
 Test: tests/test_fleet_poll.py, tests/test_fleet_poll_workspace_servers.py (through fleet-poll.py)
 """
+import fcntl
 import json
 import os
 import re
@@ -27,6 +28,30 @@ def bind(poller):
 
 class TmuxError(Exception):
     pass
+
+
+def acquire_poll_lock(path):
+    """("held", fd) | ("busy", detail) | ("unknown", detail) for an exclusive flock on `path` (#10571).
+
+    Why: two live pollers double every alert and type two wakes into one box.
+    What: a non-blocking LOCK_EX on `path` (created when absent). "held" returns the open fd, which the caller
+    keeps for the process's life; "busy" means another process holds it; "unknown" (no flock, an unwritable
+    inbox) is never a refusal: the caller logs it and polls.
+    Test: test_a_second_live_poller_exits_before_any_write, test_an_unknown_lock_state_only_logs
+    """
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        return "unknown", f"cannot open {path}: {e}"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return "busy", f"another fleet poller holds {path}"
+    except OSError as e:
+        os.close(fd)
+        return "unknown", f"cannot lock {path}: {e}"
+    return "held", fd
 
 
 def log(msg, dry_run=False):
