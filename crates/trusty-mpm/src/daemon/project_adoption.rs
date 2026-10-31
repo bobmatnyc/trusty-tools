@@ -72,11 +72,15 @@ pub struct RegisterProjectResponse {
 /// Test: `project_register_backfills_pre_existing_worktrees`,
 /// `project_register_backfill_is_idempotent`,
 /// `project_register_succeeds_when_the_checkout_is_not_a_repository`,
+/// `spawn_sends_nothing_without_a_key_or_a_checkout` (the search hook, #10531),
 /// `parity_register_adopts_the_same_worktrees_across_transports`.
 pub(crate) fn adopt_pre_existing_worktrees(
     state: &Arc<DaemonState>,
     project: &Project,
 ) -> BackfillReport {
+    // #10531: both transports pass through here, so neither can skip the index.
+    // Detached and best effort; registration never waits on the search daemon.
+    crate::daemon::search_project_ensure::spawn_ensure_project_index(state, project);
     let checkout = std::path::Path::new(&project.repo_url);
     if !checkout.is_dir() {
         return BackfillReport::default();

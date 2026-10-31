@@ -78,11 +78,53 @@ pub(crate) fn register_project_index(project_root: &Path) -> Option<String> {
     // #10530: pass the registry project; the id is the legacy basename until
     // `REGISTRY_IDS_ADOPTED` flips, so this names the index trusty-code names.
     let registered = registered_project_for(project_root, &crate::project::registry_data_dir());
+    // #10531: a registered, non-worktree project asks the daemon the same
+    // question registration does; any failure falls through to the older path.
+    if !skip_vector
+        && let Some(id) = registered
+            .as_ref()
+            .and_then(|r| ensure_via_daemon(project_root, r))
+    {
+        return Some(id);
+    }
     trusty_common::search_index::ensure_project_indexed_with_as(
         project_root,
         registered.as_ref(),
         trusty_common::search_index::IndexOptions::default().with_skip_vector(skip_vector),
     )
+}
+
+/// `search.project.ensure` for a registered project at session launch (#10531).
+///
+/// Why: registration and launch must find-or-create through one daemon call, so
+/// they agree on the id and the overlap guard applies to both.
+/// What: `Some(index_id)` only when the daemon answered; `None` in a test
+/// harness, with no socket, or on any refusal or transport failure (the caller
+/// then takes the older client-side path, which the same guards refuse).
+/// Test: `ensure_via_daemon_is_silent_under_the_test_harness`.
+pub(super) fn ensure_via_daemon(
+    project_root: &Path,
+    registered: &trusty_common::RegisteredProject,
+) -> Option<String> {
+    if trusty_common::running_under_test_harness() {
+        return None;
+    }
+    let socket = trusty_common::search_rpc::search_socket().ok()?;
+    if !socket.exists() {
+        return None;
+    }
+    let root = trusty_common::resolve_project_root(project_root);
+    let body = trusty_common::search_rpc::ensure_project_blocking(
+        &socket,
+        &registered.project_key,
+        &registered.name,
+        &root,
+        None,
+        std::time::Duration::from_secs(30),
+    )
+    .inspect_err(|e| tracing::warn!("#10531: search.project.ensure at launch: {e:#}"))
+    .ok()?;
+    body.get("index_id")?.as_str().map(str::to_string)
 }
 
 /// The registry project whose checkout is `project_root`'s project root (#10530).

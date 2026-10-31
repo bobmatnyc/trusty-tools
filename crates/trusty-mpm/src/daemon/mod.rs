@@ -113,6 +113,8 @@ pub mod mcp_project;
 pub mod mcp_proxy;
 pub mod mcp_session;
 pub mod project_adoption;
+// #10531: best-effort `search.project.ensure` at registration.
+pub(crate) mod search_project_ensure;
 // #6431: record-only bulk deletion for the console's unknown-state bucket.
 pub mod mcp_session_bulk;
 pub mod openapi;

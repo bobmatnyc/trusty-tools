@@ -47,6 +47,7 @@ pub mod warm;
 pub mod project;
 
 /// Registration for the project map: map, park, unpark, pin (#9169 PR-B1).
+pub mod project_ensure;
 pub mod project_map;
 
 /// Registration for the dashboard's file read (#9029).

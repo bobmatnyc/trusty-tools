@@ -166,3 +166,16 @@ fn worktree_skip_vector_false_for_plain_clone() {
         "a primary clone still embeds — skip_vector is a worktree-only decision"
     );
 }
+
+/// Why: a test process must never reach the operator's daemon through the
+/// launch-time `search.project.ensure` (#4255 posture, #10531).
+/// Test: this test.
+#[test]
+fn ensure_via_daemon_is_silent_under_the_test_harness() {
+    let dir = tempdir().expect("tempdir");
+    let registered = trusty_common::RegisteredProject::new("demo", "o/demo");
+    assert_eq!(
+        super::search_index::ensure_via_daemon(dir.path(), &registered),
+        None
+    );
+}
