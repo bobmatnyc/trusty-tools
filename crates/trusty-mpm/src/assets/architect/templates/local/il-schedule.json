@@ -1,0 +1,18 @@
+{
+  "jobs": [
+    {"name": "prune", "due": "2026-01-01", "every": "1h", "command": "builtin:prune"},
+    {"name": "rotate", "due": "2026-01-01", "every": "1h", "command": "builtin:rotate"},
+    {"name": "size-check", "due": "2026-01-01", "every": "1h", "command": "builtin:size-check"}
+  ],
+  "sessions": [],
+  "thresholds": {
+    "floor_ctx": 150000,
+    "stale_pct": 70,
+    "bar_ctx": 250000,
+    "approach_ctx": 220000,
+    "guard_ctx": 400000,
+    "fixed_base": 83000
+  },
+  "do_not_clear": [],
+  "paused_sessions": []
+}

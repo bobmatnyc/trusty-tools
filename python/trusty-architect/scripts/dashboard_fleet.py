@@ -86,7 +86,9 @@ def map_state(raw, idle_min, tokens_1h, blocked, agents=(), messaged=False):
 
 
 STATUSES = ("working", "waiting", "paused", "inactive")
-POLLER = "tm-architect-poll"       # the Architect's own poller is infrastructure, never a managed session
+# The Architect's own poller is infrastructure, never a managed session; named as fleet_poll_cfg.py names it (#10571).
+POLLER = (os.environ.get("ARCHITECT_POLL_SESSION")
+          or f"{os.environ.get('ARCHITECT_SESSION') or 'tm-architect'}-poll")
 PAUSED_DOC = ("parked", "refreshing")   # doc states meaning "deliberately held, session alive"
 GONE_KEEP_S = 24 * 3600            # a session doc whose tmux session is gone stays listed (inactive) this long
 def tmux_sessions(run=subprocess.run):

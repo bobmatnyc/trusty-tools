@@ -16,6 +16,7 @@ EVENTS = os.path.join(INBOX, "events.jsonl")
 ALERTS = os.path.join(INBOX, "alerts.jsonl")
 STATE = os.path.join(INBOX, "poll-state.json")
 LOG = os.path.join(INBOX, "poll.log")
+LOCK = os.path.join(INBOX, "poll.lock")  # #10571: one live poller per inbox
 SOCKET = os.environ.get("TMUX_SOCKET", "")
 # #8928 step 4: the name prefix of a workspace's private tmux server.
 WORKSPACE_PREFIX = "tm-ws-"

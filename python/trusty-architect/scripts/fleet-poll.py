@@ -35,9 +35,12 @@ ARCHITECT_INBOX_DIR (default <root>/inbox), ARCHITECT_QUIET_SESSIONS_FILE
 CONTEXT_BAR_TOKENS (default 250000), CONTEXT_WINDOW_TOKENS (default 1000000);
 see README.md.
 Test: tests/test_fleet_poll.py, tests/test_quiet_sessions.py,
-tests/test_fleet_poll_workspace_servers.py, tests/test_fleet_poll_split.py
+tests/test_fleet_poll_workspace_servers.py, tests/test_fleet_poll_split.py,
+tests/test_fleet_poll_lock.py
 Usage: scripts/fleet-poll.py [--once] [--interval N] [--dry-run]
        (normally run via scripts/start-fleet-poll.sh)
+Exit: 0 after --once or --dry-run; 3 when another live poller holds
+inbox/poll.lock (checked before the first log line or state write).
 """
 import argparse
 import copy
@@ -51,6 +54,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # #9997: each context-bar warning is logged once per poller process.
 _LOGGED_BAR_WARNINGS = set()
+_HELD_LOCK = []  # #10571: the poll.lock fd main() holds
 
 
 def _load_by_path(name, filename):
@@ -79,6 +83,7 @@ class _Poller:
 _cfg = _load_by_path("fleet_poll_cfg", "fleet_poll_cfg.py")
 ROOT, INBOX, EVENTS, ALERTS = _cfg.ROOT, _cfg.INBOX, _cfg.EVENTS, _cfg.ALERTS
 STATE, LOG, SOCKET, WORKSPACE_PREFIX = _cfg.STATE, _cfg.LOG, _cfg.SOCKET, _cfg.WORKSPACE_PREFIX
+LOCK = _cfg.LOCK
 ARCHITECT, POLL_SESSION, SKIP_SESSIONS = _cfg.ARCHITECT, _cfg.POLL_SESSION, _cfg.SKIP_SESSIONS
 SHELLS, EVENT_TYPES = _cfg.SHELLS, _cfg.EVENT_TYPES
 DISK_HIGH, LOAD_FACTOR_DEFAULT = _cfg.DISK_HIGH, _cfg.LOAD_FACTOR_DEFAULT
@@ -113,6 +118,7 @@ TmuxError, log, tmux, socket_dir = _io.TmuxError, _io.log, _io.tmux, _io.socket_
 workspace_servers, list_panes, _rows = _io.workspace_servers, _io.list_panes, _io._rows
 capture, capture_pane, send_to_architect = _io.capture, _io.capture_pane, _io.send_to_architect
 read_events, swap_used_mb, host_alerts = _io.read_events, _io.swap_used_mb, _io.host_alerts
+acquire_poll_lock = _io.acquire_poll_lock
 resolve_context_bar, self_ctx_alerts = _alerts.resolve_context_bar, _alerts.self_ctx_alerts
 il_cron_alerts, ctx_watch_alerts = _alerts.il_cron_alerts, _alerts.ctx_watch_alerts
 run_architect_relaunch, architect_busy = _watchdog.run_architect_relaunch, _watchdog.architect_busy
@@ -217,6 +223,15 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if not args.dry_run:
         os.makedirs(INBOX, exist_ok=True)
+        # #10571: a second live poller stops here, before its first log line or state write.
+        held, detail = acquire_poll_lock(LOCK)
+        if held == "busy":
+            print(f"fleet-poll: {detail}; exiting", file=sys.stderr)
+            return 3
+        if held == "unknown":
+            log(f"WARNING poll lock: {detail}; polling without it")
+        else:
+            _HELD_LOCK.append(detail)  # the fd: the lock lasts as long as this process
     state = load_state()
     if args.dry_run:
         state = copy.deepcopy(state)
@@ -230,9 +245,9 @@ def main(argv=None):
         except Exception as e:  # one bad cycle must not stop the poller
             log(f"ERROR {type(e).__name__}: {e}", args.dry_run)
         if args.once or args.dry_run:
-            return
+            return 0
         time.sleep(args.interval)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
