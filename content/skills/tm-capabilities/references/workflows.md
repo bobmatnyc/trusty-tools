@@ -163,7 +163,11 @@ in the section format the catch-up reader parses (`## Summary` /
   `not_a_git_repo`, or `unchanged`.
 - **Session ref (ADR-0062, #7830).** Separately, on every project tracked or
   not, the snapshot is appended to this session's own append-only git ref
-  `refs/tm/sessions/<user-id>/<session-key>` and lease-pushed to `origin`.
+  `refs/tm/sessions/<user-id>/<session-key>` and lease-pushed to `origin` —
+  only when GitHub confirms `origin` is private. A public, non-GitHub or
+  unconfirmed `origin` gets no push and a `ref_error` saying why
+  (#10614); the pushed copy reads `~` for the home directory and a
+  hashed `<user-id>`.
   `ref_name` names the ref, `ref_published` says whether the push landed, and
   `ref_error` carries the reason when it did not. A ref failure NEVER fails the
   pause, because the local snapshot is the primary write. A non-null
