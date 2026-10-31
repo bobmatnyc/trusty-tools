@@ -6,13 +6,13 @@
 =tm-dogfood:	20000101T0000Z-tm-dogfood.ansi
 %4	20000101T0000Z-tm-memory-01.ansi
 =tm-memory-01:	20000101T0000Z-tm-memory-01.ansi
-%5	20000101T0000Z-tm-mpm-utils-01.ansi
-=tm-mpm-utils-01:	20000101T0000Z-tm-mpm-utils-01.ansi
+%5	20000101T0000Z-tm-pkg-utils-01.ansi
+=tm-pkg-utils-01:	20000101T0000Z-tm-pkg-utils-01.ansi
 %6	20000101T0000Z-tm-review-01.ansi
 =tm-review-01:	20000101T0000Z-tm-review-01.ansi
 %7	20000101T0000Z-tm-search-01.ansi
 =tm-search-01:	20000101T0000Z-tm-search-01.ansi
 %8	20000101T0000Z-tm-secrets-01.ansi
 =tm-secrets-01:	20000101T0000Z-tm-secrets-01.ansi
-%9	20000101T0000Z-tm-things-01.ansi
-=tm-things-01:	20000101T0000Z-tm-things-01.ansi
+%9	20000101T0000Z-tm-widget-01.ansi
+=tm-widget-01:	20000101T0000Z-tm-widget-01.ansi
