@@ -1104,6 +1104,38 @@ unchanged.
   A retry finishes the job, including vectors whose rows the failed call
   already deleted and hashes it did not forget.
 
+##### `search.index.embed_missing` (#10551)
+
+Embed only the chunks that have no vector, and settle the semantic stage.
+Socket-only (no HTTP twin); MCP tool `embed_missing`; CLI `trusty-search index
+embed-missing [--dry-run]`. Use it on an index that reads `degraded` after an
+embedder fault (`embedder stdio IPC error: child closed stdout`) with
+`semantic_coverage.vectors_present` below `chunk_count`; a full reindex is not
+needed.
+
+- **Request body**: `{ "dry_run": false }`. `dry_run: true` reports the gap and
+  queues nothing.
+- **Response 200**: `{ "index_id", "dry_run", "action", "chunks", "missing",
+  "vectors_rejected", "semantic" }`. `action` is `queued` (the missing chunks
+  went to the deferred-embed pass; poll `status` until `semantic` is `ready`),
+  `would_queue` (dry run), `already_running`, `noop` (nothing missing), or
+  `settled` (nothing missing and a `failed` stage was set `ready`). `missing`
+  is measured by chunk id; chunks the store durably refused
+  (`vectors_rejected`, #8884) are not a gap. A repeat run is a `noop`.
+- **Response 409** `embed_missing_not_applicable` (`retryable: false`): the
+  vector lane is off (`skip_vector`, `lexical_only`, serve-only) or no embedder
+  is wired. `embed_missing_busy` (`retryable: true`): a reindex holds the index.
+- **Response 503** `embed_missing_embedder_unavailable` and
+  `embed_missing_unreadable` (`retryable: true`): the embedder failed a probe
+  embed, or the vector store or corpus could not be read. The stage is not
+  touched.
+- **Auto-retry**: the daemon runs the same operation by itself for every index
+  whose semantic stage is `failed`. A ticker wakes every 30 s; per index it
+  waits 30 s, then 60 s, doubling to 15 min, and probes the embedder before it
+  resumes. A dead embedder is probed at the 15 min cap indefinitely; a resume
+  that was queued and failed again counts against a cap of 5, after which the
+  ticker leaves the index to an operator.
+
 ##### `POST /indexes/:id/reindex`
 
 Fire-and-forget full reindex. Returns immediately with an SSE stream URL; poll
@@ -1275,7 +1307,7 @@ server or `OPENROUTER_API_KEY` in the daemon's environment.
 ### MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **22 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **23 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -1285,6 +1317,7 @@ this table is generated from it, not maintained by hand.
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
+| `embed_missing` | `index_id`, `dry_run?` | Embed only the chunks of an index that have no vector, then settle its semantic stage. |
 | `get_call_chain` | `entry_point`, `direction?`, `full?`, `include_source?`, `index_id?`, `max_bytes?`, `max_depth?`, `project?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `project?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
 | `index_file` | `index_id`, `path`, `content` | Add or update one file in an index. |

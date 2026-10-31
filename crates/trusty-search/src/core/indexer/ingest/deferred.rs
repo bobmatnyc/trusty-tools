@@ -308,6 +308,17 @@ impl CodeIndexer {
         VectorCoverage::Measured { chunks, missing }
     }
 
+    /// The wired embedder, so a caller can probe it without holding the
+    /// indexer lock (#10551).
+    ///
+    /// Why: a probe is one embed call and a dead embedder can stall it; an
+    /// indexer read guard held that long queues every writer behind it.
+    /// What: a clone of the `Arc`, `None` when no embedder is wired.
+    /// Test: `a_dead_embedder_is_refused_before_the_stage_is_touched`.
+    pub(crate) fn embedder_arc(&self) -> Option<std::sync::Arc<dyn crate::core::embed::Embedder>> {
+        self.embedder.clone()
+    }
+
     /// Wait, on a background budget, until the chunk map is a view of the
     /// durable corpus (#8761).
     ///

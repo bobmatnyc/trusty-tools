@@ -19,8 +19,9 @@ use super::{
 };
 use crate::service::rpc::reads::{METHOD_CHUNKS_LIST, METHOD_INDEXES_LIST, METHOD_INDEX_STATUS};
 use crate::service::rpc::writes::{
-    METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_FILES_REMOVE, METHOD_INDEX_FILE_PUT,
-    METHOD_INDEX_FILE_REMOVE, METHOD_INDEX_REINDEX, METHOD_INDEX_ROOTS_ADD,
+    METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_EMBED_MISSING,
+    METHOD_INDEX_FILES_REMOVE, METHOD_INDEX_FILE_PUT, METHOD_INDEX_FILE_REMOVE,
+    METHOD_INDEX_REINDEX, METHOD_INDEX_ROOTS_ADD,
 };
 
 /// The `add_root` tool's descriptor (#7434), appended by `tool_descriptors`.
@@ -40,6 +41,29 @@ pub(super) fn add_root_descriptor() -> Value {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Absolute directory paths to add."
+                }
+            }
+        }
+    })
+}
+
+/// The `embed_missing` tool's descriptor (#10551), appended by `tool_descriptors`.
+///
+/// Why: kept beside its dispatch arm, out of `descriptors.rs`, which sits near
+/// the line cap. The description names what the tool does NOT do, so a caller
+/// does not reach for `reindex` to recover missing vectors.
+pub(super) fn embed_missing_descriptor() -> Value {
+    serde_json::json!({
+        "name": "embed_missing",
+        "description": "Embed only the chunks of an index that have no vector, then settle its semantic stage. Use it when index_status reports a degraded index whose semantic stage failed (for example `embedder stdio IPC error: child closed stdout`) and semantic_coverage.vectors_present is below chunk_count; it replaces a full reindex, which re-walks and re-chunks the whole tree. It measures the gap by chunk id, probes the embedder, queues the existing deferred-embed pass for the missing chunks and answers at once; poll index_status until the stage reads ready. Chunks the store durably refused (vectors_rejected) are not a gap. Idempotent: with nothing missing it is a no-op, or settles a failed stage to ready. The daemon also retries a failed stage by itself with backoff once the embedder answers. action is one of queued, would_queue, already_running, noop, settled. Refused with embed_missing_embedder_unavailable (retryable) while the embedder fails a probe, embed_missing_busy (retryable) while a reindex holds the index, and embed_missing_not_applicable when the vector lane is off.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["index_id"],
+            "properties": {
+                "index_id": { "type": "string" },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "true reports chunks and missing and queues nothing."
                 }
             }
         }
@@ -233,6 +257,21 @@ pub(super) async fn dispatch_index_tool(
             let params = serde_json::json!({ "index_id": index_id, "body": body });
             Some(server.call(METHOD_INDEX_FILES_REMOVE, params).await)
         }
+        // #10551: the embed-only resume of a failed semantic stage.
+        "embed_missing" => {
+            let index_id = match required_index_id(server, args) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let mut body = serde_json::json!({});
+            match optional_bool(args, "dry_run", "true reports the gap and queues nothing") {
+                Ok(Some(dry_run)) => body["dry_run"] = Value::Bool(dry_run),
+                Ok(None) => {}
+                Err(e) => return Some(Err(e)),
+            }
+            let params = serde_json::json!({ "index_id": index_id, "body": body });
+            Some(server.call(METHOD_INDEX_EMBED_MISSING, params).await)
+        }
         // Issue #312: request details=true so the response includes
         // per-index size_bytes in addition to the id list.
         "list_indexes" => Some(list_indexes(server).await),
@@ -323,7 +362,7 @@ pub(super) async fn dispatch_index_tool(
                 Ok(None) => {
                     return Some(
                         super::index_directory::index_directory(server, "index_status").await,
-                    )
+                    );
                 }
                 Err(e) => return Some(Err(e)),
             };
@@ -349,7 +388,7 @@ pub(super) async fn dispatch_index_tool(
                 Ok(None) => {
                     return Some(Err(DispatchError::InvalidParams(
                         super::types::MISSING_INDEX_ID.into(),
-                    )))
+                    )));
                 }
                 Err(e) => return Some(Err(e)),
             };

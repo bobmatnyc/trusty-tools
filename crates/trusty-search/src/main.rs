@@ -33,7 +33,6 @@ use colored::Colorize;
 use commands::convert::ConvertTarget;
 use commands::explicit_target::index_id_source;
 use commands::index_action::IndexAction;
-use commands::index_remove::handle_index_remove;
 use commands::monitor::MonitorTarget;
 use commands::service::ServiceAction;
 use std::io;
@@ -1168,33 +1167,7 @@ async fn run() -> Result<()> {
             no_kg,
             action,
         } => match action {
-            // #6422: the on-disk data goes by default; `--keep-data` opts out.
-            Some(IndexAction::Remove {
-                path: rm_path,
-                keep_data,
-                yes,
-            }) => {
-                handle_index_remove(rm_path, cli.index, index_source, keep_data, yes).await?;
-            }
-            Some(IndexAction::Add {
-                path: add_path,
-                name: add_name,
-                allow_sensitive_path: add_allow_sensitive,
-            }) => {
-                commands::index_allowlist::handle_allowlist_add(
-                    add_path,
-                    add_name,
-                    add_allow_sensitive,
-                )
-                .await?;
-            }
-            Some(IndexAction::List { json }) => {
-                commands::index_allowlist::handle_allowlist_list(json).await?;
-            }
-            Some(IndexAction::Relocate { to }) => {
-                commands::index_relocate::handle_index_relocate(&cli.index, index_source, to)
-                    .await?;
-            }
+            Some(action) => action.run(cli.index, index_source, cli.json).await?,
             None => {
                 commands::index::handle_index(
                     path,

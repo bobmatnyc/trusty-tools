@@ -183,6 +183,33 @@ impl CodeIndexer {
     /// must treat as a real gap. Reads the chunk ids only when a record exists.
     /// Test: see the module doc.
     pub(crate) async fn refusals_behind_vector_gap(&self) -> Result<Option<usize>> {
+        let Some((corpus, record)) = self.load_refusal_record().await? else {
+            return Ok(None);
+        };
+        let missing = match self.vector_coverage().await {
+            VectorCoverage::Measured { missing, .. } => missing,
+            VectorCoverage::NotApplicable => return Ok(None),
+            VectorCoverage::Unreadable(why) => bail!("{why}"),
+        };
+        Self::excused_count(corpus, record, missing).await
+    }
+
+    /// [`Self::refusals_behind_vector_gap`] over a gap the caller already
+    /// measured (#10551).
+    ///
+    /// Why: the embed-missing resume has the `missing` ids from its own
+    /// `vector_coverage` read; measuring again would scan every corpus id twice.
+    /// What: the same verdict as the method above for exactly `missing`.
+    /// Test: `a_refused_chunk_is_not_a_gap_to_an_embed_missing_resume`.
+    pub(crate) async fn refusals_excusing(&self, missing: Vec<String>) -> Result<Option<usize>> {
+        let Some((corpus, record)) = self.load_refusal_record().await? else {
+            return Ok(None);
+        };
+        Self::excused_count(corpus, record, missing).await
+    }
+
+    /// The corpus and its non-empty refusal record, if both exist.
+    async fn load_refusal_record(&self) -> Result<Option<(Arc<CorpusStore>, RefusalRecord)>> {
         let Some(corpus) = self.corpus.clone() else {
             return Ok(None);
         };
@@ -194,14 +221,16 @@ impl CodeIndexer {
             return Ok(None);
         };
         let record = RefusalRecord::decode(&bytes)?;
-        if record.refused.is_empty() {
-            return Ok(None);
-        }
-        let missing = match self.vector_coverage().await {
-            VectorCoverage::Measured { missing, .. } => missing,
-            VectorCoverage::NotApplicable => return Ok(None),
-            VectorCoverage::Unreadable(why) => bail!("{why}"),
-        };
+        Ok((!record.refused.is_empty()).then_some((corpus, record)))
+    }
+
+    /// `Some(n)` when every id in `missing` is a recorded refusal of its
+    /// current content.
+    async fn excused_count(
+        corpus: Arc<CorpusStore>,
+        record: RefusalRecord,
+        missing: Vec<String>,
+    ) -> Result<Option<usize>> {
         if missing.is_empty() || missing.iter().any(|id| !record.refused.contains_key(id)) {
             return Ok(None);
         }

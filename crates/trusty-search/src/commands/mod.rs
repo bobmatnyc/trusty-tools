@@ -51,6 +51,8 @@ pub mod index;
 pub(crate) mod index_action;
 pub mod index_allowlist;
 pub mod index_cwd_resolve;
+// #10551: `index embed-missing`, the embed-only resume of a failed semantic stage.
+pub(crate) mod index_embed_missing;
 pub(crate) mod index_persist;
 pub mod index_relocate;
 pub mod index_remove;

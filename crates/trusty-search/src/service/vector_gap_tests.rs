@@ -804,6 +804,29 @@ async fn a_restore_after_a_refused_embedding_does_not_demote_the_stage() {
     assert_eq!(semantic.vectors_rejected, Some(1), "{semantic:?}");
 }
 
+/// A chunk the store durably refused is not owed to an embed-missing resume.
+///
+/// Why (#10551): the resume's own coverage read feeds the refusal check, so a
+/// refused chunk must be subtracted from it exactly as the restore reconcile
+/// subtracts it, or the resume would re-queue it for ever.
+/// What: a `Failed` stage over a corpus whose only gap is the refused `beta`
+/// chunk settles `Ready` with `vectors_rejected: 1` and embeds nothing.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_refused_chunk_is_not_a_gap_to_an_embed_missing_resume() {
+    use crate::service::embed_missing::{resume_semantic, ResumeAction};
+    let (restored, _corpus, _dir) = restored_after_a_refusal("vector-gap-10551-refused").await;
+    restored.stages.write().await.semantic = StageState::failed("embedder died");
+
+    let report = resume_semantic(&restored, false).await.expect("resume");
+    assert_eq!(report.action, ResumeAction::Settled, "{report:?}");
+    assert_eq!((report.missing, report.rejected), (Some(0), 1));
+    let semantic = restored.stages.read().await.semantic.clone();
+    assert_eq!(semantic.status, StageStatus::Ready, "{semantic:?}");
+    assert_eq!(semantic.vectors_rejected, Some(1), "{semantic:?}");
+}
+
 /// Assert the reconcile treated the gap as real, then wait for the backfill
 /// it queued to settle so the next serial test starts with an empty queue.
 async fn assert_backfilled(handle: &Arc<IndexHandle>, why: &str) {
