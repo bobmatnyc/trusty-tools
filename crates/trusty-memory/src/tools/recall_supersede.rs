@@ -1,5 +1,6 @@
-//! Supersession demotion for recall: a drawer another drawer superseded ranks
-//! below its replacement (#9421, ADR-0028 D6).
+//! Supersession lookup for recall: a drawer another drawer superseded ranks
+//! below its replacement (#9421, ADR-0028 D6) and, by default, is left out of
+//! the answer (#10609, ADR-0074, owner ruling D83).
 //!
 //! Why: [`super::recall_rank`] demotes stale drawers only by tag (snapshot) or
 //! by Tier C slot. A drawer that a newer fact superseded, with neither, ranked
@@ -11,12 +12,14 @@
 //! one result window in one KG read per palace, bounded by
 //! [`LOOKUP_BUDGET`]. The rulings leg reads each rulings palace's own edges
 //! through [`supersessions_for_within`], inside the leg's time bound. A failed
-//! or late read logs a warning naming the palace and demotes nothing for that
-//! palace, so recall still answers ([`fail_open`]). An edge counts only when
+//! or late read logs a warning naming the palace and finds no edge for that
+//! palace, so recall still answers ([`fail_open`]), and reports the lookup as
+//! unverified ([`SupersessionLookup::unverified`]). An edge counts only when
 //! its replacement is a drawer of the palace (#9462, [`resolved_edges`]).
 //! [`demote_superseded`] halves a
 //! superseded drawer's score and, when its replacement is in the same list,
 //! keeps it strictly below the replacement. Nothing is deleted (D6).
+//! The exclusion rule itself lives in [`super::recall_supersede_view`].
 //! Test: `tools::recall_supersede_tests`; end to end in
 //! `tests/recall_supersession.rs` (rulings palaces included) and the
 //! `superseded_by` groups of `tests/recall_eval.rs`.
@@ -32,11 +35,34 @@ use uuid::Uuid;
 /// `superseded drawer id -> replacement drawer id` for one recall.
 pub(crate) type Supersessions = HashMap<Uuid, Uuid>;
 
+/// The edges one lookup found, and whether the lookup answered.
+///
+/// Why (#10609): a failed or late read finds no edges, which is
+/// indistinguishable from "nothing is superseded". Default recall excludes
+/// superseded drawers, so the caller must be told when it could not check.
+/// What: `edges` as [`Supersessions`]; `unverified` is `true` when any palace's
+/// read errored or ran past its budget.
+/// Test: `a_failed_lookup_demotes_nothing`, `a_late_lookup_demotes_nothing`.
+#[derive(Debug, Default)]
+pub(crate) struct SupersessionLookup {
+    pub edges: Supersessions,
+    pub unverified: bool,
+}
+
+impl SupersessionLookup {
+    /// Fold `other` into `self`: edges merge, unverified is sticky.
+    pub(crate) fn absorb(&mut self, other: SupersessionLookup) {
+        self.edges.extend(other.edges);
+        self.unverified |= other.unverified;
+    }
+}
+
 /// Score multiplier for a superseded drawer.
 ///
-/// Why: demotion, not exclusion (ADR-0028 D6): with no replacement in the
-/// window, the old drawer stays recallable as history. Same value as the
-/// snapshot floor, so the two demotions weigh alike.
+/// Why: applies only to a superseded drawer a historical search
+/// (`include_superseded`) returned: default recall excludes it (ADR-0074). With
+/// no replacement in the window the old drawer stays recallable as history.
+/// Same value as the snapshot floor, so the two demotions weigh alike.
 /// Test: `a_superseded_drawer_is_halved_when_its_replacement_is_absent`.
 pub(crate) const SUPERSEDED_WEIGHT: f32 = 0.5;
 
@@ -75,27 +101,33 @@ where
     }
 }
 
-/// Run `lookup` within `budget`; on any failure, log and demote nothing.
+/// Run `lookup` within `budget`; on any failure, log and report it unverified.
 ///
 /// Why (#9421): a KG read error or a stalled read must never drop the recall
-/// or turn it into an error. Recall without demotion is the pre-#9421 answer,
-/// which is a safe answer.
+/// or turn it into an error. #10609: and it must never pass silently, because
+/// the edges it could not read are drawers the recall can no longer exclude.
 /// What: [`lookup_within`]; an `Err` is logged at WARN with the palace and
-/// mapped to an empty map.
+/// mapped to an empty map with `unverified: true`.
 /// Test: `a_failed_lookup_demotes_nothing`, `a_late_lookup_demotes_nothing`.
-pub(crate) async fn fail_open<F>(palace: &str, lookup: F, budget: Duration) -> Supersessions
+pub(crate) async fn fail_open<F>(palace: &str, lookup: F, budget: Duration) -> SupersessionLookup
 where
     F: Future<Output = anyhow::Result<Supersessions>>,
 {
     match lookup_within(lookup, budget).await {
-        Ok(found) => found,
+        Ok(edges) => SupersessionLookup {
+            edges,
+            unverified: false,
+        },
         Err(e) => {
-            // #9421: fail open — the recall answers, undemoted.
+            // #9421: fail open — the recall answers. #10609: flagged unverified.
             tracing::warn!(
                 palace,
-                "#9421: {e}; recall answers without supersession demotion"
+                "#9421: {e}; recall answers without edge-based supersession"
             );
-            Supersessions::new()
+            SupersessionLookup {
+                edges: Supersessions::new(),
+                unverified: true,
+            }
         }
     }
 }
@@ -107,7 +139,7 @@ where
 pub(crate) async fn supersessions_for(
     handle: &PalaceHandle,
     results: &[RecallResult],
-) -> Supersessions {
+) -> SupersessionLookup {
     supersessions_for_within(handle, results, LOOKUP_BUDGET).await
 }
 
@@ -121,9 +153,9 @@ pub(crate) async fn supersessions_for_within(
     handle: &PalaceHandle,
     results: &[RecallResult],
     budget: Duration,
-) -> Supersessions {
+) -> SupersessionLookup {
     if results.is_empty() {
-        return Supersessions::new();
+        return SupersessionLookup::default();
     }
     let ids = results.iter().map(|r| r.drawer.id).collect();
     fail_open(handle.id.as_str(), resolved_edges(handle, ids), budget).await
@@ -135,13 +167,14 @@ pub(crate) async fn supersessions_for_within(
 /// each palace answers for its own hits.
 /// What: groups `results` by palace id and runs [`supersessions_for`]'s read
 /// against each matching handle. Drawer ids are UUIDs, so the per-palace
-/// maps merge without collision.
+/// maps merge without collision; one palace's failed read marks the whole
+/// lookup unverified.
 /// Test: `a_superseded_drawer_ranks_below_its_replacement_on_every_recall_surface`.
 pub(crate) async fn supersessions_across(
     handles: &[Arc<PalaceHandle>],
     results: &[CrossPalaceResult],
-) -> Supersessions {
-    let mut found = Supersessions::new();
+) -> SupersessionLookup {
+    let mut found = SupersessionLookup::default();
     for handle in handles {
         let ids: Vec<Uuid> = results
             .iter()
@@ -152,7 +185,7 @@ pub(crate) async fn supersessions_across(
             continue;
         }
         let lookup = resolved_edges(handle, ids);
-        found.extend(fail_open(handle.id.as_str(), lookup, LOOKUP_BUDGET).await);
+        found.absorb(fail_open(handle.id.as_str(), lookup, LOOKUP_BUDGET).await);
     }
     found
 }
@@ -278,6 +311,8 @@ impl RankedHit for CrossPalaceResult {
 }
 
 /// Demote every superseded drawer in `results`; the caller re-sorts.
+///
+/// Reached only for drawers a historical search kept (ADR-0074).
 ///
 /// Why (#9421 AC1): a weight alone cannot promise "below its replacement" —
 /// an old drawer can out-score its replacement by more than any fixed factor.

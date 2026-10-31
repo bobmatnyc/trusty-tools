@@ -1,6 +1,6 @@
 # 0028. Memory recall splits into three tiers — Standing, Current, Episodic — with enforced retirement for Current
 
-- **Status:** Accepted
+- **Status:** Amended by [0074](0074-exclude-superseded-drawers-from-default-recall.md)
 - **Date:** 2026-08-04
 - **Scope:** crates `trusty-common` (`memory_core`: retrieval layers, decay,
   drawer model), `trusty-memory` (prompt-facts surface, `prompt-context` hook
@@ -575,6 +575,8 @@ happens when humans are left to link by hand: the one correction that mattered
 pointed at the wrong drawer.
 
 ### D6. What happens to a superseded fact
+
+> Amended by [ADR-0074](0074-exclude-superseded-drawers-from-default-recall.md): default recall now excludes a superseded drawer; `include_superseded` returns it.
 
 **Demoted, never deleted.** On supersession the prior fact:
 

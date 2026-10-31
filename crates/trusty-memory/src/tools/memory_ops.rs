@@ -32,7 +32,7 @@ use super::palace_index::{PalaceScope, resolve_palace_or_index};
 // `memory_list` takes the same `room`/`wing` scope the recall tools do
 // (ADR-0027 D4.1), so it borrows the resolver rather than re-spelling it.
 use super::recall_ops::recall_scope;
-use super::recall_projection::with_access;
+use super::recall_projection::{project_tags, with_access};
 use super::wing_ops::resolve_wing_arg;
 
 pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
@@ -379,7 +379,8 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
                     "drawer_id": d.id.to_string(),
                     "content": d.content(),
                     "importance": d.importance,
-                    "tags": d.tags,
+                    // #10609: stored tags minus the internal retirement marker.
+                    "tags": project_tags(&d.tags, true),
                     "created_at": d.created_at.to_rfc3339(),
                     "drawer_type": d.drawer_type.as_str(),
                     "expires_at": d.expires_at.map(|t| t.to_rfc3339()),

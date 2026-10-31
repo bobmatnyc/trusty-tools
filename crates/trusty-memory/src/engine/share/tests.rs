@@ -661,6 +661,48 @@ async fn merge_unions_tags_and_takes_the_higher_importance() {
     );
 }
 
+/// Why: a crafted share file can repeat a live drawer's content carrying
+/// `superseded-by:<uuid>`; merging that tag would hide the live drawer from
+/// default recall (#10609). A merge never imports a retirement.
+/// What: a record with the marker merges into a live local drawer (and into a
+/// sibling record via `merge_records`); the marker is not unioned, the ordinary
+/// tag is.
+/// Test: this test.
+#[tokio::test]
+async fn a_merge_import_never_imports_a_retirement_marker() {
+    let tmp = tempdir().unwrap();
+    let dst = open_palace(tmp.path(), "marker-dst");
+    let id = write(&dst, "a live fact", &["alpha"]).await;
+    assert_eq!(dst.drawers.read().first().unwrap().retired_by(), None);
+
+    let marker = format!("superseded-by:{}", Uuid::new_v4());
+    let mut d = crate::engine::palace::Drawer::new(Uuid::new_v4(), "a live fact");
+    d.tags = vec![marker.clone(), "beta".to_string()];
+    let rec = SharedMemoryRecord::from_drawer(&d, "general");
+
+    let summary = import_palace_records(&dst, std::slice::from_ref(&rec))
+        .await
+        .unwrap();
+    assert_eq!(summary.inserted, 0, "{summary:?}");
+    let live = dst
+        .drawers
+        .read()
+        .iter()
+        .find(|x| x.id == id)
+        .cloned()
+        .unwrap();
+    assert_eq!(live.retired_by(), None, "tags: {:?}", live.tags);
+    assert_eq!(live.tags, vec!["alpha".to_string(), "beta".to_string()]);
+
+    let plain = SharedMemoryRecord::from_drawer(
+        &crate::engine::palace::Drawer::new(Uuid::new_v4(), "a live fact"),
+        "general",
+    );
+    let merged = merge_records(&[std::slice::from_ref(&plain), std::slice::from_ref(&rec)]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].tags, vec!["beta".to_string()]);
+}
+
 /// Why: an imported memory that cannot be recalled is not a memory. This is the
 /// end of the chain the re-embed decision rests on — the vector is rebuilt on
 /// this side, so the fact has to come back out of `recall`.

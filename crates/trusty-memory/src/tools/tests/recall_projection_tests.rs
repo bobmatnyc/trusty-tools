@@ -103,6 +103,27 @@ fn creator_tags_come_back_when_the_flag_is_set() {
     assert_eq!(tag_arrays(&response), vec![expected]);
 }
 
+/// Why (#10609): the `superseded-by:<id>` retirement marker is internal; a
+/// historical search reports it as `superseded_by`, so showing the raw tag too
+/// is noise that an agent could copy back onto a live write.
+/// What: a hit carrying the marker; the serialized tags omit it under both
+/// the default and the `include_creator_tags` projection.
+/// Test: this test.
+#[test]
+fn the_retirement_marker_is_never_shown_as_a_tag() {
+    let mut marked = hit(2, 0.9, &["rust"]);
+    marked.drawer.mark_retired_by(Uuid::new_v4());
+    for include in [false, true] {
+        let response = serialize_recall("alpha", "q", vec![marked.clone()], &no_floor(include));
+        let tags = &tag_arrays(&response)[0];
+        assert!(tags.contains(&"rust".to_string()), "{tags:?}");
+        assert!(
+            tags.iter().all(|t| !t.starts_with("superseded-by:")),
+            "include_creator_tags={include}: {tags:?}"
+        );
+    }
+}
+
 /// Why: 0.38 and 0.46 are the observed band this ruling names, so the floor is
 /// asserted at exactly the two values it was chosen to separate.
 /// What: a floor of 0.4 over one 0.38 hit and one 0.46 hit.

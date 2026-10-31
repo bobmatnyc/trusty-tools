@@ -862,14 +862,20 @@ pub(crate) fn skipped_envelope(palace_id: &str, reason: &str) -> Value {
 /// Test: covered indirectly by `dispatch_remember_then_recall` and
 /// `auto_kg_extraction_hooks_into_memory_remember`.
 pub(crate) fn parse_tags(args: &Value) -> Vec<String> {
-    args.get("tags")
+    let mut tags: Vec<String> = args
+        .get("tags")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|t| t.as_str().map(|s| s.to_string()))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // #10609: the `superseded-by:` namespace is reserved to the retirement
+    // commit; a caller-supplied one would hide a live drawer from recall.
+    let palace = args.get("palace").and_then(Value::as_str).unwrap_or("");
+    crate::engine::retired_marker::strip_retirement_tags(&mut tags, palace);
+    tags
 }
 
 /// Attach the MCP attribution tags (`creator:*` and the bare-UUID session

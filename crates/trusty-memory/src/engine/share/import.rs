@@ -25,6 +25,7 @@ use super::record::SharedMemoryRecord;
 use crate::engine::content_hash::ContentHash;
 use crate::engine::embed::Embedder;
 use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::retired_marker::is_retirement_tag;
 use crate::engine::retrieval::{PalaceHandle, embed_chunks, shared_embedder};
 use crate::engine::room_identity::DEFAULT_WING_ID;
 use crate::engine::store::rooms::resolve_or_create_room_in_wing;
@@ -331,7 +332,8 @@ fn find_by_hash(
 /// correct.
 /// Test: `merge_keeps_the_earlier_created_at_in_either_order`,
 /// `merge_keeps_the_earlier_created_at_in_either_order`,
-/// `merge_unions_tags_and_takes_the_higher_importance`, `import_is_idempotent`.
+/// `merge_unions_tags_and_takes_the_higher_importance`, `import_is_idempotent`,
+/// `a_merge_import_never_imports_a_retirement_marker`.
 async fn merge_into_existing(
     handle: &PalaceHandle,
     rec: &SharedMemoryRecord,
@@ -343,7 +345,9 @@ async fn merge_into_existing(
     let earlier = local_created_at.min(rec.created_at);
     let mut tags = local_tags.clone();
     for t in &rec.tags {
-        if !tags.contains(t) {
+        // #10609: a merge never imports a retirement; a record repeating a live
+        // drawer's content must not hide it.
+        if !is_retirement_tag(t) && !tags.contains(t) {
             tags.push(t.clone());
         }
     }
@@ -481,7 +485,8 @@ async fn insert_new(
 /// What: earliest `created_at` wins, tags union, importance takes the maximum —
 /// the same merge as [`merge_into_existing`], on records rather than drawers.
 /// Records that fail [`SharedMemoryRecord::verify`] are dropped.
-/// Test: `merge_records_converges_two_machines_exports`.
+/// Test: `merge_records_converges_two_machines_exports`,
+/// `a_merge_import_never_imports_a_retirement_marker`.
 pub fn merge_records(sets: &[&[SharedMemoryRecord]]) -> Vec<SharedMemoryRecord> {
     let mut by_hash: HashMap<ContentHash, SharedMemoryRecord> = HashMap::new();
     for set in sets {
@@ -496,7 +501,8 @@ pub fn merge_records(sets: &[&[SharedMemoryRecord]]) -> Vec<SharedMemoryRecord> 
                 Some(kept) => {
                     kept.created_at = kept.created_at.min(rec.created_at);
                     for t in &rec.tags {
-                        if !kept.tags.contains(t) {
+                        // #10609: a merge never imports a retirement.
+                        if !is_retirement_tag(t) && !kept.tags.contains(t) {
                             kept.tags.push(t.clone());
                         }
                     }

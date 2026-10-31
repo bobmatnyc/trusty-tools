@@ -156,7 +156,9 @@ async fn a_failed_lookup_demotes_nothing() {
         LOOKUP_BUDGET,
     )
     .await;
-    assert!(found.is_empty());
+    assert!(found.edges.is_empty());
+    // #10609: a failed read is reported, not mistaken for "nothing superseded".
+    assert!(found.unverified);
     let lines = log.lines_naming("#9421");
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("WARN") && lines[0].contains("kg.redb unreadable"));
@@ -181,7 +183,11 @@ async fn a_late_lookup_demotes_nothing() {
     let (log, _guard) = LogCapture::install();
     let stalled = std::future::pending::<anyhow::Result<Supersessions>>();
     let found = fail_open("p-9421", stalled, budget).await;
-    assert!(found.is_empty());
+    assert!(found.edges.is_empty());
+    assert!(
+        found.unverified,
+        "#10609: a late read is reported unverified"
+    );
     let lines = log.lines_naming("#9421");
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("budget"), "{lines:?}");
@@ -283,6 +289,8 @@ async fn an_edge_to_a_missing_drawer_demotes_nothing() {
     };
     let handle = handle_with(dir.path(), &seed);
     let found = supersessions_for(&handle, &[hit_for(old)]).await;
+    assert!(!found.unverified);
+    let found = found.edges;
     assert!(found.is_empty(), "dangling edge honoured: {found:?}");
 
     let mut results = vec![hit_for(old)];
@@ -303,7 +311,9 @@ async fn an_edge_to_an_existing_drawer_is_still_honoured() {
         ..Seed::default()
     };
     let handle = handle_with(dir.path(), &seed);
-    let found = supersessions_for(&handle, &[hit_for(old_a), hit_for(old_b)]).await;
+    let found = supersessions_for(&handle, &[hit_for(old_a), hit_for(old_b)])
+        .await
+        .edges;
     assert_eq!(
         found,
         Supersessions::from([(old_a, in_mirror), (old_b, on_disk)])
@@ -326,7 +336,9 @@ async fn an_unverifiable_replacement_demotes_nothing() {
     let handle = handle_with(dir.path(), &seed);
 
     let (log, _guard) = LogCapture::install();
-    let found = supersessions_for(&handle, &[hit_for(old), hit_for(old_ok)]).await;
+    let found = supersessions_for(&handle, &[hit_for(old), hit_for(old_ok)])
+        .await
+        .edges;
     assert_eq!(found, Supersessions::from([(old_ok, ok)]), "{found:?}");
     let lines = log.lines_naming("#9462");
     assert_eq!(lines.len(), 1, "{lines:?}");

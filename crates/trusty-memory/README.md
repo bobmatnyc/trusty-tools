@@ -278,9 +278,9 @@ this table is generated from it, not maintained by hand.
 | `memory_forget` | `palace`, `drawer_id` | Delete a drawer from a palace by its UUID. |
 | `memory_list` | `full?`, `limit?`, `max_bytes?`, `palace?`, `room?`, `tag?`, `wing?` | List drawers in a palace, optionally filtered by wing, room type, or tag. |
 | `memory_note` | `palace`, `content?`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `room?`, `tags?`, `text?`, `verify?`, `workstream?` | Curated shortcut for short, high-signal facts ("User prefers snake_case", "Deploy target is prod-east"). |
-| `memory_recall` | `query`, `full?`, `include_creator_tags?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?`, `wing?` | Recall memories using L0+L1+L2 progressive retrieval. |
-| `memory_recall_all` | `q`, `deep?`, `full?`, `include_creator_tags?`, `max_bytes?`, `scope?`, `top_k?` | Semantic search across palaces: by default (`scope: "resident"`) only the palaces already loaded in memory, opening none; with `scope:… |
-| `memory_recall_deep` | `query`, `full?`, `include_creator_tags?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?` | Deep recall using L3 full HNSW search. |
+| `memory_recall` | `query`, `full?`, `include_creator_tags?`, `include_superseded?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?`, `wing?` | Recall memories using L0+L1+L2 progressive retrieval. |
+| `memory_recall_all` | `q`, `deep?`, `full?`, `include_creator_tags?`, `include_superseded?`, `max_bytes?`, `scope?`, `top_k?` | Semantic search across palaces: by default (`scope: "resident"`) only the palaces already loaded in memory, opening none; with `scope:… |
+| `memory_recall_deep` | `query`, `full?`, `include_creator_tags?`, `include_superseded?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?` | Deep recall using L3 full HNSW search. |
 | `memory_remember` | `palace`, `allow_secret_like?`, `content?`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `force?`, `room?`, `tags?`, `text?`, `type?`, `verify?`, `wing?`, `workstream?` | Store a memory (drawer) in a palace room. |
 | `memory_send_message` | `to_palace`, `purpose`, `content`, `cwd?`, `from_palace?`, `workstream?` | Send an inter-project message (issue #99). |
 | `palace_backup` | `dest?`, `palace?` | #9282: write a consistent backup of one palace while the daemon serves it; writers are not paused. |
