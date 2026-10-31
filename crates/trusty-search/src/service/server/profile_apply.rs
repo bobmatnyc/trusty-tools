@@ -103,7 +103,12 @@ pub(crate) fn purge_body(result: &Result<(usize, usize), String>) -> serde_json:
 /// cost #10110 removed.
 /// What: lists the index's files (`indexed_file_set`), selects every file `new_globs` exclude (idempotent, so a repeat PATCH finishes a purge that failed part-way), and runs
 /// the batch removal, the commit stamp and the hash forget of
-/// `search.index.files.remove`. The caller holds the index's teardown guard.
+/// `search.index.files.remove`. The caller, `patch_index_config_report`, already holds
+/// the shared teardown guard (`index_config.rs`, taken before any mutation) and has
+/// try-acquired the per-index permit; this function takes neither. A second
+/// read of the teardown lock would park behind a queued DELETE while the first
+/// is held. The guard lint declares this with a `CALLER:` row in
+/// `scripts/teardown-guard-manifest.tsv`.
 /// Nothing selected touches nothing. Returns `(files, chunks)` removed.
 /// Test: `a_profile_patch_removes_newly_excluded_files_and_does_not_rebuild`.
 pub(crate) async fn purge_newly_excluded(
