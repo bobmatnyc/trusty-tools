@@ -247,30 +247,97 @@ fn lease_processes() -> Result<LeaseProcesses, String> {
         .process(Pid::from_u32(me))
         .map(sysinfo::Process::start_time)
         .ok_or_else(|| "this process is missing from the process table".to_string())?;
+    let rows = sys.processes().iter().map(|(pid, proc_)| LeaseCandidate {
+        pid: pid.as_u32(),
+        start_time: proc_.start_time(),
+        argv: proc_.cmd(),
+        thread_of: thread_leader(proc_.thread_kind(), proc_.parent().map(Pid::as_u32)),
+    });
+    Ok(select_lease_processes(me, my_start, rows))
+}
+
+/// The process a table row is a thread of, or `None` for a process row.
+///
+/// Why: on Linux sysinfo lists each non-leader thread as a row of its own,
+/// marked `ThreadKind::Userland` with its leader as parent (#10260). On every
+/// other OS `Process::thread_kind` is always `None`, and macOS fills the table
+/// from `proc_listallpids`, which returns process ids only, so no thread row
+/// exists there to over-count.
+/// What: a `Userland` row with a parent maps to that parent; anything else is a
+/// process. A `Userland` row with no parent stays a process, so no real process
+/// is ever dropped.
+/// Test: `only_userland_rows_with_a_parent_are_threads`.
+fn thread_leader(kind: Option<sysinfo::ThreadKind>, parent: Option<u32>) -> Option<u32> {
+    match kind {
+        Some(sysinfo::ThreadKind::Userland) => parent,
+        _ => None,
+    }
+}
+
+/// One process-table row, as [`select_lease_processes`] reads it.
+struct LeaseCandidate<'a> {
+    pid: u32,
+    start_time: u64,
+    argv: &'a [std::ffi::OsString],
+    /// The leader pid when this row is a user thread, not a process.
+    thread_of: Option<u32>,
+}
+
+/// Whether `argv` is a `tm build-lease` (or `trusty-mpm build-lease`) command.
+fn is_build_lease_argv(argv: &[std::ffi::OsString]) -> bool {
+    if !argv.iter().any(|a| a == "build-lease") {
+        return false;
+    }
+    let program = argv.first().map(|a| a.to_string_lossy());
+    let base = program
+        .as_deref()
+        .and_then(|p| p.rsplit('/').next())
+        .unwrap_or("");
+    base == "tm" || base == "trusty-mpm"
+}
+
+/// Pick the other `tm build-lease` processes out of `rows`.
+///
+/// Why: sysinfo on Linux lists each thread of a process as its own row, with
+/// the process's argv, so one `tm build-lease` and its ~29 tokio threads read
+/// as ~29 unleased builds and filled the ceiling (#10260).
+/// What: a thread row is skipped when its leader has a row of its own. When
+/// the leader row is absent (sysinfo drops a leader whose `/proc/<pid>/stat`
+/// read fails but keeps its tasks), the leader pid is counted once in its
+/// place and treated as earlier: dropping it would admit a build over the cap.
+/// Kept pids are not `me`, carry a `build-lease` argument and run `tm` or
+/// `trusty-mpm`; `earlier` holds those ordered before `(my_start, me)`.
+/// Test: `threads_of_a_lease_process_are_not_counted`,
+/// `a_thread_whose_leader_row_is_missing_counts_the_leader_once`,
+/// `only_tm_build_lease_processes_are_selected`.
+fn select_lease_processes<'a>(
+    me: u32,
+    my_start: u64,
+    rows: impl IntoIterator<Item = LeaseCandidate<'a>>,
+) -> LeaseProcesses {
+    let rows: Vec<LeaseCandidate<'a>> = rows.into_iter().collect();
+    let processes: std::collections::HashSet<u32> = rows
+        .iter()
+        .filter(|r| r.thread_of.is_none())
+        .map(|r| r.pid)
+        .collect();
     let mut all = Vec::new();
     let mut earlier = Vec::new();
-    for (pid, proc_) in sys.processes() {
-        let pid = pid.as_u32();
-        if pid == me || !proc_.cmd().iter().any(|a| a == "build-lease") {
-            continue;
-        }
-        let program = proc_
-            .cmd()
-            .first()
-            .map(|a| a.to_string_lossy().into_owned());
-        let base = program
-            .as_deref()
-            .and_then(|p| p.rsplit('/').next())
-            .unwrap_or("");
-        if base != "tm" && base != "trusty-mpm" {
+    for row in &rows {
+        let pid = match row.thread_of {
+            None => row.pid,
+            Some(leader) if processes.contains(&leader) => continue,
+            Some(leader) => leader,
+        };
+        if pid == me || all.contains(&pid) || !is_build_lease_argv(row.argv) {
             continue;
         }
         all.push(pid);
-        if (proc_.start_time(), pid) < (my_start, me) {
+        if row.thread_of.is_some() || (row.start_time, pid) < (my_start, me) {
             earlier.push(pid);
         }
     }
-    Ok(LeaseProcesses { all, earlier })
+    LeaseProcesses { all, earlier }
 }
 
 /// A census entry standing for one earlier `tm build-lease` with no lease.
@@ -418,6 +485,89 @@ mod tests {
         assert!(r.foreign.is_ok(), "{:?}", r.foreign);
         let u = sampler.sample_unleased();
         assert!(u.foreign.is_ok(), "{:?}", u.foreign);
+    }
+
+    fn argv(words: &[&str]) -> Vec<std::ffi::OsString> {
+        words.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    /// #10260: two `tm build-lease` processes (pids 50 and 90), each with 29
+    /// threads carrying the same argv as Linux sysinfo lists them, are two
+    /// lease processes, not 60.
+    #[test]
+    fn threads_of_a_lease_process_are_not_counted() {
+        let lease = argv(&["/usr/bin/tm", "build-lease", "--", "cargo", "test"]);
+        let tree = |leader: u32| {
+            (leader..leader + 30).map(move |pid| (pid, (pid != leader).then_some(leader)))
+        };
+        let rows = tree(50)
+            .chain(tree(90))
+            .map(|(pid, thread_of)| LeaseCandidate {
+                pid,
+                start_time: 100,
+                argv: &lease,
+                thread_of,
+            });
+        let found = select_lease_processes(1000, 200, rows);
+        assert_eq!(found.all, vec![50, 90]);
+        assert_eq!(found.earlier, vec![50, 90]);
+    }
+
+    /// #10260 fail-closed: sysinfo dropped the leader row (pid 50, its stat
+    /// unreadable) but kept its threads. The live lease is counted once, as
+    /// its leader, and as earlier — never dropped.
+    #[test]
+    fn a_thread_whose_leader_row_is_missing_counts_the_leader_once() {
+        let lease = argv(&["tm", "build-lease", "--", "cargo", "build"]);
+        let rows = (51..56).map(|pid| LeaseCandidate {
+            pid,
+            start_time: 300,
+            argv: &lease,
+            thread_of: Some(50),
+        });
+        let found = select_lease_processes(1000, 200, rows);
+        assert_eq!(found.all, vec![50]);
+        assert_eq!(found.earlier, vec![50]);
+    }
+
+    /// Linux marks non-leader threads `Userland`; macOS and every other OS
+    /// report `None`, so each of their rows is a process and is counted.
+    #[test]
+    fn only_userland_rows_with_a_parent_are_threads() {
+        use sysinfo::ThreadKind;
+        assert_eq!(
+            thread_leader(Some(ThreadKind::Userland), Some(50)),
+            Some(50)
+        );
+        assert_eq!(thread_leader(Some(ThreadKind::Userland), None), None);
+        assert_eq!(thread_leader(Some(ThreadKind::Kernel), Some(2)), None);
+        assert_eq!(thread_leader(None, Some(1)), None);
+    }
+
+    /// One row per process, as macOS lists them: every lease is counted.
+    #[test]
+    fn only_tm_build_lease_processes_are_selected() {
+        let tm = argv(&["tm", "build-lease", "--", "cargo", "build"]);
+        let long = argv(&["/opt/bin/trusty-mpm", "build-lease"]);
+        let other = argv(&["/bin/grep", "build-lease"]);
+        let plain = argv(&["tm", "status"]);
+        let cand = |pid, start_time, argv| LeaseCandidate {
+            pid,
+            start_time,
+            argv,
+            thread_of: None,
+        };
+        let rows = vec![
+            cand(10, 300, &tm),
+            cand(11, 100, &long),
+            cand(12, 100, &other),
+            cand(13, 100, &plain),
+            cand(7, 200, &tm), // `me`
+            cand(6, 200, &tm), // same start, lower pid: earlier
+        ];
+        let found = select_lease_processes(7, 200, rows);
+        assert_eq!(found.all, vec![10, 11, 6]);
+        assert_eq!(found.earlier, vec![11, 6]);
     }
 
     #[test]
