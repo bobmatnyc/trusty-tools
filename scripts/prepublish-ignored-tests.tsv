@@ -234,5 +234,10 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # --include-ignored"]`. It runs a real `cargo install`, so it stays unselected.
 # 143 + 1 -> 144 (Refs #9663; failing run 39681835195).
 #
+# #10637 adds one: trusty-search `sweep_cost_on_a_clean_index`
+# (src/core/store/relink_9450_tests.rs), `#[ignore = "timing probe, run by
+# hand"]`. It is a hand-run timing probe, not a gate test, so it stays
+# unselected. 144 + 1 -> 145 (Refs #10609; failing run 41235811530).
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 144
+# UNSELECTED-BASELINE: 145
