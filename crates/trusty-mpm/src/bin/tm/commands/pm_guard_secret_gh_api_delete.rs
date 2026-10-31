@@ -19,8 +19,13 @@
 //! `pm_guard_denies_a_gh_api_delete_of_a_secret_8875`.
 
 use super::is_redirect_shaped;
-use crate::commands::pm_guard_bash::{split_shell_segments, tokenize};
+use crate::commands::pm_guard_bash::{segment_substitution_spans, split_shell_segments, tokenize};
 use crate::commands::pm_guard_secret_read::command_basename;
+use rebound::{Rebinds, rebound_call_deletes};
+
+// #10566: the names a command rebinds, split out for the 500-SLOC cap.
+#[path = "pm_guard_secret_rebound.rs"]
+mod rebound;
 
 /// `gh api` switches: they take no value (pflag also accepts `--name=bool`).
 const GH_API_SWITCHES: &[&str] = &[
@@ -110,7 +115,9 @@ const MAX_DEPTH: usize = 8;
 /// expansion is an `api` DELETE or a `secret delete`, `gh alias import`, and a
 /// `curl` DELETE of a `secrets` URL or one it cannot read. `ssh`/`eval`
 /// operands and a non-literal shell's `-c` text are judged as commands of
-/// their own, up to [`MAX_DEPTH`] deep.
+/// their own, up to [`MAX_DEPTH`] deep. A call through a name the command
+/// rebinds (`hash -p`, `alias`, a function) is judged as the call it may run
+/// ([`rebound_call_deletes`], #10566).
 ///
 /// Fail closed: an unlexable segment that starts one of these calls denies; a
 /// `gh api` call with an unknown option or a flag missing its value denies
@@ -120,34 +127,90 @@ const MAX_DEPTH: usize = 8;
 /// `denies_a_delete_whose_endpoint_the_guard_cannot_read_8875`,
 /// `denies_the_round_three_forms_8875`,
 /// `keeps_the_get_listing_and_literal_non_secret_deletes_8875`,
-/// `every_gh_api_delete_arm_fails_closed_8875`.
+/// `every_gh_api_delete_arm_fails_closed_8875`,
+/// `a_call_through_a_rebound_name_is_refused_10566`.
 pub(crate) fn evaluate_gh_api_secret_delete(command: &str) -> Option<String> {
-    judge(command, 0).then(deny_reason)
+    JUDGES.with(|spent| spent.set(0));
+    judge(command, 0, &Rebinds::default()).then(deny_reason)
 }
 
-/// Whether `command`, reached `depth` re-judges deep, deletes a secret.
-fn judge(command: &str, depth: usize) -> bool {
-    // #8875 round 3: past the cap the guard cannot see the call.
-    if depth > MAX_DEPTH {
+/// Re-judges one command may spend (#10566 round 2): an `eval` run is
+/// unwrapped into a segment per layer, and each layer re-judged, so the walk
+/// would grow as layers to the power of [`MAX_DEPTH`].
+const MAX_JUDGES: usize = 4096;
+
+thread_local! {
+    /// Re-judges the command under evaluation has spent.
+    static JUDGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether `command`, reached `depth` re-judges deep under the rebindings
+/// `inherited` from the text around it, deletes a secret.
+fn judge(command: &str, depth: usize, inherited: &Rebinds) -> bool {
+    let spent = JUDGES.with(|n| {
+        n.set(n.get() + 1);
+        n.get()
+    });
+    // #8875 round 3: past the cap the guard cannot see the call; #10566: nor
+    // past the budget.
+    if depth > MAX_DEPTH || spent > MAX_JUDGES {
         return true;
     }
     let secrets_named = names_secrets(command);
     // #10548 P7: only the top-level command, and only one plain command.
     let plain = depth == 0 && one_plain_command(command);
+    // #10566: a name the command rebinds may run gh or curl.
+    let rebinds = inherited.with_scan(command);
     split_shell_segments(command)
         .iter()
-        .any(|segment| segment_deletes_a_secret(segment, secrets_named, plain, depth))
+        .any(|segment| segment_deletes_a_secret(segment, secrets_named, plain, depth, &rebinds))
 }
 
 /// Whether one segment runs a call the guard must refuse.
-fn segment_deletes_a_secret(segment: &str, secrets_named: bool, plain: bool, depth: usize) -> bool {
+fn segment_deletes_a_secret(
+    segment: &str,
+    secrets_named: bool,
+    plain: bool,
+    depth: usize,
+    rebinds: &Rebinds,
+) -> bool {
+    // #10566: a substitution body runs under the rebindings around it.
+    if !rebinds.is_empty()
+        && segment_substitution_spans(segment)
+            .iter()
+            .any(|(_, body)| judge(body.text(), depth + 1, rebinds))
+    {
+        return true;
+    }
     let Ok(argv) = tokenize(segment) else {
         // #8875 round 3 (owner ruling): an unlexable call is refused outright.
-        return starts_a_watched_call(segment);
+        // #10566: so is one through a rebound name, read with quotes removed.
+        let flat: Vec<String> = segment
+            .replace(['\'', '"', '\\'], " ")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        return starts_a_watched_call(segment)
+            || (!rebinds.is_empty() && rebound_call_deletes(&flat, secrets_named, depth, rebinds));
     };
-    let calls = |sub| gh_calls(&argv, sub, plain);
-    reruns_a_refused_command(&argv, depth)
-        || calls("api").any(|(_, tail)| gh_api_deletes(tail, secrets_named))
+    reruns_a_refused_command(&argv, depth, rebinds)
+        || argv_deletes_a_secret(&argv, secrets_named, plain, depth, false)
+        || rebound_call_deletes(&argv, secrets_named, depth, rebinds)
+}
+
+/// Whether one argv runs a `gh api|secret|alias` or `curl` call the guard
+/// must refuse. `guessed` marks an argv [`rebound_call_deletes`] built: a
+/// `gh api` tail gh would reject then denies only when the command names
+/// `secrets`, so an ordinary call through an alias is not refused (#10566).
+fn argv_deletes_a_secret(
+    argv: &[String],
+    secrets_named: bool,
+    plain: bool,
+    depth: usize,
+    guessed: bool,
+) -> bool {
+    let calls = |sub| gh_calls(argv, sub, plain);
+    calls("api").any(|(_, tail)| gh_api_deletes(tail, secrets_named, guessed))
         || calls("secret").any(|(sub, tail)| secret_subcommand_deletes(sub, tail))
         || calls("alias").any(|(sub, tail)| alias_defines_a_delete(sub, tail, depth))
         || argv
@@ -186,19 +249,20 @@ fn starts_a_watched_call(segment: &str) -> bool {
 
 /// `ssh`/`eval` operands, and a non-literal shell's `-c` text (`$S -c '…'`),
 /// judged as a command of their own.
-fn reruns_a_refused_command(argv: &[String], depth: usize) -> bool {
+/// #10566: the operands run under the rebindings the command made.
+fn reruns_a_refused_command(argv: &[String], depth: usize, rebinds: &Rebinds) -> bool {
     // #8875 round 2: `ssh host 'gh api …'` runs its operands as a command.
     let runner = argv
         .iter()
         .position(|w| OPERAND_RUNNERS.contains(&command_basename(w).as_str()));
-    if runner.is_some_and(|at| judge(&argv[at + 1..].join(" "), depth + 1)) {
+    if runner.is_some_and(|at| judge(&argv[at + 1..].join(" "), depth + 1, rebinds)) {
         return true;
     }
     // #8875 round 3: a shell named by an expansion is no `sh -c` wrapper the
     // segment splitter knows.
     argv.windows(3).any(|w| {
         let c_flag = w[1].starts_with('-') && !w[1].starts_with("--") && w[1].contains('c');
-        is_rewritten(&w[0]) && c_flag && judge(&w[2], depth + 1)
+        is_rewritten(&w[0]) && c_flag && judge(&w[2], depth + 1, rebinds)
     })
 }
 
@@ -388,11 +452,11 @@ fn is_rewritten(word: &str) -> bool {
 }
 
 /// Whether a `gh api` argv tail DELETEs a secret, or one the guard cannot read.
-fn gh_api_deletes(tail: &[String], secrets_named: bool) -> bool {
+fn gh_api_deletes(tail: &[String], secrets_named: bool, guessed: bool) -> bool {
     let Some((methods, endpoints)) = parse_gh_api(tail) else {
         // #8875: gh rejects this argv, so only a suspicious one is refused.
         let words: Vec<&str> = tail.iter().map(String::as_str).collect();
-        return secrets_named || suspicious(&words);
+        return secrets_named || (!guessed && suspicious(&words));
     };
     maybe_delete(&methods)
         && match endpoints.as_slice() {
@@ -449,7 +513,7 @@ fn alias_defines_a_delete(sub: &str, tail: &[String], depth: usize) -> bool {
 /// method, or a `secret delete|remove`.
 fn expansion_deletes(expansion: &str, shell: bool, depth: usize) -> bool {
     if let Some(script) = expansion.strip_prefix('!').or(shell.then_some(expansion)) {
-        return judge(script, depth + 1);
+        return judge(script, depth + 1, &Rebinds::default());
     }
     let Ok(words) = tokenize(expansion) else {
         return true;
@@ -647,3 +711,7 @@ fn deny_reason() -> String {
 #[cfg(test)]
 #[path = "pm_guard_secret_gh_api_delete_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pm_guard_secret_rebound_tests.rs"]
+mod rebound_tests;
