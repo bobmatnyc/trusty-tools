@@ -4,9 +4,9 @@
 Why: self-clear.sh must not type /clear mid-turn; its own grep missed spinners without "esc to interrupt". A crash
 used to exit 1, the same code as "not running", so a broken check let a clear through (#10579). Only 10 means idle;
 every other code, 3 included, means busy.
-What: fleet-poll's parse_pane "turn_active" (status line has "…"/"esc to interrupt", or a current-turn WAITING
-line); background agent rows are ignored, since the Architect always has monitors. Any exception (fleet-poll missing,
-no `turn_active` field, unreadable stdin) exits 3, never 10.
+What: fleet-classify's parse_pane "turn_active", the parser the poller's cycle also calls (status line has
+"…"/"esc to interrupt", or a current-turn WAITING line); background agent rows are ignored, since the Architect
+always has monitors. Any exception (fleet-classify missing, no `turn_active` field, unreadable stdin) exits 3, never 10.
 Test: tests/test_turn_active.py
 """
 import importlib.util
@@ -18,10 +18,11 @@ RUNNING, IDLE, ERROR = 0, 10, 3
 
 def main(stdin_text):
     here = os.path.dirname(os.path.abspath(__file__))
-    spec = importlib.util.spec_from_file_location("fleet_poll", os.path.join(here, "fleet-poll.py"))
-    fp = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(fp)
-    return RUNNING if fp.parse_pane(stdin_text)["turn_active"] else IDLE
+    # #10579: the pure parser only; loading fleet-poll.py would pull in its I/O and environment.
+    spec = importlib.util.spec_from_file_location("fleet_classify", os.path.join(here, "fleet-classify.py"))
+    fc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fc)
+    return RUNNING if fc.parse_pane(stdin_text)["turn_active"] else IDLE
 
 
 if __name__ == "__main__":
