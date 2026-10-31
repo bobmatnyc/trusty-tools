@@ -55,7 +55,8 @@ impl PrivateTmux {
 
     /// The pane id the session `NAME` holds, or `None` when it is gone.
     fn pane(&self) -> Option<String> {
-        self.run(&["list-panes", "-t", &format!("={NAME}"), "-F", "#{pane_id}"])
+        let target = trusty_common::tmux::exact_window_target(NAME);
+        self.run(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
     }
 }
 
