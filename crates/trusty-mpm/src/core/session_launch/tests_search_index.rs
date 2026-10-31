@@ -180,9 +180,17 @@ fn ensure_via_daemon_is_silent_under_the_test_harness() {
     );
 }
 
+/// The ensure reply for an index that already existed.
+fn found() -> serde_json::Value {
+    serde_json::json!({ "index_id": "demo", "created": false })
+}
+
 /// Run `ensure_and_refresh` against a mock daemon; return the id and the
 /// methods the daemon saw.
-async fn launch_against(created: bool, status: serde_json::Value) -> (Option<String>, Vec<String>) {
+async fn launch_against(
+    ensure: serde_json::Value,
+    status: serde_json::Value,
+) -> (Option<String>, Vec<String>) {
     use crate::uds_mock::{self, MockFuture};
     use std::sync::{Arc, Mutex};
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -190,9 +198,7 @@ async fn launch_against(created: bool, status: serde_json::Value) -> (Option<Str
     let daemon = uds_mock::spawn(move |method, _| -> MockFuture {
         rec.lock().expect("lock").push(method.to_string());
         let answer = match method {
-            "search.project.ensure" => {
-                serde_json::json!({ "index_id": "demo", "created": created })
-            }
+            "search.project.ensure" => ensure.clone(),
             "search.index.status" => status.clone(),
             _ => serde_json::json!({ "queued": true }),
         };
@@ -218,7 +224,7 @@ async fn launch_against(created: bool, status: serde_json::Value) -> (Option<Str
 /// `search.index.reindex` was sent.
 #[tokio::test]
 async fn a_found_but_empty_index_gets_a_reindex_on_launch() {
-    let (id, calls) = launch_against(false, serde_json::json!({ "chunk_count": 0 })).await;
+    let (id, calls) = launch_against(found(), serde_json::json!({ "chunk_count": 0 })).await;
     assert_eq!(id.as_deref(), Some("demo"));
     assert!(
         calls.contains(&"search.index.reindex".to_string()),
@@ -232,7 +238,7 @@ async fn a_found_but_empty_index_gets_a_reindex_on_launch() {
 async fn a_found_stale_index_gets_a_reindex_on_launch() {
     let stale = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
     let (_, calls) = launch_against(
-        false,
+        found(),
         serde_json::json!({ "chunk_count": 9, "last_indexed": stale }),
     )
     .await;
@@ -248,7 +254,7 @@ async fn a_found_stale_index_gets_a_reindex_on_launch() {
 async fn a_found_fresh_index_gets_no_reindex_on_launch() {
     let fresh = chrono::Utc::now().to_rfc3339();
     let (_, calls) = launch_against(
-        false,
+        found(),
         serde_json::json!({ "chunk_count": 9, "last_indexed": fresh }),
     )
     .await;
@@ -262,6 +268,28 @@ async fn a_found_fresh_index_gets_no_reindex_on_launch() {
 /// Test: this test.
 #[tokio::test]
 async fn a_created_index_gets_no_second_reindex_on_launch() {
-    let (_, calls) = launch_against(true, serde_json::json!({ "chunk_count": 0 })).await;
+    let (_, calls) = launch_against(
+        serde_json::json!({ "index_id": "demo", "created": true, "reindex_queued": true }),
+        serde_json::json!({ "chunk_count": 0 }),
+    )
+    .await;
     assert_eq!(calls, vec!["search.project.ensure".to_string()]);
+}
+
+/// Why: `created: true` with a failed first queue leaves an empty index that no
+/// other path populates (#10531 re-check).
+/// Test: this test. Before the fix the trigger tested `created` alone, so no
+/// `search.index.reindex` was sent.
+#[tokio::test]
+async fn a_created_index_whose_first_queue_failed_gets_a_reindex_on_launch() {
+    let reply = serde_json::json!({
+        "index_id": "demo", "created": true, "reindex_queued": false,
+        "reindex_error": "reindex_already_running",
+    });
+    let (id, calls) = launch_against(reply, serde_json::json!({ "chunk_count": 0 })).await;
+    assert_eq!(id.as_deref(), Some("demo"));
+    assert!(
+        calls.contains(&"search.index.reindex".to_string()),
+        "{calls:?}"
+    );
 }

@@ -121,12 +121,14 @@ pub(super) fn ensure_via_daemon(
 /// Why: the older launch path also ran a freshness-gated reindex; `ensure`
 /// queues one only for an index it just created, so a found index that is empty,
 /// stale, or whose first queue failed would otherwise never be populated.
-/// What: `created: true` already queued its reindex. For `created: false`,
-/// runs `best_effort_trigger_reindex`, which skips a fresh index (chunks and
+/// What: `created: true` with `reindex_queued: true` already has its reindex.
+/// For any other reply (found, or created with a failed first queue), runs
+/// `best_effort_trigger_reindex`, which skips a fresh index (chunks and
 /// indexed within the hour) and otherwise queues `search.index.reindex`.
 /// Test: `a_found_but_empty_index_gets_a_reindex_on_launch`,
 /// `a_found_fresh_index_gets_no_reindex_on_launch`,
-/// `a_created_index_gets_no_second_reindex_on_launch`.
+/// `a_created_index_gets_no_second_reindex_on_launch`,
+/// `a_created_index_whose_first_queue_failed_gets_a_reindex_on_launch`.
 pub(super) fn ensure_and_refresh(
     socket: &Path,
     project_root: &Path,
@@ -144,7 +146,10 @@ pub(super) fn ensure_and_refresh(
     .inspect_err(|e| tracing::warn!("#10531: search.project.ensure at launch: {e:#}"))
     .ok()?;
     let id = body.get("index_id")?.as_str()?.to_string();
-    if body.get("created").and_then(serde_json::Value::as_bool) != Some(true) {
+    let flag = |key: &str| body.get(key).and_then(serde_json::Value::as_bool);
+    // A created index whose first queue failed (`reindex_queued` false) is empty
+    // and nothing else would populate it.
+    if flag("created") != Some(true) || flag("reindex_queued") != Some(true) {
         trusty_common::search_index::best_effort_trigger_reindex(socket, &id);
     }
     Some(id)
