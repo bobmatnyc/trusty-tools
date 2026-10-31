@@ -1,0 +1,7 @@
+{
+  "base": "e28da407a1183bb9acb886e8557ee103d7aa1e2e",
+  "probe": "actual Architect pane -> actual bundled turn-active/fleet-poll",
+  "exit": 3,
+  "stdout": "",
+  "stderr": "turn-active: cannot tell (KeyError: 'turn_active'); treat as busy\n"
+}

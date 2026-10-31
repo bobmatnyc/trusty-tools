@@ -1,0 +1,65 @@
+
+✻ Sautéed for 27s · done 12:23 AM
+
+❯ [Codex] Build-host Architect confirms 250k is a cost threshold, not a hard cap; your window is 1M and status is30%. Save an exact
+  current checkpoint and state with pruning disabled, then stay quiet awaiting the reviewed bundle. No clear/refresh now, no commands or
+  permission question for the owner. Preserve the recurring task-loop registration, usage HOLD and Q17=C no-merge rule. Report snapshot
+  path/hash here; at about600k we will revisit supported recovery.
+
+  Called trusty-mpm (ctrl+o to expand)
+
+⏺ Bash(f=.trusty-mpm/sessions/tmux-window-0/session-20261031-042555.md; shasum -a 256 "$f"; wc -c < "$f"; tail -n 1
+      134 -  the records are at a safe boundary; asked Codex 04:23Z for permission to
+      135 -  checkpoint and refresh before automatic compaction.
+      134 +  the records are at a safe boundary. Codex 04:25Z (build-host Architect):
+      135 +  250k is a cost threshold, not a hard cap; window is 1M (about 30%). No
+      136 +  clear or refresh now; revisit supported recovery at about 600k.
+      137 +  Checkpoint saved 04:25:55Z with pruning disabled:
+      138 +  .trusty-mpm/sessions/tmux-window-0/session-20261031-042555.md (sha256
+      139 +  ac205bb3...c7, 2696 bytes; pause line in sessions-log.jsonl, verified).
+      140
+      141  ## Improvement candidates
+      142
+
+⏺ Bash(printf '\n## 2026-10-31T04:25:55Z checkpoint (Codex: 250k is cost threshold, 1M window)\n- session_context_pause, prune_worktrees
+      false: .trusty-mpm/sessions/tm…)
+  ⎿  18071ba local: checkpoint 04:25Z
+     27390f10dd8f97e5
+  ⎿  Updated local/actions.md (+4 -0)
+      432
+      433  ## 2026-10-31T04:23:13Z self_ctx alert
+      434  - Poller 04:23:09Z: self ctx 296,974 (bar 250,000). Refresh still deferred per Codex; records at a safe boundary; asked
+           Codex for permission to checkpoint and refresh. Watermark advanced.
+      435 +
+      436 +## 2026-10-31T04:25:55Z checkpoint (Codex: 250k is cost threshold, 1M window)
+      437 +- session_context_pause, prune_worktrees false: .trusty-mpm/sessions/tmux-window-0/session-20261031-042555.md, sha256 ac
+          +205bb31ff488b34e7d8e482292e68c562bfabb8132489d307db9e23ed9c3c7, 2696 bytes; pause log line present; resume slot stored;
+          +no worktrees pruned; ref not published (no origin, expected) (verified).
+      438 +- No clear or refresh. Task loop be3c108b kept; HOLD and QUESTION 17 C kept. Revisit recovery near 600k. Staying quiet f
+          +or the reviewed bundle.
+
+⏺ I saved an exact checkpoint and committed the state, with worktree pruning turned off. I did not clear or refresh.
+
+  - Snapshot: ~/trusty-mpm-projects/architect/.trusty-mpm/sessions/tmux-window-0/session-20261031-042555.md
+  - Snapshot SHA-256: ac205bb31ff488b34e7d8e482292e68c562bfabb8132489d307db9e23ed9c3c7 (2,696 bytes)
+  - Checks: the pause line is in the session log and the resume slot is stored. No worktrees were pruned. The git ref wasn't published
+    because this repo has no remote, as expected.
+  - State: local/state.md (SHA-256 starts 27390f10dd8f97e5) is committed as 18071ba. Its task: and next: lines are at the top.
+
+  The recurring task loop be3c108b is still registered. Usage HOLD and the Q17=C no-merge rule are unchanged. I'll stay quiet until the
+  reviewed bundle arrives and check in again at around 600k tokens.
+
+  Dashboard: local · tail
+  0 items open: 0 decisions, 0 actions, 0 tasks.
+
+✻ Cooked for 41s · done 12:26 AM
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── tm-architect ─
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  TM 1.11.1 ● | architect ⎇ tm-architect | @example-org | ✻owner@example.com | Opus 5.5 | ctx 31% | $12.18 | ⏳9% 📅65…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+                                                                                                                              /rc active
+
+
+
