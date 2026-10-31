@@ -1470,7 +1470,7 @@
  "quiet": [
   {
    "case": "one_per_line",
-   "content": "# parked by the owner\ntm-hotstats-reporting-01\n\ntm-ai-power-rankings-01  # paused pending #8261\n   \n"
+   "content": "# parked by the owner\ntm-examples-reporting-01\n\ntm-ai-power-rankings-01  # paused pending #8261\n   \n"
   },
   {
    "case": "missing",
@@ -1493,7 +1493,7 @@
   "tm-r0",
   "tm-r42-worker",
   "tm-supervisor",
-  "tm-hotstats-reporting-01",
+  "tm-examples-reporting-01",
   "tm-api",
   "tm-qa",
   "tm-r",

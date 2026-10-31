@@ -1,4 +1,4 @@
-{"case": "one_per_line", "sessions": ["tm-ai-power-rankings-01", "tm-hotstats-reporting-01"]}
+{"case": "one_per_line", "sessions": ["tm-ai-power-rankings-01", "tm-examples-reporting-01"]}
 {"case": "missing", "sessions": []}
 {"case": "all_comments", "sessions": []}
 {"case": "crlf_and_tabs", "sessions": ["tm-a", "tm-b", "tm-c"]}
@@ -9,7 +9,7 @@
 ["tm-r0", true]
 ["tm-r42-worker", true]
 ["tm-supervisor", false]
-["tm-hotstats-reporting-01", false]
+["tm-examples-reporting-01", false]
 ["tm-api", false]
 ["tm-qa", false]
 ["tm-r", false]
