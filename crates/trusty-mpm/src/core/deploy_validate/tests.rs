@@ -1178,3 +1178,26 @@ fn a_hook_writer_failure_surfaces_rather_than_reporting_no_gaps() {
         "a refused write must never report the workspace repaired"
     );
 }
+
+/// #10425: the plan `--repair --dry-run` prints is the branch `repair_with` takes.
+#[test]
+fn repair_plan_matches_the_branch_repair_takes() {
+    let report = |gaps| ValidationReport { gaps };
+    assert_eq!(report(vec![]).repair_plan(), RepairPlan::Nothing);
+    let hook = DeploymentGap::ProjectHookGroupMissing("Stop".into(), "tm hook".into());
+    assert_eq!(
+        report(vec![hook.clone()]).repair_plan(),
+        RepairPlan::ResyncHookGroups
+    );
+    assert_eq!(
+        report(vec![hook, DeploymentGap::SettingsMissing]).repair_plan(),
+        RepairPlan::RerunPipeline
+    );
+    for plan in [
+        RepairPlan::Nothing,
+        RepairPlan::ResyncHookGroups,
+        RepairPlan::RerunPipeline,
+    ] {
+        assert!(!plan.describe().is_empty());
+    }
+}

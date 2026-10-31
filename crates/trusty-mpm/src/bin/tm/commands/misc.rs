@@ -129,12 +129,27 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
 /// calls `prepare_session_with_repo_url`, the same pipeline `spawn_managed`
 /// uses) before printing the final verdict. Exits the process with status `1`
 /// when the final report is incomplete, `0` otherwise.
-/// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`
-/// cover parsing; the diff/repair logic itself is covered by
-/// `core::deploy_validate`'s own unit tests.
-pub(crate) async fn validate(path: Option<std::path::PathBuf>, repair: bool) -> anyhow::Result<()> {
+/// #10425: `dry_run` (with `repair`) prints the gaps and the repair
+/// [`trusty_mpm::core::deploy_validate::ValidationReport::repair_plan`] selects,
+/// and writes nothing; the exit code is the plain validate's.
+/// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`,
+/// `cli_parses_validate_repair_dry_run` cover parsing;
+/// `tm_validate_repair_dry_run_changes_nothing` drives the binary; the
+/// diff/repair logic itself is covered by `core::deploy_validate`'s tests.
+/// It takes the whole `Command::Validate` so `main.rs` stays one line under
+/// its SLOC cap; any other variant is an `Err`.
+pub(crate) async fn validate(cmd: crate::cli::Command) -> anyhow::Result<()> {
     use trusty_mpm::core::deploy_validate::{validate_and_repair, validate_workspace};
     use trusty_mpm::core::paths::FrameworkPaths;
+
+    let crate::cli::Command::Validate {
+        path,
+        repair,
+        dry_run,
+    } = cmd
+    else {
+        anyhow::bail!("`validate` was dispatched a non-validate command");
+    };
 
     let workspace = match path {
         Some(p) => p,
@@ -144,7 +159,13 @@ pub(crate) async fn validate(path: Option<std::path::PathBuf>, repair: bool) -> 
 
     println!("tm validate: {}", workspace.display());
 
-    let complete = if repair {
+    let complete = if repair && dry_run {
+        let report = validate_workspace(&fw);
+        println!("repair dry run — nothing will be written");
+        print_gaps(&report.gaps);
+        println!("  would {}", report.repair_plan().describe());
+        report.is_complete()
+    } else if repair {
         let outcome = validate_and_repair(&fw, &workspace, None);
         // #4781: an attempt ran exactly when the pre-repair report had gaps;
         // `repaired` now reports whether it SUCCEEDED, so it can no longer gate

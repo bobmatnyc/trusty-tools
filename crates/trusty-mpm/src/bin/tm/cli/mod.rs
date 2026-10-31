@@ -376,7 +376,8 @@ pub(crate) enum Command {
     /// What: prints every gap found, or a completeness confirmation, and
     /// exits non-zero when the workspace is incomplete (after an optional
     /// `--repair` attempt still leaves gaps).
-    /// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`.
+    /// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`,
+    /// `cli_parses_validate_repair_dry_run`.
     Validate {
         /// Workspace directory to validate. Defaults to the current directory.
         #[arg(long)]
@@ -386,6 +387,9 @@ pub(crate) enum Command {
         /// before reporting the final verdict.
         #[arg(long)]
         repair: bool,
+        /// With `--repair`, print the planned repairs and change nothing (#10425).
+        #[arg(long, requires = "repair")]
+        dry_run: bool,
     },
     /// Project-settings hook hygiene: detect and remove tm hook contamination
     /// (issue #2940).
@@ -1863,6 +1867,35 @@ pub struct DoctorFlags {
     /// `--quarantine-mcp` from a dry run to an applied run.
     #[arg(long, requires = "writes")]
     pub yes: bool,
+
+    /// State the preview explicitly: run the selected repairs as a DRY RUN.
+    ///
+    /// Why (#10425): a preview was only the absence of `--yes`, so a script or
+    /// operator could not ask for one and be refused if it would write.
+    /// What: every write action stays a dry run; it conflicts with `--yes`.
+    /// A repair whose effect cannot be determined prints `NOT EVALUATED`,
+    /// never "no change".
+    /// Test: `cli_parses_doctor_fix_dry_run_and_only`, `tm_doctor_fix_dry_run`.
+    #[arg(long, requires = "writes", conflicts_with = "yes")]
+    pub dry_run: bool,
+
+    /// With `--fix`, run only the named check's repair. Repeatable.
+    ///
+    /// Why (#10425): `--fix --yes` applied the whole plan, so one check's
+    /// repair could not be applied without every other one.
+    /// What: the ids are the `[check]` tags `--fix` prints; the repairs still
+    /// run in their fixed dependency order. An unknown id is an error.
+    /// Test: `cli_parses_doctor_fix_dry_run_and_only`,
+    /// `cli_rejects_an_unknown_doctor_only_id`.
+    #[arg(
+        long,
+        value_name = "CHECK",
+        requires = "fix",
+        value_parser = clap::builder::PossibleValuesParser::new(
+            crate::commands::doctor_fix_run::FIX_REPAIR_IDS
+        )
+    )]
+    pub only: Vec<String>,
 
     /// Quarantine one specific stray `.mcp.json` by path. DRY RUN unless
     /// `--yes`.

@@ -9,22 +9,17 @@
 //! followed by is dispatched from — `--prune-stale-skills`, `--fix-skills`,
 //! `--fix` — so `commands/misc.rs` stays the report and the actions stay
 //! together (and under the 500-SLOC production cap).
-//! What: [`run_post_report_actions`] — the dispatch; [`run_repairs`] — resolve
-//! the paths, run each repair from [`trusty_mpm::core::doctor_repair`] plus the
-//! skill redeploy, and print one line per item, dry run unless `apply`;
-//! [`prune_stale_skills_locally`] — the hidden pre-rename cleanup.
+//! What: [`run_post_report_actions`] — the dispatch; the `--fix` runner lives
+//! in `doctor_fix_run` (#10425), and this file keeps the helpers it shares
+//! with the narrow flags; [`prune_stale_skills_locally`] — the hidden
+//! pre-rename cleanup.
 //! Test: `core::doctor_repair`'s tests cover every repair and every refusal;
 //! this file is path resolution and printing.
 
 use colored::Colorize;
-use trusty_mpm::core::doctor_repair::{
-    RepairMode, RepairStep, StepStatus, refuse_legacy_sources, repair_build_tree_binary,
-    repair_hooks_contamination, repair_missing_hook_group, repair_output_style, repair_push_guard,
-    repair_statusline,
-};
-use trusty_mpm::core::doctor_repair_scope::repair_session_scope;
+use trusty_mpm::core::doctor_repair::{RepairMode, RepairStep, StepStatus, repair_output_style};
 use trusty_mpm::core::skill_repair::RepairAction;
-use trusty_mpm::core::stray_mcp::{quarantine_explicit, quarantine_strays};
+use trusty_mpm::core::stray_mcp::quarantine_explicit;
 
 use crate::cli::DoctorFlags;
 
@@ -41,30 +36,36 @@ use crate::cli::DoctorFlags;
 /// Test: `cli_parses_doctor_fix`, `cli_parses_doctor_fix_skills` pin the flags;
 /// `the_scoped_launchd_flag_selects_exactly_one_repair` pins the dispatch; the
 /// actions' own modules carry the behaviour tests.
-/// `Err` (after every action has run) when `--rotate-deps` printed a FAIL row.
+/// `Err` (after every action has run) when `--rotate-deps` printed a FAIL row;
+/// `Err` before any action runs when `--only` names no `--fix` repair (#10425).
 pub(crate) fn run_post_report_actions(flags: &DoctorFlags) -> anyhow::Result<()> {
+    super::doctor_fix_run::resolve_scope(&flags.only)?;
+    // #10425: `--dry-run` wins over `--yes`; clap also refuses the pair.
+    let yes = flags.yes && !flags.dry_run;
     let mut failed = Ok(());
     for action in post_report_actions(flags) {
         match action {
             PostReportAction::PruneStaleSkills => prune_stale_skills_locally(),
             PostReportAction::FixSkills => {
-                super::doctor_fix_skills::fix_skills_locally(flags.include_frozen, flags.yes);
+                super::doctor_fix_skills::fix_skills_locally(flags.include_frozen, yes);
             }
             // #6649: the agent mirror of `--fix-skills`, and like it never run
             // by `--fix` — `--fix` still never deletes.
-            PostReportAction::FixAgents => super::doctor_fix_agents::fix_agents_locally(flags.yes),
+            PostReportAction::FixAgents => super::doctor_fix_agents::fix_agents_locally(yes),
             // #8236: the credential strip alone, never the other repair classes.
             PostReportAction::FixLaunchdSecrets => {
-                super::doctor_fix_launchd_secrets::fix_launchd_secrets_locally(flags.yes);
+                super::doctor_fix_launchd_secrets::fix_launchd_secrets_locally(yes);
             }
             // #10212: the oversized-deps rotation alone; `--fix` never runs it.
             PostReportAction::RotateDeps => {
-                failed = super::doctor_rotate_deps::rotate_deps_locally(flags.yes);
+                failed = super::doctor_rotate_deps::rotate_deps_locally(yes);
             }
-            PostReportAction::Fix => run_repairs(flags.yes, flags.include_frozen),
+            PostReportAction::Fix => {
+                super::doctor_fix_run::run_repairs(yes, flags.include_frozen, &flags.only)?;
+            }
             PostReportAction::QuarantineMcp => {
                 if let Some(target) = &flags.quarantine_mcp {
-                    quarantine_one_mcp(target, flags.yes);
+                    quarantine_one_mcp(target, yes);
                 }
             }
         }
@@ -169,260 +170,7 @@ fn quarantine_apply_hint(target: &std::path::Path) -> String {
 /// Why: the counterpart to [`quarantine_apply_hint`] — pinned so the two
 /// cannot collapse back into one shared literal.
 /// Test: `fix_hint_names_the_fix_command`.
-const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
-
-/// `--fix` action — preview, or apply, every safe repair.
-///
-/// Why: see the module doc. The default is a preview because these repairs
-/// rewrite files the operator can see and care about; `--yes` is the second
-/// deliberate act that lets one write.
-/// What: runs, in order, the skill redeploy (`skill_staleness`), the
-/// machine-wide build-tree repoint (`hooks_build_tree_binary`, #7262 — first,
-/// so the strip below cannot delete a PM guard the repoint would have fixed),
-/// the machine-wide interpreter prefix for bare seeded `.sh` hook commands
-/// (`hook-interpreter`, #10263), the project hook cleanup (`hooks_contamination`), the lifecycle-group
-/// re-merge (`hooks_missing_tm_group`, #7490 — after that cleanup, so it
-/// restores what a managed launch would write), the push-guard retrofit
-/// (`push_guard`), the session-scope re-apply (`session_scope`, #7678 — the
-/// project-tier `enabledPlugins` map and the composed session-MCP file, skipped
-/// entirely for a directory with no `.trusty-mpm/` marker), the two-way
-/// auto-memory key (`auto_memory`, #7685), the trusty-search duplicate parks
-/// (`search_project_duplicate_index`, #9664 — through the daemon, never the map),
-/// the output-style redeploy at BOTH style tiers
-/// (`output_style_staleness`, #5866, #7423),
-/// the `legacy_sources` refusals, the stray-`.mcp.json`
-/// sweep (`stray_mcp_json`), the LaunchAgent credential strip
-/// (`launchd_secrets`, #8236), the `ProcessType=Interactive` plist write
-/// (`launchd_process_type`, #8562 — file only, applies when launchd next loads
-/// the label), the opt-in `Notification` entry
-/// (`notification_hook`, #8392), and the ownership-marker move into the git
-/// admin dir across every registered project (`worktree_markers`, #8511) — printing each item's path, what would change,
-/// and the outcome. In dry run it closes by naming the flag that applies. It
-/// never deletes: `legacy_sources` findings are reported as refused, and a
-/// stray `.mcp.json` is RENAMED aside rather than removed.
-/// Test: `core::doctor_repair`'s and `core::stray_mcp`'s tests; this function
-/// is printing.
-pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
-    let mode = RepairMode::from_apply_flag(apply);
-    println!(
-        "\nfix ({})",
-        if apply {
-            "applying".to_string()
-        } else {
-            "dry run — nothing will be written".to_string()
-        }
-    );
-
-    let mut steps = skill_steps(include_frozen, mode);
-
-    let project_dir = std::env::current_dir().ok();
-    // #9293: the home root is the caller's, so a test can supply a temp one.
-    let machine_files =
-        machine_wide_settings_files(project_dir.as_deref(), dirs::home_dir().as_deref());
-    // #7262: the repoint runs BEFORE the contamination strip. A build-tree
-    // command is tm-owned by `is_mpm_hook_command`, so a strip that ran first
-    // would delete the PM guard this pass repairs in place.
-    steps.extend(repair_build_tree_binary(&machine_files, mode));
-    // #10263: add the interpreter to bare seeded `.sh` hook commands, over the
-    // same machine-wide list the `hook-interpreter` row reads.
-    steps.extend(
-        trusty_mpm::core::hook_interpreter_doctor::repair_hook_interpreter(&machine_files, mode),
-    );
-    // #7617: AFTER the repoint, so a build-tree `statusLine` command is fixed by
-    // the pass that owns that damage class and this one only seeds what is
-    // missing. Scoped to the two tiers the `statusline` check reads — the cwd
-    // project and the user tier — NOT the machine-wide sweep above: seeding an
-    // entry into every project on the disk is a far larger change than
-    // repointing the ones already broken, and nobody asked for it.
-    steps.extend(repair_statusline(
-        &statusline_settings_files(project_dir.as_deref()),
-        mode,
-    ));
-    if let Some(project) = &project_dir {
-        steps.extend(repair_hooks_contamination(project, mode));
-        // #7490: AFTER the strip above, never before. That pass removes every
-        // `<exe> hook` entry it finds, including the ones this pass restores,
-        // so running first would report a merge the strip then undid.
-        steps.extend(repair_missing_hook_group(project, mode));
-        steps.extend(repair_push_guard(project, mode));
-        // #7678: re-apply the two session-scope writes `prepare_session` performs
-        // once at launch. A session paused before that write existed keeps
-        // loading every user-tier plugin, and nothing but this puts it back.
-        // Refuses silently for a directory with no `.trusty-mpm/` marker.
-        steps.extend(repair_session_scope(
-            project,
-            trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
-            trusty_mpm::core::session_mcp_scope::session_mcp_path(project).as_deref(),
-            mode,
-        ));
-        // #7673: rename a pure tm seed template above the project aside, and
-        // exclude a content-carrying one. `project` is the process cwd; the
-        // repair resolves it to the nearest project boundary before scanning
-        // and before choosing which `.claude/settings.local.json` to write.
-        steps.extend(
-            trusty_mpm::core::ancestor_claude_md_repair::repair_ancestor_claude_md(
-                project,
-                dirs::home_dir().as_deref(),
-                trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
-                &chrono::Utc::now().format("%Y%m%d").to_string(),
-                mode,
-            ),
-        );
-        // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14) —
-        // write `autoMemoryEnabled: false` into the project tier whatever
-        // trusty-memory's state. Additive: one boolean key, every other key
-        // preserved, through the same merge the launch path uses.
-        steps.extend(trusty_mpm::daemon::doctor_auto_memory::repair_auto_memory(
-            project, mode,
-        ));
-        // #9664: park what `search_project_duplicate_index` flags, through the
-        // daemon's `search.project.park`; never this project's own index.
-        steps.extend(trusty_mpm::daemon::doctor::repair_duplicate_indexes(
-            project, mode,
-        ));
-    } else {
-        eprintln!("  could not resolve the current directory — skipped the project-scoped repairs");
-    }
-
-    if let Some(home) = dirs::home_dir() {
-        // See #6868: create the shared cargo target directory and seed the
-        // `build:` defaults the `rust_build_env` row reports. Both halves are
-        // skipped when already done, which is what makes a second `--fix` run
-        // silent, and neither ever touches `~/.cargo/config.toml`.
-        steps.extend(rust_build_env_steps(&home, project_dir.as_deref(), mode));
-        // #5866: `output_style_staleness` named `tm install` as its remedy and
-        // `tm install` has no output-style step, so the finding had no repair at
-        // all. This is it.
-        // #7423: and the managed `$CLAUDE_CONFIG_DIR` tier beside it — the copy
-        // a tm-launched session actually reads, which this repair never touched.
-        steps.extend(output_style_steps(
-            // #9396: a doctor repair never fetches the content release.
-            trusty_mpm::core::content_source::framework_content_local(None),
-            &home,
-            trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
-            mode,
-        ));
-        steps.extend(refuse_legacy_sources(&home));
-        // A `.mcp.json` above the workspace configures every session started
-        // beneath it. This quarantines ONLY the ones the provenance ledger
-        // proves tm wrote and nobody has edited since; everything else is
-        // reported as refused, with the reason and the `--quarantine-mcp`
-        // escape hatch. Like every other repair here, it deletes nothing — the
-        // file is renamed aside.
-        steps.extend(quarantine_strays(
-            &trusty_mpm::core::mcp_provenance::default_framework_root(),
-            project_dir.as_deref(),
-            &home,
-            mode,
-        ));
-        // #8236: strip plaintext credentials out of the trusty LaunchAgent
-        // plists. The only repair here that takes NO backup — a backup of a
-        // plist holding a credential is a second readable copy of it. Removing
-        // the entry does not un-expose the value, so each step says to rotate.
-        steps.extend(
-            trusty_mpm::daemon::doctor_launchd_secrets_repair::repair_launchd_plist_secrets(
-                &home, mode,
-            ),
-        );
-        // #8562: set ProcessType=Interactive in the daemon and supervisor
-        // plists. The file only — launchd is never reloaded, so each step says
-        // it applies when launchd next loads that label (owner ruling 2026-09-28).
-        steps.extend(
-            trusty_mpm::daemon::doctor_launchd_process_type::repair::repair_launchd_process_type(
-                &home, mode,
-            ),
-        );
-    }
-
-    // #10041: move plaintext credentials out of the managed `.claude.json`
-    // env blocks into the credential store, and tighten it and its copies to 0600.
-    if let Some(dir) = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir() {
-        steps.extend(
-            trusty_mpm::daemon::doctor_claude_json_secrets_repair::repair_claude_json_secrets(
-                &dir, mode,
-            ),
-        );
-    }
-
-    // #8392: bring tm's opt-in `Notification` entry in the managed settings in
-    // line with `[notification_hook] enabled`; silent when it already matches.
-    if let Some(dir) = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir() {
-        steps.extend(
-            trusty_mpm::core::standalone::hooks::notification::repair_notification_hook(
-                &dir.join("settings.json"),
-                None,
-                trusty_mpm::core::config::MpmConfig::load_default()
-                    .notification_hook
-                    .enabled,
-                mode,
-            ),
-        );
-    }
-
-    // #8511: exclude the harness files and move legacy ownership markers into
-    // the git admin dir, across every registered project's trees.
-    steps.extend(
-        trusty_mpm::session_manager::worktree_marker_migration::repair_worktree_markers(
-            &trusty_mpm::daemon::managed_routes::inproject::repos_root(),
-            &trusty_mpm::project::default_adopted_anchors(),
-            mode,
-        ),
-    );
-
-    print_steps(&steps, apply, FIX_APPLY_HINT);
-}
-
-/// The `rust_build_env` repair, resolved against the operator's real paths.
-///
-/// Why (#6868): [`trusty_mpm::core::build_env_repair::repair_rust_build_env`]
-/// is hermetic by design — it takes the config path and the already-resolved
-/// settings so its tests never reach a real `$HOME`. This is the one place that
-/// turns the operator's home directory and cwd into those arguments, and it is
-/// where the two refusals live: a project that is not a Rust checkout, and a
-/// machine whose repo identity cannot be derived, both produce NO steps rather
-/// than a guessed target directory.
-/// What: resolves the `build:` section from `<home>/.trusty-tools/trusty-mpm/
-/// config.yaml`, derives `<owner>/<repo>` from the project's `origin` remote,
-/// and delegates. The `rust_build_env` doctor row reports the same values
-/// through the same resolver, so `--fix` can never act on a different reading
-/// than the one the operator saw.
-/// Test: `core::build_env_repair`'s tests cover every step and every refusal;
-/// this function is path resolution.
-fn rust_build_env_steps(
-    home: &std::path::Path,
-    project_dir: Option<&std::path::Path>,
-    mode: RepairMode,
-) -> Vec<RepairStep> {
-    // The same gate the row uses. `None` is a cut-short scan, which has not
-    // shown the project is free of Rust — and equally has not shown it is one,
-    // so `--fix` declines rather than creating a directory on a guess.
-    if project_dir.and_then(trusty_mpm::core::build_env::project_is_rust) != Some(true) {
-        return Vec::new();
-    }
-    let config_path = trusty_common::crate_config::crate_config_path_at(
-        home,
-        trusty_mpm::core::trusty_tools_config::CRATE_NAME,
-    );
-    let config = trusty_common::crate_config::load_at::<
-        trusty_mpm::core::trusty_tools_config::TrustyToolsConfig,
-    >(&config_path)
-    .ok()
-    .flatten();
-    let identity = project_dir.and_then(trusty_common::github_path::derive_github_path);
-    match trusty_mpm::core::build_env::resolve_build_env(
-        config.as_ref().and_then(|c| c.build.as_ref()),
-        home,
-        identity.as_ref(),
-        trusty_mpm::core::build_env::host_cores(),
-    ) {
-        Ok(env) => {
-            trusty_mpm::core::build_env_repair::repair_rust_build_env(&config_path, &env, mode)
-        }
-        // The `rust_build_env` row already reports this as UNDETERMINED with the
-        // key to set; `--fix` has nothing safe to do about it.
-        Err(_) => Vec::new(),
-    }
-}
+pub(super) const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 
 /// Every `.claude/settings*.json` the build-tree repoint should reach (#7262).
 ///
@@ -437,7 +185,7 @@ fn rust_build_env_steps(
 /// settings.local.json}` and
 /// [`trusty_common::claude_config::discover_claude_settings`] under the
 /// resolved home, which never enters a top-level synced folder or another
-/// device. Existence is not checked here — [`repair_build_tree_binary`] treats
+/// device. Existence is not checked here — the build-tree repoint treats
 /// a missing file as nothing to do. An unresolvable home contributes nothing
 /// rather than aborting the repair.
 ///
@@ -484,12 +232,15 @@ pub(crate) fn machine_wide_settings_files(
 /// is the seeding case.
 /// Test: `core::doctor_repair`'s `statusline_repair_*` tests cover the repair;
 /// this is path resolution.
-fn statusline_settings_files(project_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+pub(super) fn statusline_settings_files(
+    project_dir: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     if let Some(dir) = project_dir {
         files.push(dir.join(".claude").join("settings.json"));
     }
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home {
         files.push(home.join(".claude").join("settings.json"));
     }
     files
@@ -572,7 +323,7 @@ pub(crate) fn print_steps(steps: &[RepairStep], apply: bool, apply_hint: &str) {
 /// [`StepStatus::Failed`] step against `<home>/.claude/output-styles` whose
 /// reason is the content error, which names its remedy.
 /// Test: `a_missing_content_source_fails_the_output_style_repair`.
-fn output_style_steps(
+pub(super) fn output_style_steps(
     content: Result<
         trusty_mpm::core::content_source::FrameworkContent,
         trusty_mpm::core::content_source::AgentContentError,
@@ -603,7 +354,7 @@ fn output_style_steps(
 /// function `--fix-skills` uses, in the mode this run selected — and maps each
 /// outcome onto a step. The classification itself is never re-derived here.
 /// Test: `core::skill_repair`'s tests produce every outcome variant.
-fn skill_steps(include_frozen: bool, mode: RepairMode) -> Vec<RepairStep> {
+pub(super) fn skill_steps(include_frozen: bool, mode: RepairMode) -> Vec<RepairStep> {
     let backup_root = super::doctor_fix_skills::default_backup_root();
     // `--fix` deliberately does not run the #6586 sweep, so it defers nothing.
     let (_origin, outcomes) = super::doctor_fix_skills::skill_repair_outcomes(

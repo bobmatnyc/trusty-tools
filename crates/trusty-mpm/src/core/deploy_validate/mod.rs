@@ -241,6 +241,57 @@ impl ValidationReport {
     pub fn is_complete(&self) -> bool {
         self.gaps.is_empty()
     }
+
+    /// Which repair `tm validate --repair` would run against this report.
+    ///
+    /// Why (#10425): `--repair --dry-run` must name the repair the real run
+    /// takes, so the preview and [`repair_with`] read the same decision.
+    /// What: [`RepairPlan::Nothing`] when complete, [`RepairPlan::ResyncHookGroups`]
+    /// when every gap is a tm hook group (#7849), else
+    /// [`RepairPlan::RerunPipeline`].
+    /// Test: `repair_plan_matches_the_branch_repair_takes`.
+    pub fn repair_plan(&self) -> RepairPlan {
+        if self.is_complete() {
+            RepairPlan::Nothing
+        } else if self.gaps.iter().all(DeploymentGap::is_project_hook_group) {
+            RepairPlan::ResyncHookGroups
+        } else {
+            RepairPlan::RerunPipeline
+        }
+    }
+}
+
+/// The repair `tm validate --repair` selects for a report (#10425).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairPlan {
+    /// The workspace is complete; nothing runs.
+    Nothing,
+    /// Rewrite only the tm hook groups in `.claude/settings.json`, in place.
+    ResyncHookGroups,
+    /// Re-run the session preparation pipeline over the whole `.claude/` tier.
+    RerunPipeline,
+}
+
+impl RepairPlan {
+    /// One operator-facing line naming what the repair would write.
+    ///
+    /// Why: a dry run must not claim a file-level effect it has not computed;
+    /// the pipeline decides each write when it runs, so the line says that.
+    /// Test: `repair_plan_matches_the_branch_repair_takes`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Nothing => "nothing — the deployment is complete",
+            Self::ResyncHookGroups => {
+                "resync the tm hook groups in .claude/settings.json in place; no other file"
+            }
+            Self::RerunPipeline => {
+                "re-run the session preparation pipeline, which may rewrite .claude/agents, \
+                 .claude/skills, .claude/settings.json (hooks, outputStyle, plugin allowlist, \
+                 statusLine) and the output styles; the exact files are decided when it runs, \
+                 so this preview lists the gaps it must close, not each write"
+            }
+        }
+    }
 }
 
 /// Validate `fw`'s deployed `.claude/{agents,skills}` payload and
@@ -645,7 +696,9 @@ fn repair_with(
     claude_config_dir: Option<&Path>,
 ) -> RepairOutcome {
     let before = validate_workspace_with_exe(fw, hook_exe);
-    if before.is_complete() {
+    // #10425: the same decision `tm validate --repair --dry-run` previews.
+    let plan = before.repair_plan();
+    if plan == RepairPlan::Nothing {
         return RepairOutcome {
             after: before.clone(),
             before,
@@ -661,7 +714,7 @@ fn repair_with(
     // it can refuse fatally for a reason a hook resync has nothing to do with.
     // An Err here is reported: a repair that could not write must never leave
     // the caller reading "no gaps found" (the fail-open shape this issue is).
-    if before.gaps.iter().all(DeploymentGap::is_project_hook_group) {
+    if plan == RepairPlan::ResyncHookGroups {
         let repair_error =
             crate::core::session_launch::ensure_project_hooks_with(fw, workspace, hook_exe)
                 .err()

@@ -501,7 +501,7 @@ async fn main() -> anyhow::Result<()> {
             commands::session_account::session_as_account(&daemon, action, account, token).await
         }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
-        Some(Command::Validate { path, repair }) => validate(path, repair).await,
+        Some(cmd @ Command::Validate { .. }) => validate(cmd).await,
         Some(Command::Hooks { action }) => {
             use cli::HooksAction;
             match action {

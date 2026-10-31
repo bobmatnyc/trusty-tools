@@ -88,6 +88,8 @@ pub(crate) mod doctor_daemon_row;
 pub(crate) mod doctor_fix_agents;
 // #8236: `--fix-launchd-secrets`, the credential strip without the other repairs.
 pub(crate) mod doctor_fix_launchd_secrets;
+// #10425: the `--fix` runner, its `--only` scope and fail-closed dry run.
+pub(crate) mod doctor_fix_run;
 pub(crate) mod doctor_fix_skills;
 // #8371: the opt-in `--network` gcloud auth row.
 pub(crate) mod doctor_gcloud;
