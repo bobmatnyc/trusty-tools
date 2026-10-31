@@ -11,7 +11,8 @@
 //! runs — an interpreter (`bash`, `sh`, `zsh`, `dash`, `ksh`, `source`, `.`,
 //! `python*`, `node`, `ruby`, `perl`) given a script operand, a file it loads
 //! as code (`node -r`, `ruby -r`, `bash --rcfile`), or its stdin redirected
-//! from a file, and a first word that is a path to a file. It reads the file
+//! from a file, and a first word that is a path to a file — in the segment
+//! and in each `$( … )` or backtick body it carries (#10566). It reads the file
 //! (see [`read_script`]), blanks its full-line comments, joins its line
 //! continuations and rewrites it as the inline equivalent — a shell body is
 //! itself the command text; any other body is handed to its interpreter as a
@@ -33,8 +34,9 @@
 //! regular file, over the 256 KiB `MAX_SCRIPT_BYTES`, or not UTF-8 text; an
 //! interpreter's script or loaded file computed at run time (`bash "$S"`,
 //! `bash <(…)`, a glob); a literal script that does not exist and that
-//! nothing else in the command names; and a script run past
-//! [`MAX_SCRIPT_DEPTH`]. Nested runs are resolved as strictly as the top
+//! nothing else in the command names; a script run past
+//! [`MAX_SCRIPT_DEPTH`]; and substitutions nested past
+//! `MAX_SUBSTITUTION_DEPTH` (#10566). Nested runs are resolved as strictly as the top
 //! level (#9037). A symlinked script is judged by its target. `$HOME` and
 //! `$PWD` prefixes resolve. A compiled executable (ELF or Mach-O magic) is
 //! not a script and allows.
@@ -64,6 +66,9 @@
 //!    (`cat .en[v]`, `cat {.env,}`): the file rule fails closed on every such
 //!    shape, and shell programs carry them as regexes and awk code, so a body
 //!    refuses only on a secret name written without one ([`judge_text`]).
+//! 10. Inside a script body, a substitution that runs a script whose literal
+//!     word names no file (#10566): prose and here-documents quote code in
+//!     backticks. A computed, `/dev/fd/` or resolved-variable word refuses.
 //!
 //! Fail-open check: this rule only ADDS refusals and runs after the inline
 //! rules, which still judge the command text. Every [`Unread`] arm refuses.
@@ -77,7 +82,6 @@ use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use crate::commands::pm_guard_bash::build_lease_cwd::{BuildDir, build_dir};
 use crate::commands::pm_guard_bash::{
     RedirectRole, evaluate_credential_print_command, input_redirect_operand, redirect_role,
-    split_heredoc_bodies, split_shell_segments, tokenize,
 };
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_read_rules;
@@ -90,6 +94,11 @@ pub(crate) use crate::commands::pm_guard_secret_script_read::{
     Body, Rule, Unread, deny_reason, read_script,
 };
 use crate::commands::pm_guard_secret_script_self::resolve_self_paths;
+use walk::{Walk, each_script, each_script_in};
+
+// #10566: the walk that locates each script, split out for the 500-SLOC cap.
+#[path = "pm_guard_secret_script_walk.rs"]
+mod walk;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;
@@ -198,55 +207,13 @@ struct Candidate {
 pub(crate) fn evaluate_script_body_secret_read(command: &str, cwd: &Path) -> Option<String> {
     let mut seen = Vec::new();
     let bases = [cwd.to_path_buf()];
-    each_script(
-        command,
-        &bases,
-        true,
-        |word, found, interpreter, seg_bases| {
-            let rule = match found {
-                Ok(path) => judge_script(&path, interpreter, seg_bases, 0, &mut seen),
-                Err(why) => Some((Rule::Unread(why), None)),
-            };
-            rule.map(|(rule, inner)| deny_reason(word, inner.as_deref(), rule))
-        },
-    )
-}
-
-/// Call `judge` on each located script of `command` until one answers. With
-/// `strict`, a script the command runs but whose path cannot be resolved is
-/// handed over as an [`Unread`] error ([`unresolved`]).
-fn each_script<T>(
-    command: &str,
-    bases: &[PathBuf],
-    strict: bool,
-    mut judge: impl FnMut(&str, Result<PathBuf, Unread>, Option<&str>, &[PathBuf]) -> Option<T>,
-) -> Option<T> {
-    let (argv_text, _) = split_heredoc_bodies(command);
-    for segment in split_shell_segments(&argv_text) {
-        let trimmed = segment.trim();
-        let Ok(argv) = tokenize(trimmed) else {
-            continue;
+    each_script(command, &bases, |word, found, interpreter, seg_bases| {
+        let rule = match found {
+            Ok(path) => judge_script(&path, interpreter, seg_bases, 0, &mut seen),
+            Err(why) => Some((Rule::Unread(why), None)),
         };
-        let (candidates, exact) = candidates(&argv);
-        if candidates.is_empty() {
-            continue;
-        }
-        let seg_bases = segment_bases(&argv_text, trimmed, bases);
-        for (word, path, interpreter) in locate(&candidates, &seg_bases) {
-            if let Some(answer) = judge(&word, Ok(path), interpreter.as_deref(), &seg_bases) {
-                return Some(answer);
-            }
-        }
-        // #8879: an unresolvable or missing script fails closed at the top level.
-        if strict
-            && exact
-            && let Some((word, why)) = unresolved(&candidates, &seg_bases, command)
-            && let Some(answer) = judge(&word, Err(why), None, &seg_bases)
-        {
-            return Some(answer);
-        }
-    }
-    None
+        rule.map(|(rule, inner)| deny_reason(word, inner.as_deref(), rule))
+    })
 }
 
 /// The script word a segment runs but the guard cannot resolve to a body:
@@ -348,19 +315,39 @@ fn judge_script(
     }
     // #9037: nested runs resolve as strictly as the top level.
     let nested = resolve_self_paths(&body, path);
-    each_script(
-        &nested,
-        bases,
-        true,
-        // #10548: a nested refusal names the innermost word it could not judge.
-        |word, inner, inner_interp, inner_bases| {
-            let refused = match inner {
-                Ok(inner) => judge_script(&inner, inner_interp, inner_bases, depth + 1, seen),
-                Err(why) => Some((Rule::Unread(why), None)),
-            };
-            refused.map(|(rule, named)| (rule, named.or_else(|| Some(word.to_string()))))
-        },
-    )
+    // #10548: a nested refusal names the innermost word it could not judge.
+    let mut refuse = |word: &str,
+                      inner: Result<PathBuf, Unread>,
+                      inner_interp: Option<&str>,
+                      inner_bases: &[PathBuf]| {
+        let refused = match inner {
+            Ok(inner) => judge_script(&inner, inner_interp, inner_bases, depth + 1, seen),
+            Err(why) => Some((Rule::Unread(why), None)),
+        };
+        refused.map(|(rule, named)| (rule, named.or_else(|| Some(word.to_string()))))
+    };
+    let own = Walk {
+        root: &nested,
+        written: &body,
+        strict: true,
+        own: true,
+        subs: false,
+    };
+    // #10566: a body's substitutions are read with comment lines blanked and
+    // leniently — a literal script word that is missing allows — so a
+    // backtick pair quoted in prose or in a here-document the guard cannot
+    // split is not a run (residual 10).
+    let substituted = resolve_self_paths(&blank_comment_lines(&body, true), path);
+    let subs = Walk {
+        strict: false,
+        own: false,
+        subs: true,
+        ..own
+    };
+    // #10566 round 2: substitutions first, so a body's `$(bash "$B")` is
+    // named as the computed word it was written as.
+    each_script_in(&substituted, bases, subs, 0, &mut refuse)
+        .or_else(|| each_script_in(&nested, bases, own, 0, &mut refuse))
 }
 
 /// Run the inline credential judges over `command`, the inline spelling of
@@ -402,17 +389,26 @@ fn judge_text(command: &str, body: &str, cwd: &Path) -> Option<Rule> {
 /// Test: `without_comment_lines_keeps_a_substitution_8879`,
 /// `the_repo_gate_scripts_allow_8879`.
 fn without_comment_lines(body: &str) -> String {
+    blank_comment_lines(body, false).replace("\\\n", " ")
+}
+
+/// `body` with each full-line `#` comment blanked (see
+/// [`without_comment_lines`]) and every other byte kept, so a here-document's
+/// delimiter line still closes it (#10566). With `keep_backticks`, a line
+/// carrying a backtick stays as well: inside a multi-line double-quoted
+/// string it runs, and the substitution walk blanks real comments itself.
+fn blank_comment_lines(body: &str, keep_backticks: bool) -> String {
     body.split_inclusive('\n')
         .map(|line| {
-            let comment = line.trim_start().starts_with('#') && !line.contains("$(");
+            let runs = line.contains("$(") || (keep_backticks && line.contains('`'));
+            let comment = line.trim_start().starts_with('#') && !runs;
             if comment {
                 if line.ends_with('\n') { "\n" } else { "" }
             } else {
                 line
             }
         })
-        .collect::<String>()
-        .replace("\\\n", " ")
+        .collect()
 }
 
 /// The inline spelling of running the script: a shell body is itself the
@@ -652,3 +648,7 @@ mod tests;
 #[cfg(test)]
 #[path = "pm_guard_secret_fp_10548_tests.rs"]
 mod fp_10548_tests;
+
+#[cfg(test)]
+#[path = "pm_guard_secret_script_10566_tests.rs"]
+mod substitution_10566_tests;

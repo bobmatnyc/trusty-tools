@@ -105,6 +105,86 @@ pub(crate) fn segment_substitution_spans(segment: &str) -> Vec<(Range<usize>, Su
     )
 }
 
+/// `text` with each shell comment blanked to spaces, newlines kept (#10566).
+///
+/// Why: a comment that quotes code in backticks holds pairs the shell never
+/// runs, and an apostrophe in a comment (`# the crate's gate`) desyncs a
+/// comment-blind quote map for every line after it; both made the
+/// script-body rule refuse this repository's own gate scripts.
+/// What: one pass tracking quotes, backslashes, backticks, `${ }` brace depth
+/// and paren depth. A `#` opens a comment only when it is unquoted, starts a
+/// word, and every depth is 0 (`${x:- #}` and `$(a # b)` open none). When the
+/// pass ends inside a quote, a backtick or an open depth, the reading is
+/// unclear and only full-line comments are blanked
+/// ([`full_line_comments_blanked`]); every trailing comment stays, the
+/// over-reading direction.
+/// Test: `a_substitution_in_a_comment_is_not_run_10566`.
+pub(crate) fn blank_shell_comments(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = bytes.to_vec();
+    let (mut single, mut double, mut tick) = (false, false, false);
+    let (mut brace, mut paren) = (0usize, 0usize);
+    let mut i = 0;
+    while let Some(&c) = bytes.get(i) {
+        let next = bytes.get(i + 1).copied();
+        match c {
+            _ if single => single = c != b'\'',
+            b'\\' => i += 1,
+            b'"' => double = !double,
+            _ if double => {}
+            b'\'' => single = true,
+            b'`' => tick = !tick,
+            b'$' if matches!(next, Some(b'{' | b'(')) => {
+                if next == Some(b'{') {
+                    brace += 1
+                } else {
+                    paren += 1
+                }
+                i += 1;
+            }
+            b'}' if brace > 0 => brace -= 1,
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'#' if brace == 0 && paren == 0 && !tick && word_start(bytes, i) => {
+                while out.get(i).is_some_and(|b| *b != b'\n') {
+                    out[i] = b' ';
+                    i += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if single || double || tick || brace > 0 || paren > 0 {
+        return full_line_comments_blanked(text);
+    }
+    String::from_utf8(out).unwrap_or_else(|_| full_line_comments_blanked(text))
+}
+
+/// The fallback when [`blank_shell_comments`] cannot read `text`: each line
+/// whose first word starts with `#` and that carries no `$(` is blanked, as
+/// `pm_guard_secret_script` reads a body for the inline rules (residual 7 —
+/// a backtick `#` line inside a multi-line string is not judged there).
+fn full_line_comments_blanked(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|line| {
+            let comment = line.trim_start().starts_with('#') && !line.contains("$(");
+            match (comment, line.ends_with('\n')) {
+                (true, true) => "\n",
+                (true, false) => "",
+                (false, _) => line,
+            }
+        })
+        .collect()
+}
+
+/// Whether byte `i` starts a shell word: at the start, or after whitespace
+/// or an operator byte.
+fn word_start(bytes: &[u8], i: usize) -> bool {
+    i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b';' | b'&' | b'|')
+}
+
 /// The substitution walk shared by argv text and here-document bodies.
 ///
 /// What: with `honour_escapes`, an opener behind an odd run of backslashes
