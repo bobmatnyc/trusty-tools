@@ -125,11 +125,11 @@ fn input_state_binary_matches_python_and_fails_closed() {
         text(&out)
     );
     // Every target captured: exit 0, as the script.
-    let ok = env.run(&panes(), &["input-state", "%3", "=tm-things-01:"]);
+    let ok = env.run(&panes(), &["input-state", "%3", "=tm-widget-01:"]);
     assert_eq!(ok.status.code(), Some(0), "{}", text(&ok));
     assert_eq!(
         stdout(&ok),
-        "%3 empty | \n=tm-things-01: suggestion | Pause lifted, start #304\n"
+        "%3 empty | \n=tm-widget-01: suggestion | Pause lifted, start #101\n"
     );
 }
 

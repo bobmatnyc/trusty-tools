@@ -136,12 +136,11 @@ def test_dialog_words_in_transcript_above_the_box_are_not_a_dialog():
 
 
 # --- box detection against a real capture with a labeled top rule -----------
-# tests/fixtures/idle-pane-labeled-rule.txt: the Architect's own idle pane,
-# captured 2026-09-27. Claude Code now draws the box's TOP rule with a short
-# date label ("──…── 9-26/2026 ─"); the old plain-rule-only check made
-# find_box() miss it (has_box=False), so the poller could never wake the
-# Architect even while genuinely idle (poll-state.json: wake_pending=239,
-# no wake sent since 2026-09-26T19:15Z).
+# tests/fixtures/idle-pane-labeled-rule.txt: a synthetic idle pane with the
+# line structure of a real capture (#10627). Claude Code now draws the box's
+# TOP rule with a short date label ("──…── 1-01/2000 ─"); the old
+# plain-rule-only check made find_box() miss it (has_box=False), so the poller
+# could never wake the Architect even while genuinely idle.
 
 def test_labeled_top_rule_is_still_recognized_as_the_box():
     with open(os.path.join(FIXTURES, "idle-pane-labeled-rule.txt")) as f:

@@ -51,7 +51,7 @@ fn ctx_rows(env: &Env) -> TestResult<Vec<(String, String, String)>> {
 fn cycle_falls_back_to_transcript_when_status_ctx_is_none() -> TestResult {
     let env = Env::new(&[])?;
     transcript(env.root(), "%2", "sid-a", 300_000)?;
-    let cap = screen(10).replace("ctx 10% |", "⤵ 969k→77k (92%) |");
+    let cap = screen(10).replace("ctx 10% |", "⤵ 500k→77k (92%) |");
     let tmux = fleet(&[("tm-a", "%2", "claude")], &cap);
     let clock = FakeClock::new(0.0);
     let mut session = PollSession::new(PollState::default());

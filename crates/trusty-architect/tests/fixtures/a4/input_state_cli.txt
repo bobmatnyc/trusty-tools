@@ -7,14 +7,14 @@
 %4 empty | 
 =tm-memory-01: empty | 
 %5 empty | 
-=tm-mpm-utils-01: empty | 
+=tm-pkg-utils-01: empty | 
 %6 empty | 
 =tm-review-01: empty | 
 %7 empty | 
 =tm-search-01: empty | 
 %8 empty | 
 =tm-secrets-01: empty | 
-%9 suggestion | Pause lifted, start #304
-=tm-things-01: suggestion | Pause lifted, start #304
+%9 suggestion | Pause lifted, start #101
+=tm-widget-01: suggestion | Pause lifted, start #101
 %99 missing |
 =tm-gone: missing |
