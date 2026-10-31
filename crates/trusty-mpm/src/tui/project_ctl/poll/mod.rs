@@ -39,6 +39,7 @@
 //! exercised manually / by launching the TUI.
 
 mod rows;
+pub(crate) mod tick;
 
 pub(crate) use rows::{activity_from_response, live_session_rows, project_to_row};
 // Only reachable from `super::tests` (this module's daemon-down test
@@ -49,13 +50,13 @@ pub(crate) use rows::{activity_from_response, live_session_rows, project_to_row}
 pub(crate) use rows::session_to_row;
 
 use crate::client::{DaemonClient, ManagedActivityResponse};
-use crate::project::Project;
+use crate::tui::project_ctl::trace::CallTimings;
 // #9556: the one pin-aware re-discovery step every TUI poll shares.
 use crate::tui::rediscover_daemon as rediscover;
 
 #[cfg(test)]
 use super::state::ActivityInfo;
-use super::state::{ProjectCtlState, ProjectRow, SessionRow};
+use super::state::ProjectCtlState;
 
 /// Refresh [`ProjectCtlState`] from one daemon poll.
 ///
@@ -93,32 +94,15 @@ pub(crate) async fn project_ctl_poll_daemon(
     state: &mut ProjectCtlState,
     client: &mut DaemonClient,
 ) {
-    state.daemon_reachable = client.is_healthy().await;
-    if rediscover(client, state.daemon_reachable) {
-        state.daemon_reachable = client.is_healthy().await;
-    }
-    if state.daemon_reachable {
-        match fetch_projects_and_sessions(client).await {
-            Ok((projects, sessions_by_project, projects_full)) => {
-                state.projects = projects;
-                state.sessions_by_project = sessions_by_project;
-                state.projects_full = projects_full;
-            }
-            Err(_) => {
-                state.daemon_reachable = false;
-                state.projects.clear();
-                state.sessions_by_project.clear();
-                state.projects_full.clear();
-            }
-        }
+    let core = tick::fetch_core(client, true, &mut CallTimings::new()).await;
+    tick::apply_core(state, core);
+    // #10476: `/activity` is a tmux capture on the daemon; a cached pane is
+    // served until `tick::ACTIVITY_REFRESH` has passed for the selection.
+    if tick::activity_target(state, std::time::Instant::now()).is_some() {
+        refresh_activity(state, client).await;
     } else {
-        state.projects.clear();
-        state.sessions_by_project.clear();
-        state.projects_full.clear();
+        tick::apply_activity(state, None);
     }
-    state.projects_nav.sync_len(state.projects.len());
-    state.sessions_nav.sync_len(state.current_sessions().len());
-    refresh_activity(state, client).await;
     refresh_deliverables(state, client).await;
 }
 
@@ -159,31 +143,16 @@ pub(crate) async fn project_ctl_poll_daemon(
 /// `refresh_deliverables_clears_on_daemon_down`,
 /// `refresh_deliverables_keeps_stale_list_on_transient_fetch_failure`.
 async fn refresh_deliverables(state: &mut ProjectCtlState, client: &DaemonClient) {
-    let Some(project_name) = state.selected_project_name().map(str::to_string) else {
-        state.deliverables = None;
-        return;
+    // #10476: the same fetch and apply the off-loop tick runs. A transient
+    // `Err` leaves `state.deliverables` untouched (stale-keep, see above).
+    let req = tick::request_for_deliverables(state);
+    let fetched = match req.project.as_deref() {
+        Some(project) if state.daemon_reachable => {
+            tick::fetch_deliverables(client, project, req.milestones, &mut CallTimings::new()).await
+        }
+        _ => tick::DeliverablesFetch::default(),
     };
-
-    if !state.daemon_reachable {
-        state.deliverables = None;
-        return;
-    }
-
-    // A transient `Err` deliberately falls through WITHOUT touching
-    // `state.deliverables` — see the doc above for why (stale-keep, not
-    // clear, to avoid a false "dangling" glyph on one bad poll).
-    if let Ok(deliverables) = client.list_deliverables(&project_name, None).await {
-        state.deliverables = Some(deliverables);
-    }
-    sync_open_view_deliverables(state, &project_name);
-
-    if let Some(view) = &state.deliverable_view
-        && view.project_name == project_name
-        && let Ok(milestones) = client.list_milestones(&project_name).await
-        && let Some(view) = &mut state.deliverable_view
-    {
-        view.milestones = milestones;
-    }
+    tick::apply_deliverables(state, fetched);
 }
 
 /// Keep an open [`super::state::DeliverableView`]'s `deliverables` in sync
@@ -266,7 +235,7 @@ async fn refresh_activity(state: &mut ProjectCtlState, client: &DaemonClient) {
 /// Test: `classify_status_error_is_non_transport`,
 /// `classify_connect_error_is_transport` (in `tests`, below).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActivityFetchFailure {
+pub(crate) enum ActivityFetchFailure {
     /// Connection refused/timeout — the whole daemon looks down.
     Transport,
     /// The daemon answered; this session's activity fetch failed anyway.
@@ -352,14 +321,15 @@ fn apply_activity_outcome(
 /// projected down to `ProjectRow`.
 async fn fetch_projects_and_sessions(
     client: &DaemonClient,
-) -> anyhow::Result<(
-    Vec<ProjectRow>,
-    std::collections::BTreeMap<String, Vec<SessionRow>>,
-    std::collections::BTreeMap<String, Project>,
-)> {
+    calls: &mut CallTimings,
+) -> anyhow::Result<tick::FleetData> {
+    let t = std::time::Instant::now();
     let projects = client.registry_list_projects(None).await?;
+    calls.push(("projects", t.elapsed()));
+    let t = std::time::Instant::now();
     // #10476: the tui reads `unresumable`, never `stale_assets`.
     let groups = client.fleet_managed_sessions_slim().await?;
+    calls.push(("fleet", t.elapsed()));
 
     let mut sessions_by_project = std::collections::BTreeMap::new();
     for group in &groups {
@@ -380,5 +350,7 @@ async fn fetch_projects_and_sessions(
     Ok((rows, sessions_by_project, projects_full))
 }
 
+#[cfg(test)]
+mod cadence_tests;
 #[cfg(test)]
 mod tests;
