@@ -308,6 +308,7 @@ pub(super) type ReadItem<'a> = dyn Fn(usize, &mut [f32]) -> Result<Option<u64>> 
 /// Add items `0..n` of `read` to `rebuilt` on [`rebuild_threads`] threads;
 /// returns the count `read` had no vector for. `fault` runs before each add.
 /// The first read, add or fault error stops every thread and is returned.
+/// A multi-thread build then sweeps for stranded nodes (#9450).
 /// Test: `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`.
 pub(super) fn add_parallel(
     rebuilt: &Index,
@@ -320,7 +321,8 @@ pub(super) fn add_parallel(
     let missing = AtomicUsize::new(0);
     let abort = AtomicBool::new(false);
     let first_error: Mutex<Option<anyhow::Error>> = Mutex::new(None);
-    let per_thread = n.div_ceil(rebuild_threads(n)).max(1);
+    let threads = rebuild_threads(n);
+    let per_thread = n.div_ceil(threads).max(1);
     std::thread::scope(|scope| {
         for start in (0..n).step_by(per_thread) {
             let end = start.saturating_add(per_thread).min(n);
@@ -350,8 +352,12 @@ pub(super) fn add_parallel(
             });
         }
     });
-    match first_error.into_inner().unwrap_or_else(|p| p.into_inner()) {
-        Some(e) => Err(e),
-        None => Ok(missing.into_inner()),
+    if let Some(e) = first_error.into_inner().unwrap_or_else(|p| p.into_inner()) {
+        return Err(e);
     }
+    // #9450: concurrent inserts can strand a node; a sweep re-links any.
+    if threads > 1 {
+        super::usearch_relink::relink_stranded(rebuilt, n, dim, threads, label, read)?;
+    }
+    Ok(missing.into_inner())
 }
