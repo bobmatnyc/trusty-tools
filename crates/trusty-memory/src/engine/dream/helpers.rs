@@ -182,7 +182,8 @@ pub(crate) fn merged_drawer(survivor: &Drawer, loser: &Drawer) -> Option<Drawer>
     }
     merged.importance = merged.importance.max(loser.importance);
     for tag in &loser.tags {
-        if !merged.tags.contains(tag) {
+        // #10609: a retirement marker belongs to the drawer it was stamped on.
+        if !crate::engine::retired_marker::is_retirement_tag(tag) && !merged.tags.contains(tag) {
             merged.tags.push(tag.clone());
         }
     }

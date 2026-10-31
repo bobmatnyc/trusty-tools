@@ -892,6 +892,34 @@ async fn a_retired_slot_incumbent_is_linked_to_its_replacement() {
     );
 }
 
+/// Why (#10609, ADR-0074): default recall excludes a retiree from a marker on
+/// its own row, so the marker must be on the DURABLE row the commit wrote, not
+/// only on an in-memory copy.
+/// What: two writes into one slot; the incumbent's redb row names the newcomer
+/// as its replacement, and the newcomer carries no marker.
+/// Test: this test.
+#[tokio::test]
+async fn a_retired_slot_incumbent_carries_a_superseded_by_marker() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+
+    let old = write(&handle, "PR #4818 is in flight", Some(SLOT), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(&handle, old).retired_by(),
+        None,
+        "live until replaced"
+    );
+    let new = write(&handle, "PR #4818 merged", Some(SLOT), None)
+        .await
+        .unwrap();
+
+    assert_eq!(stored(&handle, old).retired_by(), Some(new));
+    assert_eq!(stored(&handle, new).retired_by(), None);
+}
+
 /// Why (#9433 AC4): each retirement links one retiree to its own successor.
 /// What: A, B, C into one slot yields A→B and B→C, one active edge each, and
 /// none from the live claimant C.
@@ -1070,6 +1098,8 @@ async fn a_failed_edge_write_still_lands_the_remember_and_warns() {
         "the incumbent is retired"
     );
     assert!(superseded_by_edges(&handle.kg, old).await.is_empty());
+    // #10609: with no edge, the row marker still names the replacement.
+    assert_eq!(stored(&handle, old).retired_by(), Some(new));
     let logged = cap.text();
     let warned = logged.lines().any(|l| {
         l.contains("WARN")

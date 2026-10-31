@@ -1,6 +1,6 @@
 # 0028. Memory recall splits into three tiers — Standing, Current, Episodic — with enforced retirement for Current
 
-- **Status:** Accepted
+- **Status:** Amended by [0074](0074-exclude-superseded-drawers-from-default-recall.md)
 - **Date:** 2026-08-04
 - **Scope:** crates `trusty-common` (`memory_core`: retrieval layers, decay,
   drawer model), `trusty-memory` (prompt-facts surface, `prompt-context` hook

@@ -85,6 +85,8 @@ pub mod recall_rulings;
 // #9421: `superseded_by` demotion, read from the palace KG.
 #[cfg(feature = "server")]
 pub(crate) mod recall_supersede;
+// #10609 (ADR-0074): default exclusion of superseded drawers, and its opt-in.
+pub(crate) mod recall_supersede_view;
 // #9143 AC2: the rank floor that keeps an answering ruling inside `top_k`.
 #[cfg(feature = "server")]
 pub(crate) mod recall_rulings_floor;

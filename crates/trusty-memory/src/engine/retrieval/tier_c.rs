@@ -396,6 +396,9 @@ pub(super) async fn persist_with_retirement(
     let mut retired = incumbent;
     retired.fact_key = None;
     retired.expires_at = None;
+    // #10609: the marker rides in the same atomic commit, so default recall
+    // excludes the retiree from a field on its row, never from a KG lookup.
+    retired.mark_retired_by(drawer.id);
 
     // Order matters: the retirement releases the index entry it owns, then the
     // newcomer's upsert claims it. Reversed, the release would evict the
