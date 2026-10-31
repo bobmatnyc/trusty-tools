@@ -11,7 +11,8 @@
 //! `oauth_token_check_ok_when_env_var_set`,
 //! `oauth_token_check_warns_when_only_api_key_set`,
 //! `oauth_token_check_ok_when_not_relocated`,
-//! `oauth_token_check_ok_when_managed_tier_holds_login` (all in `doctor_tests.rs`).
+//! `oauth_token_check_ok_when_managed_tier_holds_login`,
+//! `oauth_token_check_warns_on_empty_managed_login_evidence` (all in `doctor_tests.rs`).
 
 use std::path::Path;
 
@@ -59,15 +60,17 @@ pub(super) fn check_oauth_token_config() -> DoctorCheck {
 ///
 /// Why: a supervisor install runs `/login` inside the managed tier, so the
 /// login lives there and no stored token is needed.
-/// What: `Some(<file>)` when `<dir>/.credentials.json` is a file (the Linux
-/// store), or when `<dir>/.claude.json` carries the `oauthAccount` object
+/// What: `Some(<file>)` when `<dir>/.credentials.json` is a non-empty file (the
+/// Linux store), or when `<dir>/.claude.json` carries a non-empty `oauthAccount` object
 /// Claude Code writes on login (the macOS secret stays in the Keychain, which
-/// this never reads — #9121). `None` on absence, an unreadable file or bad
+/// this never reads — #9121). `None` on absence, an empty file or object, an unreadable file or bad
 /// JSON, so the caller keeps its `Warn`.
-/// Test: `oauth_token_check_ok_when_managed_tier_holds_login`.
+/// Test: `oauth_token_check_ok_when_managed_tier_holds_login`,
+/// `oauth_token_check_warns_on_empty_managed_login_evidence`.
 pub(super) fn managed_tier_login(dir: &Path) -> Option<String> {
     let file = dir.join(".credentials.json");
-    if file.is_file() {
+    // Length only, never the content; an empty file is not a login.
+    if std::fs::metadata(&file).is_ok_and(|m| m.is_file() && m.len() > 0) {
         return Some(file.display().to_string());
     }
     let file = dir.join(".claude.json");
@@ -75,7 +78,8 @@ pub(super) fn managed_tier_login(dir: &Path) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     value
         .get("oauthAccount")
-        .is_some_and(serde_json::Value::is_object)
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|account| !account.is_empty())
         .then(|| format!("{} oauthAccount", file.display()))
 }
 

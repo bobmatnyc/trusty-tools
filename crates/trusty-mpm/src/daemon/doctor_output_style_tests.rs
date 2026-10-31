@@ -131,6 +131,23 @@ fn output_style_resolves_in_the_managed_config_tier() {
     );
 }
 
+// The managed dir is absent, so the tier list drops it; the Fail names it anyway.
+#[test]
+fn output_style_fail_names_an_absent_managed_dir() {
+    let home = tempfile::tempdir().unwrap();
+    write_settings(home.path(), r#"{"outputStyle": "trusty-mpm"}"#);
+    let managed = crate::core::trusty_tools_config::managed_claude_config_dir_at(home.path());
+    assert!(!managed.exists());
+    let check = check_output_style(None, home.path());
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+    assert!(
+        check.message.contains(&managed.display().to_string())
+            && check.message.contains("managed dir absent"),
+        "the Fail must name the absent managed tier: {}",
+        check.message
+    );
+}
+
 #[test]
 fn output_style_fail_on_malformed_json() {
     let home = tempfile::tempdir().unwrap();

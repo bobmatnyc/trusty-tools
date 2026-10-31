@@ -240,6 +240,7 @@ pub(crate) fn check_output_style(project_dir: Option<&Path>, home: &Path) -> Doc
 /// Test: `output_style_ok_when_style_resolves`, `output_style_fail_when_id_unknown`,
 /// `output_style_fail_when_file_missing`,
 /// `output_style_resolves_in_the_managed_config_tier`,
+/// `output_style_fail_names_an_absent_managed_dir`,
 /// `output_style_ok_for_a_project_style_and_its_composite`,
 /// `legacy_output_style_id_is_recognised_by_doctor`.
 fn evaluate_style(
@@ -287,11 +288,20 @@ fn evaluate_style(
     } else {
         ""
     };
-    let searched = candidates
+    // #10580: `output_style_tiers` drops an absent managed dir, but the Fail
+    // must still name every path searched, so list it, marked absent.
+    let managed_candidate = managed.join("output-styles").join(style.file_name);
+    let mut searched = candidates
         .iter()
         .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    if !candidates.contains(&managed_candidate) {
+        searched.insert(
+            0,
+            format!("{} (managed dir absent)", managed_candidate.display()),
+        );
+    }
+    let searched = searched.join(", ");
     match found {
         Some(style_path) => DoctorCheck::new(
             "output_style",

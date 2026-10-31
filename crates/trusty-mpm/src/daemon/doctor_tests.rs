@@ -712,11 +712,32 @@ fn oauth_token_check_ok_when_managed_tier_holds_login() {
     );
 
     std::fs::remove_file(&claude_json).unwrap();
-    std::fs::write(managed.path().join(".credentials.json"), "{}").unwrap();
+    std::fs::write(managed.path().join(".credentials.json"), r#"{"k": 1}"#).unwrap();
     assert!(
         managed_tier_login(managed.path()).is_some(),
         "the Linux store counts"
     );
+}
+
+// Fail closed: empty evidence is not a login.
+#[test]
+fn oauth_token_check_warns_on_empty_managed_login_evidence() {
+    let managed = tempfile::tempdir().unwrap();
+    std::fs::write(managed.path().join(".credentials.json"), "").unwrap();
+    assert_eq!(
+        managed_tier_login(managed.path()),
+        None,
+        "empty credentials"
+    );
+    std::fs::write(
+        managed.path().join(".claude.json"),
+        r#"{"oauthAccount": {}}"#,
+    )
+    .unwrap();
+    let login = managed_tier_login(managed.path());
+    assert_eq!(login, None, "empty oauthAccount");
+    let check = build_oauth_token_check(true, false, false, login.as_deref());
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
 }
 
 #[test]
