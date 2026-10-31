@@ -91,6 +91,32 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/fleet-classify.py",
         false
     ),
+    // #10571 Phase 2: fleet-poll.py loads these split modules by path.
+    embedded!(
+        "scripts/fleet_poll_cfg.py",
+        "scripts/fleet_poll_cfg.py",
+        false
+    ),
+    embedded!(
+        "scripts/fleet_poll_io.py",
+        "scripts/fleet_poll_io.py",
+        false
+    ),
+    embedded!(
+        "scripts/fleet_poll_alerts.py",
+        "scripts/fleet_poll_alerts.py",
+        false
+    ),
+    embedded!(
+        "scripts/fleet_poll_wake.py",
+        "scripts/fleet_poll_wake.py",
+        false
+    ),
+    embedded!(
+        "scripts/fleet_poll_selfrefresh.py",
+        "scripts/fleet_poll_selfrefresh.py",
+        false
+    ),
     embedded!("scripts/input-state.py", "scripts/input-state.py", true),
     embedded!(
         "scripts/quiet-sessions.py",

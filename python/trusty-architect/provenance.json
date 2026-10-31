@@ -1,6 +1,6 @@
 {
   "export_manifest": "scripts/architect_export_manifest.txt",
-  "export_manifest_sha256": "63f32f274934f5b65e7d68f7de25f0063bfa46a5573c809c2b5080e81f1d92c5",
+  "export_manifest_sha256": "943da65738713b38b4926f604639f0d2a037b4993854cb036420c79c7fac8893",
   "files": {
     "docs/voice.md": "7655db40ae8a555747910cbbd6f6f0589702e0c3a8fbca944287661ac2bcdf02",
     "schemas/dashboard/accounts.schema.json": "4a5e030ca974132b5f96b0727b6ffdbb5907e1ae0eadfc3f8200f38d5b0a80d0",
@@ -55,7 +55,12 @@
     "scripts/datg_ready.py": "2647953581916e7e39b0967aa3265d6eb4e7f66a490fe75021e4aa947d89e82b",
     "scripts/datg_store.py": "5896d5383c8acec8f7ab34cebf25137c71ef3d10e3ff7525c5f0e72c139c7a62",
     "scripts/fleet-classify.py": "748c5fcc3bd4ba8581eb946079b1e4336846129f478cc86bbde4818487fe2d7f",
-    "scripts/fleet-poll.py": "032a50b227331b152b189a35f4a1a0a8bfc5e8ef1df0538be1fb23053d09f131",
+    "scripts/fleet-poll.py": "7fbb977898cae217b9c9f704fd30468ce2f9cff3dd3b4ae868d16c73afc32fa1",
+    "scripts/fleet_poll_alerts.py": "03f3f4839995a9a65af3ff98518a17e380122720ecac3b86210bd8716e6a92ef",
+    "scripts/fleet_poll_cfg.py": "b73a45aa2aa0fe1ced5b533337e9f74a2b3623492c5a3d6176f854d3a73a7a06",
+    "scripts/fleet_poll_io.py": "5a7b99e5ebcd88e1b3238dcffe08d67095d2aa1d5000b0cc3218b90cde2493e0",
+    "scripts/fleet_poll_selfrefresh.py": "16ba9b61f3b3747687cf8b86c4e5274e83e239c5ad5f14df2839dda0d7b01f9b",
+    "scripts/fleet_poll_wake.py": "3257cba1b87a64cae39d9b880f76a47cff0112dcfe12af6688e9b49a9496e0d7",
     "scripts/il-archive.py": "8ed22d8c6fdfae7153a3a8bebc71adbd339dbb1faad795617c3b2cede3a73745",
     "scripts/il-cron.py": "b5bf8479a69f6e558b786a5d6988444026c8a97bae8e1844d511bc07f64e9b66",
     "scripts/input-state.py": "750ab5f5a5c6d77c667d94d705886741575e6ef7559390c81c277284b8c34704",
