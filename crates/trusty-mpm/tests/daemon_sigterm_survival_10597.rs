@@ -65,9 +65,10 @@ impl Drop for PrivateTmux {
     }
 }
 
-/// The `state` of the store record named `NAME`, read from `sessions.json`.
-fn record_state(data: &Path) -> Option<String> {
-    let text = find_sessions_json(data).and_then(|p| std::fs::read_to_string(p).ok())?;
+/// The `state` of the store record named `NAME`, read from the first
+/// `sessions.json` under `root` (the store sits under `$HOME/.trusty-mpm`).
+fn record_state(root: &Path) -> Option<String> {
+    let text = find_sessions_json(root).and_then(|p| std::fs::read_to_string(p).ok())?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let sessions = json.get("sessions")?.as_object()?;
     sessions
@@ -137,7 +138,7 @@ fn a_daemon_sigterm_leaves_a_managed_session_running() {
 
     let socket = data.join("trusty-mpm").join("trusty-mpm.sock");
     let started = Instant::now();
-    while !(socket.exists() && record_state(&data).as_deref() == Some("active")) {
+    while !(socket.exists() && record_state(root.path()).as_deref() == Some("active")) {
         if let Some(status) = child.try_wait().expect("try_wait") {
             panic!("the daemon exited during boot ({status}):\n{}", log());
         }
@@ -146,7 +147,7 @@ fn a_daemon_sigterm_leaves_a_managed_session_running() {
             let _ = child.wait();
             panic!(
                 "the daemon never adopted {NAME} as active (state {:?}):\n{}",
-                record_state(&data),
+                record_state(root.path()),
                 log()
             );
         }
@@ -178,7 +179,7 @@ fn a_daemon_sigterm_leaves_a_managed_session_running() {
         log()
     );
     assert_eq!(
-        record_state(&data).as_deref(),
+        record_state(root.path()).as_deref(),
         Some("active"),
         "the daemon's SIGTERM moved {NAME}'s record:\n{}",
         log()
