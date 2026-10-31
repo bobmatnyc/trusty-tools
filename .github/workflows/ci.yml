@@ -1315,6 +1315,12 @@ jobs:
             echo "seeded=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # #10639: fail fast, BEFORE Save, on an incomplete model cache, so a missing fp32 file
+      # is named here instead of surfacing as a silent INT8 fallback.
+      - name: Verify fastembed model cache is complete
+        if: needs.changes.outputs.docs_only != 'true' && (steps.fastembed-cache.outputs.cache-hit == 'true' || steps.fastembed-preseed.outputs.seeded == 'true')
+        run: ./scripts/check_fastembed_cache.sh
+
       # #4940: save explicitly, HERE — before any test runs — instead of
       # relying on `actions/cache`'s post step, which is `post-if: success()`
       # and therefore never fires on a failing job. Gated on the pre-seed
@@ -1703,10 +1709,16 @@ jobs:
           echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
 
       - name: Restore fastembed model cache
+        id: fastembed-cache
         uses: actions/cache/restore@v4
         with:
           path: /home/runner/.cache/fastembed
           key: ${{ steps.fastembed-key.outputs.key }}
+
+      # Restore-only job: a miss is not an error here (tests download on demand).
+      - name: Verify fastembed model cache is complete (#10639)
+        if: steps.fastembed-cache.outputs.cache-hit == 'true'
+        run: ./scripts/check_fastembed_cache.sh
 
       # trusty-common never appears here: the plan hands it to the
       # `trusty-common-lanes` job. Were it ever to, its empty default feature
@@ -1878,11 +1890,16 @@ jobs:
 
       # Restore only: `test-shard` on main is the sole writer of this key.
       - name: Restore fastembed model cache
+        id: fastembed-cache
         if: steps.decide.outputs.run == 'true'
         uses: actions/cache/restore@v4
         with:
           path: /home/runner/.cache/fastembed
           key: ${{ steps.fastembed-key.outputs.key }}
+
+      - name: Verify fastembed model cache is complete (#10639)
+        if: steps.decide.outputs.run == 'true' && steps.fastembed-cache.outputs.cache-hit == 'true'
+        run: ./scripts/check_fastembed_cache.sh
 
       - name: Run every trusty-common coverage lane
         if: steps.decide.outputs.run == 'true'

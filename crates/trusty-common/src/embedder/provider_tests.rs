@@ -104,9 +104,11 @@ fn fast_embedder_model_name_reports_fp32_default() {
     let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", None);
     let name = current_thread_runtime().block_on(async {
         let e = FastEmbedder::new().await.unwrap();
-        e.model_name()
+        (e.model_name(), e.fallback_reason().map(str::to_owned))
     });
-    assert_eq!(name, "all-MiniLM-L6-v2");
+    assert_eq!(name.0, "all-MiniLM-L6-v2");
+    // #10639: a clean fp32 load records no fallback reason.
+    assert_eq!(name.1, None);
 }
 
 /// Issue #3530 — the explicit INT8 opt-in must be reflected by
