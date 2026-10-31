@@ -10,9 +10,10 @@
 //! Test: `pane_ops_identity_tests.rs`; the pane-gone refusal in
 //! `pane_scoped_tests.rs`.
 
-use tracing::warn;
+use tracing::{error, info, warn};
 
 use super::manager::{ManagedError, SessionManager};
+use super::pane_rebind::RebindOutcome;
 use super::record::{ManagedSessionId, SessionRecord};
 use super::runtime_identity::{RuntimeOwnership, same_server};
 
@@ -86,6 +87,56 @@ impl SessionManager {
         }
     }
 
+    /// [`Self::owned_pane`] for a send: a gone recorded pane is first
+    /// re-resolved to the live pane of the record's own tmux session (#10442).
+    ///
+    /// Why: a relaunch or respawn in the same tmux session moves the agent to
+    /// a new `%N`. The record kept the dead id, so `session_send` refused a
+    /// live session (tm-architect: recorded `%17`, live `%44`).
+    /// What: on `PaneGone` only, runs [`Self::reresolve_live_pane`]. On
+    /// `Rebound` it re-reads the record, whose binding that call wrote under
+    /// the store lock, and gates it again. Any other outcome or error keeps
+    /// today's `PaneGone` refusal and logs the reason at ERROR, so
+    /// `list_recent_errors` returns it. Every other refusal passes through.
+    /// Answers the record the pane was proven on, for the caller's write.
+    /// Test: `a_send_to_a_stale_pane_reresolves_the_live_pane_and_delivers`,
+    /// `a_send_to_a_dead_session_still_refuses_and_logs_an_error`,
+    /// `a_send_to_a_session_with_a_sibling_pane_still_refuses`,
+    /// `a_send_whose_session_pane_is_another_projects_still_refuses`.
+    pub(crate) async fn live_owned_pane(
+        &self,
+        id: &ManagedSessionId,
+        record: SessionRecord,
+    ) -> Result<(SessionRecord, String), ManagedError> {
+        let (sid, stale) = match self.owned_pane(id, &record) {
+            Ok(pane) => return Ok((record, pane)),
+            Err(ManagedError::PaneGone(sid, stale)) => (sid, stale),
+            Err(e) => return Err(e),
+        };
+        let why = match self.reresolve_live_pane(id).await {
+            Ok(RebindOutcome::Rebound { .. }) => {
+                let fresh = self.get(id).await?;
+                let pane = self.owned_pane(id, &fresh)?;
+                info!(id = %id, from_pane = %stale, to_pane = %pane, "send re-resolved the live pane (#10442)");
+                return Ok((fresh, pane));
+            }
+            Ok(RebindOutcome::Current { .. }) => "the record already names that pane".to_owned(),
+            Ok(
+                RebindOutcome::NoMatch(why)
+                | RebindOutcome::Ambiguous(why)
+                | RebindOutcome::Skipped(why),
+            ) => why,
+            Err(e) => e.to_string(),
+        };
+        error!(
+            id = %id, name = %record.tmux_name, pane_id = %stale,
+            "send refused: recorded pane {stale} is gone and no live pane of tmux session '{}' \
+             could be re-resolved: {why} (#10442)",
+            record.tmux_name
+        );
+        Err(ManagedError::PaneGone(sid, stale))
+    }
+
     /// The process in the foreground of pane `pane_id`, from the manager's own
     /// tmux driver (#9566).
     /// Test: `a_stopped_record_whose_pane_runs_a_live_agent_is_never_reactivated_in_place`.
@@ -113,3 +164,7 @@ fn refusal(id: &ManagedSessionId, record: &SessionRecord, why: String) -> Manage
         format!("refusing to act on the recorded pane: {why}"),
     )
 }
+
+#[cfg(test)]
+#[path = "send_reresolve_tests.rs"]
+mod send_reresolve_tests;

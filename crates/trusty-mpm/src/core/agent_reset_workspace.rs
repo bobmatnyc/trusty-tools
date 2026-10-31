@@ -315,6 +315,7 @@ mod tests {
         SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: tmux_name.to_string(),
             cwd: PathBuf::from("/tmp"),
@@ -358,6 +359,7 @@ mod tests {
         SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             workspace_path: Some(workspace.to_path_buf()),
             state: ManagedSessionState::Active,
             workspace_owned: true,

@@ -265,7 +265,7 @@ fn architect_record(
     dir: &Path,
     kind: SessionKind,
     prior: Option<&SessionRecord>,
-    (pane_id, tmux_server): (Option<String>, Option<String>),
+    (pane_id, tmux_server, tmux_session_id): (Option<String>, Option<String>, Option<String>),
 ) -> SessionRecord {
     let task = match kind {
         SessionKind::Architect => "the Architect (tm fleet init)",
@@ -274,6 +274,7 @@ fn architect_record(
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id,
         id,
         tmux_name: name.to_owned(),
         cwd: dir.to_path_buf(),

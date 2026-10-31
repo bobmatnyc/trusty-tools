@@ -285,6 +285,7 @@ fn owned_record(id: ManagedSessionId, state: ManagedSessionState) -> SessionReco
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id,
         tmux_name: format!("tm-owner-gate-{id}"),
         cwd: std::path::PathBuf::from("/tmp"),
