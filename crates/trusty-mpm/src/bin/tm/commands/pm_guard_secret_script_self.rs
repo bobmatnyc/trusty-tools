@@ -59,9 +59,11 @@ static MOVES_DIR: LazyLock<Regex> = LazyLock::new(|| {
 /// A git environment override, or a redefinition of what `git` runs: a
 /// function, an alias, a command-table entry, `hash`/`enable`, an exported
 /// function, or a new `PATH` (#10622). zsh's `path` array is [`ZSH_PATH`].
+/// A shell start-up file (`BASH_ENV`, `ENV`, `ZDOTDIR`, `--rcfile`,
+/// `--init-file`) runs code before the script, so it counts too (#10622).
 static REDEFINES_GIT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"\bGIT_[A-Z0-9_]*|\bfunction\s+git\b|\bgit\s*\(\s*\)|\balias\b[^\n]*\bgit=|\[git\]|\b(?:hash|enable)\b[^\n]*\bgit\b|\bexport\s+-f\b|\bPATH\+?[=\[]",
+        r"\bGIT_[A-Z0-9_]*|\bfunction\s+git\b|\bgit\s*\(\s*\)|\balias\b[^\n]*\bgit=|\[git\]|\b(?:hash|enable)\b[^\n]*\bgit\b|\bexport\s+-f\b|\bPATH\+?[=\[]|\b(?:BASH_ENV|ENV|ZDOTDIR)\+?=|--(?:rcfile|init-file)\b",
     )
     .expect("git redefinition regex")
 });
@@ -225,7 +227,8 @@ pub(crate) fn resolve_self_paths_with(body: &str, script: &Path, risk: ToplevelR
 /// the line count advances from the previous match.
 /// Test: `a_toplevel_after_a_cwd_or_git_change_stays_unresolved_10622`,
 /// `a_toplevel_run_later_or_spelled_in_quotes_stays_unresolved_10622`,
-/// `a_body_full_of_toplevel_idioms_resolves_in_linear_time_10622`.
+/// `a_body_full_of_toplevel_idioms_resolves_in_linear_time_10622`,
+/// `a_shell_startup_file_counts_as_a_git_or_cwd_change_10622`.
 fn resolve_toplevel(text: &str, home: &Path, risk: &ToplevelRisk) -> String {
     let (mut at, mut line) = (0usize, 0usize);
     GIT_TOPLEVEL

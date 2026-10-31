@@ -404,3 +404,45 @@ fn a_body_full_of_toplevel_idioms_resolves_in_linear_time_10622() {
         "{lines} idioms took {elapsed:?}"
     );
 }
+
+/// 🔴 REGRESSION (#10622 round 3): a shell start-up file — a `BASH_ENV`,
+/// `ENV` or `ZDOTDIR` assignment, or the `--rcfile` / `--init-file` option —
+/// in a script body or on the invoking command counts as a git or directory
+/// change, so a toplevel idiom, bare or with `-C`, stays unresolved.
+#[test]
+fn a_shell_startup_file_counts_as_a_git_or_cwd_change_10622() {
+    let (dir, scripts, target) = checkout();
+    let path = scripts.join("gate.sh");
+    let with_c = format!(
+        "T=\"$(bash \"$(git -C {} rev-parse --show-toplevel)/scripts/x.sh\")\"\n",
+        dir.path().display()
+    );
+    for prefix in [
+        "export BASH_ENV=/fake-elsewhere/rc\n",
+        "ENV=/fake-elsewhere/rc\n",
+        "ZDOTDIR=/fake-elsewhere\n",
+        "bash --rcfile /fake-elsewhere/rc -c true\n",
+        "bash --init-file /fake-elsewhere/rc -c true\n",
+    ] {
+        for idiom in [RUN_X, with_c.as_str()] {
+            let resolved = resolve_self_paths(&format!("{prefix}{idiom}"), &path);
+            assert!(!resolved.contains(&target), "{prefix:?} {idiom:?}");
+        }
+    }
+    std::fs::write(scripts.join("x.sh"), "echo fake-value\n").expect("write x.sh");
+    std::fs::write(&path, RUN_X).expect("write gate.sh");
+    assert_eq!(
+        evaluate_script_body_secret_read("bash scripts/gate.sh", dir.path()),
+        None
+    );
+    for command in [
+        "BASH_ENV=/fake-elsewhere/rc bash scripts/gate.sh",
+        "export ENV=/fake-elsewhere/rc; bash scripts/gate.sh",
+    ] {
+        let reason = evaluate_script_body_secret_read(command, dir.path()).unwrap_or_default();
+        assert!(
+            reason.contains("computed at run time"),
+            "`{command}` must deny: {reason}"
+        );
+    }
+}
