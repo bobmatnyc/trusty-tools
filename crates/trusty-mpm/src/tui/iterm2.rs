@@ -6,7 +6,8 @@
 //! on every macOS iTerm2 install.
 //! What: `is_iterm2()` checks env vars at startup; `open_session_tab` runs
 //! an `osascript` one-liner that creates a new tab running `tm sessions attach
-//! <id>`.
+//! <id>`. #10476: [`focus_session_tab`] selects an existing tab and never
+//! creates one; the tui's Focus key uses it.
 //! Test: Detection logic is pure and unit-tested below; AppleScript calls are
 //! integration-only (no test without a live iTerm2).
 
@@ -58,9 +59,72 @@ end tell"#
     }
 }
 
+/// AppleScript that selects the iTerm2 tab already showing tmux session
+/// `session`, printing `found` or `missing`.
+///
+/// Why (#10476): the Focus key may only move to an existing tab, never
+/// create one (owner, #10476 comment 2). The script only reads names and
+/// calls `select`.
+/// What: walks every window, tab and session; the first session whose name
+/// contains `session` has its window, tab and session selected, and the
+/// script returns `found`. Otherwise it returns `missing`. `\` and `"` in the
+/// name are escaped for the AppleScript string literal.
+/// Test: `focus_script_selects_and_never_creates_tab`.
+pub fn focus_script(session: &str) -> String {
+    let needle = session.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if name of s contains "{needle}" then
+          select w
+          tell t to select
+          tell s to select
+          return "found"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "missing"
+end tell"#
+    )
+}
+
+/// Select the existing iTerm2 tab for tmux session `session`.
+///
+/// Why (#10476): the iTerm2 half of the tui's Focus key, outside tmux.
+/// What: runs [`focus_script`] through `osascript` with captured output (the
+/// tui's alternate screen stays intact). `Ok(true)` when a tab was selected,
+/// `Ok(false)` when none shows the session, `Err` when `osascript` fails.
+/// Test: the script is tested by `focus_script_selects_and_never_creates_tab`;
+/// the `osascript` run needs a live iTerm2 and is checked by hand.
+pub fn focus_session_tab(session: &str) -> Result<bool, String> {
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(focus_script(session))
+        .output()
+        .map_err(|e| format!("osascript spawn failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("osascript exited with status {}", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "found")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_script_selects_and_never_creates_tab() {
+        let script = focus_script("tm-alpha-1");
+        assert!(script.contains("if name of s contains \"tm-alpha-1\""));
+        assert!(script.contains("tell t to select"));
+        assert!(!script.to_lowercase().contains("create"), "{script}");
+        assert!(!script.contains("command"), "{script}");
+        let quoted = focus_script("a\"b");
+        assert!(quoted.contains("contains \"a\\\"b\""), "{quoted}");
+    }
 
     #[test]
     fn iterm2_detected_via_term_program() {
