@@ -4,6 +4,7 @@
 use super::*;
 
 use crate::commands::pm_guard_bash::{MAX_SUBSTITUTION_DEPTH, blank_shell_comments};
+use crate::commands::pm_guard_secret_script_read::MAX_SCRIPT_BYTES;
 
 /// A Keychain read that prints its value — refused inline (#8596).
 const KEYCHAIN_READ: &str = "security find-generic-password -s fake-svc -w\n";
@@ -297,5 +298,109 @@ fn a_toplevel_after_a_cwd_or_git_change_stays_unresolved_10622() {
     assert!(
         reason.contains("computed at run time"),
         "must deny: {reason}"
+    );
+}
+
+/// 🔴 REGRESSION (#10622 round 2): `$$` is the pid parameter, so a `'` after
+/// it opens a plain single-quoted string; a later double-quoted region that
+/// holds a `#` and a substitution is not a comment, and is judged.
+#[test]
+fn a_pid_expansion_before_a_plain_string_keeps_the_scanner_in_step_10622() {
+    let line = "echo $$'a\\' \"b ' # $(bash probe.sh)\"";
+    assert_eq!(blank_shell_comments(line), line);
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "probe.sh", KEYCHAIN_READ);
+    all_name(dir.path(), &[line], "probe.sh");
+}
+
+/// A checkout root (a `.git` entry) holding `scripts/`, and the path
+/// `{root}/scripts/x.sh` a resolved toplevel idiom names.
+fn checkout() -> (tempfile::TempDir, PathBuf, String) {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::create_dir_all(dir.path().join(".git")).expect("git dir");
+    let scripts = dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    let target = format!("{}/scripts/x.sh", dir.path().display());
+    (dir, scripts, target)
+}
+
+/// A line running `x.sh` through the bare toplevel idiom.
+const RUN_X: &str = "T=\"$(bash \"$(git rev-parse --show-toplevel)/scripts/x.sh\")\"\n";
+
+/// 🔴 REGRESSION (#10622 round 2): a bare toplevel idiom stays unresolved
+/// when a directory change can run before it at run time — the idiom in a
+/// function or loop with a `cd` anywhere — or when the directory change or
+/// the git redefinition is spelled with quotes or backslashes. A `cd` after
+/// a top-level idiom still resolves.
+#[test]
+fn a_toplevel_run_later_or_spelled_in_quotes_stays_unresolved_10622() {
+    let (_dir, scripts, target) = checkout();
+    let path = scripts.join("gate.sh");
+    for body in [
+        format!("top() {{\n  {RUN_X}}}\ncd /fake-elsewhere\ntop\n"),
+        format!("for d in a b; do\n  {RUN_X}  cd /fake-elsewhere\ndone\n"),
+        format!("\"cd\" /fake-elsewhere\n{RUN_X}"),
+        format!("\\cd /fake-elsewhere\n{RUN_X}"),
+        format!("'pushd' /fake-elsewhere\n{RUN_X}"),
+        format!("alias g\\it=fake-git\n{RUN_X}"),
+        format!("{RUN_X}alias \"git\"=fake-git\n"),
+    ] {
+        let resolved = resolve_self_paths(&body, &path);
+        assert!(!resolved.contains(&target), "{body:?} must stay unresolved");
+    }
+    let top_level = format!("{RUN_X}cd /fake-elsewhere\n");
+    assert!(resolve_self_paths(&top_level, &path).contains(&target));
+}
+
+/// 🔴 REGRESSION (#10622 round 2): a `GIT_*` assignment on the invoking
+/// command, or exported by a parent script, reaches the script it runs, so
+/// that script's toplevel idiom stays unresolved and the run refuses.
+#[test]
+fn a_toplevel_inherits_the_invoking_git_environment_10622() {
+    let (dir, scripts, _) = checkout();
+    std::fs::write(scripts.join("x.sh"), "echo fake-value\n").expect("write x.sh");
+    std::fs::write(scripts.join("gate.sh"), RUN_X).expect("write gate.sh");
+    script(
+        dir.path(),
+        "outer.sh",
+        "export GIT_DIR=/fake-elsewhere/.git\nbash scripts/gate.sh\n",
+    );
+    assert_eq!(
+        evaluate_script_body_secret_read("bash scripts/gate.sh", dir.path()),
+        None
+    );
+    for command in [
+        "GIT_DIR=/fake-elsewhere/.git bash scripts/gate.sh",
+        "export GIT_WORK_TREE=/fake-elsewhere; bash scripts/gate.sh",
+        "bash outer.sh",
+    ] {
+        let reason = evaluate_script_body_secret_read(command, dir.path()).unwrap_or_default();
+        assert!(
+            reason.contains("computed at run time"),
+            "`{command}` must deny: {reason}"
+        );
+    }
+}
+
+/// 🔴 REGRESSION (#10622 round 2, bounded time): a body near the script size
+/// bound made of toplevel idioms resolves in linear time.
+#[test]
+fn a_body_full_of_toplevel_idioms_resolves_in_linear_time_10622() {
+    let (_dir, scripts, target) = checkout();
+    let line = "echo \"$(git rev-parse --show-toplevel)\"\n";
+    let lines = MAX_SCRIPT_BYTES as usize / line.len() - 1;
+    let body = line.repeat(lines);
+    let started = std::time::Instant::now();
+    let resolved = resolve_self_paths(&body, &scripts.join("gate.sh"));
+    let elapsed = started.elapsed();
+    let root = target.trim_end_matches("/scripts/x.sh");
+    assert_eq!(
+        resolved.matches(root).count(),
+        lines,
+        "every idiom resolves"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "{lines} idioms took {elapsed:?}"
     );
 }

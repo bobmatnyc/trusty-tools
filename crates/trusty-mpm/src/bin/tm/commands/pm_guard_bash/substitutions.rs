@@ -122,7 +122,8 @@ pub(crate) fn segment_substitution_spans(segment: &str) -> Vec<(Range<usize>, Su
 /// ends only at an unescaped `'` (#10622).
 /// Test: `a_substitution_in_a_comment_is_not_run_10566`,
 /// `an_ansi_c_string_keeps_the_comment_scanner_in_step_10622`,
-/// `the_comment_fallback_keeps_a_line_that_runs_code_10622`.
+/// `the_comment_fallback_keeps_a_line_that_runs_code_10622`,
+/// `a_pid_expansion_before_a_plain_string_keeps_the_scanner_in_step_10622`.
 pub(crate) fn blank_shell_comments(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = bytes.to_vec();
@@ -139,6 +140,8 @@ pub(crate) fn blank_shell_comments(text: &str) -> String {
             b'\\' => i += 1,
             b'"' => double = !double,
             _ if double => {}
+            // #10622: `$$` is the pid parameter; a `'` after it opens a plain string.
+            b'$' if next == Some(b'$') => i += 1,
             b'$' if next == Some(b'\'') => {
                 ansi = true;
                 i += 1;
