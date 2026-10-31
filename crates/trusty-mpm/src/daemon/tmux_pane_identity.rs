@@ -26,6 +26,17 @@ impl TmuxDriver {
         )
     }
 
+    /// The raw [`PANE_FACTS_FORMAT`] line tmux prints for `pane_id`
+    /// (#10442); `Err` as [`Self::pane_identity_line`] does.
+    ///
+    /// [`PANE_FACTS_FORMAT`]: crate::session_manager::pane_identity::PANE_FACTS_FORMAT
+    pub fn pane_facts_line(&self, pane_id: &str) -> Result<String> {
+        self.pane_display_line(
+            pane_id,
+            crate::session_manager::pane_identity::PANE_FACTS_FORMAT,
+        )
+    }
+
     /// The process tmux reports in the foreground of pane `pane_id` (#9566).
     ///
     /// What: `display-message -t %N -p '#{pane_current_command}'`, trimmed;

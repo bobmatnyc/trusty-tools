@@ -79,22 +79,75 @@ impl PaneIdentity {
     }
 }
 
-/// `name`'s pane id and the identity of the tmux server it was read on, for
-/// a record to store as `(pane_id, tmux_server)` (#9004).
+/// The `display-message` format a [`PaneFacts`] is parsed from; the path
+/// comes last because it is the only free-text field (#10442).
+pub const PANE_FACTS_FORMAT: &str = "#{session_id}|#{session_created}|#{pane_current_path}";
+
+/// What one pane's session and directory are, read by pane id (#10442).
+///
+/// Why: a send re-resolves a record only into the tmux session instance it
+/// launched, in its own project; both facts must be read for the pane, not
+/// for whatever session holds the name now.
+/// What: the pane's session `$N` id, that session's creation time in epoch
+/// seconds, and the pane's current path.
+/// Test: `a_pane_facts_line_parses_only_when_whole`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneFacts {
+    /// The `$N` id of the session holding the pane.
+    pub session_id: String,
+    /// That session's `session_created`, epoch seconds.
+    pub session_created: i64,
+    /// The pane's `pane_current_path`.
+    pub current_path: std::path::PathBuf,
+}
+
+impl PaneFacts {
+    /// Parse a [`PANE_FACTS_FORMAT`] line read for `pane_id`; `Err` naming
+    /// the line unless the id is `$N`, the time is digits and the path is
+    /// non-empty, because a missing pane answers exit 0 with empty fields.
+    /// Test: `a_pane_facts_line_parses_only_when_whole`.
+    pub fn parse(pane_id: &str, line: &str) -> Result<Self, String> {
+        let bad = || format!("unreadable session facts for pane {pane_id}: {line:?}");
+        let mut fields = line.trim_end_matches(['\n', '\r']).splitn(3, '|');
+        let (Some(session_id), Some(created), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(bad());
+        };
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        if !session_id.strip_prefix('$').is_some_and(digits) || path.is_empty() {
+            return Err(bad());
+        }
+        let session_created = created.parse::<i64>().map_err(|_| bad())?;
+        Ok(Self {
+            session_id: session_id.to_owned(),
+            session_created,
+            current_path: std::path::PathBuf::from(path),
+        })
+    }
+}
+
+/// `name`'s pane id, the tmux server it was read on, and its session's `$N`
+/// id, for a record to store as `(pane_id, tmux_server, tmux_session_id)`
+/// (#9004, #10442).
 ///
 /// Why: every site that captures a record's pane id must capture the server
 /// with it, or the record cannot later prove its pane is the one on the live
-/// server.
+/// server; and the session id, or a send cannot tell a reused name (#10442).
 /// What: [`ManagedTmuxDriver::get_pane_id`], then
-/// [`ManagedTmuxDriver::pane_identity`] of that pane. The server is `None`
+/// [`ManagedTmuxDriver::pane_identity`] of that pane. The server and session
+/// id are `None`
 /// when either read fails, or when the identity names a session other than
 /// `name` (the server restarted between the two reads), so the record fails
 /// closed: it is never `Owned`. A failed read is logged at `warn`.
 /// Test: `capture_pairs_the_pane_with_its_server`,
 /// `capture_without_a_readable_server_stores_no_server`.
-pub fn capture(tmux: &dyn ManagedTmuxDriver, name: &str) -> (Option<String>, Option<String>) {
+pub fn capture(
+    tmux: &dyn ManagedTmuxDriver,
+    name: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
     let Some(pane_id) = tmux.get_pane_id(name) else {
-        return (None, None);
+        return (None, None, None);
     };
     let identity = match tmux.pane_identity(&pane_id) {
         Ok(identity) => identity,
@@ -104,7 +157,7 @@ pub fn capture(tmux: &dyn ManagedTmuxDriver, name: &str) -> (Option<String>, Opt
                 pane_id = %pane_id,
                 "pane identity read failed; the record stores no tmux server (#9004): {e}"
             );
-            return (Some(pane_id), None);
+            return (Some(pane_id), None, None);
         }
     };
     // #9004: the same session-name check `same_server` applies at ownership
@@ -117,9 +170,13 @@ pub fn capture(tmux: &dyn ManagedTmuxDriver, name: &str) -> (Option<String>, Opt
             identity_session = %identity.session_name,
             "pane identity names another session; the record stores no tmux server (#9004)"
         );
-        return (Some(pane_id), None);
+        return (Some(pane_id), None, None);
     }
-    (Some(pane_id), Some(identity.server))
+    (
+        Some(pane_id),
+        Some(identity.server),
+        Some(identity.session_id),
+    )
 }
 
 #[cfg(test)]

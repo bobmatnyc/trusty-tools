@@ -889,6 +889,7 @@ mod tests {
         let record = SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id,
             tmux_name: "tm-ownerless-test".into(),
             cwd: std::path::PathBuf::from("/tmp"),
@@ -1051,6 +1052,7 @@ mod tests {
         let record = SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: "tm-fallback-test".into(),
             cwd: ws.path().to_path_buf(),

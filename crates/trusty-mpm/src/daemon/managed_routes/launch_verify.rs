@@ -465,6 +465,7 @@ mod tests {
         crate::session_manager::SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id: crate::session_manager::ManagedSessionId::new(),
             tmux_name: "tmpm-probe".to_owned(),
             cwd: std::path::PathBuf::from("/tmp/project"),

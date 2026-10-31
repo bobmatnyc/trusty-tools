@@ -281,7 +281,8 @@ impl SessionManager {
         // session-scoped env var is inherited by sibling panes/windows and
         // therefore insufficient (see `SessionRecord::pane_id`'s doc).
         // #9004: with the server it was read on, or the record never owns it.
-        let (pane_id, tmux_server) = super::pane_identity::capture(self.tmux.as_ref(), &tmux_name);
+        let (pane_id, tmux_server, tmux_session_id) =
+            super::pane_identity::capture(self.tmux.as_ref(), &tmux_name);
 
         // OWN the freshly-created tmux session immediately (#1453). From here
         // until the record is durably persisted, this guard is the session's
@@ -306,6 +307,7 @@ impl SessionManager {
         let record = SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id,
             id,
             tmux_name: tmux_name.clone(),
             cwd,

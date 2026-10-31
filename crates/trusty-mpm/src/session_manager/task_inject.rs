@@ -460,13 +460,13 @@ impl SessionManager {
                 record.tmux_name, record.state
             )));
         }
+        if record.runtime != RuntimeKind::ClaudeCode {
+            return Ok(());
+        }
         // #9101: the modal probe reads the pane, so it runs only on a pane
-        // proven to be this record's.
-        if record.runtime == RuntimeKind::ClaudeCode
-            && pane_shows_blocking_modal(
-                &self.capture_readiness_pane(&record.tmux_name, &self.owned_pane(id, &record)?),
-            )
-        {
+        // proven to be this record's. #10442: a gone pane is re-resolved first.
+        let (record, pane) = self.live_owned_pane(id, record).await?;
+        if pane_shows_blocking_modal(&self.capture_readiness_pane(&record.tmux_name, &pane)) {
             return Err(ManagedError::TmuxUnavailable(format!(
                 "session {} is showing a blocking onboarding/trust modal; \
                  cannot inject input until it is dismissed",

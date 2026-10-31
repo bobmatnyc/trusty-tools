@@ -35,6 +35,7 @@ fn record_serde_round_trip() {
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-quiet-falcon".into(),
         cwd: PathBuf::from("/tmp/project"),
@@ -81,6 +82,7 @@ fn stopped_state_survives_serde() {
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-test".into(),
         cwd: PathBuf::from("/tmp"),
@@ -125,6 +127,7 @@ fn decommissioned_state_survives_serde() {
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-gone".into(),
         cwd: PathBuf::from("/tmp"),
@@ -194,6 +197,7 @@ fn record_round_trips_tcode_runtime() {
     let mut record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-tcode".into(),
         cwd: PathBuf::from("/tmp"),
@@ -267,6 +271,7 @@ fn record_round_trips_ephemeral_true() {
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-ephemeral".into(),
         cwd: PathBuf::from("/tmp"),
@@ -370,6 +375,7 @@ fn record_round_trips_scrollback_fields() {
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-snap".into(),
         cwd: PathBuf::from("/home/user/project"),
@@ -418,6 +424,7 @@ fn record_round_trips_workspace_owned_true() {
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-clone".into(),
         cwd: PathBuf::from("/managed/root/owner/repo/abc"),
@@ -494,6 +501,7 @@ fn record_round_trips_deliverable_id() {
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-bound".into(),
         cwd: PathBuf::from("/tmp"),
@@ -567,6 +575,7 @@ fn record_round_trips_worktree_owner() {
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: owner,
         tmux_name: "tmpm-owned".into(),
         cwd: PathBuf::from("/tmp"),
@@ -714,6 +723,7 @@ fn terminal_fixture() -> SessionRecord {
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tm-terminal-fixture".into(),
         cwd: PathBuf::from("/tmp"),

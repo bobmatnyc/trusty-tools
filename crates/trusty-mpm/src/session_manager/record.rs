@@ -515,6 +515,19 @@ pub struct SessionRecord {
     #[serde(default)]
     pub tmux_server: Option<String>,
 
+    /// The `$N` id of the tmux session `pane_id` was read in (#10442).
+    ///
+    /// Why: tm names sessions `tm-<folder>`, so a dead session's name can be
+    /// reused by an unrelated one on the same server. `$N` is never reused
+    /// within one server instance, so with `tmux_server` it names one session
+    /// instance for all time; a send re-resolves only into that instance.
+    /// What: written with `pane_id` at every capture and by a successful
+    /// rebind. `None` for every record written before this field, and skipped
+    /// when `None`, so such a record re-saves byte-identical.
+    /// Test: `tmux_session_id_round_trips_and_old_records_load`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_session_id: Option<String>,
+
     /// Delivery status of the turnkey `--task` pane injection (#2364).
     ///
     /// Why: `inject_task_when_ready` was fire-and-forget before this field

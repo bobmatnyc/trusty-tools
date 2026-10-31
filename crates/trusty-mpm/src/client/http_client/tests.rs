@@ -252,6 +252,7 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
         let record = SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id,
             tmux_name: format!("tm-7877-client-{id}"),
             cwd: shared.clone(),

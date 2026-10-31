@@ -45,6 +45,7 @@ fn record_at(
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: workspace.path().to_path_buf(),

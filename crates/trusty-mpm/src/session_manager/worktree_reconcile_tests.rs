@@ -51,6 +51,7 @@ fn record_at(state: ManagedSessionState, workspace: Option<PathBuf>) -> SessionR
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tm-reconcile-test".into(),
         cwd: PathBuf::from("/tmp"),

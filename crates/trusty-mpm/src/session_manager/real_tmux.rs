@@ -307,6 +307,16 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(ManagedError::TmuxUnavailable)
     }
 
+    /// #10442: one `display-message -t %N`, parsed strictly.
+    fn pane_facts(&self, pane_id: &str) -> Result<super::pane_identity::PaneFacts, ManagedError> {
+        let line = self
+            .driver
+            .pane_facts_line(pane_id)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        super::pane_identity::PaneFacts::parse(pane_id, &line)
+            .map_err(ManagedError::TmuxUnavailable)
+    }
+
     /// #9566: one `display-message -t %N '#{pane_current_command}'`.
     fn pane_foreground_command(&self, pane_id: &str) -> Result<String, ManagedError> {
         self.driver

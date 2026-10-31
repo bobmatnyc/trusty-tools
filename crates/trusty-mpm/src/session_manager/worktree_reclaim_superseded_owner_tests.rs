@@ -62,6 +62,7 @@ pub(super) fn pm_record(tmux_name: &str, current: &str) -> SessionRecord {
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::for_adopted_tmux_name(tmux_name),
         tmux_name: tmux_name.to_owned(),
         cwd: PathBuf::new(),
