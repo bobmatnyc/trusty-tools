@@ -24,7 +24,7 @@ MOVED = {
             "capture_pane", "send_to_architect", "read_events", "swap_used_mb", "host_alerts"],
     "_alerts": ["resolve_context_bar", "self_ctx_alerts", "il_cron_alerts", "ctx_watch_alerts"],
     "_watchdog": ["run_architect_relaunch", "architect_busy", "architect_transcript_mtime", "watchdog_alerts"],
-    "_wake": ["_norm", "_box_full_text", "_own_pointer", "wake", "dispatch_wake"],
+    "_wake": ["_norm", "_box_full_text", "_own_pointer", "wake", "dispatch_wake", "self_clear_running"],
     "_selfrefresh": ["self_refresh_step"],
 }
 
@@ -37,6 +37,7 @@ def test_every_moved_name_is_re_exported_from_its_module():
 
 def test_a_moved_function_reads_fleet_polls_names_when_it_runs(monkeypatch):
     sent = []
+    monkeypatch.setattr(fp, "self_clear_running", lambda arch_dir: False)  # no live self-clear here
     monkeypatch.setattr(fp, "tmux", lambda *a, **k: sent.append(a) or "tm-other\n")
     with pytest.raises(fp.TmuxError, match="refusing to send to %9"):
         fp.send_to_architect("%9", "x")

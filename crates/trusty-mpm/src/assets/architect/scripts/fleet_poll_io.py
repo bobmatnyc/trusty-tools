@@ -140,7 +140,10 @@ def capture_pane(p):
 
 
 def send_to_architect(pane, *keys):
-    """The only send path. Re-checks that `pane` belongs to the Architect first."""
+    """The only send path. Re-checks that `pane` belongs to the Architect first, and that no
+    self-clear.sh run may be typing there (#10599): every key the poller sends passes this check."""
+    if P.self_clear_running(P.ROOT):
+        raise P.TmuxError(f"refusing to send to {pane}: self-clear running")
     owner = P.tmux("display-message", "-p", "-t", pane, "#{session_name}").strip()
     if owner != P.ARCHITECT:
         raise P.TmuxError(f"refusing to send to {pane} (session {owner!r})")
