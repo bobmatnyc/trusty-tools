@@ -369,7 +369,7 @@ fn test_status_line_ctx_wins_over_the_transcript() -> TestResult {
 // Python: test_status_line_without_a_plain_ctx_percent_uses_the_transcript
 #[test]
 fn test_status_line_without_a_plain_ctx_percent_uses_the_transcript() -> TestResult {
-    for replacement in ["⤵ 969k→77k (92%) |", "ctx>200k |"] {
+    for replacement in ["⤵ 500k→77k (92%) |", "ctx>200k |"] {
         let dir = tempfile::tempdir()?;
         transcript_env(dir.path(), "%40", "sid-p", Some(699_000))?;
         let cfg = config(dir.path(), &[])?;
@@ -391,7 +391,7 @@ fn test_no_transcript_means_no_ctx_alert_and_no_crash() -> TestResult {
     let dir = tempfile::tempdir()?;
     transcript_env(dir.path(), "%40", "sid-p", None)?;
     let cfg = config(dir.path(), &[])?;
-    let cap = busy_screen(30).replace("ctx 30% |", "⤵ 969k→77k (92%) |");
+    let cap = busy_screen(30).replace("ctx 30% |", "⤵ 500k→77k (92%) |");
     let mut ctx = TranscriptCtx::new();
     assert!(ctx_cycle(&cfg, &mut ctx, &cap, "%40")?.is_empty());
     assert_eq!(ctx.pct(&cfg, "")?, None);

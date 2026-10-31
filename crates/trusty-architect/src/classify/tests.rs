@@ -23,7 +23,7 @@ fn box_top_rule_accepts_a_short_label() {
     let rule = "─".repeat(12);
     assert!(is_rule(&format!("  {rule}  ")));
     assert!(!is_rule(&"─".repeat(9)));
-    assert!(is_box_top_rule(&format!("{rule} 9-26/2026 ─")));
+    assert!(is_box_top_rule(&format!("{rule} 1-01/2026 ─")));
     assert!(is_box_top_rule(&rule));
     assert!(!is_box_top_rule(&format!("{rule} {} ─", "x".repeat(31))));
     assert!(!is_box_top_rule(&format!("{rule} label")));
