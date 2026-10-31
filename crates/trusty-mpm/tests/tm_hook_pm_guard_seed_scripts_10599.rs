@@ -170,6 +170,11 @@ const RUNS_DATG: &str = refusal!(
     "it runs the script `<ARCH>/scripts/datg.py`: its body, or a script it runs, runs a \
      credential-reading command (a Keychain, token or secret CLI; #8596, #8248)"
 );
+/// `self-clear.sh` runs `turn-active.py`, which the seed does not ship yet.
+const NO_TURN_ACTIVE: &str = refusal!(
+    "it runs the script `<ARCH>/scripts/turn-active.py`, which does not exist and nothing else \
+     in the command names it, so the guard cannot judge its body and fails closed"
+);
 /// A comment line in `pm-notify.sh` reads as a script run.
 const PM_NOTIFY: &str = refusal!(
     "it runs the script `ack/progress/fyi`, which does not exist and nothing else in the \
@@ -185,8 +190,9 @@ const GUARD_10598: &str = "#10598";
 /// path, so the guard follows the scripts it runs instead of refusing
 /// `$ROOT/...` as computed from `ARCHITECT_ROOT`. Relative from the default
 /// Architect, absolute in a non-default one, run by path and through `bash`.
-/// The one refusal left is the seeded `datg.py` it runs ([`RUNS_DATG`]),
-/// which #10571 fixes; the ratchet below fails once that passes.
+/// The refusals left are both #10571's: the unseeded `turn-active.py`
+/// ([`NO_TURN_ACTIVE`]), then the seeded `datg.py` ([`RUNS_DATG`]); the
+/// ratchet below fails once either changes.
 #[test]
 fn self_clear_resolves_its_own_root_at_both_installed_paths_10599() {
     let default = seed(false);
@@ -207,8 +213,8 @@ fn self_clear_resolves_its_own_root_at_both_installed_paths_10599() {
         let got = judge(arch, &command)
             .map(|r| normalized(arch, &r.replace(&format!("`{word}`"), "`<SCRIPT>`")));
         assert!(
-            got.is_none() || got.as_deref() == Some(RUNS_DATG),
-            "`{command}` must allow, or refuse only on the seeded datg.py: {got:?}"
+            got.is_none() || [Some(NO_TURN_ACTIVE), Some(RUNS_DATG)].contains(&got.as_deref()),
+            "`{command}` must allow, or refuse only on turn-active.py or datg.py: {got:?}"
         );
     }
 }
@@ -262,7 +268,8 @@ const RESIDUALS: &[Residual] = &[
     residual("datg_store.py", FILE, FIXED_IN_10571),
     residual("fleet-poll.py", NESTED, GUARD_10598),
     residual("pm-notify.sh", PM_NOTIFY, GUARD_10598),
-    residual("self-clear.sh", RUNS_DATG, FIXED_IN_10571),
+    // #10599: #10571 seeds turn-active.py; then this row becomes RUNS_DATG.
+    residual("self-clear.sh", NO_TURN_ACTIVE, FIXED_IN_10571),
 ];
 
 /// 🔴 RATCHET (#10599): every seeded script, run relative from the Architect
