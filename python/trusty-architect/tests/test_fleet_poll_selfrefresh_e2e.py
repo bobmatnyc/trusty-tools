@@ -7,7 +7,7 @@ decision. A faked idle answer proves nothing. Codex repro c386927d512e exited 3 
 What: the c386927d512e tests run the shipped turn-active.py and fleet-classify.parse_pane on a
 synthetic pane fixture (invented session, paths, timestamps and hashes, with the layout of an idle
 Architect pane: an earlier prompt, tool-call blocks, the done line, the empty box and the status bar)
-and require 0 or 10 and agreement. The seeded chain starts a private tmux server (its own
+and require exit 10 (idle) and agreement. The seeded chain starts a private tmux server (its own
 TMUX_TMPDIR) whose Architect pane prints that pane, lists it with the seeded fleet-poll.py, and runs the
 seeded self_refresh_step, as the seeded fleet-poll.py binds it, for real: the bar from its
 resolve_context_bar (CONTEXT_BAR_TOKENS unset: 250k), socket, capture, turn-active.py, `datg.py ready`
@@ -60,11 +60,12 @@ def test_c386927d512e_the_recorded_failure_was_exit_3_keyerror():
     assert rec["exit"] == 3 and "KeyError: 'turn_active'" in rec["stderr"]
 
 
-def test_c386927d512e_the_pane_reads_0_or_10_never_3_and_parse_pane_agrees():
+def test_c386927d512e_the_pane_reads_10_idle_never_0_or_3_and_parse_pane_agrees():
+    # The fixture is an idle pane by construction: only 10 passes; 0 (busy) or 3 (error) fails.
     code, err = _turn_active(SCRIPTS, _pane())
-    assert code in (0, 10), err
+    assert code == 10, err
     fc = _load(os.path.join(SCRIPTS, "fleet-classify.py"), "fc_codex")
-    assert fc.parse_pane(_pane())["turn_active"] is (code == 0)
+    assert fc.parse_pane(_pane())["turn_active"] is False
 
 
 # --- seeded chain: tm fleet init --no-launch, non-default dir, private tmux ----
