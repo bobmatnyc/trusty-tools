@@ -5,7 +5,7 @@
 //! `hash -p /usr/bin/gh ls`, `alias ls=gh`, `ls() { gh "$@"; }` or
 //! `BASH_CMDS[ls]=/usr/bin/gh`, the word `ls` runs gh, so
 //! `ls api -X DELETE …/secrets/K` deleted a secret unrefused.
-//! What: [`Rebinds::scan`] lists the names a command rebinds — `hash` and
+//! What: [`Rebinds::with_scan`] lists the names a command rebinds — `hash` and
 //! `enable` operands, `alias NAME=VALUE`, `function NAME` and `NAME()`
 //! definitions, and the `BASH_CMDS`, `BASH_ALIASES`, `BASH_FUNC_`, zsh
 //! `commands`, `aliases` and `functions` table entries — reading `eval`
