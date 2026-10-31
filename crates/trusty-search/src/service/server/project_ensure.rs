@@ -12,8 +12,10 @@
 //! [`trusty_common::index_id_for_root`] names (the registry-derived id when the
 //! legacy basename is taken by another tree), pins its group, and queues the
 //! first reindex. A found index queues no reindex, so a second call changes
-//! nothing. `profile` is accepted and echoed but applies no globs until the
-//! `std-v1` profile lands (#10532); the response says so.
+//! nothing. #10532: the new index's excludes come from the checkout's
+//! `.trusty-search.yaml`, else the request's `exclude` (the registry override),
+//! else the `profile` (default `std-v1`); the response carries the stored
+//! `name@hash` and `profile_applied: true` for the creating call.
 //! Test: `project_ensure_tests.rs`.
 
 use std::path::PathBuf;
@@ -44,9 +46,33 @@ pub struct EnsureProjectRequest {
     pub name: String,
     /// Absolute path of the project checkout.
     pub root: PathBuf,
-    /// Exclude profile name (#10532). Echoed; applies nothing yet.
+    /// Exclude profile name (#10532). Absent: `std-v1`; any other name is 400.
     #[serde(default)]
     pub profile: Option<String>,
+    /// The registry override (`index.exclude`, #10532): used when the checkout
+    /// has no `.trusty-search.yaml` exclude list, and ahead of the profile.
+    #[serde(default)]
+    pub exclude: Option<Vec<String>>,
+}
+
+/// The `exclude` list of the checkout's `.trusty-search.yaml`, if it has one.
+///
+/// What: `(None, None)` for no file or no list; `(None, Some(why))` for a file
+/// that does not parse or holds a bad glob, which the response reports and
+/// which leaves the lower tiers to decide.
+/// Test: `a_repo_yaml_exclude_beats_the_registry_override`.
+fn repo_config_excludes(root: &std::path::Path) -> (Option<Vec<String>>, Option<String>) {
+    match crate::core::project_config::ProjectConfig::load(root) {
+        Ok(Some(cfg)) => match cfg.exclude {
+            Some(list) => match crate::core::repo_config::validate_exclude_globs(&list) {
+                Ok(()) => (Some(list), None),
+                Err(e) => (None, Some(e)),
+            },
+            None => (None, None),
+        },
+        Ok(None) => (None, None),
+        Err(e) => (None, Some(format!("{e:#}"))),
+    }
 }
 
 /// A 4xx refusal for a malformed or unindexable request.
@@ -107,7 +133,7 @@ fn pick_id(
 ///
 /// Why: see the module doc. Every refusal happens before anything registers.
 /// What: `{index_id, project_key, created, root_path, reindex_queued,
-/// profile, profile_applied}` plus `reindex` or `reindex_error` when created,
+/// profile, profile_applied, profile_source}` plus `reindex` or `reindex_error` when created,
 /// and `project_map_error` when the pin could not be written (the index still
 /// exists). A request with an empty key or name is 400; a home or filesystem
 /// root is 409 `project_root_unindexable`; an overlapping root is 409
@@ -143,6 +169,8 @@ pub(crate) async fn ensure_project_report(
     let handles = state.registry.list_handles();
     let cold = state.cold_store.snapshot();
     let found = find_root_path_collision(&handles, &cold, &root, None);
+    let mut profile_note = None;
+    let mut created_label: Option<String> = None;
     let (index_id, created) = match found {
         Some(existing) => (existing.0, false),
         None => {
@@ -165,8 +193,28 @@ pub(crate) async fn ensure_project_report(
                 Err(failure) => return Err(overlap_check_failed_response(&failure)),
             }
             let id = pick_id(&req, &root, &handles, &cold)?;
+            // #10532: `.trusty-search.yaml`, then the registry override, then the
+            // profile. A caller list reaches create as `exclude_globs`; with
+            // none, create applies the profile itself.
+            let (overrides, repo_config_error) = repo_config_excludes(&root);
+            let resolved = crate::core::profile::resolve(
+                overrides.as_deref(),
+                req.exclude.as_deref(),
+                req.profile.as_deref(),
+            )
+            .map_err(|e| {
+                refuse(
+                    StatusCode::BAD_REQUEST,
+                    "unknown_profile",
+                    serde_json::json!({ "message": e.to_string() }),
+                )
+            })?;
+            let caller_globs = (resolved.source != crate::core::profile::Source::Profile)
+                .then(|| resolved.globs.clone());
+            profile_note = Some((resolved.source, repo_config_error));
             let create = serde_json::from_value(serde_json::json!({
                 "id": id, "root_path": root,
+                "exclude_globs": caller_globs, "profile": req.profile,
             }))
             .map_err(|e| {
                 refuse(
@@ -178,6 +226,10 @@ pub(crate) async fn ensure_project_report(
             // #10531: a racer can register the same id and root after the snapshot
             // above; `created` is the daemon's word on who won, not this branch's.
             let registered = create_index_report(state, create).await?;
+            created_label = registered
+                .get("profile")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             let won = registered
                 .get("created")
                 .and_then(serde_json::Value::as_bool)
@@ -194,9 +246,22 @@ pub(crate) async fn ensure_project_report(
         "created": created,
         "root_path": root.display().to_string(),
         "reindex_queued": false,
-        "profile": req.profile,
+        "profile": null,
         "profile_applied": false,
     });
+    // The label the index carries (`std-v1@<hash>` or `custom@<hash>`). It is
+    // "applied" only by the call that created the index.
+    let label = created_label.or_else(|| {
+        super::profile_apply::stored_label(state.registry_path_override.as_deref(), &index_id)
+    });
+    body["profile_applied"] = (created && label.is_some()).into();
+    body["profile"] = label.into();
+    if let Some((source, repo_config_error)) = profile_note {
+        body["profile_source"] = format!("{source:?}").into();
+        if let Some(e) = repo_config_error {
+            body["repo_config_error"] = e.into();
+        }
+    }
     if let Some(e) = project_map_error {
         body["project_map_error"] = e.into();
     }

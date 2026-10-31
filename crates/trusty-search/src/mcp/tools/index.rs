@@ -55,7 +55,7 @@ pub(super) fn add_root_descriptor() -> Value {
 pub(super) fn ensure_project_descriptor() -> Value {
     serde_json::json!({
         "name": "ensure_project",
-        "description": "Find or create the one index of a trusty-mpm project and pin it for its group. Idempotent: a repeat call for the same root returns the same index_id with created=false and queues no reindex. A new index queues its first reindex (reindex_queued, or reindex_error when it could not be queued). Refused with project_root_overlap (data.overlapping_index_id) when root contains, or sits inside, a root another index already owns: attach to that index instead. Also refused with project_root_unindexable (home or filesystem root) and project_id_taken. profile is accepted and echoed; profile_applied stays false until the std-v1 profile lands.",
+        "description": "Find or create the one index of a trusty-mpm project and pin it for its group. Idempotent: a repeat call for the same root returns the same index_id with created=false and queues no reindex. A new index queues its first reindex (reindex_queued, or reindex_error when it could not be queued). Refused with project_root_overlap (data.overlapping_index_id) when root contains, or sits inside, a root another index already owns: attach to that index instead. Also refused with project_root_unindexable (home or filesystem root) and project_id_taken. A new index runs the exclude profile std-v1 (record directories, archives, logs, worktrees, databases, lockfiles) unless the checkout's .trusty-search.yaml exclude list, then the exclude argument, names its own list; profile_applied is true on the call that created it and profile reads std-v1@<hash> or custom@<hash>. index_status shows the same profile line.",
         "inputSchema": {
             "type": "object",
             "required": ["project_key", "name", "root"],
@@ -63,7 +63,8 @@ pub(super) fn ensure_project_descriptor() -> Value {
                 "project_key": { "type": "string", "description": "owner/repo or local:<uuid>, as tm stored it at register." },
                 "name": { "type": "string", "description": "The tm registry name; labels a registry-derived id." },
                 "root": { "type": "string", "description": "Absolute path of the project checkout." },
-                "profile": { "type": "string", "description": "Exclude profile name (reserved for std-v1)." }
+                "profile": { "type": "string", "description": "Exclude profile name; std-v1 is the default and the only one defined." },
+                "exclude": { "type": "array", "items": { "type": "string" }, "description": "Registry override of the exclude globs; used when .trusty-search.yaml has none, and ahead of the profile." }
             }
         }
     })
@@ -290,6 +291,9 @@ pub(super) async fn dispatch_index_tool(
             }
             if let Some(profile) = args.get("profile").and_then(Value::as_str) {
                 body["profile"] = Value::String(profile.to_string());
+            }
+            if let Some(globs) = string_array(args, "exclude") {
+                body["exclude"] = Value::Array(globs);
             }
             Some(server.call(METHOD_PROJECT_ENSURE, body).await)
         }

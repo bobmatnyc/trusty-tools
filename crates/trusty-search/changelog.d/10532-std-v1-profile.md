@@ -1,0 +1,4 @@
+Added
+- The `std-v1` exclude profile (#10532). An index created with no explicit `exclude_globs` skips record directories (`owner-queue`, `owner-queue-archive`), archives, `.worktrees`, `*.db`, `*.sqlite*`, `*.lock`, logs, checkpoints, backups, `actions.md`, `local/usage` and `local/dashboard*` JSON. The resolved profile name and hash are stored on the index and `index_status` reports `profile: std-v1@<hash>` (`custom@<hash>` for a caller list, `null` for an index persisted before this release).
+- `PATCH /indexes/:id/config` accepts `profile: "std-v1"`. A PATCH that changes the excludes removes the indexed files the new list excludes, through the `search.index.files.remove` machinery, and runs no reindex; the reply carries `profile` and `profile_purge`.
+- `search.project.ensure` applies the profile on create (`.trusty-search.yaml` exclude list, then the new `exclude` argument, then `std-v1`) and answers `profile_applied: true`, `profile` and `profile_source`.

@@ -22,6 +22,7 @@ fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateI
         root_path,
         include_paths: None,
         exclude_globs: None,
+        profile: None,
         extensions: None,
         domain_terms: None,
         path_filter: None,
