@@ -1,17 +1,19 @@
-//! Reachability sweep after a parallel HNSW rebuild (issue #9450).
+//! Reachability sweep after an HNSW rebuild (issue #9450).
 //!
-//! Why: usearch takes concurrent `add`s, so a parallel rebuild's graph depends
-//! on insert order, and now and then a node ends up with no in-link a search
-//! can follow: the key is in the graph but not even its own vector finds it.
-//! Heavy remove churn never recovered from this, and a compaction that builds
-//! with several threads can produce it afresh (1 survivor in 6000, about once
-//! in 165 runs of `survivors_self_recall_after_heavy_remove_churn`, more often
-//! under CPU load).
+//! Why: an HNSW graph depends on insert order, and now and then a node ends up
+//! with no in-link a search can follow: the key is in the graph but not even
+//! its own vector finds it. Concurrent `add`s make this differ from run to run
+//! (1 survivor in 6000, about once in 165 runs of
+//! `survivors_self_recall_after_heavy_remove_churn`, more often under CPU
+//! load). A single-threaded build is no safer in production: the rebuild
+//! reads keys from the store's `HashMap`, whose per-process `RandomState`
+//! makes the insert order differ per process, and a sequential 100K build in
+//! the tests stranded a node too. `rebuild_threads` is 1 below 10K keys and
+//! on small machines, so those builds are swept as well.
 //! What: [`relink_stranded`] searches every key with its own vector and
 //! re-inserts (remove, then add, one thread) each key that is not among the
 //! top [`SWEEP_K`] hits. It repeats up to [`MAX_PASSES`] times, because a
-//! `remove` can strand a neighbour. A single-threaded build is not swept: its
-//! insert order is fixed, so a seeded build cannot strand a node at random.
+//! `remove` can strand a neighbour. `add_parallel` runs it after every build.
 //! Test: `super::relink_9450_tests`.
 
 use std::sync::Mutex;
@@ -82,7 +84,7 @@ pub(super) fn find_stranded(
 }
 
 /// Make every key of `read` reachable by its own vector; returns how many
-/// distinct re-insertions that took.
+/// re-insertions that took, counted per pass.
 ///
 /// Why: see the module doc. Postcondition: on `Ok`, the last sweep's strand
 /// count is logged; a key still stranded after [`MAX_PASSES`] is reported, not
@@ -107,7 +109,10 @@ pub(super) fn relink_stranded(
             return Ok(finish(relinked, 0, label, started));
         }
         for (i, key) in stranded {
-            read(i, &mut buffer)?;
+            let Some(read_key) = read(i, &mut buffer)? else {
+                continue;
+            };
+            debug_assert_eq!(read_key, key, "item {i} changed key between passes");
             index
                 .remove(key)
                 .map_err(|e| anyhow!("usearch re-link remove of key {key} failed: {e}"))?;
@@ -131,7 +136,7 @@ fn finish(relinked: usize, left: usize, label: &str, started: Instant) -> usize 
     }
     if relinked > 0 {
         tracing::warn!(
-            "usearch: re-linked {relinked} stranded vectors after parallel rebuild at {label} \
+            "usearch: re-linked {relinked} stranded vectors after rebuild at {label} \
              in {} ms (#9450)",
             started.elapsed().as_millis()
         );

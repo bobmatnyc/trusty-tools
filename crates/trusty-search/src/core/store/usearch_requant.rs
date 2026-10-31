@@ -308,7 +308,7 @@ pub(super) type ReadItem<'a> = dyn Fn(usize, &mut [f32]) -> Result<Option<u64>> 
 /// Add items `0..n` of `read` to `rebuilt` on [`rebuild_threads`] threads;
 /// returns the count `read` had no vector for. `fault` runs before each add.
 /// The first read, add or fault error stops every thread and is returned.
-/// A multi-thread build then sweeps for stranded nodes (#9450).
+/// Every build then sweeps for stranded nodes (#9450).
 /// Test: `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`.
 pub(super) fn add_parallel(
     rebuilt: &Index,
@@ -355,9 +355,7 @@ pub(super) fn add_parallel(
     if let Some(e) = first_error.into_inner().unwrap_or_else(|p| p.into_inner()) {
         return Err(e);
     }
-    // #9450: concurrent inserts can strand a node; a sweep re-links any.
-    if threads > 1 {
-        super::usearch_relink::relink_stranded(rebuilt, n, dim, threads, label, read)?;
-    }
+    // #9450: a build can strand a node; the sweep re-links any, on every build.
+    super::usearch_relink::relink_stranded(rebuilt, n, dim, threads, label, read)?;
     Ok(missing.into_inner())
 }
