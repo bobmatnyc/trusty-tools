@@ -225,12 +225,10 @@ use crate::commands::pm_guard_bash::{
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_build_lease;
+use crate::commands::pm_guard_content;
 use crate::commands::pm_guard_cost;
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
-// #8722: moved out with the denial record; re-exported for existing importers.
-use crate::commands::pm_guard_content;
 use crate::commands::pm_guard_deny_log::DenyContext;
-pub(crate) use crate::commands::pm_guard_deny_log::audit_denied_tool;
 use crate::commands::pm_guard_dispatch;
 use crate::commands::pm_guard_enter_worktree;
 use crate::commands::{pm_guard_fanout, pm_guard_profile, pm_guard_resume_worktree};
@@ -238,18 +236,17 @@ use crate::commands::{pm_guard_fanout, pm_guard_profile, pm_guard_resume_worktre
 // so every existing `pm_guard::build_pretooluse_*` path still resolves.
 use crate::commands::pm_guard_architect_envfile::gate_secret_file_read;
 use crate::commands::pm_guard_floor::{self, ArchitectGate};
-use crate::commands::pm_guard_protected_paths::{
-    PROTECTED_PATH_RULE, ProtectedEnv, evaluate as protected_paths,
-};
-pub(crate) use crate::commands::pm_guard_response::{
-    build_pm_guard_deny_response, build_pretooluse_context_response,
-};
+use crate::commands::pm_guard_protected_paths::{ProtectedEnv, evaluate as protected_paths};
+// #10641: every deny goes through `refuse`, which names the policy entry.
+use crate::commands::pm_guard_refusal::{emit, refuse};
+pub(crate) use crate::commands::pm_guard_response::build_pretooluse_context_response;
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
 use crate::commands::pm_guard_trust_anchor;
 use crate::commands::pm_guard_worktree_grant;
 use crate::commands::pm_guard_write_boundary;
 use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
 use trusty_mpm::core::config::MpmConfig;
+use trusty_mpm::core::guard_policy;
 
 /// Escape-hatch env var: `TRUSTY_MPM_PM_UNRESTRICTED=1` disables all PM
 /// enforcement for the invocation.
@@ -451,23 +448,20 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // them. Placing the refusal here rather than inside each rule is what
         // keeps a rule added later from inheriting the same hole.
         if let Some(reason) = unclassifiable_reason(command) {
-            audit_denied_tool(&refused, "unclassifiable-command", &reason).await; // #9001
-            println!("{}", build_pm_guard_deny_response(&reason));
+            refuse(&refused, &guard_policy::UNCLASSIFIABLE_COMMAND, &reason).await; // #9001
             return Ok(());
         }
         // #8439: a read-only dispatch runs only allowlisted read shapes. ABSOLUTE
         // and ahead of Guards 1/4, because the caller it binds is always an agent.
         // #8571: the payload's session id binds a read-only cp/rm to its scratchpad.
         if let Some(reason) = evaluate_read_only_dispatch_command(command, &payload) {
-            audit_denied_tool(&refused, "read-only-dispatch", &reason).await;
-            println!("{}", build_pm_guard_deny_response(&reason));
+            refuse(&refused, &guard_policy::READ_ONLY_DISPATCH, &reason).await;
             return Ok(());
         }
         // #7497 joins #3955 here: same placement, same reason. `evaluate_worktree_add`
         // runs the temp-root denylist and the `disk.max_usage_pct` threshold.
         if let Some(reason) = evaluate_worktree_add(command, &hook_cwd) {
-            audit_denied_tool(&refused, "worktree-add", &reason).await;
-            println!("{}", build_pm_guard_deny_response(&reason));
+            refuse(&refused, &guard_policy::WORKTREE_ADD, &reason).await;
             return Ok(());
         }
         // ABSOLUTE guard (issue #4031) — the same placement, and for the same
@@ -489,8 +483,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         if let Some(class) = evaluate_destructive_delete_command(command, &hook_cwd)
             && !(class == DeleteTarget::Worktree && architect.is_architect())
         {
-            audit_denied_tool(&refused, "destructive-delete", class.reason()).await;
-            println!("{}", build_pm_guard_deny_response(class.reason()));
+            refuse(&refused, &guard_policy::DESTRUCTIVE_DELETE, class.reason()).await;
             return Ok(());
         }
         // ABSOLUTE guard (issue #7122) — the same placement, and for the same
@@ -504,8 +497,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // and the sanctioned alternative (absolute-path reference, or the
         // gitignore-verified `untracked_sync` channel).
         if let Some(reason) = evaluate_secret_file_copy_command(command, &hook_cwd) {
-            audit_denied_tool(&refused, "secret-file-copy", &reason).await;
-            println!("{}", build_pm_guard_deny_response(&reason));
+            refuse(&refused, &guard_policy::SECRET_FILE_COPY, &reason).await;
             return Ok(());
         }
         // ABSOLUTE guard (ADR-0037) — the same placement, and for the same
@@ -520,8 +512,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         if let Some(reason) = evaluate_main_checkout_destructive_command(command, &hook_cwd)
             && !architect.is_architect()
         {
-            audit_denied_tool(&refused, "main-checkout-destructive", &reason).await;
-            println!("{}", build_pm_guard_deny_response(&reason));
+            refuse(&refused, &guard_policy::MAIN_CHECKOUT_DESTRUCTIVE, &reason).await;
             return Ok(());
         }
         // #8572: ABSOLUTE, same placement and reason as the rule above — the
@@ -530,8 +521,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         if let Some(reason) =
             evaluate_main_checkout_head_switch(command, &hook_cwd, caller_is_subagent)
         {
-            audit_denied_tool(&refused, "head-switch", &reason).await;
-            println!("{}", build_pm_guard_deny_response(&reason));
+            refuse(&refused, &guard_policy::HEAD_SWITCH, &reason).await;
             return Ok(());
         }
         // ABSOLUTE guard (ADR-0044 decision 1, enforced by ADR-0048, amended by
@@ -551,8 +541,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             .filter(|_| !architect.is_architect())
         {
             Some(CommitVerdict::Deny(reason)) => {
-                audit_denied_tool(&refused, "main-checkout-commit", &reason).await;
-                println!("{}", build_pm_guard_deny_response(&reason));
+                refuse(&refused, &guard_policy::MAIN_CHECKOUT_COMMIT, &reason).await;
                 return Ok(());
             }
             Some(CommitVerdict::DocsOnly { root, dirs }) => {
@@ -563,8 +552,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 .await;
                 if !live.is_empty() {
                     let reason = docs_commit_deny_reason(&root, &live, &records);
-                    audit_denied_tool(&refused, "docs-commit", &reason).await;
-                    println!("{}", build_pm_guard_deny_response(&reason));
+                    refuse(&refused, &guard_policy::DOCS_COMMIT, &reason).await;
                     return Ok(());
                 }
             }
@@ -602,8 +590,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     if let Some(deny) =
         gate_secret_file_read(&refused, tool_name, tool_input, &hook_cwd, &architect).await
     {
-        audit_denied_tool(&refused, deny.rule, &deny.reason).await;
-        println!("{}", build_pm_guard_deny_response(&deny.reason));
+        refuse(&refused, guard_policy::for_rule(deny.rule), &deny.reason).await;
         return Ok(());
     }
 
@@ -620,8 +607,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         pm_guard_write_boundary::evaluate_main_checkout_write(tool_name, tool_input, &hook_cwd)
         && !architect.is_architect()
     {
-        audit_denied_tool(&refused, "main-checkout-write", &reason).await;
-        println!("{}", build_pm_guard_deny_response(&reason));
+        refuse(&refused, &guard_policy::MAIN_CHECKOUT_WRITE, &reason).await;
         return Ok(());
     }
     // #8878: the trust-anchor floor, ahead of Guards 1 and 4 — a subagent,
@@ -635,8 +621,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     if let Some(reason) = protected_paths(tool_name, tool_input, Some(&hook_cwd), &env)
         && !architect.is_architect()
     {
-        audit_denied_tool(&refused, PROTECTED_PATH_RULE, &reason).await;
-        println!("{}", build_pm_guard_deny_response(&reason));
+        refuse(&refused, &guard_policy::PROTECTED_PATH_WRITE, &reason).await;
         return Ok(());
     }
 
@@ -652,8 +637,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // unrecognised context allows the dispatch rather than blocking the PM.
     // (`caller_is_subagent` is resolved above, beside `hook_cwd` — #8572.)
     if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(tool_name, caller_is_subagent) {
-        audit_denied_tool(&refused, "subagent-fanout", reason).await;
-        println!("{}", build_pm_guard_deny_response(reason));
+        refuse(&refused, &guard_policy::SUBAGENT_FANOUT, reason).await;
         return Ok(());
     }
 
@@ -669,8 +653,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         caller_is_subagent,
         &hook_cwd,
     ) {
-        audit_denied_tool(&refused, "enter-worktree", &reason).await;
-        println!("{}", build_pm_guard_deny_response(&reason));
+        refuse(&refused, &guard_policy::ENTER_WORKTREE, &reason).await;
         return Ok(());
     }
 
@@ -703,8 +686,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         ) {
             WorktreeRemoveVerdict::Allow => {}
             WorktreeRemoveVerdict::Deny(reason) => {
-                audit_denied_tool(&refused, "worktree-remove", &reason).await;
-                println!("{}", build_pm_guard_deny_response(&reason));
+                refuse(&refused, &guard_policy::WORKTREE_REMOVE, &reason).await;
                 return Ok(());
             }
             WorktreeRemoveVerdict::ReCheck { target } => {
@@ -735,8 +717,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
              ({why}); allowing this SendMessage (#8004)"
         ),
         pm_guard_resume_worktree::ResumeVerdict::Deny(reason) => {
-            audit_denied_tool(&refused, "resume-worktree", &reason).await;
-            println!("{}", build_pm_guard_deny_response(&reason));
+            refuse(&refused, &guard_policy::RESUME_WORKTREE, &reason).await;
             return Ok(());
         }
     }
@@ -770,8 +751,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     let roster = match pm_guard_content::dispatch_roster(caller_is_subagent, tool_name) {
         Ok(roster) => roster,
         Err(reason) => {
-            audit_denied_tool(&refused, "dispatch-content", &reason).await;
-            println!("{}", build_pm_guard_deny_response(&reason));
+            refuse(&refused, &guard_policy::DISPATCH_CONTENT, &reason).await;
             return Ok(());
         }
     };
@@ -793,19 +773,16 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 .await
                 {
                     Some(reason) => {
-                        audit_denied_tool(&refused, "worktree-grant-dispatch", &reason).await;
-                        println!("{}", build_pm_guard_deny_response(&reason));
+                        refuse(&refused, &guard_policy::WORKTREE_GRANT_DISPATCH, &reason).await;
                     }
                     // #8261: dispatch takes no builder slot; the build command does.
-                    None => println!(
-                        "{}",
-                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
-                    ),
+                    None => emit(pm_guard_worktree_grant::build_worktree_grant_response(
+                        &updated_input,
+                    )),
                 }
             }
             pm_guard_worktree_grant::WorktreeGrant::Deny(reason) => {
-                audit_denied_tool(&refused, "worktree-grant", &reason).await;
-                println!("{}", build_pm_guard_deny_response(&reason));
+                refuse(&refused, &guard_policy::WORKTREE_GRANT, &reason).await;
             }
             // #5814: this project declared `agent_worktree = false`, so the
             // dispatch keeps the checkout and is told the workflow that replaces
@@ -822,14 +799,12 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 .await
                 {
                     Some(reason) => {
-                        audit_denied_tool(&refused, "dispatch", &reason).await;
-                        println!("{}", build_pm_guard_deny_response(&reason));
+                        refuse(&refused, &guard_policy::DISPATCH, &reason).await;
                     }
                     // #8261: dispatch takes no builder slot; the build command does.
-                    None => println!(
-                        "{}",
-                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
-                    ),
+                    None => emit(pm_guard_worktree_grant::build_worktree_grant_response(
+                        &updated_input,
+                    )),
                 }
             }
         }
@@ -853,8 +828,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             pm_guard_dispatch::evaluate(roster, url, &payload, tool_name, tool_input, session_id)
                 .await
     {
-        audit_denied_tool(&refused, "dispatch", &reason).await;
-        println!("{}", build_pm_guard_deny_response(&reason));
+        refuse(&refused, &guard_policy::DISPATCH, &reason).await;
         return Ok(());
     }
 
@@ -894,8 +868,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 if !pm_guard_cost::is_persistence_escape(tool_name, tool_input) =>
             {
                 let reason = agent_cost::stop_reason(tokens, cost_config.max_tokens);
-                audit_denied_tool(&refused, "agent-cost", &reason).await;
-                println!("{}", build_pm_guard_deny_response(&reason));
+                refuse(&refused, &guard_policy::AGENT_COST, &reason).await;
                 return Ok(());
             }
             BudgetStatus::Warning => {
@@ -923,10 +896,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     let lease_rewrite = match pm_guard_build_lease::evaluate(tool_name, tool_input, &hook_cwd) {
         pm_guard_build_lease::LeaseVerdict::Deny(reason) => {
             // #8722: recorded under its own check slug, as every other deny.
-            println!(
-                "{}",
-                pm_guard_build_lease::deny_response(&refused, &reason).await
-            );
+            emit(pm_guard_build_lease::deny_response(&refused, &reason).await);
             return Ok(());
         }
         pm_guard_build_lease::LeaseVerdict::Rewrite(response) => Some(response),
@@ -962,8 +932,12 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         {
             let status = pm_guard_deny_by_default::persona_status(url).await;
             if status.should_deny() {
-                audit_denied_tool(&refused, "persona-deny-by-default", PERSONA_DENY_REASON).await;
-                println!("{}", build_pm_guard_deny_response(PERSONA_DENY_REASON));
+                refuse(
+                    &refused,
+                    &guard_policy::PERSONA_DENY_BY_DEFAULT,
+                    PERSONA_DENY_REASON,
+                )
+                .await;
                 return Ok(());
             }
         }
@@ -981,7 +955,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // ALLOW: exit 0 with no output so the normal permission flow applies —
         // unless #8261's lease rule rewrote a heavy build the PM may run.
         if let Some(rewrite) = lease_rewrite {
-            println!("{rewrite}");
+            emit(rewrite);
         }
         return Ok(());
     };
@@ -1017,8 +991,12 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                     "PM file-change budget {budget}/{budget} used this turn (prohibitions P1/P5). \
                      Delegate further changes to {hint} via the Task/Agent tool."
                 );
-                audit_denied_tool(&refused, "file-change-budget", &exhausted_reason).await;
-                println!("{}", build_pm_guard_deny_response(&exhausted_reason));
+                refuse(
+                    &refused,
+                    &guard_policy::FILE_CHANGE_BUDGET,
+                    &exhausted_reason,
+                )
+                .await;
                 Ok(())
             }
         };
@@ -1029,8 +1007,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // emit the block. The audit POST is intentionally the *only* daemon call
     // and fires solely on the rare deny path, so the common ALLOW path adds
     // zero latency to every tool invocation.
-    audit_denied_tool(&refused, "pm-tool-policy", reason).await;
-    println!("{}", build_pm_guard_deny_response(reason));
+    refuse(&refused, &guard_policy::PM_TOOL_POLICY, reason).await;
     Ok(())
 }
 
@@ -1222,7 +1199,7 @@ pub(crate) fn emit_cost_notice(payload: &serde_json::Value, notice: Option<Strin
         return;
     };
     if pm_guard_cost::claim_warn_notice(payload) {
-        println!("{}", build_pretooluse_context_response(&text));
+        emit(build_pretooluse_context_response(&text));
     }
 }
 
@@ -1248,7 +1225,7 @@ pub(crate) fn emit_cost_notice(payload: &serde_json::Value, notice: Option<Strin
 /// consumer — the daemon's event stream, where the PM and dashboard read it.
 /// Both are needed: the agent acts on the nudge, the PM sees which of its
 /// delegations are running expensive. Fire-and-forget with the same tight
-/// timeouts as [`audit_denied_tool`]: a down daemon costs the timeout and
+/// timeouts as [`crate::commands::pm_guard_deny_log::audit_denied_tool`]: a down daemon costs the timeout and
 /// nothing else, and never changes the decision.
 /// What: POSTs `{session_id, event:"PreToolUse", payload:{cwd, tool,
 /// pm_guard_decision:"warn", agent_cost_tokens, agent_cost_max,

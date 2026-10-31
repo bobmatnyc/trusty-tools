@@ -36,7 +36,8 @@ pub(crate) async fn run(
     if egress_guard {
         crate::commands::egress_guard::egress_guard(url).await
     } else if pm_guard {
-        crate::commands::pm_guard::pm_guard(url, started).await
+        // #10600: a guard that panics or errors denies instead of exiting non-zero.
+        crate::commands::pm_guard_refusal::run(url, started).await
     // #6887: a separate hook mode, not a pm-guard variant.
     } else if divert_check {
         crate::commands::divert_check::divert_check().await

@@ -53,9 +53,10 @@ use crate::commands::pm_guard_bash::{
     evaluate_architect_pane, evaluate_d4_floor, evaluate_destructive_delete_command,
     evaluate_tmux_exact_target, unclassifiable_reason,
 };
-use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
-use crate::commands::pm_guard_response::build_pm_guard_deny_response;
+use crate::commands::pm_guard_deny_log::DenyContext;
+use crate::commands::pm_guard_refusal::refuse;
 use crate::commands::pm_guard_trust_anchor::{self, HookEnv, TRUST_ANCHOR_RULE};
+use trusty_mpm::core::guard_policy;
 
 /// The rule name recorded with a D4-remainder deny.
 pub(crate) const D4_FLOOR_RULE: &str = "d4-floor";
@@ -161,13 +162,14 @@ pub(crate) async fn deny_floors(
         audit_envfile_allow(&DenyContext::from_payload(url, payload), gate).await;
         return false;
     };
-    audit_denied_tool(
+    // #10641: the label names the policy entry; a miss is still a refusal (GP-000).
+    let policy = guard_policy::for_rule(deny.rule);
+    refuse(
         &DenyContext::from_payload(url, payload),
-        deny.rule,
+        policy,
         &deny.reason,
     )
     .await;
-    println!("{}", build_pm_guard_deny_response(&deny.reason));
     true
 }
 

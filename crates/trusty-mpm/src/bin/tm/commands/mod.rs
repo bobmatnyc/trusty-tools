@@ -223,6 +223,8 @@ pub(crate) mod pm_guard_kuzu_names;
 pub(crate) mod pm_guard_kuzu_store;
 // #8453: the PM delegation rules apply by session profile.
 pub(crate) mod pm_guard_profile;
+// #10600, #10641: the fail-closed entry point and the policy-tagged refusal.
+pub(crate) mod pm_guard_refusal;
 pub(crate) mod pm_guard_response;
 // #8004: a resume of an agent whose isolated worktree is gone is refused.
 pub(crate) mod pm_guard_resume_worktree;

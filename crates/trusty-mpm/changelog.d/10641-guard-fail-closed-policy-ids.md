@@ -1,0 +1,3 @@
+Changed
+- `tm hook --pm-guard` and `tm hook --egress-guard` end every refusal with the policy it enforces, as `[policy GP-005 destructive-delete; source: #4031]`. The table of policies lives in `trusty_mpm::core::guard_policy` and in `docs/reference/guard-policies.md`; a refusal whose rule has no entry names `GP-000` and still refuses. No verdict changes (#10641).
+- The `PreToolUse` hook entry tm writes for PM sessions carries `onFailure: "block"`, so a `tm hook --pm-guard` that times out or crashes blocks the tool call on Claude Code v2.1.295 and later. The guard also denies, naming `GP-003`, when it panics or errors before deciding, on any Claude Code version (#10600).

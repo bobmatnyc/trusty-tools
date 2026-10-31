@@ -50,6 +50,7 @@ use crate::commands::pm_guard_response::build_pm_guard_deny_response;
 use crate::commands::pm_guard_trust_anchor::{HookEnv, TRUST_ANCHOR_RULE, evaluate};
 use trusty_mpm::core::channels_readiness::{NotReady, policy_ready};
 use trusty_mpm::core::config::MpmConfig;
+use trusty_mpm::core::guard_policy;
 use trusty_mpm::core::session_profile;
 
 /// The deny reason printed when the guard panics.
@@ -347,7 +348,11 @@ where
 {
     match AssertUnwindSafe(run).catch_unwind().await {
         Ok(response) => response,
-        Err(_) => Some(build_pm_guard_deny_response(PANIC_REASON)),
+        // #10641: GP-048.
+        Err(_) => Some(build_pm_guard_deny_response(
+            &guard_policy::EGRESS_GUARD_PANIC,
+            PANIC_REASON,
+        )),
     }
 }
 
@@ -398,7 +403,11 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let ctx = DenyContext::from_payload(url, read.as_ref().unwrap_or(&null));
     record_deny(&ctx, check, &reason);
     post_deny_audit(&ctx, &reason).await;
-    Some(build_pm_guard_deny_response(&reason))
+    // #10641: the check names the policy entry; a miss still refuses (GP-000).
+    Some(build_pm_guard_deny_response(
+        guard_policy::for_rule(check),
+        &reason,
+    ))
 }
 
 /// `tm hook --egress-guard` entry point.

@@ -460,6 +460,7 @@ pub mod architect_claude_version;
 // #8436: the Architect's fixed core and its composed prompt.
 pub mod architect_core;
 pub mod architect_launch;
+pub mod guard_policy; // #10641: the policy table every pm-guard refusal names.
 // #10127: the Architect's own `--settings` deny and chat-token env scrub.
 pub mod architect_lockdown;
 pub mod architect_prompt;

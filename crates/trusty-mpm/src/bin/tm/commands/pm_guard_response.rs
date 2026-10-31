@@ -17,6 +17,8 @@
 //!
 //! Test: the `#[cfg(test)]` suite below.
 
+use trusty_mpm::core::guard_policy::GuardPolicy;
+
 /// The decision a `PreToolUse` REWRITE may carry (#8261 round 3).
 ///
 /// Why: a rewrite of a command the user's settings `ask` about must still
@@ -96,20 +98,30 @@ fn build_pretooluse_deny_response(reason: &str) -> serde_json::Value {
 pub(crate) const PM_GUARD_REFUSAL_PREFIX: &str = "tm pm-guard: ";
 
 /// Build the deny for a `tm hook --pm-guard` refusal: `reason` behind
-/// [`PM_GUARD_REFUSAL_PREFIX`].
+/// [`PM_GUARD_REFUSAL_PREFIX`], followed by the policy it enforces.
 ///
 /// Why (#8546): the one builder every pm-guard deny site calls, so the prefix
 /// is added in one place instead of being written into ~30 reason strings, any
-/// of which a new rule could forget.
-/// What: the private deny envelope over `reason` with the prefix prepended; a
-/// `reason` that already starts with it is not prefixed twice.
+/// of which a new rule could forget. #10641: it takes the policy entry, so a
+/// refusal that names no written policy does not compile — an entry exists
+/// only in `trusty_mpm::core::guard_policy`'s table.
+/// What: the private deny envelope over
+/// `tm pm-guard: <reason> [policy <id> <rule>; source: <source>]`; a `reason`
+/// that already starts with the prefix is not prefixed twice. The tag goes at
+/// the end, so every reason still starts where it did before #10641.
 /// Test: `pm_guard_deny_carries_the_prefix_exactly_once`,
+/// `every_pm_guard_deny_names_its_policy_id`,
 /// `pm_guard_modules_never_print_an_unprefixed_deny`.
-pub(crate) fn build_pm_guard_deny_response(reason: &str) -> serde_json::Value {
+pub(crate) fn build_pm_guard_deny_response(
+    policy: &GuardPolicy,
+    reason: &str,
+) -> serde_json::Value {
     let body = reason
         .strip_prefix(PM_GUARD_REFUSAL_PREFIX)
         .unwrap_or(reason);
-    build_pretooluse_deny_response(&format!("{PM_GUARD_REFUSAL_PREFIX}{body}"))
+    // #10641: every refusal names its policy id.
+    let tag = policy.tag();
+    build_pretooluse_deny_response(&format!("{PM_GUARD_REFUSAL_PREFIX}{body} {tag}"))
 }
 
 /// Build the deny for a `tm hook --divert-check` refusal, with no prefix.
@@ -156,6 +168,7 @@ pub(crate) fn build_pretooluse_context_response(context: &str) -> serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trusty_mpm::core::guard_policy;
 
     #[test]
     fn build_pretooluse_deny_response_has_expected_shape() {
@@ -169,14 +182,43 @@ mod tests {
 
     #[test]
     fn pm_guard_deny_carries_the_prefix_exactly_once() {
+        let policy = &guard_policy::DESTRUCTIVE_DELETE;
         for reason in ["nope", "tm pm-guard: nope"] {
-            let v = build_pm_guard_deny_response(reason);
+            let v = build_pm_guard_deny_response(policy, reason);
             assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
             assert_eq!(
-                v["hookSpecificOutput"]["permissionDecisionReason"], "tm pm-guard: nope",
+                v["hookSpecificOutput"]["permissionDecisionReason"],
+                "tm pm-guard: nope [policy GP-005 destructive-delete; source: #4031]",
                 "input {reason:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_pm_guard_deny_names_its_policy_id() {
+        // #10641: whichever entry a site passes, the refusal names it.
+        for policy in guard_policy::POLICIES {
+            let v = build_pm_guard_deny_response(policy, "nope");
+            assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+            let reason = v["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(reason.starts_with("tm pm-guard: nope "), "{reason}");
+            assert!(reason.ends_with(&policy.tag()), "{reason}");
+            assert!(
+                reason.contains(&format!("[policy {} ", policy.id)),
+                "{reason}"
+            );
+        }
+        // A lookup miss still builds a deny, naming GP-000.
+        let miss = build_pm_guard_deny_response(guard_policy::for_rule("no-such-rule"), "x");
+        assert_eq!(miss["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            miss["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .is_some_and(|r| r.contains("[policy GP-000 policy-lookup-miss;")),
+            "{miss}"
+        );
     }
 
     #[test]

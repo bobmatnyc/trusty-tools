@@ -381,3 +381,109 @@ fn the_gate_walks_the_process_table_lazily_and_once() {
     assert!(gate.is_architect() && gate.is_architect());
     assert_eq!(walks.load(Ordering::SeqCst), 1, "cached after one walk");
 }
+
+/// One floor golden row: a Bash command, whether a bypass is set, and the
+/// rule for the process-bound Architect, a PM and a subagent of the Architect.
+type FloorRow = (&'static str, bool, [Option<&'static str>; 3]);
+
+/// #10641 PR1: today's floor verdicts per role, pinned before the policy table
+/// changes anything. Each row restates a verdict an existing test already
+/// asserts for at least one role; the other roles follow from the same code.
+const FLOOR_GOLDEN: [FloorRow; 10] = [
+    ("git status", false, [None, None, None]),
+    ("rm -rf /", false, [None, None, None]),
+    (
+        D4_COMMANDS[0],
+        false,
+        [None, Some(D4_FLOOR_RULE), Some(D4_FLOOR_RULE)],
+    ),
+    (
+        D4_COMMANDS[1],
+        true,
+        [None, Some(D4_FLOOR_RULE), Some(D4_FLOOR_RULE)],
+    ),
+    (
+        D4_COMMANDS[2],
+        true,
+        [None, Some(D4_FLOOR_RULE), Some(D4_FLOOR_RULE)],
+    ),
+    ("tm fleet relaunch", false, [Some(FLEET_RELAUNCH_RULE); 3]),
+    ("tm fleet status", true, [None, None, None]),
+    ("rm -rf /", true, [Some("destructive-delete"); 3]),
+    ("cat .env.local", true, [Some("secret-file-read"); 3]),
+    (
+        DECODED_COMMANDS[1],
+        true,
+        [Some("unclassifiable-command"); 3],
+    ),
+];
+
+#[test]
+fn the_floor_verdicts_are_unchanged_per_role() {
+    let fx = fixture();
+    for (command, bypassed, want) in FLOOR_GOLDEN {
+        let main = bash(&fx, command);
+        let mut sub = main.clone();
+        sub["agent_id"] = json!("agent-10641");
+        let callers = [
+            (&main, architect_env(&fx)),
+            (&main, pm_env(&fx)),
+            (&sub, architect_env(&fx)),
+        ];
+        for (n, (call, env)) in callers.into_iter().enumerate() {
+            let gate = ArchitectGate::new(call, env, || allowlist(&fx));
+            let got = evaluate_floors(call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed)
+                .map(|d| d.rule);
+            assert_eq!(got, want[n], "{command} bypassed={bypassed} caller={n}");
+            // #10641: every floor rule the golden reaches has a policy entry.
+            if let Some(rule) = got {
+                assert!(
+                    trusty_mpm::core::guard_policy::find(rule).is_some(),
+                    "{rule} has no policy entry"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_deny_names_a_policy_id() {
+    // #10641: every audit label a deny site records, by constant or literal,
+    // has a policy entry; `guard_policy::for_rule` would otherwise answer
+    // GP-000. A new label without an entry fails here and in every
+    // integration collector (`common::assert_refusal_names_a_policy`).
+    use crate::commands::{egress_guard_architect, egress_guard_bash, egress_guard_taint};
+    use trusty_mpm::core::guard_policy::find;
+    let labels = [
+        D4_FLOOR_RULE,
+        ARCHITECT_PANE_RULE,
+        TMUX_TARGET_RULE,
+        FLEET_RELAUNCH_RULE,
+        TRUST_ANCHOR_RULE,
+        crate::commands::pm_guard_architect_envfile::SECRET_FILE_READ_RULE,
+        crate::commands::pm_guard_kuzu_store::KUZU_STORE_RULE,
+        crate::commands::pm_guard_kuzu_exception::KUZU_IMPORT_PYTHON_RULE,
+        crate::commands::pm_guard_protected_paths::PROTECTED_PATH_RULE,
+        crate::commands::pm_guard_build_lease::DENY_CHECK,
+        egress_guard_bash::BASH_CHECK,
+        egress_guard_taint::TAINT_CHECK,
+        egress_guard_taint::POLICY_CHECK,
+        egress_guard_architect::AUDIT_CHECK,
+        // hook_stdin, the floor and the egress guard's literal labels.
+        "unreadable-payload",
+        "unclassifiable-payload",
+        "unclassifiable-command",
+        "destructive-delete",
+        "worktree-remove-recheck",
+        "egress-family",
+        "egress-unreadable-payload",
+        "egress-unclassifiable-payload",
+        "egress-unnamed-resource-server",
+        "egress-malformed-mcp-name",
+    ];
+    let missing: Vec<&str> = labels.into_iter().filter(|l| find(l).is_none()).collect();
+    assert!(
+        missing.is_empty(),
+        "labels with no policy entry: {missing:?}"
+    );
+}
