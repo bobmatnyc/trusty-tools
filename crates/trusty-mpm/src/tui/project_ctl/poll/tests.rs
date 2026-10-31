@@ -17,6 +17,7 @@
 
 use super::*;
 use crate::client::ManagedSessionSummary;
+use crate::tui::project_ctl::state::ProjectRow;
 
 fn summary(id: &str, state: &str) -> ManagedSessionSummary {
     ManagedSessionSummary {
@@ -527,9 +528,10 @@ async fn tui_fleet_fetch_sends_slim_and_other_callers_do_not() {
     tokio::spawn(axum::serve(listener, app).into_future());
     let client = DaemonClient::new(format!("http://{addr}"));
 
-    let (_rows, sessions_by_project, _full) = fetch_projects_and_sessions(&client)
-        .await
-        .expect("tui fetch");
+    let (_rows, sessions_by_project, _full) =
+        fetch_projects_and_sessions(&client, &mut CallTimings::new())
+            .await
+            .expect("tui fetch");
     client
         .fleet_managed_sessions()
         .await
@@ -547,4 +549,38 @@ async fn tui_fleet_fetch_sends_slim_and_other_callers_do_not() {
         widget[0].unresumable,
         "unresumable must still reach the tui row"
     );
+}
+
+/// #10476: the selected session's `/activity` is due on a new selection or
+/// once `ACTIVITY_REFRESH` has passed, never on a tick in between.
+#[test]
+fn activity_target_serves_cache_until_refresh_is_due() {
+    use std::time::{Duration, Instant};
+    use tick::{ACTIVITY_REFRESH, activity_target};
+
+    let mut state = seeded_activity_state("s1");
+    let t0 = Instant::now();
+    assert_eq!(activity_target(&mut state, t0).as_deref(), Some("s1"));
+    assert_eq!(
+        activity_target(&mut state, t0 + Duration::from_secs(1)),
+        None,
+        "a tick inside the refresh window serves the cache"
+    );
+    assert_eq!(
+        activity_target(&mut state, t0 + ACTIVITY_REFRESH).as_deref(),
+        Some("s1"),
+        "the window elapsing makes the next tick fetch"
+    );
+
+    // A different selection is due at once.
+    state.activity_attempt = Some(("other".to_string(), t0 + ACTIVITY_REFRESH));
+    assert_eq!(
+        activity_target(&mut state, t0 + ACTIVITY_REFRESH).as_deref(),
+        Some("s1")
+    );
+
+    // A down daemon asks for nothing.
+    state.daemon_reachable = false;
+    state.activity_attempt = None;
+    assert_eq!(activity_target(&mut state, t0), None);
 }

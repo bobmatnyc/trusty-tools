@@ -431,6 +431,9 @@ pub struct ProjectCtlState {
     pub(crate) needs_repoll: bool,
     /// Set when the operator asks to quit; the event loop exits on the next tick.
     pub should_exit: bool,
+    /// #10476: the session and time of the last `/activity` request, so a tick
+    /// serves the cached Activity pane instead of a tmux capture each second.
+    pub(crate) activity_attempt: Option<(String, std::time::Instant)>,
 }
 
 impl ProjectCtlState {
