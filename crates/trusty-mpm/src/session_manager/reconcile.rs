@@ -446,10 +446,12 @@ impl SessionManager {
                 None => ManagedSessionId::for_adopted_tmux_name(name),
             };
             // #9004: the pane id with the server it was read on.
-            let (pane_id, tmux_server) = super::pane_identity::capture(self.tmux.as_ref(), name);
+            let (pane_id, tmux_server, tmux_session_id) =
+                super::pane_identity::capture(self.tmux.as_ref(), name);
             let external = SessionRecord {
                 context_usage: None,
                 parent_session_id: None,
+                tmux_session_id,
                 id,
                 tmux_name: name.clone(),
                 cwd: resolved_cwd.clone(),

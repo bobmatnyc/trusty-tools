@@ -476,6 +476,19 @@ pub trait ManagedTmuxDriver: Send + Sync {
         )))
     }
 
+    /// The session id, session creation time and current path of pane
+    /// `pane_id` (#10442).
+    ///
+    /// What: the default is `Err`, so a driver that cannot read them never
+    /// rebinds a record automatically. [`super::real_tmux::RealTmuxDriver`]
+    /// reads them with one `display-message -t %N`.
+    /// Test: `a_pane_facts_line_parses_only_when_whole`.
+    fn pane_facts(&self, pane_id: &str) -> Result<super::pane_identity::PaneFacts, ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "this driver cannot read the session facts of pane {pane_id}"
+        )))
+    }
+
     /// The `%N` id of every pane in session `name`, across all its windows
     /// (#9313).
     ///

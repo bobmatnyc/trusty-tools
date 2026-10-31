@@ -1313,6 +1313,7 @@ pub(crate) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str
     SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: PathBuf::from("/tmp"),
@@ -1450,6 +1451,7 @@ async fn manager_reconcile_skips_decommissioned() {
     let tombstone = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-decomm".into(),
         cwd: PathBuf::from("/tmp"),
@@ -1519,6 +1521,7 @@ async fn manager_reconcile_skips_deleted() {
     let deleted = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-deleted".into(),
         cwd: PathBuf::from("/tmp"),
@@ -1596,6 +1599,7 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
     let stale = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-stale-decision".into(),
         cwd: PathBuf::from("/tmp"),
@@ -2188,6 +2192,7 @@ pub(super) async fn seed_record(
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id,
         tmux_name: tmux_name.clone(),
         cwd: root.path().to_path_buf(),
@@ -2718,6 +2723,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
         let record = SessionRecord {
             context_usage: None,
             parent_session_id: None,
+            tmux_session_id: None,
             id,
             tmux_name: format!("tmpm-aged-{id}"),
             cwd: root.path().to_path_buf(),
@@ -2815,6 +2821,7 @@ async fn manager_decommission_unowned_skips_deletion() {
     let record = SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id,
         tmux_name: format!("tmpm-local-{id}"),
         cwd: repo_path.clone(),

@@ -739,6 +739,7 @@ async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
     let existing = super::record::SessionRecord {
         context_usage: None,
         parent_session_id: None,
+        tmux_session_id: None,
         id: super::record::ManagedSessionId::new(),
         tmux_name: "tm-known-01".into(),
         cwd: workspace.path().to_path_buf(),

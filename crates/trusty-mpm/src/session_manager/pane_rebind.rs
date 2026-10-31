@@ -21,7 +21,7 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use super::manager::{ManagedError, ManagedTmuxDriver, SessionManager};
-use super::pane_identity::PaneIdentity;
+use super::pane_identity::{PaneFacts, PaneIdentity};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::rename::validate_session_name;
 
@@ -74,6 +74,20 @@ impl RebindOutcome {
             Self::Skipped(_) => "skipped",
         }
     }
+}
+
+/// Which caller a rebind runs for; each adds its own gates (#9313, #10442).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RebindMode {
+    /// `tm sessions rebind <id>`: the operator decides, so no server or
+    /// project gate.
+    Manual,
+    /// `tm sessions rebind --all`: only a record whose tmux server was
+    /// replaced, and only to a pane in its own project.
+    ServerReplaced,
+    /// #10442: a pane send whose recorded pane is gone. Only an `Active`
+    /// record on the live server, and only to a pane in its own project.
+    LivePane,
 }
 
 /// Whether `record` may be rebound: only `Active` and `Stopped` records
@@ -166,37 +180,88 @@ fn single_pane(tmux: &dyn ManagedTmuxDriver, target: &str) -> Result<PaneMatch, 
     }
 }
 
-/// Why `pane` is not the record's own project, or `None` when the session's
-/// current path lies under the record's `cwd` or `workspace_path` (#9313).
+/// The session facts of `identity`'s pane when its current path lies under
+/// the record's `cwd` or `workspace_path`; otherwise why not (#9313).
 ///
 /// Why: a same-named session on a replaced server can belong to another
 /// project; binding to it lets idle-stop, `tm sessions stop` and daemon
 /// shutdown signal that foreign session.
-/// What: reads `pane_current_path` for the record's tmux session; an unread
-/// path is a reason too, so doubt never binds.
-/// Test: `a_pane_in_another_project_is_not_rebound_automatically`.
-fn outside_project(
+/// What: one [`ManagedTmuxDriver::pane_facts`] read BY PANE ID (#10442), so
+/// the path is the pane's own, not whatever session holds the name. An
+/// unread answer, or one naming a session other than `identity`'s, is a
+/// reason too, so doubt never binds.
+/// Test: `a_pane_in_another_project_is_not_rebound_automatically`,
+/// `a_send_whose_session_pane_is_another_projects_still_refuses`.
+fn in_project(
     tmux: &dyn ManagedTmuxDriver,
     record: &SessionRecord,
-    pane: &str,
-) -> Option<String> {
-    let Some(path) = tmux.get_pane_cwd(&record.tmux_name) else {
-        return Some(format!(
-            "tmux did not report the current path of pane {pane}"
+    identity: &PaneIdentity,
+) -> Result<PaneFacts, String> {
+    let pane = identity.pane_id.as_str();
+    let facts = tmux
+        .pane_facts(pane)
+        .map_err(|e| format!("tmux did not report the session and path of pane {pane}: {e}"))?;
+    if facts.session_id != identity.session_id {
+        return Err(format!(
+            "pane {pane} answered in session {}, then in {}",
+            identity.session_id, facts.session_id
         ));
-    };
+    }
     let roots: Vec<&Path> = std::iter::once(record.cwd.as_path())
         .chain(record.workspace_path.as_deref())
         .collect();
-    if roots.iter().any(|root| path_under(&path, root)) {
-        return None;
+    if roots
+        .iter()
+        .any(|root| path_under(&facts.current_path, root))
+    {
+        return Ok(facts);
     }
     let roots: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
-    Some(format!(
+    Err(format!(
         "pane {pane} is in {}, outside the record's {}",
-        path.display(),
+        facts.current_path.display(),
         roots.join(" and ")
     ))
+}
+
+/// Why `identity` is not the tmux session instance `record` launched, or
+/// `None` when it provably is (#10442).
+///
+/// Why: tm names sessions `tm-<folder>`, so a dead session's name can be
+/// reused by an unmanaged one in the same project; a send must never type
+/// into it.
+/// What: a record storing a `$N` session id matches only that id, which tmux
+/// never reuses within one server. A record storing none (written before the
+/// field) matches only a session created no later than the record's
+/// `created_at`, which tm stamps after the launch; a relaunched session is
+/// newer, so it is refused. Fails closed either way.
+/// Test: `a_send_into_a_session_recreated_under_the_same_name_refuses`,
+/// `a_legacy_record_reresolves_into_a_session_older_than_itself`.
+fn other_instance(
+    record: &SessionRecord,
+    identity: &PaneIdentity,
+    facts: &PaneFacts,
+) -> Option<String> {
+    let live = identity.session_id.as_str();
+    match record.tmux_session_id.as_deref() {
+        Some(own) if own == live => None,
+        Some(own) => Some(format!(
+            "tmux session '{}' is now {live}, not the {own} the record launched; \
+             the name was reused",
+            identity.session_name
+        )),
+        None => {
+            let launched = record.created_at.timestamp();
+            (facts.session_created > launched).then(|| {
+                format!(
+                    "the record stores no tmux session id, and session {live} was created at \
+                     {} (epoch s), after the record's launch at {launched}; the name may have \
+                     been reused",
+                    facts.session_created
+                )
+            })
+        }
+    }
 }
 
 /// Whether `path` lies under `root`, compared by component both as given
@@ -243,7 +308,7 @@ impl SessionManager {
         id: &ManagedSessionId,
         tmux: Option<&str>,
     ) -> Result<RebindOutcome, ManagedError> {
-        self.rebind_one(id, tmux, false).await
+        self.rebind_one(id, tmux, RebindMode::Manual).await
     }
 
     /// `tm sessions rebind --all`'s per-record rebind (#9313).
@@ -261,17 +326,43 @@ impl SessionManager {
         &self,
         id: &ManagedSessionId,
     ) -> Result<RebindOutcome, ManagedError> {
-        self.rebind_one(id, None, true).await
+        self.rebind_one(id, None, RebindMode::ServerReplaced).await
+    }
+
+    /// Re-resolve an `Active` record whose recorded pane is gone to the one
+    /// live pane its own tmux session holds (#10442).
+    ///
+    /// Why: a relaunch or respawn inside the same tmux session gives the
+    /// agent a new `%N`; the record keeps the dead one and every send is
+    /// refused while the agent runs.
+    /// What: [`Self::rebind_session`] with no `--tmux`, plus four gates: the
+    /// record is `Active`, it captured a tmux server and that server is the
+    /// live one, the pane's current path lies under the record's `cwd`
+    /// or `workspace_path`, and the session is the instance the record
+    /// launched (`other_instance`). Any other case answers without a write.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::rebind_session`].
+    /// Test: `a_send_to_a_stale_pane_reresolves_the_live_pane_and_delivers`,
+    /// `a_send_to_a_session_with_a_sibling_pane_still_refuses`,
+    /// `a_send_whose_session_pane_is_another_projects_still_refuses`,
+    /// `a_send_into_a_session_recreated_under_the_same_name_refuses`.
+    pub(crate) async fn reresolve_live_pane(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<RebindOutcome, ManagedError> {
+        self.rebind_one(id, None, RebindMode::LivePane).await
     }
 
     /// The shared body of [`Self::rebind_session`] and
-    /// [`Self::rebind_if_server_replaced`]; `replaced_only` adds the
-    /// automatic pass's server gate.
+    /// [`Self::rebind_if_server_replaced`] and [`Self::reresolve_live_pane`];
+    /// `mode` adds each caller's gates.
     async fn rebind_one(
         &self,
         id: &ManagedSessionId,
         tmux: Option<&str>,
-        replaced_only: bool,
+        mode: RebindMode,
     ) -> Result<RebindOutcome, ManagedError> {
         let record = self.get(id).await?;
         // #9850: refused first, so the error names the front gate.
@@ -285,8 +376,15 @@ impl SessionManager {
                 ),
             ));
         }
+        // #10442: a send never reactivates a stopped record.
+        if mode == RebindMode::LivePane && record.state != ManagedSessionState::Active {
+            return Ok(RebindOutcome::Skipped(format!(
+                "a {} record is not re-resolved by a send",
+                record.state
+            )));
+        }
         // #9313: the automatic pass never rebinds a record with no server.
-        if replaced_only && record.tmux_server.is_none() {
+        if mode != RebindMode::Manual && record.tmux_server.is_none() {
             return Ok(RebindOutcome::Skipped(format!(
                 "the record captured no tmux server, so no replacement can be seen; \
                  `tm sessions rebind {id}` rebinds it by hand"
@@ -311,18 +409,33 @@ impl SessionManager {
             });
         }
         // #9313: `--all` takes the automatic pass's server gate.
-        if replaced_only && same_server {
+        if mode == RebindMode::ServerReplaced && same_server {
             return Ok(RebindOutcome::Skipped(format!(
                 "the record is on the live tmux server; `tm sessions rebind {id}` \
                  binds it to pane {} by hand",
                 identity.pane_id
             )));
         }
-        // #9313: `--all` also takes the automatic pass's project gate.
-        if replaced_only
-            && let Some(why) = outside_project(self.tmux.as_ref(), &record, &identity.pane_id)
-        {
-            return Ok(RebindOutcome::NoMatch(why));
+        // #10442: a send re-resolves a pane change on the record's own server
+        // only; a replaced server is the automatic pass's.
+        if mode == RebindMode::LivePane && !same_server {
+            return Ok(RebindOutcome::Skipped(format!(
+                "pane {} is on tmux server {}, not the record's",
+                identity.pane_id, identity.server
+            )));
+        }
+        // #9313: `--all` and (#10442) a send take the project gate.
+        if mode != RebindMode::Manual {
+            let facts = match in_project(self.tmux.as_ref(), &record, &identity) {
+                Ok(facts) => facts,
+                Err(why) => return Ok(RebindOutcome::NoMatch(why)),
+            };
+            // #10442: a send binds only the session instance the record launched.
+            if mode == RebindMode::LivePane
+                && let Some(why) = other_instance(&record, &identity, &facts)
+            {
+                return Ok(RebindOutcome::NoMatch(why));
+            }
         }
         self.write_rebind(&record, &target, &identity).await
     }
@@ -421,7 +534,7 @@ impl SessionManager {
             ))));
         }
         // #9313: a same-named session on the new server may be another project's.
-        if let Some(why) = outside_project(self.tmux.as_ref(), record, first) {
+        if let Err(why) = in_project(self.tmux.as_ref(), record, &identity) {
             return Ok(Some(RebindOutcome::NoMatch(why)));
         }
         self.write_rebind(record, name, &identity).await.map(Some)
@@ -451,7 +564,8 @@ impl SessionManager {
         let unchanged = stored.state == before.state
             && stored.tmux_name == before.tmux_name
             && stored.pane_id == before.pane_id
-            && stored.tmux_server == before.tmux_server;
+            && stored.tmux_server == before.tmux_server
+            && stored.tmux_session_id == before.tmux_session_id;
         if !unchanged {
             return Ok(RebindOutcome::NoMatch(
                 "the record changed while it was being rebound".to_string(),
@@ -461,6 +575,8 @@ impl SessionManager {
         updated.tmux_name = target.to_owned();
         updated.pane_id = Some(identity.pane_id.clone());
         updated.tmux_server = Some(identity.server.clone());
+        // #10442: the instance a later send must find again.
+        updated.tmux_session_id = Some(identity.session_id.clone());
         let reactivated = updated.state != ManagedSessionState::Active;
         if reactivated {
             updated.set_lifecycle_state(ManagedSessionState::Active, Utc::now());
