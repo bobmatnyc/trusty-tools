@@ -201,7 +201,7 @@ impl std::fmt::Display for ScanIncomplete {
 /// `a_skip_listed_directory_wider_than_its_check_cap_is_incomplete`,
 /// `clear_is_constructed_in_one_place`.
 pub fn scan_for_child_repo(dir: &Path) -> ChildRepoScan {
-    scan(dir, None, WORKSPACE_SCAN_BUDGET, None)
+    scan(dir, &[], WORKSPACE_SCAN_BUDGET, None)
 }
 
 /// [`scan_for_child_repo`], with one entry of the tree left out.
@@ -214,7 +214,7 @@ pub fn scan_for_child_repo(dir: &Path) -> ChildRepoScan {
 /// [`scan_for_child_repo`].
 /// Test: `an_excepted_entry_is_skipped_and_its_siblings_are_still_found`.
 pub fn scan_for_child_repo_except(dir: &Path, except: &Path) -> ChildRepoScan {
-    scan(dir, Some(except), WORKSPACE_SCAN_BUDGET, None)
+    scan(dir, &[except], WORKSPACE_SCAN_BUDGET, None)
 }
 
 /// The fleet preflight's scan: no skip list, every directory charged to
@@ -263,15 +263,19 @@ pub fn scan_for_child_repo_exhaustive(
     except: Option<&Path>,
     budget: usize,
 ) -> ChildRepoScan {
-    scan(dir, except, budget, Some(device_of))
+    scan(dir, except.as_slice(), budget, Some(device_of))
 }
 
 /// [`scan_for_child_repo_exhaustive`] with the `st_dev` reader named by the
-/// caller, so a caller's test can fake a mount point (#10457).
-/// Test: `a_mount_point_at_local_is_refused`.
+/// caller, so a caller's test can fake a mount point (#10457), and with every
+/// entry of `except` left out, each on the same terms as one `except`.
+/// Test: `a_mount_point_at_local_is_refused`,
+/// `a_linked_worktree_of_the_dirs_own_repository_passes`.
+// #10262: several entries, so the preflight can also leave out the
+// directory's own linked worktrees beside `local/`.
 pub fn scan_for_child_repo_exhaustive_with(
     dir: &Path,
-    except: Option<&Path>,
+    except: &[&Path],
     budget: usize,
     device_of: DeviceOf,
 ) -> ChildRepoScan {
@@ -401,7 +405,7 @@ impl Fence {
 
 fn scan(
     dir: &Path,
-    except: Option<&Path>,
+    except: &[&Path],
     budget: usize,
     exhaustive: Option<DeviceOf>,
 ) -> ChildRepoScan {
@@ -437,7 +441,7 @@ fn scan(
 /// The state one scan carries from level to level.
 struct Walk<'a> {
     root: &'a Path,
-    except: Option<&'a Path>,
+    except: &'a [&'a Path],
     budget: usize,
     visited: usize,
     /// `Some` under the exhaustive rule (#10457).
@@ -501,7 +505,7 @@ impl Walk<'_> {
             let entry = entry.map_err(|e| unreadable(current, e))?;
             let path = entry.path();
             // #8878 R1: the caller checks the excepted entry itself.
-            if self.except == Some(path.as_path()) {
+            if self.except.contains(&path.as_path()) {
                 // #10457: its device is compared here; its own scan cannot.
                 if let Some(fence) = self.fence {
                     let kind = entry.file_type().map_err(|e| unreadable(&path, e))?;

@@ -730,3 +730,232 @@ fn a_mount_point_at_local_is_refused() {
     );
     assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
 }
+
+/// A repository at `path` with one empty commit, so `git worktree add` works.
+fn committed_repo(s: &Scratch, path: &Path) -> PathBuf {
+    let repo = s.repo(path, false);
+    let identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+    let commit = ["commit", "--allow-empty", "--quiet", "-m", "seed"];
+    let args: Vec<&str> = identity
+        .iter()
+        .chain(&["-c", "commit.gpgsign=false"])
+        .chain(&commit)
+        .copied()
+        .collect();
+    git(&repo, &args);
+    repo
+}
+
+/// A detached linked worktree of `repo` at `at`, so no branch is made.
+fn add_worktree(repo: &Path, at: &Path) -> PathBuf {
+    let at_str = at.to_str().expect("utf-8 path");
+    let args = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "worktree",
+        "add",
+        "--detach",
+        "--quiet",
+    ];
+    let mut args = args.to_vec();
+    args.push(at_str);
+    git(repo, &args);
+    at.to_path_buf()
+}
+
+/// #10262, FAILS BEFORE THE FIX: the scan took a linked worktree of the
+/// directory's own repository for a child project, so a stopped Architect
+/// with leftover agent worktrees could not relaunch.
+#[test]
+fn a_linked_worktree_of_the_dirs_own_repository_passes() {
+    let s = Scratch::new();
+    let dir = committed_repo(&s, &s.outer().join("architect"));
+    s.repo(&dir.join("local"), false);
+    let trees = dir.join(".claude/worktrees");
+    add_worktree(&dir, &trees.join("agent-a"));
+    // One nested in another is still a worktree of the same repository.
+    add_worktree(&dir, &trees.join("agent-a/.claude/worktrees/agent-b"));
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
+    init(&dir, &s.home(), false, NO_TMUX).unwrap_or_else(|e| panic!("{e:#}"));
+}
+
+/// #10262: only the directory's own worktrees are excepted. A worktree of
+/// another repository, a forged `.git` file that points into the directory's
+/// own worktree records, and a repository inside an own worktree all refuse,
+/// and a worktree refusal names the `git worktree` fix.
+#[test]
+fn a_worktree_that_is_not_the_dirs_own_still_refuses() {
+    let s = Scratch::new();
+    let other = committed_repo(&s, &s.outer().join("other"));
+    let foreign = s.repo(&s.outer().join("foreign"), false);
+    let wt = add_worktree(&other, &foreign.join(".claude/worktrees/x"));
+    let refusal = s.refused(&foreign);
+    assert!(
+        refusal.to_string().contains("`git worktree list`"),
+        "{refusal}"
+    );
+    assert_workspace_parent(
+        refusal,
+        &foreign,
+        &format!("`git worktree remove {}`", wt.display()),
+    );
+
+    let forged = committed_repo(&s, &s.outer().join("forged"));
+    let real = add_worktree(&forged, &forged.join(".claude/worktrees/real"));
+    let fake = forged.join(".claude/worktrees/fake");
+    std::fs::create_dir_all(&fake).unwrap();
+    std::fs::copy(real.join(".git"), fake.join(".git")).unwrap();
+    assert_workspace_parent(
+        s.refused(&forged),
+        &forged,
+        &format!("contains the repository {}", fake.display()),
+    );
+
+    let nested = committed_repo(&s, &s.outer().join("nested"));
+    let own = add_worktree(&nested, &nested.join(".claude/worktrees/own"));
+    let inner = s.repo(&own.join("project"), false);
+    assert_workspace_parent(
+        s.refused(&nested),
+        &nested,
+        &format!("contains the repository {}", inner.display()),
+    );
+}
+
+/// An own worktree `<outer>/<name>/.claude/worktrees/a` that passes, as
+/// `(dir, worktree, record)`, so each case changes one file and nothing else.
+fn passing_worktree(s: &Scratch, name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let dir = committed_repo(s, &s.outer().join(name));
+    let wt = add_worktree(&dir, &dir.join(".claude/worktrees/a"));
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()), "{name}: control");
+    let record = dir.join(".git/worktrees/a");
+    (dir, wt, record)
+}
+
+fn write(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+}
+
+/// `dir` refuses because its worktree `wt` was scanned as a repository.
+fn assert_wt_scanned(s: &Scratch, dir: &Path, wt: &Path) {
+    let why = format!("contains the repository {}", wt.display());
+    assert_workspace_parent(s.refused(dir), dir, &why);
+}
+
+/// #10262 critic CRITICAL, FAILS BEFORE THE FIX: the record's `commondir`
+/// was never read, so a record whose `commondir` names another repository
+/// was exempt while git ran that worktree against the foreign repository.
+#[test]
+fn a_worktree_record_whose_commondir_is_not_the_dirs_own_refuses() {
+    let s = Scratch::new();
+    let other = committed_repo(&s, &s.outer().join("other"));
+    let (dir, wt, record) = passing_worktree(&s, "foreign");
+    write(
+        &record.join("commondir"),
+        &format!("{}\n", other.join(".git").display()),
+    );
+    assert_wt_scanned(&s, &dir, &wt);
+
+    let (dir, wt, record) = passing_worktree(&s, "missing");
+    std::fs::remove_file(record.join("commondir")).unwrap();
+    assert_wt_scanned(&s, &dir, &wt);
+
+    // A symlink outside the dir that leads to another repository's `.git`.
+    let link = s.outer().join("link-to-other");
+    std::os::unix::fs::symlink(other.join(".git"), &link).unwrap();
+    let (dir, wt, record) = passing_worktree(&s, "via-symlink");
+    write(&record.join("commondir"), &link.display().to_string());
+    assert_wt_scanned(&s, &dir, &wt);
+}
+
+/// #10262 critic, FAILS BEFORE THE FIX: a record's `config.worktree`, or an
+/// `includeIf "onbranch:"` matching only the worktree's branch, gave it config the target's own
+/// `git remote` never read, such as a foreign `origin`.
+#[test]
+fn a_worktree_with_its_own_config_or_remote_refuses() {
+    let s = Scratch::new();
+    let (dir, wt, record) = passing_worktree(&s, "worktree-config");
+    git(&dir, &["config", "extensions.worktreeConfig", "true"]);
+    write(&record.join("config.worktree"), "[core]\n\tbare = false\n");
+    assert_wt_scanned(&s, &dir, &wt);
+
+    let (dir, wt, _) = passing_worktree(&s, "include-if");
+    git(&wt, &["switch", "--quiet", "-c", "wt-only"]);
+    let inc = s.outer().join("foreign-remote.inc");
+    write(
+        &inc,
+        "[remote \"origin\"]\n\turl = https://example.invalid/f.git\n",
+    );
+    let rule = format!(
+        "[includeIf \"onbranch:wt-only\"]\n\tpath = {}\n",
+        inc.display()
+    );
+    let config = dir.join(".git/config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(&rule);
+    write(&config, &text);
+    let why = format!("its linked worktree {} has remote(s) origin", wt.display());
+    assert_workspace_parent(s.refused(&dir), &dir, &why);
+}
+
+/// #10262 critic LOW: a record or pointer that leaves the directory, or holds
+/// `..`, and a worktree at `local/`, all refuse. The `..` cases FAIL BEFORE
+/// THE FIX; the others pin refusals the first round already made.
+#[test]
+fn a_worktree_record_or_pointer_that_escapes_refuses() {
+    let s = Scratch::new();
+    let outer = s.outer();
+
+    let (dir, _, _) = passing_worktree(&s, "records-link");
+    let moved = outer.join("records-elsewhere");
+    std::fs::rename(dir.join(".git/worktrees"), &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, dir.join(".git/worktrees")).unwrap();
+    s.refused(&dir);
+
+    let (dir, _, record) = passing_worktree(&s, "record-link");
+    let moved = outer.join("record-elsewhere");
+    std::fs::rename(&record, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &record).unwrap();
+    s.refused(&dir);
+
+    // The worktree is a symlink out of the dir to a real worktree elsewhere.
+    let dir = committed_repo(&s, &outer.join("worktree-link"));
+    let real = add_worktree(&dir, &outer.join("real-tree"));
+    let link = dir.join(".claude/worktrees/a");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    write(
+        &dir.join(".git/worktrees/real-tree/gitdir"),
+        &format!("{}\n", link.join(".git").display()),
+    );
+    s.refused(&dir);
+
+    let (dir, wt, record) = passing_worktree(&s, "dotdot-gitdir");
+    let back = dir.join(".claude/worktrees/../worktrees/a/.git");
+    write(&record.join("gitdir"), &format!("{}\n", back.display()));
+    assert_wt_scanned(&s, &dir, &wt);
+
+    let (dir, wt, _) = passing_worktree(&s, "dotdot-pointer");
+    let pointer = dir.join(".git/worktrees/../worktrees/a");
+    write(
+        &wt.join(".git"),
+        &format!("gitdir: {}\n", pointer.display()),
+    );
+    assert_wt_scanned(&s, &dir, &wt);
+
+    let (dir, wt, record) = passing_worktree(&s, "gitdir-outside");
+    let out = outer.join("outside-tree");
+    std::fs::create_dir(&out).unwrap();
+    write(
+        &out.join(".git"),
+        &format!("gitdir: {}\n", record.display()),
+    );
+    write(
+        &record.join("gitdir"),
+        &format!("{}\n", out.join(".git").display()),
+    );
+    assert_wt_scanned(&s, &dir, &wt);
+
+    let dir = committed_repo(&s, &outer.join("local-tree"));
+    let local = add_worktree(&dir, &dir.join("local"));
+    assert_wt_scanned(&s, &dir, &local);
+}

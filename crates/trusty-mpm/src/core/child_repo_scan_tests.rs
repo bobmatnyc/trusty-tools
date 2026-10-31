@@ -465,7 +465,7 @@ fn exhaustive_charges_skip_listed_dirs_to_the_budget() {
 
 /// The shallow rule with a named budget, to compare against the exhaustive one.
 fn scan_for_child_repo_within_shallow(dir: &Path, budget: usize) -> ChildRepoScan {
-    scan(dir, None, budget, None)
+    scan(dir, &[], budget, None)
 }
 
 /// #10457: the probe still runs before the escape check, so a symlink whose
@@ -500,12 +500,12 @@ fn exhaustive_refuses_a_mount_point_and_an_unreadable_device() {
     let tmp = TempDir::new().unwrap();
     let ws = workspace(&tmp);
     std::fs::create_dir_all(ws.join("a/b")).unwrap();
-    assert_eq!(scan(&ws, None, 64, Some(fake_device)), ChildRepoScan::Clear);
+    assert_eq!(scan(&ws, &[], 64, Some(fake_device)), ChildRepoScan::Clear);
 
     let mnt = ws.join("a/b/mnt");
     std::fs::create_dir_all(&mnt).unwrap();
     assert_eq!(
-        scan(&ws, None, 64, Some(fake_device)),
+        scan(&ws, &[], 64, Some(fake_device)),
         ChildRepoScan::Incomplete(ScanIncomplete::MountPoint { path: mnt.clone() })
     );
     std::fs::remove_dir(&mnt).unwrap();
@@ -513,7 +513,7 @@ fn exhaustive_refuses_a_mount_point_and_an_unreadable_device() {
     let bad = ws.join("a/bad");
     std::fs::create_dir_all(&bad).unwrap();
     assert!(matches!(
-        scan(&ws, None, 64, Some(fake_device)),
+        scan(&ws, &[], 64, Some(fake_device)),
         ChildRepoScan::Incomplete(ScanIncomplete::Unreadable { path, .. }) if path == bad
     ));
     // The real reader sees one filesystem across the scratch tree.
@@ -549,12 +549,12 @@ fn exhaustive_refuses_an_excepted_entry_on_another_device() {
     std::fs::create_dir_all(&mnt).unwrap();
     std::fs::create_dir_all(&local).unwrap();
     assert_eq!(
-        scan(&ws, Some(&mnt), 64, Some(fake_device)),
+        scan(&ws, &[mnt.as_path()], 64, Some(fake_device)),
         ChildRepoScan::Incomplete(ScanIncomplete::MountPoint { path: mnt.clone() })
     );
     std::fs::remove_dir(&mnt).unwrap();
     assert_eq!(
-        scan(&ws, Some(&local), 64, Some(fake_device)),
+        scan(&ws, &[local.as_path()], 64, Some(fake_device)),
         ChildRepoScan::Clear
     );
 }
@@ -576,7 +576,7 @@ fn exhaustive_refuses_a_root_that_vanishes_mid_scan() {
     let root = workspace(&tmp).join("vanish");
     std::fs::create_dir_all(&root).unwrap();
     assert!(matches!(
-        scan(&root, None, 64, Some(vanishing_device)),
+        scan(&root, &[], 64, Some(vanishing_device)),
         ChildRepoScan::Incomplete(ScanIncomplete::Unreadable { path, .. }) if path == root
     ));
     assert_eq!(
