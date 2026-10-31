@@ -586,6 +586,8 @@ mod recall_access_tests;
 mod recall_projection_tests;
 // #9144: `memory_remember`'s optional drawer `type`.
 mod remember_type_tests;
+// #10609: the `superseded-by:` retirement marker, end to end.
+mod retired_marker_tests;
 // #9390: a Tier C slot's `verify` command, end to end through the dispatcher.
 mod verify_with_tests;
 mod write_budget_tests;
