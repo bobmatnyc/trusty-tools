@@ -451,6 +451,8 @@ fn cli_parses_doctor() {
                 quarantine_mcp: None,
                 dir: None,
                 network: false,
+                dry_run: false,
+                only: _,
             }
         }
     ));
@@ -504,6 +506,8 @@ fn cli_parses_doctor_prune_stale_skills() {
                 quarantine_mcp: None,
                 dir: None,
                 network: false,
+                dry_run: false,
+                only: _,
             }
         }
     ));
@@ -534,6 +538,8 @@ fn cli_parses_doctor_fix_skills() {
                 quarantine_mcp: None,
                 dir: None,
                 network: false,
+                dry_run: false,
+                only: _,
             }
         }
     ));
@@ -676,7 +682,7 @@ fn cli_parses_doctor_fix() {
 fn cli_parses_validate() {
     let cli = Cli::try_parse_from(["trusty-mpm", "validate"]).unwrap();
     match cli.command.unwrap() {
-        Command::Validate { path, repair } => {
+        Command::Validate { path, repair, .. } => {
             assert_eq!(path, None);
             assert!(!repair);
         }
@@ -689,7 +695,7 @@ fn cli_parses_validate_with_path_and_repair() {
     let cli =
         Cli::try_parse_from(["trusty-mpm", "validate", "--path", "/tmp/ws", "--repair"]).unwrap();
     match cli.command.unwrap() {
-        Command::Validate { path, repair } => {
+        Command::Validate { path, repair, .. } => {
             assert_eq!(path, Some(std::path::PathBuf::from("/tmp/ws")));
             assert!(repair);
         }

@@ -62,6 +62,8 @@ mod tm_cli_socket;
 mod tm_client_socket_cutover_6288;
 // #10569: `tm register` never feeds its repo argument to `--url`.
 mod tm_compress_pipe;
+// #10425: `tm doctor --fix --dry-run` / `--only`, `tm validate --repair --dry-run`.
+mod tm_doctor_fix_dry_run;
 mod tm_doctor_network;
 mod tm_doctor_standalone;
 mod tm_register_url_id_10569;
