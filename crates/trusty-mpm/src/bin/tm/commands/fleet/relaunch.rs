@@ -12,7 +12,8 @@
 //! ([`launch::prepare_restart`], the launch path `init` uses). Then it stops
 //! the pane's `claude` ([`stop_claude`]), proves the pane holds none, and
 //! starts and records the new one. A new `claude` that is not recorded is
-//! stopped and the run fails (#10448). Last it removes this session's replaced
+//! stopped and the run fails (#10448). A bound one gets its poller back when
+//! that is absent (#10357). Last it removes this session's replaced
 //! launch records ([`prune_replaced`]); `fleet::run` then re-registers the
 //! Architect with the daemon (#8942).
 //! Test: `relaunch_tests.rs`; `tests/tm_fleet.rs` (`fleet_relaunch_*`).
@@ -32,7 +33,7 @@ use trusty_mpm::session_manager::ArchitectRegistration;
 
 use super::launch::{self, PaneState};
 use super::session_name::SessionNames;
-use super::{Probe, Step, TMUX, register, status};
+use super::{Probe, Step, TMUX, poller, register, status};
 
 /// How long a stopped `claude` gets after SIGTERM before SIGKILL.
 const STOP_GRACE: Duration = Duration::from_secs(10);
@@ -61,6 +62,8 @@ pub(crate) struct Ops {
     /// Prepare a new `claude`, touching no tmux session; the returned
     /// [`launch::Pending`] starts and records it. See [`launch::prepare_restart`].
     pub(crate) prepare: fn(&Path, &Path, &str) -> anyhow::Result<launch::Pending>,
+    /// Start the poller session; see [`poller::start`] (#10357).
+    pub(crate) start_poller: poller::StartFn,
 }
 
 /// The real tmux server, process table and launch path.
@@ -71,6 +74,7 @@ pub(crate) const LIVE: Ops = Ops {
     pane_claude: process::pane_claude,
     stop: stop_claude,
     prepare: launch::prepare_restart,
+    start_poller: poller::start,
 };
 
 /// The steps one `relaunch` run took.
@@ -118,12 +122,15 @@ impl RelaunchReport {
 /// runs, is located under the pane shell; the new launch is prepared
 /// (`ops.prepare`), so each launch-path refusal comes before any stop; the
 /// old `claude` is stopped, and the pane must then still be the only one and
-/// hold no `claude`; the new `claude` is started and recorded; this
-/// session's replaced launch records are removed. Every refusal before the
+/// hold no `claude`; the new `claude` is started and recorded; the poller
+/// is started when absent ([`poller::step_with`], #10357); this session's
+/// replaced launch records are removed. Every refusal before the
 /// stop says nothing was stopped; every failure after it names the stopped
 /// PID. #10448: a failed record stops the new `claude` ([`stop_unbound`])
 /// and is `Err`.
-/// Test: `relaunch_refuses_an_absent_session_and_names_init`,
+/// Test: `relaunch_restores_a_missing_poller_once`,
+/// `relaunch_never_starts_a_poller_unless_the_architect_is_bound`,
+/// `relaunch_refuses_an_absent_session_and_names_init`,
 /// `relaunch_refuses_before_any_change_when_the_pane_cannot_be_read`,
 /// `relaunch_refuses_a_session_with_more_than_one_pane`,
 /// `relaunch_stops_nothing_when_the_launch_cannot_be_prepared`,
@@ -198,6 +205,15 @@ pub(crate) fn relaunch(
         record.pid,
         conversation.describe()
     )));
+    // #10357: only a bound Architect gets its poller back, before the
+    // registration that records it.
+    report.steps.push(poller::step_with(
+        &dir,
+        true,
+        ops.probe,
+        names,
+        ops.start_poller,
+    ));
     let root = home.join(".trusty-mpm");
     report.steps.extend(prune_replaced(
         &root,

@@ -402,7 +402,12 @@ pub(crate) fn init_with_seed(
     }
     report.steps.push(step);
     report.unbound = unbound;
-    report.steps.push(poller::step(dir, launch, probe, &names));
+    // #10357: no poller beside an Architect that is not bound.
+    report.steps.push(if unbound {
+        poller::unbound(&names)
+    } else {
+        poller::step(dir, launch, probe, &names)
+    });
     Ok(report)
 }
 

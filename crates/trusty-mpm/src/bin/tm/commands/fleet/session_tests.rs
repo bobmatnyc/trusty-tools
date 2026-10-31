@@ -416,6 +416,36 @@ fn a_running_unbound_session_is_reported_by_init() {
     );
 }
 
+/// #10357 fail closed: `init` with launch on, beside a running Architect no
+/// launch record binds, starts no poller and says why. The poller's pane
+/// reads `Unknown`, so pre-fix code fails the step without reaching tmux.
+#[test]
+fn an_unbound_init_never_starts_the_poller() {
+    const UNBOUND_HERE: Probe = Probe {
+        pane: |name| {
+            if name.ends_with("-poll") {
+                PaneState::Unknown("the test reaches no tmux".to_owned())
+            } else {
+                PaneState::Live(HERE.with(|h| h.borrow().clone()))
+            }
+        },
+        ..LIVE_HERE
+    };
+    let h = Home::new();
+    init(&h.dir(), h.home(), false, NO_TMUX).expect("first init");
+    let canonical = std::fs::canonicalize(h.dir()).expect("canonical dir");
+    HERE.with(|here| *here.borrow_mut() = canonical);
+
+    let report = init_with_session(&h.dir(), h.home(), true, UNBOUND_HERE, None).expect("init");
+    let text = report.render();
+    assert!(report.unbound && !report.failed(), "{text}");
+    assert!(
+        text.contains("the Architect is not bound, so tm-architect-poll was not started"),
+        "{text}"
+    );
+    assert!(report.registration.is_none(), "{text}");
+}
+
 /// Item 5: a rename refuses while only the recorded poller session exists.
 #[test]
 fn a_rename_is_refused_while_only_the_recorded_poller_runs() {
