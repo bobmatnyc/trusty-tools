@@ -60,9 +60,11 @@ mod tm_build_lease;
 mod tm_cli_socket;
 // #6288 client cutover: moved commands reach the socket only, failing closed.
 mod tm_client_socket_cutover_6288;
+// #10569: `tm register` never feeds its repo argument to `--url`.
 mod tm_compress_pipe;
 mod tm_doctor_network;
 mod tm_doctor_standalone;
+mod tm_register_url_id_10569;
 // #9822: `tm architect <verb>` against the Python goldens, fake tmux.
 mod tm_architect_verbs;
 // #8436: `tm fleet init|status` through the binary.
