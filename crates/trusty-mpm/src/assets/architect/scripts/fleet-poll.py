@@ -422,7 +422,8 @@ def cycle(state, dry_run=False, now=None):
         candidates += found
         if dry_run:
             print(f"  {s} {pid} cmd={p['cmd']} box={info['box']} agents={info['agents']} "
-                  f"busy={info['busy']} dialog={bool(info['dialog'])} ctx={info['ctx']} "
+                  f"busy={info['busy']} turn_active={info['turn_active']} "
+                  f"dialog={bool(info['dialog'])} ctx={info['ctx']} "
                   f"plan={info['plan5h']}/{info['planwk']} q={bool(info['question'])} "
                   f"alerts={[a['kind'] for a in found] or '-'}")
     for s, pid in state.get("sessions", {}).items():

@@ -4,12 +4,14 @@ Why: fleet-poll.py grew past the 500-SLOC production cap (#8891). Its pure half
 splits off cleanly: nothing here calls tmux, reads a file, or sends keys.
 What: parse_pane() turns one pane capture into a dict of facts (input box via
 scripts/input-state.py `classify`, dialog, question, ctx, plan, limit,
-errors). evaluate() and fleet_plan_alerts() turn those facts into alert
+errors, and `turn_active`: a running spinner or a current-turn WAITING line,
+never an agent row; turn-active.py reads it, #10579). evaluate() and fleet_plan_alerts() turn those facts into alert
 dicts; dedup() splits alerts into new and suppressed. context_bar() reads the
 one context bar (#9997): CONTEXT_BAR_TOKENS, default 250000, against
 CONTEXT_WINDOW_TOKENS, default 1000000, for panes that show only a percent. fleet-poll.py loads this
 file by path and re-exports these names, so its callers see no change.
-Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports)
+Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports),
+tests/test_fleet_poll_idle.py, tests/test_turn_active.py
 """
 import hashlib
 import importlib.util
@@ -129,6 +131,26 @@ def current_status(lines, top):
     return ""
 
 
+# A finished turn's summary line: "✻ Brewed for 42s · done 1:13 AM" (#10579).
+COMPLETED = re.compile(r"^[·✢✳✶✻✽*∗] .*\bfor \d+\s*[smh]\b|· done ")
+
+
+def current_waiting(lines, top):
+    """True when the newest "Waiting for N background agent" line is of the current turn.
+
+    Why: the capture carries scrollback, so stale WAITING lines made idle panes read busy.
+    What: a WAITING line counts only if no completed-turn line and no submitted
+    "❯ " turn (above the input box) follows it.
+    Test: test_stale_waiting_lines_are_not_busy, test_newest_waiting_line_is_busy
+    """
+    end = top if top is not None else len(lines)
+    w = max((i for i in range(end) if WAITING.search(lines[i])), default=None)
+    if w is None:
+        return False
+    return not any(COMPLETED.search(l) or l.lstrip().startswith("❯")
+                   for l in lines[w + 1:end])
+
+
 def last_question(lines, top):
     """The last line of the latest PM turn when it ends in '?', else None."""
     last, seen_status = None, False
@@ -238,7 +260,7 @@ def parse_pane(capture):
     dialog = find_dialog(lines, bottom)
     status = current_status(lines, top) if box else ""
     agents = sum(1 for l in footer if AGENT_ROW.match(l))
-    waiting = bool(WAITING.search(status))
+    waiting = bool(WAITING.search(status)) or current_waiting(lines, top)
     spinning = bool(status) and bool(ACTIVE.search(status))
     busy = agents > 0 or waiting or spinning
     ftext = "\n".join(footer)
@@ -251,6 +273,7 @@ def parse_pane(capture):
         "status": status,
         "agents": agents,
         "busy": busy,
+        "turn_active": spinning or waiting,  # #10579: agent rows never make a turn running
         "ctx": _pct(r"\bctx (\d+)%", ftext),
         "ctx_tokens": _footer_tokens(ftext),
         "plan5h": _pct(r"⏳\s*(\d+)%", ftext),

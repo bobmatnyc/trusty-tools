@@ -189,8 +189,12 @@ def test_busy_pane_is_neither_idle_nor_question(agents, status):
 
 
 def test_old_waiting_line_above_a_newer_turn_is_not_busy():
+    # #10579: a WAITING line counts until a finished-turn summary or a submitted ❯ turn follows it
+    # (prototype current_waiting); a newer turn ends with its "· done" summary.
     body = ["✻ Waiting for 1 background agent to finish"] + PM_TURN
-    assert not fp.parse_pane(screen(body))["busy"]
+    info = fp.parse_pane(screen(body, status="✻ Cooked for 23s · done 7:36 AM"))
+    assert not info["busy"] and not info["turn_active"]
+    assert fp.parse_pane(screen(body))["turn_active"]   # no summary yet: the wait is still current
 
 
 def test_question_is_last_pm_line_ending_in_question_mark():
