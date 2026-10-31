@@ -1,0 +1,12 @@
+crate   trusty-mpm
+version 1.10.0
+reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  auto_trait_impl_removed type ActionPublisher is no longer UnwindSafe
+accept  constructible_struct_adds_field field PruneWorktreesRequest.detach
+accept  constructible_struct_adds_field field ResumeBreakerConfig.boot_grace
+accept  enum_unit_variant_changed_kind variant ScanIncomplete::BudgetExhausted
+accept  enum_variant_added variant MemoryReachability:ProtocolMismatch
+accept  enum_variant_added variant ScanIncomplete:BudgetExhaustedAt
+accept  enum_variant_added variant ScanIncomplete:MountPoint
+accept  enum_variant_added variant ScanIncomplete:SymlinkEscapes
+accept  inherent_method_missing Supervisor::with_auto_resume_path
