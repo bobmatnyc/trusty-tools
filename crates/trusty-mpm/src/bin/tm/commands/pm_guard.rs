@@ -355,6 +355,8 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // always sends a JSON object on stdin, so a payload that did not read or
     // parse is a delivery fault, never "nothing to guard".
     let payload = read_stdin_payload_or_deny(url).await;
+    // #10641: the failure arms judge this payload against the recovery allowlist.
+    crate::commands::pm_guard_refusal::record_payload(&payload);
     // ADR-0048: hoisted so every rule below judges the same directory.
     let hook_cwd = payload
         .get("cwd")

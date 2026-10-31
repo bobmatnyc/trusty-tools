@@ -162,6 +162,13 @@ pub fn render_markdown() -> String {
          `TM_UPDATE_GUARD_POLICY_DOC=1 cargo test -p trusty-mpm --lib policy_doc_matches_table`.\n\n\
          Every `tm hook --pm-guard` and `tm hook --egress-guard` refusal ends with \
          `[policy <id> <rule>; source: <source>]`.\n\n\
+         When the guard fails (it panics, errors, or has not decided 8 s after it starts) it \
+         still refuses writes; read-only tools and exactly `tm doctor`, `tm install ...` and \
+         `cargo install trusty-mpm --version <v> --locked` run. When the `tm` binary is \
+         missing or cannot start, no guard code runs and Claude Code's `onFailure: \"block\"` \
+         refuses every tool: from a terminal outside the session, reinstall with \
+         `cargo install trusty-mpm --version <v> --locked`, or set `[pm_guard] enabled = false` \
+         in `~/.trusty-mpm/config.toml` and relaunch the session.\n\n\
          | Id | Rule | Binds | Absolute | Architect core limit | Source | Summary |\n\
          |---|---|---|---|---|---|---|\n",
     );

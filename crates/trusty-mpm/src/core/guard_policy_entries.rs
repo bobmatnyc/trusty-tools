@@ -60,7 +60,7 @@ pub static UNCLASSIFIABLE_PAYLOAD: GuardPolicy = policy(
 pub static GUARD_FAILURE: GuardPolicy = policy(
     "GP-003",
     "guard-failure",
-    "A guard run that panics or errors before deciding denies the call.",
+    "A guard run that panics or errors before deciding refuses the call, bar the recovery allowlist.",
     "#10600, #10641",
     ALL,
     true,
@@ -417,6 +417,19 @@ pub static PM_TOOL_POLICY: GuardPolicy = policy(
     None,
 );
 
+/// #10641: the in-process watchdog's refusal; the recovery allowlist
+/// (read-only tools, `tm doctor`, `tm install`, `cargo install trusty-mpm`)
+/// still runs.
+pub static GUARD_TIMEOUT: GuardPolicy = policy(
+    "GP-049",
+    "guard-timeout",
+    "A guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist.",
+    "#10600, #10641",
+    ALL,
+    true,
+    GUARD_STAYS_ON,
+);
+
 /// Every entry once, in id order.
 pub static POLICIES: &[&GuardPolicy] = &[
     &POLICY_LOOKUP_MISS,
@@ -468,4 +481,5 @@ pub static POLICIES: &[&GuardPolicy] = &[
     &EGRESS_POLICY_NOT_READY,
     &EGRESS_ARCHITECT_AUDIT_UNWRITABLE,
     &EGRESS_GUARD_PANIC,
+    &GUARD_TIMEOUT,
 ];
