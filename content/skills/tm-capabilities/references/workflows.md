@@ -166,7 +166,7 @@ in the section format the catch-up reader parses (`## Summary` /
   `refs/tm/sessions/<user-id>/<session-key>` and lease-pushed to `origin` —
   only when GitHub confirms `origin` is private. A public, non-GitHub or
   unconfirmed `origin` gets no push and a `ref_error` saying why
-  (#TBD-pause-ref); the pushed copy reads `~` for the home directory and a
+  (#10614); the pushed copy reads `~` for the home directory and a
   hashed `<user-id>`.
   `ref_name` names the ref, `ref_published` says whether the push landed, and
   `ref_error` carries the reason when it did not. A ref failure NEVER fails the

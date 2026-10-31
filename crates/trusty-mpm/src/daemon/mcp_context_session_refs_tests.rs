@@ -221,7 +221,7 @@ fn private(_: &Path, _: &[(String, String)]) -> RepoVisibility {
     RepoVisibility::Private
 }
 
-/// 🔴 See #TBD-pause-ref (fail closed): the PRODUCTION pause path, on an
+/// 🔴 See #10614 (fail closed): the PRODUCTION pause path, on an
 /// origin GitHub cannot vouch for, pushes no ref — even though the ambient
 /// credential could. The receipt says why; the local snapshot is untouched.
 /// Test: itself.
@@ -245,7 +245,7 @@ async fn an_unknown_visibility_skips_the_publish() {
     assert!(outcome.snapshot_path.exists(), "the local snapshot stays");
 }
 
-/// 🔴 See #TBD-pause-ref: a public origin receives no ref, whatever
+/// 🔴 See #10614: a public origin receives no ref, whatever
 /// credential could push it.
 /// Test: itself.
 #[tokio::test]
@@ -272,7 +272,7 @@ async fn a_public_origin_skips_the_publish() {
     );
 }
 
-/// 🔴 See #TBD-pause-ref: a private origin still gets the ref, but the
+/// 🔴 See #10614: a private origin still gets the ref, but the
 /// pushed blob carries `~` for the home directory and the ref's user segment
 /// is the hashed id, never the raw `git config user.name`.
 /// Test: itself.
@@ -322,5 +322,50 @@ async fn a_pinned_fetch_failure_names_the_identity() {
     assert!(
         error.contains("git ran as gh account 'octo-fixture', GH_CONFIG_DIR=/fixture/gh"),
         "{receipt:?}"
+    );
+}
+
+/// df-D4e (#10614): a ref written before the hash change, under the
+/// login-named segment, is still found by a resume when no hashed ref exists.
+/// Test: itself.
+#[tokio::test]
+async fn a_resume_reads_a_legacy_login_named_ref() {
+    use crate::core::session_ref_publish::{
+        SessionRefRequest, publish_session_ref_as, resolve_legacy_user_id, resolve_user_id,
+    };
+    let fx = Remote::new();
+    let outcome = pause(&fx);
+    let legacy = resolve_legacy_user_id(&fx.repo).expect("the fixture sets user.name");
+    assert_ne!(Some(legacy.clone()), resolve_user_id(&fx.repo));
+    let env = fx.pinned();
+    publish_session_ref_as(
+        &SessionRefRequest {
+            repo: &fx.repo,
+            session_id: "s-9160",
+            snapshot_path: &outcome.snapshot_path,
+            timestamp: outcome.timestamp,
+            git_env: env.vars(),
+        },
+        Some(&legacy),
+    )
+    .expect("the legacy-named fixture ref is written");
+    let legacy_ref = format!("refs/tm/sessions/{legacy}/s-9160");
+    assert!(
+        remote_session_refs(&fx).contains(&legacy_ref),
+        "{:?}",
+        remote_session_refs(&fx)
+    );
+    std::fs::remove_dir_all(fx.repo.join(".trusty-mpm/sessions")).expect("drop the cache");
+
+    let receipt = hydrate_session_refs_with(&fx.repo, Some("s-9160"), move |_| env).await;
+    assert!(receipt.hydrated, "{receipt:?}");
+    assert!(receipt.own_ref_found, "{receipt:?}");
+    assert_eq!(receipt.restored, 1, "{receipt:?}");
+    assert!(outcome.snapshot_path.exists(), "the snapshot was restored");
+    assert_eq!(
+        remote_session_refs(&fx).len(),
+        2,
+        "the read pushed nothing: {:?}",
+        remote_session_refs(&fx)
     );
 }

@@ -235,7 +235,7 @@ snapshot to this session's own append-only git ref,
 a resume from a fresh clone rebuilds its cache from.
 
 - **A public `origin`, a non-GitHub `origin`, or a visibility lookup that fails
-  gets no ref push** (fail closed, #TBD-pause-ref). The snapshot stays in the
+  gets no ref push** (fail closed, #10614). The snapshot stays in the
   local `.trusty-mpm/sessions/` cache only, and `ref_error` says which case
   applied. This is expected; never push the ref yourself, never run
   `git push origin refs/tm/sessions/...`, and never retry the pause to force it.

@@ -36,7 +36,9 @@ use crate::daemon::catchup_payload::HydrationReceipt;
 /// leaves the cache exactly as it found it, because a catch-up must never fail
 /// on an unreachable remote. It is never silent either: the failure is a
 /// `tracing::warn!` AND the returned receipt, which reaches the response's
-/// `session_refs` object.
+/// `session_refs` object. df-D4e (#10614): when the hashed ref is absent, the
+/// ref under the pre-hash login-named segment is read instead — a read, never
+/// a write or a push.
 ///
 /// Only the PRIMARY project is hydrated, not every project an `all_projects`
 /// peek walks: `resolved_snapshot` — the value a resume acts on — is resolved
@@ -45,7 +47,8 @@ use crate::daemon::catchup_payload::HydrationReceipt;
 /// Test: `catchup_hydrates_a_deleted_cache_from_the_session_ref`,
 /// `catchup_reports_a_hydration_failure_without_failing_the_catchup`,
 /// `a_pinned_env_reaches_the_catchup_fetch`,
-/// `an_unproven_pin_never_falls_back_to_the_ambient_credential`.
+/// `an_unproven_pin_never_falls_back_to_the_ambient_credential`,
+/// `a_resume_reads_a_legacy_login_named_ref`.
 pub(crate) async fn hydrate_session_refs(
     project_dir: &Path,
     session_id: Option<&str>,
@@ -69,20 +72,35 @@ pub(crate) async fn hydrate_session_refs_with(
             ..HydrationReceipt::default()
         };
     };
+    // df-D4e (#10614): the pre-hash, login-named ref — read only, as a fallback.
+    let legacy = crate::core::session_ref_publish::resolve_legacy_user_id(project_dir)
+        .filter(|legacy| *legacy != target.user_id)
+        .map(
+            |user_id| trusty_common::catchup::session_refs::SessionRefTarget {
+                user_id,
+                ..target.clone()
+            },
+        );
     let dir = project_dir.to_path_buf();
     let hydrated = tokio::task::spawn_blocking(move || {
+        use trusty_common::catchup::session_refs::hydrate_session_cache_with_env;
         // #9160: resolved on the blocking thread — proving a pin may run `gh`.
         let git_env = resolve(&dir);
         git_env.log(&dir, "fetch");
         if let Some(reason) = git_env.refusal() {
             return Err(reason.to_string());
         }
-        trusty_common::catchup::session_refs::hydrate_session_cache_with_env(
-            &dir,
-            &target,
-            git_env.vars(),
-        )
-        .map_err(|e| git_env.annotate(&e.to_string()))
+        let outcome = hydrate_session_cache_with_env(&dir, &target, git_env.vars())
+            .map_err(|e| git_env.annotate(&e.to_string()))?;
+        match legacy {
+            Some(legacy) if !outcome.own_ref_found => {
+                match hydrate_session_cache_with_env(&dir, &legacy, git_env.vars()) {
+                    Ok(found) if found.own_ref_found => Ok(found),
+                    _ => Ok(outcome),
+                }
+            }
+            _ => Ok(outcome),
+        }
     })
     .await;
     match hydrated {
@@ -161,7 +179,7 @@ fn session_ref_target(
 /// `enabled` its caller resolved from `[session_refs]`. #9160: the ls-remote,
 /// fetch and push run as the project's pinned gh identity; a pin that cannot
 /// be proven publishes nothing and makes no network call, and the receipt
-/// says why. See #TBD-pause-ref: an origin that GitHub does not confirm as
+/// says why. See #10614: an origin that GitHub does not confirm as
 /// private — public, non-GitHub, or a failed lookup — publishes nothing
 /// either, and the receipt says which. A join failure is itself a receipt,
 /// never a pause failure.
@@ -190,7 +208,7 @@ pub(crate) async fn publish_session_ref(
 }
 
 /// [`publish_session_ref`] with the identity and visibility resolvers given
-/// (#9160, #TBD-pause-ref).
+/// (#9160, #10614).
 pub(crate) async fn publish_session_ref_with(
     project_path: &Path,
     session_id: &str,
@@ -221,7 +239,7 @@ pub(crate) async fn publish_session_ref_with(
                 error: Some(reason.to_string()),
             };
         }
-        // See #TBD-pause-ref: fail closed — only a confirmed-private origin
+        // See #10614: fail closed — only a confirmed-private origin
         // receives the ref.
         if let Some(reason) = visibility(&repo, git_env.vars()).refusal() {
             tracing::info!(project = %repo.display(), "{reason}");

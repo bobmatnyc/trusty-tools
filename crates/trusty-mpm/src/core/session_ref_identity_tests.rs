@@ -530,7 +530,7 @@ fn resolve_user_id_still_reads_the_active_account() {
         .filter(|login| !login.contains('@'))
         .and_then(|login| sanitize_ref_component(&login))
         .unwrap_or_else(|| "q3-fixture".to_string());
-    // See #TBD-pause-ref: the ref key is the HASH of that writer name.
+    // See #10614: the ref key is the HASH of that writer name.
     use crate::core::session_ref_privacy::anonymous_user_id;
     assert_eq!(
         resolve_user_id(&fx.repo),

@@ -197,7 +197,7 @@ pub fn sanitize_ref_component(raw: &str) -> Option<String> {
 /// What: `gh`'s active github.com login from its own `hosts.yml` (a file read,
 /// no subprocess — this runs on every pause), else `git config user.name`, each
 /// through [`sanitize_ref_component`] and then hashed by
-/// [`crate::core::session_ref_privacy::anonymous_user_id`] (See #TBD-pause-ref:
+/// [`crate::core::session_ref_privacy::anonymous_user_id`] (See #10614:
 /// a `user.name` put a full personal name into the ref). `None` when neither
 /// resolves, which skips the publish with `ref_error` set and leaves the local
 /// snapshot alone.
@@ -206,6 +206,16 @@ pub fn sanitize_ref_component(raw: &str) -> Option<String> {
 /// `resolve_user_id_still_reads_the_active_account`.
 pub fn resolve_user_id(repo: &Path) -> Option<String> {
     resolve_writer_name(repo).map(|raw| crate::core::session_ref_privacy::anonymous_user_id(&raw))
+}
+
+/// The pre-#10614 `<user-id>`: the sanitized writer name, unhashed.
+///
+/// Why (df-D4e): refs written before the hash change are keyed by this name,
+/// and a resume must still find them. READ-ONLY — nothing writes or pushes
+/// under it; the publish path uses [`resolve_user_id`] alone.
+/// Test: `a_resume_reads_a_legacy_login_named_ref`.
+pub fn resolve_legacy_user_id(repo: &Path) -> Option<String> {
+    resolve_writer_name(repo)
 }
 
 /// The raw writer name [`resolve_user_id`] hashes.
@@ -515,7 +525,7 @@ pub fn publish_session_ref_as(
     req: &SessionRefRequest<'_>,
     user_id: Option<&str>,
 ) -> Result<SessionRefOutcome, RefPublishError> {
-    // See #TBD-pause-ref: the ref carries `~`, never this host's home path.
+    // See #10614: the ref carries `~`, never this host's home path.
     let snapshot = crate::core::session_ref_privacy::redact_home(
         &std::fs::read_to_string(req.snapshot_path)?,
         dirs::home_dir().as_deref(),
@@ -685,7 +695,7 @@ fn commit_message(req: &SessionRefRequest<'_>, rel: &str) -> String {
 /// naming the resolved writer is both sufficient and more accurate than an
 /// ambient identity.
 /// What: the user id as the name, an `.invalid` address built from it as the
-/// email (See #TBD-pause-ref: the id is a hash, not a GitHub login), and the
+/// email (See #10614: the id is a hash, not a GitHub login), and the
 /// PAUSE timestamp as both dates — so the chain orders by pause time rather
 /// than by whenever the push happened to succeed.
 fn commit_identity(user: &str, timestamp: DateTime<Utc>) -> Vec<(&'static str, String)> {
