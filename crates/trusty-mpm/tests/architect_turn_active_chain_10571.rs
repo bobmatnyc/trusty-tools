@@ -353,6 +353,9 @@ impl Chain {
             .base("bash")
             .arg(self.arch().join("scripts/self-clear.sh"))
             .arg("--live")
+            // #10599: self-clear.sh refuses without a live socket; this is the private server's.
+            .arg("--socket")
+            .arg(self.tmux_socket())
             .current_dir(self.arch())
             .env("PATH", path)
             .env("FAKE_TMUX_DIR", self.path("fake"))
@@ -557,10 +560,9 @@ fn the_clear_chain_runs_on_a_fresh_install() {
 }
 
 /// A parser with no `turn_active` (the bundle before #10579) exits 3, and the
-/// clear must not run. Ignored until #10599 PR-1: today's self-clear.sh reads
-/// any nonzero exit as idle.
+/// clear must not run: #10599 PR-1's self-clear.sh treats only turn-active
+/// exit 10 as idle.
 #[test]
-#[ignore = "#10599 PR-1: self-clear.sh treats only turn-active exit 10 as idle"]
 fn a_parser_without_turn_active_blocks_the_clear() {
     let chain = Chain::new();
     chain.fleet_init();

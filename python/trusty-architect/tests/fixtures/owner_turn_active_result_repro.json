@@ -1,0 +1,7 @@
+{
+  "base": "0000000000000000000000000000000000000000",
+  "probe": "synthetic Architect pane fixture -> bundled turn-active/fleet-poll",
+  "exit": 3,
+  "stdout": "",
+  "stderr": "turn-active: cannot tell (KeyError: 'turn_active'); treat as busy\n"
+}
