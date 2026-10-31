@@ -124,7 +124,7 @@ il_cron_alerts, ctx_watch_alerts = _alerts.il_cron_alerts, _alerts.ctx_watch_ale
 run_architect_relaunch, architect_busy = _watchdog.run_architect_relaunch, _watchdog.architect_busy
 architect_transcript_mtime, watchdog_alerts = _watchdog.architect_transcript_mtime, _watchdog.watchdog_alerts
 _norm, _box_full_text, _own_pointer = _wake._norm, _wake._box_full_text, _wake._own_pointer
-wake, dispatch_wake = _wake.wake, _wake.dispatch_wake
+wake, dispatch_wake, self_clear_running = _wake.wake, _wake.dispatch_wake, _wake.self_clear_running
 self_refresh_step = _selfrefresh.self_refresh_step
 
 

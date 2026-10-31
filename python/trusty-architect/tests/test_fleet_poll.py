@@ -34,6 +34,12 @@ def _no_context_bar_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_self_clear(monkeypatch):
+    """#10599: a self-clear.sh running on this host must not change what wake() does here."""
+    monkeypatch.setattr(fp, "self_clear_running", lambda arch_dir: False)
+
+
 def screen(body, box="", dim=False, agents=(), ctx=10, plan=(30, 40), status=None,
            ctx_field=None):
     """A pane capture: transcript, optional status line, input box, footer.
