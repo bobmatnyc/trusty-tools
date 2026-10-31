@@ -13,7 +13,11 @@
 # Test: run against a temp dir; CI runs it after the cache restore/pre-seed.
 set -euo pipefail
 
-CACHE_DIR="${FASTEMBED_CACHE_DIR:-${HOME}/.cache/fastembed}"
+if [ -z "${FASTEMBED_CACHE_DIR:-}" ]; then
+  echo "::error::FASTEMBED_CACHE_DIR is unset; refusing to guess a cache path"
+  exit 1
+fi
+CACHE_DIR="${FASTEMBED_CACHE_DIR}"
 TOKENIZER_FILES="tokenizer.json config.json special_tokens_map.json tokenizer_config.json"
 
 # check_model <hf-repo> <model-file>
