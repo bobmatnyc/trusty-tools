@@ -112,6 +112,8 @@ mod tm_hook_pm_guard_refusing_daemon_9526;
 mod tm_hook_pm_guard_secret_batch;
 // #9791: `file -f`/`-m` on a secret file under each bypass and for the Architect.
 mod tm_hook_pm_guard_secret_file_list_9791;
+// #10599: the fleet-init Architect's seeded scripts through the real hook.
+mod tm_hook_pm_guard_seed_scripts_10599;
 mod tm_hook_pm_guard_stdin_7975;
 mod tm_hook_pm_guard_tmux_target_9001;
 mod tm_hook_pm_guard_trust_anchor_8878;
