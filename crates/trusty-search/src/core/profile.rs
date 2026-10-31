@@ -27,14 +27,28 @@ pub const STD_V1: &str = "std-v1";
 /// `.trusty-search.yaml`, the registry override, or an explicit request).
 pub const CUSTOM: &str = "custom";
 
-/// The `std-v1` exclude globs, matched on the index-relative path.
+/// The `std-v1` exclude globs, matched on the ROOT-RELATIVE path.
 ///
-/// Why: derived from the Architect tree and checked by a `du` pass over the
-/// `rdash`, `apex`, `cto` and `trusty-tools` checkouts (#10532). Two entries
-/// from the #10529 design are scoped to `local/`: `**/usage/**` matched the
-/// source directories `crates/trusty-agents/src/usage` and
-/// `crates/trusty-architect/src/poller/steps/usage`, and
-/// `**/dashboard*/**/*.json` matched `schemas/dashboard/*.json`.
+/// Why: derived from the Architect tree and checked by a `du` and `find` pass
+/// over the `rdash`, `apex`, `cto` and `trusty-tools` checkouts (#10532). Each
+/// glob that can name source or docs elsewhere is either scoped to the
+/// Architect's `local/` tree or kept for a measured payoff:
+/// - `owner-queue`, `owner-queue-archive`, `.worktrees`, `*.db`, `*.sqlite*`,
+///   `*.lock`, `dashboard*.log`: kept; no source or doc path in the four
+///   checkouts carries these names (one `.db` test fixture, lockfiles).
+/// - `archive`, `_archive`: kept. cto holds 200 `archive` dirs, 16,190 files,
+///   309 MB; apex 258 dirs, 2,608 files. They collide with this repo's
+///   `docs/design/archive` (9 archived design docs) and
+///   `docs/trusty-agents/_archive` (5), and would drop a code module named
+///   `archive`; a PATCH with an explicit list overrides.
+/// - `logs`, `backups`, `checkpoints`, `actions.md`, `usage`, `dashboard*`
+///   JSON: scoped to `**/local/`. Their payoff is small (cto `logs` 124 files,
+///   15 MB; Architect `backups` 0.9 MB, `checkpoints` 4 KB) and they collide:
+///   `docs/research/.../01-research/logs` (10 research logs), `src/logs/`,
+///   `src/checkpoints/`, `docs/actions.md`, `crates/trusty-agents/src/usage`,
+///   `schemas/dashboard/*.json`. `local/usage` is 32 MB in the Architect.
+///   (`templates/local/actions.md` in this repo is still excluded.)
+///
 /// What: record directories, archives, worktrees, databases, lockfiles and
 /// logs. `briefs/**` is deliberately absent: briefs are documents.
 /// Test: `std_v1_excludes_the_architect_records_and_keeps_source`.
@@ -50,10 +64,10 @@ pub const STD_V1_GLOBS: &[&str] = &[
     "**/*.lock",
     "**/dashboard*.log",
     "**/local/dashboard*/**/*.json",
-    "**/checkpoints/**",
-    "**/backups/**",
-    "**/logs/**",
-    "**/actions.md",
+    "**/local/checkpoints/**",
+    "**/local/backups/**",
+    "**/local/logs/**",
+    "**/local/actions.md",
     "**/local/usage/**",
 ];
 
@@ -110,6 +124,17 @@ pub enum Source {
     Registry,
     /// The named profile.
     Profile,
+}
+
+impl Source {
+    /// The wire name `search.project.ensure` reports as `profile_source`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RepoConfig => "RepoConfig",
+            Self::Registry => "Registry",
+            Self::Profile => "Profile",
+        }
+    }
 }
 
 /// The exclude list an index runs with, and what to store about it.
@@ -229,6 +254,7 @@ mod tests {
             "local/archive/old.md",
             "local/actions.md",
             "local/usage/2026-10.jsonl",
+            "docs/design/archive/README.md",
             "local/dashboard-serve.log",
             "local/dashboard-apex/state/a.json",
             "local/logs/run.txt",
@@ -251,6 +277,11 @@ mod tests {
             "crates/trusty-architect/src/poller/steps/usage/a.rs",
             "schemas/dashboard/widget.json",
             "package.json",
+            "src/logs/mod.rs",
+            "src/checkpoints/store.rs",
+            "src/backups/mod.rs",
+            "docs/actions.md",
+            "docs/research/harness/01-research/logs/README.md",
         ] {
             assert!(
                 !path_matches_any_glob(Path::new(kept), &globs),

@@ -46,6 +46,19 @@ async fn reindex(state: &Arc<SearchAppState>, id: &str) {
     spawn_reindex_awaitable(handle, Arc::new(ReindexProgress::new()), false)
         .await
         .expect("reindex task");
+    // The deferred embed pass keeps the per-index permit after the walk; a
+    // PATCH that changes the excludes needs it (409 otherwise).
+    let index = IndexId::new(id);
+    for _ in 0..400 {
+        if crate::service::reindex::index_semaphore(&index)
+            .try_acquire_owned()
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the index permit was never released");
 }
 
 async fn chunks_of(state: &Arc<SearchAppState>, id: &str, rel: &str) -> usize {
@@ -282,4 +295,195 @@ fn a_pre_profile_index_loads_with_no_profile() {
         super::profile_apply::stored_label(Some(&path), "legacy"),
         None
     );
+}
+
+/// A fixture repo whose root sits under a directory called `parent`.
+fn tree_under(parent: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let (dir, base) = super::test_support::allowlisted_index_root("prof-up-10532-");
+    let root = base.join(parent).join("proj");
+    crate::allowlist::test_fixtures::approve(&root);
+    for (rel, body) in [
+        (SOURCE, "pub fn widget() -> u32 { 42 }\n"),
+        (DOC, "# Guide\nHow the widget works.\n"),
+        (RECORD, "{\"decision\": \"answered item\"}\n"),
+        (LOG, "log line about the answered item\n"),
+    ] {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+        std::fs::write(path, body).expect("write fixture");
+    }
+    (dir, root)
+}
+
+async fn indexes_source_but_not_records(parent: &str, id: &str) {
+    let state = mock_state().await;
+    let (_dir, root) = tree_under(parent);
+    create(&state, id, &root, None).await;
+    reindex(&state, id).await;
+    for kept in [SOURCE, DOC] {
+        assert!(
+            chunks_of(&state, id, kept).await > 0,
+            "{kept} under {parent}/"
+        );
+    }
+    for gone in [RECORD, LOG] {
+        assert_eq!(chunks_of(&state, id, gone).await, 0, "{gone}");
+    }
+}
+
+/// An index root below a directory named `archive` indexes normally: the
+/// globs match the root-relative path, not the directories above the root.
+/// Test: this test. With absolute-path matching `src/lib.rs` has no chunks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn an_index_root_under_an_archive_dir_still_indexes_its_source() {
+    let _data = IsolatedDataDir::new();
+    indexes_source_but_not_records("archive", "prof-up-archive").await;
+}
+
+/// Same for a root below `.worktrees`, where linked worktrees live.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn an_index_root_under_a_worktrees_dir_still_indexes_its_source() {
+    let _data = IsolatedDataDir::new();
+    indexes_source_but_not_records(".worktrees", "prof-up-wt").await;
+}
+
+/// A glob written as an absolute pattern still matches the absolute path.
+/// Test: this test.
+#[test]
+#[serial_test::parallel]
+fn an_absolute_glob_still_matches_and_a_root_ancestor_name_does_not() {
+    use crate::service::index_admission::globs_exclude;
+    let root = std::path::PathBuf::from("/data/archive/proj");
+    let file = root.join("src/lib.rs");
+    let std_v1 = profile::std_v1_globs();
+    assert!(!globs_exclude(&root, &[], &std_v1, &file));
+    assert!(globs_exclude(
+        &root,
+        &[],
+        &std_v1,
+        &root.join("archive/old.md")
+    ));
+    assert!(globs_exclude(
+        &root,
+        &[],
+        &["/data/archive/proj/src/**".to_string()],
+        &file
+    ));
+    assert!(!globs_exclude(
+        &root,
+        &[],
+        &["/elsewhere/**".to_string()],
+        &file
+    ));
+}
+
+/// A purge that failed is finished by repeating the same PATCH, even though
+/// the stored list no longer differs from the request.
+/// Test: this test. Holding the corpus scan gate makes the batch removal
+/// busy; before the fix the repeat PATCH saw old == new and skipped the purge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_failed_purge_is_finished_by_a_repeat_patch() {
+    let _data = IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = tree();
+    create(&state, "prof-retry", &root, Some(vec!["nothing/**".into()])).await;
+    reindex(&state, "prof-retry").await;
+    let handle = state
+        .registry
+        .get(&IndexId::new("prof-retry"))
+        .expect("handle");
+    let gate = handle.indexer.read().await.scan_gate_for_test();
+    let patch = || {
+        patch_index_config_report(
+            &state,
+            "prof-retry",
+            PatchIndexConfigRequest {
+                profile: Some("std-v1".into()),
+                ..Default::default()
+            },
+        )
+    };
+    {
+        let _held = gate.read().await;
+        let failed = patch()
+            .await
+            .expect("the config applies; the purge reports");
+        assert!(failed["profile_purge"]["error"].is_string(), "{failed}");
+        assert!(
+            chunks_of(&state, "prof-retry", RECORD).await > 0,
+            "nothing removed"
+        );
+    }
+    let retried = patch().await.expect("PATCH");
+    assert_eq!(retried["profile_purge"]["files_removed"], 3, "{retried}");
+    assert_eq!(chunks_of(&state, "prof-retry", RECORD).await, 0);
+}
+
+/// A PATCH that changes the excludes is refused with 409 while a reindex (or
+/// catch-up) holds the index, and changes nothing.
+/// Test: this test. Before the fix a profile-only PATCH took no permit and
+/// purged under a walk that still used the old globs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_profile_patch_is_refused_while_a_reindex_holds_the_index() {
+    let _data = IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = tree();
+    create(&state, "prof-409", &root, Some(vec!["nothing/**".into()])).await;
+    reindex(&state, "prof-409").await;
+    let permit = crate::service::reindex::index_semaphore(&IndexId::new("prof-409"))
+        .try_acquire_owned()
+        .expect("permit free");
+    let (status, body) = patch_index_config_report(
+        &state,
+        "prof-409",
+        PatchIndexConfigRequest {
+            profile: Some("std-v1".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("refused");
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+    assert!(
+        chunks_of(&state, "prof-409", RECORD).await > 0,
+        "nothing purged"
+    );
+    let handle = state
+        .registry
+        .get(&IndexId::new("prof-409"))
+        .expect("handle");
+    assert_eq!(handle.exclude_globs, vec!["nothing/**".to_string()]);
+    drop(permit);
+}
+
+/// After a PATCH, a reindex keeps the excluded files out.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_reindex_after_a_profile_patch_keeps_excluded_files_out() {
+    let _data = IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = tree();
+    create(&state, "prof-re", &root, Some(vec!["nothing/**".into()])).await;
+    reindex(&state, "prof-re").await;
+    patch_index_config_report(
+        &state,
+        "prof-re",
+        PatchIndexConfigRequest {
+            profile: Some("std-v1".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("PATCH");
+    reindex(&state, "prof-re").await;
+    for gone in [RECORD, ARCHIVE, LOG] {
+        assert_eq!(chunks_of(&state, "prof-re", gone).await, 0, "{gone}");
+    }
+    assert!(chunks_of(&state, "prof-re", SOURCE).await > 0);
 }

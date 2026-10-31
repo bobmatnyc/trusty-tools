@@ -286,7 +286,9 @@ pub(crate) async fn patch_index_config_report(
         components::should_rearm_vector_catch_up(&transition, req.vector, semantic_status);
     // The per-index permit is still the 409 guard for a re-arm: a reindex in
     // flight on this index answers 409 exactly as for a toggle.
-    let permit = if transition.needs_catch_up() || rearm {
+    // #10532: a changed exclude list takes the permit too, so a reindex walking
+    // with the old globs cannot re-add the files the purge below removes.
+    let permit = if transition.needs_catch_up() || rearm || stamp.is_some() {
         match crate::service::reindex::index_semaphore(&index_id).try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => {
@@ -413,18 +415,14 @@ pub(crate) async fn patch_index_config_report(
         stamp.as_ref(),
     );
 
-    // #10532: files the new globs exclude and the old ones did not leave the
-    // index now, through the batch removal; no reindex runs. Before the
+    // #10532: files the new globs exclude leave the index now, through the batch removal; no reindex runs. Before the
     // catch-up below, which takes over the teardown guard.
-    let purge = if view.exclude_globs != existing.exclude_globs {
+    // Whenever the request names the list, not only when it changed: the new
+    // globs are already stored, so a retry after a failed purge sees no change.
+    let purge = if stamp.is_some() {
         Some(
-            super::profile_apply::purge_newly_excluded(
-                &registered,
-                &index_id,
-                &existing.exclude_globs,
-                &view.exclude_globs,
-            )
-            .await,
+            super::profile_apply::purge_newly_excluded(&registered, &index_id, &view.exclude_globs)
+                .await,
         )
     } else {
         None

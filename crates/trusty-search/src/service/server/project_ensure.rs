@@ -257,7 +257,7 @@ pub(crate) async fn ensure_project_report(
     body["profile_applied"] = (created && label.is_some()).into();
     body["profile"] = label.into();
     if let Some((source, repo_config_error)) = profile_note {
-        body["profile_source"] = format!("{source:?}").into();
+        body["profile_source"] = source.as_str().into();
         if let Some(e) = repo_config_error {
             body["repo_config_error"] = e.into();
         }

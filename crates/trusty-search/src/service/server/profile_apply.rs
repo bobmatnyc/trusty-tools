@@ -17,7 +17,6 @@ use axum::http::StatusCode;
 use crate::core::path_selection::PathSelection;
 use crate::core::profile::{self, ResolvedProfile};
 use crate::core::registry::{IndexHandle, IndexId};
-use crate::core::repo_config::path_matches_any_glob;
 
 type Refusal = (StatusCode, serde_json::Value);
 
@@ -97,12 +96,12 @@ pub(crate) fn purge_body(result: &Result<(usize, usize), String>) -> serde_json:
     }
 }
 
-/// Remove the indexed files `new_globs` exclude and `old_globs` did not.
+/// Remove the indexed files `new_globs` exclude.
 ///
 /// Why: a profile change must take effect on what the index already holds,
 /// and a full rebuild of a large corpus to drop a record directory is the
 /// cost #10110 removed.
-/// What: lists the index's files (`indexed_file_set`), selects the newly excluded ones, and runs
+/// What: lists the index's files (`indexed_file_set`), selects every file `new_globs` exclude (idempotent, so a repeat PATCH finishes a purge that failed part-way), and runs
 /// the batch removal, the commit stamp and the hash forget of
 /// `search.index.files.remove`. The caller holds the index's teardown guard.
 /// Nothing selected touches nothing. Returns `(files, chunks)` removed.
@@ -110,7 +109,6 @@ pub(crate) fn purge_body(result: &Result<(usize, usize), String>) -> serde_json:
 pub(crate) async fn purge_newly_excluded(
     handle: &IndexHandle,
     index_id: &IndexId,
-    old_globs: &[String],
     new_globs: &[String],
 ) -> Result<(usize, usize), String> {
     let indexer = handle.indexer.read().await;
@@ -118,11 +116,14 @@ pub(crate) async fn purge_newly_excluded(
         .indexed_file_set()
         .await
         .map_err(|e| format!("could not list indexed files: {e:#}"))?;
+    // Stored keys are root-relative (`@root<n>/…` for an additional root; a
+    // pre-#9510 key may be absolute). Match like the walker: relative to the root.
+    let (primary, additional) = (&handle.root_path, &handle.additional_roots);
     let newly: BTreeSet<String> = files
         .into_iter()
         .filter(|f| {
-            let p = std::path::Path::new(f);
-            path_matches_any_glob(p, new_globs) && !path_matches_any_glob(p, old_globs)
+            let abs = crate::core::index_roots::resolve_absolute(primary, additional, f);
+            crate::service::index_admission::globs_exclude(primary, additional, new_globs, &abs)
         })
         .collect();
     if newly.is_empty() {

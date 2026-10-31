@@ -104,6 +104,15 @@ impl CodeIndexer {
         self.corpus_scan_gate.read().await
     }
 
+    /// The scan gate itself, so a test can hold it and force a batch removal `Busy`.
+    ///
+    /// Test: `a_failed_purge_is_finished_by_a_repeat_patch` in
+    /// `service::server::profile_10532_tests`.
+    #[cfg(test)]
+    pub(crate) fn scan_gate_for_test(&self) -> std::sync::Arc<tokio::sync::RwLock<()>> {
+        std::sync::Arc::clone(&self.corpus_scan_gate)
+    }
+
     /// Chunk ids the corpus holds for `file_path`.
     ///
     /// Why: the corpus is the authority on which of a file's chunks exist.
