@@ -167,13 +167,16 @@ async fn umask_000_child_scenario() {
 /// Prefixes of the random-named temp directories the code under test makes.
 const RANDOM_NAME_PREFIXES: [&str; 2] = ["trusty-kuzu-import-", "trusty-kuzu-dry-run-"];
 
+/// Random characters `tempfile` 3.27 appends to a prefix (`NUM_RAND_CHARS`).
+const TEMPFILE_RANDOM_LEN: usize = 6;
+
 /// `seen` with the uncontrolled random characters of temp-dir names removed.
 ///
 /// Why (#10549): a 4-char window of a token matched the random suffix of a
 /// temp-dir name (`Pe2R`) in a path the run printed. That is chance, not a
 /// leak, and a strict window scan cannot tell them apart.
-/// What: replaces each `roots` path with `<root>`, then drops the alphanumeric
-/// run after each [`RANDOM_NAME_PREFIXES`] entry. Everything else the run
+/// What: replaces each `roots` path with `<root>`, then drops the 6 random
+/// characters after each [`RANDOM_NAME_PREFIXES`] entry. Everything else the run
 /// produced stays in the scan, so a real leak is still caught.
 /// Test: `scrub_removes_random_names_but_keeps_real_content`.
 fn scrub_random_names(seen: &str, roots: &[&Path]) -> String {
@@ -190,7 +193,12 @@ fn scrub_random_names(seen: &str, roots: &[&Path]) -> String {
         while let Some(at) = rest.find(prefix) {
             let end = at + prefix.len();
             kept.push_str(&rest[..end]);
-            rest = rest[end..].trim_start_matches(|c: char| c.is_ascii_alphanumeric());
+            let skip = rest[end..]
+                .chars()
+                .take(TEMPFILE_RANDOM_LEN)
+                .take_while(char::is_ascii_alphanumeric)
+                .count();
+            rest = &rest[end + skip..];
         }
         kept.push_str(rest);
         out = kept;
@@ -215,6 +223,19 @@ fn scrub_removes_random_names_but_keeps_real_content() {
     }
     let real = scrub_random_names(&format!("{seen} leak {}", mixed_token()), &[tmp]);
     assert!(!leaked_windows(&mixed_token(), &real).is_empty());
+    // The scrub's blind spots: a token in a path under the root, and a token
+    // written right after the 6-char random suffix, must survive it.
+    let tok = mixed_token();
+    let under_root = scrub_random_names(&format!("{}/{tok}.json", tmp.display()), &[tmp]);
+    assert!(
+        !leaked_windows(&tok, &under_root).is_empty(),
+        "{under_root}"
+    );
+    let after_prefix = scrub_random_names(&format!("trusty-kuzu-import-Ab3dEf{tok}"), &[tmp]);
+    assert!(
+        !leaked_windows(&tok, &after_prefix).is_empty(),
+        "{after_prefix}"
+    );
 }
 
 /// Why (#8624 rules 1, 3, 5, 6, 9): under umask 000 the run directory comes
