@@ -11,7 +11,7 @@
 use std::sync::atomic::Ordering;
 
 use super::*;
-use crate::service::embed_missing_test_support::{failed_mid_stage, wait_for_stage};
+use crate::service::embed_missing_support_tests::{failed_mid_stage, wait_for_stage};
 
 /// Test: this test.
 #[test]
@@ -145,7 +145,7 @@ async fn a_deleted_index_is_forgotten_and_a_recreated_id_starts_fresh() {
 #[tokio::test]
 #[serial_test::serial]
 async fn nothing_to_embed_on_a_failed_stage_is_terminal() {
-    use crate::service::embed_missing_test_support::unembedded_handle;
+    use crate::service::embed_missing_support_tests::unembedded_handle;
     let embedder = Arc::new(crate::core::embed::MockEmbedder::new(8));
     let (handle, _store, _dir) = unembedded_handle("embed-retry-empty", 0, embedder).await;
     handle.stages.write().await.semantic.status = StageStatus::Failed;

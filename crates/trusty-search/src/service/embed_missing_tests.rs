@@ -4,11 +4,11 @@
 //! embedded, the stage leaves `Failed`, a repeat run is a no-op, and a dead
 //! embedder never touches the stage.
 //! What: every case starts from an index whose embedder died mid-stage
-//! (`embed_missing_test_support::failed_mid_stage`), the failure the issue saw.
+//! (`embed_missing_support_tests::failed_mid_stage`), the failure the issue saw.
 //! Test: this file.
 
 use super::*;
-use crate::service::embed_missing_test_support::{failed_mid_stage, wait_for_stage};
+use crate::service::embed_missing_support_tests::{failed_mid_stage, wait_for_stage};
 
 /// The #10551 failure path: kill the embedder mid-stage, then resume to zero
 /// missing, embedding only the tail.
@@ -119,7 +119,7 @@ async fn a_failed_stage_with_every_vector_present_is_settled_ready() {
         store
             .upsert(
                 &format!("m{i}.rs:1:1"),
-                vec![0.5; crate::service::embed_missing_test_support::DIM],
+                vec![0.5; crate::service::embed_missing_support_tests::DIM],
             )
             .await
             .expect("seed vector");
@@ -193,7 +193,7 @@ impl crate::core::embed::Embedder for SkipDuringProbe {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_skipped_stage_set_during_the_window_is_not_overwritten() {
-    use crate::service::embed_missing_test_support::unembedded_handle;
+    use crate::service::embed_missing_support_tests::unembedded_handle;
     let hook = Arc::new(SkipDuringProbe {
         inner: crate::core::embed::MockEmbedder::new(8),
         stages: std::sync::Mutex::new(None),
@@ -218,7 +218,7 @@ async fn a_skipped_stage_set_during_the_window_is_not_overwritten() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_second_call_while_in_progress_reports_already_running() {
-    use crate::service::embed_missing_test_support::unembedded_handle;
+    use crate::service::embed_missing_support_tests::unembedded_handle;
     let embedder = Arc::new(crate::core::embed::MockEmbedder::new(8));
     let (handle, store, _dir) = unembedded_handle("embed-missing-running", 5, embedder).await;
     handle.stages.write().await.semantic.status = StageStatus::InProgress;
@@ -234,7 +234,7 @@ async fn a_second_call_while_in_progress_reports_already_running() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_held_index_is_refused_as_busy() {
-    use crate::service::embed_missing_test_support::unembedded_handle;
+    use crate::service::embed_missing_support_tests::unembedded_handle;
     let embedder = Arc::new(crate::core::embed::MockEmbedder::new(8));
     let (handle, store, _dir) = unembedded_handle("embed-missing-busy", 5, embedder).await;
     handle.stages.write().await.semantic.status = StageStatus::Failed;
@@ -252,7 +252,7 @@ async fn a_held_index_is_refused_as_busy() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_skipped_stage_is_not_applicable() {
-    use crate::service::embed_missing_test_support::unembedded_handle;
+    use crate::service::embed_missing_support_tests::unembedded_handle;
     let embedder = Arc::new(crate::core::embed::MockEmbedder::new(8));
     let (handle, _store, _dir) = unembedded_handle("embed-missing-skipped", 5, embedder).await;
     handle.stages.write().await.semantic.status = StageStatus::Skipped;
