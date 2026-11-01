@@ -229,7 +229,8 @@ fn widening_key(value: Option<&Value>, key: &str, file: &Path) -> Option<Sandbox
 /// What: the allowlist is [`project_policy`]'s own `sandbox` object, so it
 /// cannot drift from what [`super::sandbox_settings::write_sandbox_settings`]
 /// emits. A key tm writes as an object must be an object here too. Values are
-/// not compared.
+/// not compared. Deliberately stricter than [`user_tier_keys`]: an unwritten
+/// key refuses even with an empty value of its type.
 /// Test: `unwritten_project_sandbox_keys_refuse_the_launch`,
 /// `an_unwritten_project_key_is_kept_by_the_merge_and_named_by_verify`.
 fn unwritten_key(found: Option<&Value>, wanted: Option<&Value>, at: &str) -> Option<String> {
@@ -376,7 +377,8 @@ fn edit_allow_rules(
 /// it widens `allowWrite` the same way an `Edit(...)` allow rule does.
 /// What: each entry is placed as a directory path — `~` or `~/p` under the
 /// home, an absolute path as spelled, any other relative to each of
-/// `place.bases` — and its literal prefix, after [`resolve_existing`], must sit
+/// `place.bases` — and its full literal path ([`literal_dir`]; an entry is a
+/// directory, not a glob), after [`resolve_existing`], must sit
 /// inside one of `roots`, the roots [`edit_allow_rules`] uses. Fail-closed: a
 /// non-list value, a non-text entry, a `..` segment, a `~user` path, a home
 /// that is not absolute and an unresolvable symlink all refuse.
@@ -417,10 +419,25 @@ fn additional_directories(
         } else {
             Some(place.bases.iter().map(|base| base.join(text)).collect())
         };
-        let prefixes = full.and_then(|f| f.iter().map(|p| literal_prefix(p)).collect());
-        grants.push((format!("lists the additional directory `{text}`"), prefixes));
+        // #10102 fix round: the whole literal path, never truncated at a glob.
+        let paths = full.and_then(|f| f.iter().map(|p| literal_dir(p)).collect());
+        grants.push((format!("lists the additional directory `{text}`"), paths));
     }
     contained(file, roots, grants)
+}
+
+/// `path` with `.` segments dropped; `None` on a `..` segment or when it is
+/// not absolute. Unlike [`literal_prefix`], `*?[{` are plain characters.
+fn literal_dir(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => return None,
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out.is_absolute().then_some(out)
 }
 
 /// Refuse a write grant whose path is not inside `roots` after symlinks.

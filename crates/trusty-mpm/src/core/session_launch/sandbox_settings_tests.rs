@@ -424,6 +424,20 @@ fn link_loop(fx: &Fx) {
     std::os::unix::fs::symlink(fx.tools(), fx.tools()).expect("link loop");
 }
 
+/// `<ws>/<name>` linked to a directory outside the workspace.
+fn link_named_outside(fx: &Fx, name: &str) {
+    std::fs::create_dir_all(fx.outside()).expect("mkdir outside");
+    std::os::unix::fs::symlink(fx.outside(), fx.inputs.workspace.join(name)).expect("link outside");
+}
+
+fn link_star_outside(fx: &Fx) {
+    link_named_outside(fx, "tools*");
+}
+
+fn link_brace_outside(fx: &Fx) {
+    link_named_outside(fx, "t{1}");
+}
+
 fn link_inside(fx: &Fx) {
     let real = fx.inputs.workspace.join("real");
     std::fs::create_dir_all(&real).expect("mkdir real");
@@ -960,6 +974,16 @@ fn additional_directories_outside_the_roots_refuse_the_launch() {
         Case {
             setup: Some(link_dangling),
             ..case("tools -> a missing path", Project, dirs, json!(["tools"]))
+        },
+        // #10102 fix round: an entry is a literal directory, never a glob, so
+        // a glob character must not truncate it to a passing prefix.
+        Case {
+            setup: Some(link_star_outside),
+            ..case("tools* -> a dir outside", Project, dirs, json!(["tools*"]))
+        },
+        Case {
+            setup: Some(link_brace_outside),
+            ..case("t{1} -> a dir outside", Project, dirs, json!(["t{1}"]))
         },
     ];
     let wrong = misses(cases, true, None);
