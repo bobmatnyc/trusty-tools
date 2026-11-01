@@ -66,10 +66,11 @@ import dashboard_store as ds  # noqa: E402
 COLLECTIONS = ("items", "sessions", "effort_tunes", "il_steers", "goals")
 
 
-def pending(root=None, now=None):
+def pending(root=None, now=None, colls=COLLECTIONS):
+    """colls limits which collections are read: a caller that wants only item answers (#10670) is not stopped by a bad document elsewhere."""
     now = now or datetime.now(timezone.utc)
     store = ds.Store(root or ds.DEFAULT_ROOT)
-    return derive.pending(derive.snapshot(store, COLLECTIONS), now)
+    return derive.pending(derive.snapshot(store, colls), now)
 
 
 def resolve_id(root, ref):

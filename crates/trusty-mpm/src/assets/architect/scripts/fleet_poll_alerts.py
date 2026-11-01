@@ -2,12 +2,19 @@
 
 Why: fleet-poll.py sat at the 500-SLOC cap; its alert steps move here unchanged, and later steps land here.
 What: resolve_context_bar (the context bar, each warning logged once per process), self_ctx_alerts (the
-Architect's own context against that bar), il_cron_alerts (il-cron.py's due cadence jobs) and
-ctx_watch_alerts (ctx-watch.py's clear candidates). Names from the poller are read through `P`, the late-bound view
+Architect's own context against that bar), il_cron_alerts (il-cron.py's due cadence jobs),
+ctx_watch_alerts (ctx-watch.py's clear candidates) and owner_answer_alerts (dashboard answers not yet relayed, #10670).
+Names from the poller are read through `P`, the late-bound view
 fleet-poll.py passes to bind(), so rebinding a fleet-poll name still steers these, as before the split.
-Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports), tests/test_fleet_poll_watchdog_wiring.py
+Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports), tests/test_fleet_poll_watchdog_wiring.py,
+tests/test_fleet_poll_owner_answers.py
 """
+import os
+
 P = None  # fleet-poll.py's late-bound view; set by bind()
+# #10670: the pending kinds that are an owner's answer to a dashboard item.
+ANSWER_KINDS = ("answered", "cancelled", "architect_do")
+ANSWER_KEY = "||owner_answer|"  # dedup's key prefix for these alerts
 
 
 def bind(poller):
@@ -69,3 +76,44 @@ def ctx_watch_alerts(now, dry_run=False, step=None):
     except Exception as e:
         P.log(f"ctx-watch ERROR {type(e).__name__}: {e}", dry_run)
     return out
+
+
+def owner_answer_alerts(now, dry_run=False, root=None, ever_read=True):
+    """(alerts, failure): one `owner_answer` alert per answer still pending; alerts is None
+    when the items collection could not be read, and failure then names why (or is None when
+    the store simply is not there yet).
+
+    Why: #10670: without this read an answered item woke nobody on a fresh install.
+    What: reads only `items`, where answers live, so a bad document in goals or sessions
+    cannot stop delivery. fingerprint = item id + answered_at, so a re-answer alerts again.
+    A missing store reads as empty to Store, so it is refused here: a failed read must differ
+    from "nothing pending", which dedup would take as consumed. A store never read before
+    (`ever_read` false) and with no items collection is not an install yet: logged only.
+    Root: `root`, else DASHBOARD_ROOT, else the default; DASHBOARD_FORMAT picks the format.
+    Test: test_a_new_answer_alerts_and_wakes_on_the_next_idle_cycle,
+    test_a_bad_read_after_an_alert_neither_consumes_nor_resets_the_clock,
+    test_a_corrupt_document_outside_items_does_not_stop_answers,
+    test_a_failed_read_alerts_once_per_episode_and_wakes
+    """
+    root = root or os.environ.get("DASHBOARD_ROOT") or P.owner_answers.ds.DEFAULT_ROOT
+    try:
+        if not (os.path.isdir(os.path.join(root, "items"))
+                or os.path.exists(os.path.join(root, "items.jsonl"))):
+            raise FileNotFoundError(f"no items collection under {root}")
+        items = P.owner_answers.pending(root, colls=("items",))
+    except Exception as e:
+        P.log(f"owner answers ERROR {type(e).__name__}: {e}; retrying next cycle", dry_run)
+        quiet = isinstance(e, FileNotFoundError) and not ever_read
+        return None, (None if quiet else type(e).__name__)
+    out = []
+    for it in items:
+        if it["kind"] not in ANSWER_KINDS:
+            continue
+        verb = "cancelled" if it["kind"] == "cancelled" else "answered"
+        hhmm = it["at"][11:16] + "Z" if len(it["at"]) >= 16 else "?"
+        a = P.alert("owner_answer", f"{it['id']}@{it['at']}", f"{it['id']} {verb} {hhmm}", now=now)
+        text = P.clean(it["text"])
+        text = text[:77] + "..." if len(text) > 80 else text
+        a["display"] = f"[owner] {a['detail']}" + (f": {text}" if text else "")
+        out.append(a)
+    return out, None
