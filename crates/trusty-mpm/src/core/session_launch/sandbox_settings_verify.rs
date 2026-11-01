@@ -47,7 +47,10 @@ const GLOB_CHARS: [char; 4] = ['*', '?', '[', '{'];
 /// non-empty `allowRead`; when the user tier sets a `sandbox` key other than
 /// `network.strictAllowlist` and `credentials`; and when any tier's
 /// `permissions.allow` holds an edit-tool rule outside the workspace and the
-/// role's `allowWrite` roots. For the Architect, refuses unless the project
+/// role's `allowWrite` roots. #10102: refuses too when the project `sandbox`
+/// block holds a key [`project_policy`] does not write, when any tier's
+/// `permissions.additionalDirectories` names a path outside those roots, and
+/// when a widening key or `excludedCommands` is `null`. For the Architect, refuses unless the project
 /// file's `sandbox.enabled` is `false`. FAIL-CLOSED: a missing project or user
 /// file, any of the three that cannot be read or is not a JSON object, an
 /// allow list or rule that is not text, and a rule path that cannot be placed
@@ -64,7 +67,10 @@ const GLOB_CHARS: [char; 4] = ['*', '?', '[', '{'];
 /// `widening_sandbox_keys_refuse_the_launch`,
 /// `apple_events_and_outside_edit_rules_refuse_the_launch`,
 /// `inside_edit_rules_still_verify`,
-/// `an_edit_rule_with_no_home_to_place_it_refuses`.
+/// `an_edit_rule_with_no_home_to_place_it_refuses`,
+/// `unwritten_project_sandbox_keys_refuse_the_launch`,
+/// `additional_directories_outside_the_roots_refuse_the_launch`,
+/// `null_sandbox_values_refuse_the_launch`.
 pub fn verify_sandbox_settings(
     role: SandboxRole,
     inputs: &SandboxInputs,
@@ -142,7 +148,19 @@ pub fn verify_sandbox_settings(
             home: &inputs.home,
         };
         edit_allow_rules(settings, file, &place, &roots)?;
+        // #10102: an additional directory is writable, like an `Edit` rule.
+        additional_directories(settings, file, &place, &roots)?;
     }
+    // #10102: the project `sandbox` block holds only keys tm writes.
+    unwritten_key(project.get("sandbox"), policy.get("sandbox"), "sandbox").map_or(
+        Ok(()),
+        |key| {
+            Err(refused(&format!(
+                "`{}` sets `{key}`, a sandbox key tm does not write; remove it",
+                project_file.display()
+            )))
+        },
+    )?;
     user_tier_keys(&user, &user_file)?;
     if user.pointer("/sandbox/network/strictAllowlist") != Some(&Value::Bool(true)) {
         return Err(refused(
@@ -152,10 +170,12 @@ pub fn verify_sandbox_settings(
     Ok(())
 }
 
-/// The refusal when `settings` sets a non-empty `sandbox.excludedCommands`.
+/// The refusal when `settings` sets `sandbox.excludedCommands` to anything but
+/// an empty list.
 fn excluded_commands(settings: &Value, file: &Path) -> Option<SandboxSettingsError> {
     let list = settings.pointer("/sandbox/excludedCommands")?;
-    if list.is_null() || list.as_array().is_some_and(Vec::is_empty) {
+    // #10102: `null` refuses — Claude Code may skip a file its schema rejects.
+    if list.as_array().is_some_and(Vec::is_empty) {
         return None;
     }
     Some(refused(&format!(
@@ -169,19 +189,21 @@ fn excluded_commands(settings: &Value, file: &Path) -> Option<SandboxSettingsErr
 ///
 /// Why: #10107 — these keys open the sandbox, and the merge keeps them.
 /// What: a [`WIDENING_FLAGS`] key, or `disabled` under `filesystem`, set to
-/// anything but `false` or `null` refuses; so does an `allowRead` that is not
-/// `null` or an empty list, because it overrides `denyRead`. Fail-closed: a
-/// non-boolean flag and a non-list `allowRead` refuse.
+/// anything but `false` refuses; so does an `allowRead` that is not an empty
+/// list, because it overrides `denyRead`. Fail-closed: a non-boolean flag, a
+/// non-list `allowRead`, and `null` for either refuse (#10102).
 /// Test: `widening_sandbox_keys_refuse_the_launch`,
-/// `apple_events_and_outside_edit_rules_refuse_the_launch`.
+/// `apple_events_and_outside_edit_rules_refuse_the_launch`,
+/// `null_sandbox_values_refuse_the_launch`.
 fn widening_key(value: Option<&Value>, key: &str, file: &Path) -> Option<SandboxSettingsError> {
     let map = value?.as_object()?;
     for (k, v) in map {
         let flag = WIDENING_FLAGS.contains(&k.as_str()) || (key == "filesystem" && k == "disabled");
+        // #10102: `null` is not `false`, and Claude Code may skip the file.
         let widens = if flag {
-            !(v.is_null() || *v == Value::Bool(false))
+            *v != Value::Bool(false)
         } else if k == "allowRead" {
-            !(v.is_null() || v.as_array().is_some_and(Vec::is_empty))
+            !v.as_array().is_some_and(Vec::is_empty)
         } else {
             false
         };
@@ -193,6 +215,38 @@ fn widening_key(value: Option<&Value>, key: &str, file: &Path) -> Option<Sandbox
         }
         if let Some(why) = widening_key(Some(v), k, file) {
             return Some(why);
+        }
+    }
+    None
+}
+
+/// The dotted path of the first key under `found` that `wanted` — tm's own
+/// policy — does not hold, at any depth.
+///
+/// Why: #10102 — the merge keeps operator keys verify never reads, such as
+/// `allowMachLookup`, `enableWeakerNestedSandbox` or a `network.httpProxyPort`
+/// that routes traffic through an operator-chosen proxy.
+/// What: the allowlist is [`project_policy`]'s own `sandbox` object, so it
+/// cannot drift from what [`super::sandbox_settings::write_sandbox_settings`]
+/// emits. A key tm writes as an object must be an object here too. Values are
+/// not compared. Deliberately stricter than [`user_tier_keys`]: an unwritten
+/// key refuses even with an empty value of its type.
+/// Test: `unwritten_project_sandbox_keys_refuse_the_launch`,
+/// `an_unwritten_project_key_is_kept_by_the_merge_and_named_by_verify`.
+fn unwritten_key(found: Option<&Value>, wanted: Option<&Value>, at: &str) -> Option<String> {
+    for (k, v) in found?.as_object()? {
+        let path = format!("{at}.{k}");
+        match wanted.and_then(|w| w.get(k)) {
+            None => return Some(path),
+            Some(w) if w.is_object() => {
+                if !v.is_object() {
+                    return Some(path);
+                }
+                if let Some(key) = unwritten_key(Some(v), Some(w), &path) {
+                    return Some(key);
+                }
+            }
+            Some(_) => {}
         }
     }
     None
@@ -310,13 +364,99 @@ fn edit_allow_rules(
                 "holds the allow rule {rule}, which is not text"
             )));
         };
-        edits.extend(edit_spec(text).map(|spec| (text, spec)));
+        if let Some(spec) = edit_spec(text) {
+            edits.push((format!("allows `{text}`"), rule_prefixes(spec, place)));
+        }
     }
-    if edits.is_empty() {
+    contained(file, roots, edits)
+}
+
+/// Refuse a `permissions.additionalDirectories` entry outside `roots`.
+///
+/// Why: #10102 — an additional directory grants the session write access, so
+/// it widens `allowWrite` the same way an `Edit(...)` allow rule does.
+/// What: each entry is placed as a directory path — `~` or `~/p` under the
+/// home, an absolute path as spelled, any other relative to each of
+/// `place.bases` — and its full literal path ([`literal_dir`]; an entry is a
+/// directory, not a glob), after [`resolve_existing`], must sit
+/// inside one of `roots`, the roots [`edit_allow_rules`] uses. Fail-closed: a
+/// non-list value, a non-text entry, a `..` segment, a `~user` path, a home
+/// that is not absolute and an unresolvable symlink all refuse.
+/// Test: `additional_directories_outside_the_roots_refuse_the_launch`,
+/// `additional_directories_inside_the_roots_still_verify`.
+fn additional_directories(
+    settings: &Value,
+    file: &Path,
+    place: &Place<'_>,
+    roots: &[PathBuf],
+) -> Result<(), SandboxSettingsError> {
+    let Some(dirs) = settings.pointer("/permissions/additionalDirectories") else {
+        return Ok(());
+    };
+    let Some(dirs) = dirs.as_array() else {
+        return Err(refused(&format!(
+            "`{}` sets `permissions.additionalDirectories` to {dirs}, not a list",
+            file.display()
+        )));
+    };
+    let mut grants = Vec::new();
+    for dir in dirs {
+        let Some(text) = dir.as_str() else {
+            return Err(refused(&format!(
+                "`{}` lists the additional directory {dir}, which is not text",
+                file.display()
+            )));
+        };
+        let full: Option<Vec<PathBuf>> = if text == "~" || text.starts_with("~/") {
+            place
+                .home
+                .is_absolute()
+                .then(|| vec![place.home.join(text[1..].trim_start_matches('/'))])
+        } else if text.starts_with('~') {
+            None
+        } else if Path::new(text).is_absolute() {
+            Some(vec![PathBuf::from(text)])
+        } else {
+            Some(place.bases.iter().map(|base| base.join(text)).collect())
+        };
+        // #10102 fix round: the whole literal path, never truncated at a glob.
+        let paths = full.and_then(|f| f.iter().map(|p| literal_dir(p)).collect());
+        grants.push((format!("lists the additional directory `{text}`"), paths));
+    }
+    contained(file, roots, grants)
+}
+
+/// `path` with `.` segments dropped; `None` on a `..` segment or when it is
+/// not absolute. Unlike [`literal_prefix`], `*?[{` are plain characters.
+fn literal_dir(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => return None,
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out.is_absolute().then_some(out)
+}
+
+/// Refuse a write grant whose path is not inside `roots` after symlinks.
+///
+/// What: each grant is `(what it is, its absolute prefixes)`; a `None` prefix
+/// list could not be placed and refuses. Each prefix and root goes through
+/// [`resolve_existing`] (#10107 fix round: a committed `tools -> <outside>`
+/// link cannot pass on its spelling), and every prefix must start with a root.
+/// Test: `apple_events_and_outside_edit_rules_refuse_the_launch`,
+/// `additional_directories_outside_the_roots_refuse_the_launch`.
+fn contained(
+    file: &Path,
+    roots: &[PathBuf],
+    grants: Vec<(String, Option<Vec<PathBuf>>)>,
+) -> Result<(), SandboxSettingsError> {
+    if grants.is_empty() {
         return Ok(());
     }
-    // #10107 fix round: judged after symlinks, so a committed `tools ->
-    // <outside>` link cannot pass `Edit(/tools/**)` on its spelling.
+    let why = |what: String| refused(&format!("`{}` {what}", file.display()));
     let unresolved = |path: &Path, e: std::io::Error| {
         why(format!(
             "names `{}`, whose symlinks cannot be resolved ({e})",
@@ -327,14 +467,14 @@ fn edit_allow_rules(
     for root in roots {
         real_roots.push(resolve_existing(root).map_err(|e| unresolved(root, e))?);
     }
-    for (text, spec) in edits {
+    for (what, prefixes) in grants {
         let outside = || {
             why(format!(
-                "allows `{text}`, which widens the sandbox's writes outside the workspace and \
-                 its `allowWrite` roots"
+                "{what}, which widens the sandbox's writes outside the workspace and its \
+                 `allowWrite` roots"
             ))
         };
-        for prefix in rule_prefixes(spec, place).ok_or_else(outside)? {
+        for prefix in prefixes.ok_or_else(outside)? {
             let real = resolve_existing(&prefix).map_err(|e| unresolved(&prefix, e))?;
             if !real_roots.iter().any(|root| real.starts_with(root)) {
                 return Err(outside());
