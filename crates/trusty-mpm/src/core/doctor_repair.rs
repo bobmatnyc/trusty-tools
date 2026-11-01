@@ -167,7 +167,10 @@ const PM_GUARD_REMOVAL_CLAUSE: &str =
 /// reason.
 /// What: scans `<project>/.claude/settings.json` and `settings.local.json`
 /// through [`clean_settings_file`], whose `force` parameter IS the dry-run
-/// gate, so preview and apply share one reader and one classifier. Applying
+/// gate, so preview and apply share one reader and one classifier. #10565: in
+/// a file a managed launch provisioned (PM guard or `trusty-memory` entry
+/// present) only a build-tree entry counts — the installed lifecycle triad is
+/// that session's own, the Architect's included. Applying
 /// writes a byte-identical `<path>.bak-<epoch>` first. A file with no tm
 /// entries produces no step. Scope is this project only — the `$HOME`-wide
 /// sweep stays `tm hooks clean`, which pays that cost once on request rather
@@ -177,7 +180,9 @@ const PM_GUARD_REMOVAL_CLAUSE: &str =
 /// `hooks_repair_dry_run_changes_nothing`,
 /// `hooks_repair_leaves_foreign_entries_alone`,
 /// `hooks_repair_warns_when_it_removes_the_pm_guard`,
-/// `hooks_repair_omits_the_pm_guard_clause_for_other_entries`.
+/// `hooks_repair_omits_the_pm_guard_clause_for_other_entries`,
+/// `doctor_fix_keeps_the_architect_hooks`,
+/// `a_refused_re_merge_never_leaves_the_architect_hooks_stripped`.
 pub fn repair_hooks_contamination(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
     let claude = project_dir.join(".claude");
     let mut steps = Vec::new();
@@ -237,9 +242,9 @@ const MISSING_GROUP_CHECK: &str = "hooks_missing_tm_group";
 /// a hand-edit of `.claude/settings.json`.
 ///
 /// This runs AFTER [`repair_hooks_contamination`] in the driver, deliberately.
-/// That pass STRIPS every `<exe> hook` entry it finds, including the ones this
-/// pass exists to restore, so running first would report a merge the strip
-/// then undid. Running last means a managed project ends the `--fix` in the
+/// That pass STRIPS a build-tree `<exe> hook` entry (#10565: in a provisioned
+/// file, nothing else), including ones this pass exists to restore, so running
+/// first would report a merge the strip then undid. Running last means a managed project ends the `--fix` in the
 /// state its next launch would write, rather than with PM lifecycle hooks
 /// offline until then.
 /// What: one step for `<project>/.claude/settings.json` when

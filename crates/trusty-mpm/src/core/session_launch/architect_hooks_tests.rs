@@ -402,3 +402,80 @@ fn the_launch_writes_the_architect_hooks_by_profile() {
         );
     }
 }
+
+/// An allow-listed Architect project under `base`: its framework layout, with
+/// `[architect] projects` naming `project` and the `supervisor` profile set.
+fn architect_fw(base: &Path, project: &Path) -> crate::core::paths::FrameworkPaths {
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(base, project);
+    std::fs::create_dir_all(&fw.root).unwrap();
+    std::fs::write(
+        fw.config_toml(),
+        format!(
+            "[hooks]\nprompt_context = true\n[architect]\nprojects = [{:?}]\ndirect_commands = true\n",
+            project.display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".trusty-mpm.toml"),
+        "profile = \"supervisor\"\n",
+    )
+    .unwrap();
+    fw
+}
+
+/// #10565: `tm doctor --fix`'s `hooks_contamination` repair leaves the hooks
+/// an Architect launch wrote in place, in the dry run and when applied. On
+/// 1.9.1 it stripped the lifecycle entry from all seven events.
+#[test]
+fn doctor_fix_keeps_the_architect_hooks() {
+    use crate::core::doctor_repair::{RepairMode, repair_hooks_contamination};
+    let dir = tempdir().unwrap();
+    write(dir.path(), architect(true));
+    let path = dir.path().join(".claude/settings.json");
+    let before = std::fs::read_to_string(&path).unwrap();
+    for mode in [RepairMode::DryRun, RepairMode::Apply] {
+        let steps = repair_hooks_contamination(dir.path(), mode);
+        assert!(
+            steps.is_empty(),
+            "{mode:?} planned a strip of the Architect's own hooks: {steps:?}"
+        );
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap(), "{mode:?}");
+    }
+}
+
+/// #10565 error arm: when the re-merge that follows the strip cannot run (an
+/// Architect on a Claude Code below v2.1.295), the `--fix --yes` sequence
+/// still leaves the Architect's hooks in place rather than reporting a
+/// failure over a file it already stripped.
+#[test]
+fn a_refused_re_merge_never_leaves_the_architect_hooks_stripped() {
+    use crate::core::doctor_repair::{
+        RepairMode, StepStatus, repair_hooks_contamination, repair_missing_hook_group_with,
+    };
+    let project = tempdir().unwrap();
+    let base = tempdir().unwrap();
+    let fw = architect_fw(base.path(), project.path());
+    write(project.path(), architect(true));
+    let path = project.path().join(".claude/settings.json");
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let probe = &crate::core::architect_claude_version::TEST_PROBE;
+    probe.with(|p| *p.borrow_mut() = Ok("2.1.294 (Claude Code)".to_owned()));
+    let strip = repair_hooks_contamination(project.path(), RepairMode::Apply);
+    let merge = repair_missing_hook_group_with(
+        &fw,
+        project.path(),
+        Some(Path::new(EXE)),
+        RepairMode::Apply,
+    );
+    probe.with(|p| *p.borrow_mut() = Ok("2.1.312 (Claude Code)".to_owned()));
+
+    assert!(
+        !merge
+            .iter()
+            .any(|s| matches!(s.status, StepStatus::Failed(_) | StepStatus::Refused(_))),
+        "the strip {strip:?} left a gap the refused merge could not close: {merge:?}"
+    );
+    assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+}

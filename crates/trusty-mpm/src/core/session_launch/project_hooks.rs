@@ -379,12 +379,11 @@ pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
 /// What: `true` for a PM-guard command (ends with [`PM_GUARD_SUFFIX`]) or a
 /// `trusty-memory ` command. Deliberately narrower than
 /// [`is_project_managed_hook_command`], which is a STRIP domain rather than a
-/// tier marker.
+/// tier marker. #10565: defined in `standalone::hooks::cleanup`, whose
+/// contamination classifier needs the same marker.
 /// Test: `the_tier_marker_ignores_a_user_tier_lifecycle_command`,
 /// `the_tier_marker_recognises_the_pm_guard`.
-pub(super) fn is_project_tier_marker_command(cmd: &str) -> bool {
-    cmd.ends_with(PM_GUARD_SUFFIX) || cmd.starts_with("trusty-memory ")
-}
+pub(super) use crate::core::standalone::hooks::cleanup::is_project_tier_marker_command;
 
 #[cfg(test)]
 #[path = "project_hooks_tests.rs"]

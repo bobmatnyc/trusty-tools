@@ -457,3 +457,31 @@ fn clean_settings_file_force_removes_the_build_tree_incident() {
         Some(format!("{INCIDENT_EXE} statusline"))
     );
 }
+
+/// #10565: a file tm's project tier provisioned (PM guard present) keeps its
+/// installed lifecycle entries — neither reported nor stripped by `--force`.
+#[test]
+fn clean_settings_file_spares_a_provisioned_files_own_hooks() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("settings.json");
+    let guard = json!({
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "/usr/local/bin/tm hook --pm-guard" }]
+    });
+    let mut val = tm_settings();
+    val["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, guard);
+    let original = serde_json::to_string_pretty(&val).unwrap();
+    std::fs::write(&path, &original).unwrap();
+
+    assert!(contamination_event_names(&val).is_empty(), "{val}");
+    assert_eq!(clean_settings_file(&path, true).unwrap(), None);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    // The unprovisioned shape is still contamination.
+    assert_eq!(
+        contamination_event_names(&tm_settings()),
+        vec!["PreToolUse".to_string()]
+    );
+}

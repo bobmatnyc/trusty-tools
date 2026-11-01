@@ -63,7 +63,7 @@ use serde_json::Value;
 
 use super::{
     build_tree::PM_GUARD_SUFFIX, is_build_tree_hook_command, is_build_tree_statusline_command,
-    is_claude_mpm_hook_command, is_mpm_hook_command, strip_mpm_hook_entries,
+    is_claude_mpm_hook_command, is_mpm_hook_command,
 };
 
 /// Per-file outcome of a [`clean_settings_file`] pass.
@@ -105,7 +105,7 @@ pub struct CleanOutcome {
 /// ONE recognised by [`is_mpm_hook_command`] (issue #2948: entry-level, not
 /// whole-group, so a hand-mixed group carrying one tm command alongside a
 /// foreign one is still detected — mirroring the matching semantics
-/// [`strip_mpm_hook_entries`] uses to decide what to remove).
+/// [`super::strip_mpm_hook_entries`] uses to decide what to remove).
 /// Test: `contains_tm_hooks_true_for_tm_entry`,
 /// `contains_tm_hooks_false_for_foreign_or_absent`.
 pub fn contains_tm_hooks(val: &Value) -> bool {
@@ -115,7 +115,7 @@ pub fn contains_tm_hooks(val: &Value) -> bool {
 /// The `hooks` event keys that carry at least one tm-owned group.
 ///
 /// Why: [`CleanOutcome::removed_events`] must be computed BEFORE
-/// [`strip_mpm_hook_entries`] mutates the value away, and the doctor probe
+/// [`super::strip_mpm_hook_entries`] mutates the value away, and the doctor probe
 /// wants the same list for its message.
 /// What: returns every event key (e.g. `PreToolUse`, `Stop`) under `hooks`
 /// where at least one group carries at least one tm-owned entry (issue #2948:
@@ -125,6 +125,54 @@ pub fn contains_tm_hooks(val: &Value) -> bool {
 /// `tm_hook_event_names_flags_mixed_group`.
 pub fn tm_hook_event_names(val: &Value) -> Vec<String> {
     event_names_matching(val, is_mpm_hook_command)
+}
+
+/// Recognise a hook command only tm's PROJECT tier ever writes.
+///
+/// Why (#7849): the PM guard and the `trusty-memory` block are written by
+/// `session_launch::project_hooks` and by nothing else, so either one marks a
+/// settings file a managed launch provisioned. Lives here since #10565 so the
+/// contamination classifier and the session-launch gap probe share one marker.
+/// What: `true` for a PM-guard command (ends with [`PM_GUARD_SUFFIX`], either
+/// hook form) or a `trusty-memory ` command.
+/// Test: `the_tier_marker_ignores_a_user_tier_lifecycle_command`,
+/// `the_tier_marker_recognises_the_pm_guard`.
+pub(crate) fn is_project_tier_marker_command(cmd: &str) -> bool {
+    cmd.ends_with(PM_GUARD_SUFFIX) || cmd.starts_with("trusty-memory ")
+}
+
+/// The predicate that decides which tm hook entries in `val` are contamination.
+///
+/// Why (#10565): since #2969 every managed launch writes the lifecycle triad
+/// into the project's own `.claude/settings.json`, so in a file the project
+/// tier provisioned those `<tm> hook` entries are the session's own hooks, not
+/// pre-#2940 residue. Stripping them and relying on the later
+/// `hooks_missing_tm_group` re-merge dropped the Architect's hooks whenever
+/// that re-merge was skipped (`--only`), absent from the plan (dry run), or
+/// refused (old Claude Code, unresolvable binary).
+/// What: [`is_build_tree_hook_command`] for a file carrying a
+/// [`is_project_tier_marker_command`] entry — a build-tree executable is
+/// damage in any file (#7262) — and [`is_mpm_hook_command`] for every other.
+/// Test: `doctor_fix_keeps_the_architect_hooks`,
+/// `clean_settings_file_spares_a_provisioned_files_own_hooks`.
+fn contamination_predicate(val: &Value) -> fn(&str) -> bool {
+    if event_names_matching(val, is_project_tier_marker_command).is_empty() {
+        is_mpm_hook_command
+    } else {
+        is_build_tree_hook_command
+    }
+}
+
+/// The `hooks` event keys carrying a tm hook entry that is contamination.
+///
+/// Why (#10565): `tm doctor`'s `hooks_contamination` check and
+/// [`clean_settings_file`] must agree on what a strip would remove, or the
+/// check reports a finding the repair does not act on.
+/// What: [`event_names_matching`] under [`contamination_predicate`]; equal to
+/// [`tm_hook_event_names`] for a file the project tier never provisioned.
+/// Test: `check_hooks_hygiene_is_ok_for_a_provisioned_file`.
+pub fn contamination_event_names(val: &Value) -> Vec<String> {
+    event_names_matching(val, contamination_predicate(val))
 }
 
 /// The `hooks` event keys that carry at least one FOREIGN (claude-mpm) group.
@@ -206,7 +254,7 @@ fn hook_commands(val: &Value) -> impl Iterator<Item = std::borrow::Cow<'_, str>>
 /// and has to be said out loud.
 /// What: `true` when any hook command ends with [`PM_GUARD_SUFFIX`] AND
 /// [`is_mpm_hook_command`] claims it — the same predicate
-/// [`strip_mpm_hook_entries`] removes by, so this can never report a removal
+/// [`super::strip_mpm_hook_entries`] removes by, so this can never report a removal
 /// that will not happen. In practice that pairing is only satisfiable by a
 /// build-tree executable (the #7244 shape): an INSTALLED
 /// `<abs>/tm hook --pm-guard` is left in place, and correctly reports `false`.
@@ -295,13 +343,14 @@ pub fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> 
 /// the same class of mutation.
 /// What: reads `path` (missing file → `Ok(None)`, malformed/non-object JSON →
 /// `Ok(None)` — never touched), returns `Ok(None)` when
-/// [`contains_tm_hooks`] is `false`. Otherwise computes the contaminated
+/// [`contamination_event_names`] is empty (#10565: a file the project tier
+/// provisioned keeps its own hooks). Otherwise computes the contaminated
 /// event list and the [`CleanOutcome::removed_pm_guard`] flag (both BEFORE any
 /// mutation), and when `force` is `true`: writes a byte-identical backup of
 /// the pre-clean text to `<path>.bak-<unix-epoch-seconds>` (this crate's own
 /// backup, reported via [`CleanOutcome::backup_path`]; `write_json_atomic`
 /// additionally maintains its own internal `<path>.bak`, a harmless second
-/// safety net), strips the tm-owned groups via [`strip_mpm_hook_entries`],
+/// safety net), strips the contaminated entries by the same predicate,
 /// and atomically writes the result back (preserving every other key). In
 /// dry-run mode (`force: false`) the file is never touched and `backup_path`
 /// is `None`.
@@ -351,7 +400,9 @@ fn clean_settings_file_inner(path: &Path, force: bool) -> anyhow::Result<Option<
         return Ok(None);
     }
 
-    let removed_events = tm_hook_event_names(&val);
+    // #10565: a provisioned file's own hooks are not contamination.
+    let is_contamination = contamination_predicate(&val);
+    let removed_events = event_names_matching(&val, is_contamination);
     if removed_events.is_empty() {
         return Ok(None);
     }
@@ -368,7 +419,8 @@ fn clean_settings_file_inner(path: &Path, force: bool) -> anyhow::Result<Option<
         std::fs::write(&bak, &text)
             .map_err(|e| anyhow::anyhow!("write backup {}: {e}", bak.display()))?;
 
-        let changed = strip_mpm_hook_entries(&mut val);
+        let changed =
+            super::strip_hook_entries_matching_for_events(&mut val, None, is_contamination);
         debug_assert!(changed, "removed_events was non-empty but nothing stripped");
         // #7762: `settings_lock::publish` rather than `write_json_atomic` — the
         // `<path>.bak-<epoch>` copy taken just above is the one this function
