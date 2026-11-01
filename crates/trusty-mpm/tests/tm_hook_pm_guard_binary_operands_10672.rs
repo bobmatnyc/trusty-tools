@@ -30,6 +30,10 @@ const INSPECT_SHAPE: &str = "import sys\nfrom docx import Document\n\ndoc = Docu
 /// A literal Keychain read, as Python.
 const KEYCHAIN_PY: &str = "import subprocess\nsubprocess.run([\"security\", \"find-generic-password\", \"-s\", \"x\", \"-w\"])\n";
 
+/// A literal Keychain read, as Ruby.
+const KEYCHAIN_RB: &str =
+    "system(\"security\", \"find-generic-password\", \"-s\", \"x\", \"-w\")\n";
+
 /// The refusal text of a body that is not text.
 const NOT_TEXT: &str = "its body is not UTF-8 text";
 
@@ -103,6 +107,13 @@ fn fixtures() -> tempfile::TempDir {
     }
     let creds_sh = "security find-generic-password -s x -w\n";
     std::fs::write(d.join("creds.sh"), creds_sh).expect("write text fixture");
+    // #10672: Ruby scripts reading a Keychain item, one named with a word
+    // (`json`) that the command also passes as an option value.
+    for name in ["creds.rb", "dump_json.rb"] {
+        std::fs::write(d.join(name), KEYCHAIN_RB).expect("write text fixture");
+    }
+    let outer_sh = "x=$(bash -oe pipefail creds.sh)\n";
+    std::fs::write(d.join("outer.sh"), outer_sh).expect("write text fixture");
     dir
 }
 
@@ -242,6 +253,18 @@ fn a_credential_script_is_denied_whatever_its_arguments_10672() {
         ("bash creds.sh in.docx", "#8596"),
         ("bash creds.sh -c x", "#8596"),
         ("bash -o pipefail creds.sh", "#8596"),
+        ("bash creds.sh -", "#8596"),
+        // #10672: a cluster letter that takes the next word never hides the script.
+        ("ruby -wr json dump_json.rb", "#8596"),
+        ("ruby -wr json creds.rb", "the script `creds.rb`"),
+        ("bash -oe pipefail creds.sh", "#8596"),
+        ("bash outer.sh", "#8596"),
+        ("ruby -W:no-deprecated creds.rb", "#8596"),
+        ("ruby -rjson creds.rb -e x", "#8596"),
+        ("python3 -X importtime creds.py", "#8596"),
+        ("env python3 creds.py -c x", "#8596"),
+        // An option whose value is in doubt keeps the first-that-exists verdict.
+        ("node --no-warnings \"$S\" in.docx", "#8879"),
         ("python3 x.docx", "#8596"),
         ("python3 x.docx in.docx", "#8596"),
         ("cat ~/.netrc", "#7266"),

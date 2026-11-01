@@ -41,21 +41,31 @@ impl Family {
             Family::Shell => &['o', 'O'],
             Family::Python => &['W', 'X'],
             Family::Node => &['r'],
-            Family::Ruby => &['I', 'r', 'C', 'E', 'F', 'K', 'x', '0'],
+            // #10672: `-W` takes an optional attached level (`-W:no-deprecated`).
+            Family::Ruby => &['I', 'r', 'C', 'E', 'F', 'K', 'W', 'x', '0'],
             Family::Perl => &['I', 'M', 'm', 'i', 'l', '0', 'C', 'F', 'd', 'D', 'x'],
         }
     }
 
     /// #10672: short option letters that take the next word as their value when
-    /// they end a cluster (`python3 -W ignore s.py`). The other valued letters
-    /// only ever attach theirs (`perl -i.bak`).
+    /// they end a cluster (`python3 -W ignore s.py`, `ruby -wr json s.rb`); a
+    /// shell's take one each wherever they sit (`bash -oe pipefail s.sh`). The
+    /// other valued letters only ever attach theirs (`perl -i.bak`).
     fn next_word_letters(self) -> &'static [char] {
         match self {
             Family::Shell => &['o', 'O'],
             Family::Python => &['W', 'X'],
             Family::Node => &['C'],
-            Family::Ruby => &['I', 'C', 'E', 'X'],
+            Family::Ruby => &['I', 'r', 'C', 'E', 'X'],
             Family::Perl => &['I'],
+        }
+    }
+
+    /// #10672: short option letters whose value is a file loaded as code.
+    fn loaded_letters(self) -> &'static [char] {
+        match self {
+            Family::Ruby => &['r'],
+            _ => &[],
         }
     }
 
@@ -85,8 +95,8 @@ impl Family {
                 "--loader",
                 "--experimental-loader",
             ],
-            Family::Ruby => &["-r"],
-            Family::Python | Family::Perl => &[],
+            // #10672: Ruby `-r` is a cluster letter, read by `cluster_value`.
+            Family::Python | Family::Ruby | Family::Perl => &[],
         }
     }
 }
@@ -110,8 +120,9 @@ pub(super) fn family_of(program: &str) -> Option<Family> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Role {
     /// The script operand. #10672: the words after it are the script's own
-    /// arguments, so there is one, unless an unlisted long option left its
-    /// next word in doubt; then the first that exists is the script.
+    /// arguments, so there is one, unless an unlisted long option or a value
+    /// letter read as taking no next word left that word in doubt; then the
+    /// first that exists is the script.
     Positional,
     /// A file an option loads as code, beside the script.
     Loaded,
@@ -176,6 +187,9 @@ pub(super) fn candidates(argv: &[String]) -> (Vec<Candidate>, bool) {
 /// script word did not resolve, and read `-c` after a script as inline code.
 /// What: stops at the script operand, skipping the value word of an option
 /// that takes one. A redirected stdin counts only when no script is named.
+/// When a word is in doubt, the next operand is a candidate too and a later
+/// inline option no longer drops them, so a misread value falls back to the
+/// first-that-exists reading.
 /// Test: `plain_script_with_binary_args_allows_10672`,
 /// `an_unresolved_script_does_not_fall_through_to_data_10672`,
 /// `a_credential_script_is_denied_whatever_its_arguments_10672`.
@@ -190,6 +204,7 @@ fn interpreter_candidates(family: Family, interpreter: &str, args: &[String]) ->
     };
     let mut options_done = false;
     let mut maybe_a_value = false;
+    let mut in_doubt = false;
     let mut i = 0;
     while let Some(token) = args.get(i) {
         i += 1;
@@ -221,6 +236,7 @@ fn interpreter_candidates(family: Family, interpreter: &str, args: &[String]) ->
             push(&mut out, token, Role::Positional);
             // #10672: what follows the script is its arguments, not more scripts.
             if after_unlisted {
+                in_doubt = true;
                 continue;
             }
             break;
@@ -228,7 +244,11 @@ fn interpreter_candidates(family: Family, interpreter: &str, args: &[String]) ->
         if token == "--" {
             options_done = true;
         } else if token == "-" || runs_inline(family, token) {
-            out.retain(|c| c.role != Role::Positional);
+            // #10672: after a word in doubt, this option may be the script's
+            // own argument, so the words before it stay judged.
+            if !in_doubt {
+                out.retain(|c| c.role != Role::Positional);
+            }
             return out;
         } else if family.code_loading_options().contains(&token.as_str()) {
             if let Some(value) = args.get(i) {
@@ -239,8 +259,24 @@ fn interpreter_candidates(family: Family, interpreter: &str, args: &[String]) ->
             && family.code_loading_options().contains(&flag)
         {
             push(&mut out, value, Role::Loaded);
-        } else if takes_next_word(family, token) {
+        } else if family.next_word_long_options().contains(&token.as_str()) {
             i += 1;
+        } else if let Some((letter, rest, words)) = cluster_value(family, token) {
+            // #10672: Ruby `-r` loads its value as code, attached or the next word.
+            if family.loaded_letters().contains(&letter) {
+                let value = if rest.is_empty() {
+                    args.get(i).map(String::as_str)
+                } else {
+                    Some(rest)
+                };
+                if let Some(value) = value {
+                    push(&mut out, value, Role::Loaded);
+                }
+            }
+            i += words;
+            // #10672: a value letter read as taking no next word may still take
+            // it, so the next word gets the first-that-exists reading.
+            maybe_a_value = words == 0;
         } else {
             maybe_a_value = family.has_unlisted_long_values()
                 && token.starts_with("--")
@@ -259,25 +295,26 @@ fn is_option(family: Family, token: &str) -> bool {
     token.starts_with('-') || (family == Family::Shell && token.len() > 1 && token.starts_with('+'))
 }
 
-/// #10672: whether option `token` takes the next word as its value, so that
-/// word is not the script.
-fn takes_next_word(family: Family, token: &str) -> bool {
-    if family.next_word_long_options().contains(&token) {
-        return true;
-    }
-    let Some(cluster) = token
+/// #10672: the value a short option cluster takes: its first value-taking
+/// letter, the value attached after it, and how many next words it takes.
+/// `None` for a cluster with no value-taking letter. Elsewhere the first such
+/// letter takes the rest of the cluster, or the next word when it ends it; a
+/// shell's `o`/`O` each take one next word (`bash -oe pipefail s.sh`).
+fn cluster_value(family: Family, token: &str) -> Option<(char, &str, usize)> {
+    let cluster = token
         .strip_prefix(['-', '+'])
-        .filter(|c| !c.starts_with('-'))
-    else {
-        return false;
-    };
+        .filter(|c| !c.is_empty() && !c.starts_with('-'))?;
     let next_word = family.next_word_letters();
+    if family == Family::Shell {
+        let letter = cluster.chars().find(|c| next_word.contains(c))?;
+        let words = cluster.chars().filter(|c| next_word.contains(c)).count();
+        return Some((letter, "", words));
+    }
     let valued = |c: char| next_word.contains(&c) || family.valued_letters().contains(&c);
-    // The first valued letter takes the rest of the cluster; with no rest, the next word.
-    cluster
-        .char_indices()
-        .find(|&(_, c)| valued(c))
-        .is_some_and(|(at, c)| at + c.len_utf8() == cluster.len() && next_word.contains(&c))
+    let (at, letter) = cluster.char_indices().find(|&(_, c)| valued(c))?;
+    let rest = &cluster[at + letter.len_utf8()..];
+    let words = usize::from(rest.is_empty() && next_word.contains(&letter));
+    Some((letter, rest, words))
 }
 
 /// Whether option `token` makes `family` run inline code or read stdin.
