@@ -37,6 +37,7 @@
 #               inputs (#8378)
 #   parity-selftest / check5-decision / check8-decision – release-decision
 #               fixtures, unconditional
+#   fastembed-cache-selftest – the model-cache check and key sites, unconditional
 #   website-corpus – the website content gate, step-gated on its own relevance
 #   ci-gate  – "CI gate": one context that fails when any context it stands in
 #              for fails, or a job skipped without the classifier's say-so
@@ -1010,6 +1011,12 @@ jobs:
       # re-downloaded ~110 MB from HuggingFace. Keying on the version the
       # comment always described makes the key rotate when the models actually
       # change and not otherwise.
+      #
+      # #10639: `ref-exact` retires the cache saved 2026-09-28, whose refs/main
+      # pointers end in a newline that makes hf-hub miss on every file. All four
+      # key sites (three here, one in pre-publish.yml) must stay identical.
+      # scripts/check_fastembed_cache_selftest.sh checks that on every PR and
+      # push, in the `fastembed-cache-selftest` job that `CI gate` needs.
       - name: Resolve fastembed model cache key
         if: needs.changes.outputs.docs_only != 'true'
         id: fastembed-key
@@ -1022,7 +1029,7 @@ jobs:
             exit 1
           fi
           echo "Resolved fastembed version from Cargo.lock: ${ver}"
-          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+          echo "key=fastembed-v${ver}-ref-exact-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
 
       # #4940: `actions/cache/restore` + an explicit `actions/cache/save`
       # below, NOT the combined `actions/cache`. The combined action declares
@@ -1198,7 +1205,9 @@ jobs:
             XENOVA_REV="${XENOVA_REV:-751bff37182d3f1213fa05d7196b954e230abad9}"
             echo "Using Xenova/all-MiniLM-L6-v2 revision: ${XENOVA_REV}"
 
-            echo "${XENOVA_REV}" > "${XENOVA_DIR}/refs/main"
+            # #10639: no trailing newline. hf-hub reads this file verbatim, so
+            # `echo` here made every model file miss the cache at test time.
+            printf '%s' "${XENOVA_REV}" > "${XENOVA_DIR}/refs/main"
             SNAP_DIR="${XENOVA_DIR}/snapshots/${XENOVA_REV}"
             mkdir -p "${SNAP_DIR}/onnx"
 
@@ -1260,7 +1269,8 @@ jobs:
             QDRANT_REV="${QDRANT_REV:-5f1b8cd78bc4fb444dd171e59b18f3a3af89a079}"
             echo "Using Qdrant/all-MiniLM-L6-v2-onnx revision: ${QDRANT_REV}"
 
-            echo "${QDRANT_REV}" > "${QDRANT_DIR}/refs/main"
+            # #10639: no trailing newline, same as the Xenova ref above.
+            printf '%s' "${QDRANT_REV}" > "${QDRANT_DIR}/refs/main"
             QDRANT_SNAP_DIR="${QDRANT_DIR}/snapshots/${QDRANT_REV}"
             mkdir -p "${QDRANT_SNAP_DIR}"
 
@@ -1706,7 +1716,7 @@ jobs:
             echo "::error::could not resolve the fastembed version from Cargo.lock — refusing to fall back to an unkeyed cache"
             exit 1
           fi
-          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+          echo "key=fastembed-v${ver}-ref-exact-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
 
       - name: Restore fastembed model cache
         id: fastembed-cache
@@ -1886,7 +1896,7 @@ jobs:
             echo "::error::could not resolve the fastembed version from Cargo.lock — refusing to fall back to an unkeyed cache"
             exit 1
           fi
-          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+          echo "key=fastembed-v${ver}-ref-exact-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
 
       # Restore only: `test-shard` on main is the sole writer of this key.
       - name: Restore fastembed model cache
@@ -2696,6 +2706,19 @@ jobs:
       - name: Preflight CHECK 10 crate-size self-test (an over-limit .crate must FAIL)
         run: bash scripts/check-crate-size-selftest.sh
 
+  # #10639: holds check_fastembed_cache.sh to what hf-hub reads and every
+  # fastembed cache key site to one value. Unconditional, because `test-shard`
+  # skips PRs: a fault found only there has already merged.
+  fastembed-cache-selftest:
+    name: Fastembed cache check self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fastembed cache check self-test
+        run: bash scripts/check_fastembed_cache_selftest.sh
+
   # The website CONTENT gate (owner ruling 2026-09-18): every website suite
   # that reads real repository content runs here and nowhere else, and it is
   # the only suite a docs, content or changelog change can turn red. Moved
@@ -2967,6 +2990,7 @@ jobs:
         parity-selftest,
         check5-decision,
         check8-decision,
+        fastembed-cache-selftest,
         website-corpus,
         changelog-fragment,
       ]

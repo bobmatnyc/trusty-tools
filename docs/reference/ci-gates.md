@@ -44,7 +44,8 @@ fails.** The covered list is the `CONTEXTS` table in
 `scripts/ci-gate-verdict.sh` — Format check, Clippy, MSRV check, Rust tests
 (affected crates), the four Tauri UI clippies, the daemon smoke test, the
 teardown guard, the tmux exact-target gate, the three release-decision
-selftests, Website content corpus, and Per-PR changelog fragment (the
+selftests, the fastembed cache check self-test, Website content corpus, and
+Per-PR changelog fragment (the
 fragment gate and the #8388 content gates; owner ruling 407). That job has no
 `changes` dependency and no skip, so a docs or content PR runs it; its steps run
 on a `pull_request` and on a `workflow_dispatch` off main (diffing against

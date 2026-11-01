@@ -187,6 +187,19 @@ assert_eq "every changelog-fragment step runs on pull_request" "0" \
   "$(printf '%s\n' "$cf_job" | grep -E '^        if: ' | grep -vc "github.event_name == 'pull_request'")"
 assert_eq "no changelog-fragment step carries continue-on-error" "0" \
   "$(printf '%s\n' "$cf_job" | grep -c 'continue-on-error')"
+# #10639: this selftest in a job that skips PRs lets a diverged cache key merge
+# green and then fail every main shard.
+fc_job="$(sed -n '/^  fastembed-cache-selftest:$/,/^  website-corpus:$/p' "$ci")"
+assert_eq "fastembed-cache-selftest row allows no skip" "1" \
+  "$(bash scripts/ci-gate-verdict.sh --list | grep -cx 'fastembed-cache-selftest|Fastembed cache check self-test|-')"
+assert_eq "fastembed-cache-selftest has no job-level if or needs" "0" \
+  "$(printf '%s\n' "$fc_job" | grep -cE '^    (if|needs):')"
+assert_eq "fastembed-cache-selftest runs the selftest" "1" \
+  "$(printf '%s\n' "$fc_job" | grep -c 'run: bash scripts/check_fastembed_cache_selftest\.sh$')"
+assert_eq "no other ci.yml job runs the fastembed selftest" "1" \
+  "$(grep -c 'run: .*check_fastembed_cache_selftest\.sh$' "$ci")"
+assert_eq "ci.yml triggers carry no path filter" "0" \
+  "$(sed -n '/^on:$/,/^[a-z]/p' "$ci" | grep -cE '^[[:space:]]+paths(-ignore)?:')"
 for moved in teardown-guard tmux-exact-targets tag-publish-parity changelog-fragment; do
   assert_eq "${moved}.yml is gone (one check run per name)" "0" \
     "$([ -e ".github/workflows/${moved}.yml" ] && echo 1 || echo 0)"

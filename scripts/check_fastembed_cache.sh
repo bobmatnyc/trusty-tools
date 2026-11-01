@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# check_fastembed_cache.sh — fail fast when the restored fastembed model cache
-# is incomplete (#10639).
+# check_fastembed_cache.sh — fail fast when hf-hub cannot read the restored
+# fastembed model cache (#10639).
 #
 # Why: the fp32 embedder load (Qdrant/all-MiniLM-L6-v2-onnx) failing makes
 # FastEmbedder fall back to INT8, and the reference-accuracy test then fails
-# with a wrong-model error that hides the real cause (a missing cache file).
-# What: resolves refs/main under each model's HF cache dir and requires every
-# file fastembed loads to exist, non-empty, in snapshots/<rev>/. File lists
-# come from fastembed 5.x `TextEmbedding::get_model_info` (model_code,
+# with a wrong-model error that hides the real cause. Two faults reach that
+# state: a missing cache file, and a refs/main holding whitespace. hf-hub's
+# `Cache::get` reads refs/main verbatim, so a trailing newline resolves to a
+# snapshot path that does not exist. Every file then misses, parallel test
+# processes all start the same download, and the loser's blob flock times out
+# after 5 s.
+# What: requires each model's refs/main to be whitespace-free, then requires
+# every file fastembed loads to exist, non-empty, in snapshots/<rev>/. File
+# lists come from fastembed 5.x `TextEmbedding::get_model_info` (model_code,
 # model_file) and its tokenizer loader (tokenizer.json, config.json,
 # special_tokens_map.json, tokenizer_config.json).
-# Test: run against a temp dir; CI runs it after the cache restore/pre-seed.
+# Test: scripts/check_fastembed_cache_selftest.sh; CI runs this script after
+# the cache restore/pre-seed.
 set -euo pipefail
 
 if [ -z "${FASTEMBED_CACHE_DIR:-}" ]; then
@@ -30,6 +36,12 @@ check_model() {
     exit 1
   fi
   rev=$(tr -d '[:space:]' < "${ref}")
+  # #10639: compare byte counts. `$(cat ref)` would strip the trailing newline
+  # this check exists to catch.
+  if [ "$(wc -c < "${ref}")" -ne "${#rev}" ]; then
+    echo "::error::fastembed cache unreadable by hf-hub: ${ref} contains whitespace (${repo})"
+    exit 1
+  fi
   snap="${dir}/snapshots/${rev}"
   for f in ${TOKENIZER_FILES} "${model_file}"; do
     # -s follows symlinks: a dangling blob link or empty file fails too.
