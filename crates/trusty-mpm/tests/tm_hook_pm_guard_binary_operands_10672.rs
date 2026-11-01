@@ -197,6 +197,28 @@ fn an_unresolved_script_does_not_fall_through_to_data_10672() {
             "missing.py",
             "does not exist",
         ),
+        // An attached option value or a bare letter taking nothing still leaves
+        // the next word the script, so a missing one refuses.
+        (
+            "python3 -Wd missing.py notes.txt",
+            "missing.py",
+            "does not exist",
+        ),
+        (
+            "ruby -Ilib missing.rb notes.txt",
+            "missing.rb",
+            "does not exist",
+        ),
+        (
+            "ruby -W missing.rb notes.txt",
+            "missing.rb",
+            "does not exist",
+        ),
+        (
+            "perl -l missing.pl notes.txt",
+            "missing.pl",
+            "does not exist",
+        ),
         ("bash missing.sh in.docx", "missing.sh", "does not exist"),
         ("bash missing.sh notes.txt", "missing.sh", "does not exist"),
         ("node missing.js in.docx", "missing.js", "does not exist"),

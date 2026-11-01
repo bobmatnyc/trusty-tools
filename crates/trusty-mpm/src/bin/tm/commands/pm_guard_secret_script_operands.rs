@@ -274,9 +274,6 @@ fn interpreter_candidates(family: Family, interpreter: &str, args: &[String]) ->
                 }
             }
             i += words;
-            // #10672: a value letter read as taking no next word may still take
-            // it, so the next word gets the first-that-exists reading.
-            maybe_a_value = words == 0;
         } else {
             maybe_a_value = family.has_unlisted_long_values()
                 && token.starts_with("--")
