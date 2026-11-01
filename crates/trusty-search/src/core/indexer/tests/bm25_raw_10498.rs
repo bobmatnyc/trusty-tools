@@ -171,8 +171,17 @@ async fn ranking_is_byte_identical_to_the_pre_change_snapshot() {
 #[serial_test::serial]
 async fn the_debug_log_names_raw_bm25_scores_without_the_query_text() {
     let idx = corpus().await;
-    let (cap, _guard) = capture();
     let text = "authenticate";
+    // #10633: tracing-core caches one interest per callsite. While one
+    // dispatcher exists, a callsite's first hit asks only the hitting thread's
+    // default subscriber, so a parallel test with none caches "never" here.
+    // This search registers the callsites. The next `capture()` builds a new
+    // dispatcher, and that rebuilds every registered callsite's interest.
+    {
+        let (_primed, _guard) = capture();
+        idx.search(&query(text)).await.expect("priming search");
+    }
+    let (cap, _guard) = capture();
     idx.search(&query(text)).await.expect("search");
     let log = cap.text();
     let line = log
