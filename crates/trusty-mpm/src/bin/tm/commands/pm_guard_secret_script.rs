@@ -70,8 +70,13 @@
 //!     word names no file (#10566): prose and here-documents quote code in
 //!     backticks. A computed, `/dev/fd/` or resolved-variable word refuses.
 //!
+//! 11. A Python body with no credential call or secret file in its Python
+//!     reading skips the shell judges (#10598); `pm_guard_secret_script_python`
+//!     lists what that reading cannot see.
+//!
 //! Fail-open check: this rule only ADDS refusals and runs after the inline
-//! rules, which still judge the command text. Every [`Unread`] arm refuses.
+//! rules, which still judge the command text. Every [`Unread`] arm refuses, and
+//! a Python body the reader cannot read goes to the shell judges (#10598).
 //! Test: `pm_guard_secret_script_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_secret_batch.rs`
 //! (`pm_guard_refuses_a_script_whose_body_reads_a_credential_8879`).
@@ -98,7 +103,17 @@ use crate::commands::pm_guard_secret_script_self::resolve_self_paths;
 use crate::commands::pm_guard_secret_script_self::{
     ToplevelRisk, passes_on_git_changes, resolve_self_paths_with,
 };
+use comments::blank_run_scan_comments;
+use python::{Reading, python_reading};
 use walk::{Walk, each_script, each_script_in};
+
+// #10598: a Python body is read as Python, not as shell (500-SLOC cap).
+#[path = "pm_guard_secret_script_python.rs"]
+mod python;
+
+// #10598: the nested-run scan's own comment reading (500-SLOC cap).
+#[path = "pm_guard_secret_script_comments.rs"]
+mod comments;
 
 // #10566: the walk that locates each script, split out for the 500-SLOC cap.
 #[path = "pm_guard_secret_script_walk.rs"]
@@ -316,7 +331,17 @@ fn judge_script(
         .map(str::to_string)
         .unwrap_or_else(|| shebang_interpreter(&body));
     let cwd = bases.first().map_or(Path::new("/"), PathBuf::as_path);
-    let plain = without_comment_lines(&body);
+    let mut plain = without_comment_lines(&body);
+    // #10598: a Python body is read as Python first; a body the reader cannot
+    // vouch for keeps its comments, which `exec` can run, for the shell judges.
+    if family_of(&interpreter) == Some(Family::Python) {
+        match python_reading(&body) {
+            Reading::Clean => return None,
+            Reading::Refuse(rule) => return Some((rule, None)),
+            Reading::Weigh => plain = without_comment_lines(&body.replace('\r', "\n")),
+            Reading::Unread => plain = body.replace('\r', "\n"),
+        }
+    }
     if let Some(rule) = judge_text(&inline_equivalent(&interpreter, &plain), &plain, cwd) {
         return Some((rule, None));
     }
@@ -327,7 +352,8 @@ fn judge_script(
     let risk = ToplevelRisk::scan(&body, git_env, interpreter.contains("zsh"));
     let git_env = risk.passes_on();
     // #9037: nested runs resolve as strictly as the top level.
-    let nested = resolve_self_paths_with(&body, path, risk);
+    // #10598: comment prose is not a run; see `blank_run_scan_comments`.
+    let nested = resolve_self_paths_with(&blank_run_scan_comments(&body), path, risk);
     // #10548: a nested refusal names the innermost word it could not judge.
     let mut refuse = |word: &str,
                       inner: Result<PathBuf, Unread>,
@@ -671,3 +697,7 @@ mod fp_10548_tests;
 #[cfg(test)]
 #[path = "pm_guard_secret_script_10566_tests.rs"]
 mod substitution_10566_tests;
+
+#[cfg(test)]
+#[path = "pm_guard_secret_script_python_tests.rs"]
+mod python_10598_tests;

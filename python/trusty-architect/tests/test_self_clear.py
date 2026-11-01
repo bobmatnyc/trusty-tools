@@ -1,5 +1,6 @@
 """self-clear.sh freshness gate: refuses (non-zero, no tmux call) unless the IL is fresh and its SESSION block is recorded."""
 import os
+import shutil
 import stat
 import subprocess
 
@@ -19,6 +20,13 @@ def _fake_datg(fresh_code, digest):
     )
 
 
+def _install(tmp_path):
+    """#10570: self-clear.sh finds its root from its own path, so run a copy beside the fakes."""
+    dest = tmp_path / "scripts" / "self-clear.sh"
+    shutil.copy(SCRIPT, dest)
+    return str(dest)
+
+
 def _run(tmp_path, fresh_code, digest, wait=60):
     (tmp_path / "scripts").mkdir()
     (tmp_path / "inbox").mkdir()
@@ -28,9 +36,9 @@ def _run(tmp_path, fresh_code, digest, wait=60):
     tmux = bindir / "tmux"
     tmux.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/tmux.log\nexit 1\n')
     tmux.chmod(tmux.stat().st_mode | stat.S_IEXEC)
-    env = dict(os.environ, ARCHITECT_ROOT=str(tmp_path), PATH=f"{bindir}:{os.environ['PATH']}")
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
     try:
-        r = subprocess.run(["bash", SCRIPT, "--live"], env=env, capture_output=True, text=True, timeout=wait)
+        r = subprocess.run(["bash", _install(tmp_path), "--live"], env=env, capture_output=True, text=True, timeout=wait)
     except subprocess.TimeoutExpired:
         r = None  # past the gate the idle loop polls for up to 30 minutes
     return r, (tmp_path / "tmux.log").exists()
@@ -75,9 +83,9 @@ def test_resume_sent_after_clear_when_transcript_check_reports_unknown(tmp_path)
     tmux = bindir / "tmux"
     tmux.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/tmux.log\n')
     tmux.chmod(tmux.stat().st_mode | stat.S_IEXEC)
-    env = dict(os.environ, ARCHITECT_ROOT=str(tmp_path), PATH=f"{bindir}:{os.environ['PATH']}",
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
                SELF_CLEAR_POLL="0.05", SELF_CLEAR_SETTLE="0.05", SELF_CLEAR_ECHO="0.05")
-    r = subprocess.run(["bash", SCRIPT, "--live"], env=env, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(["bash", _install(tmp_path), "--live"], env=env, capture_output=True, text=True, timeout=60)
     log = (tmp_path / "inbox" / "self-clear.log").read_text()
     assert r.returncode == 0, r.stdout + r.stderr + log
     assert "sent /clear" in log and "sent resume prompt" in log
@@ -92,7 +100,7 @@ def test_default_is_dry_run_and_sends_no_keys(tmp_path):
     tmux = bindir / "tmux"
     tmux.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/tmux.log\n')
     tmux.chmod(tmux.stat().st_mode | stat.S_IEXEC)
-    env = dict(os.environ, ARCHITECT_ROOT=str(tmp_path), PATH=f"{bindir}:{os.environ['PATH']}")
-    r = subprocess.run(["bash", SCRIPT], env=env, capture_output=True, text=True, timeout=20)
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+    r = subprocess.run(["bash", _install(tmp_path)], env=env, capture_output=True, text=True, timeout=20)
     assert r.returncode == 0 and "dry run" in r.stdout, r.stdout + r.stderr
     assert not (tmp_path / "tmux.log").exists()

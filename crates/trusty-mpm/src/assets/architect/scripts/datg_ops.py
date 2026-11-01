@@ -202,7 +202,7 @@ def _merge_refs(old, new):
     for r in _rows({"refs": new}, "refs", REFS_MAX, "refs"):
         key = r.get("key")
         if not isinstance(key, str) or not REF_KEY.match(key):
-            raise DatgError(f"refs.key must match {REF_KEY.pattern}")
+            raise DatgError(f"refs key must match {REF_KEY.pattern}")
         val = _lim(r.get("value"), "refs.value", 200, True)
         refs[key] = val
     if len(refs) > REFS_MAX:

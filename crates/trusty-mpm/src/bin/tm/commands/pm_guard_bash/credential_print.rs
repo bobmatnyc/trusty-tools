@@ -93,6 +93,8 @@ use super::bash_tokens::tokenize;
 use super::shell_lex::{WrappedCommand, wrapped_command};
 use crate::commands::program_word::resolve_program_word;
 use credential_print_clis::{interactive_security, judge_cli_echoes, names_cli_trigger};
+// #10598: read by the Python body reader in `pm_guard_secret_script`.
+pub(crate) use credential_print_clis::python_reader_words;
 use credential_print_heredoc::strip_comments_and_heredocs;
 // #9150: the here-document scanner asks this walk which `<<` opens a body.
 pub(super) use credential_print_heredoc::{OperatorCtx, heredoc_operators};
@@ -127,7 +129,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 /// Subcommand names whose presence makes the command worth parsing.
-const TRIGGERS: &[&str] = &[
+pub(crate) const TRIGGERS: &[&str] = &[
     "find-generic-password",
     "find-internet-password",
     "dump-keychain",

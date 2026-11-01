@@ -1586,3 +1586,56 @@ fn a_seed_with_one_more_skill_seeds_it() {
     assert_eq!(row.contents, "---\nname: tm-probe-extra\n---\n");
     assert!(!row.executable);
 }
+
+/// 🔴 REGRESSION (#10570, #10598): pm-guard's credential rules let the Architect
+/// run every script `tm fleet init` seeds, by interpreter, with `--help`, and by
+/// path. The loop reads the seeded rows, so a new seed is judged with no edit
+/// here, and there is no exclusion list. On origin/main `dashboard-db.py`,
+/// `datg.py`, `dashboard-serve.py`, `fleet-poll.py`, `pm-notify.sh` and
+/// `self-clear.sh` refuse.
+#[test]
+fn every_seeded_architect_script_passes_10570() {
+    use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
+    use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_in;
+    use crate::commands::pm_guard_secret_script::evaluate_script_body_secret_read;
+    let dir = tempfile::tempdir().expect("architect dir");
+    let files = seeded_files();
+    for f in &files {
+        let path = dir.path().join(&f.dest);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, f.contents).unwrap();
+        if f.executable {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let refuses = |c: &str| {
+        let input = serde_json::json!({ "command": c });
+        evaluate_secret_file_read_in("Bash", Some(&input), Some(dir.path()))
+            .or_else(|| evaluate_env_plist_read("Bash", Some(&input), dir.path()))
+            .or_else(|| evaluate_script_body_secret_read(c, dir.path()))
+    };
+    let (mut runs, mut refused) = (0, Vec::new());
+    for f in files.iter().filter(|f| f.dest.starts_with("scripts/")) {
+        let runner = if f.dest.ends_with(".sh") {
+            "bash"
+        } else {
+            "python3"
+        };
+        let mut commands = vec![
+            format!("{runner} {}", f.dest),
+            format!("{runner} {} --help", f.dest),
+        ];
+        if f.executable {
+            commands.push(format!("./{}", f.dest));
+        }
+        runs += 1;
+        refused.extend(
+            commands
+                .iter()
+                .filter_map(|c| refuses(c).map(|why| format!("{c}: {why}"))),
+        );
+    }
+    assert!(runs > 40, "seeded scripts judged: {runs}");
+    assert!(refused.is_empty(), "refused:\n{}", refused.join("\n"));
+}
