@@ -602,6 +602,8 @@ async fn upgrade_one(
         Outcome::ChecksumMismatch(mismatch) => Err(anyhow::Error::new(mismatch)),
         // #9974: binaries placed, cargo's launcher record not taken over.
         Outcome::CargoRecord(e) => Err(anyhow::Error::new(e)),
+        // #10584: only `tctl install` passes the no-downgrade guard; terminal.
+        Outcome::Refused(e) => Err(anyhow::Error::new(e)),
         Outcome::Fallback { reason } => {
             tracing::info!(crate_name = %c.crate_name, %reason, "prebuilt unavailable; using cargo install");
             // Verify cargo is available before attempting the fallback.

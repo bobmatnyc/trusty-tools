@@ -423,3 +423,67 @@ async fn tga_prebuilt_live_installs_past_the_old_repo_ceiling() {
     assert!(v >= semver::Version::new(9, 0, 0), "installed {version}");
     assert!(paths.iter().any(|p| p.ends_with("tga")), "{paths:?}");
 }
+
+/// Why (#10584): `tctl install` resolved `latest` and placed it over a newer
+/// installed dev build. The refusal must happen before anything is placed.
+/// What: publishes a valid 1.0.0 release; with a 2.0.0 build installed, the
+/// guarded pipeline returns `Refused` naming both versions and leaves the
+/// installed file untouched.
+/// Test: This is the test. Skipped on a non-Tier-1 host (see above).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_release_older_than_the_installed_build_is_refused_before_download() {
+    let Some(target) = tier1() else { return };
+    let (name, version) = ("demo-tool", "1.0.0");
+    let suffix = glibc::select_asset_suffix(name, target, glibc::host_glibc_version()).suffix;
+    let archive = release::asset_filename(name, version, &suffix);
+    let tarball = fake_tarball(name, &format!("{name} {version}"));
+    let digest = sha256_hex(&tarball);
+    let mut routes: Routes = std::collections::HashMap::new();
+    routes.insert(
+        "/releases".to_owned(),
+        (
+            200,
+            format!(r#"[{{"tag_name":"{name}-v{version}","prerelease":false}}]"#).into_bytes(),
+        ),
+    );
+    let key = format!("/dl/{name}-v{version}/{archive}");
+    routes.insert(
+        format!("{key}.sha256"),
+        (200, format!("{digest}  {archive}\n").into_bytes()),
+    );
+    routes.insert(key, (200, tarball));
+    let base = serve_fixture(routes).await;
+    let (releases_url, download_base) = (format!("{base}/releases"), format!("{base}/dl"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let dev_build = "echo 'demo-tool 2.0.0'";
+    let path = test_fixture::write_fake_binary(dir.path(), name, dev_build);
+    let installed = version_guard::probe_installed_build(name, &[&path])
+        .await
+        .unwrap();
+
+    let outcome = try_install_prebuilt_guarded_at(
+        &http_client(),
+        &pinned::Endpoints {
+            releases_url: &releases_url,
+            download_base: &download_base,
+        },
+        name,
+        dir.path(),
+        None,
+        installed.as_ref(),
+    )
+    .await;
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        after.contains(dev_build),
+        "installed build replaced: {after:?}"
+    );
+    let Outcome::Refused(refusal) = &outcome else {
+        panic!("an older release must not replace a newer build: {outcome:?}")
+    };
+    let msg = refusal.to_string();
+    assert!(msg.contains("2.0.0") && msg.contains("1.0.0"), "{msg}");
+}

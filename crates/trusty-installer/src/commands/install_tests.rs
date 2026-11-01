@@ -112,6 +112,23 @@ fn is_integrity_failure_ignores_a_routine_failure() {
     assert!(!is_integrity_failure(&e));
 }
 
+/// Why (#10584): an optional member's downgrade refusal must fail the run,
+/// not render as "skipped (no prebuilt)" and exit 0.
+/// What: wraps a `DowngradeRefusal` in context; asserts it is caught.
+/// Test: This is the test.
+#[test]
+fn is_integrity_failure_spots_a_downgrade_refusal() {
+    use crate::download::version_guard::DowngradeRefusal;
+    let refusal = DowngradeRefusal::NewerInstalled {
+        crate_name: "trusty-search".to_owned(),
+        installed: "2.0.0".to_owned(),
+        target: "1.0.0".to_owned(),
+        path: std::path::PathBuf::from("/bin/trusty-search"),
+    };
+    let e = anyhow::Error::new(refusal).context("installing trusty-search");
+    assert!(is_integrity_failure(&e));
+}
+
 /// Why: The JSON envelope is a public contract; pin its shape.
 /// What: Builds a report and asserts the serialised keys/values.
 /// Test: This is the test.

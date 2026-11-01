@@ -39,10 +39,12 @@ pub mod glibc;
 pub mod pinned;
 pub mod platform;
 pub mod release;
+// #10584: `tctl install` refuses to replace a newer installed build.
 /// Loopback release-server fixtures shared by this module's suite and
 /// `pinned::tests` — one server, not two (#5518).
 #[cfg(test)]
 pub(crate) mod test_fixture;
+pub mod version_guard;
 
 use std::path::PathBuf;
 
@@ -161,6 +163,9 @@ pub enum Outcome {
     /// standalone `trusty-embedderd-py` as the launcher's owner and could not
     /// be taken over. Terminal — the caller reports it as a failure (#9974).
     CargoRecord(CargoRecordError),
+    /// The resolved release is older than the installed build, or either
+    /// version is unreadable. Terminal — nothing was downloaded (#10584).
+    Refused(version_guard::DowngradeRefusal),
 }
 
 /// Attempt to install a prebuilt binary for `crate_name` into `install_dir`.
@@ -262,6 +267,46 @@ pub(crate) async fn try_install_prebuilt_at(
     install_dir: &std::path::Path,
     floor: Option<&str>,
 ) -> Outcome {
+    try_install_prebuilt_guarded_at(client, endpoints, crate_name, install_dir, floor, None).await
+}
+
+/// [`try_install_prebuilt`], refusing a release older than `installed`.
+///
+/// Why (#10584): `tctl install` must never replace a newer dev build with an
+/// older `latest`.
+/// What: production endpoints; `installed` is the build already at the
+/// destination (`None` when nothing is installed).
+/// Test: `mod_tests::a_release_older_than_the_installed_build_is_refused_before_download`.
+pub(crate) async fn try_install_prebuilt_no_downgrade(
+    crate_name: &str,
+    install_dir: &std::path::Path,
+    installed: Option<&version_guard::InstalledBuild>,
+) -> Outcome {
+    let endpoints = pinned::Endpoints::for_crate(crate_name);
+    try_install_prebuilt_guarded_at(
+        &http_client(),
+        &endpoints,
+        crate_name,
+        install_dir,
+        None,
+        installed,
+    )
+    .await
+}
+
+/// The prebuilt pipeline behind every entry point above.
+///
+/// What: resolve, apply the `floor` (#8642) and `installed` (#10584) guards,
+/// then download, verify and place.
+/// Test: `mod_tests::a_release_older_than_the_installed_build_is_refused_before_download`.
+pub(crate) async fn try_install_prebuilt_guarded_at(
+    client: &reqwest::Client,
+    endpoints: &pinned::Endpoints<'_>,
+    crate_name: &str,
+    install_dir: &std::path::Path,
+    floor: Option<&str>,
+    installed: Option<&version_guard::InstalledBuild>,
+) -> Outcome {
     // Step 1: Check Tier-1 target.
     let target = match platform::current_target() {
         Some(t) => t,
@@ -301,6 +346,14 @@ pub(crate) async fn try_install_prebuilt_at(
     if let Some(reason) = floor_fallback_reason(crate_name, &resolved.version, floor) {
         tracing::info!(crate_name, version = %resolved.version, ?floor, "prebuilt not newer");
         return Outcome::Fallback { reason };
+    }
+    // #10584: never place a release older than the installed build.
+    if let Some(build) = installed {
+        if let Err(refusal) =
+            version_guard::check_no_downgrade(crate_name, build, &resolved.version)
+        {
+            return Outcome::Refused(refusal);
+        }
     }
 
     // Step 3: Pick the glibc-aware asset suffix. On a low-glibc Linux host the
@@ -983,6 +1036,7 @@ mod tests {
                 panic!("a real GitHub release must verify against its own checksum: {m}")
             }
             Outcome::CargoRecord(e) => panic!("a temp dir holds no cargo metadata: {e}"),
+            Outcome::Refused(e) => panic!("no guard is passed on this path: {e}"),
         }
     }
 }
