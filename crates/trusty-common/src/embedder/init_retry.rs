@@ -80,6 +80,12 @@ fn is_transient_init_error(err: &anyhow::Error) -> bool {
         "connection failed",
         "connection refused",
         "body data reading stalled",
+        // #10662: std's lookup failure, the prefix alone because the
+        // `gai_strerror` detail after it differs by libc. An offline host hits
+        // this one; `host not found` needs a lookup that succeeded.
+        "failed to lookup address information",
+        "network is unreachable",
+        "no route to host",
     ];
     TRANSIENT.iter().any(|needle| msg.contains(needle))
 }
