@@ -21,7 +21,13 @@ until it clears for one cycle, or its kind's re-emit interval passes.
 `dispatch_wake` types the one-line pointer into the Architect's pane and
 sends keys to no other pane. quiet_sessions.py drops "idle" for a parked
 session and "exited" for a disposable test-fixture one. The pure parsing and
-alert evaluation live in scripts/fleet-classify.py; this file does the I/O.
+alert evaluation live in scripts/fleet-classify.py; the settings, I/O, alert
+steps and wake live in scripts/fleet_poll_{cfg,io,alerts,wake}.py, and the
+self-refresh step in fleet_poll_selfrefresh.py (#10571). This file keeps the
+cycle, the state file and main, and re-exports every moved name. Each cycle
+also runs the Architect watchdog (fleet_poll_watchdog.py, architect-watchdog.py),
+the Intent Ledger cadence jobs (il-cron.py) and the clear-signal check
+(ctx-watch.py), and appends their findings as alerts.
 Config (env, all optional): ARCHITECT_SESSION (default tm-architect),
 ARCHITECT_POLL_SESSION (default <ARCHITECT_SESSION>-poll),
 ARCHITECT_INBOX_DIR (default <root>/inbox), ARCHITECT_QUIET_SESSIONS_FILE
@@ -29,47 +35,26 @@ ARCHITECT_INBOX_DIR (default <root>/inbox), ARCHITECT_QUIET_SESSIONS_FILE
 CONTEXT_BAR_TOKENS (default 250000), CONTEXT_WINDOW_TOKENS (default 1000000);
 see README.md.
 Test: tests/test_fleet_poll.py, tests/test_quiet_sessions.py,
-tests/test_fleet_poll_workspace_servers.py
+tests/test_fleet_poll_workspace_servers.py, tests/test_fleet_poll_split.py,
+tests/test_fleet_poll_lock.py
 Usage: scripts/fleet-poll.py [--once] [--interval N] [--dry-run]
        (normally run via scripts/start-fleet-poll.sh)
+Exit: 0 after --once or --dry-run; 3 when another live poller holds
+inbox/poll.lock (checked before the first log line or state write).
 """
 import argparse
 import copy
 import importlib.util
 import json
 import os
-import re
-import shutil
-import socket
-import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-# ARCHITECT_INBOX_DIR relocates the queues and logs, e.g. in tests.
-INBOX = os.environ.get("ARCHITECT_INBOX_DIR") or os.path.join(ROOT, "inbox")
-EVENTS = os.path.join(INBOX, "events.jsonl")
-ALERTS = os.path.join(INBOX, "alerts.jsonl")
-STATE = os.path.join(INBOX, "poll-state.json")
-LOG = os.path.join(INBOX, "poll.log")
-SOCKET = os.environ.get("TMUX_SOCKET", "")
-# #8928 step 4: the name prefix of a workspace's private tmux server.
-WORKSPACE_PREFIX = "tm-ws-"
-
-# The Architect's own tmux session: the only pane this poller sends keys to.
-ARCHITECT = os.environ.get("ARCHITECT_SESSION") or "tm-architect"
-POLL_SESSION = os.environ.get("ARCHITECT_POLL_SESSION") or f"{ARCHITECT}-poll"
-SKIP_SESSIONS = {ARCHITECT, POLL_SESSION}
-SHELLS = {"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh", "login"}
-EVENT_TYPES = {"permission_prompt", "agent_needs_input"}  # idle_prompt is not an alert
-
-DISK_HIGH = 90
-LOAD_FACTOR_DEFAULT = 1.5  # x cores, vs. the 5-min load avg; env LOAD_FACTOR overrides
 
 # #9997: each context-bar warning is logged once per poller process.
 _LOGGED_BAR_WARNINGS = set()
+_HELD_LOCK = []  # #10571: the poll.lock fd main() holds
 
 
 def _load_by_path(name, filename):
@@ -79,6 +64,30 @@ def _load_by_path(name, filename):
     spec.loader.exec_module(mod)
     return mod
 
+
+class _Poller:
+    """Late-bound view of this module's globals, handed to each fleet_poll_* module (#10571).
+
+    A moved function reads the poller's names when it runs, not when it loads, so rebinding
+    `fleet-poll.tmux`, `fleet-poll.LOG` or `fleet-poll.wake` still steers it, as before the split.
+    """
+
+    def __getattr__(self, name):
+        try:
+            return globals()[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+
+# Settings (#10571 split). These names stay fleet-poll attributes.
+_cfg = _load_by_path("fleet_poll_cfg", "fleet_poll_cfg.py")
+ROOT, INBOX, EVENTS, ALERTS = _cfg.ROOT, _cfg.INBOX, _cfg.EVENTS, _cfg.ALERTS
+STATE, LOG, SOCKET, WORKSPACE_PREFIX = _cfg.STATE, _cfg.LOG, _cfg.SOCKET, _cfg.WORKSPACE_PREFIX
+LOCK = _cfg.LOCK
+ARCHITECT, POLL_SESSION, SKIP_SESSIONS = _cfg.ARCHITECT, _cfg.POLL_SESSION, _cfg.SKIP_SESSIONS
+SHELLS, EVENT_TYPES = _cfg.SHELLS, _cfg.EVENT_TYPES
+DISK_HIGH, LOAD_FACTOR_DEFAULT = _cfg.DISK_HIGH, _cfg.LOAD_FACTOR_DEFAULT
+QUIET_SESSIONS_FILE, RELAUNCH_SCRIPT = _cfg.QUIET_SESSIONS_FILE, _cfg.RELAUNCH_SCRIPT
 
 # Pure pane parsing and alert evaluation live in fleet-classify.py (#8891).
 # These names stay fleet-poll attributes, as they were before the split.
@@ -92,300 +101,31 @@ fleet_plan_alerts, dedup = fleet_classify.fleet_plan_alerts, fleet_classify.dedu
 
 self_ctx = _load_by_path("self_ctx", "self-ctx.py")
 quiet_sessions = _load_by_path("quiet_sessions", "quiet-sessions.py")
+watchdog = _load_by_path("architect_watchdog", "architect-watchdog.py")
+il_cron = _load_by_path("il_cron", "il-cron.py")
+ctx_watch = il_cron.ctx_watch
 SELF_CTX_DIR = os.environ.get("SELF_CTX_DIR") or self_ctx.default_dir()
-QUIET_SESSIONS_FILE = (os.environ.get("ARCHITECT_QUIET_SESSIONS_FILE")
-                       or os.path.join(ROOT, "quiet-sessions.txt"))
 
-
-# --- I/O ---------------------------------------------------------------------
-
-class TmuxError(Exception):
-    pass
-
-
-def log(msg, dry_run=False):
-    line = f"{iso()} {msg}"
-    if dry_run:
-        print(line)
-        return
-    with open(LOG, "a") as f:
-        f.write(line + "\n")
-
-
-def tmux(*args, server=None):
-    # #8928: `server` names a workspace's private server (`tmux -L <server>`).
-    where = ["-L", server] if server else (["-S", SOCKET] if SOCKET else [])
-    cmd = ["tmux", *where, *args]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise TmuxError(f"{args[0]}: {e}") from e
-    if r.returncode != 0:
-        raise TmuxError(f"{args[0]}: {r.stderr.strip()[:200]}")
-    return r.stdout
-
-
-def socket_dir():
-    """tmux's socket directory: $TMUX_TMPDIR (or /tmp), resolved, + tmux-<uid>."""
-    base = os.path.realpath(os.environ.get("TMUX_TMPDIR") or "/tmp")
-    return os.path.join(base, f"tmux-{os.getuid()}")
-
-
-def workspace_servers(directory=None):
-    """#8928: live workspace servers (`tm-ws-*` sockets that answer), sorted."""
-    directory = directory or socket_dir()
-    try:
-        names = os.listdir(directory)
-    except FileNotFoundError:
-        return []
-    live = []
-    for name in sorted(n for n in names if n.startswith(WORKSPACE_PREFIX)):
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(1.0)  # a wedged server must not stall the cycle
-        try:
-            s.connect(os.path.join(directory, name))
-            live.append(name)
-        except OSError:
-            pass  # not a socket, or a server that exited
-        finally:
-            s.close()
-    return live
-
-
-def list_panes():
-    """Panes of the default server and, unless TMUX_SOCKET pins one server,
-    of every live workspace server; each pane names the server it is on."""
-    fmt = "#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{window_active}#{pane_active}"
-    panes = _rows(tmux("list-panes", "-a", "-F", fmt), None)
-    for server in ([] if SOCKET else workspace_servers()):
-        try:
-            panes += _rows(tmux("list-panes", "-a", "-F", fmt, server=server), server)
-        except TmuxError as e:
-            log(f"{server} list-panes ERROR {e}")
-    return panes
-
-
-def _rows(out, server):
-    panes = []
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) == 4:
-            pane = dict(zip(("session", "pane", "cmd", "active"), parts))
-            if server:
-                pane["server"] = server
-            panes.append(pane)
-    return panes
-
-
-def capture(pane, server=None):
-    if server:
-        return tmux("capture-pane", "-e", "-p", "-S", "-80", "-t", pane, server=server)
-    return tmux("capture-pane", "-e", "-p", "-S", "-80", "-t", pane)
-
-
-def capture_pane(p):
-    """Capture listed pane `p` on the server it was listed from (#8928)."""
-    return capture(p["pane"], p["server"]) if p.get("server") else capture(p["pane"])
-
-
-def send_to_architect(pane, *keys):
-    """The only send path. Re-checks that `pane` belongs to the Architect first."""
-    owner = tmux("display-message", "-p", "-t", pane, "#{session_name}").strip()
-    if owner != ARCHITECT:
-        raise TmuxError(f"refusing to send to {pane} (session {owner!r})")
-    tmux("send-keys", "-t", pane, *keys)
-
-
-def read_events(state):
-    """New permission_prompt / agent_needs_input lines since the saved offset."""
-    size = os.path.getsize(EVENTS) if os.path.exists(EVENTS) else 0
-    off = state.get("events_offset")
-    if off is None or size < off:   # first run: skip backlog; smaller file: rotated
-        off = size if off is None else 0
-    evs = []
-    if size > off:
-        with open(EVENTS) as f:
-            f.seek(off)
-            chunk = f.read()
-            off = f.tell()
-        for line in chunk.splitlines():
-            try:
-                ev = json.loads(line)
-            except ValueError:
-                continue
-            s = ev.get("tmux_session") or ""
-            if ev.get("type") in EVENT_TYPES and s not in SKIP_SESSIONS:
-                evs.append(alert(ev["type"], fp(line), ev.get("message") or ev["type"],
-                                 s, ev.get("tmux_pane") or "", now=time.time()))
-    state["events_offset"] = off
-    return evs
-
-
-def swap_used_mb():
-    if sys.platform == "darwin":
-        out = subprocess.run(["sysctl", "-n", "vm.swapusage"], capture_output=True,
-                             text=True, timeout=5).stdout
-        m = re.search(r"used = ([\d.]+)([KMG])", out)
-        if not m:
-            return None
-        return float(m.group(1)) * {"K": 1 / 1024, "M": 1, "G": 1024}[m.group(2)]
-    with open("/proc/meminfo") as f:
-        mi = {l.split(":")[0]: int(l.split()[1]) for l in f if ":" in l}
-    return (mi.get("SwapTotal", 0) - mi.get("SwapFree", 0)) / 1024
-
-
-def host_alerts(now):
-    out = []
-    load1, load5, load15 = os.getloadavg()
-    cores, factor = os.cpu_count() or 1, float(os.environ.get("LOAD_FACTOR", LOAD_FACTOR_DEFAULT))
-    if load5 > factor * cores:
-        out.append(alert("load", "load", f"load {load1:.1f}/{load5:.1f}/{load15:.1f} "
-                         f"(5m > {factor}x{cores} cores)", now=now))
-    du = shutil.disk_usage("/")
-    pct = 100 * du.used / du.total
-    if pct > DISK_HIGH:
-        out.append(alert("disk", "disk", f"root disk {pct:.0f}% used", now=now))
-    try:
-        swap = swap_used_mb()
-    except (OSError, subprocess.SubprocessError, ValueError):
-        swap = None
-    if swap:
-        out.append(alert("swap", "swap", f"swap in use: {swap:.0f} MB", now=now))
-    return out
-
-
-def resolve_context_bar(dry_run=False):
-    """(bar_tokens, window_tokens) from fleet-classify's context_bar(), logging
-    each warning once per process (#9997): an invalid value falls back to the
-    default and says so; it never switches the alert off."""
-    bar, window, warnings = fleet_classify.context_bar()
-    for w in warnings:
-        if w not in _LOGGED_BAR_WARNINGS:
-            _LOGGED_BAR_WARNINGS.add(w)
-            log(f"WARNING {w}", dry_run)
-    return bar, window
-
-
-def self_ctx_alerts(now, dry_run=False):
-    """One "self_ctx" alert when the Architect's own context (self_ctx.py,
-    tailing its transcript) is at/over the context bar, in tokens; no window
-    is involved (#9997). A missing or unreadable transcript logs and yields
-    no alert; self_ctx.py never raises for that."""
-    bar, _ = resolve_context_bar(dry_run)
-    try:
-        tokens = self_ctx.self_ctx_tokens(SELF_CTX_DIR)
-    except (OSError, ValueError, TypeError) as e:
-        log(f"self_ctx ERROR {type(e).__name__}: {e}", dry_run)
-        return []
-    if tokens is None or tokens < bar:
-        return []
-    return [alert("self_ctx", str(bar), f"self ctx {tokens} tokens (bar {bar} tokens)",
-                  ARCHITECT, now=now)]
-
-
-def _norm(text):
-    """Strip all whitespace (including the box's leading non-breaking space)
-    so a message that wraps across screen rows compares equal to itself."""
-    return re.sub(r"\s+", "", text.replace("\xa0", ""))
-
-
-def _box_full_text(capture):
-    """Normalized text of the whole input box: the ❯ row plus any wrapped
-    continuation rows that carry no rule of their own. A narrow pane (the
-    Architect's own is ~47 columns) wraps a typed message across several
-    screen rows, and only the first carries the ❯ glyph input_state.classify()
-    keys on — this reads the box find_box() bounds instead, so wrapping never
-    makes a message that IS present look unconfirmed. "" if no box is found."""
-    lines = _screen_lines(capture)
-    box = find_box(lines)
-    if not box:
-        return ""
-    top, bottom = box
-    return _norm("".join(lines[top + 1:bottom]).replace("❯", ""))
-
-
-def _own_pointer(text):
-    """True if normalized box text looks like a wake() pointer this poller
-    typed itself ('[poll HH:MMZ] N new alerts -> path'), including one split
-    across wrapped rows. Never true for a human draft that merely starts with
-    the same characters without the rest of the shape — a false positive here
-    would delete a real draft, which wake() must never do."""
-    return text.startswith("[poll") and "newalerts->" in text
-
-
-def wake(n, panes, dry_run):
-    """Type the pointer into the Architect's input box. Returns a log phrase.
-
-    Why: 2026-09-27/28 poll.log — the Architect's pane is narrow enough that a
-    typed pointer wraps across screen rows, so the old prefix-in-one-line
-    confirmation failed even though the text WAS in the box, leaving that text
-    sitting there for later cycles to trip over as "input typed" and, once,
-    to get submitted merged with unrelated input.
-    What: confirms against the whole box (wrap-tolerant); on a genuine
-    confirmation failure, removes exactly the characters it just typed
-    (BSpace x len(msg) — safe because the box was verified empty/suggestion
-    immediately before typing, so nothing else can be there) and reports
-    whether the cleanup left the box empty; and recognizes its own stale
-    pointer left over from an earlier cycle with a distinct log reason instead
-    of the generic "input typed", without ever deleting text it cannot
-    positively identify as its own.
-    Test: test_wake_confirms_wrapped_message_and_sends_enter,
-    test_wake_cleans_up_its_own_text_when_confirmation_fails,
-    test_wake_detects_its_own_stale_pointer_and_does_not_send
-    """
-    sup = sorted((p for p in panes if p["session"] == ARCHITECT),
-                 key=lambda p: p["active"] != "11")
-    if not sup:
-        return f"skipped: no {ARCHITECT} pane"
-    target = sup[0]["pane"]
-    raw = capture(target)
-    info = parse_pane(raw)
-    if info["dialog"]:
-        return "skipped: dialog open"
-    if not info["has_box"]:
-        # Usually the Architect busy on its own turn: Claude Code's TUI drops
-        # the rule-bounded box find_box() requires while it works, even though
-        # a stale "❯" line elsewhere can still make input_state.classify()
-        # guess "empty"/"suggestion" — that guess is not this skip's real
-        # cause, so it must never appear in the log in its place.
-        return "skipped: no input box found"
-    if info["box"] not in ("empty", "suggestion"):
-        if _own_pointer(_box_full_text(raw)):
-            return "skipped: own stale pointer in box"
-        return f"skipped: input {info['box']}"
-    msg = f"[poll {datetime.now(timezone.utc):%H:%M}Z] {n} new alerts -> {ALERTS}"
-    if dry_run:
-        return f"dry-run: would send to {target}: {msg}"
-    send_to_architect(target, "-l", msg)
-    time.sleep(0.5)
-    if _norm(msg) not in _box_full_text(capture(target)):
-        send_to_architect(target, *(["BSpace"] * len(msg)))
-        time.sleep(0.3)
-        empty = input_state.classify(capture(target))[0] in ("empty", "suggestion")
-        return ("failed: text not confirmed in the input box; cleaned up, box empty"
-                 if empty else
-                 "failed: text not confirmed in the input box; cleanup left box non-empty")
-    send_to_architect(target, "Enter")
-    time.sleep(1)
-    left = input_state.classify(capture(target))[1]
-    return f"sent to {target}" + (" (still in box after Enter)" if msg[:40] in left else "")
-
-
-def dispatch_wake(state, panes, new_count, dry_run):
-    """Carry `new_count` into state["wake_pending"] and attempt one wake()
-    when anything is pending; clears only on a confirmed send, so a skipped
-    or failed attempt leaves the FULL total for the next cycle to retry.
-    Returns the log phrase."""
-    state["wake_pending"] = state.get("wake_pending", 0) + new_count
-    if not state["wake_pending"]:
-        return "none"
-    try:
-        result = wake(state["wake_pending"], panes, dry_run)
-    except TmuxError as e:
-        result = f"failed: {e}"
-    if result.startswith("sent"):
-        state["wake_pending"] = 0
-    return result
+# I/O, alert steps, wake and self-refresh (#10571 split), each bound to this module's names.
+_io = _load_by_path("fleet_poll_io", "fleet_poll_io.py")
+_alerts = _load_by_path("fleet_poll_alerts", "fleet_poll_alerts.py")
+_wake = _load_by_path("fleet_poll_wake", "fleet_poll_wake.py")
+_watchdog = _load_by_path("fleet_poll_watchdog", "fleet_poll_watchdog.py")
+_selfrefresh = _load_by_path("fleet_poll_selfrefresh", "fleet_poll_selfrefresh.py")
+for _mod in (_io, _alerts, _wake, _watchdog, _selfrefresh):
+    _mod.bind(_Poller())
+TmuxError, log, tmux, socket_dir = _io.TmuxError, _io.log, _io.tmux, _io.socket_dir
+workspace_servers, list_panes, _rows = _io.workspace_servers, _io.list_panes, _io._rows
+capture, capture_pane, send_to_architect = _io.capture, _io.capture_pane, _io.send_to_architect
+read_events, swap_used_mb, host_alerts = _io.read_events, _io.swap_used_mb, _io.host_alerts
+acquire_poll_lock = _io.acquire_poll_lock
+resolve_context_bar, self_ctx_alerts = _alerts.resolve_context_bar, _alerts.self_ctx_alerts
+il_cron_alerts, ctx_watch_alerts = _alerts.il_cron_alerts, _alerts.ctx_watch_alerts
+run_architect_relaunch, architect_busy = _watchdog.run_architect_relaunch, _watchdog.architect_busy
+architect_transcript_mtime, watchdog_alerts = _watchdog.architect_transcript_mtime, _watchdog.watchdog_alerts
+_norm, _box_full_text, _own_pointer = _wake._norm, _wake._box_full_text, _wake._own_pointer
+wake, dispatch_wake, self_clear_running = _wake.wake, _wake.dispatch_wake, _wake.self_clear_running
+self_refresh_step = _selfrefresh.self_refresh_step
 
 
 # --- one cycle ---------------------------------------------------------------
@@ -398,6 +138,7 @@ def cycle(state, dry_run=False, now=None):
         log(f"panes=? ERROR {e}; cycle skipped", dry_run)
         return
     state.setdefault("panes", {})
+    watch_found, watch_phrase = watchdog_alerts(state, panes, now, dry_run)  # #10571 (prototype :1889)
     bar = resolve_context_bar(dry_run)
     watched = [p for p in panes
                if p["session"].startswith("tm-") and p["session"] not in SKIP_SESSIONS]
@@ -405,9 +146,9 @@ def cycle(state, dry_run=False, now=None):
     for p in watched:
         s, pid = p["session"], p["pane"]
         current[s] = pid
-        ps = state["panes"].setdefault(f"{s}|{pid}", {})
+        pane_st = state["panes"].setdefault(f"{s}|{pid}", {})
         if p["cmd"] in SHELLS or p["cmd"].startswith("-"):
-            ps["idle_since"] = None
+            pane_st["idle_since"] = None
             if not quiet_sessions.is_test_fixture_session(s):
                 candidates.append(alert("exited", f"shell-{p['cmd']}",
                                         f"pane runs {p['cmd']}, not Claude", s, pid, now))
@@ -418,11 +159,12 @@ def cycle(state, dry_run=False, now=None):
             log(f"{s} {pid} capture ERROR {e}", dry_run)
             continue
         infos.append((s, info))
-        found = evaluate(info, ps, now, s, pid, bar)
+        found = evaluate(info, pane_st, now, s, pid, bar)
         candidates += found
         if dry_run:
             print(f"  {s} {pid} cmd={p['cmd']} box={info['box']} agents={info['agents']} "
-                  f"busy={info['busy']} dialog={bool(info['dialog'])} ctx={info['ctx']} "
+                  f"busy={info['busy']} turn_active={info['turn_active']} "
+                  f"dialog={bool(info['dialog'])} ctx={info['ctx']} "
                   f"plan={info['plan5h']}/{info['planwk']} q={bool(info['question'])} "
                   f"alerts={[a['kind'] for a in found] or '-'}")
     for s, pid in state.get("sessions", {}).items():
@@ -432,9 +174,12 @@ def cycle(state, dry_run=False, now=None):
     live = {f"{s}|{pid}" for s, pid in current.items()}
     state["panes"] = {k: v for k, v in state["panes"].items() if k in live}
     candidates += fleet_plan_alerts(infos, now)
+    candidates += il_cron_alerts(now, dry_run)      # #10571 (prototype :1942)
+    candidates += ctx_watch_alerts(now, dry_run)    # #10571 (prototype :1943)
     candidates += read_events(state)
     candidates += host_alerts(now)
     candidates += self_ctx_alerts(now, dry_run)
+    candidates += watch_found
     quiet = quiet_sessions.read_quiet_sessions(QUIET_SESSIONS_FILE)
     candidates = [a for a in candidates if not (a["kind"] == "idle" and a["session"] in quiet)]
     new, suppressed = dedup(state, candidates, now)
@@ -446,7 +191,11 @@ def cycle(state, dry_run=False, now=None):
             for a in new:
                 f.write(json.dumps(a, ensure_ascii=False) + "\n")
     result = dispatch_wake(state, panes, len(new), dry_run)
-    log(f"panes={len(watched)} new={len(new)} suppressed={suppressed} wake={result}", dry_run)
+    # #10599 PR-1's slot (prototype :2000): never type into the box twice in a cycle.
+    if not result.startswith("sent"):
+        watch_phrase = f"{watch_phrase} {self_refresh_step(state, panes, now, dry_run)}".rstrip()
+    log(f"panes={len(watched)} new={len(new)} suppressed={suppressed} wake={result} {watch_phrase}".rstrip(),
+        dry_run)
 
 
 def load_state():
@@ -474,6 +223,15 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if not args.dry_run:
         os.makedirs(INBOX, exist_ok=True)
+        # #10571: a second live poller stops here, before its first log line or state write.
+        held, detail = acquire_poll_lock(LOCK)
+        if held == "busy":
+            print(f"fleet-poll: {detail}; exiting", file=sys.stderr)
+            return 3
+        if held == "unknown":
+            log(f"WARNING poll lock: {detail}; polling without it")
+        else:
+            _HELD_LOCK.append(detail)  # the fd: the lock lasts as long as this process
     state = load_state()
     if args.dry_run:
         state = copy.deepcopy(state)
@@ -487,9 +245,9 @@ def main(argv=None):
         except Exception as e:  # one bad cycle must not stop the poller
             log(f"ERROR {type(e).__name__}: {e}", args.dry_run)
         if args.once or args.dry_run:
-            return
+            return 0
         time.sleep(args.interval)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

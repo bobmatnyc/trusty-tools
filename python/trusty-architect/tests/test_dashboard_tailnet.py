@@ -147,6 +147,11 @@ class Guard(unittest.TestCase):
             srv.server_close()
         self.assertEqual(names, ["Pat", "the owner"])
 
+    def test_config_names_the_console_origin_from_the_guard_name(self):
+        # #10571: /config.json console is https://<guard name>/; "" with no guard name
+        self.assertEqual(self.config(self.port)["console"], f"https://{NAME}/")
+        self.assertEqual(self.mod.console_origin(frozenset()), "")
+
 
 class PageTailnet(unittest.TestCase):
     """#10161: the reader's dashHosts admits the configured tailnet origin and nothing built into the page."""
@@ -169,6 +174,25 @@ class PageTailnet(unittest.TestCase):
         r = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), [[True, True, False], [False, True, False]])
+
+
+class ConsoleLink(unittest.TestCase):
+    """the owner 2026-10-24: the Trusty Console link matches the access mode (local or tailnet)."""
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_console_href_follows_host(self):
+        with open(os.path.join(os.path.dirname(HERE), "templates", "dashboard", "index.html"), encoding="utf-8") as f:
+            page = f.read()
+        self.assertEqual(page.count('http://127.0.0.1:7788/"'), 2)   # the anchor default and the function's local fallback
+        a = page.index("  function consoleHref(")
+        js = page[a:page.index("  }\n", a) + 4] + """
+        const T = "https://h.tn.example.com:7890/", L = "http://127.0.0.1:7788/";
+        console.log(JSON.stringify([
+          consoleHref("", T, "h.tn.example.com"), consoleHref("https://h.tn.example.com/", T, "h.tn.example.com"),
+          consoleHref("", T, "127.0.0.1"), consoleHref("", "", "h.tn.example.com"), consoleHref("", "", "127.0.0.1")]));"""
+        r = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), ["https://h.tn.example.com/", "https://h.tn.example.com/", "http://127.0.0.1:7788/", "http://127.0.0.1:7788/", "http://127.0.0.1:7788/"])
 
 
 def allowed(mod, extra):

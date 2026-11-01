@@ -18,6 +18,10 @@ if [ -n "$WANT" ]; then
   [ "$S" = "$WANT" ] || exit 0
   export DATG_SESSION="$WANT"  # datg.py logs warn-mode warnings under this session name
 fi
+# Project dir (arg 2 or $DATG_PROJECT): the ledger root when it is not the session cwd, e.g. the Architect's
+# local/il. datg.py `hook` reads CLAUDE_PROJECT_DIR, never --project. Unset: current behaviour.
+PROJ="${2:-$DATG_PROJECT}"
+[ -n "$PROJ" ] && export CLAUDE_PROJECT_DIR="$PROJ"
 R=$(cd "$(dirname "$0")/.." && pwd)
 # #10109: stderr passes through, so a fail-open (unreadable ledger) is visible in the hook log.
 python3 "$R/scripts/datg.py" hook

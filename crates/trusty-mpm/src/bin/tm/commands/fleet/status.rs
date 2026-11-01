@@ -66,6 +66,9 @@ pub(crate) struct StatusReport {
     /// Whether the Architect's shipped skills are current in its project
     /// tier (#9540); informational, never part of `complete`.
     pub(crate) skills: Check,
+    /// Which prototype commit and content the seeded bundle came from
+    /// (#10571); informational, never part of `complete`.
+    pub(crate) bundle: Check,
     /// Whether the calling session is bound as the Architect; informational,
     /// never part of `complete`. `None` when not evaluated.
     pub(crate) this_session: Option<Check>,
@@ -87,6 +90,11 @@ impl StatusReport {
         out.push_str(&format!(
             "  {mark}  {:<12} {}\n",
             self.skills.name, self.skills.detail
+        ));
+        let mark = if self.bundle.ok { "ok     " } else { "WARN   " };
+        out.push_str(&format!(
+            "  {mark}  {:<12} {}\n",
+            self.bundle.name, self.bundle.detail
         ));
         for c in std::iter::once(&self.binding).chain(&self.this_session) {
             let mark = if c.ok { "ok     " } else { "UNBOUND" };
@@ -159,6 +167,7 @@ pub(crate) fn status(
         unrecorded,
         binding,
         skills: skills_check(&dir),
+        bundle: bundle_check(&dir),
         session: names
             .as_ref()
             .map(|n| n.architect().to_owned())
@@ -322,6 +331,30 @@ pub(crate) fn skills_check(dir: &Path) -> Check {
         name: "skills",
         ok,
         detail,
+    }
+}
+
+/// The seeded bundle's provenance, from `docs/architect/bundle-provenance.json`.
+///
+/// Why: #10571, an install must say which prototype commit and content it runs.
+/// What: ok with the provenance line when the seeded stamp parses; a warning
+/// naming `tm fleet init` when it is absent or unreadable. Reads only.
+/// Test: `init_and_status_report_the_bundle_provenance`.
+pub(crate) fn bundle_check(dir: &Path) -> Check {
+    let path = dir.join(super::seed::refresh::PROVENANCE_DEST);
+    let line = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| super::seed::refresh::provenance_line(&t));
+    Check {
+        name: "bundle",
+        ok: line.is_some(),
+        detail: line.unwrap_or_else(|| {
+            format!(
+                "no readable {}: run `tm fleet init --dir {}` to seed it",
+                super::seed::refresh::PROVENANCE_DEST,
+                dir.display()
+            )
+        }),
     }
 }
 

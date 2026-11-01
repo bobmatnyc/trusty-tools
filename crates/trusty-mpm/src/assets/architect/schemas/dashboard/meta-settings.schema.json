@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "dashboard/meta-settings.schema.json",
-  "title": "meta/settings (owner presence and sleep window)",
+  "title": "meta/settings (owner presence, sleep window and morning brief)",
   "type": "object",
   "$defs": {
     "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"}
@@ -14,7 +14,22 @@
     "user_state": {"enum": ["active", "remote", "away", "sleeping"]},
     "user_state_at": {"$ref": "#/$defs/iso"},
     "user_state_by": {"type": "string"},
+    "owner_signal_at": {"$ref": "#/$defs/iso"},
+    "owner_signal_kind": {"type": "string"},
     "sleep_auto_on": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "morning_brief": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "time": {"type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$"},
+        "days": {"oneOf": [
+          {"enum": ["weekdays", "daily"]},
+          {"type": "array", "items": {"enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}}
+        ]},
+        "tz": {"type": "string", "minLength": 1}
+      }
+    },
     "updated": {"$ref": "#/$defs/iso"}
   }
 }

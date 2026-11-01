@@ -6,9 +6,11 @@ What: `load_projects` builds the server-side project allowlist {name: realpath o
 "- Root `<abs path>`" line of each local/projects/<name>.md, plus optional local/projects/roots.json {name: abs path}.
 `resolve_doc` returns the real path of a readable .md file under a project root, or None: `..`, empty or absolute
 segments, a realpath outside the root (symlink escape), non-.md files, any segment starting with "." (.git, .env,
-.claude, .trusty-mpm), node_modules, target, and any filename matching *secret*, *credential* or *.env*
-(case-insensitive; checked again on the resolved path) are refused. `list_briefs` lists the briefs the reader can
-reach, newest first; each file passes `resolve_doc`. `usage_samples` reads one account's last 24 h of ledger samples.
+.claude), node_modules, target, and any filename matching *secret*, *credential* or *.env*
+(case-insensitive; checked again on the resolved path) are refused. One dot exception (`doc_denied`): a leading
+`.trusty-mpm` segment is readable (PM plans) unless the next segment is `sessions`. `list_briefs` lists the briefs the
+reader can reach, newest first, each with its durable brief id (brief_ids); each file passes `resolve_doc`.
+`usage_samples` reads one account's last 24 h of ledger samples. `MAX_EDIT` bounds a PUT /doc text.
 Standard library only. The Rust successor is the console route (See #10064).
 Test: tests/test_dashboard_doc.py, tests/test_dashboard_item_brief.py, tests/test_dashboard_files.py
 """
@@ -20,10 +22,13 @@ import re
 import time
 from datetime import datetime, timezone
 
+import brief_ids
+
 ARCHITECT = "architect"
 DENY_DIRS = ("node_modules", "target")                                # path segments never served (plus any starting with ".")
 DENY_NAMES = ("*secret*", "*credential*", "*.env*")                   # filename globs never served, case-insensitive
 MAX_DOC = 4 << 20
+MAX_EDIT = 1 << 20                                                    # PUT /doc text limit, bytes
 ROOT_LINE = re.compile(r"^- Root:? +`(/[^`\n]+)`", re.M)
 BRIEF_DIRS = {ARCHITECT: ("docs/briefs", "local/briefs")}
 USAGE_WINDOW_S = 24 * 3600
@@ -106,13 +111,26 @@ def list_briefs(projects):
                         text = f.read()
                     body = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)
                     h1 = re.search(r"^#\s+(.+?)\s*$", body, re.M)
+                    h1_id = brief_ids.H1_ID_RE.match(h1.group(1)) if h1 else None
+                    bid = brief_ids.marker_id(text) or (h1_id.group(1) if h1_id else None)   # durable brief id; the H1 "Bxxxx: " prefix leaves the title
                     m = _DATE.match(name)
                     st = os.stat(real)
-                    out.append({"project": project, "path": "/".join(rel), "title": h1.group(1) if h1 else name,
+                    out.append({"project": project, "path": "/".join(rel), "title": brief_ids.H1_ID_RE.sub("", h1.group(1), count=1) if h1 else name, "brief_id": bid,
                                 "date": m.group(1) if m else datetime.fromtimestamp(st.st_mtime, timezone.utc).strftime("%Y-%m-%d"),
                                 "size": st.st_size, "words": len(body.split())})
     out.sort(key=lambda b: (b["date"], b["path"]), reverse=True)
     return out
+
+
+def doc_denied(segments):
+    """`denied` for the doc reader/editor, with one exception: a leading `.trusty-mpm` segment is allowed (PM plans live in
+    .trusty-mpm/plans/ and .trusty-mpm/*.md) unless the next segment is `sessions` (snapshots). Every other dot segment stays denied."""
+    segs = list(segments)
+    if len(segs) > 1 and segs[0] == ".trusty-mpm":
+        if segs[1] == "sessions":
+            return True
+        segs = segs[1:]
+    return denied(segs, segments[-1])
 
 
 def resolve_doc(projects, project, rel_segments):
@@ -125,13 +143,13 @@ def resolve_doc(projects, project, rel_segments):
     for seg in rel_segments:
         if seg in ("", ".", "..") or "/" in seg or "\\" in seg or "\x00" in seg:
             return None
-    if not rel_segments[-1].endswith(".md") or denied(rel_segments, rel_segments[-1]):
+    if not rel_segments[-1].endswith(".md") or doc_denied(rel_segments):
         return None
     root_real = os.path.realpath(root)
     real = os.path.realpath(os.path.join(root_real, *rel_segments))
     if os.path.commonpath([root_real, real]) != root_real or real == root_real or not real.endswith(".md") or not os.path.isfile(real):
         return None
     rsegs = os.path.relpath(real, root_real).split(os.sep)
-    if denied(rsegs, rsegs[-1]):
+    if doc_denied(rsegs):
         return None
     return real
