@@ -13,8 +13,7 @@ use tracing::warn;
 
 /// Log every tmux session in `names` as left running; returns how many.
 ///
-/// Why: see the module doc. The managed sessions the daemon can prove it
-/// owns are stopped by `SessionManager::shutdown` before this runs.
+/// Why: see the module doc. #10597: managed sessions are left running too.
 /// What: one `warn` per name; no tmux call.
 /// Test: `the_shutdown_legacy_pass_kills_no_legacy_session`.
 pub(crate) fn skip_legacy_names(names: impl IntoIterator<Item = String>) -> usize {

@@ -3024,60 +3024,6 @@ async fn fake_driver_graceful_stop_without_pid() {
     );
 }
 
-/// `SessionManager::shutdown` signals and kills an owned Active session.
-///
-/// Why: the trait-level unit tests above call the driver directly, bypassing
-/// the `SessionManager::shutdown` orchestration.
-/// What: builds a manager with one Active session whose pane `%1` is on the
-/// fake's server, calls `mgr.shutdown()`, and asserts one Ctrl-C reached that
-/// pane and the session was killed. #9101: by session id after an ownership
-/// re-check, no longer by name. The grace window in test builds is 0 s
-/// (`SIGTERM_GRACE_SECS = 0` under `#[cfg(test)]`).
-/// Test: this is the test.
-#[tokio::test]
-async fn shutdown_stops_an_owned_active_session() {
-    let dir = crate::test_support::hermetic_temp_dir();
-    let fake = fake_with_pane();
-    let mgr = SessionManager::new(dir.path(), fake.clone())
-        .await
-        .expect("manager");
-
-    let record = mgr
-        .create(
-            "shutdown-integration-task".into(),
-            Some(PathBuf::from("/tmp/wt-shutdown")),
-            Some("shutdown-integ".into()),
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("create");
-    assert_eq!(record.tmux_server.as_deref(), Some(FAKE_TMUX_SERVER));
-    {
-        let mut store = mgr.store.write().await;
-        let mut r = record.clone();
-        r.state = ManagedSessionState::Active;
-        store.upsert(r).await.expect("upsert active");
-    }
-    let tmux_name = record.tmux_name.clone();
-
-    mgr.shutdown().await;
-
-    assert_eq!(
-        fake.pane_interrupt_calls.lock().unwrap().as_slice(),
-        [(tmux_name.clone(), "%1".to_string())],
-        "shutdown signals the owned pane once"
-    );
-    // #9101: the fake records a kill by id as the id, a kill by name as the
-    // name, so this tells the two apart.
-    assert_eq!(
-        fake.kill_calls.lock().unwrap().as_slice(),
-        [FAKE_SESSION_ID.to_string()],
-        "shutdown must kill every owned Active session by its session id"
-    );
-}
-
 #[tokio::test]
 async fn claude_session_id_persists_on_session() {
     // Why (#1744): set_claude_session_id must survive a store reload so that

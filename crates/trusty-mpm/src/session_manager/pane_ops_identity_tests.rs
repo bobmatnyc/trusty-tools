@@ -55,7 +55,6 @@ async fn assert_every_pane_op_refuses(
         ManagedSessionState::Stopped,
         "a refused resume moved the record"
     );
-    f.scoped(m.shutdown()).await;
 
     let calls = f.calls();
     assert!(
@@ -149,11 +148,11 @@ async fn a_pane_identity_naming_another_session_refuses_every_pane_operation() {
     refuses_with(fake, Some("%9"), Some(LIVE_SERVER)).await;
 }
 
-/// Control: a record whose pane is on the live server still gets its keys,
-/// its capture and its shutdown kill, so the refusals above are the gate's.
+/// Control: a record whose pane is on the live server still gets its keys
+/// and its capture, so the refusals above are the gate's.
 #[serial_test::serial]
 #[tokio::test]
-async fn an_owned_pane_still_receives_keys_capture_and_shutdown() {
+async fn an_owned_pane_still_receives_keys_and_capture() {
     let f = Fixture::new(FakeTmux::default()).await;
     let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
     // #10127: the owned pane passes the ownership gate and reaches the
@@ -169,38 +168,14 @@ async fn an_owned_pane_still_receives_keys_capture_and_shutdown() {
     f.scoped(f.mgr.capture_pane(&id, 20))
         .await
         .expect("capture the owned pane");
-    f.scoped(f.mgr.shutdown()).await;
     let calls = f.calls();
-    for verb in PANE_VERBS {
+    // #10597: the daemon-stop kill this control also observed is deleted.
+    for verb in ["send-keys", "capture-pane"] {
         assert!(
             calls.contains(verb),
             "the owned pane never saw `{verb}`: {calls}"
         );
     }
-    // #9101: the shutdown kills by `$N` session id, never by exact name.
-    assert!(calls.contains("kill-session -t $"), "{calls}");
-    assert!(!calls.contains("kill-session -t ="), "{calls}");
-}
-
-/// Fail open: a shutdown neither signals nor kills a session whose pane
-/// identity cannot be read.
-#[serial_test::serial]
-#[tokio::test]
-async fn shutdown_skips_a_record_whose_pane_identity_is_unreadable() {
-    let fake = FakeTmux {
-        identity: None,
-        ..FakeTmux::default()
-    };
-    let f = Fixture::new(fake).await;
-    f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
-    f.scoped(f.mgr.shutdown()).await;
-    let calls = f.calls();
-    assert!(!calls.contains("send-keys"), "{calls}");
-    assert!(!calls.contains("kill-session"), "{calls}");
-    assert!(
-        calls.contains("display-message"),
-        "the identity was read: {calls}"
-    );
 }
 
 /// The pane command for the live tests: prints [`LIVE_TEXT`], and Ctrl-C
@@ -376,24 +351,6 @@ async fn a_stale_record_after_a_server_restart_never_reads_the_pane() {
         "capture_pane read the live pane: {captured:?}"
     );
     assert_eq!(by_name, None, "the idle-reaper capture read the live pane");
-}
-
-/// #9101 kill class, on a real tmux: the daemon shutdown leaves the restarted
-/// server's session running. Red on b016bf17fa, which killed it by name.
-#[serial_test::serial]
-#[tokio::test]
-async fn a_stale_record_after_a_server_restart_is_never_killed_by_shutdown() {
-    let Some(r) = Restarted::new("9101-kill").await else {
-        return;
-    };
-    r.stale("active").await;
-    let before = live_pane(&r.server, &r.name);
-    r.f.scoped(r.f.mgr.shutdown()).await;
-    assert_eq!(
-        live_pane(&r.server, &r.name),
-        before,
-        "shutdown killed the live session"
-    );
 }
 
 /// #9101 adopt class, on a real tmux: resuming the stale record refuses and

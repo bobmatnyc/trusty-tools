@@ -102,89 +102,10 @@ async fn stop_refuses_an_architect_record_and_never_signals_it() {
     assert!(fake.pane_interrupt_calls.lock().unwrap().is_empty());
 }
 
-/// The daemon's shutdown stops ordinary sessions and never the Architect's.
-#[tokio::test]
-async fn shutdown_skips_an_architect_session() {
-    let (dir, fake, mgr) = manager().await;
-    let arch = seed(
-        &mgr,
-        &dir,
-        ManagedSessionState::Active,
-        SessionKind::Architect,
-    )
-    .await;
-    let work = seed(
-        &mgr,
-        &dir,
-        ManagedSessionState::Active,
-        SessionKind::Ordinary,
-    )
-    .await;
-    // #9101: shutdown stops only a session that owns its pane.
-    crate::session_manager::tests::bind_pane(&mgr, &arch).await;
-    crate::session_manager::tests::bind_pane(&mgr, &work).await;
-    mgr.shutdown().await;
-    // #9101: the kill is by session id, so the signalled pane names the session.
-    let name = |id: ManagedSessionId| format!("tmpm-seed-{id}");
-    let signalled: Vec<String> = (fake.pane_interrupt_calls.lock().unwrap().iter())
-        .map(|(session, _)| session.clone())
-        .collect();
-    assert_eq!(
-        signalled,
-        vec![name(work)],
-        "shutdown reached {signalled:?}"
-    );
-    assert!(!signalled.contains(&name(arch)));
-    let stopped: Vec<String> = fake.kill_calls.lock().unwrap().clone();
-    assert_eq!(
-        stopped,
-        vec![crate::session_manager::tests::FAKE_SESSION_ID.to_string()],
-        "one kill, by id: {stopped:?}"
-    );
-}
-
-/// #9017 row 2b, legacy records: shutdown never signals a stale ORDINARY
-/// record that carries a name an Architect sidecar records (the #8935 shape),
-/// and still stops an ordinary session that owns its pane.
-#[tokio::test]
-async fn shutdown_never_signals_a_stale_record_named_by_an_architect_sidecar() {
-    let (dir, fake, mgr) = manager().await;
-    let stale = seed(
-        &mgr,
-        &dir,
-        ManagedSessionState::Active,
-        SessionKind::Ordinary,
-    )
-    .await;
-    let work = seed(
-        &mgr,
-        &dir,
-        ManagedSessionState::Active,
-        SessionKind::Ordinary,
-    )
-    .await;
-    crate::session_manager::tests::bind_pane(&mgr, &stale).await;
-    crate::session_manager::tests::bind_pane(&mgr, &work).await;
-    let stale_name = mgr.get(&stale).await.expect("stale").tmux_name;
-    sidecar(dir.path(), &stale_name);
-
-    mgr.shutdown().await;
-
-    let signalled: Vec<String> = (fake.pane_interrupt_calls.lock().unwrap().iter())
-        .map(|(session, _)| session.clone())
-        .collect();
-    assert_eq!(
-        signalled,
-        vec![format!("tmpm-seed-{work}")],
-        "{signalled:?}"
-    );
-    assert!(fake.interrupt_calls.lock().unwrap().is_empty());
-    assert_eq!(state_of(&mgr, &stale).await, ManagedSessionState::Active);
-}
-
-/// Shut down a manager over `dir` that holds a live, pane-owning Architect
-/// record named in a sidecar and one ordinary session; return both ids.
-async fn shut_down_with_an_architect(
+/// Run a manager over `dir` that holds a live, pane-owning Architect record
+/// named in a sidecar and one ordinary session, then drop it the way a
+/// stopped daemon does; return both ids. #10597: the stop signals nothing.
+async fn stopped_daemon_with_an_architect(
     dir: &tempfile::TempDir,
 ) -> (ManagedSessionId, ManagedSessionId, String) {
     let fake = FakeTmuxDriver::new();
@@ -209,26 +130,20 @@ async fn shut_down_with_an_architect(
     crate::session_manager::tests::bind_pane(&mgr, &work).await;
     let arch_name = mgr.get(&arch).await.expect("architect").tmux_name;
     sidecar(dir.path(), &arch_name);
-    mgr.shutdown().await;
-    let signalled: Vec<String> = (fake.pane_interrupt_calls.lock().unwrap().iter())
-        .map(|(session, _)| session.clone())
-        .collect();
-    assert_eq!(
-        signalled,
-        vec![format!("tmpm-seed-{work}")],
-        "{signalled:?}"
-    );
+    drop(mgr);
+    assert!(fake.pane_interrupt_calls.lock().unwrap().is_empty());
+    assert!(fake.kill_calls.lock().unwrap().is_empty());
     (arch, work, arch_name)
 }
 
-/// #9017 row 2 (restart): shutdown, then a new manager over the same store
+/// #9017 row 2 (restart): a daemon stop, then a new manager over the same store
 /// (the restarted daemon) whose tmux still holds the Architect's pane. Boot
 /// reconcile re-adopts the record under its own id and kind, and the new
 /// daemon signals, kills and creates nothing.
 #[tokio::test]
 async fn a_daemon_restart_leaves_a_live_architect_alone() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (arch, _work, arch_name) = shut_down_with_an_architect(&dir).await;
+    let (arch, _work, arch_name) = stopped_daemon_with_an_architect(&dir).await;
 
     let fake = FakeTmuxDriver::new();
     fake.seeded_names.lock().unwrap().push(arch_name.clone());
@@ -256,7 +171,7 @@ async fn a_daemon_restart_leaves_a_live_architect_alone() {
 async fn a_daemon_restart_never_relaunches_an_architect_whose_pane_died() {
     use crate::session_manager::stop_cause_tests::CountingRelauncher;
     let dir = crate::test_support::hermetic_temp_dir();
-    let (arch, work, _) = shut_down_with_an_architect(&dir).await;
+    let (arch, work, _) = stopped_daemon_with_an_architect(&dir).await;
 
     let fake = FakeTmuxDriver::new();
     let mgr = Arc::new(

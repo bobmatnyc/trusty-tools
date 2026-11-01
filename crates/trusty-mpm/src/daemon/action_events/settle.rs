@@ -86,7 +86,7 @@ impl ActionEvents {
     /// Why: [`ActionPublisher::buffer`] logs late events only at powers of
     /// two, and the sessions a normal stop ends after the settle send hooks.
     /// What: one warn line with `late_lost` when it is above zero. Each stop
-    /// path calls it last: serve after `mgr.shutdown()`, the signal path
+    /// path calls it last: serve after the shutdown report, the signal path
     /// before `process::exit`.
     /// Test: `the_signal_path_logs_the_final_late_total_10412`.
     pub fn report_late(&self) -> u64 {
