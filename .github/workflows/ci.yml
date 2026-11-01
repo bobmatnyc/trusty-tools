@@ -37,6 +37,7 @@
 #               inputs (#8378)
 #   parity-selftest / check5-decision / check8-decision – release-decision
 #               fixtures, unconditional
+#   fastembed-cache-selftest – the model-cache check and key sites, unconditional
 #   website-corpus – the website content gate, step-gated on its own relevance
 #   ci-gate  – "CI gate": one context that fails when any context it stands in
 #              for fails, or a job skipped without the classifier's say-so
@@ -1013,8 +1014,9 @@ jobs:
       #
       # #10639: `ref-exact` retires the cache saved 2026-09-28, whose refs/main
       # pointers end in a newline that makes hf-hub miss on every file. All four
-      # key sites (three here, one in pre-publish.yml) must stay identical;
-      # scripts/check_fastembed_cache_selftest.sh enforces that.
+      # key sites (three here, one in pre-publish.yml) must stay identical.
+      # scripts/check_fastembed_cache_selftest.sh checks that on every PR and
+      # push, in the `fastembed-cache-selftest` job that `CI gate` needs.
       - name: Resolve fastembed model cache key
         if: needs.changes.outputs.docs_only != 'true'
         id: fastembed-key
@@ -1322,11 +1324,6 @@ jobs:
           else
             echo "seeded=true" >> "$GITHUB_OUTPUT"
           fi
-
-      # #10639: the check below must keep agreeing with what hf-hub reads.
-      - name: Fastembed cache check self-test
-        if: needs.changes.outputs.docs_only != 'true'
-        run: ./scripts/check_fastembed_cache_selftest.sh
 
       # #10639: fail fast, BEFORE Save, on an incomplete model cache, so a missing fp32 file
       # is named here instead of surfacing as a silent INT8 fallback.
@@ -2706,6 +2703,19 @@ jobs:
       - name: Preflight CHECK 10 crate-size self-test (an over-limit .crate must FAIL)
         run: bash scripts/check-crate-size-selftest.sh
 
+  # #10639: holds check_fastembed_cache.sh to what hf-hub reads and every
+  # fastembed cache key site to one value. Unconditional, because `test-shard`
+  # skips PRs: a fault found only there has already merged.
+  fastembed-cache-selftest:
+    name: Fastembed cache check self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fastembed cache check self-test
+        run: bash scripts/check_fastembed_cache_selftest.sh
+
   # The website CONTENT gate (owner ruling 2026-09-18): every website suite
   # that reads real repository content runs here and nowhere else, and it is
   # the only suite a docs, content or changelog change can turn red. Moved
@@ -2977,6 +2987,7 @@ jobs:
         parity-selftest,
         check5-decision,
         check8-decision,
+        fastembed-cache-selftest,
         website-corpus,
         changelog-fragment,
       ]

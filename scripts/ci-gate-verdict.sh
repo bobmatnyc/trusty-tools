@@ -52,6 +52,7 @@ tmux-exact-targets|Every tmux -t target is exact|tmux_targets_relevant
 parity-selftest|Parity gate self-test (must catch a drifted tag)|-
 check5-decision|CHECK 5 decision self-test (0 compared must never print PASS)|-
 check8-decision|CHECK 8 decision self-test (a run's head_sha is not what it gated)|-
+fastembed-cache-selftest|Fastembed cache check self-test|-
 website-corpus|Website content corpus|-
 changelog-fragment|Per-PR changelog fragment|-
 "
