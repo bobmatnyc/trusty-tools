@@ -984,10 +984,36 @@ async fn bind_singleton_refuses_while_another_binder_holds_the_lock() {
         "a refused bind must not touch the path"
     );
 
+    // #10661: unlock, not just drop. A child a sibling test forks shares this
+    // descriptor until it execs, and a close alone leaves the lock held for it.
+    holder.unlock().expect("release the bind lock");
     drop(holder);
     bind_singleton_hardened(&sock)
         .await
         .expect("a released lock lets the corpse be taken over");
+}
+
+/// Why: #10661 — a child forked while the bind lock is held shares its open file
+/// description until it execs, so a guard that only closed its descriptor left
+/// the next bind refused with `BindInProgress`.
+/// What: a `try_clone` is a copy of the description, the same thing a fork
+/// inherits. With that copy still open, dropping the guard must free the lock.
+/// Test: itself.
+#[tokio::test]
+async fn bind_lock_guard_releases_past_a_descriptor_a_fork_inherited() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("inherited.sock");
+    drop(bind_hardened(&sock).expect("bind the soon-to-be corpse"));
+    wait_until_corpse(&sock).await;
+
+    let guard = super::singleton::lock_for_bind(&sock).expect("take the bind lock");
+    let inherited = guard.file.try_clone().expect("copy the description");
+    drop(guard);
+
+    bind_singleton_hardened(&sock)
+        .await
+        .expect("a dropped guard must release the lock for every copy");
+    drop(inherited);
 }
 
 /// Why: #8759 Fail-Open Check — a bind lock that cannot be taken must stop the
@@ -1324,6 +1350,7 @@ async fn tune_connected_buffers_raises_both_buffers_on_a_socketpair() {
 async fn tune_connected_buffers_reports_a_peer_that_already_hung_up() {
     let (a, b) = tokio::net::UnixStream::pair().expect("socketpair");
     drop(b);
+    wait_until_peer_hung_up(&a).await;
 
     let outcome = tune_connected_buffers(&a).expect("a dead peer is not a sizing failure");
 
@@ -1374,6 +1401,27 @@ async fn a_listener_can_never_classify_a_failure_as_a_hung_up_peer() {
     );
 }
 
+/// Wait until `side` reads end-of-file, which proves its peer has really gone.
+///
+/// #10661: `drop(peer)` closes only this process's descriptor. A child a sibling
+/// test forked keeps the peer open until it execs, and until then the hang-up
+/// these tests assert has not happened.
+async fn wait_until_peer_hung_up(side: &tokio::net::UnixStream) {
+    let eof = async {
+        loop {
+            side.readable().await.expect("readable");
+            match side.try_read(&mut [0u8; 1]) {
+                Ok(0) => return,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => continue,
+                other => panic!("expected end-of-file, got {other:?}"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), eof)
+        .await
+        .expect("the dropped peer never hung up");
+}
+
 /// The strict form refuses precisely where the forgiving one tolerates.
 ///
 /// A hung-up peer is the one condition the two treat differently, so a socket
@@ -1387,6 +1435,8 @@ async fn tune_listener_buffers_refuses_where_the_connected_form_tolerates() {
     drop(peer);
     let (lenient_side, peer) = tokio::net::UnixStream::pair().expect("socketpair");
     drop(peer);
+    wait_until_peer_hung_up(&strict_side).await;
+    wait_until_peer_hung_up(&lenient_side).await;
 
     let strict = tune_listener_buffers(&strict_side);
     let lenient = tune_connected_buffers(&lenient_side).expect("the forgiving form tolerates it");
