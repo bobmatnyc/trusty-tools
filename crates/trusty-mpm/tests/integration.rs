@@ -121,6 +121,8 @@ mod tm_hook_pm_guard_secret_file_list_9791;
 // #10599: the fleet-init Architect's seeded scripts through the real hook.
 mod tm_hook_pm_guard_seed_scripts_10599;
 mod tm_hook_pm_guard_stdin_7975;
+// #10665: a whole-server tmux kill needs an explicit scratch `-S` socket.
+mod tm_hook_pm_guard_tmux_kill_server_10665;
 mod tm_hook_pm_guard_tmux_target_9001;
 mod tm_hook_pm_guard_trust_anchor_8878;
 mod tm_hook_pm_guard_unquoted_heredoc_expansion;

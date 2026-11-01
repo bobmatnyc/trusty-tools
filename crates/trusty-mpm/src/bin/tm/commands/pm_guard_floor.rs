@@ -21,7 +21,9 @@
 //! Universal on every path since #9001: a tmux target that does not resolve
 //! exactly to an existing pane, window or session
 //! (`pm_guard_bash::evaluate_tmux_exact_target`); since #10033, any
-//! `tm fleet relaunch` (`pm_guard_bash::evaluate_fleet_relaunch`).
+//! `tm fleet relaunch` (`pm_guard_bash::evaluate_fleet_relaunch`); since
+//! #10665, a `tmux kill-server` or `kill-session -a` without an explicit
+//! scratch `-S` socket (`pm_guard_bash::tmux_kill_server`).
 //! [`ArchitectGate`] is the one
 //! identity answer for the D4 remainder and the D5 call sites in `pm_guard`;
 //! it asks [`architect_main_thread`] at most once, and only when a rule
@@ -47,6 +49,9 @@ use crate::commands::pm_guard_architect_reason::{
 };
 use crate::commands::pm_guard_bash::fleet_relaunch::{
     FLEET_RELAUNCH_RULE, evaluate_fleet_relaunch,
+};
+use crate::commands::pm_guard_bash::tmux_kill_server::{
+    ServerEnv, TMUX_KILL_SERVER_RULE, evaluate_tmux_kill_server,
 };
 use crate::commands::pm_guard_bash::{
     ARCHITECT_PANE_RULE, GitProbe, LiveGit, LivePanes, PaneProbe, TMUX_TARGET_RULE,
@@ -208,6 +213,16 @@ pub(crate) fn evaluate_floors(
         return Some(FloorDeny {
             rule: D4_FLOOR_RULE,
             reason: with_identity(reason, why),
+        });
+    }
+    // #10665: an inherited `$TMUX` beats `-L` and `TMUX_TMPDIR`, so a
+    // whole-server kill needs an explicit scratch `-S`; every caller is bound.
+    if let Some(reason) =
+        command.and_then(|c| evaluate_tmux_kill_server(c, &ServerEnv::from_process()))
+    {
+        return Some(FloorDeny {
+            rule: TMUX_KILL_SERVER_RULE,
+            reason,
         });
     }
     // #8902: no tmux verb aimed at the Architect's pane; the Architect is exempt.

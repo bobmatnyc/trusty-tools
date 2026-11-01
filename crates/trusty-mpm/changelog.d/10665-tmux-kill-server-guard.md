@@ -1,0 +1,2 @@
+Fixed
+- `tm hook --pm-guard` refuses `tmux kill-server` and `tmux kill-session -a` unless the same command gives an explicit `-S` naming a scratch socket: not the socket `$TMUX` names, and not one in the tmux socket directory. `-L`, `TMUX_TMPDIR` and no flag are refused, because an inherited `$TMUX` wins over both. The floor binds every caller under every bypass, reads wrapped, nested and chained forms, and refuses an unreadable command that names a whole-server kill (policy GP-050, #10665).

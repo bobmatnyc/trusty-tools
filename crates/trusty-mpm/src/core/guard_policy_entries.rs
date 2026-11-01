@@ -430,6 +430,17 @@ pub static GUARD_TIMEOUT: GuardPolicy = policy(
     GUARD_STAYS_ON,
 );
 
+/// #10665: an inherited `$TMUX` beats `-L` and `TMUX_TMPDIR`.
+pub static TMUX_KILL_SERVER: GuardPolicy = policy(
+    "GP-050",
+    "tmux-kill-server",
+    "tmux kill-server and kill-session -a run only with an explicit -S naming a scratch socket.",
+    "#10665",
+    ALL,
+    true,
+    CHECKPOINT_FIRST,
+);
+
 /// Every entry once, in id order.
 pub static POLICIES: &[&GuardPolicy] = &[
     &POLICY_LOOKUP_MISS,
@@ -482,4 +493,5 @@ pub static POLICIES: &[&GuardPolicy] = &[
     &EGRESS_ARCHITECT_AUDIT_UNWRITABLE,
     &EGRESS_GUARD_PANIC,
     &GUARD_TIMEOUT,
+    &TMUX_KILL_SERVER,
 ];
