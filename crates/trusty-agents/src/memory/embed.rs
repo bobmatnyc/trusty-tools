@@ -9,147 +9,24 @@
 //! `FastEmbedder` concrete impl that lazy-loads the ONNX model on
 //! construction, caching it in the workspace-wide fastembed cache that
 //! `trusty_common::embedder::resolve_fastembed_cache_dir` resolves. Init is
-//! wrapped in a bounded retry so a rate-limited or lock-contended model
-//! fetch recovers instead of failing the caller.
+//! wrapped in trusty-common's bounded retry so a rate-limited or lock-contended
+//! model fetch recovers instead of failing the caller.
 //! Test: `cargo test -p trusty-agents memory::embed` — first run downloads the
-//! model (~30-60s, ~23MB), subsequent runs hit the cache. Tests cover the
-//! retry classifier and backoff loop (no network), plus `#[ignore]`d smoke
+//! model (~30-60s, ~23MB), subsequent runs hit the cache. Tests cover
+//! `#[ignore]`d smoke
 //! (single vector shape + finiteness), batch consistency (two distinct
 //! non-identical vectors), and semantic sanity (cosine similarity of a
 //! paraphrase pair beats an unrelated pair).
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use trusty_common::embedder::{InitRetryPolicy, retry_transient_init};
 
 /// Output dimension of the `AllMiniLML6V2` embedding model.
 pub const ALL_MINI_LM_L6_V2_DIM: usize = 384;
-
-/// Bounded retry schedule for a transient model-fetch failure during init.
-///
-/// Why: `TextEmbedding::try_new` reaches HuggingFace when the model is not
-/// already on disk, and two of its failure modes are transient rather than
-/// terminal — HTTP 429 from the hub's rate limiter, and hf-hub's per-blob
-/// `Lock acquisition failed` when another process is mid-download of the same
-/// file. See #812.
-/// What: attempt count plus an exponential backoff, capped. A zero
-/// `base_backoff` disables sleeping entirely, which is what the unit tests use.
-/// Test: `retry_recovers_after_transient_failures`,
-/// `retry_stops_at_max_attempts`, `backoff_grows_and_is_capped`.
-#[derive(Debug, Clone, Copy)]
-struct InitRetryPolicy {
-    max_attempts: u32,
-    base_backoff: Duration,
-    max_backoff: Duration,
-}
-
-impl Default for InitRetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: 5,
-            base_backoff: Duration::from_millis(750),
-            max_backoff: Duration::from_secs(15),
-        }
-    }
-}
-
-/// Classify an init error as transient (worth retrying) or terminal.
-///
-/// Why: retrying a missing-file or corrupt-model error just multiplies the
-/// wall-clock cost of a failure that will never succeed. Only the hub's
-/// rate-limit and inter-process lock-contention responses recover on their own.
-/// What: lowercases the full `anyhow` chain (`{err:#}`) and looks for the
-/// signatures both #812 recurrences produced, plus the neighbouring 5xx and
-/// timeout responses from the same endpoint. The status-code needles are
-/// anchored on their surrounding words so a digit sequence inside a SHA or a
-/// byte count cannot match.
-/// Test: `transient_classifier_matches_observed_signatures`,
-/// `transient_classifier_rejects_terminal_errors`.
-fn is_transient_init_error(err: &anyhow::Error) -> bool {
-    let msg = format!("{err:#}").to_ascii_lowercase();
-    // #812: the first two needles are the exact strings the two 2026-09-01
-    // pre-publish gate runs failed on.
-    const TRANSIENT: &[&str] = &[
-        "status: 429",
-        "lock acquisition failed",
-        "too many requests",
-        "rate limit",
-        "status: 502",
-        "status: 503",
-        "status: 504",
-        "timed out",
-        "connection reset",
-        "too many retries",
-    ];
-    TRANSIENT.iter().any(|needle| msg.contains(needle))
-}
-
-/// Backoff before retry `attempt` (1-based), including per-process jitter.
-///
-/// Why: Gate 4 runs under `cargo nextest`, which gives every test its own
-/// PROCESS. A backoff identical across processes re-synchronises them onto the
-/// same blob lock on the next attempt, so the jitter is what actually breaks
-/// the contention up. The pid supplies it without a `rand` dependency.
-/// What: `base * 2^(attempt-1)`, clamped to `max_backoff`, plus 0-499ms keyed
-/// on the pid. A zero `base_backoff` short-circuits to zero, jitter included.
-/// Test: `backoff_grows_and_is_capped`, `zero_base_backoff_never_sleeps`.
-fn backoff_for(policy: InitRetryPolicy, attempt: u32) -> Duration {
-    if policy.base_backoff.is_zero() {
-        return Duration::ZERO;
-    }
-    let factor = 1u32 << (attempt.saturating_sub(1)).min(16);
-    let raw = policy
-        .base_backoff
-        .saturating_mul(factor)
-        .min(policy.max_backoff);
-    raw + Duration::from_millis(u64::from(std::process::id() % 500))
-}
-
-/// Run `attempt` until it succeeds, exhausts `policy.max_attempts`, or fails
-/// terminally.
-///
-/// Why: #812 — every consumer of `FastEmbedder::new` (the code indexer, the
-/// REPL, the recall tool, and the `#[ignore]`d ONNX tests the pre-publish gate
-/// runs) shares one model-fetch path, so the recovery belongs there once rather
-/// than at each call site.
-/// What: a bounded loop. A terminal error returns immediately with its context
-/// intact; a transient one sleeps `backoff_for` and retries; the final
-/// attempt's error is returned as-is so the caller sees the real failure rather
-/// than a wrapper.
-/// Test: `retry_recovers_after_transient_failures`, `retry_stops_at_max_attempts`,
-/// `retry_does_not_retry_a_terminal_error`.
-fn retry_transient_init<T>(
-    policy: InitRetryPolicy,
-    mut attempt: impl FnMut(u32) -> Result<T>,
-) -> Result<T> {
-    let max = policy.max_attempts.max(1);
-    let mut n = 1u32;
-    loop {
-        match attempt(n) {
-            Ok(value) => return Ok(value),
-            Err(err) => {
-                if n >= max || !is_transient_init_error(&err) {
-                    return Err(err);
-                }
-                let wait = backoff_for(policy, n);
-                tracing::warn!(
-                    attempt = n,
-                    max_attempts = max,
-                    backoff_ms = wait.as_millis() as u64,
-                    error = %format!("{err:#}"),
-                    "transient embedder init failure; retrying"
-                );
-                if !wait.is_zero() {
-                    std::thread::sleep(wait);
-                }
-                n += 1;
-            }
-        }
-    }
-}
 
 /// Trait for text-to-vector embedding providers.
 ///
@@ -277,155 +154,7 @@ impl Embedder for FastEmbedder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
     use std::sync::OnceLock;
-
-    /// A policy that retries the same number of times but never sleeps.
-    fn instant_policy(max_attempts: u32) -> InitRetryPolicy {
-        InitRetryPolicy {
-            max_attempts,
-            base_backoff: Duration::ZERO,
-            max_backoff: Duration::ZERO,
-        }
-    }
-
-    /// The two error strings the 2026-09-01 pre-publish gate runs actually
-    /// failed on, verbatim from the job logs (#812).
-    const GATE_429: &str = "Failed to retrieve model.onnx: request error: http status: 429";
-    const GATE_LOCK: &str = "Failed to retrieve model.onnx: Lock acquisition failed: \
-         /home/runner/.cache/trusty-agents/models/models--Qdrant--all-MiniLM-L6-v2-onnx/blobs/9bbecc17.lock";
-
-    #[test]
-    fn transient_classifier_matches_observed_signatures() {
-        for msg in [
-            GATE_429,
-            GATE_LOCK,
-            "hub returned 429 Too Many Requests",
-            "request error: http status: 503",
-            "operation timed out",
-            "Too many retries: connection reset by peer",
-        ] {
-            assert!(
-                is_transient_init_error(&anyhow::anyhow!(msg.to_string())),
-                "expected transient classification for: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn transient_classifier_rejects_terminal_errors() {
-        for msg in [
-            "No such file or directory (os error 2)",
-            "request error: http status: 404",
-            "invalid ONNX protobuf: unexpected end of stream",
-            // A SHA or byte count containing the digits must not match the
-            // status-code needles, which is why those are anchored on "status:".
-            "corrupt blob 429004299142 (429 bytes)",
-        ] {
-            assert!(
-                !is_transient_init_error(&anyhow::anyhow!(msg.to_string())),
-                "expected terminal classification for: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn transient_classifier_reads_the_whole_anyhow_chain() {
-        // The real failure arrives as a `.context()`-wrapped chain, with the
-        // 429 buried two levels down — `{err:#}` is what surfaces it.
-        let err = anyhow::anyhow!(GATE_429)
-            .context("failed to initialize fastembed TextEmbedding (AllMiniLML6V2)")
-            .context("init FastEmbedder");
-        assert!(is_transient_init_error(&err));
-    }
-
-    #[test]
-    fn retry_recovers_after_transient_failures() {
-        // The lock-contention path: two processes lose the race, the third
-        // attempt finds the blob already written and succeeds.
-        let attempts = Cell::new(0u32);
-        let got = retry_transient_init(instant_policy(5), |n| {
-            attempts.set(n);
-            if n < 3 {
-                Err(anyhow::anyhow!(GATE_LOCK))
-            } else {
-                Ok("model")
-            }
-        })
-        .expect("a transient failure must not be fatal");
-        assert_eq!(got, "model");
-        assert_eq!(attempts.get(), 3, "expected exactly three attempts");
-    }
-
-    #[test]
-    fn retry_stops_at_max_attempts() {
-        let attempts = Cell::new(0u32);
-        let err = retry_transient_init(instant_policy(4), |n| {
-            attempts.set(n);
-            Err::<(), _>(anyhow::anyhow!(GATE_429))
-        })
-        .expect_err("an always-429 init must eventually give up");
-        assert_eq!(attempts.get(), 4, "expected the attempt budget to be spent");
-        assert!(
-            format!("{err:#}").contains("429"),
-            "the final attempt's own error must survive, got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn retry_does_not_retry_a_terminal_error() {
-        let attempts = Cell::new(0u32);
-        let err = retry_transient_init(instant_policy(5), |n| {
-            attempts.set(n);
-            Err::<(), _>(anyhow::anyhow!("No such file or directory (os error 2)"))
-        })
-        .expect_err("a terminal error must propagate");
-        assert_eq!(attempts.get(), 1, "a terminal error must not be retried");
-        assert!(format!("{err:#}").contains("No such file"));
-    }
-
-    #[test]
-    fn retry_runs_at_least_once_with_a_zero_attempt_budget() {
-        let attempts = Cell::new(0u32);
-        let policy = InitRetryPolicy {
-            max_attempts: 0,
-            ..instant_policy(0)
-        };
-        retry_transient_init(policy, |n| {
-            attempts.set(n);
-            Ok::<_, anyhow::Error>(())
-        })
-        .expect("a zero budget must still attempt once");
-        assert_eq!(attempts.get(), 1);
-    }
-
-    #[test]
-    fn backoff_grows_and_is_capped() {
-        let policy = InitRetryPolicy {
-            max_attempts: 8,
-            base_backoff: Duration::from_millis(100),
-            max_backoff: Duration::from_millis(400),
-        };
-        // Jitter is 0-499ms on top of the exponential term, so assert on the
-        // bracket rather than an exact value.
-        let a1 = backoff_for(policy, 1);
-        let a3 = backoff_for(policy, 3);
-        assert!(a1 >= Duration::from_millis(100) && a1 < Duration::from_millis(600));
-        assert!(a3 >= a1, "backoff must not shrink as attempts grow");
-        for n in 3..=8 {
-            assert!(
-                backoff_for(policy, n) < Duration::from_millis(900),
-                "attempt {n} exceeded max_backoff + max jitter"
-            );
-        }
-    }
-
-    #[test]
-    fn zero_base_backoff_never_sleeps() {
-        for n in 1..=10 {
-            assert_eq!(backoff_for(instant_policy(10), n), Duration::ZERO);
-        }
-    }
 
     /// #812: the cache dir must be redirectable, because the pre-publish gate
     /// pre-seeds the model into `FASTEMBED_CACHE_DIR` and this crate used to
