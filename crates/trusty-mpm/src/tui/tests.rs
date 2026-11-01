@@ -248,7 +248,8 @@ impl std::io::Write for FailingScreen {
 #[test]
 fn enter_with_restores_the_terminal_when_the_screen_fails() {
     let restored = std::cell::Cell::new(false);
-    let result = super::terminal::enter_with(FailingScreen, || Ok(()), || restored.set(true));
+    let result =
+        super::terminal::enter_with(FailingScreen, || Ok(()), || restored.set(true), false);
     assert!(
         result.is_err(),
         "a screen that rejects EnterAlternateScreen must surface as Err"
@@ -271,12 +272,150 @@ fn enter_with_leaves_the_terminal_alone_when_raw_mode_fails() {
         FailingScreen,
         || Err(std::io::Error::other("no tty")),
         || restored.set(true),
+        false,
     );
     assert!(result.is_err(), "a raw-mode failure must surface as Err");
     assert!(
         !restored.get(),
         "nothing engaged, so nothing may be restored"
     );
+}
+
+// ── Mouse capture (#10476) ───────────────────────────────────────────────────
+
+/// `?1000h`, the first mode crossterm's `EnableMouseCapture` turns on.
+const CAPTURE_ON: &str = "\x1b[?1000h";
+/// `?1000l`, the mode crossterm's `DisableMouseCapture` turns off last.
+const CAPTURE_OFF: &str = "\x1b[?1000l";
+const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
+const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
+
+/// A screen that records every byte and can reject the capture-on sequence.
+///
+/// Why: these tests must never touch a real terminal; `Terminal::new` consumes
+/// its writer, so the record is shared.
+#[derive(Clone, Default)]
+struct RecordingScreen {
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    reject_capture: bool,
+}
+
+impl RecordingScreen {
+    fn text(&self) -> String {
+        let bytes = self.bytes.lock().expect("the record lock");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl std::io::Write for RecordingScreen {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes
+            .lock()
+            .expect("the record lock")
+            .extend_from_slice(buf);
+        if self.reject_capture && self.text().contains(CAPTURE_ON) {
+            return Err(std::io::Error::other("screen rejected mouse capture"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The teardown every exit path shares turns capture off (#10476), before it
+/// leaves the alternate screen. Without this a shell after the TUI prints
+/// escape sequences on every mouse move.
+#[test]
+fn restore_disables_capture() {
+    let mut screen = RecordingScreen::default();
+    super::terminal::write_restore(&mut screen).expect("a recording screen cannot fail");
+    let text = screen.text();
+    let off = text.find(CAPTURE_OFF);
+    let leave = text.find(LEAVE_ALT_SCREEN);
+    assert!(off.is_some(), "no capture-off sequence in {text:?}");
+    assert!(leave.is_some(), "no leave-screen sequence in {text:?}");
+    assert!(off < leave, "capture must go off first: {text:?}");
+}
+
+/// With the mouse off, no enable sequence ever reaches the terminal, and with
+/// it on, this same path does send one, so the assertion can fail (#10476).
+#[test]
+fn enter_with_mouse_false_never_enables_capture() {
+    let screen = RecordingScreen::default();
+    // `Terminal::new` queries the real size and may fail without a tty; only
+    // the bytes matter here, and a failure restores through the closure.
+    let _ = super::terminal::enter_with(screen.clone(), || Ok(()), || {}, false);
+    let text = screen.text();
+    assert!(text.contains(ENTER_ALT_SCREEN), "{text:?}");
+    assert!(!text.contains("\x1b[?100"), "mouse mode in {text:?}");
+
+    let screen = RecordingScreen::default();
+    let _ = super::terminal::enter_with(screen.clone(), || Ok(()), || {}, true);
+    assert!(screen.text().contains(CAPTURE_ON), "{:?}", screen.text());
+}
+
+/// Capture failing after raw mode and the alternate screen engaged restores the
+/// terminal and propagates, so raw mode is not left on (#10476).
+#[test]
+fn enter_with_restores_the_terminal_when_capture_fails() {
+    let restored = std::cell::Cell::new(false);
+    let screen = RecordingScreen {
+        reject_capture: true,
+        ..Default::default()
+    };
+    let result =
+        super::terminal::enter_with(screen.clone(), || Ok(()), || restored.set(true), true);
+    let error = result
+        .err()
+        .expect("a rejected capture must surface as Err");
+    assert!(error.to_string().contains("mouse capture"), "{error}");
+    assert!(restored.get(), "the failure path must restore the terminal");
+    assert!(screen.text().contains(ENTER_ALT_SCREEN), "reached capture");
+
+    // With the mouse off the same screen is never asked, so nothing fails.
+    let restored = std::cell::Cell::new(false);
+    let screen = RecordingScreen {
+        reject_capture: true,
+        ..Default::default()
+    };
+    let _ = super::terminal::enter_with(screen.clone(), || Ok(()), || restored.set(true), false);
+    assert!(!screen.text().contains(CAPTURE_ON));
+}
+
+/// Around a child process: suspend's sequence turns capture off, and resume's
+/// turns it back on only for a surface that had it (#10476).
+#[test]
+fn suspend_disables_and_resume_reenables_only_when_asked() {
+    let mut suspended = RecordingScreen::default();
+    super::terminal::write_restore(&mut suspended).expect("a recording screen cannot fail");
+    assert!(suspended.text().contains(CAPTURE_OFF));
+
+    let mut resumed = RecordingScreen::default();
+    super::terminal::write_enter(&mut resumed, true).expect("a recording screen cannot fail");
+    let text = resumed.text();
+    assert!(
+        text.find(ENTER_ALT_SCREEN) < text.find(CAPTURE_ON),
+        "{text:?}"
+    );
+
+    let mut other_tui = RecordingScreen::default();
+    super::terminal::write_enter(&mut other_tui, false).expect("a recording screen cannot fail");
+    assert!(!other_tui.text().contains(CAPTURE_ON));
+    assert!(other_tui.text().contains(ENTER_ALT_SCREEN));
+}
+
+/// `--no-mouse` or `TM_TUI_MOUSE=0` turn the mouse off; anything else leaves it on.
+#[test]
+fn mouse_enabled_honours_flag_and_env() {
+    use super::terminal::mouse_enabled;
+    assert!(mouse_enabled(false, None), "on by default");
+    assert!(mouse_enabled(false, Some("1")));
+    assert!(mouse_enabled(false, Some("")));
+    assert!(!mouse_enabled(true, None), "--no-mouse");
+    assert!(!mouse_enabled(false, Some("0")), "TM_TUI_MOUSE=0");
+    assert!(!mouse_enabled(true, Some("1")), "the flag wins");
 }
 
 /// An absent, empty, or `dumb` `TERM` refuses raw mode (#7224).

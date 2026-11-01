@@ -78,7 +78,10 @@ pub(crate) async fn launch_bare_tui() -> anyhow::Result<()> {
     let explicit = trusty_mpm::core::explicit_url_from_env();
     let url = trusty_mpm::core::try_resolve_daemon_url(explicit.as_deref())?;
     let daemon = trusty_mpm::client::DaemonClient::with_client(client, url);
-    trusty_mpm::tui::run_initial_view_with(daemon, PROJECT_CTL_INTERVAL_MS, None, false).await
+    // #10476: this view captures the mouse unless `TM_TUI_MOUSE=0`.
+    let mouse = trusty_mpm::tui::terminal::mouse_from_env(false);
+    trusty_mpm::tui::run_initial_view_with(daemon, PROJECT_CTL_INTERVAL_MS, None, false, mouse)
+        .await
 }
 
 /// `tm tui`: the console home screen, whose MPM tile opens the projects view.
@@ -90,9 +93,11 @@ pub(crate) async fn run_tui(
     url: Option<String>,
     interval_ms: u64,
     single_pane: bool,
+    no_mouse: bool,
 ) -> anyhow::Result<()> {
     let client = trusty_mpm::tui::client_for(url.as_deref())?;
-    trusty_mpm::tui::home::run_tui_entry(client, interval_ms, single_pane).await
+    let mouse = trusty_mpm::tui::terminal::mouse_from_env(no_mouse);
+    trusty_mpm::tui::home::run_tui_entry(client, interval_ms, single_pane, mouse).await
 }
 
 /// True when `argv` is exactly a bare `tm projects` invocation (#2118).

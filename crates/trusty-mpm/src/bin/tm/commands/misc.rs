@@ -848,7 +848,9 @@ pub(crate) async fn attach_cmd(
             // #6288: `url` is the socket locator `main` resolved; re-discovery
             // resolves the same socket, so nothing needs pinning.
             let daemon = trusty_mpm::client::DaemonClient::new(url);
-            trusty_mpm::tui::run_initial_view_with(daemon, 1000, Some(id), single_pane).await
+            // #10476: the projects view captures the mouse unless `TM_TUI_MOUSE=0`.
+            let mouse = trusty_mpm::tui::terminal::mouse_from_env(false);
+            trusty_mpm::tui::run_initial_view_with(daemon, 1000, Some(id), single_pane, mouse).await
         }
         ResolveResult::Ambiguous(ids) => {
             eprintln!(

@@ -79,8 +79,9 @@ fn project_node_name(state: &mut ProjectCtlState) -> Option<String> {
 
 /// Enter: toggle an owner or project; open details on a session.
 ///
-/// #10476: before the tree, Enter on a session did nothing.
-fn enter(state: &mut ProjectCtlState) {
+/// #10476: before the tree, Enter on a session did nothing. A click on a row
+/// runs this too (`events::mouse`).
+pub(super) fn enter(state: &mut ProjectCtlState) {
     match state.selected_node() {
         Some(NodeId::Owner(_) | NodeId::Project { .. }) => state.toggle_selected(),
         Some(NodeId::Session { .. }) => {
