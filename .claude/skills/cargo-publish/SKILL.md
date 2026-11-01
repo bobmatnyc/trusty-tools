@@ -159,8 +159,9 @@ version instead). Runs six checks and fails loud on any of them:
 
 1. **merged-main**: current HEAD's commit SHA is EXACTLY `origin/main`'s HEAD
    SHA (stricter than `check-publish-ready.sh`'s ancestor check).
-2. **identity**: the active `gh auth status` account is `bobmatnyc`. Any
-   other active account fails with the remedy `gh auth switch --user bobmatnyc`.
+2. **identity**: `gh api user` answers that the credential gh is using
+   authenticates as `bobmatnyc` (#10587). Any other login, a rejected credential
+   or no credential fails with the remedy `gh auth switch --user bobmatnyc`.
 3. **clean-tree**: `git status --porcelain` is empty.
 4. **version-not-live**: the target version is not already published on
    crates.io (queries `https://crates.io/api/v1/crates/<name>/<version>`) —
