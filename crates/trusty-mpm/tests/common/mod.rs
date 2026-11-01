@@ -339,7 +339,29 @@ pub fn assert_pm_guard_refusals_prefixed(stdout: &str) {
                 && reason.matches(PM_GUARD_REFUSAL_PREFIX.trim_end()).count() == 1,
             "a tm pm-guard refusal must start with {PM_GUARD_REFUSAL_PREFIX:?} exactly once: {reason:?}"
         );
+        assert_refusal_names_a_policy(reason);
     }
+}
+
+/// Assert that one refusal reason ends with the tag of a listed guard policy
+/// entry other than the lookup-miss sentinel (#10641).
+///
+/// Why: every pm-guard collector reaches this through
+/// [`assert_pm_guard_refusals_prefixed`], so a deny path that names no policy,
+/// or one whose audit label is missing from the table (GP-000), fails the first
+/// integration test that exercises it.
+/// What: some entry of `guard_policy::POLICIES`, not GP-000, has a `tag()` the
+/// reason ends with.
+pub fn assert_refusal_names_a_policy(reason: &str) {
+    use trusty_mpm::core::guard_policy::{POLICIES, POLICY_LOOKUP_MISS};
+    let named = POLICIES
+        .iter()
+        .find(|p| reason.ends_with(&p.tag()))
+        .map(|p| p.id);
+    assert!(
+        named.is_some_and(|id| id != POLICY_LOOKUP_MISS.id),
+        "a tm pm-guard refusal must end with a listed policy tag (#10641), got {named:?}: {reason:?}"
+    );
 }
 
 /// Install the checkout's instructional content into `home` as a verified

@@ -767,10 +767,13 @@ fn write_project_hooks_locked(
 /// the statusLine command — because a bare `tm hook --pm-guard` would silently
 /// no-op under Claude Code's minimal `PATH`, leaving the guard un-fired.
 /// What: returns the `PreToolUse` handler-group array with `matcher: ""` (fires
-/// for every tool) invoking `<abs-path> hook --pm-guard` with a short timeout.
-/// An absent binary is a non-blocking hook error, so it never blocks the PM; a
-/// stdin payload the guard cannot read denies (#7975).
-/// Test: `write_project_hooks_registers_pm_guard`.
+/// for every tool) invoking `<abs-path> hook --pm-guard` with a short timeout
+/// and `onFailure: "block"` (#10600): a guard that times out, crashes or
+/// cannot start denies the call instead of letting it through. Claude Code
+/// honours the key from v2.1.295; an older one ignores it, which is the
+/// pre-#10600 behaviour. A stdin payload the guard cannot read denies (#7975).
+/// Test: `write_project_hooks_registers_pm_guard`,
+/// `pm_hook_entry_carries_block_on_failure`.
 pub(super) fn pm_guard_hook_value() -> serde_json::Value {
     serde_json::json!([
         {
@@ -779,7 +782,9 @@ pub(super) fn pm_guard_hook_value() -> serde_json::Value {
                 {
                     "type": "command",
                     "command": format!("{}{PM_GUARD_SUFFIX}", resolve_statusline_binary()),
-                    "timeout": 10
+                    "timeout": 10,
+                    // #10600: fail closed on timeout or crash, as the Architect's guard does.
+                    "onFailure": "block"
                 }
             ]
         }

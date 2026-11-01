@@ -1488,6 +1488,49 @@ fn write_project_hooks_registers_pm_guard() {
         serde_json::json!(10),
         "the guard's registered timeout must stay above its read + audit budget"
     );
+    // #10600: a guard that times out or crashes blocks the call.
+    assert_eq!(guard["hooks"][0]["onFailure"], "block");
+}
+
+#[test]
+fn pm_hook_entry_carries_block_on_failure() {
+    // #10600: the PM hook entry had `timeout: 10` and no failure handling, so a
+    // judgement slower than 10 s let the tool call through. The written entry
+    // must block on failure, and only the guard: every other hook keeps its
+    // behaviour (acceptance 4).
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    write_project_hooks(
+        project,
+        Some(std::path::Path::new("/usr/local/bin/tm")),
+        true,
+        false,
+    )
+    .expect("write succeeds");
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    let mut blocking = Vec::new();
+    for (event, groups) in value["hooks"].as_object().expect("hooks object") {
+        for group in groups.as_array().into_iter().flatten() {
+            for entry in group["hooks"].as_array().into_iter().flatten() {
+                if entry.get("onFailure").is_some() {
+                    blocking.push((event.clone(), entry.clone()));
+                }
+            }
+        }
+    }
+    assert_eq!(blocking.len(), 1, "only the PM guard blocks: {blocking:?}");
+    let (event, entry) = &blocking[0];
+    assert_eq!(event, "PreToolUse");
+    assert_eq!(entry["onFailure"], "block");
+    assert!(
+        entry["command"]
+            .as_str()
+            .is_some_and(|c| c.ends_with(" hook --pm-guard")),
+        "{entry}"
+    );
 }
 
 #[test]

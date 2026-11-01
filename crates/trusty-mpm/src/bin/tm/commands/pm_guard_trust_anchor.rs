@@ -56,12 +56,13 @@ use crate::commands::misc::SUB_AGENT_ENV;
 use crate::commands::pm_guard::{EDIT_TOOLS, edit_tool_target_path};
 use crate::commands::pm_guard_architect_reason::{architect_main_thread, with_identity};
 use crate::commands::pm_guard_bash::{AnchorWrite, UnplaceableWrite, anchor_writes};
-use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
-use crate::commands::pm_guard_response::build_pm_guard_deny_response;
+use crate::commands::pm_guard_deny_log::DenyContext;
+use crate::commands::pm_guard_refusal::refuse;
 use crate::commands::pm_guard_trust_anchor_paths::{
     FileId, Placed, Resolved, dequote, file_id, has_shell_pattern, is_json, place, resolve,
     same_ci, starts_with_ci,
 };
+use trusty_mpm::core::guard_policy;
 
 /// The rule name recorded with each deny.
 pub(crate) const TRUST_ANCHOR_RULE: &str = "trust-anchor-write";
@@ -155,13 +156,9 @@ pub(crate) async fn deny_trust_anchor_write(url: &str, payload: &Value) -> bool 
     let Some(reason) = evaluate(payload, &HookEnv::ambient(), MpmConfig::load_default) else {
         return false;
     };
-    audit_denied_tool(
-        &DenyContext::from_payload(url, payload),
-        TRUST_ANCHOR_RULE,
-        &reason,
-    )
-    .await;
-    println!("{}", build_pm_guard_deny_response(&reason));
+    // #10641: GP-006; its rule is `TRUST_ANCHOR_RULE`.
+    let refused = DenyContext::from_payload(url, payload);
+    refuse(&refused, &guard_policy::TRUST_ANCHOR_WRITE, &reason).await;
     true
 }
 
