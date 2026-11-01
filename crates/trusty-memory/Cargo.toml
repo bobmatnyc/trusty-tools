@@ -259,6 +259,10 @@ libc = { workspace = true }
 image = { workspace = true }
 tower = { workspace = true }
 serial_test = { workspace = true }
+# replay_leaves_no_point_without_neighbours builds on a pool of its own, so
+# other tests' work on rayon's global pool cannot queue ahead of its builds.
+# Already in the graph through hnsw_rs; this adds no new crate.
+rayon = "1.12"
 # #8729: capture the user-forget log line in `service::core_tests`. Already a
 # normal dependency of trusty-common, so this adds no crate to the build.
 tracing-subscriber = { workspace = true }
