@@ -247,6 +247,39 @@ pub fn require_text(content: &ResolvedContent, path: &str) -> Result<String, Pro
     }
 }
 
+/// Every file under [`CONTENT_DIR`] this binary reads by a name it ships: the
+/// content manifest a deployed release must satisfy (#10588).
+///
+/// Why: an installer pinned a release older than the binary and reported
+/// success, so the first review refused on a missing prompt. A list lets an
+/// installer ask before then.
+/// What: paths relative to [`CONTENT_DIR`]; [`check_required`] reads each.
+/// Test: `the_required_files_are_the_checkout_content_tree`.
+pub const REQUIRED_FILES: &[&str] = &[
+    "prompts/system_prompt_stock.md",
+    "prompts/system_prompt_coverage_gating.md",
+    "prompts/principles_addendum.md",
+    "templates/report-technical-dd.md",
+    "templates/report-technical-dd-cast.md",
+    "templates/review/strict-security.md",
+    "voices/duetto/voice.toml",
+];
+
+/// Reads every [`REQUIRED_FILES`] entry from `content` (#10588).
+///
+/// Why: `trusty-review content check` must name every absent file, not only
+/// the first one a review would trip on.
+/// What: [`require_text`] per entry; returns each failure, in list order. An
+/// empty vector means the content serves this binary.
+/// Test: `check_required_names_every_file_older_content_lacks`,
+/// `check_required_passes_the_checkout_content`.
+pub fn check_required(content: &ResolvedContent) -> Vec<PromptContentError> {
+    REQUIRED_FILES
+        .iter()
+        .filter_map(|rel| require_text(content, &content_path(rel)).err())
+        .collect()
+}
+
 /// [`require_text`] where an absent file of a name this binary does not ship
 /// is `Ok(None)`: the caller's own not-found, not a content defect (#9015).
 ///
