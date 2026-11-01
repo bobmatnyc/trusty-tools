@@ -48,15 +48,23 @@ class FakePane:
         self.box, self.continuation, self.submitted, self.keys = "", "", [], []
         self.busy = self.box_hidden = self.no_bottom_rule = False
         self.dim = False  # the box row is a dim auto-suggestion; typing replaces it
+        self.plain_continuation = False  # #10670: an undimmed draft row under the dim row
         self.footer = FOOTER
         self.typed_during_send = None  # (text, "before" | "after"): a human racing the wake
+        self.raw = None
 
     def capture(self, _pane=None):
+        if self.raw is not None:  # a literal -e capture, shown until a key is typed
+            return self.raw
         if self.box_hidden:  # the TUI drops the rule-bounded box mid-turn
             return "❯\n\n  ✻ Working… (2m 14s · esc to interrupt)\n"
         status = ["✻ Working… (2m 14s · esc to interrupt)"] if self.busy else []
-        shown = f"\x1b[2m{self.box}\x1b[0m" if self.dim and self.box else self.box
-        rows = [f"❯\xa0{shown}"] + ([self.continuation] if self.continuation else [])
+        rows = [f"❯\xa0{self.box}"] + ([self.continuation] if self.continuation else [])
+        if self.dim and self.box:  # #10670: capture-pane -e carries SGR 2 onto a wrapped row
+            ends_dim = len(rows) == 1 or self.plain_continuation
+            rows[0] = f"❯\xa0\x1b[2m{self.box}" + ("\x1b[0m" if ends_dim else "")
+            if len(rows) > 1 and not self.plain_continuation:
+                rows[1] += "\x1b[0m"
         if self.no_bottom_rule:  # #10670: footer rows straight under the box
             return "\n".join(["⏺ Done."] + status + [RULE] + rows + self.footer) + "\n"
         return "\n".join(["⏺ Done."] + status + [RULE] + rows + [RULE]) + "\n"
@@ -64,6 +72,7 @@ class FakePane:
     def send(self, _pane, *keys):
         self.keys.append(keys)
         if keys[0] == "-l":
+            self.raw = None
             if self.dim:  # typing over a suggestion replaces all of it
                 self.box = self.continuation = ""
                 self.dim = False
@@ -493,6 +502,72 @@ def test_a_wrapped_suggestion_under_a_plain_rule_still_wakes(pane, store):
     pane.dim, pane.box, pane.continuation = True, "suggested next prompt that", "wraps onto a second row"
     fp.cycle({}, now=T0)
     assert len(pane.submitted) == 1 and "1 new alerts ->" in pane.submitted[0]
+
+
+def test_a_dim_row_over_an_undimmed_draft_is_never_typed_beside(pane, store):
+    """#10670: one SGR 2 on the ❯ row made classify() call the whole box a suggestion."""
+    _answer(store)
+    pane.dim, pane.plain_continuation = True, True
+    pane.box, pane.continuation = "suggested next prompt", "a real draft under it"
+    state = {}
+    fp.cycle(state, now=T0)
+    assert pane.keys == [] and state["wake_pending"] == 1
+
+
+# #10670: synthetic -e captures in Claude Code's escape layout: grey (SGR 38;5;244) rules,
+# a labelled top rule, SGR 39 before the ❯, a no-break space, SGR 2 text closed by SGR 0,
+# and a bottom rule whose colour runs to the end. Text and label are invented.
+GREY, LABELLED = "\x1b[38;5;244m", "─" * 60 + " demo-box ─"
+
+
+def _box(*rows):
+    return "\n".join([GREY + LABELLED, "\x1b[39m❯\xa0" + rows[0], *rows[1:], GREY + "─" * 72]) + "\n"
+
+
+SUGGESTION_BOXES = {
+    "single dim row": _box("\x1b[2mlist the open pull requests\x1b[0m"),
+    "wrapped dim row, no escape of its own": _box("\x1b[2mlist the open pull requests", "and their checks\x1b[0m"),
+    "dim with an inverse cursor cell": _box("\x1b[7ml\x1b[27;2mist the open pull requests\x1b[0m"),
+    "dim after bold-off and a 256-colour fg": _box("\x1b[1;22;38;5;2;2mlist the open pull requests\x1b[0m"),
+}
+TYPED_BOXES = {
+    "dim row above an undimmed draft": _box("\x1b[2mlist the open pull requests\x1b[0m", "my own draft"),
+    "typed command with a dim ghost hint": _box("/review\x1b[2m <pr-number>\x1b[0m"),
+    "typed text with an inverse cursor mid-text": _box("fix the\x1b[7m \x1b[27mlogin bug"),
+    "typed text, cursor mid-text, dim hint after": _box("fix t\x1b[7mh\x1b[27me bug\x1b[2m and test it\x1b[0m"),
+    "dim reset by SGR 22 mid-row": _box("\x1b[2mlist the\x1b[22m open pull requests\x1b[0m"),
+    "inverse cells with no dim cell": _box("\x1b[7mmy own draft\x1b[27m"),
+    "a 256-colour 2 is not dim":_box("\x1b[38;5;2mlist the open pull requests\x1b[0m"),
+}
+
+
+@pytest.mark.parametrize("name", SUGGESTION_BOXES)
+def test_a_box_is_a_suggestion_only_when_every_cell_is_dim_or_inverse(name):
+    assert fp.fleet_classify.box_is_suggestion(SUGGESTION_BOXES[name])
+
+
+@pytest.mark.parametrize("name", TYPED_BOXES)
+def test_a_typed_cell_anywhere_in_the_box_is_not_a_suggestion(name):
+    assert not fp.fleet_classify.box_is_suggestion(TYPED_BOXES[name])
+
+
+WAKE_BOXES = {**{n: (r, True) for n, r in SUGGESTION_BOXES.items()},
+              "empty box with a cursor cell": (_box("\x1b[7m \x1b[27m"), True),
+              **{n: (r, False) for n, r in TYPED_BOXES.items()}}
+
+
+@pytest.mark.parametrize("name", WAKE_BOXES)
+def test_a_suggestion_wakes_only_when_the_whole_box_is_dim(pane, store, name):
+    """#10670: a typed cell anywhere in the box, on any row, holds the wake with no keys sent."""
+    _answer(store)
+    raw, wakes = WAKE_BOXES[name]
+    pane.raw, pane.dim = raw, True  # typing over a suggestion replaces it
+    state = {}
+    fp.cycle(state, now=T0)
+    if wakes:
+        assert len(pane.submitted) == 1 and state["wake_pending"] == 0
+    else:
+        assert pane.keys == [] and state["wake_pending"] == 1
 
 
 def test_a_rule_that_vanishes_after_typing_strands_the_pointer_without_enter(pane, store, monkeypatch):

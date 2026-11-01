@@ -116,7 +116,8 @@ def wake(n, panes, dry_run, defer_turn=False):
     pointer), and a pointer with a draft after it stays in the box until the human clears
     it. It also recognizes its
     own stale pointer from an earlier cycle ("own stale pointer in box") and never deletes
-    text it cannot positively identify as its own. `defer_turn` holds the wake while a
+    text it cannot positively identify as its own. A suggestion wakes only when every
+    non-blank box cell is dim or inverse (the cursor); any other cell is "input typed". `defer_turn` holds the wake while a
     turn runs (owner_answer-only batches); other kinds keep the pre-#10670 timing.
     On a pane with no plain bottom rule under the ❯ it sends no keys in any box state
     and returns "skipped: no bottom rule ..."; the pending wake goes out once the rule
@@ -134,6 +135,8 @@ def wake(n, panes, dry_run, defer_turn=False):
     test_no_bottom_rule_sends_no_keys_in_any_box_state,
     test_the_pending_wake_is_delivered_once_the_bottom_rule_returns,
     test_a_wrapped_suggestion_under_a_plain_rule_still_wakes,
+    test_a_dim_row_over_an_undimmed_draft_is_never_typed_beside,
+    test_a_suggestion_wakes_only_when_the_whole_box_is_dim,
     test_a_rule_that_vanishes_after_typing_strands_the_pointer_without_enter
     """
     sup = sorted((p for p in panes if p["session"] == P.ARCHITECT),
@@ -161,12 +164,15 @@ def wake(n, panes, dry_run, defer_turn=False):
     # #10670: with `defer_turn`, a running turn holds the wake; background agents alone do not.
     if defer_turn and P.fleet_classify.ACTIVE.search(info["status"]):
         return "skipped: architect turn running"
-    if info["box"] not in ("empty", "suggestion"):
+    # #10670: classify() reads one SGR 2 on the ❯ row; a suggestion is a box whose every cell is dim.
+    state = ("suggestion" if P.fleet_classify.box_is_suggestion(raw)
+             else "typed" if info["box"] == "suggestion" else info["box"])
+    if state not in ("empty", "suggestion"):
         if P._own_pointer(P._box_full_text(raw)):
             return "skipped: own stale pointer in box"
-        return f"skipped: input {info['box']}"
+        return f"skipped: input {state}"
     # #10670: classify() reads only the ❯ row; a draft can sit on a later row.
-    if info["box"] == "empty" and P._box_full_text(raw):
+    if state == "empty" and P._box_full_text(raw):
         return "skipped: input typed"
     msg = f"[poll {datetime.now(timezone.utc):%H:%M}Z] {n} new alerts -> {P.ALERTS}"
     if dry_run:

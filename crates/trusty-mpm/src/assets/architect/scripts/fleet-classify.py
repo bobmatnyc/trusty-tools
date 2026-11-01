@@ -103,6 +103,65 @@ def find_box(lines):
     return None
 
 
+SGR_SEQ = re.compile(r"\x1b\[([0-9;]*)m")
+_ANSI_SPLIT = re.compile(f"({ANSI.pattern})")
+
+
+def _apply_sgr(params, dim, inverse):
+    """(dim, inverse) after one SGR sequence's parameters; colour arguments are skipped."""
+    codes, i = (params.split(";") if params else ["0"]), 0
+    while i < len(codes):
+        c = int(codes[i] or 0)
+        if c in (38, 48, 58):  # 38;5;n or 38;2;r;g;b: the arguments are not codes
+            i += 3 if codes[i + 1:i + 2] == ["5"] else 5
+            continue
+        if c == 0:
+            dim = inverse = False
+        dim = True if c == 2 else False if c == 22 else dim
+        inverse = True if c == 7 else False if c == 27 else inverse
+        i += 1
+    return dim, inverse
+
+
+def box_is_suggestion(capture):
+    """True when every non-blank cell of the input box is dim (SGR 2) or inverse (SGR 7),
+    and at least one is dim.
+
+    Why: classify() calls a ❯ row a suggestion on any literal SGR 2, so a typed `/review`
+    with a dim hint after it, or a dim row over an undimmed draft, read as a suggestion,
+    and a dim row whose SGR 2 shares a sequence with another code did not (#10670).
+    What: walks the capture from its first row, carrying SGR state across rows as
+    `capture-pane -e` does (a wrapped dim row repeats no escape), and checks each cell
+    between find_box()'s rules, skipping blanks and the ❯ glyph. An inverse cell is the
+    cursor. False with no box, or with no dim cell.
+    Test: test_a_box_is_a_suggestion_only_when_every_cell_is_dim_or_inverse,
+    test_a_typed_cell_anywhere_in_the_box_is_not_a_suggestion,
+    test_a_suggestion_wakes_only_when_the_whole_box_is_dim
+    """
+    rows = capture.splitlines()
+    box = find_box(_screen_lines(capture))
+    if not box:
+        return False
+    top, bottom = box
+    dim = inverse = seen = False
+    for n, row in enumerate(rows[:bottom]):
+        glyph = n == top + 1  # the ❯ row's first ❯ is the prompt, not text
+        for piece in _ANSI_SPLIT.split(row):
+            if (sgr := SGR_SEQ.fullmatch(piece)):
+                dim, inverse = _apply_sgr(sgr.group(1), dim, inverse)
+                continue
+            if n <= top or ANSI.fullmatch(piece):
+                continue
+            for ch in piece:
+                if glyph and ch == "❯":
+                    glyph = False
+                elif not ch.isspace():
+                    if not (dim or inverse):
+                        return False
+                    seen = seen or dim
+    return seen
+
+
 def find_dialog(lines, bottom):
     """(fingerprint_text, detail) of an open dialog below any input box, or None."""
     start = max(0, len(lines) - 25)
