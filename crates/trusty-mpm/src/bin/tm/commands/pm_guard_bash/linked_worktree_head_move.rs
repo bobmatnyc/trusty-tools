@@ -50,10 +50,12 @@ use super::main_checkout::{
     git_verb_targets_with_tail, head_move_deny_reason, main_checkout_head_move, starts_a_head_move,
 };
 use super::{PathEnv, shell_groups, unresolved_target};
-use crate::commands::pm_guard::{audit_denied_tool, build_pm_guard_deny_response};
 use crate::commands::pm_guard_deny_log::DenyContext;
+// #10641: each refusal names its policy id.
 use crate::commands::pm_guard_dispatch::{self, SHARED_TREE_ROUTE, SharedTreeReply};
 use crate::commands::pm_guard_floor::ArchitectGate;
+use crate::commands::pm_guard_refusal::refuse;
+use trusty_mpm::core::guard_policy;
 
 /// A HEAD move whose target is a linked worktree, awaiting the daemon's answer.
 #[derive(Debug, PartialEq, Eq)]
@@ -211,8 +213,7 @@ pub(crate) async fn deny_main_checkout_head_move(
         }
     };
     let refused = DenyContext::from_payload(url, payload);
-    audit_denied_tool(&refused, "head-move", &reason).await;
-    println!("{}", build_pm_guard_deny_response(&reason));
+    refuse(&refused, &guard_policy::HEAD_MOVE, &reason).await;
     true
 }
 
@@ -236,8 +237,7 @@ pub(crate) async fn deny_linked_worktree_head_move(
         return false;
     };
     let refused = DenyContext::from_payload(url, payload);
-    audit_denied_tool(&refused, "linked-worktree-head-move", &reason).await;
-    println!("{}", build_pm_guard_deny_response(&reason));
+    refuse(&refused, &guard_policy::LINKED_WORKTREE_HEAD_MOVE, &reason).await;
     true
 }
 

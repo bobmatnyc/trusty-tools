@@ -54,6 +54,7 @@ use super::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use super::pm_guard_response::{
     RewriteDecision, build_pm_guard_deny_response, build_rewrite_response,
 };
+use trusty_mpm::core::guard_policy;
 
 /// What the lease rule decided for one tool call.
 ///
@@ -204,13 +205,15 @@ pub(crate) fn emit_allow(payload: &Value, cost_notice: Option<String>, rewrite: 
         return;
     };
     let context = cost_notice.filter(|_| super::pm_guard_cost::claim_warn_notice(payload));
-    println!(
-        "{}",
-        super::pm_guard_worktree_grant::with_additional_context(&rewrite, context.as_deref())
-    );
+    // #10600: recorded as printed, so a later guard failure adds no object.
+    super::pm_guard_refusal::emit(super::pm_guard_worktree_grant::with_additional_context(
+        &rewrite,
+        context.as_deref(),
+    ));
 }
 
-/// The check slug a build-lease refusal is recorded under (#8722).
+/// The check slug a build-lease refusal is recorded under (#8722); the
+/// [`guard_policy::BUILD_LEASE`] entry's rule (#10641).
 pub(crate) const DENY_CHECK: &str = "build-lease";
 
 /// Record a build-lease refusal, then render its deny response for stdout.
@@ -222,7 +225,7 @@ pub(crate) const DENY_CHECK: &str = "build-lease";
 /// Test: `a_lease_refusal_is_recorded_before_it_is_printed`.
 pub(crate) async fn deny_response(refused: &DenyContext<'_>, reason: &str) -> String {
     audit_denied_tool(refused, DENY_CHECK, reason).await;
-    build_pm_guard_deny_response(reason).to_string()
+    build_pm_guard_deny_response(&guard_policy::BUILD_LEASE, reason).to_string()
 }
 
 /// The Bash permission patterns, by kind.

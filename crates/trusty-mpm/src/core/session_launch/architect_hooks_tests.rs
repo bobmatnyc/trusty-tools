@@ -134,14 +134,16 @@ fn a_disabled_guard_registers_no_architect_handler() {
 }
 
 /// PM and agent sessions: every toggle combination gives the same block as
-/// before #10459, the guard stays shell form, and nothing carries `args`,
-/// `onFailure` or a `UserPromptExpansion` group.
+/// before #10459, the guard stays shell form, and nothing carries `args` or a
+/// `UserPromptExpansion` group. #10600: `onFailure: "block"` sits on the PM
+/// guard entry and on no other entry.
 #[test]
 fn pm_session_registers_no_ticket_handler() {
     let shell_guard = json!({
         "type": "command",
         "command": format!("{}{PM_GUARD_SUFFIX}", resolve_statusline_binary()),
-        "timeout": 10
+        "timeout": 10,
+        "onFailure": "block"
     });
     for bits in 0u8..32 {
         let on = |bit: u8| bits & (1 << bit) != 0;
@@ -157,7 +159,13 @@ fn pm_session_registers_no_ticket_handler() {
         assert!(got["hooks"].get("UserPromptExpansion").is_none(), "{got}");
         for (event, entry) in entries(&got) {
             assert!(entry.get("args").is_none(), "{event}: {entry}");
-            assert!(entry.get("onFailure").is_none(), "{event}: {entry}");
+            // #10600: only the PM guard fails closed; every other hook keeps its behaviour.
+            let is_guard = entry == shell_guard;
+            assert_eq!(
+                entry.get("onFailure").is_some(),
+                is_guard,
+                "{event}: {entry}"
+            );
         }
         assert_eq!(
             got["hooks"]["PreToolUse"][0]["hooks"][0] == shell_guard,
@@ -395,7 +403,8 @@ fn the_launch_writes_the_architect_hooks_by_profile() {
         let settings = launch(project.path(), home.path());
         let guard = &settings["hooks"]["PreToolUse"][0]["hooks"][0];
         assert!(guard.get("args").is_none(), "{settings}");
-        assert!(guard.get("onFailure").is_none(), "{settings}");
+        // #10600: the PM guard fails closed too, in shell form.
+        assert_eq!(guard["onFailure"], "block", "{settings}");
         assert!(
             settings["hooks"].get("UserPromptExpansion").is_none(),
             "{settings}"

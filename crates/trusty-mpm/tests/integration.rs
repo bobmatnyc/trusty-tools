@@ -99,6 +99,8 @@ mod tm_hook_pm_guard_fleet_relaunch_10033;
 mod tm_hook_pm_guard_head_switch;
 mod tm_hook_pm_guard_heredoc_continuation_9180;
 mod tm_hook_pm_guard_heredoc_delimiter_9150;
+// #10641: golden allow/deny table per role; every deny names its policy id.
+mod tm_hook_pm_guard_policy_10641;
 // #8625: the kuzu-store deny under each bypass and for the Architect.
 mod tm_hook_pm_guard_kuzu_store_8625;
 // #9720: a `<<`-dense command is judged inside the hook timeout.

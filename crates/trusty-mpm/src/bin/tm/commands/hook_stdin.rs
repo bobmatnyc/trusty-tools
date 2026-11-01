@@ -306,11 +306,9 @@ pub(crate) async fn guarded_tool_name_or_deny<'a>(
 /// on stdout, then exit 0.
 /// Test: covered through its two callers' tests.
 async fn audit_then_deny_and_exit(refused: &DenyContext<'_>, check: &str, reason: String) -> ! {
-    crate::commands::pm_guard::audit_denied_tool(refused, check, &reason).await;
-    println!(
-        "{}",
-        crate::commands::pm_guard_response::build_pm_guard_deny_response(&reason)
-    );
+    // #10641: `check` names the policy entry (GP-001, GP-002); a miss is GP-000.
+    let policy = trusty_mpm::core::guard_policy::for_rule(check);
+    crate::commands::pm_guard_refusal::refuse(refused, policy, &reason).await;
     exit_after_decision()
 }
 
