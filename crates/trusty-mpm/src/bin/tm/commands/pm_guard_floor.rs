@@ -60,6 +60,7 @@ use crate::commands::pm_guard_bash::{
 };
 use crate::commands::pm_guard_deny_log::DenyContext;
 use crate::commands::pm_guard_refusal::refuse;
+use crate::commands::pm_guard_secret_script::tmux_kill::evaluate_script_body_tmux_kill;
 use crate::commands::pm_guard_trust_anchor::{self, HookEnv, TRUST_ANCHOR_RULE};
 use trusty_mpm::core::guard_policy;
 
@@ -217,9 +218,12 @@ pub(crate) fn evaluate_floors(
     }
     // #10665: an inherited `$TMUX` beats `-L` and `TMUX_TMPDIR`, so a
     // whole-server kill needs an explicit scratch `-S`; every caller is bound.
-    if let Some(reason) =
-        command.and_then(|c| evaluate_tmux_kill_server(c, &ServerEnv::from_process()))
-    {
+    // The incident ran from a script, so the scripts a command runs count too.
+    if let Some(reason) = command.and_then(|c| {
+        let env = ServerEnv::from_process();
+        evaluate_tmux_kill_server(c, &env)
+            .or_else(|| evaluate_script_body_tmux_kill(c, hook_cwd, &env))
+    }) {
         return Some(FloorDeny {
             rule: TMUX_KILL_SERVER_RULE,
             reason,

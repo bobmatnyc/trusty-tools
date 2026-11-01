@@ -7,7 +7,8 @@
 //! `TRUSTY_MPM_ALLOW_HOST_STATE` (so the guard's tmux listing is refused,
 //! #5784), and `$TMUX` naming a socket inside a temp directory, so no tmux
 //! server is touched. The incident shape and `kill-session -a` deny naming
-//! the policy; an explicit scratch `-S` is not refused by this floor.
+//! the policy, inline and from a script; an explicit scratch `-S` is not
+//! refused by this floor.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_tmux_kill_server_10665::`.
 
 use crate::common;
@@ -79,7 +80,12 @@ fn a_whole_server_kill_with_tmux_inherited_is_refused_under_each_bypass() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
     let scratch = root.join("scratch").display().to_string();
+    // The incident ran from line 38 of a scratch script.
+    let script = root.join("exp2.sh");
+    let body = format!("#!/bin/bash\nT={scratch}\nTMUX_TMPDIR=\"$T\" tmux kill-server\n");
+    std::fs::write(&script, body).expect("write script");
     for command in [
+        format!("bash {}", script.display()),
         format!("TMUX_TMPDIR={scratch} tmux kill-server"),
         format!("TMUX_TMPDIR={scratch} tmux kill-session -a"),
         "tmux -L scratch kill-server".to_string(),

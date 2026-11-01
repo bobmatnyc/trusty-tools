@@ -168,7 +168,7 @@ fn canonical(path: &Path) -> PathBuf {
 
 /// Whether `command` names a whole-server kill as text: a `kill-server` word,
 /// or a `kill-session` word with an `-a…` flag word anywhere after it.
-fn names_whole_server_kill(command: &str) -> bool {
+pub(crate) fn names_whole_server_kill(command: &str) -> bool {
     let words: Vec<&str> = command
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
         .filter(|w| !w.is_empty())
@@ -183,7 +183,7 @@ fn names_whole_server_kill(command: &str) -> bool {
 }
 
 /// The refusal text for `why`, naming the rule and the safe form.
-fn refusal(why: &str) -> String {
+pub(crate) fn refusal(why: &str) -> String {
     format!(
         "Refused: a whole-server tmux kill (#10665): {why}. An inherited `$TMUX` once \
          killed the fleet's tmux server this way; {SAFE_FORM}."
