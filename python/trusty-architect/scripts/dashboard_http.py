@@ -4,18 +4,24 @@ Why: one handler serves the page, the JSON store API and the read-only views, an
 DNS-rebinding and CSRF guard.
 What: `Handler` routes GET / (the page with the shim), /config.json, /api/<coll>[/<id>] (store reads and versioned
 writes; 409 on if_version mismatch), /api/batch, /api/user, /api/il, /api/harness[/diff], /api/viz, /live, /files,
-/usage, /media, /media-file, /doc, /doc-sync, /briefs and /vendor (see dashboard-serve.py for the API list). A request
+/usage, /media, /media-file, /doc, /doc-sync, /briefs and /vendor (see dashboard-serve.py for the API list), plus the
+dashboard_routes.py routes (PUT /doc, /api/attach, /api/fleet, /api/projects, /api/cli-profiles, /static). A request
 whose Host is not 127.0.0.1/localhost:<port> or a guard name (bare, :<port>, :443), or a write whose Origin is not
 http://127.0.0.1|localhost:<port> or https://<name>[:<port>|:443], gets 403 (`host_allowed`, `origin_allowed`).
 /config.json carries the tailnet origin the server was given (local/architect.json `tailnet_url`, "" when unset) and,
 in architect mode only, the session nav from `load_nav`. /api/user names meta/state.owner_name, else the configured
 owner_name, else "the owner". The Notion share sidecar is optional: without notion_sync every /doc-sync answer is
-{"share": false}. A Content-Length that is not plain digits is a 400 before any body read, and each connection
-times out after REQUEST_TIMEOUT_S (#10161). Standard library only. The Rust successor is the console route (See #10064).
+{"share": false}. The Secrets and project-lifecycle routes are optional too (#10571): while dashboard_secrets or
+dashboard_lifecycle is not shipped, /api/secrets/* and /api/projects/<verb>/<id> fall through to the store API, which
+refuses them (404 or 405), and nothing runs. A Content-Length that is not
+plain digits is a 400 before any body read, and each connection times out after REQUEST_TIMEOUT_S (#10161). A gzip copy
+of /api/harness goes to a client that accepts it. Standard library only. The Rust successor is the console route
+(See #10064).
 Test: tests/test_dashboard_store.py, tests/test_dashboard_tailnet.py, tests/test_dashboard_mode.py, tests/test_dashboard_doc.py,
 tests/test_dashboard_media.py, tests/test_dashboard_harness.py, tests/test_dashboard_il.py, tests/test_dashboard_viz.py,
 tests/test_dashboard_concurrency.py
 """
+import hashlib
 import json
 import os
 import re
@@ -29,6 +35,7 @@ import dashboard_harness
 import dashboard_il
 import dashboard_media
 import dashboard_page as page
+import dashboard_routes as routes
 import dashboard_store as ds
 import dashboard_viz
 
@@ -36,6 +43,14 @@ try:
     import notion_sync  # the Notion share sidecar; optional, not shipped yet
 except ImportError:
     notion_sync = None
+try:  # #10571: the Secrets nav and project lifecycle need the trusty-secrets bridge; optional, not shipped yet
+    import dashboard_secrets
+except ImportError:
+    dashboard_secrets = None
+try:
+    import dashboard_lifecycle
+except ImportError:
+    dashboard_lifecycle = None
 
 MAX_BODY = 1 << 20
 REQUEST_TIMEOUT_S = 30   # #10161: a stalled client releases its handler thread after this
@@ -54,18 +69,29 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "GET" or (str(code).isdigit() and int(code) >= 400):
             super().log_request(code, size)
 
-    def _send(self, status, payload, ctype="application/json; charset=utf-8", cache="no-store"):
+    def _send(self, status, payload, ctype="application/json; charset=utf-8", cache="no-store", gz=None):
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        # gz: pre-compressed copy of body; sent only when the client accepts gzip (a phone over the tailnet)
+        gzip_ok = gz is not None and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+        if gzip_ok:
+            body = gz
         self.send_response(status)
         self.send_header("Content-Type", ctype)
+        if gz is not None:
+            self.send_header("Vary", "Accept-Encoding")
+        if gzip_ok:
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         if getattr(self, "_csp", None):
             self.send_header("Content-Security-Policy", self._csp)
             self._csp = None
+        for k, v in (getattr(self, "_extra", None) or {}).items():
+            self.send_header(k, v)
+        self._extra = None
         try:
-            self.send_header("X-Page-Rev", page.page_rev(self.server.page))
+            self.send_header("X-Page-Rev", self.server.rev())
         except OSError:
             pass
         self.end_headers()
@@ -115,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
             if not parts or parts == ["index.html"]:
                 if self.command not in ("GET", "HEAD"):
                     return self._err(405, "method_not_allowed", "GET only")
-                rev = page.page_rev(self.server.page)
+                rev = self.server.rev()
                 with open(self.server.page, "r", encoding="utf-8") as f:
                     return self._send(200, page.inject(f.read(), rev).encode("utf-8"), "text/html; charset=utf-8")
             if parts == ["config.json"]:
@@ -123,7 +149,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(405, "method_not_allowed", "GET only")
                 # ar-T44: session links only on the Architect dashboard; a session dash serves an empty nav
                 nav = load_nav(self.server.nav_file) if self.server.config.get("mode") == "architect" else []
-                return self._send(200, dict(self.server.config, nav=nav, tailnet=self.server.tailnet_url))   # See #10161
+                return self._send(200, dict(self.server.config, nav=nav, tailnet=self.server.tailnet_url, console=self.server.console_url,
+                                            features=features()))   # See #10161; #10571: the page hides a tab whose backend is absent
             if parts == ["api", "il"]:
                 # Df7: consolidated Intent Ledger view; architect mode only, read-only, GET only
                 if self.server.config.get("mode") != "architect":
@@ -131,21 +158,28 @@ class Handler(BaseHTTPRequestHandler):
                 if self.command not in ("GET", "HEAD"):
                     return self._err(405, "method_not_allowed", "GET only")
                 return self._send(200, dashboard_il.aggregate(self.server.projects(), self.server.il_schedule, self.server.architect_il))
-            if parts == ["live"]:
-                # ar-Te8: the Live view page; architect mode only, GET only, static file
+            if parts == ["live"] or parts == ["live", "kiosk"]:
+                # ar-Te8: the Live view page (also /live/kiosk, the same page in kiosk mode); architect mode only, GET only
                 if self.server.config.get("mode") != "architect":
                     return self._err(404, "not_found", "no such path")
                 if self.command not in ("GET", "HEAD"):
                     return self._err(405, "method_not_allowed", "GET only")
-                with open(self.server.live_page, "rb") as f:
-                    return self._send(200, f.read(), "text/html; charset=utf-8")
+                with open(self.server.live_page, "r", encoding="utf-8") as f:
+                    return self._send(200, page.inject(f.read(), self.server.rev(), shim_on=False).encode("utf-8"), "text/html; charset=utf-8")
             if parts == ["api", "harness"]:
                 # ar-Te8: read-only Live snapshot (sessions, subagents, recent in/out messages); architect mode only, cached ~4 s
                 if self.server.config.get("mode") != "architect":
                     return self._err(404, "not_found", "no such path")
                 if self.command not in ("GET", "HEAD"):
                     return self._err(405, "method_not_allowed", "GET only")
-                return self._send(200, self.server.harness_cache.get(self._harness))
+                body, gz = self.server.harness_body(self.server.harness_cache.get(self._harness))
+                return self._send(200, body, gz=gz)
+            if parts == ["api", "fleet"]:
+                return routes.fleet(self)
+            if parts == ["api", "projects"]:
+                return routes.projects(self)
+            if parts == ["api", "cli-profiles"]:
+                return routes.cli_profiles(self, url)
             if parts == ["api", "harness", "diff"]:
                 # ar-Tea: unified diff of the latest change behind a Docs row; same checks as /api/harness
                 if self.server.config.get("mode") != "architect":
@@ -180,14 +214,26 @@ class Handler(BaseHTTPRequestHandler):
                 if parts[0] == "media":
                     return self._send(200, {"media": self._media(parse_qs(url.query))}) if len(parts) == 1 else self._err(404, "not_found", "no such path")
                 return self._media_file(url.path)
-            if parts[0] in ("doc", "vendor", "doc-sync", "briefs"):
+            if parts[0] == "doc" and self.command == "PUT":
+                return routes.doc_put(self, url.path, origin_allowed, _DIGITS)
+            if parts[0] in ("doc", "vendor", "doc-sync", "briefs", "static"):
                 if self.command not in ("GET", "HEAD"):
                     return self._err(405, "method_not_allowed", "GET only")
+                if parts[0] == "static":
+                    return routes.static(self, parts[1:])
                 if parts[0] == "briefs":
-                    return self._send(200, {"briefs": docs.list_briefs(self.server.projects())}) if len(parts) == 1 else self._err(404, "not_found", "no such path")
+                    return self._send(200, {"briefs": self._brief_rows()}) if len(parts) == 1 else self._err(404, "not_found", "no such path")
                 if parts[0] == "doc-sync":
                     return self._doc_sync(url.path, parse_qs(url.query))
                 return self._doc(url.path) if parts[0] == "doc" else self._vendor(parts[1:])
+            if parts[:2] == ["api", "attach"]:
+                return routes.attach(self, parts[2:], parse_qs(url.query), _DIGITS)
+            if dashboard_secrets is not None and tuple(parts[:2]) == dashboard_secrets.PREFIX:
+                # Secrets nav: POST-only, Origin + CSRF guarded; never returns a value
+                return dashboard_secrets.handle(self, parts[2:], host_allowed, origin_allowed)
+            if dashboard_lifecycle is not None and tuple(parts[:2]) == dashboard_lifecycle.PREFIX and len(parts) == 3:
+                # Projects archive/decommission/restore: POST-only, CSRF guarded
+                return dashboard_lifecycle.handle(self, parts[2:], host_allowed, origin_allowed)
             if parts[0] != "api":
                 return self._err(404, "not_found", "no such path")
             return self._api(parts[1:], parse_qs(url.query))
@@ -195,6 +241,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(e.status, e.code, str(e))
         except FileNotFoundError as e:
             return self._err(404, "not_found", f"missing file: {e.filename}")
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True   # the client went away mid-response: quiet, no 500, no traceback
+            return
         except Exception as e:  # noqa: BLE001 - last-resort 500 with the message in the log
             sys.stderr.write(f"internal error on {self.command} {self.path}: {e!r}\n")
             return self._err(500, "internal", "internal error")
@@ -203,9 +252,15 @@ class Handler(BaseHTTPRequestHandler):
         sv = self.server
         sdocs = [d["data"] for d in sv.store.list_docs("sessions")]
         idocs = [d["data"] for d in sv.store.list_docs("items")]
+        gdocs = [d["data"] for d in sv.store.list_docs("goals")]
         roots = sv.projects()
         cwds = {x.get("name"): roots[x.get("project")] for x in sdocs if x.get("name") and x.get("project") in roots}
-        return dashboard_harness.build(sv.inbox, sv.claude_projects, sdocs, idocs, project_cwds=cwds, roots=roots)
+        try:
+            ustate = sv.store.get("meta", "settings")["data"].get("user_state")
+        except Exception:  # noqa: BLE001 - settings absent: state unknown, never sleeping
+            ustate = None
+        return dashboard_harness.build(sv.inbox, sv.claude_projects, sdocs, idocs, project_cwds=cwds, roots=roots, goal_docs=gdocs,
+                                       user_state=ustate, tmux=dashboard_harness.tmux_sessions())
 
     def _file(self, path):
         """Serve /files/local/briefs/<rel>. Anything that does not resolve to a regular file
@@ -241,6 +296,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, "not_found", "no such document")
         with open(real, "rb") as f:
             data = f.read()
+        self._extra = {"X-Doc-Sha256": hashlib.sha256(data).hexdigest()}   # the base_sha256 a PUT /doc must name
         return self._send(200, data, "text/plain; charset=utf-8")
 
     def _doc_sync(self, raw_path, query):
@@ -258,16 +314,21 @@ class Handler(BaseHTTPRequestHandler):
             notion_sync.maybe_refresh(doc_id)
         return self._send(200, notion_sync.snapshot(doc_id))
 
+    def _brief_rows(self):
+        """GET /briefs rows; the architect dash adds a stable B id to each (same `media` collection as diagrams)."""
+        store = self.server.store if self.server.config.get("mode") == "architect" else None
+        return dashboard_media.brief_rows(store, self.server.projects(), docs.list_briefs(self.server.projects()), docs.denied)
+
     def _media(self, q):
-        """GET /media?type=diagram,image (default both): diagrams and images under the doc roots. Briefs stay on /briefs."""
-        want = {t for v in q.get("type", ["diagram,image"]) for t in v.split(",")} & {"diagram", "image"}
+        """GET /media?type=diagram,image,file (default diagram,image): diagrams, images and .json files under the doc roots."""
+        want = {t for v in q.get("type", ["diagram,image"]) for t in v.split(",")} & {"diagram", "image", "file"}
         if not want:
             return []
         store = self.server.store if self.server.config.get("mode") == "architect" else None   # B ids: architect dash only
-        return dashboard_media.media_rows(store, self.server.projects(), want, docs.denied)
+        return dashboard_media.media_rows(store, self.server.projects(), want, docs.denied, docs.list_briefs(self.server.projects()))
 
     def _media_file(self, raw_path):
-        """GET /media-file/<project>/<rel>: a diagram or image file, read-only. Same 404-for-everything rule as /doc.
+        """GET /media-file/<project>/<rel>: a diagram, image or .json file, read-only. Same 404-for-everything rule as /doc.
         SVG is sandboxed by CSP so a script inside it cannot run even if opened directly."""
         segs = [unquote(x) for x in raw_path.split("/")[2:]]
         real = dashboard_media.resolve_media(self.server.projects(), segs[0], segs[1:], docs.denied) if segs else None
@@ -300,16 +361,20 @@ class Handler(BaseHTTPRequestHandler):
             # #10161: no owner name ships; meta/state, else local/architect.json, else a neutral default.
             name = name or self.server.owner_name or "the owner"
             return self._send(200, {"id": "local", "name": name, "can_write": True})
+        if len(parts) == 2 and parts[0] == "media-archive" and m == "POST":   # archive a media item (architect dash only)
+            if self.server.config.get("mode") != "architect":
+                return self._err(404, "not_found", "no such path")
+            return self._send(200, dashboard_media.archive_media(store, self.server.projects(), parts[1], docs.denied))
         if parts == ["batch"] and m == "POST":
             return self._send(200, {"results": store.batch(self._body().get("ops"), actor=self._actor())})
         if len(parts) == 1:
             coll = parts[0]
             if m == "GET":
-                docs = store.list_docs(
+                rows = store.list_docs(
                     coll, status=(q.get("status") or [None])[0], order_by=(q.get("order_by") or [None])[0],
                     desc=(q.get("dir") or ["asc"])[0] == "desc",
                     limit=int(q["limit"][0]) if q.get("limit") and q["limit"][0].isdigit() else None)
-                return self._send(200, {"docs": docs, "rev": page.rev_of(docs)})
+                return self._send(200, {"docs": rows, "rev": page.rev_of(rows)})
             if m == "POST":
                 return self._send(201, store.add(coll, self._body().get("data"), actor=self._actor()))
         if len(parts) == 2:
@@ -326,6 +391,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._err(405, "method_not_allowed", f"{m} {'/'.join(parts)} not supported")
 
     do_GET = do_HEAD = do_PUT = do_PATCH = do_POST = do_DELETE = _dispatch
+
+
+def features():
+    """Which optional backends this install has (#10571): {"secrets", "cli_profiles", "project_lifecycle"} -> bool.
+    The page drops the Secrets and CLI Profiles tabs and the archive buttons when their flag is false."""
+    return {"secrets": dashboard_secrets is not None, "cli_profiles": routes.cli_profiles_mod is not None,
+            "project_lifecycle": dashboard_lifecycle is not None}
 
 
 def host_allowed(host, port, names):

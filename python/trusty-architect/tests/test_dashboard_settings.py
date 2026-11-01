@@ -42,6 +42,33 @@ class TestUserStateLogic(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestMorningBriefSettings(unittest.TestCase):
+    def test_defaults_and_payload_shape(self):
+        body = """const e = (x) => x.error;
+        console.log(JSON.stringify([briefOf(null), briefOf({morning_brief: {enabled: false, time: "08:15", days: "daily"}}),
+          briefOf({morning_brief: {days: ["sun", "mon"], time: "7:5"}}),
+          briefPayload({tz: "Europe/Rome"}, true, "07:30", ["mon", "tue", "wed", "thu", "fri"]),
+          briefPayload(null, true, "07:30", BRIEF_DAYS), briefPayload(null, false, "06:45", ["sat", "mon"]),
+          e(briefPayload(null, true, "", ["mon"])), e(briefPayload(null, true, "07:30", []))]));"""
+        got = run(PAGES[0], ["sleepHours", "morningBrief"], body)
+        self.assertEqual(got[0], {"enabled": True, "time": "07:30", "days": ["mon", "tue", "wed", "thu", "fri"]})
+        self.assertEqual(got[1], {"enabled": False, "time": "08:15", "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]})
+        self.assertEqual(got[2], {"enabled": True, "time": "07:30", "days": ["mon", "sun"]})
+        self.assertEqual(got[3], {"payload": {"morning_brief": {"tz": "Europe/Rome", "enabled": True, "time": "07:30", "days": "weekdays"}}})
+        self.assertEqual(got[4]["payload"]["morning_brief"]["days"], "daily")
+        self.assertEqual(got[5]["payload"]["morning_brief"], {"enabled": False, "time": "06:45", "days": ["mon", "sat"]})
+        self.assertTrue(all(isinstance(x, str) and x for x in got[6:]))
+
+    def test_pane_has_the_controls_and_saves_through_the_one_write_path(self):
+        src = open(PAGES[0], encoding="utf-8").read()
+        pane = src[src.index('<dialog id="settings-pane"'):src.index("</dialog>")]
+        for needle in ('id="set-brief-enabled"', 'id="set-brief-time"', 'id="set-brief-days"', 'id="set-brief-err"'):
+            self.assertIn(needle, pane)
+        self.assertEqual(len(re.findall(r'data-day="', pane)), 7)
+        self.assertIn("saveSettings(r.payload)", src[src.index("async function saveBriefSettings"):])
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
 class TestIdLinks(unittest.TestCase):
     def test_known_ids_link_unused_next_ids_stay_text(self):
         body = r"""

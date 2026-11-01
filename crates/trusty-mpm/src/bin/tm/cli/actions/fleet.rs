@@ -34,6 +34,11 @@ pub(crate) enum FleetAction {
         /// `[supervisor] session` so later runs and `status` use it (#8878).
         #[arg(long)]
         session: Option<String>,
+        /// Move a dashboard this Architect already runs by hand under the
+        /// login start (stop it, start it from launchd, put it back if that
+        /// fails). Without it a running dashboard is reported and left alone.
+        #[arg(long)]
+        dashboard_takeover: bool,
     },
     /// Report whether the Architect is set up and running (read-only).
     ///

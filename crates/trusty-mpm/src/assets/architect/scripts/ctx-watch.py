@@ -17,7 +17,7 @@ TTL at a boundary; S4 restored idle history (once per sessionId); S5 ctx >= guar
 boundary_at + boundary_slack_s (boundary_at has minute resolution).
 Thresholds come from il-schedule.json "thresholds" (+ per-session "thresholds").
 CLI: ctx-watch.py [--json] [--now ISO] [--no-state] [--session NAME]
-Env (tests): IL_SCHEDULE, SESSIONS_DIR, TRANSCRIPT_BASE, SUPERVISOR_INBOX_DIR,
+Env (tests): IL_SCHEDULE, SESSIONS_DIR, TRANSCRIPT_BASE, ARCHITECT_INBOX_DIR, SUPERVISOR_INBOX_DIR,
 CTX_PROXY_LOG, CTX_CYCLE_JSONL.
 Test: scripts/test_ctx_watch.py
 """
@@ -55,7 +55,8 @@ CTX_USE_RE = re.compile(r"CTX-USE:\s*active\s*~(\d{1,2})%\s*·\s*stale\s*~(\d{1,
 
 
 def paths():
-    inbox = os.environ.get("SUPERVISOR_INBOX_DIR") or os.path.join(ROOT, "inbox")
+    inbox = (os.environ.get("ARCHITECT_INBOX_DIR") or os.environ.get("SUPERVISOR_INBOX_DIR")
+             or os.path.join(ROOT, "inbox"))  # #10571: the poller's inbox first
     return {
         "schedule": os.environ.get("IL_SCHEDULE") or os.path.join(ROOT, "local", "il-schedule.json"),
         "state": os.path.join(inbox, "ctx-watch-state.json"),

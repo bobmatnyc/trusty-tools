@@ -9,7 +9,8 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PAGES = [os.path.join(ROOT, p) for p in ("templates/dashboard/index.html",)]
-TAP_CLASSES = [".btn", ".rm", ".opt", ".cp", ".jump", ".collapse-all", ".console-link", ".cbar .pg", ".mv", ".handle", ".step-hit", ".tap"]
+CTL = open(os.path.join(ROOT, "templates/dashboard/tokens.css"), encoding="utf-8").read()
+TAP_CLASSES = [".btn", ".rm", ".opt", ".cp", ".jump", ".mv", ".handle", ".step-hit", ".tap"]
 MAIN_CONTAINERS = {"body", "html", ".wrap", "header", ".sec", ".sec-body", ".rows", ".item", ".body", ".kv", ".opts", ".brand", ".goal-row"}
 
 
@@ -40,8 +41,11 @@ class TestDashboardMobileCss(unittest.TestCase):
         for src in self.pages():
             self.assertIn('name="viewport" content="width=device-width, initial-scale=1', src)
             self.assertIn("@media (prefers-reduced-motion: reduce)", src)
-            self.assertIn("@media (prefers-color-scheme: dark)", src)
-            self.assertIn(':root[data-theme="dark"]', src)
+        tok = read(os.path.join(ROOT, "templates/dashboard/tokens.css"))      # the dark selectors moved to the shared file; the pages follow the theme through it
+        self.assertIn("@media (prefers-color-scheme: dark)", tok)
+        self.assertIn(':root[data-theme="dark"]', tok)
+        for page in PAGES + [os.path.join(ROOT, "templates/dashboard/live.html")]:
+            self.assertNotIn("--surface-0:", read(page), page)                   # no page carries its own token block
 
     def test_no_fixed_width_above_360px_on_main_containers(self):
         for src in self.pages():
@@ -67,6 +71,98 @@ class TestDashboardMobileCss(unittest.TestCase):
             wrap = [d for s, d in rules if ".item > summary" in s and d.get("flex-wrap") == "wrap"]
             title = [d for s, d in rules if ".item > summary .title" in s and d.get("white-space") == "normal"]
             self.assertTrue(wrap and title)
+
+
+class TestDashboardHeaderIcons(unittest.TestCase):
+    """Header (the owner 2026-10-24): Live is an icon link; the Menu hamburger lives in the left column header."""
+
+    def test_live_icon_and_column_hamburger(self):
+        for src in [read(p) for p in PAGES]:
+            live = re.search(r'<a [^>]*id="live-link"[^>]*>(.*?)</a>', src, re.S)
+            self.assertTrue(live, "no Live link")
+            self.assertIn('href="/live"', live.group(0))
+            self.assertIn('aria-label="Live"', live.group(0))
+            self.assertIn("<svg", live.group(1))
+            self.assertNotIn("Live", live.group(1))
+            menu = re.search(r'<button [^>]*id="nav-toggle"[^>]*>(.*?)</button>', src, re.S)
+            self.assertTrue(menu, "no Menu button")
+            self.assertIn('aria-label="Collapse menu"', menu.group(0))
+            self.assertIn("<svg", menu.group(1))
+
+    def test_icon_buttons_are_at_least_40px(self):
+        for src in [read(p) for p in PAGES]:
+            self.assertRegex(CTL, r"\.ctl \{[^}]*height: var\(--h-control\)")
+            self.assertRegex(CTL, r"\.ctl--icon \{ width: var\(--h-control\)")
+            self.assertIn("--h-control: 40px", CTL)
+
+    def test_header_controls_have_40px_hit_areas(self):
+        # one control (.ctl in tokens.css): 40px, 44px on phones and coarse pointers; pages keep no private header-button sizes
+        self.assertIn("--h-touch: 44px", CTL)
+        self.assertRegex(CTL, r"@media \(max-width: 600px\), \(pointer: coarse\) \{\s*\.ctl \{ height: var\(--h-touch\)")
+        for src in [read(p) for p in PAGES]:
+            for old in ("\n.collapse-all {", "\n.console-link {", "\n.state-badge { border-block", "\n.sess-pick { box-sizing"):
+                self.assertNotIn(old, src)
+
+
+class TestDashboardCollapsibleColumn(unittest.TestCase):
+    """Left column (the owner 2026-10-24): the toggle sits in the column header, the main header is inside the main pane, collapse state persists."""
+
+    def setUp(self):
+        self.src = read(PAGES[0])
+
+    def test_toggle_is_in_column_header_not_main_header(self):
+        col = re.search(r'<aside id="navcol">(.*?)</aside>', self.src, re.S).group(1)
+        head = re.search(r'<div id="navcol-head">(.*?)</div>', col, re.S).group(1)
+        self.assertIn('id="nav-toggle"', head)
+        self.assertIn("<svg", head)
+        self.assertLess(col.index("navcol-head"), col.index('<nav id="nav"'))
+        main_header = re.search(r"<header>(.*?)</header>", self.src, re.S).group(1)
+        self.assertNotIn("nav-toggle", main_header)
+
+    def test_main_header_is_inside_the_pane_above_main(self):
+        pane = self.src.index('<div id="pane">')
+        self.assertLess(self.src.index('<aside id="navcol">'), pane)
+        self.assertLess(pane, self.src.index("<header>"))
+        self.assertLess(self.src.index("</header>"), self.src.index('<main id="main">'))
+        self.assertLess(self.src.index("</main>"), self.src.index("<footer"))
+        self.assertNotRegex(self.src, r'<div class="wrap">\s*<header>')   # header no longer spans the full page
+
+    def test_reopen_control_when_drawer_closed(self):
+        m = re.search(r'<button [^>]*id="nav-reopen"[^>]*>', self.src)
+        self.assertTrue(m and 'aria-label="Open menu"' in m.group(0))
+        self.assertGreater(m.start(), self.src.index('<div id="pane">'))
+        self.assertLess(m.start(), self.src.index("<header>"))
+        rules = css_rules(self.src)
+        self.assertEqual([d["display"] for s, d in rules if s == ["#nav-reopen"] and "display" in d][0], "none")
+        self.assertTrue([d for s, d in rules if s == ["#nav-reopen"] and d.get("display") == "inline-flex"])
+
+    def test_desktop_collapses_to_rail_and_widens_main(self):
+        rules = css_rules(self.src)
+        rail = [d for s, d in rules if "body.nav-collapsed .shell" in s][0]
+        self.assertEqual(rail["grid-template-columns"], "56px minmax(0, 1fr)")
+        self.assertTrue([d for s, d in rules if "body.nav-collapsed #nav" in s and d.get("display") == "none"])
+        wide = [d for s, d in rules if "body.nav-collapsed #main" in s][0]
+        self.assertGreater(int(wide["max-width"][:-2]), 980)
+        self.assertTrue([d for s, d in rules if "body.nav-open #navcol" in s])   # <= 840px overlay drawer
+
+    def test_collapse_state_persists_in_try_catch_localstorage(self):
+        self.assertIn('NAVCOL_KEY = "arch.navcol.collapsed"', self.src)
+        self.assertRegex(self.src, r'try \{ localStorage\.setItem\(NAVCOL_KEY[^}]*\} catch \(_\) \{\}')
+        self.assertRegex(self.src, r'try \{ if \(localStorage\.getItem\(NAVCOL_KEY\) === "1"\)[^}]*\} catch \(_\) \{\}')
+
+
+class TestLiveFrameFit(unittest.TestCase):
+    """The Visualize Live frame is sized from its real offset (header sits inside the pane), not a fixed calc(100vh - N)."""
+
+    def test_frame_height_fits_from_offset_and_page_does_not_scroll(self):
+        src = read(PAGES[0])
+        fn = src[src.index("window.fitLiveFrame = function"):src.index("window.addEventListener(\"resize\"")]
+        self.assertIn("getBoundingClientRect().top + window.scrollY", fn)
+        self.assertIn("window.innerHeight - top - below", fn)
+        self.assertIn("window.fitLiveFrame", src[src.index('b.id === "viz-live"'):][:400])   # run when the frame is shown
+        self.assertIn('hashchange", () => requestAnimationFrame(window.fitLiveFrame)', src)
+        live = [d for s_, d in css_rules(src) if any("footer" in x and "data-sub=\"live\"" in x for x in s_)]
+        self.assertTrue(live and live[0]["display"] == "none")   # nothing under the frame to scroll to
 
 
 FAKE = r"""

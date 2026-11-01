@@ -18,7 +18,9 @@ An open item whose resume_request is a dict with `at` (the Resume button on a pa
 resume_request null) and relays to the PM.
 An open item whose brief_request is a dict with `at` and that has no `brief` (the "Ask for a brief" button on a decision or ask)
 yields {id, kind: "brief_request", at: brief_request.at, text: title}; the Architect writes the brief, sets `brief` to
-"<project>/docs/briefs/<file>.md" on the item, and the request stops being reported.
+"<project>/docs/briefs/<file>.md" on the item, and the request stops being reported. A goal doc with brief_request {at} and no `brief`
+yields the same kind with the goal id. "Refresh briefing" (item or goal that already has `brief`) writes brief_request {at, by, refresh: true}
+and is reported until the Architect regenerates the brief and sets brief_request to null.
 Each `steer_requests` entry {text, at, by} on a task without `relayed_at` (the Steer button) yields
 {id, kind: "steer", at: entry.at, text: entry.text}, whatever the item's status. The Architect relays it to the
 owning PM as `User instruction (the owner): <text>`, then sets that entry's relayed_at (ISO time) with

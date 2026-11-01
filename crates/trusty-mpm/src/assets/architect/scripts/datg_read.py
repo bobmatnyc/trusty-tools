@@ -200,9 +200,9 @@ def _digest_sections(project, st):
     if size > SIZE_WARN:
         head.append(f"SIZE: state.json {size} B over the {SIZE_WARN} B bar; run datg.py prune")
     sess = ["SESSION"]
-    if not ses.get("task") and not ses.get("next"):
+    if not ses.get("task") or not ses.get("next"):   # #10579: a HOLD is an extra line, never a substitute
         sess.append("  none recorded")
-    for k in ("task", "next"):
+    for k in ("hold", "merge_hold", "task", "next"):   # #10579: the holds are read first
         if ses.get(k):
             sess.append(f"  {k}: {ses[k]}")
     for w in ses.get("waiting_on") or []:

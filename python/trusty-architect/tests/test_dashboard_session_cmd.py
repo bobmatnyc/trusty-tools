@@ -37,32 +37,31 @@ class TestDashboardSessionCmd(unittest.TestCase):
     def test_controls_render_by_state_and_hide_when_read_only(self):
         body = """
         const out = {};
-        for (const st of ["idle", "parked", "exited", "waiting-owner", "waiting-ci", "working"]) {
-          const b = el("div"); sessionCommandControl(b, { id: "S01", name: "tm-x", state: st }, [{ id: "G01", title: "t" }]);
+        for (const st of ["waiting", "paused", "inactive", "working"]) {
+          const b = el("div"); sessionCommandControl(b, { id: "S01", name: "tm-x", status: st }, [{ id: "G01", title: "t" }]);
           out[st] = b.find((n) => n.tagName === "button").map((n) => n.textContent);
         }
-        readOnly = true; const b = el("div"); sessionCommandControl(b, { id: "S01", state: "idle" }, []); out.ro = b.children.length;
+        readOnly = true; const b = el("div"); sessionCommandControl(b, { id: "S01", status: "waiting" }, []); out.ro = b.children.length;
         console.log(JSON.stringify(out));"""
         for r in self.each(body):
-            self.assertEqual(r, {"idle": ["Park", "Activate", "Prioritize"], "parked": ["Activate", "Prioritize"],
-                                 "exited": ["Restart", "Park"], "waiting-owner": ["Prioritize"], "waiting-ci": ["Prioritize"],
-                                 "working": ["Prioritize"], "ro": 0})
+            self.assertEqual(r, {"waiting": ["Park", "Activate", "Prioritize"], "paused": ["Activate", "Prioritize"],
+                                 "inactive": ["Restart", "Park"], "working": ["Prioritize"], "ro": 0})
 
     def test_architect_rows_have_no_park_or_restart(self):
         body = """
         const out = {};
-        for (const name of ["tm-architect", "tm-architect-poll"]) for (const st of ["idle", "exited"]) {
-          const b = el("div"); sessionCommandControl(b, { id: "S01", name, state: st }, []);
+        for (const name of ["tm-architect", "tm-architect-poll"]) for (const st of ["waiting", "inactive"]) {
+          const b = el("div"); sessionCommandControl(b, { id: "S01", name, status: st }, []);
           out[name + "/" + st] = b.find((n) => n.tagName === "button").map((n) => n.textContent);
         }
         console.log(JSON.stringify(out));"""
         for r in self.each(body):
-            self.assertEqual(r, {"tm-architect/idle": ["Activate", "Prioritize"], "tm-architect/exited": [],
-                                 "tm-architect-poll/idle": ["Activate", "Prioritize"], "tm-architect-poll/exited": []})
+            self.assertEqual(r, {"tm-architect/waiting": ["Activate", "Prioritize"], "tm-architect/inactive": [],
+                                 "tm-architect-poll/waiting": ["Activate", "Prioritize"], "tm-architect-poll/inactive": []})
 
     def test_forms_have_goal_picker_and_optional_text(self):
         body = """
-        const s = { id: "S01", name: "tm-x", state: "idle" }; const goals = [{ id: "G01", title: "one" }, { id: "G02", title: "two" }];
+        const s = { id: "S01", name: "tm-x", status: "waiting" }; const goals = [{ id: "G01", title: "one" }, { id: "G02", title: "two" }];
         const out = {};
         for (const [label, idx] of [["Prioritize", 2], ["Activate", 1], ["Park", 0]]) {
           cmdOpen.clear(); const b = el("div"); sessionCommandControl(b, s, goals); b.find((n) => n.tagName === "button")[idx].listeners.click();
@@ -79,7 +78,7 @@ class TestDashboardSessionCmd(unittest.TestCase):
     def test_send_writes_command_with_if_version_then_shows_sent_until_applied(self):
         body = """
         (async () => {
-          const s = { id: "S03", name: "tm-memory", state: "idle" };
+          const s = { id: "S03", name: "tm-memory", status: "waiting" };
           await sendSessionCommand(s, { type: "activate", text: "  #9451  " });
           const a = updated;
           await sendSessionCommand(s, { type: "prioritize", goal: "G02", note: " first " });
@@ -107,7 +106,7 @@ class TestDashboardSessionCmd(unittest.TestCase):
     def test_park_and_restart_write_the_command_and_show_requested_until_applied(self):
         body = """
         (async () => {
-          const s = { id: "S03", name: "tm-memory", state: "exited" };
+          const s = { id: "S03", name: "tm-memory", status: "inactive" };
           await sendSessionCommand(s, { type: "restart", note: "  after build " });
           const r = updated;
           const shown = withCommand({ id: "S03" }, optimisticCmd);
@@ -132,7 +131,7 @@ class TestDashboardSessionCmd(unittest.TestCase):
         body = """
         (async () => {
           db = { collection: () => ({ doc: () => ({ get: async () => ({ version: 1 }), update: async () => { throw new Error("nope"); } }) }) };
-          const s = { id: "S03", name: "tm-memory", state: "idle" };
+          const s = { id: "S03", name: "tm-memory", status: "waiting" };
           const ok = await sendSessionCommand(s, { type: "activate", text: "x" });
           console.log(JSON.stringify({ ok, pending: optimisticCmd.size, open: cmdOpen.has("S03") }));
         })();"""
@@ -141,7 +140,7 @@ class TestDashboardSessionCmd(unittest.TestCase):
 
     def test_park_of_a_session_a_goal_depends_on_asks_first_and_cancel_writes_nothing(self):
         body = """
-        const s = { id: "S01", name: "tm-x", state: "idle" };
+        const s = { id: "S01", name: "tm-x", status: "waiting" };
         const goals = [{ id: "G01", title: "one", sessions: ["tm-x"] }, { id: "G02", title: "two", sessions: ["tm-x"], parked: { until: null } }];
         const out = {}; const btn = (b, t) => b.find((n) => n.tagName === "button").filter((n) => n.textContent === t)[0];
         let b = el("div"); sessionCommandControl(b, s, goals); btn(b, "Park").listeners.click();

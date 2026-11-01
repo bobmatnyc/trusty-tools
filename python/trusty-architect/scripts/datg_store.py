@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -27,13 +28,38 @@ EVENTS = ("open", "escalated", "answered", "done", "drift", "reprio", "update")
 CODE_RE = re.compile(r"^[a-z][a-z0-9]{1,7}$")
 ID_RE = re.compile(r"^([a-z][a-z0-9]{1,7})-([GDAT])([0-9a-f]{2})$")
 TITLE_MAX = 120
-SIZE_WARN = 8 * 1024
-SIZE_REFUSE = 16 * 1024
+
+
+def _size_cap(name, default):
+    """The `caps.<name>` byte bar from local/architect.json, else `default` (#10571).
+
+    Why: the state.json size bar is an owner decision (D74: 64 KB everywhere), so
+    it is an instance cap, not a shipped constant. What: reads architect_config beside this
+    file; a missing loader, an unusable config or a non-positive value keeps `default`.
+    Test: tests/test_datg_size_cap.py
+    """
+    try:
+        import architect_config  # sibling module; absent in a bare checkout of datg alone
+        value = architect_config.load().caps.get(name)
+    except Exception as e:  # an unusable config never stops the ledger; the shipped bar applies
+        sys.stderr.write(f"datg: caps.{name} not read ({type(e).__name__}); using {default} B\n")
+        return default
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        sys.stderr.write(f"datg: caps.{name} must be a positive number of bytes; using {default} B\n")
+        return default
+    return int(value)
+
+
+SIZE_REFUSE = _size_cap("datg_size_refuse", 64 * 1024)   # owner ruling D74
+SIZE_WARN = _size_cap("datg_size_warn", SIZE_REFUSE // 2)  # 32 KB by default
 SESSION_MAX = 2048
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 WHO = ("owner", "architect", "ci", "agent", "other")
 VAGUE = {"latest", "main", "master", "head", "current", "tbd", "unknown", "?", "n/a", "none", "-"}
 _SESSION = None  # set by --session; forces the per-PM directory
+VERB_KEY = "op"  # a batch entry's verb key (the stdin batch protocol); datg.py names it only through this (#10571)
 
 RULES = (
     "DATG rules (state: .trusty-mpm/datg/state.json). You are the only writer: one "

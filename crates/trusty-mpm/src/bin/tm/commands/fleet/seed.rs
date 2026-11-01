@@ -17,9 +17,10 @@
 //! `scripts/check_architect_subproject.sh` fails when a shipped copy drifts.
 //! The skills are not in the framework bundle (`core::bundle::ALL`): that
 //! bundle deploys to every session's user tier, and these must reach the
-//! Architect only. [`deploy`] writes each file only when it is absent. A file
-//! with other bytes is someone's edit and is reported skipped, never
-//! overwritten. The skills' bytes are the ones every Architect launch also
+//! Architect only. [`deploy`] writes each file when it is absent, and since
+//! #10571 replaces one whose bytes are an earlier shipped version
+//! (`seed_history.tsv`, see [`refresh`]). A file with any other bytes is
+//! someone's edit and is reported skipped, never overwritten. The skills' bytes are the ones every Architect launch also
 //! deploys (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `every_template_asset_is_seeded`, `every_script_asset_is_seeded`,
@@ -48,249 +49,19 @@ pub(crate) struct Seeded<'a> {
     pub(crate) executable: bool,
 }
 
-/// One embedded [`files`] row: destination, bytes, executable.
-type Embedded = (&'static str, &'static str, bool);
-
-/// Build one [`EMBEDDED`] row from a path under `src/assets/architect/`.
-macro_rules! embedded {
-    ($dest:literal, $asset:literal, $exec:literal) => {
-        (
-            $dest,
-            include_str!(concat!("../../../../assets/architect/", $asset)),
-            $exec,
-        )
-    };
+/// The shipped bytes of the compiled-in row seeded at `dest`, if any.
+pub(crate) fn embedded_contents(dest: &str) -> Option<&'static str> {
+    EMBEDDED
+        .iter()
+        .find(|(d, _, _)| *d == dest)
+        .map(|&(_, c, _)| c)
 }
 
-/// Build one [`EMBEDDED`] row for a template seeded at the same relative path
-/// under the Architect directory as under `src/assets/architect/templates/`.
-macro_rules! template {
-    ($rel:literal) => {
-        (
-            $rel,
-            include_str!(concat!("../../../../assets/architect/templates/", $rel)),
-            false,
-        )
-    };
-}
-
-/// Build one [`EMBEDDED`] row for a dashboard schema seeded at
-/// `schemas/dashboard/<name>`, its path under `src/assets/architect/` (#10161).
-macro_rules! schema {
-    ($name:literal) => {
-        (
-            concat!("schemas/dashboard/", $name),
-            include_str!(concat!(
-                "../../../../assets/architect/schemas/dashboard/",
-                $name
-            )),
-            false,
-        )
-    };
-}
-
-/// Build one [`EMBEDDED`] row for a dashboard page file seeded at
-/// `templates/dashboard/<rel>`, its path under `src/assets/architect/dashboard/`
-/// (#10161).
-macro_rules! page {
-    ($rel:literal) => {
-        (
-            concat!("templates/dashboard/", $rel),
-            include_str!(concat!("../../../../assets/architect/dashboard/", $rel)),
-            false,
-        )
-    };
-}
-
-/// The files still compiled in, in write order, after `CLAUDE.md`.
-const EMBEDDED: &[Embedded] = &[
-    embedded!(".gitignore", "templates/gitignore", false),
-    // #9997: the records layout is `local/`, never the old directory.
-    template!("local/state.md"),
-    template!("local/actions.md"),
-    template!("local/goals.md"),
-    template!("local/user.md"),
-    template!("local/instance.md"),
-    template!("local/projects/_template.md"),
-    template!("local/owner/README.md"),
-    template!("local/owner/business.md"),
-    template!("local/owner/process.md"),
-    template!("local/owner/decision-making.md"),
-    template!("local/owner/risk-tolerance.md"),
-    template!("local/owner/detail-and-communication.md"),
-    template!("local/owner/contradictions.md"),
-    template!("local/owner/dream-log.md"),
-    template!("local/mandates/README.md"),
-    template!("local/mandates/example.toml"),
-    // See #10161: the instance config `scripts/architect_config.py` reads.
-    template!("local/architect.json"),
-    embedded!("scripts/fleet-poll.py", "scripts/fleet-poll.py", true),
-    // #8891: fleet-poll.py loads this sibling by path; it must ship beside it.
-    embedded!(
-        "scripts/fleet-classify.py",
-        "scripts/fleet-classify.py",
-        false
-    ),
-    embedded!("scripts/input-state.py", "scripts/input-state.py", true),
-    embedded!(
-        "scripts/quiet-sessions.py",
-        "scripts/quiet-sessions.py",
-        false
-    ),
-    embedded!("scripts/self-ctx.py", "scripts/self-ctx.py", false),
-    // See #10161: the poller's alert triage and Architect watchdog (P1b-0).
-    embedded!("scripts/alert_triage.py", "scripts/alert_triage.py", false),
-    embedded!(
-        "scripts/architect-watchdog.py",
-        "scripts/architect-watchdog.py",
-        false
-    ),
-    // See #10161: PM intake, its digest and the Notification hook pair (P2).
-    embedded!("scripts/pm_intake.py", "scripts/pm_intake.py", false),
-    embedded!("scripts/pm-digest.py", "scripts/pm-digest.py", true),
-    embedded!("scripts/pm-notify.sh", "scripts/pm-notify.sh", true),
-    embedded!(
-        "scripts/notify-supervisor.sh",
-        "scripts/notify-supervisor.sh",
-        true
-    ),
-    // See #10161: the Intent Ledger set (P3). datg.py imports its four
-    // datg_* modules from its own directory, so all five ship together.
-    embedded!("scripts/datg.py", "scripts/datg.py", true),
-    embedded!("scripts/datg_store.py", "scripts/datg_store.py", false),
-    embedded!("scripts/datg_ops.py", "scripts/datg_ops.py", false),
-    embedded!("scripts/datg_log.py", "scripts/datg_log.py", false),
-    embedded!("scripts/datg_read.py", "scripts/datg_read.py", false),
-    embedded!("scripts/datg-hook.sh", "scripts/datg-hook.sh", true),
-    embedded!("scripts/ctx-watch.py", "scripts/ctx-watch.py", false),
-    embedded!("scripts/il-cron.py", "scripts/il-cron.py", false),
-    embedded!("scripts/self-clear.sh", "scripts/self-clear.sh", true),
-    embedded!("scripts/state-archive.py", "scripts/state-archive.py", true),
-    embedded!(
-        "scripts/architect-idle.py",
-        "scripts/architect-idle.py",
-        true
-    ),
-    // See #10161: the dashboard store set (P4a-1). Each module imports its
-    // siblings from its own directory, and dashboard_schema.py reads
-    // `schemas/dashboard/` beside `scripts/`, so all of them ship together.
-    embedded!(
-        "scripts/dashboard_store.py",
-        "scripts/dashboard_store.py",
-        true
-    ),
-    embedded!(
-        "scripts/dashboard_jsonl.py",
-        "scripts/dashboard_jsonl.py",
-        false
-    ),
-    embedded!(
-        "scripts/dashboard_schema.py",
-        "scripts/dashboard_schema.py",
-        false
-    ),
-    embedded!(
-        "scripts/dashboard_derive.py",
-        "scripts/dashboard_derive.py",
-        false
-    ),
-    embedded!(
-        "scripts/dashboard_ids.py",
-        "scripts/dashboard_ids.py",
-        false
-    ),
-    embedded!(
-        "scripts/dashboard_qual.py",
-        "scripts/dashboard_qual.py",
-        false
-    ),
-    embedded!(
-        "scripts/owner_answers.py",
-        "scripts/owner_answers.py",
-        false
-    ),
-    embedded!("scripts/dashboard-db.py", "scripts/dashboard-db.py", true),
-    embedded!("scripts/il-archive.py", "scripts/il-archive.py", false),
-    embedded!("scripts/stale-tasks.py", "scripts/stale-tasks.py", true),
-    // See #10161: the dashboard server (D3b), split into a facade and three
-    // modules it imports by name, and the read-only views it serves. The page,
-    // the Live view and the reader libraries sit where the server reads them.
-    embedded!(
-        "scripts/dashboard-serve.py",
-        "scripts/dashboard-serve.py",
-        true
-    ),
-    embedded!(
-        "scripts/dashboard_http.py",
-        "scripts/dashboard_http.py",
-        false
-    ),
-    embedded!(
-        "scripts/dashboard_page.py",
-        "scripts/dashboard_page.py",
-        false
-    ),
-    embedded!(
-        "scripts/dashboard_docs.py",
-        "scripts/dashboard_docs.py",
-        false
-    ),
-    embedded!("scripts/dashboard_il.py", "scripts/dashboard_il.py", false),
-    embedded!(
-        "scripts/dashboard_media.py",
-        "scripts/dashboard_media.py",
-        false
-    ),
-    embedded!(
-        "scripts/dashboard_viz.py",
-        "scripts/dashboard_viz.py",
-        false
-    ),
-    embedded!(
-        "scripts/dashboard_harness.py",
-        "scripts/dashboard_harness.py",
-        false
-    ),
-    page!("index.html"),
-    page!("live.html"),
-    page!("vendor/marked.umd.js"),
-    page!("vendor/purify.min.js"),
-    page!("vendor/VERSIONS.md"),
-    schema!("accounts.schema.json"),
-    schema!("briefs.schema.json"),
-    schema!("effort_tunes.schema.json"),
-    schema!("goal_removals.schema.json"),
-    schema!("goal_reorders.schema.json"),
-    schema!("goals.schema.json"),
-    schema!("il_steers.schema.json"),
-    schema!("items.schema.json"),
-    schema!("media.schema.json"),
-    schema!("meta-gh_track.schema.json"),
-    schema!("meta-seen.schema.json"),
-    schema!("meta-settings.schema.json"),
-    schema!("meta-state.schema.json"),
-    schema!("questions.schema.json"),
-    schema!("sessions.schema.json"),
-    schema!("step_progress.schema.json"),
-    embedded!(
-        "scripts/start-fleet-poll.sh",
-        "scripts/start-fleet-poll.sh",
-        true
-    ),
-    // #9997: the two-step relay send and the double-post guard the manual names.
-    embedded!("scripts/relay.sh", "scripts/relay.sh", true),
-    embedded!("scripts/posted.sh", "scripts/posted.sh", true),
-    // posted.sh runs this sibling by path.
-    embedded!("scripts/relay-marker.py", "scripts/relay-marker.py", false),
-    // See #10161: the `local/architect.json` loader; a module, not a command.
-    embedded!(
-        "scripts/architect_config.py",
-        "scripts/architect_config.py",
-        false
-    ),
-    // #9997: the voice guide the manual and `architect-operating-rules` cite.
-    embedded!("docs/architect/voice.md", "docs/voice.md", false),
-];
+#[path = "seed_refresh.rs"]
+pub(crate) mod refresh;
+#[path = "seed_table.rs"]
+mod table;
+use table::EMBEDDED;
 
 /// Every file `tm fleet init` writes, in write order.
 ///
@@ -341,6 +112,23 @@ pub(crate) const DIRS: &[&str] = &[
 /// Test: `a_first_run_seeds_the_architect_project`,
 /// `an_edited_seed_or_script_is_never_overwritten`.
 pub(crate) fn deploy(dir: &Path, seed: &ArchitectSeed) -> anyhow::Result<Vec<Step>> {
+    deploy_with(dir, seed, &refresh::shipped_before)
+}
+
+/// The predicate [`deploy_with`] asks whether live bytes are an earlier shipped copy.
+pub(crate) type ShippedBefore<'a> = &'a dyn Fn(&str, &[u8]) -> bool;
+
+/// [`deploy`] with the shipped-history predicate injected (#10571).
+///
+/// Why: a test needs an earlier shipped copy whose bytes it knows; the real
+/// history holds only hashes. What: as [`deploy`], `shipped_before` decides
+/// which differing files are refreshed.
+/// Test: `a_refresh_updates_an_unedited_earlier_copy`.
+pub(crate) fn deploy_with(
+    dir: &Path,
+    seed: &ArchitectSeed,
+    shipped_before: ShippedBefore<'_>,
+) -> anyhow::Result<Vec<Step>> {
     let files = files(seed);
     let mut steps = Vec::with_capacity(files.len() + DIRS.len() + 2);
     // #9997: an Architect that still keeps `records/` gets no `local/` rows.
@@ -349,7 +137,15 @@ pub(crate) fn deploy(dir: &Path, seed: &ArchitectSeed) -> anyhow::Result<Vec<Ste
         if records_era && file.dest.starts_with("local/") {
             continue;
         }
-        steps.push(deploy_file(dir, file)?);
+        steps.push(deploy_file(dir, file, shipped_before)?);
+    }
+    // #10571: name the prototype commit and content this binary's bundle came from.
+    if let Some(line) = files
+        .iter()
+        .find(|f| f.dest == refresh::PROVENANCE_DEST)
+        .and_then(|f| refresh::provenance_line(f.contents))
+    {
+        steps.push(Step::Unchanged(line));
     }
     for rel in DIRS {
         if records_era {
@@ -392,21 +188,39 @@ fn records_era_steps(dir: &Path) -> Vec<Step> {
     steps
 }
 
-/// Write one file when absent; never replace bytes that differ.
-fn deploy_file(dir: &Path, file: &Seeded<'_>) -> anyhow::Result<Step> {
+/// Write one file when absent or an unedited earlier shipped copy; never
+/// replace bytes that someone edited.
+///
+/// Why: #10571, an existing install must receive updated scripts it never
+/// edited, and keep and report the ones its owner edited.
+/// What: equal bytes are unchanged; bytes `shipped_before` lists
+/// for this destination are replaced (mode kept for a script); any other
+/// bytes are an edit, reported skipped and left as is; absent is written.
+/// Test: `a_refresh_updates_an_unedited_earlier_copy`,
+/// `a_refresh_keeps_an_edited_copy_and_reports_it`,
+/// `an_edited_seed_or_script_is_never_overwritten`.
+fn deploy_file(
+    dir: &Path,
+    file: &Seeded<'_>,
+    shipped_before: ShippedBefore<'_>,
+) -> anyhow::Result<Step> {
     let path = dir.join(&file.dest);
     match std::fs::read(&path) {
         Ok(bytes) if bytes == file.contents.as_bytes() => Ok(Step::Unchanged(file.dest.clone())),
+        Ok(bytes) if shipped_before(&file.dest, &bytes) => {
+            write_seed(&path, file)?;
+            Ok(Step::Changed(format!(
+                "updated {} (an unedited earlier shipped copy)",
+                file.dest
+            )))
+        }
         Ok(_) => Ok(Step::Skipped(format!(
-            "{}: differs from the shipped copy (edited), so it is left as is",
+            "{}: differs from the shipped copy (edited), so it is left as is; \
+             custom copy kept, not refreshed",
             file.dest
         ))),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            trusty_common::atomic_file::write_atomic(&path, file.contents.as_bytes())
-                .with_context(|| format!("cannot write {}", path.display()))?;
-            if file.executable {
-                make_executable(&path)?;
-            }
+            write_seed(&path, file)?;
             Ok(Step::Changed(format!("wrote {}", file.dest)))
         }
         Err(err) if err.kind() == std::io::ErrorKind::IsADirectory => {
@@ -417,6 +231,16 @@ fn deploy_file(dir: &Path, file: &Seeded<'_>) -> anyhow::Result<Step> {
         }
         Err(err) => Err(err).with_context(|| format!("cannot read {}", path.display())),
     }
+}
+
+/// Write `file`'s shipped bytes to `path` atomically; mode `0755` for a script.
+fn write_seed(path: &Path, file: &Seeded<'_>) -> anyhow::Result<()> {
+    trusty_common::atomic_file::write_atomic(path, file.contents.as_bytes())
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    if file.executable {
+        make_executable(path)?;
+    }
+    Ok(())
 }
 
 /// Set mode `0755` on a script tm just wrote.

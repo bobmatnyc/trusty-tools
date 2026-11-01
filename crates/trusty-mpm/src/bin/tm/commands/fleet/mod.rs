@@ -20,7 +20,9 @@
 //! `commands::fleet::relaunch::tests`, `tests/tm_fleet.rs`.
 
 mod config;
+mod dashboard_agent;
 // #10033: relaunch refuses inside a Claude Code session.
+mod il_init;
 mod inside_claude;
 // #8902: the pm-guard's Architect pane floor names the launch session.
 pub(crate) mod launch;
@@ -68,11 +70,23 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             dir,
             no_launch,
             session,
+            dashboard_takeover,
         } => {
             // #8878 R1: a bad name refuses before anything is read or written.
             let session = session.as_deref().map(SessionNames::new).transpose()?;
             let dir = resolve_dir(dir.as_deref(), &home)?;
             let mut report = init_with_session(&dir, &home, !no_launch, TMUX, session.as_ref())?;
+            // #10571 P1b: the dashboard's login start, once the scripts are seeded.
+            if !report.failed() {
+                let shipped = seed::embedded_contents(dashboard_agent::SCRIPT).unwrap_or_default();
+                report.steps.extend(dashboard_agent::login_steps(
+                    &dir,
+                    &home,
+                    !no_launch,
+                    dashboard_takeover,
+                    shipped,
+                ));
+            }
             // #8942: after the poller step, so its pane can be placed.
             if let Some(reg) = report.registration.take() {
                 report.steps.push(register::register(&reg).await);
@@ -393,6 +407,13 @@ pub(crate) fn init_with_seed(
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir, &seed)?);
+    // #10571/#10579: the Architect's own Intent Ledger and its hooks, on install and upgrade.
+    // #10459: never before a launch's Claude Code version refusal; the launch step reports it.
+    let version_ok = !launch
+        || trusty_mpm::core::architect_claude_version::require_architect_claude_version().is_ok();
+    if version_ok && !dir.join(status::STALE_RECORDS_DIR).is_dir() {
+        report.steps.extend(il_init::steps(dir, names.architect()));
+    }
     // #8942 ruling 2: before the launch writes this run's sidecar.
     report.steps.extend(register::prune_step(home, probe));
     let (step, unbound) = launch_step(dir, home, launch, probe, &names)?;

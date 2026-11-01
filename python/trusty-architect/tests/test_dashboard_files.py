@@ -150,36 +150,5 @@ class TestTaskSection(unittest.TestCase):
             self.assertEqual(run("zzz", 0)[3:], [0, 0, 0])
 
 
-@unittest.skipUnless(shutil.which("node"), "node not installed")
-class TestOwnerState(unittest.TestCase):
-    """Needs-owner shows only while an open item naming the session has blocks_session true."""
-
-    def states(self, page, items, stored):
-        src = open(page, encoding="utf-8").read()
-        js = re.search(r"/\* BEGIN ownerState \*/(.*?)/\* END ownerState \*/", src, re.S).group(1)
-        js += "const b = blockedSessions(%s); console.log(JSON.stringify(%s.map((s) => ownerState(s, b.has('pm')))));" % (
-            json.dumps(items), json.dumps(stored))
-        return json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
-
-    def test_only_open_blocking_item_sets_needs_owner(self):
-        stored = ["working", "idle", "waiting-owner", "blocked", "parked"]
-        cases = [
-            ([{"status": "open", "session": "pm"}], ["working", "idle", "idle", "blocked", "parked"]),
-            ([{"status": "open", "session": "pm", "blocks_session": False}], ["working", "idle", "idle", "blocked", "parked"]),
-            ([{"status": "open", "session": "pm", "blocks_session": True}],
-             ["waiting-owner", "waiting-owner", "waiting-owner", "blocked", "parked"]),
-            ([{"status": "answered", "session": "pm", "blocks_session": True}], ["working", "idle", "idle", "blocked", "parked"]),
-        ]
-        for page in PAGES:
-            for items, want in cases:
-                self.assertEqual(self.states(page, items, stored), want, (page, items))
-
-    def test_blocked_is_not_in_the_owner_group(self):
-        for page in PAGES:
-            src = open(page, encoding="utf-8").read()
-            self.assertIn('{ key: "owner", states: ["waiting-owner"],', src)
-            self.assertRegex(src, r'key: "waiting", states: \["blocked", "waiting-ci", "idle"\]')
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,10 @@
   "type": "object",
   "$defs": {
     "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"},
-    "isoOrNull": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/iso"}]}
+    "isoOrNull": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/iso"}]},
+    "req": {"oneOf": [{"type": "null"},
+                      {"type": "object", "required": ["at"], "additionalProperties": false,
+                       "properties": {"at": {"$ref": "#/$defs/iso"}, "by": {"type": "string"}, "refresh": {"type": "boolean"}}}]}
   },
   "required": ["kind", "rank", "title", "lifecycle", "updated"],
   "additionalProperties": false,
@@ -30,6 +33,7 @@
                           "properties": {"until": {"$ref": "#/$defs/isoOrNull"}, "choice": {"const": "owner"},
                                          "at": {"$ref": "#/$defs/iso"}, "by": {"type": "string"}}}]},
     "park_ack": {"$ref": "#/$defs/isoOrNull"},
+    "brief": {"type": "string", "pattern": "^[^/]+/docs/briefs/.+[.]md$"}, "brief_request": {"$ref": "#/$defs/req"},
     "unparked_at": {"$ref": "#/$defs/iso"}, "unparked_by": {"type": "string"},
     "done_at": {"$ref": "#/$defs/iso"}, "done_by": {"type": "string"}, "done_note": {"type": "string"}, "done_ack": {"$ref": "#/$defs/isoOrNull"},
     "reopened_at": {"$ref": "#/$defs/iso"}, "reopened_by": {"type": "string"}

@@ -62,7 +62,7 @@ class TestSleepStart(unittest.TestCase):
         self.assertIn('id="set-sleep-start" step="900"', pane)
         self.assertNotIn("sleep-end", src)
         self.assertNotIn("Sleep until", src)
-        self.assertEqual(re.findall(r'<input type="time"[^>]*>', src), ['<input type="time" id="set-sleep-start" step="900">'])
+        self.assertEqual(re.findall(r'<input type="time"[^>]*>', src), ['<input type="time" id="set-sleep-start" step="900">', '<input type="time" id="set-brief-time" step="300">'])   # the second is the morning brief time
         m = re.search(r"/\* BEGIN sleepHours \*/(.*?)/\* END sleepHours \*/", src, re.S).group(1)
         js = m + """console.log(JSON.stringify([sleepPayload("Europe/Rome","20:00"), sleepPayload("Europe/Rome","20:10").error, sleepPayload("Nope/Zone","20:00").error, sleepPayload("UTC","").error]));"""
         r = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
@@ -73,7 +73,7 @@ class TestSleepStart(unittest.TestCase):
 
     def test_phone_width_css_keeps_inputs_inside(self):
         src = open(PAGES[0], encoding="utf-8").read()
-        self.assertIn(".sp-group { border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px;", src)
+        self.assertIn(".sp-group { border: 1px solid var(--line); border-radius: var(--r-lg); padding: 10px 16px;", src)
         self.assertIn('input[type="time"] { -webkit-appearance: none; appearance: none; display: block; max-width: 100%;', src)
 
 

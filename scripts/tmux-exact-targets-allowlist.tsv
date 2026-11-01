@@ -30,3 +30,5 @@ crates/trusty-mpm/src/assets/architect/scripts/notify-supervisor.sh	tmux display
 python/trusty-architect/scripts/notify-supervisor.sh	tmux display-message -p -t "\$TMUX_PANE" '#S'	#10161: TMUX_PANE is the hook's own immutable %N pane id, which an exact_* helper passes through unchanged; exported verbatim from the Architect prototype
 crates/trusty-mpm/src/assets/architect/scripts/datg-hook.sh	display-message -p -t "\$TMUX_PANE"	#10161: TMUX_PANE is the hook's own immutable %N pane id, which an exact_* helper passes through unchanged; exported verbatim from the Architect prototype
 python/trusty-architect/scripts/datg-hook.sh	display-message -p -t "\$TMUX_PANE"	#10161: TMUX_PANE is the hook's own immutable %N pane id, which an exact_* helper passes through unchanged; exported verbatim from the Architect prototype
+crates/trusty-mpm/tests/architect_turn_active_chain_10571.rs	if "-t" in rest:	Python source of the fake tmux: it strips the -t argv pair it is handed, it issues no tmux target (#10571)
+crates/trusty-mpm/tests/architect_turn_active_chain_10571.rs	i = rest\.index\("-t"\)	same fake-tmux argv strip, no tmux target (#10571)

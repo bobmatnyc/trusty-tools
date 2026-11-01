@@ -209,6 +209,24 @@ class HookCase(Base):
         self.assertEqual(json.loads(r.stdout or "{}").get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
 
 
+class ProjectArgCase(Base):
+    """datg-hook.sh <session> <project>: arg 2 selects the ledger dir (the Architect's IL is local/il)."""
+
+    def test_project_arg_overrides_session_cwd(self):
+        sub = os.path.join(self.p, "il")
+        bare = os.path.join(self.p, "bare")
+        os.makedirs(sub)
+        os.makedirs(bare)
+        subprocess.run(["python3", os.path.join(SCRIPTS, "datg.py"), "--project", sub, "init", "--code", "ar"],
+                       check=True, capture_output=True, text=True)
+        e = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "DATG_SESSION", "TMUX_PANE")}
+        payload = json.dumps({"hook_event_name": "SessionStart", "source": "startup", "cwd": bare})
+        none = subprocess.run([HOOK, "", bare], input=payload, capture_output=True, text=True, env=e, timeout=60)
+        self.assertEqual(none.stdout, "")  # bare has no ledger of its own
+        got = subprocess.run([HOOK, "", sub], input=payload, capture_output=True, text=True, env=e, timeout=60)
+        self.assertIn("additionalContext", got.stdout)
+
+
 class SessionFilterCase(Base):
     """datg-hook.sh <session>: output only when the TMUX_PANE session is exactly that name."""
     EVENTS = ({"hook_event_name": "SessionStart"},
@@ -491,7 +509,7 @@ class SizeAndRotateCase(Base):
     def test_write_over_16kb_is_refused_with_largest_items_named(self):
         before = open(self.sp).read()
         ops = [{"op": "add", "kind": "D", "title": "q", "goal": "th-G01",
-                "opts": [{"l": "o" * 160, "rec": False}] * 4} for _ in range(30)]
+                "opts": [{"l": "o" * 160, "rec": False}] * 4} for _ in range(120)]
         with self.assertRaises(datg.DatgError) as cm:
             datg.write_ops(self.p, ops)
         self.assertIn("largest", str(cm.exception))
@@ -499,10 +517,12 @@ class SizeAndRotateCase(Base):
         self.assertEqual(run_cli(self.p, ["batch"], stdin=json.dumps(ops)).returncode, 2)
 
     def test_crossing_8kb_logs_size_warning_once(self):
+        # #10571: the bars are caps (default 32 KB warn / 64 KB refuse, D74); land between them, whatever they are
+        n = (datg.SIZE_WARN + datg.SIZE_REFUSE) // 2 // 880
         ops = [{"op": "add", "kind": "D", "title": "q", "goal": "th-G01", "opts": [{"l": "o" * 160, "rec": False}] * 4}
-               for _ in range(14)]
+               for _ in range(n)]
         datg.write_ops(self.p, ops)
-        self.assertGreater(os.path.getsize(self.sp), 8192)
+        self.assertGreater(os.path.getsize(self.sp), datg.SIZE_WARN)
         datg.write_ops(self.p, [{"op": "update", "id": "th-D01", "title": "again"}])
         self.assertEqual(len([x for x in self.log() if x.get("kind") == "size_warning"]), 1)
 
@@ -561,6 +581,17 @@ class DigestFreshCase(Base):
         self.assertEqual(before, open(self.sp).read())
         run_cli(self.p, ["session", "set", "--ref", "none"])
         self.assertEqual(refs(), [])
+
+    def test_ref_key_none_removes_only_that_key(self):
+        def refs():
+            return self.state()["session"].get("refs")
+        run_cli(self.p, ["session", "set", "--task", "th-T01 x", "--ref", "doc=u1", "--ref", "marker=m1"])
+        r = run_cli(self.p, ["session", "set", "--ref", "doc=none"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(refs(), [{"key": "marker", "value": "m1"}])
+        r = run_cli(self.p, ["session", "set", "--ref", "absent=none"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(refs(), [{"key": "marker", "value": "m1"}])
 
     def test_digest_prints_refs_first_and_keeps_them_past_the_pointer_cut(self):
         run_cli(self.p, ["session", "set", "--task", "th-T01 x", "--next", "n", "--owe", "none", "--ref", "doc=https://docs/x"])
@@ -665,7 +696,7 @@ class StopHookCase(Base):
     def test_large_digest_stays_under_the_hook_limit(self):
         # #10109: Claude Code caps additionalContext at 10,000 chars; a cut digest points at the full one.
         datg.write_ops(self.p, [{"op": "session", "task": "big", "next": "keep going"}])
-        for kind, n in (("D", 40), ("T", 30)):  # near the 16 KB state bar
+        for kind, n in (("D", 40), ("T", 30)):  # well under the 64 KB state bar
             datg.write_ops(self.p, [{"op": "add", "kind": kind, "title": f"{kind} {i:02d} " + "w" * 105,
                                      "goal": "th-G01"} for i in range(n)])
         self.assertGreater(len(datg.RULES) + len(datg.build_digest(self.p)), 10000)  # uncut, over the limit
@@ -703,6 +734,32 @@ class StopHookCase(Base):
         out2 = SessionFilterCase.run_hook(self, ev, "tm-other", arg="tm-other").stdout
         self.assertIn("TOP th-G01", out2)  # no per-PM dir for that name: the legacy layout answers
         self.assertEqual(run_cli(self.p, ["init", "--code", "bad"], session="../x").returncode, 2)
+
+
+class NextIdCase(unittest.TestCase):
+    """_next_id wraps past ff and recycles free low ids."""
+
+    @staticmethod
+    def st(used, nxt):
+        return {"code": "th", "goals": [], "items": [],
+                "tasks": [{"id": f"th-T{i:02x}"} for i in used], "next": {"T": nxt}}
+
+    def test_wraps_to_free_low_id_and_pointer_follows(self):
+        st = self.st(range(0x10, 0x100), "ff")
+        self.assertEqual(datg._next_id(st, "T"), "th-T01")
+        self.assertEqual(st["next"]["T"], "02")
+
+    def test_scans_up_before_wrapping(self):
+        st = self.st([0xfe], "fe")
+        self.assertEqual(datg._next_id(st, "T"), "th-Tff")
+        self.assertEqual(st["next"]["T"], "01")  # ff wraps to 01
+
+    def test_error_only_when_all_255_used(self):
+        st = self.st(range(1, 256), "80")
+        with self.assertRaises(datg.DatgError):
+            datg._next_id(st, "T")
+        st = self.st([i for i in range(1, 256) if i != 0x05], "ff")
+        self.assertEqual(datg._next_id(st, "T"), "th-T05")
 
 
 if __name__ == "__main__":

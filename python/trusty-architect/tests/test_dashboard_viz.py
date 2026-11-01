@@ -3,8 +3,8 @@
 Covers: directory -> project -> session -> goal attribution (name match, project-text match, goal-doc fallback, label-only
 goal, worktree directories folding into their repo, unmapped directories), token sums per (hour, goal) inside the window,
 the Architect's repo naming ARCHITECT_SESSION, closed IL tasks from archive.jsonl, the endpoint (shape, GET only, Host check, bad days, session mode 404), and the nav link.
-Run: python3 -m unittest scripts/test_dashboard_viz.py
-Test: scripts/test_dashboard_viz.py
+Run: python3 -m unittest tests/test_dashboard_viz.py
+Test: tests/test_dashboard_viz.py
 """
 import json
 import os
@@ -44,6 +44,8 @@ class Fx(unittest.TestCase):
         S("sessions", "S03", {"name": "tm-architect", "goal": "Standing · supervision", "project": "z"})
         S("sessions", "S04", {"name": "tm-w", "goal": "G02 · other", "project": "repo-w (extra)"})
         S("goals", "G07", {"title": "beta goal", "rank": 2, "sessions": ["tm-beta-01"], "lifecycle": "active"})
+        self.pr = os.path.join(t, "pm")
+        os.makedirs(os.path.join(self.pr, "acme", "widget"))
         self.projects = {"alpha": self.alpha, "beta": self.beta, "repo-w": os.path.join(t, "w"), "architect": self.il}
         os.makedirs(self.projects["repo-w"])
         self.tok = os.path.join(t, "tok.jsonl")
@@ -67,7 +69,49 @@ class Fx(unittest.TestCase):
             json.dump({"sessions": [{"name": "tm-architect", "project": self.il, "code": "ar"}]}, f)
 
     def build(self, days=7):
-        return dv.build(self.store, self.tok, self.projects, self.sched, self.il, NOW, days)
+        return dv.build(self.store, self.tok, self.projects, self.sched, self.il, NOW, days, registry=[], projects_root=self.pr)
+
+
+class TestUnnamedRows(Fx):
+    """the owner 2026-10-27: every Visualize row has a readable name; encoded dirs map by registry, then path, then temp rules."""
+
+    def resolve(self, d, registry=()):
+        sess = [{"name": "tm-widget-01", "goal": "G09 · widgets", "project": "acme/widget"},
+                {"name": "tm-other", "goal": "G05 · other", "project": "zeta/widget"}]
+        return dv.resolve_dir(d, list(registry), sess, [], projects_root=self.pr)
+
+    def test_registry_path_match_names_owner_repo_and_goal(self):
+        reg = [{"name": "widget", "path": os.path.join(self.pr, "acme", "widget"), "owner": "acme", "repo": "widget"}]
+        r = self.resolve(dv.enc(os.path.join(self.pr, "acme", "widget")), reg)
+        self.assertEqual((r["name"], r["goal"], r["sessions"], r["basis"]), ("acme/widget", "G09", ["tm-widget-01"], "tm registry (path match)"))
+
+    def test_unregistered_path_under_projects_root_is_owner_repo_and_never_crosses_owners(self):
+        r = self.resolve(dv.enc(os.path.join(self.pr, "acme", "widget")))
+        self.assertEqual((r["name"], r["basis"], r["sessions"]), ("acme/widget", "path, not registered", ["tm-widget-01"]))   # zeta/widget's session excluded
+
+    def test_checkout_missing_on_disk_still_splits_owner_repo(self):
+        r = self.resolve(dv.enc(self.pr) + "-acme-gone-repo")
+        self.assertEqual((r["name"], r["basis"]), ("acme/gone-repo", "path, not registered; checkout not on disk; no session found"))
+
+    def test_scratchpad_follows_parent_project(self):
+        parent = dv.enc(os.path.join(self.pr, "acme", "widget"))
+        r = self.resolve("-private-tmp-claude-502-" + parent + "-0123abcd-0123-0123-0123-0123456789ab-scratchpad-x")
+        self.assertEqual((r["name"], r["goal"]), ("acme/widget (scratch)", "G09"))
+        self.assertTrue(r["basis"].startswith("Claude scratchpad of acme/widget"))
+
+    def test_os_temp_dirs_are_named_temp(self):
+        for d, name in (("-private-tmp-s9725-wd", "temp: s9725-wd"), ("-private-var-folders-7s-abc-T", "temp: var/folders/T")):
+            r = self.resolve(d)
+            self.assertEqual((r["name"], r["basis"]), (name, "OS temp dir"))
+
+    def test_decode_resolves_hyphen_ambiguity_by_listing(self):
+        os.makedirs(os.path.join(self.pr, "a-b", "c.d"))
+        self.assertEqual(dv.decode(dv.enc(os.path.join(self.pr, "a-b", "c.d"))), os.path.realpath(os.path.join(self.pr, "a-b", "c.d")))
+
+    def test_name_is_never_empty(self):
+        for d in ("-nowhere-at-all", "-", "", "-private-tmp-", dv.enc(self.pr), "-srv-pat-x-y"):
+            self.assertTrue(self.resolve(d)["name"], d)
+        self.assertTrue(all(p["name"] for p in self.build()["projects"]))
 
 
 class TestBuild(Fx):
@@ -84,7 +128,7 @@ class TestBuild(Fx):
         p = {x["name"]: x for x in self.build()["projects"]}
         self.assertEqual((p["alpha"]["goal"], p["alpha"]["basis"], p["alpha"]["out"]), ("G01", "session name", 150))
         self.assertEqual(p["repo-w"]["basis"], "session project text")
-        self.assertEqual(p[""]["basis"], "directory not in the project allowlist")
+        self.assertEqual((p["temp: private-var-T"]["basis"] if "temp: private-var-T" in p else "", ""), ("OS temp dir" if "temp: private-var-T" in p else "", ""))
 
     def test_ctx_hours_estimate_turns_times_p50_per_hour_and_directory(self):
         ch = {(r["hour"], r["dir"]): r for r in self.build()["ctx_hours"]}

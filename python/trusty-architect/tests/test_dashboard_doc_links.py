@@ -51,11 +51,20 @@ class TestDocLinkSource(unittest.TestCase):
             src = open(page, encoding="utf-8").read()
             self.assertIn('a.title = project + "/" + path;', src)
             self.assertIn('el("a", "doc-link", label || docName(path))', src)
-            self.assertIn("sr.appendChild(docAnchor(dr.project, dr.path, txt(x.label)))", src)   # specs row
+            self.assertIn("docAnchors(sr, dr.project, dr.path, txt(x.label))", src)   # specs row (ar-T74: read link plus Edit)
             self.assertIn("if (l.title) a.title = l.title;", src)                               # Linked: row
             self.assertIn("dr.project + \"/\" + dr.path", src)
             body = re.search(r"function docAnchor\(.*?\n  }\n", src, re.S).group(0)
             self.assertNotIn("innerHTML", body)
+
+    def test_markdown_doc_links_get_an_edit_link_on_the_edit_route(self):   # ar-T74
+        for page in PAGES:
+            src = open(page, encoding="utf-8").read()
+            self.assertIn('function editHash(project, path) { return "#edit/"', src)
+            self.assertIn("/^#?(doc|edit)\\/([^/]+)\\/(.+)$/", src)
+            body = re.search(r"function docAnchors\(.*?\n  }\n", src, re.S).group(0)
+            self.assertIn("\\.md$", body)
+            self.assertIn('e.setAttribute("data-arch-only", "")', body)
 
     def test_prose_and_answer_note_get_doc_links_for_architect_items(self):
         for page in PAGES:
@@ -96,6 +105,10 @@ class TestThemeInSettings(unittest.TestCase):
             live = open(os.path.join(base, name), encoding="utf-8").read()
             self.assertNotIn('id="theme"', live)                                    # no second toggle
             self.assertIn('localStorage.getItem("architect-theme")', live)          # follows the stored choice
+            self.assertNotRegex(live, r"--accent\s*:")                              # tokens come from tokens.css, not a page copy
+            if name == "preview-live.html":
+                self.assertIn('<link rel="stylesheet" href="/static/tokens.css">', live)   # not routed: links the file itself
+            # live.html gets its link from dashboard-serve.py (checked in test_dashboard_tokens.py: the served /live page)
 
 
 if __name__ == "__main__":

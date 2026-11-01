@@ -52,12 +52,15 @@ def _next_id(st, pre, explicit=None):
         if explicit in used:
             raise DatgError(f"id collision: {explicit} exists")
         return explicit
-    n = int(st["next"].get(pre, "01"), 16)
-    while n <= 255 and f"{st['code']}-{pre}{n:02x}" in used:
-        n += 1
-    if n > 255:
+    # Why: ids are recycled (the owner 2026-10-24); scan from the pointer, wrap ff -> 01.
+    # What: first free id in pointer..ff then 01..pointer-1; pointer = next hex after it, ff -> 01.
+    # Test: test_datg.py NextIdCase
+    start = int(st["next"].get(pre, "01"), 16) or 1
+    order = list(range(start, 256)) + list(range(1, start))
+    n = next((i for i in order if f"{st['code']}-{pre}{i:02x}" not in used), None)
+    if n is None:
         raise DatgError(f"no free {pre} id (01-ff exhausted)")
-    st["next"][pre] = f"{n + 1:02x}" if n < 255 else "ff"
+    st["next"][pre] = f"{n % 255 + 1:02x}"
     return f"{st['code']}-{pre}{n:02x}"
 
 
@@ -195,7 +198,7 @@ REFS_MAX = 12
 
 
 def _merge_refs(old, new):
-    """Merge [{key, value}] into the stored refs: same key replaces; None/[] clears (session set --ref none)."""
+    """Merge [{key, value}] into the stored refs: same key replaces; value None removes that key; [] clears (session set --ref none)."""
     if not new:
         return []
     refs = {r["key"]: r["value"] for r in old}
@@ -203,8 +206,10 @@ def _merge_refs(old, new):
         key = r.get("key")
         if not isinstance(key, str) or not REF_KEY.match(key):
             raise DatgError(f"refs.key must match {REF_KEY.pattern}")
-        val = _lim(r.get("value"), "refs.value", 200, True)
-        refs[key] = val
+        if r.get("value") is None:
+            refs.pop(key, None)
+            continue
+        refs[key] = _lim(r.get("value"), "refs.value", 200, True)
     if len(refs) > REFS_MAX:
         raise DatgError(f"refs: at most {REFS_MAX} refs")
     return [{"key": k, "value": v} for k, v in refs.items()]
@@ -217,6 +222,10 @@ def apply_session(st, a):
         ses["task"] = _lim(a["task"], "task", 160, True)
     if a.get("next") is not None:
         ses["next"] = _lim(a["next"], "next", 200, True)
+    if a.get("hold") is not None:   # #10579: "" clears it
+        ses["hold"] = _lim(a["hold"], "hold", 1000)   # a usage HOLD carries its reset/projection/resume context
+    if a.get("merge_hold") is not None:   # #10579: a no-merge hold, never folded into the usage HOLD
+        ses["merge_hold"] = _lim(a["merge_hold"], "merge_hold", 1000)
     if "waiting_on" in a:
         ses["waiting_on"] = [
             {"who": r.get("who") if r.get("who") in WHO else _bad(f"waiting_on.who must be one of {WHO}"),

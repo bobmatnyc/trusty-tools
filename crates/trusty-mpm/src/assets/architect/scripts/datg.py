@@ -19,7 +19,7 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   `--ref` pointers (the Google Doc, its source md, the relay marker) live in session.refs [{key, value}]: KEY
   ^[a-z0-9][a-z0-9_.-]{0,31}$, VALUE one line <= 200 chars, <= 12 refs; an existing KEY is replaced, `none` clears.
   The digest prints them first under POINTERS and cuts them after items. Omitted fields are kept; a repeatable flag replaces its list; value `none` states an empty list
-  (`--owe none` sets owed_none). Batch op: {"op":"session","task":..,"waiting_on":[{who,what}],
+  (`--owe none` sets owed_none). Batch entry: {VERB_KEY:"session","task":..,"waiting_on":[{who,what}],
   "owed":[{check,expect,ref}],"agents":[..],"crons":[..],"boundary":true,"ctx_use":{..}}.
   Every commit stamps session.written_at (ISO minute) and written_epoch (int seconds).
 - close / `update --status done` / prune move D, A, T items to archive.jsonl in the same commit
@@ -28,7 +28,7 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   `prune [--dry-run] [--answered-hours 24] [--require-outcome]` archives every done item/task and
   every answered item older than 24 h (spec says "with outcome"; the pilot's 36 answered items
   have none, so outcome is required only with --require-outcome). `archive-show ID` prints one line.
-- Size bar: state.json > 8 KB logs `size_warning` on crossing; a write that leaves it > 16 KB and
+- Size bar: state.json > 32 KB logs `size_warning` on crossing; a write that leaves it > 64 KB and
   larger than before is refused (exit 2, largest items named) after one automatic prune attempt.
 - `rotate`: log lines older than 7 days go to log-<YYYYMMDD>.jsonl (rotation day). Both log shapes
   (t/ev and ts/kind) are read.
@@ -41,7 +41,7 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   state-changing tool (Edit/Write/Agent/Task/SendMessage/Cron*, or Bash git/gh mutations) and no
   datg.py write followed, append {ts, session, kind: stale_il, n} to log.jsonl (n = consecutive
   stale turns) and record stamp.json changed_epoch for `fresh`.
-Escalation: `update --esc architect` (or a batch op) also queues a `decision` through the D10
+Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
 intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD); a failure is logged, never fatal.
 A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
@@ -62,6 +62,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:  # #10161: -P / PYTHONSAFEPATH drop the script dir; the datg_* modules live beside this file
     sys.path.insert(0, HERE)
 import datg_store  # noqa: E402  (#10161: main() sets datg_store._SESSION, which per_pm_session reads)
+from datg_store import VERB_KEY  # noqa: E402  (#10571: a batch entry's verb key)
+from datg_ready import op_ready  # noqa: E402  (#10579: datg.py ready)
 from datg_store import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     CODE_RE, DEFAULT_BLOCK_AFTER, DatgError, EVENTS, ID_RE, Locked, PREFIXES, RULES, SESSION_MAX, SESSION_RE,
     SIZE_REFUSE, SIZE_WARN, STATUS, TITLE_MAX, VAGUE, WHO, _atomic_write, _dump, _jl, _largest, _size,
@@ -193,13 +195,15 @@ def build_parser():
     s.add_argument("action", choices=("set",))
     s.add_argument("--task")
     s.add_argument("--next")
+    s.add_argument("--hold", help="what the owner put on hold; 'none' clears it (#10579)")
+    s.add_argument("--merge-hold", help="a no-merge hold, kept apart from --hold; 'none' clears it")
     s.add_argument("--wait", action="append", metavar="WHO:WHAT", help="repeatable; 'none' = empty list")
     s.add_argument("--owe", action="append", metavar="CHECK=EXPECT@REF", help="repeatable; 'none' = nothing owed")
     s.add_argument("--agent", action="append", metavar="ID:GOAL:WHAT", help="repeatable; 'none'")
     s.add_argument("--cron", action="append", metavar="ID=SCHEDULE=PROMPT", help="repeatable; 'none'")
     s.add_argument("--boundary", action="store_true")
     s.add_argument("--ctx-use", metavar="ACTIVE:STALE:CTX:KEEP")
-    s.add_argument("--ref", action="append", metavar="KEY=VALUE", help="repeatable; same KEY replaces; 'none' clears")
+    s.add_argument("--ref", action="append", metavar="KEY=VALUE", help="repeatable; same KEY replaces; KEY=none removes KEY; 'none' clears all")
     s = sub.add_parser("prune", help="archive done items/tasks and answered items older than 24 h")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--answered-hours", type=float, default=24)
@@ -214,12 +218,20 @@ def build_parser():
     s.add_argument("--since", help="ISO YYYY-MM-DDTHH:MMZ or epoch seconds")
     s.add_argument("--max-age", type=float, help="minutes")
     sub.add_parser("stamp", help="Stop hook step; hook JSON on stdin")
+    s = sub.add_parser("ready", help="exit 0 ready to clear, 1 not ready (reasons printed), 2 missing or unreadable")
+    s.add_argument("--json", action="store_true", help='print {"ready", "reasons", "written_at", "hold"}')
+    s.add_argument("--since", help="ISO YYYY-MM-DDTHH:MMZ or epoch seconds (as for fresh)")
+    s.add_argument("--max-age", type=float, help="minutes (as for fresh)")
     return p
 
 
 def session_op(a):
-    """Build the batch-style `session` op from the CLI flags (strings parsed here, validated in apply_session)."""
-    op = {"op": "session", "task": a.task, "next": a.next, "boundary": a.boundary}
+    """Build the batch-style `session` entry from the CLI flags (strings parsed here, validated in apply_session)."""
+    entry = {VERB_KEY: "session", "task": a.task, "next": a.next, "boundary": a.boundary}
+    if a.hold is not None:
+        entry["hold"] = "" if a.hold == "none" else a.hold   # #10579: HOLD is a session field
+    if a.merge_hold is not None:
+        entry["merge_hold"] = "" if a.merge_hold == "none" else a.merge_hold
 
     def lst(vals, parse):
         return [] if vals == ["none"] else [parse(v) for v in vals]
@@ -231,26 +243,29 @@ def session_op(a):
         return parts
 
     if a.wait is not None:
-        op["waiting_on"] = lst(a.wait, lambda v: dict(zip(("who", "what"), need(v, ":", 2, "WHO:WHAT"))))
+        entry["waiting_on"] = lst(a.wait, lambda v: dict(zip(("who", "what"), need(v, ":", 2, "WHO:WHAT"))))
     if a.owe is not None:
         def owe(v):
             check, expect_ref = need(v, "=", 2, "CHECK=EXPECT@REF")
             expect, _, ref = expect_ref.partition("@")
             return {"check": check, "expect": expect, "ref": ref}
-        op["owed"] = lst(a.owe, owe)
+        entry["owed"] = lst(a.owe, owe)
     if a.agent is not None:
-        op["agents"] = lst(a.agent, lambda v: dict(zip(("id", "goal", "what"), need(v, ":", 3, "ID:GOAL:WHAT"))))
+        entry["agents"] = lst(a.agent, lambda v: dict(zip(("id", "goal", "what"), need(v, ":", 3, "ID:GOAL:WHAT"))))
     if a.cron is not None:
-        op["crons"] = lst(a.cron, lambda v: dict(zip(("id", "schedule", "prompt"), need(v, "=", 3, "ID=SCHEDULE=PROMPT"))))
+        entry["crons"] = lst(a.cron, lambda v: dict(zip(("id", "schedule", "prompt"), need(v, "=", 3, "ID=SCHEDULE=PROMPT"))))
     if a.ref is not None:
-        op["refs"] = lst(a.ref, lambda v: dict(zip(("key", "value"), need(v, "=", 2, "KEY=VALUE"))))
+        def ref(v):
+            key, val = need(v, "=", 2, "KEY=VALUE")
+            return {"key": key, "value": None if val == "none" else val}   # KEY=none removes KEY
+        entry["refs"] = lst(a.ref, ref)
     if a.ctx_use:
         act, stale, ctx, keep = need(a.ctx_use, ":", 4, "ACTIVE:STALE:CTX:KEEP")
         try:
-            op["ctx_use"] = {"active": int(act), "stale": int(stale), "ctx": int(ctx), "keep": keep}
+            entry["ctx_use"] = {"active": int(act), "stale": int(stale), "ctx": int(ctx), "keep": keep}
         except ValueError:
             raise DatgError("ctx-use: ACTIVE, STALE, CTX must be integers")
-    return op
+    return entry
 
 
 def main(argv=None):
@@ -262,6 +277,13 @@ def main(argv=None):
             if out:
                 print(out)
             return 0
+        if a.verb == "ready":   # #10579: the readiness check self-clear's il_ok calls (#10599)
+            code, reasons, info = op_ready(a.project, a.since, a.max_age)
+            if a.json:
+                print(json.dumps({"ready": code == 0, "reasons": reasons, **info}))
+            else:
+                print("\n".join(reasons) if reasons else "ready: task, next, saved work, owed and crons recorded; fresh")
+            return code
         if a.verb == "fresh":
             code, msg = op_fresh(a.project, a.since, a.max_age)
             print(msg)
@@ -269,17 +291,17 @@ def main(argv=None):
         if a.verb == "init":
             print(op_init(a.project, a.code))
         elif a.verb == "add":
-            op = {"op": "add", "kind": a.kind, "title": a.title, "goal": a.goal, "rank": a.rank,
+            entry = {VERB_KEY: "add", "kind": a.kind, "title": a.title, "goal": a.goal, "rank": a.rank,
                   "finish": a.finish, "maps": a.maps, "opts": _opts(a.opts), "to": a.to, "id": a.id}
-            print(write_ops(a.project, [op]))
+            print(write_ops(a.project, [entry]))
         elif a.verb == "update":
-            op = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank")}
-            op.update({"op": "update", "id": a.id})
-            evs, st = write_ops_ev(a.project, [op])
+            entry = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank")}
+            entry.update({VERB_KEY: "update", "id": a.id})
+            evs, st = write_ops_ev(a.project, [entry])
             print(", ".join(e["id"] for e in evs))
             notify_escalations(a.project, evs, st)
         elif a.verb == "close":
-            print(write_ops(a.project, [{"op": "close", "id": a.id, "outcome": a.outcome}]))
+            print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome}]))
         elif a.verb == "batch":
             try:
                 ops = json.loads(sys.stdin.read())

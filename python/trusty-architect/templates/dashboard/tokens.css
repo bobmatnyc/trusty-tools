@@ -1,0 +1,141 @@
+/* tokens.css: the only colour, type, radius, space and shadow values in the dashboard pages
+   (index.html, live.html, preview-live.html). Served by scripts/dashboard-serve.py at GET /static/tokens.css.
+   Source of the values: local/briefs/2026-10-24-dash-design-system.md (validator runs P1-P8 in its appendix).
+   Theme switch: data-theme on <html> (light|dark) wins both ways; no attribute = follow the OS.
+   The dark block appears twice (OS dark, data-theme dark) and is generated identical; scripts/test_dashboard_tokens.py checks that. */
+:root {
+  color-scheme: light;
+  /* surfaces (Foundry: content-bg, card-bg, surface-raised) */
+  --surface-0: #f5efe7;  --surface-1: #fffdf9;  --surface-2: #efe6d8;
+  --hover: rgba(183, 65, 14, 0.06);
+  /* ink: 1 body, 2 secondary (4.5:1+), 3 meta at sm size and up only (4.35:1 on surface-1) */
+  --ink-1: #2b1c12;  --ink-2: #6e5843;  --ink-3: #8a7460;
+  --line: #d8c9b4;  --line-strong: #c4b096;
+  /* brand: controls, links, ids, hub. Never a state. */
+  --accent: #b7410e;  --accent-hover: #8a2f0b;  --accent-ink: #ffffff;  --accent-soft: #f3d9cb;
+  --focus: var(--accent);
+  /* state ladder (fills and marks; chip text stays ink). -ink = coloured text at 4.5:1+ */
+  --st-ok: #2a9d67;    --st-ok-ink: #1f7a50;
+  --st-slow: #e3a924;  --st-slow-ink: #8a6008;   /* below 3:1 as a fill: always with label or glyph */
+  --st-stop: #8e1855;  --st-stop-ink: #8e1855;
+  --st-info: #2a75ba;  --st-info-ink: #1d5f9a;
+  --st-park: #aea298;  --st-park-ink: var(--ink-2); /* recedes by design: dotted outline + bars glyph */
+  --st-soft: 14%;      /* chip tint: color-mix(in srgb, var(--st-x) var(--st-soft), var(--surface-1)) */
+  /* goal priority, ordinal P1..P5 (P6+ = P5) */
+  --prio-1: #772e11; --prio-2: #983803; --prio-3: #b24b0a; --prio-4: #c7692c; --prio-5: #d78951;
+  /* chart series (identity), fixed order, never cycled; other = neutral, unattributed = hatched */
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6;
+  --series-other: #8a7a68; --series-unattr: #b3a590;
+  /* task palette for the Live pie slices (12 hues, fixed order, one per task id; tuned by search against check_palette: contrast and lightness band pass, a few near-miss colour-blind pairs; the slice position and the summary card are the second cue) */
+  --pal-1: #c51e5c; --pal-2: #a95a00; --pal-3: #694d01; --pal-4: #8c007f; --pal-5: #007061; --pal-6: #0096b9;
+  --pal-7: #785f97; --pal-8: #0068df; --pal-9: #899101; --pal-10: #c17486; --pal-11: #8f76f8; --pal-12: #562db7;
+  /* type (Foundry scale, 15px base) */
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Chakra Petch", "IBM Plex Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --fs-base: 15px;
+  --fs-xs: 0.75rem; --fs-sm: 0.875rem; --fs-md: 1rem; --fs-lg: 1.125rem; --fs-xl: 1.45rem;
+  --track-eyebrow: 0.09em;
+  /* shape and space */
+  --r-sm: 3px; --r-md: 5px; --r-lg: 8px; --r-pill: 999px;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --h-compact: 32px; --h-control: 40px; --h-touch: 44px;
+  --shadow: 0 1px 2px rgba(43, 28, 18, 0.06);
+  --shadow-lg: 0 14px 32px rgba(43, 28, 18, 0.28);
+  --scrim: rgba(43, 28, 18, 0.45);
+  /* page extras: the header mark's face, faded rows, and the two mix anchors used for pie shading and image backdrops */
+  --mark-face: #fffdf9;
+  --faded-opacity: 0.55;
+  --mix-dark: #000000; --mix-light: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #201612; --surface-1: #2b1c12; --surface-2: #382513;
+    --hover: rgba(217, 119, 66, 0.09);
+    --ink-1: #f0e7d8; --ink-2: #cbb69c; --ink-3: #a58a6b;
+    --line: #46311f; --line-strong: #5c4126;
+    --accent: #d97742; --accent-hover: #e8905c; --accent-ink: #201612; --accent-soft: rgba(217, 119, 66, 0.16);
+    --st-ok: #51bd85;   --st-ok-ink: #51bd85;
+    --st-slow: #f0b135; --st-slow-ink: #f0b135;
+    --st-stop: #ca4b85; --st-stop-ink: #e27aa5;
+    --st-info: #4b99d7; --st-info-ink: #64a6e0;
+    --st-park: #6c6158; --st-park-ink: var(--ink-2);
+    --st-soft: 18%;
+    --prio-1: #f9c59c; --prio-2: #eea471; --prio-3: #de844f; --prio-4: #c96736; --prio-5: #ab502a;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9;
+    --series-other: #a39482; --series-unattr: #7d6c58;
+    --pal-1: #fd8504; --pal-2: #f0c68b; --pal-3: #f093ad; --pal-4: #a18142; --pal-5: #21c059; --pal-6: #bfde00;
+    --pal-7: #1d95be; --pal-8: #3fead7; --pal-9: #d57efc; --pal-10: #9ec1fa; --pal-11: #836af6; --pal-12: #db4585;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 14px 32px rgba(0, 0, 0, 0.5);
+    --scrim: rgba(0, 0, 0, 0.55);
+    --mark-face: #201612;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #201612; --surface-1: #2b1c12; --surface-2: #382513;
+  --hover: rgba(217, 119, 66, 0.09);
+  --ink-1: #f0e7d8; --ink-2: #cbb69c; --ink-3: #a58a6b;
+  --line: #46311f; --line-strong: #5c4126;
+  --accent: #d97742; --accent-hover: #e8905c; --accent-ink: #201612; --accent-soft: rgba(217, 119, 66, 0.16);
+  --st-ok: #51bd85;   --st-ok-ink: #51bd85;
+  --st-slow: #f0b135; --st-slow-ink: #f0b135;
+  --st-stop: #ca4b85; --st-stop-ink: #e27aa5;
+  --st-info: #4b99d7; --st-info-ink: #64a6e0;
+  --st-park: #6c6158; --st-park-ink: var(--ink-2);
+  --st-soft: 18%;
+  --prio-1: #f9c59c; --prio-2: #eea471; --prio-3: #de844f; --prio-4: #c96736; --prio-5: #ab502a;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --series-5: #d55181; --series-6: #008300; --series-7: #9085e9;
+  --series-other: #a39482; --series-unattr: #7d6c58;
+  --pal-1: #fd8504; --pal-2: #f0c68b; --pal-3: #f093ad; --pal-4: #a18142; --pal-5: #21c059; --pal-6: #bfde00;
+  --pal-7: #1d95be; --pal-8: #3fead7; --pal-9: #d57efc; --pal-10: #9ec1fa; --pal-11: #836af6; --pal-12: #db4585;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 14px 32px rgba(0, 0, 0, 0.5);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --mark-face: #201612;
+}
+
+/* semantic aliases: pages name the meaning, never the hue */
+:root {
+  --sess-working: var(--st-ok);   --sess-slow: var(--st-slow);  --sess-owner: var(--st-slow);
+  --sess-blocked: var(--st-stop); --sess-exited: var(--st-stop); --sess-parked: var(--st-park);
+  --task-open: var(--st-info); --task-blocked: var(--st-stop); --task-done: var(--st-ok); --task-factory: var(--accent);
+  --ctx-ok: var(--st-ok); --ctx-warn: var(--st-slow); --ctx-hot: var(--st-stop);   /* <60, 60-85, >=85 % of 250k */
+  --msg-out: var(--st-info); --msg-in: var(--ink-1); --msg-blocker: var(--st-stop);
+  --eta-high: var(--st-ok-ink); --eta-med: var(--st-slow-ink); --eta-low: var(--st-stop-ink);
+  --kind-d: var(--series-1); --kind-a: var(--series-2); --kind-t: var(--series-3); /* charts only; rows use the id prefix in ink */
+}
+
+/* One control (the owner 2026-10-25: "use one type of control for all buttons"): every header and toolbar button, select trigger,
+   link-button and icon button on both pages is .ctl. Modifiers: .ctl--icon (square), .ctl--caret (dropdown trigger; a select gets the caret itself),
+   .dot inside a control (status dot; colour from --st). State shows through aria-pressed, aria-expanded and aria-current, never a new shape. */
+.ctl {
+  box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; flex: none; gap: var(--sp-2);
+  height: var(--h-control); padding: 0 var(--sp-3); margin: 0;
+  font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; line-height: 1; letter-spacing: 0; text-transform: none; text-decoration: none; white-space: nowrap;
+  color: var(--ink-1); background: var(--surface-1); border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  cursor: pointer; user-select: none; -webkit-appearance: none; appearance: none;
+}
+.ctl:hover { background: var(--hover); border-color: var(--accent); }
+.ctl:active { background: var(--accent-soft); border-color: var(--accent); }
+.ctl:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.ctl[aria-pressed="true"], .ctl[aria-current="page"], .ctl[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+.ctl:disabled { opacity: 0.55; cursor: default; }
+.ctl--icon { width: var(--h-control); padding: 0; }
+.ctl svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ctl .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--st, var(--ink-2)); flex: none; }
+.ctl--caret::after { content: ""; width: 0; height: 0; border: 4px solid transparent; border-top-color: currentColor; border-bottom-width: 0; flex: none; }
+select.ctl {
+  justify-content: flex-start; padding-right: 28px; text-overflow: ellipsis;
+  background-image: conic-gradient(from -45deg at 50% 100%, currentColor 90deg, transparent 0);   /* the same 8x4 triangle as .ctl--caret::after */
+  background-position: calc(100% - 12px) 50%; background-size: 8px 4px; background-repeat: no-repeat;
+}
+@media (max-width: 600px), (pointer: coarse) {
+  .ctl { height: var(--h-touch); min-width: var(--h-touch); font-size: 16px; }   /* 16px: iOS does not zoom a focused select */
+  .ctl--icon { width: var(--h-touch); }
+}

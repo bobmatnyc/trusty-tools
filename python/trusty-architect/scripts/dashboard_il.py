@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 
 STALE_S = 24 * 3600          # a ledger not written for a day is flagged stale
-MAX_STATE = 2 << 20          # a state.json past 2 MB is an error row (datg refuses writes past 16 KB)
+MAX_STATE = 2 << 20          # a state.json past 2 MB is an error row (datg refuses writes past its caps.datg_size_refuse bar, 64 KB by default)
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 DEFAULT_ARCHITECT_SESSION = "tm-architect"
 ANSWER_MAX = 300

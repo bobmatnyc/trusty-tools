@@ -3,17 +3,19 @@
 Why: the page was written for the claude.ai runtime (window.claude.use("db"|"user")). The server serves it unchanged
 and injects a shim, so one page file runs both under claude.ai and on localhost.
 What: `SHIM` defines window.claude.use over this server's JSON endpoints and emulates onSnapshot by polling every 2 s;
-`inject` inserts it right after <head>. `page_rev` is sha1[:16] of the page file, sent as X-Page-Rev on every response:
+`inject` inserts the shared tokens.css link and then the shim right after the document's own <head> (the /live page
+gets the link only). `page_rev` is sha1[:16] of the page file plus tokens.css, sent as X-Page-Rev on every response:
 the shim holds the rev it was served with and reloads the tab once when it differs, after window.__stashDrafts(); it
 also checks /config.json every 60 s and when the tab becomes visible, skipping while a text field holds text.
 `rev_of` is a collection's snapshot rev. `vendor_file` resolves one of the fixed reader-library names: marked and
 DOMPurify ship in templates/dashboard/vendor/; mermaid.min.js is not shipped and comes from the instance tree
 (local/artifacts/owner-queue/vendor/) when present. Standard library only. The Rust successor is the console route
-(See #10064).
+(See #10064). `STATIC_FILES` are the fixed names served at /static/<name> (the design tokens, #10571).
 Test: tests/test_dashboard_store.py, tests/test_dashboard_reload.py, tests/test_dashboard_busy.py, tests/test_dashboard_doc.py
 """
 import hashlib
 import os
+import re
 
 import dashboard_store as ds
 
@@ -23,6 +25,11 @@ LIVE_PAGE = os.path.join(ds.REPO, "templates", "dashboard", "live.html")
 VENDOR = os.path.join(ds.REPO, "templates", "dashboard", "vendor")
 VENDOR_INSTANCE = os.path.join(ds.REPO, "local", "artifacts", "owner-queue", "vendor")
 VENDOR_FILES = ("marked.umd.js", "purify.min.js", "mermaid.min.js")   # fixed names; nothing else under vendor/ is served
+# Design system: one shared token file for every page, served at /static/<name>.
+STATIC = os.path.join(ds.REPO, "templates", "dashboard")
+STATIC_FILES = ("tokens.css",)   # fixed names; nothing else under templates/dashboard/ is served as static
+TOKENS_CSS = os.path.join(STATIC, "tokens.css")
+TOKENS = os.path.join(ds.REPO, "local", "usage", "token-hourly.jsonl")   # hourly usage rows (dashboard_viz); #10571: named here, not in the server script
 
 
 def vendor_file(vendor, name):
@@ -53,7 +60,7 @@ SHIM = r"""<script>
   function hasDraft() {
     return Array.prototype.some.call(document.querySelectorAll("input, textarea"), function (el) {
       var t = (el.type || "").toLowerCase();
-      return (el.tagName === "TEXTAREA" || t === "" || t === "text" || t === "search" || t === "url" || t === "email") && String(el.value || "").trim() !== "";
+      return (el.tagName === "TEXTAREA" || t === "" || t === "text" || t === "search" || t === "url" || t === "email" || t === "password") && String(el.value || "").trim() !== "";
     });
   }
   function revPoll() {
@@ -166,29 +173,43 @@ SHIM = r"""<script>
 _REV_CACHE = {}
 
 
-def page_rev(path):
-    """First 16 hex of the sha1 of the page file; re-read only when its (mtime, size) changes."""
+def _file_stamp(path):
     st = os.stat(path)
-    key = (st.st_mtime_ns, st.st_size)
-    hit = _REV_CACHE.get(path)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def page_rev(path, extra=()):
+    """First 16 hex of the sha1 of the page file plus each file in `extra` (tokens.css), so a token-only change
+    reloads open tabs; re-read only when a file's (mtime, size) changes. A missing extra file raises OSError like the page."""
+    paths = (path,) + tuple(extra)
+    key = tuple(_file_stamp(p) for p in paths)
+    hit = _REV_CACHE.get(paths)
     if hit and hit[0] == key:
         return hit[1]
-    with open(path, "rb") as f:
-        rev = hashlib.sha1(f.read()).hexdigest()[:16]
-    _REV_CACHE[path] = (key, rev)
+    h = hashlib.sha1()
+    for p in paths:
+        with open(p, "rb") as f:
+            h.update(f.read())
+    rev = h.hexdigest()[:16]
+    _REV_CACHE[paths] = (key, rev)
     return rev
 
 
-def inject(html, rev=""):
-    """Insert the shim right after <head> (before any page script); prepend when there is no head."""
-    shim = SHIM.replace("__PAGE_REV__", rev)
-    low = html.lower()
-    i = low.find("<head")
-    if i >= 0:
-        j = html.find(">", i)
-        if j >= 0:
-            return html[: j + 1] + "\n" + shim + html[j + 1:]
-    return shim + html
+_HEAD_OPEN = re.compile(r"\s*(?:<!doctype[^>]*>\s*)?(?:<html(?:\s[^>]*)?>\s*)?<head(?:\s[^>]*)?>", re.I)
+
+
+def tokens_link(rev=""):
+    return '<link rel="stylesheet" href="/static/tokens.css%s">' % ("?v=" + rev if rev else "")
+
+
+def inject(html, rev="", shim_on=True):
+    """Insert the tokens.css link, then the shim, right after <head> (before any page script); prepend when there is no head.
+    shim_on=False (the /live page, which has no window.claude use) inserts the link only."""
+    head = tokens_link(rev) + ("\n" + SHIM.replace("__PAGE_REV__", rev) if shim_on else "")
+    m = _HEAD_OPEN.match(html)   # the real <head> at the top of the document only: not a <header> element, not text that mentions the tag
+    if m:
+        return html[: m.end()] + "\n" + head + html[m.end():]
+    return head + html
 
 
 def rev_of(docs):

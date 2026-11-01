@@ -31,14 +31,33 @@ class TestSessionBars(unittest.TestCase):
         for page in PAGES:
             r = run(page, ["ctxFill"], body)
             self.assertEqual([x["pct"] for x in r[:5]], [9, 20, 36, 100, 100])   # grows with ctx_k, clamped
-            self.assertEqual([x["hot"] for x in r[:5]], [False, False, False, True, True])
+            self.assertEqual([x["hot"] for x in r[:5]], [False, False, False, True, True])   # hot from 85%
+            self.assertEqual([x["band"] for x in r[:5]], ["ok", "ok", "ok", "hot", "over"])    # 60 / 85 / 100% bands, same as /live
+            self.assertEqual([x["raw"] for x in r[:5]], [9, 20, 36, 100, 160])                 # raw is not clamped: the ring draws a second lap
             self.assertEqual(r[5]["pct"], 22)                                     # context.pct wins; 22% -> 22% filled
             self.assertIsNone(r[6]); self.assertIsNone(r[7])
+            self.assertEqual(r[0]["text"], "context 22k of 250k (9%)")                             # the ring's aria-label
+            self.assertEqual(r[5]["text"], "context 55k of 250k (22%)")
+
+    def test_ctx_bands_cut_at_60_85_100(self):
+        body = """console.log(JSON.stringify([0, 59, 60, 84, 85, 100, 101].map((p) => ctxBand(p))));"""
+        for page in PAGES:
+            self.assertEqual(run(page, ["ctxFill"], body), ["ok", "ok", "warn", "warn", "hot", "hot", "over"])
+
+    def test_ring_path_is_a_clockwise_arc_from_twelve(self):
+        body = """console.log(JSON.stringify([ringPath(6, 0), ringPath(6, 0.25), ringPath(6, 0.75).startsWith("M0 -6A6 6 0 1 1"), ringPath(6, 1).endsWith("Z")]));"""
+        for page in PAGES:
+            r = run(page, ["ctxFill"], body)
+            self.assertEqual(r[0], "")
+            self.assertEqual(r[1], "M0 -6A6 6 0 0 1 6.00 -0.00")
+            self.assertTrue(r[2] and r[3])
 
     def test_session_row_bar_is_ctx_and_progress_is_labelled(self):
         for page in PAGES:
             src = open(page, encoding="utf-8").read()
-            self.assertIn('style.setProperty("--ctx"', src)
+            self.assertIn("sum.appendChild(ctxRingEl(cf))", src)                     # the 16px ring replaces the full-row fill
+            self.assertNotIn("has-ctx", src)
+            self.assertNotIn('style.setProperty("--ctx"', src)
             self.assertNotRegex(src, r'd\.style\.setProperty\("--pct", roll\.pct')
             self.assertIn('"tasks " + roll.pct', src)
 

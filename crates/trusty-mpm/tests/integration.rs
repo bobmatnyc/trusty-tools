@@ -19,6 +19,8 @@
 // #8545: `common` arms the home-write fence before `main`.
 mod common;
 
+// #10571 Phase 2: the Architect's clear chain on a fresh install.
+mod architect_turn_active_chain_10571;
 mod catalog_sync_idempotent;
 mod commit_stats_hook_budget;
 mod config_mount;
