@@ -11,6 +11,9 @@
 //! into the exit code; a failure names [`REMEDY`] and never rolls back or
 //! aborts anything — the binaries stay placed and every other step has
 //! already run. [`dry_run_command`] is what `--dry-run` reports instead.
+//! #10588: [`run_content_steps`] then runs each placed [`CONTENT_CHECKS`]
+//! member's check verb, so content older than a placed binary fails the run
+//! naming the missing file.
 //! Test: `content_step_tests.rs`, and the report folding in `install_tests.rs`
 //! and `upgrade_tests.rs`.
 
@@ -157,6 +160,106 @@ pub fn run_if_mpm_placed(
     }
     Some(outcome)
 }
+
+/// Members that read runtime content, and the verb that checks the installed
+/// content against the placed binary (#10588).
+pub const CONTENT_CHECKS: [(&str, [&str; 2]); 1] = [("trusty-review", ["content", "check"])];
+
+/// The content step of an install or upgrade: `tm content update`, then a
+/// check that the content serves every placed binary that reads it.
+///
+/// Why: #10588 — the newest content release (2.3.0) predated a prompt
+/// trusty-review 0.39.0 reads, so the update pinned it, the install reported
+/// success, and the first review exited 1. tctl cannot deploy content no
+/// release has, so it fails naming the missing file instead.
+/// What: runs [`run_if_mpm_placed`]; a failed update is the outcome and no
+/// check runs. Then each placed [`CONTENT_CHECKS`] member runs its check verb
+/// (the placed binary, by path); the first failure is the outcome, its detail
+/// carrying the member's last stderr line, which names the missing file.
+/// Otherwise the update's outcome, else the last check's; `None` when
+/// neither ran.
+/// Test: `install_fails_when_content_is_older_than_a_placed_binary`,
+/// `install_passes_when_content_serves_every_placed_binary`,
+/// `a_failed_content_update_skips_the_content_check`,
+/// `a_placed_trusty_review_alone_checks_the_installed_content`,
+/// `upgrade_fails_when_content_is_older_than_a_placed_binary`.
+pub fn run_content_steps(
+    placed: &[(String, PathBuf)],
+    runner: &dyn CommandRunner,
+    json: bool,
+) -> Option<ContentStepOutcome> {
+    let update = run_if_mpm_placed(placed, runner, json);
+    if update.as_ref().is_some_and(|u| !u.ok) {
+        return update;
+    }
+    let mut checked = None;
+    for (name, args) in &CONTENT_CHECKS {
+        let Some((_, binary)) = placed.iter().find(|(member, _)| member == name) else {
+            continue;
+        };
+        let outcome = run_check(name, binary, args, runner, json);
+        if !outcome.ok {
+            return Some(outcome);
+        }
+        checked = Some(outcome);
+    }
+    update.or(checked)
+}
+
+/// Runs one member's content check verb and narrates the result (#10588).
+fn run_check(
+    name: &str,
+    binary: &Path,
+    args: &[&str],
+    runner: &dyn CommandRunner,
+    json: bool,
+) -> ContentStepOutcome {
+    let command = format!("{} {}", binary.display(), args.join(" "));
+    let narr = narrator(json);
+    let _ = narr.info(&format!(
+        "checking {name}'s instructional content: {command}"
+    ));
+    let failed = |why: String| ContentStepOutcome {
+        ok: false,
+        command: command.clone(),
+        detail: format!(
+            "{why}; the binaries are installed, but {name} cannot run until content that \
+             serves it is installed"
+        ),
+    };
+    let outcome = match runner.run(binary, args) {
+        Ok(out) if out.success => ContentStepOutcome {
+            ok: true,
+            command: command.clone(),
+            detail: last_line(&out.stdout)
+                .unwrap_or("content serves it")
+                .to_owned(),
+        },
+        // A release older than the verb: clap's usage error, exit 2. It
+        // predates #10588, so there is no manifest to check it against.
+        Ok(out) if out.code == Some(2) && out.stderr.contains(UNKNOWN_VERB) => ContentStepOutcome {
+            ok: true,
+            command: command.clone(),
+            detail: format!("not checked: this {name} predates `{}`", args.join(" ")),
+        },
+        Ok(out) => {
+            let why = last_line(&out.stderr)
+                .or_else(|| last_line(&out.stdout))
+                .unwrap_or("no output");
+            failed(format!("`{command}` failed: {why}"))
+        }
+        Err(e) => failed(format!("could not run `{command}`: {e}")),
+    };
+    if outcome.ok {
+        let _ = narr.info(&format!("content: {}", outcome.detail));
+    } else {
+        let _ = narr.error(&format!("content: {}", outcome.detail));
+    }
+    outcome
+}
+
+/// What clap prints for a subcommand the binary does not have.
+const UNKNOWN_VERB: &str = "unrecognized subcommand";
 
 /// The last non-blank line of `text`, trimmed.
 fn last_line(text: &str) -> Option<&str> {

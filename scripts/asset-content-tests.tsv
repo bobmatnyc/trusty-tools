@@ -184,6 +184,7 @@ trusty-review	lib	pipeline::runner::tests::prompts_from_content	reads prompt_tem
 trusty-review	lib	pipeline::runner::tests::spec_docs::default_prompts_never_mention_doc_citations	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)
 trusty-review	test:model_eval	*	reads support/prompts.rs checkout_prompts (content/instructions/trusty-review/prompts, #9015)
 trusty-review	test:stale_content_e2e	*	runtime: stages the checkout's content/ prompts into a bundle a spawned trusty-review reads (#9015)
+trusty-review	test:content_check_cli	*	runtime: stages the checkout's content/ bundle a spawned `trusty-review content check` reads (#10588)
 trusty-review	lib	report::template::tests	runtime: TemplateLoader reads content/instructions/trusty-review/templates via resolve_for_process (#9015)
 trusty-review	lib	report::split::tests	runtime: TemplateLoader::bundled_only reads content/instructions/trusty-review/templates (#9015)
 trusty-review	lib	report::assurance::assurance_tests	runtime: TemplateLoader::bundled_only reads content/instructions/trusty-review/templates (#9015)

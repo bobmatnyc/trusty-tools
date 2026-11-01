@@ -142,6 +142,15 @@ enum Commands {
         json: bool,
     },
 
+    /// Check the installed instructional content against this binary
+    /// (#10588).
+    ///
+    /// `content check` exits 1 naming every file this trusty-review reads
+    /// that the content lacks; `tctl install` and `tctl upgrade` run it after
+    /// `tm content update`. Never fetches.
+    #[command(subcommand)]
+    Content(commands::content::ContentCommand),
+
     /// Manage inference provider configuration (API keys) — the universal
     /// `config keys set/list/test/unset` surface shared by every trusty-*
     /// binary (epic #2400 Wave 1, #2405).
@@ -242,6 +251,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // #10588: like `version`, answered from the binary and the content alone.
+    if let Commands::Content(cmd) = &cli.command {
+        return commands::content::run(cmd);
+    }
+
     // #9015: the reviewer prompts are runtime content; refuse before any work.
     preflight_prompts(&cli.command)?;
 
@@ -333,6 +347,9 @@ async fn async_main(cli: Cli) -> Result<()> {
         // #6913: dispatched in `main`, before the runtime and the config.
         Commands::Version { .. } => {
             unreachable!("version dispatched before the tokio runtime is built")
+        }
+        Commands::Content(_) => {
+            unreachable!("content dispatched before the tokio runtime is built")
         }
     }
 }

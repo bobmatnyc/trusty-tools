@@ -318,9 +318,10 @@ fn resolve_and_apply(
 /// Why: the step runs after every member's upgrade and daemon restart
 /// finished; its failure only adds to the report, never undoes a member.
 /// What: [`UpgradeReport::applied`] then [`UpgradeReport::with_content`] over
-/// [`super::content_step::run_if_mpm_placed`].
+/// [`super::content_step::run_content_steps`].
 /// Test: `upgrade_of_trusty_mpm_runs_content_update`,
-/// `a_failed_content_update_after_an_upgrade_exits_non_zero`.
+/// `a_failed_content_update_after_an_upgrade_exits_non_zero`,
+/// `upgrade_fails_when_content_is_older_than_a_placed_binary`.
 fn applied_with_content(
     candidates: Vec<UpdateCandidate>,
     outcomes: Vec<UpgradeOutcome>,
@@ -328,7 +329,8 @@ fn applied_with_content(
     runner: &dyn CommandRunner,
     json: bool,
 ) -> UpgradeReport {
-    let content = super::content_step::run_if_mpm_placed(placed, runner, json);
+    // #10588: the update, then a check that the content serves each placed binary.
+    let content = super::content_step::run_content_steps(placed, runner, json);
     UpgradeReport::applied(candidates, outcomes).with_content(content)
 }
 

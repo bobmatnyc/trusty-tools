@@ -1411,6 +1411,97 @@ fn a_failed_content_update_keeps_the_install_and_exits_non_zero() {
     );
 }
 
+/// #10588 Fail-Open Check: a placed trusty-review newer than the content `tm
+/// content update` pinned fails the install, naming the missing file; the
+/// check runs the placed binary, after the update.
+#[test]
+fn install_fails_when_content_is_older_than_a_placed_binary() {
+    use crate::commands::content_step::tests::{
+        placed_with_mpm_and_review, FakeRunner, PRINCIPLES,
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runner = FakeRunner::review_newer_than_content();
+    let outcomes = vec![
+        outcome("trusty-mpm", true, "installed"),
+        outcome("trusty-review", true, "installed"),
+    ];
+    let placed = placed_with_mpm_and_review(dir.path());
+    let report = report_with_content(outcomes, &placed, &runner, true);
+    let args = |a: &str, b: &str| vec![a.to_owned(), b.to_owned()];
+    assert_eq!(
+        runner.calls(),
+        vec![
+            (dir.path().join("tm"), args("content", "update")),
+            (dir.path().join("trusty-review"), args("content", "check")),
+        ]
+    );
+    let content = report.content.as_ref().expect("the content step ran");
+    assert!(!content.ok, "{content:?}");
+    assert!(content.detail.contains(PRINCIPLES), "{content:?}");
+    assert!(!report.all_ok);
+    assert_eq!(report.exit_code(), 2);
+    let lines = install_report::summary_lines(&report);
+    assert!(
+        lines.errors.iter().any(|l| l.contains(PRINCIPLES)),
+        "{lines:?}"
+    );
+}
+
+/// #10588: content that serves every placed binary keeps the install green,
+/// and the report still shows what `tm content update` pinned.
+#[test]
+fn install_passes_when_content_serves_every_placed_binary() {
+    use crate::commands::content_step::tests::{placed_with_mpm_and_review, FakeRunner};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runner = FakeRunner::review_served();
+    let outcomes = vec![
+        outcome("trusty-mpm", true, "installed"),
+        outcome("trusty-review", true, "installed"),
+    ];
+    let placed = placed_with_mpm_and_review(dir.path());
+    let report = report_with_content(outcomes, &placed, &runner, true);
+    assert_eq!(runner.calls().len(), 2, "update, then the check");
+    let content = report.content.as_ref().expect("the content step ran");
+    assert!(content.ok, "{content:?}");
+    assert!(
+        content.detail.contains("pinned content-v2.3.0"),
+        "{content:?}"
+    );
+    assert_eq!(report.exit_code(), 0);
+}
+
+/// #10588: a failed `tm content update` is the reported failure; the check
+/// does not run against content the update could not fetch.
+#[test]
+fn a_failed_content_update_skips_the_content_check() {
+    use crate::commands::content_step::tests::{placed_with_mpm_and_review, FakeRunner};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runner = FakeRunner::failing();
+    let outcomes = vec![outcome("trusty-review", true, "installed")];
+    let placed = placed_with_mpm_and_review(dir.path());
+    let report = report_with_content(outcomes, &placed, &runner, true);
+    assert_eq!(runner.calls().len(), 1, "only the update ran");
+    let content = report.content.as_ref().expect("the content step ran");
+    assert!(content.detail.contains("could not reach"), "{content:?}");
+    assert_eq!(report.exit_code(), 2);
+}
+
+/// #10588: trusty-review placed without trusty-mpm still checks the content
+/// already installed, and fails when that content is too old.
+#[test]
+fn a_placed_trusty_review_alone_checks_the_installed_content() {
+    use crate::commands::content_step::tests::{FakeRunner, PRINCIPLES};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runner = FakeRunner::review_newer_than_content();
+    let placed = vec![("trusty-review".to_owned(), dir.path().join("trusty-review"))];
+    let outcomes = vec![outcome("trusty-review", true, "installed")];
+    let report = report_with_content(outcomes, &placed, &runner, true);
+    assert_eq!(runner.calls().len(), 1, "only the check ran");
+    let content = report.content.as_ref().expect("the check ran");
+    assert!(content.detail.contains(PRINCIPLES), "{content:?}");
+    assert_eq!(report.exit_code(), 2);
+}
+
 /// #9396: `--dry-run` reports the content step when trusty-mpm is selected,
 /// and runs nothing — the preview takes no runner at all.
 #[test]
