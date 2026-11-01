@@ -23,11 +23,14 @@
 //! `enter_with_restores_the_terminal_when_capture_fails`,
 //! `restore_disables_capture`, `enter_with_mouse_false_never_enables_capture`,
 //! `suspend_disables_and_resume_reenables_only_when_asked`,
-//! `mouse_enabled_honours_flag_and_env` and
+//! `mouse_enabled_honours_flag_and_env`,
+//! `restore_then_exit_exits_143_when_restore_blocks` and
 //! `term_supports_raw_mode_rejects_dumb_and_missing` in `super::tests`.
 
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::time::Duration;
 
 use crossterm::{
     cursor::Show,
@@ -43,6 +46,10 @@ pub type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 /// True while this process's TUI wants mouse capture, so [`resume`] puts back
 /// what [`suspend`] took and a surface that never asked gets nothing (#10476).
 static CAPTURE_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// How long SIGTERM waits for the terminal restore before exiting anyway (#10476).
+#[cfg(unix)]
+const TERM_RESTORE_BOUND: Duration = Duration::from_millis(500);
 
 /// May the projects view capture the mouse?
 ///
@@ -198,8 +205,10 @@ pub fn disable_capture(terminal: &mut TuiTerminal) -> io::Result<()> {
 /// for the process's life, so the home screen behind the projects view also
 /// restores and exits. Outside a tokio runtime, or if registration fails, the
 /// default action stays. A no-mouse run never registers, so its signal
-/// behaviour is unchanged.
-/// Test: `kill -TERM` is a live check; a unit test cannot signal its own runner.
+/// behaviour is unchanged. #10476: [`restore_then_exit`] bounds the restore, so
+/// a stalled terminal cannot turn the signal into a hang.
+/// Test: the bound by `restore_then_exit_exits_143_when_restore_blocks`; the
+/// signal registration is a live check, a unit test cannot signal its own runner.
 fn install_term_restore() {
     #[cfg(unix)]
     {
@@ -217,11 +226,36 @@ fn install_term_restore() {
         };
         runtime.spawn(async move {
             if term.recv().await.is_some() {
-                restore();
-                std::process::exit(143);
+                restore_then_exit(restore, TERM_RESTORE_BOUND);
             }
         });
     }
+}
+
+/// Run `restore_terminal`, wait at most `bound` for it, then exit 143 (#10476).
+///
+/// Why: the restore writes to stdout, which can block on a stalled tty or on
+/// the stdout lock a main-thread draw holds, and the default SIGTERM never hung.
+/// What: the restore runs on its own thread, so this one can give up on it.
+/// `process::exit` only `try_lock`s stdout, so a stuck restore cannot hold it up.
+/// Test: `restore_then_exit_exits_143_when_restore_blocks`,
+/// `restore_then_exit_runs_the_restore_first`.
+#[cfg(unix)]
+pub(super) fn restore_then_exit(
+    restore_terminal: impl FnOnce() + Send + 'static,
+    bound: Duration,
+) -> ! {
+    let (done, finished) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("tm-term-restore".to_string())
+        .spawn(move || {
+            restore_terminal();
+            let _ = done.send(());
+        });
+    if spawned.is_ok() {
+        let _ = finished.recv_timeout(bound);
+    }
+    std::process::exit(143);
 }
 
 /// [`enter`] with its two terminal side effects injected, so failure is testable.

@@ -56,12 +56,17 @@ fn on_focus_button(state: &ProjectCtlState, column: u16, row: u16) -> bool {
 /// `click_session_opens_details`, `click_blank_space_ignored`,
 /// `click_outside_pane_ignored`, `click_under_modal_ignored`,
 /// `click_focus_button_returns_focus`, `wheel_moves_selection`,
-/// `click_hits_the_drawn_row_when_scrolled`.
+/// `click_hits_the_drawn_row_when_scrolled`,
+/// `mouse_closes_details_when_session_leaves`.
 pub fn handle_mouse(state: &mut ProjectCtlState, mouse: MouseEvent) -> Option<PendingAction> {
     if state.pending_confirm.is_some()
         || state.deliverable_view.is_some()
         || state.config_form.is_some()
     {
+        return None;
+    }
+    // #10476: a stale overlay draws nothing, so it must not swallow the mouse.
+    if tree::close_stale_details(state) {
         return None;
     }
     let (column, row) = (mouse.column, mouse.row);
@@ -232,6 +237,50 @@ mod tests {
         assert_eq!(click(&mut state, 5, row), None);
         assert_eq!(state.selected_node(), Some(&project("alpha")));
         assert!(!state.tree.expanded.contains(&project("alpha")));
+    }
+
+    /// #10476: the session goes while its overlay is open. The overlay draws
+    /// nothing, so a click or the wheel closes it as a key does, consumes the
+    /// event, and the next click acts on the tree.
+    #[test]
+    fn mouse_closes_details_when_session_leaves() {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::ScrollDown,
+        ] {
+            let mut state = state_with(1);
+            state.select_node(session("s0"));
+            assert!(state.open_details());
+            state.sessions_by_project.get_mut("alpha").unwrap().clear();
+            state.rebuild_tree();
+            state.select_node(owner());
+            draw(&mut state, 80, 24);
+            let row = screen_row(&state, index_of(&state, &owner()));
+
+            assert_eq!(handle_mouse(&mut state, at(kind, 5, row)), None);
+            assert_eq!(state.tree.details, None, "{kind:?} closes the details");
+            assert_eq!(
+                state.notice.as_deref(),
+                Some("that session is no longer listed"),
+                "{kind:?} sets the key path's notice"
+            );
+            assert_eq!(
+                state.selected_node(),
+                Some(&owner()),
+                "{kind:?} is consumed"
+            );
+            assert!(
+                state.tree.expanded.contains(&owner()),
+                "{kind:?} is consumed"
+            );
+
+            draw(&mut state, 80, 24);
+            click(&mut state, 5, row);
+            assert!(
+                !state.tree.expanded.contains(&owner()),
+                "the click after {kind:?} toggles"
+            );
+        }
     }
 
     #[test]

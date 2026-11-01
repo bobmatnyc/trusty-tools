@@ -339,6 +339,99 @@ fn restore_disables_capture() {
     assert!(off < leave, "capture must go off first: {text:?}");
 }
 
+/// Names the stand-in a re-executed test binary runs instead of its body.
+#[cfg(unix)]
+const TERM_EXIT_CHILD_ENV: &str = "TM_TEST_TERM_EXIT_CHILD";
+
+/// Child half of the `restore_then_exit` tests: a no-op unless a parent test
+/// re-executed this binary, since `process::exit` would end the whole runner.
+#[cfg(unix)]
+#[test]
+fn restore_then_exit_child() {
+    let bound = std::time::Duration::from_millis(500);
+    match std::env::var(TERM_EXIT_CHILD_ENV).as_deref() {
+        // The stuck write: holds the stdout lock, as a stalled draw does.
+        Ok("block") => super::terminal::restore_then_exit(
+            || {
+                let _held = std::io::stdout().lock();
+                loop {
+                    std::thread::park();
+                }
+            },
+            bound,
+        ),
+        Ok(marker) => {
+            let marker = marker.to_string();
+            super::terminal::restore_then_exit(
+                move || std::fs::write(marker, "restored").expect("write the marker"),
+                bound,
+            )
+        }
+        Err(_) => {}
+    }
+}
+
+/// Run `restore_then_exit_child` in a child process with `mode`, killing it at
+/// the deadline. Answers its exit code, `None` for a hang, and the time taken.
+#[cfg(unix)]
+fn run_term_exit_child(mode: &std::path::Path) -> (Option<i32>, std::time::Duration) {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let deadline = Duration::from_secs(30);
+    let started = Instant::now();
+    let mut child = Command::new(std::env::current_exe().expect("the test binary"))
+        .args(["--exact", "tui::tests::restore_then_exit_child"])
+        .env(TERM_EXIT_CHILD_ENV, mode)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the test binary");
+    loop {
+        if let Some(status) = child.try_wait().expect("wait for the child") {
+            return (status.code(), started.elapsed());
+        }
+        if started.elapsed() > deadline {
+            child.kill().expect("kill the hung child");
+            child.wait().expect("reap the hung child");
+            return (None, started.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// #10476: a restore that never returns must not stop the exit. The child's
+/// stand-in holds the stdout lock forever; the child still exits 143. The
+/// elapsed-time ceiling allows for test-binary startup on a loaded host.
+#[cfg(unix)]
+#[test]
+fn restore_then_exit_exits_143_when_restore_blocks() {
+    let (code, elapsed) = run_term_exit_child(std::path::Path::new("block"));
+    assert_eq!(code, Some(143), "after {elapsed:?}");
+    assert!(
+        elapsed >= std::time::Duration::from_millis(500),
+        "exited after {elapsed:?}, before the bound, so the stand-in did not block"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "took {elapsed:?}"
+    );
+}
+
+/// #10476: the normal case still restores before it exits.
+#[cfg(unix)]
+#[test]
+fn restore_then_exit_runs_the_restore_first() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let marker = dir.path().join("restored");
+    let (code, _) = run_term_exit_child(&marker);
+    assert_eq!(code, Some(143));
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("the restore ran"),
+        "restored"
+    );
+}
+
 /// With the mouse off, no enable sequence ever reaches the terminal, and with
 /// it on, this same path does send one, so the assertion can fail (#10476).
 #[test]
