@@ -2690,6 +2690,9 @@ jobs:
       - name: Preflight CHECK 8 decision self-test
         run: bash scripts/preflight-check8-selftest.sh
 
+      - name: Preflight CHECK 2 identity self-test (#10587)
+        run: bash scripts/preflight-check2-selftest.sh
+
       - name: Preflight CHECK 10 crate-size self-test (an over-limit .crate must FAIL)
         run: bash scripts/check-crate-size-selftest.sh
 
