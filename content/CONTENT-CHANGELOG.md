@@ -9,6 +9,30 @@ Sections are rolled up from `content/changelog.d/` by
 
 ---
 
+## [2.3.3] — 2026-11-01
+
+### Added
+
+- The `architect-strategy` skill (0.2.0) says each factory board gets one GitHub Projects v2 status update per day, posted by a single owning session when several share the board, and that sweeps check the latest update's date before posting.
+- `prototype-then-port` skill (0.1.0): prototype in Python while the shape changes, then port the settled parts to Rust. The entry point gives the port trigger (stable, measured cost, named consumer), an eight-step path and a checklist; references cover type mapping, idioms, parity and shadow runs, PyO3 versus a whole binary, and silent behavior changes. Owner ruling 2026-10-30.
+- The Architect instructions carry rule r-192 (self-improvement is a routine task; the daily pass checks that every scheduled routine ran, `architect-improvements` 0.2.0) and rule r-193 (every owner ask is classified as Throwaway, Q&A, Task, Decision or Goal; answers go to the `questions/Q..` collection in `architect-dashboard`).
+- `instructions/trusty-review/prompts/principles_addendum.md`: trusty-review's review-principles addendum, moved out of the `trusty-review` binary byte for byte. Like the other reviewer prompts it carries no frontmatter, because the file is sent to the model verbatim, and it declares no version, so it is not a manifest member (#9991).
+- `neon-postgres` skill (1.0.0): rules first (never hand-set the Neon integration's `DATABASE_URL`, `DATABASE_URL_UNPOOLED` or preview-branch variables), how the Vercel integration and preview-branch databases work, pooled vs direct strings, drizzle migrate/push/baseline against Neon, read-only inspection, and gated production changes.
+
+### Fixed
+
+- The `tm-capabilities` doctor reference describes the `events` row as it now behaves: it warns on a host without the trusty-events bus, and its not-running remedy is `tctl start trusty-events` only, not `tctl install trusty-events` (#10151).
+
+### Changed
+
+- The ticketing agent runs `tm issue board add <N>` after `gh issue create` instead of passing `--project` or `--add-project`, and the Architect provisioning checklist runs `tm issue board check` (#10277).
+- The `tm-architect-setup` skill says `tm fleet status` also exits 1 when its `binding` row is `UNBOUND` (#10448).
+- The tm-secrets skill and the secrets-manager agent say an agent may `set`, `import` and locally `copy` a key with no deny, and name the new `agent_key_denied` refusal beside `agent_use_refused` (#10459).
+- The tm-capabilities MCP tool catalog lists the optional `parent_session_id` argument of `session_new`, which the `tm serve --stdio` bridge sets (#10476).
+- The trusty-mpm output styles, the session-management skill and the sessions architecture doc state the new session-name rule: bare `tm-<project>` first, a `-02`, `-03`, … counter only on a duplicate (#10478).
+- The tm-capabilities CLI catalog describes `tm tui` as opening on the console home screen, with one tile per service and Enter on MPM opening the projects dashboard (#10491).
+- `tm-session-pause` and the `tm-capabilities` workflows reference say the session-ref push now happens only on a GitHub-confirmed private `origin` (#10614). A public, non-GitHub or unconfirmed `origin` gets no push and a `ref_error`; the agent reports it and never pushes the ref by hand.
+
 ## [2.3.0] — 2026-10-24
 
 ### Added
