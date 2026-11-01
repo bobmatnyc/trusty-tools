@@ -630,3 +630,49 @@ fn upgrade_fails_when_content_is_older_than_a_placed_binary() {
     assert!(content.detail.contains(PRINCIPLES), "{content:?}");
     assert_eq!(report.exit_code(), 2);
 }
+
+/// Why: #10607 — the same gate as install's, on the upgrade path.
+/// What: a drift finding turns an all-ok applied report into exit 2.
+/// Test: This is the test.
+#[test]
+fn a_deployment_drift_after_an_upgrade_exits_non_zero() {
+    use crate::commands::deployment_record::{DeploymentAudit, DriftFinding, DriftKind};
+    let audit = DeploymentAudit {
+        state: "drifted",
+        findings: vec![DriftFinding {
+            member: "trusty-search".to_owned(),
+            kind: DriftKind::RunningVersion,
+            detail: String::new(),
+        }],
+    };
+    let report = || UpgradeReport::applied(Vec::new(), vec![outcome("trusty-search", true, "ok")]);
+    assert_eq!(report().exit_code(), 0);
+    assert_eq!(report().with_deployment(Some(audit)).exit_code(), 2);
+    assert_eq!(report().with_deployment(None).exit_code(), 0);
+}
+
+/// Why: #10607 — the record holds the version the upgrade verified, and a member
+/// with no verified version was not placed.
+/// What: pairs each placed member with its outcome's `applied` version and skips
+/// one without.
+/// Test: This is the test.
+#[test]
+fn placements_pair_each_placed_member_with_its_version() {
+    let mut placed_ok = outcome("trusty-search", true, "ok");
+    placed_ok.applied = Some("1.2.3".to_owned());
+    let unverified = outcome("trusty-memory", true, "ok");
+    let placed = vec![
+        (
+            "trusty-search".to_owned(),
+            std::path::PathBuf::from("/b/trusty-search"),
+        ),
+        (
+            "trusty-memory".to_owned(),
+            std::path::PathBuf::from("/b/trusty-memory"),
+        ),
+    ];
+    let placements = placements_of(&[placed_ok, unverified], &placed);
+    assert_eq!(placements.len(), 1);
+    assert_eq!(placements[0].crate_name, "trusty-search");
+    assert_eq!(placements[0].version, "1.2.3");
+}

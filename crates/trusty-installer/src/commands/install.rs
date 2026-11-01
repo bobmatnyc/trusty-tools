@@ -58,7 +58,8 @@ use crate::output::render_json;
 mod install_report;
 use install_report::{
     plans_mpm_supervisor_bootstrap, plans_service_bootstrap, print_dry_run, print_human_summary,
-    report_with_content, selection_error, selection_notes, InstallOutcome, InstallReport,
+    report_with_content, selection_error, selection_notes, short_reason, InstallOutcome,
+    InstallReport,
 };
 
 /// Handle `tctl install [<members>…]`.
@@ -300,7 +301,7 @@ pub fn run(
         }
     }
 
-    let mut report = block_on(install_all(&selected, json, service_enabled, force));
+    let (mut report, placements) = block_on(install_all(&selected, json, service_enabled, force));
 
     // #2560: post-install verify tail — ensure + health (with the #2498
     // kickstart retry), folded into the SAME report/exit-code so `--json`
@@ -310,6 +311,8 @@ pub fn run(
         let verify = super::verify_tail::run_verify_tail(&selected);
         report = report.with_verify(verify);
     }
+    // #10607: record what landed; compare the machine with it unless --no-verify.
+    report = report.with_deployment(super::deployment_record::finish(&placements, !no_verify));
 
     if json {
         // A failed machine-readable write must not exit 0: automation would
@@ -325,6 +328,10 @@ pub fn run(
         if let Some(verify) = &report.verify {
             super::verify_tail::print_human(verify);
         }
+        report
+            .deployment
+            .iter()
+            .for_each(super::deployment_record::print_human);
     }
     report.exit_code()
 }
@@ -394,7 +401,7 @@ async fn install_all(
     json: bool,
     service_enabled: bool,
     force: bool,
-) -> InstallReport {
+) -> (InstallReport, Vec<super::deployment_record::Placement>) {
     let narr = narrator(json);
     let _ = narr.info(&format!("installing {} component(s)", selected.len()));
 
@@ -433,6 +440,7 @@ async fn install_all(
     let mut show_signing_tip = false;
     // #9396: what landed, for the content step after the loop.
     let mut placed = Vec::new();
+    let mut placements = Vec::new();
 
     for m in selected {
         checklist.set(&m.crate_name, ComponentState::Downloading);
@@ -442,6 +450,11 @@ async fn install_all(
         match install_one(m).await {
             Ok(installed) => {
                 placed.push((m.crate_name.clone(), installed.path.clone()));
+                placements.push(super::deployment_record::Placement::new(
+                    &m.crate_name,
+                    &installed.path,
+                    &installed.version,
+                ));
                 checklist.set(&m.crate_name, ComponentState::Verifying);
                 // #4964: size of the binary THIS run just placed, at its
                 // concrete path — never a name re-joined onto a directory the
@@ -703,7 +716,11 @@ async fn install_all(
     if show_signing_tip {
         eprintln!("{}", super::macos_signing::signing_persistence_tip());
     }
-    report_with_content(outcomes, &placed, &super::content_step::ProcessRunner, json)
+    let runner = super::content_step::ProcessRunner;
+    (
+        report_with_content(outcomes, &placed, &runner, json),
+        placements,
+    )
 }
 
 /// Whether an install failure is a failed integrity check rather than a routine
@@ -729,26 +746,6 @@ fn is_integrity_failure(e: &anyhow::Error) -> bool {
         c.is::<crate::download::ChecksumMismatch>()
             || c.is::<crate::download::version_guard::DowngradeRefusal>()
     })
-}
-
-/// Shorten an install error to a single-line reason for the live checklist row.
-///
-/// Why: `install_one`'s `anyhow::Error` chains can be long / multi-line (a
-/// health-gate mismatch message embeds a raw `--version` output); a checklist
-/// row must stay one line so the block keeps reading cleanly.
-/// What: Takes the first line of `e`'s `Display` output, truncated to 80
-/// chars (with a `…` marker) if still too long.
-/// Test: `tests::short_reason_truncates_long_and_multiline_errors`.
-fn short_reason(e: &anyhow::Error) -> String {
-    const MAX: usize = 80;
-    let first_line = e.to_string();
-    let first_line = first_line.lines().next().unwrap_or_default();
-    if first_line.chars().count() > MAX {
-        let truncated: String = first_line.chars().take(MAX).collect();
-        format!("{truncated}…")
-    } else {
-        first_line.to_owned()
-    }
 }
 
 /// Select the concrete path for `binary` from a prebuilt placement's

@@ -40,6 +40,7 @@ use tokio::runtime::Handle;
 use trusty_progress::{Component, ComponentTracker};
 
 use super::content_step::{CommandRunner, ContentStepOutcome, ProcessRunner};
+use super::deployment_record::Placement;
 use super::progress_ui::{is_tty, narrator, prompt_yes_no};
 use super::runtime::with_runtime;
 use super::shadow_check;
@@ -106,6 +107,9 @@ pub struct UpgradeReport {
     /// `None` when trusty-mpm was not placed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentStepOutcome>,
+    /// #10607: what the machine holds against what upgrade placed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<super::deployment_record::DeploymentAudit>,
 }
 
 impl UpgradeReport {
@@ -122,6 +126,7 @@ impl UpgradeReport {
             members: Vec::new(),
             all_ok: true,
             content: None,
+            deployment: None,
         }
     }
 
@@ -145,7 +150,19 @@ impl UpgradeReport {
             members,
             all_ok,
             content: None,
+            deployment: None,
         }
+    }
+
+    /// Fold the deployment audit into this report (#10607).
+    ///
+    /// Why: an upgrade must not exit 0 over a deployed set it left stale or mixed.
+    /// What: attaches `audit`; one that blocks an upgrade flips `all_ok`.
+    /// Test: `tests::a_deployment_drift_after_an_upgrade_exits_non_zero`.
+    fn with_deployment(mut self, audit: Option<super::deployment_record::DeploymentAudit>) -> Self {
+        self.all_ok &= !audit.as_ref().is_some_and(|a| a.blocks_install());
+        self.deployment = audit;
+        self
     }
 
     /// Fold the content step's outcome into this report (#9396).
@@ -249,6 +266,10 @@ pub fn run(
         }
     } else {
         print_human(&report);
+        report
+            .deployment
+            .iter()
+            .for_each(super::deployment_record::print_human);
     }
     report.exit_code()
 }
@@ -308,9 +329,27 @@ fn resolve_and_apply(
         ApplyDecision::Decline => UpgradeReport::non_applying("declined", candidates),
         ApplyDecision::Apply => {
             let (outcomes, placed) = handle.block_on(apply_all(&candidates, json));
+            let placements = placements_of(&outcomes, &placed);
             applied_with_content(candidates, outcomes, &placed, &ProcessRunner, json)
+                .with_deployment(super::deployment_record::finish(&placements, true))
         }
     }
+}
+
+/// Each placed member with the version its outcome reports (#10607).
+///
+/// Test: `tests::placements_pair_each_placed_member_with_its_version`.
+fn placements_of(
+    outcomes: &[UpgradeOutcome],
+    placed: &[(String, std::path::PathBuf)],
+) -> Vec<Placement> {
+    placed
+        .iter()
+        .filter_map(|(name, path)| {
+            let outcome = outcomes.iter().find(|o| o.member == *name)?;
+            Some(Placement::new(name, path, outcome.applied.as_deref()?))
+        })
+        .collect()
 }
 
 /// The applied report, then the content step for what `placed` holds (#9396).

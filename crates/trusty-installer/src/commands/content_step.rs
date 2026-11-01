@@ -259,10 +259,10 @@ fn run_check(
 }
 
 /// What clap prints for a subcommand the binary does not have.
-const UNKNOWN_VERB: &str = "unrecognized subcommand";
+pub(super) const UNKNOWN_VERB: &str = "unrecognized subcommand";
 
 /// The last non-blank line of `text`, trimmed.
-fn last_line(text: &str) -> Option<&str> {
+pub(super) fn last_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).rfind(|l| !l.is_empty())
 }
 
