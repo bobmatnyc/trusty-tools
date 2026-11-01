@@ -305,13 +305,121 @@ mod tests {
     /// CPU fallback would stop firing. Text from `try_new_bounded`.
     #[test]
     fn a_coreml_hang_stays_terminal() {
-        let err = anyhow::anyhow!(
+        assert_terminal_reaches_fallback(
             "CoreML EP init did not complete within 60s (issue #2111) — presumed hung; \
              the stuck OS thread is abandoned and CoreML will be skipped for the rest of \
              this process (falling back to CPU). Set TRUSTY_COREML_INIT_TIMEOUT_SECS \
-             to raise the bound if this host's CoreML cold-compile legitimately needs more time."
+             to raise the bound if this host's CoreML cold-compile legitimately needs more time.",
         );
-        assert!(!is_transient_init_error(&err));
+    }
+
+    /// `text` must spend the whole attempt budget and end in the named error,
+    /// never the fallback model.
+    #[track_caller]
+    fn assert_transient_never_falls_back(text: &str) {
+        let attempts = Cell::new(0u32);
+        let got = init_or_fallback(
+            instant_policy(3),
+            "fp32",
+            |n| {
+                attempts.set(n);
+                Err::<&str, _>(anyhow::anyhow!(text.to_string()))
+            },
+            |_| Ok("int8"),
+        );
+        let Err(err) = got else {
+            panic!("{text:?} was classified terminal and loaded the other model");
+        };
+        assert_eq!(attempts.get(), 3, "{text:?} did not spend its retries");
+        assert!(
+            format!("{err:#}").contains("embedder init failed"),
+            "{text:?} did not fail by name: {err:#}"
+        );
+    }
+
+    /// `text` must take the fallback path on its first attempt.
+    #[track_caller]
+    fn assert_terminal_reaches_fallback(text: &str) {
+        let attempts = Cell::new(0u32);
+        let got = init_or_fallback(
+            instant_policy(3),
+            "fp32",
+            |n| {
+                attempts.set(n);
+                Err::<&str, _>(anyhow::anyhow!(text.to_string()))
+            },
+            |_| Ok("int8"),
+        );
+        assert_eq!(attempts.get(), 1, "{text:?} was retried");
+        assert_eq!(got.ok(), Some("int8"), "{text:?} did not reach the fallback");
+    }
+
+    // #10662: the texts below are what `ureq` 3.3.0 renders (`error.rs:232-241,
+    // 276`, `timings.rs:227`, `unversioned/transport/tcp.rs:123`) inside the
+    // wrappers `hf-hub` 0.5.0 (`api/sync.rs:180, 188`) and `fastembed` add.
+    #[test]
+    fn ureq_connect_timeout_is_transient() {
+        assert_transient_never_falls_back(
+            "Failed to retrieve model.onnx: request error: timeout: connect",
+        );
+    }
+
+    /// An offline host with only the other model cached lands here.
+    #[test]
+    fn ureq_host_not_found_is_transient() {
+        assert_transient_never_falls_back(
+            "Failed to retrieve model.onnx: request error: host not found",
+        );
+    }
+
+    #[test]
+    fn ureq_connection_failed_is_transient() {
+        assert_transient_never_falls_back(
+            "Failed to retrieve model.onnx: request error: connection failed",
+        );
+    }
+
+    #[test]
+    fn ureq_http_500_is_transient() {
+        assert_transient_never_falls_back(
+            "Failed to retrieve model.onnx: request error: http status: 500",
+        );
+    }
+
+    #[test]
+    fn ureq_connection_refused_is_transient() {
+        assert_transient_never_falls_back(
+            "Failed to retrieve model.onnx: request error: io: Connection refused",
+        );
+    }
+
+    /// A body read fails inside `std::io::copy`, so hf-hub renders it as I/O.
+    #[test]
+    fn ureq_body_stall_is_transient() {
+        assert_transient_never_falls_back(
+            "Failed to retrieve model.onnx: I/O error body data reading stalled",
+        );
+    }
+
+    #[test]
+    fn ureq_http_401_stays_terminal() {
+        assert_terminal_reaches_fallback(
+            "Failed to retrieve model.onnx: request error: http status: 401",
+        );
+    }
+
+    #[test]
+    fn ureq_http_403_stays_terminal() {
+        assert_terminal_reaches_fallback(
+            "Failed to retrieve model.onnx: request error: http status: 403",
+        );
+    }
+
+    #[test]
+    fn ureq_http_404_stays_terminal() {
+        assert_terminal_reaches_fallback(
+            "Failed to retrieve model.onnx: request error: http status: 404",
+        );
     }
 
     /// #10662: the bound a daemon start waits on. hf-hub spends about 5 s per
