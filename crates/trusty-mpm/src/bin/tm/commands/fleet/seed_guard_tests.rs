@@ -169,9 +169,9 @@ fn every_seeded_architect_script_passes_10570() {
                 .iter()
                 .find(|(n, _)| *n == name)
                 .expect("a refusal text per listed row");
-            let joined = why.join("\n");
-            if !why.is_empty() && !joined.contains(text) {
-                wrong_text.push(format!("{name}: want `{text}` in:\n{joined}"));
+            // #10641: every refusal carries the text, so a second reason fails.
+            if !why.iter().all(|line| line.contains(text)) {
+                wrong_text.push(format!("{name}: want `{text}` in:\n{}", why.join("\n")));
             }
             listed.push((name, why.is_empty()));
         } else {

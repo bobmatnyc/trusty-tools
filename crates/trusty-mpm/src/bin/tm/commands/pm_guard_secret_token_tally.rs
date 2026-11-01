@@ -30,6 +30,10 @@ pub(super) fn is_token_tally(base: &str) -> bool {
     else {
         return false;
     };
+    // #10641: a computed or glob name is is never an exempt tally.
+    if base.contains(['$', '`', '{', '*', '?', '[']) {
+        return false;
+    }
     let last = ext.rsplit('.').next().unwrap_or_default();
     RECORD_EXTENSIONS.contains(&last)
         && rest.split(['-', '_']).any(|w| TALLY_WORDS.contains(&w))
@@ -61,6 +65,14 @@ mod tests {
             ("cat token-usage.key.log", true),
             ("cat token-hourly.pem.jsonl", true),
             ("cat local/usage/token-hourly.jsonl", false),
+            // #10641: a glob name is never exempt. (`token-hourly-$T.jsonl`
+            // is cut at `$` into fragments no rule reads; main allows it too.)
+            ("cat token-hourly-*.jsonl", true),
+            ("cat token-hourly.*.jsonl", true),
+            ("cat token-hourly-{credentials,x}.jsonl", true),
+            ("cat token-hourly.jsonl", false),
+            ("cat local/usage/token-usage.jsonl", false),
+            ("cat token-hourly.jsonl; cat ~/.netrc", true),
         ]
         .iter()
         .filter(|(c, deny)| evaluate_secret_file_read_command(c).is_some() != *deny)
