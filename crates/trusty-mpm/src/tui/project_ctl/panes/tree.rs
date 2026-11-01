@@ -152,8 +152,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState) {
     };
     let title =
         Line::from(format!("OWNERS / PROJECTS / SESSIONS ({owners} owners)")).style(title_style);
+    let block = Block::default().borders(Borders::ALL).title(title);
+    // #10476: record the rows' rectangle for the mouse hit test.
+    state.tree.hit.tree_rows = block.inner(area);
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(block)
         .highlight_style(
             Style::default()
                 .fg(Color::White)

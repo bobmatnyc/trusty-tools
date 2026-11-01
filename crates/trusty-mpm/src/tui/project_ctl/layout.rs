@@ -59,9 +59,12 @@ pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
         ])
         .split(frame.area());
 
+    // #10476: only what this frame draws may be clicked.
+    state.tree.hit = Default::default();
     tree::render(frame, outer[0], state);
     activity::render(frame, outer[1], state);
     actions_bar::render(frame, outer[2], state);
+    state.tree.hit.bar_focus = actions_bar::focus_button(state, outer[2]);
 
     if let Some(view) = &state.deliverable_view {
         deliverables_view::render(frame, view);

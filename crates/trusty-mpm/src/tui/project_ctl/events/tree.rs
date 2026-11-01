@@ -79,8 +79,9 @@ fn project_node_name(state: &mut ProjectCtlState) -> Option<String> {
 
 /// Enter: toggle an owner or project; open details on a session.
 ///
-/// #10476: before the tree, Enter on a session did nothing.
-fn enter(state: &mut ProjectCtlState) {
+/// #10476: before the tree, Enter on a session did nothing. A click on a row
+/// runs this too (`events::mouse`).
+pub(super) fn enter(state: &mut ProjectCtlState) {
     match state.selected_node() {
         Some(NodeId::Owner(_) | NodeId::Project { .. }) => state.toggle_selected(),
         Some(NodeId::Session { .. }) => {
@@ -102,6 +103,26 @@ fn request_focus(state: &mut ProjectCtlState) -> Option<PendingAction> {
     }
 }
 
+/// Close a details overlay whose session has left the fleet; `true` if it did.
+///
+/// #10476: the overlay draws nothing for that session, so the key and mouse
+/// paths share this one rule and neither leaves the input dead.
+/// Test: `details_swallow_quit_and_close_when_session_leaves`,
+/// `mouse_closes_details_when_session_leaves`.
+pub(super) fn close_stale_details(state: &mut ProjectCtlState) -> bool {
+    if state.tree.details.is_none() {
+        return false;
+    }
+    let shown = state.details_session().map(|(_, s)| s.id.clone());
+    let selected = state.selected_session().map(|s| s.id.clone());
+    if shown.is_some() && shown == selected {
+        return false;
+    }
+    state.close_details();
+    state.set_notice("that session is no longer listed");
+    true
+}
+
 /// Route one key while the read-only details overlay is open.
 ///
 /// What: the overlay is modal, like the other three: `Esc` (or Enter) closes
@@ -115,11 +136,7 @@ pub(super) fn handle_details_key(
     state: &mut ProjectCtlState,
     key: KeyEvent,
 ) -> Option<PendingAction> {
-    let shown = state.details_session().map(|(_, s)| s.id.clone());
-    let selected = state.selected_session().map(|s| s.id.clone());
-    if shown.is_none() || shown != selected {
-        state.close_details();
-        state.set_notice("that session is no longer listed");
+    if close_stale_details(state) {
         return None;
     }
     match key.code {

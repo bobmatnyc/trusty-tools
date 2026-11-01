@@ -88,8 +88,10 @@ use crate::client::http_client::projects::PatchProjectArgs;
 use super::state::{ConfirmKind, Pane, ProjectCtlState, SessionRow};
 
 mod modal;
+mod mouse;
 mod tree;
 use modal::{handle_config_form_key, handle_confirm_key, handle_deliverable_view_key};
+pub use mouse::handle_mouse;
 
 /// An action a key press requested that needs an async daemon round trip.
 ///

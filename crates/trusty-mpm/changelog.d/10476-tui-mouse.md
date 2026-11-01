@@ -1,0 +1,2 @@
+Added
+- The projects view in `tm tui`, `tm projects` and `tm attach` takes the mouse. A click on an owner or project opens or closes it, a click on a session opens its details, a click on `[f] focus` in the action bar or the details view acts as `f`, and the wheel over the tree moves the selection. Clicks under a dialog, on blank space and outside the tree do nothing. `tm tui --no-mouse` or `TM_TUI_MOUSE=0` keeps the terminal's own mouse handling, including text selection. Quitting, a panic and `kill -TERM` all turn mouse capture off; no other screen turns it on (#10476).

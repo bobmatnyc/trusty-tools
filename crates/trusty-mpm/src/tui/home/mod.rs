@@ -67,11 +67,12 @@ pub async fn run_tui_entry(
     client: DaemonClient,
     interval_ms: u64,
     single_pane: bool,
+    mouse: bool,
 ) -> anyhow::Result<()> {
     match tui_entry(single_pane) {
-        TuiEntry::Home => run_home(client, interval_ms).await,
+        TuiEntry::Home => run_home(client, interval_ms, mouse).await,
         TuiEntry::SinglePane => {
-            crate::tui::run_initial_view_with(client, interval_ms, None, true).await
+            crate::tui::run_initial_view_with(client, interval_ms, None, true, false).await
         }
     }
 }
@@ -84,9 +85,14 @@ pub async fn run_tui_entry(
 /// What: spawns the health poller, enters the terminal under a
 /// [`TerminalGuard`], then loops. Enter on trusty-mpm hands the same terminal
 /// to `project_ctl::run_in_terminal`; leaving that view (`q`) returns here.
+/// #10476: `mouse` applies to that view; this screen never captures.
 /// Test: the pure pieces are unit-tested; this loop is exercised by the
 /// smoke run.
-pub async fn run_home(mut client: DaemonClient, interval_ms: u64) -> anyhow::Result<()> {
+pub async fn run_home(
+    mut client: DaemonClient,
+    interval_ms: u64,
+    mouse: bool,
+) -> anyhow::Result<()> {
     let (health_tx, mut health_rx) = mpsc::channel(64);
     let (metrics_tx, mut metrics_rx) = mpsc::channel::<MetricsUpdate>(16);
     probe::spawn_health_poller(
@@ -120,8 +126,13 @@ pub async fn run_home(mut client: DaemonClient, interval_ms: u64) -> anyhow::Res
         }
         match handle_key(&mut state, key, Instant::now()) {
             Some(HomeAction::OpenProjects) => {
-                crate::tui::project_ctl::run_in_terminal(&mut terminal, &mut client, interval_ms)
-                    .await?;
+                crate::tui::project_ctl::run_in_terminal(
+                    &mut terminal,
+                    &mut client,
+                    interval_ms,
+                    mouse,
+                )
+                .await?;
                 terminal.clear()?;
             }
             Some(HomeAction::FetchMetrics(id)) => {
