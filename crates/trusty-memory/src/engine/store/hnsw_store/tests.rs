@@ -1592,7 +1592,8 @@ fn replay_leaves_no_point_without_neighbours() {
         let mut bad_builds = Vec::new();
         for build in 0..REPLAY_BUILDS {
             let index = replay::new_index();
-            pool.install(|| replay::replay(&index, &live)).expect("replay");
+            pool.install(|| replay::replay(&index, &live))
+                .expect("replay");
             assert_eq!(index.get_nb_point(), n, "build {build}: point count");
             let orphans = points_without_neighbours(&index);
             if !orphans.is_empty() {
