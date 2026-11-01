@@ -1581,11 +1581,18 @@ fn replay_leaves_no_point_without_neighbours() {
         .map(|i| (spread_vec(dim, 55_000 + i as u64), i))
         .collect();
     let (tick, ticks) = std::sync::mpsc::channel::<usize>();
+    // A pool of its own: on rayon's global pool, other tests' replays queued
+    // ahead of a build for minutes, which the per-build guard cannot tell from
+    // a hang.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(REPLAY_POOL_THREADS)
+        .build()
+        .expect("replay pool");
     let body = std::thread::spawn(move || {
         let mut bad_builds = Vec::new();
         for build in 0..REPLAY_BUILDS {
             let index = replay::new_index();
-            replay::replay(&index, &live).expect("replay");
+            pool.install(|| replay::replay(&index, &live)).expect("replay");
             assert_eq!(index.get_nb_point(), n, "build {build}: point count");
             let orphans = points_without_neighbours(&index);
             if !orphans.is_empty() {
@@ -1615,15 +1622,19 @@ fn replay_leaves_no_point_without_neighbours() {
 /// Builds `replay_leaves_no_point_without_neighbours` runs.
 const REPLAY_BUILDS: usize = 200;
 
+/// Threads in the test's own replay pool; a 4-vCPU CI runner's count, so the
+/// inserts still race.
+const REPLAY_POOL_THREADS: usize = 4;
+
 /// Longest one replay build may take before the test calls it hung.
 ///
 /// Why: on a 4-vCPU CI runner the 200 builds took ~27 minutes in total, about
 /// 8 s each, and a CI leg sat silent past that. A bound on the whole test
 /// would have to clear 27 minutes; a bound on each build fails a stalled build
-/// within minutes. The bound is ~15 times the CI per-build time and ~140 times
-/// EVO's (0.85 s at 28 threads).
+/// within minutes. Alone on EVO with 4 threads a build takes 3.6 s; the bound
+/// is ~35 times the CI per-build time.
 /// What: [`watch_replay_builds`] waits at most this long for each build.
-const REPLAY_BUILD_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+const REPLAY_BUILD_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Wait for one tick per replay build; panic, naming the build, if a build
 /// takes longer than [`REPLAY_BUILD_HANG_GUARD`].
