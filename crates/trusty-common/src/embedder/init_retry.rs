@@ -364,7 +364,11 @@ mod tests {
             |_| Ok("int8"),
         );
         assert_eq!(attempts.get(), 1, "{text:?} was retried");
-        assert_eq!(got.ok(), Some("int8"), "{text:?} did not reach the fallback");
+        assert_eq!(
+            got.ok(),
+            Some("int8"),
+            "{text:?} did not reach the fallback"
+        );
     }
 
     // #10662: the texts below are what `ureq` 3.3.0 renders (`error.rs:232-241,
