@@ -602,3 +602,31 @@ fn a_failed_content_update_after_an_upgrade_exits_non_zero() {
     assert!(!report.all_ok);
     assert_eq!(report.exit_code(), 2);
 }
+
+/// #10588 Fail-Open Check: an upgrade whose trusty-review is newer than the
+/// content `tm content update` pinned exits non-zero, naming the file.
+#[test]
+fn upgrade_fails_when_content_is_older_than_a_placed_binary() {
+    use crate::commands::content_step::tests::{
+        placed_with_mpm_and_review, FakeRunner, PRINCIPLES,
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runner = FakeRunner::review_newer_than_content();
+    let outcomes = vec![
+        outcome("trusty-mpm", true, "upgraded"),
+        outcome("trusty-review", true, "upgraded"),
+    ];
+    let report = applied_with_content(
+        vec![candidate()],
+        outcomes,
+        &placed_with_mpm_and_review(dir.path()),
+        &runner,
+        true,
+    );
+    assert_eq!(runner.calls().len(), 2, "update, then the check");
+    assert!(report.members.iter().all(|m| m.ok), "{report:?}");
+    let content = report.content.as_ref().expect("the content step ran");
+    assert!(!content.ok);
+    assert!(content.detail.contains(PRINCIPLES), "{content:?}");
+    assert_eq!(report.exit_code(), 2);
+}

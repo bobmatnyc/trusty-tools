@@ -596,16 +596,18 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
 /// Why: one place orders the two — the step runs after every member's own
 /// steps finished, and its failure only adds to the report.
 /// What: [`InstallReport::build`] then [`InstallReport::with_content`] over
-/// [`crate::commands::content_step::run_if_mpm_placed`].
+/// [`crate::commands::content_step::run_content_steps`].
 /// Test: `install_runs_content_update_after_tm_lands`,
-/// `a_failed_content_update_keeps_the_install_and_exits_non_zero`.
+/// `a_failed_content_update_keeps_the_install_and_exits_non_zero`,
+/// `install_fails_when_content_is_older_than_a_placed_binary`.
 pub(super) fn report_with_content(
     outcomes: Vec<InstallOutcome>,
     placed: &[(String, std::path::PathBuf)],
     runner: &dyn CommandRunner,
     json: bool,
 ) -> InstallReport {
-    let content = crate::commands::content_step::run_if_mpm_placed(placed, runner, json);
+    // #10588: the update, then a check that the content serves each placed binary.
+    let content = crate::commands::content_step::run_content_steps(placed, runner, json);
     InstallReport::build(outcomes).with_content(content)
 }
 
