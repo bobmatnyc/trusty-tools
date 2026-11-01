@@ -148,7 +148,8 @@ macro_rules! refusal {
             ". A script gets the same credential-read refusal as the command written inline \
              (owner rulings 263 and 268), so moving a refused read into a script does not \
              change the answer. Stop and report this refusal to the Architect; do not retry \
-             the read in another form."
+             the read in another form. [policy GP-007 secret-file-read; source: #7266, #8879, \
+             #8939]"
         )
     };
 }
