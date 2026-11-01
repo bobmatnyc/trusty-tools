@@ -241,6 +241,30 @@ where
     bind_hardened(path)
 }
 
+/// The held bind lock; dropping it releases the lock at once.
+///
+/// Why: #10661 — a `flock` belongs to the open file description, and a child
+/// forked by any thread shares that description until it execs. Closing this
+/// process's descriptor therefore leaves the lock held for as long as such a
+/// child lives, so a bind that had already returned could still refuse the next
+/// binder with [`UdsSecurityError::BindInProgress`].
+/// What: `LOCK_UN` on drop, which releases the lock for every copy of the
+/// description. A failed unlock is logged; the close that follows still
+/// releases the lock once the last copy goes.
+/// Test: `bind_lock_guard_releases_past_a_descriptor_a_fork_inherited`.
+#[derive(Debug)]
+pub(super) struct BindLockGuard {
+    pub(super) file: File,
+}
+
+impl Drop for BindLockGuard {
+    fn drop(&mut self) {
+        if let Err(err) = self.file.unlock() {
+            tracing::debug!(%err, "explicit bind lock release failed; closing instead");
+        }
+    }
+}
+
 /// Take the exclusive, non-blocking bind lock beside `path`.
 ///
 /// Why: #8759 — see the invariant in the module doc. Like every other path
@@ -251,7 +275,7 @@ where
 /// a regular file, then `try_lock`s it. Contention is
 /// [`UdsSecurityError::BindInProgress`]; a symlink, a non-regular file, or any
 /// I/O failure is [`UdsSecurityError::BindLock`] naming the lock path. The
-/// returned file holds the lock until dropped.
+/// returned [`BindLockGuard`] holds the lock until dropped.
 /// Test: `bind_singleton_refuses_while_another_binder_holds_the_lock`,
 /// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`,
 /// `bind_singleton_refuses_a_symlink_to_a_file_at_the_lock_path`,
@@ -259,7 +283,7 @@ where
 /// `bind_singleton_refuses_a_symlink_to_a_directory_at_the_lock_path`,
 /// `bind_singleton_refuses_a_fifo_at_the_lock_path`,
 /// `bind_singleton_releases_the_bind_lock_when_it_returns`.
-fn lock_for_bind(path: &Path) -> Result<File, UdsSecurityError> {
+pub(super) fn lock_for_bind(path: &Path) -> Result<BindLockGuard, UdsSecurityError> {
     let lock_path = bind_lock_path(path);
     let refuse = |source| UdsSecurityError::BindLock {
         path: lock_path.clone(),
@@ -285,7 +309,7 @@ fn lock_for_bind(path: &Path) -> Result<File, UdsSecurityError> {
         return Err(refuse(not_a_regular_file(&file_type)));
     }
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(BindLockGuard { file }),
         Err(TryLockError::WouldBlock) => Err(UdsSecurityError::BindInProgress {
             path: path.to_path_buf(),
         }),
