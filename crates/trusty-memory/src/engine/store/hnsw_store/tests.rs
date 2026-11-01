@@ -1580,27 +1580,73 @@ fn replay_leaves_no_point_without_neighbours() {
     let live: Vec<(Vec<f32>, usize)> = (0..n)
         .map(|i| (spread_vec(dim, 55_000 + i as u64), i))
         .collect();
-    let mut bad_builds = Vec::new();
-    for build in 0..200 {
-        let index = replay::new_index();
-        replay::replay(&index, &live).expect("replay");
-        assert_eq!(index.get_nb_point(), n, "build {build}: point count");
-        let orphans = points_without_neighbours(&index);
-        if !orphans.is_empty() {
-            bad_builds.push((
-                build,
-                orphans.len(),
-                orphans[..orphans.len().min(10)].to_vec(),
-            ));
+    let (tick, ticks) = std::sync::mpsc::channel::<usize>();
+    let body = std::thread::spawn(move || {
+        let mut bad_builds = Vec::new();
+        for build in 0..REPLAY_BUILDS {
+            let index = replay::new_index();
+            replay::replay(&index, &live).expect("replay");
+            assert_eq!(index.get_nb_point(), n, "build {build}: point count");
+            let orphans = points_without_neighbours(&index);
+            if !orphans.is_empty() {
+                bad_builds.push((
+                    build,
+                    orphans.len(),
+                    orphans[..orphans.len().min(10)].to_vec(),
+                ));
+            }
+            let _ = tick.send(build);
         }
-    }
+        bad_builds
+    });
+    watch_replay_builds(&ticks);
+    let bad_builds = body
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     assert!(
         bad_builds.is_empty(),
-        "{} of 200 builds left points with no layer-0 neighbours; first \
-         (build, count, first ids): {:?}",
+        "{} of {REPLAY_BUILDS} builds left points with no layer-0 neighbours; \
+         first (build, count, first ids): {:?}",
         bad_builds.len(),
         bad_builds.first()
     );
+}
+
+/// Builds `replay_leaves_no_point_without_neighbours` runs.
+const REPLAY_BUILDS: usize = 200;
+
+/// Longest one replay build may take before the test calls it hung.
+///
+/// Why: on a 4-vCPU CI runner the 200 builds took ~27 minutes in total, about
+/// 8 s each, and a CI leg sat silent past that. A bound on the whole test
+/// would have to clear 27 minutes; a bound on each build fails a stalled build
+/// within minutes. The bound is ~15 times the CI per-build time and ~140 times
+/// EVO's (0.85 s at 28 threads).
+/// What: [`watch_replay_builds`] waits at most this long for each build.
+const REPLAY_BUILD_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Wait for one tick per replay build; panic, naming the build, if a build
+/// takes longer than [`REPLAY_BUILD_HANG_GUARD`].
+///
+/// Why: a hang inside `hnsw_rs`'s `parallel_insert_slice` otherwise stalls the
+/// whole test binary with no result line until the CI job times out.
+/// What: returns when the body thread has sent [`REPLAY_BUILDS`] ticks or has
+/// ended (the caller's `join` then reports its panic). The stalled body thread
+/// is left behind; the harness exits the process after its last test.
+/// Test: `replay_leaves_no_point_without_neighbours`.
+fn watch_replay_builds(ticks: &std::sync::mpsc::Receiver<usize>) {
+    use std::sync::mpsc::RecvTimeoutError;
+    for expected in 0..REPLAY_BUILDS {
+        match ticks.recv_timeout(REPLAY_BUILD_HANG_GUARD) {
+            Ok(_) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => panic!(
+                "replay_leaves_no_point_without_neighbours: build {expected} of \
+                 {REPLAY_BUILDS} did not finish within {REPLAY_BUILD_HANG_GUARD:?}; \
+                 the replay's parallel insert is stalled"
+            ),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
