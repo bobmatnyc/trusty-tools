@@ -531,7 +531,7 @@ jobs:
             echo "::error::could not resolve the fastembed version from Cargo.lock — refusing to fall back to an unkeyed cache"
             exit 1
           fi
-          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+          echo "key=fastembed-v${ver}-ref-exact-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
 
       - name: Restore fastembed model cache
         id: fastembed-cache
@@ -605,6 +605,11 @@ jobs:
             "tokenizer_config.json" "special_tokens_map.json"
 
           du -sh "${CACHE_DIR}" || true
+
+      # #10639: this job runs the real-model tests in parallel, so a cache that
+      # hf-hub cannot read races on the blob lock instead of failing here.
+      - name: Verify fastembed model cache is complete (#10639)
+        run: ./scripts/check_fastembed_cache.sh
 
       - name: Save fastembed model cache
         if: steps.fastembed-cache.outputs.cache-hit != 'true'
