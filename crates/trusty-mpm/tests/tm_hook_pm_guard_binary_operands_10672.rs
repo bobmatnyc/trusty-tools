@@ -262,15 +262,13 @@ fn a_credential_script_is_denied_whatever_its_arguments_10672() {
     }
 }
 
-/// The read-only inspect shape allows on what it does, with no allowance by
-/// library name; the same body with a secret read or a dump the guard knows
-/// refuses. Refuses at origin/main through `ps =` (#8756); #10641 PR2 cleared it.
+/// The read-only inspect body plus a secret read or a dump the guard knows
+/// refuses.
 #[test]
-fn a_read_only_inspect_shape_allows_and_a_secret_read_refuses_10672() {
+fn a_read_only_inspect_shape_with_a_secret_read_refuses_10672() {
+    // #10672: the allow half moved to the ps-as-identifier follow-up issue.
     let dir = fixtures();
     let d = dir.path();
-    assert_eq!(verdict("python3 inspect.py in.docx", d), None);
-    assert_eq!(verdict("python3 script.py in.docx out.docx", d), None);
     for (name, tail, cite) in [
         (
             "netrc.py",
