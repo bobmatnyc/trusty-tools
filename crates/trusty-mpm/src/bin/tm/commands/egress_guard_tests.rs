@@ -201,3 +201,47 @@ fn egress_trust_anchor_verdict_precedes_the_family_check() {
         }
     ));
 }
+
+/// A config whose `[egress_guard] mode` is `mode`.
+fn with_mode(mode: Option<&str>) -> MpmConfig {
+    let mut config = MpmConfig::default();
+    config.egress_guard.mode = mode.map(str::to_owned);
+    config
+}
+
+/// 🔴 #10690 Fail-Open Check: only the exact `"log"` is log mode; no key and
+/// every other value (`"Log"`, `"off"`, `""`) enforce.
+#[test]
+fn guard_mode_is_log_only_for_the_exact_value_10690() {
+    assert_eq!(guard_mode(|| with_mode(Some("log"))), EgressGuardMode::Log);
+    assert_eq!(guard_mode(MpmConfig::default), EgressGuardMode::Enforce);
+    for value in ["enforce", "Log", "off", "", "LOG", "log "] {
+        assert_eq!(
+            guard_mode(|| with_mode(Some(value))),
+            EgressGuardMode::Enforce,
+            "{value:?}"
+        );
+    }
+}
+
+/// 🔴 #10690 Fail-Open Check: an error while reading the mode is a deny,
+/// never a log-mode allow — a panicking load is caught by `deny_on_panic`.
+#[tokio::test]
+async fn guard_mode_panicking_load_still_denies_10690() {
+    let run = async {
+        let _ = guard_mode(|| panic!("injected config-load panic"));
+        None
+    };
+    let response = deny_on_panic(run).await.expect("a load panic must deny");
+    assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+/// 🔴 #10690: `enforce` refuses every check, the trust-anchor floor included;
+/// `log` refuses none, the floor included (owner instruction).
+#[test]
+fn enforced_refuses_everything_only_under_enforce_10690() {
+    for check in [TRUST_ANCHOR_RULE, "egress-family", BASH_CHECK, TAINT_CHECK] {
+        assert!(enforced(EgressGuardMode::Enforce, check), "{check}");
+        assert!(!enforced(EgressGuardMode::Log, check), "{check}");
+    }
+}

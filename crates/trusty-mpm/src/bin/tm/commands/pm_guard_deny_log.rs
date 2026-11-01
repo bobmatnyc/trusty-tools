@@ -42,6 +42,9 @@ pub(crate) struct DenyContext<'a> {
     pub(crate) cwd: String,
     /// An explicit denial store — a test's temp file; `None` is the ambient one.
     pub(crate) store: Option<PathBuf>,
+    /// #10690: the egress guard's `[egress_guard] mode` when it did not
+    /// enforce this deny; the audit POST then carries `egress_guard_mode`.
+    pub(crate) guard_mode: Option<&'static str>,
 }
 
 impl<'a> DenyContext<'a> {
@@ -73,6 +76,7 @@ impl<'a> DenyContext<'a> {
             command,
             cwd,
             store: None,
+            guard_mode: None,
         }
     }
 }
@@ -136,7 +140,7 @@ pub(crate) async fn post_deny_audit(ctx: &DenyContext<'_>, reason: &str) {
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
         .unwrap_or_default();
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "session_id": ctx.session_id,
         "event": "PreToolUse",
         "payload": {
@@ -146,6 +150,10 @@ pub(crate) async fn post_deny_audit(ctx: &DenyContext<'_>, reason: &str) {
             "pm_guard_reason": reason,
         }
     });
+    // #10690: a deny the egress guard logged without enforcing names its mode.
+    if let Some(mode) = ctx.guard_mode {
+        body["payload"]["egress_guard_mode"] = serde_json::json!(mode);
+    }
     // #6288: over the daemon socket `main` resolved; never TCP.
     let _ = trusty_mpm::client::DaemonClient::new(ctx.url)
         .post("/hooks")

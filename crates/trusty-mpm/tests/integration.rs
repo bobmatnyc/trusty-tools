@@ -81,6 +81,8 @@ mod tm_hook_delegation_payload;
 mod tm_hook_egress_anchor_8454;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 mod tm_hook_egress_guard_8454;
+// #10690: `[egress_guard] mode = "log"` records every deny without enforcing it.
+mod tm_hook_egress_guard_log_mode_10690;
 // #10387: the per-project read-only Slack allowlist through the binary.
 mod tm_hook_egress_slack_read_10387;
 // #9923: the egress guard taints a hook-less id under a live mark.

@@ -158,6 +158,60 @@ fn config_pm_guard_malformed_file_stays_enabled() {
     assert!(MpmConfig::load(unreadable.path()).pm_guard.enabled);
 }
 
+/// #10690 Fail-Open Check: every fault reading `[egress_guard] mode` is
+/// enforce — a missing file, section or key, a malformed file, a wrong type,
+/// and an unreadable file. Each row fails if its arm defaulted to log.
+#[test]
+fn config_egress_guard_mode_fails_closed_to_enforce() {
+    let missing = tempfile::TempDir::new().unwrap();
+    assert_eq!(
+        MpmConfig::load(missing.path()).egress_guard.mode(),
+        EgressGuardMode::Enforce,
+        "missing file"
+    );
+    for (case, content) in [
+        ("missing section", "[pm_guard]\nenabled = true\n"),
+        ("missing key", "[egress_guard]\n"),
+        ("malformed file", "[egress_guard\nmode = \"log\"\n"),
+        ("wrong type", "[egress_guard]\nmode = true\n"),
+        ("array value", "[egress_guard]\nmode = [\"log\"]\n"),
+    ] {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            load_from_str(dir.path(), content).egress_guard.mode(),
+            EgressGuardMode::Enforce,
+            "{case}"
+        );
+    }
+    // Unreadable: `config.toml` is a directory, so the read itself fails.
+    let unreadable = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(unreadable.path().join("config.toml")).unwrap();
+    assert_eq!(
+        MpmConfig::load(unreadable.path()).egress_guard.mode(),
+        EgressGuardMode::Enforce,
+        "unreadable file"
+    );
+}
+
+/// #10690: only the exact string `"log"` turns enforcement off; every other
+/// string enforces, and all but `"enforce"` report as unknown.
+#[test]
+fn config_egress_guard_mode_log_is_the_only_off_value() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let log = load_from_str(dir.path(), "[egress_guard]\nmode = \"log\"\n").egress_guard;
+    assert_eq!(log.mode(), EgressGuardMode::Log);
+    assert_eq!(log.unknown_mode(), None);
+    let enforce = load_from_str(dir.path(), "[egress_guard]\nmode = \"enforce\"\n").egress_guard;
+    assert_eq!(enforce.mode(), EgressGuardMode::Enforce);
+    assert_eq!(enforce.unknown_mode(), None);
+    for value in ["Log", "LOG", "off", "", " log", "log ", "disabled"] {
+        let content = format!("[egress_guard]\nmode = {value:?}\n");
+        let cfg = load_from_str(dir.path(), &content).egress_guard;
+        assert_eq!(cfg.mode(), EgressGuardMode::Enforce, "{value:?}");
+        assert_eq!(cfg.unknown_mode(), Some(value), "{value:?}");
+    }
+}
+
 /// #7688: the host default is OFF, and "off" is spelled `None` — the key
 /// declines to decide so a project's own `.trusty-mpm.toml` can.
 #[test]
