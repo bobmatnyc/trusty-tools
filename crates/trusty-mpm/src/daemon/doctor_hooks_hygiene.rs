@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::standalone::hooks::cleanup::{
-    build_tree_hook_commands, build_tree_statusline_command, foreign_hook_event_names,
-    tm_hook_event_names,
+    build_tree_hook_commands, build_tree_statusline_command, contamination_event_names,
+    foreign_hook_event_names,
 };
 
 /// Every `.claude/settings*.json` this probe should inspect.
@@ -153,7 +153,9 @@ pub(super) fn check_hooks_hygiene_with_exe(
         if !gaps.is_empty() {
             missing.push((path.clone(), gaps));
         }
-        if !tm_hook_event_names(&val).is_empty() {
+        // #10565: a provisioned file's own hooks are not contamination, so the
+        // check never names a finding `--fix` would act on by stripping them.
+        if !contamination_event_names(&val).is_empty() {
             contaminated.push(path.clone());
         }
         if !foreign_hook_event_names(&val).is_empty() {

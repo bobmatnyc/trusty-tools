@@ -883,18 +883,18 @@ fn missing_group_repair_dry_run_changes_nothing() {
 /// The driver's repair ORDER leaves a healthy project in the state a launch
 /// would write (#7490).
 ///
-/// Why: `repair_hooks_contamination` strips every `<exe> hook` entry it finds,
-/// which on a tm-provisioned project IS the lifecycle triad. The comments in
-/// `core::doctor_repair` and `bin/tm/commands/doctor_repair::run_repairs` both
-/// claim the re-merge runs after that strip precisely so the strip cannot undo
-/// it — a claim nothing tested. Reversing the two calls, or dropping the
-/// second, must fail here.
+/// Why: on a tm-provisioned project `repair_hooks_contamination` strips only a
+/// build-tree `<exe> hook` entry (#10565 — the installed triad is the
+/// session's own), and the re-merge runs after that strip so the strip cannot
+/// leave the event unwired. Reversing the two calls, or dropping the second,
+/// must fail here.
 /// What: seeds a settings file carrying the full triad (produced by the merge
-/// itself), then runs the two repairs in Apply mode in the SAME order
-/// `run_repairs` uses, and asserts the resulting bytes equal what
-/// `ensure_project_hooks` alone produces for the same input. Every merge runs
-/// under one [`hermetic_fw`] layout, so the toggles cannot change between the
-/// expected and the actual merge.
+/// itself), points its `SessionStart` lifecycle entry into a Cargo build tree,
+/// then runs the two repairs in Apply mode in the SAME order `run_repairs`
+/// uses, and asserts the resulting bytes equal what `ensure_project_hooks`
+/// alone produces for the same input. Every merge runs under one
+/// [`hermetic_fw`] layout, so the toggles cannot change between the expected
+/// and the actual merge.
 /// Test: itself.
 #[test]
 fn contamination_strip_then_missing_group_merge_restores_the_launch_state() {
@@ -919,6 +919,15 @@ fn contamination_strip_then_missing_group_merge_restores_the_launch_state() {
     let actual_path = write_missing_group_settings(actual_project.path());
     crate::core::session_launch::ensure_project_hooks_with(&actual_fw, actual_project.path(), exe)
         .unwrap();
+    // #10565: only a build-tree entry is contamination in a provisioned file.
+    let launched = fs::read_to_string(&actual_path).unwrap();
+    let build_tree = format!(
+        "{} hook\"",
+        crate::core::standalone::hooks::build_tree::tests::INCIDENT_EXE
+    );
+    let damaged = launched.replacen("/usr/local/bin/tm hook\"", &build_tree, 1);
+    assert_ne!(launched, damaged, "the fixture must carry a triad entry");
+    fs::write(&actual_path, damaged).unwrap();
     let strip = repair_hooks_contamination(actual_project.path(), RepairMode::Apply);
     assert!(
         !strip.is_empty(),
