@@ -154,7 +154,6 @@ fn writing_preserves_unrelated_keys_and_verifies() {
     let existing = json!({
         "hooks": { "Stop": [] },
         "permissions": { "allow": ["Bash(ls:*)"], "deny": ["Read(//x)"] },
-        "sandbox": { "operatorNote": { "kept": true } },
     });
     std::fs::write(fx.file("settings.json"), existing.to_string()).expect("seed");
     std::fs::create_dir_all(&fx.user).expect("mkdir user");
@@ -165,7 +164,6 @@ fn writing_preserves_unrelated_keys_and_verifies() {
     assert_eq!(project["permissions"]["allow"], json!(["Bash(ls:*)"]));
     let deny = strings(&project, "/permissions/deny");
     assert_eq!(deny[0], "Read(//x)", "operator entries kept first");
-    assert_eq!(project["sandbox"]["operatorNote"], json!({ "kept": true }));
     assert_eq!(project["sandbox"]["enabled"], json!(true));
     let user = read(&fx.user.join("settings.json"));
     assert_eq!(user["model"], json!("opus"));
@@ -286,7 +284,6 @@ fn operator_denies_and_env_vars_survive_a_merge() {
     let project = json!({ "sandbox": {
         "enabled": false,
         "filesystem": { "denyRead": ["/op/secret"], "denyWrite": ["/op/frozen"] },
-        "network": { "operatorKey": 1 },
     }});
     std::fs::write(fx.file("settings.json"), project.to_string()).expect("seed project");
     std::fs::create_dir_all(&fx.user).expect("mkdir user");
@@ -307,10 +304,6 @@ fn operator_denies_and_env_vars_survive_a_merge() {
     assert!(
         deny_write.contains(&"/op/frozen".to_owned()),
         "{deny_write:?}"
-    );
-    assert_eq!(
-        project.pointer("/sandbox/network/operatorKey"),
-        Some(&json!(1))
     );
     assert_eq!(
         project.pointer("/sandbox/enabled"),
@@ -429,6 +422,20 @@ fn link_dangling(fx: &Fx) {
 
 fn link_loop(fx: &Fx) {
     std::os::unix::fs::symlink(fx.tools(), fx.tools()).expect("link loop");
+}
+
+/// `<ws>/<name>` linked to a directory outside the workspace.
+fn link_named_outside(fx: &Fx, name: &str) {
+    std::fs::create_dir_all(fx.outside()).expect("mkdir outside");
+    std::os::unix::fs::symlink(fx.outside(), fx.inputs.workspace.join(name)).expect("link outside");
+}
+
+fn link_star_outside(fx: &Fx) {
+    link_named_outside(fx, "tools*");
+}
+
+fn link_brace_outside(fx: &Fx) {
+    link_named_outside(fx, "t{1}");
 }
 
 fn link_inside(fx: &Fx) {
@@ -849,4 +856,222 @@ fn type_matched_empty_user_keys_still_verify() {
     ];
     let wrong = misses(cases, false, None);
     assert!(wrong.is_empty(), "wrongly refused:\n{}", wrong.join("\n"));
+}
+
+/// #10102 gap 1: a project `sandbox` key that `project_policy` does not write
+/// refuses the launch, at any depth, even as an empty value.
+#[test]
+fn unwritten_project_sandbox_keys_refuse_the_launch() {
+    use Tier::Project;
+    let cases = vec![
+        case(
+            "allowMachLookup",
+            Project,
+            "/sandbox/allowMachLookup",
+            json!(["com.apple.x"]),
+        ),
+        case(
+            "enableWeakerNestedSandbox",
+            Project,
+            "/sandbox/enableWeakerNestedSandbox",
+            json!(true),
+        ),
+        case(
+            "allowNestedUserNamespaces",
+            Project,
+            "/sandbox/allowNestedUserNamespaces",
+            json!(true),
+        ),
+        case(
+            "network.httpProxyPort",
+            Project,
+            "/sandbox/network/httpProxyPort",
+            json!(8080),
+        ),
+        case(
+            "network.socksProxyPort",
+            Project,
+            "/sandbox/network/socksProxyPort",
+            json!(1080),
+        ),
+        case(
+            "an empty excludedCommands, which tm does not write",
+            Project,
+            "/sandbox/excludedCommands",
+            json!([]),
+        ),
+        case(
+            "filesystem.someFutureKey: {}",
+            Project,
+            "/sandbox/filesystem/someFutureKey",
+            json!({}),
+        ),
+        case(
+            "network as a non-object",
+            Project,
+            "/sandbox/network",
+            json!("open"),
+        ),
+    ];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10102 gap 1: the merge keeps an operator's project `sandbox` key, and
+/// verify then refuses the launch naming that key.
+#[test]
+fn an_unwritten_project_key_is_kept_by_the_merge_and_named_by_verify() {
+    let fx = Fx::new();
+    let seeded = json!({ "sandbox": { "network": { "httpProxyPort": 8080 } } });
+    std::fs::write(fx.file("settings.json"), seeded.to_string()).expect("seed");
+    match write_sandbox_settings(SandboxRole::Agent, &fx.inputs, &fx.user) {
+        Err(SandboxSettingsError::Refused(why)) => {
+            assert!(why.contains("`sandbox.network.httpProxyPort`"), "{why}");
+        }
+        other => panic!("an unwritten project key must refuse, got {other:?}"),
+    }
+    let project = read(&fx.file("settings.json"));
+    assert_eq!(
+        project.pointer("/sandbox/network/httpProxyPort"),
+        Some(&json!(8080)),
+        "the merge keeps the operator's key"
+    );
+}
+
+/// #10102 gap 2: a `permissions.additionalDirectories` entry outside the
+/// workspace and the role's `allowWrite` roots refuses, in any tier.
+#[test]
+fn additional_directories_outside_the_roots_refuse_the_launch() {
+    use Tier::{Local, Project, User};
+    let dirs = "/permissions/additionalDirectories";
+    let cases = vec![
+        case("project /etc", Project, dirs, json!(["/etc"])),
+        case("project ../escape", Project, dirs, json!(["../escape"])),
+        case("project src/../..", Project, dirs, json!(["src/../.."])),
+        case(
+            "project ~/.cargo/bin",
+            Project,
+            dirs,
+            json!(["~/.cargo/bin"]),
+        ),
+        case("project ~", Project, dirs, json!(["~"])),
+        case("project ~bob", Project, dirs, json!(["~bob/x"])),
+        case(
+            "local /usr/local/bin",
+            Local,
+            dirs,
+            json!(["/usr/local/bin"]),
+        ),
+        case("user /etc", User, dirs, json!(["/etc"])),
+        // Fail-closed: a list or entry verify cannot read refuses.
+        case("project as a string", Project, dirs, json!("/etc")),
+        case("project a non-text entry", Project, dirs, json!([7])),
+        case("project null", Project, dirs, json!(null)),
+        Case {
+            setup: Some(link_outside),
+            ..case("tools -> a dir outside", Project, dirs, json!(["tools"]))
+        },
+        Case {
+            setup: Some(link_dangling),
+            ..case("tools -> a missing path", Project, dirs, json!(["tools"]))
+        },
+        // #10102 fix round: an entry is a literal directory, never a glob, so
+        // a glob character must not truncate it to a passing prefix.
+        Case {
+            setup: Some(link_star_outside),
+            ..case("tools* -> a dir outside", Project, dirs, json!(["tools*"]))
+        },
+        Case {
+            setup: Some(link_brace_outside),
+            ..case("t{1} -> a dir outside", Project, dirs, json!(["t{1}"]))
+        },
+    ];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10102 gap 2: an additional directory inside the workspace or an
+/// `allowWrite` root still verifies — the check is not a blanket refusal.
+#[test]
+fn additional_directories_inside_the_roots_still_verify() {
+    use Tier::{Local, Project};
+    let dirs = "/permissions/additionalDirectories";
+    let cases = vec![
+        case("project docs", Project, dirs, json!(["docs", "./notes"])),
+        case(
+            "project ~/.cargo/registry",
+            Project,
+            dirs,
+            json!(["~/.cargo/registry"]),
+        ),
+        case("local an empty list", Local, dirs, json!([])),
+        Case {
+            setup: Some(link_inside),
+            ..case("tools -> a dir inside", Project, dirs, json!(["tools"]))
+        },
+    ];
+    let wrong = misses(cases, false, None);
+    assert!(wrong.is_empty(), "wrongly refused:\n{}", wrong.join("\n"));
+}
+
+/// #10102 gap 3: `null` for a widening key or `excludedCommands` in the
+/// project tier refuses — Claude Code may skip a file its schema rejects.
+#[test]
+fn null_sandbox_values_refuse_the_launch() {
+    use Tier::Project;
+    let cases = vec![
+        case(
+            "allowLocalBinding: null",
+            Project,
+            "/sandbox/network/allowLocalBinding",
+            json!(null),
+        ),
+        case(
+            "allowAllUnixSockets: null",
+            Project,
+            "/sandbox/network/allowAllUnixSockets",
+            json!(null),
+        ),
+        case(
+            "allowAppleEvents: null",
+            Project,
+            "/sandbox/allowAppleEvents",
+            json!(null),
+        ),
+        case(
+            "filesystem.disabled: null",
+            Project,
+            "/sandbox/filesystem/disabled",
+            json!(null),
+        ),
+        case(
+            "allowRead: null",
+            Project,
+            "/sandbox/filesystem/allowRead",
+            json!(null),
+        ),
+        case(
+            "excludedCommands: null",
+            Project,
+            "/sandbox/excludedCommands",
+            json!(null),
+        ),
+    ];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+    // The named checks, not only the key allowlist, refuse `null`.
+    let fx = Fx::new();
+    write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("baseline");
+    for (pointer, named) in [
+        ("/sandbox/excludedCommands", "excludedCommands"),
+        ("/sandbox/filesystem/allowRead", "widens the sandbox"),
+    ] {
+        fx.set(Tier::Project, pointer, json!(null));
+        match verify(&fx, SandboxRole::Pm) {
+            Err(SandboxSettingsError::Refused(why)) => assert!(why.contains(named), "{why}"),
+            other => panic!("{pointer}: null must refuse, got {other:?}"),
+        }
+        std::fs::write(fx.file("settings.json"), "{}").expect("reset");
+        write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("rewrite");
+    }
 }
