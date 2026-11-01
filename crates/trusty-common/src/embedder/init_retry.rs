@@ -381,12 +381,80 @@ mod tests {
         );
     }
 
-    /// An offline host with only the other model cached lands here.
+    /// The lookup succeeded but returned no address of the wanted family
+    /// (`resolver.rs:135`). An offline host lands on `ureq_failed_lookup_*`.
     #[test]
     fn ureq_host_not_found_is_transient() {
         assert_transient_never_falls_back(
             "Failed to retrieve model.onnx: request error: host not found",
         );
+    }
+
+    // #10662: an offline host with only the other model cached lands on these.
+    // Rust std renders the lookup failure as a fixed prefix plus `gai_strerror`,
+    // which differs by libc. Each detail below came from a real failed lookup.
+    #[test]
+    fn ureq_failed_lookup_macos_is_transient() {
+        assert_transient_never_falls_back(
+            "Failed to retrieve model.onnx: request error: io: failed to lookup address \
+             information: nodename nor servname provided, or not known",
+        );
+    }
+
+    /// Linux, with DNS reachable and the name absent (glibc 2.43, EVO).
+    #[test]
+    fn ureq_failed_lookup_linux_unknown_name_is_transient() {
+        assert_transient_never_falls_back(
+            "Failed to retrieve model.onnx: request error: io: failed to lookup address \
+             information: Name or service not known",
+        );
+    }
+
+    /// Linux with no network, in an empty network namespace (glibc 2.43, EVO).
+    #[test]
+    fn ureq_failed_lookup_linux_offline_is_transient() {
+        assert_transient_never_falls_back(
+            "Failed to retrieve model.onnx: request error: io: failed to lookup address \
+             information: Temporary failure in name resolution",
+        );
+    }
+
+    #[test]
+    fn ureq_failed_lookup_any_detail_or_casing_is_transient() {
+        for text in [
+            "Failed to retrieve model.onnx: request error: io: failed to lookup address \
+             information: a detail no libc has shipped yet",
+            "FAILED TO RETRIEVE MODEL.ONNX: REQUEST ERROR: IO: FAILED TO LOOKUP ADDRESS \
+             INFORMATION: NAME OR SERVICE NOT KNOWN",
+        ] {
+            assert_transient_never_falls_back(text);
+        }
+    }
+
+    /// `(os error N)` is what `connect` renders: 101 seen on EVO, 51 is macOS.
+    #[test]
+    fn ureq_network_unreachable_is_transient() {
+        for text in [
+            "Failed to retrieve model.onnx: request error: io: Network is unreachable",
+            "Failed to retrieve model.onnx: request error: io: Network is unreachable (os error 101)",
+            "Failed to retrieve model.onnx: request error: io: Network is unreachable (os error 51)",
+            "failed to retrieve model.onnx: request error: io: network is unreachable",
+        ] {
+            assert_transient_never_falls_back(text);
+        }
+    }
+
+    /// `(os error N)` is what `connect` renders: 113 seen on EVO, 65 is macOS.
+    #[test]
+    fn ureq_no_route_to_host_is_transient() {
+        for text in [
+            "Failed to retrieve model.onnx: request error: io: No route to host",
+            "Failed to retrieve model.onnx: request error: io: No route to host (os error 113)",
+            "Failed to retrieve model.onnx: request error: io: No route to host (os error 65)",
+            "failed to retrieve model.onnx: request error: io: no route to host",
+        ] {
+            assert_transient_never_falls_back(text);
+        }
     }
 
     #[test]
