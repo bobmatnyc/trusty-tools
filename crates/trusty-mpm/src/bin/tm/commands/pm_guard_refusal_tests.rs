@@ -182,6 +182,26 @@ fn the_deadline_leaves_a_margin_inside_the_hook_timeout() {
 }
 
 #[test]
+fn the_watchdog_is_armed_in_release_builds_only() {
+    // #10641 (Architect ruling, option 3): a later edit cannot silently drop
+    // the watchdog from release, nor arm it in debug. `run` reaches the
+    // watchdog only through this gate.
+    assert_eq!(watchdog_enabled(), !cfg!(debug_assertions));
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/bin/tm/commands/pm_guard_refusal.rs");
+    let text = std::fs::read_to_string(&path).expect("read pm_guard_refusal.rs");
+    let body = text
+        .split("pub(crate) async fn run(")
+        .nth(1)
+        .expect("run is defined");
+    let gate = body
+        .find("if watchdog_enabled()")
+        .expect("run gates the watchdog");
+    let arm = body.find("spawn_watchdog(").expect("run arms the watchdog");
+    assert!(gate < arm, "the watchdog is armed inside the gate");
+}
+
+#[test]
 fn hook_mode_runs_the_guard_through_this_wrapper() {
     // The critic's wiring pin: `tm hook --pm-guard` reaches `run`, not the bare guard.
     let path =

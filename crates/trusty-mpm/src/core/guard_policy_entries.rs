@@ -417,13 +417,13 @@ pub static PM_TOOL_POLICY: GuardPolicy = policy(
     None,
 );
 
-/// #10641: the in-process watchdog's refusal; the recovery allowlist
-/// (read-only tools, `tm doctor`, `tm install`, `cargo install trusty-mpm`)
-/// still runs.
+/// #10641: the in-process watchdog's refusal, release builds only; the
+/// recovery allowlist (read-only tools, `tm doctor`, `tm install`,
+/// `cargo install trusty-mpm`) still runs.
 pub static GUARD_TIMEOUT: GuardPolicy = policy(
     "GP-049",
     "guard-timeout",
-    "A guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist.",
+    "Release builds: a guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist.",
     "#10600, #10641",
     ALL,
     true,

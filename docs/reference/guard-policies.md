@@ -4,7 +4,7 @@ Generated from `crates/trusty-mpm/src/core/guard_policy_entries.rs` by the `poli
 
 Every `tm hook --pm-guard` and `tm hook --egress-guard` refusal ends with `[policy <id> <rule>; source: <source>]`.
 
-When the guard fails (it panics, errors, or has not decided 8 s after it starts) it still refuses writes; read-only tools and exactly `tm doctor`, `tm install ...` and `cargo install trusty-mpm --version <v> --locked` run. When the `tm` binary is missing or cannot start, no guard code runs and Claude Code's `onFailure: "block"` refuses every tool: from a terminal outside the session, reinstall with `cargo install trusty-mpm --version <v> --locked`, or set `[pm_guard] enabled = false` in `~/.trusty-mpm/config.toml` and relaunch the session.
+When the guard fails (it panics, errors, or, in a release build, has not decided 8 s after it starts) it still refuses writes; read-only tools and exactly `tm doctor`, `tm install ...` and `cargo install trusty-mpm --version <v> --locked` run. A debug build arms no watchdog, because an unoptimized `tm` can take longer than 8 s on a megabyte command; there a stall falls through to Claude Code's 10 s block. When the `tm` binary is missing or cannot start, no guard code runs and Claude Code's `onFailure: "block"` refuses every tool: from a terminal outside the session, reinstall with `cargo install trusty-mpm --version <v> --locked`, or set `[pm_guard] enabled = false` in `~/.trusty-mpm/config.toml` and relaunch the session.
 
 | Id | Rule | Binds | Absolute | Architect core limit | Source | Summary |
 |---|---|---|---|---|---|---|
@@ -57,4 +57,4 @@ When the guard fails (it panics, errors, or has not decided 8 s after it starts)
 | GP-046 | `egress-policy-not-ready` | PM, Architect, Agent | yes | no unruled outward action | #9741, #8454 | A tainted call is denied while the egress policy cannot be loaded. |
 | GP-047 | `egress-architect-audit-unwritable` | Architect | yes | no unruled outward action | #10447 | An Architect egress allow stands only once its audit line is written. |
 | GP-048 | `egress-guard-panic` | PM, Architect, Agent | yes | the guard stays on | #8454 | An egress guard run that panics denies the call. |
-| GP-049 | `guard-timeout` | PM, Architect, Agent | yes | the guard stays on | #10600, #10641 | A guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist. |
+| GP-049 | `guard-timeout` | PM, Architect, Agent | yes | the guard stays on | #10600, #10641 | Release builds: a guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist. |

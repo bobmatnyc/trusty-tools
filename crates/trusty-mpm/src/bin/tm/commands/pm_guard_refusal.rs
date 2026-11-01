@@ -13,7 +13,8 @@
 //! prints through the process-wide one. [`refuse`] audits and emits a deny.
 //! [`run`] records nothing itself: `pm_guard` records its payload with
 //! [`record_payload`], [`spawn_watchdog`] decides at [`GUARD_DEADLINE`] from
-//! process start, and [`fail_closed`] decides a panic or an error.
+//! process start (release builds only, [`watchdog_enabled`]), and
+//! [`fail_closed`] decides a panic or an error in every build.
 //! Test: `pm_guard_refusal_tests.rs`.
 
 use std::fmt::Display;
@@ -39,8 +40,23 @@ use crate::commands::pm_guard_response::build_pm_guard_deny_response;
 /// plus the 2 s audit POST; one daemon call after a slow read (7.5 s) still
 /// decides itself. The 2 s left covers spawn-to-`main` latency under load and
 /// the print, flush and exit, which take milliseconds.
+/// Release builds only: see [`watchdog_enabled`].
 /// Test: `the_deadline_leaves_a_margin_inside_the_hook_timeout`.
 pub(crate) const GUARD_DEADLINE: Duration = Duration::from_secs(8);
+
+/// Whether [`run`] arms the watchdog: release builds only (#10641).
+///
+/// Why: an unoptimized debug `tm` judges a 1 MB command in 8.2–9.37 s under a
+/// loaded test run (`MEGABYTE_RUN_CEILING` in
+/// `tests/tm_hook_pm_guard_stdin_7975.rs`), so the watchdog would replace a
+/// content verdict with GP-049. The Architect ruled (option 3): no watchdog in
+/// debug builds. There a stall falls through to Claude Code's 10 s
+/// `onFailure: "block"`; the panic and error arms still apply the allowlist.
+/// What: `!cfg!(debug_assertions)`.
+/// Test: `the_watchdog_is_armed_in_release_builds_only`.
+pub(crate) const fn watchdog_enabled() -> bool {
+    !cfg!(debug_assertions)
+}
 
 /// One process's single `PreToolUse` decision.
 ///
@@ -191,18 +207,25 @@ where
 /// `tm hook --pm-guard` entry point: `pm_guard::pm_guard` that fails closed,
 /// bar the recovery allowlist.
 ///
-/// What: arms [`spawn_watchdog`] for what is left of [`GUARD_DEADLINE`],
-/// runs the guard under [`fail_closed`], emits a returned deny, then claims
-/// the decision so the watchdog cannot decide during shutdown. Always `Ok`.
-/// Test: `hook_mode_runs_the_guard_through_this_wrapper`; the guard end to
+/// What: when [`watchdog_enabled`] (release builds), arms [`spawn_watchdog`]
+/// for what is left of [`GUARD_DEADLINE`]; runs the guard under
+/// [`fail_closed`], emits a returned deny, then claims the decision so the
+/// watchdog cannot decide during shutdown. Always `Ok`.
+/// Test: `hook_mode_runs_the_guard_through_this_wrapper`,
+/// `the_watchdog_is_armed_in_release_builds_only`; the guard end to
 /// end in `tests/tm_hook_pm_guard.rs`.
 pub(crate) async fn run(url: &str, started: std::time::Instant) -> anyhow::Result<()> {
-    // #10641: decide before Claude Code's 10 s cancel, so the allowlist applies.
-    let wait = GUARD_DEADLINE.saturating_sub(started.elapsed());
     let payload = || PAYLOAD.get().cloned();
-    spawn_watchdog(&DECISION, wait, payload, std::io::stdout(), || {
-        std::process::exit(0)
-    });
+    // #10641: decide before Claude Code's 10 s cancel, so the allowlist
+    // applies — release builds only (Architect ruling, option 3). A plain
+    // `if` on a const, not `#[cfg]`, so the debug build still compiles and
+    // lints the watchdog path.
+    if watchdog_enabled() {
+        let wait = GUARD_DEADLINE.saturating_sub(started.elapsed());
+        spawn_watchdog(&DECISION, wait, payload, std::io::stdout(), || {
+            std::process::exit(0)
+        });
+    }
     // #10600: a guard that panics or errors decides here; it never exits non-zero.
     let guard = crate::commands::pm_guard::pm_guard(url, started);
     if let Some(deny) = fail_closed(guard, || DECISION.is_decided(), payload).await {
