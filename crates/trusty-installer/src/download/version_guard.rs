@@ -16,9 +16,14 @@
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The crates.io API root `cargo install` resolves its newest version from.
 const CRATES_IO_API: &str = "https://crates.io/api/v1/crates";
+/// How long an installed binary's `--version` may run before it is killed.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the crates.io lookup may take before the guard refuses.
+const CRATES_IO_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The build already installed at a destination `tctl install` would write to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +147,16 @@ pub(crate) async fn probe_installed_build(
     crate_name: &str,
     paths: &[&Path],
 ) -> Result<Option<InstalledBuild>, DowngradeRefusal> {
+    probe_installed_build_within(crate_name, paths, PROBE_TIMEOUT).await
+}
+
+/// [`probe_installed_build`] with a caller-supplied per-binary timeout (test seam).
+/// Test: `version_guard_tests::a_hung_probe_is_killed_at_the_timeout`.
+pub(crate) async fn probe_installed_build_within(
+    crate_name: &str,
+    paths: &[&Path],
+    limit: Duration,
+) -> Result<Option<InstalledBuild>, DowngradeRefusal> {
     let mut best: Option<(semver::Version, InstalledBuild)> = None;
     for (i, path) in paths.iter().enumerate() {
         if !path.exists() || paths[..i].contains(path) {
@@ -152,9 +167,7 @@ pub(crate) async fn probe_installed_build(
             path: path.to_path_buf(),
             reason,
         };
-        let line = trusty_common::update::verify_installed_binary_at_path(path)
-            .await
-            .map_err(|e| unreadable(e.to_string()))?;
+        let line = read_version_line(path, limit).await.map_err(unreadable)?;
         let version = crate::commands::update_engine::extract_version_from_line(&line)
             .ok_or_else(|| unreadable(format!("no version in `--version` output {line:?}")))?;
         let parsed = semver::Version::parse(&version)
@@ -173,6 +186,54 @@ pub(crate) async fn probe_installed_build(
     Ok(best.map(|(_, build)| build))
 }
 
+/// Run `<path> --version` and return its trimmed stdout, killing it at `limit`.
+///
+/// Why (#10584 review, HIGH): the shared trusty-common probe drops a timed-out
+/// child without killing it, and this probe runs before every install member,
+/// so a hung binary would be orphaned.
+/// What: spawns with `kill_on_drop`, reads stdout while waiting; on timeout
+/// sends SIGKILL and reaps the child before returning `Err`. A non-zero exit
+/// or spawn failure is also `Err`.
+/// Test: `version_guard_tests::a_hung_probe_is_killed_at_the_timeout`.
+async fn read_version_line(path: &Path, limit: Duration) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let shown = path.display();
+    let mut child = tokio::process::Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("failed to spawn `{shown} --version`: {e}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("`{shown} --version` has no stdout pipe"))?;
+    let run = tokio::time::timeout(limit, async {
+        let mut out = Vec::new();
+        let (read, status) = tokio::join!(stdout.read_to_end(&mut out), child.wait());
+        read.map_err(|e| format!("reading `{shown} --version` output: {e}"))?;
+        let status = status.map_err(|e| format!("waiting for `{shown} --version`: {e}"))?;
+        Ok::<_, String>((status, out))
+    })
+    .await;
+    match run {
+        Ok(Ok((status, out))) if status.success() => {
+            Ok(String::from_utf8_lossy(&out).trim().to_owned())
+        }
+        Ok(Ok((status, _))) => Err(format!("`{shown} --version` exited with {status}")),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            // SIGKILL, then wait, so no orphan or zombie outlives the probe.
+            let _ = child.kill().await;
+            Err(format!(
+                "`{shown} --version` did not finish within {limit:?}; killed"
+            ))
+        }
+    }
+}
+
 /// Refuse a `cargo install` fallback that would replace a newer build.
 ///
 /// Why: `cargo install <crate>` places crates.io's newest version, which can
@@ -186,20 +247,31 @@ pub(crate) async fn guard_cargo_fallback(
     crate_name: &str,
     installed: Option<&InstalledBuild>,
 ) -> Result<(), DowngradeRefusal> {
-    guard_cargo_fallback_at(&super::http_client(), CRATES_IO_API, crate_name, installed).await
+    let client = super::http_client();
+    guard_cargo_fallback_at(
+        &client,
+        CRATES_IO_API,
+        crate_name,
+        installed,
+        CRATES_IO_TIMEOUT,
+    )
+    .await
 }
 
-/// [`guard_cargo_fallback`] against a caller-supplied API root (test seam).
+/// [`guard_cargo_fallback`] against a caller-supplied API root and per-request
+/// timeout (test seam). A timeout is a failed lookup: `UnknownTarget`.
+/// Test: `version_guard_tests::cargo_fallback_refuses_when_crates_io_stalls`.
 pub(crate) async fn guard_cargo_fallback_at(
     client: &reqwest::Client,
     api_base: &str,
     crate_name: &str,
     installed: Option<&InstalledBuild>,
+    limit: Duration,
 ) -> Result<(), DowngradeRefusal> {
     let Some(installed) = installed else {
         return Ok(());
     };
-    let target = crates_io_latest_at(client, api_base, crate_name)
+    let target = crates_io_latest_at(client, api_base, crate_name, limit)
         .await
         .map_err(|e| DowngradeRefusal::UnknownTarget {
             crate_name: crate_name.to_owned(),
@@ -215,6 +287,7 @@ async fn crates_io_latest_at(
     client: &reqwest::Client,
     api_base: &str,
     crate_name: &str,
+    limit: Duration,
 ) -> anyhow::Result<String> {
     use anyhow::Context;
 
@@ -231,6 +304,8 @@ async fn crates_io_latest_at(
     let url = format!("{api_base}/{crate_name}");
     let body: Body = client
         .get(&url)
+        // #10584 review: the shared client has no timeout; a stall is a hang.
+        .timeout(limit)
         // crates.io refuses requests without a descriptive User-Agent.
         .header(
             "User-Agent",
