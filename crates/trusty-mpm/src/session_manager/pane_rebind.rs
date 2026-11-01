@@ -184,8 +184,8 @@ fn single_pane(tmux: &dyn ManagedTmuxDriver, target: &str) -> Result<PaneMatch, 
 /// the record's `cwd` or `workspace_path`; otherwise why not (#9313).
 ///
 /// Why: a same-named session on a replaced server can belong to another
-/// project; binding to it lets idle-stop, `tm sessions stop` and daemon
-/// shutdown signal that foreign session.
+/// project; binding to it lets idle-stop and `tm sessions stop` signal that
+/// foreign session.
 /// What: one [`ManagedTmuxDriver::pane_facts`] read BY PANE ID (#10442), so
 /// the path is the pane's own, not whatever session holds the name. An
 /// unread answer, or one naming a session other than `identity`'s, is a

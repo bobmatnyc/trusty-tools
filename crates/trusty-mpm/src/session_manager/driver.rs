@@ -687,9 +687,9 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// work the claude process was persisting. Sending a termination signal first
     /// gives the process a chance to flush state — the async caller is responsible
     /// for inserting the ~2 s grace window before calling this (see
-    /// `SessionManager::shutdown` in `restart_ops.rs`). This method is
-    /// intentionally synchronous so it can live on the non-async trait; the delay
-    /// is owned by the async shutdown path to avoid blocking a Tokio worker thread.
+    /// `SessionManager::graceful_terminate_runtime` in `restart_ops.rs`). This
+    /// method is intentionally synchronous so it can live on the non-async trait;
+    /// the delay is owned by the async caller to avoid blocking a Tokio worker thread.
     /// What: if `claude_pid` is known, sends SIGTERM via `nix::signal::kill`;
     /// then unconditionally calls `kill_session`. If `claude_pid` is `None`,
     /// falls back to `send_interrupt` (Ctrl-C) before the kill. Signal errors are
@@ -721,8 +721,7 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// the signal-only half, letting an async caller insert a `tokio::time::sleep`
     /// grace window between it and `kill_session` (see
     /// [`SessionManager::graceful_terminate_runtime`](crate::session_manager::SessionManager::graceful_terminate_runtime) for the CLI stop/decommission
-    /// path). `graceful_stop` composes this with an immediate kill for the
-    /// batched, one-grace-window-for-all shutdown path.
+    /// path). `graceful_stop` composes this with an immediate kill.
     /// What: SIGTERMs the known `claude_pid` via `nix::signal::kill` (unix only);
     /// when the pid is unknown, falls back to a single `send_interrupt` (Ctrl-C).
     /// Signal errors are logged and swallowed — the process may already be gone —

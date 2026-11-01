@@ -343,8 +343,8 @@ fn flush_health_warns_once_per_outage_6849() {
 }
 
 /// #6849 fix round: a hung bus holds tm's SIGTERM path for at most
-/// [`SIGNAL_FLUSH_BUDGET`], so `process::exit` still beats the serve drain's
-/// `mgr.shutdown()` (#6288). The peer accepts and never reads, so the flush
+/// [`SIGNAL_FLUSH_BUDGET`], so `process::exit` still beats the serve drain
+/// (#6288). The peer accepts and never reads, so the flush
 /// stalls mid-write; the budget is what bounds it.
 #[tokio::test]
 async fn the_signal_path_flush_returns_within_its_budget_6849() {
