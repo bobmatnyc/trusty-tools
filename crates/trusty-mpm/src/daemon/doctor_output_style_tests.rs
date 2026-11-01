@@ -101,6 +101,53 @@ fn output_style_fail_when_file_missing() {
     assert_eq!(check.status, CheckStatus::Fail);
 }
 
+// #10580: a supervisor install deploys the style only to the managed
+// `$CLAUDE_CONFIG_DIR/output-styles`; the check must find it there, and must
+// still Fail when neither tier holds it.
+#[test]
+fn output_style_resolves_in_the_managed_config_tier() {
+    let home = tempfile::tempdir().unwrap();
+    write_settings(home.path(), r#"{"outputStyle": "trusty-mpm"}"#);
+    let managed = crate::core::trusty_tools_config::managed_claude_config_dir_at(home.path());
+    std::fs::create_dir_all(managed.join("output-styles")).unwrap();
+
+    let check = check_output_style(None, home.path());
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+    assert!(
+        check.message.contains(&managed.display().to_string()),
+        "the Fail must name the managed tier it searched: {}",
+        check.message
+    );
+
+    let default = OUTPUT_STYLES[0];
+    let style_path = managed.join("output-styles").join(default.file_name);
+    std::fs::write(&style_path, default.content(rc())).unwrap();
+    let check = check_output_style(None, home.path());
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    assert!(
+        check.message.contains(&style_path.display().to_string()),
+        "the Ok must name the managed copy: {}",
+        check.message
+    );
+}
+
+// The managed dir is absent, so the tier list drops it; the Fail names it anyway.
+#[test]
+fn output_style_fail_names_an_absent_managed_dir() {
+    let home = tempfile::tempdir().unwrap();
+    write_settings(home.path(), r#"{"outputStyle": "trusty-mpm"}"#);
+    let managed = crate::core::trusty_tools_config::managed_claude_config_dir_at(home.path());
+    assert!(!managed.exists());
+    let check = check_output_style(None, home.path());
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+    assert!(
+        check.message.contains(&managed.display().to_string())
+            && check.message.contains("managed dir absent"),
+        "the Fail must name the absent managed tier: {}",
+        check.message
+    );
+}
+
 #[test]
 fn output_style_fail_on_malformed_json() {
     let home = tempfile::tempdir().unwrap();

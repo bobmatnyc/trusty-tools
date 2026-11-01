@@ -10,7 +10,11 @@
 //! `oauth_token_check_ok_when_token_stored`,
 //! `oauth_token_check_ok_when_env_var_set`,
 //! `oauth_token_check_warns_when_only_api_key_set`,
-//! `oauth_token_check_ok_when_not_relocated` (all in `doctor_tests.rs`).
+//! `oauth_token_check_ok_when_not_relocated`,
+//! `oauth_token_check_ok_when_managed_tier_holds_login`,
+//! `oauth_token_check_warns_on_empty_managed_login_evidence` (all in `doctor_tests.rs`).
+
+use std::path::Path;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 
@@ -39,9 +43,44 @@ use crate::core::doctor::{CheckStatus, DoctorCheck};
 /// `oauth_token_check_ok_when_token_stored`,
 /// `oauth_token_check_warns_when_only_api_key_set`.
 pub(super) fn check_oauth_token_config() -> DoctorCheck {
-    let relocated = crate::core::trusty_tools_config::managed_claude_config_dir().is_some();
+    let managed = crate::core::trusty_tools_config::managed_claude_config_dir();
     let status = crate::core::oauth_token::compute_status();
-    build_oauth_token_check(relocated, status.stored_token_present, status.env_var_set)
+    // #10581: a login already stored in the managed tier cannot loop.
+    let login = managed.as_deref().and_then(managed_tier_login);
+    build_oauth_token_check(
+        managed.is_some(),
+        status.stored_token_present,
+        status.env_var_set,
+        login.as_deref(),
+    )
+}
+
+/// Evidence that Claude Code already holds a login keyed to the managed
+/// `CLAUDE_CONFIG_DIR` `dir` (#10581).
+///
+/// Why: a supervisor install runs `/login` inside the managed tier, so the
+/// login lives there and no stored token is needed.
+/// What: `Some(<file>)` when `<dir>/.credentials.json` is a non-empty file (the
+/// Linux store), or when `<dir>/.claude.json` carries a non-empty `oauthAccount` object
+/// Claude Code writes on login (the macOS secret stays in the Keychain, which
+/// this never reads — #9121). `None` on absence, an empty file or object, an unreadable file or bad
+/// JSON, so the caller keeps its `Warn`.
+/// Test: `oauth_token_check_ok_when_managed_tier_holds_login`,
+/// `oauth_token_check_warns_on_empty_managed_login_evidence`.
+pub(super) fn managed_tier_login(dir: &Path) -> Option<String> {
+    let file = dir.join(".credentials.json");
+    // Length only, never the content; an empty file is not a login.
+    if std::fs::metadata(&file).is_ok_and(|m| m.is_file() && m.len() > 0) {
+        return Some(file.display().to_string());
+    }
+    let file = dir.join(".claude.json");
+    let text = std::fs::read_to_string(&file).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("oauthAccount")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|account| !account.is_empty())
+        .then(|| format!("{} oauthAccount", file.display()))
 }
 
 /// Pure verdict for [`check_oauth_token_config`], separated for hermetic
@@ -55,18 +94,35 @@ pub(super) fn check_oauth_token_config() -> DoctorCheck {
 /// `ANTHROPIC_API_KEY` is intentionally NOT an input: managed spawns scrub it,
 /// so it can never satisfy the managed-session auth requirement (#2246 doctor
 /// false-negative fix).
+/// #10581: `managed_login` (from [`managed_tier_login`]) names a login
+/// already stored under the managed tier; it turns that `Warn` into `Ok`.
 /// Test: `oauth_token_check_warns_when_relocated_with_no_token_or_key`,
 /// `oauth_token_check_ok_when_token_stored`,
 /// `oauth_token_check_ok_when_env_var_set`,
 /// `oauth_token_check_warns_when_only_api_key_set`,
-/// `oauth_token_check_ok_when_not_relocated`.
+/// `oauth_token_check_ok_when_not_relocated`,
+/// `oauth_token_check_ok_when_managed_tier_holds_login`.
 pub(super) fn build_oauth_token_check(
     relocated: bool,
     stored_token_present: bool,
     env_var_set: bool,
+    managed_login: Option<&str>,
 ) -> DoctorCheck {
     let token_available = stored_token_present || env_var_set;
-    if relocated && !token_available {
+    if relocated
+        && !token_available
+        && let Some(login) = managed_login
+    {
+        // #10581: the managed tier holds its own login, so it cannot loop.
+        DoctorCheck::new(
+            "oauth_token",
+            CheckStatus::Ok,
+            format!(
+                "managed sessions authenticate with the login stored under the managed \
+                 CLAUDE_CONFIG_DIR ({login}); no CLAUDE_CODE_OAUTH_TOKEN needed"
+            ),
+        )
+    } else if relocated && !token_available {
         DoctorCheck::new(
             "oauth_token",
             CheckStatus::Warn,

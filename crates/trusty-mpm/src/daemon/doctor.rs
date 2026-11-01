@@ -366,7 +366,7 @@ use doctor_oauth_token::check_oauth_token_config;
 // The pure verdict half has no production caller here — `doctor_tests.rs`
 // exercises it directly through this module's `use super::*`.
 #[cfg(test)]
-use doctor_oauth_token::build_oauth_token_check;
+use doctor_oauth_token::{build_oauth_token_check, managed_tier_login};
 #[path = "doctor_tmux_options.rs"]
 mod doctor_tmux_options;
 use doctor_tmux_options::check_tmux_options;
