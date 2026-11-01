@@ -10,6 +10,8 @@
 //! dir) and by its absolute path, plus the exact refresh forms; three
 //! credential reads must still be refused. [`KNOWN_EXCEPTIONS`] lists guard
 //! false positives tracked in #10598, never a weakened rule.
+//! `every_seeded_architect_script_passes_10570` judges every seeded script,
+//! modules too; [`STILL_REFUSED_10570`] names the ones that still refuse.
 
 use std::path::Path;
 
@@ -73,6 +75,115 @@ fn every_seeded_script_passes_the_guard_at_its_installed_path() {
     }
     assert!(checked > 30, "checked only {checked} commands");
     assert!(refused.is_empty(), "refused:\n{}", refused.join("\n"));
+}
+
+/// Seeded scripts that still refuse under the unchanged guard, with the exact
+/// reason each cannot be changed without changing what it does (#10570).
+/// The four Python rows are modules with no `__main__`; the commands that
+/// import them (`datg.py`, `dashboard-serve.py`) pass.
+const STILL_REFUSED_10570: &[(&str, &str)] = &[
+    (
+        "datg_ops.py",
+        "the error texts `refs.key must match` (a `.key` file name) and `unknown op` read as \
+         a 1Password call; a passing body changes the message the caller sees",
+    ),
+    (
+        "dashboard_docs.py",
+        "DENY_NAMES is the `*secret*`/`*credential*`/`*.env*` glob list the doc route refuses; \
+         it is the script's own deny list",
+    ),
+    (
+        "dashboard_harness.py",
+        "DOC_DENY is the secret-file glob list the harness refuses; it is the script's own deny list",
+    ),
+    (
+        "dashboard_projects.py",
+        "SECRET_NAME is the secret-name regex the project scan skips; it is the script's own deny list",
+    ),
+    (
+        "self-clear.sh",
+        "#10599 owns its ROOT: `$ROOT/scripts/input-state.py` is a computed path, and \
+         ARCHITECT_ROOT is the override its tests and deployments set",
+    ),
+];
+
+/// #10641: the text each [`STILL_REFUSED_10570`] row's refusal must carry, so a
+/// row that starts refusing for another reason is seen.
+const REFUSAL_TEXT_10570: &[(&str, &str)] = &[
+    // #10641: each text is the phrase only the intended refusal carries.
+    (
+        "datg_ops.py",
+        "runs a credential-reading command (a Keychain, token or secret CLI",
+    ),
+    ("dashboard_docs.py", "names a secret-bearing file (#7266)"),
+    (
+        "dashboard_harness.py",
+        "names a secret-bearing file (#7266)",
+    ),
+    (
+        "dashboard_projects.py",
+        "names a secret-bearing file (#7266)",
+    ),
+    (
+        "self-clear.sh",
+        "runs the script `$ROOT/scripts/input-state.py`: its path is computed at run time",
+    ),
+];
+
+/// 🔴 REGRESSION (#10570, #10598): every script `tm fleet init` seeds under
+/// `scripts/`, module or command, passes the guard by interpreter, with
+/// `--help`, and by path. The loop reads the real seeded rows, so a new seed is
+/// judged with no edit here; [`STILL_REFUSED_10570`] names each script that
+/// still refuses, and is checked to refuse, so a fixed one leaves the list.
+#[test]
+fn every_seeded_architect_script_passes_10570() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = std::fs::canonicalize(fx.dir()).unwrap();
+    let (mut runs, mut refused, mut listed) = (0, Vec::new(), Vec::new());
+    let mut wrong_text = Vec::new();
+    let files = seeded_files();
+    for f in &files {
+        let Some(name) = f.dest.strip_prefix("scripts/") else {
+            continue;
+        };
+        let run = if name.ends_with(".sh") {
+            "bash"
+        } else {
+            "python3"
+        };
+        let mut commands = vec![
+            format!("{run} {}", f.dest),
+            format!("{run} {} --help", f.dest),
+        ];
+        if f.executable {
+            commands.push(format!("./{}", f.dest));
+        }
+        runs += 1;
+        let why: Vec<String> = commands
+            .iter()
+            .filter_map(|c| verdict(c, &dir).map(|why| format!("{c}: {why}")))
+            .collect();
+        if STILL_REFUSED_10570.iter().any(|(n, _)| *n == name) {
+            let (_, text) = REFUSAL_TEXT_10570
+                .iter()
+                .find(|(n, _)| *n == name)
+                .expect("a refusal text per listed row");
+            let joined = why.join("\n");
+            if !why.is_empty() && !joined.contains(text) {
+                wrong_text.push(format!("{name}: want `{text}` in:\n{joined}"));
+            }
+            listed.push((name, why.is_empty()));
+        } else {
+            refused.extend(why);
+        }
+    }
+    assert!(runs > 40, "seeded scripts judged: {runs}");
+    assert!(refused.is_empty(), "refused:\n{}", refused.join("\n"));
+    let passing: Vec<_> = listed.iter().filter(|(_, ok)| *ok).collect();
+    assert!(passing.is_empty(), "listed but passing: {passing:?}");
+    assert_eq!(listed.len(), STILL_REFUSED_10570.len(), "{listed:?}");
+    assert!(wrong_text.is_empty(), "{}", wrong_text.join("\n\n"));
 }
 
 #[test]

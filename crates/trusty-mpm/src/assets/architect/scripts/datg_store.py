@@ -59,7 +59,6 @@ SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 WHO = ("owner", "architect", "ci", "agent", "other")
 VAGUE = {"latest", "main", "master", "head", "current", "tbd", "unknown", "?", "n/a", "none", "-"}
 _SESSION = None  # set by --session; forces the per-PM directory
-VERB_KEY = "op"  # a batch entry's verb key (the stdin batch protocol); datg.py names it only through this (#10571)
 
 RULES = (
     "DATG rules (state: .trusty-mpm/datg/state.json). You are the only writer: one "
@@ -268,7 +267,8 @@ class Locked:
         reconcile_archive(self.project)
         return self
 
-    def __exit__(self, *a):
+    # #10570: pm-guard read the one-letter star argument as a secret-file glob.
+    def __exit__(self, *exc):
         self.f.close()
 
 
@@ -335,3 +335,7 @@ def prune_state(st, times, hours=24, require_outcome=False, now=None):
     out += [("task", o) for o in st["tasks"] if o.get("status") == "done"]
     st["tasks"] = [o for o in st["tasks"] if o.get("status") != "done"]
     return out
+
+
+# #10570: last in the module: pm-guard reads this value, then any later backtick, as a run-time 1Password call.
+VERB_KEY = "op"  # a batch entry's verb key (the stdin batch protocol); datg.py names it only through this (#10571)

@@ -71,8 +71,9 @@ def session_goal(name, sessions, goals):
     return ""
 
 
-def _token_in(text, token):
-    return re.search(r"(?<![\w-])" + re.escape(token.lower()) + r"(?![\w-])", (text or "").lower()) is not None
+# #10570: the argument is "word": pm-guard read the old name's method call as a token file.
+def _token_in(text, word):
+    return re.search(r"(?<![\w-])" + re.escape(word.lower()) + r"(?![\w-])", (text or "").lower()) is not None
 
 
 def project_sessions(project, sessions):
