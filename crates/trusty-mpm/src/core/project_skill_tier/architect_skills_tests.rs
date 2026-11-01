@@ -264,7 +264,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "tm-context-refresh",
-            "ea25ebe3f0fee74963bcf4ccb1452535c233c47eb844754392d05e17382242e7",
+            "6b0fdc7b311e3272b706a410ab9b6f0f5608623eda9778d8577e1e37452ff014",
         ),
         (
             "architect-tmux-ops",
