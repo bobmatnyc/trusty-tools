@@ -79,7 +79,10 @@ trusty-code = { workspace = true }
 #      `aws-types` below are already unconditional direct dependencies of this
 #      crate for the existing `llm::bedrock` (Converse, non-streaming) client.
 trusty-mcp = { workspace = true, features = ["config"] }  # JSON-RPC / MCP primitives (ADR-0040, #5803); `config` (#7454, ADR-0060) is the one MCP-server config authority this crate's connectors are built from.
-trusty-common = { workspace = true, features = ["symgraph-parser", "credentials", "chat-attachments", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli", "redb-open", "log-drain"] }  # `redb-open` (#5063): named explicitly, because `memory::redb_recovery` uses it directly. `log-drain` (#6537): `trusty_common::log_drain::{run_once, DrainConfig, ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the drain CORE `crate::log_drain`'s scheduler calls.
+# #10662: `memory::embed` imports `embedder::retry_transient_init`, first in
+# trusty-common 0.67.5. The workspace entry admits `^0.67`, so this crate states
+# its own floor, as trusty-memory does. The dev-dependency below matches it.
+trusty-common = { path = "../trusty-common", version = "0.67.5", features = ["symgraph-parser", "credentials", "chat-attachments", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli", "redb-open", "log-drain"] }  # `redb-open` (#5063): named explicitly, because `memory::redb_recovery` uses it directly. `log-drain` (#6537): `trusty_common::log_drain::{run_once, DrainConfig, ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the drain CORE `crate::log_drain`'s scheduler calls.
 # Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
 #      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
 #      surface (it owns its own axum stack for the orchestrator's UI). Setting
@@ -247,7 +250,7 @@ tar = { workspace = true }
 secrecy = "0.10"
 # #9123: the shared credential test sandbox. Dev-only because it mutates the
 # process environment; it must never reach a normal build.
-trusty-common = { workspace = true, features = ["credential-test-sandbox"] }
+trusty-common = { path = "../trusty-common", version = "0.67.5", features = ["credential-test-sandbox"] }
 
 [lints.clippy]
 doc_lazy_continuation = "allow"
