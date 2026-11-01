@@ -2180,6 +2180,11 @@ fn a_create_the_daemon_hung_up_on_is_confirmed_by_polling_the_registry() {
 /// Test: this test.
 #[test]
 fn registered_and_plain_entry_points_register_the_same_id() {
+    // #10661: these calls read the socket and production-state variables that
+    // sibling tests set under ENV_LOCK; unlocked, they reach a sibling's fake.
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let project = scratch_dir("registered");
     fs::create_dir_all(project.join(".git")).unwrap();
     let registered = crate::RegisteredProject::new("renamed-in-registry", "acme/widget");
@@ -2198,6 +2203,11 @@ fn registered_and_plain_entry_points_register_the_same_id() {
 /// Test: this test.
 #[test]
 fn unregistered_root_keeps_the_legacy_basename_id() {
+    // #10661: these calls read the socket and production-state variables that
+    // sibling tests set under ENV_LOCK; unlocked, they reach a sibling's fake.
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let project = scratch_dir("unregistered");
     fs::create_dir_all(project.join(".git")).unwrap();
 

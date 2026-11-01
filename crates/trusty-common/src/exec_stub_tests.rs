@@ -46,7 +46,7 @@ fn a_missing_parent_is_an_error() {
 }
 
 /// The #10248 race, forced by load: four threads write and exec stubs while
-/// four more spawn `/bin/true` without pause. Writing the stubs in-process
+/// four more spawn `/usr/bin/true` without pause. Writing the stubs in-process
 /// failed about one exec in seven with ETXTBSY on Linux; through
 /// [`write_executable`] none may fail.
 ///
@@ -78,6 +78,11 @@ fn stubs_exec_while_siblings_spawn_without_etxtbsy() {
         );
         return;
     }
+    // #10661: `/bin/true` does not exist on macOS. Spawning it failed with ENOENT
+    // tens of thousands of times a second, which made spawns across this host
+    // fail with EAGAIN and did none of the load this test is about.
+    const SIBLING: &str = "/usr/bin/true";
+    assert!(Path::new(SIBLING).exists(), "{SIBLING} must exist");
     let dir = tempfile::tempdir().expect("tempdir");
     let stop = Arc::new(AtomicBool::new(false));
     let spawners: Vec<_> = (0..4)
@@ -85,7 +90,7 @@ fn stubs_exec_while_siblings_spawn_without_etxtbsy() {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    let _ = Command::new("/bin/true").status();
+                    let _ = Command::new(SIBLING).status();
                 }
             })
         })
