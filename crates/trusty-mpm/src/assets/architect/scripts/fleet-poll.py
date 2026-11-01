@@ -14,8 +14,8 @@ below, for two exceptions), reads new permission_prompt / agent_needs_input
 lines of inbox/events.jsonl, checks host load (5-min avg > LOAD_FACTOR x
 cores), disk and swap, self_ctx_alerts (self-ctx.py: the Architect's own
 context in tokens, which has no `ctx N%` line to read, against the same
-context bar), and appends each NEW alert as
-a JSON line to inbox/alerts.jsonl. Dedup state is inbox/poll-state.json: an
+context bar), owner_answer_alerts (dashboard answers not yet relayed), and
+appends each NEW alert as a JSON line to inbox/alerts.jsonl. Dedup state is inbox/poll-state.json: an
 alert with the same (session, pane, kind, fingerprint) is not re-emitted
 until it clears for one cycle, or its kind's re-emit interval passes.
 `dispatch_wake` types the one-line pointer into the Architect's pane and
@@ -36,7 +36,7 @@ CONTEXT_BAR_TOKENS (default 250000), CONTEXT_WINDOW_TOKENS (default 1000000);
 see README.md.
 Test: tests/test_fleet_poll.py, tests/test_quiet_sessions.py,
 tests/test_fleet_poll_workspace_servers.py, tests/test_fleet_poll_split.py,
-tests/test_fleet_poll_lock.py
+tests/test_fleet_poll_lock.py, tests/test_fleet_poll_owner_answers.py
 Usage: scripts/fleet-poll.py [--once] [--interval N] [--dry-run]
        (normally run via scripts/start-fleet-poll.sh)
 Exit: 0 after --once or --dry-run; 3 when another live poller holds
@@ -98,9 +98,11 @@ fp, iso, alert = fleet_classify.fp, fleet_classify.iso, fleet_classify.alert
 find_box, _screen_lines = fleet_classify.find_box, fleet_classify._screen_lines
 parse_pane, evaluate = fleet_classify.parse_pane, fleet_classify.evaluate
 fleet_plan_alerts, dedup = fleet_classify.fleet_plan_alerts, fleet_classify.dedup
+clean = fleet_classify.clean
 
 self_ctx = _load_by_path("self_ctx", "self-ctx.py")
 quiet_sessions = _load_by_path("quiet_sessions", "quiet-sessions.py")
+owner_answers = _load_by_path("owner_answers", "owner_answers.py")  # #10670: the answer store
 watchdog = _load_by_path("architect_watchdog", "architect-watchdog.py")
 il_cron = _load_by_path("il_cron", "il-cron.py")
 ctx_watch = il_cron.ctx_watch
@@ -121,6 +123,8 @@ read_events, swap_used_mb, host_alerts = _io.read_events, _io.swap_used_mb, _io.
 acquire_poll_lock = _io.acquire_poll_lock
 resolve_context_bar, self_ctx_alerts = _alerts.resolve_context_bar, _alerts.self_ctx_alerts
 il_cron_alerts, ctx_watch_alerts = _alerts.il_cron_alerts, _alerts.ctx_watch_alerts
+owner_answer_alerts, ANSWER_KINDS = _alerts.owner_answer_alerts, _alerts.ANSWER_KINDS
+ANSWER_KEY = _alerts.ANSWER_KEY
 run_architect_relaunch, architect_busy = _watchdog.run_architect_relaunch, _watchdog.architect_busy
 architect_transcript_mtime, watchdog_alerts = _watchdog.architect_transcript_mtime, _watchdog.watchdog_alerts
 _norm, _box_full_text, _own_pointer = _wake._norm, _wake._box_full_text, _wake._own_pointer
@@ -180,9 +184,23 @@ def cycle(state, dry_run=False, now=None):
     candidates += host_alerts(now)
     candidates += self_ctx_alerts(now, dry_run)
     candidates += watch_found
+    answers, failure = owner_answer_alerts(now, dry_run, ever_read=state.get("answers_read", False))
+    if answers is not None:
+        state["answers_read"] = True
+    candidates += answers or []
+    if failure:
+        # #10670: a failed read must reach the Architect; owner_* always wakes (alert_triage).
+        # The fingerprint is the error class, so one failure episode alerts once.
+        candidates.append(alert("owner_answer_error", failure,
+                                f"cannot read owner answers ({failure}); see poll.log", now=now))
+    # #10670: dedup clears a key absent from a cycle. A failed read says nothing about an
+    # answer, so hold its keys: it stays unconsumed and keeps its re-emit clock.
+    held = {} if answers is not None else {
+        k: v for k, v in state.get("alerts", {}).items() if k.startswith(ANSWER_KEY)}
     quiet = quiet_sessions.read_quiet_sessions(QUIET_SESSIONS_FILE)
     candidates = [a for a in candidates if not (a["kind"] == "idle" and a["session"] in quiet)]
     new, suppressed = dedup(state, candidates, now)
+    state["alerts"].update(held)
     if dry_run:
         for a in new:
             print(f"  would alert: {a['display']}")
@@ -190,7 +208,8 @@ def cycle(state, dry_run=False, now=None):
         with open(ALERTS, "a") as f:
             for a in new:
                 f.write(json.dumps(a, ensure_ascii=False) + "\n")
-    result = dispatch_wake(state, panes, len(new), dry_run)
+    result = dispatch_wake(state, panes, len(new), dry_run,
+                           sum(1 for a in new if a["kind"] == "owner_answer"))
     # #10599 PR-1's slot (prototype :2000): never type into the box twice in a cycle.
     if not result.startswith("sent"):
         watch_phrase = f"{watch_phrase} {self_refresh_step(state, panes, now, dry_run)}".rstrip()
