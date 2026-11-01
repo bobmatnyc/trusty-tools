@@ -22,9 +22,9 @@ use uuid::Uuid;
 use super::bm25::bm25_delete_document;
 use super::helpers::{
     WriteDrawerParams, apply_tier_c, attach_mcp_attribution, begin_budgeted_write, blocklist_gate,
-    content_gate, dedup_gate, mcp_remember_opts, open_palace_handle, open_palace_handle_within,
-    parse_tags, resolve_aliased_str_arg, resolve_palace, resolve_tier_c, resolve_type_arg,
-    resolve_verify_arg, room_label, skipped_envelope, write_drawer,
+    content_gate, dedup_gate, dedup_gate_applies, mcp_remember_opts, open_palace_handle,
+    open_palace_handle_within, parse_tags, resolve_aliased_str_arg, resolve_palace, resolve_tier_c,
+    resolve_type_arg, resolve_verify_arg, room_label, skipped_envelope, write_drawer,
 };
 // #6318: the read tools below fall back to a palace index; the write tools in
 // this file keep `resolve_palace`'s error.
@@ -53,6 +53,9 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     let classify_as = resolve_type_arg(&args, "memory_remember")?;
     // #9390: same rule for `verify` — a refusal must not hide behind a gate.
     let verify = resolve_verify_arg(&args, "memory_remember")?;
+    // #10643: resolve the slot before any gate — a bad `expires_at` must not
+    // hide behind a "skipped" envelope, and the dedup gate keys on the result.
+    let admission = resolve_tier_c(&args, "memory_remember")?;
 
     // Issue #2442: `force` must be parsed BEFORE any content-quality gate
     // runs so it can bypass every one of them uniformly — it is an explicit
@@ -140,7 +143,8 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     // landed in the same palace within the last 5 minutes. The
     // `force=true` operator override bypasses the gate so
     // intentional re-writes are not silently dropped.
-    if !force {
+    // #10643: an admitted Tier C slot rewrite replaces its occupant instead.
+    if dedup_gate_applies(&admission, force) {
         let handle = open_palace_handle_within(state, palace, budget)?;
         if dedup_gate(&handle, &text) {
             tracing::debug!(
@@ -165,7 +169,7 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     // #4886: ADR-0028 D3/D4. `fact_key` is what makes this a Tier C write; a
     // slot that fails admission degrades to an ordinary drawer, and the
     // envelope below reports which tier the write actually landed in.
-    let admission = resolve_tier_c(&args, "memory_remember")?;
+    // `admission` was resolved before the gates (#10643).
     let mut opts = RememberOptions {
         wing_id,
         // #9144: an explicit type beats the heuristic classifier; `None` keeps it.
@@ -214,6 +218,9 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     let raw_content = resolve_aliased_str_arg(&args, "memory_note", "content", "text")?.to_string();
     // #9390: refuse a bad `verify` before any content gate can skip the write.
     let verify = resolve_verify_arg(&args, "memory_note")?;
+    // #10643: same ordering as `memory_remember` — slot resolution precedes
+    // every gate.
+    let admission = resolve_tier_c(&args, "memory_note")?;
     // Issue #220: blocklist gate — silently drop content matching
     // known low-value auto-capture patterns. Same filter as
     // `memory_remember` so the gate is uniform across the write
@@ -262,7 +269,9 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     // `memory_remember`. `memory_note` has no `force` arg, so the
     // gate is unconditional: curated short-fact writes that happen
     // to duplicate an existing recent note are still skipped.
-    {
+    // #10643: except an admitted Tier C slot rewrite, which replaces its
+    // occupant.
+    if dedup_gate_applies(&admission, false) {
         let handle = open_palace_handle_within(state, palace, budget)?;
         if dedup_gate(&handle, &content) {
             tracing::debug!(
@@ -294,8 +303,7 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     // more likely home for a current fact — it is the short, curated, pinned
     // `importance = 1.0` path, which is exactly the privilege ADR-0028 §C5
     // measured at 8.25x median injection lift and D4 requires be paired with a
-    // retirement condition.
-    let admission = resolve_tier_c(&args, "memory_note")?;
+    // retirement condition. `admission` was resolved before the gates (#10643).
     let mut opts = RememberOptions {
         defer_embedding,
         ..RememberOptions::note()

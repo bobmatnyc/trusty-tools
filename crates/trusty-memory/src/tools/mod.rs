@@ -336,3 +336,6 @@ mod tests;
 // descriptor/router consistency the enforcement table owns.
 #[cfg(all(test, feature = "server"))]
 mod byte_cap_tests;
+// #10643: the near-duplicate window gate against Tier C slot rewrites.
+#[cfg(all(test, feature = "server"))]
+mod slot_gate_tests;
