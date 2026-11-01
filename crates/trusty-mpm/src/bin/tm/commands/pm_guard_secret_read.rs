@@ -989,6 +989,10 @@ pub(crate) fn names_a_secret_file(word: &str, scan: Scan) -> bool {
         return true;
     }
     let base = normalize_bracket_classes(&command_basename(word));
+    // #10570: a `token*` usage tally is no token file.
+    if token_tally::is_token_tally(&base) {
+        return false;
+    }
     if base.is_empty() || !denies_as_a_read_target(&base, scan) {
         return false;
     }
@@ -1400,6 +1404,10 @@ fn deny_reason(target: &str, how: &str) -> String {
          read it for you."
     )
 }
+
+// #10570: the tally name rule (500-SLOC cap).
+#[path = "pm_guard_secret_token_tally.rs"]
+mod token_tally;
 
 #[cfg(test)]
 mod tests {
