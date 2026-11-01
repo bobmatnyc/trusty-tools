@@ -14,8 +14,8 @@ use std::time::Duration;
 
 /// Bounded retry schedule for a transient model-fetch failure during init.
 ///
-/// Why: two failure modes of a model fetch are transient rather than terminal:
-/// HTTP 429 from the hub's rate limiter, and hf-hub's per-blob `Lock acquisition
+/// Why: some model-fetch failures are transient rather than terminal, such as
+/// HTTP 429 from the hub's rate limiter, or hf-hub's per-blob `Lock acquisition
 /// failed` when another process is mid-download of the same file. See #812.
 /// What: attempt count plus an exponential backoff, capped. A zero
 /// `base_backoff` disables sleeping entirely, which is what the unit tests use.
@@ -43,15 +43,18 @@ impl Default for InitRetryPolicy {
 /// Classify an init error as transient (worth retrying) or terminal.
 ///
 /// Why: retrying a missing-file or corrupt-model error just multiplies the
-/// wall-clock cost of a failure that will never succeed. Only the hub's
-/// rate-limit and inter-process lock-contention responses recover on their own.
+/// wall-clock cost of a failure that will never succeed. The hub's rate limit,
+/// a sibling's blob lock, a server 5xx and a network failure can each recover
+/// on their own, and #10662 needs none of them to select a different model.
 /// What: lowercases the full `anyhow` chain (`{err:#}`) and looks for the
-/// signatures both #812 recurrences produced, plus the neighbouring 5xx and
-/// timeout responses from the same endpoint. The status-code needles are
-/// anchored on their surrounding words so a digit sequence inside a SHA or a
-/// byte count cannot match.
+/// signatures both #812 recurrences produced, the neighbouring 5xx and timeout
+/// responses from the same endpoint, and the network failures `ureq` 3.3.0
+/// reports through `hf-hub`. The status-code needles are anchored on their
+/// surrounding words so a digit sequence inside a SHA or a byte count cannot
+/// match. A 401, 403 or 404 matches no needle, so it stays terminal.
 /// Test: `transient_classifier_matches_observed_signatures`,
-/// `transient_classifier_rejects_terminal_errors`.
+/// `transient_classifier_rejects_terminal_errors`, the `ureq_*_is_transient`
+/// and `ureq_http_*_stays_terminal` tests, `a_coreml_hang_stays_terminal`.
 fn is_transient_init_error(err: &anyhow::Error) -> bool {
     let msg = format!("{err:#}").to_ascii_lowercase();
     // #812: the first two needles are the exact strings the two 2026-09-01
@@ -61,12 +64,22 @@ fn is_transient_init_error(err: &anyhow::Error) -> bool {
         "lock acquisition failed",
         "too many requests",
         "rate limit",
+        "status: 500",
         "status: 502",
         "status: 503",
         "status: 504",
         "timed out",
+        // #10662: `ureq`'s `Timeout`. The colon keeps the CoreML hang text's
+        // `TRUSTY_COREML_INIT_TIMEOUT_SECS` hint terminal.
+        "timeout: ",
         "connection reset",
         "too many retries",
+        // #10662: `ureq` network failures, so an offline host does not switch
+        // models after one attempt.
+        "host not found",
+        "connection failed",
+        "connection refused",
+        "body data reading stalled",
     ];
     TRANSIENT.iter().any(|needle| msg.contains(needle))
 }
