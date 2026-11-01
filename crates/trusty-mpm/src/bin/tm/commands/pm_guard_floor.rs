@@ -23,7 +23,7 @@
 //! (`pm_guard_bash::evaluate_tmux_exact_target`); since #10033, any
 //! `tm fleet relaunch` (`pm_guard_bash::evaluate_fleet_relaunch`); since
 //! #10665, a `tmux kill-server` or `kill-session -a` without an explicit
-//! scratch `-S` socket (`pm_guard_bash::tmux_kill_server`).
+//! scratch `-S` socket (`pm_guard_bash::kill_server`).
 //! [`ArchitectGate`] is the one
 //! identity answer for the D4 remainder and the D5 call sites in `pm_guard`;
 //! it asks [`architect_main_thread`] at most once, and only when a rule
@@ -50,7 +50,7 @@ use crate::commands::pm_guard_architect_reason::{
 use crate::commands::pm_guard_bash::fleet_relaunch::{
     FLEET_RELAUNCH_RULE, evaluate_fleet_relaunch,
 };
-use crate::commands::pm_guard_bash::tmux_kill_server::{
+use crate::commands::pm_guard_bash::kill_server::{
     ServerEnv, TMUX_KILL_SERVER_RULE, evaluate_tmux_kill_server,
 };
 use crate::commands::pm_guard_bash::{

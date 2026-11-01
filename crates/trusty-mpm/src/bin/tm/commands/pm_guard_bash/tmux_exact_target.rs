@@ -32,6 +32,10 @@ use super::architect_pane_parse::{Hit, Target, UNPARSED, may_run_tmux, tmux_hits
 use super::architect_pane_probe::Listed;
 use super::architect_pane_reach::without_data_bodies;
 
+// #10665: the whole-server kill floor shares this parser and file family.
+#[path = "tmux_kill_server.rs"]
+pub(crate) mod kill_server;
+
 /// The rule name recorded with an exact-target deny.
 pub(crate) const TMUX_TARGET_RULE: &str = "tmux-target-unresolved";
 

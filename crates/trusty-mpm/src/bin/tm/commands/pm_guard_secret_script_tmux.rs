@@ -8,7 +8,7 @@
 //! What: [`evaluate_script_body_tmux_kill`] locates each script with
 //! `walk::each_script`, reads it with `read_script`, and judges a shell body
 //! (comment lines blanked, continuations joined) with
-//! `tmux_kill_server::evaluate_tmux_kill_server`, then the scripts that body
+//! `kill_server::evaluate_tmux_kill_server`, then the scripts that body
 //! runs, to `MAX_SCRIPT_DEPTH`. A body in another language that names a
 //! whole-server kill refuses: the guard cannot read it as shell.
 //! Residual: a script the guard cannot locate or read is the #8879 rule's
@@ -23,7 +23,7 @@ use super::{
     Body, Family, MAX_SCRIPT_DEPTH, family_of, read_script, shebang_interpreter,
     without_comment_lines,
 };
-use crate::commands::pm_guard_bash::tmux_kill_server::{
+use crate::commands::pm_guard_bash::kill_server::{
     ServerEnv, evaluate_tmux_kill_server, names_whole_server_kill, refusal,
 };
 use crate::commands::pm_guard_secret_script_self::{ToplevelRisk, resolve_self_paths_with};

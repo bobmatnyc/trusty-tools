@@ -21,8 +21,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::architect_pane_parse::{Target, tmux_hits};
-use super::unclassifiable_command;
+use super::super::architect_pane_parse::{Target, tmux_hits};
+use super::super::unclassifiable_command;
 use trusty_mpm::core::tmux_server::socket_dir;
 
 /// The rule name recorded with a whole-server kill deny.
