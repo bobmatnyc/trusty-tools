@@ -1456,12 +1456,15 @@ fn cli_parses_tui_defaults() {
             url,
             interval_ms,
             single_pane,
+            no_mouse,
         } => {
             assert_eq!(url.as_deref(), Some(DEFAULT_URL));
             assert_eq!(interval_ms, 1000);
             // #6483: bare `tm tui` opts into nothing — the multipane
             // project_ctl dashboard is what `initial_view(false)` resolves to.
             assert!(!single_pane);
+            // #10476: the mouse is on unless the operator opts out.
+            assert!(!no_mouse);
             assert_eq!(
                 trusty_mpm::tui::initial_view(single_pane),
                 trusty_mpm::tui::TuiView::Multipane
@@ -1483,6 +1486,15 @@ fn cli_parses_tui_single_pane_opt_in() {
                 trusty_mpm::tui::TuiView::SinglePane
             );
         }
+        other => panic!("expected Tui, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_tui_no_mouse_opt_out() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "tui", "--no-mouse"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Tui { no_mouse, .. } => assert!(no_mouse),
         other => panic!("expected Tui, got {other:?}"),
     }
 }

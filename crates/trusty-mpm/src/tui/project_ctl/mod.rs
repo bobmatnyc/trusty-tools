@@ -78,15 +78,17 @@ pub async fn run_focused(
     interval_ms: u64,
     focus_id: Option<String>,
 ) -> anyhow::Result<()> {
-    run_focused_with_client(DaemonClient::new(url), interval_ms, focus_id).await
+    let mouse = crate::tui::terminal::mouse_from_env(false);
+    run_focused_with_client(DaemonClient::new(url), interval_ms, focus_id, mouse).await
 }
 
 /// [`run_focused`] against a caller-built client, so a pinned URL (#9556)
-/// reaches the poll loop.
+/// reaches the poll loop. `mouse` turns capture on (#10476).
 pub(crate) async fn run_focused_with_client(
     mut client: DaemonClient,
     interval_ms: u64,
     focus_id: Option<String>,
+    mouse: bool,
 ) -> anyhow::Result<()> {
     let mut state = ProjectCtlState::default();
     project_ctl_poll_daemon(&mut state, &mut client).await;
@@ -105,7 +107,7 @@ pub(crate) async fn run_focused_with_client(
     // panic unwind — so it is the SOLE teardown (no manual cleanup follows
     // `run_loop`).
     // #7224: setup and guard both come from `tui::terminal`.
-    let mut terminal = crate::tui::terminal::enter()?;
+    let mut terminal = crate::tui::terminal::enter_mouse(mouse)?;
     let _guard = TerminalGuard;
 
     run_loop(&mut terminal, &mut client, state, interval_ms).await
@@ -118,17 +120,29 @@ pub(crate) async fn run_focused_with_client(
 /// the terminal back when the operator leaves it, so it must not enter or
 /// restore the terminal itself.
 /// What: the priming poll [`run_focused_with_client`] does, then [`run_loop`]
-/// until `q` / Ctrl-C.
+/// until `q` / Ctrl-C. #10476: with `mouse` set, capture is on for this view
+/// only, so the home screen gets the terminal back uncaptured on a normal or
+/// error return; on a panic the caller's `TerminalGuard` turns it off.
 /// Test: exercised by the home-screen smoke run; the loop is unchanged.
 pub(crate) async fn run_in_terminal(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     client: &mut DaemonClient,
     interval_ms: u64,
+    mouse: bool,
 ) -> anyhow::Result<()> {
     let mut state = ProjectCtlState::default();
     project_ctl_poll_daemon(&mut state, client).await;
     terminal.clear()?;
-    run_loop(terminal, client, state, interval_ms).await
+    if mouse {
+        crate::tui::terminal::enable_capture(terminal)?;
+    }
+    let result = run_loop(terminal, client, state, interval_ms).await;
+    if mouse {
+        // The loop's own error, if any, is the one worth reporting.
+        let disabled = crate::tui::terminal::disable_capture(terminal);
+        return result.and(disabled.map_err(Into::into));
+    }
+    result
 }
 
 /// The live render + poll + input loop.

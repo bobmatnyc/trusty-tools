@@ -512,6 +512,75 @@ async fn drive_with_slow_poller(script: Vec<Option<KeyCode>>) -> SlowRun {
     }
 }
 
+/// Plays back whole events, then `q`.
+struct ScriptedRawEvents(std::collections::VecDeque<Option<crossterm::event::Event>>);
+
+impl super::drive::EventSource for ScriptedRawEvents {
+    fn next_event(
+        &mut self,
+        _timeout: std::time::Duration,
+    ) -> std::io::Result<Option<crossterm::event::Event>> {
+        Ok(self.0.pop_front().unwrap_or_else(|| {
+            Some(crossterm::event::Event::Key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            )))
+        }))
+    }
+}
+
+/// #10476: the loop routes a mouse event, drawn against the frame before it. A
+/// click on the project row opens it. Without the loop's mouse arm it stays shut.
+#[tokio::test(start_paused = true)]
+async fn click_reaches_the_tree_through_the_loop_10476() {
+    use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+
+    let project = NodeId::Project {
+        owner: "acme".to_string(),
+        name: "trusty-tools".to_string(),
+    };
+    let row = seeded_state()
+        .tree
+        .rows
+        .iter()
+        .position(|r| r.id == project)
+        .expect("the project row") as u16;
+    let click = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        // One border row above the list; offset 0 in an 80x24 frame.
+        row: row + 1,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("test backend");
+    let mut opened = Vec::new();
+    let mut draw = |state: &mut ProjectCtlState| -> anyhow::Result<()> {
+        terminal.draw(|f| super::layout::render(f, state))?;
+        opened.push(state.tree.expanded.contains(&project));
+        Ok(())
+    };
+    let mut client = DaemonClient::new("http://127.0.0.1:1".to_string());
+    super::drive::drive(
+        &mut draw,
+        &mut ScriptedRawEvents(vec![None, Some(click), None].into()),
+        slow_poller(SLOW_POLL, std::sync::Arc::new(PollCounts::default())),
+        &mut client,
+        seeded_state(),
+        std::time::Duration::from_secs(3600),
+        &mut super::trace::TuiTrace::disabled(),
+    )
+    .await
+    .expect("drive returns Ok on q");
+    assert_eq!(opened.first(), Some(&false), "the project starts shut");
+    assert_eq!(
+        opened.last(),
+        Some(&true),
+        "the click opened it: {opened:?}"
+    );
+}
+
 /// #10476: a key pressed while a poll is in flight is drawn before that poll
 /// completes, and `q` exits without waiting for it.
 #[tokio::test(start_paused = true)]

@@ -467,6 +467,10 @@ pub(crate) enum Command {
         /// dashboard (#6483 opt-in).
         #[arg(long)]
         single_pane: bool,
+        /// Keep the terminal's own mouse handling: the projects view does not
+        /// capture clicks or the wheel. `TM_TUI_MOUSE=0` does the same (#10476).
+        #[arg(long)]
+        no_mouse: bool,
     },
     /// Manage the Telegram remote-management bot (pair, status, start, stop).
     Telegram {

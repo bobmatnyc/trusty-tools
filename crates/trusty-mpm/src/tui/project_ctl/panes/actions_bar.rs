@@ -116,6 +116,37 @@ pub fn bar_text(state: &ProjectCtlState) -> String {
     format!("{left}   ·   {daemon}")
 }
 
+/// The label a click treats as the Focus button (#10476).
+const FOCUS_LABEL: &str = "[f] focus";
+
+/// Where `area` shows the Focus button, if this frame's bar shows one.
+///
+/// Why: the owner asked for a Focus key or button (#10476 comment 2); the hint
+/// text already names the key, so that label is the button.
+/// What: the label's cells within `area` while the bar shows the session or
+/// details hint. A confirm prompt or a notice replaces the hint, and with it
+/// the button.
+/// Test: `focus_button_tracks_the_visible_label`.
+pub fn focus_button(state: &ProjectCtlState, area: Rect) -> Option<Rect> {
+    if state.pending_confirm.is_some() || state.notice.is_some() {
+        return None;
+    }
+    let hint = focus_hint(state);
+    if hint != SESSIONS_HINT && hint != DETAILS_KEYS {
+        return None;
+    }
+    let start = hint.find(FOCUS_LABEL)?;
+    let column = u16::try_from(hint[..start].chars().count()).ok()?;
+    let label = Rect {
+        x: area.x.saturating_add(column),
+        y: area.y,
+        width: FOCUS_LABEL.len() as u16,
+        height: 1,
+    }
+    .intersection(area);
+    (!label.is_empty()).then_some(label)
+}
+
 /// Draw the action bar into `area`.
 ///
 /// Why: the single entry point [`super::super::layout::render`] calls for the
@@ -204,6 +235,34 @@ mod tests {
         let mut details = state_at(Some(session_node()));
         assert!(details.open_details());
         assert_eq!(focus_hint(&details), DETAILS_KEYS);
+    }
+
+    #[test]
+    fn focus_button_tracks_the_visible_label() {
+        let area = Rect::new(2, 9, 100, 1);
+        let mut state = state_at(Some(session_node()));
+        let button = focus_button(&state, area).expect("a session shows the button");
+        let start = SESSIONS_HINT.find(FOCUS_LABEL).expect("the hint names it") as u16;
+        assert_eq!(button, Rect::new(2 + start, 9, FOCUS_LABEL.len() as u16, 1));
+        assert_eq!(
+            &bar_text(&state)[start as usize..start as usize + FOCUS_LABEL.len()],
+            FOCUS_LABEL,
+            "the rectangle must sit on the drawn label"
+        );
+
+        assert_eq!(focus_button(&state_at(None), area), None, "owner");
+        let project = state_at(Some(project_node()));
+        assert_eq!(focus_button(&project, area), None, "project");
+
+        state.set_notice("something happened");
+        assert_eq!(focus_button(&state, area), None, "a notice hides the label");
+        state.clear_notice();
+        state.request_confirm(ConfirmKind::Kill, "s1", "name");
+        assert_eq!(focus_button(&state, area), None, "a prompt hides the label");
+
+        // Too narrow to show the label at all.
+        let narrow = state_at(Some(session_node()));
+        assert_eq!(focus_button(&narrow, Rect::new(0, 0, 5, 1)), None);
     }
 
     #[test]

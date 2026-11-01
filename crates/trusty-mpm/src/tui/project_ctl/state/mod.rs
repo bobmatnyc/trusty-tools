@@ -37,7 +37,7 @@ pub use modals::{
 pub mod tree;
 pub mod tree_nav;
 pub use tree::{NodeId, TreeRow, TreeRowKind};
-pub use tree_nav::TreeView;
+pub use tree_nav::{HitMap, TreeView};
 
 /// Which of the two navigable panes currently has keyboard focus.
 ///

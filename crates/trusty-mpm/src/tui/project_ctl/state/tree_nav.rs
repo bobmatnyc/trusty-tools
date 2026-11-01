@@ -14,6 +14,8 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
+use ratatui::layout::Rect;
+
 use super::tree::{NodeId, TreeRow, build_tree, owner_of_repo_url};
 use super::{ProjectCtlState, SessionRow};
 use crate::session_manager::ssh_host_alias::SshHostAliases;
@@ -35,6 +37,28 @@ pub struct TreeView {
     pub nav: ListNav,
     /// The session id whose read-only details overlay is open.
     pub details: Option<String>,
+    /// #10476: where the last frame drew what a click can hit.
+    pub hit: HitMap,
+}
+
+/// Where the last frame drew the mouse targets (#10476).
+///
+/// Why: a click arrives as a screen cell, and only the renderer knows the
+/// layout. Recording it per frame means the hit test never recomputes it.
+/// What: [`crate::tui::project_ctl::layout::render`] clears this and each pane
+/// fills its part, so a pane not drawn this frame has no target.
+/// Test: `click_hits_the_drawn_row_when_scrolled`,
+/// `click_focus_button_returns_focus`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HitMap {
+    /// The tree list's rows: its area without the borders.
+    pub tree_rows: Rect,
+    /// The action bar's `[f] focus` label, when the bar shows it.
+    pub bar_focus: Option<Rect>,
+    /// The details overlay's whole area, when it is drawn.
+    pub details: Option<Rect>,
+    /// The details overlay's `[f] focus window` label, when it is drawn.
+    pub details_focus: Option<Rect>,
 }
 
 /// The `~/.ssh/config` aliases the owner parser resolves, read once.
@@ -128,6 +152,20 @@ impl ProjectCtlState {
             .unwrap_or(0);
         self.tree.nav.sync_len(self.tree.rows.len());
         self.tree.nav.select(index);
+    }
+
+    /// Select the visible row at `index`; `false` when there is no such row.
+    ///
+    /// Test: `click_blank_space_ignored`, `click_session_opens_details`.
+    pub(crate) fn select_row(&mut self, index: usize) -> bool {
+        // #10476: a click names a row by position; the selection stays a NodeId.
+        match self.tree.rows.get(index).map(|row| row.id.clone()) {
+            Some(id) => {
+                self.set_selected(id);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Select `id`, opening its owner and project first so the row is visible.

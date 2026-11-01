@@ -5,7 +5,7 @@
 //! drawing and key input for every tick; with a slow or unreachable daemon a
 //! keypress waited for the round trip.
 //! What: [`drive`] draws, reads at most one event for [`KEY_POLL`], dispatches
-//! a key, then collects a finished poll task and applies it, then starts the
+//! a key or mouse event, then collects a finished poll task and applies it, then starts the
 //! next poll as a spawned task when the interval has passed or a mutation asked
 //! for a repoll. At most one poll is in flight. A [`HealthCadence`] decides
 //! which polls probe `/health`. The draw, the event source and the poll are
@@ -17,11 +17,11 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, MouseEventKind};
 use tokio::task::JoinHandle;
 
 use super::actions;
-use super::events::handle_key;
+use super::events::{handle_key, handle_mouse};
 use super::poll::tick::{HealthCadence, PollOutcome, PollRequest, apply_tick, request_for};
 use super::state::ProjectCtlState;
 use super::trace::TuiTrace;
@@ -42,12 +42,30 @@ pub(crate) trait EventSource {
 /// The real terminal's events, through crossterm.
 pub(crate) struct TerminalEvents;
 
+/// Is this event pointer motion, which nothing in the projects view acts on?
+///
+/// Why: crossterm's capture mode reports every motion, and the loop draws once
+/// per event, so a moving mouse would otherwise burn a redraw per cell (#10476).
+/// Test: `pointer_motion_is_dropped_before_the_loop`.
+fn is_pointer_motion(event: &Event) -> bool {
+    matches!(event, Event::Mouse(m) if matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)))
+}
+
 impl EventSource for TerminalEvents {
     fn next_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>> {
-        if event::poll(timeout)? {
-            Ok(Some(event::read()?))
-        } else {
-            Ok(None)
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !event::poll(left)? {
+                return Ok(None);
+            }
+            let event = event::read()?;
+            if !is_pointer_motion(&event) {
+                return Ok(Some(event));
+            }
+            if left.is_zero() {
+                return Ok(None);
+            }
         }
     }
 }
@@ -105,6 +123,13 @@ where
                     break Ok(());
                 }
             }
+            // #10476: a click can request the same actions a key can.
+            Ok(Some(Event::Mouse(mouse))) => {
+                key_at = Some(Instant::now());
+                if let Some(action) = handle_mouse(&mut state, mouse) {
+                    actions::dispatch(&mut state, client, action).await;
+                }
+            }
             Ok(_) => {}
         }
 
@@ -137,4 +162,32 @@ where
         handle.abort();
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
+
+    #[test]
+    fn pointer_motion_is_dropped_before_the_loop() {
+        let mouse = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert!(is_pointer_motion(&mouse(MouseEventKind::Moved)));
+        assert!(is_pointer_motion(&mouse(MouseEventKind::Drag(
+            MouseButton::Left
+        ))));
+        assert!(!is_pointer_motion(&mouse(MouseEventKind::Down(
+            MouseButton::Left
+        ))));
+        assert!(!is_pointer_motion(&mouse(MouseEventKind::ScrollDown)));
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!is_pointer_motion(&Event::Key(key)));
+    }
 }

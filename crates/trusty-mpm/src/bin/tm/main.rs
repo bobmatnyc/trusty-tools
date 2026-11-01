@@ -516,7 +516,8 @@ async fn main() -> anyhow::Result<()> {
             url: tui_url,
             interval_ms,
             single_pane,
-        }) => commands::projects::run_tui(tui_url, interval_ms, single_pane).await,
+            no_mouse,
+        }) => commands::projects::run_tui(tui_url, interval_ms, single_pane, no_mouse).await,
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install {
