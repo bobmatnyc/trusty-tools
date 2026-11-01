@@ -76,7 +76,7 @@ impl FastEmbedder {
     /// hit the on-disk cache without touching the network.
     /// Test: Constructing is implicitly tested by every test in this
     /// module — failure propagates via `anyhow::Error`. The retry loop around
-    /// it is covered by `retry_recovers_after_transient_failures`.
+    /// it is covered by the tests in trusty-common's init retry module.
     pub fn new() -> Result<Self> {
         // #812: one bounded retry around the fetch, so an HTTP 429 or a
         // contended hf-hub blob lock recovers instead of failing the caller.
