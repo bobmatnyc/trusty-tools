@@ -67,6 +67,32 @@ fn check_hooks_hygiene_warns_on_tm_contamination() {
     assert_eq!(foreign.status, CheckStatus::Ok);
 }
 
+/// #10565: a file a managed launch provisioned — the PM guard (here exec form,
+/// as the Architect writes it) beside the lifecycle triad — is not reported as
+/// contamination, so `tm doctor` never steers an operator at a strip.
+#[test]
+fn check_hooks_hygiene_is_ok_for_a_provisioned_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("architect");
+    let mut val = tm_hooks_value();
+    val["hooks"]["PreToolUse"].as_array_mut().unwrap().insert(
+        0,
+        serde_json::json!({ "matcher": "", "hooks": [{
+            "type": "command", "command": "/usr/local/bin/tm",
+            "args": ["hook", "--pm-guard"], "onFailure": "block"
+        }] }),
+    );
+    write_settings(&project, &val);
+
+    let (contamination, ..) = check_hooks_hygiene(Some(&project), &[]);
+    assert_eq!(
+        contamination.status,
+        CheckStatus::Ok,
+        "{}",
+        contamination.message
+    );
+}
+
 #[test]
 fn check_hooks_hygiene_warns_on_foreign_conflict() {
     let dir = tempfile::tempdir().unwrap();
