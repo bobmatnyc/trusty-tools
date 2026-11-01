@@ -1,5 +1,12 @@
 //! Key dispatch for the `tm projects` TUI (#2118).
 //!
+//! **Tree (#10476)**: the Owner -> Project -> Sessions tree replaced the
+//! Projects and Sessions panes (Architect Q9). Every key those panes bound
+//! keeps its meaning and now acts on the selected tree node; the tree's own
+//! keys (arrows, Enter, `f`, `g`) and its read-only details overlay live in
+//! [`tree`]. The pane-scoped wording below predates the tree: read "Projects
+//! pane" as a project node and "Sessions pane" as a session node.
+//!
 //! Why: separating "a key arrives → mutate state, maybe request an async
 //! action" from the terminal pump keeps the dispatch pure and unit-testable,
 //! mirroring `tui::coordinator::events::handle_key`.
@@ -81,6 +88,7 @@ use crate::client::http_client::projects::PatchProjectArgs;
 use super::state::{ConfirmKind, Pane, ProjectCtlState, SessionRow};
 
 mod modal;
+mod tree;
 use modal::{handle_config_form_key, handle_confirm_key, handle_deliverable_view_key};
 
 /// An action a key press requested that needs an async daemon round trip.
@@ -111,6 +119,9 @@ pub enum PendingAction {
     /// args for the named project; see [`super::actions::dispatch`] for the
     /// success/error handling (close-on-success, inline-error-on-failure).
     SubmitConfig(String, PatchProjectArgs),
+    /// #10476: `f` on a session — move to its existing tmux window or iTerm2
+    /// tab (by tmux session name); never opens a new one.
+    Focus(String),
 }
 
 /// Manual `PartialEq` (not derived): [`PatchProjectArgs`] — a contract type
@@ -128,6 +139,7 @@ impl PartialEq for PendingAction {
             (Self::Resume(a), Self::Resume(b)) => a == b,
             (Self::Decommission(a), Self::Decommission(b)) => a == b,
             (Self::Attach(a), Self::Attach(b)) => a == b,
+            (Self::Focus(a), Self::Focus(b)) => a == b,
             (Self::SubmitConfig(name_a, args_a), Self::SubmitConfig(name_b, args_b)) => {
                 name_a == name_b
                     && serde_json::to_value(args_a).ok() == serde_json::to_value(args_b).ok()
@@ -162,20 +174,20 @@ pub fn is_quit(key: &KeyEvent) -> bool {
 /// [`ProjectCtlState::config_form`] is `Some`, through
 /// [`handle_config_form_key`] (#2120 — checked THIRD, see the module doc for
 /// why this ordering makes the three modals mutually exclusive by
-/// construction). Otherwise: Ctrl-C / `q` set `should_exit`. Tab/Shift+Tab
-/// cycle pane focus. ↑/↓ move the selection in the focused pane
-/// (Projects-pane movement also resets the Sessions-pane selection via
-/// [`ProjectCtlState::on_project_selection_changed`]); the Activity pane has
-/// no navigable rows, so movement there is a no-op. Enter on the Projects
-/// pane drills into Sessions. `l`/`r`/`a` in the Sessions pane return the
-/// matching [`PendingAction`] immediately when a target is selected, else set
-/// an explanatory notice and return `None`. `c` in the Projects pane calls
-/// [`ProjectCtlState::open_config_form`] directly (a pure state mutation, NOT
-/// a [`PendingAction`] — see the module doc) when a project is selected, else
-/// sets the same explanatory notice. `k`/`d` (see [`request_kill`] /
-/// [`request_decommission`]) open the confirm gate instead of returning an
-/// action directly, except a `k` on a non-Active session, which is not
-/// destructive-pending and fires immediately. Esc clears any shown notice.
+/// construction); else, #10476, when the session details overlay is open,
+/// through `tree::handle_details_key`. Otherwise: Ctrl-C / `q` set
+/// `should_exit`. Tab/Shift+Tab cycle pane focus. Esc clears any shown
+/// notice. With the tree focused, every other key goes to
+/// `tree::handle_tree_key` (arrows, Enter, `f`, `g` and the lettered verbs —
+/// see its module doc). `l`/`r`/`a` return the matching [`PendingAction`]
+/// immediately when a target is selected, else set an explanatory notice and
+/// return `None`. `c` calls [`ProjectCtlState::open_config_form`] directly (a
+/// pure state mutation, NOT a [`PendingAction`] — see the module doc) when a
+/// project is selected, else sets the same explanatory notice. `k`/`d` (see
+/// [`request_kill`] / [`request_decommission`]) open the confirm gate instead
+/// of returning an action directly, except a `k` on a non-Active session,
+/// which is not destructive-pending and fires immediately. The Activity pane
+/// binds nothing.
 /// Test: `super::tests`.
 pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingAction> {
     if state.pending_confirm.is_some() {
@@ -188,6 +200,11 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
 
     if state.config_form.is_some() {
         return handle_config_form_key(state, key);
+    }
+
+    // #10476: the read-only session details overlay is the fourth modal.
+    if state.tree.details.is_some() {
+        return tree::handle_details_key(state, key);
     }
 
     if is_quit(&key) {
@@ -204,57 +221,11 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
             state.cycle_focus_prev();
             None
         }
-        KeyCode::Up => {
-            move_selection(state, Direction::Up);
-            None
-        }
-        KeyCode::Down => {
-            move_selection(state, Direction::Down);
-            None
-        }
-        KeyCode::Enter if state.focus == Pane::Projects => {
-            state.drill_into_sessions();
-            None
-        }
         KeyCode::Esc => {
             state.clear_notice();
             None
         }
-        KeyCode::Char('l') if state.focus == Pane::Sessions => {
-            match state.selected_project_name() {
-                Some(name) => Some(PendingAction::Launch(name.to_string())),
-                None => {
-                    state.set_notice("no project selected");
-                    None
-                }
-            }
-        }
-        KeyCode::Char('k') if state.focus == Pane::Sessions => request_kill(state),
-        KeyCode::Char('r') if state.focus == Pane::Sessions => request_resume(state),
-        KeyCode::Char('d') if state.focus == Pane::Sessions => request_decommission(state),
-        KeyCode::Char('a') if state.focus == Pane::Sessions => {
-            selected_session_action(state, PendingAction::Attach)
-        }
-        KeyCode::Char('c') if state.focus == Pane::Projects => {
-            match state.selected_project_name() {
-                Some(name) => {
-                    let name = name.to_string();
-                    state.open_config_form(name);
-                }
-                None => state.set_notice("no project selected"),
-            }
-            None
-        }
-        KeyCode::Char('v') if state.focus == Pane::Projects => {
-            match state.selected_project_name() {
-                Some(name) => {
-                    let name = name.to_string();
-                    state.open_deliverable_view(name);
-                }
-                None => state.set_notice("no project selected"),
-            }
-            None
-        }
+        _ if state.focus == Pane::Tree => tree::handle_tree_key(state, key),
         _ => None,
     }
 }
@@ -344,36 +315,6 @@ fn request_decommission(state: &mut ProjectCtlState) -> Option<PendingAction> {
     let label = confirm_label(&session);
     state.request_confirm(ConfirmKind::Decommission, session.id, label);
     None
-}
-
-/// Which way ↑/↓ moves the selection.
-enum Direction {
-    Up,
-    Down,
-}
-
-/// Move the selection in the currently focused pane.
-///
-/// Why: factored out of [`handle_key`] so the Projects-pane branch's
-/// session-reset side effect ([`ProjectCtlState::on_project_selection_changed`])
-/// lives in one place.
-/// What: Projects — moves `projects_nav`, then resets the Sessions selection;
-/// Sessions — moves `sessions_nav`; Activity — no-op (nothing to navigate).
-fn move_selection(state: &mut ProjectCtlState, dir: Direction) {
-    match state.focus {
-        Pane::Projects => {
-            match dir {
-                Direction::Up => state.projects_nav.up(),
-                Direction::Down => state.projects_nav.down(),
-            }
-            state.on_project_selection_changed();
-        }
-        Pane::Sessions => match dir {
-            Direction::Up => state.sessions_nav.up(),
-            Direction::Down => state.sessions_nav.down(),
-        },
-        Pane::Activity => {}
-    }
 }
 
 /// Build a session-targeted [`PendingAction`] from the current selection, or

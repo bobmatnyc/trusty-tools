@@ -228,6 +228,8 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
 async fn main() -> anyhow::Result<()> {
     // #7889: the pm-guard hook's decision deadline is measured from here.
     let started = std::time::Instant::now();
+    // #10476: lend the tui the guarded, quiet tmux switch for its Focus key.
+    commands::tmux_attach::install_tui_focus_hook();
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion (issue #216) before exiting on a clap error.
     let argv: Vec<String> = std::env::args().collect();
@@ -514,12 +516,7 @@ async fn main() -> anyhow::Result<()> {
             url: tui_url,
             interval_ms,
             single_pane,
-        }) => {
-            // #9556: an explicit `--url` is pinned. #10491: `tm tui` opens on the
-            // console home screen; Enter on the MPM tile opens the projects view.
-            let client = trusty_mpm::tui::client_for(tui_url.as_deref())?;
-            trusty_mpm::tui::home::run_tui_entry(client, interval_ms, single_pane).await
-        }
+        }) => commands::projects::run_tui(tui_url, interval_ms, single_pane).await,
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install {

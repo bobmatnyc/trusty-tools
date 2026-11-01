@@ -81,6 +81,20 @@ pub(crate) async fn launch_bare_tui() -> anyhow::Result<()> {
     trusty_mpm::tui::run_initial_view_with(daemon, PROJECT_CTL_INTERVAL_MS, None, false).await
 }
 
+/// `tm tui`: the console home screen, whose MPM tile opens the projects view.
+///
+/// Why: #9556 pins an explicit `--url`; #10491 opens `tm tui` on the home
+/// screen. Moved out of `main.rs` (#10476), which sits at the SLOC cap.
+/// Test: terminal glue, exercised by launching the TUI.
+pub(crate) async fn run_tui(
+    url: Option<String>,
+    interval_ms: u64,
+    single_pane: bool,
+) -> anyhow::Result<()> {
+    let client = trusty_mpm::tui::client_for(url.as_deref())?;
+    trusty_mpm::tui::home::run_tui_entry(client, interval_ms, single_pane).await
+}
+
 /// True when `argv` is exactly a bare `tm projects` invocation (#2118).
 ///
 /// Why: split out of [`should_launch_bare_tui`] so the argv-shape rule and the

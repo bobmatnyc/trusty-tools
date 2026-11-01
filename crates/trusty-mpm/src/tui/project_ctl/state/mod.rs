@@ -8,9 +8,10 @@
 //! `tui::coordinator::state::CoordinatorState`.
 //! What: [`ProjectCtlState`] plus its row types ([`ProjectRow`],
 //! [`SessionRow`]) and the [`Pane`] focus enum. Sessions are keyed by owning
-//! project name in [`ProjectCtlState::sessions_by_project`] so switching the
-//! Projects-pane selection never requires a new daemon round trip — the
-//! Sessions pane simply re-reads the already-polled map. [`ConfirmKind`] /
+//! project name in [`ProjectCtlState::sessions_by_project`]; #10476's
+//! [`tree`] projects both lists into the Owner -> Project -> Sessions tree,
+//! and [`tree_nav`] holds its selection, so moving through the tree never
+//! needs a daemon round trip. [`ConfirmKind`] /
 //! [`PendingConfirm`] are the shared confirmation-gate mechanism DOC-35 §5.2
 //! requires before `k` (kill, when Active) or `d` (decommission, always) may
 //! execute.
@@ -28,30 +29,29 @@ use std::collections::BTreeMap;
 
 use crate::deliverable::Deliverable;
 use crate::project::Project;
-use crate::tui::coordinator::nav::ListNav;
-
 mod modals;
 pub use modals::{
     ConfigFormField, ConfigFormFocus, ConfigFormTags, ConfigFormView, DeliverableView,
 };
+// #10476: the tree model and its navigation, kept out of this file (SLOC cap).
+pub mod tree;
+pub mod tree_nav;
+pub use tree::{NodeId, TreeRow, TreeRowKind};
+pub use tree_nav::TreeView;
 
-/// Which of the three navigable panes currently has keyboard focus.
+/// Which of the two navigable panes currently has keyboard focus.
 ///
-/// Why: Tab/Shift+Tab cycle focus Projects → Sessions → Activity (DOC-35 §5);
-/// a typed enum keeps the cycle exhaustive and the render path's highlight
-/// branch unambiguous. The Activity pane is a skeleton in this issue (#2118)
-/// — it renders the focused session's static fields only — but it is still a
-/// stop in the focus cycle per the spec's keybinding table.
-/// What: three variants in cycle order; [`Pane::next`] / [`Pane::prev`] wrap.
+/// Why: Tab/Shift+Tab cycle focus between the panes (DOC-35 §5). #10476: the
+/// Owner -> Project -> Sessions tree replaced the Projects and Sessions panes
+/// (Architect Q9), so the cycle is the tree and the Activity strip.
+/// What: two variants in cycle order; [`Pane::next`] / [`Pane::prev`] wrap.
 /// Test: `pane_cycle_wraps_forward_and_backward`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pane {
-    /// The left-column project list (25% width).
+    /// The Owner -> Project -> Sessions tree.
     #[default]
-    Projects,
-    /// The right-column session list for the selected project (75% width).
-    Sessions,
-    /// The bottom activity strip for the focused session.
+    Tree,
+    /// The bottom activity strip for the selected session.
     Activity,
 }
 
@@ -59,19 +59,14 @@ impl Pane {
     /// Advance to the next pane in the cycle, wrapping after Activity.
     pub fn next(self) -> Self {
         match self {
-            Pane::Projects => Pane::Sessions,
-            Pane::Sessions => Pane::Activity,
-            Pane::Activity => Pane::Projects,
+            Pane::Tree => Pane::Activity,
+            Pane::Activity => Pane::Tree,
         }
     }
 
-    /// Step back to the previous pane in the cycle, wrapping before Projects.
+    /// Step back to the previous pane in the cycle; with two panes, the other.
     pub fn prev(self) -> Self {
-        match self {
-            Pane::Projects => Pane::Activity,
-            Pane::Sessions => Pane::Projects,
-            Pane::Activity => Pane::Sessions,
-        }
+        self.next()
     }
 }
 
@@ -151,6 +146,13 @@ pub struct SessionRow {
     /// `crate::tui::project_ctl::poll::rows::session_to_row`.
     /// Test: `crate::tui::project_ctl::events::tests::resume_on_unresumable_session_is_blocked`.
     pub unresumable: bool,
+    /// #10476: the session that launched this one, from the daemon's
+    /// `parent_session_id`. Drives the tree's worker indentation.
+    pub parent_session_id: Option<String>,
+    /// The session's workspace (worktree) path, for the details overlay.
+    pub workspace_path: Option<String>,
+    /// When the session was last active, for the details overlay.
+    pub last_activity_at: Option<String>,
 }
 
 /// Live per-session activity fetched from `GET .../{id}/activity` (DOC-35
@@ -322,23 +324,21 @@ pub enum DeliverableLinkState {
 /// Why: a single owned struct (mirroring `CoordinatorState`) keeps the
 /// data/render split clean — the event loop and the poller mutate it, the
 /// layout reads it.
-/// What: the project list + its navigation, the per-project session map + its
-/// navigation, the focused pane, daemon reachability, a transient notice
+/// What: the project list, the per-project session map, the tree view over
+/// both (#10476), the focused pane, daemon reachability, a transient notice
 /// (toast) line, and the repoll/exit flags.
 /// Test: `super::tests` covers focus cycling, selection, and the flags.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectCtlState {
     /// Registered projects, in registry order.
     pub projects: Vec<ProjectRow>,
-    /// Projects-pane selection + scroll offset.
-    pub projects_nav: ListNav,
     /// Every project's sessions, keyed by project name — populated by one
     /// `GET /api/v1/sessions/managed/fleet` poll per tick rather than a
     /// per-project round trip.
     pub sessions_by_project: BTreeMap<String, Vec<SessionRow>>,
-    /// Sessions-pane selection + scroll offset (scoped to the currently
-    /// selected project).
-    pub sessions_nav: ListNav,
+    /// #10476: the tree pane's rows, selection, expanded set and details
+    /// overlay (see [`tree_nav`]).
+    pub tree: TreeView,
     /// Which pane currently has keyboard focus.
     pub focus: Pane,
     /// Whether the daemon answered its last health probe.
@@ -439,12 +439,15 @@ pub struct ProjectCtlState {
 impl ProjectCtlState {
     /// The currently selected project row, if any.
     ///
-    /// Why: the Sessions/Activity panes and the `l`/`c` actions all need to
-    /// know which project is selected.
-    /// What: `projects[projects_nav.selected()]`, or `None` on an empty list.
-    /// Test: `selected_project_reads_nav_index`.
+    /// Why: the Activity pane, the Deliverables fetch and the `l`/`c`/`v`
+    /// actions all need to know which project is selected.
+    /// What: #10476 — the project of the selected tree node: a project node
+    /// itself, or the project a session or anchor sits under. `None` on an
+    /// owner bar or with nothing selected.
+    /// Test: `selected_project_follows_the_tree_node`.
     pub fn selected_project(&self) -> Option<&ProjectRow> {
-        self.projects.get(self.projects_nav.selected())
+        let name = self.tree.selected.as_ref()?.project_name()?;
+        self.projects.iter().find(|p| p.name == name)
     }
 
     /// The currently selected project's name, if any.
@@ -454,8 +457,6 @@ impl ProjectCtlState {
 
     /// The session list for the currently selected project (may be empty).
     ///
-    /// Why: the Sessions pane and the `k`/`r`/`d`/`a` actions read this rather
-    /// than re-deriving it from `sessions_by_project` at every call site.
     /// What: `sessions_by_project[selected project name]`, or `&[]` when no
     /// project is selected or the project has no sessions.
     /// Test: `current_sessions_follows_selected_project`.
@@ -467,8 +468,18 @@ impl ProjectCtlState {
     }
 
     /// The currently selected session row, if any.
+    ///
+    /// #10476: only a session node yields one, so kill/resume/decommission/
+    /// attach on an owner, project or anchor act on nothing.
+    /// Test: `selected_session_is_none_on_owner_and_project_nodes`.
     pub fn selected_session(&self) -> Option<&SessionRow> {
-        self.current_sessions().get(self.sessions_nav.selected())
+        let NodeId::Session { project, id, .. } = self.tree.selected.as_ref()? else {
+            return None;
+        };
+        self.sessions_by_project
+            .get(project)?
+            .iter()
+            .find(|s| &s.id == id)
     }
 
     /// The live [`ActivityInfo`] for the currently selected session, only
@@ -510,84 +521,52 @@ impl ProjectCtlState {
         self.activity_failures.is_unavailable_for(selected_id)
     }
 
-    /// Re-sync the Sessions-pane navigation to a freshly selected project.
-    ///
-    /// Why: switching WHICH project is selected in the Projects pane means the
-    /// Sessions pane now shows an unrelated list; carrying over the old scroll
-    /// position would highlight an arbitrary, unrelated row. Resetting to the
-    /// top on an explicit project switch (but NOT on every poll — see
-    /// [`super::poll::project_ctl_poll_daemon`], which preserves the Sessions
-    /// selection across a refresh) matches the operator's expectation.
-    /// [`Self::deliverables`] is ALSO reset to `Unknown` (`None`) here — it
-    /// belonged to the PREVIOUS project, and carrying it over would let a new
-    /// project's session rows resolve against a stranger project's Deliverable
-    /// set (harmless by UUID uniqueness, but semantically wrong and worth
-    /// avoiding outright rather than relying on that coincidence).
-    /// What: replaces `sessions_nav` with a fresh default, then syncs its
-    /// length to `current_sessions().len()`; clears `deliverables` to `None`.
-    /// Test: `project_switch_resets_session_selection`,
-    /// `project_switch_resets_deliverables_to_unknown`.
-    pub fn on_project_selection_changed(&mut self) {
-        self.sessions_nav = ListNav::default();
-        self.sessions_nav.sync_len(self.current_sessions().len());
-        self.deliverables = None;
-    }
-
-    /// Cycle focus forward (Projects → Sessions → Activity → …).
+    /// Cycle focus forward (Tree → Activity → …).
     pub fn cycle_focus_next(&mut self) {
         self.focus = self.focus.next();
     }
 
-    /// Cycle focus backward (Activity → Sessions → Projects → …).
+    /// Cycle focus backward.
     pub fn cycle_focus_prev(&mut self) {
         self.focus = self.focus.prev();
     }
 
-    /// Drill into a project's Sessions pane (Enter on the Projects pane).
-    pub fn drill_into_sessions(&mut self) {
-        self.focus = Pane::Sessions;
-    }
-
-    /// Select the project and session row owning `session_id`, focusing Sessions.
+    /// Select the tree node of `session_id`, opening its owner and project.
     ///
     /// Why: #6483 routes `tm attach <target>` at this multipane dashboard
     /// instead of the single-pane chat. That command resolves a session id and
     /// expects the TUI to open ON that session; without this the operator
-    /// would land on whichever project happens to sort first and have to hunt
-    /// for the session they just named.
+    /// would land on whichever owner sorts first and have to hunt for it.
     /// What: scans `projects` in registry order for the first project whose
-    /// `sessions_by_project` entry contains `session_id`, syncs and points both
-    /// navs at it, and moves keyboard focus to [`Pane::Sessions`]. Returns
-    /// `false` (leaving every selection untouched) when the id is unknown —
-    /// the fleet may not have polled it yet, and a silent no-op is better than
-    /// a misleading selection.
+    /// `sessions_by_project` entry contains `session_id`, selects that session
+    /// node through [`Self::select_node`] (#10476) and focuses the tree.
+    /// Returns `false` (leaving the selection untouched) when the id is
+    /// unknown — the fleet may not have polled it yet.
     /// Test: `focus_session_selects_owning_project_and_row`,
     /// `focus_session_is_a_noop_for_an_unknown_id`.
     pub fn focus_session(&mut self, session_id: &str) -> bool {
-        let Some((project_idx, session_idx)) = self.locate_session(session_id) else {
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|p| {
+                self.sessions_by_project
+                    .get(&p.name)
+                    .is_some_and(|rows| rows.iter().any(|s| s.id == session_id))
+            })
+            .map(|p| p.name.clone())
+        else {
             return false;
         };
-        self.projects_nav.sync_len(self.projects.len());
-        self.projects_nav.select(project_idx);
-        self.sessions_nav.sync_len(self.current_sessions().len());
-        self.sessions_nav.select(session_idx);
-        self.focus = Pane::Sessions;
+        let Some(owner) = self.owner_of_project(&project) else {
+            return false;
+        };
+        self.select_node(NodeId::Session {
+            owner,
+            project,
+            id: session_id.to_string(),
+        });
+        self.focus = Pane::Tree;
         true
-    }
-
-    /// Locate `session_id` as a `(project index, session index)` pair.
-    ///
-    /// Why: keeps [`Self::focus_session`]'s search separate from its mutation
-    /// so the borrow of `self` ends before the navs are written.
-    /// What: the first match scanning `projects` in order; `None` when no
-    /// project's session list holds the id.
-    /// Test: covered through `focus_session_*`.
-    fn locate_session(&self, session_id: &str) -> Option<(usize, usize)> {
-        self.projects.iter().enumerate().find_map(|(pi, project)| {
-            let sessions = self.sessions_by_project.get(&project.name)?;
-            let si = sessions.iter().position(|s| s.id == session_id)?;
-            Some((pi, si))
-        })
     }
 
     /// Set the transient action-bar notice.
@@ -697,29 +676,58 @@ mod tests {
             proposed_default: None,
             deliverable_id: None,
             unresumable: false,
+            ..Default::default()
+        }
+    }
+
+    /// The tree node of project `name` (owner `acme`, per [`row`]).
+    fn project_node(name: &str) -> NodeId {
+        NodeId::Project {
+            owner: "acme".to_string(),
+            name: name.to_string(),
         }
     }
 
     #[test]
     fn pane_cycle_wraps_forward_and_backward() {
-        assert_eq!(Pane::Projects.next(), Pane::Sessions);
-        assert_eq!(Pane::Sessions.next(), Pane::Activity);
-        assert_eq!(Pane::Activity.next(), Pane::Projects);
-        assert_eq!(Pane::Projects.prev(), Pane::Activity);
-        assert_eq!(Pane::Activity.prev(), Pane::Sessions);
-        assert_eq!(Pane::Sessions.prev(), Pane::Projects);
+        assert_eq!(Pane::Tree.next(), Pane::Activity);
+        assert_eq!(Pane::Activity.next(), Pane::Tree);
+        assert_eq!(Pane::Tree.prev(), Pane::Activity);
+        assert_eq!(Pane::Activity.prev(), Pane::Tree);
     }
 
     #[test]
-    fn selected_project_reads_nav_index() {
+    fn selected_project_follows_the_tree_node() {
         let mut state = ProjectCtlState {
             projects: vec![row("a"), row("b")],
             ..Default::default()
         };
-        state.projects_nav.sync_len(state.projects.len());
+        state.rebuild_tree();
+        assert!(
+            state.selected_project().is_none(),
+            "the first row is the owner bar, which names no project"
+        );
+        state.select_node(project_node("a"));
         assert_eq!(state.selected_project().unwrap().name, "a");
-        state.projects_nav.down();
+        state.select_node(project_node("b"));
         assert_eq!(state.selected_project().unwrap().name, "b");
+    }
+
+    #[test]
+    fn selected_session_is_none_on_owner_and_project_nodes() {
+        let mut state = ProjectCtlState {
+            projects: vec![row("a")],
+            ..Default::default()
+        };
+        state
+            .sessions_by_project
+            .insert("a".to_string(), vec![session("sess-1")]);
+        state.select_node(NodeId::Owner("acme".to_string()));
+        assert!(state.selected_session().is_none());
+        state.select_node(project_node("a"));
+        assert!(state.selected_session().is_none());
+        assert!(state.focus_session("sess-1"));
+        assert_eq!(state.selected_session().unwrap().id, "sess-1");
     }
 
     #[test]
@@ -732,38 +740,26 @@ mod tests {
             .sessions_by_project
             .insert("a".to_string(), vec![session("aaaaaaaa1111")]);
         state.sessions_by_project.insert("b".to_string(), vec![]);
-        state.projects_nav.sync_len(state.projects.len());
+        state.select_node(project_node("a"));
         assert_eq!(state.current_sessions().len(), 1);
-        state.projects_nav.down();
+        state.select_node(project_node("b"));
         assert!(state.current_sessions().is_empty());
-    }
-
-    #[test]
-    fn project_switch_resets_session_selection() {
-        let mut state = ProjectCtlState {
-            projects: vec![row("a"), row("b")],
-            ..Default::default()
-        };
-        state.sessions_by_project.insert(
-            "a".to_string(),
-            vec![session("id1111111111"), session("id2222222222")],
-        );
-        state.projects_nav.sync_len(state.projects.len());
-        state.sessions_nav.sync_len(state.current_sessions().len());
-        state.sessions_nav.down();
-        assert_eq!(state.sessions_nav.selected(), 1);
-        state.on_project_selection_changed();
-        assert_eq!(state.sessions_nav.selected(), 0);
     }
 
     #[test]
     fn project_switch_resets_deliverables_to_unknown() {
         let mut state = ProjectCtlState {
-            deliverables: Some(vec![]),
+            projects: vec![row("a"), row("b")],
             ..Default::default()
         };
-        assert!(state.deliverables.is_some());
-        state.on_project_selection_changed();
+        state.select_node(project_node("a"));
+        state.deliverables = Some(vec![]);
+        state.select_node(project_node("a"));
+        assert!(
+            state.deliverables.is_some(),
+            "re-selecting the same project keeps its deliverables"
+        );
+        state.select_node(project_node("b"));
         assert!(
             state.deliverables.is_none(),
             "switching projects must reset deliverables to Unknown, not carry over the \
@@ -824,8 +820,7 @@ mod tests {
         state
             .sessions_by_project
             .insert("a".to_string(), vec![session("sess-1")]);
-        state.projects_nav.sync_len(state.projects.len());
-        state.sessions_nav.sync_len(state.current_sessions().len());
+        state.focus_session("sess-1");
         state.activity = Some(activity("sess-1"));
         assert_eq!(
             state.activity_for_selected().unwrap().summary,
@@ -842,8 +837,7 @@ mod tests {
         state
             .sessions_by_project
             .insert("a".to_string(), vec![session("sess-1")]);
-        state.projects_nav.sync_len(state.projects.len());
-        state.sessions_nav.sync_len(state.current_sessions().len());
+        state.focus_session("sess-1");
         // Simulates a fetch that landed for a session the selection has since
         // moved off of.
         state.activity = Some(activity("some-other-session"));
@@ -921,7 +915,7 @@ mod tests {
     fn focus_session_selects_owning_project_and_row() {
         // #6483: `tm attach <target>` opens THIS dashboard, so the resolved
         // session id must select its owning project AND its row, with keyboard
-        // focus on the Sessions pane.
+        // focus on the tree (#10476: was the Sessions pane).
         let mut state = ProjectCtlState {
             projects: vec![row("a"), row("b")],
             ..Default::default()
@@ -937,7 +931,7 @@ mod tests {
         assert!(state.focus_session("bbbbbbbb2222"));
         assert_eq!(state.selected_project().unwrap().name, "b");
         assert_eq!(state.selected_session().unwrap().id, "bbbbbbbb2222");
-        assert_eq!(state.focus, Pane::Sessions);
+        assert_eq!(state.focus, Pane::Tree);
     }
 
     #[test]
@@ -950,9 +944,11 @@ mod tests {
         state
             .sessions_by_project
             .insert("a".to_string(), vec![session("aaaaaaaa1111")]);
+        state.select_node(project_node("a"));
+        state.focus = Pane::Activity;
 
         assert!(!state.focus_session("cccccccc9999"));
         assert_eq!(state.selected_project().unwrap().name, "a");
-        assert_eq!(state.focus, Pane::Projects);
+        assert_eq!(state.focus, Pane::Activity);
     }
 }

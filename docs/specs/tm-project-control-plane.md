@@ -394,6 +394,10 @@ launches this TUI when a TTY is attached (mirroring `tm session tui`'s existing 
 
 ### 5.1 Pane layout (ASCII mockup)
 
+**AMENDED (#10476, owner 2026-10-29; Architect Q9):** one Owner → Project → Sessions tree pane
+replaces the Projects and Sessions panes below. The Activity pane and the actions line stay. The
+mockup is kept as the pre-#10476 record; region 1 below describes the tree.
+
 ```
 ┌─ tm projects ─────────────────────────── v0.x.y · daemon ● http://127.0.0.1:7880 ┐
 │ PROJECTS (4)              │ SESSIONS — trusty-tools (3)                          │
@@ -415,18 +419,25 @@ launches this TUI when a TTY is attached (mirroring `tm session tui`'s existing 
 Four regions (ratatui vertical+horizontal `Layout`, mirroring the `Constraint` conventions
 already used in `tui/coordinator/layout.rs` and `tui/health/render.rs`):
 
-1. **Projects pane** (left column, `Constraint::Percentage(25)`) — one row per registered
-   project (registry B), a glyph for aggregate state, and a live session count. `▸` marks focus.
-2. **Sessions pane** (right column, `Constraint::Percentage(75)`) — the selected project's
-   sessions, numbered (DOC-16 §3.2 convention), sourced from `GET
-   .../fleet?project=<name>` (§4). **RESOLVED (#2476):** decommissioned (tombstoned) sessions
-   are filtered OUT of this pane and its `(N)` header count on every poll tick — decommissioning
-   flips a session record's `state` to `"decommissioned"` in the daemon's store but does not
-   delete it, so an unfiltered projection would let a dead row (and an inflated count) persist
-   forever. The pane counts *live* sessions; a session later replaced by a new one reusing its
-   `name` never ghosts or duplicates, since every tick rebuilds the row list wholesale from the
-   daemon's current fleet snapshot rather than diffing against the previous tick's rows. See
-   `tui/project_ctl/poll/rows.rs::live_session_rows`.
+1. **Tree pane** (top, flexing, #10476) — one bar per repository owner, derived from each
+   project's `repo_url` (`owner` of the github.com slug, `host/owner` on another host, `(local)`
+   for a path or an unparsable URL; no stored owner field). An owner bar shows its project count
+   and session counters; a project row shows its session counters (`<total> sessions, <live>
+   live`, live = `active` or `provisioning`). Owners and projects expand and collapse; all start
+   collapsed. A project's sessions list under it, each worker indented under the session that
+   launched it — by the daemon's `parent_session_id`, else by a name heuristic (a `worker` or
+   numeric-suffix name under a `manager`/`lead`/`orchestrator` name sharing two leading
+   segments). A parent the project does not list is a dimmed anchor line. Rows come from the same
+   fleet poll and keep the **RESOLVED (#2476)** rule below: decommissioned (tombstoned) sessions
+   are filtered out before any row or counter is built. The selection and the expanded set are
+   held by node identity, so a refresh keeps them; a removed selected session clamps to its
+   project. See `tui/project_ctl/state/tree.rs` and `state/tree_nav.rs`.
+2. *(Pre-#10476, replaced by item 1.)* **Sessions pane** — **RESOLVED (#2476):** decommissioned
+   (tombstoned) sessions are filtered OUT on every poll tick — decommissioning flips a session
+   record's `state` to `"decommissioned"` in the daemon's store but does not delete it, so an
+   unfiltered projection would let a dead row (and an inflated count) persist forever. Every tick
+   rebuilds the row list wholesale from the daemon's current fleet snapshot rather than diffing
+   against the previous tick's rows. See `tui/project_ctl/poll/rows.rs::live_session_rows`.
 3. **Activity pane** (bottom, `Constraint::Length(4)`) — the focused session's status line,
    sourced from `GET .../{id}/activity` (§4) — the same fields DOC-16 §6.2 already specifies
    (`state`, `summary`/`last_summary` equivalent, `pending_decision`, `proposed_default`).
@@ -437,15 +448,20 @@ already used in `tui/coordinator/layout.rs` and `tui/health/render.rs`):
 
 | Key | Context | Action |
 |---|---|---|
-| `↑`/`↓`, `j`/`k` (as motion) | any pane | move selection within the focused pane |
-| `Tab` / `Shift+Tab` | — | cycle pane focus: Projects → Sessions → Activity |
-| `Enter` | Projects pane | drill into that project's Sessions pane (auto-focus) |
-| `l` | Sessions pane | `launch` — opens a small deterministic form (task, ref, name-hint) → `POST /api/v1/sessions/managed` |
-| `k` | Sessions pane, row selected | `kill` (runtime-stop) — confirmation gate if session is Active (mirrors DOC-16 §5.6 active-session confirmation) |
-| `r` | Sessions pane, row selected | `resume` |
-| `d` | Sessions pane, row selected | `decommission` — confirmation gate (terminal) |
-| `a` | Sessions pane, row selected | fetch + display `attach-cmd` (copy-to-clipboard where supported, else print) |
-| `c` | Projects pane, row selected | open the config view (§6) for that project |
+| `↑`/`↓` | tree | move the selection one visible row |
+| `←` / `→` | tree | collapse an open owner/project, else go to the parent / expand, else step into the first child |
+| `Tab` / `Shift+Tab` | — | cycle pane focus: Tree → Activity (#10476) |
+| `Enter` | owner or project node | expand / collapse (#10476) |
+| `Enter` | session node | open the read-only session details overlay (#10476) |
+| `f` | session node, or details | focus the session's existing tmux window (`switch-client`) or iTerm2 tab; never opens one; outside tmux and iTerm2, a one-line notice (#10476) |
+| `g` | tree | toggle worker indentation (default on) (#10476) |
+| `l` | project or session node | `launch` for that project |
+| `k` | session node | `kill` (runtime-stop) — confirmation gate if session is Active (mirrors DOC-16 §5.6 active-session confirmation) |
+| `r` | session node | `resume` |
+| `d` | session node | `decommission` — confirmation gate (terminal) |
+| `a` | session node | fetch + display `attach-cmd` (copy-to-clipboard where supported, else print) |
+| `c` / `v` | project node | open the config view (§6) / the Deliverable view (§10.8) for that project |
+| — | owner or project node | `k`/`r`/`d`/`a` act on nothing: a notice only |
 | `q` / `Ctrl-C` | not in a modal | quit (restore terminal) |
 | `Esc` | any modal/form | cancel, return to prior pane |
 
@@ -923,6 +939,10 @@ as §8: file after resolving design questions).
 
 ## 15. Change log
 
+- **2026-10-30 (v3.3, #10476)** — AMENDED §5.1 and §5.2: an Owner → Project → Sessions tree pane
+  replaces the Projects and Sessions panes (Architect Q9); Enter on a session opens a read-only
+  details overlay; `f` focuses the session's existing tmux window or iTerm2 tab and never opens
+  one; `g` toggles worker indentation. The Activity pane and the actions line are unchanged.
 - **2026-07-12 (v3.2, #2477)** — CLARIFIED pane wording for precision. The spec previously referred
   to a "4-pane" TUI layout, but the shipped implementation (#2118) is a 3-pane + actions-bar design:
   three boxed panes (Projects, Sessions, Activity) plus a 1-row contextual actions hint line. Updated

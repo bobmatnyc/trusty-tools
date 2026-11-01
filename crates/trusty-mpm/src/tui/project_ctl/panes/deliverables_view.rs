@@ -44,7 +44,7 @@ use crate::tui::project_ctl::state::DeliverableView;
 /// three-line pure function, not worth a cross-module dependency to share.
 /// What: same behavior as the dashboard original: centers a `width x height`
 /// box within `area`, clamped so it never exceeds `area`'s own bounds.
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let w = width.min(area.width);
     let h = height.min(area.height);
     Rect {

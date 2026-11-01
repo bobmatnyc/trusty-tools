@@ -100,6 +100,14 @@ async fn normal_tick_makes_no_activity_call_10476() {
     let hits = Arc::new(Hits::default());
     let mut client = DaemonClient::new(stub_daemon(hits.clone()).await);
     let mut state = ProjectCtlState::default();
+    // The tree opens on the owner bar, which asks for no activity; the first
+    // poll fills the tree, then the session is selected.
+    project_ctl_poll_daemon(&mut state, &mut client).await;
+    assert_eq!(hits.activity.load(Ordering::SeqCst), 0);
+    assert!(
+        state.focus_session("s-10476"),
+        "the fleet lists the session"
+    );
 
     for _ in 0..3 {
         project_ctl_poll_daemon(&mut state, &mut client).await;

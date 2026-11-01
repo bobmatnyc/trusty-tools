@@ -265,8 +265,8 @@ pub(crate) fn apply_core(state: &mut ProjectCtlState, core: CoreFetch) {
             state.activity_attempt = None;
         }
     }
-    state.projects_nav.sync_len(state.projects.len());
-    state.sessions_nav.sync_len(state.current_sessions().len());
+    // #10476: the tree keeps its selection and expanded set across the swap.
+    state.rebuild_tree();
 }
 
 /// One `/activity` call, classified for [`apply_activity_outcome`].

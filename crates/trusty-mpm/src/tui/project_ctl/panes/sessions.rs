@@ -1,4 +1,7 @@
-//! Sessions pane (right column, 75% width) — DOC-35 §5 pane 2.
+//! Session row builders — formerly the Sessions pane, DOC-35 §5 pane 2.
+//!
+//! #10476: the tree pane (`panes::tree`) replaced the Sessions pane and draws
+//! its session rows from [`session_spans`]; this module keeps the builders.
 //!
 //! Why: the selected project's sessions, numbered per DOC-16 §3.2, each
 //! showing a lifecycle-state glyph, branch, and a one-line detail. The glyph
@@ -7,30 +10,27 @@
 //! that live "awaiting approval" / "idle Nm" detail into this pane later).
 //! A second, independent glyph (DOC-35 §10.6, #2383) marks a row whose
 //! `deliverable_id` is bound to a Deliverable — resolved (`◆`, cyan) when it
-//! matches one of [`ProjectCtlState::deliverables`], dangling (`◈`, dim red)
+//! matches one of [`ProjectCtlState::deliverables`](crate::tui::project_ctl::state::ProjectCtlState::deliverables), dangling (`◈`, dim red)
 //! when it CONFIRMS the id does not resolve, and no glyph at all when the
 //! link state is [`DeliverableLinkState::Unknown`] (no successfully fetched
 //! Deliverable set exists yet — a transient fetch failure must never be
 //! rendered as a confirmed-dangling reference, see
-//! [`ProjectCtlState::deliverable_link_state`]'s own doc for the full
+//! [`ProjectCtlState::deliverable_link_state`](crate::tui::project_ctl::state::ProjectCtlState::deliverable_link_state)'s own doc for the full
 //! rationale). The spec (§12 as filed) enumerates the WORK ITEM but does not
 //! pin an exact glyph/color — this is a disclosed design choice, not a
 //! literal spec transcription; see the PR body for the full disclosure.
-//! What: [`state_glyph`] / [`deliverable_glyph`] / [`session_line`] are pure
-//! builders (unit tested without a terminal); [`render`] composes them into a
-//! ratatui stateful `List`, passing the current tick's [`DeliverableLinkState`]
-//! per row so the glyph resolves without a second daemon round trip per row.
+//! What: [`state_glyph`] / [`deliverable_glyph`] / [`session_spans`] /
+//! [`session_line`] are pure builders (unit tested without a terminal); the
+//! caller passes the current tick's [`DeliverableLinkState`] per row so the
+//! glyph resolves without a second daemon round trip per row.
 //! Test: `tests` covers all three glyph states and the line content.
 
 use ratatui::{
-    Frame,
-    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, HighlightSpacing, List, ListItem},
 };
 
-use crate::tui::project_ctl::state::{DeliverableLinkState, Pane, ProjectCtlState, SessionRow};
+use crate::tui::project_ctl::state::{DeliverableLinkState, SessionRow};
 
 /// Glyph for a session whose runtime is currently running.
 pub const ACTIVE_GLYPH: char = '●';
@@ -54,7 +54,7 @@ pub const DECOMMISSIONED_GLYPH: char = '⊘';
 /// live poll path as of #2476:
 /// [`super::super::poll::live_session_rows`] drops every decommissioned
 /// session before a [`SessionRow`] is ever built, so this function never
-/// actually receives that word from [`render`] — a decommissioned session's
+/// actually receives that word from [`render`](super::tree::render) — a decommissioned session's
 /// row simply stops existing rather than rendering tombstoned.
 /// What: maps each of the five known state words to its glyph; any other
 /// (forward-compat) value falls back to [`STOPPED_GLYPH`].
@@ -121,8 +121,8 @@ pub fn deliverable_glyph(
 /// its list position; the label column names the session, as every other view
 /// of the same fleet does, and the detail column prefers the task description
 /// and falls back to the raw state word when no task is recorded.
-/// `deliverable_link_state` is resolved by the caller ([`render`]) via
-/// [`ProjectCtlState::deliverable_link_state`] so this function stays a pure,
+/// `deliverable_link_state` is resolved by the caller ([`render`](super::tree::render)) via
+/// [`ProjectCtlState::deliverable_link_state`](crate::tui::project_ctl::state::ProjectCtlState::deliverable_link_state) so this function stays a pure,
 /// terminal-free builder.
 /// What: returns e.g. `1. ● tm-trusty-tools-27  main  ship the thing ◆` when
 /// bound and resolved, `… ◈` (dim) when bound and confirmed dangling, or no
@@ -140,6 +140,23 @@ pub fn session_line(
     row: &SessionRow,
     deliverable_link_state: DeliverableLinkState,
 ) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{number:>2}. "),
+        Style::default().fg(Color::DarkGray),
+    )];
+    spans.extend(session_spans(row, deliverable_link_state));
+    Line::from(spans)
+}
+
+/// The spans of one session row after its number: `<glyph> <name>  <branch>
+/// <detail>` plus the optional deliverable glyph.
+///
+/// #10476: the tree pane indents these instead of numbering them.
+/// Test: through `session_line`'s tests.
+pub fn session_spans(
+    row: &SessionRow,
+    deliverable_link_state: DeliverableLinkState,
+) -> Vec<Span<'static>> {
     let glyph = state_glyph(&row.state);
     let branch = row.branch.clone().unwrap_or_else(|| "-".to_string());
     // #8163: rows named themselves by an 8-char uuid prefix; the name is what
@@ -156,10 +173,6 @@ pub fn session_line(
         _ => row.state.clone(),
     };
     let mut spans = vec![
-        Span::styled(
-            format!("{number:>2}. "),
-            Style::default().fg(Color::DarkGray),
-        ),
         Span::styled(format!("{glyph} "), glyph_style(&row.state)),
         Span::styled(
             format!("{label}  "),
@@ -173,7 +186,7 @@ pub fn session_line(
     {
         spans.push(Span::styled(format!("  {glyph}"), style));
     }
-    Line::from(spans)
+    spans
 }
 
 /// Style a state glyph by its lifecycle state.
@@ -184,54 +197,6 @@ fn glyph_style(state: &str) -> Style {
         "errored" => Style::default().fg(Color::Red),
         "decommissioned" => Style::default().fg(Color::DarkGray),
         _ => Style::default().fg(Color::Gray),
-    }
-}
-
-/// Draw the Sessions pane into `area`.
-///
-/// Why: the single entry point [`super::super::layout::render`] calls for the
-/// right column.
-/// What: a bordered, titled (`SESSIONS — <project> (N)`) stateful `List`
-/// scoped to `state.current_sessions()`; the title names the selected
-/// project, or reads `SESSIONS` when none is selected (empty registry).
-pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState) {
-    let focused = state.focus == Pane::Sessions;
-    let sessions = state.current_sessions().to_vec();
-    let items: Vec<ListItem> = sessions
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let link_state = s
-                .deliverable_id
-                .as_deref()
-                .map(|id| state.deliverable_link_state(id))
-                .unwrap_or(DeliverableLinkState::Unknown);
-            ListItem::new(session_line(i + 1, s, link_state))
-        })
-        .collect();
-    let project_label = state.selected_project_name().unwrap_or("-");
-    let title = Line::from(format!("SESSIONS — {project_label} ({})", sessions.len()))
-        .style(title_style(focused));
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_spacing(HighlightSpacing::Always);
-    frame.render_stateful_widget(list, area, state.sessions_nav.state_mut());
-}
-
-/// Style the pane title, brighter when it holds focus.
-fn title_style(focused: bool) -> Style {
-    if focused {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
     }
 }
 
@@ -251,6 +216,7 @@ mod tests {
             proposed_default: None,
             deliverable_id: None,
             unresumable: false,
+            ..Default::default()
         }
     }
 

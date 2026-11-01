@@ -56,7 +56,8 @@ use super::state::ProjectCtlState;
 /// verbs); on failure, the form STAYS OPEN and the error renders INLINE in
 /// it (`set_config_form_error`) rather than as a transient notice — the
 /// explicit #2120 requirement that a rejected submit never discards the
-/// operator's other unsaved edits.
+/// operator's other unsaved edits. `Focus` (#10476) runs
+/// [`crate::tui::focus::focus_session`] and shows its one-line result.
 pub(crate) async fn dispatch(
     state: &mut ProjectCtlState,
     client: &DaemonClient,
@@ -92,6 +93,12 @@ pub(crate) async fn dispatch(
             Ok(resp) => state.set_notice(format!("attach: {}", resp.attach_cmd)),
             Err(e) => state.set_notice(format!("attach failed: {e}")),
         },
+        // #10476: the plan is pure; the tmux branch runs the bin's guarded,
+        // quiet switch on the blocking pool, the iTerm2 branch a 5 s-bounded
+        // osascript. Nothing here can create a session, window or tab.
+        PendingAction::Focus(name) => {
+            state.set_notice(crate::tui::focus::focus_session(&name).await);
+        }
         PendingAction::SubmitConfig(name, args) => {
             match client.registry_patch_project(&name, &args).await {
                 Ok(project) => {

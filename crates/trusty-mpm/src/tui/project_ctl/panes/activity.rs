@@ -171,11 +171,11 @@ mod tests {
             }],
             ..Default::default()
         };
+        let id = session.id.clone();
         state
             .sessions_by_project
             .insert("widget".to_string(), vec![session]);
-        state.projects_nav.sync_len(state.projects.len());
-        state.sessions_nav.sync_len(state.current_sessions().len());
+        state.focus_session(&id);
         state
     }
 
@@ -191,6 +191,7 @@ mod tests {
             proposed_default: None,
             deliverable_id: None,
             unresumable: false,
+            ..Default::default()
         }
     }
 
