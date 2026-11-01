@@ -13,25 +13,28 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "usage: self-clear.sh [--live] [--locked] [--socket PATH] [--target PANE]" >&2; exit 64;; esac; shift; done
 log(){ echo "$(date -u +%H:%M:%SZ) self-refresh $1" | tee -a "$ROOT/inbox/self-clear.log"; }
 t=${T:-"=$S:"}
-tx(){ tmux -S "$SOCK" "$@"; }
+# #10628: the target is a %N pane id (the poller's --target) or the exact =session: default. Anything else is refused,
+# so the one tmux -t below never prefix-matches another session (#8443).
+[[ $t =~ ^%[0-9]+$ || $t =~ ^=.+:$ ]] || { echo "self-clear.sh: target '$t' is not a %N pane id or =session:" >&2; exit 64; }
+tx(){ local verb=$1; shift; tmux -S "$SOCK" "$verb" -t "$t" "$@"; }
 # #10599: pane ids are reissued after a tmux server restart, so the pane must still be in $S before every key
 # and at the start of every idle wait (the poller's send_to_architect checks the same way). Else: send nothing.
-own(){ local s; s=$(tx display-message -p -t "$t" '#{session_name}' 2>/dev/null) && [ "$s" = "$S" ] && return 0
+own(){ local s; s=$(tx display-message -p '#{session_name}' 2>/dev/null) && [ "$s" = "$S" ] && return 0
   log "pane $t is in session '${s:-unknown}', not $S; nothing sent"; exit 6; }
 # idle [fresh]: with "fresh" (after /clear) skip architect-idle.py, which reports unknown on a transcript holding only /clear records (2026-10-21 RCA); pane not turn-active + empty/suggestion box still gate the send.
 idle(){ local ok=0 i ta fresh=$1; own; for i in $(seq 1 360); do
-  cap=$(tx capture-pane -t "$t" -e -p -S -80); box=$(python3 "$ROOT/scripts/input-state.py" "$t" | awk '{print $2}')
+  cap=$(tx capture-pane -e -p -S -80); box=$(python3 "$ROOT/scripts/input-state.py" "$t" | awk '{print $2}')
   # #10599: turn-active.py exits 0 running, 10 idle, 3 internal error. Only 10 is idle. A missing helper or any other code is busy.
   python3 "$ROOT/scripts/turn-active.py" <<<"$cap"
   ta=$?
   if [ "$ta" = 10 ] && { [ "$fresh" = fresh ] || python3 "$ROOT/scripts/architect-idle.py" >/dev/null; } && { [ "$box" = empty ] || [ "$box" = suggestion ]; }; then ok=$((ok+1)); else ok=0; fi
   [ $ok -ge 3 ] && return 0; sleep "${SELF_CLEAR_POLL:-5}"; done; return 1; }
-send(){ own; tx send-keys -t "$t" -l "$1"; sleep "${SELF_CLEAR_ECHO:-1.5}"
+send(){ own; tx send-keys -l "$1"; sleep "${SELF_CLEAR_ECHO:-1.5}"
   # The slash-command menu appends its description after the typed text, and input-state shows only the first
   # pane row (cut at 100 chars), so match the first 60 characters as a prefix.
   local p="${1:0:60}"
   case "$(python3 "$ROOT/scripts/input-state.py" "$t" | cut -d' ' -f2-)" in "typed | $p"*) ;; *) log "echo mismatch for $p"; return 1;; esac
-  own; tx send-keys -t "$t" Enter; }
+  own; tx send-keys Enter; }
 # #10599: the one readiness check. Only exit 0 permits a clear. 1 not ready, 2 IL missing or unreadable, any other code refuses.
 il_ready(){ python3 "$ROOT/scripts/datg.py" --project "$ROOT/local/il" ready; }
 il_ok(){ local out rc line; out=$(il_ready 2>&1); rc=$?
