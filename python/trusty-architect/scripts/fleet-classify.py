@@ -26,7 +26,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 IDLE_AFTER = 600          # seconds an idle pane waits before it alerts
 REEMIT = {"idle": 1800, "ctx": 1800, "load": 1800, "disk": 1800, "swap": 1800,
           "self_ctx": 1800, "architect_dead": 1800, "architect_silent": 1800,
-          "architect_frozen": 1800}  # #10571: the watchdog's alerts re-emit as the prototype's do
+          "architect_frozen": 1800,  # #10571: the watchdog's alerts re-emit as the prototype's do
+          "owner_answer": 1800}  # #10670: until owner_answers.pending stops listing it
 # #9997: one context bar in tokens; a pane's `ctx N%` is converted against the
 # window. "approaching" fires at 90% of the bar, "bar" at the bar.
 CONTEXT_BAR_DEFAULT = 250_000
@@ -86,13 +87,18 @@ def find_box(lines):
     """(top_rule, bottom_rule) indexes of Claude Code's input box, or None.
 
     The box is the last ❯ line that sits directly under a horizontal rule and
-    is not a dialog's numbered-option cursor.
+    is not a dialog's numbered-option cursor. The box ends at the first plain
+    rule below it. With no plain bottom rule (#10670) the box runs to the
+    end of the screen, so every row under the ❯ counts as box text, footer rows included.
+    A draft on the next row is then never mistaken for an empty box. wake()
+    reads the end-of-screen bottom as "no bottom rule" and sends no keys: on
+    such a pane every wake skips, a stall rather than a typed-over draft.
     """
     for i in range(len(lines) - 1, 0, -1):
         if (lines[i].lstrip().startswith("❯") and not OPTION.match(lines[i])
                 and BOX_TOP_RULE.match(lines[i - 1])):
             bottom = next((j for j in range(i + 1, len(lines)) if RULE.match(lines[j])),
-                          len(lines) - 1)
+                          len(lines))  # #10670: no rule -> every row below the ❯ is box text
             return i - 1, bottom
     return None
 
