@@ -251,6 +251,8 @@ fn next_step(outcome: Outcome) -> Next {
         Outcome::ChecksumMismatch(mismatch) => Next::Abort(mismatch.to_string()),
         // #9974: unreachable for tctl itself (it ships no launcher), but terminal.
         Outcome::CargoRecord(e) => Next::Abort(e.to_string()),
+        // #10584: only `tctl install` passes the no-downgrade guard; terminal.
+        Outcome::Refused(e) => Next::Abort(e.to_string()),
     }
 }
 

@@ -716,14 +716,19 @@ async fn install_all(
 /// `download::Outcome` alone would leave the conflation intact one layer up
 /// (#5518).
 ///
-/// What: Walks the error's source chain for a `download::ChecksumMismatch`. The
-/// chain, not just the head, because a caller may add context above it.
+/// What: Walks the error's source chain for a `download::ChecksumMismatch` or
+/// a `version_guard::DowngradeRefusal` (#10584). The chain, not just the head,
+/// because a caller may add context above it.
 ///
 /// Test: `tests::is_integrity_failure_spots_a_checksum_mismatch_through_context`,
-/// `tests::is_integrity_failure_ignores_a_routine_failure`.
+/// `tests::is_integrity_failure_ignores_a_routine_failure`,
+/// `tests::is_integrity_failure_spots_a_downgrade_refusal`.
 fn is_integrity_failure(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|c| c.is::<crate::download::ChecksumMismatch>())
+    // #10584: a downgrade refusal must not render as an optional skip either.
+    e.chain().any(|c| {
+        c.is::<crate::download::ChecksumMismatch>()
+            || c.is::<crate::download::version_guard::DowngradeRefusal>()
+    })
 }
 
 /// Shorten an install error to a single-line reason for the live checklist row.
@@ -855,6 +860,11 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// because it means the binary being health-gated is provably not the one
 /// that was just placed.
 ///
+/// #10584: before either branch writes, the build already at the destination
+/// is probed; a release (or crates.io version) older than it, or an installed
+/// binary whose version cannot be read, is a `DowngradeRefusal` — see
+/// `crate::download::version_guard`.
+///
 /// Test: Side-effecting; the fallback routing and shaping are unit-tested in
 /// `crate::download::tests`. The #3554 shape (health gate immune to a
 /// PATH-shadowing stale binary) is covered at the `verify_installed_binary_at_path`
@@ -862,7 +872,7 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// path-selection glue specifically is covered by `select_prebuilt_bin_path`'s
 /// and `cargo_fallback_bin_path`'s own tests (see above).
 async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
-    use crate::download::{self, Outcome};
+    use crate::download::{self, version_guard as vg, Outcome};
 
     // Resolve the install directory — the canonical cargo bin dir (#5777:
     // `default_install_dir()` delegates to the shared `canonical_bin_dir()`,
@@ -878,7 +888,13 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
     let (existed_at_preferred, existed_at_cargo_bin) =
         existed_before_at_both(&preferred_bin_path, &cargo_bin_path);
 
-    let outcome = download::try_install_prebuilt(&m.crate_name, &install_dir).await;
+    // #10584: read the build already installed before anything is fetched; a
+    // newer one is never replaced, and an unreadable one is refused.
+    let dests = [preferred_bin_path.as_path(), cargo_bin_path.as_path()];
+    let have = vg::probe_installed_build(&m.crate_name, &dests).await?;
+    let outcome =
+        download::try_install_prebuilt_no_downgrade(&m.crate_name, &install_dir, have.as_ref())
+            .await;
     match outcome {
         Outcome::Installed { paths, version } => {
             tracing::info!(crate_name = %m.crate_name, %version, "installed from prebuilt");
@@ -924,8 +940,11 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
         Outcome::ChecksumMismatch(mismatch) => Err(anyhow::Error::new(mismatch)),
         // #9974: binaries placed, cargo's launcher record not taken over.
         Outcome::CargoRecord(e) => Err(anyhow::Error::new(e)),
+        Outcome::Refused(e) => Err(anyhow::Error::new(e)),
         Outcome::Fallback { reason } => {
             tracing::info!(crate_name = %m.crate_name, %reason, "prebuilt unavailable; using cargo install");
+            // #10584: `cargo install` places crates.io's newest — same guard.
+            vg::guard_cargo_fallback(&m.crate_name, have.as_ref()).await?;
             // Verify cargo is available before attempting the fallback.
             which::which("cargo").map_err(|_| {
                 anyhow::anyhow!(

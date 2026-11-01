@@ -1,0 +1,2 @@
+Fixed
+- `trusty-installer install` no longer replaces a newer installed build (such as a dev build) with an older `latest` release. When the installed binary reports a newer version than the release, or than crates.io's newest on the `cargo install` fallback, the member fails with a message naming both versions and the run exits 2. A binary whose version cannot be read is refused rather than overwritten; remove the file to reinstall (#10584).
