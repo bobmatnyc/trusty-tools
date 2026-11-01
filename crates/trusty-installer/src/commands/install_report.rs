@@ -79,7 +79,8 @@ pub struct InstallOutcome {
     /// derivation and the human summary's skip-vs-fail wording.
     pub required: bool,
     /// `false` ONLY when this member's prebuilt artifact failed SHA-256
-    /// verification (#5518). Unlike every other field here, it is NOT filtered
+    /// verification (#5518), or the install refused to replace a newer or
+    /// unreadable installed build (#10584). Unlike every other field here, it is NOT filtered
     /// by `required`: an optional member's routine install failure is a
     /// graceful degrade, but an optional member's TAMPERED download is still a
     /// tampered download, and a run that exits 0 after seeing one has not
