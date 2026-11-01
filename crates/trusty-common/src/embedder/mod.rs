@@ -40,6 +40,8 @@ pub mod rss;
 // #9275: token-exact chunking for embedders with a bounded input window.
 mod chunk;
 mod fast_embedder;
+// #10662: shared with trusty-agents, which owned this retry since #812.
+mod init_retry;
 mod types;
 
 #[cfg(any(test, feature = "embedder-test-support"))]
@@ -75,6 +77,7 @@ mod chunk_tests;
 
 pub use chunk::{CHUNK_OVERLAP_PERCENT, ChunkError, ChunkTokenizer, TextChunk, chunk_text};
 pub use fast_embedder::{FASTEMBED_MAX_LENGTH, FastEmbedder};
+pub use init_retry::{InitRetryPolicy, retry_transient_init};
 pub use types::{
     CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
     DEFAULT_ORT_INTER_THREADS, EMBED_DIM, Embedder, ExecutionProvider, OrtThreadingOptions,
