@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 
 use trusty_common::content::{ContentSource, DevOverride};
 
-use super::test_support::{fake_checkout, repo_content_files, staged};
+use super::test_support::{fake_checkout, installed_without, repo_content_files, staged};
 use super::*;
 
 /// Why (#9015): a checkout must serve content only when the operator names
@@ -96,4 +96,38 @@ fn a_missing_file_names_the_remedy_for_its_source() {
         installed.to_string().contains("tm content update"),
         "{installed}"
     );
+}
+
+/// Why (#10588): the list is what an installer checks a release against, so
+/// a content file this binary reads must not be left off it.
+/// What: [`REQUIRED_FILES`] under [`CONTENT_DIR`] is exactly the checkout's
+/// `content/instructions/trusty-review/` tree.
+#[test]
+fn the_required_files_are_the_checkout_content_tree() {
+    let mut required: Vec<String> = REQUIRED_FILES.iter().map(|r| content_path(r)).collect();
+    required.sort();
+    let tree: Vec<String> = repo_content_files().into_iter().map(|(p, _)| p).collect();
+    assert_eq!(required, tree);
+}
+
+/// Why (#10588): content released before this binary needed a file must be
+/// refused naming that file, not passed.
+/// What: a release without the principles addendum yields one `Missing`
+/// naming its path.
+#[test]
+fn check_required_names_every_file_older_content_lacks() {
+    let path = content_path("prompts/principles_addendum.md");
+    let problems = check_required(&installed_without(&path));
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        matches!(&problems[0], PromptContentError::Missing { path: p, .. } if *p == path),
+        "{problems:?}"
+    );
+}
+
+/// What (#10588): the checkout's own content passes the check.
+#[test]
+fn check_required_passes_the_checkout_content() {
+    let problems = check_required(&staged());
+    assert!(problems.is_empty(), "{problems:?}");
 }
