@@ -132,7 +132,8 @@ mod floor_d4_rules;
 mod force_push;
 
 pub(crate) use anchor_verbs::{AnchorWrite, anchor_writes};
-pub(crate) use credential_print::evaluate_credential_print_command;
+// #10598: `python_reader_words` is read by the Python reader in `pm_guard_secret_script`.
+pub(crate) use credential_print::{evaluate_credential_print_command, python_reader_words};
 pub(crate) use destructive_delete::{
     DeleteTarget, evaluate_destructive_delete_command, lone_inert_heredoc,
 };

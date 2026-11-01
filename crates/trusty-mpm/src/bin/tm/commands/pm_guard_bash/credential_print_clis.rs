@@ -23,8 +23,14 @@ use super::credential_print_programs::basename;
 use super::credential_print_redirect::{Routed, redirect_target_sink};
 use super::{Emitted, Lifted, MARK, Refusal, Sink, carries, route};
 
+/// #10598: the calls the Python body reader in `pm_guard_secret_script` names.
+pub(crate) mod python_reader_words {
+    pub(crate) use super::super::TRIGGERS;
+    pub(crate) use super::{RUN_TIME_PREFIXES, WORD_TRIGGERS, security_is_interactive};
+}
+
 /// Word sequences, in order, that name a sibling credential call.
-const WORD_TRIGGERS: &[&[&str]] = &[
+pub(crate) const WORD_TRIGGERS: &[&[&str]] = &[
     &["gcloud", "secrets", "access"],
     &["gh", "auth", "token"],
     &["gh", "auth", "--show-token"],
@@ -52,7 +58,7 @@ enum Echo<'a> {
 
 /// Leading words of a [`WORD_TRIGGERS`] sequence after which a run-time word
 /// (`$`, a backtick) may supply the rest (#8677 review round 4).
-const RUN_TIME_PREFIXES: &[&[&str]] = &[
+pub(crate) const RUN_TIME_PREFIXES: &[&[&str]] = &[
     &["gcloud", "secrets"],
     &["gh", "auth"],
     &["op"],
@@ -86,7 +92,7 @@ pub(super) fn names_cli_trigger(flat: &str) -> bool {
 /// Whether `security`'s own leading options start interactive mode, where it
 /// reads commands from stdin: `-i`, or `-p prompt`, which implies it. A `-h`
 /// in the same run does not clear it: the guard reads it closed.
-fn security_is_interactive<S: AsRef<str>>(args: &[S]) -> bool {
+pub(crate) fn security_is_interactive<S: AsRef<str>>(args: &[S]) -> bool {
     for a in args {
         let Some(cluster) = a
             .as_ref()
