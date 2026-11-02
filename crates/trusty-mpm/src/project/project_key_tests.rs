@@ -110,6 +110,22 @@ fn a_flat_checkout_spelled_with_a_tilde_keys_by_its_origin_10604() {
     );
 }
 
+/// Why (#10604): `dirs::home_dir` returns a relative `$HOME` as given; expanding
+/// `~/x` against it would point `git -C` at the daemon's cwd. It is unexpandable.
+/// Test: this test.
+#[test]
+fn a_relative_home_expands_no_tilde_path_10604() {
+    let relative = Path::new("relative/home");
+    assert_eq!(local_repo_path("~/x", Some(relative)), None);
+    assert_eq!(local_repo_path("~", Some(relative)), None);
+    assert_eq!(project_key_from_repo_url_in("~/x", Some(relative)), None);
+    // An absolute path never needed a home.
+    assert_eq!(
+        local_repo_path("/abs/x", Some(relative)),
+        Some(PathBuf::from("/abs/x"))
+    );
+}
+
 /// Why: only the registered checkout may claim the project's index; a linked
 /// worktree or another clone must not.
 /// Test: this test.

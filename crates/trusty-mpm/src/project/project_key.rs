@@ -28,16 +28,20 @@ use super::record::Project;
 /// project `trusty-mpm-projects/trusty-tools`: a wrong key and a clone path
 /// nested inside the projects root.
 /// What: `Some(path)` for an absolute path, `Some(home)` for `~`, and
-/// `Some(home/rest)` for `~/rest`. `None` for anything else — a URL — and for a
-/// `~` spelling with no `home` to expand it against; [`is_path_spelling`] tells
-/// those two apart.
+/// `Some(home/rest)` for `~/rest`. `None` for anything else — a URL or a
+/// `~user/…` spelling — and for a `~` spelling with no usable `home` (absent, or
+/// not absolute); [`is_path_spelling`] tells a URL from the rest.
 /// Test: `a_flat_checkout_spelled_with_a_tilde_keys_by_its_origin_10604`,
+/// `a_relative_home_expands_no_tilde_path_10604`,
 /// `local_checkout_for_expands_a_tilde_repo_url_10604`.
 pub fn local_repo_path(repo_url: &str, home: Option<&Path>) -> Option<PathBuf> {
     let trimmed = repo_url.trim();
     if trimmed.starts_with('/') {
         return Some(PathBuf::from(trimmed));
     }
+    // #10604: `$HOME` is passed through as given; a relative one would make
+    // `git -C` run against the daemon's cwd and store a wrong permanent key.
+    let home = home.filter(|h| h.is_absolute());
     if trimmed == "~" {
         return home.map(Path::to_path_buf);
     }

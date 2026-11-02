@@ -136,12 +136,15 @@ mod tests {
     /// path every slugified caller already uses.
     #[test]
     fn base_clone_path_is_canonical_for_a_mixed_case_identity_10604() {
-        let canonical = base_clone_path("bobmatnyc", "trusty-tools");
-        assert_eq!(base_clone_path("BobMatNYC", "Trusty_Tools"), canonical);
-        assert_eq!(base_clone_path("BOBMATNYC", "Trusty-Tools.git"), canonical);
-        assert!(
-            canonical.ends_with("bobmatnyc/trusty-tools"),
-            "{canonical:?}"
-        );
+        // #10604: assert on the tail, not on three `repos_root()` reads, so a
+        // concurrent test that changes HOME or the root env cannot flake this.
+        for (owner, repo) in [
+            ("bobmatnyc", "trusty-tools"),
+            ("BobMatNYC", "Trusty_Tools"),
+            ("BOBMATNYC", "Trusty-Tools.git"),
+        ] {
+            let path = base_clone_path(owner, repo);
+            assert!(path.ends_with("bobmatnyc/trusty-tools"), "{path:?}");
+        }
     }
 }
