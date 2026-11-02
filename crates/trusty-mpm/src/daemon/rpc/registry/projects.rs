@@ -22,7 +22,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use trusty_common::uds::server::RpcRouter;
 
-use crate::core::project::ProjectInfo;
+use crate::core::project::{KeptRegistryRecord, ProjectInfo, RegisterProjectResponse};
 use crate::daemon::api::types::{
     DiscoverProjectsResponse, DiscoveredProjectInfo, ProjectsResponse,
 };
@@ -31,7 +31,7 @@ use crate::daemon::managed_routes::ProjectStatusResponse;
 use crate::daemon::managed_routes::project_registry_routes as reg;
 use crate::daemon::managed_routes::project_status;
 use crate::daemon::state::DaemonState;
-use crate::project::{Project, ProjectStoreError};
+use crate::project::Project;
 
 use super::NoParams;
 
@@ -95,7 +95,8 @@ pub struct PathParams {
 /// `tm project list` reads, keyed on the same name, unless a record with that
 /// name or that `origin`'s `owner/repo` already exists. A registry-B record
 /// needs a `repo_url`, so a directory with no `origin` remote is refused up
-/// front.
+/// front. When a record is kept rather than written, the response's
+/// `kept_existing` names it; the field is absent after a write.
 ///
 /// # Errors
 ///
@@ -111,11 +112,12 @@ pub struct PathParams {
 /// `project_init_without_origin_is_refused_and_persists_nothing_10586`,
 /// `project_init_keeps_an_existing_registry_record_10586`,
 /// `project_init_with_ssh_origin_keeps_the_https_record_10586`,
-/// `project_init_registry_write_failure_names_the_cause_10586`.
+/// `project_init_registry_write_failure_names_the_cause_10586`,
+/// `project_init_reports_the_kept_record_for_a_different_origin_10586`.
 pub async fn register_project_op(
     state: &Arc<DaemonState>,
     path: PathBuf,
-) -> Result<ProjectInfo, DaemonError> {
+) -> Result<RegisterProjectResponse, DaemonError> {
     // #10586: no origin, no registry-B record — refuse before any side effect.
     let repo_url = origin_url_for_init(&path)?;
     // #7171: an explicit registration is the "operator points trusty-mpm at
@@ -141,8 +143,12 @@ pub async fn register_project_op(
             "#7588: `tm project init` adopted pre-existing worktrees too"
         );
     }
-    persist_registry_record(state, &name, &repo_url).await?;
-    Ok(info)
+    // #10586: a kept record rides on the 200, so init never reports a silent write.
+    let kept_existing = persist_registry_record(state, &name, &repo_url).await?;
+    Ok(RegisterProjectResponse {
+        info,
+        kept_existing,
+    })
 }
 
 /// The `origin` URL `tm project init` records, or the refusal it answers.
@@ -175,19 +181,21 @@ fn origin_url_for_init(path: &Path) -> Result<String, DaemonError> {
 /// `tm projects register`) — so init never overwrites configuration set
 /// elsewhere or duplicates a repo.
 /// What: one [`crate::project::ProjectRegistry::register_unless_present`] call,
-/// so the existence check and the insert share one lock. A
-/// [`ProjectStoreError::DuplicateProjectKey`] means "already registered" and
-/// answers `Ok(())`; any other store error reaches the caller as a 500 that
-/// carries the store's own text.
+/// so the existence check and the insert share one lock. `Ok(None)` when the
+/// record was written; `Ok(Some(kept))` names the record kept instead, its
+/// `repo_url` without userinfo. Every store error, `DuplicateProjectKey`
+/// included, reaches the caller as a 500 that carries the store's own text.
 /// Test: `project_init_then_registry_list_shows_the_project_10586`,
 /// `project_init_keeps_an_existing_registry_record_10586`,
 /// `project_init_with_ssh_origin_keeps_the_https_record_10586`,
-/// `project_init_registry_write_failure_names_the_cause_10586`.
+/// `project_init_registry_write_failure_names_the_cause_10586`,
+/// `project_init_reports_the_kept_record_for_a_different_origin_10586`,
+/// `project_init_kept_record_url_carries_no_userinfo_10586`.
 async fn persist_registry_record(
     state: &Arc<DaemonState>,
     name: &str,
     repo_url: &str,
-) -> Result<(), DaemonError> {
+) -> Result<Option<KeptRegistryRecord>, DaemonError> {
     let registry = state.project_registry().await;
     let project = Project {
         name: name.to_string(),
@@ -205,8 +213,10 @@ async fn persist_registry_record(
         project_key: None,
     };
     // #10586: check and insert under one lock, so no writer lands between them.
+    // #10586: a kept record is reported, never a silent success; the
+    // `DuplicateProjectKey` arm is gone, so that error is a 500 like the rest.
     match registry.register_unless_present(project).await {
-        Ok(_) | Err(ProjectStoreError::DuplicateProjectKey { .. }) => Ok(()),
+        Ok(kept) => Ok(kept.map(|p| KeptRegistryRecord::redacted(&p.name, &p.repo_url))),
         Err(e) => {
             tracing::warn!(error = %e, project = %name, "#10586: project registry write failed");
             Err(DaemonError::Internal(format!(
@@ -278,10 +288,11 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     });
 
     let held = Arc::clone(state);
-    let r = r.typed::<PathParams, ProjectInfo, _, _>("mpm.projects.register", move |p| {
-        let s = Arc::clone(&held);
-        async move { register_project_op(&s, p.path).await.map_err(Into::into) }
-    });
+    let r =
+        r.typed::<PathParams, RegisterProjectResponse, _, _>("mpm.projects.register", move |p| {
+            let s = Arc::clone(&held);
+            async move { register_project_op(&s, p.path).await.map_err(Into::into) }
+        });
 
     let held = Arc::clone(state);
     let r = r.typed::<PathParams, ProjectInfo, _, _>("mpm.projects.current", move |p| {

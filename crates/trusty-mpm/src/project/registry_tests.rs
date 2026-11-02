@@ -841,11 +841,13 @@ async fn register_unless_present_matches_on_project_key() {
         ..make_project("gizmo")
     };
     for candidate in [ssh, same_name, make_project("gizmo")] {
-        let inserted = registry
+        let kept = registry
             .register_unless_present(candidate.clone())
             .await
             .expect("no store error");
-        assert!(!inserted, "{candidate:?} is already covered");
+        // #10586: the kept record comes back, so the caller can name it.
+        let kept = kept.unwrap_or_else(|| panic!("{candidate:?} is already covered"));
+        assert_eq!(kept.name, "gizmo");
     }
     let all = registry.list().await.expect("list");
     assert_eq!(all.len(), 1, "{all:?}");
@@ -855,7 +857,7 @@ async fn register_unless_present_matches_on_project_key() {
         .register_unless_present(make_project("other"))
         .await
         .expect("insert");
-    assert!(fresh, "a new repo under a new name is inserted");
+    assert!(fresh.is_none(), "a new repo under a new name is inserted");
     let other = registry.get("other").await.expect("get");
     assert_eq!(other.project_key.as_deref(), Some("o/other"));
 }

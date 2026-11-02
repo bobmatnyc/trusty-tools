@@ -265,6 +265,53 @@ async fn register_project_without_origin_shows_the_daemon_message_10586() {
     }
 }
 
+/// Telegram "Set Active" on a directory whose name a stored record already
+/// holds reports that record, its URL without userinfo (#10586).
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_project_reports_the_kept_record_10586() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("gizmo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git_ok = |args: &[&str]| {
+        trusty_common::git::command_in(&repo)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !git_ok(&["init", "-q", "."])
+        || !git_ok(&[
+            "remote",
+            "add",
+            "origin",
+            "https://gitlab.com/other/thing.git",
+        ])
+    {
+        return; // no git on this runner
+    }
+    let repo = repo.to_string_lossy().into_owned();
+    let (state, url) = spawn_test_daemon().await;
+    let token = "ghp_10586SyntheticNotARealToken";
+    let seed: crate::project::Project = serde_json::from_value(serde_json::json!({
+        "name": "gizmo",
+        "repo_url": format!("https://octo:{token}@github.com/acme/gizmo"),
+        "default_branch": "main",
+    }))
+    .unwrap();
+    state.project_registry().await.register(seed).await.unwrap();
+
+    let executor = CommandExecutor::new(url);
+    match executor.register_project(&repo).await {
+        CommandResult::ProjectKept { path, kept } => {
+            assert_eq!(path, repo);
+            assert_eq!(kept.name, "gizmo");
+            assert_eq!(kept.repo_url, "https://github.com/acme/gizmo");
+        }
+        other => panic!("expected ProjectKept, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
     // `/doctor` round-trips a real report through the client executor.

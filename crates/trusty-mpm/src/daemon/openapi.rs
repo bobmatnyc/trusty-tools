@@ -79,6 +79,8 @@ use utoipa::OpenApi;
         crate::core::session::ControlModel,
         crate::core::session::SessionHost,
         crate::core::project::ProjectInfo,
+        crate::core::project::RegisterProjectResponse,
+        crate::core::project::KeptRegistryRecord,
         crate::core::compress::CompressionLevel,
         crate::core::external_session::ExternalSession,
         crate::core::external_session::SessionOrigin,

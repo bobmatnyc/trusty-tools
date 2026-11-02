@@ -607,11 +607,16 @@ impl DaemonClient {
     ///
     /// Why: the `/projects` keyboard's "Set Active" button registers a
     /// discovered project with the daemon.
-    /// What: POSTs `{"path": <path>}`; returns `Ok(())` on a 2xx response, and
-    /// otherwise an error carrying the daemon's own message.
+    /// What: POSTs `{"path": <path>}`; on a 2xx response returns the record the
+    /// daemon kept instead of writing (`None` after a write), and otherwise an
+    /// error carrying the daemon's own message.
     /// Test: `register_project_succeeds`,
-    /// `register_project_without_origin_shows_the_daemon_message_10586`.
-    pub async fn register_project(&self, path: &str) -> anyhow::Result<()> {
+    /// `register_project_without_origin_shows_the_daemon_message_10586`,
+    /// `register_project_reports_the_kept_record_10586`.
+    pub async fn register_project(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<Option<crate::core::project::KeptRegistryRecord>> {
         let url = "/projects".to_string();
         let resp = self
             .post(&url)
@@ -619,8 +624,10 @@ impl DaemonClient {
             .send()
             .await?;
         // #10586: a refused registration (no `origin` remote) names its fix.
-        error::response_or_body_error(resp).await?;
-        Ok(())
+        let resp = error::response_or_body_error(resp).await?;
+        // #10586: a kept record is reported, not read as a silent success.
+        let body: crate::core::project::RegisterProjectResponse = resp.json().await?;
+        Ok(body.kept_existing)
     }
 
     /// Capture a tmux pane snapshot via `GET /tmux/sessions/{name}/snapshot`.

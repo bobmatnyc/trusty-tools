@@ -578,6 +578,98 @@ async fn project_init_registry_write_failure_names_the_cause_10586() {
     );
 }
 
+/// Seed a registry-B record straight into the store, bypassing the HTTP
+/// route's own URL handling (#10586).
+async fn seed_registry_record(state: &Arc<DaemonState>, name: &str, repo_url: &str) {
+    let project: crate::project::Project = serde_json::from_value(
+        json!({ "name": name, "repo_url": repo_url, "default_branch": "main" }),
+    )
+    .expect("project json");
+    let registry = state.project_registry().await;
+    registry.register(project).await.expect("seed record");
+}
+
+/// Init whose `origin` is a DIFFERENT repo that only shares `owner/repo` with a
+/// stored record reports the kept record instead of silent success (#10586
+/// delta critic M2).
+///
+/// Why: the `owner/repo` key drops the host, so `gitlab.com/acme/gizmo` matches
+/// a stored `github.com/acme/gizmo`; init wrote nothing and answered a bare
+/// 200. Red on 027373c6e9: no `kept_existing` in the body.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_reports_the_kept_record_for_a_different_origin_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(repo) = git_repo(
+        &dir,
+        "checkout-dir",
+        Some("https://gitlab.com/acme/gizmo.git"),
+    ) else {
+        return; // no git on this runner
+    };
+    let stored = "https://github.com/acme/gizmo";
+    seed_registry_record(&state, "gnomish", stored).await;
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kept_existing"]["name"], "gnomish", "{body}");
+    assert_eq!(body["kept_existing"]["repo_url"], stored, "{body}");
+
+    let registry = state.project_registry().await;
+    let projects = registry.list().await.expect("list");
+    assert_eq!(projects.len(), 1, "no second record: {projects:?}");
+    assert_eq!(projects[0].repo_url, stored);
+}
+
+/// The kept record's `repo_url` leaves the daemon with no userinfo, on both
+/// transports, and a written record carries no `kept_existing` (#10586).
+///
+/// Why: a pre-#9124 record can still hold `https://user:token@host/o/r`, and
+/// the field is shown in Telegram and the CLI.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_kept_record_url_carries_no_userinfo_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    // Same directory name as the stored record, different origin: the name arm.
+    let Some(repo) = git_repo(&dir, "gizmo", Some("https://gitlab.com/other/thing.git")) else {
+        return; // no git on this runner
+    };
+    let token = "ghp_10586SyntheticNotARealToken";
+    seed_registry_record(
+        &state,
+        "gizmo",
+        &format!("https://octo:{token}@github.com/acme/gizmo"),
+    )
+    .await;
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let result = rpc_ok(
+        &rpc_router(&state),
+        "mpm.projects.register",
+        json!({ "path": repo }),
+    )
+    .await;
+    for kept in [&body["kept_existing"], &result["kept_existing"]] {
+        assert_eq!(kept["name"], "gizmo", "{kept}");
+        let url = kept["repo_url"].as_str().expect("repo_url string");
+        assert_eq!(url, "https://github.com/acme/gizmo");
+        assert!(!url.contains(token) && !url.contains("octo") && !url.contains('@'));
+    }
+
+    let Some(fresh) = git_repo(&dir, "fresh", Some("https://github.com/acme/fresh.git")) else {
+        return;
+    };
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": fresh }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.get("kept_existing").is_none(),
+        "a write keeps nothing: {body}"
+    );
+}
+
 /// Test: this function IS the test.
 #[tokio::test]
 async fn parity_projects_current_agrees_across_transports() {

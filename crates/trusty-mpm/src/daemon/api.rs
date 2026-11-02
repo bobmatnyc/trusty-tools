@@ -1239,19 +1239,20 @@ pub struct RegisterProject {
 ///
 /// Why: the daemon owns the project registry; `project init` posts the
 /// resolved directory here.
-/// What: delegates to `register_project_op` and returns the stored info as
-/// JSON with `200`. #10586: `400` when the directory has no `origin` remote,
+/// What: delegates to `register_project_op`; `200` with the info, plus a
+/// `kept_existing` record (absent after a write). #10586: `400` for no origin,
 /// `500` with the store's error text when the registry write fails.
 /// Test: `register_and_list_projects`,
 /// `project_init_without_origin_is_refused_and_persists_nothing_10586`,
-/// `project_init_registry_write_failure_names_the_cause_10586`.
+/// `project_init_registry_write_failure_names_the_cause_10586`,
+/// `project_init_reports_the_kept_record_for_a_different_origin_10586`.
 #[utoipa::path(
     post,
     path = "/projects",
     tag = "projects",
     request_body = RegisterProject,
     responses(
-        (status = 200, description = "Project registered", body = ProjectInfo),
+        (status = 200, description = "Registered; `kept_existing` (absent after a write) names a record kept instead", body = crate::core::project::RegisterProjectResponse),
         (status = 400, description = "The directory has no readable `origin` remote"),
         (status = 500, description = "The project registry write failed"),
     )
@@ -1259,7 +1260,7 @@ pub struct RegisterProject {
 pub async fn register_project(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RegisterProject>,
-) -> Result<Json<ProjectInfo>, DaemonError> {
+) -> Result<Json<crate::core::project::RegisterProjectResponse>, DaemonError> {
     // #6288: the body is shared with `mpm.projects.register`.
     // #10586: it now refuses a directory with no `origin` remote (400).
     crate::daemon::rpc::registry::projects::register_project_op(&state, body.path)

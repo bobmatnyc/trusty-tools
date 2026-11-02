@@ -69,13 +69,17 @@ pub(crate) async fn project(
                     .unwrap_or(text);
                 anyhow::bail!("tm project init failed ({status}): {detail}");
             }
-            let body: serde_json::Value = resp.json().await?;
+            let body: trusty_mpm::core::project::RegisterProjectResponse = resp.json().await?;
             let report = scaffold_project_dir(&path)?;
             for line in &report {
                 println!("  {line}");
             }
-            let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let name = &body.info.name;
             println!("registered project '{name}' at {}", path.display());
+            // #10586: a kept record is named, never reported as a silent write.
+            if let Some(kept) = &body.kept_existing {
+                println!("project registry: {}", kept.notice());
+            }
         }
         ProjectAction::List => {
             // #5994: rows come from the persistent registry, not the daemon's
