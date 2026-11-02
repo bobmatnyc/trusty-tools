@@ -232,16 +232,13 @@ const fn residual(script: &'static str, reason: &'static str, issue: &'static st
 // #10599: the verdicts on #10571's P1 squash (7bad523a3c) with #10599 applied.
 // self-clear.sh, datg.py, datg-hook.sh, dashboard-db.py, dashboard-serve.py,
 // dashboard_media.py, fleet-poll.py and pm-notify.sh now pass.
+// #10641: dashboard_http.py, dashboard_page.py, dashboard_store.py,
+// dashboard_viz.py and datg_store.py pass after their behaviour-neutral edits.
 const RESIDUALS: &[Residual] = &[
     residual("dashboard_docs.py", FILE, OWNED_BY_10571),
     residual("dashboard_harness.py", FILE, OWNED_BY_10571),
-    residual("dashboard_http.py", FILE, OWNED_BY_10571),
-    residual("dashboard_page.py", CRED, OWNED_BY_10571),
     residual("dashboard_projects.py", FILE, OWNED_BY_10571),
-    residual("dashboard_store.py", CRED, OWNED_BY_10571),
-    residual("dashboard_viz.py", FILE, OWNED_BY_10571),
     residual("datg_ops.py", CRED, OWNED_BY_10571),
-    residual("datg_store.py", CRED, OWNED_BY_10571),
 ];
 
 /// 🔴 RATCHET (#10599): every seeded script, run relative from the Architect
