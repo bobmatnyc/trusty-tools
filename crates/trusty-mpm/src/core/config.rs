@@ -361,6 +361,70 @@ impl Default for PmGuardConfig {
     }
 }
 
+/// `[egress_guard]` section — the enforcement switch for `tm hook --egress-guard`.
+///
+/// Why (#10690, owner instruction): turn the guard's refusals off for a while,
+/// keep every deny logged, and re-apply later what proves valuable.
+/// What: `mode = "enforce"` (default) refuses every deny the guard decides;
+/// `mode = "log"` records and POSTs each deny exactly as before, then lets the
+/// call proceed — the #8878 trust-anchor floor included. The value is kept as
+/// a string so a bad string cannot reset the rest of the file; a wrong type
+/// (`mode = true`) fails the whole parse, so the file loads as defaults and
+/// the guard enforces. Only the exact string `"log"` turns enforcement off. A
+/// missing key or section, a missing, unreadable or malformed file, and any
+/// other value (`"Log"`, `"off"`, `""`) all mean enforce. Read per hook run,
+/// from the user-level `~/.trusty-mpm/config.toml` only, so an edit applies to
+/// the next call.
+/// Test: `config_egress_guard_mode_fails_closed_to_enforce`,
+/// `config_egress_guard_mode_log_is_the_only_off_value`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EgressGuardConfig {
+    /// `"enforce"` or `"log"`; read it through [`EgressGuardConfig::mode`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+/// Whether `tm hook --egress-guard` refuses its denies or only logs them (#10690).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressGuardMode {
+    /// Refuse every deny; the default and every fault's answer.
+    Enforce,
+    /// Record and POST every deny, then let the call proceed.
+    Log,
+}
+
+impl EgressGuardMode {
+    /// The mode's config spelling, as the deny record and POST carry it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Log => "log",
+        }
+    }
+}
+
+impl EgressGuardConfig {
+    /// The effective mode: [`EgressGuardMode::Log`] for exactly `"log"`, else enforce.
+    ///
+    /// Test: `config_egress_guard_mode_log_is_the_only_off_value`.
+    pub fn mode(&self) -> EgressGuardMode {
+        match self.mode.as_deref() {
+            Some("log") => EgressGuardMode::Log,
+            _ => EgressGuardMode::Enforce,
+        }
+    }
+
+    /// The configured value when it is neither `"enforce"` nor `"log"`.
+    ///
+    /// Test: `config_egress_guard_mode_log_is_the_only_off_value`.
+    pub fn unknown_mode(&self) -> Option<&str> {
+        self.mode
+            .as_deref()
+            .filter(|value| !matches!(*value, "enforce" | "log"))
+    }
+}
+
 /// `[session_refs]` section — the ADR-0062 session-history ref publisher.
 ///
 /// Why (#7830): a pause now appends to
@@ -440,6 +504,12 @@ pub struct MpmConfig {
     ///
     /// Absent section → `enabled = true`, the entry is written as before.
     pub pm_guard: PmGuardConfig,
+
+    /// `[egress_guard]` — `mode = "enforce"` (default) or `"log"` (#10690).
+    ///
+    /// Absent section → enforce. `"log"` records every egress-guard deny,
+    /// trust-anchor floor included, without refusing the call.
+    pub egress_guard: EgressGuardConfig,
 
     /// `[session_manager]` — Session Manager agent config (DOC-14 §10).
     ///
