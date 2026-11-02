@@ -11605,6 +11605,7 @@ dependencies = [
  "parking_lot",
  "petgraph 0.8.3",
  "postcard",
+ "rayon",
  "redb 4.3.0",
  "regex",
  "reqwest 0.12.28",
