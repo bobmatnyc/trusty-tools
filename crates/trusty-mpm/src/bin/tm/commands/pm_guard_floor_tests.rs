@@ -173,11 +173,12 @@ fn fleet_relaunch_binds_every_caller_on_every_path() {
     }
 }
 
-/// #10665 r3: a plain scratch-socket whole-server kill passes every floor,
-/// inline and from a script, guarded and bypassed. A kill that moves `TMUX`
-/// (`env -u TMUX`), or one nested in another tmux command's body, is refused:
-/// a nested hit copies its server list from the outer command, so the outer
-/// `-S` must not clear it.
+/// #10665 r3: a scratch-socket whole-server kill passes every floor, inline
+/// and from a script, guarded and bypassed — `env -u TMUX` included (df-D77:
+/// the #10665 floor owns that form, so #9001 does not refuse it as opaque).
+/// A kill nested in another tmux command's body is refused: a nested hit
+/// copies its server list from the outer command, so the outer `-S` must not
+/// clear it.
 #[test]
 fn a_scratch_socket_kill_passes_every_floor() {
     let fx = fixture();
@@ -194,13 +195,17 @@ fn a_scratch_socket_kill_passes_every_floor() {
             format!("tmux -S {sock} kill-server"),
             format!("tmux -S {sock} kill-session -a"),
             format!("bash {}", script.display()),
+            format!("env -u TMUX tmux -S {sock} kill-server"),
+            format!("env --unset TMUX tmux -S {sock} kill-session -a"),
+            format!(
+                "env -u TMUX TMUX_TMPDIR={} tmux kill-server",
+                fx.cwd.display()
+            ),
         ] {
             assert_eq!(verdict(&command, bypassed), None, "{command} {bypassed}");
         }
         for command in [
             "env -u TMUX tmux kill-server".to_string(),
-            format!("env -u TMUX tmux -S {sock} kill-server"),
-            format!("env --unset TMUX tmux -S {sock} kill-session -a"),
             format!("tmux -S {sock} new-session -d 'env -u TMUX tmux kill-server'"),
             format!("tmux -S {sock} run-shell 'TMUX=/tmp/tmux-501/default tmux kill-server'"),
         ] {

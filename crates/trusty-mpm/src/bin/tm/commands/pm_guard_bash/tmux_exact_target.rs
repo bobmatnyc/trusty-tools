@@ -97,6 +97,11 @@ pub(crate) fn evaluate_tmux_exact_target(command: &str, probe: &dyn PaneProbe) -
     for hit in &hits {
         // #9001 critic r1: #8902 judges an opaque hit only while an Architect
         // is live; this floor binds every caller.
+        // #10665 r3: a whole-server kill in a moved or reset environment is
+        // judged by the kill floor, which runs first; it names no target here.
+        if kill_server::owned_by_kill_floor(hit) {
+            continue;
+        }
         if let Some(why) = hit.opaque {
             // #9001 critic r2: a here-document body is not a tmux mention.
             if why != UNPARSED || may_run_tmux(&without_data_bodies(command), 0) {

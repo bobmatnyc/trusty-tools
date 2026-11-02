@@ -22,8 +22,8 @@
 //! exactly to an existing pane, window or session
 //! (`pm_guard_bash::evaluate_tmux_exact_target`); since #10033, any
 //! `tm fleet relaunch` (`pm_guard_bash::evaluate_fleet_relaunch`); since
-//! #10665, a `tmux kill-server` or `kill-session -a` without an explicit
-//! scratch `-S` socket (`pm_guard_bash::kill_server`).
+//! #10665, a `tmux kill-server` or `kill-session -a` that does not name a
+//! scratch server (`pm_guard_bash::kill_server`).
 //! [`ArchitectGate`] is the one
 //! identity answer for the D4 remainder and the D5 call sites in `pm_guard`;
 //! it asks [`architect_main_thread`] at most once, and only when a rule
@@ -216,8 +216,8 @@ pub(crate) fn evaluate_floors(
             reason: with_identity(reason, why),
         });
     }
-    // #10665: an inherited `$TMUX` beats `-L` and `TMUX_TMPDIR`, so a
-    // whole-server kill needs an explicit scratch `-S`; every caller is bound.
+    // #10665: an inherited `$TMUX` beats `TMUX_TMPDIR` (not `-L`/`-S`), so a
+    // whole-server kill must name a scratch server; every caller is bound.
     // The incident ran from a script, so the scripts a command runs count too.
     if let Some(reason) = command.and_then(|c| {
         let env = ServerEnv::from_process();

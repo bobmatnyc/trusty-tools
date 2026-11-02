@@ -8,7 +8,9 @@
 //! #5784), and `$TMUX` naming a socket inside a temp directory, so no tmux
 //! server is touched. The incident shape and `kill-session -a` deny naming
 //! the policy, inline and from a script; an explicit scratch `-S` is not
-//! refused by this floor.
+//! refused by this floor. #10665 r3: every row runs as the PM and as an
+//! engineer subagent (`agent_id`, `agent_type`), and covers the fail-closed
+//! rows, the inert-argument rows and the sandbox script (df-D77).
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_tmux_kill_server_10665::`.
 
 use crate::common;
@@ -24,9 +26,12 @@ const BYPASSES: [Option<(&str, &str)>; 3] = [
     Some(("TRUSTY_MPM_DISABLE_HOOKS", "1")),
 ];
 
-/// The guard's stdout for a PM-stamped Bash `command`, with `$TMUX` naming a
-/// socket under `root` and `env` added.
-fn guard(root: &Path, command: &str, env: &[(&str, &str)]) -> String {
+/// The two callers every row runs as: the PM, and an engineer subagent.
+const CALLERS: [Option<&str>; 2] = [None, Some("engineer")];
+
+/// The guard's stdout for a Bash `command` from the PM, or from a subagent
+/// of `agent` type, with `$TMUX` naming a socket under `root` and `env` added.
+fn guard(root: &Path, command: &str, env: &[(&str, &str)], agent: Option<&str>) -> String {
     let home = root.join("home");
     let project = root.join("project");
     std::fs::create_dir_all(home.join(".trusty-mpm")).expect("mkdir root");
@@ -55,13 +60,18 @@ fn guard(root: &Path, command: &str, env: &[(&str, &str)]) -> String {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn `tm hook --pm-guard`");
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "hook_event_name": "PreToolUse",
         "session_id": "s-1",
         "cwd": project.display().to_string(),
         "tool_name": "Bash",
         "tool_input": { "command": command },
     });
+    // #10665 r3: a subagent payload carries its id and type.
+    if let Some(agent) = agent {
+        payload["agent_id"] = serde_json::json!("a-123");
+        payload["agent_type"] = serde_json::json!(agent);
+    }
     child
         .stdin
         .take()
@@ -88,14 +98,57 @@ fn a_whole_server_kill_with_tmux_inherited_is_refused_under_each_bypass() {
         format!("bash {}", script.display()),
         format!("TMUX_TMPDIR={scratch} tmux kill-server"),
         format!("TMUX_TMPDIR={scratch} tmux kill-session -a"),
-        "tmux -L scratch kill-server".to_string(),
+        "tmux -L default kill-server".to_string(),
+        // #10665 r3 (df-D77): kill words no judged tmux command accounts for.
+        format!(
+            "cat > {s} <<'EOF'\ntmux kill-server\nEOF\nbash {s}",
+            s = script.display()
+        ),
+        format!("tee {} <<< 'tmux kill-server' && sh {0}", script.display()),
+        "awk 'BEGIN{system(\"tmux kill-server\")}'".to_string(),
+        "tclsh <<< 'exec tmux kill-server'".to_string(),
+        "alias t=tmux\nt kill-server".to_string(),
+        "ssh localhost tmux kill-server".to_string(),
+        "tmux kill-session -t =tm-ws-x".to_string(),
     ] {
         for bypass in BYPASSES {
-            let env: Vec<(&str, &str)> = bypass.into_iter().collect();
-            let out = guard(&root, &command, &env);
-            assert!(out.contains("\"deny\""), "{command} {bypass:?}: {out}");
-            assert!(out.contains("GP-050"), "{command} {bypass:?}: {out}");
-            assert!(out.contains("-S <absolute scratch socket>"), "{out}");
+            for agent in CALLERS {
+                let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+                let out = guard(&root, &command, &env, agent);
+                assert!(
+                    out.contains("\"deny\""),
+                    "{command} {bypass:?} {agent:?}: {out}"
+                );
+                assert!(
+                    out.contains("GP-050"),
+                    "{command} {bypass:?} {agent:?}: {out}"
+                );
+                assert!(out.contains("-S <absolute scratch socket>"), "{out}");
+            }
+        }
+    }
+}
+
+/// #10665 r3 (#10548): a command that only prints or searches for the words,
+/// and the sandbox script, are not refused by this floor, as either caller.
+#[test]
+fn inert_mentions_and_the_sandbox_script_are_not_refused_by_this_floor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sandbox = repo.join("scripts/sandbox_daemon.sh");
+    for command in [
+        "grep -rn kill-server crates/".to_string(),
+        "rg 'tmux kill-server' docs/".to_string(),
+        "echo \"never run tmux kill-server\"".to_string(),
+        "git commit -m \"guard tmux kill-server\"".to_string(),
+        "sed -n '/kill-server/p' file".to_string(),
+        "cat docs/x.md".to_string(),
+        format!("bash {} --help", sandbox.display()),
+    ] {
+        for agent in CALLERS {
+            let out = guard(&root, &command, &[], agent);
+            assert!(!out.contains("#10665"), "{command} {agent:?}: {out}");
         }
     }
 }
@@ -106,7 +159,21 @@ fn a_whole_server_kill_with_tmux_inherited_is_refused_under_each_bypass() {
 fn an_explicit_scratch_socket_is_not_refused_by_this_floor() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
-    let command = format!("tmux -S {} kill-server", root.join("s.sock").display());
-    let out = guard(&root, &command, &[]);
-    assert!(!out.contains("#10665"), "{out}");
+    let sock = root.join("s.sock").display().to_string();
+    // #10665 r3 (df-D77): `env -u TMUX` with an explicit scratch socket or a
+    // scratch `TMUX_TMPDIR`, and an `-L` label that is not the default.
+    for command in [
+        format!("tmux -S {sock} kill-server"),
+        format!("env -u TMUX tmux -S {sock} kill-server"),
+        format!(
+            "env -u TMUX TMUX_TMPDIR={} tmux kill-server",
+            root.display()
+        ),
+        "tmux -L dfg01 kill-server".to_string(),
+    ] {
+        for agent in CALLERS {
+            let out = guard(&root, &command, &[], agent);
+            assert!(!out.contains("#10665"), "{command} {agent:?}: {out}");
+        }
+    }
 }

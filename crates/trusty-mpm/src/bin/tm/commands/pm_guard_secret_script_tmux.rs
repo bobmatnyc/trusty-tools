@@ -14,7 +14,8 @@
 //! Residual: a script the guard cannot locate or read is the #8879 rule's
 //! fail-closed refusal, not this one's.
 //! Test: `a_kill_server_in_a_script_body_is_refused`,
-//! `a_scratch_socket_kill_in_a_script_is_allowed`.
+//! `a_scratch_socket_kill_in_a_script_is_allowed`,
+//! `the_sandbox_daemon_script_is_allowed`.
 
 use std::path::{Path, PathBuf};
 
@@ -138,5 +139,14 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    /// #10665 r3 (df-D77): the sandbox script stops its own server with
+    /// `env -i … tmux -S "$SOCK" kill-server`; running it is not refused.
+    #[test]
+    fn the_sandbox_daemon_script_is_allowed() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let command = "bash scripts/sandbox_daemon.sh --help";
+        assert_eq!(evaluate_script_body_tmux_kill(command, &repo, &env()), None);
     }
 }

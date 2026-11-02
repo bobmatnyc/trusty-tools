@@ -208,7 +208,8 @@ pub(super) fn may_run_tmux(text: &str, depth: usize) -> bool {
 /// Why: the shared segment splitter reads the `;` of tmux's `\;` separator as
 /// a shell separator, which leaves a segment ending in a lone `\` that does
 /// not lex. Both spellings give tmux the same `;` argument.
-fn quote_escaped_semicolons(command: &str) -> String {
+// #10665 r3: the whole-server kill walk splits segments the same way.
+pub(super) fn quote_escaped_semicolons(command: &str) -> String {
     let scan = QuoteScan::new(command);
     let bytes = command.as_bytes();
     let mut out = String::with_capacity(command.len());

@@ -58,4 +58,4 @@ When the guard fails (it panics, errors, or, in a release build, has not decided
 | GP-047 | `egress-architect-audit-unwritable` | Architect | yes | no unruled outward action | #10447 | An Architect egress allow stands only once its audit line is written. |
 | GP-048 | `egress-guard-panic` | PM, Architect, Agent | yes | the guard stays on | #8454 | An egress guard run that panics denies the call. |
 | GP-049 | `guard-timeout` | PM, Architect, Agent | yes | the guard stays on | #10600, #10641 | Release builds: a guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist. |
-| GP-050 | `tmux-kill-server` | PM, Architect, Agent | yes | checkpoint first | #10665 | tmux kill-server and kill-session -a run only with an explicit -S naming a scratch socket. |
+| GP-050 | `tmux-kill-server` | PM, Architect, Agent | yes | checkpoint first | #10665 | tmux kill-server and kill-session -a run only against a scratch server: an explicit scratch -S, a non-default -L, or env -u TMUX with a scratch TMUX_TMPDIR. |
