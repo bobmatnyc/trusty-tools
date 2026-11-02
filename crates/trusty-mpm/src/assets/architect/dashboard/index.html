@@ -2171,6 +2171,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       }
       if (j) ["briefs_abs", "tailnet", "console"].forEach((k) => { if (typeof j[k] === "string") d[k] = j[k]; });
       if (j && j.features && typeof j.features === "object") d.features = j.features;   /* #10571: which optional backends this install has */
+      if (j && Array.isArray(j.warnings)) d.warnings = j.warnings.filter((w) => typeof w === "string" && w);   /* #10606: e.g. Python below 3.11 */
     } catch (_) { /* no config: architect mode */ }
     return d;
   })();
@@ -2178,6 +2179,13 @@ html.lib-strip.rd-open body { padding-right: 0; }
   const featureOff = (name) => !!(CFG.features && CFG.features[name] === false);
   [["secrets", "sec-secrets"], ["cli_profiles", "sec-cliprof"]].forEach(([f, id]) => { if (featureOff(f)) { const s = document.getElementById(id); if (s) s.remove(); } });
   document.documentElement.setAttribute("data-features-off", ["secrets", "cli_profiles", "project_lifecycle"].filter(featureOff).join(" "));   /* read by the later page scripts */
+  /* #10606: the server's runtime warnings show as one line under the header; none, nothing shown */
+  if (CFG.warnings && CFG.warnings.length) {
+    const wb = document.createElement("p"); wb.id = "runtime-warning"; wb.setAttribute("role", "alert");
+    wb.textContent = "\u26a0 " + CFG.warnings.join(" \u00b7 ");
+    wb.style.cssText = "margin:0;padding:6px 12px;border-bottom:2px solid var(--ctx-warn, #b45309);font-weight:600;";
+    const hd = document.querySelector("header"); if (hd) hd.after(wb); else document.body.prepend(wb);
+  }
   const SESSION = CFG.mode === "session";
   document.documentElement.setAttribute("data-mode", CFG.mode);
   document.documentElement.setAttribute("data-tailnet", CFG.tailnet || "");   /* #10161: read by the reader's dashHosts */

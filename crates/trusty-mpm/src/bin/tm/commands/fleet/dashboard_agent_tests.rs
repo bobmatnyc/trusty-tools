@@ -499,3 +499,109 @@ fn a_non_login_home_gets_one_skipped_line_and_no_files() {
     assert!(!agent::plist_path(&home).exists());
     assert!(!agent::log_dir(&dir).exists());
 }
+
+/// A fake `python3` in `dir` that prints `version`, as the probe expects.
+#[cfg(unix)]
+fn fake_python(dir: &Path, version: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    let p = dir.join("python3");
+    std::fs::write(&p, format!("#!/bin/sh\necho {version}\n")).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// #10606: an older python3 first on PATH loses to a >= 3.11 one later; a
+/// host whose first python3 is already new enough keeps it.
+#[cfg(unix)]
+#[test]
+fn the_dashboard_prefers_a_python_at_or_above_the_floor() {
+    use agent::python;
+    let tmp = tempfile::tempdir().unwrap();
+    let old = fake_python(&tmp.path().join("old"), "3.9");
+    let new = fake_python(&tmp.path().join("new"), "3.12");
+    let path = std::env::join_paths([old.parent().unwrap(), new.parent().unwrap()]).unwrap();
+    let cands = python::candidates(Some(&path), &[]);
+    assert_eq!(cands, vec![old.clone(), new.clone()]);
+    let chosen = python::choose(&cands, &python::version).unwrap();
+    assert_eq!(chosen.path, new);
+    assert_eq!(chosen.version, Some((3, 12)));
+    assert!(!chosen.below_floor());
+
+    let path = std::env::join_paths([new.parent().unwrap(), old.parent().unwrap()]).unwrap();
+    let cands = python::candidates(Some(&path), &[]);
+    assert_eq!(python::choose(&cands, &python::version).unwrap().path, new);
+}
+
+/// #10606: with no python3 at or above 3.11 the first one still runs the
+/// dashboard, flagged below the floor so the warning path fires.
+#[cfg(unix)]
+#[test]
+fn the_dashboard_falls_back_to_the_first_python_below_the_floor() {
+    use agent::python;
+    let tmp = tempfile::tempdir().unwrap();
+    let first = fake_python(&tmp.path().join("a"), "3.9");
+    let broken = fake_python(&tmp.path().join("b"), "not-a-version");
+    let cands = python::candidates(
+        None,
+        &[
+            first.parent().unwrap().to_path_buf(),
+            broken.parent().unwrap().to_path_buf(),
+        ],
+    );
+    let chosen = python::choose(&cands, &python::version).unwrap();
+    assert_eq!(chosen.path, first);
+    assert_eq!(chosen.version, Some((3, 9)));
+    assert!(chosen.below_floor());
+    assert_eq!(python::choose(&[], &python::version), None);
+}
+
+/// A fake `python3` in `dir` with `body` as its shell script.
+#[cfg(unix)]
+fn fake_script(dir: &Path, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    let p = dir.join("python3");
+    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// The probe budget for the hang tests, and the slack the runner's pipe-drain
+/// wait (2 s) plus a loaded host may add.
+#[cfg(unix)]
+const PROBE: std::time::Duration = std::time::Duration::from_millis(500);
+#[cfg(unix)]
+const MARGIN: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// #10606: a shim that exits but leaves a child holding stdout is unknown,
+/// within the budget, and its group is killed.
+#[cfg(unix)]
+#[test]
+fn the_python_probe_gives_up_on_a_shim_that_leaves_stdout_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let py = fake_script(tmp.path(), "sleep 30 &\necho 3.12\nexit 0");
+    let t0 = std::time::Instant::now();
+    assert_eq!(agent::python::version_with(&py, PROBE), None);
+    assert!(t0.elapsed() < PROBE + MARGIN, "took {:?}", t0.elapsed());
+}
+
+/// #10606: a python3 that never exits is unknown within the budget.
+#[cfg(unix)]
+#[test]
+fn the_python_probe_gives_up_on_a_python_that_never_exits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let py = fake_script(tmp.path(), "sleep 30");
+    let t0 = std::time::Instant::now();
+    assert_eq!(agent::python::version_with(&py, PROBE), None);
+    assert!(t0.elapsed() < PROBE + MARGIN, "took {:?}", t0.elapsed());
+}
+
+/// #10606: a python3 that exits non-zero is unknown, so below the floor.
+#[cfg(unix)]
+#[test]
+fn the_python_probe_reads_a_failing_python_as_unknown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let py = fake_script(tmp.path(), "echo 3.12\nexit 3");
+    assert_eq!(agent::python::version_with(&py, PROBE), None);
+}

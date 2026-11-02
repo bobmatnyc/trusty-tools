@@ -1,0 +1,4 @@
+Fixed
+- The Architect dashboard now says when it runs on Python older than 3.11, or when `tmux` is not on its PATH: a `WARNING` line on stderr at startup, a `warnings` list in `/config.json`, and a one-line banner on the page. Before, the Projects view silently lost its TOML stack and config rows on old Python, and listed no live sessions without tmux. The tmux check is a PATH lookup and never runs tmux (#10606).
+- The dashboard LaunchAgent now picks the first `python3` that is 3.11 or newer among its candidates, and falls back to the first `python3` (with a warning from `tm fleet init`) when none is (#10606).
+- The LaunchAgent's `python3` version probe is now bounded: a `python3` that never exits, or that leaves a child holding its output, no longer hangs `tm fleet init`. Its process group is killed and the interpreter counts as below 3.11, so the dashboard warns (#10606).
