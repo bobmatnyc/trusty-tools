@@ -390,11 +390,22 @@ impl OpBreaker {
         }
     }
 
-    /// Trip, count the abandoned operation, and log it. Called only by the
+    /// Count the abandoned operation, trip, and log it. Called only by the
     /// party that settles an `OpSlot` as overrun, so once per operation.
+    ///
+    /// Why (#10707): a reader that sees `is_tripped()` must also see the count.
+    /// What: the count is sequenced before the Release store of `tripped`, so
+    /// an Acquire load that reads `true` happens-after the increment, and any
+    /// later `abandoned_ops()` load reads at least that value.
+    /// Test: `a_reader_that_sees_the_breaker_tripped_also_sees_the_abandoned_count`,
+    /// `a_dropped_caller_still_trips_the_breaker_at_the_budget`.
     fn abandon(&self, op: &'static str, palace: &str) -> OpBudgetError {
-        let err = self.exceeded(op, palace);
+        // #10707: count before tripping; the reverse order let a waiter on
+        // `is_tripped()` read `abandoned_ops() == 0`.
         let abandoned = self.abandoned.fetch_add(1, Ordering::Relaxed) + 1;
+        #[cfg(test)]
+        tests::record_abandon_midpoint(self);
+        let err = self.exceeded(op, palace);
         tracing::error!(
             palace,
             op,
