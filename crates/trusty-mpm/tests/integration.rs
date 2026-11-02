@@ -94,6 +94,7 @@ mod tm_hook_pm_guard;
 mod tm_hook_pm_guard_absolute_write_7228;
 mod tm_hook_pm_guard_architect_envfile_8939;
 mod tm_hook_pm_guard_architect_pane_8902;
+mod tm_hook_pm_guard_binary_operands_10672;
 mod tm_hook_pm_guard_build_lease;
 mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
