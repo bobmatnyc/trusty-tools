@@ -1,0 +1,58 @@
+
+✻ Sautéed for 12s · done 9:14 AM
+
+❯ [Peer] Fixture Architect note: the context bar is a cost threshold, not a hard cap. Save a checkpoint of the
+  example ledger, then stay quiet until the next bundle arrives. No clear or refresh now. Report the snapshot
+  path and hash here.
+
+  Called trusty-mpm (ctrl+o to expand)
+
+⏺ Bash(f=.trusty-mpm/sessions/fixture-window/session-20000101-090000.md; shasum -a 256 "$f"; wc -c < "$f"; tail -n 1
+      40 -  the example records are at a safe boundary; asked the peer at 09:10Z for
+      41 -  permission to checkpoint before compaction.
+      40 +  the example records are at a safe boundary. Peer 09:12Z: the bar is a
+      41 +  cost threshold, not a hard cap. No clear or refresh now.
+      42 +  Checkpoint saved 09:13:00Z:
+      43 +  .trusty-mpm/sessions/fixture-window/session-20000101-090000.md (sha256
+      44 +  0123abcd...ef, 1024 bytes).
+      45
+      46  ## Notes
+      47
+
+⏺ Bash(printf '\n## 2000-01-01T09:13:00Z checkpoint (example)\n- checkpoint saved: .trusty-mpm/sessions/fixture-win…)
+  ⎿  abc1234 fixture: checkpoint 09:13Z
+     0011223344556677
+  ⎿  Updated example/notes.md (+3 -0)
+      10
+      11  ## 2000-01-01T09:10:00Z ctx alert
+      12  - Poller 09:10:00Z: example ctx 260,000 (bar 250,000). Records at a safe boundary; asked
+           the peer for permission to checkpoint. Watermark advanced.
+      13 +
+      14 +## 2000-01-01T09:13:00Z checkpoint (example)
+      15 +- checkpoint saved: .trusty-mpm/sessions/fixture-window/session-20000101-090000.md, sha256 01
+          +23abcd00000000000000000000000000000000000000000000000000ef, 1024 bytes (verified).
+      16 +- No clear or refresh. Staying quiet until the next bundle.
+
+⏺ I saved a checkpoint of the example ledger. I did not clear or refresh.
+
+  - Snapshot: /fixture-root/proj/.trusty-mpm/sessions/fixture-window/session-20000101-090000.md
+  - Snapshot SHA-256: 0123abcd00000000000000000000000000000000000000000000000000ef (1,024 bytes)
+  - Checks: the checkpoint file exists and its size matches.
+  - State: example/notes.md is committed as abc1234.
+
+  I'll stay quiet until the next bundle arrives.
+
+  Dashboard: local · tail
+  0 items open: 0 decisions, 0 actions, 0 tasks.
+
+✻ Cooked for 20s · done 9:15 AM
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── tm-arch-fixture ─
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  TM 0.0.0 ● | fixture-proj ⎇ tm-arch-fixture | @example-org | ✻owner@example.com | Opus 5.5 | ctx 31% | $1.00 | ⏳9% 📅65…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+                                                                                                                              /rc active
+
+
+
