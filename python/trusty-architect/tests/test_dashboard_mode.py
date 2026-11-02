@@ -27,6 +27,26 @@ PAGE = serve.PAGE
 SESSION_CFG = serve.session_config("tm-apex Intent Ledger", "https://github.com/example/r/blob/main/")
 
 
+# #10606: a stub `tmux` (exit 1) first on PATH for the whole module, so no route reaches a real tmux server
+_STUB = _PATH = None
+
+
+def setUpModule():
+    global _STUB, _PATH
+    _STUB = tempfile.TemporaryDirectory()
+    stub = os.path.join(_STUB.name, "tmux")
+    with open(stub, "w") as f:
+        f.write("#!/bin/sh\nexit 1\n")
+    os.chmod(stub, 0o755)
+    _PATH = mock.patch.dict(os.environ, {"PATH": _STUB.name + os.pathsep + os.environ.get("PATH", "")})
+    _PATH.start()
+
+
+def tearDownModule():
+    _PATH.stop()
+    _STUB.cleanup()
+
+
 def start(store, config=None, **kw):
     srv = serve.DashboardServer(0, store, PAGE, config=config, **kw)
     threading.Thread(target=srv.serve_forever, daemon=True).start()

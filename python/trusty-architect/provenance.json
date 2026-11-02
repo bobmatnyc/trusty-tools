@@ -41,7 +41,7 @@
     "scripts/dashboard_jsonl.py": "2903240c181641decefa268a1aef868abcd2c87b294d0050912f6b87bcba30a0",
     "scripts/dashboard_media.py": "4ad5f67a155df44455de1c55760cdd33037d1c591ece24091a8cc3cee526d0b2",
     "scripts/dashboard_page.py": "e7e63b2d6d01f90e984437c946705484b48b1dbed1c9b8b2186c28ae74b60989",
-    "scripts/dashboard_projects.py": "f8a0c9f26f4bbaeca1abc6e381a60def880832e00f5c22966a1c02cc7514ad8c",
+    "scripts/dashboard_projects.py": "62b6e0ef82de6eb2eee7547ef841ae5c7e858bb9bef379e701ce85198e6b6dd5",
     "scripts/dashboard_qual.py": "cfca46862dcf7e56249a6b70ae6792f625595f7ff9f938f6319a83a76531d904",
     "scripts/dashboard_routes.py": "b7d42d990d4b98dd76fa3360c0e3180c48b72abdafb6a0857cd98ea104b313a0",
     "scripts/dashboard_schema.py": "0c639507bc06ad3855e47ee3f04582cbc6cf7f8de67f2e0a153fdbd48230d1a1",

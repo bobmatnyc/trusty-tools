@@ -26,6 +26,7 @@ Test: scripts/test_dashboard_projects.py
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -87,18 +88,24 @@ def read_capped(root, rel, cap=READ_CAP):
 
 
 def runtime_warnings(version=None):
-    """#10606: one line per reason this interpreter degrades the dashboard; [] on Python >= 3.11 with tomllib.
+    """#10606: one line per reason this host degrades the dashboard; [] on Python >= 3.11 with tomllib and tmux on PATH.
 
     Why: on Python < 3.11 tomllib is absent and _toml() returns {}, so every TOML stack and config row goes empty
-    with no message. What: version defaults to sys.version_info. The server writes each line to stderr at startup
-    and serves the list as /config.json `warnings`; the page shows it as a banner.
+    with no message; without tmux, tmux_panes() returns {}, so no live session is listed, also silently.
+    What: version defaults to sys.version_info. tmux is looked up on PATH (shutil.which), never run. The server writes
+    each line to stderr at startup and serves the list as /config.json `warnings`; the page shows it as a banner.
     Test: tests/test_dashboard_python_floor.py
     """
+    out = []
     major, minor = tuple(version or sys.version_info)[:2]
-    if (major, minor) >= PYTHON_FLOOR and tomllib is not None:
-        return []
-    return ["Python %d.%d runs this dashboard; it needs Python %d.%d or newer (tomllib), so Projects shows no stack "
-            "or config read from TOML files. Run the dashboard with python3 3.11 or newer." % ((major, minor) + PYTHON_FLOOR)]
+    if (major, minor) < PYTHON_FLOOR or tomllib is None:
+        out.append("Python %d.%d runs this dashboard; it needs Python %d.%d or newer (tomllib), so Projects shows no "
+                   "stack or config read from TOML files. Run the dashboard with python3 3.11 or newer."
+                   % ((major, minor) + PYTHON_FLOOR))
+    if shutil.which("tmux") is None:   # #10606: a PATH lookup only; running tmux could reach the default server
+        out.append("tmux is not on this dashboard's PATH, so live sessions cannot be listed. "
+                   "Install tmux and restart the dashboard.")
+    return out
 
 
 def _toml(text):

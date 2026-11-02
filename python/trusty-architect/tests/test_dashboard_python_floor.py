@@ -1,7 +1,8 @@
 """#10606: a dashboard on Python < 3.11 (no tomllib) says so on stderr, in /config.json `warnings` and on the page.
 
 Covers: runtime_warnings() for a missing tomllib and for a 3.9 version; the startup stderr line; the /config.json field
-on a live server with tomllib forced off; no warning anywhere on this interpreter (>= 3.11); the page's banner hook.
+on a live server with tomllib forced off; no warning anywhere on this interpreter (>= 3.11); the page's banner hook;
+the tmux line when tmux is not on PATH (looked up, never run), none with the module's stub tmux on PATH.
 Test: tests/test_dashboard_python_floor.py
 """
 import http.client
@@ -9,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -18,6 +20,26 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 PAGE = os.path.join(os.path.dirname(HERE), "templates", "dashboard", "index.html")
+
+
+# #10606: a stub `tmux` (exit 1) first on PATH for the whole module, so no route reaches a real tmux server
+_STUB = _PATH = None
+
+
+def setUpModule():
+    global _STUB, _PATH
+    _STUB = tempfile.TemporaryDirectory()
+    stub = os.path.join(_STUB.name, "tmux")
+    with open(stub, "w") as f:
+        f.write("#!/bin/sh\nexit 1\n")
+    os.chmod(stub, 0o755)
+    _PATH = mock.patch.dict(os.environ, {"PATH": _STUB.name + os.pathsep + os.environ.get("PATH", "")})
+    _PATH.start()
+
+
+def tearDownModule():
+    _PATH.stop()
+    _STUB.cleanup()
 
 
 def load():
@@ -76,6 +98,22 @@ class PythonFloor(unittest.TestCase):
         self.mod.warn_runtime(err)
         self.assertEqual(err.getvalue(), "")
         self.assertEqual(self.config()["warnings"], [])
+
+    def test_tmux_presence_on_path_decides_the_tmux_warning(self):
+        # #10606: absent -> one tmux line, in runtime_warnings, on stderr and in /config.json
+        empty = os.path.join(self.tmp, "no-tmux")
+        os.makedirs(empty)
+        with mock.patch.dict(os.environ, {"PATH": empty}):
+            lines = [w for w in self.dp.runtime_warnings((3, 12)) if "tmux" in w]
+            self.assertEqual(len(lines), 1, lines)
+            self.assertIn("live sessions cannot be listed", lines[0])
+            err = io.StringIO()
+            self.mod.warn_runtime(err)
+            self.assertIn("dashboard-serve: WARNING: tmux is not on this dashboard's PATH", err.getvalue())
+            self.assertEqual([w for w in self.config()["warnings"] if "tmux" in w], lines)
+        # present (the module's stub, found by a PATH lookup) -> no tmux line
+        self.assertEqual(os.path.dirname(shutil.which("tmux")), _STUB.name)
+        self.assertEqual([w for w in self.dp.runtime_warnings((3, 12)) if "tmux" in w], [])
 
     def test_the_page_shows_the_warnings_as_a_banner(self):
         with open(PAGE, encoding="utf-8") as f:
