@@ -100,11 +100,6 @@ const STILL_REFUSED_10570: &[(&str, &str)] = &[
         "dashboard_projects.py",
         "SECRET_NAME is the secret-name regex the project scan skips; it is the script's own deny list",
     ),
-    (
-        "self-clear.sh",
-        "#10599 owns its ROOT: `$ROOT/scripts/input-state.py` is a computed path, and \
-         ARCHITECT_ROOT is the override its tests and deployments set",
-    ),
 ];
 
 /// #10641: the text each [`STILL_REFUSED_10570`] row's refusal must carry, so a
@@ -123,10 +118,6 @@ const REFUSAL_TEXT_10570: &[(&str, &str)] = &[
     (
         "dashboard_projects.py",
         "names a secret-bearing file (#7266)",
-    ),
-    (
-        "self-clear.sh",
-        "runs the script `$ROOT/scripts/input-state.py`: its path is computed at run time",
     ),
 ];
 
