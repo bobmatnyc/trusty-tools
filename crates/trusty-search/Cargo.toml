@@ -64,7 +64,7 @@ name = "trusty-search"
 # touches src/** (quiet graph-refresh rebuild).
 # 0.62.0 (Refs #10110): minor — adds the search.index.files.remove verb and the
 # remove_files MCP tool; the Architect ruled the bump at 13:26Z 2026-10-22.
-version = "0.62.2"
+version = "0.63.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
@@ -259,7 +259,7 @@ trusty-common = { workspace = true, features = ["knowledge-document", "chat-atta
 # named below EXISTS ONLY FROM 0.4.0. Published 0.3.11 spells it `http-server`
 # and gates the axum listener ADR-0032 retired, so a registry resolve against
 # any 0.3.x cannot satisfy this edge at all.
-trusty-embedderd = { path = "../trusty-embedderd", version = "0.4", default-features = false, features = [
+trusty-embedderd = { path = "../trusty-embedderd", version = "0.5", default-features = false, features = [
     "daemon",
 ] }
 # Opt-in Python/MPS embedding sidecar launcher (epic #3524, slices 2-4). Pulls

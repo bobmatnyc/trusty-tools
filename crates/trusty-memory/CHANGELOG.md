@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.36.5] — 2026-11-02
+
+### Fixed
+
+- the uncached-palace console metrics test waits for the aborted KgWriter task before it reads the disk, which removes a flaky failure (Refs [#10515](https://github.com/bobmatnyc/trusty-tools/issues/10515))
+- `memory_note` and `memory_remember` no longer skip a `fact_key` slot rewrite as a near-duplicate. A new value that differs from the slot's occupant by a few characters, such as a step number, now replaces the occupant instead of leaving the stale value in recall. Writes without an admitted slot keep the 5-minute near-duplicate window (#10643).
+- A malformed `expires_at` on either tool is now an error even when the content would also trip a content gate; it no longer returns a "skipped" success envelope (#10643).
+- An HNSW operation abandoned at its budget is now counted before the store's breaker trips, so any reader that sees the breaker tripped also sees `abandoned_ops` at least 1. Before, a health read or test could catch the tripped breaker with a count of 0 (#10707).
+
 ## [0.36.4] — 2026-10-31
 
 ### Changed

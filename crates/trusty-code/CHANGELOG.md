@@ -6,6 +6,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.0] — 2026-11-02
+
+### Breaking
+
+- **`tcode serve` serves only its Unix socket.** The loopback HTTP/SSE listener is gone, so no `tcode` daemon binds a TCP port. `tcode serve` with no transport flag is now the persistent daemon on `<data dir>/trusty-code/trusty-code.sock` (`0600`, in a `0700` directory); it used to exit asking for `--stdio` or `--http`. `--stdio` is unchanged ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- `tcode serve --http` and `--port` are hard errors (exit 2) that name the socket the daemon answers on. `--project-socket` no longer requires `--http` ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- `tcode tui` autospawns `tcode serve [--project-socket] [--project <path>]`, without `--http --port 0`, and attaches over the socket as before ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- Rust API removed: `serve::http` (`build_axum_router`, `run_http`, the bearer-token and origin guard, `SSE_TICKET_PATH`), `serve::rest`, `serve::discovery` (the `http_addr` file), `serve::DEFAULT_HTTP_PORT`, `serve::run_http`, `http_credential` (`TCODE_DAEMON_TOKEN`), `session::TcodeConnector` and `workstreams::sse::routes`. `serve::uds::run_daemon`, `run_project_daemon` and `run_daemon_on` lose their `http_port` parameter, and `run_daemon_on`'s shutdown future must be `'static` ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- The daemon exits non-zero when its socket accept loop panics or returns without a shutdown signal, instead of exiting 0 or running on with no listener ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- The `axum` dependency and the `trusty-common` `daemon-token` feature are dropped; `axum-server` is a dev-only feature now ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- `scripts/compression_soak.py` and `compression_load_soak.py` start the daemon with its data directory under `/tmp`, so the socket path fits `sun_path` on macOS whatever `--out-dir` is ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+
+### Fixed
+
+- `session.attach` over the daemon's Unix socket is refused with JSON-RPC `-32601` and a message naming `session.events`, with `data.use_stream = "session.events"`. It used to answer success with the replay and then push nothing, because a socket connection is one frame in, one frame out. Open `session.events` with `"stream": true` for the replay and the live tail. `session.attach` over `tcode serve --stdio` is unchanged ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- `tcode tui` bounds opening a daemon stream (`session.events`, `workstream.events`) by the 15-second call budget instead of the 15-minute frame budget, so a daemon that stops reading the request no longer holds the client for fifteen minutes (#7216).
+- `tcode run-task --json` on the default daemon path now carries `transcript`, `turns`, `usage` and `cost_usd`, read from the run's own daemon before it exits, so a caller gets per-run cost without `--legacy-in-process`. The human output gains a one-line usage footer, and the legacy report gains the same `turns` count (#8155).
+- A `run-task` report and `session.get_transcript` label each delegated turn with the agent the PM actually delegated to, such as `rust-engineer`, instead of always `python-engineer`; `TCODE_DEBUG_TRANSCRIPT` capture uses the same label (#8158).
+- `tcode tui` refuses to attach to a daemon whose build or version differs from its own, or that reports no build, with a message naming both builds, the daemon's pid and the restart steps. Two builds that both report `unknown` (a checkout without git) are told apart by version. A daemon whose `health` call fails gets its own message. The daemon's `tcode serve: starting` log entry now carries a `build` field (#8203).
+- Memory calls (`memory_envelope`, `recall_session`, the session memory sink) now refuse a trusty-memory daemon on an unsupported protocol with the named error, through the shared client check in trusty-common (#9538).
+- `tcode session list|status`, `tcode attach`, `tcode cancel` and `tcode transcript` talk to the running daemon on its Unix socket, starting one if none answers, the same way `tcode tui` does. They no longer spawn a `serve --stdio` child, which knew no session but its own, so `session list` against a live daemon now lists that daemon's sessions. A daemon whose project cannot be verified is an error, not an empty listing. `attach` tails `session.events` and also ends on a cancelled session (#10169).
+- The `tcode` CLI's stdio client returns only a true response (`result` or `error`, no `method`) to the awaited request id. A server request that reused the id was returned as the call's result; it is now skipped and logged (#10360).
+- The `tcode` CLI's stdio client rejects a daemon stdout line over 16 MiB with an error instead of buffering it whole, then resumes at the next newline; reads are now cancel-safe under the call timeout. The warn log for a frame that reuses the awaited id truncates the child-supplied method (#10360).
+
+### Changed
+
+- The project picker reads trusty-mpm's project registry with `mpm.projects.registry.list` on the daemon's Unix socket (`TRUSTY_MPM_SOCKET` pins it), not `GET http://127.0.0.1:7880/api/v1/projects`; `TRUSTY_MPM_URL` no longer applies. An absent socket or an error answer degrades to the filesystem-only roster (`source: fs_only`) as before (#6288).
+- The `default_http_port_does_not_collide_with_known_siblings` guard no longer reserves 7880 for `trusty-mpm`: the daemon serves its Unix socket only and binds no TCP port since #6288 S3a (#6288).
+- `tcode` no longer compiles in any agent or skill text. Its 12 own agents (the 8 built-in defaults and the 4 read-only forks) are read from content `agents/trusty-code/`, its 28 default skills from `instructions/trusty-code/skills/`, and the 4 skill files a composed agent points at from the shared `skills/<name>.md`, through the same resolver `tm` uses: the trusty-tools checkout above the cwd, else the installed content bundle. With no content installed no built-in agent or default skill loads: `tcode run-task <agent>` fails naming `tm content update` and the offline `tm content install --from`, and `agents.list` answers from disk agents only, under one ERROR line. A content release older than this change does not carry these files: run `tm content update` (#9013).
+- `SkillError` gains a `Content` variant, returned when a skill cannot be read because no content is installed or the release lacks the file (#9013).
+
+### Removed
+
+- `fs_browse::mpm_registry::DEFAULT_MPM_DAEMON_URL` (`http://127.0.0.1:7880`). The project picker reaches the trusty-mpm daemon over its socket and has no HTTP address to default to (#6288).
+- `trusty_code::assets::DEFAULT_SKILLS` is now `DEFAULT_SKILL_NAMES`, a table of names only; the skill text is read from content.
+- `trusty_code::assets::EmbeddedSkill` and `tm_agent_sources` are removed, and so is `REFERENCED_SKILL_FILES`; the roster and the skill files an agent points at are read from content.
+- `EmbeddedAgent::Direct` no longer carries compiled-in text; it names the agent and its text is read from content `agents/trusty-code/`.
+
+### Security
+
+- A delegating PM can no longer write the bound project's source: its own `write_file`, `write_files`, `edit` and `bash` calls are denied, not asked, on both `run-task` paths. `delegate_to_agent` naming the delegator's own card (in any letter case) is refused at dispatch with guidance to use a specialist, so a delegator never runs its own card as a sub-agent and its `finish_task` gate cannot wedge. `--permission-mode allow-asks` and a remembered grant do not lift the lock. A `--no-delegate` run keeps those tools (#8288, #8206).
+
+### Documentation
+
+- The embedded `code-critic` and `code-analyzer` agent forks state that a review never runs `tm secrets`, the `trusty-secrets` CLI or any live-socket call (#7524).
+- The deployed-roster `permissions:` recovery in the agent loader is now documented as covering only cards deployed by a pre-#8199 build; current deploys carry the block themselves. No behaviour change. (#8199)
+
 ## [0.7.0] — 2026-10-10
 
 ### Added

@@ -6,6 +6,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.63.0] — 2026-11-02
+
+### Added
+
+- `index_status` `embed_window.window` now reports the sidecar's real input window, and the embed pass counts truncation against it (#9284). A sidecar that sends no window leaves it `null`.
+- Per-index searches report where their time went (#10195). The `search` log line and the new `meta.timings` reply object carry `resolve_ms` (index lookup, including a cold lazy load), `lock_ms`, `embed_ms`, `vector_ms`, `lexical_ms`, `ripgrep_ms`, `fusion_ms`, `rehydrate_wait_ms`, `total_ms`, and whether the query started a corpus rehydrate (`rehydrate_ran`) or ran while the vector index promoted its mmap view (`hnsw_promoted`).
+- `latency_ms` now starts before the index is resolved, so a search that lazy-loads a cold index counts the load.
+- A search cancelled at the query deadline logs `query_timeout` at WARN with `index_id`, the truncated `query`, the `stage` it was in and `elapsed_ms`.
+- `search_all` writes one `info` line per call (`search_all`) naming its target index ids, the indexes searched, `embed_ms` and `latency_ms`; it logged only at debug before.
+- The rehydrate log line adds `index_id` and the stage split `scan_ms`, `sort_ms`, `entities_ms`, `bm25_build_ms` and `commit_ms` beside `rehydrate_ms`.
+- New and changed chunks that exceed the embedder window are now split into window-sized chunks before they embed (#10481). Each window is its own chunk with its own line-span id, vector, BM25 document and corpus row, so text past the window is visible to the vector lane and `embed_window.truncated` stays flat for new files. Only the inline embed paths split (`index_file` and the full-pipeline reindex of an index that opts out of `defer_embed`); existing chunks, the deferred catch-up pass and embedders that report no window or tokenizer are unchanged. `GET /indexes/:id/status` reports `embed_window.chunks_split`.
+- The text sent to the embedder for those chunks starts with a deterministic `// path: <file> :: <Kind> <symbol>` header that counts against the window. The header is never stored and never reaches BM25. An index now holds headed vectors for new and changed files beside unheaded vectors for existing ones until it is reindexed with `force`.
+- Each search hit the BM25 lane returned now carries `bm25_raw`, the BM25 engine's own score before fusion (#10498). The field is absent for a vector-only, KG-only or ripgrep-only hit, and `compact` mode drops it. `score` and the ranking are unchanged. A debug log line per query lists the top 10 BM25 hits with chunk id, raw score, BM25 rank and fused rank, keyed by a hashed query id, never the query text.
+- The default deferred-embed path now splits new and changed chunks at the embedder window when it parses them (#10504), so a long function is stored as window-sized chunks from the first commit and `embed_window.truncated` stays flat for new files on a default index. The window is the embedder's reported one, else the MiniLM tokenizer's maximum length (256) from the model cache; with neither, nothing splits. Stored chunks are never rewritten, so existing indexes keep their whole chunks until a forced reindex. `index_file` and the inline reindex also split before a lazy sidecar has reported its window, using the same assumed 256. `TRUSTY_DEFERRED_WINDOW_SPLIT=0` is a full rollback to #10481's behaviour: no deferred split, no catch-up header, and no assumed window, so a split needs a reported window.
+- The deferred catch-up now sends the `// path: <file> :: <Kind> <symbol>` header with each chunk it embeds for the first time, when header and chunk fit the window. The header is embed-only: stored text and BM25 never carry it.
+- `search.project.ensure` (MCP `ensure_project`) finds or creates the one pinned index of a trusty-mpm project and queues its first reindex once; a repeat call returns the same id and queues nothing. A root that contains, or sits inside, a registered root is refused with `project_root_overlap` naming the overlapping index id (#10531).
+- The `std-v1` exclude profile (#10532). An index created with no explicit `exclude_globs` skips record directories (`owner-queue`, `owner-queue-archive`), `archive/` and `_archive/` directories, `.worktrees`, `*.db`, `*.sqlite*`, `*.lock` and `dashboard*.log`. Logs, backups, checkpoints, `actions.md`, usage and dashboard JSON are scoped to a `local/` directory. The `archive/` rule also drops repo docs and any code module under such a directory; an explicit `exclude_globs` list or a `PATCH` overrides it. The resolved profile name and hash are stored on the index and `index_status` reports `profile: std-v1@<hash>` (`custom@<hash>` for a caller list, `null` for an index persisted before this release).
+- `PATCH /indexes/:id/config` accepts `profile: "std-v1"`. A `PATCH` that carries `profile` or `exclude_globs` removes the indexed files the new list excludes, through the `search.index.files.remove` machinery, and runs no reindex; the reply carries `profile` and `profile_purge`. A repeat `PATCH` finishes a purge that failed part-way.
+- `search.project.ensure` applies the profile on create (`.trusty-search.yaml` exclude list, then the new `exclude` argument, then `std-v1`) and answers `profile_applied: true`, `profile` and `profile_source`.
+- `trusty-search index embed-missing`, the `search.index.embed_missing` socket method and the `embed_missing` MCP tool embed only the chunks that have no vector and settle the semantic stage, so an index left `degraded` by an embedder fault no longer needs a full reindex. `dry_run` reports the gap; a repeat run with nothing missing is a no-op; a dead embedder is refused before the stage is touched (#10551).
+- The daemon retries a `Failed` semantic stage on its own: a ticker probes the embedder with a 30 s to 15 min doubling backoff and resumes the stage once it answers, giving up after 5 resumes that fail again (#10551).
+
+### Fixed
+
+- A graph compaction or precision backfill now searches every key with its own vector after every rebuild, single-threaded or not, and re-inserts any survivor the build left unreachable, so a rebuilt index never serves a stranded vector; the count is logged as `re-linked N stranded vectors after rebuild` (#9450).
+- The `index_file` reply now counts the chunks committed after the window split (the windows), not the chunks the parser produced (#10504). A long function stored as 9 windows used to answer `chunks: 1`.
+
+### Changed
+
+- The create-index collision and allowlist tests now call `create_index_report`, the core the socket serves, through a `create_answer` test helper instead of the test-only `create_index_handler` shim (#9939, no runtime change).
+- `exclude_globs` now match the path relative to the index root, for every index, not only `std-v1`. A checkout under a directory named `archive` or `.worktrees` no longer loses its files to a glob that named a directory above the root. A glob that starts with `/` still matches the absolute path. A relative glob that embeds the root's own directory name (`proj/src/**`) no longer matches.
+- `PATCH /indexes/:id/config` with `profile` or `exclude_globs` now answers `409` while a reindex or deferred embed pass holds the index, and changes nothing. Retry once it completes.
+
+### Removed
+
+- Test-only HTTP handler shims for the index-file, remove-file, chunks, grep, call-chain and contributed-graph routes; their tests now call the `*_report` cores the socket serves (#9939, no runtime change).
+- Test-only HTTP handler shims for the logs-tail, admin-stop, index-config get/patch and quantize routes; their tests now call the `*_report` cores the socket serves (#9939, no runtime change).
+- Test-only HTTP handler shims for the index-status, graph, list-indexes and delete-index routes; their tests now call the `*_report` cores the socket serves (#9939, no runtime change).
+- Test-only HTTP handler shim for the health route; its tests now call `health_report`, the core the socket serves (#9939, no runtime change).
+- Test-only HTTP handler shims for the single-index and global search routes; their tests now call `search_report` and `global_search_report`, the cores the socket serves (#9939, no runtime change).
+- Test-only HTTP handler shims for the create-index, relocate-index and reindex routes, the last of the #9939 shims; their tests now call `create_index_report`, `relocate_index_report` and `reindex_report`, the cores the socket serves (#9939, no runtime change).
+
+### Security
+
+- Spreadsheet extraction now uses calamine 0.37, which reads `.xlsx`/`.xlsm` packages with the patched zip 9.0.5. calamine 0.36 pulled zip 8.6.0, which is inside the range of GHSA-m665-v7pm-7grj (a zip parser differential, `zip <= 9.0.4`).
+
 ## [0.62.1] — 2026-10-29
 
 ### Fixed

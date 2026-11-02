@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.2] — 2026-11-02
+
+### Added
+
+- Success frames carry an optional `result.window`, the model's `max_seq_length`, omitted when unknown (#9284).
+
+### Fixed
+
+- `trusty-embedderd-py --version` and `-V` print the version and exit 0 without bootstrapping the venv; they no longer create a lock or project dir (#10582).
+
 ## [0.2.0] — 2026-10-21
 
 ### Breaking
