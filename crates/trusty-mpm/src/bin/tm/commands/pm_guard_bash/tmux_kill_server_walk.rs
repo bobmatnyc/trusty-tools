@@ -4,17 +4,22 @@
 //! was let through: `awk 'BEGIN{system("tmux kill-server")}'`, `ssh host tmux
 //! kill-server`, an alias, or a script a heredoc or `tee` writes and the same
 //! command runs. The owner also wants no false refusal of a command that
-//! only prints or searches for the words (#10548).
-//! What: [`judge`] reads the shell text and, for every segment, here-document
-//! body and command substitution that spells a kill word, requires one of:
-//! a tmux command, judged here on its `-L`/`-S` words (`scratch_server`) with
-//! each command-string argument judged in turn; or a known-inert program
+//! only prints or searches for the words (#10548). Owner ruling Dac
+//! (2026-11-02) keeps every such finding log-only; only a fleet kill a tmux
+//! command spells is refused.
+//! What: [`Walk::judge`] reads the shell text and, for every segment,
+//! here-document body and command substitution that spells a kill word,
+//! requires one of: a tmux command, judged here on its `-L`/`-S` words
+//! (`scratch_server`) with each command-string argument judged in turn; a
+//! shell `-c` string or `eval` text, judged in turn; or a known-inert program
 //! printing to stdout (`echo`, `printf` without `-v`, `grep`/`rg`, `sed -n`
 //! without `-i`, `cat`, `git` with the words only in a `-m` value), piped
 //! only into readers (`head`, `wc`, …). A here-document body counts as an
-//! argument of the program its operator line feeds. Anything else refuses.
-//! Test: `a_kill_word_no_tmux_hit_accounts_for_is_refused`,
-//! `a_kill_word_in_an_inert_argument_is_allowed`.
+//! argument of the program its operator line feeds. A fleet kill is `Err`;
+//! anything else is noted in [`Walk::soft`] and the walk goes on.
+//! Test: `a_kill_word_no_tmux_hit_accounts_for_is_log_only`,
+//! `a_kill_word_in_an_inert_argument_is_allowed`,
+//! `wrapped_nested_and_chained_kills_are_refused`.
 
 use super::super::super::architect_pane_parse::{quote_escaped_semicolons, tmux_hits};
 use super::super::super::command_substitutions;
@@ -32,93 +37,156 @@ const READERS: &[&str] = &[
     "egrep", "fgrep", "rg",
 ];
 
-/// `Err` naming why a kill word `text` spells is not accounted for. `script`
-/// is the whole command or script body, which holds the assignments.
-pub(super) fn judge(text: &str, script: &str, depth: usize, env: &ServerEnv) -> Result<(), String> {
-    if depth > MAX_DEPTH {
-        return Err("it nests deeper than the guard reads".into());
-    }
-    let text = quote_escaped_semicolons(text);
-    let scan = HeredocBodies::scan(&text);
-    let mut spans = Vec::new();
-    for body in scan.bodies() {
-        let (start, end) = body.span;
-        if names_whole_server_kill(&text[start..end]) && !inert_heredoc(&text, body.operator_line) {
-            return Err(
-                "a here-document names one, and the program it feeds may run or \
-                 keep it"
-                    .into(),
-            );
-        }
-        spans.push(body.span);
-    }
-    for sub in command_substitutions(&text) {
-        if names_whole_server_kill(sub.text()) {
-            judge(sub.text(), script, depth + 1, env)?;
-        }
-    }
-    let flat = blank_spans(&text, &spans);
-    let segs = segments(&flat);
-    for (n, seg) in segs.iter().enumerate() {
-        if !names_whole_server_kill(&without_substitutions(&seg.text)) {
-            continue;
-        }
-        match wrapped_command(&seg.text) {
-            // Its body is listed as the segments that follow.
-            WrappedCommand::Inner(_) => continue,
-            WrappedCommand::Unlexable => {
-                return Err("a wrapper the guard cannot read names one".into());
-            }
-            WrappedCommand::None => {}
-        }
-        let Some(argv) = shlex::split(&seg.text) else {
-            return Err("a command naming one does not parse".into());
-        };
-        let positions = program_positions(&argv);
-        if let Some(&(pos, _)) = positions
-            .iter()
-            .find(|(_, p)| p.eq_ignore_ascii_case("tmux"))
-        {
-            tmux_command(&argv, pos, script, depth, env)?;
-            continue;
-        }
-        if !(inert(&seg.text) && reads_only(&segs[n + 1..])) {
-            let first = argv.first().map_or("", String::as_str);
-            let program = positions.first().map_or(first, |(_, p)| p.as_str());
-            return Err(format!(
-                "`{program}` may run it where the guard cannot read its server"
-            ));
-        }
-    }
-    Ok(())
+/// Shells whose `-c` string the walk judges as shell text (#10665, ruling Dac).
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh"];
+
+/// One walk over a command or script body (#10665, ruling Dac).
+pub(super) struct Walk<'a> {
+    /// The whole command or script body, which holds the assignments.
+    script: &'a str,
+    env: &'a ServerEnv,
+    /// The first log-only finding: the call runs and the hook records it.
+    pub(super) soft: Option<String>,
 }
 
-/// Judge one tmux command: each hit of its argv, with the socket made
-/// explicit (`socket::explicit_argv`), then each command-string argument.
-fn tmux_command(
-    argv: &[String],
-    pos: usize,
-    script: &str,
-    depth: usize,
-    env: &ServerEnv,
-) -> Result<(), String> {
-    let argv = socket::explicit_argv(argv, pos, script, env);
-    let text = join(&argv).ok_or("a tmux command naming one holds a NUL byte")?;
-    for hit in tmux_hits(&text) {
-        if let Some(why) = hit.opaque
-            && hit.targets.is_empty()
-        {
-            return Err(why.to_string());
-        }
-        judge_hit(&hit, env)?;
-    }
-    // A nested hit borrows the outer `-L`/`-S`; judge the string on its own.
-    for word in argv.get(pos + 1..).unwrap_or_default() {
-        if word.contains(char::is_whitespace) && names_whole_server_kill(word) {
-            judge(word, script, depth + 1, env)?;
+impl<'a> Walk<'a> {
+    /// A walk over `script` under the hook's `env`.
+    pub(super) fn new(script: &'a str, env: &'a ServerEnv) -> Self {
+        Self {
+            script,
+            env,
+            soft: None,
         }
     }
-    Ok(())
+
+    /// Keep the first log-only finding.
+    fn note(&mut self, why: impl Into<String>) {
+        if self.soft.is_none() {
+            self.soft = Some(why.into());
+        }
+    }
+
+    /// `Err` naming why a kill word `text` spells kills the fleet's server or
+    /// a `tm-` session; every other finding is noted and the walk goes on.
+    pub(super) fn judge(&mut self, text: &str, depth: usize) -> Result<(), String> {
+        if depth > MAX_DEPTH {
+            self.note("it nests deeper than the guard reads");
+            return Ok(());
+        }
+        let text = quote_escaped_semicolons(text);
+        let scan = HeredocBodies::scan(&text);
+        let mut spans = Vec::new();
+        for body in scan.bodies() {
+            let (start, end) = body.span;
+            if names_whole_server_kill(&text[start..end])
+                && !inert_heredoc(&text, body.operator_line)
+            {
+                self.note("a here-document names one, and the program it feeds may run or keep it");
+            }
+            spans.push(body.span);
+        }
+        for sub in command_substitutions(&text) {
+            if names_whole_server_kill(sub.text()) {
+                self.judge(sub.text(), depth + 1)?;
+            }
+        }
+        let flat = blank_spans(&text, &spans);
+        let segs = segments(&flat);
+        for (n, seg) in segs.iter().enumerate() {
+            if !names_whole_server_kill(&without_substitutions(&seg.text)) {
+                continue;
+            }
+            match wrapped_command(&seg.text) {
+                // Its body is listed as the segments that follow.
+                WrappedCommand::Inner(_) => continue,
+                WrappedCommand::Unlexable => {
+                    self.note("a wrapper the guard cannot read names one");
+                    continue;
+                }
+                WrappedCommand::None => {}
+            }
+            let Some(argv) = shlex::split(&seg.text) else {
+                self.note("a command naming one does not parse");
+                continue;
+            };
+            let positions = program_positions(&argv);
+            if let Some(&(pos, _)) = positions
+                .iter()
+                .find(|(_, p)| p.eq_ignore_ascii_case("tmux"))
+            {
+                self.tmux_command(&argv, pos, depth)?;
+                continue;
+            }
+            // #10665 (ruling Dac): a fleet kill in `sh -c '…'` or `eval` text
+            // is still a tmux command the guard reads.
+            if let Some(inner) = shell_text(&argv, &positions) {
+                self.judge(&inner, depth + 1)?;
+                continue;
+            }
+            if !(inert(&seg.text) && reads_only(&segs[n + 1..])) {
+                let first = argv.first().map_or("", String::as_str);
+                let program = positions.first().map_or(first, |(_, p)| p.as_str());
+                self.note(format!(
+                    "`{program}` may run it where the guard cannot read its server"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Judge one tmux command: each hit of its argv, with the socket made
+    /// explicit (`socket::explicit_argv`), then each command-string argument.
+    fn tmux_command(&mut self, argv: &[String], pos: usize, depth: usize) -> Result<(), String> {
+        let argv = socket::explicit_argv(argv, pos, self.script, self.env);
+        let Some(text) = join(&argv) else {
+            self.note("a tmux command naming one holds a NUL byte");
+            return Ok(());
+        };
+        for hit in tmux_hits(&text) {
+            if let Some(why) = hit.opaque
+                && hit.targets.is_empty()
+            {
+                self.note(why);
+                continue;
+            }
+            match judge_hit(&hit, self.env) {
+                Ok(()) => {}
+                Err(miss) if miss.fleet => return Err(miss.why),
+                Err(miss) => self.note(miss.why),
+            }
+        }
+        // A nested hit borrows the outer `-L`/`-S`; judge the string on its own.
+        for word in argv.get(pos + 1..).unwrap_or_default() {
+            if word.contains(char::is_whitespace) && names_whole_server_kill(word) {
+                self.judge(word, depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The shell text a segment runs in place: the `-c` string of a [`SHELLS`]
+/// program, or the words after `eval`, joined. `None` for anything else.
+fn shell_text(argv: &[String], positions: &[(usize, String)]) -> Option<String> {
+    let [(pos, program)] = positions else {
+        return None;
+    };
+    let args = argv.get(pos + 1..)?;
+    if program == "eval" {
+        return Some(args.join(" "));
+    }
+    if !SHELLS.contains(&program.as_str()) {
+        return None;
+    }
+    let mut takes_string = false;
+    for arg in args {
+        if arg.starts_with('-') {
+            takes_string |= !arg.starts_with("--") && arg.contains('c');
+            continue;
+        }
+        return takes_string.then(|| arg.clone());
+    }
+    None
 }
 
 /// `argv` as shell text that `tmux_hits` reads back word for word: a word

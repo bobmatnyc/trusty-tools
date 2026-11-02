@@ -431,10 +431,11 @@ pub static GUARD_TIMEOUT: GuardPolicy = policy(
 );
 
 /// #10665: an inherited `$TMUX` beats `TMUX_TMPDIR`; `-L` and `-S` override it.
+/// Owner ruling Dac: only the fleet-kill row enforces.
 pub static TMUX_KILL_SERVER: GuardPolicy = policy(
     "GP-050",
     "tmux-kill-server",
-    "tmux kill-server and kill-session -a run only against a scratch server: an explicit scratch -S, a non-default -L, or env -u TMUX with a scratch TMUX_TMPDIR.",
+    "No tmux kill-server or kill-session -a on the fleet server (default, $TMUX, -L default, a tm- server) and no kill-session of a tm- session; a scratch -S or -L is allowed. Other findings are log-only.",
     "#10665",
     ALL,
     true,

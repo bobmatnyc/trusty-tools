@@ -6,11 +6,13 @@
 //! What: `tm hook --pm-guard` runs as a PM with a scratch `$HOME`, no
 //! `TRUSTY_MPM_ALLOW_HOST_STATE` (so the guard's tmux listing is refused,
 //! #5784), and `$TMUX` naming a socket inside a temp directory, so no tmux
-//! server is touched. The incident shape and `kill-session -a` deny naming
-//! the policy, inline and from a script; an explicit scratch `-S` is not
-//! refused by this floor. #10665 r3: every row runs as the PM and as an
-//! engineer subagent (`agent_id`, `agent_type`), and covers the fail-closed
-//! rows, the inert-argument rows and the sandbox script (df-D77).
+//! server is touched. Owner ruling Dac: a `kill-server` or `kill-session -a`
+//! of the fleet's server (df-D7f), or a kill of a `tm-` session, denies
+//! naming the policy; an explicit scratch `-S` or `-L` is not refused by this
+//! floor; every other finding (script bodies, the fail-closed rows) runs and
+//! is recorded in the would-refuse store. #10665 r3: every row runs as the PM and as an
+//! engineer subagent (`agent_id`, `agent_type`), and covers the inert-argument
+//! rows and the sandbox script (df-D77).
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_tmux_kill_server_10665::`.
 
 use crate::common;
@@ -39,6 +41,8 @@ fn guard(root: &Path, command: &str, env: &[(&str, &str)], agent: Option<&str>) 
     common::write_disk_threshold(&home, 100);
     let tmux = format!("{},4242,0", root.join("tmux-0/default").display());
     let mut cmd = common::tm_command_in(&home);
+    // #10665 (ruling Dac): the would-refuse store lands under `root`.
+    cmd.env("TRUSTY_DATA_DIR_OVERRIDE", root.join("data"));
     cmd.args(["--url", "http://127.0.0.1:1", "hook", "--pm-guard"])
         .current_dir(&project)
         .env("CLAUDE_PROJECT_DIR", &project)
@@ -83,33 +87,36 @@ fn guard(root: &Path, command: &str, env: &[(&str, &str)], agent: Option<&str>) 
     String::from_utf8(out.stdout).expect("utf-8 stdout")
 }
 
-/// The incident shape and `kill-session -a` deny under each bypass, with
-/// `$TMUX` set, naming the policy entry and the safe form.
+/// The would-refuse lines recorded under `root` so far (#10665, ruling Dac).
+fn would_refuse_lines(root: &Path) -> Vec<String> {
+    let store = root.join("data/trusty-mpm/pm-guard-would-refuse.jsonl");
+    std::fs::read_to_string(store)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The incident shape, a fleet kill under each bypass with `$TMUX` set, and
+/// a `tm-` session kill deny, naming the policy entry and the safe form
+/// (#10665, owner ruling Dac).
 #[test]
 fn a_whole_server_kill_with_tmux_inherited_is_refused_under_each_bypass() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
     let scratch = root.join("scratch").display().to_string();
-    // The incident ran from line 38 of a scratch script.
-    let script = root.join("exp2.sh");
-    let body = format!("#!/bin/bash\nT={scratch}\nTMUX_TMPDIR=\"$T\" tmux kill-server\n");
-    std::fs::write(&script, body).expect("write script");
     for command in [
-        format!("bash {}", script.display()),
         format!("TMUX_TMPDIR={scratch} tmux kill-server"),
+        "tmux kill-server".to_string(),
+        // df-D7f: `kill-session -a` on the fleet server kills `tm-` sessions.
         format!("TMUX_TMPDIR={scratch} tmux kill-session -a"),
+        "tmux kill-session -a".to_string(),
         "tmux -L default kill-server".to_string(),
-        // #10665 r3 (df-D77): kill words no judged tmux command accounts for.
-        format!(
-            "cat > {s} <<'EOF'\ntmux kill-server\nEOF\nbash {s}",
-            s = script.display()
-        ),
-        format!("tee {} <<< 'tmux kill-server' && sh {0}", script.display()),
-        "awk 'BEGIN{system(\"tmux kill-server\")}'".to_string(),
-        "tclsh <<< 'exec tmux kill-server'".to_string(),
-        "alias t=tmux\nt kill-server".to_string(),
-        "ssh localhost tmux kill-server".to_string(),
+        // df-D7f: any `tm-` server holds fleet sessions (allowed at ba1eb15878).
+        "tmux -L tm-ws-y kill-server".to_string(),
+        "sh -c 'tmux kill-server'".to_string(),
         "tmux kill-session -t =tm-ws-x".to_string(),
+        "tmux kill-session -t tm-foo".to_string(),
     ] {
         for bypass in BYPASSES {
             for agent in CALLERS {
@@ -124,6 +131,49 @@ fn a_whole_server_kill_with_tmux_inherited_is_refused_under_each_bypass() {
                     "{command} {bypass:?} {agent:?}: {out}"
                 );
                 assert!(out.contains("-S <absolute scratch socket>"), "{out}");
+            }
+        }
+    }
+}
+
+/// #10665 (owner ruling Dac): every other finding of this floor runs — the
+/// incident's script, the fail-closed rows — and leaves one would-refuse
+/// line naming the rule.
+#[test]
+fn every_other_finding_is_logged_and_allowed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+    let scratch = root.join("scratch").display().to_string();
+    // The incident ran from line 38 of a scratch script.
+    let script = root.join("exp2.sh");
+    let body = format!("#!/bin/bash\nT={scratch}\nTMUX_TMPDIR=\"$T\" tmux kill-server\n");
+    std::fs::write(&script, body).expect("write script");
+    for command in [
+        format!("bash {}", script.display()),
+        format!(
+            "cat > {s} <<'EOF'\ntmux kill-server\nEOF\nbash {s}",
+            s = script.display()
+        ),
+        "awk 'BEGIN{system(\"tmux kill-server\")}'".to_string(),
+        "tclsh <<< 'exec tmux kill-server'".to_string(),
+        "ssh localhost tmux kill-server".to_string(),
+    ] {
+        for bypass in BYPASSES {
+            for agent in CALLERS {
+                let before = would_refuse_lines(&root).len();
+                let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+                let out = guard(&root, &command, &env, agent);
+                assert!(
+                    !out.contains("GP-050") && !out.contains("#10665"),
+                    "{command} {bypass:?} {agent:?}: {out}"
+                );
+                let lines = would_refuse_lines(&root);
+                assert_eq!(lines.len(), before + 1, "{command} {bypass:?} {agent:?}");
+                let last = lines.last().map_or("", String::as_str);
+                assert!(
+                    last.contains("tmux-kill-server:would-refuse"),
+                    "{command}: {last}"
+                );
             }
         }
     }
@@ -151,6 +201,8 @@ fn inert_mentions_and_the_sandbox_script_are_not_refused_by_this_floor() {
             assert!(!out.contains("#10665"), "{command} {agent:?}: {out}");
         }
     }
+    // #10665 (ruling Dac): an allowed scratch kill records nothing.
+    assert!(would_refuse_lines(&root).is_empty());
 }
 
 /// An explicit scratch `-S` outside the tmux socket directory is not this
@@ -164,6 +216,8 @@ fn an_explicit_scratch_socket_is_not_refused_by_this_floor() {
     // scratch `TMUX_TMPDIR`, and an `-L` label that is not the default.
     for command in [
         format!("tmux -S {sock} kill-server"),
+        "tmux -S /abs/scratch.sock kill-server".to_string(),
+        "tmux -L scratch1 kill-server".to_string(),
         format!("env -u TMUX tmux -S {sock} kill-server"),
         format!(
             "env -u TMUX TMUX_TMPDIR={} tmux kill-server",
@@ -176,4 +230,6 @@ fn an_explicit_scratch_socket_is_not_refused_by_this_floor() {
             assert!(!out.contains("#10665"), "{command} {agent:?}: {out}");
         }
     }
+    // #10665 (ruling Dac): an allowed scratch kill records nothing.
+    assert!(would_refuse_lines(&root).is_empty());
 }

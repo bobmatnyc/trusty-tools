@@ -1,4 +1,7 @@
-//! Tests for the whole-server kill floor (#10665). No test runs tmux.
+//! Tests for the whole-server kill floor (#10665). No test runs tmux, and
+//! no test touches a tmux socket: every `$TMUX` and `-S` is a path string.
+//! Owner ruling Dac: `refused` rows refuse, `logged` rows are log-only, and
+//! `None` rows are allowed silently.
 
 use super::*;
 
@@ -20,8 +23,77 @@ fn scratch() -> (tempfile::TempDir, String) {
     (dir, sock)
 }
 
+/// Whether the floor refuses `command` under [`fleet_env`].
 fn refused(command: &str) -> bool {
-    evaluate_tmux_kill_server(command, &fleet_env()).is_some()
+    refused_in(command, &fleet_env())
+}
+
+/// Whether the floor refuses `command` under `env`.
+fn refused_in(command: &str, env: &ServerEnv) -> bool {
+    matches!(
+        evaluate_tmux_kill_server(command, env),
+        Some(KillVerdict::Refuse(_))
+    )
+}
+
+/// #10665 (ruling Dac): whether `command` is a log-only would-refuse.
+fn logged(command: &str) -> bool {
+    matches!(
+        evaluate_tmux_kill_server(command, &fleet_env()),
+        Some(KillVerdict::LogOnly(_))
+    )
+}
+
+/// #10665 (ruling Dac, df-D7f): the rows the owner's ruling names, one each.
+#[test]
+fn the_ruling_dac_rows_refuse_or_allow() {
+    // kill-server under an inherited `$TMUX`.
+    assert!(refused("tmux kill-server"));
+    // Bare kill-server on the default server: no `$TMUX` at all.
+    let bare = ServerEnv {
+        tmux: None,
+        tmux_tmpdir: None,
+        uid: 501,
+    };
+    assert!(refused_in("tmux kill-server", &bare));
+    // kill-session of a `tm-` session.
+    assert!(refused("tmux kill-session -t tm-foo"));
+    assert!(refused_in("tmux kill-session -t tm-foo", &bare));
+    // A scratch `-S` and a scratch `-L` are allowed.
+    assert_eq!(
+        evaluate_tmux_kill_server("tmux -S /abs/scratch.sock kill-server", &fleet_env()),
+        None
+    );
+    assert_eq!(
+        evaluate_tmux_kill_server("tmux -L scratch1 kill-server", &fleet_env()),
+        None
+    );
+    // `-L default` is the default server.
+    assert!(refused("tmux -L default kill-server"));
+    // df-D7f: `kill-session -a` on the fleet server kills `tm-` sessions; on
+    // a scratch server it is allowed.
+    assert!(refused("tmux kill-session -a"));
+    assert!(refused_in("tmux kill-session -a", &bare));
+    assert_eq!(
+        evaluate_tmux_kill_server("tmux -S /abs/scratch.sock kill-session -a", &fleet_env()),
+        None
+    );
+}
+
+/// #10665 (ruling Dac): every other finding records and allows.
+#[test]
+fn every_other_finding_is_log_only() {
+    let dir = socket_dir(None, 501);
+    for command in [
+        "tmux -S rel.sock kill-server".to_string(),
+        "tmux -S \"$SOCK\" kill-server".to_string(),
+        format!("tmux -S {} kill-server", dir.join("scratch1").display()),
+        "python3 -c \"import os; os.system('tmux kill-server')\"".to_string(),
+        "awk 'BEGIN{system(\"tmux kill-server\")}'".to_string(),
+        "T=tmux; $T kill-server".to_string(),
+    ] {
+        assert!(logged(&command), "{command} must be log-only");
+    }
 }
 
 #[test]
@@ -31,10 +103,13 @@ fn the_incident_shape_is_refused_with_tmux_inherited() {
     for command in [
         format!("TMUX_TMPDIR={t} tmux kill-server"),
         format!("TMUX_TMPDIR=\"{t}\" tmux kill-server 2>/dev/null || true"),
+        // df-D7f: the `kill-session -a` form of the incident.
         format!("TMUX_TMPDIR={t} tmux kill-session -a"),
     ] {
-        let reason = evaluate_tmux_kill_server(&command, &fleet_env())
-            .unwrap_or_else(|| panic!("{command} must be refused"));
+        let Some(KillVerdict::Refuse(reason)) = evaluate_tmux_kill_server(&command, &fleet_env())
+        else {
+            panic!("{command} must be refused");
+        };
         assert!(reason.contains("#10665"), "{reason}");
         assert!(reason.contains("`$TMUX`"), "{reason}");
         assert!(
@@ -73,15 +148,15 @@ fn a_default_socket_or_label_is_refused() {
     let (_scratch, sock) = scratch();
     for command in [
         "tmux kill-server".to_string(),
+        // df-D7f: `kill-session -a` on the fleet server.
         "tmux kill-session -a".to_string(),
         "tmux kill-session -a -t keep".to_string(),
+        "tmux -Ldefault kill-session -a".to_string(),
         // #10665 r3: the default label, and the label of the `$TMUX` socket.
         "tmux -L default kill-server".to_string(),
-        "tmux -Ldefault kill-session -a".to_string(),
         format!("tmux -S {} kill-server", dir.join("default").display()),
         format!("tmux -S {} kill-server", dir.join("tm-ws-x").display()),
         "tmux -S /tmp/tmux-501/default kill-server".to_string(),
-        "tmux -S rel.sock kill-server".to_string(),
         "env -u TMUX tmux kill-server".to_string(),
         format!(
             "env -u TMUX tmux -S {} kill-server",
@@ -104,14 +179,19 @@ fn a_default_socket_or_label_is_refused() {
     };
     let default = socket_dir(Some(tmp.path()), env.uid).join("default");
     let command = format!("tmux -S {} kill-server", default.display());
-    assert!(evaluate_tmux_kill_server(&command, &moved).is_some());
+    assert!(refused_in(&command, &moved));
     // #10665 r3: `-L <label of the $TMUX socket>` is this session's server.
     let own = ServerEnv {
         tmux: Some(format!("{},4242,0", dir.join("tm-ws-x").display())),
         ..env
     };
-    assert!(evaluate_tmux_kill_server("tmux -L tm-ws-x kill-server", &own).is_some());
-    assert!(evaluate_tmux_kill_server("tmux -L tm-ws-y kill-server", &own).is_none());
+    assert!(refused_in("tmux -L tm-ws-x kill-server", &own));
+    // #10665 (ruling Dac, df-D7f): any `tm-` server holds fleet sessions.
+    // This row was allowed at ba1eb15878 and is refused now.
+    assert!(refused_in("tmux -L tm-ws-y kill-server", &own));
+    assert!(evaluate_tmux_kill_server("tmux -L scratch kill-server", &own).is_none());
+    // #10665 (ruling Dac): a relative `-S` is log-only.
+    assert!(logged("tmux -S rel.sock kill-server"));
 }
 
 #[test]
@@ -122,7 +202,6 @@ fn wrapped_nested_and_chained_kills_are_refused() {
         "nohup tmux kill-server",
         "sudo tmux kill-server",
         "echo $(tmux kill-server)",
-        "x=`tmux kill-session -a`",
         "sh -c 'tmux kill-server'",
         "bash -c \"TMUX_TMPDIR=/tmp/s tmux kill-server\"",
         "true; tmux kill-server",
@@ -130,10 +209,21 @@ fn wrapped_nested_and_chained_kills_are_refused() {
         "false || tmux -L default kill-server",
         "tmux list-sessions \\; kill-server",
         "tmux kill-ser",
-        "tmux kill-session -aC",
         "TMUX kill-server",
         "/usr/local/bin/tmux kill-server",
-        // #10665 r2: inline evaluator code, plain, wrapped and chained.
+        // #10665 (ruling Dac): a shell `-c` string and `eval` text are read.
+        "bash -lc 'tmux kill-server'",
+        "eval tmux kill-server",
+        "bash -c \"sh -c 'tmux -L default kill-server'\"",
+        // df-D7f: `kill-session -a` in a substitution.
+        "x=`tmux kill-session -a`",
+        "tmux kill-session -aC",
+    ] {
+        assert!(refused(command), "{command} must be refused");
+    }
+    // #10665 r2: inline evaluator code, plain, wrapped and chained; ruling
+    // Dac keeps it log-only (#10706).
+    for command in [
         "python3 -c \"import os; os.system('tmux kill-server')\"",
         "perl -e 'system \"tmux kill-server\"'",
         "node -e \"require('child_process').execSync('tmux kill-server')\"",
@@ -142,12 +232,13 @@ fn wrapped_nested_and_chained_kills_are_refused() {
         "true && perl -e 'system \"tmux kill-server\"'",
         "sh -c \"node -e 'require(1).execSync(\\\"tmux kill-server\\\")'\"",
     ] {
-        assert!(refused(command), "{command} must be refused");
+        assert!(logged(command), "{command} must be log-only");
     }
 }
 
+/// #10665 (ruling Dac): a kill the guard cannot read is log-only.
 #[test]
-fn an_unreadable_kill_fails_closed() {
+fn an_unreadable_kill_is_log_only() {
     for command in [
         "tmux kill-server 'unterminated",
         "$'\\x74mux' kill-server",
@@ -155,7 +246,7 @@ fn an_unreadable_kill_fails_closed() {
         "tmux $FLAGS kill-server",
         "tmux kill-session $ARGS -a",
     ] {
-        assert!(refused(command), "{command} must be refused");
+        assert!(logged(command), "{command} must be log-only");
     }
 }
 
@@ -232,21 +323,24 @@ fn a_socket_variable_is_read_from_its_one_assignment() {
             "{command}"
         );
     }
+    assert!(refused(
+        "SOCK=/tmp/tmux-501/default; tmux -S \"$SOCK\" kill-server"
+    ));
+    // #10665 (ruling Dac): a socket the guard cannot resolve is log-only.
     for command in [
-        "SOCK=/tmp/tmux-501/default; tmux -S \"$SOCK\" kill-server".to_string(),
         "tmux -S \"$SOCK\" kill-server".to_string(),
         format!("SOCK={sock}; SOCK=/tmp/tmux-501/default; tmux -S \"$SOCK\" kill-server"),
         format!("SOCK={sock}; read SOCK; tmux -S \"$SOCK\" kill-server"),
     ] {
-        assert!(refused(&command), "{command} must be refused");
+        assert!(logged(&command), "{command} must be log-only");
     }
 }
 
 /// #10665 r3 (df-D77): a kill word that no judged tmux command accounts for
-/// refuses — a script written and run in the same command, an interpreter,
-/// a remote shell, an alias.
+/// — a script written and run in the same command, an interpreter, a remote
+/// shell, an alias. Ruling Dac: log-only (#10706).
 #[test]
-fn a_kill_word_no_tmux_hit_accounts_for_is_refused() {
+fn a_kill_word_no_tmux_hit_accounts_for_is_log_only() {
     for command in [
         "cat > /tmp/k.sh <<'EOF'\nexport TMUX_TMPDIR=/tmp/s\ntmux kill-server\nEOF\nbash /tmp/k.sh",
         "tee /tmp/x.sh <<< 'tmux kill-server' && sh /tmp/x.sh",
@@ -262,7 +356,7 @@ fn a_kill_word_no_tmux_hit_accounts_for_is_refused() {
         "awk 'BEGIN{system(\"tmux kill-ser\")}'",
         "tmux -S /tmp/dfg01/s.sock run-shell 'awk \"BEGIN{system(\\\"tmux kill-server\\\")}\"'",
     ] {
-        assert!(refused(command), "{command} must be refused");
+        assert!(logged(command), "{command} must be log-only");
     }
 }
 
@@ -291,8 +385,8 @@ fn a_kill_word_in_an_inert_argument_is_allowed() {
 }
 
 /// #10665 r3 (df-D77): `kill-session` of a fleet session (`tm-…`, `=tm-…`)
-/// refuses on the default or `$TMUX` server; a scratch server allows it, and
-/// `kill-session -a` stays refused.
+/// refuses on the default, `$TMUX` or a `tm-` server; a scratch server
+/// allows it. `kill-session -a` naming a `tm-` session refuses too.
 #[test]
 fn a_fleet_session_kill_needs_a_scratch_server() {
     let (_dir, sock) = scratch();
@@ -301,6 +395,7 @@ fn a_fleet_session_kill_needs_a_scratch_server() {
         "tmux kill-session -t =tm-ws-x",
         "tmux -L default kill-session -t tm-ws-x:0",
         "tmux kill-session -a -t tm-ws-x",
+        "tmux -L tm-ws-x kill-session -t tm-ws-x",
     ] {
         assert!(refused(command), "{command} must be refused");
     }

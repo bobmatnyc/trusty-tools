@@ -11,6 +11,9 @@
 //! `kill_server::evaluate_tmux_kill_server`, then the scripts that body
 //! runs, to `MAX_SCRIPT_DEPTH`. A body in another language that names a
 //! whole-server kill refuses: the guard cannot read it as shell.
+//! Owner ruling Dac (2026-11-02): this rule is log-only. Its finding is a
+//! would-refuse the hook records; the call runs. Script-body bypasses are
+//! #10706's scope.
 //! Residual: a script the guard cannot locate or read is the #8879 rule's
 //! fail-closed refusal, not this one's.
 //! Test: `a_kill_server_in_a_script_body_is_refused`,
@@ -25,12 +28,13 @@ use super::{
     without_comment_lines,
 };
 use crate::commands::pm_guard_bash::kill_server::{
-    ServerEnv, evaluate_tmux_kill_server, names_whole_server_kill, refusal,
+    KillVerdict, ServerEnv, evaluate_tmux_kill_server, names_whole_server_kill, refusal,
 };
 use crate::commands::pm_guard_secret_script_self::{ToplevelRisk, resolve_self_paths_with};
 
-/// Refuse a Bash command that runs a script whose body runs a whole-server
-/// tmux kill without an explicit scratch `-S`: `Some(reason)` denies.
+/// The would-refuse reason for a Bash command that runs a script whose body
+/// runs a whole-server tmux kill without a scratch server, or `None`.
+/// #10665 (ruling Dac): the caller logs it and never refuses.
 pub(crate) fn evaluate_script_body_tmux_kill(
     command: &str,
     cwd: &Path,
@@ -74,7 +78,10 @@ fn judge(
         return names_whole_server_kill(&body)
             .then(|| refusal("a script body the guard cannot read as shell names one"));
     }
-    if let Some(why) = evaluate_tmux_kill_server(&without_comment_lines(&body), env) {
+    // #10665 (ruling Dac): either verdict is only a would-refuse here.
+    if let Some(KillVerdict::Refuse(why) | KillVerdict::LogOnly(why)) =
+        evaluate_tmux_kill_server(&without_comment_lines(&body), env)
+    {
         return Some(why);
     }
     let risk = ToplevelRisk::scan(&body, false, interpreter.contains("zsh"));
