@@ -435,7 +435,7 @@ pub static GUARD_TIMEOUT: GuardPolicy = policy(
 pub static TMUX_KILL_SERVER: GuardPolicy = policy(
     "GP-050",
     "tmux-kill-server",
-    "No tmux kill-server or kill-session -a on the fleet server (default, $TMUX, -L default, a tm- server) and no kill-session of a tm- session; a scratch -S or -L is allowed. Other findings are log-only.",
+    "No tmux kill-server or kill-session -a on the fleet server (default, $TMUX, -L default, a tm- server, case folded), and no kill-session there unless it names a literal non-tm- session; a scratch -S or -L is allowed. Other findings are log-only.",
     "#10665",
     ALL,
     true,

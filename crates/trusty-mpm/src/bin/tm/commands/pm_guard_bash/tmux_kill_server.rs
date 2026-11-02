@@ -141,7 +141,9 @@ impl ServerEnv {
 /// `a_kill_word_in_an_inert_argument_is_allowed`,
 /// `a_fleet_session_kill_needs_a_scratch_server`,
 /// `the_ruling_dac_rows_refuse_or_allow`,
-/// `every_other_finding_is_log_only`.
+/// `every_other_finding_is_log_only`,
+/// `a_case_variant_of_a_fleet_label_is_refused`,
+/// `an_untargeted_fleet_kill_session_is_refused`.
 pub(crate) fn evaluate_tmux_kill_server(command: &str, env: &ServerEnv) -> Option<KillVerdict> {
     let mentions_kill = names_whole_server_kill(command);
     // #10665 (ruling Dac): a command the guard cannot classify is log-only.
@@ -171,9 +173,10 @@ pub(crate) fn evaluate_tmux_kill_server(command: &str, env: &ServerEnv) -> Optio
 }
 
 /// `Err` naming why `hit` — a whole-server kill (`kill-server`,
-/// `kill-session -a`), or a `kill-session` of a fleet session — does not
-/// reach a scratch server; `fleet` when it reaches the fleet's server
-/// (#10665, ruling Dac; df-D7f: `kill-session -a` there kills `tm-` sessions).
+/// `kill-session -a`), or a `kill-session` that does not name a literal
+/// non-`tm-` session — does not reach a scratch server; `fleet` when it
+/// reaches the fleet's server (#10665, ruling Dac; df-D7f: `kill-session -a`
+/// there kills `tm-` sessions; r4: so does a bare `kill-session`).
 fn judge_hit(hit: &Hit, env: &ServerEnv) -> Result<(), Miss> {
     // #10665 r3: a `tm-` session lives on the fleet's server.
     let fleet = hit.targets.iter().find_map(|t| match t {
@@ -191,18 +194,47 @@ fn judge_hit(hit: &Hit, env: &ServerEnv) -> Result<(), Miss> {
             fleet: miss.fleet,
         });
     }
-    match fleet {
-        Some(target) if hit.verb == "kill-session" => {
-            scratch_server(&hit.server, env).map_err(|miss| Miss {
-                why: format!(
-                    "`tmux kill-session -t {target}` kills a fleet session and {}",
-                    miss.why
-                ),
-                fleet: miss.fleet,
-            })
-        }
-        _ => Ok(()),
+    if hit.verb != "kill-session" {
+        return Ok(());
     }
+    // #10665 r4: on the fleet server a `kill-session` must name a literal
+    // session that is not a `tm-` one; no `-t`, `%0`, `$0`, `@1`, `:` or an
+    // expansion kills the caller's own or an unknown session.
+    let Some(target) = hit.targets.iter().find(|t| !names_other_session(t)) else {
+        return Ok(());
+    };
+    let named = match target {
+        Target::Literal(t) | Target::Dynamic(t) => format!("-t {t}"),
+        _ => "with no `-t`".to_string(),
+    };
+    let what = if fleet.is_some() {
+        "kills a fleet session"
+    } else {
+        "may kill a fleet session, the caller's own included,"
+    };
+    scratch_server(&hit.server, env).map_err(|miss| Miss {
+        why: format!("`tmux kill-session {named}` {what} and {}", miss.why),
+        fleet: miss.fleet,
+    })
+}
+
+/// Whether a `kill-session` target names one literal session that is not a
+/// fleet (`tm-`) session (#10665 r4). An exact `=name` is read as written;
+/// a bare name is also refused when tmux's prefix or pattern match could
+/// reach a `tm-` session (`t`, `tm`, `*`). Case is folded.
+fn names_other_session(target: &Target) -> bool {
+    let Target::Literal(text) = target else {
+        return false;
+    };
+    let (exact, text) = match text.strip_prefix('=') {
+        Some(rest) => (true, rest),
+        None => (false, text.as_str()),
+    };
+    let session = text.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if session.is_empty() || session.starts_with(['%', '$', '@']) || session.starts_with("tm-") {
+        return false;
+    }
+    exact || !("tm-".starts_with(&session) || session.contains(['*', '?', '[']))
 }
 
 /// Whether the #9001 and #8902 floors leave `hit` to this one (#10665 r3):
@@ -242,14 +274,15 @@ fn scratch_server(server: &[String], env: &ServerEnv) -> Result<(), Miss> {
         ));
     }
     let path = canonical(path);
-    if env.inherited_socket().is_some_and(|s| s == path) {
+    // #10665 r4: APFS folds case, so every path compare here folds it too.
+    if env.inherited_socket().is_some_and(|s| same_ci(&s, &path)) {
         return Err(Miss::fleet(
             "names the socket `$TMUX` names: the server this session runs on",
         ));
     }
     if path
         .parent()
-        .is_some_and(|dir| env.socket_dirs().iter().any(|d| d == dir))
+        .is_some_and(|dir| env.socket_dirs().iter().any(|d| same_ci(d, dir)))
     {
         // #10665 (ruling Dac): an `-S` in the socket directory is the `-L` of
         // its file name; only a fleet name is enforced.
@@ -267,19 +300,32 @@ fn scratch_server(server: &[String], env: &ServerEnv) -> Result<(), Miss> {
 
 /// `Err` when `-L <label>` names a fleet server: `default`, the label of the
 /// `$TMUX` socket, or a `tm-` server such as a workspace's `tm-ws-…`.
+/// #10665 r4: the label is a file name on a case-insensitive volume (APFS),
+/// so `DEFAULT` and `TM-ws-1` are those servers too; case is folded.
 fn fleet_label(label: &str, env: &ServerEnv) -> Result<(), &'static str> {
-    if label == "default" {
+    let folded = label.to_ascii_lowercase();
+    if folded == "default" {
         return Err("names `-L default`, the default server");
     }
     let own = env.inherited_socket();
-    if own.as_deref().and_then(Path::file_name) == Some(label.as_ref()) {
+    let own_name = own
+        .as_deref()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str());
+    if own_name.is_some_and(|n| n.eq_ignore_ascii_case(label)) {
         return Err("names the `-L` label of the server `$TMUX` names: this session's");
     }
     // #10665 (ruling Dac): a `tm-` server holds fleet sessions.
-    if label.starts_with("tm-") {
+    if folded.starts_with("tm-") {
         return Err("names a `tm-` server, which holds fleet sessions");
     }
     Ok(())
+}
+
+/// Whether two paths are the same once ASCII case is folded (#10665 r4).
+fn same_ci(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
 /// `path` with its symlinks followed: its longest existing ancestor

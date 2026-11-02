@@ -80,6 +80,73 @@ fn the_ruling_dac_rows_refuse_or_allow() {
     );
 }
 
+/// #10665 r4: an `-L` label is a file name on APFS, which folds case, so a
+/// case variant of `default`, of the `$TMUX` label or of `tm-` is the fleet's
+/// server. A scratch label stays allowed.
+#[test]
+fn a_case_variant_of_a_fleet_label_is_refused() {
+    let dir = socket_dir(None, 501);
+    for command in [
+        "tmux -L DEFAULT kill-server".to_string(),
+        "tmux -L Default kill-session -a".to_string(),
+        "tmux -L TM-ws-1 kill-server".to_string(),
+        "tmux -L Default kill-session -t tm-x".to_string(),
+        format!("tmux -S {} kill-server", dir.join("DEFAULT").display()),
+    ] {
+        assert!(refused(&command), "{command} must be refused");
+    }
+    let own = ServerEnv {
+        tmux: Some(format!("{},4242,0", dir.join("tm-ws-x").display())),
+        ..fleet_env()
+    };
+    assert!(refused_in("tmux -L TM-WS-X kill-server", &own));
+    for command in ["tmux -L scratch kill-server", "tmux -L scr kill-session"] {
+        assert_eq!(
+            evaluate_tmux_kill_server(command, &fleet_env()),
+            None,
+            "{command}"
+        );
+    }
+}
+
+/// #10665 r4: on the fleet server a `kill-session` that names no literal
+/// non-`tm-` session kills the caller's own session or an unknown one; it is
+/// refused with and without `$TMUX`. On a scratch server it is allowed.
+#[test]
+fn an_untargeted_fleet_kill_session_is_refused() {
+    let bare = ServerEnv {
+        tmux: None,
+        tmux_tmpdir: None,
+        uid: 501,
+    };
+    for command in [
+        "tmux kill-session",
+        "tmux kill-session -t %0",
+        "tmux kill-session -t '$0'",
+        "tmux kill-session -t @1",
+        "tmux kill-session -t :",
+        "tmux kill-session -t tm",
+        "tmux kill-session -t '*'",
+        "tmux kill-session -t TM-x",
+    ] {
+        assert!(refused(command), "{command} must be refused");
+        assert!(refused_in(command, &bare), "{command} must be refused");
+    }
+    let (_dir, sock) = scratch();
+    for command in [
+        "tmux -L scr kill-session".to_string(),
+        format!("tmux -S {sock} kill-session"),
+        "tmux kill-session -t =scratch".to_string(),
+        "tmux kill-session -t scratch".to_string(),
+    ] {
+        assert_eq!(
+            evaluate_tmux_kill_server(&command, &fleet_env()),
+            None,
+            "{command}"
+        );
+    }
+}
+
 /// #10665 (ruling Dac): every other finding records and allows.
 #[test]
 fn every_other_finding_is_log_only() {

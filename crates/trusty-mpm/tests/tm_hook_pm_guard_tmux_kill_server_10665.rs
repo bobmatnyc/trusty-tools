@@ -114,6 +114,13 @@ fn a_whole_server_kill_with_tmux_inherited_is_refused_under_each_bypass() {
         "tmux -L default kill-server".to_string(),
         // df-D7f: any `tm-` server holds fleet sessions (allowed at ba1eb15878).
         "tmux -L tm-ws-y kill-server".to_string(),
+        // #10665 r4: APFS folds case; an untargeted kill-session is the caller's.
+        "tmux -L DEFAULT kill-server".to_string(),
+        "tmux -L Default kill-session -a".to_string(),
+        "tmux -L TM-ws-1 kill-server".to_string(),
+        "tmux -L Default kill-session -t tm-x".to_string(),
+        "tmux kill-session".to_string(),
+        "tmux kill-session -t %0".to_string(),
         "sh -c 'tmux kill-server'".to_string(),
         "tmux kill-session -t =tm-ws-x".to_string(),
         "tmux kill-session -t tm-foo".to_string(),
@@ -224,6 +231,9 @@ fn an_explicit_scratch_socket_is_not_refused_by_this_floor() {
             root.display()
         ),
         "tmux -L dfg01 kill-server".to_string(),
+        // #10665 r4: a scratch label, with and without a session target.
+        "tmux -L scratch kill-server".to_string(),
+        "tmux -L scr kill-session".to_string(),
     ] {
         for agent in CALLERS {
             let out = guard(&root, &command, &[], agent);
