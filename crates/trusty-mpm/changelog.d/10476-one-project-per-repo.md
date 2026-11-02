@@ -1,0 +1,2 @@
+Fixed
+- `tm tui` and the managed fleet reply show one project per repo. Registrations of one repo that differ only by case, a trailing `/` or `.git` now fold into one project node, and each of the repo's sessions is listed once under it. The node takes the smallest registered name (case-insensitive, then exact), and session-to-project binding uses the same rule instead of registry order. The registry on disk is unchanged (#10476).
