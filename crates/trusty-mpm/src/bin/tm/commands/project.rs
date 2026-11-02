@@ -54,15 +54,22 @@ pub(crate) async fn project(
     match action {
         ProjectAction::Init { dir } => {
             let path = resolve_dir(dir)?;
-            let body: serde_json::Value =
-                trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
-                    .post("/projects")
-                    .json(&serde_json::json!({ "path": path }))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await?;
+            let resp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+                .post("/projects")
+                .json(&serde_json::json!({ "path": path }))
+                .send()
+                .await?;
+            // #10586: a refused init (no `origin` remote) names its fix.
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                let detail = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                    .unwrap_or(text);
+                anyhow::bail!("tm project init failed ({status}): {detail}");
+            }
+            let body: serde_json::Value = resp.json().await?;
             let report = scaffold_project_dir(&path)?;
             for line in &report {
                 println!("  {line}");

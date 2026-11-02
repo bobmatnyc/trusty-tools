@@ -317,16 +317,44 @@ async fn parity_projects_list_agrees_across_transports() {
     assert_same("mpm.projects.list", body, result, &[]);
 }
 
+/// A fresh git repo at `dir/name`, with `origin` set when given (#10586).
+///
+/// Why: `POST /projects` refuses a directory with no `origin` remote, so every
+/// case that registers through it needs a real repo. `None` means git is not
+/// on this runner, and the caller returns early.
+fn git_repo(dir: &TempDir, name: &str, origin: Option<&str>) -> Option<std::path::PathBuf> {
+    let repo = dir.path().join(name);
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let git_ok = |args: &[&str]| {
+        trusty_common::git::command_in(&repo)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !git_ok(&["init", "-q", "."]) {
+        return None;
+    }
+    if let Some(url) = origin {
+        assert!(git_ok(&["remote", "add", "origin", url]), "add origin");
+    }
+    Some(repo)
+}
+
 /// Why this asserts the STORE and not just the two answers: register is a write,
 /// and two equal responses could both have persisted nothing.
 /// Test: this function IS the test.
 #[tokio::test]
+// #10586: register now writes the project registry, which seeds from `$HOME`.
+#[serial_test::serial]
 async fn parity_projects_register_agrees_across_transports() {
-    let (state, dir) = hermetic();
-    let over_http = dir.path().join("via-http");
-    let over_rpc = dir.path().join("via-rpc");
-    std::fs::create_dir_all(&over_http).expect("mkdir");
-    std::fs::create_dir_all(&over_rpc).expect("mkdir");
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(over_http) = git_repo(&dir, "via-http", Some("https://example.invalid/a.git")) else {
+        return; // no git on this runner
+    };
+    let Some(over_rpc) = git_repo(&dir, "via-rpc", Some("https://example.invalid/b.git")) else {
+        return;
+    };
 
     let (status, body) = http(
         &state,
@@ -367,20 +395,17 @@ async fn parity_projects_register_agrees_across_transports() {
 ///
 /// Test: this function IS the test.
 #[tokio::test]
+// #10586: register now writes the project registry, which seeds from `$HOME`.
+#[serial_test::serial]
 async fn register_project_op_disables_git_auto_maintenance() {
-    let (state, dir) = hermetic();
-    let repo = dir.path().join("existing-repo");
-    std::fs::create_dir_all(&repo).expect("mkdir");
-    let init_ok = trusty_common::git::command_in(&repo)
-        .args(["init", "-q", "."])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !init_ok {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(repo) = git_repo(&dir, "existing-repo", Some("https://example.invalid/r.git")) else {
         return; // no git on this runner
-    }
+    };
 
-    super::projects::register_project_op(&state, repo.clone());
+    super::projects::register_project_op(&state, repo.clone())
+        .await
+        .expect("a repo with an origin registers");
 
     let get = |key: &str| {
         trusty_common::git::command_in(&repo)
@@ -400,6 +425,98 @@ async fn register_project_op_disables_git_auto_maintenance() {
         Some("0"),
         "register_project_op must disable gc.auto on the repo it registers"
     );
+}
+
+/// `tm project init` then `tm project list` on an empty `$HOME` (#10586).
+///
+/// Why: init posted to `/projects`, which wrote only the in-memory map, while
+/// list reads registry B (`/api/v1/projects`), so list stayed empty. Red before
+/// the fix: the registry answers zero projects.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_then_registry_list_shows_the_project_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let url = "https://example.invalid/acme/gizmo.git";
+    let Some(repo) = git_repo(&dir, "gizmo", Some(url)) else {
+        return; // no git on this runner
+    };
+
+    let (status, init) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK, "{init}");
+    // A second init of the same directory must not add a second record.
+    let (status, _) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, list) = http(&state, "GET", "/api/v1/projects", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let projects = list["projects"].as_array().expect("projects array");
+    assert_eq!(projects.len(), 1, "init must persist one record: {list}");
+    assert_eq!(projects[0]["name"], init["name"], "{list}");
+    assert_eq!(projects[0]["repo_url"], url, "{list}");
+}
+
+/// Init with no `origin` remote is refused and writes nothing (#10586, owner
+/// ruling 2026-10-31).
+///
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_without_origin_is_refused_and_persists_nothing_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(repo) = git_repo(&dir, "no-origin", None) else {
+        return; // no git on this runner
+    };
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().is_some_and(|e| e.contains("origin")),
+        "the refusal must name the missing remote: {body}"
+    );
+    let error = rpc_err(
+        &rpc_router(&state),
+        "mpm.projects.register",
+        json!({ "path": repo }),
+    )
+    .await;
+    assert_eq!(error["code"], json!(CODE_INVALID_PARAMS), "{error}");
+
+    assert!(
+        state.project(&repo).is_none(),
+        "nothing in the in-memory map"
+    );
+    let registry = state.project_registry().await;
+    assert!(
+        registry.list().await.expect("list").is_empty(),
+        "nothing in registry B"
+    );
+}
+
+/// Init never overwrites or duplicates a record `tm projects register` wrote
+/// for the same `origin` (#10586).
+///
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_keeps_an_existing_registry_record_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let url = "https://example.invalid/acme/gizmo.git";
+    let Some(repo) = git_repo(&dir, "checkout-dir", Some(url)) else {
+        return; // no git on this runner
+    };
+    let seed = json!({ "name": "gnomish", "repo_url": url, "description": "kept" });
+    let (status, _) = http(&state, "POST", "/api/v1/projects", Some(seed)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let registry = state.project_registry().await;
+    let projects = registry.list().await.expect("list");
+    assert_eq!(projects.len(), 1, "{projects:?}");
+    assert_eq!(projects[0].name, "gnomish");
+    assert_eq!(projects[0].description.as_deref(), Some("kept"));
 }
 
 /// Test: this function IS the test.

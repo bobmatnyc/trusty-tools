@@ -1,0 +1,2 @@
+Fixed
+- `tm project init` now writes the project to the persistent registry, so `tm project list` shows it afterwards. Init keeps an existing record with the same name or the same `origin` URL and never overwrites it. A directory with no `origin` remote is refused with a 400 that names the fix (`git remote add origin <url>` or `tm projects register <name> --repo-url <url>`), and nothing is registered.

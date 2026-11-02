@@ -250,13 +250,9 @@ async fn current_project_found_and_missing() {
     // `GET /projects/current` returns the project for a registered path
     // and `404` for an unregistered one.
     let state = DaemonState::shared();
-    let _ = register_project(
-        State(Arc::clone(&state)),
-        Json(RegisterProject {
-            path: "/work/demo".into(),
-        }),
-    )
-    .await;
+    // #10586: `POST /projects` now needs a git `origin`; this case tests the
+    // lookup, so it seeds the in-memory map directly.
+    state.register_project("/work/demo".into());
 
     let ok = current_project(
         State(Arc::clone(&state)),

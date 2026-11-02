@@ -210,11 +210,27 @@ async fn execute_adopt_unknown_session_errors() {
 #[tokio::test]
 async fn register_project_succeeds() {
     // The `[Set Active]` flow registers a project by path.
+    // #10586: registration needs a git repo with an `origin` remote.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("discovered-demo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git_ok = |args: &[&str]| {
+        trusty_common::git::command_in(&repo)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !git_ok(&["init", "-q", "."])
+        || !git_ok(&["remote", "add", "origin", "https://example.invalid/d.git"])
+    {
+        return; // no git on this runner
+    }
+    let repo = repo.to_string_lossy().into_owned();
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
-    match executor.register_project("/work/discovered-demo").await {
+    match executor.register_project(&repo).await {
         CommandResult::ProjectRegistered { path } => {
-            assert_eq!(path, "/work/discovered-demo");
+            assert_eq!(path, repo);
         }
         other => panic!("expected ProjectRegistered, got {other:?}"),
     }

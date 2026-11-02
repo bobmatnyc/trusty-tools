@@ -1252,11 +1252,12 @@ pub struct RegisterProject {
 pub async fn register_project(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RegisterProject>,
-) -> Json<ProjectInfo> {
+) -> Result<Json<ProjectInfo>, DaemonError> {
     // #6288: the body is shared with `mpm.projects.register`.
-    Json(crate::daemon::rpc::registry::projects::register_project_op(
-        &state, body.path,
-    ))
+    // #10586: it now refuses a directory with no `origin` remote (400).
+    crate::daemon::rpc::registry::projects::register_project_op(&state, body.path)
+        .await
+        .map(Json)
 }
 
 /// `GET /projects` — snapshot of every registered project.
