@@ -578,6 +578,10 @@ debug = false
 [profile.test]
 debug = "line-tables-only"
 
+# #10619: hnsw_rs at opt-level 0 makes trusty-memory's 200-build HNSW replay test take tens of minutes.
+[profile.test.package.hnsw_rs]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "thin"
