@@ -338,7 +338,8 @@ impl Parser<'_> {
     fn escaped(&mut self) -> Result<char, String> {
         let c = self.peek().ok_or_else(|| self.fail("trailing backslash"))?;
         if !c.is_ascii_punctuation() {
-            return Err(self.fail("escape classes like \\d are not supported"));
+            // #10697: name the escape found; "like \d" sent a `\s` report after `\d`.
+            return Err(self.fail(&format!("escape class \\{c} is not supported")));
         }
         self.pos += 1;
         Ok(c)
