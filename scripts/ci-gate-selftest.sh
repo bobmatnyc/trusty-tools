@@ -11,7 +11,7 @@
 # What: asserts
 #   ci-gate-relevance: each mode's inputs, non-inputs, self-inclusion and
 #                      every fail-closed arm;
-#   ci-gate-verdict:   pass, fail, ordered skip, unordered skip, failed
+#   ci-gate-verdict:   pass, fail, ordered skip, unordered skip, PR-only skip, failed
 #                      classifier, missing need, unusable input;
 #   ci.yml wiring:     the ci-gate job's `needs:` equals the verdict table,
 #                      each job carries the context name the table claims,
@@ -102,8 +102,14 @@ needs_json() {
   done
   printf '%s' "$json"
 }
-# env -u: a fixture verdict must not append its table to the real job summary.
-verdict() { env -u GITHUB_STEP_SUMMARY NEEDS_JSON="$(needs_json "$@")" bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?"; }
+# env -u: a fixture verdict must not append its table to the real job summary,
+# and must not read the CI runner's own EVENT_NAME (unset is the fail-closed
+# default). verdict_on <event> pins the event.
+verdict() { env -u GITHUB_STEP_SUMMARY -u EVENT_NAME NEEDS_JSON="$(needs_json "$@")" bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?"; }
+verdict_on() {
+  local ev="$1"; shift
+  env -u GITHUB_STEP_SUMMARY EVENT_NAME="$ev" NEEDS_JSON="$(needs_json "$@")" bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?"
+}
 
 assert_eq "every context succeeded"                     "0" "$(verdict)"
 assert_eq "clippy failed (probe 7)"                     "1" "$(verdict clippy=failure)"
@@ -117,6 +123,17 @@ assert_eq "teardown skipped, classifier said nothing"   "1" "$(verdict teardown-
 assert_eq "tmux skipped under the teardown verdict"     "1" "$(verdict tmux-exact-targets=skipped out:teardown_guard_relevant=false)"
 assert_eq "an unfiltered job skipped (Clippy)"          "1" "$(verdict clippy=skipped out:docs_only=true)"
 assert_eq "a covered job missing from needs"            "1" "$(verdict drop:website-corpus)"
+# #10631: the pre-publish `test` aggregate runs only off pull_request.
+assert_eq "test succeeded on push"                      "0" "$(verdict_on push test=success)"
+assert_eq "test failed on push"                         "1" "$(verdict_on push test=failure)"
+assert_eq "test failed on pull_request"                 "1" "$(verdict_on pull_request test=failure)"
+assert_eq "test cancelled on push"                      "1" "$(verdict_on push test=cancelled)"
+assert_eq "test missing from needs"                     "1" "$(verdict_on push drop:test)"
+assert_eq "test skipped on push"                        "1" "$(verdict_on push test=skipped)"
+assert_eq "test skipped on workflow_dispatch"           "1" "$(verdict_on workflow_dispatch test=skipped)"
+assert_eq "test skipped on pull_request (by design)"    "0" "$(verdict_on pull_request test=skipped)"
+assert_eq "test skipped, EVENT_NAME unset (fail closed)" "1" "$(verdict test=skipped)"
+assert_eq "test skipped, EVENT_NAME empty (fail closed)" "1" "$(verdict_on '' test=skipped)"
 assert_eq "NEEDS_JSON not an object"                    "2" \
   "$(env -u GITHUB_STEP_SUMMARY NEEDS_JSON='[]' bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?")"
 assert_eq "NEEDS_JSON unset"                            "2" \
@@ -145,6 +162,9 @@ assert_eq "ci-gate runs whatever its needs did" "1" \
   "$(printf '%s\n' "$gate_job" | grep -c '^    if: \${{ always() }}$')"
 assert_eq "ci-gate reports as \"CI gate\"" "1" \
   "$(printf '%s\n' "$gate_job" | grep -c '^    name: CI gate$')"
+# shellcheck disable=SC2016  # a literal `${{ }}` expression, matched as text
+assert_eq "ci-gate verdict reads the event name (#10631)" "1" \
+  "$(printf '%s\n' "$gate_job" | grep -c '^          EVENT_NAME: \${{ github\.event_name }}$')"
 mismatch=""
 while IFS='|' read -r key context _; do
   [ -n "$key" ] || continue
@@ -165,6 +185,7 @@ assert_eq "changes exports both relevance outputs" "2" \
 lanes_job="$(sed -n '/^  trusty-common-lanes:$/,/^  # ----/p' "$ci")"
 assert_eq "trusty-common-lanes runs the lanes script" "1" \
   "$(printf '%s\n' "$lanes_job" | grep -c '^        run: \./scripts/test_trusty_common_lanes\.sh$')"
+# shellcheck disable=SC2016  # a literal `${{ }}` expression, matched as text
 assert_eq "trusty-common-lanes steps read the plan's trusty_common" "1" \
   "$(printf '%s\n' "$lanes_job" | grep -c 'SELECTED: \${{ needs\.affected-plan\.outputs\.trusty_common }}')"
 assert_eq "no single cargo test -p trusty-common step remains" "0" \

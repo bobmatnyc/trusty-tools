@@ -212,7 +212,9 @@ jobs:
   #   gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   #     --jq '.required_status_checks.contexts'
   # "Rust tests (pre-publish gate)" (the `test` aggregate below) is NOT
-  # required, and does not run on pull requests at all. GitHub does
+  # required, and does not run on pull requests at all.
+  # #10631: `CI gate` covers it instead — red on push when it is not green,
+  # and a skip passes only on pull_request. GitHub does
   # not create check runs for a workflow its path/branch filters skipped, so a
   # required context would sit pending forever and a docs-only PR would become
   # unmergeable instead of fast — the trap #4468 calls out and the one
@@ -1508,7 +1510,10 @@ jobs:
   # command itself; it only checks that every `test-shard` leg succeeded.
   #
   # It is NOT a required branch-protection context (see the `changes` job
-  # comment above for the live list), and it can no longer become one by
+  # comment above for the live list).
+  # #10631: `ci-gate` needs it, so a red shard turns `CI gate` red on push;
+  # the verdict's `pr_skip` row accepts its skip on pull_request only.
+  # It can no longer become required by
   # editing branch protection alone: it inherits `test-shard`'s
   # `github.event_name != 'pull_request'` condition, so on a PR it is skipped
   # rather than green. Making it required would need that condition dropped
@@ -2993,6 +2998,7 @@ jobs:
         fastembed-cache-selftest,
         website-corpus,
         changelog-fragment,
+        test,
       ]
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -3003,6 +3009,7 @@ jobs:
       - name: Every covered context passed, or was skipped by the classifier
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: bash scripts/ci-gate-verdict.sh
 
   # --------------------------------------------------------------------------
