@@ -53,10 +53,6 @@ fn an_explicit_scratch_socket_is_allowed() {
         format!("TMUX_TMPDIR=/tmp/x tmux -S '{sock}' kill-server"),
         format!("tmux -L x -S {sock} kill-session -a"),
         format!("tmux -S{sock} kill-session -a -t keep"),
-        // #10665 r2: the standing rule's form, `env`'s value flags skipped.
-        format!("env -u TMUX tmux -S {sock} kill-server"),
-        format!("env --unset TMUX tmux -S {sock} kill-server"),
-        format!("env --unset=TMUX tmux -S {sock} kill-server"),
     ] {
         assert_eq!(
             evaluate_tmux_kill_server(&command, &fleet_env()),

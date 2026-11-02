@@ -174,9 +174,7 @@ pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
     shell(command, 0, &mut scan);
     let moved = scan.dynamic_env || moves_server_env(command);
     for hit in &mut scan.hits {
-        // #10665 r2: an absolute `-S` names a whole-server hit's server
-        // outright, so a moved `TMUX`/`TMUX_TMPDIR` cannot redirect it.
-        if moved && !names_its_socket(hit) {
+        if moved {
             hit.opaque.get_or_insert(SERVER_ENV);
         }
         hit.retargeted = scan.retargets;
@@ -193,14 +191,6 @@ pub(super) fn explicit_socket(server: &[String]) -> Option<&str> {
         .filter_map(|pair| pair.get(1))
         .next_back()
         .map(String::as_str)
-}
-
-/// Whether `hit` reaches whole servers only (`kill-server`, `kill-session
-/// -a`) on an absolute [`explicit_socket`]: no environment picks its server.
-fn names_its_socket(hit: &Hit) -> bool {
-    !hit.targets.is_empty()
-        && hit.targets.iter().all(|t| *t == Target::Server)
-        && explicit_socket(&hit.server).is_some_and(|s| s.starts_with('/'))
 }
 
 /// Whether shell text that does not parse could run a deny-set tmux command:
