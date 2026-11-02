@@ -817,3 +817,45 @@ async fn implicit_registration_warns_and_registers_nothing_when_list_fails() {
         "projects.json must be left unchanged"
     );
 }
+
+/// `register_unless_present` keys on `owner/repo`, not the URL string (#10586).
+///
+/// Why: `tm project init` read the origin as `git@github.com:o/r.git` while
+/// the record said `https://github.com/o/r`; the old string compare missed it
+/// and `upsert` then refused on the shared key. The name, the same string and
+/// the stored key must each count as "present", and nothing is written then.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_unless_present_matches_on_project_key() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(make_project("gizmo"))
+        .await
+        .expect("seed");
+
+    let mut ssh = make_project("checkout-dir");
+    ssh.repo_url = "git@github.com:O/gizmo.git".into();
+    let same_name = Project {
+        repo_url: "https://github.com/o/elsewhere".into(),
+        ..make_project("gizmo")
+    };
+    for candidate in [ssh, same_name, make_project("gizmo")] {
+        let inserted = registry
+            .register_unless_present(candidate.clone())
+            .await
+            .expect("no store error");
+        assert!(!inserted, "{candidate:?} is already covered");
+    }
+    let all = registry.list().await.expect("list");
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].repo_url, "https://github.com/o/gizmo");
+
+    let fresh = registry
+        .register_unless_present(make_project("other"))
+        .await
+        .expect("insert");
+    assert!(fresh, "a new repo under a new name is inserted");
+    let other = registry.get("other").await.expect("get");
+    assert_eq!(other.project_key.as_deref(), Some("o/other"));
+}

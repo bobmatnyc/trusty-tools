@@ -519,6 +519,65 @@ async fn project_init_keeps_an_existing_registry_record_10586() {
     assert_eq!(projects[0].description.as_deref(), Some("kept"));
 }
 
+/// Init with an ssh `origin` keeps a record stored under the https form of the
+/// same repo and another name (#10586 critic HIGH).
+///
+/// Why: the old check compared URL strings, so it missed this record, and
+/// `upsert` then refused the insert on the shared `owner/repo` key: a 500
+/// "project registry write failed" on every init. Red on 545160a18b.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_with_ssh_origin_keeps_the_https_record_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let origin = "git@github.com:Acme/Gizmo.git";
+    let Some(repo) = git_repo(&dir, "checkout-dir", Some(origin)) else {
+        return; // no git on this runner
+    };
+    let stored = "https://github.com/acme/gizmo";
+    let seed = json!({ "name": "gnomish", "repo_url": stored });
+    let (status, _) = http(&state, "POST", "/api/v1/projects", Some(seed)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let registry = state.project_registry().await;
+    let projects = registry.list().await.expect("list");
+    assert_eq!(projects.len(), 1, "no second record: {projects:?}");
+    assert_eq!(projects[0].name, "gnomish");
+    assert_eq!(projects[0].repo_url, stored);
+}
+
+/// A registry write failure reaches the caller with the store's own text
+/// (#10586 critic MEDIUM).
+///
+/// Why: the generic "project registry write failed" hid the cause. A directory
+/// where `projects.json` belongs makes the locked read-modify-write fail with
+/// an I/O error on every platform and as any user.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_registry_write_failure_names_the_cause_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(repo) = git_repo(&dir, "gizmo", Some("https://github.com/acme/gizmo")) else {
+        return; // no git on this runner
+    };
+    // Load the (empty) registry first, then break its backing file.
+    let _ = state.project_registry().await;
+    let store_dir = crate::project::registry_data_dir_under(state.framework_root());
+    std::fs::create_dir_all(store_dir.join("projects.json")).expect("mkdir in place of the file");
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.contains("project registry write failed: "), "{body}");
+    assert!(
+        error.contains("project store"),
+        "the store's own text: {body}"
+    );
+}
+
 /// Test: this function IS the test.
 #[tokio::test]
 async fn parity_projects_current_agrees_across_transports() {

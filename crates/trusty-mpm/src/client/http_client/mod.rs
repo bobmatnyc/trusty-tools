@@ -607,15 +607,19 @@ impl DaemonClient {
     ///
     /// Why: the `/projects` keyboard's "Set Active" button registers a
     /// discovered project with the daemon.
-    /// What: POSTs `{"path": <path>}`; returns `Ok(())` on a 2xx response.
-    /// Test: covered by the executor's projects test.
+    /// What: POSTs `{"path": <path>}`; returns `Ok(())` on a 2xx response, and
+    /// otherwise an error carrying the daemon's own message.
+    /// Test: `register_project_succeeds`,
+    /// `register_project_without_origin_shows_the_daemon_message_10586`.
     pub async fn register_project(&self, path: &str) -> anyhow::Result<()> {
         let url = "/projects".to_string();
-        self.post(&url)
+        let resp = self
+            .post(&url)
             .json(&serde_json::json!({ "path": path }))
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        // #10586: a refused registration (no `origin` remote) names its fix.
+        error::response_or_body_error(resp).await?;
         Ok(())
     }
 

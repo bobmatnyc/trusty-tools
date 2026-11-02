@@ -236,6 +236,35 @@ async fn register_project_succeeds() {
     }
 }
 
+/// Telegram "Set Active" on a directory with no `origin` shows the daemon's
+/// 400 message, not "daemon unreachable" with a bare status (#10586).
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_project_without_origin_shows_the_daemon_message_10586() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("no-origin");
+    std::fs::create_dir_all(&repo).unwrap();
+    let init_ok = trusty_common::git::command_in(&repo)
+        .args(["init", "-q", "."])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !init_ok {
+        return; // no git on this runner
+    }
+    let repo = repo.to_string_lossy().into_owned();
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.register_project(&repo).await {
+        CommandResult::Error(msg) => {
+            assert!(msg.contains("no `origin` remote"), "{msg}");
+            assert!(msg.contains("git remote add origin"), "{msg}");
+            assert!(!msg.contains("unreachable"), "{msg}");
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
     // `/doctor` round-trips a real report through the client executor.

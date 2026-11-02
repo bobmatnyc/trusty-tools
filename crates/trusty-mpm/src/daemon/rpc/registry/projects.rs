@@ -31,7 +31,7 @@ use crate::daemon::managed_routes::ProjectStatusResponse;
 use crate::daemon::managed_routes::project_registry_routes as reg;
 use crate::daemon::managed_routes::project_status;
 use crate::daemon::state::DaemonState;
-use crate::project::Project;
+use crate::project::{Project, ProjectStoreError};
 
 use super::NoParams;
 
@@ -93,13 +93,15 @@ pub struct PathParams {
 ///
 /// #10586: it also writes the registry-B record (`projects.json`) that
 /// `tm project list` reads, keyed on the same name, unless a record with that
-/// name or that `origin` URL already exists. A registry-B record needs a
-/// `repo_url`, so a directory with no `origin` remote is refused up front.
+/// name or that `origin`'s `owner/repo` already exists. A registry-B record
+/// needs a `repo_url`, so a directory with no `origin` remote is refused up
+/// front.
 ///
 /// # Errors
 ///
 /// [`DaemonError::InvalidRequest`] when `path` has no readable `origin`
-/// remote; [`DaemonError::Internal`] when the registry-B read or write fails.
+/// remote; [`DaemonError::Internal`], carrying the store's error text, when
+/// the registry-B write fails.
 ///
 /// Test: `parity_projects_register_agrees_across_transports`,
 /// `register_project_op_disables_git_auto_maintenance`,
@@ -107,7 +109,9 @@ pub struct PathParams {
 /// `register_project_op_adopts_under_the_owning_projects_name_7588`,
 /// `project_init_then_registry_list_shows_the_project_10586`,
 /// `project_init_without_origin_is_refused_and_persists_nothing_10586`,
-/// `project_init_keeps_an_existing_registry_record_10586`.
+/// `project_init_keeps_an_existing_registry_record_10586`,
+/// `project_init_with_ssh_origin_keeps_the_https_record_10586`,
+/// `project_init_registry_write_failure_names_the_cause_10586`.
 pub async fn register_project_op(
     state: &Arc<DaemonState>,
     path: PathBuf,
@@ -167,26 +171,24 @@ fn origin_url_for_init(path: &Path) -> Result<String, DaemonError> {
 ///
 /// Why: `tm project list` reads `projects.json`; init wrote only the in-memory
 /// map, so list stayed empty. An existing record wins — the same name, or the
-/// same `origin` under another name (an operator's `tm projects register`) —
-/// so init never overwrites configuration set elsewhere or duplicates a repo.
+/// same `owner/repo` under another name and URL form (an operator's
+/// `tm projects register`) — so init never overwrites configuration set
+/// elsewhere or duplicates a repo.
+/// What: one [`crate::project::ProjectRegistry::register_unless_present`] call,
+/// so the existence check and the insert share one lock. A
+/// [`ProjectStoreError::DuplicateProjectKey`] means "already registered" and
+/// answers `Ok(())`; any other store error reaches the caller as a 500 that
+/// carries the store's own text.
 /// Test: `project_init_then_registry_list_shows_the_project_10586`,
-/// `project_init_keeps_an_existing_registry_record_10586`.
+/// `project_init_keeps_an_existing_registry_record_10586`,
+/// `project_init_with_ssh_origin_keeps_the_https_record_10586`,
+/// `project_init_registry_write_failure_names_the_cause_10586`.
 async fn persist_registry_record(
     state: &Arc<DaemonState>,
     name: &str,
     repo_url: &str,
 ) -> Result<(), DaemonError> {
     let registry = state.project_registry().await;
-    let existing = registry.list().await.map_err(|e| {
-        tracing::warn!(error = %e, "#10586: project registry read failed");
-        DaemonError::Internal("project registry read failed".to_string())
-    })?;
-    if existing
-        .iter()
-        .any(|p| p.name == name || p.repo_url == repo_url)
-    {
-        return Ok(());
-    }
     let project = Project {
         name: name.to_string(),
         repo_url: repo_url.to_string(),
@@ -202,10 +204,16 @@ async fn persist_registry_record(
         worktree: None,
         project_key: None,
     };
-    registry.register(project).await.map_err(|e| {
-        tracing::warn!(error = %e, project = %name, "#10586: project registry write failed");
-        DaemonError::Internal("project registry write failed".to_string())
-    })
+    // #10586: check and insert under one lock, so no writer lands between them.
+    match registry.register_unless_present(project).await {
+        Ok(_) | Err(ProjectStoreError::DuplicateProjectKey { .. }) => Ok(()),
+        Err(e) => {
+            tracing::warn!(error = %e, project = %name, "#10586: project registry write failed");
+            Err(DaemonError::Internal(format!(
+                "project registry write failed: {e}"
+            )))
+        }
+    }
 }
 
 /// `GET /projects`, `mpm.projects.list` — every announced directory.
