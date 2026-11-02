@@ -72,6 +72,15 @@ struct Run {
 
 /// Run the guard over `payload` in `fx` against a mock daemon socket.
 fn run(fx: &Fixture, payload: &serde_json::Value) -> Run {
+    run_with(fx, payload, |_| {})
+}
+
+/// [`run`], with `adjust` applied to the command last.
+fn run_with(
+    fx: &Fixture,
+    payload: &serde_json::Value,
+    adjust: impl FnOnce(&mut std::process::Command),
+) -> Run {
     let (url, frames) = common::socket::spawn_mock(|_| {
         common::socket::Reply::Frame(common::socket::result_frame("{}"))
     });
@@ -89,6 +98,7 @@ fn run(fx: &Fixture, payload: &serde_json::Value) -> Run {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    adjust(&mut command);
     let mut child = command.spawn().expect("spawn tm hook --egress-guard");
     let mut pipe = child.stdin.take().expect("stdin");
     let _ = pipe.write_all(payload.to_string().as_bytes());
@@ -218,6 +228,53 @@ fn log_mode_records_and_posts_a_trust_anchor_deny_and_allows_10690() {
     let logged = run(&fx, &write_to(&fx.anchor()));
     assert_allowed(&logged.out, "log");
     assert_logged(&fx, &logged, "trust-anchor-write", text);
+}
+
+/// 🔴 #10690 Fail-Open Check: log mode allows a deny only once its record is
+/// written. With recording off (`TRUSTY_NO_BUG_CAPTURE`) or the store
+/// unwritable, the same Slack send is refused with today's policy id.
+#[test]
+fn log_mode_enforces_a_deny_it_cannot_record_10690() {
+    let log = Some("[egress_guard]\nmode = \"log\"\n");
+    let fx = Fixture::new(log);
+    let off = run_with(&fx, &slack_send(), |cmd| {
+        cmd.env("TRUSTY_NO_BUG_CAPTURE", "1");
+    });
+    let reason = denied_reason(&off.out, "no bug capture");
+    assert!(reason.contains("[policy GP-043"), "{reason}");
+    assert!(!reason.contains(LOG_PREFIX), "{reason}");
+
+    // The store path is a directory, so the append itself fails.
+    let fx = Fixture::new(log);
+    std::fs::create_dir_all(fx.data.join("trusty-mpm/pm-guard-denials.jsonl"))
+        .expect("block the denial store");
+    let blocked = run(&fx, &slack_send());
+    let reason = denied_reason(&blocked.out, "unwritable store");
+    assert!(reason.contains("[policy GP-043"), "{reason}");
+    let stderr = String::from_utf8_lossy(&blocked.out.stderr);
+    assert!(stderr.contains("enforcing it"), "{stderr}");
+    let body = &blocked.post["payload"];
+    assert!(body.get("egress_guard_mode").is_none(), "{}", blocked.post);
+}
+
+/// 🔴 #10690: only the user's `~/.trusty-mpm/config.toml` sets the mode. A
+/// repository's `.trusty-mpm.toml` and a project-local `.trusty-mpm/config.toml`
+/// saying `log`, under `CLAUDE_PROJECT_DIR` and as the cwd, still enforce.
+#[test]
+fn log_mode_in_a_project_config_still_enforces_10690() {
+    let fx = Fixture::new(Some("[egress_guard]\nmode = \"enforce\"\n"));
+    let project = fx.data.join("repo");
+    std::fs::create_dir_all(project.join(".trusty-mpm")).expect("mkdir project");
+    let log = "[egress_guard]\nmode = \"log\"\n";
+    std::fs::write(project.join(".trusty-mpm.toml"), log).expect("project toml");
+    std::fs::write(project.join(".trusty-mpm/config.toml"), log).expect("project config");
+    let result = run_with(&fx, &slack_send(), |cmd| {
+        cmd.env("CLAUDE_PROJECT_DIR", &project)
+            .current_dir(&project);
+    });
+    let reason = denied_reason(&result.out, "project log");
+    assert!(reason.contains("[policy GP-043"), "{reason}");
+    assert_enforced_audit(&fx, &result, "egress-family");
 }
 
 /// 🔴 #10690 Fail-Open Check: every fault on the switch enforces — no file,
