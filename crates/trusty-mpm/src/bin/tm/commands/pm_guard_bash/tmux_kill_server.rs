@@ -15,13 +15,22 @@
 //! default server live). Every caller is bound, the Architect included.
 //! FAIL-CLOSED: when the guard cannot read the command — an opaque hit with
 //! no readable verb, or a command it cannot classify — a `kill-server` word,
-//! or a `kill-session` word beside an `-a` flag, refuses.
+//! or a `kill-session` word beside an `-a` flag, refuses. So does inline
+//! code a non-shell evaluator runs (`python3 -c`, `perl -e`, `node -e`,
+//! `osascript -e`, …) that names one: the guard cannot read it as shell.
+//! Residual, out of #10665's scope: `pkill tmux`, `killall tmux`,
+//! `kill -TERM <server pid>`, a shell `alias`, a symlink to the default
+//! socket created in the same command, `tmux source-file` of a file holding
+//! `kill-server`, and a script written and run in the same command.
 //! Test: `tmux_kill_server_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_tmux_kill_server_10665.rs`.
 
 use std::path::{Path, PathBuf};
 
-use super::super::architect_pane_parse::{Target, tmux_hits};
+use super::super::architect_pane_parse::{Target, explicit_socket, tmux_hits};
+use super::super::credential_print::{code_operands, evaluator_name};
+use super::super::floor_d4::{program_positions, segments};
+use super::super::shell_lex::DASH_C_SHELLS;
 use super::super::unclassifiable_command;
 use trusty_mpm::core::tmux_server::socket_dir;
 
@@ -90,6 +99,12 @@ pub(crate) fn evaluate_tmux_kill_server(command: &str, env: &ServerEnv) -> Optio
     if mentions_kill && unclassifiable_command(command).is_some() {
         return Some(refusal("the guard cannot read the command"));
     }
+    // #10665 r2: evaluator code is not shell, so `tmux_hits` never reads it.
+    if mentions_kill && evaluator_code_names_kill(command) {
+        return Some(refusal(
+            "inline code an evaluator runs names one, and the guard cannot read it as shell",
+        ));
+    }
     for hit in tmux_hits(command) {
         if let Some(why) = hit.opaque
             && hit.targets.is_empty()
@@ -114,15 +129,34 @@ pub(crate) fn evaluate_tmux_kill_server(command: &str, env: &ServerEnv) -> Optio
     None
 }
 
+/// Whether a segment of `command`, wrapper bodies included, runs a non-shell
+/// evaluator (`python3 -c`, `perl -e`, `node -e`, `osascript -e`) whose
+/// inline code names a whole-server kill. Shells, `eval` and `source` are
+/// read by `tmux_hits`; `ssh` runs on another host.
+fn evaluator_code_names_kill(command: &str) -> bool {
+    let read_as_shell = |name: &str| {
+        DASH_C_SHELLS.contains(&name) || matches!(name, "eval" | "source" | "." | "ssh")
+    };
+    segments(command).iter().any(|seg| {
+        let Some(argv) = shlex::split(&seg.text) else {
+            return false;
+        };
+        program_positions(&argv).into_iter().any(|(at, program)| {
+            let program = program.to_ascii_lowercase();
+            evaluator_name(&program).is_some_and(|name| {
+                !read_as_shell(name)
+                    && code_operands(name, argv.get(at + 1..).unwrap_or_default())
+                        .into_iter()
+                        .any(names_whole_server_kill)
+            })
+        })
+    })
+}
+
 /// `Ok` when `server`, a hit's `-L`/`-S` words, selects an explicit scratch
 /// socket; `Err` names why it does not.
 fn scratch_socket(server: &[String], env: &ServerEnv) -> Result<(), &'static str> {
-    let socket = server
-        .chunks(2)
-        .filter(|pair| pair.first().is_some_and(|f| f == "-S"))
-        .filter_map(|pair| pair.get(1))
-        .next_back();
-    let Some(socket) = socket else {
+    let Some(socket) = explicit_socket(server) else {
         return Err(
             "gives no `-S <socket>`, so it reaches the server `$TMUX` names or the \
              default one; `-L` and `TMUX_TMPDIR` do not override an inherited `$TMUX`",

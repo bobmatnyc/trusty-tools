@@ -28,7 +28,8 @@ use super::floor_d4_rules::{disk_tool_reason, exfiltration_reason};
 use super::force_push::{GitProbe, force_push_reason};
 use super::shell_lex::{WrappedCommand, wrapped_command};
 use super::{MAX_WRAPPER_DEPTH, split_shell_segments_raw, unclassifiable_command};
-use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, strip_wrapper_prefix};
+use crate::commands::hook_rewrite::COMMAND_WRAPPERS;
+use crate::commands::program_word::program_index;
 use python::{heredoc_split, python_upload_reason};
 
 // #8878 S5: the python-upload row, a child module so it shares this file's
@@ -220,8 +221,9 @@ fn mentions_d4_word(text: &str) -> bool {
 ///
 /// What: the position past env assignments and [`COMMAND_WRAPPERS`], plus
 /// every token right after a wrapper word, a `timeout` duration, or a
-/// [`EXEC_FLAGS`] flag. A wrapper followed by a flag makes EVERY token a
-/// candidate — fail closed.
+/// [`EXEC_FLAGS`] flag. A wrapper option the shared grammar cannot measure
+/// makes EVERY token a candidate — fail closed (#10665 r2: a measured one,
+/// `env -u NAME`, does not).
 /// #9001 critic r1: leading shell grammar ([`grammar_prefix`]) is skipped
 /// first, and a `(` glued to the program word (`(tmux …`) is dropped.
 /// Test: `a_wrapped_program_is_still_found`,
@@ -295,7 +297,8 @@ fn positions_past_wrappers(argv: &[String]) -> Vec<(usize, String)> {
         let tok = tok.strip_prefix('\\').unwrap_or(tok);
         tok.rsplit('/').next().unwrap_or(tok).to_string()
     };
-    let Some(first) = strip_wrapper_prefix(argv) else {
+    // #10665 r2: wrapper option values (`env -u TMUX`) are not programs.
+    let Some(first) = program_index(argv) else {
         return argv.iter().enumerate().map(|(i, t)| (i, base(t))).collect();
     };
     let mut out: Vec<(usize, String)> = Vec::new();
