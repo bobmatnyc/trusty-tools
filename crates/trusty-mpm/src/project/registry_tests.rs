@@ -639,3 +639,121 @@ async fn implicit_registration_never_logs_a_credentialed_url() {
         lines.len()
     );
 }
+
+/// Load a registry whose `projects.json` holds `records` verbatim, so a record
+/// can be legacy (no stored `project_key`) or malformed.
+async fn registry_with_raw_records(dir: &TempDir, records: serde_json::Value) -> ProjectRegistry {
+    let raw = serde_json::json!({ "projects": records });
+    std::fs::write(dir.path().join("projects.json"), raw.to_string()).expect("write projects.json");
+    ProjectRegistry::load(dir.path()).await.expect("load")
+}
+
+/// Why (#10696): a directory-named record keyed `acme/widget` must stop a
+/// session on the same origin from registering `widget`. Before the fix the
+/// store refused that write and the pass logged it as a failure.
+/// Test: this test.
+#[tokio::test]
+async fn implicit_registration_skips_a_keyed_record_with_the_same_origin() {
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    crate::test_support::enable_event_capture();
+    let dir = TempDir::new().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let mut dir_named = make_project("widget-checkout");
+    dir_named.repo_url = "https://github.com/acme/widget.git".into();
+    registry.register(dir_named).await.expect("register");
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let session = make_session_with_repo("https://github.com/acme/widget", None);
+    registry
+        .register_from_session(&session)
+        .with_subscriber(subscriber)
+        .await;
+
+    let names: Vec<String> = registry
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["widget-checkout".to_string()],
+        "must not duplicate"
+    );
+    let lines = buffer.tail(64);
+    assert!(
+        lines.iter().all(|l| !l.contains("failed to register")),
+        "a same-origin session must be skipped, not refused: {lines:?}"
+    );
+}
+
+/// Why (#10696, #10586 MEDIUM 1): a legacy record has no stored key, so a
+/// session on its repo — over https, or the identical URL — added a second
+/// record under the URL-derived name.
+/// Test: this test.
+#[tokio::test]
+async fn implicit_registration_skips_a_legacy_ssh_record_for_the_same_repo() {
+    for legacy_url in [
+        "git@github.com:acme/widget.git",
+        "https://github.com/acme/widget.git",
+    ] {
+        let dir = TempDir::new().expect("tempdir");
+        let registry = registry_with_raw_records(
+            &dir,
+            serde_json::json!({ "widget-checkout": {
+                "name": "widget-checkout", "repo_url": legacy_url, "default_branch": "main"
+            }}),
+        )
+        .await;
+
+        let session = make_session_with_repo("https://github.com/acme/widget.git", None);
+        registry.register_from_session(&session).await;
+
+        let names: Vec<String> = registry
+            .list()
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["widget-checkout".to_string()],
+            "legacy record at {legacy_url} must not be duplicated"
+        );
+    }
+}
+
+/// Why (#10696): the origin match must not swallow a different repo, and a
+/// malformed legacy record (empty `repo_url`) must not panic the pass.
+/// Test: this test.
+#[tokio::test]
+async fn implicit_registration_registers_a_different_origin() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = registry_with_raw_records(
+        &dir,
+        serde_json::json!({
+            "widget-checkout": {
+                "name": "widget-checkout", "repo_url": "git@github.com:acme/widget.git", "default_branch": "main"
+            },
+            "broken": { "name": "broken", "repo_url": "", "default_branch": "main" },
+        }),
+    )
+    .await;
+
+    let session = make_session_with_repo("https://github.com/acme/gadget.git", None);
+    registry.register_from_session(&session).await;
+
+    let gadget = registry
+        .get("gadget")
+        .await
+        .expect("a different origin registers");
+    assert_eq!(gadget.repo_url, "https://github.com/acme/gadget.git");
+    assert_eq!(registry.list().await.expect("list").len(), 3);
+}
