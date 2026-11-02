@@ -123,12 +123,20 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let script = dir.path().join("clean.sh");
         let sock = dir.path().join("s.sock");
-        let body = format!("tmux -S {} kill-server\necho done\n", sock.display());
-        std::fs::write(&script, body).expect("write script");
-        let command = format!("bash {}", script.display());
-        assert_eq!(
-            evaluate_script_body_tmux_kill(&command, dir.path(), &env()),
-            None
-        );
+        let sock = sock.display();
+        // #10665 r2: the standing rule's `env -u TMUX` form, in a body too.
+        for body in [
+            format!("tmux -S {sock} kill-server\necho done\n"),
+            format!("env -u TMUX tmux -S {sock} kill-server\n"),
+            format!("env --unset=TMUX tmux -S {sock} kill-server\n"),
+        ] {
+            std::fs::write(&script, &body).expect("write script");
+            let command = format!("bash {}", script.display());
+            assert_eq!(
+                evaluate_script_body_tmux_kill(&command, dir.path(), &env()),
+                None,
+                "{body}"
+            );
+        }
     }
 }

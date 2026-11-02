@@ -53,6 +53,10 @@ fn an_explicit_scratch_socket_is_allowed() {
         format!("TMUX_TMPDIR=/tmp/x tmux -S '{sock}' kill-server"),
         format!("tmux -L x -S {sock} kill-session -a"),
         format!("tmux -S{sock} kill-session -a -t keep"),
+        // #10665 r2: the standing rule's form, `env`'s value flags skipped.
+        format!("env -u TMUX tmux -S {sock} kill-server"),
+        format!("env --unset TMUX tmux -S {sock} kill-server"),
+        format!("env --unset=TMUX tmux -S {sock} kill-server"),
     ] {
         assert_eq!(
             evaluate_tmux_kill_server(&command, &fleet_env()),
@@ -77,6 +81,11 @@ fn a_default_socket_or_label_is_refused() {
         format!("tmux -S {} kill-server", dir.join("tm-ws-x").display()),
         "tmux -S /tmp/tmux-501/default kill-server".to_string(),
         "tmux -S rel.sock kill-server".to_string(),
+        "env -u TMUX tmux kill-server".to_string(),
+        format!(
+            "env -u TMUX tmux -S {} kill-server",
+            dir.join("default").display()
+        ),
         // The last `-S` is the one tmux uses.
         format!(
             "tmux -S {sock} -S {} kill-server",
@@ -116,6 +125,14 @@ fn wrapped_nested_and_chained_kills_are_refused() {
         "tmux kill-session -aC",
         "TMUX kill-server",
         "/usr/local/bin/tmux kill-server",
+        // #10665 r2: inline evaluator code, plain, wrapped and chained.
+        "python3 -c \"import os; os.system('tmux kill-server')\"",
+        "perl -e 'system \"tmux kill-server\"'",
+        "node -e \"require('child_process').execSync('tmux kill-server')\"",
+        "osascript -e 'do shell script \"tmux kill-server\"'",
+        "env FOO=1 python3 -c \"import os; os.system('tmux kill-session -a')\"",
+        "true && perl -e 'system \"tmux kill-server\"'",
+        "sh -c \"node -e 'require(1).execSync(\\\"tmux kill-server\\\")'\"",
     ] {
         assert!(refused(command), "{command} must be refused");
     }

