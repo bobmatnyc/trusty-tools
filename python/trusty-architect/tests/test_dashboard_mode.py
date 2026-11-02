@@ -40,6 +40,7 @@ class TestConfig(ServerCase):
         cfg = json.loads(body)
         self.assertIsInstance(cfg.pop("nav"), list)
         self.assertIsInstance(cfg.pop("features"), dict)   # #10571: optional-backend flags (test_dashboard_routes)
+        self.assertIsInstance(cfg.pop("warnings"), list)   # #10606: test_dashboard_python_floor
         self.assertEqual(cfg, {"mode": "architect", "title": "Architect Dashboard", "briefs_base": "",
                                "storage_key": "architect-dashboard",
                                "briefs_abs": os.path.join(serve.ds.REPO, "local", "briefs") + "/", "tailnet": "", "console": ""})
@@ -54,6 +55,7 @@ class TestConfig(ServerCase):
                 cfg = json.load(r)
         cfg.pop("nav")
         cfg.pop("features")   # #10571
+        cfg.pop("warnings")   # #10606
         self.assertEqual(cfg, {"mode": "session", "title": "tm-apex Intent Ledger",
                                "briefs_base": "https://github.com/example/r/blob/main/", "storage_key": "tm-apex-intent-ledger",
                                "tailnet": "", "console": ""})

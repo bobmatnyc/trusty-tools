@@ -499,3 +499,59 @@ fn a_non_login_home_gets_one_skipped_line_and_no_files() {
     assert!(!agent::plist_path(&home).exists());
     assert!(!agent::log_dir(&dir).exists());
 }
+
+/// A fake `python3` in `dir` that prints `version`, as the probe expects.
+#[cfg(unix)]
+fn fake_python(dir: &Path, version: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    let p = dir.join("python3");
+    std::fs::write(&p, format!("#!/bin/sh\necho {version}\n")).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// #10606: an older python3 first on PATH loses to a >= 3.11 one later; a
+/// host whose first python3 is already new enough keeps it.
+#[cfg(unix)]
+#[test]
+fn the_dashboard_prefers_a_python_at_or_above_the_floor() {
+    use agent::python;
+    let tmp = tempfile::tempdir().unwrap();
+    let old = fake_python(&tmp.path().join("old"), "3.9");
+    let new = fake_python(&tmp.path().join("new"), "3.12");
+    let path = std::env::join_paths([old.parent().unwrap(), new.parent().unwrap()]).unwrap();
+    let cands = python::candidates(Some(&path), &[]);
+    assert_eq!(cands, vec![old.clone(), new.clone()]);
+    let chosen = python::choose(&cands, &python::version).unwrap();
+    assert_eq!(chosen.path, new);
+    assert_eq!(chosen.version, Some((3, 12)));
+    assert!(!chosen.below_floor());
+
+    let path = std::env::join_paths([new.parent().unwrap(), old.parent().unwrap()]).unwrap();
+    let cands = python::candidates(Some(&path), &[]);
+    assert_eq!(python::choose(&cands, &python::version).unwrap().path, new);
+}
+
+/// #10606: with no python3 at or above 3.11 the first one still runs the
+/// dashboard, flagged below the floor so the warning path fires.
+#[cfg(unix)]
+#[test]
+fn the_dashboard_falls_back_to_the_first_python_below_the_floor() {
+    use agent::python;
+    let tmp = tempfile::tempdir().unwrap();
+    let first = fake_python(&tmp.path().join("a"), "3.9");
+    let broken = fake_python(&tmp.path().join("b"), "not-a-version");
+    let cands = python::candidates(
+        None,
+        &[
+            first.parent().unwrap().to_path_buf(),
+            broken.parent().unwrap().to_path_buf(),
+        ],
+    );
+    let chosen = python::choose(&cands, &python::version).unwrap();
+    assert_eq!(chosen.path, first);
+    assert_eq!(chosen.version, Some((3, 9)));
+    assert!(chosen.below_floor());
+    assert_eq!(python::choose(&[], &python::version), None);
+}

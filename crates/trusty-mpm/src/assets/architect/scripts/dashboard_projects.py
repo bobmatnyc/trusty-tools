@@ -27,13 +27,16 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 
 try:
     import tomllib
-except ImportError:   # pragma: no cover - Python < 3.11
+except ImportError:   # pragma: no cover - Python < 3.11; runtime_warnings() names it (#10606)
     tomllib = None
+
+PYTHON_FLOOR = (3, 11)   # #10606: tomllib, so the stack and config rows need 3.11
 
 READ_CAP = 65536
 MAX_AGENTS = 100
@@ -81,6 +84,21 @@ def read_capped(root, rel, cap=READ_CAP):
             return f.read(cap).decode("utf-8", "replace")
     except OSError:
         return None
+
+
+def runtime_warnings(version=None):
+    """#10606: one line per reason this interpreter degrades the dashboard; [] on Python >= 3.11 with tomllib.
+
+    Why: on Python < 3.11 tomllib is absent and _toml() returns {}, so every TOML stack and config row goes empty
+    with no message. What: version defaults to sys.version_info. The server writes each line to stderr at startup
+    and serves the list as /config.json `warnings`; the page shows it as a banner.
+    Test: tests/test_dashboard_python_floor.py
+    """
+    major, minor = tuple(version or sys.version_info)[:2]
+    if (major, minor) >= PYTHON_FLOOR and tomllib is not None:
+        return []
+    return ["Python %d.%d runs this dashboard; it needs Python %d.%d or newer (tomllib), so Projects shows no stack "
+            "or config read from TOML files. Run the dashboard with python3 3.11 or newer." % ((major, minor) + PYTHON_FLOOR)]
 
 
 def _toml(text):
