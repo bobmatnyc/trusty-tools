@@ -490,17 +490,32 @@ pub fn local_checkout_for(project: &Project) -> Option<PathBuf> {
 /// throwaway record just to read one field would be a second spelling of this
 /// derivation; `repo_url` was always the only input.
 /// What: identical to [`local_checkout_for`], which is now this function
-/// applied to `project.repo_url`.
+/// applied to `project.repo_url`; `~` expands against the process home.
 /// Test: `local_checkout_for_derives_the_managed_clone_path`,
 /// `local_checkout_for_keeps_an_absolute_repo_url`,
 /// `local_checkout_for_refuses_what_names_no_project`.
 pub fn local_checkout_for_url(repo_url: &str) -> Option<PathBuf> {
+    local_checkout_for_url_in(repo_url, dirs::home_dir().as_deref())
+}
+
+/// [`local_checkout_for_url`] with an explicit home directory (#10604).
+///
+/// What: a path spelling (`/…`, `~`, `~/…`) IS the directory, with `~`
+/// expanded against `home` ([`local_repo_path`](crate::project::project_key::local_repo_path));
+/// a `~` that cannot be expanded is `None`, never a URL parse.
+/// Test: `local_checkout_for_expands_a_tilde_repo_url_10604`.
+pub fn local_checkout_for_url_in(
+    repo_url: &str,
+    home: Option<&std::path::Path>,
+) -> Option<PathBuf> {
     let trimmed = repo_url.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.starts_with('/') {
-        return Some(PathBuf::from(trimmed));
+    // #10604: `~/x` once parsed as host `~`, owner `x`'s parent, and named a
+    // directory nested inside the projects root.
+    if crate::project::project_key::is_path_spelling(trimmed) {
+        return crate::project::project_key::local_repo_path(trimmed, home);
     }
     let gh = trusty_common::github_path::parse_github_path(trimmed)?;
     // A one-segment `repo_url` parses with a placeholder owner; that names no

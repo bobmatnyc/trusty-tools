@@ -1,0 +1,3 @@
+Fixed
+- The managed clone path is canonical for any owner/repo case: `base_clone_path` slugifies both segments, so `BobMatNYC/Trusty_Tools` and `bobmatnyc/trusty-tools` name one directory under the projects root.
+- A project registered with a `~` path (a flat or hand-cloned checkout, or a `config.yaml` `projects:` entry) now keys by its checkout's origin, the same `owner/repo` key its GitHub URL gives, and resolves to that checkout. It used to be parsed as a URL with host `~`, which gave a key such as `trusty-mpm-projects/trusty-tools` and a clone path nested inside the projects root. A key already stored in `projects.json` is not changed.

@@ -82,6 +82,34 @@ fn key_from_path_without_origin_is_none() {
     assert!(assign_project_key(tmp.path().to_str().unwrap()).starts_with("local:"));
 }
 
+/// Why (#10604): a flat or mixed-case hand clone registered as a `~` path must
+/// key by its origin, the same one key its GitHub URL gives — never the
+/// `trusty-mpm-projects/trusty-tools` a URL parse of `~/…` produced.
+/// Test: this test, against a clean temp HOME.
+#[test]
+fn a_flat_checkout_spelled_with_a_tilde_keys_by_its_origin_10604() {
+    let home = TempDir::new().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let origin = "https://github.com/BobMatNYC/Trusty-Tools.git";
+    let projects = home.join("trusty-mpm-projects");
+    checkout(&projects, "trusty-tools", origin);
+    checkout(&home.join("code"), "Trusty-Tools", origin);
+    let canonical = project_key_from_repo_url(origin);
+    assert_eq!(canonical.as_deref(), Some("bobmatnyc/trusty-tools"));
+    for spelled in ["~/trusty-mpm-projects/trusty-tools", "~/code/Trusty-Tools"] {
+        assert_eq!(
+            project_key_from_repo_url_in(spelled, Some(&home)),
+            canonical,
+            "{spelled}"
+        );
+    }
+    // No home: no key (the store then mints `local:`), never a URL guess.
+    assert_eq!(
+        project_key_from_repo_url_in("~/trusty-mpm-projects/trusty-tools", None),
+        None
+    );
+}
+
 /// Why: only the registered checkout may claim the project's index; a linked
 /// worktree or another clone must not.
 /// Test: this test.

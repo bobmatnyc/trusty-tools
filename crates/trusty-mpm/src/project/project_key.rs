@@ -6,31 +6,75 @@
 //! design brief, section 1. The KEY is stable now; index NAMING keeps the legacy
 //! basename until trusty-code can look the key up too (`REGISTRY_IDS_ADOPTED`).
 //! What: [`project_key_from_repo_url`] and [`assign_project_key`] mint the key
-//! the store writes at first register; [`registered_project_for_root`] finds the
+//! the store writes at first register, reading a path-spelled `repo_url` through
+//! [`local_repo_path`] (#10604); [`registered_project_for_root`] finds the
 //! registry project whose checkout is a given root; [`index_id_for_registered_root`]
 //! gives the one index id every caller (session launch, the residency producer,
 //! `tm doctor`) uses for it.
 //! Test: `project_key_tests.rs`, `store_tests.rs`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use trusty_common::RegisteredProject;
 use trusty_common::github_path::{UNKNOWN_OWNER, derive_github_path, parse_github_path};
 
 use super::record::Project;
 
+/// The local directory a path-spelled `repo_url` names, if it is one (#10604).
+///
+/// Why: a flat or hand-cloned checkout is often registered as `~/…` (a
+/// `config.yaml` `projects:` entry is never shell-expanded). Parsed as a URL,
+/// `~/trusty-mpm-projects/trusty-tools` dropped `~` as a host and named the
+/// project `trusty-mpm-projects/trusty-tools`: a wrong key and a clone path
+/// nested inside the projects root.
+/// What: `Some(path)` for an absolute path, `Some(home)` for `~`, and
+/// `Some(home/rest)` for `~/rest`. `None` for anything else — a URL — and for a
+/// `~` spelling with no `home` to expand it against; [`is_path_spelling`] tells
+/// those two apart.
+/// Test: `a_flat_checkout_spelled_with_a_tilde_keys_by_its_origin_10604`,
+/// `local_checkout_for_expands_a_tilde_repo_url_10604`.
+pub fn local_repo_path(repo_url: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let trimmed = repo_url.trim();
+    if trimmed.starts_with('/') {
+        return Some(PathBuf::from(trimmed));
+    }
+    if trimmed == "~" {
+        return home.map(Path::to_path_buf);
+    }
+    let rest = trimmed.strip_prefix("~/")?;
+    home.map(|h| h.join(rest))
+}
+
+/// `true` when `repo_url` is spelled as a local path (`/…`, `~`, `~/…`, `~user/…`).
+///
+/// Why: such a value must never fall through to URL parsing (#10604).
+pub fn is_path_spelling(repo_url: &str) -> bool {
+    let trimmed = repo_url.trim();
+    trimmed.starts_with('/') || trimmed.starts_with('~')
+}
+
 /// Canonical lowercase `owner/repo` for a repo URL or checkout path, if it has one.
 ///
 /// Why: the key for a project with an origin is its `owner/repo`, matching the
 /// group key the project map already uses.
-/// What: parses a URL with [`parse_github_path`]; for an absolute path reads the
-/// checkout's `remote.origin.url` via [`derive_github_path`]. `None` when no
-/// owner can be named (a bare path with no origin, a one-segment URL).
+/// What: [`project_key_from_repo_url_in`] against the process home directory.
 /// Test: `key_from_url_forms_is_one_owner_repo`, `key_from_path_without_origin_is_none`.
 pub fn project_key_from_repo_url(repo_url: &str) -> Option<String> {
+    project_key_from_repo_url_in(repo_url, dirs::home_dir().as_deref())
+}
+
+/// [`project_key_from_repo_url`] with an explicit home directory.
+///
+/// What: parses a URL with [`parse_github_path`]; for a path spelling
+/// ([`local_repo_path`], `~` expanded against `home`) reads the checkout's
+/// `remote.origin.url` via [`derive_github_path`]. `None` when no owner can be
+/// named (a path with no origin or an unexpandable `~`, a one-segment URL).
+/// Test: `a_flat_checkout_spelled_with_a_tilde_keys_by_its_origin_10604`.
+pub fn project_key_from_repo_url_in(repo_url: &str, home: Option<&Path>) -> Option<String> {
     let trimmed = repo_url.trim();
-    let gh = if trimmed.starts_with('/') {
-        derive_github_path(Path::new(trimmed))?
+    // #10604: a `~` path is a checkout, never a URL whose host is `~`.
+    let gh = if is_path_spelling(trimmed) {
+        derive_github_path(&local_repo_path(trimmed, home)?)?
     } else {
         parse_github_path(trimmed)?
     };

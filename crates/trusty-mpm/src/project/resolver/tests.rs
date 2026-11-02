@@ -639,6 +639,26 @@ fn local_checkout_for_keeps_an_absolute_repo_url() {
     );
 }
 
+/// #10604: a `~` path names the flat checkout under the home directory, never
+/// `<repos_root>/trusty-mpm-projects/trusty-tools` (host `~` dropped).
+#[test]
+fn local_checkout_for_expands_a_tilde_repo_url_10604() {
+    let home = std::path::Path::new("/home/u");
+    assert_eq!(
+        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", Some(home)),
+        Some(PathBuf::from("/home/u/trusty-mpm-projects/trusty-tools"))
+    );
+    assert_eq!(
+        local_checkout_for_url_in("~", Some(home)),
+        Some(PathBuf::from("/home/u"))
+    );
+    // No home to expand against: no answer, not a guessed managed clone.
+    assert_eq!(
+        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", None),
+        None
+    );
+}
+
 #[test]
 fn local_checkout_for_refuses_what_names_no_project() {
     assert_eq!(local_checkout_for(&proj("empty", "")), None);
