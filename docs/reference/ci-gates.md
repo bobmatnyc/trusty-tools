@@ -52,7 +52,10 @@ on a `pull_request` and on a `workflow_dispatch` off main (diffing against
 main). `scripts/ci-gate-selftest.sh` holds that table equal to the job's
 `needs:`. The job runs under `if: always()` and goes
 red on a failed or cancelled need, a failed `changes` classifier, a job
-missing from `needs:`, or a skip the classifier did not order.
+missing from `needs:`, or a skip the classifier did not order. It also
+covers `Rust tests (pre-publish gate)` (job `test`, #10631), which runs only
+off `pull_request`: its skip passes on a `pull_request` and fails on any other
+event, an unset one included. `test` stays out of the required list.
 
 - **Why the covered jobs live in `ci.yml`.** `needs:` cannot name a job in
   another workflow file, so #8378 moved the teardown guard, the tmux gate, the
