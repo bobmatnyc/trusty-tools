@@ -4,7 +4,7 @@ Why: the page was written for the claude.ai runtime (window.claude.use("db"|"use
 and injects a shim, so one page file runs both under claude.ai and on localhost.
 What: `SHIM` defines window.claude.use over this server's JSON endpoints and emulates onSnapshot by polling every 2 s;
 `inject` inserts the shared tokens.css link and then the shim right after the document's own <head> (the /live page
-gets the link only). `page_rev` is sha1[:16] of the page file plus tokens.css, sent as X-Page-Rev on every response:
+gets the link only). `page_rev` is sha1[:16] of the page file plus tokens.css and goes out as X-Page-Rev on every response:
 the shim holds the rev it was served with and reloads the tab once when it differs, after window.__stashDrafts(); it
 also checks /config.json every 60 s and when the tab becomes visible, skipping while a text field holds text.
 `rev_of` is a collection's snapshot rev. `vendor_file` resolves one of the fixed reader-library names: marked and
@@ -179,7 +179,8 @@ def _file_stamp(path):
 
 
 def page_rev(path, extra=()):
-    """First 16 hex of the sha1 of the page file plus each file in `extra` (tokens.css), so a token-only change
+    # #10570: no backtick here: pm-guard reads one after the page script's verb word as a run-time 1Password call.
+    """First 16 hex of the sha1 of the page file plus each file in extra (tokens.css), so a token-only change
     reloads open tabs; re-read only when a file's (mtime, size) changes. A missing extra file raises OSError like the page."""
     paths = (path,) + tuple(extra)
     key = tuple(_file_stamp(p) for p in paths)

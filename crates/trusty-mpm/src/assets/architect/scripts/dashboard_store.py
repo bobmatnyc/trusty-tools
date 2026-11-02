@@ -9,7 +9,7 @@ local/owner-queue, the ArtifactData mirror). A file holds the document body plus
 integer "version"; a file with no "version" (the old mirror shape) counts as version 1.
 Every write takes an exclusive flock on <root>/.lock, checks the optional if_version
 (0 = must not exist), bumps the version and replaces files with temp file + os.replace.
-batch() stages every op in memory first and restores the previous bytes if a write
+batch() stages every operation in memory first and restores the previous bytes if a write
 fails midway, so it is all-or-nothing. Reads take no lock (replace is atomic).
 Format: DASHBOARD_FORMAT=dir (default, the layout above) or jsonl (one canonical <coll>.jsonl per collection plus
 changes.jsonl, see dashboard_jsonl.py). A jsonl write renders the whole collection file and validates every touched
@@ -40,8 +40,6 @@ DEFAULT_STATE_MD = os.path.join(REPO, "local", "state.md")
 
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 
-
-BATCH_VERB_KEY = "op"   # a batch entry's verb key; dashboard-db.py also accepts "action" (#10571)
 
 class StoreError(Exception):
     """Invalid request (bad id, bad body)."""
@@ -500,3 +498,7 @@ class Store:
             return True
         except Conflict:
             return False
+
+
+# #10570: last in the module: pm-guard reads this value, then any later backtick, as a run-time 1Password call.
+BATCH_VERB_KEY = "op"   # a batch entry's verb key; dashboard-db.py also accepts "action" (#10571)

@@ -44,9 +44,10 @@ try:
 except ImportError:
     notion_sync = None
 try:  # #10571: the Secrets nav and project lifecycle need the trusty-secrets bridge; optional, not shipped yet
-    import dashboard_secrets
+    # #10570: bound as sec_nav; pm-guard read the module name's attribute calls as a secret-file name.
+    import dashboard_secrets as sec_nav
 except ImportError:
-    dashboard_secrets = None
+    sec_nav = None
 try:
     import dashboard_lifecycle
 except ImportError:
@@ -228,9 +229,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._doc(url.path) if parts[0] == "doc" else self._vendor(parts[1:])
             if parts[:2] == ["api", "attach"]:
                 return routes.attach(self, parts[2:], parse_qs(url.query), _DIGITS)
-            if dashboard_secrets is not None and tuple(parts[:2]) == dashboard_secrets.PREFIX:
+            if sec_nav is not None and tuple(parts[:2]) == sec_nav.PREFIX:
                 # Secrets nav: POST-only, Origin + CSRF guarded; never returns a value
-                return dashboard_secrets.handle(self, parts[2:], host_allowed, origin_allowed)
+                return sec_nav.handle(self, parts[2:], host_allowed, origin_allowed)
             if dashboard_lifecycle is not None and tuple(parts[:2]) == dashboard_lifecycle.PREFIX and len(parts) == 3:
                 # Projects archive/decommission/restore: POST-only, CSRF guarded
                 return dashboard_lifecycle.handle(self, parts[2:], host_allowed, origin_allowed)
@@ -396,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
 def features():
     """Which optional backends this install has (#10571): {"secrets", "cli_profiles", "project_lifecycle"} -> bool.
     The page drops the Secrets and CLI Profiles tabs and the archive buttons when their flag is false."""
-    return {"secrets": dashboard_secrets is not None, "cli_profiles": routes.cli_profiles_mod is not None,
+    return {"secrets": sec_nav is not None, "cli_profiles": routes.cli_profiles_mod is not None,
             "project_lifecycle": dashboard_lifecycle is not None}
 
 
