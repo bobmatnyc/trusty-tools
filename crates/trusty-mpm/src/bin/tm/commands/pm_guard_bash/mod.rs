@@ -123,7 +123,8 @@ pub(crate) use architect_pane_probe::LivePanes;
 mod tmux_exact_target;
 #[cfg(test)]
 pub(crate) use tmux_exact_target::TmuxObject;
-pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target};
+// #10665: `kill_server` — no whole-server tmux kill without a scratch `-S`.
+pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target, kill_server};
 // #10033: no hooked session runs `tm fleet relaunch`, the Architect included.
 pub(crate) mod fleet_relaunch;
 // #8878: the D4-remainder floor — uploads, disk tools, force-push to the default.
