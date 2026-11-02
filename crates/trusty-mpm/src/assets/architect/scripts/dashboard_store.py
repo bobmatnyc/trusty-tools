@@ -11,7 +11,8 @@ Every write takes an exclusive flock on <root>/.lock, checks the optional if_ver
 (0 = must not exist), bumps the version and replaces files with temp file + os.replace.
 The store stamps "created"/"updated" from its own clock; a client value for either is ignored (#10678).
 batch() stages every operation in memory first and restores the previous bytes if a write
-fails midway, so it is all-or-nothing. Reads take no lock (replace is atomic).
+fails midway, so it is all-or-nothing. Reads take a shared flock on the same file, so a read never lands between
+the files of one batch (#10679); snapshot() reads several collections under one shared lock.
 Format: DASHBOARD_FORMAT=dir (default, the layout above) or jsonl (one canonical <coll>.jsonl per collection plus
 changes.jsonl, see dashboard_jsonl.py). A jsonl write renders the whole collection file and validates every touched
 document against schemas/dashboard/ (DASHBOARD_SCHEMA=off|warn|enforce; default warn for jsonl, off for dir).
@@ -19,7 +20,7 @@ A store of the other format is refused loudly, never read as empty.
 A set or update carrying meta/settings.technical_level or an item's level_override outside the six levels is refused
 (technical_level.refusal, #11064), whatever the schema mode.
 No network, no secrets.
-Test: tests/test_dashboard_store.py, tests/test_dashboard_jsonl.py
+Test: tests/test_dashboard_store.py, tests/test_dashboard_jsonl.py, tests/test_dashboard_views_agree.py
 """
 import copy
 import fcntl
@@ -248,8 +249,34 @@ class Store:
         self._cache[coll] = (sig, docs)
         return docs
 
+    @contextmanager
+    def _read_lock(self):
+        """Shared flock on <root>/.lock for the length of a read.
+        Why: a batch replaces one file per document (dir) or per collection (jsonl) in turn; an unlocked read between
+        two of them saw the new task beside the old session and header (#10679).
+        What: LOCK_SH on the writers' lock file, so a read waits for a batch in progress, never for another read.
+        A read never creates the lock file: none yet means no batch has ever run, so there is nothing to wait for.
+        Test: tests/test_dashboard_views_agree.py"""
+        try:
+            lf = open(os.path.join(self.root, ".lock"), "r")
+        except FileNotFoundError:
+            lf = None
+        if lf is None:
+            yield
+            return
+        with lf:
+            fcntl.flock(lf, fcntl.LOCK_SH)
+            try:
+                yield
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
     def get(self, coll, doc_id):
         """Return {"id","version","data"}; raise NotFound when absent."""
+        with self._read_lock():   # #10679: never between the files of one batch
+            return self._get(coll, doc_id)
+
+    def _get(self, coll, doc_id):
         if self.fmt == "jsonl":
             _check_id("doc id", doc_id)
             found = self._jcoll(coll).get(doc_id)
@@ -287,6 +314,15 @@ class Store:
 
     def list_docs(self, coll, status=None, order_by=None, desc=False, limit=None):
         """Documents of a collection (empty when it is absent), id order by default."""
+        with self._read_lock():   # #10679: never between the files of one batch
+            return self._list_docs(coll, status, order_by, desc, limit)
+
+    def snapshot(self, colls):
+        """{coll: list_docs(coll)} for every coll, read under one shared lock so they come from the same batch (#10679)."""
+        with self._read_lock():
+            return {c: self._list_docs(c) for c in colls}
+
+    def _list_docs(self, coll, status=None, order_by=None, desc=False, limit=None):
         self._guard(coll)
         if self.fmt == "jsonl":
             cur = self._jcoll(coll)
