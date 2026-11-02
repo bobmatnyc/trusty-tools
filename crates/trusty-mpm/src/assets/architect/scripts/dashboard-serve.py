@@ -286,6 +286,12 @@ def session_config(title, briefs_base, session=""):
     return {"mode": "session", "title": title, "briefs_base": briefs_base, "storage_key": slug}
 
 
+def warn_runtime(stream=None):
+    """#10606: write each dashboard_projects.runtime_warnings() line to stderr ("dashboard-serve: WARNING: ...") at startup."""
+    for w in dashboard_projects.runtime_warnings():
+        (stream or sys.stderr).write(f"dashboard-serve: WARNING: {w}\n")
+
+
 def _raise_interrupt(signum, frame):
     raise KeyboardInterrupt
 
@@ -335,6 +341,7 @@ def main(argv=None):
         return 1
     if store.seed_meta(**({"owner_name": owner_name} if owner_name else {})):
         sys.stderr.write("dashboard-serve: seeded meta/state\n")
+    warn_runtime()
     sys.stderr.write(f"dashboard-serve: pid {os.getpid()} serving http://{HOST}:{srv.server_address[1]}/ "
                      f"store={store.root} extra_hosts={sorted(srv.tailnet_names)}\n")
     sys.stderr.flush()

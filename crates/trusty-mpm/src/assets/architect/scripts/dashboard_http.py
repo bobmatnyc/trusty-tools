@@ -8,6 +8,7 @@ writes; 409 on if_version mismatch), /api/batch, /api/user, /api/il, /api/harnes
 dashboard_routes.py routes (PUT /doc, /api/attach, /api/fleet, /api/projects, /api/cli-profiles, /static). A request
 whose Host is not 127.0.0.1/localhost:<port> or a guard name (bare, :<port>, :443), or a write whose Origin is not
 http://127.0.0.1|localhost:<port> or https://<name>[:<port>|:443], gets 403 (`host_allowed`, `origin_allowed`).
+/config.json `warnings` lists why this interpreter degrades the page ([] on Python >= 3.11, #10606).
 /config.json carries the tailnet origin the server was given (local/architect.json `tailnet_url`, "" when unset) and,
 in architect mode only, the session nav from `load_nav`. /api/user names meta/state.owner_name, else the configured
 owner_name, else "the owner". The Notion share sidecar is optional: without notion_sync every /doc-sync answer is
@@ -35,6 +36,7 @@ import dashboard_harness
 import dashboard_il
 import dashboard_media
 import dashboard_page as page
+import dashboard_projects
 import dashboard_routes as routes
 import dashboard_store as ds
 import dashboard_viz
@@ -150,7 +152,8 @@ class Handler(BaseHTTPRequestHandler):
                 # ar-T44: session links only on the Architect dashboard; a session dash serves an empty nav
                 nav = load_nav(self.server.nav_file) if self.server.config.get("mode") == "architect" else []
                 return self._send(200, dict(self.server.config, nav=nav, tailnet=self.server.tailnet_url, console=self.server.console_url,
-                                            features=features()))   # See #10161; #10571: the page hides a tab whose backend is absent
+                                            features=features(),   # See #10161; #10571: the page hides a tab whose backend is absent
+                                            warnings=dashboard_projects.runtime_warnings()))   # #10606: the page shows these as a banner
             if parts == ["api", "il"]:
                 # Df7: consolidated Intent Ledger view; architect mode only, read-only, GET only
                 if self.server.config.get("mode") != "architect":
