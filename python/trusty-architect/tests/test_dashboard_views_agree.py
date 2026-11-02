@@ -4,6 +4,8 @@ A reader that lands while a batch is between its files used to get the new task 
 Each test pauses a real batch after its first file and reads from a second Store (another process in production).
 Run: python3 -I -m pytest tests/test_dashboard_views_agree.py
 """
+import contextlib
+import fcntl
 import http.client
 import importlib.util
 import json
@@ -11,6 +13,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -132,6 +135,83 @@ class ViewsAgree(unittest.TestCase):
                 t.join(10)
                 self.assertIsNone(pb.error)
                 self.assertEqual(got, [NEW_VIEW], f"{fmt}: /api served a mix mid-batch: {got}")
+
+    def test_api_harness_reads_sessions_items_goals_and_settings_from_one_batch(self):
+        # #10679: /api/harness read four collections under four locks; a batch committing between them tore the page.
+        serve = _load_serve()
+        old = {"sessions": ("tm-a", {"name": "tm-a", "state": "needs owner"}), "items": ("D01", {"title": "t", "status": "open"}),
+               "goals": ("G1", {"title": "g", "status": "open"}), "meta": ("settings", {"user_state": "awake"})}
+        new = {"sessions": {"state": "working"}, "items": {"status": "answered"}, "goals": {"status": "done"}, "meta": {"user_state": "asleep"}}
+        for fmt in ds.FORMATS:
+            with self.subTest(fmt=fmt):
+                tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(tmp.cleanup)
+                root = os.path.join(tmp.name, "oq")
+                writer = ds.Store(root, fmt=fmt, schema_mode="off")
+                writer.batch([{"op": "set", "collection": c, "id": i, "data": d} for c, (i, d) in old.items()], actor="test")
+                reader, fired = ds.Store(root, fmt=fmt, schema_mode="off"), []
+                real_lock = reader._read_lock
+
+                @contextlib.contextmanager
+                def lock_then_commit():
+                    with real_lock():
+                        yield
+                    if not fired:   # the moment the reader lets go, a whole batch commits
+                        fired.append(1)
+                        writer.batch([{"op": "update", "collection": c, "id": old[c][0], "data": new[c]} for c in new], actor="test")
+
+                reader._read_lock = lock_then_commit
+                page = os.path.join(tmp.name, "index.html")
+                with open(page, "w") as f:
+                    f.write("<html><head></head><body>x</body></html>")
+                srv = serve.DashboardServer(0, reader, page, projects={}, live_page=page, inbox=tmp.name, claude_projects=tmp.name)
+                seen = []
+
+                def build(_inbox, _proj, sdocs, idocs, goal_docs=None, user_state=None, **_kw):
+                    seen.append((sdocs[0]["state"], idocs[0]["status"], goal_docs[0]["status"], user_state))
+                    return {"ok": True}
+
+                with mock.patch.object(serve.dashboard_harness, "build", build), \
+                        mock.patch.object(serve.dashboard_harness, "tmux_sessions", lambda: []):
+                    threading.Thread(target=srv.serve_forever, daemon=True).start()
+                    self.addCleanup(srv.server_close)
+                    self.addCleanup(srv.shutdown)
+                    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+                    c.request("GET", "/api/harness")
+                    self.assertEqual(c.getresponse().status, 200)
+                    c.close()
+                self.assertEqual(fired, [1])
+                self.assertIn(seen, ([("needs owner", "open", "open", "awake")], [("working", "answered", "done", "asleep")]),
+                              f"{fmt}: /api/harness mixed two batches: {seen}")
+
+    def test_a_read_behind_a_held_writer_lock_is_503_within_the_wait(self):
+        # #10679: a shared-lock wait with no bound hung every dashboard GET behind a hung writer.
+        serve = _load_serve()
+        root, _ = self.seed("dir")
+        store = ds.Store(root, fmt="dir", schema_mode="off")
+        store.lock_wait = 0.2
+        page = os.path.join(os.path.dirname(root), "index.html")
+        with open(page, "w") as f:
+            f.write("<html><head></head><body>x</body></html>")
+        srv = serve.DashboardServer(0, store, page)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        held = open(os.path.join(root, ".lock"), "a")
+        fcntl.flock(held, fcntl.LOCK_EX)   # a writer that never lets go
+        self.addCleanup(held.close)
+        self.addCleanup(fcntl.flock, held, fcntl.LOCK_UN)
+        start = time.monotonic()
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)   # an unbounded wait times out here
+        c.request("GET", "/api/items")
+        r = c.getresponse()
+        body = json.loads(r.read())
+        c.close()
+        self.assertEqual((r.status, body.get("code")), (503, "unavailable"), body)
+        self.assertLess(time.monotonic() - start, 3.0)
+        with self.assertRaises(ds.Unavailable):   # the read fails; it never reads unlocked
+            store.list_docs("items")
+        self.assertEqual(ds.LOCK_WAIT, 10.0)   # the Rust store's LOCK_WAIT
 
 
 def _load_serve():

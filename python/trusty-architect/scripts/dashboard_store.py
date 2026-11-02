@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -52,6 +53,12 @@ class StoreError(Exception):
     code = "invalid_argument"
 
 
+class Unavailable(StoreError):
+    """The lock stayed held by a writer past LOCK_WAIT: answer 503, never hang and never read unlocked (#10679)."""
+    status = 503
+    code = "unavailable"
+
+
 class NotFound(StoreError):
     status = 404
     code = "not_found"
@@ -73,6 +80,7 @@ class SchemaInvalid(StoreError):
 
 
 FORMATS = ("dir", "jsonl")
+LOCK_WAIT = 10.0   # #10679: seconds a read waits for a writer; the Rust store's LOCK_WAIT
 
 
 def default_format(env=None):
@@ -195,6 +203,7 @@ class Store:
         self.actor = actor or os.environ.get("DASHBOARD_ACTOR") or "unknown"
         self.schema_mode = schema_mode or dsch.mode() or ("warn" if self.fmt == "jsonl" else "off")
         self.clock = clock
+        self.lock_wait = LOCK_WAIT
         self._cache = {}     # jsonl: coll -> ((mtime_ns, size, inode), {id: (version, data)})
 
     # ---- paths and reads -------------------------------------------------
@@ -255,6 +264,7 @@ class Store:
         Why: a batch replaces one file per document (dir) or per collection (jsonl) in turn; an unlocked read between
         two of them saw the new task beside the old session and header (#10679).
         What: LOCK_SH on the writers' lock file, so a read waits for a batch in progress, never for another read.
+        The wait is bounded by self.lock_wait; past it the read raises Unavailable (HTTP 503).
         A read never creates the lock file: none yet means no batch has ever run, so there is nothing to wait for.
         Test: tests/test_dashboard_views_agree.py"""
         try:
@@ -265,7 +275,15 @@ class Store:
             yield
             return
         with lf:
-            fcntl.flock(lf, fcntl.LOCK_SH)
+            start = time.monotonic()
+            while True:   # #10679: bounded, so a hung writer cannot hang every dashboard GET
+                try:
+                    fcntl.flock(lf, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() - start >= self.lock_wait:
+                        raise Unavailable(f"{self.root}/.lock is held by a writer (waited {self.lock_wait}s)") from None
+                    time.sleep(0.01)
             try:
                 yield
             finally:
