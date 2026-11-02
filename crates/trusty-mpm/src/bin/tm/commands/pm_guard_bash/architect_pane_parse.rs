@@ -182,6 +182,17 @@ pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
     scan.hits
 }
 
+/// The socket a hit's `-L`/`-S` words select by path: the last `-S` value,
+/// which overrides `-L` and an earlier `-S`.
+pub(super) fn explicit_socket(server: &[String]) -> Option<&str> {
+    server
+        .chunks(2)
+        .filter(|pair| pair.first().is_some_and(|f| f == "-S"))
+        .filter_map(|pair| pair.get(1))
+        .next_back()
+        .map(String::as_str)
+}
+
 /// Whether shell text that does not parse could run a deny-set tmux command:
 /// it names `tmux` and, below the top level, also a deny verb — so typed
 /// prose with an apostrophe that mentions tmux is not refused.
@@ -197,7 +208,8 @@ pub(super) fn may_run_tmux(text: &str, depth: usize) -> bool {
 /// Why: the shared segment splitter reads the `;` of tmux's `\;` separator as
 /// a shell separator, which leaves a segment ending in a lone `\` that does
 /// not lex. Both spellings give tmux the same `;` argument.
-fn quote_escaped_semicolons(command: &str) -> String {
+// #10665 r3: the whole-server kill walk splits segments the same way.
+pub(super) fn quote_escaped_semicolons(command: &str) -> String {
     let scan = QuoteScan::new(command);
     let bytes = command.as_bytes();
     let mut out = String::with_capacity(command.len());
