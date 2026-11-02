@@ -555,3 +555,53 @@ fn the_dashboard_falls_back_to_the_first_python_below_the_floor() {
     assert!(chosen.below_floor());
     assert_eq!(python::choose(&[], &python::version), None);
 }
+
+/// A fake `python3` in `dir` with `body` as its shell script.
+#[cfg(unix)]
+fn fake_script(dir: &Path, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    let p = dir.join("python3");
+    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// The probe budget for the hang tests, and the slack the runner's pipe-drain
+/// wait (2 s) plus a loaded host may add.
+#[cfg(unix)]
+const PROBE: std::time::Duration = std::time::Duration::from_millis(500);
+#[cfg(unix)]
+const MARGIN: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// #10606: a shim that exits but leaves a child holding stdout is unknown,
+/// within the budget, and its group is killed.
+#[cfg(unix)]
+#[test]
+fn the_python_probe_gives_up_on_a_shim_that_leaves_stdout_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let py = fake_script(tmp.path(), "sleep 30 &\necho 3.12\nexit 0");
+    let t0 = std::time::Instant::now();
+    assert_eq!(agent::python::version_with(&py, PROBE), None);
+    assert!(t0.elapsed() < PROBE + MARGIN, "took {:?}", t0.elapsed());
+}
+
+/// #10606: a python3 that never exits is unknown within the budget.
+#[cfg(unix)]
+#[test]
+fn the_python_probe_gives_up_on_a_python_that_never_exits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let py = fake_script(tmp.path(), "sleep 30");
+    let t0 = std::time::Instant::now();
+    assert_eq!(agent::python::version_with(&py, PROBE), None);
+    assert!(t0.elapsed() < PROBE + MARGIN, "took {:?}", t0.elapsed());
+}
+
+/// #10606: a python3 that exits non-zero is unknown, so below the floor.
+#[cfg(unix)]
+#[test]
+fn the_python_probe_reads_a_failing_python_as_unknown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let py = fake_script(tmp.path(), "echo 3.12\nexit 3");
+    assert_eq!(agent::python::version_with(&py, PROBE), None);
+}

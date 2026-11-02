@@ -7,12 +7,13 @@
 //! falls back to the first candidate when none qualifies. The dashboard then
 //! reports the old Python itself, on stderr, in `/config.json` and on the page.
 //! Test: `the_dashboard_prefers_a_python_at_or_above_the_floor`,
-//! `the_dashboard_falls_back_to_the_first_python_below_the_floor`.
+//! `the_dashboard_falls_back_to_the_first_python_below_the_floor`,
+//! `the_python_probe_gives_up_on_a_shim_that_leaves_stdout_held`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The lowest Python the dashboard runs at full function (`tomllib`).
 pub(crate) const PYTHON_FLOOR: (u32, u32) = (3, 11);
@@ -86,38 +87,39 @@ pub(crate) fn choose(
     first
 }
 
-/// `(major, minor)` that `python -I -c` prints, or `None` when it fails, exits
-/// non-zero, prints something else, or runs past [`PROBE_TIMEOUT`].
+/// [`version_with`] under [`PROBE_TIMEOUT`].
 pub(crate) fn version(python: &Path) -> Option<(u32, u32)> {
-    let mut child = Command::new(python)
-        .args([
-            "-I",
-            "-c",
-            "import sys; print('%d.%d' % sys.version_info[:2])",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + PROBE_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let out = child.wait_with_output().ok()?;
+    version_with(python, PROBE_TIMEOUT)
+}
+
+/// `(major, minor)` that `python -I -c` prints, or `None` when it fails, exits
+/// non-zero, prints something else, outlives `timeout`, or leaves a descendant
+/// holding its stdout.
+///
+/// Why: a `python3` shim that does not exec, or that leaves a child holding the
+/// pipe, must not hang `tm fleet init`; `None` counts as below the floor, so
+/// the dashboard warns.
+/// What: runs through `run_bounded` (own process group, both pipes drained on
+/// their own threads, the whole group SIGKILLed on timeout or on a pipe held
+/// open after the exit). Worst case `timeout` plus the runner's pipe-drain wait.
+/// Test: `the_python_probe_gives_up_on_a_shim_that_leaves_stdout_held`,
+/// `the_python_probe_gives_up_on_a_python_that_never_exits`,
+/// `the_python_probe_reads_a_failing_python_as_unknown`.
+pub(crate) fn version_with(python: &Path, timeout: Duration) -> Option<(u32, u32)> {
+    // #10606: the old try_wait loop bounded only the exit; wait_with_output then
+    // read stdout to EOF with no limit, and kill() reached only the direct child.
+    let mut cmd = Command::new(python);
+    cmd.args([
+        "-I",
+        "-c",
+        "import sys; print('%d.%d' % sys.version_info[:2])",
+    ])
+    .stdin(Stdio::null());
+    let out = trusty_mpm::core::bounded_proc::run_bounded(cmd, timeout).ok()?;
     if !out.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (major, minor) = text.trim().split_once('.')?;
+    let (major, minor) = out.stdout.trim().split_once('.')?;
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
