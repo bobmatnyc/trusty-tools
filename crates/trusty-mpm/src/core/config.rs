@@ -368,10 +368,13 @@ impl Default for PmGuardConfig {
 /// What: `mode = "enforce"` (default) refuses every deny the guard decides;
 /// `mode = "log"` records and POSTs each deny exactly as before, then lets the
 /// call proceed — the #8878 trust-anchor floor included. The value is kept as
-/// a string so a bad one cannot reset the rest of the file: only the exact
-/// string `"log"` turns enforcement off. A missing key or section, a missing,
-/// unreadable or malformed file, and any other value (`"Log"`, `"off"`, `""`)
-/// all mean enforce. Read per hook run, so an edit applies to the next call.
+/// a string so a bad string cannot reset the rest of the file; a wrong type
+/// (`mode = true`) fails the whole parse, so the file loads as defaults and
+/// the guard enforces. Only the exact string `"log"` turns enforcement off. A
+/// missing key or section, a missing, unreadable or malformed file, and any
+/// other value (`"Log"`, `"off"`, `""`) all mean enforce. Read per hook run,
+/// from the user-level `~/.trusty-mpm/config.toml` only, so an edit applies to
+/// the next call.
 /// Test: `config_egress_guard_mode_fails_closed_to_enforce`,
 /// `config_egress_guard_mode_log_is_the_only_off_value`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

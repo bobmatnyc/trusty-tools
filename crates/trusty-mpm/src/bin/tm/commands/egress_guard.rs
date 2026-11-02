@@ -345,9 +345,12 @@ pub(crate) const LOG_MODE_PREFIX: &str = "[egress_guard mode=log: recorded, not 
 /// What: `load()`'s [`EgressGuardConfig::mode`](trusty_mpm::core::config::EgressGuardConfig::mode);
 /// a value that is neither `"enforce"` nor `"log"` prints one warning on
 /// stderr. Every load fault already answers the default config, which is
-/// enforce; a panic in `load` is a [`deny_on_panic`] deny.
+/// enforce; a panic in `load` is a [`deny_on_panic`] deny. [`guard_once`]
+/// passes `MpmConfig::load_default`, the user's `~/.trusty-mpm/config.toml`
+/// alone: no project `.trusty-mpm.toml` and no env var reaches this key.
 /// Test: `guard_mode_is_log_only_for_the_exact_value_10690`,
-/// `guard_mode_panicking_load_still_denies_10690`.
+/// `guard_mode_panicking_load_still_denies_10690`,
+/// `log_mode_in_a_project_config_still_enforces_10690`.
 pub(crate) fn guard_mode(load: impl FnOnce() -> MpmConfig) -> EgressGuardMode {
     let config = load().egress_guard;
     if let Some(value) = config.unknown_mode() {
@@ -412,11 +415,13 @@ where
 /// is dropped, and a panic in either is caught by [`deny_on_panic`].
 /// #10690: under `[egress_guard] mode = "log"` ([`guard_mode`]) a deny is
 /// recorded and POSTed with [`LOG_MODE_PREFIX`] and `egress_guard_mode`, then
-/// allowed; [`enforced`] holds the trust-anchor floor's own arm.
+/// allowed; [`enforced`] holds the trust-anchor floor's own arm. A log-mode
+/// deny whose record is not written (`record_deny` false) is enforced.
 /// Test: `egress_deny_is_audited_without_changing_verdict_when_log_unwritable`,
 /// `slack_read_allowlist_allows_tm_apex_reads_with_one_audit_line`,
 /// `log_mode_records_and_posts_a_family_deny_and_allows_10690`,
-/// `log_mode_records_and_posts_a_trust_anchor_deny_and_allows_10690`.
+/// `log_mode_records_and_posts_a_trust_anchor_deny_and_allows_10690`,
+/// `log_mode_enforces_a_deny_it_cannot_record_10690`.
 async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let read = read_stdin_hook_payload_strict(PM_GUARD_STDIN_TIMEOUT).await;
     // #10690: read where the guard runs, from the same user config the floor reads.
@@ -453,15 +458,23 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     // An unreadable payload names nothing: audit it with every field empty.
     let null = serde_json::Value::Null;
     let mut ctx = DenyContext::from_payload(url, read.as_ref().unwrap_or(&null));
-    if !enforced(mode, check) {
+    if enforced(mode, check) {
+        record_deny(&ctx, check, &reason);
+    } else {
         // #10690: log mode — the same record and POST, marked, then allow.
         ctx.guard_mode = Some(mode.as_str());
         let logged = format!("{LOG_MODE_PREFIX}{reason}");
-        record_deny(&ctx, check, &logged);
-        post_deny_audit(&ctx, &logged).await;
-        return None;
+        if record_deny(&ctx, check, &logged) {
+            post_deny_audit(&ctx, &logged).await;
+            return None;
+        }
+        // #10690: a deny log mode cannot record is enforced, never a silent allow.
+        eprintln!(
+            "tm hook --egress-guard: `[egress_guard] mode = \"log\"` could not record deny \
+             `{check}`; enforcing it"
+        );
+        ctx.guard_mode = None;
     }
-    record_deny(&ctx, check, &reason);
     post_deny_audit(&ctx, &reason).await;
     // #10641: the check names the policy entry; a miss still refuses (GP-000).
     Some(build_pm_guard_deny_response(
