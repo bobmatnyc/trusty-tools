@@ -2,7 +2,7 @@
 
 Covers: every name moved to fleet_poll_{cfg,io,alerts,wake,watchdog,selfrefresh}.py is still a fleet-poll attribute; a
 moved function reads fleet-poll's names when it runs, so rebinding one (as a test or caller does) steers it; the
-self-refresh stub returns "" and the cycle calls it once a cycle unless the wake was sent, leaving the log line
+self-refresh step (#10599) is bound to the poller and the cycle calls it once a cycle unless the wake was sent, leaving the log line
 as it was.
 Test: tests/test_fleet_poll_split.py
 """
@@ -44,8 +44,13 @@ def test_a_moved_function_reads_fleet_polls_names_when_it_runs(monkeypatch):
     assert sent == [("display-message", "-p", "-t", "%9", "#{session_name}")]   # no send-keys after the refusal
 
 
-def test_self_refresh_stub_returns_nothing():
-    assert fp.self_refresh_step({}, [], 0.0, False) == ""
+def test_the_self_refresh_slot_is_bound_and_returns_a_decision(monkeypatch, tmp_path):
+    # #10599 PR-1 fills the slot: the step reads fleet-poll's bar and INBOX, and returns one decision phrase.
+    monkeypatch.setattr(fp, "INBOX", str(tmp_path))
+    monkeypatch.setattr(fp, "resolve_context_bar", lambda dry_run=False: (1, 1000))
+    monkeypatch.setattr(fp._selfrefresh, "_tokens", lambda: None)
+    assert fp.self_refresh_step({}, [], 0.0, False) == "self-refresh=ctx-unreadable"
+    assert (tmp_path / "self-refresh.log").is_file()
 
 
 def _cycle(monkeypatch, tmp_path, wake_result):

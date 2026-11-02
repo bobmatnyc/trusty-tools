@@ -1,8 +1,11 @@
 """self-clear.sh readiness gate: refuses (non-zero, no /clear) unless `datg.py ready` exits 0, before and after the idle wait (#10599)."""
 import os
 import shutil
+import socket
 import stat
 import subprocess
+import sys
+import tempfile
 
 import pytest
 
@@ -54,13 +57,28 @@ def _arch(tmp_path, datg, turn_active=IDLE):
         (s / "turn-active.py").write_text(turn_active)
     (s / "architect-idle.py").write_text("import sys\nsys.exit(0)\n")
     (s / "input-state.py").write_text("print('p empty')\n")
+    # #10599: a run without --locked asks the module whether the self-clear.pid lock is free.
+    shutil.copy(os.path.join(SCRIPTS, "fleet_poll_selfrefresh.py"), s / "fleet_poll_selfrefresh.py")
     bindir = tmp_path / "bin"
     bindir.mkdir()
     tmux = bindir / "tmux"
-    tmux.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/tmux.log\n')
+    # #10599: display-message names the pane's session, as a live server would.
+    tmux.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/tmux.log\n'
+                    'case "$*" in *display-message*) echo "${FAKE_TMUX_SESSION-${ARCHITECT_SESSION:-tm-architect}}";; esac\n')
     tmux.chmod(tmux.stat().st_mode | stat.S_IEXEC)
-    return dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
-                SELF_CLEAR_POLL="0.05", SELF_CLEAR_SETTLE="0.05", SELF_CLEAR_ECHO="0.05")
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", TMUX_SOCKET=_socket_file(),
+               SELF_CLEAR_POLL="0.05", SELF_CLEAR_SETTLE="0.05", SELF_CLEAR_ECHO="0.05")
+    env.pop("TMUX", None)
+    return env
+
+
+def _socket_file():
+    """#10599: a live unix socket file standing in for a tmux server (a short /tmp path fits the limit)."""
+    path = os.path.join(tempfile.mkdtemp(prefix="sc", dir="/tmp"), "s")
+    sock = socket.socket(socket.AF_UNIX)
+    sock.bind(path)
+    sock.close()
+    return path
 
 
 def _live(tmp_path, datg, turn_active=IDLE, wait=6):
@@ -142,7 +160,7 @@ def test_resume_sent_after_clear_when_transcript_check_reports_unknown(tmp_path)
     # box: typed text between a literal send and its Enter, else empty
     (s / "input-state.py").write_text(
         "import os\nlines = open(%r).read().splitlines() if os.path.exists(%r) else []\n"
-        "last = [l for l in lines if l.startswith('send-keys')]\n"
+        "last = [l for l in lines if ' send-keys ' in l]\n"
         "if last and ' -l ' in last[-1]:\n    print('p typed |', last[-1].split(' -l ', 1)[1])\nelse:\n    print('p empty')\n"
         % (str(tmp_path / "tmux.log"), str(tmp_path / "tmux.log")))
     r = subprocess.run(["bash", _install(tmp_path), "--live"], env=env, capture_output=True, text=True, timeout=60)
@@ -169,7 +187,106 @@ def test_sourced_from_another_cwd_resolves_root_to_the_architect_dir(tmp_path):
     shutil.copy(SCRIPT, script)
     cwd = tmp_path / "elsewhere" / "sub"
     cwd.mkdir(parents=True)
-    r = subprocess.run(["bash", "-c", '. "$1"', "bash", str(script)], cwd=cwd,
+    r = subprocess.run(["bash", "-c", 'f=$1; shift; . "$f"', "bash", str(script)], cwd=cwd,
                        capture_output=True, text=True, timeout=20)
     assert r.returncode == 4, r.stdout + r.stderr
     assert "what is owed is not recorded" in (arch / "inbox" / "self-clear.log").read_text()
+
+
+# --- #10599 PR-1: one tmux server and one pane for every step ------------------------------------
+
+_STATEFUL_TMUX = '''#!{python}
+"""Fake tmux: logs argv; capture-pane shows a box holding the last literal send until Enter clears it."""
+import os, sys
+a = sys.argv[1:]
+open({log!r}, "a").write(" ".join(a) + "\\n")
+typed = open({state!r}).read() if os.path.exists({state!r}) else ""
+if "display-message" in a:
+    print(os.environ.get("ARCHITECT_SESSION") or "tm-architect")
+elif "capture-pane" in a:
+    rule = "\\u2500" * 40
+    print("done\\n" + rule + "\\n\\u276f " + typed + "\\n" + rule + "\\n  footer")
+elif "send-keys" in a:
+    if "-l" in a:
+        open({state!r}, "w").write(a[a.index("-l") + 1])
+    elif "Enter" in a:
+        open({state!r}, "w").write("")
+'''
+
+
+def test_every_tmux_call_uses_the_given_socket_and_pane(tmp_path):
+    """#10599 (a): with --socket and --target, capture, input-state, both sends and both Enters reach that
+    server and that pane only; the real input-state.py reads the box through the same socket."""
+    env = _arch(tmp_path, _fake_datg(0))
+    shutil.copy(os.path.join(SCRIPTS, "input-state.py"), tmp_path / "scripts" / "input-state.py")
+    tmux = tmp_path / "bin" / "tmux"
+    tmux.write_text(_STATEFUL_TMUX.format(python=sys.executable, log=str(tmp_path / "tmux.log"),
+                                          state=str(tmp_path / "box")))
+    sock = _socket_file()
+    env["TMUX_SOCKET"] = _socket_file()  # a different server in the environment must not win
+    r = subprocess.run(["bash", _install(tmp_path), "--live", "--socket", sock, "--target", "%7"],
+                       env=env, capture_output=True, text=True, timeout=60)
+    log = (tmp_path / "inbox" / "self-clear.log").read_text()
+    assert r.returncode == 0, r.stdout + r.stderr + log
+    calls = (tmp_path / "tmux.log").read_text().splitlines()
+    assert calls and all(c.startswith(f"-S {sock} ") and " -t %7" in c for c in calls), calls
+    assert sum("send-keys" in c and c.endswith(" Enter") for c in calls) == 2
+    assert "sent /clear" in log and "sent resume prompt" in log
+
+
+@pytest.mark.parametrize("args", [
+    ["--socket", "/nonexistent/tmux-sock"],   # named but not a socket
+    [],                                         # nothing resolves: no TMUX_SOCKET, no $TMUX, no default
+])
+def test_an_unresolvable_socket_sends_nothing(tmp_path, args):
+    """#10599 (b): no live socket at the resolved path: exit 5 before any tmux call."""
+    env = _arch(tmp_path, _fake_datg(0))
+    env.pop("TMUX_SOCKET")
+    env["TMUX_TMPDIR"] = str(tmp_path / "no-tmux-here")
+    code = subprocess.run(["bash", _install(tmp_path), "--live", *args], env=env,
+                          capture_output=True, text=True, timeout=20).returncode
+    assert code == 5
+    assert not (tmp_path / "tmux.log").exists()
+    assert "no tmux socket" in (tmp_path / "inbox" / "self-clear.log").read_text()
+
+
+def test_an_option_without_a_value_refuses(tmp_path):
+    env = _arch(tmp_path, _fake_datg(0))
+    r = subprocess.run(["bash", _install(tmp_path), "--live", "--socket"], env=env,
+                       capture_output=True, text=True, timeout=20)
+    assert r.returncode == 64
+    assert not (tmp_path / "tmux.log").exists()
+
+
+@pytest.mark.parametrize("session", ["tm-other-pm", ""])
+def test_a_pane_that_left_the_architect_session_gets_no_key(tmp_path, session):
+    """#10599: after a server restart the pane id can belong to another session; nothing is sent."""
+    env = _arch(tmp_path, _fake_datg(0))
+    env["FAKE_TMUX_SESSION"] = session
+    r = subprocess.run(["bash", _install(tmp_path), "--live", "--target", "%7"], env=env,
+                       capture_output=True, text=True, timeout=20)
+    log = (tmp_path / "inbox" / "self-clear.log").read_text()
+    assert r.returncode == 6, r.stdout + r.stderr + log
+    assert "send-keys" not in (tmp_path / "tmux.log").read_text()
+    assert "not tm-architect; nothing sent" in log
+
+
+def test_a_run_by_hand_refuses_while_the_lock_is_held_and_runs_when_free(tmp_path):
+    """#10599: self-clear.sh without --locked sends nothing while inbox/self-clear.pid is flocked."""
+    import fcntl
+    env = _arch(tmp_path, _fake_datg(0))
+    fd = os.open(tmp_path / "inbox" / "self-clear.pid", os.O_RDWR | os.O_CREAT)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        r = subprocess.run(["bash", _install(tmp_path), "--live"], env=env, capture_output=True, text=True,
+                           timeout=20)
+    finally:
+        os.close(fd)
+    log = (tmp_path / "inbox" / "self-clear.log").read_text()
+    assert r.returncode == 7, r.stdout + r.stderr + log
+    assert "send-keys" not in ((tmp_path / "tmux.log").read_text() if (tmp_path / "tmux.log").exists() else "")
+    try:  # the lock is free now (the file stays): the same run proceeds to /clear
+        subprocess.run(["bash", _install(tmp_path), "--live"], env=env, capture_output=True, text=True, timeout=6)
+    except subprocess.TimeoutExpired:
+        pass
+    assert "-l /clear" in (tmp_path / "tmux.log").read_text()
