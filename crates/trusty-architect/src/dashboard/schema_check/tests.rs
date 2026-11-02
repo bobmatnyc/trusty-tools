@@ -212,7 +212,7 @@ fn status_brief_pattern_matches_python_whitespace() -> Result<(), String> {
         };
         let want = !py_space.contains(&cp) && c != '/';
         assert_eq!(
-            brief.search(&format!("p{c}q/a.md")),
+            brief.search(&format!("{c}/a.md")),
             want,
             "U+{cp:04X} before /"
         );
