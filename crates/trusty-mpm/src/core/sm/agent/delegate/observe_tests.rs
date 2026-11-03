@@ -58,26 +58,23 @@ fn interpret_launched() {
 
 /// Why: the verification gate — a pane carrying a printed PR URL is gate-satisfying
 /// EVIDENCE, so the task interprets as `Verified` WITH that evidence captured.
-/// What: interprets a record whose pane output contains the PR URL its task named
-/// (#10721 W1).
+/// What: interprets a record whose pane shows a `gh pr comment` on the PR its task
+/// named, with the comment URL as the result (#10721 W1).
 /// Test: this is the test.
 #[test]
 fn interpret_verified_with_pr_url() {
     let expect =
         TaskExpectation::from_task("Address the review on https://github.com/acme/repo/pull/42");
+    let pane = "⏺ Bash(gh pr comment 42 --body \"Addressed\")\n\
+                \u{20}\u{20}⎿  https://github.com/acme/repo/pull/42#issuecomment-7";
     let obs = interpret_for(
-        &json!({
-            "session": {
-                "state": "running",
-                "pane": "Opened PR https://github.com/acme/repo/pull/42 ready for review"
-            }
-        }),
+        &json!({ "session": { "state": "running", "pane": pane } }),
         &expect,
     );
     assert_eq!(obs.state, SessionTaskState::Verified);
     assert_eq!(
         obs.evidence.as_deref(),
-        Some("PR opened: https://github.com/acme/repo/pull/42")
+        Some("PR comment: https://github.com/acme/repo/pull/42#issuecomment-7")
     );
 }
 
@@ -95,12 +92,12 @@ fn interpret_no_evidence_stays_unverified() {
 
 /// Why: the PR-URL scanner is the most common evidence path; it must find a URL
 /// even surrounded by prose/punctuation.
-/// What: scans a sentence with a trailing-punctuation PR URL the task named.
+/// What: scans a `gh pr create` result sentence with a trailing-punctuation PR URL.
 /// Test: this is the test.
 #[test]
 fn scan_finds_pr_url() {
-    let expect = TaskExpectation::from_task("Fix CI on https://github.com/o/r/pull/7");
-    let ev = scan_for("All set. See https://github.com/o/r/pull/7).", &expect).unwrap();
+    let ev = scan_evidence("$ gh pr create --fill\nAll set. See https://github.com/o/r/pull/7).")
+        .unwrap();
     assert_eq!(ev, "PR opened: https://github.com/o/r/pull/7");
 }
 
@@ -110,12 +107,12 @@ fn scan_finds_pr_url() {
 /// evidence would hold a garbled, unopenable URL.
 /// What: interprets a record whose pane field ENDS with the PR URL (so the
 /// serialized form is `…pull/9"}}`) and asserts the captured evidence URL has no
-/// trailing framing characters. The URL is tied to the session by the
-/// `gh pr create` line before it (#10721 W1).
+/// trailing framing characters. The URL is the result of the `gh pr create`
+/// invocation before it (#10721 W1).
 /// Test: this is the test.
 #[test]
 fn scan_pr_url_strips_json_framing() {
-    let pane = "Creating pull request for fix into main in o/r\n\nhttps://github.com/o/r/pull/9";
+    let pane = "$ gh pr create --fill\nhttps://github.com/o/r/pull/9";
     let obs = interpret_session(&json!({
         "session": { "state": "running", "pane": pane }
     }));
@@ -135,13 +132,9 @@ fn scan_pr_url_strips_json_framing() {
 /// Test: this is the test.
 #[test]
 fn interpret_evidence_from_raw_pane() {
-    let pane =
-        "Ran the job: \"build\" finished.\nOpened PR https://github.com/acme/repo/pull/13\nDone.";
-    let expect = TaskExpectation::from_task("Rebase https://github.com/acme/repo/pull/13");
-    let obs = interpret_for(
-        &json!({ "session": { "state": "running", "pane": pane } }),
-        &expect,
-    );
+    let pane = "Ran the job: \"build\" finished.\n$ gh pr create --fill\n\
+                https://github.com/acme/repo/pull/13\nDone.";
+    let obs = interpret_session(&json!({ "session": { "state": "running", "pane": pane } }));
     assert_eq!(obs.state, SessionTaskState::Verified);
     assert_eq!(
         obs.evidence.as_deref(),
@@ -152,18 +145,17 @@ fn interpret_evidence_from_raw_pane() {
 
 /// Why: when NO pane/output field is present, the scanner must FALL BACK to the
 /// record's other string values so evidence in another record field is found.
-/// What: a record with the task's PR URL in a non-pane field and no pane field;
-/// asserts the URL is still captured via the fallback.
+/// What: a record with a `gh pr create` transcript in a non-pane field and no
+/// pane field; asserts the created PR is still captured via the fallback.
 /// Test: this is the test.
 #[test]
 fn interpret_evidence_fallback_to_json_when_no_pane() {
-    let expect = TaskExpectation::from_task("Land https://github.com/o/r/pull/5");
-    let obs = interpret_for(
-        &json!({
-            "session": { "state": "running", "result_url": "https://github.com/o/r/pull/5" }
-        }),
-        &expect,
-    );
+    let obs = interpret_session(&json!({
+        "session": {
+            "state": "running",
+            "result": "$ gh pr create --fill\nhttps://github.com/o/r/pull/5"
+        }
+    }));
     assert_eq!(obs.state, SessionTaskState::Verified);
     assert_eq!(
         obs.evidence.as_deref(),
@@ -266,43 +258,46 @@ fn failed_state_with_evidence_is_failed() {
     assert!(obs.evidence.is_none(), "got {:?}", obs.evidence);
 }
 
-/// Why: #10721 W1 — with a task that names a PR, that PR (any case, any sub-path)
-/// is evidence and a different PR, repo or host is not.
-/// What: scans matching and non-matching PR URLs against one expectation.
+/// Why: #10721 W1 — a non-create `gh pr` action proves work only on the PR the
+/// task named (any case, any sub-path); one on a different PR, repo or host
+/// does not.
+/// What: `gh pr comment` results for matching and non-matching PR URLs against
+/// one expectation.
 /// Test: this is the test.
 #[test]
 fn pr_url_matching_the_task_pr_is_verified() {
     let expect = TaskExpectation::from_task("Fix review on https://github.com/acme/repo/pull/42");
+    let action = |url: &str| format!("$ gh pr comment 42 --body done\n{url}#issuecomment-1");
     assert_eq!(
-        scan_for(
-            "pushed: https://github.com/Acme/Repo/pull/42/files",
-            &expect
-        )
-        .as_deref(),
-        Some("PR opened: https://github.com/Acme/Repo/pull/42/files")
+        scan_for(&action("https://github.com/Acme/Repo/pull/42"), &expect).as_deref(),
+        Some("PR comment: https://github.com/Acme/Repo/pull/42#issuecomment-1")
     );
     for other in [
         "https://github.com/acme/repo/pull/43",
         "https://github.com/acme/other/pull/42",
         "https://github.com/example/project/pull/123",
     ] {
-        assert_eq!(scan_for(other, &expect), None, "input: {other}");
+        assert_eq!(scan_for(&action(other), &expect), None, "input: {other}");
     }
 }
 
 /// Why: #10721 W1 — a PR the session opens has no number the task could name;
-/// `gh pr create`'s status line ties the URL to this session and repo.
-/// What: a created PR in the named repo verifies; a URL for another repo does not.
+/// the `gh pr create` result is its in-session provenance, including the TTY
+/// draft form, but only from a `gh pr` action, never from narration.
+/// What: a TTY draft create inside a Bash step verifies; narration that only
+/// mentions running `gh pr create` does not.
 /// Test: this is the test.
 #[test]
 fn pr_created_in_session_is_verified() {
-    let pane = "Creating pull request for feat into main in acme/login\n\nhttps://github.com/acme/login/pull/9";
+    let pane = "⏺ Bash(cd /r && gh pr create --draft --fill)\n\
+                \u{20}\u{20}⎿  Creating draft pull request for feat into main in acme/login\n\
+                \u{20}\u{20}   https://github.com/acme/login/pull/9";
     assert_eq!(
         scan_evidence(pane).as_deref(),
         Some("PR opened: https://github.com/acme/login/pull/9")
     );
-    let other = "Creating pull request for feat into main in acme/login\nhttps://github.com/acme/web/pull/9";
-    assert_eq!(scan_evidence(other), None);
+    let narration = "⏺ I ran gh pr create and got https://github.com/acme/login/pull/9";
+    assert_eq!(scan_evidence(narration), None);
 }
 
 /// Why: #10721 W1 provenance — the SM types the task into the pane, so the task's
@@ -364,4 +359,108 @@ fn write_naming_a_path_is_write_evidence() {
         let ev = scan_evidence(text).unwrap_or_else(|| panic!("no evidence for: {text}"));
         assert!(ev.starts_with("edit made:"), "{ev}");
     }
+}
+
+/// Why: #10721 critic round — a task-named PR URL identifies the PR but proves
+/// nothing; a failure line or the agent restating the task must not verify.
+/// What: two panes naming the task's PR with no `gh` action result; asserts no
+/// evidence.
+/// Test: this is the test.
+#[test]
+fn task_named_pr_url_without_an_action_is_not_verified() {
+    let expect = TaskExpectation::from_task("Fix review on https://github.com/acme/repo/pull/42");
+    let wrong: Vec<_> = [
+        "Task failed; reference PR https://github.com/acme/repo/pull/42",
+        "⏺ I'll review https://github.com/acme/repo/pull/42 and push the fix.",
+    ]
+    .into_iter()
+    .filter_map(|p| scan_for(p, &expect).map(|ev| (p, ev)))
+    .collect();
+    assert!(wrong.is_empty(), "verified without an action: {wrong:#?}");
+}
+
+/// Why: #10721 critic round — a failure between a `gh pr create` and a later URL
+/// means the create did not succeed.
+/// What: the critic's TTY-shaped failing pane, and the same failure under a
+/// Claude Code `Bash(gh pr create …)` invocation; asserts no evidence.
+/// Test: this is the test.
+#[test]
+fn gh_pr_create_failure_before_url_is_not_verified() {
+    let wrong: Vec<_> = [
+        "Creating pull request for f into main in acme/repo\n\
+         pull request create failed: GraphQL: Head sha can't be blank\n\
+         see https://github.com/acme/repo/pull/3",
+        "⏺ Bash(gh pr create --fill)\n\
+         \u{20}\u{20}⎿  pull request create failed: GraphQL: Head sha can't be blank\n\
+         \u{20}\u{20}   see https://github.com/acme/repo/pull/3",
+        "⏺ Bash(gh pr create --fill)\n\
+         \u{20}\u{20}⎿  a pull request for branch \"f\" into branch \"main\" already exists:\n\
+         \u{20}\u{20}   https://github.com/acme/repo/pull/3",
+    ]
+    .into_iter()
+    .filter_map(|p| scan_evidence(p).map(|ev| (p, ev)))
+    .collect();
+    assert!(wrong.is_empty(), "verified after a failure: {wrong:#?}");
+}
+
+/// Why: #10721 critic round — with no TTY (Claude Code's Bash tool) a real
+/// `gh pr create` prints only the new PR's URL; that result must verify.
+/// What: the Claude Code `⎿ <url>` result shape and a plain shell transcript;
+/// asserts the created PR is the evidence.
+/// Test: this is the test.
+#[test]
+fn non_tty_gh_pr_create_result_is_verified() {
+    let wrong: Vec<_> = [
+        "⏺ Bash(gh pr create --title \"Fix login\" --body \"Refs #1\")\n\
+         \u{20}\u{20}⎿  https://github.com/acme/repo/pull/9",
+        "$ gh pr create --draft --fill\nhttps://github.com/acme/repo/pull/9",
+    ]
+    .into_iter()
+    .map(|p| (p, scan_evidence(p)))
+    .filter(|(_, ev)| ev.as_deref() != Some("PR opened: https://github.com/acme/repo/pull/9"))
+    .collect();
+    assert!(
+        wrong.is_empty(),
+        "real create result not verified: {wrong:#?}"
+    );
+}
+
+/// Why: #10721 critic round — failure-only summaries (no `passed` token) must be
+/// seen, and a failure after a pass means the latest run failed.
+/// What: a passing cargo summary followed by each failure-only line; asserts no
+/// evidence.
+/// Test: this is the test.
+#[test]
+fn failure_only_line_after_a_pass_is_failed() {
+    let wrong: Vec<_> = [
+        "==== 3 failed in 0.4s ====",
+        "Tests: 3 failed, 3 total",
+        "error[E0308]: mismatched types",
+        "error: could not compile `app` (lib) due to 1 previous error",
+        "thread 'tests::login' panicked at src/lib.rs:9:5:",
+    ]
+    .into_iter()
+    .filter_map(|fail| {
+        let pane = format!("test result: ok. 4 passed; 0 failed\n{fail}");
+        scan_evidence(&pane).map(|ev| (fail, ev))
+    })
+    .collect();
+    assert!(
+        wrong.is_empty(),
+        "failure after a pass still verified: {wrong:#?}"
+    );
+}
+
+/// Why: #10721 critic round — the latest summary decides, so a red run fixed by a
+/// later green run is test evidence.
+/// What: a failing cargo summary then a passing one; asserts the passing line is
+/// the evidence.
+/// Test: this is the test.
+#[test]
+fn red_then_green_is_test_evidence() {
+    let pane = "test result: FAILED. 3 passed; 1 failed\ntest result: ok. 4 passed; 0 failed";
+    assert_eq!(
+        scan_evidence(pane).as_deref(),
+        Some("tests pass: test result: ok. 4 passed; 0 failed")
+    );
 }

@@ -71,32 +71,31 @@ impl PrRef {
 ///
 /// Why: the gate forbids `Verified` without OBSERVED evidence; #10721 made each
 /// rule demand a real, successful result tied to this task.
-/// What: returns `None` when any test summary in `observed` reports a failure (a
-/// failure marker beats evidence). Otherwise returns the first match, in priority
-/// order: (1) a PR URL that is a PR the task named, or one `gh pr create` reports
-/// creating in the observed text; (2) a test summary with a positive pass count
-/// and zero failures; (3) a `diff --git` header or a write phrase that names a
+/// What: the LATEST test summary or failure line in `observed` decides the run:
+/// when it is a failure, returns `None` (a failure marker beats evidence).
+/// Otherwise returns the first match, in priority order: (1) a PR URL printed as
+/// the result of a `gh pr` action ([`find_pr_action`]); (2) that latest summary
+/// when it passes; (3) a `diff --git` header or a write phrase that names a
 /// written path. Undecidable text → `None`. The caller removes task echoes first
 /// ([`drop_task_echo`]).
 /// Test: `observe_tests.rs::scan_finds_pr_url`, `scan_finds_test_pass`,
 /// `scan_finds_diff`, `scan_finds_nothing`,
 /// `zero_passed_three_failed_is_not_test_evidence`,
-/// `wrote_nothing_is_not_write_evidence`, `failing_summary_vetoes_other_evidence`.
+/// `wrote_nothing_is_not_write_evidence`, `failing_summary_vetoes_other_evidence`,
+/// `failure_only_line_after_a_pass_is_failed`, `red_then_green_is_test_evidence`.
 pub fn scan_evidence(observed: &str, expect: &TaskExpectation) -> Option<String> {
-    // #10721: a failing test summary anywhere in the observed text wins.
-    if observed
+    // #10721: the latest summary or failure line decides; a failure wins.
+    let latest = observed
         .lines()
-        .any(|l| classify_test_summary(l) == Some(TestSummary::Fail))
-    {
+        .rev()
+        .find_map(|l| classify_test_summary(l).map(|v| (l, v)));
+    if let Some((_, TestSummary::Fail)) = latest {
         return None;
     }
-    if let Some(url) = find_pr_url(observed, expect) {
-        return Some(format!("PR opened: {url}"));
+    if let Some(found) = find_pr_action(observed, expect) {
+        return Some(found);
     }
-    if let Some(pass) = observed
-        .lines()
-        .find(|l| classify_test_summary(l) == Some(TestSummary::Pass))
-    {
+    if let Some((pass, TestSummary::Pass)) = latest {
         return Some(format!("tests pass: {}", pass.trim()));
     }
     if let Some(diff) = observed.lines().find(|l| names_a_write(l)) {
@@ -160,42 +159,95 @@ fn pr_urls(text: &str) -> Vec<String> {
     urls
 }
 
-/// Find a PR URL that this task is entitled to claim.
-///
-/// Why: #10721 W1 — a URL is evidence only when it identifies the PR the
-/// delegation was meant to open or touch, never an arbitrary or different PR.
-/// What: returns the first observed PR URL whose identity equals a PR the task
-/// named, or that a `gh pr create` line in the observed text reports creating.
-/// Test: `observe_tests.rs::pr_url_for_a_different_pr_is_not_verified`,
-/// `pr_url_matching_the_task_pr_is_verified`, `pr_created_in_session_is_verified`.
-fn find_pr_url(observed: &str, expect: &TaskExpectation) -> Option<String> {
-    let created = created_pr_projects(observed);
-    pr_urls(observed).into_iter().find(|url| {
-        PrRef::parse(url).is_some_and(|pr| {
-            expect.expected_prs.contains(&pr)
-                || (pr.host == "github.com" && created.contains(&pr.project))
-        })
-    })
+/// `gh pr` subcommands whose printed result can prove a PR action.
+const GH_PR_ACTIONS: &[&str] = &["create", "comment", "edit", "merge", "review", "ready"];
+
+/// Lowercase fragments that mark a command result as failed.
+const FAILURE_WORDS: &[&str] = &[
+    "fail",
+    "error",
+    "unable",
+    "could not",
+    "couldn't",
+    "already exists",
+    "denied",
+    "not found",
+    "fatal",
+];
+
+/// Leading pane decoration: prompt glyphs, Claude Code's step and result marks.
+fn is_decoration(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '⏺' | '●' | '$' | '>' | '❯' | '⎿' | '│')
 }
 
-/// Repos (`owner/repo`, lowercased) that `gh pr create` reports opening a PR in.
+/// The `gh pr` action a line invokes, if it is a command invocation.
 ///
-/// Why: a PR the session creates has no number the task could name in advance;
-/// `gh pr create`'s own status line is the in-session provenance for it.
-/// What: collects the trailing `owner/repo` of each
-/// `Creating pull request for <head> into <base> in <owner/repo>` line.
-/// Test: `observe_tests.rs::pr_created_in_session_is_verified`.
-fn created_pr_projects(observed: &str) -> Vec<String> {
-    observed
-        .lines()
-        .filter_map(|line| {
-            let lower = line.trim().to_ascii_lowercase();
-            let rest = lower.strip_prefix("creating pull request for ")?;
-            let (_, repo) = rest.rsplit_once(" in ")?;
-            let repo = repo.trim().trim_end_matches('.');
-            repo.contains('/').then(|| repo.to_string())
-        })
-        .collect()
+/// Why: #10721 — a PR URL is proof only as the RESULT of an action, so the scan
+/// must know where a `gh pr` command was run, not where a URL was mentioned.
+/// What: inside a Claude Code `Bash(…)` step, finds `gh pr <verb>` anywhere in
+/// the command; otherwise the decoration-stripped line must start with it (a
+/// shell transcript). Returns the verb when it is in [`GH_PR_ACTIONS`].
+/// Test: `observe_tests.rs::non_tty_gh_pr_create_result_is_verified`,
+/// `task_named_pr_url_without_an_action_is_not_verified`.
+fn gh_pr_action(line: &str) -> Option<&'static str> {
+    let lower = line.to_ascii_lowercase();
+    let cmd = match lower.find("bash(") {
+        Some(i) => {
+            let inner = &lower[i + "bash(".len()..];
+            &inner[inner.find("gh pr ")?..]
+        }
+        None => lower.trim_start_matches(is_decoration),
+    };
+    let verb = cmd.strip_prefix("gh pr ")?.split_whitespace().next()?;
+    GH_PR_ACTIONS.iter().copied().find(|a| *a == verb)
+}
+
+/// Whether a line starts a new step, ending the previous command's result.
+fn starts_new_step(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with(['⏺', '●', '$', '>', '❯']) || t.to_ascii_lowercase().contains("bash(")
+}
+
+/// Find a PR URL printed as the successful result of a `gh pr` action.
+///
+/// Why: #10721 W1 — a URL alone, task-named or not, is never proof. Without a
+/// TTY (Claude Code's Bash tool) `gh pr create` prints only the new PR's URL, so
+/// the proof is that URL as the invocation's result, bound to its PR number.
+/// What: for each `gh pr <verb>` invocation, reads its result lines up to the
+/// next step. A line carrying a failure word ([`FAILURE_WORDS`]) rejects that
+/// invocation. A PR URL on a result line is evidence when the verb is `create`
+/// (a PR opened in this session) or when the URL is a PR the task named. Returns
+/// `PR opened: <url>` for a create, `PR <verb>: <url>` otherwise.
+/// Test: `observe_tests.rs::non_tty_gh_pr_create_result_is_verified`,
+/// `gh_pr_create_failure_before_url_is_not_verified`,
+/// `task_named_pr_url_without_an_action_is_not_verified`,
+/// `pr_url_for_a_different_pr_is_not_verified`,
+/// `pr_url_matching_the_task_pr_is_verified`, `pr_created_in_session_is_verified`.
+fn find_pr_action(observed: &str, expect: &TaskExpectation) -> Option<String> {
+    let lines: Vec<&str> = observed.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(verb) = gh_pr_action(line) else {
+            continue;
+        };
+        for result in &lines[i + 1..] {
+            if starts_new_step(result) {
+                break;
+            }
+            let lower = result.to_ascii_lowercase();
+            if FAILURE_WORDS.iter().any(|w| lower.contains(w)) {
+                break;
+            }
+            let claimed = pr_urls(result).into_iter().find(|url| {
+                verb == "create"
+                    || PrRef::parse(url).is_some_and(|pr| expect.expected_prs.contains(&pr))
+            });
+            if let Some(url) = claimed {
+                let label = if verb == "create" { "opened" } else { verb };
+                return Some(format!("PR {label}: {url}"));
+            }
+        }
+    }
+    None
 }
 
 /// The verdict a test-run summary line carries.
@@ -203,33 +255,41 @@ fn created_pr_projects(observed: &str) -> Vec<String> {
 enum TestSummary {
     /// A positive pass count with zero failures.
     Pass,
-    /// Any failure count above zero, or a failure word with no count.
+    /// A failure count above zero, a failing summary, a compiler error or a panic.
     Fail,
 }
 
-/// Classify one line as a passing or failing test summary, or neither.
+/// Classify one line as a passing or failing test/build outcome, or neither.
 ///
 /// Why: #10721 W2 — "a digit plus `passed`" accepted `0 passed, 3 failed`. The
-/// counts must be parsed: a pass needs a positive count and zero failures.
-/// What: a line is a summary when it carries `test result:` or a `passed` word.
-/// `test result: failed`, a failure word (`failed`, `failures`, `errors`, …)
-/// bound to a count above zero, or one with no count at all → `Fail`. Otherwise a
-/// summed `passed` count above zero → `Pass`; zero passes → `None` (no evidence,
-/// no veto, so cargo's empty `0 passed; 0 failed` targets stay neutral).
+/// counts must be parsed: a pass needs a positive count and zero failures. A
+/// failure-only line (pytest `3 failed in 0.4s`, jest `3 failed, 3 total`, rustc
+/// `error[E…]`, a panic) has no `passed` word and must still count as a failure.
+/// What: `Fail` for a rustc `error[`/`error:` line, a `thread '…' panicked` line,
+/// `test result: failed`, or any failure word (`failed`, `failures`, `errors`, …)
+/// bound to a count above zero. On a summary line (`test result:` or a `passed`
+/// word) an unbound failure word is also `Fail`, and otherwise a summed `passed`
+/// count above zero is `Pass`. Zero passes → `None` (no evidence, no veto, so
+/// cargo's empty `0 passed; 0 failed` targets stay neutral).
 /// Test: `observe_tests.rs::zero_passed_three_failed_is_not_test_evidence`,
-/// `scan_finds_test_pass`, `failing_summary_vetoes_other_evidence`.
+/// `scan_finds_test_pass`, `failing_summary_vetoes_other_evidence`,
+/// `failure_only_line_after_a_pass_is_failed`.
 fn classify_test_summary(line: &str) -> Option<TestSummary> {
     let lower = line.to_ascii_lowercase();
+    let bare = lower.trim_start_matches(is_decoration);
+    // #10721: compiler errors and panics are failures with no counts at all.
+    if bare.starts_with("error[")
+        || bare.starts_with("error:")
+        || (lower.contains("thread '") && lower.contains("panicked"))
+        || lower.contains("test result: failed")
+    {
+        return Some(TestSummary::Fail);
+    }
     let tokens: Vec<&str> = lower
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|t| !t.is_empty())
         .collect();
-    if !lower.contains("test result:") && !tokens.contains(&"passed") {
-        return None;
-    }
-    if lower.contains("test result: failed") {
-        return Some(TestSummary::Fail);
-    }
+    let summary = lower.contains("test result:") || tokens.contains(&"passed");
     // The count bound to the word at `i`: the token before it, or before `tests`.
     let count_at = |i: usize| -> Option<u64> {
         let prev = tokens.get(i.checked_sub(1)?)?;
@@ -242,15 +302,17 @@ fn classify_test_summary(line: &str) -> Option<TestSummary> {
     for (i, tok) in tokens.iter().enumerate() {
         match *tok {
             "passed" => passed += count_at(i).unwrap_or(0),
-            "failed" | "failures" | "failure" | "failing" | "errors" | "error" | "errored"
-                if count_at(i).is_none_or(|n| n > 0) =>
-            {
-                return Some(TestSummary::Fail);
+            "failed" | "failures" | "failure" | "failing" | "errors" | "error" | "errored" => {
+                match count_at(i) {
+                    Some(n) if n > 0 => return Some(TestSummary::Fail),
+                    None if summary => return Some(TestSummary::Fail),
+                    _ => {}
+                }
             }
             _ => {}
         }
     }
-    (passed > 0).then_some(TestSummary::Pass)
+    (summary && passed > 0).then_some(TestSummary::Pass)
 }
 
 /// Whether `line` reports a real write: a diff header or a write naming a path.
