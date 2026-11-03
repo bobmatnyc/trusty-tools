@@ -61,6 +61,10 @@ async fn extraction_checkpoint_retries_publication_without_repeating_inference()
             if method == trusty_common::search_rpc::METHOD_INDEXES_LIST {
                 return Ok(json!({"indexes":[{"id":index,"root_path":root}]}));
             }
+            // #10740: every bind checks for indexed bookkeeping files.
+            if method == "search.chunks.list" {
+                return Ok(json!({"chunks":[]}));
+            }
             if method == "search.index.config.get" {
                 return Ok(json!({"extensions":["md"]}));
             }

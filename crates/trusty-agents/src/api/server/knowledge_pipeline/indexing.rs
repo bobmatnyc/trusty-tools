@@ -42,7 +42,9 @@ pub(super) async fn status(socket: Option<&Path>, store: &ProtectedStore, create
 /// What: creates the index with [`OKG_EXCLUDE_GLOBS`] and no allowlist, or
 /// reconciles an existing `assistant-okg-` binding to carry them.
 /// Test: `new_okg_binding_admits_every_concept_and_no_bookkeeping`,
-/// `existing_okg_binding_gains_exclusions_and_drops_indexed_bookkeeping`.
+/// `existing_okg_binding_gains_exclusions_and_drops_indexed_bookkeeping`,
+/// `failed_bookkeeping_removal_is_retried_on_the_next_bind`,
+/// `config_set_purge_error_fails_the_bind`.
 pub(super) async fn at(
     socket: &Path,
     store: &ProtectedStore,
@@ -113,6 +115,7 @@ pub(super) async fn at(
         }
         // #10740: an existing binding gains the literal exclusions, keeping any
         // other entries it already carries.
+        // #10740: residual — legacy include_paths; cleared via #10739
         let mut globs = config
             .get("exclude_globs")
             .and_then(Value::as_array)
@@ -127,23 +130,15 @@ pub(super) async fn at(
             body.insert("exclude_globs".into(), Value::Array(globs));
         }
         if !body.is_empty() {
-            call(
+            let reply = call(
                 socket,
                 "search.index.config.set",
                 json!({"index_id":store.index_id,"body":body}),
             )
             .await?;
-        }
-        if !missing.is_empty() {
-            // #10740: withdraw bookkeeping files an older binding already indexed.
-            for glob in OKG_EXCLUDE_GLOBS {
-                let prefix = glob.trim_end_matches("/**");
-                call(
-                    socket,
-                    "search.index.files.remove",
-                    json!({"index_id":store.index_id,"body":{"path_prefix":prefix}}),
-                )
-                .await?;
+            // #10740: a 200 reply can still report a failed purge of excluded files.
+            if let Some(error) = reply.pointer("/profile_purge/error") {
+                anyhow::bail!("Search could not purge excluded bookkeeping files: {error}");
             }
         }
         if wrong_extensions {
@@ -155,6 +150,10 @@ pub(super) async fn at(
             )
             .await?;
         }
+    }
+    if store.index_id.starts_with("assistant-okg-") {
+        // #10740: every bind re-checks, so a removal that failed earlier is retried.
+        scrub_bookkeeping(socket, store).await?;
     }
     let status = call(
         socket,
@@ -185,6 +184,80 @@ pub(super) async fn at(
     Ok(
         json!({"connected":connected,"index_id":store.index_id,"status":status,"reason":if connected {None} else {Some("Search has not reported this protected index ready")}}),
     )
+}
+
+/// Every indexed path with a `_sources` or `_state` component, nested included.
+async fn bookkeeping_paths(
+    socket: &Path,
+    store: &ProtectedStore,
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let trees: Vec<&str> = OKG_EXCLUDE_GLOBS
+        .iter()
+        .map(|glob| glob.trim_end_matches("/**"))
+        .collect();
+    let mut found = std::collections::BTreeSet::new();
+    let mut after = String::new();
+    loop {
+        let page = call(
+            socket,
+            "search.chunks.list",
+            json!({"index_id":store.index_id,"limit":1000,"after":after}),
+        )
+        .await?;
+        let chunks = page
+            .get("chunks")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("Search returned an invalid chunk page"))?;
+        for chunk in chunks {
+            let path = chunk
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    let file = Path::new(chunk.get("file")?.as_str()?);
+                    let relative = file.strip_prefix(&store.root).unwrap_or(file);
+                    Some(relative.to_string_lossy().into_owned())
+                })
+                .ok_or_else(|| anyhow::anyhow!("Search returned a chunk without a path"))?;
+            let bookkeeping = Path::new(&path)
+                .components()
+                .any(|c| trees.iter().any(|tree| c.as_os_str() == *tree));
+            if bookkeeping {
+                found.insert(path);
+            }
+        }
+        match page.get("next_cursor").and_then(Value::as_str) {
+            Some(next) if !next.is_empty() && !chunks.is_empty() => after = next.to_owned(),
+            _ => return Ok(found),
+        }
+    }
+}
+
+/// Remove indexed `_sources`/`_state` files; fail the bind unless none remain.
+/// Why: SPEC-OKF-01 §5.3.1 — a removal that failed once must not read as bound.
+/// What: lists the leaked paths, removes them in batches, re-lists, and errors
+/// when any path is still indexed.
+/// Test: `failed_bookkeeping_removal_is_retried_on_the_next_bind`.
+async fn scrub_bookkeeping(socket: &Path, store: &ProtectedStore) -> anyhow::Result<()> {
+    let leaked = bookkeeping_paths(socket, store).await?;
+    if leaked.is_empty() {
+        return Ok(());
+    }
+    let leaked: Vec<String> = leaked.into_iter().collect();
+    for batch in leaked.chunks(10_000) {
+        call(
+            socket,
+            "search.index.files.remove",
+            json!({"index_id":store.index_id,"body":{"paths":batch}}),
+        )
+        .await?;
+    }
+    let left = bookkeeping_paths(socket, store).await?;
+    anyhow::ensure!(
+        left.is_empty(),
+        "Search still indexes bookkeeping files: {left:?}"
+    );
+    Ok(())
 }
 
 /// Approve only this validated protected root, preserving all existing policy entries.
@@ -239,6 +312,10 @@ mod tests {
         config: Value,
         indexed: BTreeSet<String>,
         calls: Vec<(String, Value)>,
+        /// `files.remove` calls still to refuse, as a busy daemon does.
+        refuse_removes: usize,
+        /// A `profile_purge.error` for the `config.set` reply to carry.
+        purge_error: Option<String>,
     }
 
     /// A fake trusty-search that keeps `config.set` and `files.remove` effects.
@@ -252,6 +329,12 @@ mod tests {
         let mock = crate::uds_mock::spawn(move |method, params| {
             let mut d = shared.lock().unwrap();
             d.calls.push((method.to_owned(), params.clone()));
+            if method == "search.index.files.remove" && d.refuse_removes > 0 {
+                d.refuse_removes -= 1;
+                return Box::pin(async {
+                    Err(crate::uds_mock::RpcError::new(-32050, "remove_files_busy"))
+                });
+            }
             let reply = match method {
                 search_rpc::METHOD_INDEXES_LIST => json!({"indexes": d.listed.iter().collect::<Vec<_>>()}),
                 search_rpc::METHOD_INDEX_CREATE => {
@@ -263,11 +346,25 @@ mod tests {
                     for (key, value) in params["body"].as_object().unwrap() {
                         d.config[key] = value.clone();
                     }
-                    json!({"persisted": true})
+                    match &d.purge_error {
+                        Some(error) => json!({"persisted": true, "profile_purge": {"error": error}}),
+                        None => json!({"persisted": true}),
+                    }
+                }
+                "search.chunks.list" => {
+                    let chunks: Vec<Value> = d.indexed.iter().map(|p| json!({"path": p})).collect();
+                    json!({"chunks": chunks, "next_cursor": null})
                 }
                 "search.index.files.remove" => {
-                    let prefix = params["body"]["path_prefix"].as_str().unwrap().to_owned();
-                    d.indexed.retain(|p| !Path::new(p).starts_with(&prefix));
+                    let body = &params["body"];
+                    let paths: BTreeSet<String> = body["paths"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                        .unwrap_or_default();
+                    let prefix = body["path_prefix"].as_str().map(str::to_owned);
+                    d.indexed.retain(|p| {
+                        !paths.contains(p) && !prefix.as_ref().is_some_and(|x| Path::new(p).starts_with(x))
+                    });
                     json!({})
                 }
                 search_rpc::METHOD_INDEX_STATUS => json!({"root_path": root, "status": "ready"}),
@@ -287,9 +384,10 @@ mod tests {
         }
     }
 
-    /// trusty-search's admission policy for a root-relative path, read from a
-    /// binding: `include_paths` roots, `exclude_globs` through the daemon's
-    /// own matcher, then the extension allowlist.
+    /// Request-shape check only: what a binding's `include_paths`,
+    /// `exclude_globs` (through the daemon's own glob matcher) and `extensions`
+    /// say about a root-relative path. It does not run trusty-search's
+    /// admission code, which is crate-private.
     fn admits(binding: &Value, path: &str) -> bool {
         let strings = |key: &str| -> Vec<String> {
             binding[key]
@@ -400,6 +498,62 @@ mod tests {
                 .any(|m| m == "search.index.config.set" || m == "search.index.files.remove"),
             "a corrected binding is left alone: {methods:?}"
         );
+    }
+
+    fn legacy(root: &Path) -> Daemon {
+        Daemon {
+            listed: Some(json!({"id": "assistant-okg-twin", "root_path": root})),
+            config: json!({"extensions": ["md"]}),
+            indexed: [
+                "_sources/registry.toml",
+                "nested/_state/conversion-log.md",
+                "notes/a.md",
+            ]
+            .map(str::to_owned)
+            .into(),
+            ..Daemon::default()
+        }
+    }
+
+    /// Why: a refused removal (busy daemon, timeout) after `config.set` stored
+    /// the globs must not leave the bookkeeping indexed behind a bound OKG.
+    /// What: the first bind's `files.remove` fails; the second bind still
+    /// removes the top-level and nested bookkeeping and only then binds.
+    #[tokio::test]
+    async fn failed_bookkeeping_removal_is_retried_on_the_next_bind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = Daemon {
+            refuse_removes: 1,
+            ..legacy(tmp.path())
+        };
+        let (mock, daemon) = fake(tmp.path(), daemon).await;
+        assert!(
+            super::at(mock.socket(), &store(tmp.path()), true)
+                .await
+                .is_err()
+        );
+        daemon.lock().unwrap().refuse_removes = 0;
+        let bound = super::status(Some(mock.socket()), &store(tmp.path()), true).await;
+        assert_eq!(bound["connected"], json!(true), "{bound}");
+        assert_eq!(
+            daemon.lock().unwrap().indexed,
+            BTreeSet::from(["notes/a.md".to_owned()])
+        );
+    }
+
+    /// Why: trusty-search answers 200 to a `config.set` whose purge of newly
+    /// excluded files failed, and reports it only in `profile_purge.error`.
+    /// What: such a reply fails the bind, so the OKG never reads connected.
+    #[tokio::test]
+    async fn config_set_purge_error_fails_the_bind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = Daemon {
+            purge_error: Some("could not list indexed files".into()),
+            ..legacy(tmp.path())
+        };
+        let (mock, _daemon) = fake(tmp.path(), daemon).await;
+        let bound = super::status(Some(mock.socket()), &store(tmp.path()), true).await;
+        assert_eq!(bound["connected"], json!(false), "{bound}");
     }
 
     #[test]
