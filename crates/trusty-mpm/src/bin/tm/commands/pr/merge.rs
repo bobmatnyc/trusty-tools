@@ -17,7 +17,8 @@
 //! re-validates the body with [`body::validate`] — reporting the nine-field
 //! gaps and refusing only on a missing attribution footer, which is the half
 //! that belongs to the commit message this command writes (#7868) — applies
-//! the #8614 checks gate ([`check_gate`]), and either
+//! the #10724 code-critic verdict gate ([`critic_verdict`]) and the #8614
+//! checks gate ([`check_gate`]), and either
 //! refuses with one line and no `gh pr merge` call, or merges
 //! with `--squash --delete-branch --subject "<title> (#<n>)" --body-file <tmp>`
 //! where the temp file holds that validated body. The refusal itself is
@@ -33,6 +34,7 @@ use serde::Deserialize;
 
 use super::body;
 use super::check_gate::{self, CheckGate};
+use super::critic_verdict;
 use super::rollup::RollupEntry;
 use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv, repo_slug};
 use crate::cli::PrMergeArgs;
@@ -408,7 +410,13 @@ fn merged_after_failure<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> Option<Merge
 /// [`check_gate::needs_required`] says the answer depends on them, and a
 /// waived check heads the commit body. A failed or unparseable read, or a
 /// view with no `baseRefName`, is an error and nothing merges.
-/// Test: `merge_refuses_without_calling_gh_merge`,
+///
+/// #10724: between [`decide`] and the checks gate, [`critic_verdict::assess`]
+/// refuses an unresolved code-critic BLOCK on the head; a failed verdict read
+/// refuses too. Known limit: a raw `gh pr merge` skips this gate entirely.
+/// Test: `pr_10724_a_block_pinned_to_the_head_refuses`,
+/// `pr_10724_a_verdict_read_failure_refuses`,
+/// `merge_refuses_without_calling_gh_merge`,
 /// `run_auto_refuses_while_a_non_required_check_runs`,
 /// `run_refuses_while_a_non_required_check_runs_without_auto`,
 /// `run_refuses_without_a_base_ref_name`,
@@ -443,6 +451,24 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
 
     if let Decision::Refuse(reason) = decide(&view, &report.merge_failures()) {
         return Ok(refuse(args.pr, &reason));
+    }
+
+    // #10724: an unresolved code-critic BLOCK on the head holds the merge; an
+    // unreadable verdict set fails closed.
+    let mut verdict_read = argv(&["pr", "view", &args.pr.to_string()]);
+    push_repo(&mut verdict_read, args);
+    let critic = match critic_verdict::read(gh, verdict_read) {
+        Ok(v) => critic_verdict::assess(&v),
+        Err(e) => {
+            let reason = format!("cannot read the code-critic verdicts ({e:#})");
+            return Ok(refuse(args.pr, &reason));
+        }
+    };
+    if let Some(reason) = critic.refusal {
+        return Ok(refuse(args.pr, &reason));
+    }
+    if let Some(warning) = critic.warning {
+        eprintln!("tm pr merge: #{}: warning — {warning}", args.pr);
     }
 
     // #8614: the checks gate, after every other hold signal passed.
