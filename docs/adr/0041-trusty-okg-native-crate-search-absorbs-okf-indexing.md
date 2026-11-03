@@ -1,6 +1,6 @@
 # 0041. `trusty-kb` renamed `trusty-okg`, stays a native crate; `trusty-search` absorbs OKF indexing; agent-facing reads front it as a service in `trusty-mcp-services` — amends ADR-0040
 
-- **Status:** Accepted
+- **Status:** Amended by [0075](0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md)
 - **Date:** 2026-08-10
 - **Scope:** crate `trusty-kb` (renamed `trusty-okg`); `crates/trusty-agents/src/stores/index_feed.rs` (indexing logic this decision moves out of `trusty-agents`); `trusty-search`'s indexer (destination for OKF awareness); `trusty-mcp-services` (new dependent — hosts the agent-facing OKG service); `crates/trusty-agents/src/tools/okg/*.rs` (unaffected — the native ingest `ToolExecutor`s stay); `.mcp.json`/`stable_set()`/`picker.rs` (affected only once the new service ships — not designed here)
 - **Reversibility Cost:** Low-Medium — never published (free rename, see Consequences); the indexing-ownership move and the new service are more work than the rename (OKF-awareness code in `trusty-search`, retirement of `index_feed.rs`'s push logic, a new MCP service crate-internal to `trusty-mcp-services`) but touch no external contract, since nothing outside this workspace consumes either crate today

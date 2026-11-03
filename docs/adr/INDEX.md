@@ -1,6 +1,6 @@
 # ADR Index — All Decisions
 
-**Last updated:** 2026-10-29 | **Format version:** 1.1
+**Last updated:** 2026-11-03 | **Format version:** 1.1
 
 This index is the complete, concise vetting surface for workspace ADRs. The ADR
 files remain authoritative for full context, decision text, and consequences.
@@ -51,7 +51,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0038](0038-kg-stays-additive-recall-gated-on-extraction-quality.md) | KG remains additive in recall | Accepted | A KG-primary recall lane waits for three extraction-quality preconditions. | `trusty-common`, `trusty-memory` |
 | [0039](0039-operator-named-sessions-unique-by-construction.md) | Unique operator-named sessions | Amended by 0073 | Operator names are unique and unsuffixed; serials remain for automatic creation. | `trusty-mpm` |
 | [0040](0040-trusty-mcp-services-absorbs-trusty-gworkspace.md) | Split MCP framework and services | Accepted | `trusty-mcp` holds protocol primitives and `trusty-mcp-services` initially absorbs gworkspace only. | Workspace |
-| [0041](0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md) | Native trusty-okg with search indexing | Accepted | trusty-okg stays native, trusty-search owns OKF indexing, and an MCP service fronts agent reads. | Workspace |
+| [0041](0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md) | Native trusty-okg with search indexing | Amended by 0075 | trusty-okg stays native, trusty-search owns OKF indexing, and an MCP service fronts agent reads; ADR-0075 replaces the `trusty-okg` name with `trusty-okf` and moves the feed loop into trusty-okf. | Workspace |
 | [0042](0042-mcp-configuration-is-static-and-persistent.md) | Static persistent MCP configuration | Amended by 0058 | MCP declarations live once in user scope and are not injected into workspaces. | `trusty-mpm`, `trusty-search` |
 | [0043](0043-cargo-bin-policy.md) | Traceable `$CARGO_HOME/bin` provenance | Proposed | Registry installs, prebuilt placements, and user-managed files are classified explicitly; path installs are forbidden. | Workspace |
 | [0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md) | Main-checkout write boundary | Amended by 0048, 0056 | Main-checkout sessions write only docs/config, and the harness—not trusty-mpm—owns agent worktree creation. | `trusty-mpm` |
@@ -91,3 +91,4 @@ Crate-specific ADRs have independent sequences and indexes under
 - Superseded ADRs remain indexed as historical decisions.
 - An amended ADR remains in force together with every listed amendment.
 | [0074](0074-exclude-superseded-drawers-from-default-recall.md) | Exclude superseded drawers from default recall | Accepted | Default recall leaves out replaced facts (a `superseded-by:` row marker, stamped atomically at slot retirement, plus resolved KG edges); `include_superseded` opts back in with `superseded_by` tags; a KG lookup failure sets `supersession_unverified`. Amends ADR-0028 D6. Owner ruling D83. | `trusty-memory` |
+| [0075](0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) | trusty-okf consolidates trusty-kb and owns the feed loop | Accepted | Generic `trusty-kb` code moves into the native crate `trusty-okf`, which replaces the planned `trusty-okg` name; agent glue stays in trusty-agents; the index-feed loop moves into trusty-okf behind a cargo feature, and trusty-search keeps chunking, embedding and ranking. Amends ADR-0041. | `trusty-okf`, `trusty-agents`, `trusty-search` |
