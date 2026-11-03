@@ -647,3 +647,101 @@ async fn failed_mutation_leaves_existing_goal_unchanged() {
     }
     assert_unchanged(&store, "set_status");
 }
+
+/// Why: #10722 — `Verified` is the gate-satisfying state, so a link must never
+/// reach it without observed evidence; a missing or blank evidence string on a
+/// Verified update must be refused and leave the link untouched.
+/// What: links one session, then sends Verified with no evidence, and Verified
+/// with blank evidence; asserts each is an error and the link stays `Launched`
+/// with no evidence and progress 0.
+/// Test: this is the test.
+#[tokio::test]
+async fn update_to_verified_without_evidence_is_rejected() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = store_with(palace, &dir);
+
+    let id = store.create("g", vec![]).await.expect("create").id;
+    store
+        .link(&id, SessionLink::launched("s-0", "a"))
+        .await
+        .expect("link");
+
+    for evidence in [None, Some("   ".to_string())] {
+        let result = store
+            .update(
+                &id,
+                SessionUpdate {
+                    session_id: "s-0".into(),
+                    state: Some(SessionTaskState::Verified),
+                    evidence: evidence.clone(),
+                    note: None,
+                },
+            )
+            .await;
+        let err = result.expect_err("Verified without evidence must be rejected");
+        assert!(
+            err.to_string().contains("evidence"),
+            "error must name the missing evidence, got: {err}"
+        );
+        let g = store.get(&id).expect("present");
+        assert_eq!(g.sessions[0].state, SessionTaskState::Launched);
+        assert_eq!(g.sessions[0].evidence, None);
+        assert_eq!(g.progress, 0);
+    }
+}
+
+/// Why: #10722 — data persisted by an older build may hold a `Verified` link with
+/// no evidence (field absent) or blank evidence. Such a link must read as
+/// unverified, so the goal cannot reach `Done` through it.
+/// What: seeds the palace with a legacy goal JSON (one link without an
+/// `evidence` field, one with `""`), loads the store, asserts the goal
+/// deserialises, its progress reads 0, and `close` is refused by the gate with
+/// the goal still not `Done`.
+/// Test: this is the test.
+#[tokio::test]
+async fn legacy_verified_without_evidence_does_not_allow_done() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let legacy = r#"{
+        "id": "g-legacy0000000000",
+        "description": "legacy goal",
+        "status": "inProgress",
+        "acceptance": [],
+        "sessions": [
+            {"session_id": "s-0", "task": "a", "state": "verified"},
+            {"session_id": "s-1", "task": "b", "state": "verified", "evidence": ""}
+        ],
+        "progress": 100,
+        "created": "2026-06-16T12:00:00Z",
+        "updated": "2026-06-16T12:00:00Z",
+        "notes": []
+    }"#;
+    palace
+        .remember_goal(legacy.to_string(), GOAL_TAG)
+        .await
+        .expect("seed legacy goal");
+
+    let mut store = SmGoalStore::load(palace, dir.path()).await.expect("load");
+    let id = "g-legacy0000000000";
+    let g = store.get(id).expect("legacy record must still deserialise");
+    assert_eq!(g.sessions.len(), 2);
+    assert_eq!(
+        g.progress, 0,
+        "evidence-less Verified links count as unverified"
+    );
+
+    let result = store.close(id).await;
+    assert!(
+        matches!(
+            result,
+            Err(SmGoalError::VerificationGate {
+                verified: 0,
+                total: 2,
+                ..
+            })
+        ),
+        "legacy evidence-less links must not pass the gate, got {result:?}"
+    );
+    assert_ne!(store.get(id).expect("present").status, GoalStatus::Done);
+}
