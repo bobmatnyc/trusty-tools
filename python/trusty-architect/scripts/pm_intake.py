@@ -4,7 +4,12 @@
 Why: every SendMessage from a PM starts a full Architect turn, including acks and
 progress notes (the owner D10 2026-10-12: the filter and wake digest are an Architect
 feature). A PM that appends to inbox/pm-messages.jsonl instead lets the poller decide.
-What: `notify` appends one JSON line (used by pm-notify.sh). `classify` is a pure rule
+What: `notify` appends one JSON line (used by pm-notify.sh) and reads it back. It never prints a bare
+`queued` (#10723): exit 3 prints `queued-local <id>: ... delivery unconfirmed` (appended and read back,
+not yet acked by the Architect); exit 2 means nothing was appended (bad arguments or a failed write).
+`receipt <id>` exits 0 with `acked <id>: <outcome>` once inbox/pm-acks.jsonl holds an ack for the id,
+3 while it does not, 2 for an unknown id. These codes match datg's (2 error, 3 saved but unconfirmed).
+`classify` is a pure rule
 function returning (wake|hold, reason): kinds decision, blocker, head, done always wake;
 `urgent` wakes any kind; an unknown or missing kind wakes; a head without a 7+ hex SHA
 wakes as unknown; ack/progress/fyi are held, unless the text asks for a ruling
@@ -12,7 +17,7 @@ wakes as unknown; ack/progress/fyi are held, unless the text asks for a ruling
 offset and drops a repeat of (session, kind, pr, head, text) within 30 min.
 Cursor commands (D39): `unread [--wake-only]`, `ack <id>... --outcome T`, `ack-through <id> --outcome T`,
 `push-due [--mark]` (logic in pm_cursor.py; acks go to inbox/pm-acks.jsonl).
-Test: scripts/test_pm_intake.py, scripts/test_pm_cursor.py
+Test: scripts/test_pm_intake.py, scripts/test_pm_cursor.py, tests/test_pm_intake_receipt.py
 """
 import argparse
 import hashlib
@@ -164,14 +169,56 @@ def notify(argv):
     a = ap.parse_args(argv)
     msg = {"ts": iso(), "session": a.session, "kind": a.kind, "pr": a.pr, "head": a.head,
            "urgent": a.urgent, "text": " ".join(a.text)}
-    line = (json.dumps({k: v for k, v in msg.items() if v is not None}, ensure_ascii=False) + "\n").encode()
-    os.makedirs(inbox(), exist_ok=True)
-    fd = os.open(messages_path(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    text = json.dumps({k: v for k, v in msg.items() if v is not None}, ensure_ascii=False)
+    line = (text + "\n").encode()
     try:
-        os.write(fd, line)  # one O_APPEND write: concurrent PMs do not interleave
+        append_read_back(messages_path(), line)
+    except OSError as e:  # #10723: exit 2, never a queue claim
+        print(f"pm_intake: append failed {type(e).__name__}: {e}; not queued", file=sys.stderr)
+        sys.exit(2)
+    mid = msg_id(text)
+    print(f"queued-local {mid}: appended to {messages_path()}, delivery unconfirmed (not yet acked by the "
+          f"Architect; do not resend; check: pm_intake.py receipt {mid})")
+    sys.exit(3)
+
+
+def append_read_back(path, line):
+    """One O_APPEND write, then read the written bytes back. OSError when either step fails.
+
+    Why: #10723, the old notify printed `queued` from the write call alone.
+    What: a short write or a read-back mismatch raises OSError; a pass proves only the local record.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        n = os.write(fd, line)  # one O_APPEND write: concurrent PMs do not interleave
+        end = os.lseek(fd, 0, os.SEEK_CUR)
+        if n != len(line) or os.pread(fd, len(line), end - len(line)) != line:
+            raise OSError(f"read-back mismatch after {n} of {len(line)} bytes")
     finally:
         os.close(fd)
-    print("queued")
+
+
+def receipt(mid):
+    """(exit, line): 0 acked (outcome observed in pm-acks.jsonl), 3 appended but unacked, 2 unknown id."""
+    import pm_cursor
+    if mid not in dict(pm_cursor.JsonlSource().messages()):
+        return 2, f"pm_intake: unknown message id: {mid}"
+    outcome = None
+    try:
+        with open(pm_cursor.acks_path(), encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("id") == mid:
+                    outcome = str(row.get("outcome") or "")
+    except OSError:
+        pass
+    if outcome is None:
+        return 3, f"queued-local {mid}: delivery unconfirmed (not yet acked by the Architect)"
+    return 0, f"acked {mid}: {outcome}"
 
 
 def _ack_summary(ids):
@@ -207,8 +254,12 @@ def cursor_cli(cmd, argv):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "notify":
         notify(sys.argv[2:])
+    elif len(sys.argv) == 3 and sys.argv[1] == "receipt":
+        rc, out = receipt(sys.argv[2])
+        print(out, file=sys.stderr if rc == 2 else sys.stdout)
+        sys.exit(rc)
     elif len(sys.argv) > 1 and sys.argv[1] in ("unread", "ack", "ack-through", "push-due"):
         cursor_cli(sys.argv[1], sys.argv[2:])
     else:
         sys.exit("usage: pm_intake.py notify --kind K --session S [--pr N --head SHA --urgent] text"
-                 " | unread [--wake-only] | ack <id>... --outcome T | ack-through <id> --outcome T | push-due [--mark]")
+                 " | receipt <id> | unread [--wake-only] | ack <id>... --outcome T | ack-through <id> --outcome T | push-due [--mark]")

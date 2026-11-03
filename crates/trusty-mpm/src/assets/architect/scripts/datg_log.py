@@ -127,7 +127,9 @@ def notify_escalations(project, evs, st):
         try:
             r = subprocess.run([cmd, "--kind", "decision", "--session", sess, text],
                                capture_output=True, text=True, timeout=30)
-            err = "" if r.returncode == 0 else f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:200]}"
+            # #10723: pm-notify exits 3 with `queued-local` for a local append (queued, delivery unconfirmed)
+            queued = r.returncode == 0 or (r.returncode == 3 and r.stdout.startswith("queued-local "))
+            err = "" if queued else f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:200]}"
         except (OSError, subprocess.SubprocessError) as e:
             err = f"{type(e).__name__}: {e}"
         if err:
