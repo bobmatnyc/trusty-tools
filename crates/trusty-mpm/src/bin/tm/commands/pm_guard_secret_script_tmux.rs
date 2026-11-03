@@ -125,7 +125,11 @@ fn trusted_sandbox_script(path: &Path, body: &str) -> bool {
     let (Some(top), Some(blob)) = (lines.next(), lines.next()) else {
         return false;
     };
-    let at_top = std::fs::canonicalize(top).is_ok_and(|t| t == root);
+    // Both sides canonical: a symlinked workspace path must still match.
+    let at_top = std::fs::canonicalize(top)
+        .ok()
+        .zip(std::fs::canonicalize(root).ok())
+        .is_some_and(|(t, r)| t == r);
     let origin = git(root, &["config", "--get", "remote.origin.url"], None);
     let ours = origin.is_some_and(|url| {
         let url = url.trim().trim_end_matches('/').to_ascii_lowercase();
@@ -164,10 +168,14 @@ fn git(dir: &Path, args: &[&str], input: Option<&str>) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    if let Some(input) = input {
-        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
-    }
+    // Reap the child before acting on a failed write, so it never lingers.
+    let wrote = match (input, child.stdin.take()) {
+        (Some(input), Some(mut stdin)) => stdin.write_all(input.as_bytes()).is_ok(),
+        (Some(_), None) => false,
+        (None, _) => true,
+    };
     let out = child.wait_with_output().ok()?;
+    wrote.then_some(())?;
     out.status
         .success()
         .then(|| String::from_utf8(out.stdout).ok())
