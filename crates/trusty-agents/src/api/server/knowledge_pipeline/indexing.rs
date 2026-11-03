@@ -4,6 +4,11 @@ use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 use trusty_common::search_rpc;
 
+/// #10740: the OKG binding admits every concept path except these trees
+/// (SPEC-OKF-01 §5.3.1 rule 1, D3). Literal entries, so the §5.3.1 rule 4
+/// exclusion proof can read them back from `search.index.config.get`.
+const OKG_EXCLUDE_GLOBS: [&str; 2] = ["_sources/**", "_state/**"];
+
 async fn call(socket: &Path, method: &str, params: Value) -> anyhow::Result<Value> {
     search_rpc::call_at(socket, method, params, Duration::from_secs(3)).await
 }
@@ -32,6 +37,12 @@ pub(super) async fn status(socket: Option<&Path>, store: &ProtectedStore, create
     }
 }
 
+/// Bind the protected OKG at `socket`, creating it when `create` is set.
+/// Why: the binding decides which bundle paths trusty-search admits (#10740).
+/// What: creates the index with [`OKG_EXCLUDE_GLOBS`] and no allowlist, or
+/// reconciles an existing `assistant-okg-` binding to carry them.
+/// Test: `new_okg_binding_admits_every_concept_and_no_bookkeeping`,
+/// `existing_okg_binding_gains_exclusions_and_drops_indexed_bookkeeping`.
 pub(super) async fn at(
     socket: &Path,
     store: &ProtectedStore,
@@ -60,7 +71,8 @@ pub(super) async fn at(
             "Protected index is registered to another root; no changes were made"
         );
     } else if create {
-        let request = json!({"id":store.index_id,"root_path":store.root,"follow_links":false,"include_paths":["notes"],"extensions":["md"]});
+        // #10740: no `include_paths` allowlist — a concept can sit in any directory.
+        let request = json!({"id":store.index_id,"root_path":store.root,"follow_links":false,"exclude_globs":OKG_EXCLUDE_GLOBS,"extensions":["md"]});
         if let Err(error) = call(socket, search_rpc::METHOD_INDEX_CREATE, request.clone()).await {
             if error
                 .downcast_ref::<search_rpc::SearchRpcError>()
@@ -94,13 +106,47 @@ pub(super) async fn at(
             .get("extensions")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow::anyhow!("Invalid search index configuration"))?;
-        if extensions != &vec![json!("md")] {
+        let mut body = serde_json::Map::new();
+        let wrong_extensions = extensions != &vec![json!("md")];
+        if wrong_extensions {
+            body.insert("extensions".into(), json!(["md"]));
+        }
+        // #10740: an existing binding gains the literal exclusions, keeping any
+        // other entries it already carries.
+        let mut globs = config
+            .get("exclude_globs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let missing: Vec<&str> = OKG_EXCLUDE_GLOBS
+            .into_iter()
+            .filter(|glob| !globs.iter().any(|v| v.as_str() == Some(glob)))
+            .collect();
+        globs.extend(missing.iter().map(|glob| json!(glob)));
+        if !missing.is_empty() {
+            body.insert("exclude_globs".into(), Value::Array(globs));
+        }
+        if !body.is_empty() {
             call(
                 socket,
                 "search.index.config.set",
-                json!({"index_id":store.index_id,"body":{"extensions":["md"]}}),
+                json!({"index_id":store.index_id,"body":body}),
             )
             .await?;
+        }
+        if !missing.is_empty() {
+            // #10740: withdraw bookkeeping files an older binding already indexed.
+            for glob in OKG_EXCLUDE_GLOBS {
+                let prefix = glob.trim_end_matches("/**");
+                call(
+                    socket,
+                    "search.index.files.remove",
+                    json!({"index_id":store.index_id,"body":{"path_prefix":prefix}}),
+                )
+                .await?;
+            }
+        }
+        if wrong_extensions {
             // Reconcile old generated indexes to remove formerly indexed bookkeeping documents.
             call(
                 socket,
@@ -179,6 +225,183 @@ fn approve_owned_root(store: &ProtectedStore, config: Option<&Path>) -> anyhow::
 
 #[cfg(test)]
 mod tests {
+    use crate::knowledge::ProtectedStore;
+    use serde_json::{Value, json};
+    use std::collections::BTreeSet;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use trusty_common::search_rpc;
+
+    /// The daemon side of the fake: its config, its indexed paths, every call.
+    #[derive(Default)]
+    struct Daemon {
+        listed: Option<Value>,
+        config: Value,
+        indexed: BTreeSet<String>,
+        calls: Vec<(String, Value)>,
+    }
+
+    /// A fake trusty-search that keeps `config.set` and `files.remove` effects.
+    async fn fake(
+        root: &Path,
+        daemon: Daemon,
+    ) -> (crate::uds_mock::MockMemoryDaemon, Arc<Mutex<Daemon>>) {
+        let state = Arc::new(Mutex::new(daemon));
+        let shared = state.clone();
+        let root = root.to_path_buf();
+        let mock = crate::uds_mock::spawn(move |method, params| {
+            let mut d = shared.lock().unwrap();
+            d.calls.push((method.to_owned(), params.clone()));
+            let reply = match method {
+                search_rpc::METHOD_INDEXES_LIST => json!({"indexes": d.listed.iter().collect::<Vec<_>>()}),
+                search_rpc::METHOD_INDEX_CREATE => {
+                    d.config = json!({"extensions": params["extensions"], "exclude_globs": params["exclude_globs"]});
+                    json!({"created": true})
+                }
+                "search.index.config.get" => d.config.clone(),
+                "search.index.config.set" => {
+                    for (key, value) in params["body"].as_object().unwrap() {
+                        d.config[key] = value.clone();
+                    }
+                    json!({"persisted": true})
+                }
+                "search.index.files.remove" => {
+                    let prefix = params["body"]["path_prefix"].as_str().unwrap().to_owned();
+                    d.indexed.retain(|p| !Path::new(p).starts_with(&prefix));
+                    json!({})
+                }
+                search_rpc::METHOD_INDEX_STATUS => json!({"root_path": root, "status": "ready"}),
+                _ => json!({}),
+            };
+            Box::pin(async move { Ok(reply) })
+        })
+        .await;
+        (mock, state)
+    }
+
+    fn store(root: &Path) -> ProtectedStore {
+        ProtectedStore {
+            root: root.to_path_buf(),
+            index_id: "assistant-okg-twin".into(),
+            protected: true,
+        }
+    }
+
+    /// trusty-search's admission policy for a root-relative path, read from a
+    /// binding: `include_paths` roots, `exclude_globs` through the daemon's
+    /// own matcher, then the extension allowlist.
+    fn admits(binding: &Value, path: &str) -> bool {
+        let strings = |key: &str| -> Vec<String> {
+            binding[key]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (include, globs, extensions) = (
+            strings("include_paths"),
+            strings("exclude_globs"),
+            strings("extensions"),
+        );
+        let path = Path::new(path);
+        (include.is_empty() || include.iter().any(|p| path.starts_with(p)))
+            && !trusty_search::core::repo_config::path_matches_any_glob(path, &globs)
+            && (extensions.is_empty()
+                || path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| extensions.iter().any(|x| x == e)))
+    }
+
+    /// Why: SPEC-OKF-01 §5.3.1 rule 1 (D3, #10740) — the bundle's bookkeeping
+    /// trees must never be indexed, and every concept path must be.
+    /// What: binds a fresh OKG and checks the create request's admission over
+    /// bookkeeping and concept paths, and that it names no allowlist.
+    #[tokio::test]
+    async fn new_okg_binding_admits_every_concept_and_no_bookkeeping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mock, daemon) = fake(tmp.path(), Daemon::default()).await;
+        super::at(mock.socket(), &store(tmp.path()), true)
+            .await
+            .unwrap();
+        let calls = daemon.lock().unwrap().calls.clone();
+        let (_, binding) = calls
+            .iter()
+            .find(|(m, _)| m == search_rpc::METHOD_INDEX_CREATE)
+            .expect("the binding is created");
+        assert_eq!(
+            binding["exclude_globs"],
+            json!(["_sources/**", "_state/**"])
+        );
+        assert!(binding.get("include_paths").is_none(), "{binding}");
+        for refused in [
+            "_sources/registry.toml",
+            "_sources/notes-ledger.md",
+            "_state/conversion-log.md",
+        ] {
+            assert!(!admits(binding, refused), "{refused} admitted by {binding}");
+        }
+        for concept in ["index.md", "log.md", "notes/a.md", "drive/team/plans/q3.md"] {
+            assert!(admits(binding, concept), "{concept} refused by {binding}");
+        }
+    }
+
+    /// Why: an OKG bound before #10740 carries no exclusions, and may already
+    /// hold `_sources/` or `_state/` chunks (SPEC-OKF-01 §5.3.1, D3).
+    /// What: the next bind adds both literal globs, keeps the binding's other
+    /// globs, removes both prefixes, and changes nothing on a second bind.
+    #[tokio::test]
+    async fn existing_okg_binding_gains_exclusions_and_drops_indexed_bookkeeping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let legacy = Daemon {
+            listed: Some(json!({"id": "assistant-okg-twin", "root_path": root})),
+            config: json!({"extensions": ["md"], "exclude_globs": ["**/node_modules/**"]}),
+            indexed: [
+                "_sources/registry.toml",
+                "_state/conversion-log.md",
+                "notes/a.md",
+            ]
+            .map(str::to_owned)
+            .into(),
+            ..Daemon::default()
+        };
+        let (mock, daemon) = fake(&root, legacy).await;
+        super::at(mock.socket(), &store(&root), true).await.unwrap();
+        {
+            let d = daemon.lock().unwrap();
+            assert_eq!(
+                d.config["exclude_globs"],
+                json!(["**/node_modules/**", "_sources/**", "_state/**"])
+            );
+            assert_eq!(d.indexed, BTreeSet::from(["notes/a.md".to_owned()]));
+            assert!(
+                !d.calls
+                    .iter()
+                    .any(|(m, _)| m == search_rpc::METHOD_INDEX_REINDEX)
+            );
+        }
+        daemon.lock().unwrap().calls.clear();
+        super::at(mock.socket(), &store(&root), true).await.unwrap();
+        let methods: Vec<String> = daemon
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .map(|(m, _)| m.clone())
+            .collect();
+        assert!(
+            !methods
+                .iter()
+                .any(|m| m == "search.index.config.set" || m == "search.index.files.remove"),
+            "a corrected binding is left alone: {methods:?}"
+        );
+    }
+
     #[test]
     fn existing_root_approval_preserves_policy_entries() {
         use trusty_search::allowlist::{AllowlistConfig, AllowlistEntry};
