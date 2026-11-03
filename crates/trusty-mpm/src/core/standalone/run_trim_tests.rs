@@ -59,13 +59,12 @@ fn run_launch_command_trims_a_pm_and_not_an_architect() {
     )));
 }
 
-/// #10127: `tm run` of an Architect carries the production deny as ONE
-/// `--settings`, merged into the owner file, and removes every chat token
-/// from the child; an owner file it cannot read refuses the run. Before the
-/// fix the owner file rode bare and the tokens were inherited.
+/// #10127, #10735: `tm run` of an Architect passes the owner file bare (the
+/// production deny is empty, so no connector deny and no
+/// `disableClaudeAiConnectors`) and removes every chat token from the child.
 #[test]
 fn run_launch_command_carries_the_architect_lockdown() {
-    use crate::core::architect_lockdown::{ARCHITECT_ENV_UNSET, assert_production_deny};
+    use crate::core::architect_lockdown::{ARCHITECT_ENV_UNSET, assert_connectors_not_denied};
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let carrier = tmp.path().join("owner.json");
     std::fs::write(&carrier, r#"{"deniedMcpServers":[{"serverName":"x"}]}"#).expect("carrier");
@@ -88,13 +87,12 @@ fn run_launch_command_carries_the_architect_lockdown() {
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    assert_production_deny(&args);
-    assert!(!args.contains(&carrier.display().to_string()), "{args:?}");
+    assert_connectors_not_denied(&args);
+    assert!(args.contains(&carrier.display().to_string()), "{args:?}");
     for name in ARCHITECT_ENV_UNSET {
         assert!(
             cmd.get_envs().any(|(k, v)| k == *name && v.is_none()),
             "{name} must be removed"
         );
     }
-    assert!(build(tmp.path().join("gone.json")).is_err());
 }

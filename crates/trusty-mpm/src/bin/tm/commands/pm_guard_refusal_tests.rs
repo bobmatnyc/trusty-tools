@@ -127,7 +127,7 @@ impl SharedOut {
 #[test]
 fn a_slow_judgement_is_decided_by_the_watchdog() {
     // #10641 timeout arm: the judgement is still running at the deadline. The
-    // watchdog refuses a write (GP-049, with the recovery note) and lets an
+    // watchdog refuses a write (GP-039, with the recovery note) and lets an
     // allowlisted command through; the late judgement then prints nothing.
     for (payload, want_deny) in [(write_call(), true), (doctor_call(), false)] {
         let decision: &'static Decision = Box::leak(Box::new(Decision::new()));

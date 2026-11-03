@@ -134,7 +134,7 @@ fn a_whole_server_kill_with_tmux_inherited_is_refused_under_each_bypass() {
                     "{command} {bypass:?} {agent:?}: {out}"
                 );
                 assert!(
-                    out.contains("GP-050"),
+                    out.contains("GP-040"),
                     "{command} {bypass:?} {agent:?}: {out}"
                 );
                 assert!(out.contains("-S <absolute scratch socket>"), "{out}");
@@ -171,7 +171,7 @@ fn every_other_finding_is_logged_and_allowed() {
                 let env: Vec<(&str, &str)> = bypass.into_iter().collect();
                 let out = guard(&root, &command, &env, agent);
                 assert!(
-                    !out.contains("GP-050") && !out.contains("#10665"),
+                    !out.contains("GP-040") && !out.contains("#10665"),
                     "{command} {bypass:?} {agent:?}: {out}"
                 );
                 let lines = would_refuse_lines(&root);

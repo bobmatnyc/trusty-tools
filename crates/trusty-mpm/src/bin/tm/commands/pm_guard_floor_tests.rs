@@ -527,7 +527,6 @@ fn every_deny_names_a_policy_id() {
     // has a policy entry; `guard_policy::for_rule` would otherwise answer
     // GP-000. A new label without an entry fails here and in every
     // integration collector (`common::assert_refusal_names_a_policy`).
-    use crate::commands::{egress_guard_architect, egress_guard_bash, egress_guard_taint};
     use trusty_mpm::core::guard_policy::find;
     let labels = [
         D4_FLOOR_RULE,
@@ -539,21 +538,12 @@ fn every_deny_names_a_policy_id() {
         crate::commands::pm_guard_kuzu_store::KUZU_STORE_RULE,
         crate::commands::pm_guard_kuzu_exception::KUZU_IMPORT_PYTHON_RULE,
         crate::commands::pm_guard_build_lease::DENY_CHECK,
-        egress_guard_bash::BASH_CHECK,
-        egress_guard_taint::TAINT_CHECK,
-        egress_guard_taint::POLICY_CHECK,
-        egress_guard_architect::AUDIT_CHECK,
-        // hook_stdin, the floor and the egress guard's literal labels.
+        // hook_stdin and the floor's literal labels.
         "unreadable-payload",
         "unclassifiable-payload",
         "unclassifiable-command",
         "destructive-delete",
         "worktree-remove-recheck",
-        "egress-family",
-        "egress-unreadable-payload",
-        "egress-unclassifiable-payload",
-        "egress-unnamed-resource-server",
-        "egress-malformed-mcp-name",
     ];
     let missing: Vec<&str> = labels.into_iter().filter(|l| find(l).is_none()).collect();
     assert!(

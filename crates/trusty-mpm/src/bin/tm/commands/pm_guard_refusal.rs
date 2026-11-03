@@ -49,7 +49,7 @@ pub(crate) const GUARD_DEADLINE: Duration = Duration::from_secs(8);
 /// Why: an unoptimized debug `tm` judges a 1 MB command in 8.2–9.37 s under a
 /// loaded test run (`MEGABYTE_RUN_CEILING` in
 /// `tests/tm_hook_pm_guard_stdin_7975.rs`), so the watchdog would replace a
-/// content verdict with GP-049. The Architect ruled (option 3): no watchdog in
+/// content verdict with GP-039. The Architect ruled (option 3): no watchdog in
 /// debug builds. There a stall falls through to Claude Code's 10 s
 /// `onFailure: "block"`; the panic and error arms still apply the allowlist.
 /// What: `!cfg!(debug_assertions)`.

@@ -1,0 +1,4 @@
+Removed
+
+- The claude.ai connector egress guard is removed (owner ruling D19, [#10735](https://github.com/bobmatnyc/trusty-tools/issues/10735)). Slack, Gmail, Notion and Google Chat tool calls and matching Bash commands are no longer denied, the `egress_guard` doctor row and the ten egress policy entries are gone (`guard-timeout` and `tmux-kill-server` renumber from GP-049 and GP-050 to GP-039 and GP-040), and `tm install` and the launch writers strip a stale `tm hook --egress-guard` settings entry. The `--egress-guard` flag stays as a no-op that exits 0, so a stale settings file never errors.
+- The Architect launch no longer passes `disableClaudeAiConnectors: true` or denies the connector tool families, so the claude.ai connectors load in the Architect ([#10725](https://github.com/bobmatnyc/trusty-tools/issues/10725)). The Architect still loses its chat tokens.

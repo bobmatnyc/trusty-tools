@@ -70,27 +70,22 @@ fn deny_of(payload: &str) -> Vec<String> {
         .collect()
 }
 
-/// #10127 D24 = B: the deny list is the plan's full list as written
-/// (`s5-p3-plan.md` §1a), the gworkspace braces expanded to four globs.
+/// #10735: the production deny list is empty, so an Architect launch denies no
+/// connector family and sets no `disableClaudeAiConnectors`.
 #[test]
-fn the_production_deny_list_is_the_plans_full_list() {
+fn the_production_deny_list_is_empty() {
+    assert!(ARCHITECT_DENY_GLOBS.is_empty());
     assert_eq!(
-        ARCHITECT_DENY_GLOBS,
-        [
-            "mcp__*slack*",
-            "mcp__*gmail*",
-            "mcp__*googlemail*",
-            "mcp__*notion*",
-            "mcp__*googlechat*",
-            "mcp__*google-chat*",
-            "mcp__*gchat*",
-            "mcp__*gworkspace*__*mail*",
-            "mcp__*gworkspace*__*chat*",
-            "mcp__*gworkspace*__*message*",
-            "mcp__*gworkspace*__*draft*",
-        ]
+        Lockdown::PRODUCTION.deny_rules().expect("rules"),
+        Vec::<String>::new()
     );
-    assert!(Lockdown::PRODUCTION.deny_rules().is_ok());
+    let architect =
+        spec(SessionProfile::Architect, None, &[], &Lockdown::PRODUCTION).expect("spec");
+    assert!(
+        settings_values(&architect).is_empty(),
+        "no --settings: {:?}",
+        architect.args
+    );
 }
 
 /// #10127 Q3 (#8454 box 14): the env list is every Slack and Telegram
@@ -130,63 +125,6 @@ fn chat_tokens_follow_a_new_registry_entry() {
     );
 }
 
-/// Whether Claude Code's `*` glob `pattern` matches `name`.
-fn glob_matches(pattern: &str, name: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let first = parts.next().unwrap_or_default();
-    let Some(mut rest) = name.strip_prefix(first) else {
-        return false;
-    };
-    let tail: Vec<&str> = parts.collect();
-    for (i, part) in tail.iter().enumerate() {
-        if i + 1 == tail.len() {
-            return rest.ends_with(part);
-        }
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return false,
-        }
-    }
-    rest.is_empty()
-}
-
-/// #10127 C2: `ask_owner` is the Architect's only outbound path, so no rule
-/// (glob or capitalised variant) matches it or any other trusty-mpm tool; the
-/// families' own tools are matched.
-#[test]
-fn the_family_deny_never_matches_ask_owner_or_the_trusty_mpm_tools() {
-    let rules = Lockdown::PRODUCTION.deny_rules().expect("rules");
-    let tools: Vec<String> = crate::mcp::tools::tool_catalog()
-        .iter()
-        .map(|t| format!("mcp__trusty-mpm__{}", t["name"].as_str().expect("a name")))
-        .collect();
-    assert!(
-        tools.contains(&"mcp__trusty-mpm__ask_owner".to_owned()),
-        "{tools:?}"
-    );
-    for tool in &tools {
-        for rule in &rules {
-            assert!(!glob_matches(rule, tool), "{rule} must not match {tool}");
-        }
-    }
-    for denied in [
-        "mcp__slack-mcp__send_message",
-        "mcp__claude_ai_Slack__slack_send_message",
-        "mcp__gmail__send",
-        "mcp__claude_ai_Notion__search",
-        "mcp__google-chat__post",
-        "mcp__gworkspace-mcp__send_gmail_message",
-        "mcp__gworkspace-mcp__create_draft",
-    ] {
-        assert!(rules.iter().any(|r| glob_matches(r, denied)), "{denied}");
-    }
-    assert!(
-        !rules
-            .iter()
-            .any(|r| glob_matches(r, "mcp__gworkspace-mcp__list_files"))
-    );
-}
-
 /// #10127 Q5: each word after the `mcp__` prefix gains a capital, so a
 /// differently-cased server name (`claude_ai_Slack`) is denied too.
 #[test]
@@ -220,6 +158,8 @@ fn architect_launch_carries_every_glob_and_its_capitalised_variant() {
     }
     let body: Value = serde_json::from_str(&values[0]).expect("json");
     assert_eq!(body["permissions"].as_object().map(|p| p.len()), Some(1));
+    // #10735: the lockdown never turns the claude.ai connectors off.
+    assert!(body.get("disableClaudeAiConnectors").is_none(), "{body}");
 
     let pm = spec(SessionProfile::Pm, None, &[], &TEST).expect("spec");
     assert!(settings_values(&pm).is_empty(), "PM: {:?}", pm.args);
@@ -243,6 +183,7 @@ fn architect_lockdown_merges_into_the_owner_carrier_file() {
     assert_eq!(values.len(), 1, "one --settings: {:?}", architect.args);
     let body: Value = serde_json::from_str(&values[0]).expect("json");
     assert_eq!(body["deniedMcpServers"][0]["serverName"], "x");
+    // #10735: the lockdown never adds `disableClaudeAiConnectors`; the carrier's own key survives.
     assert_eq!(body["disableClaudeAiConnectors"], true);
     assert!(deny_of(&values[0]).contains(&"mcp__*Slack*".to_owned()));
 
@@ -340,7 +281,7 @@ fn an_empty_deny_list_leaves_the_architect_argv_unchanged() {
 /// unset.
 #[test]
 fn architect_isolated_spec_carries_the_production_lockdown() {
-    use crate::core::architect_lockdown::{assert_chat_tokens_unset, assert_production_deny};
+    use crate::core::architect_lockdown::{assert_chat_tokens_unset, assert_connectors_not_denied};
     let tmp = tempfile::tempdir().expect("tempdir");
     let carrier = tmp.path().join("owner.json");
     std::fs::write(&carrier, "{}").expect("carrier");
@@ -358,7 +299,7 @@ fn architect_isolated_spec_carries_the_production_lockdown() {
         };
         let spec = crate::runtime::cli_launch::isolated_spec(Path::new("/work/architect"), &launch)
             .expect("spec");
-        assert_production_deny(&spec.args);
+        assert_connectors_not_denied(&spec.args);
         assert_chat_tokens_unset(&spec.env_unset);
     }
 }

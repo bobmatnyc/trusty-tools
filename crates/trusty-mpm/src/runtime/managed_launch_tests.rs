@@ -354,13 +354,13 @@ fn an_architect_spawn_keeps_every_tool() {
     );
 }
 
-/// #10127: the daemon's managed spawn and resume of an Architect carry the
-/// production deny as ONE `--settings` — merged into the owner file when one
-/// was provisioned — and every path, attach included, loses the chat tokens
-/// even when the launch assigned one. A PM spawn carries neither.
+/// #10127, #10735: the daemon's managed spawn and resume of an Architect carry
+/// no connector deny and no `disableClaudeAiConnectors` (the owner file rides
+/// bare), and every path, attach included, loses the chat tokens even when the
+/// launch assigned one. A PM spawn carries neither.
 #[test]
 fn every_architect_spec_seam_carries_the_lockdown() {
-    use crate::core::architect_lockdown::{assert_chat_tokens_unset, assert_production_deny};
+    use crate::core::architect_lockdown::{assert_chat_tokens_unset, assert_connectors_not_denied};
     let w = Worst::new();
     let tmp = tempfile::tempdir().expect("tempdir");
     let carrier = tmp.path().join("owner.json");
@@ -377,13 +377,14 @@ fn every_architect_spec_seam_carries_the_lockdown() {
             spawn_spec(&launch).expect("spec"),
             resume_spec(&launch, Some("conv")).expect("spec"),
         ] {
-            assert_production_deny(&spec.args);
+            assert_connectors_not_denied(&spec.args);
             assert_chat_tokens_unset(&spec.env_unset);
-            assert!(
-                !spec
-                    .args
+            // #10735: the production deny is empty, so the owner file rides bare.
+            assert_eq!(
+                spec.args
                     .iter()
-                    .any(|a| a == &carrier.display().to_string())
+                    .any(|a| a == &carrier.display().to_string()),
+                settings.is_some()
             );
             assert_eq!(value_of(&spec.env_set, "SLACK_BOT_TOKEN"), None);
         }
@@ -392,24 +393,6 @@ fn every_architect_spec_seam_carries_the_lockdown() {
     let pm = spawn_spec(&w.launch()).expect("spec");
     assert!(!pm.args.iter().any(|a| a == "--settings"), "{:?}", pm.args);
     assert!(!pm.env_unset.iter().any(|n| n == "SLACK_BOT_TOKEN"));
-}
-
-/// #10127 Fail-Open Check: an owner file the Architect deny cannot merge into
-/// refuses the managed spawn; launching with the bare owner file (the
-/// pre-#10127 argv) would drop the deny, and this fails.
-#[test]
-fn an_unreadable_owner_file_refuses_the_managed_architect_spawn() {
-    let w = Worst::new();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let missing = tmp.path().join("gone.json");
-    let launch = ManagedLaunch {
-        profile: crate::core::session_profile::SessionProfile::Architect,
-        settings: Some(&missing),
-        ..w.launch()
-    };
-    let err = spawn_spec(&launch).expect_err("an unreadable owner file refuses");
-    assert!(err.to_string().contains("refusing the launch"), "{err}");
-    assert!(resume_spec(&launch, None).is_err());
 }
 
 #[test]

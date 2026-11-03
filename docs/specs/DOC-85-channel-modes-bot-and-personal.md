@@ -42,7 +42,7 @@ A channel call runs in exactly one mode.
 
 A mode never grants more than the route and the host ceiling already allow. The table is the most a mode may do.
 
-Separately from modes, the `tm hook --egress-guard` backstop (#8454) refuses every Slack MCP tool in a tm-launched session. Its one exception is the host `channels.slack_read_allowlist` (#10387): a listed project may call `slack_read_channel` and `slack_read_thread` on the `slack-mcp` or `claude_ai_Slack` server, and nothing else. Schema and rules: `crates/trusty-channels/src/policy/slack_read.rs`.
+Separately from modes, the `tm hook --egress-guard` backstop (#8454) and its `channels.slack_read_allowlist` exception (#10387) are removed (#10735, owner ruling D19): no Slack MCP tool is refused in a tm-launched session.
 
 ### 2.1 Service-account scope {#SPEC-CHMODE-02A~draft}
 

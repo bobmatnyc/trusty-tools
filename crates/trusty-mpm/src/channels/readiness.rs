@@ -31,11 +31,7 @@ pub const KILL_MARGIN: Duration = Duration::from_millis(500);
 /// What: in order, a denied load (its host fault when it has one), any
 /// finding, any project file not `Effective`, and an empty policy are each
 /// [`NotReady`]; anything else is ready.
-/// Test: `config_missing_denies_a_gated_call`, `denied_report_denies`,
-/// `finding_denies_a_gated_call`, `refused_project_file_denies`,
-/// `file_not_in_effect_denies_a_gated_call`,
-/// `empty_policy_with_enabled_channel_denies`,
-/// `ready_policy_falls_through_to_taint_deny`.
+/// Test: `denied_policy_report_is_cached_as_deny_not_allow` (`daemon/managed_routes/egress_verdict_tests.rs`).
 pub fn classify(report: &LoadReport) -> Result<(), NotReady> {
     if report.denied {
         let host = report.findings.iter().find_map(|f| match f {
@@ -115,8 +111,7 @@ fn variant_name(value: &impl std::fmt::Debug) -> String {
 /// [`NotReady::TimedOut`], a load that panicked is [`NotReady::Stopped`], a
 /// report is [`classify`]d. A thread that cannot start panics here, and the
 /// egress guard's `deny_on_panic` denies it.
-/// Test: `load_past_deadline_denies`, `load_panic_denies`,
-/// `denied_report_denies`.
+/// Test: `denied_policy_report_is_cached_as_deny_not_allow` (`daemon/managed_routes/egress_verdict_tests.rs`).
 pub fn check_with<L>(loader: L, req: LoadRequest, limit: Duration) -> Result<(), NotReady>
 where
     L: FnOnce(&LoadRequest, Instant) -> LoadReport + Send + 'static,
@@ -137,8 +132,7 @@ where
 /// The production check: the daemon's request (Slack and Telegram, every
 /// listed project) under `home`, loaded with git bounded by the deadline.
 ///
-/// Test: `config_missing_denies_a_gated_call`, `home_unknown_denies_a_gated_call`,
-/// `ready_policy_falls_through_to_taint_deny`.
+/// Test: `denied_policy_report_is_cached_as_deny_not_allow` (`daemon/managed_routes/egress_verdict_tests.rs`).
 pub fn check(home: Option<&Path>, limit: Duration) -> Result<(), NotReady> {
     let req = daemon_request(home.map(Path::to_path_buf));
     check_with(load_effective_until, req, limit)

@@ -2,7 +2,7 @@
 
 Generated from `crates/trusty-mpm/src/core/guard_policy_entries.rs` by the `policy_doc_matches_table` test (#10641). Do not edit by hand; run `TM_UPDATE_GUARD_POLICY_DOC=1 cargo test -p trusty-mpm --lib policy_doc_matches_table`.
 
-Every `tm hook --pm-guard` and `tm hook --egress-guard` refusal ends with `[policy <id> <rule>; source: <source>]`.
+Every `tm hook --pm-guard` refusal ends with `[policy <id> <rule>; source: <source>]`.
 
 When the guard fails (it panics, errors, or, in a release build, has not decided 8 s after it starts) it still refuses writes; read-only tools and exactly `tm doctor`, `tm install ...` and `cargo install trusty-mpm --version <v> --locked` run. A debug build arms no watchdog, because an unoptimized `tm` can take longer than 8 s on a megabyte command; there a stall falls through to Claude Code's 10 s block. When the `tm` binary is missing or cannot start, no guard code runs and Claude Code's `onFailure: "block"` refuses every tool: from a terminal outside the session, reinstall with `cargo install trusty-mpm --version <v> --locked`, or set `[pm_guard] enabled = false` in `~/.trusty-mpm/config.toml` and relaunch the session.
 
@@ -47,15 +47,5 @@ When the guard fails (it panics, errors, or, in a release build, has not decided
 | GP-036 | `persona-deny-by-default` | Agent | no | - | #2231 | Opt-in: a subagent whose persona failed is refused guarded tools. |
 | GP-037 | `file-change-budget` | PM | no | - | #2918 (prohibitions P1, P5) | A PM's direct file changes are capped per turn; past the cap it delegates. |
 | GP-038 | `pm-tool-policy` | PM | no | - | #1977 (prohibitions P1-P11) | A PM delegates builds, tests, network calls and source edits. |
-| GP-039 | `egress-unreadable-payload` | PM, Architect, Agent | yes | the guard stays on | #8454 | The egress guard denies a payload it cannot read. |
-| GP-040 | `egress-unclassifiable-payload` | PM, Architect, Agent | yes | the guard stays on | #8454 | The egress guard denies a payload it cannot classify. |
-| GP-041 | `egress-unnamed-resource-server` | PM, Architect, Agent | yes | the guard stays on | #8454 | An MCP resource call must name its server. |
-| GP-042 | `egress-malformed-mcp-name` | PM, Architect, Agent | yes | the guard stays on | #8454 | An MCP tool name the guard cannot parse is denied. |
-| GP-043 | `egress-family` | PM, Architect, Agent | yes | no unruled outward action | #8454, #10387 | No call to a messaging or mail family (Slack, Gmail, Notion, chat) outside its allowlist. |
-| GP-044 | `egress-bash` | PM, Architect, Agent | yes | no unruled outward action | #8454 | No Bash command that reaches a messaging or mail endpoint. |
-| GP-045 | `egress-channel-tainted` | PM, Architect, Agent | yes | no unruled outward action | #8433, #8454 | No outward call from a session whose channel is tainted. |
-| GP-046 | `egress-policy-not-ready` | PM, Architect, Agent | yes | no unruled outward action | #9741, #8454 | A tainted call is denied while the egress policy cannot be loaded. |
-| GP-047 | `egress-architect-audit-unwritable` | Architect | yes | no unruled outward action | #10447 | An Architect egress allow stands only once its audit line is written. |
-| GP-048 | `egress-guard-panic` | PM, Architect, Agent | yes | the guard stays on | #8454 | An egress guard run that panics denies the call. |
-| GP-049 | `guard-timeout` | PM, Architect, Agent | yes | the guard stays on | #10600, #10641 | Release builds: a guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist. |
-| GP-050 | `tmux-kill-server` | PM, Architect, Agent | yes | checkpoint first | #10665 | No tmux kill-server or kill-session -a on the fleet server (default, $TMUX, -L default, a tm- server, case folded), and no kill-session there unless it names a literal non-tm- session; a scratch -S or -L is allowed. Other findings are log-only. |
+| GP-039 | `guard-timeout` | PM, Architect, Agent | yes | the guard stays on | #10600, #10641 | Release builds: a guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist. |
+| GP-040 | `tmux-kill-server` | PM, Architect, Agent | yes | checkpoint first | #10665 | No tmux kill-server or kill-session -a on the fleet server (default, $TMUX, -L default, a tm- server, case folded), and no kill-session there unless it names a literal non-tm- session; a scratch -S or -L is allowed. Other findings are log-only. |

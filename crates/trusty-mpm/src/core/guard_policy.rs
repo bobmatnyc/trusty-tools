@@ -1,4 +1,4 @@
-//! The guard policy table: every `tm hook --pm-guard` and `--egress-guard`
+//! The guard policy table: every `tm hook --pm-guard`
 //! refusal names one entry (#10641, owner ruling D29).
 //!
 //! Why: the owner ruled that the Architect is the owner's proxy — a call is
@@ -17,12 +17,9 @@
 //! lookup miss can only deny. [`POLICIES`] lists every entry once, in id order.
 //! Test: `guard_policy_tests.rs`.
 
-#[path = "guard_policy_egress.rs"]
-mod egress;
 #[path = "guard_policy_entries.rs"]
 mod entries;
 
-pub use egress::*;
 pub use entries::*;
 
 /// Who a guard rule binds.
@@ -160,7 +157,7 @@ pub fn render_markdown() -> String {
          Generated from `crates/trusty-mpm/src/core/guard_policy_entries.rs` by the \
          `policy_doc_matches_table` test (#10641). Do not edit by hand; run \
          `TM_UPDATE_GUARD_POLICY_DOC=1 cargo test -p trusty-mpm --lib policy_doc_matches_table`.\n\n\
-         Every `tm hook --pm-guard` and `tm hook --egress-guard` refusal ends with \
+         Every `tm hook --pm-guard` refusal ends with \
          `[policy <id> <rule>; source: <source>]`.\n\n\
          When the guard fails (it panics, errors, or, in a release build, has not decided 8 s \
          after it starts) it still refuses writes; read-only tools and exactly `tm doctor`, \

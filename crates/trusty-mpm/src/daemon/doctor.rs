@@ -270,10 +270,6 @@ use doctor_session_profile::check_session_profile;
 #[path = "doctor_pm_guard.rs"]
 mod doctor_pm_guard;
 use doctor_pm_guard::check_pm_guard;
-// #8454: whether every tm-provisioned settings file registers the egress guard.
-#[path = "doctor_egress_guard.rs"]
-mod doctor_egress_guard;
-use doctor_egress_guard::check_egress_guard;
 // #9091: whether the `[accounts]` org → gh account table reads.
 #[path = "doctor_org_accounts.rs"]
 mod doctor_org_accounts;
@@ -711,12 +707,6 @@ pub(crate) async fn run_doctor_with_claims(
         build_tree_binary,
         missing_tm_group,
     ]);
-    // #8454: and whether those files still register the egress guard.
-    checks.push(check_egress_guard(
-        project_dir,
-        active_workspace_paths,
-        &home,
-    ));
     // Issue #2997: surface whether managed panes disclaim TCC responsibility so
     // the "trusty-mpm/tmux would like to access data…" prompt class is
     // diagnosable rather than silent. Synchronous + instantaneous (no log scan).

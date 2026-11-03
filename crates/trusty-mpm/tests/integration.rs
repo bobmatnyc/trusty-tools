@@ -79,14 +79,6 @@ mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
 // #10735: the claude.ai connectors are no longer blocked.
 mod connectors_allowed_10735;
-// #8454 S2: the trust anchors through the egress hook, pm-guard off.
-mod tm_hook_egress_anchor_8454;
-// #8454: `tm hook --egress-guard`, the outbound-channel family deny.
-mod tm_hook_egress_guard_8454;
-// #10387: the per-project read-only Slack allowlist through the binary.
-mod tm_hook_egress_slack_read_10387;
-// #9923: the egress guard taints a hook-less id under a live mark.
-mod tm_hook_egress_lazy_taint_9923;
 mod tm_hook_idle_parking;
 // #9167: relays through `tm hook` reach the bus as `message` events.
 mod tm_hook_message_events_9167;
@@ -131,8 +123,6 @@ mod tm_hook_pm_guard_unquoted_heredoc_expansion;
 mod tm_hook_pretooluse_rewrite;
 mod tm_hook_session_end_8980;
 mod tm_hook_session_start_8531;
-// #8433 P0 (D09): a tainted session's new id reads tainted at SessionStart.
-mod tm_hook_session_start_taint_8433;
 mod tm_ls_state_colors;
 // #9621: `tm secrets exec` on a fake socket, and live on a real server.
 mod tm_secrets_exec;

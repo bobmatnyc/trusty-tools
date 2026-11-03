@@ -151,19 +151,14 @@ pub(crate) use persistence::command_is_persistence_only;
 pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
 pub(crate) use process_env_dump::evaluate_process_env_dump_command;
 pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
-// #8454 S3: the egress Bash arm walks the same segments and nested bodies
-// (`shell_segments_map`). #10033: one line, for the 500-SLOC cap.
-pub(crate) use write_targets::{UnplaceableWrite, shell_segments_map, shell_write_targets};
-// #8454 S3 critic round 2: and peels the same leading shell keywords.
-pub(crate) use credential_print::keyword_words;
+pub(crate) use write_targets::{UnplaceableWrite, shell_write_targets};
 // #7266: the secret-read guard frames here-document bodies through the SAME
 // scan the write-redirection check uses, rather than growing a second parser.
 pub(crate) use heredoc::split_heredoc_bodies;
 // #9001: the `$'…'` decoder, and the #6660 refusal that names its token.
 mod ansi_c_decode;
 pub(crate) use ansi_c_decode::unclassifiable_reason;
-// #8454 S3: the egress Bash arm judges what a `$'…'` quote decodes to.
-pub(crate) use ansi_c_decode::{Decoded, decode_ansi_c, decode_ansi_c_lenient};
+pub(crate) use ansi_c_decode::{Decoded, decode_ansi_c};
 // #7839, #7738, #7744: the shared classifier the secret-read guard asks which
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
 // #8723: and which tokens are prose a `printf`/`echo` writes into a file.

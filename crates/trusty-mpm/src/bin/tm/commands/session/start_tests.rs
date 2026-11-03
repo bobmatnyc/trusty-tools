@@ -840,16 +840,14 @@ fn manual_launch_hint_names_the_prompt_file() {
     );
 }
 
-/// #10127: `tm session start` of an Architect carries the production deny as
-/// ONE `--settings` merged into the owner file, and unsets every chat token;
-/// a PM keeps the owner file argv. An owner file the deny cannot merge into
-/// refuses the launch. Before the fix the Architect spec carried the bare
-/// owner file and inherited the tokens.
+/// #10127, #10735: `tm session start` of an Architect passes the owner file
+/// argv unchanged (the production deny is empty, so no inline lockdown JSON and
+/// no `disableClaudeAiConnectors`), and unsets every chat token; a PM keeps the
+/// owner file argv. An owner file the lockdown cannot merge into no longer
+/// refuses the launch, because nothing merges.
 #[test]
 fn an_architect_inplace_session_spec_carries_the_lockdown() {
-    use trusty_mpm::core::architect_lockdown::{
-        ARCHITECT_DENY_GLOBS, ARCHITECT_ENV_UNSET, capitalised,
-    };
+    use trusty_mpm::core::architect_lockdown::ARCHITECT_ENV_UNSET;
     use trusty_mpm::core::session_profile::{SessionProfile, launch_env};
     let root = tempfile::TempDir::new().expect("tmp config root");
     let carrier = root.path().join("owner.json");
@@ -859,25 +857,20 @@ fn an_architect_inplace_session_spec_carries_the_lockdown() {
     let cwd = std::path::Path::new("/w");
     let spec = super::inplace_session_spec(cwd, root.path(), &prompt, Some(&carrier))
         .expect("the Architect spec builds");
-    let values: Vec<&String> = spec
-        .args
-        .windows(2)
-        .filter(|w| w[0] == "--settings")
-        .map(|w| &w[1])
-        .collect();
-    assert_eq!(values.len(), 1, "{:?}", spec.args);
-    let body: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
-    assert_eq!(body["deniedMcpServers"][0]["serverName"], "x");
-    assert_eq!(body["disableClaudeAiConnectors"], true);
-    let deny = body["permissions"]["deny"].as_array().expect("deny");
-    for glob in ARCHITECT_DENY_GLOBS {
-        for rule in [(*glob).to_owned(), capitalised(glob)] {
-            assert!(
-                deny.contains(&serde_json::Value::String(rule.clone())),
-                "{rule}"
-            );
-        }
-    }
+    assert!(
+        spec.args
+            .ends_with(&["--settings".to_owned(), carrier.display().to_string()]),
+        "{:?}",
+        spec.args
+    );
+    assert!(
+        !spec
+            .args
+            .iter()
+            .any(|a| a.contains("disableClaudeAiConnectors")),
+        "{:?}",
+        spec.args
+    );
     for name in ARCHITECT_ENV_UNSET {
         assert!(spec.env_unset.iter().any(|n| n == name), "{name}");
     }
@@ -889,7 +882,4 @@ fn an_architect_inplace_session_spec_carries_the_lockdown() {
             .ends_with(&["--settings".to_owned(), carrier.display().to_string()])
     );
     assert!(!pm.env_unset.iter().any(|n| n == "SLACK_BOT_TOKEN"));
-
-    let missing = root.path().join("gone.json");
-    assert!(super::inplace_session_spec(cwd, root.path(), &prompt, Some(&missing)).is_err());
 }

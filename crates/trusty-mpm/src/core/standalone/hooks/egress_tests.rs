@@ -1,5 +1,5 @@
-//! Unit tests for the egress-guard settings entry (#8454 S2): its shape, the
-//! user-tier writers, and every strip that must leave it in place.
+//! Unit tests for the retired egress-guard settings entry (#8454, #10735): its
+//! identity and read side, and the writers and strips that now remove it.
 
 use super::*;
 use crate::core::standalone::hooks::build_tree::repointed_hook_command;
@@ -9,7 +9,7 @@ use crate::core::standalone::hooks::{
     write_project_hooks_honoring_pm_guard,
 };
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// An installed-looking binary the writers accept on any host.
 const EXE_A: &str = "/usr/local/bin/tm";
@@ -47,6 +47,18 @@ fn read(path: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).expect("read settings")).expect("json")
 }
 
+/// The group the retired writer produced (#8454), for seeding a stale file.
+fn egress_guard_hook_group(exe: &Path) -> Value {
+    json!({
+        "matcher": "",
+        "hooks": [{
+            "type": "command",
+            "command": format!("{}{EGRESS_GUARD_SUFFIX}", exe.display()),
+            "timeout": EGRESS_GUARD_TIMEOUT_SECS,
+        }]
+    })
+}
+
 /// A settings value holding an installed egress entry and a pm-guard entry.
 fn installed_entries() -> Value {
     json!({ "hooks": { "PreToolUse": [
@@ -57,17 +69,9 @@ fn installed_entries() -> Value {
     ]}})
 }
 
-/// 🔴 #8454 S2: the group fires for every tool, names the absolute binary, and
-/// allows Claude Code 10 s.
+/// The identity predicate claims the egress suffix of any binary.
 #[test]
-fn egress_group_registers_the_guard_command_with_timeout_10() {
-    let group = egress_guard_hook_group(Path::new(EXE_A));
-    assert_eq!(group["matcher"], "", "{group}");
-    let entry = &group["hooks"][0];
-    assert_eq!(entry["type"], "command", "{group}");
-    assert_eq!(entry["command"], "/usr/local/bin/tm hook --egress-guard");
-    assert_eq!(entry["timeout"], 10);
-    assert_eq!(EGRESS_GUARD_TIMEOUT_SECS, 10);
+fn egress_group_is_recognised_by_its_command() {
     assert!(is_egress_guard_hook_command("/x/tm hook --egress-guard"));
     assert!(!is_egress_guard_hook_command("/x/tm hook --pm-guard"));
 }
@@ -138,88 +142,54 @@ fn egress_disable_all_hooks_detects_any_non_false_value() {
     assert!(!disables_all_hooks(&json!({})));
 }
 
-/// 🔴 #8454 S2 (plan §6): the user-tier writers add the egress group whatever
-/// `[pm_guard] enabled` says.
+/// 🔴 #10735: no writer adds the egress group any more, and each one strips a
+/// stale entry (an upgrade from a release that wrote it), whatever
+/// `[pm_guard] enabled` says. The pm-guard entry is unaffected when on.
 #[test]
-fn egress_user_tier_writer_adds_the_group_even_when_pm_guard_disabled() {
+fn egress_entry_is_stripped_by_the_user_tier_writers() {
     for pm_guard in [false, true] {
         let (_dir, path) = scratch();
+        std::fs::write(&path, installed_entries().to_string()).expect("seed");
         write_project_hooks_honoring_pm_guard(&path, Some(Path::new(EXE_A)), pm_guard)
             .expect("write");
         let settings = read(&path);
+        assert!(
+            egress_commands(&settings).is_empty(),
+            "pm_guard={pm_guard}: {settings}"
+        );
         assert_eq!(
-            egress_guard_state(&settings),
-            EgressGuardState::Present,
+            settings.to_string().contains("--pm-guard"),
+            pm_guard,
             "pm_guard={pm_guard}: {settings}"
         );
     }
     let (_dir, path) = scratch();
-    write_project_hooks(&path, Some(Path::new(EXE_A))).expect("write");
-    assert_eq!(
-        egress_commands(&read(&path)),
-        vec!["/usr/local/bin/tm hook --egress-guard".to_string()]
-    );
+    write_project_hooks(&path, Some(Path::new(EXE_A))).expect("fresh write");
+    assert!(egress_commands(&read(&path)).is_empty());
+    std::fs::write(&path, installed_entries().to_string()).expect("seed");
+    write_project_hooks(&path, Some(Path::new(EXE_B))).expect("upgrade write");
+    assert!(egress_commands(&read(&path)).is_empty());
 }
 
-/// 🔴 #8454 S2: a second write after an exe-path change replaces the entry
-/// rather than adding a second one, and a third identical write is a no-op.
+/// 🔴 #10735: `tm hooks clean` and the strips remove an installed egress entry
+/// too, so an uninstalled `tm` leaves no hook that cannot run.
 #[test]
-fn egress_user_tier_writer_is_idempotent_across_an_exe_path_change() {
+fn egress_entry_is_removed_by_clean_and_strip() {
+    // A user-tier file (no project-tier marker such as the pm-guard entry).
     let (_dir, path) = scratch();
-    write_project_hooks(&path, Some(Path::new(EXE_A))).expect("first write");
-    write_project_hooks(&path, Some(Path::new(EXE_B))).expect("second write");
-    assert_eq!(
-        egress_commands(&read(&path)),
-        vec![format!("{EXE_B} hook --egress-guard")]
-    );
-    let changed = write_project_hooks(&path, Some(Path::new(EXE_B))).expect("third write");
-    assert!(!changed, "an identical write must not rewrite the file");
-}
-
-/// 🔴 #8454 S2 (plan §6): removing the pm-guard, `tm hooks clean`,
-/// `strip_mpm_hook_entries` and the event-scoped strip all leave an installed
-/// egress entry in place.
-#[test]
-fn egress_entry_survives_pm_guard_removal_clean_and_strip() {
-    let want = vec!["/usr/local/bin/tm hook --egress-guard".to_string()];
-
-    let (_dir, path) = scratch();
-    std::fs::write(&path, installed_entries().to_string()).expect("seed");
-    write_project_hooks_honoring_pm_guard(&path, Some(Path::new(EXE_A)), false).expect("write");
-    let after = read(&path);
-    assert_eq!(egress_commands(&after), want, "pm-guard removal: {after}");
-    assert!(
-        !after.to_string().contains("--pm-guard"),
-        "the pm-guard entry is still removed: {after}"
-    );
-
-    let (_dir, path) = scratch();
-    std::fs::write(&path, installed_entries().to_string()).expect("seed");
+    let user_tier =
+        json!({ "hooks": { "PreToolUse": [egress_guard_hook_group(Path::new(EXE_A))] } });
+    std::fs::write(&path, user_tier.to_string()).expect("seed");
     clean_settings_file(&path, true).expect("clean");
-    assert_eq!(egress_commands(&read(&path)), want, "tm hooks clean");
+    assert!(egress_commands(&read(&path)).is_empty(), "tm hooks clean");
 
     let mut all = installed_entries();
     strip_mpm_hook_entries(&mut all);
-    assert_eq!(egress_commands(&all), want, "strip_mpm_hook_entries");
+    assert!(egress_commands(&all).is_empty(), "strip_mpm_hook_entries");
 
-    let mut scoped = installed_entries();
-    super::super::strip_mpm_hook_entries_for_events(
-        &mut scoped,
-        Some(&["PreToolUse".to_string()][..]),
-    );
-    assert_eq!(egress_commands(&scoped), want, "event-scoped strip");
-}
-
-/// 🔴 #8454 S2 (plan §2): the shared tm-hook predicate claims a build-tree
-/// egress command — so the strips replace and the repair repoints it — and
-/// never the installed one.
-#[test]
-fn egress_is_mpm_hook_command_claims_only_the_build_tree_shape() {
+    assert!(is_mpm_hook_command("/usr/local/bin/tm hook --egress-guard"));
     let dead = format!("{BUILD_TREE_EXE} hook --egress-guard");
     assert!(is_mpm_hook_command(&dead), "{dead}");
-    assert!(!is_mpm_hook_command(
-        "/usr/local/bin/tm hook --egress-guard"
-    ));
     assert_eq!(
         repointed_hook_command(&dead, Path::new(EXE_A)).as_deref(),
         Some("/usr/local/bin/tm hook --egress-guard")

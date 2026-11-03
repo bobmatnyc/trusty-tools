@@ -424,7 +424,9 @@ mod prompt_refusal_tests {
     /// Before the fix the Architect spec carried the bare owner file.
     #[test]
     fn an_architect_client_prompt_spec_carries_the_lockdown() {
-        use crate::core::architect_lockdown::{assert_chat_tokens_unset, assert_production_deny};
+        use crate::core::architect_lockdown::{
+            assert_chat_tokens_unset, assert_connectors_not_denied,
+        };
         let project = tempfile::tempdir().expect("project");
         let dir = tempfile::tempdir().expect("prompt dir");
         for action in ["launch", "connect"] {
@@ -436,7 +438,7 @@ mod prompt_refusal_tests {
                 crate::core::session_profile::SessionProfile::Architect,
             )
             .expect("the Architect spec builds");
-            assert_production_deny(&spec.args);
+            assert_connectors_not_denied(&spec.args);
             assert_chat_tokens_unset(&spec.env_unset);
         }
     }

@@ -50,27 +50,6 @@ pub(crate) fn decode_ansi_c(command: &str) -> Decoded {
     }
 }
 
-/// [`decode_ansi_c`] that never refuses: it also reads `\cX` and an ASCII
-/// `\u`/`\U` escape, drops a quote's text past a NUL as bash does, reads each
-/// other escape it would refuse as a space, `$"` as `"`, and closes an
-/// unterminated quote at the end.
-///
-/// Why (#8454 S3 critic rounds 1 and 2): the egress guard must still judge the
-/// decodable quotes of a command that also carries a refused one, or one
-/// undecodable `$'hi\n'` hides a decodable `$'…\x73lack.com'`; and it must
-/// read `$'\u0073endmail'` and `$'sendmail\0'` as the `sendmail` bash runs.
-/// What: the [`decode_ansi_c`] walk in lenient mode; `command` unchanged when
-/// it holds no live quote.
-/// Test: `lenient_decode_reads_past_a_refused_escape`,
-/// `bash_egress_denies_ansi_c_beside_an_undecodable_quote`.
-pub(crate) fn decode_ansi_c_lenient(command: &str) -> String {
-    match rewrite(command, true) {
-        Ok(Some(text)) => text,
-        // The lenient walk never refuses; `Err` keeps the raw text to judge.
-        Ok(None) | Err(_) => command.to_owned(),
-    }
-}
-
 /// The [`decode_ansi_c`] walk: `Ok(None)` when no live quote is found, `Err`
 /// with the refused token unless `lenient`.
 fn rewrite(command: &str, lenient: bool) -> Result<Option<String>, String> {

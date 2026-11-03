@@ -42,7 +42,7 @@ mod tests;
 pub(crate) mod backup;
 pub mod build_tree;
 pub mod cleanup;
-// #8454: the `tm hook --egress-guard` entry both tiers' writers add.
+// #10735: the removed `tm hook --egress-guard` entry's identity, strip and read side.
 pub mod egress;
 // #8392: the opt-in `Notification` entry and its push target.
 pub mod notification;
@@ -550,6 +550,11 @@ pub fn is_mpm_hook_command(cmd: &str) -> bool {
     if build_tree::is_build_tree_hook_command(cmd) {
         return true;
     }
+    // #10735: the removed egress guard's entry is tm's to strip, so a clean or
+    // an upgrade leaves no hook behind that an uninstalled `tm` cannot run.
+    if cmd.ends_with(build_tree::EGRESS_GUARD_SUFFIX) {
+        return true;
+    }
     // The command must end with " hook" (with exactly one trailing sub-command word).
     let Some(binary) = cmd.strip_suffix(" hook") else {
         return false;
@@ -992,18 +997,14 @@ pub(crate) fn strip_hook_entries_matching_for_events(
 /// `write_project_hooks_refuses_when_the_copy_cannot_be_written`,
 /// `write_project_hooks_takes_no_copy_for_a_valid_file`.
 ///
-/// #8454: the additions also carry the `hook --egress-guard` group
-/// ([`egress::with_egress_guard_group`]), whose stale copy is replaced by
-/// identity. Test: `egress_user_tier_writer_is_idempotent_across_an_exe_path_change`.
+/// #10735: the merge strips a stale `hook --egress-guard` entry
+/// ([`egress::strip_egress_guard_entries`]) and never writes one.
+/// Test: `egress_entry_is_stripped_by_the_user_tier_writers`.
 pub fn write_project_hooks(
     settings_path: &Path,
     exe_override: Option<&Path>,
 ) -> anyhow::Result<bool> {
-    // #8454: the egress group rides with the triad, unconditionally.
-    write_project_hooks_with(
-        settings_path,
-        egress::with_egress_guard_group(mpm_hook_additions_with_exe(exe_override), exe_override),
-    )
+    write_project_hooks_with(settings_path, mpm_hook_additions_with_exe(exe_override))
 }
 
 /// [`write_project_hooks`], honouring the `[pm_guard] enabled` config key.
@@ -1017,20 +1018,14 @@ pub fn write_project_hooks(
 /// [`build_tree::PM_GUARD_SUFFIX`], on every event, before the merge; the
 /// observability `tm hook` groups and foreign entries are untouched.
 /// Test: `write_project_hooks_honoring_pm_guard_strips_the_guard_when_off`,
-/// `write_project_hooks_honoring_pm_guard_keeps_the_guard_when_on`.
-///
-/// #8454: the egress group is added either way, and the pm-guard strip's
-/// exact-suffix match never reaches it.
-/// Test: `egress_user_tier_writer_adds_the_group_even_when_pm_guard_disabled`,
-/// `egress_entry_survives_pm_guard_removal_clean_and_strip`.
+/// `write_project_hooks_honoring_pm_guard_keeps_the_guard_when_on`,
+/// `egress_entry_is_stripped_by_the_user_tier_writers` (#10735).
 pub fn write_project_hooks_honoring_pm_guard(
     settings_path: &Path,
     exe_override: Option<&Path>,
     pm_guard_enabled: bool,
 ) -> anyhow::Result<bool> {
-    // #8454: the egress group is added whatever `pm_guard_enabled` says.
-    let additions =
-        egress::with_egress_guard_group(mpm_hook_additions_with_exe(exe_override), exe_override)?;
+    let additions = mpm_hook_additions_with_exe(exe_override)?;
     crate::core::settings_lock::with_settings_lock(settings_path, || {
         write_project_hooks_locked(settings_path, &additions, !pm_guard_enabled)
     })?
@@ -1098,12 +1093,8 @@ fn write_project_hooks_locked(
         let event_keys: Vec<String> = events.keys().cloned().collect();
         strip_mpm_hook_entries_for_events(&mut base, Some(&event_keys));
     }
-    // #8454: replace-by-identity for the egress entry across an exe-path
-    // change — only when a fresh one is merged below, so this writer is never
-    // a path that removes it.
-    if egress::has_egress_guard_entry(additions) {
-        egress::strip_egress_guard_entries(&mut base);
-    }
+    // #10735: the egress guard is removed; drop a stale entry on every write.
+    egress::strip_egress_guard_entries(&mut base);
     // #9018: `[pm_guard] enabled = false` — the guard entry is identified by
     // the same suffix the session writer's strip uses.
     if strip_pm_guard {

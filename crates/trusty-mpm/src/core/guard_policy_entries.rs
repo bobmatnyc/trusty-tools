@@ -10,7 +10,6 @@
 //! of `crate::core::architect_core::ARCHITECT_CORE`).
 //! Test: `guard_policy_tests.rs`.
 
-use super::egress::*;
 use super::{GuardPolicy, Role, policy};
 
 const ALL: &[Role] = &[Role::Pm, Role::Architect, Role::Agent];
@@ -421,7 +420,7 @@ pub static PM_TOOL_POLICY: GuardPolicy = policy(
 /// recovery allowlist (read-only tools, `tm doctor`, `tm install`,
 /// `cargo install trusty-mpm`) still runs.
 pub static GUARD_TIMEOUT: GuardPolicy = policy(
-    "GP-049",
+    "GP-039",
     "guard-timeout",
     "Release builds: a guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist.",
     "#10600, #10641",
@@ -433,7 +432,7 @@ pub static GUARD_TIMEOUT: GuardPolicy = policy(
 /// #10665: an inherited `$TMUX` beats `TMUX_TMPDIR`; `-L` and `-S` override it.
 /// Owner ruling Dac: only the fleet-kill row enforces.
 pub static TMUX_KILL_SERVER: GuardPolicy = policy(
-    "GP-050",
+    "GP-040",
     "tmux-kill-server",
     "No tmux kill-server or kill-session -a on the fleet server (default, $TMUX, -L default, a tm- server, case folded), and no kill-session there unless it names a literal non-tm- session; a scratch -S or -L is allowed. Other findings are log-only.",
     "#10665",
@@ -483,16 +482,6 @@ pub static POLICIES: &[&GuardPolicy] = &[
     &PERSONA_DENY_BY_DEFAULT,
     &FILE_CHANGE_BUDGET,
     &PM_TOOL_POLICY,
-    &EGRESS_UNREADABLE_PAYLOAD,
-    &EGRESS_UNCLASSIFIABLE_PAYLOAD,
-    &EGRESS_UNNAMED_RESOURCE_SERVER,
-    &EGRESS_MALFORMED_MCP_NAME,
-    &EGRESS_FAMILY,
-    &EGRESS_BASH,
-    &EGRESS_CHANNEL_TAINTED,
-    &EGRESS_POLICY_NOT_READY,
-    &EGRESS_ARCHITECT_AUDIT_UNWRITABLE,
-    &EGRESS_GUARD_PANIC,
     &GUARD_TIMEOUT,
     &TMUX_KILL_SERVER,
 ];

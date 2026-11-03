@@ -76,8 +76,7 @@ const TM_HOOK_ARGV_TAILS: &[&str] = &[
     // capture hook as tm's own, so a stale one pointing at a Cargo build tree
     // would survive the repair every sibling shape gets.
     PROMPT_FEEDBACK_SUFFIX,
-    // #8454: the build-tree shape only. The installed egress entry stays
-    // unclaimed, so `tm hooks clean` and the strips never remove it.
+    // #10735: the egress guard is removed; its entry is claimed so it is stripped.
     EGRESS_GUARD_SUFFIX,
 ];
 
@@ -135,11 +134,11 @@ pub(crate) const PROMPT_FEEDBACK_SUFFIX: &str = " hook --prompt-feedback";
 
 /// The `hook --egress-guard` argv tail (#8454 G3).
 ///
-/// Why: the same one-definition rule as [`PM_GUARD_SUFFIX`] — the writer
-/// (`super::egress::egress_guard_hook_group`), the strips' identity predicates
-/// and [`TM_HOOK_ARGV_TAILS`] here all read this exact string.
+/// Why: the same one-definition rule as [`PM_GUARD_SUFFIX`] — the strips' identity
+/// predicates and [`TM_HOOK_ARGV_TAILS`] here read this exact string (#10735:
+/// no writer remains).
 /// What: the literal suffix, including its leading space.
-/// Test: `egress_is_mpm_hook_command_claims_only_the_build_tree_shape`.
+/// Test: `egress_entry_is_removed_by_clean_and_strip`.
 pub(crate) const EGRESS_GUARD_SUFFIX: &str = " hook --egress-guard";
 
 /// Does `cmd` invoke a hook from a binary inside a Cargo build tree?

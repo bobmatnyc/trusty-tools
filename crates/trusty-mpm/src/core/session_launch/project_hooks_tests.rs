@@ -39,12 +39,8 @@ fn project_managed_hook_additions_combines_all_three_sources() {
     let pre = hooks["PreToolUse"]
         .as_array()
         .expect("PreToolUse must be an array");
-    // #8454: plus the egress-guard group, written unconditionally.
-    assert_eq!(
-        pre.len(),
-        3,
-        "PreToolUse must carry guard + triad + egress groups"
-    );
+    // #10735: no egress-guard group any more.
+    assert_eq!(pre.len(), 2, "PreToolUse must carry guard + triad groups");
     let pre_commands: Vec<&str> = pre
         .iter()
         .map(|g| g["hooks"][0]["command"].as_str().unwrap())
@@ -902,8 +898,8 @@ fn write_project_hooks_strips_stale_divert_when_disabled() {
     let pre = value["hooks"]["PreToolUse"].as_array().expect("array");
     assert_eq!(
         pre.len(),
-        3,
-        "PM guard + lifecycle triad + egress guard (#8454) must remain: {pre:?}"
+        2,
+        "PM guard + lifecycle triad must remain: {pre:?}"
     );
 }
 
@@ -1328,10 +1324,10 @@ fn egress_commands_in(hooks: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// 🔴 #8454 S2 (plan §6): the launch writer adds the egress group whatever
-/// `[pm_guard] enabled` and the other toggles say.
+/// 🔴 #10735: the launch writer adds no egress group whatever the toggles say,
+/// and rewriting a settings file that carries a stale one removes it.
 #[test]
-fn egress_settings_writer_adds_entry_even_when_pm_guard_disabled() {
+fn launch_writer_adds_no_egress_entry_and_strips_a_stale_one() {
     let exe = std::path::Path::new("/usr/local/bin/tm");
     for (pm_guard, divert, feedback) in [(false, false, false), (true, true, true)] {
         let additions = project_managed_hook_additions_with_pm_guard(
@@ -1342,57 +1338,34 @@ fn egress_settings_writer_adds_entry_even_when_pm_guard_disabled() {
             pm_guard,
         )
         .expect("a stable hook exe resolves");
-        assert_eq!(
-            egress_commands_in(&additions["hooks"]),
-            vec!["/usr/local/bin/tm hook --egress-guard".to_string()],
+        assert!(
+            egress_commands_in(&additions["hooks"]).is_empty(),
             "pm_guard={pm_guard} divert={divert} feedback={feedback}"
         );
-        let group = additions["hooks"]["PreToolUse"]
-            .as_array()
-            .and_then(|groups| {
-                groups
-                    .iter()
-                    .find(|g| g["hooks"][0]["command"] == "/usr/local/bin/tm hook --egress-guard")
-            })
-            .expect("egress group");
-        assert_eq!(group["matcher"], "");
-        assert_eq!(group["hooks"][0]["timeout"], 10);
     }
-}
-
-/// 🔴 #8454 S2: launches across an exe-path change leave exactly one egress
-/// entry, naming the newer binary.
-#[test]
-fn egress_project_writer_is_idempotent_across_an_exe_path_change() {
     let dir = TempDir::new().expect("tempdir");
-    for exe in [
-        "/usr/local/bin/tm",
-        "/opt/tm/bin/trusty-mpm",
-        "/opt/tm/bin/trusty-mpm",
-    ] {
-        super::super::settings::write_project_hooks_with(
-            dir.path(),
-            project_managed_hook_additions_with_pm_guard(
-                Some(std::path::Path::new(exe)),
-                true,
-                false,
-                false,
-                false,
-            ),
-        )
-        .expect("write");
-    }
-    let text = std::fs::read_to_string(dir.path().join(".claude/settings.json")).expect("read");
+    let claude = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude).expect("mkdir");
+    std::fs::write(
+        claude.join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"/opt/tm/bin/trusty-mpm hook --egress-guard","timeout":10}]}]}}"#,
+    )
+    .expect("seed a stale entry");
+    super::super::settings::write_project_hooks_with(
+        dir.path(),
+        project_managed_hook_additions_with_pm_guard(Some(exe), true, false, false, false),
+    )
+    .expect("write");
+    let text = std::fs::read_to_string(claude.join("settings.json")).expect("read");
     let settings: serde_json::Value = serde_json::from_str(&text).expect("json");
-    assert_eq!(
-        egress_commands_in(&settings["hooks"]),
-        vec!["/opt/tm/bin/trusty-mpm hook --egress-guard".to_string()],
+    assert!(
+        egress_commands_in(&settings["hooks"]).is_empty(),
         "{settings}"
     );
 }
 
-/// 🔴 #8454 S2: the launch writer's strip claims the egress suffix, so a stale
-/// entry is replaced (#2948) rather than kept beside the fresh one.
+/// 🔴 #8454 S2, #10735: the launch writer's strip claims the egress suffix, so
+/// a stale entry is removed rather than kept.
 #[test]
 fn egress_is_project_managed_hook_command_claims_the_egress_suffix() {
     assert!(is_project_managed_hook_command(

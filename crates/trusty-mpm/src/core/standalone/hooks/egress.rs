@@ -1,58 +1,27 @@
-//! The `tm hook --egress-guard` settings entry (#8454 G3, slice S2).
+//! The retired `tm hook --egress-guard` settings entry (#8454, removed by #10735).
 //!
-//! Why: the S1 guard denies outbound-channel MCP tools only while Claude Code
-//! runs it, so its `PreToolUse` entry has to be in every settings tier tm
-//! provisions, and has to survive every path that removes tm hook entries.
-//! Unlike the pm-guard entry it has no off switch: Architect D3 rules out a
-//! kill switch and a config key, so no writer reads `[pm_guard]` for it.
-//! Architect D4 puts it in both the project and the user tier.
-//! What: [`egress_guard_hook_group`] builds the one group;
-//! [`with_egress_guard_group`] and [`push_egress_guard_group`] add it to a
-//! writer's additions; [`strip_egress_guard_entries`] is the writers'
-//! replace-by-identity strip, so an exe-path change replaces the entry rather
-//! than duplicating it. [`egress_guard_state`] and [`disables_all_hooks`] are
-//! the read side `tm doctor`'s `egress_guard` row and the trust anchor share.
-//! Lives beside `build_tree` rather than in `session_launch`, because both
-//! tiers' writers use it and this is the lower of the two layers.
+//! Why: the owner removed the egress guard (ruling D19). An installed settings
+//! file may still carry the entry; it must be recognised so the writers strip
+//! it, and the pm-guard trust anchor still reads it while it exists.
+//! What: [`is_egress_guard_hook_command`] is the identity predicate,
+//! [`strip_egress_guard_entries`] the writers' strip, and
+//! [`egress_guard_state`] and [`disables_all_hooks`] the read side the trust
+//! anchor shares. Nothing here writes an entry.
 //! Test: `egress_tests.rs`.
 
-use std::path::Path;
-
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 pub(crate) use super::build_tree::EGRESS_GUARD_SUFFIX;
-use super::{StableHookExeError, resolve_stable_hook_exe, strip_hook_entries_matching_for_events};
+use super::strip_hook_entries_matching_for_events;
 
 /// The `timeout`, in seconds, Claude Code is told to allow the egress hook.
 ///
-/// Why: a hook that outlives its timeout is killed, and Claude Code reads a
-/// killed hook as non-blocking — an allow. S1's worst case is 7.5 s: the
-/// 500 ms gateway probe, the 5 s stdin budget and the 2 s audit POST.
-/// What: 10, the value the pm-guard entry uses.
-/// Test: `egress_hook_timeout_exceeds_the_guard_budget` (the drift test, in
-/// the binary, against S1's own constants).
+/// What: 10, the value the pm-guard entry used; only the trust-anchor read of
+/// an existing entry still compares against it.
 pub const EGRESS_GUARD_TIMEOUT_SECS: u64 = 10;
 
 /// The `PreToolUse` matchers that fire for every tool.
 const ALL_TOOLS_MATCHERS: [&str; 2] = ["", "*"];
-
-/// The `PreToolUse` group that registers `<exe> hook --egress-guard`.
-///
-/// Why: one composition point for the command, so the identity predicate has
-/// one shape to recognise (#2948).
-/// What: matcher `""` (every tool), one command entry, timeout
-/// [`EGRESS_GUARD_TIMEOUT_SECS`].
-/// Test: `egress_group_registers_the_guard_command_with_timeout_10`.
-pub fn egress_guard_hook_group(exe: &Path) -> Value {
-    serde_json::json!({
-        "matcher": ALL_TOOLS_MATCHERS[0],
-        "hooks": [{
-            "type": "command",
-            "command": format!("{}{EGRESS_GUARD_SUFFIX}", exe.display()),
-            "timeout": EGRESS_GUARD_TIMEOUT_SECS,
-        }]
-    })
-}
 
 /// Whether `cmd` is an egress-guard hook command, whatever binary it names.
 ///
@@ -61,54 +30,10 @@ pub fn is_egress_guard_hook_command(cmd: &str) -> bool {
     cmd.ends_with(EGRESS_GUARD_SUFFIX)
 }
 
-/// Append the egress group to a `hooks` object's `PreToolUse` array.
-///
-/// What: creates the array when absent; skips a group already present. A
-/// `PreToolUse` value that is not an array is left alone — the writers'
-/// loaders reject such a file before it gets here.
-/// Test: `egress_settings_writer_adds_entry_even_when_pm_guard_disabled`.
-pub(crate) fn push_egress_guard_group(hooks: &mut Map<String, Value>, exe: &Path) {
-    let group = egress_guard_hook_group(exe);
-    if let Some(groups) = hooks
-        .entry("PreToolUse")
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        && !groups.contains(&group)
-    {
-        groups.push(group);
-    }
-}
-
-/// `additions` with the egress group appended, the binary resolved by the
-/// lifecycle triad's rule.
-///
-/// Why (#7244): a refusal must reach the caller before anything is written.
-/// What: `additions`' error unchanged; then
-/// [`resolve_stable_hook_exe`]`(exe_override)`'s error; then the block with
-/// [`push_egress_guard_group`] applied to its `hooks` object.
-/// Test: `egress_user_tier_writer_adds_the_group_even_when_pm_guard_disabled`.
-pub(crate) fn with_egress_guard_group(
-    additions: Result<Value, StableHookExeError>,
-    exe_override: Option<&Path>,
-) -> Result<Value, StableHookExeError> {
-    let mut additions = additions?;
-    let exe = resolve_stable_hook_exe(exe_override)?;
-    if let Some(root) = additions.as_object_mut()
-        && let Some(hooks) = root
-            .entry("hooks")
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-    {
-        push_egress_guard_group(hooks, &exe);
-    }
-    Ok(additions)
-}
-
 /// Remove every egress-guard entry from a settings value, on every event.
 ///
-/// Why: replace-by-identity — the writers call it only when they merge a
-/// fresh egress group in the same pass, so it never removes the entry.
-/// Test: `egress_user_tier_writer_is_idempotent_across_an_exe_path_change`.
+/// Why (#10735): the guard is removed, so every writer drops a stale entry.
+/// Test: `egress_entry_is_stripped_by_the_user_tier_writers`.
 pub(crate) fn strip_egress_guard_entries(settings: &mut Value) -> bool {
     strip_hook_entries_matching_for_events(settings, None, is_egress_guard_hook_command)
 }
@@ -181,11 +106,6 @@ fn entry_fault(group: &Value, entry: &Value) -> Option<String> {
              into an allow"
         )),
     }
-}
-
-/// Whether `settings` carries any egress-guard entry, working or not.
-pub(crate) fn has_egress_guard_entry(settings: &Value) -> bool {
-    egress_guard_state(settings) != EgressGuardState::Missing
 }
 
 /// Whether `settings` sets `disableAllHooks` to anything but `false`.

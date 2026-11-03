@@ -475,7 +475,7 @@ async fn run_doctor_produces_eighty_checks() {
     // #9091 adds org_accounts (sixty-six → sixty-seven).
     // #8994 adds worktree_registry (sixty-seven → sixty-eight).
     // #9169 adds the four search_project_* rows (sixty-eight → seventy-two).
-    // #8454 adds egress_guard (seventy-two → seventy-three).
+    // #8454 added egress_guard (seventy-two → seventy-three); #10735 removed it.
     // #8992 adds agent_orphans (seventy-three → seventy-four).
     // #8988 adds owner_config (seventy-four → seventy-five).
     // #10042 adds events (seventy-five → seventy-six).
@@ -577,8 +577,6 @@ async fn run_doctor_produces_eighty_checks() {
         "hooks_build_tree_binary",
         // #7490: the lifecycle event a tm-provisioned file has no group for.
         "hooks_missing_tm_group",
-        // #8454: the egress-guard entry in every tm-provisioned file.
-        "egress_guard",
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",

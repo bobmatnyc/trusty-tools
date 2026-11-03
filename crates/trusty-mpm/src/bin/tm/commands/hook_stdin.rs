@@ -217,8 +217,7 @@ pub(crate) fn unclassifiable_payload_deny_reason(detail: &str) -> String {
 /// What: flushes stdout, ignoring a flush error because nothing is left to
 /// report it to, then calls `std::process::exit(0)`. #8454: the egress guard
 /// ends its deny the same way.
-/// Test: `pm_guard_denies_a_stdin_that_stays_open_past_the_read_timeout`,
-/// `egress_denies_a_stdin_left_open_past_the_deadline`.
+/// Test: `pm_guard_denies_a_stdin_that_stays_open_past_the_read_timeout`.
 pub(crate) fn exit_after_decision() -> ! {
     use std::io::Write;
     let _ = std::io::stdout().flush();

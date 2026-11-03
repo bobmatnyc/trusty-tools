@@ -47,16 +47,6 @@
           }
         ],
         "matcher": "*"
-      },
-      {
-        "hooks": [
-          {
-            "command": "/usr/local/bin/tm hook --egress-guard",
-            "timeout": 10,
-            "type": "command"
-          }
-        ],
-        "matcher": ""
       }
     ],
     "SessionEnd": [

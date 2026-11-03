@@ -2669,8 +2669,6 @@ fn evaluate_bash_command_judges_dense_heredocs_in_bounded_time_9720() {
 #[test]
 #[ignore = "timing probe for #9720; run with --nocapture"]
 fn heredoc_density_timings_9720_profile() {
-    use crate::commands::egress_guard::{Verdict, decide};
-    use crate::commands::egress_guard_families::FamilyTable;
     use std::time::Instant;
     for (name, command) in dense_heredoc_payloads_9720() {
         let t = Instant::now();
@@ -2682,14 +2680,9 @@ fn heredoc_density_timings_9720_profile() {
         let t = Instant::now();
         let pm = evaluate_bash_command(&command).is_some();
         let pm_time = t.elapsed();
-        let t = Instant::now();
-        let read =
-            Ok(serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": command } }));
-        let egress = decide(&read, &FamilyTable::builtin()) == Verdict::Allow;
-        let egress_time = t.elapsed();
         println!(
             "9720-probe {name}: bytes={} ops={ops} data={spans} walk={walk:?} scan={scan:?} \
-             pm={pm_time:?} (deny={pm}) egress={egress_time:?} (allow={egress})",
+             pm={pm_time:?} (deny={pm})",
             command.len(),
         );
     }

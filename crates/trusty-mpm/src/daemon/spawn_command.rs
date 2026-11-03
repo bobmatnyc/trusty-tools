@@ -324,7 +324,7 @@ mod tests {
             let (deny, body) = payload(&out);
             assert!(deny.contains(&"mcp__*slack*".to_owned()), "{deny:?}");
             assert!(deny.contains(&"mcp__*Slack*".to_owned()), "{deny:?}");
-            assert_eq!(body["disableClaudeAiConnectors"], true);
+            assert!(body.get("disableClaudeAiConnectors").is_none(), "{body}");
             // #10127: the payload file is created new, so the next line needs its path free.
             std::fs::remove_file(&out).expect("remove the payload");
         }
@@ -336,12 +336,12 @@ mod tests {
         );
     }
 
-    /// #10127: the production line merges the owner carrier file and every
-    /// shipped glob into ONE `--settings`, unsets every shipped chat token,
-    /// and stays under the pane limit for a long temp path.
+    /// #10127, #10735: the production line passes the owner carrier file as the
+    /// one `--settings` (the production deny is empty, so no lockdown payload
+    /// file), unsets every shipped chat token, and stays under the pane limit.
     #[test]
     fn gui_spawn_line_carries_the_architect_lockdown() {
-        use crate::core::architect_lockdown::{ARCHITECT_DENY_GLOBS, ARCHITECT_ENV_UNSET};
+        use crate::core::architect_lockdown::ARCHITECT_ENV_UNSET;
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("T".repeat(60));
         std::fs::create_dir(&dir).expect("prompt dir");
@@ -353,6 +353,8 @@ mod tests {
             super::gui_spawn_command_full(&file, &stamp, Some(&carrier), &Lockdown::PRODUCTION)
                 .expect("the Architect line builds");
         assert_eq!(line.matches("'--settings'").count(), 1, "{line}");
+        assert!(line.contains(&carrier.display().to_string()), "{line}");
+        assert!(!line.contains(".lockdown.json"), "{line}");
         assert!(
             line.len() <= crate::core::tmux::MAX_PANE_COMMAND_BYTES,
             "{}",
@@ -360,11 +362,6 @@ mod tests {
         );
         for name in ARCHITECT_ENV_UNSET {
             assert!(line.contains(&format!(" -u {name} ")), "{name}: {line}");
-        }
-        let (deny, body) = payload(&super::lockdown_settings_file(&file));
-        assert_eq!(body["deniedMcpServers"][0]["serverName"], "x");
-        for glob in ARCHITECT_DENY_GLOBS {
-            assert!(deny.contains(&(*glob).to_owned()), "{glob} in {deny:?}");
         }
     }
 

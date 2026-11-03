@@ -33,7 +33,6 @@ use crate::control::config::ControlPlaneConfig;
 use crate::control::event::BackendKind;
 use crate::control::id::{ControlSessionId, SessionCounter};
 use crate::core::session_launch::ensure_project_hooks;
-use crate::core::standalone::hooks::egress::{EgressGuardState, egress_guard_state};
 use crate::session_manager::inject_record::InjectSlot;
 
 /// Parameters for spawning a new session via `SessionRegistry::run_session`.
@@ -432,18 +431,18 @@ impl Default for SessionRegistry {
     }
 }
 
-/// Write the project-tier tm hooks into `workdir` and confirm the egress
-/// guard landed.
+/// Write the project-tier tm hooks into `workdir` and confirm the settings file
+/// landed as valid JSON.
 ///
 /// Why (#9704): a control-plane worker runs `claude` in `workdir` with its
 /// default tools, and no other path writes that project's hooks before it
 /// starts. [`ensure_project_hooks`] returns `Ok` without writing when the
 /// existing settings file is unparseable, so its `Ok` alone does not prove the
-/// guard is on disk.
+/// hooks are on disk. #10735: the egress guard is removed, so it is no longer checked.
 /// What: runs [`ensure_project_hooks`]`(workdir, hook_exe)`, then reads
-/// `<workdir>/.claude/settings.json` back and requires
-/// [`EgressGuardState::Present`]. A write error, an unreadable or unparseable
-/// file, or a missing or weakened guard is an `Err`; the caller spawns nothing.
+/// `<workdir>/.claude/settings.json` back. A write error, an unreadable or
+/// unparseable file, or one with no `hooks` object is an `Err`; the caller
+/// spawns nothing.
 /// Test: `run_session_refuses_and_spawns_nothing_when_hook_write_fails`,
 /// `run_session_refuses_and_spawns_nothing_when_settings_unparseable`,
 /// `run_session_writes_hooks_before_any_stream_json_backend`.
@@ -459,14 +458,12 @@ fn ensure_worker_hooks(workdir: &Path, hook_exe: Option<&Path>) -> Result<()> {
     let text = std::fs::read_to_string(&path).with_context(refusal)?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("{}: {} is not valid JSON", refusal(), path.display()))?;
-    match egress_guard_state(&value) {
-        EgressGuardState::Present => Ok(()),
-        state => anyhow::bail!(
-            "{}: egress guard {state:?} in {}",
-            refusal(),
-            path.display()
-        ),
+    // #10735: `[]` parses and the writer returns Ok without writing, so the
+    // read-back still requires a `hooks` object.
+    if !value.get("hooks").is_some_and(serde_json::Value::is_object) {
+        anyhow::bail!("{}: no tm hooks in {}", refusal(), path.display());
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -870,10 +867,10 @@ mod tests {
             "run_session must write {} before it builds a {backend:?} backend",
             settings.display()
         );
-        let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&settings).expect("read settings"))
-                .expect("settings is JSON");
-        assert_eq!(egress_guard_state(&value), EgressGuardState::Present);
+        serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(&settings).expect("read settings"),
+        )
+        .expect("settings is JSON");
 
         let blocker = ControlSessionId::new("blocker", 0);
         registry
@@ -939,7 +936,7 @@ mod tests {
     }
 
     // #9704: `[]` parses but is not an object, so the writer returns Ok
-    // without writing and only the read-back's guard-state arm can refuse.
+    // without writing and only the read-back's `hooks` check can refuse.
     #[tokio::test]
     async fn run_session_refuses_and_spawns_nothing_when_settings_not_an_object() {
         let dir = hermetic_temp_dir();
@@ -954,11 +951,11 @@ mod tests {
                 BackendKind::StreamJson,
             ))
             .await
-            .expect_err("a worker whose settings carry no egress guard must not spawn");
+            .expect_err("a worker whose settings carry no tm hooks must not spawn");
         let chain = format!("{err:#}");
         assert!(
-            chain.contains("egress guard Missing"),
-            "the refusal must come from the guard read-back: {chain}"
+            chain.contains("no tm hooks in"),
+            "the refusal must come from the hooks read-back: {chain}"
         );
         assert!(
             !chain.contains("is not valid JSON"),

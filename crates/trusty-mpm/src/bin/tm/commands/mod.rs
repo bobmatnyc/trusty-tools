@@ -49,18 +49,6 @@ pub(crate) mod socket_mock_tests;
 pub(crate) mod divert;
 pub(crate) mod divert_check;
 pub(crate) mod divert_worker;
-// #8454: `tm hook --egress-guard`, the outbound-channel family deny.
-pub(crate) mod egress_guard;
-// #10447: the Architect main-thread allow arm.
-pub(crate) mod egress_guard_architect;
-// #8454 S3: the Bash arm — a family host or program in a Bash command.
-pub(crate) mod egress_guard_bash;
-pub(crate) mod egress_guard_families;
-pub(crate) mod egress_guard_slack_read;
-// #8433 P0: the channel-taint arm of the egress guard.
-pub(crate) mod egress_guard_taint;
-// #8454 VC: the egress guard's daemon verdict client.
-pub(crate) mod egress_verdict_client;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
 // cannot detect that the process answering it is the unsupervised one.
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
@@ -72,8 +60,6 @@ pub(crate) mod build_lease_target;
 pub(crate) mod doctor_builder_cap;
 // #8454 S2c: the read-only channel route policy rows.
 pub(crate) mod doctor_channels;
-// #9741: the egress guard's policy readiness row.
-pub(crate) mod doctor_channels_egress;
 // #8451: the slot pool's volume against its eviction threshold.
 pub(crate) mod doctor_slot_pool;
 // #10212: a bounded entry count of each shared target's and slot's debug/deps.

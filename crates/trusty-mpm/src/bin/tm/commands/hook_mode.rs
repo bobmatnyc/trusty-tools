@@ -12,11 +12,11 @@ use crate::cli::Command;
 /// Run the `tm hook` mode its flags select.
 ///
 /// Why: see the module doc.
-/// What: `--egress-guard` first — it is a fail-closed deny layer, so it wins
-/// any flag combination (#8454) — then `--pm-guard`, `--divert-check`,
+/// What: `--egress-guard` first — a no-op that exits 0 since #10735 (owner ruling D19),
+/// kept so a stale settings entry never errors — then `--pm-guard`, `--divert-check`,
 /// `--prompt-feedback`, else the daemon relay. `hook` is always a
 /// [`Command::Hook`]; any other variant is a caller bug and returns an error.
-/// Test: `egress_denies_each_family_tool_name` reaches the egress branch through
+/// Test: `connector_tool_calls_are_no_longer_blocked` reaches the egress branch through
 /// the binary; `cli_parses_hook_egress_guard` the flag.
 pub(crate) async fn run(
     hook: Command,
@@ -34,7 +34,8 @@ pub(crate) async fn run(
         anyhow::bail!("hook_mode::run was handed a command that is not `tm hook`");
     };
     if egress_guard {
-        crate::commands::egress_guard::egress_guard(url).await
+        // #10735: the guard is gone; a stale settings entry still lands here and allows.
+        Ok(())
     } else if pm_guard {
         // #10600: a guard that panics or errors denies instead of exiting non-zero.
         crate::commands::pm_guard_refusal::run(url, started).await

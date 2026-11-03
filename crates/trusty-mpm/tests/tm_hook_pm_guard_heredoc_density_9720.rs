@@ -11,13 +11,40 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_heredoc_density_9720`.
 
 use crate::common;
-use crate::tm_hook_egress_guard_8454::{
-    REPRO_BOUND_9720, time_eval_heredoc_repro_9720, wait_within_9720,
-};
 use crate::tm_hook_pm_guard_trust_anchor_8878::{Fixture, bash_payload};
 
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{Output, Stdio};
+
+/// The issue's #9720 repro: `time eval` x12, then `<<x a.b ` up to the
+/// 64 KiB cap.
+fn time_eval_heredoc_repro_9720() -> String {
+    let mut command = "time eval ".repeat(12);
+    while command.len() + 8 <= 65_536 {
+        command.push_str("<<x a.b ");
+    }
+    command
+}
+
+/// The bound on a hook's verdict on [`time_eval_heredoc_repro_9720`]: ten
+/// times the slower hook's 3.5 s EVO debug-build time after #9720.
+const REPRO_BOUND_9720: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// Wait for `child` until `bound`, killing it and panicking past the bound:
+/// Claude Code kills a hook at its timeout, and a killed hook is an allow.
+fn wait_within_9720(mut child: std::process::Child, bound: std::time::Duration) -> Output {
+    let started = std::time::Instant::now();
+    while child.try_wait().expect("poll the hook").is_none() {
+        if started.elapsed() >= bound {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the hook gave no verdict within {bound:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    eprintln!("#9720: the hook answered in {:?}", started.elapsed());
+    child.wait_with_output().expect("hook output")
+}
 
 /// 🔴 #9720: the repro gets a verdict, and the guard exits 0, within the
 /// bound.

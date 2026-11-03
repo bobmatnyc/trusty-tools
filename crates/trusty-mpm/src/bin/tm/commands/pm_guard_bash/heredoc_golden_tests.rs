@@ -6,7 +6,7 @@
 //! What: renders, for a fixed corpus, every output those loops feed — the
 //! operator list, each [`HeredocBodies`] field, the per-byte answers of
 //! `contains`, `suppresses_separator` and `shell_body_starting_at`, and the
-//! pm-guard, credential-print and egress verdicts (reasons hashed) — and
+//! pm-guard and credential-print verdicts (reasons hashed) — and
 //! compares each line with `heredoc_golden_9720.txt`, recorded on f7d0c6f54c.
 //! The corpus is the here-document cases of the existing suites plus 500
 //! commands drawn by a fixed generator from shell tokens and lines.
@@ -15,8 +15,6 @@
 use super::super::credential_print::{evaluate_credential_print_command, heredoc_operators};
 use super::super::evaluate_bash_command;
 use super::HeredocBodies;
-use crate::commands::egress_guard::{Verdict, decide};
-use crate::commands::egress_guard_families::FamilyTable;
 
 /// The table recorded on the base commit, one `<index>\t<render>` per case.
 const GOLDEN: &str = include_str!("heredoc_golden_9720.txt");
@@ -184,16 +182,9 @@ fn render(command: &str) -> String {
     let starts: Vec<_> = (0..=command.len())
         .filter_map(|i| scan.shell_body_starting_at(i).map(|end| (i, end)))
         .collect();
-    let egress = match decide(
-        &Ok(serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": command } })),
-        &FamilyTable::builtin(),
-    ) {
-        Verdict::Allow => "allow".to_string(),
-        Verdict::Deny { check, reason } => format!("{check}:{}", digest(&reason)),
-    };
     format!(
         "ops={ops:?} spans={:?} frames={:?} data={data:?} expanding={:?} bodies={bodies:?} \
-         unscannable={} lost={} in={} sep={} shell={starts:?} pm={:?} cp={:?} egress={egress}",
+         unscannable={} lost={} in={} sep={} shell={starts:?} pm={:?} cp={:?}",
         scan.spans,
         scan.frames,
         scan.expanding,

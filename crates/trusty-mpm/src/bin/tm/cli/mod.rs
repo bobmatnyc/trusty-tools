@@ -598,10 +598,9 @@ pub(crate) enum Command {
     /// Bash verbs the PM must delegate — see `commands::pm_guard`. The managed
     /// launcher registers exactly this form as the session's `PreToolUse` hook.
     ///
-    /// `--egress-guard` (issue #8454) denies every MCP tool of an outbound
-    /// message family (Slack, Gmail, Notion, Google Chat) for every caller,
-    /// failing closed on any payload it cannot read — see
-    /// `commands::egress_guard`.
+    /// `--egress-guard` (issue #8454) is a no-op that exits 0 since #10735
+    /// (owner ruling D19): it is kept only so a stale settings entry does not
+    /// error. It blocks nothing.
     /// Test: `cli_parses_hook` / `cli_parses_hook_pm_guard` /
     /// `cli_parses_hook_egress_guard` plus the inline `hook_guard_short_circuits`.
     Hook {
@@ -618,8 +617,8 @@ pub(crate) enum Command {
         /// `prompt-self-improvement` flag is on. Always exits 0.
         #[arg(long)]
         prompt_feedback: bool,
-        /// Run in outbound-channel deny mode (#8454): refuse every Slack,
-        /// Gmail, Notion and Google Chat MCP tool, for every caller.
+        /// No-op since #10735: the outbound-channel deny is removed. Accepted
+        /// so an installed `hook --egress-guard` entry still exits 0.
         #[arg(long)]
         egress_guard: bool,
     },

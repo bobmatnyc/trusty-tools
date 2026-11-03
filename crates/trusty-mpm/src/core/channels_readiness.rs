@@ -60,12 +60,7 @@ impl std::fmt::Display for HostBranch {
 /// Why: the deny reason names the failed branch (#9741), and a recipient or
 /// credential ref must never reach a hook's output.
 /// What: one variant per failure branch of the S4 plan's table (B1-B9).
-/// Test: `home_unknown_denies_a_gated_call`, `config_missing_denies_a_gated_call`,
-/// `config_unreadable_denies_a_gated_call`, `config_unparseable_or_unknown_key_denies`,
-/// `denied_report_denies`, `finding_denies_a_gated_call`,
-/// `file_not_in_effect_denies_a_gated_call`, `load_past_deadline_denies`,
-/// `load_panic_denies`, `empty_policy_with_enabled_channel_denies`,
-/// `build_without_channels_feature_denies`.
+/// Test: `policy_ready_slug_budget_and_missing_config`, `build_without_channels_feature_denies`.
 // #8454 VC: serde for the daemon's egress verdict reply.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 pub enum NotReady {
@@ -139,9 +134,7 @@ impl NotReady {
 /// will deny for taint, so an untainted session never pays the load.
 /// What: with the `channels` feature, `crate::channels::readiness::check`
 /// with [`HOOK_LOAD_LIMIT`]; without it, [`NotReady::Unsupported`].
-/// Test: `config_missing_denies_a_gated_call` (through the hook),
-/// `build_without_channels_feature_denies`,
-/// `policy_ready_slug_budget_and_missing_config`.
+/// Test: `policy_ready_slug_budget_and_missing_config`, `build_without_channels_feature_denies`.
 pub fn policy_ready(home: Option<&Path>) -> Result<(), NotReady> {
     #[cfg(feature = "channels")]
     {
