@@ -5,10 +5,10 @@ Why: every SendMessage from a PM starts a full Architect turn, including acks an
 progress notes (the owner D10 2026-10-12: the filter and wake digest are an Architect
 feature). A PM that appends to inbox/pm-messages.jsonl instead lets the poller decide.
 What: `notify` appends one JSON line (used by pm-notify.sh) and reads it back. It never prints a bare
-`queued` (#10723): exit 3 prints `queued-local <id>: ... delivery unconfirmed` (appended and read back,
+`queued` (#10723): exit 0 prints `queued-local <id>: ... delivery unconfirmed` (appended and read back,
 not yet acked by the Architect); exit 2 means nothing was appended (bad arguments or a failed write).
 `receipt <id>` exits 0 with `acked <id>: <outcome>` once inbox/pm-acks.jsonl holds an ack for the id,
-3 while it does not, 2 for an unknown id. These codes match datg's (2 error, 3 saved but unconfirmed).
+3 while it does not, 2 for an unknown id (datg's scheme: 2 error, 3 saved but unconfirmed).
 `classify` is a pure rule
 function returning (wake|hold, reason): kinds decision, blocker, head, done always wake;
 `urgent` wakes any kind; an unknown or missing kind wakes; a head without a 7+ hex SHA
@@ -179,7 +179,6 @@ def notify(argv):
     mid = msg_id(text)
     print(f"queued-local {mid}: appended to {messages_path()}, delivery unconfirmed (not yet acked by the "
           f"Architect; do not resend; check: pm_intake.py receipt {mid})")
-    sys.exit(3)
 
 
 def append_read_back(path, line):
