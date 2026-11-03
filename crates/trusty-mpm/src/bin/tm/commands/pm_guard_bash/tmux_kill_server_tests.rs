@@ -769,3 +769,95 @@ fn safe_reader_programs_allowed() {
         );
     }
 }
+
+/// #10706 C1: whether the script-body rule records `body`, run as
+/// `bash <script>` (ruling Dac: that rule is log-only, so `Some` is its
+/// strongest verdict).
+fn script_body_flagged(body: &str) -> bool {
+    use crate::commands::pm_guard_secret_script::tmux_kill::evaluate_script_body_tmux_kill;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("c1.sh");
+    std::fs::write(&script, body).expect("write script");
+    let command = format!("bash {}", script.display());
+    evaluate_script_body_tmux_kill(&command, dir.path(), &fleet_env()).is_some()
+}
+
+/// #10706 C1: a here-document whose operator line ends in a pipe feeds the
+/// command after its body, here `sh`.
+#[test]
+fn heredoc_piped_to_shell_is_refused() {
+    for command in [
+        "cat <<EOF |\ntmux kill-server\nEOF\nsh",
+        "cat <<EOF |&\ntmux kill-server\nEOF\nbash",
+        "cat <<'EOF' \\\n| sh\ntmux kill-server\nEOF",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+    assert!(script_body_flagged(
+        "cat <<EOF |\ntmux kill-server\nEOF\nsh\n"
+    ));
+}
+
+/// #10706 C1: a group's output reaches the pipe after its close.
+#[test]
+fn command_group_piped_to_shell_is_refused() {
+    for command in [
+        "{ echo 'tmux kill-server'; } | sh",
+        "if true; then printf 'tmux kill-server'; fi | bash",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+    assert!(script_body_flagged("{ echo 'tmux kill-server'; } | sh\n"));
+}
+
+/// #10706 C1: a loop's output reaches the pipe after `done`.
+#[test]
+fn loop_piped_to_shell_is_refused() {
+    for command in [
+        "for x in 1; do echo 'tmux kill-server'; done | sh",
+        "while true; do echo 'tmux kill-server'; break; done | bash",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+    assert!(script_body_flagged(
+        "for x in 1; do echo 'tmux kill-server'; done | sh\n"
+    ));
+}
+
+/// #10706 C1: substitution output stored, run in place, or handed to `eval`
+/// or a shell runs the kill.
+#[test]
+fn command_substitution_executed_is_refused() {
+    for command in [
+        "x=$(echo tmux kill-server); $x",
+        "x=`echo tmux kill-server`\n$x",
+        "$(echo tmux kill-server)",
+        "eval \"$(echo tmux kill-server)\"",
+        "sh <(echo tmux kill-server)",
+        "x=$(cat <<'EOF'\ntmux kill-server\nEOF\n)\n$x",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+    assert!(script_body_flagged("x=$(echo tmux kill-server)\n$x\n"));
+}
+
+/// #10706 C1: printed text that reaches no shell keeps its verdict: a
+/// here-document to stdout or a reader, and a commit message substitution,
+/// stay allowed; a here-document to a file stays a log-only would-refuse.
+#[test]
+fn inert_output_reaching_no_shell_keeps_its_verdict() {
+    for command in [
+        "cat <<EOF\ntmux kill-server\nEOF",
+        "cat <<EOF | head -1\ntmux kill-server\nEOF",
+        "git commit -m \"$(cat <<'EOF'\nguard tmux kill-server\nEOF\n)\"",
+        "echo \"$(echo tmux kill-server)\" | wc -l",
+    ] {
+        assert_eq!(
+            evaluate_tmux_kill_server(command, &fleet_env()),
+            None,
+            "{command}"
+        );
+    }
+    let to_file = "cat <<EOF > file.txt\ntmux kill-server\nEOF";
+    assert!(logged(to_file) && !refused(to_file));
+}

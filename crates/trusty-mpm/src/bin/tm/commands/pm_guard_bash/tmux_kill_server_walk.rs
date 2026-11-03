@@ -15,13 +15,18 @@
 //! printing to stdout (`echo`, `printf` without `-v`, `grep`, `rg` without
 //! `--pre`, a `sed -n` without `-i` that only prints, `cat`, `git` with the
 //! words only in the `-m` value of a subcommand that takes a message, #10706
-//! H2), piped only into readers (`head`, `wc`, …) that write and run nothing
-//! (#10706 H1: `readers`). A here-document body counts as an
-//! argument of the program its operator line feeds. A fleet kill is `Err`;
-//! anything else is noted in [`Walk::soft`] and the walk goes on.
+//! H2), in a text whose every pipe feeds a reader (`head`, `wc`, …) that
+//! writes and runs nothing (#10706 H1: `readers`). A here-document body
+//! counts as an argument of the program its operator line feeds; a
+//! substitution's output counts only while every substitution is an inert
+//! program's argument (#10706 C1). A fleet kill is `Err`; anything else is
+//! noted in [`Walk::soft`] and the walk goes on.
 //! Test: `a_kill_word_no_tmux_hit_accounts_for_is_log_only`,
 //! `a_kill_word_in_an_inert_argument_is_allowed`,
-//! `wrapped_nested_and_chained_kills_are_refused`.
+//! `wrapped_nested_and_chained_kills_are_refused`,
+//! `inert_output_reaching_no_shell_keeps_its_verdict`, `heredoc_piped_to_shell_is_refused`,
+//! `command_group_piped_to_shell_is_refused`, `loop_piped_to_shell_is_refused`,
+//! `command_substitution_executed_is_refused`.
 
 use super::super::super::architect_pane_parse::{quote_escaped_semicolons, tmux_hits};
 use super::super::super::command_substitutions;
@@ -78,24 +83,33 @@ impl<'a> Walk<'a> {
         }
         let text = quote_escaped_semicolons(text);
         let scan = HeredocBodies::scan(&text);
-        let mut spans = Vec::new();
+        let spans: Vec<(usize, usize)> = scan.bodies().iter().map(|b| b.span).collect();
+        let flat = blank_spans(&text, &spans);
+        let segs = segments(&flat);
+        // #10706 C1: printed text is inert only while no pipe in the text
+        // feeds a non-reader (`{ echo …; } | sh`), and substitution output
+        // only while each substitution is an inert program's argument.
+        let readers_only = pipes_into_readers_only(&segs);
+        let subs_printed = readers_only && substitutions_printed_only(&segs);
         for body in scan.bodies() {
             let (start, end) = body.span;
-            if names_whole_server_kill(&text[start..end])
-                && !inert_heredoc(&text, body.operator_line)
-            {
+            if !names_whole_server_kill(&text[start..end]) {
+                continue;
+            }
+            let feeds = inert_heredoc(&text, body.operator_line);
+            if !(readers_only && feeds.is_some_and(|in_sub| !in_sub || subs_printed)) {
                 self.note("a here-document names one, and the program it feeds may run or keep it");
             }
-            spans.push(body.span);
         }
         for sub in command_substitutions(&text) {
             if names_whole_server_kill(sub.text()) {
                 self.judge(sub.text(), depth + 1)?;
+                if !subs_printed {
+                    self.note("a command substitution prints one where the shell may run it");
+                }
             }
         }
-        let flat = blank_spans(&text, &spans);
-        let segs = segments(&flat);
-        for (n, seg) in segs.iter().enumerate() {
+        for seg in &segs {
             if !names_whole_server_kill(&without_substitutions(&seg.text)) {
                 continue;
             }
@@ -126,7 +140,7 @@ impl<'a> Walk<'a> {
                 self.judge(&inner, depth + 1)?;
                 continue;
             }
-            if !(inert(&seg.text) && reads_only(&segs[n + 1..])) {
+            if !(readers_only && inert(&seg.text)) {
                 let first = argv.first().map_or("", String::as_str);
                 let program = positions.first().map_or(first, |(_, p)| p.as_str());
                 self.note(format!(
@@ -221,30 +235,36 @@ fn without_substitutions(text: &str) -> String {
 
 /// Whether the here-document whose operator line is `line` feeds a
 /// known-inert program: the command from the last `$(`, `(`, `|`, `;`, `&`
-/// or `{` before its `<<` to the line's end.
-fn inert_heredoc(text: &str, (start, end): (usize, usize)) -> bool {
+/// or `{` before its `<<` to the line's end. `Some(true)` when that command
+/// opens at a `$(` or backtick, so the body becomes substitution output.
+/// #10706 C1: `None` when the line ends in `|`, `|&`, `&&`, `||` or `\`,
+/// since the pipeline goes on after the body (`cat <<EOF |` … `sh`).
+fn inert_heredoc(text: &str, (start, end): (usize, usize)) -> Option<bool> {
     let line = &text[start..end];
-    let Some(at) = line
+    let tail = line.trim_end();
+    if ["|", "|&", "&&", "\\"].iter().any(|op| tail.ends_with(op)) {
+        return None;
+    }
+    let at = line
         .match_indices("<<")
         .map(|(i, _)| i)
-        .find(|&i| !line[i + 2..].starts_with('<') && !line[..i].ends_with('<'))
-    else {
-        return false;
-    };
+        .find(|&i| !line[i + 2..].starts_with('<') && !line[..i].ends_with('<'))?;
     let from = ["$(", "`", "(", "|", ";", "&", "{"]
         .iter()
         .filter_map(|p| line[..at].rfind(p).map(|i| i + p.len()))
         .max()
         .unwrap_or(0);
     let segs = segments(&line[from..]);
-    segs.split_first()
-        .is_some_and(|(first, rest)| inert(&first.text) && reads_only(rest))
+    let (first, rest) = segs.split_first()?;
+    let in_sub = line[..from].ends_with("$(") || line[..from].ends_with('`');
+    (inert(&first.text) && pipes_into_readers_only(rest)).then_some(in_sub)
 }
 
-/// Whether every segment `rest` pipes into is a reader that writes no file
-/// and runs no program (#10706 H1: `readers::reader_is_safe`).
-fn reads_only(rest: &[Segment]) -> bool {
-    rest.iter().take_while(|s| s.piped).all(|s| {
+/// Whether every piped segment of `segs` is a reader that writes no file
+/// and runs no program (#10706 H1: `readers::reader_is_safe`; C1: any pipe
+/// in the text, since a group or loop's output reaches the pipe after it).
+fn pipes_into_readers_only(segs: &[Segment]) -> bool {
+    segs.iter().filter(|s| s.piped).all(|s| {
         let Some(argv) = shlex::split(&s.text) else {
             return false;
         };
@@ -253,6 +273,15 @@ fn reads_only(rest: &[Segment]) -> bool {
             READERS.contains(&p.as_str()) && reader_is_safe(&p, args)
         }) && !writes_file(&s.text)
     })
+}
+
+/// #10706 C1: whether every segment holding a command substitution is a
+/// known-inert program, so substitution output is only printed. An
+/// assignment (`x=$(…)`, run later as `$x`), `eval "$(…)"` or `sh <(…)` is
+/// not.
+fn substitutions_printed_only(segs: &[Segment]) -> bool {
+    segs.iter()
+        .all(|s| command_substitutions(&s.text).is_empty() || inert(&s.text))
 }
 
 /// The one program `argv` runs, lower-cased, or `None` when the wrapper
