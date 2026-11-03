@@ -375,14 +375,13 @@ fn env_cleared_scratch_tmpdir_kills_are_allowed() {
 }
 
 /// #10665 r3: a `-S "$VAR"` the command assigns once from a literal path or
-/// `mktemp` reads as that path; under `env -i` any value is allowed.
+/// `mktemp` reads as that path (#10706 C2: `env -i` no longer allows any value).
 #[test]
 fn a_socket_variable_is_read_from_its_one_assignment() {
     let (_dir, sock) = scratch();
     for command in [
         format!("SOCK={sock}; tmux -S \"$SOCK\" kill-server"),
         "S=$(mktemp -d)/s.sock; tmux -S \"$S\" kill-server".to_string(),
-        "env -i PATH=\"$PATH\" tmux -S \"$SOCK\" kill-server >/dev/null 2>&1 || true".to_string(),
     ] {
         assert_eq!(
             evaluate_tmux_kill_server(&command, &fleet_env()),
@@ -573,6 +572,188 @@ fn a_git_message_naming_a_kill_is_allowed() {
         "git notes add -m 'tmux kill-server'",
         "git stash push -m 'tmux kill-server'",
         "git -C crates commit -am 'tmux kill-server'",
+    ] {
+        assert_eq!(
+            evaluate_tmux_kill_server(command, &fleet_env()),
+            None,
+            "{command}"
+        );
+    }
+}
+
+/// #10706 C2: the outer shell expands `"$SOCK"` before `env -i` runs, so an
+/// `env -i` prefix says nothing about the socket. A variable the command does
+/// not assign a literal scratch path is unresolved: log-only (ruling Dac).
+#[test]
+fn deny_env_i_with_preexpanded_socket() {
+    for command in [
+        "SOCK=$(echo /tmp/tmux-$(id -u)/default); env -i tmux -S \"$SOCK\" kill-server",
+        "SOCK=$(echo /tmp/tmux-$(id -u)/default)\nenv -i tmux -S \"$SOCK\" kill-server",
+        "env -i PATH=\"$PATH\" tmux -S \"$SOCK\" kill-server >/dev/null 2>&1 || true",
+        "env - tmux -S \"${SOCK}\" kill-session -a",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+}
+
+/// Run `git` in `dir` for a test fixture repository.
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .expect("run git")
+        .status
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+/// #10706 C2: with the `env -i` fallback gone, a `scripts/sandbox_*.sh` is
+/// trusted only in a bobmatnyc/trusty-tools checkout and only when its bytes
+/// match `HEAD`. The repo's own sandbox scripts stay allowed; a copy in
+/// another repo, or an edited one, is judged and its unresolved socket logged.
+#[test]
+fn sandbox_daemon_script_allowed_by_repo_and_content() {
+    use crate::commands::pm_guard_secret_script::tmux_kill::evaluate_script_body_tmux_kill;
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for command in [
+        "bash scripts/sandbox_daemon.sh --help",
+        "bash scripts/sandbox_search_daemon.sh --help",
+    ] {
+        assert_eq!(
+            evaluate_script_body_tmux_kill(command, &repo, &fleet_env()),
+            None,
+            "{command}"
+        );
+    }
+    let body = "#!/bin/bash\nSOCK=\"$D/tmux-$(id -u)/default\"\n\
+                env -i PATH=\"$PATH\" tmux -S \"$SOCK\" kill-server\n";
+    let command = "bash scripts/sandbox_fixture.sh";
+    let fixture = |origin: &str| {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["remote", "add", "origin", origin]);
+        std::fs::create_dir(dir.path().join("scripts")).expect("mkdir");
+        std::fs::write(dir.path().join("scripts/sandbox_fixture.sh"), body).expect("write");
+        git(dir.path(), &["add", "scripts"]);
+        git(dir.path(), &["commit", "-q", "-m", "fixture"]);
+        dir
+    };
+    let ours = fixture("git@github.com:bobmatnyc/trusty-tools.git");
+    assert_eq!(
+        evaluate_script_body_tmux_kill(command, ours.path(), &fleet_env()),
+        None,
+        "a committed sandbox script in a trusty-tools checkout"
+    );
+    std::fs::write(
+        ours.path().join("scripts/sandbox_fixture.sh"),
+        format!("{body}echo edited\n"),
+    )
+    .expect("edit");
+    assert!(
+        evaluate_script_body_tmux_kill(command, ours.path(), &fleet_env()).is_some(),
+        "an edited sandbox script is judged"
+    );
+    let theirs = fixture("https://github.com/someone/trusty-tools-fork.git");
+    assert!(
+        evaluate_script_body_tmux_kill(command, theirs.path(), &fleet_env()).is_some(),
+        "a sandbox script in another repo is judged"
+    );
+}
+
+/// #10706 H1: `rg --pre` runs a program on every file it searches.
+#[test]
+fn deny_rg_pre_execution() {
+    for command in [
+        "rg --pre sh -e kill-server <(echo 'tmux kill-server')",
+        "rg --pre=sh 'tmux kill-server' notes.txt",
+        "rg --pre-glob '*.txt' --pre sh 'tmux kill-server' .",
+        "echo 'tmux kill-server' | rg --pre sh -e kill x.sh",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+}
+
+/// #10706 H1: `sort -o` writes a file, and `--compress-program` runs one.
+#[test]
+fn deny_sort_output_file() {
+    for command in [
+        "echo 'tmux kill-server' | sort -o x.sh; sh x.sh",
+        "echo 'tmux kill-server' | sort -uo x.sh",
+        "echo 'tmux kill-server' | sort -ox.sh",
+        "printf 'tmux kill-server\\n' | sort --output=x.sh",
+        "echo 'tmux kill-server' | sort --out x.sh",
+        "echo 'tmux kill-server' | sort --compress-program=sh",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+}
+
+/// #10706 H1: `uniq INPUT OUTPUT` writes its second operand.
+#[test]
+fn deny_uniq_second_file() {
+    for command in [
+        "echo 'tmux kill-server' | uniq - x.sh; sh x.sh",
+        "echo 'tmux kill-server' | uniq -c - x.sh",
+        "echo 'tmux kill-server' | uniq -f 1 -- - x.sh",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+}
+
+/// #10706 H1: `less -o`/`--log-file` copies its piped input into a file.
+#[test]
+fn deny_less_log_file() {
+    for command in [
+        "echo 'tmux kill-server' | less -o x.sh",
+        "echo 'tmux kill-server' | less --log-file=x.sh",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+}
+
+/// #10706 H1: a `sed -n` script is inert only when every command is an
+/// address and `p`, or an `s` whose flags are `g`, `p`, `i`, `m` or a count.
+/// `w`, `W`, `e`, an `s///w` or `s///e`, an `-f` script, and anything the
+/// reader does not parse are not.
+#[test]
+fn deny_sed_write_or_execute() {
+    for command in [
+        "sed -n '1e tmux kill-server' f",
+        "sed -n '/tmux kill-server/w x.sh' f",
+        "sed -n '/tmux kill-server/wx.sh' f",
+        "sed -n '/a;tmux kill-server/W x.sh' f",
+        "sed -n '\\,tmux kill-server,w x.sh' f",
+        "sed -n 's/^/tmux kill-server/e' f",
+        "sed -n 's/^/tmux kill-server/w x.sh' f",
+        "sed -n -e '/kill-server/p' -e '1w x.sh' f",
+        "sed -n --expression='1w x.sh' kill-server.txt",
+        "sed -n -f k.sed kill-server.txt",
+        "sed -n '/kill-server/{w x.sh\n}' f",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+    }
+}
+
+/// #10706 H1: the readers' plain uses stay allowed.
+#[test]
+fn safe_reader_programs_allowed() {
+    for command in [
+        "rg -e 'tmux kill-server' docs/",
+        "rg -n --no-heading 'kill-server' crates/ | sort | uniq -c",
+        "echo 'tmux kill-server' | sort",
+        "echo 'tmux kill-server' | sort -u -k1,1 -t:",
+        "echo 'tmux kill-server' | uniq -c",
+        "echo 'tmux kill-server' | uniq -f 1 -",
+        "grep -rn kill-server crates/ | less",
+        "sed -n 's/x/tmux kill-server/p' f",
+        "sed -n '/kill-server/p' file",
+        "sed -n -e '1,/kill-server/p' f",
+        "sed -nE '/tmux kill-(server|session)/!p' f",
+        "sed -n '/a;b/p; s|x|tmux kill-server|gp' f",
+        "sed --quiet '$p' kill-server.log",
     ] {
         assert_eq!(
             evaluate_tmux_kill_server(command, &fleet_env()),
