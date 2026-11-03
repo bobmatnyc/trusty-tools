@@ -304,6 +304,10 @@ mod tests;
 #[cfg(test)]
 mod hash_withhold_tests;
 
+// #10738: a force reindex raises the index generation.
+#[cfg(test)]
+mod identity_10738_tests;
+
 // #6524: the embedding pause, end to end.
 #[cfg(test)]
 mod embed_pause_tests;

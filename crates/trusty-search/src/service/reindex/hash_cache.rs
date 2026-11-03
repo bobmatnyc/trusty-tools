@@ -185,8 +185,13 @@ pub(super) async fn keys_survive_root_move(handle: &IndexHandle) -> bool {
 /// What: grabs the corpus store and calls `clear_file_hashes` on a blocking
 /// worker.  Errors are logged at `warn` and ignored (same reasoning as
 /// `persist_batch`).
-/// Test: `clear_persisted_hashes_empties_store` below.
+/// #10738: this is the reset point of a force run or a legacy root move, so
+/// it also raises the index generation before any batch is written.
+/// Test: `clear_persisted_hashes_empties_store` below;
+/// `generation_changes_when_a_force_reindex_resets_the_index`.
 pub(super) async fn clear_persisted(handle: &IndexHandle) {
+    // #10738: a reset can drop chunks without a per-path remove.
+    crate::service::index_identity::bump_generation_logged(&handle.id.0, "reindex_reset");
     let corpus = {
         let indexer = handle.indexer.read().await;
         indexer.corpus_store()

@@ -104,9 +104,19 @@ pub(crate) async fn delete_index_report(
     if let Some(refusal) = outcome.refusal {
         return Err(refusal);
     }
+    let mut outcome = outcome;
     // #9027: a warm-all pin never outlives its index.
     if outcome.removed {
         state.warm.unpin(id);
+        // #10738: a re-created index must mint a new `instance_id`; a retire
+        // that failed would let it reuse this one, so the delete reports it.
+        if let Err(e) = crate::service::index_identity::retire(id) {
+            let msg = format!("index identity not retired: {e:#}");
+            outcome.error = Some(match outcome.error.take() {
+                Some(prev) => format!("{prev}; {msg}"),
+                None => msg,
+            });
+        }
     }
     // #6363: absent from the hot registry, the cold store AND `indexes.toml` —
     // there is nothing here to delete, and saying so is the only answer that
