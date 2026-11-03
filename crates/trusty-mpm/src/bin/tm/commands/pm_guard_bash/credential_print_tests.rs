@@ -1785,3 +1785,38 @@ fn allows_the_10734_neighbours() {
     let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
     check(false, &rows);
 }
+
+/// #10734: bracket nesting past the argv reader's bound counts as naming a
+/// call, so a body built to outrun it refuses rather than passing unread.
+#[test]
+fn deep_bracket_nesting_fails_closed_10734() {
+    let deep = format!("x = {}1{}", "[".repeat(80), "]".repeat(80));
+    check(true, &[python_body(&deep).as_str()]);
+    let shallow = format!("x = {}1{}", "[".repeat(8), "]".repeat(8));
+    check(false, &[python_body(&shallow).as_str()]);
+}
+
+/// #10734: the #10570 critic shapes (a mid-literal subcommand) and the typed
+/// reads still refuse beside the argv-list reading.
+#[test]
+fn keeps_the_10570_critic_shapes_refused_10734() {
+    let mut rows: Vec<String> = [
+        "OP_BIN = \"op\"\nos.system(OP_BIN + \" read op://v/i/f\")",
+        "os.system(\"op --account work read op://v/i/f\")",
+        "B = \"op\"\nos.system(\"%(b)s read %(r)s\" % {\"b\": B, \"r\": R})",
+        "B = \"op\"\nos.system(string.Template(\"$b read $r\").substitute(b=B, r=R))",
+    ]
+    .iter()
+    .map(|c| python_body(c))
+    .collect();
+    rows.extend(
+        [
+            "op read op://fake-vault/fake-item/password",
+            "op --account work read op://fake-vault/fake-item/password",
+            "security find-generic-password -s fake-svc -w",
+        ]
+        .map(String::from),
+    );
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    check(true, &rows);
+}
