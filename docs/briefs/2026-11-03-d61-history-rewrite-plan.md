@@ -55,7 +55,7 @@ gh run list --event push --created ">=<push-time>" --json workflowName,headBranc
 The last command must print nothing: no tag-triggered run exists since the push. Re-enable also runs on abort and failure (B3 wrapper).
 
 ### B3. Save and restore protection and both rulesets
-D3e (Bob): Bob disables the rulesets 26091257 and 26091265 on the GitHub dashboard (Settings, Rules, Rulesets, enforcement Disabled) and lifts main `allow_force_pushes` there. No admin-bypass test and no API toggle by the executor. Bob re-enables both on the dashboard.
+D3e (Bob 09:52Z: "disable both rulesets only for the push window, restore and verify after"). Route (Architect 10:08Z, supersedes the dashboard text in lines 65 and 84): the executor's wrapper sets rulesets 26091257 and 26091265 to enforcement disabled and main `allow_force_pushes` true by API inside the trap, then restores both from the snapshot and verifies an empty diff. Bob restores by hand only on RESTORE_DIFF=NONEMPTY.
 Save before any change (files mode 600, in `/Users/masa/d19-private/`):
 ```
 gh api repos/bobmatnyc/trusty-tools/branches/main/protection > /Users/masa/d19-private/main-protection-before.json
