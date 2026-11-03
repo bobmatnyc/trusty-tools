@@ -172,3 +172,69 @@ fn scan_finds_diff() {
 fn scan_finds_nothing() {
     assert!(scan_evidence("still working on the feature, no results yet").is_none());
 }
+
+/// Why: #10721 W1 — a PR URL the delegation never asked for is not proof that
+/// this task opened or touched it (Codex repro input, verbatim).
+/// What: a pane citing an unrelated PR after a failure; asserts not `Verified`.
+/// Test: this is the test.
+#[test]
+fn pr_url_for_a_different_pr_is_not_verified() {
+    let obs = interpret_session(&json!({
+        "session": {
+            "state": "running",
+            "pane": "Task failed; reference PR https://github.com/example/project/pull/123"
+        }
+    }));
+    assert_ne!(obs.state, SessionTaskState::Verified);
+    assert!(obs.evidence.is_none(), "got {:?}", obs.evidence);
+}
+
+/// Why: #10721 W2 — a run summary with failures, or with zero passes, is never
+/// test-pass evidence.
+/// What: scans failing and empty run summaries; asserts no evidence for each.
+/// Test: this is the test.
+#[test]
+fn zero_passed_three_failed_is_not_test_evidence() {
+    for text in [
+        "0 passed, 3 failed",
+        "0 passed; 2 failed",
+        "3 passed; 2 failed",
+        "test result: FAILED. 0 passed; 3 failed; 0 ignored",
+        "test result: ok. 0 passed; 0 failed; 0 ignored",
+        "0 passed",
+    ] {
+        assert_eq!(scan_evidence(text), None, "input: {text}");
+    }
+}
+
+/// Why: #10721 W3 — a negated or empty write claim is not "edit made" evidence.
+/// What: scans prose that says nothing was written; asserts no evidence.
+/// Test: this is the test.
+#[test]
+fn wrote_nothing_is_not_write_evidence() {
+    for text in [
+        "I never wrote the requested file.",
+        "wrote nothing",
+        "wrote 0 files",
+        "I wrote nothing, the task is blocked",
+    ] {
+        assert_eq!(scan_evidence(text), None, "input: {text}");
+    }
+}
+
+/// Why: #10721 W4 — a failed session record wins over any evidence line in its
+/// pane, so evidence can never turn a failed session into `Verified`.
+/// What: a `failed` record whose pane carries a valid passing summary; asserts
+/// `Failed` with no evidence.
+/// Test: this is the test.
+#[test]
+fn failed_state_with_evidence_is_failed() {
+    let obs = interpret_session(&json!({
+        "session": {
+            "state": "failed",
+            "pane": "test result: ok. 12 passed; 0 failed; 0 ignored"
+        }
+    }));
+    assert_eq!(obs.state, SessionTaskState::Failed);
+    assert!(obs.evidence.is_none(), "got {:?}", obs.evidence);
+}
