@@ -184,19 +184,31 @@ fn is_decoration(c: char) -> bool {
 ///
 /// Why: #10721 — a PR URL is proof only as the RESULT of an action, so the scan
 /// must know where a `gh pr` command was run, not where a URL was mentioned.
-/// What: inside a Claude Code `Bash(…)` step, finds `gh pr <verb>` anywhere in
-/// the command; otherwise the decoration-stripped line must start with it (a
-/// shell transcript). Returns the verb when it is in [`GH_PR_ACTIONS`].
+/// What: two invocation shapes only. A Claude Code step is a line that, after a
+/// leading `⏺`/`●` and spaces, starts with `Bash(`; `gh pr <verb>` may appear
+/// anywhere inside it. A shell transcript line starts with a literal `$ `
+/// prompt followed by `gh pr <verb>`. A line carrying a failure word
+/// ([`FAILURE_WORDS`]) is never an invocation (#10721: narration such as
+/// "the Bash(gh pr create) call errored"). Returns the verb when it is in
+/// [`GH_PR_ACTIONS`].
 /// Test: `observe_tests.rs::non_tty_gh_pr_create_result_is_verified`,
-/// `task_named_pr_url_without_an_action_is_not_verified`.
+/// `task_named_pr_url_without_an_action_is_not_verified`,
+/// `narrated_gh_command_is_not_an_invocation`,
+/// `bash_mentioned_in_prose_is_not_an_invocation`.
 fn gh_pr_action(line: &str) -> Option<&'static str> {
     let lower = line.to_ascii_lowercase();
-    let cmd = match lower.find("bash(") {
-        Some(i) => {
-            let inner = &lower[i + "bash(".len()..];
-            &inner[inner.find("gh pr ")?..]
-        }
-        None => lower.trim_start_matches(is_decoration),
+    if FAILURE_WORDS.iter().any(|w| lower.contains(w)) {
+        return None;
+    }
+    let trimmed = lower.trim_start();
+    // #10721: `Bash(` counts only as the step itself, `gh pr` only after `$ `.
+    let cmd = if trimmed.starts_with(['⏺', '●']) {
+        let step =
+            trimmed.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '⏺' | '●'));
+        let inner = step.strip_prefix("bash(")?;
+        &inner[inner.find("gh pr ")?..]
+    } else {
+        trimmed.strip_prefix("$ ")?.trim_start()
     };
     let verb = cmd.strip_prefix("gh pr ")?.split_whitespace().next()?;
     GH_PR_ACTIONS.iter().copied().find(|a| *a == verb)
@@ -213,13 +225,17 @@ fn starts_new_step(line: &str) -> bool {
 /// Why: #10721 W1 — a URL alone, task-named or not, is never proof. Without a
 /// TTY (Claude Code's Bash tool) `gh pr create` prints only the new PR's URL, so
 /// the proof is that URL as the invocation's result, bound to its PR number.
-/// What: for each `gh pr <verb>` invocation, reads its result lines up to the
-/// next step. A line carrying a failure word ([`FAILURE_WORDS`]) rejects that
-/// invocation. A PR URL on a result line is evidence when the verb is `create`
-/// (a PR opened in this session) or when the URL is a PR the task named. Returns
-/// `PR opened: <url>` for a create, `PR <verb>: <url>` otherwise.
+/// What: for each `gh pr <verb>` invocation, takes its result window (the lines
+/// up to the next step). A failure word ([`FAILURE_WORDS`]) anywhere in the
+/// window rejects the invocation before any URL in it is read. `remote:` lines
+/// (git push output, e.g. the unnumbered `pull/new/<branch>` compare URL) are
+/// never URL sources. A URL must be a NUMBERED PR ([`PrRef::parse`]); it is
+/// evidence when the verb is `create` (a PR opened in this session) or when it
+/// is a PR the task named. Returns `PR opened: <url>` for a create,
+/// `PR <verb>: <url>` otherwise.
 /// Test: `observe_tests.rs::non_tty_gh_pr_create_result_is_verified`,
 /// `gh_pr_create_failure_before_url_is_not_verified`,
+/// `failed_create_after_push_compare_url_is_not_verified`,
 /// `task_named_pr_url_without_an_action_is_not_verified`,
 /// `pr_url_for_a_different_pr_is_not_verified`,
 /// `pr_url_matching_the_task_pr_is_verified`, `pr_created_in_session_is_verified`.
@@ -229,17 +245,29 @@ fn find_pr_action(observed: &str, expect: &TaskExpectation) -> Option<String> {
         let Some(verb) = gh_pr_action(line) else {
             continue;
         };
-        for result in &lines[i + 1..] {
-            if starts_new_step(result) {
-                break;
-            }
-            let lower = result.to_ascii_lowercase();
-            if FAILURE_WORDS.iter().any(|w| lower.contains(w)) {
-                break;
+        let window: Vec<&str> = lines[i + 1..]
+            .iter()
+            .copied()
+            .take_while(|l| !starts_new_step(l))
+            .collect();
+        // #10721: the whole window is failure-checked before any URL is accepted.
+        if window.iter().any(|l| {
+            let lower = l.to_ascii_lowercase();
+            FAILURE_WORDS.iter().any(|w| lower.contains(w))
+        }) {
+            continue;
+        }
+        for result in window {
+            if result
+                .trim_start_matches(is_decoration)
+                .to_ascii_lowercase()
+                .starts_with("remote:")
+            {
+                continue;
             }
             let claimed = pr_urls(result).into_iter().find(|url| {
-                verb == "create"
-                    || PrRef::parse(url).is_some_and(|pr| expect.expected_prs.contains(&pr))
+                PrRef::parse(url)
+                    .is_some_and(|pr| verb == "create" || expect.expected_prs.contains(&pr))
             });
             if let Some(url) = claimed {
                 let label = if verb == "create" { "opened" } else { verb };
