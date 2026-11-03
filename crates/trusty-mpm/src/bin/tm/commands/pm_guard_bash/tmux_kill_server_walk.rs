@@ -12,10 +12,11 @@
 //! requires one of: a tmux command, judged here on its `-L`/`-S` words
 //! (`scratch_server`) with each command-string argument judged in turn; a
 //! shell `-c` string or `eval` text, judged in turn; or a known-inert program
-//! printing to stdout (`echo`, `printf` without `-v`, `grep`/`rg`, `sed -n`
-//! without `-i`, `cat`, `git` with the words only in the `-m` value of a
-//! subcommand that takes a message, #10706 H2), piped
-//! only into readers (`head`, `wc`, …). A here-document body counts as an
+//! printing to stdout (`echo`, `printf` without `-v`, `grep`, `rg` without
+//! `--pre`, a `sed -n` without `-i` that only prints, `cat`, `git` with the
+//! words only in the `-m` value of a subcommand that takes a message, #10706
+//! H2), piped only into readers (`head`, `wc`, …) that write and run nothing
+//! (#10706 H1: `readers`). A here-document body counts as an
 //! argument of the program its operator line feeds. A fleet kill is `Err`;
 //! anything else is noted in [`Walk::soft`] and the walk goes on.
 //! Test: `a_kill_word_no_tmux_hit_accounts_for_is_log_only`,
@@ -27,6 +28,7 @@ use super::super::super::command_substitutions;
 use super::super::super::floor_d4::{Segment, program_positions, segments};
 use super::super::super::heredoc::{HeredocBodies, blank_spans};
 use super::super::super::shell_lex::{QuoteScan, WrappedCommand, wrapped_command};
+use super::readers::{reader_is_safe, sed_prints_only};
 use super::{ServerEnv, judge_hit, names_whole_server_kill, socket};
 
 /// Nesting depth (substitutions, command-string arguments) the walk reads.
@@ -239,11 +241,17 @@ fn inert_heredoc(text: &str, (start, end): (usize, usize)) -> bool {
         .is_some_and(|(first, rest)| inert(&first.text) && reads_only(rest))
 }
 
-/// Whether every segment `rest` pipes into is a reader that writes no file.
+/// Whether every segment `rest` pipes into is a reader that writes no file
+/// and runs no program (#10706 H1: `readers::reader_is_safe`).
 fn reads_only(rest: &[Segment]) -> bool {
     rest.iter().take_while(|s| s.piped).all(|s| {
-        let program = shlex::split(&s.text).and_then(|argv| single_program(&argv));
-        program.is_some_and(|(_, p)| READERS.contains(&p.as_str())) && !writes_file(&s.text)
+        let Some(argv) = shlex::split(&s.text) else {
+            return false;
+        };
+        single_program(&argv).is_some_and(|(pos, p)| {
+            let args = argv.get(pos + 1..).unwrap_or_default();
+            READERS.contains(&p.as_str()) && reader_is_safe(&p, args)
+        }) && !writes_file(&s.text)
     })
 }
 
@@ -269,24 +277,12 @@ fn inert(text: &str) -> bool {
         return false;
     }
     let args = argv.get(pos + 1..).unwrap_or_default();
-    let short = |a: &str, c: char| {
-        a.starts_with('-')
-            && !a.starts_with("--")
-            && a[1..].chars().all(|x| x.is_ascii_alphabetic())
-            && a.contains(c)
-    };
     match program.as_str() {
-        "echo" | "cat" | "grep" | "egrep" | "fgrep" | "rg" => true,
+        "echo" | "cat" | "grep" | "egrep" | "fgrep" => true,
+        // #10706 H1: `rg --pre` runs a program; `sed` may only print.
+        "rg" => reader_is_safe(&program, args),
         "printf" => !args.iter().any(|a| a.starts_with("-v")),
-        "sed" => {
-            let quiet = args
-                .iter()
-                .any(|a| short(a, 'n') || a == "--quiet" || a == "--silent");
-            let in_place = args
-                .iter()
-                .any(|a| short(a, 'i') || a.starts_with("-i") || a.starts_with("--in-place"));
-            quiet && !in_place
-        }
+        "sed" => sed_prints_only(args),
         "git" => only_in_messages(args),
         _ => false,
     }
