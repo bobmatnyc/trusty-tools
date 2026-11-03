@@ -138,6 +138,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             serde_json::json!({ "index_id": INDEX, "entry_point": "anything" }),
         ),
+        // #10738: a read, so `free` like the rest of slice 2.
+        (
+            reads::METHOD_INDEX_FILE_STATUS,
+            Lane::Free,
+            serde_json::json!({ "index_id": INDEX, "body": { "path": "src/a.rs" } }),
+        ),
         // Slice 3's queries: every HTTP route is in `interactive_limited`.
         (queries::METHOD_QUERY, Lane::Interactive, query.clone()),
         (

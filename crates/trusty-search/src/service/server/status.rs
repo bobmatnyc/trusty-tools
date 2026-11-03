@@ -209,7 +209,10 @@ pub(super) fn first_existing_mtime_rfc3339(
 /// code — so one decision classifies the refusal on both transports.
 /// #9059: an index held by an invalid exclude glob reports `status: "held"`,
 /// and `last_walk_error` carries the hold reason naming the glob.
-/// Test: `status_404_only_when_absent_from_every_store`,
+/// #10738: adds `identity {instance_id, generation}` (see
+/// `service::index_identity`).
+/// Test: `identity_is_stable_across_a_daemon_restart`,
+/// `status_404_only_when_absent_from_every_store`,
 /// `cold_parked_index_status_is_503_not_404`,
 /// `cold_parked_status_503_body_names_search_as_the_restore_path`,
 /// `index_status_over_the_socket_matches_the_http_body`,
@@ -488,6 +491,10 @@ pub(crate) async fn index_status_report(
     body["profile"] =
         super::profile_apply::stored_label(state.registry_path_override.as_deref(), &index_id.0)
             .into();
+    // #10738: `identity {instance_id, generation}`, or null plus `identity_error`.
+    if let Some(obj) = body.as_object_mut() {
+        crate::service::index_identity::insert_into(&index_id.0, obj);
+    }
     Ok(body)
 }
 

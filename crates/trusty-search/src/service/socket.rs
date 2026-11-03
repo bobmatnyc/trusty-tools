@@ -102,6 +102,8 @@ pub const METHODS: &[&str] = &[
     reads::METHOD_GRAPH_STATS,
     reads::METHOD_GRAPH_NEIGHBORS,
     reads::METHOD_CALL_CHAIN,
+    // #10738: per-file revision evidence.
+    reads::METHOD_INDEX_FILE_STATUS,
     // #6285 slice 3 — the query surface.
     queries::METHOD_QUERY,
     queries::METHOD_QUERY_ALL,

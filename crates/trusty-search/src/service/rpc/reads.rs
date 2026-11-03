@@ -25,6 +25,7 @@
 //! | `search.graph.stats` | `GET /indexes/{id}/graph/stats` |
 //! | `search.graph.neighbors` | `GET /indexes/{id}/graph/neighbors` |
 //! | `search.call_chain` | `GET /indexes/{id}/call_chain` |
+//! | `search.index.file.status` | none (socket-only, #10738) |
 //!
 //! A route whose HTTP form splits its arguments across a path segment and a
 //! query string carries them as ONE `params` object here: the path's `{id}`
@@ -85,6 +86,10 @@ pub const METHOD_GRAPH_STATS: &str = "search.graph.stats";
 pub const METHOD_GRAPH_NEIGHBORS: &str = "search.graph.neighbors";
 /// `GET /indexes/{id}/call_chain` — the annotated call tree, as plain text.
 pub const METHOD_CALL_CHAIN: &str = "search.call_chain";
+/// One path's revision evidence: `{path, present, content_sha256,
+/// chunk_count, identity}` (#10738). Socket-only. Params use the write
+/// envelope, `{index_id, body: {path}}`.
+pub const METHOD_INDEX_FILE_STATUS: &str = "search.index.file.status";
 
 /// Every method this slice registers, in registration order.
 ///
@@ -103,6 +108,8 @@ pub const METHODS: &[&str] = &[
     METHOD_GRAPH_STATS,
     METHOD_GRAPH_NEIGHBORS,
     METHOD_CALL_CHAIN,
+    // #10738 — per-file revision evidence.
+    METHOD_INDEX_FILE_STATUS,
 ];
 
 /// The one argument an index-scoped method with no query string carries.
@@ -167,8 +174,9 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     }
 
     use crate::service::server::{
-        call_chain_report, config_report, graph_neighbors_report, graph_report, graph_stats_report,
-        index_chunks_report, index_config_report, index_status_report, list_indexes_report,
+        call_chain_report, config_report, file_status_report, graph_neighbors_report, graph_report,
+        graph_stats_report, index_chunks_report, index_config_report, index_status_report,
+        list_indexes_report, FileStatusRequest,
     };
 
     let r = router;
@@ -191,6 +199,15 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
         IndexRef,
         serde_json::Value,
         |s, p| index_status_report(&s, &p.index_id).await
+    );
+
+    // #10738: per-file revision evidence, in the put/remove envelope.
+    let r = fallible!(
+        r,
+        METHOD_INDEX_FILE_STATUS,
+        super::writes::IndexBody<FileStatusRequest>,
+        serde_json::Value,
+        |s, p| file_status_report(&s, &p.index_id, p.body).await
     );
 
     // ---- config ------------------------------------------------------------

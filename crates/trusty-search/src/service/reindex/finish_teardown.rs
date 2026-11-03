@@ -119,6 +119,12 @@ pub(super) async fn resolve_corpus_swap(
             // the warm map, BM25 and vector store still hold the rebuild's
             // obsolete chunks.
             if force && promoted {
+                // #10738: the promoted corpus started empty; raise the generation
+                // before the warm reconcile drops the obsolete chunks.
+                crate::service::index_identity::bump_generation_logged(
+                    &index_id.0,
+                    "force_promotion",
+                );
                 super::prune::reconcile_warm_state_to_promoted_corpus(handle, index_id).await;
             }
             // #9169: only a promoted corpus records a reindex commit.

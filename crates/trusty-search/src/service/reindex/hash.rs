@@ -143,6 +143,31 @@ pub(crate) async fn forget_file_hash(
         .map_err(|e| anyhow::anyhow!("file-hash delete task did not complete: {e}"))?
 }
 
+/// Record a file's content hash in the in-process cache and the durable corpus.
+///
+/// Why (#10738): `search.index.file.status` reports the hash of the content a
+/// pushed file's chunks came from, so `search.index.file.put` must record it
+/// the way a reindex batch does.
+/// What: inserts `rel → hash` into [`hashes_for`] and, when the indexer holds a
+/// durable corpus, upserts the row on a blocking worker. A failed upsert is an
+/// error.
+/// Test: `file_status_reports_the_put_hash_then_absent_after_remove`.
+pub(crate) async fn record_file_hash(
+    index_id: &IndexId,
+    indexer: &crate::core::CodeIndexer,
+    rel: &str,
+    hash: &str,
+) -> anyhow::Result<()> {
+    hashes_for(index_id).insert(PathBuf::from(rel), hash.to_string());
+    let Some(corpus) = indexer.corpus_store() else {
+        return Ok(());
+    };
+    let (rel, hash) = (rel.to_string(), hash.to_string());
+    tokio::task::spawn_blocking(move || corpus.upsert_file_hashes(&[(&rel, &hash)]))
+        .await
+        .map_err(|e| anyhow::anyhow!("file-hash upsert task did not complete: {e}"))?
+}
+
 impl crate::core::CodeIndexer {
     /// Purge one file for #8922: its chunks without a symbol-graph rebuild,
     /// then its content hash. Returns the chunks removed; the caller rebuilds

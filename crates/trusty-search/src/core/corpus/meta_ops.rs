@@ -81,6 +81,28 @@ impl CorpusStore {
         Ok(out)
     }
 
+    /// The persisted content hash of one relative path, if any (#10738).
+    ///
+    /// Why: `search.index.file.status` reports one file's hash; loading the
+    /// whole table for it would scan every row.
+    /// What: one point read. `Ok(None)` for an absent row or table; a corrupt
+    /// (non-UTF-8) row is an `Err`, never a hash.
+    /// Test: `file_status_reports_the_put_hash_then_absent_after_remove`.
+    pub(crate) fn file_hash(&self, path: &str) -> Result<Option<String>> {
+        let txn = self.db.begin_read().context("begin file_hash read txn")?;
+        let table = match txn.open_table(FILE_HASHES_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(anyhow::anyhow!("open file_hashes table: {e}")),
+        };
+        let Some(row) = table.get(path).context("read file_hashes row")? else {
+            return Ok(None);
+        };
+        let hash = std::str::from_utf8(row.value())
+            .with_context(|| format!("corrupt file_hashes row for {path}"))?;
+        Ok(Some(hash.to_string()))
+    }
+
     /// Atomically clear the entire file-hash table (issue #662).
     ///
     /// Why: called when `force=true` or a root move is detected so the
