@@ -12,7 +12,8 @@
 //!
 //! The verdict line is the `code-review-standards` Output Format heading,
 //! `## Verdict: <APPROVE|WARN|BLOCK>`, matched case-sensitively at the start of
-//! a line outside a code fence. A review is pinned to its own `commit.oid`; a
+//! a line outside a code fence; leading `#` marks and `**` bold are optional.
+//! A review is pinned to its own `commit.oid`; a
 //! `pinned to <sha>` clause on the verdict line overrides that, and is the only
 //! pin a plain comment can carry.
 //!
@@ -22,8 +23,11 @@ use serde::Deserialize;
 
 use super::GhRunner;
 
-/// The canonical verdict heading (`code-review-standards`, Output Format).
-const VERDICT_HEADING: &str = "## Verdict:";
+/// The verdict label (`code-review-standards`, Output Format).
+const VERDICT_LABEL: &str = "Verdict:";
+
+/// Markdown bold, tolerated around the label and the value (#10724).
+const BOLD: &str = "**";
 
 /// The clause that pins a verdict line to a commit.
 const PIN_CLAUSE: &str = "pinned to ";
@@ -59,6 +63,17 @@ pub(crate) struct VerdictView {
     /// Every review, COMMENT-type critic verdicts included.
     #[serde(default)]
     pub(crate) reviews: Vec<Review>,
+}
+
+impl VerdictView {
+    /// The head sha the verdicts were assessed against, lowercased, if valid.
+    ///
+    /// #10724: `tm pr merge` passes it as `--match-head-commit`, so a push
+    /// after the verdict read makes GitHub refuse the merge.
+    /// Test: `pr_10724_the_merge_call_matches_the_assessed_head`.
+    pub(crate) fn head_oid(&self) -> Option<String> {
+        pin_oid(&self.head)
+    }
 }
 
 /// A comment or review author.
@@ -137,42 +152,70 @@ pub(crate) fn read<R: GhRunner>(gh: &R, mut base: Vec<String>) -> anyhow::Result
         .map_err(|e| anyhow::anyhow!("cannot parse `gh {}` JSON: {e}", base.join(" ")))
 }
 
-/// The first canonical verdict line in `body`, with its `pinned to` sha.
+/// The first verdict line in `body`, with its `pinned to` sha.
 ///
-/// Why: a strict match on the Output Format heading keeps prose such as
-/// "verdict BLOCK" or a quoted line inside a code fence from holding a merge.
-/// What: skips fenced lines; requires the trimmed line to start with
-/// `## Verdict:`, then exactly `APPROVE`, `WARN` or `BLOCK` ending at a
-/// non-letter. The sha is the 7-40 hex token after `pinned to `, if any.
+/// Why: the critic decorates the Output Format heading (`# `, `**bold**`), and
+/// a decorated BLOCK that went unread let the merge through; matching at line
+/// start only keeps prose such as "said Verdict: BLOCK" from holding a merge.
+/// What: the first unfenced line [`verdict_on_line`] reads wins. #10724: a
+/// fence that never closes fails closed — a BLOCK after the unclosed opener
+/// beats an earlier APPROVE or WARN, while an APPROVE or WARN there is ignored.
 /// Test: `pr_10724_prose_and_fenced_lines_are_not_verdicts`,
+/// `pr_10724_decorated_verdict_lines_parse`,
+/// `pr_10724_an_unclosed_fence_does_not_hide_a_later_block`,
 /// `pr_10724_a_pin_clause_is_parsed_from_the_verdict_line`.
 pub(crate) fn parse_verdict_line(body: &str) -> Option<(Verdict, Option<String>)> {
     let mut fenced = false;
+    let mut first: Option<(Verdict, Option<String>)> = None;
+    // The first BLOCK seen inside a fence; it counts only if that fence never closes.
+    let mut open_block: Option<(Verdict, Option<String>)> = None;
     for line in body.lines() {
         let line = line.trim();
         if line.starts_with("```") || line.starts_with("~~~") {
             fenced = !fenced;
+            open_block = None;
             continue;
         }
-        if fenced {
+        let Some(found) = verdict_on_line(line) else {
             continue;
+        };
+        if !fenced {
+            if first.is_none() {
+                first = Some(found);
+            }
+        } else if found.0 == Verdict::Block && open_block.is_none() {
+            open_block = Some(found);
         }
-        let Some(rest) = line.strip_prefix(VERDICT_HEADING) else {
-            continue;
-        };
-        let rest = rest.trim_start();
-        let end = rest
-            .find(|c: char| !c.is_ascii_alphabetic())
-            .unwrap_or(rest.len());
-        let verdict = match &rest[..end] {
-            "APPROVE" => Verdict::Approve,
-            "WARN" => Verdict::Warn,
-            "BLOCK" => Verdict::Block,
-            _ => continue,
-        };
-        return Some((verdict, pin(&rest[end..])));
     }
-    None
+    let first_is_block = first.as_ref().is_some_and(|f| f.0 == Verdict::Block);
+    if fenced && open_block.is_some() && !first_is_block {
+        return open_block;
+    }
+    first
+}
+
+/// The verdict on one trimmed line, decorated or not.
+///
+/// What: strips leading `#` marks and `**` around the label and the value,
+/// then requires `Verdict:` followed by exactly `APPROVE`, `WARN` or `BLOCK`
+/// ending at a non-letter. The sha is the 7-40 hex token after `pinned to `.
+/// Test: `pr_10724_decorated_verdict_lines_parse`.
+fn verdict_on_line(line: &str) -> Option<(Verdict, Option<String>)> {
+    let line = line.trim_start_matches('#').trim_start();
+    let line = line.strip_prefix(BOLD).unwrap_or(line);
+    let rest = line.strip_prefix(VERDICT_LABEL)?;
+    let rest = rest.strip_prefix(BOLD).unwrap_or(rest).trim_start();
+    let rest = rest.strip_prefix(BOLD).unwrap_or(rest);
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    let verdict = match &rest[..end] {
+        "APPROVE" => Verdict::Approve,
+        "WARN" => Verdict::Warn,
+        "BLOCK" => Verdict::Block,
+        _ => return None,
+    };
+    Some((verdict, pin(&rest[end..])))
 }
 
 /// The sha after `pinned to ` in `tail`, lowercased, when it is 7-40 hex.

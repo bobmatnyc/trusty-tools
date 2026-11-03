@@ -229,10 +229,16 @@ fn conflict_field(view: &MergeView) -> Option<&'static str> {
 /// command — without them GitHub concatenates the branch's raw commit messages
 /// into the squash commit.
 /// What: `pr merge <n> [--repo <slug>] --squash [--delete-branch] [--auto]
-/// --subject "<title> (#<n>)" --body-file <path>`.
+/// [--match-head-commit <oid>] --subject "<title> (#<n>)" --body-file <path>`.
 /// Test: `merge_argv_carries_squash_delete_and_body_file`,
-/// `merge_argv_honours_auto_and_no_delete_branch`.
-pub(crate) fn plan(args: &PrMergeArgs, view: &MergeView, body_file: &Path) -> Vec<String> {
+/// `merge_argv_honours_auto_and_no_delete_branch`,
+/// `pr_10724_the_merge_call_matches_the_assessed_head`.
+pub(crate) fn plan(
+    args: &PrMergeArgs,
+    view: &MergeView,
+    body_file: &Path,
+    head_oid: Option<&str>,
+) -> Vec<String> {
     let n = args.pr.to_string();
     let mut a = argv(&["pr", "merge", &n]);
     push_repo(&mut a, args);
@@ -242,6 +248,11 @@ pub(crate) fn plan(args: &PrMergeArgs, view: &MergeView, body_file: &Path) -> Ve
     }
     if args.auto {
         a.push("--auto".to_string());
+    }
+    // #10724: merge only the head the code-critic verdicts were assessed on.
+    if let Some(oid) = head_oid {
+        a.push("--match-head-commit".to_string());
+        a.push(oid.to_string());
     }
     a.push("--subject".to_string());
     a.push(format!("{} (#{})", view.title.trim(), args.pr));
@@ -413,8 +424,11 @@ fn merged_after_failure<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> Option<Merge
 ///
 /// #10724: between [`decide`] and the checks gate, [`critic_verdict::assess`]
 /// refuses an unresolved code-critic BLOCK on the head; a failed verdict read
-/// refuses too. Known limit: a raw `gh pr merge` skips this gate entirely.
+/// refuses too. The read's `headRefOid` becomes `--match-head-commit`, so a
+/// push after the read is refused by GitHub. Known limit: a raw
+/// `gh pr merge` skips this gate entirely.
 /// Test: `pr_10724_a_block_pinned_to_the_head_refuses`,
+/// `pr_10724_the_merge_call_matches_the_assessed_head`,
 /// `pr_10724_a_verdict_read_failure_refuses`,
 /// `merge_refuses_without_calling_gh_merge`,
 /// `run_auto_refuses_while_a_non_required_check_runs`,
@@ -457,8 +471,8 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
     // unreadable verdict set fails closed.
     let mut verdict_read = argv(&["pr", "view", &args.pr.to_string()]);
     push_repo(&mut verdict_read, args);
-    let critic = match critic_verdict::read(gh, verdict_read) {
-        Ok(v) => critic_verdict::assess(&v),
+    let (critic, head_oid) = match critic_verdict::read(gh, verdict_read) {
+        Ok(v) => (critic_verdict::assess(&v), v.head_oid()),
         Err(e) => {
             let reason = format!("cannot read the code-critic verdicts ({e:#})");
             return Ok(refuse(args.pr, &reason));
@@ -510,7 +524,7 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
         .and_then(|()| tmp.flush())
         .context("cannot write the squash commit body to its temp file")?;
 
-    let a = plan(args, &view, tmp.path());
+    let a = plan(args, &view, tmp.path(), head_oid.as_deref());
     let out = gh.run(&a)?;
     if !out.success {
         // #7945: `gh pr merge --delete-branch` deletes the LOCAL branch AFTER
