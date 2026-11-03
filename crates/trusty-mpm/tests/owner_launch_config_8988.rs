@@ -281,32 +281,15 @@ fn settings_file(args: &[String]) -> (PathBuf, serde_json::Value) {
     )
 }
 
-/// #10127: an Architect's ONE `--settings` is inline JSON — the owner file's
-/// `[mcp]` part merged with the lockdown deny and the connector switch.
+/// #10127, #10735: an Architect's ONE `--settings` is the owner file alone —
+/// its `[mcp]` part, with no lockdown deny and no connector switch.
 fn assert_architect_payload(args: &[String]) {
-    use trusty_mpm::core::architect_lockdown::{ARCHITECT_DENY_GLOBS, capitalised};
-    let values: Vec<&String> = args
-        .windows(2)
-        .filter(|w| w[0] == "--settings")
-        .map(|w| &w[1])
-        .collect();
-    assert_eq!(values.len(), 1, "one --settings: {args:?}");
-    let body: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
+    let count = args.iter().filter(|a| *a == "--settings").count();
+    assert_eq!(count, 1, "one --settings: {args:?}");
+    let (_, body) = settings_file(args);
     assert_eq!(
-        body["deniedMcpServers"],
-        serde_json::json!([{"serverName": "heygen"}])
-    );
-    assert_eq!(body["disableClaudeAiConnectors"], true);
-    assert!(body.get("skillOverrides").is_none(), "{body}");
-    let mut want: Vec<String> = ARCHITECT_DENY_GLOBS
-        .iter()
-        .flat_map(|g| [(*g).to_owned(), capitalised(g)])
-        .collect();
-    want.sort();
-    want.dedup();
-    assert_eq!(
-        body["permissions"]["deny"],
-        serde_json::json!(want),
+        body,
+        serde_json::json!({ "deniedMcpServers": [{"serverName": "heygen"}] }),
         "{body}"
     );
 }
