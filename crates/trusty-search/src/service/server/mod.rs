@@ -65,6 +65,10 @@ mod reindex_handlers;
 #[cfg(test)]
 mod profile_10532_tests;
 mod profile_apply;
+// #10739: `search.index.path.admits` and the include_paths config tests.
+#[cfg(test)]
+mod include_paths_10739_tests;
+mod path_admits;
 mod remove_files;
 #[cfg(test)]
 mod remove_files_tests;
@@ -317,6 +321,7 @@ pub(crate) use contrib_graph::{graph_neighbors_report, NeighborsParams};
 pub(crate) use files::{call_chain_report, index_chunks_report, CallChainParams};
 pub(crate) use index_config::{index_config_report, IndexConfigView};
 pub(crate) use indexes::{list_indexes_report, ListIndexesParams};
+pub(crate) use path_admits::{path_admits_report, PathAdmission, PathAdmitsParams};
 pub(crate) use status::{graph_report, graph_stats_report, index_status_report, GraphQueryParams};
 
 // #6285 slice 3: the query surface's transport-neutral bodies. Same contract as
