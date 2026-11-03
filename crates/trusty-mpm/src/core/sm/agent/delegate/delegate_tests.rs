@@ -256,7 +256,9 @@ async fn delegate_verifies_and_closes_with_evidence() {
     let tmp = TempDir::new().unwrap();
     let decision = r#"{"action":"delegate","tasks":[{"workdir":"/r","prompt":"open a PR"}]}"#;
     let agent = agent_with(decision, tmp.path());
-    let evidence = "Opened PR https://github.com/acme/repo/pull/9 ready";
+    // #10721 W1: a PR URL verifies only with provenance — here `gh pr create`.
+    let evidence = "Creating pull request for feat into main in acme/repo\n\
+                    https://github.com/acme/repo/pull/9";
     let control: Arc<dyn SessionControl> = Arc::new(MockSessionControl::with_evidence(evidence));
     let goals = goal_store(&tmp);
 

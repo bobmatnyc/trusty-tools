@@ -962,7 +962,10 @@ async fn delegate_end_to_end_launch_observe_verify_close() {
     let decision = r#"{"action":"delegate","tasks":[{"workdir":"/repo","prompt":"open a PR"}]}"#;
     let agent = agent_with_decision(cfg.clone(), tmp.path(), decision);
     let control = Arc::new(EvidenceControl {
-        evidence: "Opened PR https://github.com/acme/repo/pull/7".to_string(),
+        // #10721 W1: a PR URL verifies only with provenance — here `gh pr create`.
+        evidence: "Creating pull request for feat into main in acme/repo\n\
+                   https://github.com/acme/repo/pull/7"
+            .to_string(),
         ..EvidenceControl::default()
     });
     let sessions: Arc<dyn SessionControl> = control.clone();

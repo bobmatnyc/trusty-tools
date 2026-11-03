@@ -8,10 +8,22 @@
 //! payloads.
 //! Test: this is the test module.
 
-use serde_json::json;
+use serde_json::{Value, json};
 
-use super::{interpret_session, scan_evidence};
+use super::{
+    ObservedState, TaskExpectation, interpret_session as interpret_for, scan_evidence as scan_for,
+};
 use crate::core::sm::goals::SessionTaskState;
+
+/// Interpret with no known task: no PR URL can verify (#10721 W1).
+fn interpret_session(v: &Value) -> ObservedState {
+    interpret_for(v, &TaskExpectation::default())
+}
+
+/// Scan with no known task: no PR URL can verify (#10721 W1).
+fn scan_evidence(text: &str) -> Option<String> {
+    scan_for(text, &TaskExpectation::default())
+}
 
 /// Why: an active/running session with no evidence is `Running` — in flight, not
 /// yet verified (the gate is not satisfied).
@@ -46,16 +58,22 @@ fn interpret_launched() {
 
 /// Why: the verification gate — a pane carrying a printed PR URL is gate-satisfying
 /// EVIDENCE, so the task interprets as `Verified` WITH that evidence captured.
-/// What: interprets a record whose pane output contains a PR URL.
+/// What: interprets a record whose pane output contains the PR URL its task named
+/// (#10721 W1).
 /// Test: this is the test.
 #[test]
 fn interpret_verified_with_pr_url() {
-    let obs = interpret_session(&json!({
-        "session": {
-            "state": "running",
-            "pane": "Opened PR https://github.com/acme/repo/pull/42 ready for review"
-        }
-    }));
+    let expect =
+        TaskExpectation::from_task("Address the review on https://github.com/acme/repo/pull/42");
+    let obs = interpret_for(
+        &json!({
+            "session": {
+                "state": "running",
+                "pane": "Opened PR https://github.com/acme/repo/pull/42 ready for review"
+            }
+        }),
+        &expect,
+    );
     assert_eq!(obs.state, SessionTaskState::Verified);
     assert_eq!(
         obs.evidence.as_deref(),
@@ -77,11 +95,12 @@ fn interpret_no_evidence_stays_unverified() {
 
 /// Why: the PR-URL scanner is the most common evidence path; it must find a URL
 /// even surrounded by prose/punctuation.
-/// What: scans a sentence with a trailing-punctuation PR URL.
+/// What: scans a sentence with a trailing-punctuation PR URL the task named.
 /// Test: this is the test.
 #[test]
 fn scan_finds_pr_url() {
-    let ev = scan_evidence("All set. See https://github.com/o/r/pull/7).").unwrap();
+    let expect = TaskExpectation::from_task("Fix CI on https://github.com/o/r/pull/7");
+    let ev = scan_for("All set. See https://github.com/o/r/pull/7).", &expect).unwrap();
     assert_eq!(ev, "PR opened: https://github.com/o/r/pull/7");
 }
 
@@ -91,12 +110,14 @@ fn scan_finds_pr_url() {
 /// evidence would hold a garbled, unopenable URL.
 /// What: interprets a record whose pane field ENDS with the PR URL (so the
 /// serialized form is `…pull/9"}}`) and asserts the captured evidence URL has no
-/// trailing framing characters.
+/// trailing framing characters. The URL is tied to the session by the
+/// `gh pr create` line before it (#10721 W1).
 /// Test: this is the test.
 #[test]
 fn scan_pr_url_strips_json_framing() {
+    let pane = "Creating pull request for fix into main in o/r\n\nhttps://github.com/o/r/pull/9";
     let obs = interpret_session(&json!({
-        "session": { "state": "running", "pane": "https://github.com/o/r/pull/9" }
+        "session": { "state": "running", "pane": pane }
     }));
     assert_eq!(
         obs.evidence.as_deref(),
@@ -116,9 +137,11 @@ fn scan_pr_url_strips_json_framing() {
 fn interpret_evidence_from_raw_pane() {
     let pane =
         "Ran the job: \"build\" finished.\nOpened PR https://github.com/acme/repo/pull/13\nDone.";
-    let obs = interpret_session(&json!({
-        "session": { "state": "running", "pane": pane }
-    }));
+    let expect = TaskExpectation::from_task("Rebase https://github.com/acme/repo/pull/13");
+    let obs = interpret_for(
+        &json!({ "session": { "state": "running", "pane": pane } }),
+        &expect,
+    );
     assert_eq!(obs.state, SessionTaskState::Verified);
     assert_eq!(
         obs.evidence.as_deref(),
@@ -128,15 +151,19 @@ fn interpret_evidence_from_raw_pane() {
 }
 
 /// Why: when NO pane/output field is present, the scanner must FALL BACK to the
-/// whole compact JSON so evidence in another record field is still found.
-/// What: a record with a PR URL in a non-pane field and no pane field; asserts the
-/// URL is still captured via the JSON fallback.
+/// record's other string values so evidence in another record field is found.
+/// What: a record with the task's PR URL in a non-pane field and no pane field;
+/// asserts the URL is still captured via the fallback.
 /// Test: this is the test.
 #[test]
 fn interpret_evidence_fallback_to_json_when_no_pane() {
-    let obs = interpret_session(&json!({
-        "session": { "state": "running", "result_url": "https://github.com/o/r/pull/5" }
-    }));
+    let expect = TaskExpectation::from_task("Land https://github.com/o/r/pull/5");
+    let obs = interpret_for(
+        &json!({
+            "session": { "state": "running", "result_url": "https://github.com/o/r/pull/5" }
+        }),
+        &expect,
+    );
     assert_eq!(obs.state, SessionTaskState::Verified);
     assert_eq!(
         obs.evidence.as_deref(),
@@ -237,4 +264,104 @@ fn failed_state_with_evidence_is_failed() {
     }));
     assert_eq!(obs.state, SessionTaskState::Failed);
     assert!(obs.evidence.is_none(), "got {:?}", obs.evidence);
+}
+
+/// Why: #10721 W1 — with a task that names a PR, that PR (any case, any sub-path)
+/// is evidence and a different PR, repo or host is not.
+/// What: scans matching and non-matching PR URLs against one expectation.
+/// Test: this is the test.
+#[test]
+fn pr_url_matching_the_task_pr_is_verified() {
+    let expect = TaskExpectation::from_task("Fix review on https://github.com/acme/repo/pull/42");
+    assert_eq!(
+        scan_for(
+            "pushed: https://github.com/Acme/Repo/pull/42/files",
+            &expect
+        )
+        .as_deref(),
+        Some("PR opened: https://github.com/Acme/Repo/pull/42/files")
+    );
+    for other in [
+        "https://github.com/acme/repo/pull/43",
+        "https://github.com/acme/other/pull/42",
+        "https://github.com/example/project/pull/123",
+    ] {
+        assert_eq!(scan_for(other, &expect), None, "input: {other}");
+    }
+}
+
+/// Why: #10721 W1 — a PR the session opens has no number the task could name;
+/// `gh pr create`'s status line ties the URL to this session and repo.
+/// What: a created PR in the named repo verifies; a URL for another repo does not.
+/// Test: this is the test.
+#[test]
+fn pr_created_in_session_is_verified() {
+    let pane = "Creating pull request for feat into main in acme/login\n\nhttps://github.com/acme/login/pull/9";
+    assert_eq!(
+        scan_evidence(pane).as_deref(),
+        Some("PR opened: https://github.com/acme/login/pull/9")
+    );
+    let other = "Creating pull request for feat into main in acme/login\nhttps://github.com/acme/web/pull/9";
+    assert_eq!(scan_evidence(other), None);
+}
+
+/// Why: #10721 W1 provenance — the SM types the task into the pane, so the task's
+/// own PR URL echoed back must not verify the task.
+/// What: a pane holding only the echoed task (wrapped, with prompt decoration);
+/// asserts not `Verified`.
+/// Test: this is the test.
+#[test]
+fn pr_url_echoed_from_the_task_is_not_verified() {
+    let task = "Address the review comments on https://github.com/acme/repo/pull/42 and push";
+    let pane =
+        "> Address the review comments on\n  https://github.com/acme/repo/pull/42 and push\n";
+    let obs = interpret_for(
+        &json!({ "session": { "state": "running", "pane": pane } }),
+        &TaskExpectation::from_task(task),
+    );
+    assert_ne!(obs.state, SessionTaskState::Verified);
+    assert!(obs.evidence.is_none(), "got {:?}", obs.evidence);
+}
+
+/// Why: #10721 W1 — with no pane field, a record field carrying the task text
+/// must not let the task's PR URL verify itself.
+/// What: a record whose only PR URL is inside its `prompt` field; asserts not
+/// `Verified`.
+/// Test: this is the test.
+#[test]
+fn task_field_in_record_is_not_evidence() {
+    let task = "Fix review on https://github.com/acme/repo/pull/42";
+    let obs = interpret_for(
+        &json!({ "session": { "state": "running", "prompt": task } }),
+        &TaskExpectation::from_task(task),
+    );
+    assert_ne!(obs.state, SessionTaskState::Verified);
+}
+
+/// Why: a failure marker beats evidence — a failing run in the pane vetoes an
+/// otherwise valid passing summary or diff.
+/// What: a pane with one failing and one passing summary plus a diff header;
+/// asserts no evidence.
+/// Test: this is the test.
+#[test]
+fn failing_summary_vetoes_other_evidence() {
+    let pane = "test result: ok. 12 passed; 0 failed\n\
+                test result: FAILED. 3 passed; 1 failed\n\
+                diff --git a/src/a.rs b/src/a.rs";
+    assert_eq!(scan_evidence(pane), None);
+}
+
+/// Why: #10721 W3 positive side — a write that names the written path is evidence.
+/// What: scans Claude Code's `Wrote N lines to <path>` and a `created file <path>`.
+/// Test: this is the test.
+#[test]
+fn write_naming_a_path_is_write_evidence() {
+    for text in [
+        "  ⎿  Wrote 42 lines to src/core/thing.rs",
+        "created file: docs/notes.md",
+        "wrote README.md",
+    ] {
+        let ev = scan_evidence(text).unwrap_or_else(|| panic!("no evidence for: {text}"));
+        assert!(ev.starts_with("edit made:"), "{ev}");
+    }
 }

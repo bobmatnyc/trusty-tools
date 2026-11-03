@@ -667,8 +667,10 @@ async fn sm_e2e_chat_and_sessions_over_wire() {
 #[tokio::test]
 async fn sm_e2e_delegation_chain_over_wire() {
     let tmp = TempDir::new().expect("tempdir");
+    // #10721 W1: a PR URL verifies only with provenance — here `gh pr create`.
     let control = Arc::new(MockControl::with_evidence(
-        "Opened PR https://github.com/acme/login/pull/42",
+        "Creating pull request for login into main in acme/login\n\
+         https://github.com/acme/login/pull/42",
     ));
     let _guard = TeardownGuard {
         control: control.clone(),
