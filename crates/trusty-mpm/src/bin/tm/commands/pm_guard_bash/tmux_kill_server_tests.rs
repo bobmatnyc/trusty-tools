@@ -478,3 +478,106 @@ fn a_fleet_session_kill_needs_a_scratch_server() {
         );
     }
 }
+
+/// #10706 M1: a `-S` path or `TMUX_TMPDIR` with a `..` component resolves at
+/// run time, so `/tmp/n/../tmux-501/default` is the default socket. The text
+/// is refused before any path is canonicalized.
+#[test]
+fn deny_socket_path_with_dotdot() {
+    let (dir, _sock) = scratch();
+    let t = dir.path().display();
+    for command in [
+        "tmux -S /tmp/n/../tmux-501/default kill-server".to_string(),
+        format!("tmux -S {t}/../tmux-501/default kill-server"),
+        "SOCK=/tmp/n/../tmux-501/default; tmux -S \"$SOCK\" kill-server".to_string(),
+        "TMUX_TMPDIR=/tmp/n/.. tmux kill-server".to_string(),
+        "env -u TMUX TMUX_TMPDIR=/tmp/n/.. tmux kill-server".to_string(),
+        format!("env -u TMUX TMUX_TMPDIR={t}/.. tmux kill-server"),
+    ] {
+        assert!(refused(&command), "{command} must be refused");
+    }
+}
+
+/// #10706 M1: a scratch `-S` path or `TMUX_TMPDIR` with no `..` stays allowed.
+#[test]
+fn a_scratch_socket_path_without_dotdot_is_allowed() {
+    let (dir, sock) = scratch();
+    let t = dir.path().display();
+    for command in [
+        "tmux -S /tmp/scratch/sock kill-server".to_string(),
+        format!("tmux -S {sock} kill-server"),
+        format!("env -u TMUX TMUX_TMPDIR={t} tmux kill-server"),
+    ] {
+        assert_eq!(
+            evaluate_tmux_kill_server(&command, &fleet_env()),
+            None,
+            "{command}"
+        );
+    }
+}
+
+/// #10706 H3: `printf -vSOCK` writes `SOCK` with no space after `-v`, so the
+/// one-assignment read must count it as a second write and not resolve.
+#[test]
+fn deny_printf_v_joined_assignment() {
+    for command in [
+        "SOCK=/tmp/s; printf -vSOCK %s /tmp/tmux-501/default; tmux -S \"$SOCK\" kill-server",
+        "SOCK=/tmp/s.sock\nprintf -vSOCK %s /tmp/tmux-501/default\ntmux -S \"$SOCK\" kill-server",
+        "SOCK=/tmp/s; read -raSOCK <<< /tmp/tmux-501/default; tmux -S \"$SOCK\" kill-server",
+    ] {
+        // Ruling Dac: a kill the guard cannot resolve is log-only.
+        assert!(logged(command), "{command} must be log-only");
+    }
+}
+
+/// #10706 H3: a socket variable written once stays allowed.
+#[test]
+fn a_socket_variable_written_once_is_allowed() {
+    for command in [
+        "SOCK=/tmp/scratch; tmux -S \"$SOCK\" kill-server",
+        // A longer name that ends in the variable's is another variable.
+        "SOCK=/tmp/scratch; DAEMON_SOCK=/tmp/d; echo ${#DAEMON_SOCK}; tmux -S \"$SOCK\" kill-server",
+    ] {
+        assert_eq!(
+            evaluate_tmux_kill_server(command, &fleet_env()),
+            None,
+            "{command}"
+        );
+    }
+}
+
+/// #10706 H2: only `commit`, `tag`, `merge`, `notes` and `stash` take a
+/// message after `-m`; for `git rebase` it is `--merge`, so the next word is
+/// an option such as `--exec` and must be read.
+#[test]
+fn deny_git_rebase_m_exec() {
+    for command in [
+        "git rebase -m '--exec=tmux kill-server' HEAD~1",
+        "git rebase -m -x'tmux kill-server' HEAD~1",
+        "git -C . rebase -m '--exec=tmux kill-server' HEAD~1",
+        "git rebase -m --exec 'tmux kill-server' HEAD~1",
+    ] {
+        // Ruling Dac: a kill the guard cannot resolve is log-only.
+        assert!(logged(command), "{command} must be log-only");
+    }
+}
+
+/// #10706 H2: the kill words in a message of a message-taking subcommand
+/// stay allowed.
+#[test]
+fn a_git_message_naming_a_kill_is_allowed() {
+    for command in [
+        "git commit -m \"tmux kill-server\"",
+        "git tag -a v1 -m 'guard tmux kill-server'",
+        "git merge --no-ff -m 'tmux kill-server' topic",
+        "git notes add -m 'tmux kill-server'",
+        "git stash push -m 'tmux kill-server'",
+        "git -C crates commit -am 'tmux kill-server'",
+    ] {
+        assert_eq!(
+            evaluate_tmux_kill_server(command, &fleet_env()),
+            None,
+            "{command}"
+        );
+    }
+}
