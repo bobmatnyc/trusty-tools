@@ -646,6 +646,12 @@ authenticated user as author. A post-fetch filter would mean untrusted inbound
 content was fetched, extracted, and held in memory before being discarded, and
 one bug away from being written.
 
+> **Amended 2026-11-03** (SPEC-OKF-01 r7.1, accepted 2026-11-03, §3 (l);
+> owner item 2C; #10742). SENT-only binds the automated OKG refresh only. An
+> explicit, operator-initiated inbound email import is allowed. It is allowed
+> only after the capability-grant review, and its content is labelled
+> `UntrustedExternal`.
+
 **S-3.4** (c) `drive`, (e) `slack-channel`, (f) `notion`, and (g) `granola` have
 **no equivalent constraint and cannot have one** — a Drive folder, a channel, a
 Notion tree, and a meeting transcript are all inherently multi-author. §6 governs
@@ -1734,3 +1740,4 @@ Phase B's runner ticket.
 | 2026-08-01 | §3.4 added: searchable-corpus and OKG-contributor capacities are orthogonal, and search-only is a complete end state, never pending. §10.5–§10.6 added: OKG-first search tiering with attached-store fan-out, and per-result tier/origin provenance (`SPEC-OKGSRC-14~draft`), verified absent today. |
 | 2026-08-01 | §2.4–§2.7 added: `stores/<store-identifier>/` extraction targets for remote stores with the local/remote asymmetry made explicit (`SPEC-OKGSRC-11~draft`); `${TRUSTY_AGENTS_HOME}` recorded as one system value with migration deferred; config-format, dotless, and not-access-controlled recorded as settled. |
 | 2026-09-11 | Amended for the owner's 1.0 assistant-platform scope (epic #7425). Marked §10.2 (`S-8.2`/`S-8.3`, index cardinality) and §10.5 (`SPEC-OKGSRC-14~draft`, OKG-first tiering with attached-store fan-out) superseded by the one-index-multiple-roots model (#7429): one trusty-search index per Assistant, with the OKG tree and each attached project as roots of that single index, not separate K-a/K-d indexes queried by fan-out. Pre-1.0 tier/fan-out text is retained for historical record; it governs the current implementation until #7429 lands. Clarified §7.1b that an OKG source's read-scoped credential and a two-way channel's send/receive credential (#7427) are separate grants against the same provider. Evidence: `docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md`. |
+| 2026-11-03 | S-3.3 amended: SENT-only binds the automated OKG refresh only; an explicit operator-initiated inbound email import is allowed after the capability-grant review (SPEC-OKF-01 r7.1, accepted 2026-11-03, owner item 2C; #10742) |
