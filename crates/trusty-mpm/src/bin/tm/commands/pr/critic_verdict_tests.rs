@@ -37,15 +37,17 @@ fn view(comments: Vec<Comment>, reviews: Vec<Review>) -> VerdictView {
 }
 
 #[test]
-fn pr_10724_only_the_canonical_heading_is_a_verdict() {
+fn pr_10724_prose_and_fenced_lines_are_not_verdicts() {
     for prose in [
         "verdict BLOCK from trusty-review",
-        "Verdict: BLOCK, pinned to 0a400b509d",
-        "### Verdict: BLOCK",
+        "said Verdict: BLOCK, pinned to 0a400b509d",
+        "## verdict: BLOCK",
         "## Verdict: Block",
         "## Verdict: BLOCKED",
+        "**Verdict:** BLOCKING",
         "## Verdict: <APPROVE|WARN|BLOCK>",
         "```\n## Verdict: BLOCK\n```",
+        "```\n**Verdict:** BLOCK\n```",
     ] {
         assert_eq!(parse_verdict_line(prose), None, "{prose:?}");
     }
@@ -53,6 +55,48 @@ fn pr_10724_only_the_canonical_heading_is_a_verdict() {
         parse_verdict_line("intro\n  ## Verdict: WARN\n"),
         Some((Verdict::Warn, None))
     );
+}
+
+/// FAILS BEFORE the #10724 tolerant parser: only `## Verdict:` parsed.
+#[test]
+fn pr_10724_decorated_verdict_lines_parse() {
+    for line in [
+        "## Verdict: BLOCK",
+        "# Verdict: BLOCK",
+        "### Verdict: BLOCK",
+        "Verdict: BLOCK",
+        "**Verdict: BLOCK**",
+        "**Verdict:** BLOCK",
+        "## Verdict: **BLOCK**",
+        "## **Verdict:** **BLOCK**",
+    ] {
+        assert_eq!(
+            parse_verdict_line(line),
+            Some((Verdict::Block, None)),
+            "{line:?}"
+        );
+    }
+    assert_eq!(
+        parse_verdict_line("**Verdict:** APPROVE, pinned to `0A400B509D`"),
+        Some((Verdict::Approve, Some("0a400b509d".to_string())))
+    );
+}
+
+/// FAILS BEFORE the #10724 fix: an unclosed fence hid every later line.
+#[test]
+fn pr_10724_an_unclosed_fence_does_not_hide_a_later_block() {
+    // The BLOCK sits after a fence that never closes: fail closed.
+    assert_eq!(
+        parse_verdict_line("```rust\nlet x = 1;\n## Verdict: BLOCK, pinned to 0a400b509d"),
+        Some((Verdict::Block, Some("0a400b509d".to_string())))
+    );
+    // A BLOCK in the unclosed tail outranks an APPROVE before the fence.
+    assert_eq!(
+        parse_verdict_line("## Verdict: APPROVE\n```\n```\n```\nVerdict: BLOCK"),
+        Some((Verdict::Block, None))
+    );
+    // An APPROVE in the unclosed tail cannot resolve anything.
+    assert_eq!(parse_verdict_line("```\n## Verdict: APPROVE"), None);
 }
 
 #[test]

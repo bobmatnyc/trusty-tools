@@ -172,6 +172,63 @@ fn pr_10724_prose_mentioning_block_is_ignored() {
     assert!(gh.merged(), "{:?}", gh.seen.borrow());
 }
 
+/// FAILS BEFORE the #10724 tolerant parser: a decorated BLOCK on the head
+/// merged, because only `## Verdict:` was read as a verdict.
+#[test]
+fn pr_10724_each_decorated_block_on_the_head_refuses() {
+    for line in [
+        "## Verdict: BLOCK",
+        "# Verdict: BLOCK",
+        "Verdict: BLOCK",
+        "**Verdict: BLOCK**",
+        "**Verdict:** BLOCK",
+        "## Verdict: **BLOCK**",
+        "```rust\nlet x = 1;\n## Verdict: BLOCK",
+    ] {
+        let gh = CriticGh::new(verdicts(&[], &[review(line, HEAD, "2026-11-01T10:00:00Z")]));
+        assert_eq!(
+            merge::run(&gh, &args()).expect("runs"),
+            EXIT_BLOCKED,
+            "{line:?}"
+        );
+        assert!(!gh.merged(), "{line:?}: {:?}", gh.seen.borrow());
+    }
+}
+
+/// A decorated BLOCK inside a closed code fence is still not a verdict (#10724).
+#[test]
+fn pr_10724_a_fenced_block_on_the_head_still_merges() {
+    for line in [
+        "```\n## Verdict: BLOCK\n```",
+        "```\n**Verdict:** BLOCK\n```",
+        "~~~\nVerdict: BLOCK\n~~~",
+    ] {
+        let gh = CriticGh::new(verdicts(&[], &[review(line, HEAD, "2026-11-01T10:00:00Z")]));
+        assert_eq!(merge::run(&gh, &args()).expect("runs"), EXIT_OK, "{line:?}");
+        assert!(gh.merged(), "{line:?}: {:?}", gh.seen.borrow());
+    }
+}
+
+/// FAILS BEFORE the #10724 head pin: `gh pr merge` was not told which head the
+/// verdict was assessed against, so a push between read and merge landed.
+#[test]
+fn pr_10724_the_merge_call_matches_the_assessed_head() {
+    let gh = CriticGh::new(verdicts(
+        &[],
+        &[review("## Verdict: APPROVE", HEAD, "2026-11-01T10:00:00Z")],
+    ));
+    assert_eq!(merge::run(&gh, &args()).expect("runs"), EXIT_OK);
+    let seen = gh.seen.borrow();
+    let merge_call = seen
+        .iter()
+        .find(|a| a.starts_with("pr merge"))
+        .expect("gh pr merge was called");
+    assert!(
+        merge_call.contains(&format!("--match-head-commit {HEAD}")),
+        "{merge_call}"
+    );
+}
+
 /// FAILS BEFORE #10724: an unreadable verdict set never merges silently.
 #[test]
 fn pr_10724_a_verdict_read_failure_refuses() {

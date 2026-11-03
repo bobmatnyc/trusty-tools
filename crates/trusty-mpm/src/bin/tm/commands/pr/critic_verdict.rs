@@ -144,7 +144,7 @@ pub(crate) fn read<R: GhRunner>(gh: &R, mut base: Vec<String>) -> anyhow::Result
 /// What: skips fenced lines; requires the trimmed line to start with
 /// `## Verdict:`, then exactly `APPROVE`, `WARN` or `BLOCK` ending at a
 /// non-letter. The sha is the 7-40 hex token after `pinned to `, if any.
-/// Test: `pr_10724_only_the_canonical_heading_is_a_verdict`,
+/// Test: `pr_10724_prose_and_fenced_lines_are_not_verdicts`,
 /// `pr_10724_a_pin_clause_is_parsed_from_the_verdict_line`.
 pub(crate) fn parse_verdict_line(body: &str) -> Option<(Verdict, Option<String>)> {
     let mut fenced = false;
