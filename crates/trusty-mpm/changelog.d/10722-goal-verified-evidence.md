@@ -1,0 +1,2 @@
+Fixed
+- The Session Manager goal store refuses to store or update a linked session as `Verified` without non-blank evidence, with a typed `VerifiedWithoutEvidence` error that leaves the goal unchanged (#10722). A state change now replaces the link's evidence instead of keeping the old one. Progress and the `Done` gate count a link only when it is `Verified` and carries evidence, so a goal persisted by an older build with an evidence-less `Verified` link reads that link as unverified on load and cannot close as `Done` through it.

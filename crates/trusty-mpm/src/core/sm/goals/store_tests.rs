@@ -684,11 +684,36 @@ async fn update_to_verified_without_evidence_is_rejected() {
             err.to_string().contains("evidence"),
             "error must name the missing evidence, got: {err}"
         );
+        assert!(
+            matches!(&err, SmGoalError::VerifiedWithoutEvidence { session_id, .. } if session_id == "s-0"),
+            "expected VerifiedWithoutEvidence, got {err:?}"
+        );
         let g = store.get(&id).expect("present");
         assert_eq!(g.sessions[0].state, SessionTaskState::Launched);
         assert_eq!(g.sessions[0].evidence, None);
         assert_eq!(g.progress, 0);
     }
+}
+
+/// Why: #10722 — `link` takes a whole [`SessionLink`] with public fields, so it
+/// is a second path that could store `Verified` without evidence.
+/// What: links a Verified link with no evidence, asserts the typed error and that
+/// the goal still has no links.
+/// Test: this is the test.
+#[tokio::test]
+async fn link_verified_without_evidence_is_rejected() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = store_with(palace, &dir);
+
+    let id = store.create("g", vec![]).await.expect("create").id;
+    let mut link = SessionLink::launched("s-0", "a");
+    link.state = SessionTaskState::Verified;
+    match store.link(&id, link).await {
+        Err(SmGoalError::VerifiedWithoutEvidence { .. }) => {}
+        other => panic!("expected VerifiedWithoutEvidence, got {other:?}"),
+    }
+    assert!(store.get(&id).expect("present").sessions.is_empty());
 }
 
 /// Why: #10722 — data persisted by an older build may hold a `Verified` link with
