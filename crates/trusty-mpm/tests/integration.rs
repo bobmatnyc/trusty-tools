@@ -77,6 +77,8 @@ mod tm_architect_verbs;
 mod tm_fleet;
 mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
+// #10735: the claude.ai connectors are no longer blocked.
+mod connectors_allowed_10735;
 // #8454 S2: the trust anchors through the egress hook, pm-guard off.
 mod tm_hook_egress_anchor_8454;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
