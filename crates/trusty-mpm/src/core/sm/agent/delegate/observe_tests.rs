@@ -464,3 +464,52 @@ fn red_then_green_is_test_evidence() {
         Some("tests pass: test result: ok. 4 passed; 0 failed")
     );
 }
+
+/// Why: #10721 delta critic H1 — a failed `gh pr create` after `git push` must not
+/// verify through the push's unnumbered `pull/new/<branch>` compare URL.
+/// What: the critic's pane; asserts no evidence.
+/// Test: this is the test.
+#[test]
+fn failed_create_after_push_compare_url_is_not_verified() {
+    let pane = "⏺ Bash(git push -u origin HEAD && gh pr create --fill)\n\
+                \u{20}\u{20}⎿  remote: Create a pull request for 'f' on GitHub by visiting:\n\
+                \u{20}\u{20}   remote:      https://github.com/acme/repo/pull/new/f\n\
+                \u{20}\u{20}   pull request create failed: GraphQL: No commits between main and f";
+    assert_eq!(scan_evidence(pane), None);
+}
+
+/// Why: #10721 delta critic H2 (input A) — narration that shows a `gh pr create`
+/// command line is not an invocation; only a `$ ` prompt marks a shell command.
+/// What: the critic's narration pane; asserts no evidence.
+/// Test: this is the test.
+#[test]
+fn narrated_gh_command_is_not_an_invocation() {
+    let pane = "⏺ gh is not authenticated, so I could not open the PR. Run:\n\
+                \n\
+                \u{20}\u{20}gh pr create --fill\n\
+                \n\
+                \u{20}\u{20}Related: https://github.com/acme/repo/pull/40";
+    assert_eq!(scan_evidence(pane), None);
+}
+
+/// Why: #10721 delta critic H2 (input B) — `Bash(` inside prose is not a Bash
+/// step, and an invocation line that reports a failure proves nothing.
+/// What: the critic's prose pane, and the same prose with flags inside the
+/// `Bash(…)` mention; asserts no evidence for either.
+/// Test: this is the test.
+#[test]
+fn bash_mentioned_in_prose_is_not_an_invocation() {
+    let wrong: Vec<_> = [
+        "⏺ The Bash(gh pr create) call errored; see\n\
+         \u{20}\u{20}https://github.com/o/r/pull/3",
+        "⏺ The Bash(gh pr create --fill) call errored; see\n\
+         \u{20}\u{20}https://github.com/o/r/pull/3",
+    ]
+    .into_iter()
+    .filter_map(|p| scan_evidence(p).map(|ev| (p, ev)))
+    .collect();
+    assert!(
+        wrong.is_empty(),
+        "prose verified as an invocation: {wrong:#?}"
+    );
+}
