@@ -57,17 +57,26 @@ fn tm_tui_opens_on_the_console_home_screen() {
     assert_eq!(tui_entry(true), TuiEntry::SinglePane);
 }
 
+/// The test that fails without #10476: Search used to be first and selected.
 #[test]
-fn roster_matches_the_console_order() {
+fn home_opens_with_mpm_first_and_selected() {
+    assert_eq!(ServiceId::ALL[0], ServiceId::Mpm);
+    let state = HomeState::default();
+    assert_eq!(state.selected_id(), ServiceId::Mpm);
+    assert_eq!(state.tiles[0].0, ServiceId::Mpm, "MPM tile renders first");
+}
+
+#[test]
+fn roster_lists_mpm_first_then_the_console_order() {
     let ids: Vec<&str> = ServiceId::ALL.iter().map(|s| s.id()).collect();
     assert_eq!(
         ids,
         [
+            "trusty-mpm",
             "trusty-search",
             "trusty-memory",
             "trusty-analyze",
             "trusty-review",
-            "trusty-mpm",
             "trusty-agents",
             "trusty-events",
             "trusty-console",
@@ -104,6 +113,7 @@ fn enter_on_mpm_opens_projects() {
 #[test]
 fn enter_on_search_opens_its_view_and_esc_returns() {
     let mut state = HomeState::default();
+    select(&mut state, ServiceId::Search);
     up(&mut state, ServiceId::Search);
     let action = handle_key(&mut state, key(KeyCode::Enter), Instant::now());
     assert_eq!(action, Some(HomeAction::FetchMetrics(ServiceId::Search)));
