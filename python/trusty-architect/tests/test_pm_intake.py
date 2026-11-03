@@ -114,7 +114,7 @@ def test_pm_notify_appends_one_valid_line(tmp_path):
     r = subprocess.run([os.path.join(HERE, "pm-notify.sh"), "--kind", "head", "--session", "tm-a",
                         "--pr", "7", "--head", "abcdef1", "ready", "for", "review"],
                        capture_output=True, text=True, env=env)
-    assert (r.returncode, r.stdout.strip()) == (0, "queued")
+    assert (r.returncode, r.stdout.split()[0]) == (3, "queued-local")  # #10723: appended, unconfirmed
     (line,) = (tmp_path / "pm-messages.jsonl").read_text().splitlines()
     m = json.loads(line)
     assert (m["kind"], m["pr"], m["head"], m["text"]) == ("head", 7, "abcdef1", "ready for review")
