@@ -12,13 +12,16 @@
 //! (`verified_is_owned_by_verify`); a `supersedes`/`superseded_by` value
 //! that is not a bundle-absolute concept link (`InvalidId`); a content change
 //! to a deprecated concept (`deprecated`); a later `stale_after` on a
-//! human-reviewed concept from a non-`human:` actor
-//! (`stale_after_extension`). On a content change it applies §2.10: a
+//! human-reviewed concept unless the actor is `human:` and the call carries
+//! a [`HumanConfirmation`] (`stale_after_extension`). On a content change it applies §2.10: a
 //! malformed `verified`/`generated` moves to its `legacy_` key with its raw
 //! bytes, every frontmatter event moves to the record, `verified` leaves the
 //! frontmatter, and `generated` becomes `{by, at: now}`. Then the shared
 //! strict write runs, the record is appended and `log.md` gains one entry.
-//! [`Bundle::verify`] binds a new event to the hash the verifier saw.
+//! [`Bundle::verify`] binds a new event to the hash the verifier saw, and
+//! writes a `human:` event only with a [`HumanConfirmation`] (§2.4).
+//! #10746: an `Actor::Human` value alone is never a confirmation; only the
+//! `_confirmed` entry points accept one.
 //! Order (#10746, §4.4, §4.11): every refusal, the render, and the
 //! confinement of the record and `log.md` paths run first, with no file
 //! changed. Then the record lines are appended, then the concept is renamed
@@ -27,7 +30,8 @@
 //! no event is lost. A failure writing `log.md` after the rename fails
 //! closed: the call returns the error, never `Ok`. Residual risk until
 //! slice S5's operation journal: a crash after the rename leaves `log.md`
-//! without the entry.
+//! without the entry, and a rename failure after the record append can
+//! leave the concept reading Unverified until the put is retried.
 //! Test: `a1_put_never_replaces_an_existing_file_with_a_new_concept`,
 //! `a1_put_refuses_a_stale_write`, `a2_strict_check_runs_on_rendered_values`,
 //! `a3_put_preserves_the_target_file_mode`,
@@ -38,7 +42,9 @@
 //! `c125_malformed_owned_values_move_to_legacy_keys`,
 //! `c146_stale_after_extension_needs_a_human_or_a_verify`,
 //! `unwritable_record_keeps_the_legacy_event_and_the_concept`,
-//! `put_and_verify_refuse_a_symlinked_log_with_no_file_changed`.
+//! `put_and_verify_refuse_a_symlinked_log_with_no_file_changed`,
+//! `human_actor_without_confirmation_cannot_extend_a_review`,
+//! `human_verify_without_confirmation_is_refused`.
 
 use chrono::{DateTime, FixedOffset};
 use serde_yaml::{Mapping, Value};
@@ -57,6 +63,33 @@ use crate::format::write::{
     PreparedWrite, WriteMode, WriteOutcome, check_not_stale, foreign_refusal, prepare_write,
     read_existing,
 };
+
+/// An explicit confirmation from the person a `human:` actor names
+/// (SPEC-OKF-01 §2.4).
+///
+/// Why: §2.4 accepts a `human:` verification, and a later `stale_after` on a
+/// human-reviewed concept, only with explicit human confirmation. Any caller
+/// can build an `Actor::Human`, so the actor alone never counts (#10746).
+/// What: a token with a private field, built only by
+/// [`HumanConfirmation::explicit`] and consumed by value by
+/// [`Bundle::put_confirmed`] and [`Bundle::verify_confirmed`]. Build it only
+/// where a person has just confirmed this one call, never from a default, a
+/// setting or model output. It is neither `Default` nor `Clone`, so one
+/// confirmation covers one call.
+/// Test: `c146_stale_after_extension_needs_a_human_or_a_verify`,
+/// `human_actor_without_confirmation_cannot_extend_a_review`,
+/// `human_verify_without_confirmation_is_refused`.
+#[derive(Debug)]
+pub struct HumanConfirmation {
+    _private: (),
+}
+
+impl HumanConfirmation {
+    /// The person named by the call's `human:` actor confirmed this call.
+    pub fn explicit() -> Self {
+        Self { _private: () }
+    }
+}
 
 /// What a `put` or `verify` did (SPEC-OKF-01 §4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,9 +229,9 @@ impl Bundle {
     ///
     /// Why/What: see the module doc. #10746: returns the write's findings
     /// beside the outcome (the §4.3 sketch returns the outcome only), because
-    /// criterion 125 needs the `legacy_value_moved` warnings. A `human:`
-    /// actor is taken as the caller's explicit confirmation (§2.4); the §4.3
-    /// signature carries no separate flag.
+    /// criterion 125 needs the `legacy_value_moved` warnings. #10746: this
+    /// call carries no human confirmation, so a `human:` actor here counts
+    /// as any other writer under §2.4; see [`Bundle::put_confirmed`].
     /// Test: see the module doc.
     pub fn put(
         &mut self,
@@ -207,7 +240,26 @@ impl Bundle {
         mode: WriteMode,
         now: DateTime<FixedOffset>,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
-        let (outcome, findings, _) = self.put_inner(c, &by, mode, &now, false)?;
+        let (outcome, findings, _) = self.put_inner(c, &by, false, mode, &now, false)?;
+        Ok((outcome, findings))
+    }
+
+    /// `put` with the explicit confirmation of the person `by` names (§2.4).
+    ///
+    /// Why/What: as [`Bundle::put`], except that a `human:` `by` may move
+    /// `stale_after` later on a human-reviewed concept. With any other actor
+    /// the confirmation changes nothing.
+    /// Test: `c146_stale_after_extension_needs_a_human_or_a_verify`.
+    pub fn put_confirmed(
+        &mut self,
+        c: Concept,
+        by: Actor,
+        confirmation: HumanConfirmation,
+        mode: WriteMode,
+        now: DateTime<FixedOffset>,
+    ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
+        let HumanConfirmation { _private: () } = confirmation;
+        let (outcome, findings, _) = self.put_inner(c, &by, true, mode, &now, false)?;
         Ok((outcome, findings))
     }
 
@@ -215,11 +267,13 @@ impl Bundle {
     /// `move_concept` logs once for the whole move. `link_rewrite` marks a
     /// `move_concept` link rewrite, which is not a caller edit, so a
     /// deprecated concept still takes it (§4.8 refuses caller edits only).
+    /// `confirmed` is true only under a [`HumanConfirmation`].
     /// Returns the outcome, the findings and the target ID.
     pub(crate) fn put_inner(
         &mut self,
         c: Concept,
         by: &Actor,
+        confirmed: bool,
         mode: WriteMode,
         now: &DateTime<FixedOffset>,
         link_rewrite: bool,
@@ -254,8 +308,9 @@ impl Bundle {
             if content_changed && deprecated && !link_rewrite {
                 return Err(conflict(&id, "deprecated"));
             }
+            // #10746: §2.4 needs a `human:` actor AND explicit confirmation.
             if extends_stale_after(o, &next)
-                && !matches!(by, Actor::Human(_))
+                && !(confirmed && matches!(by, Actor::Human(_)))
                 && matches!(
                     record::state_for(self, &id, o)?,
                     record::VerificationState::Verified { human: true, .. }
@@ -328,7 +383,10 @@ impl Bundle {
     ///
     /// Why: a person must not verify a revision that changed after they read
     /// it, and only a record event bound to the current hash counts.
-    /// What: `seen` must equal the current content hash, else
+    /// What: a `human:` `v.by` is refused with
+    /// `Conflict { reason: "human_not_confirmed" }` and nothing is written;
+    /// it needs [`Bundle::verify_confirmed`] (§2.4, #10746). `seen` must
+    /// equal the current content hash, else
     /// `Conflict { reason: "stale_verify_hash" }` and nothing is written. A
     /// malformed `verified` first moves to `legacy_verified` (criterion 125;
     /// `Conflict` when that key exists). The event `{by, at}` is appended to
@@ -340,13 +398,43 @@ impl Bundle {
     /// unchanged. #10746: returns findings beside the outcome, as `put`.
     /// Test: `c35_verify_with_stale_hash_is_conflict_and_writes_nothing`,
     /// `c125_malformed_owned_values_move_to_legacy_keys`,
-    /// `c146_stale_after_extension_needs_a_human_or_a_verify`.
+    /// `c146_stale_after_extension_needs_a_human_or_a_verify`,
+    /// `human_verify_without_confirmation_is_refused`.
     pub fn verify(
         &mut self,
         id: &ConceptId,
         v: Verification,
         seen: &ContentHash,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
+        self.verify_inner(id, v, seen, false)
+    }
+
+    /// `verify` with the explicit confirmation of the person `v.by` names:
+    /// the one path that writes a `human:` event (§2.4).
+    ///
+    /// Test: `c146_stale_after_extension_needs_a_human_or_a_verify`.
+    pub fn verify_confirmed(
+        &mut self,
+        id: &ConceptId,
+        v: Verification,
+        seen: &ContentHash,
+        confirmation: HumanConfirmation,
+    ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
+        let HumanConfirmation { _private: () } = confirmation;
+        self.verify_inner(id, v, seen, true)
+    }
+
+    fn verify_inner(
+        &mut self,
+        id: &ConceptId,
+        v: Verification,
+        seen: &ContentHash,
+        confirmed: bool,
+    ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
+        // #10746: a `human:` actor alone is not explicit confirmation (§2.4).
+        if matches!(v.by, Actor::Human(_)) && !confirmed {
+            return Err(conflict(id, "human_not_confirmed"));
+        }
         let c = self.get(id)?;
         if &content_hash(&c) != seen {
             return Err(conflict(id, "stale_verify_hash"));

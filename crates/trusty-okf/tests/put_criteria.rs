@@ -9,7 +9,7 @@ use std::path::Path;
 use chrono::{DateTime, FixedOffset};
 use serde_yaml::{Mapping, Value};
 use trusty_okf::OkfError;
-use trusty_okf::bundle::{Bundle, PutOutcome, VerificationState};
+use trusty_okf::bundle::{Bundle, HumanConfirmation, PutOutcome, VerificationState};
 use trusty_okf::format::v02::normalize_v02;
 use trusty_okf::format::{
     Actor, Concept, ConceptId, Field, FindingKind, Severity, TrustTier, Verification, WriteMode,
@@ -30,6 +30,11 @@ fn id(s: &str) -> ConceptId {
 
 fn process() -> Actor {
     Actor::Process("ingest".into())
+}
+
+/// #10746 (§2.4): the explicit confirmation a `human:` write needs.
+fn confirm() -> HumanConfirmation {
+    HumanConfirmation::explicit()
 }
 
 fn setup(text: &str) -> (tempfile::TempDir, Bundle) {
@@ -66,7 +71,7 @@ fn verified_bundle() -> (tempfile::TempDir, Bundle) {
     let (tmp, mut b) = setup(VERIFIED);
     let seen = content_hash(&b.get(&id("a")).unwrap());
     let v = verification(Actor::Human("jo".into()), "2026-11-01T09:00:00Z");
-    b.verify(&id("a"), v, &seen).unwrap();
+    b.verify_confirmed(&id("a"), v, &seen, confirm()).unwrap();
     assert_eq!(
         b.verification_state(&id("a")).unwrap(),
         VerificationState::Verified {
@@ -194,7 +199,7 @@ fn c35_verify_with_stale_hash_is_conflict_and_writes_nothing() {
     let stale = content_hash(&other);
     let v = verification(Actor::Human("jo".into()), "2026-11-01T09:00:00Z");
     assert_eq!(
-        conflict_reason(b.verify(&id("a"), v, &stale)),
+        conflict_reason(b.verify_confirmed(&id("a"), v, &stale, confirm())),
         "stale_verify_hash"
     );
     assert_eq!(read(tmp.path()), VERIFIED);
@@ -266,7 +271,7 @@ fn c125_malformed_owned_values_move_to_legacy_keys() {
     let (tmp, mut b) = setup("---\ntype: Note\nverified: \"yes\"\n---\nBody\n");
     let seen = content_hash(&b.get(&id("a")).unwrap());
     let v = verification(Actor::Human("jo".into()), "2026-11-02T00:00:00Z");
-    let (_, findings) = b.verify(&id("a"), v, &seen).unwrap();
+    let (_, findings) = b.verify_confirmed(&id("a"), v, &seen, confirm()).unwrap();
     assert!(
         findings
             .iter()
@@ -292,7 +297,8 @@ fn c125_malformed_owned_values_move_to_legacy_keys() {
 /// Criterion 146: on a concept with a current human verification, a
 /// `process:` actor moving `stale_after` later gets
 /// `Conflict { reason: "stale_after_extension" }` with the file unchanged;
-/// moving it earlier succeeds; a `human:` actor may move it later; a
+/// moving it earlier succeeds; a `human:` actor with explicit confirmation
+/// (`put_confirmed`, #10746) may move it later; a
 /// `verify` of the current revision with `Verification.stale_after` moves it
 /// without projecting it into `verified[]`; the same `verify` with a stale
 /// `seen` is a `Conflict` with the file unchanged.
@@ -302,18 +308,31 @@ fn c146_stale_after_extension_needs_a_human_or_a_verify() {
     let (tmp, mut b) = setup(text);
     let seen = content_hash(&b.get(&id("a")).unwrap());
     let v = verification(Actor::Human("jo".into()), "2026-11-01T00:00:00Z");
-    b.verify(&id("a"), v, &seen).unwrap();
-    let set_stale = |b: &mut Bundle, by: Actor, value: &str| {
+    b.verify_confirmed(&id("a"), v, &seen, confirm()).unwrap();
+    let stale = |b: &Bundle, value: &str| {
         let mut c = b.get(&id("a")).unwrap();
         c.set("stale_after", Value::String(value.into()));
-        b.put(c, by, WriteMode::default(), now())
+        c
     };
     let before = read(tmp.path());
-    let got = set_stale(&mut b, process(), "2027-01-01T00:00:00Z");
+    let got = b.put(
+        stale(&b, "2027-01-01T00:00:00Z"),
+        process(),
+        WriteMode::default(),
+        now(),
+    );
     assert_eq!(conflict_reason(got), "stale_after_extension");
     assert_eq!(read(tmp.path()), before);
-    set_stale(&mut b, process(), "2026-11-20T00:00:00Z").unwrap();
-    set_stale(&mut b, Actor::Human("jo".into()), "2027-02-01T00:00:00Z").unwrap();
+    let c = stale(&b, "2026-11-20T00:00:00Z");
+    b.put(c, process(), WriteMode::default(), now()).unwrap();
+    let c = stale(&b, "2027-02-01T00:00:00Z");
+    let human = Actor::Human("jo".into());
+    b.put_confirmed(c, human, confirm(), WriteMode::default(), now())
+        .unwrap();
+    assert_eq!(
+        b.get(&id("a")).unwrap().get("stale_after"),
+        Some(&Value::String("2027-02-01T00:00:00Z".into()))
+    );
 
     let seen = content_hash(&b.get(&id("a")).unwrap());
     let mut v = verification(process(), "2026-11-03T00:00:00Z");
@@ -542,7 +561,7 @@ fn unwritable_record_keeps_the_legacy_event_and_the_concept() {
 
     let seen = content_hash(&kept);
     let v = verification(Actor::Human("jo".into()), "2026-11-01T09:00:00Z");
-    let got = b.verify(&id("a"), v, &seen);
+    let got = b.verify_confirmed(&id("a"), v, &seen, confirm());
     assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
     assert_eq!(snapshot(tmp.path()), before, "verify changed no file");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -568,7 +587,71 @@ fn put_and_verify_refuse_a_symlinked_log_with_no_file_changed() {
 
     let seen = content_hash(&b.get(&id("a")).unwrap());
     let v = verification(Actor::Human("jo".into()), "2026-11-01T09:00:00Z");
-    let got = b.verify(&id("a"), v, &seen);
+    let got = b.verify_confirmed(&id("a"), v, &seen, confirm());
     assert!(matches!(got, Err(OkfError::PathEscape(_))), "{got:?}");
     assert_eq!(snapshot(r), before, "verify changed no file");
+}
+
+/// A concept a person reviewed, as found on disk: a `human:jo` event in
+/// frontmatter and the same event in the record, bound to the current hash.
+const REVIEWED: &str = "---\ntype: Note\nstale_after: 2026-12-01T00:00:00Z\nverified:\n  - { by: human:jo, at: 2026-11-01T00:00:00Z }\n---\nBody\n";
+
+fn reviewed_on_disk() -> (tempfile::TempDir, Bundle) {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.md"), REVIEWED).unwrap();
+    let hash = content_hash(&parse_concept(id("a"), REVIEWED).unwrap().0);
+    let dir = tmp.path().join("_sources/verification");
+    std::fs::create_dir_all(&dir).unwrap();
+    let line = format!(
+        "{{\"by\":\"human:jo\",\"at\":\"2026-11-01T00:00:00Z\",\"hash\":\"{}\"}}\n",
+        hash.as_str()
+    );
+    std::fs::write(dir.join("a.jsonl"), line).unwrap();
+    let b = Bundle::open(tmp.path()).unwrap().0;
+    assert_eq!(
+        b.verification_state(&id("a")).unwrap(),
+        VerificationState::Verified {
+            human: true,
+            events: 1,
+            history: 0
+        }
+    );
+    (tmp, b)
+}
+
+/// #10746 (§2.4): a `human:` actor alone is not an explicit confirmation.
+/// Plain `put` with `Actor::Human` that moves `stale_after` later on a
+/// human-reviewed concept is refused with `stale_after_extension`, and no
+/// file in the bundle changes.
+#[test]
+fn human_actor_without_confirmation_cannot_extend_a_review() {
+    let (tmp, mut b) = reviewed_on_disk();
+    let before = snapshot(tmp.path());
+    let mut c = b.get(&id("a")).unwrap();
+    c.set("stale_after", Value::String("2027-06-01T00:00:00Z".into()));
+    let got = b.put(c, Actor::Human("jo".into()), WriteMode::default(), now());
+    assert_eq!(conflict_reason(got), "stale_after_extension");
+    assert_eq!(snapshot(tmp.path()), before, "no file changed");
+}
+
+/// #10746 (§2.4): plain `verify` with a `human:` actor and no explicit
+/// confirmation is refused with `human_not_confirmed`; no file changes and
+/// the concept stays Unverified. A `process:` actor still verifies.
+#[test]
+fn human_verify_without_confirmation_is_refused() {
+    let (tmp, mut b) = setup("---\ntype: Note\n---\nBody\n");
+    let before = snapshot(tmp.path());
+    let seen = content_hash(&b.get(&id("a")).unwrap());
+    let v = verification(Actor::Human("jo".into()), "2026-11-01T09:00:00Z");
+    assert_eq!(
+        conflict_reason(b.verify(&id("a"), v, &seen)),
+        "human_not_confirmed"
+    );
+    assert_eq!(snapshot(tmp.path()), before, "no file changed");
+    assert_eq!(
+        b.verification_state(&id("a")).unwrap(),
+        VerificationState::Unverified { history: 0 }
+    );
+    let v = verification(process(), "2026-11-01T09:00:00Z");
+    b.verify(&id("a"), v, &seen).unwrap();
 }

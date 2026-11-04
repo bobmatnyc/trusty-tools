@@ -61,7 +61,7 @@ pub enum OkfError {
     /// `stale_verify_hash`, `stale_after_extension`, `deprecated`,
     /// `verified_is_owned_by_verify`, `legacy_verified_exists`,
     /// `legacy_generated_exists`, `target_exists`,
-    /// `verification_record_exists`.
+    /// `verification_record_exists`, `human_not_confirmed` (§2.4).
     #[error("conflict on {id}: {reason}")]
     Conflict {
         /// The concept the write targets.

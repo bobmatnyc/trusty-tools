@@ -39,7 +39,7 @@ pub(crate) mod walk;
 
 pub use index_md::IndexReport;
 pub use moves::{MoveReport, UnmovedLink};
-pub use put::PutOutcome;
+pub use put::{HumanConfirmation, PutOutcome};
 pub use record::{VerificationEvent, VerificationState};
 
 /// One OKF bundle, opened from its root directory.
