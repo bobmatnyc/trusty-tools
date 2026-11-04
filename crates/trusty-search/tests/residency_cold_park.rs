@@ -13,7 +13,8 @@
 //!
 //! Test: `cargo test -p trusty-search --test integration residency_cold_park::`
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -102,6 +103,68 @@ async fn reload_via_cold_path(
     .expect("reload via cold path must succeed")
 }
 
+/// Table name to that table's `(key, value)` rows, as raw bytes.
+type CorpusRows = BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>;
+
+/// Every row of every corpus table, keyed by table name, as raw bytes (#10738).
+///
+/// Why: a park must write nothing to the corpus. The redb file length is not
+/// evidence of that: redb trims free tail pages when the last handle closes,
+/// and how much it trims depends on earlier commits, so the length moves with
+/// no write at all. The rows are what a write would change.
+/// What: copies `redb_path` to `copy_path` and reads the copy, because the
+/// live store holds redb's file lock. Reads each table as `&str -> &[u8]`,
+/// `u64 -> &[u8]` or `&str -> u64` and panics on any other shape or on a
+/// multimap table, so a table it cannot read never compares equal by omission.
+fn corpus_rows(redb_path: &Path, copy_path: &Path) -> CorpusRows {
+    use redb::{ReadableDatabase, ReadableTable, TableHandle};
+    std::fs::copy(redb_path, copy_path).expect("copy corpus redb");
+    let db = redb::Database::open(copy_path).expect("open corpus redb copy");
+    let txn = db.begin_read().expect("begin corpus read txn");
+    assert_eq!(
+        txn.list_multimap_tables()
+            .expect("list multimap tables")
+            .count(),
+        0,
+        "corpus_rows reads no multimap table"
+    );
+    macro_rules! rows_as {
+        ($name:expr, $k:ty, $v:ty, $ek:expr, $ev:expr) => {
+            match txn.open_table(redb::TableDefinition::<$k, $v>::new($name)) {
+                Ok(t) => Some(
+                    t.iter()
+                        .expect("iterate corpus table")
+                        .map(|row| {
+                            let (k, v) = row.expect("read corpus row");
+                            ($ek(k.value()), $ev(v.value()))
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                Err(redb::TableError::TableTypeMismatch { .. }) => None,
+                Err(e) => panic!("open corpus table '{}': {e}", $name),
+            }
+        };
+    }
+    let mut dump = BTreeMap::new();
+    for handle in txn.list_tables().expect("list corpus tables") {
+        let name = handle.name().to_string();
+        let str_key = |k: &str| k.as_bytes().to_vec();
+        let u64_key = |k: u64| k.to_le_bytes().to_vec();
+        let bytes_val = |v: &[u8]| v.to_vec();
+        let u64_val = |v: u64| v.to_le_bytes().to_vec();
+        let rows = rows_as!(name.as_str(), &str, &[u8], str_key, bytes_val)
+            .or_else(|| rows_as!(name.as_str(), u64, &[u8], u64_key, bytes_val))
+            .or_else(|| rows_as!(name.as_str(), &str, u64, str_key, u64_val))
+            .unwrap_or_else(|| panic!("corpus table '{name}' has a shape corpus_rows cannot read"));
+        dump.insert(name, rows);
+    }
+    assert!(
+        dump.get("chunks").is_some_and(|rows| !rows.is_empty()),
+        "the corpus snapshot must hold the seeded chunks, or the comparison proves nothing"
+    );
+    dump
+}
+
 /// Extract a stable, comparable projection of search results (chunk ids +
 /// content) so we can assert two searches returned identical data without
 /// depending on score-float equality.
@@ -159,7 +222,9 @@ async fn cold_park_then_reload_returns_identical_search_results() {
     let redb_path = corpus_redb_path_for_entry(&entry).unwrap();
     let hnsw_path = hnsw_path_for_entry(&entry).unwrap();
     assert!(redb_path.exists(), "corpus redb must exist before park");
-    let redb_size_before = std::fs::metadata(&redb_path).unwrap().len();
+    // #10738: compare rows, not file length — redb's close-time tail trim moves the length.
+    let snaps = tempfile::tempdir().unwrap();
+    let rows_before = corpus_rows(&redb_path, &snaps.path().join("before.redb"));
 
     // Park.
     let parked = cold_park_index(&id, &registry, &cold, entry.clone(), || false).await;
@@ -178,10 +243,11 @@ async fn cold_park_then_reload_returns_identical_search_results() {
         redb_path.exists(),
         "corpus redb must still exist after park — cold_park_index must never touch disk"
     );
+    // #10738: a park that wrote nothing leaves every corpus row as it was.
     assert_eq!(
-        std::fs::metadata(&redb_path).unwrap().len(),
-        redb_size_before,
-        "corpus redb must be byte-identical after a pure in-memory detach"
+        corpus_rows(&redb_path, &snaps.path().join("after.redb")),
+        rows_before,
+        "corpus redb rows must be unchanged after a pure in-memory detach"
     );
     // HNSW snapshot is optional for a lexical-stage-only mock-embedded index;
     // only assert on it if the pipeline actually wrote one.
@@ -247,12 +313,14 @@ async fn park_reload_park_cycle_is_lossless() {
 
     // Second park (on the freshly-reloaded handle) → reload again.
     let redb_path = corpus_redb_path_for_entry(&entry).unwrap();
-    let size_before_second_park = std::fs::metadata(&redb_path).unwrap().len();
+    // #10738: compare rows, not file length — redb's close-time tail trim moves the length.
+    let snaps = tempfile::tempdir().unwrap();
+    let rows_before_second_park = corpus_rows(&redb_path, &snaps.path().join("before.redb"));
     assert!(cold_park_index(&id, &registry, &cold, entry.clone(), || false).await);
     assert_eq!(
-        std::fs::metadata(&redb_path).unwrap().len(),
-        size_before_second_park,
-        "second park must also leave the corpus byte-identical"
+        corpus_rows(&redb_path, &snaps.path().join("after.redb")),
+        rows_before_second_park,
+        "second park must also leave every corpus row unchanged"
     );
     let reloaded_2 =
         reload_via_cold_path(&id, &registry, &cold, entry.clone(), Arc::clone(&embedder)).await;
