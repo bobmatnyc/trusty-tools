@@ -12,10 +12,12 @@
 //! `<data dir>/trusty-agents/okf-index-state`. [`KbStore::index_view`] reads
 //! the trusty-okf backlog for the tree, and [`KbStore::okg_index_coverage_of`]
 //! folds it per source into [`IndexCoverage`]. Read-only, no network: the
-//! live identity is reported unreadable, so recorded bytes decide (§4.9.2
-//! rule 4) and nothing here can read Searchable.
+//! live identity is unknown offline, so recorded bytes decide which work is
+//! owed, and settled paths count as `unconfirmed`, never `synced` (§4.9.2
+//! rules 4-5). Only a feed pass that ended Searchable confirms them.
 //! Test: `coverage_is_pending_until_this_machines_daemon_confirms`,
-//! `two_state_dirs_over_one_tree_keep_separate_state`.
+//! `two_state_dirs_over_one_tree_keep_separate_state`,
+//! `confirmed_put_and_probe_never_read_synced_without_an_identity`.
 //!
 //! # Spec References
 //! - SPEC-OKF-01 §4.9.1, §4.9.2 and §5.4, held in the trusty-okf project
@@ -102,29 +104,50 @@ impl KbStore {
         )?))
     }
 
-    /// One source's index coverage on this machine (#3892, #10746 S12).
+    /// One source's index coverage on this machine, read offline (#3892,
+    /// #10746 S12).
     ///
     /// Why: "ingested" and "findable" are two claims; the second must come
-    /// from this machine's own index state, never from the synced tree.
-    /// What: for each ledger row, a live item is `synced` when the backlog
-    /// owes it nothing (pushed at its current bytes and probed) and
-    /// `pending` otherwise; a tombstoned item is `synced` once its
-    /// withdrawal is confirmed and `pending` while a remove is owed. A live
-    /// row whose file is missing or unreadable is `pending` and noted. With
-    /// no `view` (no bound index), every row is `pending`.
+    /// from this machine's own index state, never from the synced tree. An
+    /// offline read knows no index identity, so by SPEC-OKF-01 §4.9.2 rules
+    /// 4-5 it never reports `synced`.
+    /// What: [`KbStore::source_index_state`] with the identity unconfirmed.
     /// Test: `coverage_is_pending_until_this_machines_daemon_confirms`,
-    /// `sources_report_index_coverage`.
+    /// `confirmed_put_and_probe_never_read_synced_without_an_identity`.
     pub fn okg_index_coverage_of(
         &self,
         spec: &SourceSpec,
         view: Option<&IndexBacklog>,
     ) -> anyhow::Result<IndexCoverage> {
+        Ok(self.source_index_state(spec, view, false)?.coverage)
+    }
+
+    /// One source's coverage, its paths and the paths that block its
+    /// publication.
+    ///
+    /// What: for each ledger row, a Push or Remove task, or a live file
+    /// that is missing or unreadable, is `pending` and blocks publication; a
+    /// Probe task is `pending` only. A row the backlog owes nothing is
+    /// `synced` when `identity_confirmed` (the pass read a known, matching
+    /// index identity and ended Searchable) and `unconfirmed` otherwise
+    /// (§4.9.2 rules 4-5). With no `view` (no bound index), every row is
+    /// `pending`. `identity_confirmed` is never true for an offline read.
+    /// Test: `confirmed_put_and_probe_never_read_synced_without_an_identity`,
+    /// `unrelated_unreadable_concept_does_not_block_publication`.
+    pub(crate) fn source_index_state(
+        &self,
+        spec: &SourceSpec,
+        view: Option<&IndexBacklog>,
+        identity_confirmed: bool,
+    ) -> anyhow::Result<SourceIndexState> {
         let ledger = Ledger::load(&self.root, &spec.id)?;
-        let mut cov = IndexCoverage::default();
+        let mut out = SourceIndexState::default();
+        let cov = &mut out.coverage;
         for record in ledger.records() {
             let slug = record.entity.rsplit('/').next().unwrap_or(&record.entity);
             let path = self.entity_path(&spec.collection, slug)?;
             let rel = self.rel(&path).replace('\\', "/");
+            out.paths.insert(rel.clone());
             let live = record.status == ItemStatus::Ingested;
             let unreadable = view.and_then(|v| v.unreadable.iter().find(|u| u.path == rel));
             if live && (!path.is_file() || unreadable.is_some()) {
@@ -136,24 +159,55 @@ impl KbStore {
                     path.display()
                 ));
                 cov.pending += 1;
+                out.blocking.push(rel);
                 continue;
             }
             let Some(view) = view else {
                 cov.pending += 1;
+                out.blocking.push(rel);
                 continue;
             };
-            match view.task(&rel) {
-                Some(TaskOp::Recheck) => cov.synced += 1,
-                Some(_) => cov.pending += 1,
+            let settled = match view.task(&rel) {
+                Some(TaskOp::Recheck) => true,
+                Some(TaskOp::Probe) => {
+                    cov.pending += 1;
+                    false
+                }
+                Some(_) => {
+                    cov.pending += 1;
+                    out.blocking.push(rel);
+                    false
+                }
                 // A tombstoned row with no file and no record owes nothing.
-                None if live || path.is_file() => cov.synced += 1,
-                None => {}
+                None => live || path.is_file(),
+            };
+            if settled && identity_confirmed {
+                cov.synced += 1;
+            } else if settled {
+                cov.unconfirmed += 1;
             }
         }
-        Ok(cov)
+        Ok(out)
     }
+}
+
+/// One source's index state after a read (#10746 S12).
+#[derive(Debug, Default)]
+pub(crate) struct SourceIndexState {
+    /// The caller-facing counts.
+    pub(crate) coverage: IndexCoverage,
+    /// Every bundle-relative path this source's ledger names.
+    pub(crate) paths: std::collections::BTreeSet<String>,
+    /// Paths still owed a push or a remove, or unreadable.
+    pub(crate) blocking: Vec<String>,
 }
 
 #[cfg(test)]
 #[path = "index_state_tests.rs"]
 mod tests;
+
+// #10746 S12 fix round: tests of the `unconfirmed` count, kept apart so the
+// red-proof run can pair the older code with `index_state_tests.rs`.
+#[cfg(test)]
+#[path = "index_state_confirm_tests.rs"]
+mod confirm_tests;

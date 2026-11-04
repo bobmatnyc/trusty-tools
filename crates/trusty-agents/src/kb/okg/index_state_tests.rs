@@ -14,7 +14,7 @@ use trusty_okf::profile::Profile;
 use trusty_okf::state::{ByteHash, IndexJournal, IndexRecord};
 
 /// A tree with two ingested doc-store entities, and its source spec.
-fn fixture() -> (tempfile::TempDir, KbStore, SourceSpec) {
+pub(super) fn fixture() -> (tempfile::TempDir, KbStore, SourceSpec) {
     let tmp = tempfile::tempdir().unwrap();
     let store = KbStore::new(tmp.path().join("kb"), Profile::default_profile());
     let corpus = tmp.path().join("corpus");
@@ -42,7 +42,7 @@ fn fixture() -> (tempfile::TempDir, KbStore, SourceSpec) {
 }
 
 /// Record what a confirmed put and a passed probe of `path` would append.
-fn confirm(store: &KbStore, state: &IndexStateRef, path: &str) {
+pub(super) fn confirm(store: &KbStore, state: &IndexStateRef, path: &str) {
     let bytes = ByteHash::of(&std::fs::read(store.root.join(path)).unwrap());
     let journal = IndexJournal::open(&state.dir, &store.root, &state.index_id).unwrap();
     journal
@@ -98,8 +98,8 @@ fn machine_local_state_lives_in_the_data_area() {
 
 /// Why: §4.9.1 rule 3 and §1.1 item 13 — nothing is synced until this
 /// machine's daemon confirmed the bytes, and an edit re-enters the backlog.
-/// What: a fresh ingest is (0, 2); a confirmed put and probe of one entity is
-/// (1, 1); editing it is (0, 2) again; a state directory inside the tree is
+/// What: as (synced, pending), a fresh ingest is (0, 2); a confirmed put
+/// and probe of one entity is (0, 1), never synced without an identity; editing it is (0, 2) again; a state directory inside the tree is
 /// refused. Test: self-contained.
 #[test]
 fn coverage_is_pending_until_this_machines_daemon_confirms() {
@@ -107,7 +107,8 @@ fn coverage_is_pending_until_this_machines_daemon_confirms() {
     let state = IndexStateRef::new(tmp.path().join("state"), "idx");
     assert_eq!(coverage(&store, &spec, &state), (0, 2));
     confirm(&store, &state, "notes/one.md");
-    assert_eq!(coverage(&store, &spec, &state), (1, 1));
+    // #10746 S12 fix round: confirmed but no identity, so not synced.
+    assert_eq!(coverage(&store, &spec, &state), (0, 1));
     std::fs::write(store.root.join("notes/one.md"), "edited by hand").unwrap();
     assert_eq!(
         coverage(&store, &spec, &state),
@@ -133,8 +134,8 @@ fn coverage_is_pending_until_this_machines_daemon_confirms() {
 
 /// Why: the r4 BLOCKER 5 defect — two machines share one synced tree, and
 /// neither may read the other's confirmations.
-/// What: state A confirms both entities; state B over the same tree still
-/// reads (0, 2), and A's journal sits outside the tree. Test: self-contained.
+/// What: state A confirms both entities and owes nothing (0, 0); state B
+/// over the same tree still reads (0, 2), and A's journal sits outside the tree. Test: self-contained.
 #[test]
 fn two_state_dirs_over_one_tree_keep_separate_state() {
     let (tmp, store, spec) = fixture();
@@ -142,7 +143,7 @@ fn two_state_dirs_over_one_tree_keep_separate_state() {
     let b = IndexStateRef::new(tmp.path().join("machine-b"), "idx");
     confirm(&store, &a, "notes/one.md");
     confirm(&store, &a, "notes/two.md");
-    assert_eq!(coverage(&store, &spec, &a), (2, 0));
+    assert_eq!(coverage(&store, &spec, &a), (0, 0), "settled, not synced");
     assert_eq!(
         coverage(&store, &spec, &b),
         (0, 2),
@@ -151,4 +152,23 @@ fn two_state_dirs_over_one_tree_keep_separate_state() {
     let journal_a = IndexJournal::open(&a.dir, &store.root, "idx").unwrap();
     assert!(journal_a.path().starts_with(tmp.path().join("machine-a")));
     assert!(!journal_a.path().starts_with(&store.root));
+}
+
+/// Why: #10746 S12 fix round, HIGH — SPEC-OKF-01 §4.9.2 rule 4 (an
+/// unreadable identity reads Pending) and rule 5 (no surface reports
+/// Searchable or Synced before D1). An offline read knows no identity.
+/// What: both entities carry a confirmed put and a passed probe; the
+/// offline coverage owes nothing and still reports zero synced.
+/// Test: self-contained.
+#[test]
+fn confirmed_put_and_probe_never_read_synced_without_an_identity() {
+    let (tmp, store, spec) = fixture();
+    let state = IndexStateRef::new(tmp.path().join("state"), "idx");
+    confirm(&store, &state, "notes/one.md");
+    confirm(&store, &state, "notes/two.md");
+    let view = store.index_view(Some(&state)).unwrap();
+    let c = store.okg_index_coverage_of(&spec, view.as_ref()).unwrap();
+    assert_eq!((c.synced, c.pending), (0, 0), "{c:?}");
+    let sources = store.okg_sources(Some(&state)).unwrap();
+    assert_eq!(sources[0].index.synced, 0, "the status view agrees");
 }

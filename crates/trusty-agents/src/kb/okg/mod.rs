@@ -79,15 +79,23 @@ pub struct SourceStatus {
 /// binding at all). This field makes the lag VISIBLE — an "ingested but not yet
 /// searchable" backlog is the exact failure mode #3892 reports, and it must
 /// never again be invisible on both sides.
-/// What: `synced` entities this machine's index state says are current
-/// (#10746 S12: never the synced tree), and `pending` still owed — pushes, withdrawals, AND rows that could not be resolved to a
+/// What: from this machine's index state (#10746 S12: never the synced
+/// tree), `synced` entities confirmed searchable under a known index
+/// identity, `unconfirmed` entities pushed and probed whose identity is not
+/// known (every settled entity before SPEC-OKF-01 dependency D1), and
+/// `pending` still owed — pushes, withdrawals, AND rows that could not be resolved to a
 /// readable entity file (unsearchable too, and additionally listed in `notes`).
 /// Derived, like the watermark, so it cannot claim more than was recorded.
 /// Test: `sources_report_index_coverage`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct IndexCoverage {
-    /// Entities recorded as current in the bound index.
+    /// Entities Searchable (or Withdrawn) under a known, matching index
+    /// identity. #10746 S12: always 0 before search indexes report an
+    /// identity (SPEC-OKF-01 §4.9.2 rule 5).
     pub synced: usize,
+    /// Entities pushed at their current bytes and probed on this machine,
+    /// whose index identity is not confirmed (§4.9.2 rules 4-5).
+    pub unconfirmed: usize,
     /// Entities still owed to the index (not yet searchable, or not yet
     /// withdrawn after a tombstone).
     pub pending: usize,
@@ -191,6 +199,7 @@ impl KbStore {
         for spec in &sources {
             let c = self.okg_index_coverage_of(spec, view.as_ref())?;
             total.synced += c.synced;
+            total.unconfirmed += c.unconfirmed;
             total.pending += c.pending;
             total.notes.extend(c.notes);
         }
@@ -608,8 +617,12 @@ mod tests {
                 .unwrap();
         }
 
+        // #10746 S12 fix round: settled, but no index identity (D1), so
+        // `unconfirmed`, never `synced` (SPEC-OKF-01 §4.9.2 rules 4-5).
         let settled = store.okg_sources(Some(&state)).unwrap();
-        assert_eq!((settled[0].index.synced, settled[0].index.pending), (2, 0));
-        assert_eq!(store.okg_index_coverage(Some(&state)).unwrap().synced, 2);
+        assert_eq!((settled[0].index.synced, settled[0].index.pending), (0, 0));
+        assert_eq!(settled[0].index.unconfirmed, 2);
+        let total = store.okg_index_coverage(Some(&state)).unwrap();
+        assert_eq!((total.synced, total.unconfirmed), (0, 2));
     }
 }

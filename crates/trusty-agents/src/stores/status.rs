@@ -174,8 +174,10 @@ pub struct StoreStatus {
     /// (a hand-built tree), which is not the same as zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_index: Option<usize>,
-    /// Entities recorded as current in the index. Same nullability as
-    /// `pending_index`.
+    /// Entities confirmed searchable under a known index identity. Same
+    /// nullability as `pending_index`. #10746 S12: 0 until search indexes
+    /// report an identity (SPEC-OKF-01 §4.9.2 rule 5); a store card never
+    /// shows a synced count the index state cannot confirm.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub synced_index: Option<usize>,
     /// Names of the `/indexes/{id}/status` `stages` (`lexical`/`semantic`/

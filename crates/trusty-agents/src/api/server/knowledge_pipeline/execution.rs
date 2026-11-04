@@ -258,8 +258,9 @@ async fn feed(
         .ok_or_else(|| anyhow::anyhow!("trusty-search unavailable"))?;
     indexing::at(&socket, &state.store, true).await?;
     // #10746 S12: the pass runs in `trusty_okf::feed` with this machine's
-    // index state; publication completes only when every put and remove of
-    // the pass was confirmed.
+    // index state. Publication is gated on this record's own source only: a
+    // failure on another path stays in the report and does not block it
+    // (SPEC-OKF-01 §5.4 F2; S12 fix round).
     let index_state =
         crate::kb::okg::index_state::IndexStateRef::machine_local(&state.store.index_id)?;
     let report = crate::stores::okg_feed::feed_source(

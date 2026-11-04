@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use trusty_okf::build::policy::DocStorePolicy;
@@ -23,20 +23,24 @@ use super::*;
 use crate::kb::okg::registry::Locator;
 
 /// One machine's search daemon.
-struct Fake {
+pub(super) struct Fake {
     root: PathBuf,
     down: bool,
     refuse: Option<String>,
+    /// #10746 S12 fix round: `(entered, release)` — the status call signals
+    /// `entered`, then waits for `release`, so a test can hold a pass open.
+    gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     held: Mutex<BTreeMap<String, String>>,
     calls: Mutex<Vec<String>>,
 }
 
 impl Fake {
-    fn new(root: &Path) -> Self {
+    pub(super) fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
             down: false,
             refuse: None,
+            gate: None,
             held: Mutex::default(),
             calls: Mutex::default(),
         }
@@ -73,6 +77,12 @@ impl trusty_okf::feed::IndexFeed for Fake {
                 message: "connection refused".into(),
             });
         }
+        if method == "search.index.status"
+            && let Some((entered, release)) = &self.gate
+        {
+            entered.notify_one();
+            release.notified().await;
+        }
         let path = p["body"]["path"].as_str().unwrap_or_default().to_string();
         Ok(match method {
             "search.index.status" => json!({"root_path": self.root}),
@@ -101,7 +111,7 @@ impl trusty_okf::feed::IndexFeed for Fake {
 }
 
 /// A tree with two ingested entities and a legacy journal claiming both.
-fn fixture() -> (tempfile::TempDir, KbStore, SourceSpec) {
+pub(super) fn fixture() -> (tempfile::TempDir, KbStore, SourceSpec) {
     let tmp = tempfile::tempdir().unwrap();
     let store = KbStore::new(tmp.path().join("kb"), Profile::default_profile());
     let corpus = tmp.path().join("corpus");
@@ -167,7 +177,9 @@ fn listing(dir: &Path) -> Vec<PathBuf> {
 
 /// Why: the r4 BLOCKER 5 defect, end to end. Two machines share one synced
 /// tree whose legacy journal says both entities are indexed.
-/// What: machine A feeds its daemon and reads (synced 2, pending 0).
+/// What: machine A feeds its daemon and reads (synced 0, pending 0): both
+/// are pushed and probed, but with no index identity nothing reads synced
+/// (§4.9.2 rule 5; #10746 S12 fix round).
 /// Machine B, with its own state directory and an empty daemon, reads
 /// (0, 2) before its pass — neither A's state nor the legacy journal leaks
 /// — and its pass pushes both files to B's daemon. A's journal is unchanged
@@ -184,7 +196,7 @@ async fn two_machines_over_one_tree_keep_separate_index_state() {
 
     let ra = feed_source(&store, &spec, &a, &fake_a).await;
     assert_eq!(ra.index.as_deref(), Some("idx"), "{ra:?}");
-    assert_eq!((ra.indexed, ra.synced, ra.pending), (2, 2, 0), "{ra:?}");
+    assert_eq!((ra.indexed, ra.synced, ra.pending), (2, 0, 0), "{ra:?}");
     assert_eq!(
         ra.status,
         Some(FeedStatus::Unconfirmed),
@@ -212,7 +224,7 @@ async fn two_machines_over_one_tree_keep_separate_index_state() {
     )
     .unwrap();
     let rb = feed_source(&store, &spec, &b, &fake_b).await;
-    assert_eq!((rb.indexed, rb.synced, rb.pending), (2, 2, 0), "{rb:?}");
+    assert_eq!((rb.indexed, rb.synced, rb.pending), (2, 0, 0), "{rb:?}");
     assert_eq!(fake_b.puts(), 2, "B's own daemon received both");
     assert_eq!(
         std::fs::read(
@@ -285,7 +297,7 @@ async fn refused_put_is_partial_and_records_nothing() {
     fake.refuse = Some("notes/two.md".into());
     let r = feed_source(&store, &spec, &st, &fake).await;
     assert_eq!(r.status, Some(FeedStatus::Partial), "{r:?}");
-    assert_eq!((r.indexed, r.pending, r.synced), (1, 1, 1));
+    assert_eq!((r.indexed, r.pending, r.synced), (1, 1, 0));
     assert!(
         r.errors.iter().any(|e| e.starts_with("notes/two.md")),
         "{r:?}"
@@ -340,4 +352,69 @@ async fn migration_failure_is_not_fed() {
     assert!(r.reason.unwrap_or_default().contains("migration failed"));
     assert!(fake.calls.lock().unwrap().is_empty(), "no daemon call");
     assert!(!confirmed(&records(&store, &st)));
+}
+
+/// Why: #10746 S12 fix round, CRITICAL — the pass covers the whole tree,
+/// and §5.4 F2 says one failing concept does not stop the others. A
+/// non-UTF-8 concept of no source (or another source's path the index
+/// refuses) must not block this source's publication.
+/// What: a non-UTF-8 `misc/bad.md` sits beside the source's two entities;
+/// the pass reports it as an error, and the source's publication is still
+/// acknowledged. Test: self-contained.
+#[tokio::test]
+async fn unrelated_unreadable_concept_does_not_block_publication() {
+    let (tmp, store, spec) = fixture();
+    std::fs::create_dir_all(store.root.join("misc")).unwrap();
+    std::fs::write(store.root.join("misc/bad.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let st = IndexStateRef::new(tmp.path().join("state"), "idx");
+    let fake = Fake::new(&store.root);
+    let r = feed_source(&store, &spec, &st, &fake).await;
+    assert!(
+        r.errors.iter().any(|e| e.contains("misc/bad.md")),
+        "the unrelated failure stays in the report: {r:?}"
+    );
+    assert!(
+        r.acknowledged("idx"),
+        "and does not block this source: {r:?}"
+    );
+}
+
+/// Why: the other half of the per-source gate — a refused put of the
+/// source's OWN entity must still block its publication.
+/// What: the daemon refuses `notes/two.md`; the source is not acknowledged.
+/// Test: self-contained.
+#[tokio::test]
+async fn refused_put_of_own_entity_blocks_publication() {
+    let (tmp, store, spec) = fixture();
+    let st = IndexStateRef::new(tmp.path().join("state"), "idx");
+    let mut fake = Fake::new(&store.root);
+    fake.refuse = Some("notes/two.md".into());
+    let r = feed_source(&store, &spec, &st, &fake).await;
+    assert!(!r.acknowledged("idx"), "{r:?}");
+}
+
+/// Why: #10746 S12 fix round, HIGH — two concurrent feed calls must not
+/// each run a full-tree pass over one state journal.
+/// What: call A holds its pass open inside the status call; call B, over
+/// the same tree and state, reports `feed already running` and never calls
+/// its daemon; A then finishes normally. Test: self-contained.
+#[tokio::test]
+async fn concurrent_feed_calls_run_one_pass() {
+    let (tmp, store, spec) = fixture();
+    let st = IndexStateRef::new(tmp.path().join("state"), "idx");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut held = Fake::new(&store.root);
+    held.gate = Some((entered.clone(), release.clone()));
+    let other = Fake::new(&store.root);
+    let (a, b) = tokio::join!(feed_source(&store, &spec, &st, &held), async {
+        entered.notified().await;
+        let b = feed_source(&store, &spec, &st, &other).await;
+        release.notify_one();
+        b
+    });
+    let reason = b.reason.clone().unwrap_or_default();
+    assert!(reason.contains("feed already running"), "{b:?}");
+    assert!(other.calls.lock().unwrap().is_empty(), "B started no pass");
+    assert_eq!((a.reason, a.indexed), (None, 2), "A ran its pass");
 }
