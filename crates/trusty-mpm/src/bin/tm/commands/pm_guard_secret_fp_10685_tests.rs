@@ -177,6 +177,10 @@ fn near_miss_rows_still_refuse_10685() {
         "env printf '%s\\n' 'process\\.env\\.TZ'",
         "printf '%s\\n' 'process\\.env\\.TZ' .env",
         "echo .env",
+        // #10685 review: a path-qualified program is no printer the guard knows.
+        "./echo '.env '",
+        "/tmp/x/printf '.env '",
+        "x/echo '.env '",
         "cat ./dummy-project/.env <<'EOF'\nhi\nEOF",
         "cat <<'EOF' | sh\ncat ./dummy-project/.env\nEOF",
         "cat <<EOF\n$(cat ./dummy-project/.env)\nEOF",
