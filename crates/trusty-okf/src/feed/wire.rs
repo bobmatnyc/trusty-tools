@@ -94,7 +94,7 @@ pub fn live_identity(reply: &Value) -> LiveIdentity {
 }
 
 /// An identity object, or `None` when it is not exactly one.
-fn parse_identity(v: &Value) -> Option<IndexIdentity> {
+pub(crate) fn parse_identity(v: &Value) -> Option<IndexIdentity> {
     let instance_id = v.get("instance_id")?.as_str()?.to_string();
     let generation = v.get("generation")?.as_u64()?;
     (!instance_id.is_empty()).then_some(IndexIdentity {

@@ -5,3 +5,4 @@ Added
 - The retrieval probe is the only way to Searchable: a scoped lexical query must return the current text, and either the index's per-file hash (D1) or the path's chunks must match the current bytes. Without an index identity a pass ends `Unconfirmed`.
 - `Bundle::index_backlog` lists what one machine's index still owes, hand-written concepts and moved paths included.
 - `retrieve` (feature `search-feed`): a scoped `search.query` whose hits carry the concept, status, OKF trust tier, staleness, trust label and verification state read from the file. A hit with text the current file no longer holds is flagged `stale_revision` and reported unverified; hits for deprecated or tombstoned concepts are dropped.
+- With an index identity (D1), the probe accepts the per-file hash only when the `search.index.file.status` reply names the same identity as the acknowledged put; a null or different identity leaves the concept Acknowledged, never Searchable.

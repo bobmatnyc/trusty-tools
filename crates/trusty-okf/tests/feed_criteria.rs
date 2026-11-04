@@ -75,6 +75,9 @@ struct Script {
     query_error: bool,
     /// Every `file.remove` answers an error.
     fail_remove: bool,
+    /// The `identity` a `file.status` reply carries instead of the live one
+    /// (`Value::Null` is D1's unreadable-identity reply).
+    file_status_identity: Option<Value>,
     /// The chunker drops a path's last paragraph.
     lossy: bool,
     /// The status reply's `root_path`, when not the fake's root.
@@ -287,9 +290,13 @@ impl Fake {
             "search.index.file.status" if identity.is_some() => {
                 let present = !self.chunks_of(&path).is_empty();
                 let hash = self.hashes.lock().unwrap().get(&path).cloned();
-                Ok(with_identity(json!({"path": path, "present": present,
+                let mut reply = with_identity(json!({"path": path, "present": present,
                     "content_sha256": if present { json!(hash) } else { Value::Null },
-                    "chunk_count": self.chunks_of(&path).len()})))
+                    "chunk_count": self.chunks_of(&path).len()}));
+                if let Some(i) = &s.file_status_identity {
+                    reply["identity"] = i.clone();
+                }
+                Ok(reply)
             }
             _ => Err(err(Some(-32601), "method not found")),
         }
@@ -1057,4 +1064,44 @@ async fn failed_remove_is_partial_and_keeps_the_path_owed() {
         .index_backlog(&f.state, INDEX, &f.live(&fake))
         .unwrap();
     assert_eq!(backlog.task("a.md"), Some(TaskOp::Remove));
+}
+
+/// Why: D1's revision evidence counts only under the live identity (§4.9);
+/// a `file.status` reply whose identity is null (unreadable) is never a
+/// match. What: a D1 fake that serves the right hash with `identity: null`.
+/// Test: itself.
+#[tokio::test]
+async fn file_status_with_a_null_identity_is_never_searchable() {
+    let f = fx();
+    create(&f.root, "a", &ALPHA);
+    let fake = Fake::new(&f.index_root, true);
+    fake.script(|s| s.file_status_identity = Some(Value::Null));
+    let r = f.feed(&fake).await.unwrap();
+    assert_eq!(
+        (r.status, r.searchable),
+        (FeedStatus::Unconfirmed, 0),
+        "{r:?}"
+    );
+    assert_eq!(f.index("a", &fake), IndexState::Acknowledged);
+    assert!(!f.synced(&fake));
+}
+
+/// Why: as above, for a `file.status` reply naming another identity.
+/// What: a D1 fake whose `file.status` names another instance. Test: itself.
+#[tokio::test]
+async fn file_status_with_another_identity_is_never_searchable() {
+    let f = fx();
+    create(&f.root, "a", &ALPHA);
+    let fake = Fake::new(&f.index_root, true);
+    fake.script(|s| {
+        s.file_status_identity = Some(json!({"instance_id": "inst-other", "generation": 1}));
+    });
+    let r = f.feed(&fake).await.unwrap();
+    assert_eq!(
+        (r.status, r.searchable),
+        (FeedStatus::Unconfirmed, 0),
+        "{r:?}"
+    );
+    assert_eq!(f.index("a", &fake), IndexState::Acknowledged);
+    assert!(!f.synced(&fake));
 }

@@ -6,7 +6,8 @@
 //! The probe is the only path to Searchable.
 //! What: [`retrieval`] runs check 1 (a lexical `search.query` scoped to the
 //! path returns a hit whose text occurs in the current bytes) and check 2
-//! (with D1: `search.index.file.status` reports the current bytes' hash;
+//! (with D1: `search.index.file.status` reports the current bytes' hash
+//! under the identity the probe record carries;
 //! without D1: the path's chunks each occur verbatim in the current file and
 //! together cover every non-whitespace character of the body). [`withdrawal`]
 //! passes only when the scoped query and the path's chunk list are both
@@ -14,12 +15,15 @@
 //! #10746 S7.
 //! Test: `c133_old_chunks_fail_the_probe_and_the_new_ones_pass`,
 //! `c63_acknowledgement_alone_is_not_searchable_through_the_feed`,
-//! `chunk_coverage_needs_every_body_character`.
+//! `chunk_coverage_needs_every_body_character`,
+//! `file_status_with_a_null_identity_is_never_searchable`,
+//! `file_status_with_another_identity_is_never_searchable`.
 
 use serde_json::{Value, json};
 
-use super::wire::{CHUNKS_LIST, Chunk, FILE_STATUS, IndexStatus, QUERY, chunks_at};
+use super::wire::{CHUNKS_LIST, Chunk, FILE_STATUS, IndexStatus, QUERY, chunks_at, parse_identity};
 use super::{IndexFeed, SearchError};
+use crate::state::IndexIdentity;
 
 /// Page size for `search.chunks.list` (the daemon caps it at 1000).
 const PAGE: usize = 1000;
@@ -129,6 +133,9 @@ pub(crate) struct Sent<'a> {
     pub(crate) title: Option<&'a str>,
     /// Lower-case hex SHA-256 of `content`.
     pub(crate) hex: &'a str,
+    /// The identity the probe record will carry; with D1 the `file.status`
+    /// reply must name exactly this identity.
+    pub(crate) identity: Option<&'a IndexIdentity>,
 }
 
 /// Check 1 and check 2 for one path's sent bytes (§4.9).
@@ -146,6 +153,7 @@ pub(crate) async fn retrieval(
         body,
         title,
         hex: sent_hex,
+        ..
     } = *sent;
     let Some(text) = query_text(body, title) else {
         return Ok(false);
@@ -167,7 +175,11 @@ pub(crate) async fn retrieval(
             .await?;
         let present = reply.get("present").and_then(Value::as_bool) == Some(true);
         let hash = reply.get("content_sha256").and_then(Value::as_str);
-        return Ok(present && hash.is_some_and(|h| h.eq_ignore_ascii_case(sent_hex)));
+        // #10746: the hash counts only under the live identity the record
+        // carries; a null, malformed or other identity is not evidence (§4.9).
+        let observed = reply.get("identity").and_then(parse_identity);
+        let same = observed.is_some() && observed.as_ref() == sent.identity;
+        return Ok(same && present && hash.is_some_and(|h| h.eq_ignore_ascii_case(sent_hex)));
     }
     let chunks = chunks_under(sink, index_id, wire).await?;
     let texts: Vec<&str> = chunks

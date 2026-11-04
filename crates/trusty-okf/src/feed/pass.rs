@@ -314,6 +314,7 @@ impl Run<'_> {
             body: &c.body,
             title,
             hex: &hex,
+            identity: identity.as_ref(),
         };
         match probe::retrieval(self.sink, self.index_id, self.status, &sent).await {
             Ok(passed) => {
