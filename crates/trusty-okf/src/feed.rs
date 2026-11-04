@@ -11,7 +11,7 @@
 //! F8, live identity §4.9.2), the §5.3.1 scope check (F16), the
 //! [`Bundle::index_backlog`](crate::bundle::Bundle::index_backlog), then per
 //! task remove-then-put, reply check (F4, D1 hash), journal append (F3) and
-//! the probe ([`probe`]). [`IndexFeed`] is the transport seam;
+//! the probe (`probe`). [`IndexFeed`] is the transport seam;
 //! [`RpcIndexFeed`] is the socket client. Slice S7 of #10746.
 //! Test: `crates/trusty-okf/tests/feed_criteria.rs` (criteria 43-51, 60,
 //! 63, 133, 134) against a scripted fake daemon, with and without D1.
