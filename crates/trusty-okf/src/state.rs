@@ -25,6 +25,11 @@ pub use read::{RevisionState, StateSummary};
 pub struct ByteHash(pub(crate) String);
 
 impl ByteHash {
+    /// #10746 S6: the byte hash of `bytes`, as `adopt` takes it (§4.3).
+    pub fn of(bytes: &[u8]) -> ByteHash {
+        ByteHash(crate::format::hash::bytes_hash(bytes))
+    }
+
     /// The `sha256:<hex>` string.
     pub fn as_str(&self) -> &str {
         &self.0

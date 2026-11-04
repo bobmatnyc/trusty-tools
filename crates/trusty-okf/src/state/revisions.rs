@@ -47,9 +47,76 @@ pub(crate) struct RevisionLine {
     /// The operation step index of this append.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<usize>,
+    /// #10746 S6: whether these bytes are proven engine-written (§4.5
+    /// "Proven or unproven"). Absent on an S5 line: proven only for a
+    /// source-derived kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proven: Option<bool>,
+    /// #10746 S6: `source` or `caller` (§4.5 "Source or caller content").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
+/// Op kinds whose line is a source-derived engine write (§4.5).
+const SOURCE_KINDS: [&str; 2] = ["ingest", "rebuild"];
+
+/// `origin` of a line whose content is the newest source-derived content.
+pub(crate) const ORIGIN_SOURCE: &str = "source";
+/// `origin` of a line whose content a trusty-okf caller changed.
+pub(crate) const ORIGIN_CALLER: &str = "caller";
+
 impl RevisionLine {
+    /// Whether the line proves engine ownership of its bytes (§4.5).
+    pub(crate) fn is_proven(&self) -> bool {
+        self.proven
+            .unwrap_or_else(|| SOURCE_KINDS.contains(&self.op_kind.as_str()))
+    }
+
+    /// Whether the line's content is source-derived (§4.5).
+    pub(crate) fn is_source(&self) -> bool {
+        match &self.origin {
+            Some(o) => o == ORIGIN_SOURCE,
+            None => SOURCE_KINDS.contains(&self.op_kind.as_str()),
+        }
+    }
+
+    /// #10746 S6: stamp the §4.5 ownership of this line before it is
+    /// written. A `source` write (ingest, rebuild) is proven with origin
+    /// `source`. Any other write is proven only when the bytes it replaces
+    /// (`pre`) are the bytes of a proven line, and has origin `source` only
+    /// when its content equals the newest source-origin content of `id`.
+    /// Test: `c131_caller_edit_and_migrated_legacy_concepts_are_preserved`.
+    pub(crate) fn stamp(
+        &mut self,
+        root: &Path,
+        pre: Option<&[u8]>,
+        source: bool,
+    ) -> Result<(), OkfError> {
+        if source {
+            self.proven = Some(true);
+            self.origin = Some(ORIGIN_SOURCE.to_string());
+            return Ok(());
+        }
+        let lines = read(root)?;
+        let proven = pre
+            .map(crate::format::hash::bytes_hash)
+            .and_then(|h| record_of(&lines, &self.id, &h))
+            .is_some_and(RevisionLine::is_proven);
+        let source_content = lines
+            .iter()
+            .rev()
+            .find(|l| l.id == self.id && l.is_source())
+            .map(|l| l.content.as_str());
+        let origin = if source_content == Some(self.content.as_str()) {
+            ORIGIN_SOURCE
+        } else {
+            ORIGIN_CALLER
+        };
+        self.proven = Some(proven);
+        self.origin = Some(origin.to_string());
+        Ok(())
+    }
+
     /// The JSON text of the line.
     pub(crate) fn json(&self) -> Result<String, OkfError> {
         serde_json::to_string(self).map_err(|e| OkfError::Parse {
@@ -85,6 +152,23 @@ pub(crate) fn append(root: &Path, line: &RevisionLine) -> Result<(), OkfError> {
 pub(crate) fn read(root: &Path) -> Result<Vec<RevisionLine>, OkfError> {
     let path = confined_file(root, REVISIONS_REL)?;
     Ok(read_journal::<RevisionLine>(&path)?.records)
+}
+
+/// The record of `id`'s bytes `disk`: the newest line for `id` with those
+/// bytes (#10746 S6, §4.5).
+///
+/// Why: a line for bytes that never landed (a crash between the line and the
+/// rename, criterion 66, or a rolled-back operation) must not make the bytes
+/// on disk read as a hand edit. So the record is matched by bytes; `None`
+/// with other lines for `id` present means the disk bytes are not
+/// trusty-okf's (`hand_edit`).
+/// Test: `c111_unproven_and_hand_edited_ledger_concepts_are_preserved`.
+pub(crate) fn record_of<'a>(
+    lines: &'a [RevisionLine],
+    id: &str,
+    disk: &str,
+) -> Option<&'a RevisionLine> {
+    lines.iter().rev().find(|l| l.id == id && l.bytes == disk)
 }
 
 /// The save axis of `id` whose file bytes hash to `disk` (§4.9 Axis 1).

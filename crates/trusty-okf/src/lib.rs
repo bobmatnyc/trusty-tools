@@ -9,8 +9,9 @@
 //! What: the module tree of SPEC-OKF-01 §4.1. Slices of epic #10746 fill it:
 //! S2 [`format`], [`profile`] and [`OkfError`]; S3 [`bundle`]; S4 [`build`]
 //! (moved from trusty-kb); S5 [`state`] and the operation journal in
-//! [`bundle`]. Every other module is still empty and its doc states what it
-//! will hold.
+//! [`bundle`]; S6 corrections, migration and `adopt` in [`bundle`] and
+//! `rebuild` in [`build`]. Every other module is still empty and its doc
+//! states what it will hold.
 //!   - [`format`], [`profile`], [`bundle`], [`build`], [`state`], [`import`],
 //!     [`extract`] — the network-free core.
 //!   - `feed` and `retrieve` — behind the cargo feature `search-feed`.

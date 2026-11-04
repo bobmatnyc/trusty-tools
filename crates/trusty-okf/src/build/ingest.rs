@@ -492,8 +492,35 @@ fn write_item(
 ) -> Result<(String, Vec<IngestFinding>), OkfError> {
     let id = concept_id_for(&spec.collection, &item.name)?;
     let old = existing(bundle, &id)?;
+    let (next, findings) = next_concept(old.as_ref(), &id, profile, spec, item);
+    let actor = Actor::parse(INGEST_ACTOR);
+    // #10746: `SourceReingest`, so a deprecated concept takes the new source
+    // content (SPEC-OKF-01 §3 (c2) (i)); §2.10 and `log.md` still apply.
+    bundle.put_inner(
+        next,
+        &actor,
+        false,
+        WriteMode::Lenient,
+        now,
+        WriteKind::SourceReingest,
+        LogMode::Defer(batch),
+    )?;
+    Ok((id.as_str().to_string(), findings))
+}
+
+/// The concept a source item renders to over `old` (#10746 S6: shared by
+/// `write_item` and `rebuild`): the source-derived keys replaced,
+/// [`PRESERVED_ON_REINGEST`] kept, `updated` kept only when the content is
+/// unchanged. Returns the item's quarantine findings.
+pub(crate) fn next_concept(
+    old: Option<&Concept>,
+    id: &ConceptId,
+    profile: &Profile,
+    spec: &SourceSpec,
+    item: &SourceItem,
+) -> (Concept, Vec<IngestFinding>) {
     let (top, quarantine) = source_values(spec, item);
-    let mut next = match &old {
+    let mut next = match old {
         Some(c) => c.clone(),
         None => Concept::new(id.clone(), Mapping::new(), String::new()),
     };
@@ -521,25 +548,13 @@ fn write_item(
         next.set("type", ty);
     }
     next.body = body_text(&item.body);
-    if let Some(o) = &old
+    if let Some(o) = old
         && content_hash(o) == content_hash(&next)
         && let Some(updated) = o.get("updated")
     {
         next.set("updated", updated.clone());
     }
-    let actor = Actor::parse(INGEST_ACTOR);
-    // #10746: `SourceReingest`, so a deprecated concept takes the new source
-    // content (SPEC-OKF-01 §3 (c2) (i)); §2.10 and `log.md` still apply.
-    bundle.put_inner(
-        next,
-        &actor,
-        false,
-        WriteMode::Lenient,
-        now,
-        WriteKind::SourceReingest,
-        LogMode::Defer(batch),
-    )?;
-    Ok((id.as_str().to_string(), quarantine.findings))
+    (next, quarantine.findings)
 }
 
 /// Mark a vanished item's concept, returning the ledger line to append.

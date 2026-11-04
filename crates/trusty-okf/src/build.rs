@@ -12,8 +12,9 @@
 //! the ingest engine writes through `Bundle::put`, keeps editorial and
 //! verification keys across a re-ingest (§2.9) and quarantines protected keys
 //! (§2.13.1). #10746 S5: an ingest run writes `log.md` once (`LogBatch`);
-//! the machine-local index journal lives in `state::index`. `rebuild` comes
-//! with S6; the store entry points stay in trusty-kb until S11.
+//! the machine-local index journal lives in `state::index`. #10746 S6:
+//! [`rebuild`] regenerates ledger-owned concepts under the §4.5 ownership
+//! proof. The store entry points stay in trusty-kb until S11.
 //! Test: `golden_registry_loads_every_row`,
 //! `golden_registry_saves_byte_for_byte`,
 //! `golden_ledger_reads_and_appends_in_the_same_format`,
@@ -29,5 +30,6 @@ pub mod ingest;
 pub mod jsonl;
 pub mod ledger;
 pub mod policy;
+pub mod rebuild;
 pub mod registry;
 pub mod trust;

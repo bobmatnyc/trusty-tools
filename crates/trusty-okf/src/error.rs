@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 
+use crate::bundle::audit::LossItem;
 use crate::format::id::ConceptId;
 use crate::format::validate::Finding;
 
@@ -62,6 +63,8 @@ pub enum OkfError {
     /// `verified_is_owned_by_verify`, `legacy_verified_exists`,
     /// `legacy_generated_exists`, `target_exists`,
     /// `verification_record_exists`, `human_not_confirmed` (§2.4).
+    /// #10746 S6: `tombstone_without_source_id` (§4.8), `superseded`,
+    /// `supersede_self`, `stale_plan` (§2.9).
     #[error("conflict on {id}: {reason}")]
     Conflict {
         /// The concept the write targets.
@@ -78,6 +81,17 @@ pub enum OkfError {
         op_id: String,
         /// Its file-step paths, bundle-relative.
         paths: Vec<PathBuf>,
+    },
+    /// #10746 S6: the §2.9 migration audit failed; every changed file was
+    /// restored from its backup, or is listed as `restore_failed`.
+    #[error("migration audit failed: {0:?}")]
+    MigrationLoss(Vec<LossItem>),
+    /// #10746 S6: `adopt` refused the whole call (§4.5 "Adopt"): reason
+    /// `not_human` or `not_confirmed`; no file or record changed.
+    #[error("adopt refused: {reason}")]
+    AdoptRefused {
+        /// `not_human` or `not_confirmed`.
+        reason: String,
     },
     /// #10746 S5: an `IndexStateDir` inside the bundle root (§4.9.1).
     #[error("index state directory lies inside the bundle root: {0:?}")]

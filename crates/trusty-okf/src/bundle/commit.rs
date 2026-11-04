@@ -78,6 +78,8 @@ impl PutPlan {
             run: run.to_string(),
             op: None,
             step: None,
+            proven: None,
+            origin: None,
         }
     }
 }
@@ -136,10 +138,14 @@ impl Bundle {
         self.check_recovery(&paths)?;
         let (op_kind, run) = match (kind, log) {
             (OpKind::Verify, _) => ("verify", String::new()),
+            (OpKind::Deprecate, _) => ("deprecate", String::new()),
             (_, LogMode::Defer(batch)) => ("ingest", batch.run().to_string()),
             _ => ("put", String::new()),
         };
         let mut rev = plan.revision(op_kind, now, &run);
+        // #10746 S6: §4.5 ownership; an ingest write is source-derived.
+        let source = matches!(log, LogMode::Defer(_));
+        rev.stamp(self.root(), plan.pre.as_deref(), source)?;
         if let LogMode::Defer(batch) = log {
             batch.record(
                 self,

@@ -440,7 +440,7 @@ impl Bundle {
                 (from_bytes.clone(), content_hash(&c), Vec::new())
             }
         };
-        let rev = RevisionLine {
+        let mut rev = RevisionLine {
             id: to.as_str().to_string(),
             content: new_content.as_str().to_string(),
             bytes: bytes_hash(&new_bytes),
@@ -449,7 +449,11 @@ impl Bundle {
             run: String::new(),
             op: None,
             step: None,
+            proven: None,
+            origin: None,
         };
+        // #10746 S6: §4.5 ownership; a move is a caller write at a new ID.
+        rev.stamp(&self.root, None, false)?;
         op.append(REVISIONS_REL, revision_value(&rev)?);
         op.file(&to.file_name(), None, Some(new_bytes));
         let from_record_bytes = read_rel(&self.root, &record_rel(from))?;
@@ -467,10 +471,9 @@ impl Bundle {
             for l in &p.lines {
                 op.append(&record_rel(&p.id), l.value()?);
             }
-            op.append(
-                REVISIONS_REL,
-                revision_value(&p.revision("move", &now, ""))?,
-            );
+            let mut rev = p.revision("move", &now, "");
+            rev.stamp(&self.root, p.pre.as_deref(), false)?;
+            op.append(REVISIONS_REL, revision_value(&rev)?);
             op.file(&p.id.file_name(), p.pre.clone(), Some(p.post.clone()));
         }
         op.file("log.md", entry.old, Some(entry.text.into_bytes()));

@@ -223,6 +223,31 @@ impl Ledger {
     }
 }
 
+/// The concept IDs (`entity`) that any ledger under `_sources/` names, at
+/// any status (#10746 S6: "ledger-owned", SPEC-OKF-01 §4.5).
+///
+/// What: reads every top-level `_sources/*.jsonl` as a ledger; a line that is
+/// not a ledger record (the revision journal) is skipped, as a torn line is.
+/// Test: `c142_legacy_hashless_events_never_gain_a_hash`.
+pub(crate) fn owned_entities(root: &Path) -> Result<std::collections::BTreeSet<String>, OkfError> {
+    let dir = crate::bundle::paths::confined_file(root, "_sources")?;
+    let mut out = std::collections::BTreeSet::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(crate::bundle::paths::io_err(&dir, e)),
+    };
+    for e in entries {
+        let path = e.map_err(|e| crate::bundle::paths::io_err(&dir, e))?.path();
+        if path.is_file() && path.extension().is_some_and(|x| x == "jsonl") {
+            for r in read_journal::<LedgerRecord>(&path)?.records {
+                out.insert(r.entity);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

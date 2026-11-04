@@ -41,7 +41,8 @@ pub(crate) const STAGED: &str = ".okf-staged";
 ///
 /// #10746 S5: `Correct` covers every `put` that writes more than one file;
 /// `Ingest` is an ingest run's single deferred `log.md` write (not in the
-/// §4.2 sketch). `Supersede`, `Migrate` and `Rebuild` are written by S6.
+/// §4.2 sketch). #10746 S6 writes `Supersede`, `Deprecate`, `Migrate` and
+/// `Rebuild`; `Deprecate` (not in the §4.2 sketch) is `deprecate`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum OpKind {
@@ -59,6 +60,8 @@ pub enum OpKind {
     Rebuild,
     /// An ingest run's `log.md` write.
     Ingest,
+    /// `deprecate`: the concept and `log.md`.
+    Deprecate,
 }
 
 /// Which way recovery takes an operation (§4.2).
@@ -189,7 +192,8 @@ impl OpPlan {
     }
 
     /// The op ID: fixed, or `<kind>-<hash of now, actor and steps>`.
-    fn op_id(&self) -> String {
+    /// #10746 S6: a migration names its backups by it before `run`.
+    pub(crate) fn op_id(&self) -> String {
         if let Some(id) = &self.fixed_id {
             return id.clone();
         }
@@ -324,6 +328,19 @@ pub(crate) fn failpoint(name: &str) -> Result<(), OkfError> {
 /// `precheck_read_error_aborts_the_operation`,
 /// `completion_failure_marks_conflict_and_staging_failure_is_a_finding`.
 pub(crate) fn run(b: &mut Bundle, plan: OpPlan) -> Result<Vec<Finding>, OkfError> {
+    run_checked(b, plan, &|_| Ok(()))
+}
+
+/// [`run`], with `check` run after the last step and before the completion
+/// record (#10746 S6: the §2.9 migration audit). A failed check rolls the
+/// operation back and returns the check's error.
+/// Test: `c24_audit_restores_every_file_when_a_sources_entry_is_dropped`,
+/// `c120_body_byte_change_restores_and_a_corrupt_blob_is_restore_failed`.
+pub(crate) fn run_checked(
+    b: &mut Bundle,
+    plan: OpPlan,
+    check: &dyn Fn(&Bundle) -> Result<(), OkfError>,
+) -> Result<Vec<Finding>, OkfError> {
     // Every path is confined (no link, no escape) before any byte moves, so
     // a refused path stops the operation with no file changed.
     for s in &plan.steps {
@@ -337,6 +354,12 @@ pub(crate) fn run(b: &mut Bundle, plan: OpPlan) -> Result<Vec<Finding>, OkfError
         match s {
             Planned::File { path, pre, post } => {
                 for (side, bytes) in [("new", post), ("old", pre)] {
+                    // #10746 S6: a migration's pre-images are its
+                    // content-addressed backups, written before `run`
+                    // (§4.11 "Before the intent", §2.9 step 2).
+                    if side == "old" && plan.kind == OpKind::Migrate {
+                        continue;
+                    }
                     if let Some(bytes) = bytes {
                         put_file(b, &staged_rel(&op, side, path), Some(bytes))?;
                     }
@@ -410,6 +433,9 @@ pub(crate) fn run(b: &mut Bundle, plan: OpPlan) -> Result<Vec<Finding>, OkfError
         }
         failpoint(&format!("step-{i}"))?;
     }
+    if let Err(e) = check(b) {
+        return Err(abort(b, &op, plan.kind, &steps, e));
+    }
     failpoint("before-complete")?;
     let complete = Record::Complete {
         op: op.clone(),
@@ -451,6 +477,29 @@ fn pending(b: &mut Bundle, op: &str, paths: &[String]) -> OkfError {
 fn abort(b: &mut Bundle, op: &str, kind: OpKind, steps: &[Step], e: OkfError) -> OkfError {
     match crate::bundle::recover::roll_back_now(b, op, kind, steps) {
         Ok(()) => e,
+        // #10746 S6: a migration restore whose hash check failed keeps the
+        // operation open (no completion record) and adds `restore_failed`
+        // to the audit's loss list (§2.9 step 4).
+        Err(OkfError::MigrationLoss(failed)) => {
+            let paths: Vec<String> = steps
+                .iter()
+                .filter_map(|s| match s {
+                    Step::File { path, .. } => Some(path.clone()),
+                    Step::Append { .. } => None,
+                })
+                .collect();
+            b.mark_conflict(op, &paths);
+            let mut items = match e {
+                OkfError::MigrationLoss(items) => items,
+                other => vec![crate::bundle::audit::LossItem::new(
+                    "",
+                    "step_failed",
+                    &other.to_string(),
+                )],
+            };
+            items.extend(failed);
+            OkfError::MigrationLoss(items)
+        }
         Err(_) => {
             let paths: Vec<String> = steps
                 .iter()
@@ -464,6 +513,15 @@ fn abort(b: &mut Bundle, op: &str, kind: OpKind, steps: &[Step], e: OkfError) ->
     }
 }
 
+/// A post-image seam: under `cfg(test)` a hook may change the bytes a
+/// migration writes for `rel` (#10746 S6: the criterion 24 and 120 audit
+/// tests). Compiled to nothing otherwise.
+pub(crate) fn mutate_seam(rel: &str, bytes: &mut Vec<u8>) {
+    #[cfg(test)]
+    fail::mutate(rel, bytes);
+    let _ = (rel, bytes);
+}
+
 /// Test-only crash hooks and write counters.
 #[cfg(test)]
 pub(crate) mod fail {
@@ -471,8 +529,10 @@ pub(crate) mod fail {
     use std::collections::BTreeMap;
 
     type Hook = Box<dyn FnMut(&str) -> bool>;
+    type Mutate = Box<dyn FnMut(&str, &mut Vec<u8>)>;
 
     thread_local! {
+        static MUTATE: RefCell<Option<Mutate>> = const { RefCell::new(None) };
         static IO: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static WRITES: RefCell<BTreeMap<String, usize>> = const { RefCell::new(BTreeMap::new()) };
@@ -483,10 +543,24 @@ pub(crate) mod fail {
         HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
     }
 
-    /// Remove both hooks.
+    /// Remove every hook.
     pub(crate) fn clear() {
         HOOK.with(|h| *h.borrow_mut() = None);
         IO.with(|h| *h.borrow_mut() = None);
+        MUTATE.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// #10746 S6: install a post-image hook for a migration.
+    pub(crate) fn set_mutate(f: impl FnMut(&str, &mut Vec<u8>) + 'static) {
+        MUTATE.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(crate) fn mutate(rel: &str, bytes: &mut Vec<u8>) {
+        MUTATE.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(rel, bytes);
+            }
+        });
     }
 
     /// Install an I/O hook; it returns true to fail the named access.

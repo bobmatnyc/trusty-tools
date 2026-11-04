@@ -31,7 +31,9 @@ use std::path::PathBuf;
 use crate::OkfError;
 use crate::build::jsonl::read_journal;
 use crate::bundle::Bundle;
+use crate::bundle::audit::LossItem;
 use crate::bundle::log_md;
+use crate::bundle::migrate;
 use crate::bundle::ops::{
     JOURNAL_REL, OPS_DIR, OpKind, Record, RecoveryDirection, Step, append, append_record,
     disk_hash, failpoint, put_file, remove_staging, staged_rel,
@@ -203,8 +205,22 @@ fn apply(b: &mut Bundle, p: &Pending, dir: RecoveryDirection) -> Result<(), OkfE
             }
         }
         RecoveryDirection::RollBack => {
+            // #10746 S6: a migration restores from its content-addressed
+            // backups and checks each restored hash (§2.9 steps 4-5).
+            let mut failed = Vec::new();
             for (i, s) in p.steps.iter().enumerate().rev() {
                 match s {
+                    Step::File { path, pre, .. } if p.kind == OpKind::Migrate => {
+                        if &disk_hash(b, path)? != pre
+                            && !migrate::restore(b, &p.op, path, pre.as_deref())?
+                        {
+                            failed.push(LossItem::new(
+                                path,
+                                "restore_failed",
+                                "restored bytes do not match the manifest's old hash",
+                            ));
+                        }
+                    }
                     Step::File { path, pre, .. } => {
                         if &disk_hash(b, path)? != pre {
                             let bytes = match pre {
@@ -226,6 +242,11 @@ fn apply(b: &mut Bundle, p: &Pending, dir: RecoveryDirection) -> Result<(), OkfE
                     Step::Append { .. } => {}
                 }
                 failpoint(&format!("recover-step-{i}"))?;
+            }
+            if !failed.is_empty() {
+                // No completion record: the operation stays open and its
+                // backups stay in place.
+                return Err(OkfError::MigrationLoss(failed));
             }
         }
     }
@@ -327,7 +348,20 @@ pub(crate) fn recover_on_open(b: &mut Bundle) -> Result<Vec<Finding>, OkfError> 
             } else {
                 RecoveryDirection::RollForward
             };
-            apply(b, p, dir)?;
+            match apply(b, p, dir) {
+                Ok(()) => {}
+                // #10746 S6: a backup that does not restore its old hash
+                // leaves the migration open and conflicted, never complete.
+                Err(OkfError::MigrationLoss(failed)) => {
+                    let paths: Vec<String> =
+                        file_steps(p).map(|(path, _, _)| path.clone()).collect();
+                    b.mark_conflict(&p.op, &paths);
+                    let bad: Vec<String> = failed.into_iter().map(|f| f.path).collect();
+                    findings.push(conflict_finding(&p.op, &bad));
+                    kept.insert(p.op.clone());
+                }
+                Err(e) => return Err(e),
+            }
         } else {
             let paths: Vec<String> = file_steps(p).map(|(path, _, _)| path.clone()).collect();
             b.mark_conflict(&p.op, &paths);

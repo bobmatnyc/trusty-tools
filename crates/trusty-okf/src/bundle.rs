@@ -15,7 +15,9 @@
 //! S5: [`ops`] (the §4.11 operation journal) and [`recover`]
 //! (`recover_interrupted`, `Bundle::recover`); `open` and the build layer
 //! report and refuse interrupted operations without recovering them.
-//! `create`, `supersede`, `deprecate`, `adopt` and `migrate` come with S6.
+//! S6: [`correct`] (`deprecate`, `supersede`, the tombstone rule),
+//! [`migrate`] and [`audit`] (§2.9), [`adopt`] (3q C). `create` is not
+//! built yet.
 //! Test: `c01_bundle_open_is_ok_on_the_google_bundles`,
 //! `c54_open_on_a_missing_root_is_an_error`,
 //! `c115_bundle_open_reads_foreign_files_and_writes_never_touch_them`,
@@ -30,11 +32,15 @@ use crate::format::hash::content_hash;
 use crate::format::id::{ConceptId, ConceptRef};
 use crate::format::validate::{Finding, FindingKind, Severity};
 
+pub mod adopt;
+pub mod audit;
 pub(crate) mod commit;
+pub mod correct;
 pub mod graph;
 pub mod index_md;
 pub(crate) mod lock;
 pub mod log_md;
+pub mod migrate;
 pub mod moves;
 pub mod ops;
 pub mod paths;
@@ -43,7 +49,10 @@ pub mod record;
 pub mod recover;
 pub(crate) mod walk;
 
+pub use adopt::AdoptReport;
+pub use audit::LossItem;
 pub use index_md::IndexReport;
+pub use migrate::{FileChange, MigrationPlan, MigrationReport};
 pub use moves::{MoveReport, UnmovedLink};
 pub use ops::{OpKind, RecoveryDirection};
 pub use put::{HumanConfirmation, PutOutcome};

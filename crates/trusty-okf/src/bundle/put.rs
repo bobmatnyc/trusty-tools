@@ -401,6 +401,8 @@ impl Bundle {
         if content_changed {
             next.set("generated", generated_value(by, now));
         }
+        // #10746 S6: a tombstone must stay detectable (§4.8, criterion 38).
+        crate::bundle::correct::check_tombstone(&id, &next)?;
         let (prepared, write_findings) =
             prepare_write_with(&self.root, &next, mode, existing.as_deref())?;
         findings.extend(write_findings);
@@ -532,6 +534,7 @@ impl Bundle {
             seen,
             "verify changes lifecycle keys only"
         );
+        crate::bundle::correct::check_tombstone(id, &next)?;
         // #10746: refusals and path checks first; S5: the record line, the
         // concept and `log.md` change as one journaled `Verify` operation.
         let target = confined_file(&self.root, &id.file_name())?;
