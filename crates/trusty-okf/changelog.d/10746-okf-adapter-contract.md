@@ -3,3 +3,4 @@ Added
 - `import::record` normalises `gmail`, `drive` and `gdocs` records: IDs `mail/<source-id>/<thread-id>/<message-id>` and `docs/<source-id>/<file-id>`, source dates and revision as provenance, a thread concept that links its messages in date order, attachments listed and never extracted, `degraded: snippet_only` for a message with no decodable text part (`ContentPolicy::AllowSnippet` writes the flagged snippet), and `unsupported_format` for a base64-only export.
 - `OkfError::SelectionRequired`: a connector import with no account or no source selection is refused before any spawn or write (exit 2).
 - `trusty-okf import plan|run --from adapter:<kind> --adapter PATH --select KEY=VALUE ... [--adapter-arg A] [--adapter-var NAME=VALUE] [--operator-initiated]`.
+- The adapter runs in its own process group, and every stop kills the group; a list reply whose `cursor` is not a string or null is a protocol error (#10746).
