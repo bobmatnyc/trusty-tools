@@ -16,11 +16,12 @@ publish = false
 
 [features]
 # Both features are off by default. The core is network-free (B8) and never
-# links an extraction backend (B9). Neither feature pulls a dependency yet; the
-# slices that fill `feed`/`retrieve` (S7) and `extract::worker` (S10) add them.
+# links an extraction backend (B9). `extract-worker` pulls nothing until S10.
 default = []
 # Push loop to trusty-search and `search.query` retrieval (SPEC-OKF-01 §5).
-search-feed = []
+# #10746 S7: the socket client and its async runtime come only with this
+# feature, so `--no-default-features` stays network-free (B8).
+search-feed = ["dep:async-trait", "dep:tokio", "dep:trusty-common"]
 # Client for the out-of-process extraction worker (SPEC-OKF-01 §2.16, App. B).
 extract-worker = []
 
@@ -47,6 +48,19 @@ toml = { workspace = true }
 unicode-normalization = { workspace = true }
 # #10746 S4: the doc-store walk (`build::docstore`), moved from trusty-kb.
 walkdir = { workspace = true }
+
+# #10746 S7: feature `search-feed` only (B8). The trusty-search socket client
+# (`trusty_common::search_rpc`, SPEC-OKF-01 §5.1), the `IndexFeed` seam's
+# async trait, and the runtime its client and the feed tests run on.
+async-trait = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["macros", "rt"] }
+trusty-common = { workspace = true, optional = true, features = ["uds"] }
+
+# #10746 S7: the feed criteria need the `feed` module.
+[[test]]
+name = "feed_criteria"
+path = "tests/feed_criteria.rs"
+required-features = ["search-feed"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

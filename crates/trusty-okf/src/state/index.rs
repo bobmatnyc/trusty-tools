@@ -217,17 +217,39 @@ impl IndexJournal {
 }
 
 /// A path's folded journal state.
+///
+/// #10746 S7: crate-visible so the backlog (`state::backlog`) decides what
+/// to push from the same fold the read model uses.
 #[derive(Debug, Default, Clone)]
-struct Folded {
-    acked: Option<(String, Option<IndexIdentity>)>,
-    searchable: bool,
+pub(crate) struct Folded {
+    /// Newest acknowledged put: byte hash and identity.
+    pub(crate) acked: Option<(String, Option<IndexIdentity>)>,
+    /// A probe passed for `acked`, with no reindex since.
+    pub(crate) searchable: bool,
     error: Option<(String, String)>,
-    removed: Option<Option<IndexIdentity>>,
-    withdrawn: bool,
+    /// Newest confirmed remove (when it is newer than every put ack).
+    pub(crate) removed: Option<Option<IndexIdentity>>,
+    /// A withdrawal probe passed for `removed`.
+    pub(crate) withdrawn: bool,
+}
+
+/// Every path any record names, sorted (§5.4 "Journal coverage").
+pub(crate) fn journaled_paths(records: &[IndexRecord]) -> std::collections::BTreeSet<String> {
+    records
+        .iter()
+        .filter_map(|r| match r {
+            IndexRecord::PutAck { path, .. }
+            | IndexRecord::PutFailed { path, .. }
+            | IndexRecord::Probe { path, .. }
+            | IndexRecord::RemoveAck { path, .. }
+            | IndexRecord::WithdrawProbe { path, .. } => Some(path.clone()),
+            IndexRecord::Reindex { .. } => None,
+        })
+        .collect()
 }
 
 /// Fold `records` for `path` in journal order.
-fn fold(records: &[IndexRecord], path: &str) -> Folded {
+pub(crate) fn fold(records: &[IndexRecord], path: &str) -> Folded {
     let mut f = Folded::default();
     for r in records {
         match r {

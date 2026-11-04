@@ -89,19 +89,23 @@ impl StateSummary {
 
 /// Whether the concept should be out of the index: deprecated (3i A) or
 /// tombstoned (§4.8).
-fn withdraw_intended(c: &Concept) -> bool {
+pub(crate) fn withdraw_intended(c: &Concept) -> bool {
     matches!(c.frontmatter().status, Field::Valid(Status::Deprecated))
         || c.get("source_status").and_then(|v| v.as_str()) == Some("deleted")
 }
 
 /// The journals read once for a whole-bundle pass.
-struct Loaded {
+pub(crate) struct Loaded {
     revisions: Vec<RevisionLine>,
-    records: Vec<IndexRecord>,
+    pub(crate) records: Vec<IndexRecord>,
 }
 
 impl Bundle {
-    fn load_state(&self, dir: &IndexStateDir, index_id: &str) -> Result<Loaded, OkfError> {
+    pub(crate) fn load_state(
+        &self,
+        dir: &IndexStateDir,
+        index_id: &str,
+    ) -> Result<Loaded, OkfError> {
         let journal = IndexJournal::open(dir, self.root(), index_id)?;
         Ok(Loaded {
             revisions: revisions::read(self.root())?,
@@ -109,7 +113,7 @@ impl Bundle {
         })
     }
 
-    fn state_with(
+    pub(crate) fn state_with(
         &self,
         id: &ConceptId,
         loaded: &Loaded,
