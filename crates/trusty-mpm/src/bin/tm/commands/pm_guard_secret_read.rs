@@ -1941,11 +1941,18 @@ mod tests {
     /// this guard reads, and the workaround is to write that prose with the
     /// Edit tool, which this class does not inspect. The trailing-dot and
     /// `worktree add` halves of #7533 are unaffected and stay fixed.
+    /// #10685: a quoted span in a printer-only command is inert and allows.
     /// #7833: a quoted body `cat` writes to a file is never globbed, so the
     /// fragment there allows (`guard_7833_a_quoted_body_cat_writes_to_a_file_is_data`).
     #[test]
     fn denies_a_markdown_emphasis_fragment_7533() {
-        for command in ["echo '**A pipe confirms nothing at all.**'", "echo **A"] {
+        // #10685: a quoted fragment in a printer-only command is inert text;
+        // beside a reader, or unquoted, it still denies.
+        assert!(eval("echo '**A pipe confirms nothing at all.**'").is_none());
+        for command in [
+            "echo '**A pipe confirms nothing at all.**' | cat",
+            "echo **A",
+        ] {
             assert!(
                 eval(command).is_some(),
                 "the emphasis fragment reaches `id_rsa` and must deny: `{command}`"
