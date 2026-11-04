@@ -917,7 +917,23 @@ fn c103_sigint_cancels_the_cli_and_reaps_the_worker() {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     let fx = Fx::new(&[("a.md", "Alpha.\n"), ("b.pdf", "HANG"), ("c.pdf", "C")]);
-    let w = Fake::default().write(fx.tmp.path(), "worker");
+    // The CLI applies the platform sandbox when its launcher exists; the
+    // double's `hello` must agree with that spawn evidence.
+    let launcher = if cfg!(target_os = "macos") {
+        "/usr/bin/sandbox-exec"
+    } else {
+        "/usr/bin/bwrap"
+    };
+    let claim = if Path::new(launcher).is_file() {
+        "platform"
+    } else {
+        "none"
+    };
+    let w = Fake {
+        sandbox: claim.into(),
+        ..Fake::default()
+    }
+    .write(fx.tmp.path(), "worker");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_trusty-okf"))
         .args(["import", "run"])
         .arg(&fx.root)
