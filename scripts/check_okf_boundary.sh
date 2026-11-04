@@ -28,7 +28,8 @@
 #     b9_no_extraction_backend         B9  graph has no xberg, ort, candle-core
 #   Not checkable at S1, printed as `note:` lines: B2's inverse half
 #   (`cargo tree -i trusty-okf` lists trusty-agents; S11), B10 (no spawn code
-#   exists until S9/S10), and criterion 13's registry.toml load (S4).
+#   exists until S9/S10). Criterion 13's registry.toml load is a cargo test
+#   since S4 (#10746): build_criteria.rs golden_registry_loads_every_row.
 #
 #   The src/ greps read raw text, comments included, matching the spec's
 #   "a grep of crates/trusty-okf/src". Fails closed: a missing src/, a src/
@@ -174,7 +175,7 @@ banned_deps b9_no_extraction_backend "$TMP/all" 'xberg|ort|ort-sys|candle-core'
 
 echo "note: B2 inverse half (cargo tree -i trusty-okf lists trusty-agents) is checked from S11"
 echo "note: B10 (child-process environment) has no spawn code to check until S9/S10"
-echo "note: criterion 13 registry.toml load (gmail/drive rows survive) is checked from S4"
+echo "note: criterion 13 registry.toml load is the test golden_registry_loads_every_row (crates/trusty-okf/tests/build_criteria.rs)"
 
 if [ "$STATUS" -eq 0 ]; then
   echo "check_okf_boundary: OK"

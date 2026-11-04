@@ -90,10 +90,8 @@ impl KbStore {
         }
     }
 
-    /// Sweep for vanished items after a CHUNKED ingest; see
-    /// `trusty_okf::build::ingest::sweep_deleted`.
-    ///
-    /// Test: `sweep_tombstones_only_after_the_full_set_is_known` (trusty-okf).
+    /// Sweep for vanished items after a CHUNKED ingest; a thin delegate to
+    /// `trusty_okf::build::ingest::sweep_deleted`, whose suite covers it.
     pub fn okg_sweep_deleted(
         &self,
         spec: &SourceSpec,

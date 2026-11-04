@@ -19,9 +19,9 @@
 //!
 //! Test: the behaviours are pinned by the callers' own suites
 //! (`torn_line_is_skipped_not_fatal`,
-//! `torn_mid_utf8_codepoint_is_skipped_not_fatal`,
-//! `append_after_torn_line_does_not_corrupt_the_new_record`, and
-//! `index_journal::tests::torn_index_journal_line_is_skipped_not_fatal`).
+//! `torn_mid_utf8_codepoint_is_skipped_not_fatal` and
+//! `append_after_torn_line_does_not_corrupt_the_new_record`; trusty-kb's
+//! index-journal suite covers its own use).
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
