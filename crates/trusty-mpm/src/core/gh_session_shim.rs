@@ -285,9 +285,9 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
          \x20   (sleep {bound_secs}; kill \"$pid\") >/dev/null 2>&1 &\n\
          \x20   watchdog=$!\n\
          \x20   wait \"$pid\"\n\
-         \x20   status=$?\n\
+         \x20   looked=$?\n\
          \x20   kill \"$watchdog\" 2>/dev/null\n\
-         \x20   exit \"$status\"\n\
+         \x20   exit \"$looked\"\n\
          \x20 ) || reset=\n\
          \x20 case \"$reset\" in\n\
          \x20   ''|*[!0-9]*) when='the reset time is unknown (gh api rate_limit did not answer)' ;;\n\
