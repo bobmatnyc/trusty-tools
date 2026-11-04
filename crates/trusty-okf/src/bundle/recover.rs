@@ -389,6 +389,8 @@ impl Bundle {
     /// Test: `c106_crash_at_every_boundary_rolls_forward_byte_identical`,
     /// `c108_crash_during_recovery_and_torn_intent`.
     pub fn recover_interrupted(&mut self) -> Result<Vec<Finding>, OkfError> {
+        // #10746 S5: with the §4.4 lock, "only writer" is enforced here.
+        let _lock = self.write_lock()?;
         recover_on_open(self)
     }
 
@@ -408,6 +410,8 @@ impl Bundle {
         op_id: &str,
         dir: RecoveryDirection,
     ) -> Result<RecoveryReport, OkfError> {
+        // #10746 S5: one writer at a time (§4.4).
+        let _lock = self.write_lock()?;
         let (pending, _) = read_ops(self)?;
         let Some(p) = pending.into_iter().find(|p| p.op == op_id) else {
             return Err(OkfError::Parse {

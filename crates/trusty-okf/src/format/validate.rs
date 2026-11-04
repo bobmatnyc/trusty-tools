@@ -99,6 +99,9 @@ pub enum FindingKind {
     /// #10746 S5: an operation completed but its staging directory under
     /// `_sources/ops/` was not removed; the next recovery removes it.
     StagingLeft,
+    /// #10746 S5: another writer holds the bundle lock, so `Bundle::open`
+    /// did not recover (§4.11 "Lock held elsewhere").
+    RecoveryDeferred,
 }
 
 /// One structured validation finding.

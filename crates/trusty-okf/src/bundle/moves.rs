@@ -264,6 +264,29 @@ impl Bundle {
         to: &ConceptId,
         now: DateTime<FixedOffset>,
     ) -> Result<MoveReport, OkfError> {
+        // #10746 S5: one writer at a time (§4.4). The refusals run first
+        // without the lock, so a refused move creates no lock file; the plan
+        // is then made again under the lock.
+        let _lock = if self.held.is_none() {
+            self.plan_move(from, to, &now)?;
+            self.write_lock()?
+        } else {
+            None
+        };
+        let (op, mut report) = self.plan_move(from, to, &now)?;
+        self.check_recovery(&op.file_paths())?;
+        report.findings.extend(ops::run(self, op)?);
+        Ok(report)
+    }
+
+    /// Every refusal and the journaled operation of a move, writing nothing.
+    fn plan_move(
+        &self,
+        from: &ConceptId,
+        to: &ConceptId,
+        now: &DateTime<FixedOffset>,
+    ) -> Result<(OpPlan, MoveReport), OkfError> {
+        let now = *now;
         let from_path = confined_file(&self.root, &from.file_name())?;
         let to_path = confined_file(&self.root, &to.file_name())?;
         if !from_path.is_file() {
@@ -455,9 +478,7 @@ impl Bundle {
         if let Some(bytes) = from_record_bytes {
             op.file(&record_rel(from), Some(bytes), None);
         }
-        self.check_recovery(&op.file_paths())?;
-        report.findings.extend(ops::run(self, op)?);
-        Ok(report)
+        Ok((op, report))
     }
 }
 

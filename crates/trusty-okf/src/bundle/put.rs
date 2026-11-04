@@ -295,6 +295,18 @@ impl Bundle {
         kind: WriteKind,
         log: LogMode<'_>,
     ) -> Result<(PutOutcome, Vec<Finding>, ConceptId), OkfError> {
+        // #10746 S5: one writer at a time (§4.4). The refusals run first
+        // without the lock, so a refused or unchanged write creates no lock
+        // file; the plan is then made again under the lock.
+        let _lock = if self.held.is_none() {
+            let probe = self.plan_put(c.clone(), by, confirmed, mode, now, kind, None)?;
+            if probe.outcome == PutOutcome::Unchanged {
+                return Ok((probe.outcome, probe.findings, probe.id));
+            }
+            self.write_lock()?
+        } else {
+            None
+        };
         let plan = self.plan_put(c, by, confirmed, mode, now, kind, None)?;
         let mut out = (plan.outcome, plan.findings.clone(), plan.id.clone());
         if plan.outcome != PutOutcome::Unchanged {
@@ -464,6 +476,30 @@ impl Bundle {
         seen: &ContentHash,
         confirmed: bool,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
+        // #10746 S5: one writer at a time (§4.4). Refusals run first without
+        // the lock, so a refused verify creates no lock file; the plan is then
+        // made again under the lock.
+        let _lock = if self.held.is_none() {
+            self.plan_verify(id, &v, seen, confirmed)?;
+            self.write_lock()?
+        } else {
+            None
+        };
+        let (plan, mut findings) = self.plan_verify(id, &v, seen, confirmed)?;
+        let outcome = plan.outcome;
+        findings.extend(self.commit_op(plan, &v.by, &v.at, LogMode::Entry, OpKind::Verify)?);
+        Ok((outcome, findings))
+    }
+
+    /// Every refusal, the render and the record line of a `verify`, writing
+    /// nothing (#10746 S5).
+    fn plan_verify(
+        &self,
+        id: &ConceptId,
+        v: &Verification,
+        seen: &ContentHash,
+        confirmed: bool,
+    ) -> Result<(PutPlan, Vec<Finding>), OkfError> {
         // #10746: a `human:` actor alone is not explicit confirmation (§2.4).
         if is_human(&v.by) && !confirmed {
             return Err(conflict(id, "human_not_confirmed"));
@@ -531,8 +567,7 @@ impl Bundle {
             lines: vec![line],
             log: format!("**Verified** `/{}` by `{}`", id.file_name(), v.by),
         };
-        findings.extend(self.commit_op(plan, &v.by, &v.at, LogMode::Entry, OpKind::Verify)?);
-        Ok((outcome, findings))
+        Ok((plan, findings))
     }
 }
 

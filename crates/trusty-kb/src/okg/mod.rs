@@ -112,12 +112,13 @@ impl KbStore {
     /// What: loads the registry, upserts, and write-if-changed saves it.
     /// Test: `register_is_additive_across_sources`.
     pub fn okg_register_source(&self, spec: SourceSpec) -> anyhow::Result<RegisterOutcome> {
-        let mut reg = SourceRegistry::load(&self.root)?;
         let id = spec.id.clone();
         // #10746: only this row passes through the typed view; every other
-        // row is saved exactly as trusty-okf read it.
-        let (created, changed) = reg.upsert(spec);
-        let wrote = reg.save(&self.root)?;
+        // row is saved exactly as trusty-okf read it. S5: load, upsert and
+        // save run under the bundle lock, so a concurrent registration keeps
+        // its row (SPEC-OKF-01 §4.4).
+        let (created, changed, wrote) =
+            trusty_okf::build::registry::SourceRegistry::upsert_at(&self.root, spec.to_okf())?;
         Ok(RegisterOutcome {
             id,
             created,

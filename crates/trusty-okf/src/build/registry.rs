@@ -408,6 +408,27 @@ impl SourceRegistry {
         Ok(true)
     }
 
+    /// Load, upsert and save under the bundle lock (SPEC-OKF-01 §4.4).
+    ///
+    /// Why: #10746 S5 — two registrations that each load, upsert and save
+    /// drop one another's row. What: creates `_sources/` as `save` would (a
+    /// first registration creates the tree), takes the bundle lock, then
+    /// [`load`](Self::load), [`upsert`](Self::upsert) and
+    /// [`save`](Self::save). Returns `(created, changed, wrote)`.
+    /// Test: `lock_prevents_lost_log_and_registry_updates`.
+    pub fn upsert_at(root: &Path, incoming: SourceSpec) -> Result<(bool, bool, bool), OkfError> {
+        let path = Self::path(root)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
+        }
+        let canon = crate::bundle::paths::canonical_root(root)?;
+        let _lock = crate::bundle::lock::BundleLock::acquire(&canon)?;
+        let mut reg = Self::load(root)?;
+        let (created, changed) = reg.upsert(incoming);
+        let wrote = reg.save(root)?;
+        Ok((created, changed, wrote))
+    }
+
     /// Look up a source by its canonical (slugged) id.
     pub fn get(&self, id: &str) -> Option<&SourceSpec> {
         let slug = slugify(id);

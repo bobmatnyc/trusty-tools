@@ -295,6 +295,7 @@ fn raw(root: &Path) -> Bundle {
     Bundle {
         root: root.to_path_buf(),
         conflicts: Vec::new(),
+        held: None,
     }
 }
 

@@ -33,6 +33,7 @@ use crate::format::validate::{Finding, FindingKind, Severity};
 pub(crate) mod commit;
 pub mod graph;
 pub mod index_md;
+pub(crate) mod lock;
 pub mod log_md;
 pub mod moves;
 pub mod ops;
@@ -57,6 +58,9 @@ pub struct Bundle {
     /// #10746 S5: operations found or left conflicted, with their file-step
     /// paths; a write to one of them returns `RecoveryPending` (§4.11).
     conflicts: Vec<(String, Vec<String>)>,
+    /// #10746 S5: the bundle lock this handle holds for its whole life (an
+    /// ingest run); `None` takes the lock per write (§4.4).
+    held: Option<std::sync::Arc<lock::BundleLock>>,
 }
 
 impl Bundle {
@@ -79,11 +83,11 @@ impl Bundle {
         let mut bundle = Bundle {
             root: paths::canonical_root(root)?,
             conflicts: Vec::new(),
+            held: None,
         };
-        // #10746 S5 r2: without the §4.4 lock an incomplete operation may be
-        // a live writer's, so `open` only reports it and marks its paths;
-        // `recover_interrupted` recovers (§4.11).
-        let mut findings = recover::scan_interrupted(&mut bundle)?;
+        // #10746 S5: recovery runs before the read, under the lock; with the
+        // lock held elsewhere it is deferred (§4.11 "Lock held elsewhere").
+        let mut findings = bundle.recover_unless_locked()?;
         findings.extend(legacy_index_journals(&bundle.root)?);
         let scan = walk::scan(&bundle.root)?;
         findings.extend(scan.findings);
@@ -140,14 +144,56 @@ impl Bundle {
     /// and needs no findings, so it skips the scan. The root rule is the same
     /// (§2.11 rule 1).
     pub(crate) fn at(root: &Path) -> Result<Bundle, OkfError> {
+        let root = paths::canonical_root(root)?;
+        // #10746 S5: the build layer holds the lock for the whole run (§4.4),
+        // and recovers under it first.
+        let held = Some(std::sync::Arc::new(lock::BundleLock::acquire(&root)?));
         let mut bundle = Bundle {
-            root: paths::canonical_root(root)?,
+            root,
             conflicts: Vec::new(),
+            held,
         };
-        // #10746 S5 r2: as `open`, report-only; an operation in flight keeps
-        // its paths refused to this handle.
-        recover::scan_interrupted(&mut bundle)?;
+        recover::recover_on_open(&mut bundle)?;
         Ok(bundle)
+    }
+
+    /// The lock for one write: `None` when this handle already holds it.
+    ///
+    /// #10746 S5 (§4.4): a lock is per open file, so a handle that holds it
+    /// never takes it twice. Test: `lock_prevents_lost_log_and_registry_updates`.
+    pub(crate) fn write_lock(&self) -> Result<Option<lock::BundleLock>, OkfError> {
+        match self.held {
+            Some(_) => Ok(None),
+            None => lock::BundleLock::acquire(&self.root).map(Some),
+        }
+    }
+
+    /// Recover under the lock, or report `recovery_deferred` when another
+    /// writer holds it (§4.11). Takes no lock when nothing is journaled, so
+    /// opening a read-only bundle writes nothing.
+    /// Test: `open_defers_recovery_while_another_writer_holds_the_lock`.
+    fn recover_unless_locked(&mut self) -> Result<Vec<Finding>, OkfError> {
+        if !paths::confined_file(&self.root, ops::OPS_DIR)?.is_dir() {
+            return Ok(Vec::new());
+        }
+        match lock::BundleLock::try_acquire(&self.root)? {
+            Some(_lock) => recover::recover_on_open(self),
+            // #10746 S5 r2: a live writer holds the lock: report and refuse
+            // its paths (read-only scan), never recover under it.
+            None => Ok([
+                recover::scan_interrupted(self)?,
+                vec![Finding::new(
+                    Severity::Info,
+                    FindingKind::RecoveryDeferred,
+                    ops::OPS_DIR.to_string(),
+                    "another writer holds the bundle lock; recovery deferred, and reads may \
+                 see an operation in progress"
+                        .to_string(),
+                    "SPEC-OKF-01 §4.11",
+                )],
+            ]
+            .concat()),
+        }
     }
 
     /// The canonical root directory.
