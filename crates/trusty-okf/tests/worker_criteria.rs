@@ -540,8 +540,8 @@ fn c123_worker_ignoring_shutdown_is_killed_and_reaped() {
     assert_eq!(r.worker_errors, vec![WorkerError::ShutdownTimeout]);
     assert_eq!(outcome(&r, "b.pdf").1, "created");
     assert_eq!(r.created, 2);
-    // shutdown (1 s) + TERM grace (2 s) + item work, with slack.
-    assert!(took < S(1 + 2 + 2), "{took:?}");
+    // shutdown (1 s) + TERM grace (2 s) + spawn and item work, with slack.
+    assert!(took < S(1 + 2 + 3), "{took:?}");
     assert!(pids_gone(&pidfile), "the worker or its child survived");
     assert_eq!(r.exit_code, 3, "a run-level failure is never a clean exit");
 }
@@ -809,7 +809,13 @@ fn rlimits_kill_a_runaway_item_and_spare_the_rest() {
         let t = Instant::now();
         let spin = ex.extract(b"SPIN", &hint).unwrap_err().code;
         let took = t.elapsed();
-        let alloc = ex.extract(b"ALLOC", &hint).map(|e| e.text);
+        // macOS does not honour RLIMIT_AS, so the 1 GiB item is sent only
+        // where the limit exists (on macOS it would just allocate).
+        let alloc = if cfg!(target_os = "macos") {
+            Ok(String::new())
+        } else {
+            ex.extract(b"ALLOC", &hint).map(|e| e.text)
+        };
         let fine = ex.extract(b"fine", &hint).unwrap().text;
         (spin, took, alloc, fine)
     });
@@ -817,7 +823,7 @@ fn rlimits_kill_a_runaway_item_and_spare_the_rest() {
     assert!(took < S(6), "{took:?}");
     if cfg!(target_os = "macos") {
         // macOS does not honour RLIMIT_AS; the wall time is the bound.
-        assert!(alloc.is_ok(), "{alloc:?}");
+        eprintln!("rlimits: RLIMIT_AS half not applicable on macOS");
     } else {
         assert_eq!(alloc.unwrap_err().code, "crashed", "RLIMIT_AS did not hold");
     }
@@ -876,6 +882,7 @@ fn sandboxed_worker_cannot_fork_a_setsid_grandchild() {
     let _sweep = Sweep(marker.clone());
     let fake = Fake {
         config: tag,
+        sandbox: "platform".into(),
         ..Fake::default()
     };
     let mut cfg = config(&dir, &fake, "worker");

@@ -7,8 +7,9 @@
 //! never from the worker's word.
 //! What: [`command`] builds the spawn command in two layers, both applied
 //! before the worker binary runs.
-//! 1. Resource limits (#10746 S10 fix round): `/bin/sh -c 'ulimit -t <cpu>
-//!    && ulimit -v <kib> && exec "$@"'` sets `RLIMIT_CPU` and `RLIMIT_AS`,
+//! 1. Resource limits (#10746 S10 fix round): `/bin/sh -c 'unset PWD
+//!    OLDPWD; ulimit -t <cpu> && ulimit -v <kib> && exec "$@"'` (`/bin/dash`
+//!    on macOS) sets `RLIMIT_CPU` and `RLIMIT_AS`,
 //!    then execs the next layer, which inherits both. A `ulimit` that fails
 //!    ends the shell before `exec`, so the spawn fails before `hello`
 //!    (fails closed). macOS does not honour `RLIMIT_AS` (its `setrlimit`
@@ -53,7 +54,12 @@ pub enum SandboxPolicy {
 /// The host's record of the sandbox it applied: the launcher's name.
 pub type SpawnEvidence = Option<&'static str>;
 
-/// The shell that applies the resource limits; a fixed path.
+/// The shell that applies the resource limits; a fixed path. macOS
+/// `/bin/sh` is bash, which exports `SHLVL` into the worker's environment
+/// even after `unset`; dash adds nothing once `PWD` is unset.
+#[cfg(target_os = "macos")]
+const SHELL: &str = "/bin/dash";
+#[cfg(not(target_os = "macos"))]
 const SHELL: &str = "/bin/sh";
 
 #[cfg(target_os = "macos")]
@@ -158,7 +164,11 @@ fn limits_script(cpu_seconds: u64, address_space: u64) -> String {
     } else {
         format!(" && ulimit -v {}", (address_space / 1024).max(1))
     };
-    format!("ulimit -t {}{as_limit} && exec \"$@\"", cpu_seconds.max(1))
+    // The shell's own `PWD` must not reach the worker (§2.16 allow-list).
+    format!(
+        "unset PWD OLDPWD; ulimit -t {}{as_limit} && exec \"$@\"",
+        cpu_seconds.max(1)
+    )
 }
 
 /// The spawn command for `worker` in `cwd` under the resource limits, and
@@ -199,7 +209,7 @@ mod tests {
     #[test]
     fn limits_script_fails_closed_and_skips_as_on_macos() {
         let s = limits_script(7, 1 << 30);
-        assert!(s.starts_with("ulimit -t 7 && "), "{s}");
+        assert!(s.starts_with("unset PWD OLDPWD; ulimit -t 7 && "), "{s}");
         assert!(s.ends_with("&& exec \"$@\""), "{s}");
         assert_eq!(s.contains("ulimit -v 1048576"), !cfg!(target_os = "macos"));
     }
