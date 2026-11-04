@@ -77,7 +77,9 @@ fn cli_import_run_reports_each_axis_and_exits_3_on_a_skip() {
 
 /// Why: §4.10 code 2 — a bad call is refused before any write, with usage.
 /// What: unknown options, an unsupported source, a missing root, `--feed`
-/// without its arguments; the bundle and source snapshots stay equal.
+/// without its arguments, and (#10746 S8 fix) a state directory inside the
+/// bundle or an index ID that is not one path segment; the bundle and
+/// source snapshots stay equal.
 /// Test: self-contained.
 #[test]
 fn cli_refuses_bad_calls_with_2_before_any_write() {
@@ -85,7 +87,38 @@ fn cli_refuses_bad_calls_with_2_before_any_write() {
     let (root, from) = (s(&fx.root), format!("dir:{}", s(&fx.src)));
     let before = (snapshot(&fx.root), snapshot(&fx.src));
     let missing = s(&fx.root.join("nope"));
+    let in_bundle = s(&fx.root.join(".st"));
+    let machine = s(&fx.tmp.path().join("machine"));
+    let sock = "/nonexistent/okf.sock";
     for args in [
+        vec![
+            "import",
+            "run",
+            &root,
+            "--from",
+            &from,
+            "--feed",
+            "--index",
+            "okf",
+            "--state-dir",
+            &in_bundle,
+            "--socket",
+            sock,
+        ],
+        vec![
+            "import",
+            "run",
+            &root,
+            "--from",
+            &from,
+            "--feed",
+            "--index",
+            "a/b",
+            "--state-dir",
+            &machine,
+            "--socket",
+            sock,
+        ],
         vec!["import", "run", &root, "--from", &from, "--worker", "/x"],
         vec!["import", "run", &root, "--from", "gmail"],
         vec!["import", "run", &root],

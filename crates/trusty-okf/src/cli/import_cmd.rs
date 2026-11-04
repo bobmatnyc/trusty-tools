@@ -163,7 +163,7 @@ pub(crate) fn run(a: &Args, out: &mut dyn Write, ctx: &Ctx<'_>) -> Result<i32, F
     let root = bundle_root(a, 2)?;
     let feed = a.has("--feed");
     if feed || a.one("--index").is_some() {
-        feed_args(a)?;
+        feed_args(a, &root)?;
     }
     let now = now(a)?;
     let stamp = crate::bundle::record::instant_string(&now);
@@ -177,10 +177,17 @@ pub(crate) fn run(a: &Args, out: &mut dyn Write, ctx: &Ctx<'_>) -> Result<i32, F
         Ok(r) => r,
         Err(e) => return Err(fail(&e)),
     };
-    let mut feed_error = None;
-    if feed {
-        feed_error = feed_after_import(a, &root, &mut report, ctx)?;
-    }
+    // #10746 S8 fix: the import has written. From here every failure prints
+    // the report first and exits 1 (§4.10), never 2 ("refused before any
+    // write").
+    let feed_error = if feed {
+        match feed_after_import(a, &root, &mut report, ctx) {
+            Ok(e) => e,
+            Err(Fail::Code(_, e) | Fail::Usage(e)) => Some(e),
+        }
+    } else {
+        None
+    };
     output::report(out, &report, a.has("--json"));
     match feed_error {
         Some(e) => Err(Fail::Code(
@@ -192,8 +199,10 @@ pub(crate) fn run(a: &Args, out: &mut dyn Write, ctx: &Ctx<'_>) -> Result<i32, F
 }
 
 /// `--index`, `--state-dir` and `--socket` together, and a feed-capable
-/// build; checked before any write.
-fn feed_args(a: &Args) -> Result<(), Fail> {
+/// build; checked before any write. #10746 S8 fix: the state directory and
+/// index ID are checked as the journal will read them (`StateDirInBundle`,
+/// `PathEscape`), so a bad value refuses with 2 and no file changes.
+fn feed_args(a: &Args, root: &Path) -> Result<(), Fail> {
     if !a.has("--feed") {
         return Err(Fail::Usage("--index needs --feed".into()));
     }
@@ -203,9 +212,17 @@ fn feed_args(a: &Args) -> Result<(), Fail> {
         }
     }
     #[cfg(not(feature = "search-feed"))]
-    return Err(super::no_feed());
+    {
+        let _ = root;
+        Err(super::no_feed())
+    }
     #[cfg(feature = "search-feed")]
-    Ok(())
+    {
+        let state = IndexStateDir::new(a.one("--state-dir").unwrap_or_default());
+        crate::state::IndexJournal::open(&state, root, a.one("--index").unwrap_or_default())
+            .map(|_| ())
+            .map_err(|e| fail(&e))
+    }
 }
 
 #[cfg(feature = "search-feed")]

@@ -31,7 +31,7 @@ mod feed_cmd;
 pub const USAGE: &str = "usage:
   trusty-okf import plan   <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]... [--json]
   trusty-okf import run    <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]...
-                           [--dry-run] [--feed --index ID --state-dir DIR --socket PATH] [--now RFC3339] [--json]
+                           [--dry-run] [--feed --index ID --state-dir DIR --socket PATH] [--json]
   trusty-okf import status <bundle-root> [--store ID] [--index ID --state-dir DIR [--socket PATH]] [--json]
   trusty-okf feed          <bundle-root> --index ID --state-dir DIR --socket PATH [--json]
 ";
@@ -45,6 +45,9 @@ const VALUED: &[&str] = &[
     "--index",
     "--state-dir",
     "--socket",
+    // #10746 S8: test-only. Fixes the run's `now` so a test can compare two
+    // runs byte for byte; left out of `USAGE` on purpose (Architect ruling).
+    // Without it the CLI takes the system clock.
     "--now",
 ];
 const FLAGS: &[&str] = &["--json", "--feed", "--dry-run"];

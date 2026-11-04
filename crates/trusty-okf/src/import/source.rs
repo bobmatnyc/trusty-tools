@@ -160,7 +160,17 @@ impl ImportSource for DocTreeSource {
                 return Err(fail("symlink", format!("{item_id}: crosses a link")));
             }
         }
-        let meta = std::fs::metadata(&probe).map_err(|e| fail("fetch_error", e.to_string()))?;
+        let meta = std::fs::symlink_metadata(&probe)
+            .map_err(|e| fail("fetch_error", format!("{item_id}: {e}")))?;
+        // #10746 S8 fix: a FIFO, socket or device swapped in after the
+        // listing would block the read under the bundle lock; only a regular
+        // file is read.
+        if !meta.file_type().is_file() {
+            return Err(fail(
+                "unsupported_format",
+                format!("{item_id}: not a regular file"),
+            ));
+        }
         if meta.len() > MAX_ITEM_BYTES {
             return Err(fail(
                 "too_large",

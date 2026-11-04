@@ -708,3 +708,86 @@ fn source_changed_after_the_plan_fails_stale_plan() {
     assert!(!fx.root.join("a.md").exists());
     let _ = concepts_snapshot(&fx.root);
 }
+
+/// A test-double worker that corrupts an already written concept file while
+/// it extracts the next item: a read error after the import's writes.
+struct CorruptingWorker {
+    target: std::path::PathBuf,
+}
+
+impl Extractor for CorruptingWorker {
+    fn id(&self) -> &str {
+        "corrupting-worker"
+    }
+    fn version(&self) -> &str {
+        "1"
+    }
+    fn extract(&self, bytes: &[u8], _hint: &TypeHint) -> Result<Extracted, ExtractError> {
+        std::fs::write(&self.target, "---\nkey: [unclosed\n---\nbody\n").unwrap();
+        Ok(Extracted {
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            ..Extracted::default()
+        })
+    }
+}
+
+/// Why: §4.10 (#10746 S8 fix) — an error after the import's first write is
+/// a run-level error (exit 1), never a refusal before any write (exit 2).
+/// What: `a.md` is written, then the worker corrupts its concept while
+/// extracting `b.pdf`; the report's state read fails.
+/// Test: self-contained.
+#[test]
+fn error_after_the_writes_maps_to_exit_1_not_2() {
+    let fx = Fx::new(&[("a.md", "Alpha.\n"), ("b.pdf", "pdf text")]);
+    let worker = CorruptingWorker {
+        target: fx.root.join("a.md"),
+    };
+    let got = fx.import_with(&fx.spec(), &worker, now());
+    assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
+    assert_eq!(exit_code(&got), 1);
+}
+
+/// `mkfifo <path>`.
+#[cfg(unix)]
+fn mkfifo(p: &std::path::Path) {
+    let st = std::process::Command::new("mkfifo")
+        .arg(p)
+        .status()
+        .unwrap();
+    assert!(st.success());
+}
+
+/// Why: §2.14 rule 8 (#10746 S8 fix) — only a regular file is read. A FIFO
+/// in the tree is refused `unsupported_format`, and one swapped in for a
+/// planned file before the apply is refused too, instead of blocking the
+/// read forever under the bundle lock; the run completes.
+/// What: a FIFO at plan time; then a planned `b.md` replaced by a FIFO and
+/// the import run on a thread under a 30 s watchdog.
+/// Test: self-contained.
+#[cfg(unix)]
+#[test]
+fn non_regular_files_are_refused_and_the_run_completes() {
+    let fx = Fx::new(&[("a.md", "Alpha.\n"), ("b.md", "Beta.\n")]);
+    mkfifo(&fx.src.join("pipe.md"));
+    let plan = fx.plan(&fx.spec()).unwrap();
+    let pipe = plan.items.iter().find(|p| p.item_id == "pipe.md").unwrap();
+    assert_eq!(pipe.reason.as_deref(), Some("unsupported_format"));
+    fx.remove("b.md");
+    mkfifo(&fx.src.join("b.md"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (root, src) = (fx.root.clone(), fx.src.clone());
+    std::thread::spawn(move || {
+        let mut b = Bundle::open(&root).unwrap().0;
+        let mut source =
+            trusty_okf::import::DocTreeSource::open(&src, &DocStorePolicy::new(vec![src.clone()]))
+                .unwrap();
+        let r = trusty_okf::import::import(&mut b, &plan, &mut source, &NoWorker, now());
+        let _ = tx.send(r);
+    });
+    let r = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the import blocked on a FIFO")
+        .unwrap();
+    assert_eq!(outcome(&r, "b.md").2.as_deref(), Some("unsupported_format"));
+    assert_eq!(outcome(&r, "a.md").1, "created");
+}

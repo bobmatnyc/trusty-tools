@@ -95,6 +95,31 @@ fn c85_failed_feed_reports_not_fully_searchable_and_exits_4() {
     );
 }
 
+/// Why: §4.10 (#10746 S8 fix) — once the import has written, a failure in
+/// the feed step is a run-level error after writes began: the report is
+/// printed and the CLI exits 1, never 2.
+/// What: the fake corrupts the concept file during its put, so reading the
+/// index states after the pass fails with a parse error.
+/// Test: self-contained.
+#[test]
+fn cli_post_write_feed_error_prints_the_report_and_exits_1() {
+    let fx = Fx::new(&[("a.md", "Alpha one two.\n")]);
+    let sink = Fake::new(&fx.root, true);
+    let root = fx.root.clone();
+    sink.script(|s| {
+        s.on_put = Some(Box::new(move |wire: &str| {
+            std::fs::write(root.join(wire), "---\nkey: [unclosed\n---\nbody\n").unwrap();
+        }))
+    });
+    let (code, out) = run_cli(&fx, &sink, &[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("summary: complete"),
+        "no report printed: {out}"
+    );
+    assert!(out.contains("feed pass failed after the import"), "{out}");
+}
+
 /// Why: criterion 85 through the built binary: a socket with no daemon is a
 /// failed feed (F1), and the process exits 4 after saving the import.
 /// What: the binary with `--feed` and an absent socket.

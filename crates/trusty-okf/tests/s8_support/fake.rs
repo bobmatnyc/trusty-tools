@@ -30,6 +30,9 @@ pub fn ident(instance: &str, generation: u64) -> IndexIdentity {
     }
 }
 
+/// A side effect a put runs, given the wire path.
+pub type PutHook = Box<dyn Fn(&str) + Send + Sync>;
+
 /// What the fake does differently from a well-behaved daemon.
 #[derive(Default)]
 pub struct Script {
@@ -39,6 +42,8 @@ pub struct Script {
     pub wrong_hash: bool,
     /// The `search.index.config.get` reply.
     pub config: Option<Value>,
+    /// Runs inside every put, with the wire path.
+    pub on_put: Option<PutHook>,
 }
 
 pub struct Fake {
@@ -176,6 +181,9 @@ impl Fake {
                 Ok(json!({ "results": hits }))
             }
             "search.index.file.put" => {
+                if let Some(hook) = &s.on_put {
+                    hook(&path);
+                }
                 let content = p["body"]["content"].as_str().unwrap_or_default();
                 let echoed = if s.wrong_hash {
                     hex("other")

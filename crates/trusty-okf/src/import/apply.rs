@@ -358,7 +358,9 @@ pub fn import(
     report
         .findings
         .extend(crate::build::ingest::op_findings(left).iter().map(finding));
-    report.unfed_states(&b)?;
+    report
+        .unfed_states(&b)
+        .map_err(|e| after_writes(&root, e))?;
     let written = [report.created, report.updated, report.tombstoned];
     failpoint("import-finish")?;
     log.finish(&b, &stamp, written)
