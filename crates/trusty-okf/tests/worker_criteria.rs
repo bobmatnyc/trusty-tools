@@ -15,6 +15,8 @@
 //! Test: `cargo test -p trusty-okf --features extract-worker --test worker_criteria`.
 
 mod s8_support;
+// S9+S10 merge: the fake adapter, for the `--worker` SIGINT variant.
+mod s9_support;
 #[path = "worker_support/fake.rs"]
 mod worker_support;
 
@@ -974,6 +976,49 @@ fn c103_sigint_cancels_the_cli_and_reaps_the_worker() {
         "{text}"
     );
     assert!(group_gone(worker), "the worker group outlived the CLI");
+}
+
+/// Why: Architect ruling 2c9381bdbdc9 (S9+S10 merge) — with `--worker`,
+/// SIGINT must still cancel an adapter import: one SIGINT path per process
+/// sets one flag that the worker client and the adapter share.
+/// What: as `c97_sigint_cancels_an_adapter_import_and_reaps_its_group`
+/// (`adapter_criteria.rs`), with `--worker` naming a worker that the
+/// connector records never start; the adapter hangs in `list`, then in
+/// `fetch`. Each run exits 3 with a `cancelled` report, and the adapter,
+/// its grandchild and its process group are gone.
+/// Test: self-contained.
+#[test]
+fn sigint_cancels_an_adapter_import_with_a_worker() {
+    use s9_support::{FakeAdapter, interrupt_cli, msg, msg_entry, outcome_of};
+    use serde_json::json;
+    let fake = FakeAdapter::new("gmail");
+    fake.page(
+        None,
+        json!([msg_entry("c1", "t1"), msg_entry("c2", "t2")]),
+        None,
+        true,
+    );
+    fake.item(msg("c1", "t1", 1_767_225_600_000, "a", "One."));
+    fake.item(msg("c2", "t2", 1_767_225_700_000, "b", "Two."));
+    let worker = fake.dir.join("no-worker");
+    let worker = worker.to_str().unwrap();
+    for op in ["list", "fetch"] {
+        let got = interrupt_cli(&fake, op, &["--worker", worker]);
+        assert_eq!(got.code, Some(3), "{op}: {got:?}");
+        let report = got.report.as_ref().expect("no report printed");
+        assert_eq!(report["cancelled"], true, "{op}: {report}");
+        if op == "fetch" {
+            let reason = |id| outcome_of(report, id).2;
+            assert_eq!(
+                (reason("c1"), reason("c2")),
+                ("cancelled".into(), "cancelled".into())
+            );
+        }
+        assert!(
+            !got.adapter_left && !got.grandchild_left && !got.group_left,
+            "{op}: {got:?}"
+        );
+    }
 }
 
 /// Why: #10746 S10 last change — `RLIMIT_CPU` counts the worker's whole

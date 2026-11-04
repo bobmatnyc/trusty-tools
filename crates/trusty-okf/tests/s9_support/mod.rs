@@ -251,3 +251,124 @@ pub fn msg(id: &str, thread: &str, ms: u64, subject: &str, text: &str) -> Value 
 pub fn read(root: &Path, rel: &str) -> String {
     std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
+
+/// What a SIGINT to the CLI left behind ([`interrupt_cli`]).
+#[derive(Debug)]
+pub struct Interrupted {
+    /// The CLI's exit code; `None` when a signal ended it or it never
+    /// exited within 10 s and the test killed it.
+    pub code: Option<i32>,
+    /// The JSON report the CLI printed, when it printed one.
+    pub report: Option<Value>,
+    /// Whether the adapter, its grandchild or anything in its process group
+    /// was still running 3 s after the CLI ended.
+    pub adapter_left: bool,
+    pub grandchild_left: bool,
+    pub group_left: bool,
+}
+
+/// Whether anything is left in process group `pgid`.
+fn group_alive(pgid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-s", "0", "--", &format!("-{pgid}")])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// #10746 S9+S10 merge (Architect ruling 2c9381bdbdc9): run `import run`
+/// through the fake with `extra` arguments, make the adapter hang on `op`
+/// after it starts a grandchild, send the CLI one SIGINT, and record what
+/// is left. Every process the fake left running is killed before return,
+/// so a failing run leaks nothing.
+pub fn interrupt_cli(fake: &FakeAdapter, op: &str, extra: &[&str]) -> Interrupted {
+    use std::time::{Duration, Instant};
+    for f in ["pid", "grandchild", "requests.log"] {
+        let _ = std::fs::remove_file(fake.dir.join(f));
+    }
+    fake.flag(&format!("hang_{op}"), "");
+    fake.flag("spawn_grandchild", "");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_trusty-okf"))
+        .args(["import", "run"])
+        .arg(&fake.root)
+        .args(["--from", "adapter:gmail", "--adapter", "/bin/sh"])
+        .arg("--adapter-arg")
+        .arg(fake.script())
+        .arg("--adapter-arg")
+        .arg(&fake.dir)
+        .args([
+            "--adapter-var",
+            "PATH=/usr/bin:/bin",
+            "--adapter-var",
+            "LC_ALL=C",
+        ])
+        .args(["--select", "account=work", "--select", "query=in:sent"])
+        .args(["--json", "--now", "2026-11-04T12:00:00Z"])
+        .args(extra)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // The fake logs a request before it hangs on it.
+    let wanted = format!("\"op\":\"{op}\"");
+    let until = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read_to_string(fake.dir.join("requests.log"))
+        .unwrap_or_default()
+        .contains(&wanted)
+    {
+        assert!(Instant::now() < until, "the adapter never received {op}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let sent = std::process::Command::new("kill")
+        .args(["-s", "INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success(), "kill -INT failed");
+    let until = Instant::now() + Duration::from_secs(10);
+    let exited = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if Instant::now() >= until {
+            let _ = child.kill();
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let out = child.wait_with_output().unwrap();
+    let (adapter, grandchild) = (fake.pid(), fake.grandchild());
+    let left = |p: Option<u32>| p.is_some_and(alive);
+    let until = Instant::now() + Duration::from_secs(3);
+    while (left(adapter) || left(grandchild) || adapter.is_some_and(group_alive))
+        && Instant::now() < until
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let got = Interrupted {
+        code: if exited { out.status.code() } else { None },
+        report: serde_json::from_slice(&out.stdout).ok(),
+        adapter_left: left(adapter),
+        grandchild_left: left(grandchild),
+        group_left: adapter.is_some_and(group_alive),
+    };
+    for pid in [adapter, grandchild].into_iter().flatten() {
+        let _ = std::process::Command::new("kill")
+            .args(["-s", "KILL", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    fake.unflag(&format!("hang_{op}"));
+    fake.unflag("spawn_grandchild");
+    got
+}
+
+/// The `(read, write, reason)` of `item_id` in a JSON report.
+pub fn outcome_of(report: &Value, item_id: &str) -> (String, String, String) {
+    let it = report["items"]
+        .as_array()
+        .and_then(|a| a.iter().find(|i| i["item_id"] == item_id))
+        .unwrap_or_else(|| panic!("{item_id} not in {report}"));
+    let s = |k: &str| it[k].as_str().unwrap_or("").to_string();
+    (s("read"), s("write"), s("reason"))
+}
