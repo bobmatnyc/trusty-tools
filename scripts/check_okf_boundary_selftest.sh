@@ -11,7 +11,8 @@
 #   skipped. Each case asserts the exit status and, for a failure, the named
 #   check. Cases cover every check failing once, the accepted forms (a
 #   feature-only network crate, an `okg_` identifier), and the fail-closed
-#   paths (no source, a tree that does not start at trusty-okf).
+#   paths (no source, a tree that does not start at trusty-okf, a perl that
+#   errors).
 #
 # Usage: bash scripts/check_okf_boundary_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -45,10 +46,12 @@ new_fixture() {
 }
 
 # run_case <name> <expected-exit> <expected-message-or-empty> <dir>
+# CASE_PATH, when set, replaces PATH for the gate (stub-tool cases).
 run_case() {
   local name="$1" want="$2" needle="$3" dir="$4" out status
   set +e
-  out="$(cd "$dir" && OKF_TREE_ALL=all.txt OKF_TREE_CORE=core.txt OKF_SKIP_BUILD=1 bash "$GATE" 2>&1)"
+  out="$(cd "$dir" && PATH="${CASE_PATH:-$PATH}" OKF_TREE_ALL=all.txt OKF_TREE_CORE=core.txt \
+    OKF_SKIP_BUILD=1 bash "$GATE" 2>&1)"
   status=$?
   set -e
   if [ "$status" -ne "$want" ]; then
@@ -102,6 +105,32 @@ d="$(new_fixture index-create)"
 add_src "$d" 'pub const M: &str = "search.index.create";'
 run_case "index create method fails" 1 "FAIL c12_no_agent_paths_or_index_names" "$d"
 
+# #10746 H2: every route to std::env::var / var_os fails c12 (B3).
+d="$(new_fixture env-brace-import)"
+add_src "$d" 'use std::env::{var};'
+add_src "$d" 'pub fn h() -> Option<String> { var("HOME").ok() }'
+run_case "env brace import fails" 1 "FAIL c12_no_agent_paths_or_index_names" "$d"
+d="$(new_fixture env-brace-list)"
+add_src "$d" 'use std::env::{args, var};'
+add_src "$d" 'pub fn h() -> Option<String> { var("HOME").ok() }'
+run_case "env brace list import fails" 1 "FAIL c12_no_agent_paths_or_index_names" "$d"
+d="$(new_fixture env-alias)"
+add_src "$d" 'use std::{env as e};'
+add_src "$d" 'pub fn h() -> Option<std::ffi::OsString> { e::var_os("HOME") }'
+run_case "env module alias fails" 1 "FAIL c12_no_agent_paths_or_index_names" "$d"
+d="$(new_fixture env-multiline)"
+printf 'use std::{\n    env::{\n        var_os as v,\n    },\n};\npub fn h() -> bool { v("HOME").is_some() }\n' \
+  >> "$d/crates/trusty-okf/src/lib.rs"
+run_case "env multi-line group import fails" 1 "lib.rs:4:" "$d"
+
+# #10746 H3: a string literal naming trusty-agents anywhere fails c12 (B4).
+d="$(new_fixture agents-mid-literal)"
+add_src "$d" 'pub fn p(r: &std::path::Path) -> std::path::PathBuf { r.join("x/trusty-agents/y") }'
+run_case "trusty-agents mid-literal fails" 1 "FAIL c12_no_agent_paths_or_index_names" "$d"
+d="$(new_fixture agents-config-literal)"
+add_src "$d" 'pub const P: &str = ".config/trusty-agents";'
+run_case "trusty-agents config literal fails" 1 "FAIL c12_no_agent_paths_or_index_names" "$d"
+
 # 8. B6: a connector Locator variant (criterion 13).
 d="$(new_fixture gmail)"
 add_src "$d" 'pub enum Locator { DocStore, Gmail }'
@@ -140,6 +169,22 @@ run_case "no source fails" 1 "nothing to check is a failure" "$d"
 d="$(new_fixture bad-tree)"
 printf 'serde v1.0.0\n' > "$d/all.txt"
 run_case "tree not rooted at trusty-okf fails" 1 "does not start at trusty-okf" "$d"
+
+
+# #10746 H1: a source scan whose perl errors fails closed, both on a non-zero
+# exit and on stderr output with exit 0.
+stub="$TMP_ROOT/stub-perl-exit"
+mkdir -p "$stub"
+printf '#!/bin/sh\necho "stub perl: boom" >&2\nexit 2\n' > "$stub/perl"
+chmod +x "$stub/perl"
+d="$(new_fixture perl-exit)"
+CASE_PATH="$stub:$PATH" run_case "perl exiting non-zero fails" 1 "source scan failed" "$d"
+stub="$TMP_ROOT/stub-perl-stderr"
+mkdir -p "$stub"
+printf '#!/bin/sh\necho "Can'"'"'t open lib.rs" >&2\nexit 0\n' > "$stub/perl"
+chmod +x "$stub/perl"
+d="$(new_fixture perl-stderr)"
+CASE_PATH="$stub:$PATH" run_case "perl writing stderr fails" 1 "source scan failed" "$d"
 
 echo "check_okf_boundary_selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

@@ -13,8 +13,11 @@
 #     c11_no_agent_or_connector_deps   B1  dependency graph (all features,
 #                                          all targets, normal+dev+build)
 #                                          names no agent, MCP or connector crate
-#     c12_no_agent_paths_or_index_names B3-B5  src/ has no env::var, agent-home
-#                                          path, `okg` path word, index name
+#     c12_no_agent_paths_or_index_names B3-B5  src/ has no `env` token (every
+#                                          route to std::env, imports and
+#                                          aliases included), agent-home path,
+#                                          string literal naming trusty-agents,
+#                                          `okg` path word, index name
 #     c13_no_connector_locator_variants B6  src/ names no Gmail/Drive variant
 #     b6_no_credential_deps            B6  graph has no OAuth/token/keychain crate
 #     c14_no_mcp_surface               B7  no bin target, main.rs, src/bin/, MCP
@@ -29,8 +32,9 @@
 #
 #   The src/ greps read raw text, comments included, matching the spec's
 #   "a grep of crates/trusty-okf/src". Fails closed: a missing src/, a src/
-#   with no .rs file, or a dependency tree that does not start at trusty-okf
-#   is a failure.
+#   with no .rs file, a dependency tree that does not start at trusty-okf, or
+#   a source scan whose find/xargs/perl exits non-zero or writes to stderr is
+#   a failure.
 #
 # Usage: bash scripts/check_okf_boundary.sh
 # Env (selftest fixtures):
@@ -56,6 +60,8 @@ STATUS=0
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+nl='
+'
 # fail <check-name> <newline-separated findings>
 fail() { echo "FAIL $1"; printf '%s\n' "$2" | sed 's/^/     /'; STATUS=1; }
 
@@ -96,10 +102,16 @@ banned_deps() {
 }
 
 # banned_src <check-name> <perl-regex>: every src/ line matching is a finding.
+# #10746 H1: a scan that errors is a failure, never an empty result. perl -n
+# exits 0 on no match, so any non-zero status or stderr output is an error.
 banned_src() {
   local name="$1" re="$2" hits
-  hits="$(find "$SRC" -name '*.rs' -type f | sort |
-    OKF_RE="$re" xargs perl -ne 'print "$ARGV:$.: $_" if /$ENV{OKF_RE}/; close ARGV if eof' || true)"
+  if ! hits="$(find "$SRC" -name '*.rs' -type f | sort |
+    OKF_RE="$re" xargs perl -ne 'print "$ARGV:$.: $_" if /$ENV{OKF_RE}/; close ARGV if eof' \
+      2> "$TMP/scan.err")" || [ -s "$TMP/scan.err" ]; then
+    fail "$name" "source scan failed; the check cannot pass$nl$(cat "$TMP/scan.err")"
+    return
+  fi
   if [ -n "$hits" ]; then
     fail "$name" "$hits"
   else
@@ -113,8 +125,13 @@ banned_deps c11_no_agent_or_connector_deps "$TMP/all" \
   'trusty-agents|trusty-agents-common|trusty-agents-ui|trusty-mcp|trusty-mcp-services|trusty-gworkspace|trusty-channels|trusty-kb|tc-services'
 
 # B3 (env/home), B4 (agent home layout), B5 (index lifecycle and names).
+# #10746 H2: B3 bars deriving a path from an environment variable, so the bare
+# token `env` is banned: every route to std::env::var/var_os (a brace import,
+# `use std::{env as e}`, a multi-line group) and env!/option_env! spell it.
+# #10746 H3: a string literal naming trusty-agents anywhere in it, matched
+# from either quote so a literal split across lines is still caught.
 banned_src c12_no_agent_paths_or_index_names \
-  'env::var|knowledge_dir|TRUSTY_AGENTS_HOME|KB_KNOWLEDGE_DIR|home_dir|\.trusty-agents|"trusty-agents|\bokg\b|stores/|assistant-okg-|search\.index\.create|search\.index\.delete'
+  '\benv\b|knowledge_dir|TRUSTY_AGENTS_HOME|KB_KNOWLEDGE_DIR|home_dir|\.trusty-agents|"[^"]*trusty-agents|trusty-agents[^"]*"|\bokg\b|stores/|assistant-okg-|search\.index\.create|search\.index\.delete'
 
 # B6: connector-specific Locator variants stay in trusty-agents.
 banned_src c13_no_connector_locator_variants '\bGmail\b|\bDrive\b'
@@ -125,8 +142,6 @@ banned_deps b6_no_credential_deps "$TMP/all" \
 
 # B7: no MCP surface and no stdio server binary.
 mcp_hits=""
-nl='
-'
 if grep -qE '^\[\[bin\]\]' "$CRATE_DIR/Cargo.toml"; then
   mcp_hits="$CRATE_DIR/Cargo.toml declares a [[bin]] target$nl"
 fi
