@@ -28,9 +28,10 @@
 #                                          async runtime or socket client, and
 #                                          the core builds that way
 #     b9_no_extraction_backend         B9  graph has no xberg, ort, candle-core
-#   Not checkable at S1, printed as `note:` lines: B2's inverse half
-#   (`cargo tree -i trusty-okf` lists trusty-agents; S11), B10 (child-process
-#   environment; a cargo test since S9/S10, #10746). Criterion 13's registry.toml load is a cargo test
+#     b2_trusty_agents_depends_on_okf  B2  `cargo tree -i trusty-okf` lists
+#                                          trusty-agents (#10746 S11)
+#   Printed as `note:` lines: B10 (child-process environment; a cargo test
+#   since S9/S10, #10746). Criterion 13's registry.toml load is a cargo test
 #   since S4 (#10746): build_criteria.rs golden_registry_loads_every_row.
 #
 #   The src/ greps read raw text, comments included, matching the spec's
@@ -46,6 +47,7 @@
 #   OKF_CRATE_DIR   crate directory (default crates/trusty-okf)
 #   OKF_TREE_ALL    read this file as the all-features tree instead of cargo
 #   OKF_TREE_CORE   read this file as the --no-default-features tree
+#   OKF_TREE_INV    read this file as the `cargo tree -i trusty-okf` output
 #   OKF_SKIP_BUILD  1 skips the `cargo check --no-default-features` build
 # Exit: 0 clean; 1 on any finding.
 # Test: scripts/check_okf_boundary_selftest.sh.
@@ -182,7 +184,20 @@ fi
 # B9: no extraction backend is ever linked, under any feature.
 banned_deps b9_no_extraction_backend "$TMP/all" 'xberg|ort|ort-sys|candle-core'
 
-echo "note: B2 inverse half (cargo tree -i trusty-okf lists trusty-agents) is checked from S11"
+# B2 inverse half (#10746 S11): trusty-agents depends on trusty-okf. B1
+# (c11 above) already bars the reverse edge.
+if [ -n "${OKF_TREE_INV:-}" ]; then
+  cp "$OKF_TREE_INV" "$TMP/inv.raw"
+else
+  cargo tree -q --locked --workspace -i trusty-okf -e normal \
+    --prefix none --format '{p}' > "$TMP/inv.raw"
+fi
+if awk '{print $1}' "$TMP/inv.raw" | grep -qx 'trusty-agents'; then
+  echo "ok   b2_trusty_agents_depends_on_okf"
+else
+  fail b2_trusty_agents_depends_on_okf "cargo tree -i trusty-okf lists no trusty-agents"
+fi
+
 echo "note: B10 (child-process environment) is the tests c139_adapter_gets_exactly_the_caller_environment (crates/trusty-okf/tests/adapter_criteria.rs) and c104_worker_env_is_the_allow_list_and_cwd_is_empty (crates/trusty-okf/tests/worker_criteria.rs)"
 echo "note: criterion 13 registry.toml load is the test golden_registry_loads_every_row (crates/trusty-okf/tests/build_criteria.rs)"
 

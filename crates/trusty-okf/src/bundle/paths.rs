@@ -41,7 +41,8 @@ pub(crate) fn io_err(path: &Path, source: std::io::Error) -> OkfError {
 ///
 /// Why: a segment is caller input; it must never hold `..`, a root or
 /// prefix component, or an absolute path. Moved from trusty-kb
-/// `roots::confine` (SPEC-OKF-01 §2.7.2); trusty-agents' `kb::roots` wraps it.
+/// `roots::confine` (SPEC-OKF-01 §2.7.2); the agent crate's root mapping
+/// wraps it.
 /// What: every component of every segment must be `Normal`; an empty
 /// segment or any other component is [`OkfError::PathEscape`] naming the
 /// segment. Lexical only: [`confined_file`] adds the link check.

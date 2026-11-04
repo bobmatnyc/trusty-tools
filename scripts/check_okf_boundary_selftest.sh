@@ -41,6 +41,7 @@ new_fixture() {
     > "$dir/crates/trusty-okf/src/lib.rs"
   printf '%s\nserde v1.0.0\n' "$TREE_HEAD" > "$dir/all.txt"
   printf '%s\n' "$TREE_HEAD" > "$dir/core.txt"
+  printf '%s\ntrusty-agents v0.39.4 (/x/crates/trusty-agents)\n' "$TREE_HEAD" > "$dir/inv.txt"
   git -C "$dir" init -q
   printf '%s\n' "$dir"
 }
@@ -51,7 +52,7 @@ run_case() {
   local name="$1" want="$2" needle="$3" dir="$4" out status
   set +e
   out="$(cd "$dir" && PATH="${CASE_PATH:-$PATH}" OKF_TREE_ALL=all.txt OKF_TREE_CORE=core.txt \
-    OKF_SKIP_BUILD=1 bash "$GATE" 2>&1)"
+    OKF_TREE_INV=inv.txt OKF_SKIP_BUILD=1 bash "$GATE" 2>&1)"
   status=$?
   set -e
   if [ "$status" -ne "$want" ]; then
@@ -179,6 +180,14 @@ run_case "async runtime in core fails" 1 "FAIL c15_core_network_free" "$d"
 d="$(new_fixture ort)"
 printf 'ort v2.0.0\n' >> "$d/all.txt"
 run_case "extraction backend fails" 1 "FAIL b9_no_extraction_backend" "$d"
+
+# #10746 S11: B2 inverse half, trusty-agents must depend on trusty-okf.
+d="$(new_fixture no-agents-dependent)"
+printf '%s\n' "$TREE_HEAD" > "$d/inv.txt"
+run_case "no trusty-agents dependent fails" 1 "FAIL b2_trusty_agents_depends_on_okf" "$d"
+d="$(new_fixture agents-common-dependent)"
+printf '%s\ntrusty-agents-common v0.1.0 (/x/crates/trusty-agents-common)\n' "$TREE_HEAD" > "$d/inv.txt"
+run_case "a near-name dependent is not trusty-agents" 1 "FAIL b2_trusty_agents_depends_on_okf" "$d"
 
 # 15-16. Fail closed.
 d="$(new_fixture no-src)"
