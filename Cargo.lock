@@ -11562,6 +11562,7 @@ dependencies = [
  "tracing-subscriber",
  "trusty-common",
  "trusty-mcp",
+ "trusty-okf",
  "walkdir",
 ]
 
@@ -11703,6 +11704,13 @@ dependencies = [
 [[package]]
 name = "trusty-okf"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "trusty-progress"

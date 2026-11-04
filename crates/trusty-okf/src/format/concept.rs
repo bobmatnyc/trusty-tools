@@ -1,23 +1,39 @@
-//! Entity model — slugify, deep-merge, and `[[wiki-link]]` extraction.
+//! Concept model — the raw-preserving [`Concept`], plus the legacy [`Entity`]
+//! map model with slugify, deep-merge, and `[[wiki-link]]` extraction (moved
+//! from trusty-kb `entity.rs`, #10746).
 //!
 //! Why: entities are markdown files with a YAML frontmatter mapping and a body.
 //! The store's determinism and OKF's "never strip unknown keys" rule both live
 //! or die here: [`deep_merge`] must union without loss, and slugging must be
-//! stable so the same title always maps to the same filename.
+//! stable so the same title always maps to the same filename. SPEC-OKF-01
+//! §2.2.1 goes further: a write must keep every entry it does not own byte for
+//! byte, so [`Concept`] keeps the raw frontmatter as the source of truth.
 //!
-//! What: [`Entity`] wraps a frontmatter [`Value`] mapping + body string;
-//! [`slugify`] produces a stable filesystem-safe slug; [`deep_merge`] deep-merges
-//! two frontmatter mappings (recursive map merge, order-independent set union of
-//! sequences, existing keys never dropped); [`wiki_links`] scans text for
-//! `[[Target]]` references; [`link_values`] pulls link targets out of a
-//! frontmatter field value (scalar or list).
+//! What: [`Concept`] holds the raw block, the typed view and the body;
+//! [`parse_concept`] reads one and [`render_concept`] writes one, patching the
+//! raw block (§2.2.1) or rendering a new concept key-sorted. [`Entity`] wraps a
+//! frontmatter [`Value`] mapping + body string and is the model trusty-kb's
+//! store still writes with; slice S3 of #10746 folds its callers onto
+//! [`Concept`]. [`slugify`] produces a stable filesystem-safe slug;
+//! [`deep_merge`] deep-merges two frontmatter mappings (recursive map merge,
+//! order-independent set union of sequences, existing keys never dropped);
+//! [`wiki_links`] scans text for `[[Target]]` references; [`link_values`]
+//! pulls link targets out of a frontmatter field value (scalar or list).
 //!
 //! Test: `slugify_is_stable_and_safe`, `deep_merge_preserves_and_unions`,
-//! `wiki_links_extracts_targets`, `entity_content_roundtrip`.
+//! `wiki_links_extracts_targets`, `entity_content_roundtrip`,
+//! `concept_parse_render_is_byte_identical`, `new_concept_renders_key_sorted`.
+
+use std::path::PathBuf;
 
 use serde_yaml::{Mapping, Value};
 
-use crate::frontmatter;
+use crate::OkfError;
+use crate::format::fields::Frontmatter;
+use crate::format::frontmatter;
+use crate::format::id::{ConceptId, ConceptRef};
+use crate::format::raw::{self, RawFrontmatter};
+use crate::format::validate::Finding;
 
 /// A parsed KB entity: frontmatter mapping + markdown body.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +60,7 @@ impl Entity {
     /// What: splits on the `---` fence, parses the YAML to a mapping, and keeps
     /// the body. A file with no frontmatter yields an empty mapping.
     /// Test: `entity_content_roundtrip`.
-    pub fn from_content(content: &str) -> anyhow::Result<Self> {
+    pub fn from_content(content: &str) -> Result<Self, OkfError> {
         let split = frontmatter::split(content);
         let frontmatter = match split.frontmatter {
             Some(yaml) => frontmatter::parse(&yaml)?,
@@ -77,6 +93,157 @@ impl Entity {
     /// A string-valued frontmatter field, if present and scalar.
     pub fn get_str(&self, key: &str) -> Option<&str> {
         self.frontmatter.get(key).and_then(Value::as_str)
+    }
+}
+
+/// A concept read from a file, or built for a new one (SPEC-OKF-01 §2.2.1,
+/// §4.2). The raw block is the source of truth; the typed view is derived.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Concept {
+    /// The concept ID, or the path of a read-only foreign file.
+    pub id: ConceptRef,
+    /// The stored frontmatter block, byte for byte. Empty for a new concept
+    /// and for a file without frontmatter.
+    pub raw: RawFrontmatter,
+    /// Read-only typed view of the current values.
+    pub frontmatter: Frontmatter,
+    /// Every byte after the closing fence, unchanged.
+    pub body: String,
+    /// The current top-level values. Equal to the stored entries after a
+    /// read; changed only through [`Concept::set`] and [`Concept::remove`],
+    /// which keep `frontmatter` in step.
+    values: Mapping,
+}
+
+impl Concept {
+    /// A new concept with no stored entries; it renders key-sorted.
+    pub fn new(id: ConceptId, values: Mapping, body: String) -> Concept {
+        let frontmatter = Frontmatter::from_mapping(&values, &id.file_name()).0;
+        Concept {
+            id: ConceptRef::Id(id),
+            raw: RawFrontmatter::default(),
+            frontmatter,
+            body,
+            values,
+        }
+    }
+
+    /// The current top-level values.
+    pub fn values(&self) -> &Mapping {
+        &self.values
+    }
+
+    /// One current top-level value.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.values.get(key)
+    }
+
+    /// Set a top-level key. A write then owns this key (§2.2.1).
+    pub fn set(&mut self, key: &str, value: Value) {
+        self.values.insert(Value::String(key.to_string()), value);
+        self.refresh();
+    }
+
+    /// Remove a top-level key, returning its value.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        let old = self.values.shift_remove(key);
+        self.refresh();
+        old
+    }
+
+    /// The bundle-relative file path, `.md` included.
+    pub fn path(&self) -> String {
+        self.id.display_path()
+    }
+
+    fn refresh(&mut self) {
+        self.frontmatter = Frontmatter::from_mapping(&self.values, &self.path()).0;
+    }
+}
+
+/// Parse a concept file's text (SPEC-OKF-01 §4.3).
+///
+/// Test: `concept_parse_render_is_byte_identical`.
+pub fn parse_concept(id: ConceptId, text: &str) -> Result<(Concept, Vec<Finding>), OkfError> {
+    parse_concept_at(ConceptRef::Id(id), text)
+}
+
+/// Parse a concept file's text under a concept ID or a foreign path.
+///
+/// Why: a read never fails on a finding (§4.4), and keeps every byte so the
+/// next write can patch it (§2.2.1).
+/// What: splits the `---` block without normalising a byte, parses it to the
+/// values mapping, splits it into raw entries and builds the typed view. A
+/// file with no frontmatter reads with empty values and the whole text as
+/// body. Unparseable YAML, or a block that is not a mapping, fails with
+/// [`OkfError::Parse`] naming the file; `Bundle::open` (S3) turns that into an
+/// error finding for a tree read. Each finding carries the concept ID.
+/// Test: `concept_parse_render_is_byte_identical`,
+/// `c114_unchanged_put_writes_zero_bytes_and_reads_malformed`.
+pub fn parse_concept_at(
+    id: ConceptRef,
+    text: &str,
+) -> Result<(Concept, Vec<Finding>), OkfError> {
+    let path = id.display_path();
+    let concept_id = match &id {
+        ConceptRef::Id(c) => Some(c.clone()),
+        ConceptRef::Foreign(_) => None,
+    };
+    let (raw, values, body) = match raw::split_raw(text) {
+        None => (RawFrontmatter::default(), Mapping::new(), text),
+        Some((block_end, inner)) => {
+            let values = match frontmatter::parse(&text[inner.clone()]) {
+                Ok(Value::Mapping(m)) => m,
+                Ok(_) => Mapping::new(),
+                // The parser counts lines from the YAML; add the fence line.
+                Err(OkfError::Parse { line, message, .. }) => {
+                    return Err(OkfError::Parse {
+                        path: PathBuf::from(&path),
+                        line: line.map(|l| l + 1),
+                        message,
+                    });
+                }
+                Err(other) => return Err(other),
+            };
+            let raw = raw::read_raw(&text[..block_end], inner, &values);
+            (raw, values, &text[block_end..])
+        }
+    };
+    let (frontmatter, mut findings) = Frontmatter::from_mapping(&values, &path);
+    for f in &mut findings {
+        f.concept = concept_id.clone();
+    }
+    let concept = Concept {
+        id,
+        raw,
+        frontmatter,
+        body: body.to_string(),
+        values,
+    };
+    Ok((concept, findings))
+}
+
+/// Render a concept to file text (SPEC-OKF-01 §4.3).
+///
+/// What: a concept with a stored block is patched per §2.2.1: unchanged
+/// entries and the body keep their bytes. A concept with no stored block
+/// renders key-sorted, `---` on line 1, the body verbatim after the closing
+/// fence; with no values it renders as the body alone. A stored block that
+/// is not patchable renders unchanged; `write_concept` refuses to write it.
+/// Test: `concept_parse_render_is_byte_identical`,
+/// `new_concept_renders_key_sorted`.
+pub fn render_concept(c: &Concept) -> String {
+    if c.raw.text.is_empty() {
+        if c.values.is_empty() {
+            return c.body.clone();
+        }
+        let sorted = frontmatter::sort_value(&Value::Mapping(c.values.clone()));
+        let yaml = serde_yaml::to_string(&sorted).unwrap_or_default();
+        return format!("---\n{yaml}---\n{}", c.body);
+    }
+    match raw::patch(&c.raw, &c.values) {
+        Some(block) => format!("{block}{}", c.body),
+        None => format!("{}{}", c.raw.text, c.body),
     }
 }
 
@@ -340,5 +507,40 @@ mod tests {
         assert_eq!(e.body, "Body.\n");
         let rendered = e.to_content();
         assert!(rendered.starts_with("---\ntitle: Ada\ntype: Person\n---\n\nBody.\n"));
+    }
+
+    fn id(s: &str) -> ConceptId {
+        ConceptId::parse(s).unwrap()
+    }
+
+    /// Why: §2.2.1 — a read followed by a render of the unchanged concept is
+    /// the identity, comments, key order and body bytes included.
+    /// What: round-trips a commented, unsorted block, a CRLF file and a file
+    /// with no frontmatter.
+    /// Test: self-contained.
+    #[test]
+    fn concept_parse_render_is_byte_identical() {
+        for text in [
+            "---\n# c\nz: 1\ntype: A\nx: {b: 2}  # keep\n---\n\nBody\n",
+            "---\r\ntype: A\r\n---\r\nBody\r\n",
+            "plain body, no fence\n",
+            "---\n---\nempty block\n",
+        ] {
+            let (c, _) = parse_concept(id("a"), text).unwrap();
+            assert_eq!(render_concept(&c), text);
+        }
+    }
+
+    /// Why: a new concept has no stored entries, so it renders key-sorted.
+    /// What: builds a concept from an unsorted mapping and checks the text.
+    /// Test: self-contained.
+    #[test]
+    fn new_concept_renders_key_sorted() {
+        let values: Value = serde_yaml::from_str("type: A\ndescription: d\n").unwrap();
+        let Value::Mapping(values) = values else {
+            panic!("mapping")
+        };
+        let c = Concept::new(id("n"), values, "Body\n".to_string());
+        assert_eq!(render_concept(&c), "---\ndescription: d\ntype: A\n---\nBody\n");
     }
 }

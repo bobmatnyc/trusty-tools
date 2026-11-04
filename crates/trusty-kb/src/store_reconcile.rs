@@ -1,35 +1,32 @@
-//! Inverse-edge reconciler — materialise the other side of every relationship.
+//! Inverse-edge reconciliation — the [`KbStore`] file walk over trusty-okf's
+//! pure reconciler.
 //!
-//! Why: the profile declares relationship edges in pairs (parent_of↔child_of,
-//! works_at↔employee, …) and symmetric verbs (knows, spouse_of, …). Writing one
-//! side should deterministically create the mirror on the target so the link
-//! graph is navigable from either endpoint. This post-pass runs after every
-//! [`crate::put`] and across the whole tree after [`crate::convert`], and is
-//! idempotent: a second run finds the inverse already present and does nothing.
+//! Why: #10746 moved the edge logic to `trusty_okf::profile::reconcile`
+//! (re-exported here as [`crate::reconcile`]); inverse edges now come from the
+//! profile. Resolving a link to a file and writing it stays with [`KbStore`]
+//! until slice S3 gives trusty-okf its own `Bundle`. This post-pass runs after
+//! every [`crate::put`] and across the whole tree after [`crate::convert`].
 //!
-//! What: [`KbStore::reconcile_entity`] walks a source entity's edge fields (any
-//! key with an [`inverse_edge`]), resolves each `[[target]]` wiki-link to an
-//! existing entity file, and unions a `[[source]]` link into the target's
-//! inverse field. [`KbStore::reconcile_all`] applies it to every entity — the
-//! converter's link-graph-maintenance step. Dangling links (no target file) are
-//! left untouched for [`crate::validate`] to report; targets are never
-//! fabricated.
+//! What: [`KbStore::reconcile_entity`] resolves each `(target, inverse)` pair
+//! of a source entity to an existing entity file and unions a `[[source]]`
+//! link into it; [`KbStore::reconcile_all`] applies it to every entity.
+//! Dangling links (no target file) are left untouched for validation to
+//! report; targets are never fabricated.
 //!
 //! Test: `reconcile_materialises_symmetric_edge`, `reconcile_materialises_pair`,
 //! `reconcile_is_idempotent`, `reconcile_skips_dangling`.
 
 use std::path::PathBuf;
 
-use serde_yaml::Value;
-
-use crate::entity::{Entity, link_values, slugify};
-use crate::schema::inverse_edge;
+use crate::entity::{Entity, slugify};
+use crate::reconcile::{add_inverse_link, inverse_links, source_link};
 use crate::store::KbStore;
 
 impl KbStore {
     /// Materialise inverse edges for one source entity onto its link targets.
     ///
-    /// Why/What/Test: see the module doc.
+    /// Why/What/Test: see the module doc. Returns the root-relative paths of
+    /// the targets that changed, sorted.
     pub fn reconcile_entity(
         &self,
         _collection: &str,
@@ -37,31 +34,13 @@ impl KbStore {
         source: &Entity,
         now: &str,
     ) -> anyhow::Result<Vec<String>> {
-        // The link text targets use to point back at the source.
-        let source_link = source
-            .get_str("title")
-            .map(str::to_string)
-            .unwrap_or_else(|| source_name.to_string());
-        let Value::Mapping(map) = &source.frontmatter else {
-            return Ok(Vec::new());
-        };
-
+        let link = source_link(source_name, source);
         let mut changed: Vec<String> = Vec::new();
-        for (k, v) in map {
-            let Some(field) = k.as_str() else { continue };
-            let Some(inverse) = inverse_edge(field) else {
-                continue;
-            };
-            for target in link_values(v) {
-                // Never create a self-loop record on the same file.
-                if slugify(&target) == slugify(&source_link) {
-                    continue;
-                }
-                if let Some(path) = self.resolve_link(&target)?
-                    && self.add_inverse_link(&path, inverse, &source_link, now)?
-                {
-                    changed.push(self.rel(&path));
-                }
+        for (target, inverse) in inverse_links(&self.profile, &link, source) {
+            if let Some(path) = self.resolve_link(&target)?
+                && self.add_inverse_link_at(&path, inverse, &link, now)?
+            {
+                changed.push(self.rel(&path));
             }
         }
         changed.sort();
@@ -94,8 +73,7 @@ impl KbStore {
     /// Resolve a `[[target]]` link to an existing entity file path, by slug,
     /// searching every collection in deterministic order.
     ///
-    /// Test: exercised via `reconcile_materialises_pair` and the validate
-    /// dangling-link test.
+    /// Test: exercised via `reconcile_materialises_pair`.
     pub(crate) fn resolve_link(&self, target: &str) -> anyhow::Result<Option<PathBuf>> {
         let want = slugify(target);
         for coll in self.collection_dirs_on_disk()? {
@@ -110,7 +88,7 @@ impl KbStore {
 
     /// Union a `[[source]]` link into the `field` edge of the entity at `path`.
     /// Returns whether the target file actually changed.
-    fn add_inverse_link(
+    fn add_inverse_link_at(
         &self,
         path: &std::path::Path,
         field: &str,
@@ -120,44 +98,21 @@ impl KbStore {
         let Some(mut entity) = self.read_entity_at(path)? else {
             return Ok(false);
         };
-        let link = format!("[[{source_link}]]");
-        let want_slug = slugify(source_link);
-
-        let map = entity.map_mut();
-        let key = Value::String(field.to_string());
-        let already = map
-            .get(&key)
-            .map(|v| link_values(v).iter().any(|t| slugify(t) == want_slug))
-            .unwrap_or(false);
-        if already {
+        if !add_inverse_link(&mut entity, field, source_link, now) {
             return Ok(false);
         }
-        // Normalise the field to a sorted sequence of link scalars.
-        let mut links: Vec<String> = map
-            .get(&key)
-            .map(|v| link_values(v).iter().map(|t| format!("[[{t}]]")).collect())
-            .unwrap_or_default();
-        links.push(link);
-        links.sort();
-        links.dedup();
-        map.insert(
-            key,
-            Value::Sequence(links.into_iter().map(Value::String).collect()),
-        );
-        // Touch `updated` since the target's content changed.
-        map.insert(
-            Value::String("updated".into()),
-            Value::String(now.to_string()),
-        );
         self.write_entity_at(path, &entity)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use serde_yaml::Value;
+
+    use crate::entity::link_values;
     use crate::put::empty_map;
     use crate::schema::Profile;
+    use crate::store::KbStore;
 
     fn store() -> (tempfile::TempDir, KbStore) {
         let tmp = tempfile::tempdir().unwrap();

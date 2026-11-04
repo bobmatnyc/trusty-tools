@@ -25,3 +25,16 @@ search-feed = []
 extract-worker = []
 
 [dependencies]
+# #10746 S2: the format and profile modules moved from trusty-kb. None of these
+# is an async runtime, socket client, credential or extraction crate (B6-B9).
+# `v0.2` instants (`generated.at`, `verified[].at`, `stale_after`).
+chrono = { workspace = true }
+# `Finding` serialises; trusty-kb's `kb_validate` returns it as JSON.
+serde = { workspace = true }
+# Frontmatter parse and render; workspace-standard 0.9 line.
+serde_yaml = { workspace = true }
+# `OkfError` (SPEC-OKF-01 §4.4).
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
