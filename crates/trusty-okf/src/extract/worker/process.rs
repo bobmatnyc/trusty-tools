@@ -128,7 +128,15 @@ impl WorkerProcess {
     ) -> Result<WorkerProcess, WorkerError> {
         let cwd = fresh_dir(scratch)
             .map_err(|e| WorkerError::Spawn(format!("working directory: {e}")))?;
-        let (mut cmd, evidence) = sandbox::command(policy, worker, &cwd);
+        // #10746 S10 fix: RLIMIT_CPU and RLIMIT_AS are applied by the
+        // spawn command itself (no `unsafe` pre-exec hook, see `sandbox`).
+        let (mut cmd, evidence) = sandbox::command(
+            policy,
+            worker,
+            &cwd,
+            limits.cpu_seconds,
+            limits.address_space,
+        );
         cmd.env_clear()
             .envs(WORKER_ENV)
             .current_dir(&cwd)
@@ -162,7 +170,9 @@ impl WorkerProcess {
             }
         });
         let cap = limits.frame_cap();
-        let (ftx, frames) = mpsc::channel();
+        // #10746 S10 fix: one frame of slack. A worker that floods frames
+        // blocks on its full stdout pipe; host memory stays bounded.
+        let (ftx, frames) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let mut out = stdout;
             loop {
@@ -255,6 +265,19 @@ impl WorkerProcess {
             Event::TooLarge(n) => Err(IoFail::TooLarge(n)),
             Event::Closed => Err(IoFail::Closed),
             Event::Io(e) => Err(IoFail::Io(e)),
+        }
+    }
+
+    /// #10746 S10 fix: a frame (or end of stream) that arrived while no
+    /// request was outstanding. A frame is unsolicited: `protocol_error`.
+    pub(crate) fn unsolicited(&mut self) -> Option<(&'static str, String)> {
+        match self.frames.try_recv() {
+            Ok(Event::Frame(_)) => Some(("protocol_error", "unsolicited frame".into())),
+            Ok(Event::TooLarge(n)) => Some(("protocol_error", format!("frame of {n} bytes"))),
+            Ok(Event::Closed | Event::Io(_)) => {
+                Some(("crashed", "worker exited between items".into()))
+            }
+            Err(_) => None,
         }
     }
 

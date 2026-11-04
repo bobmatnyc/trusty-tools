@@ -8,7 +8,11 @@
 //! `CRASH` exits 3, `FLOOD` answers text one byte over the output limit,
 //! `BIG` declares a 2 GiB frame, `LIE` echoes a wrong input hash, `ERR`
 //! answers `extract_error`, `NOTEXT` answers `no_text_layer`, `STDERR`
-//! writes 1 MiB to stderr first. Any other item is echoed as its text.
+//! writes 1 MiB to stderr first, `SPAM` answers then streams 2000 more
+//! frames (logging `sent <n>` to the pidfile), `SPIN` burns CPU, `ALLOC`
+//! allocates 1 GiB, `FORK` forks a `setsid` grandchild named
+//! `okf-setsid-<config>` and answers whether the fork worked. Any other item
+//! is echoed as its text.
 
 #![allow(dead_code)]
 
@@ -101,6 +105,13 @@ while (1) {
   my $body = rd($m->{byte_len}); $body = '' unless defined $body;
   note_pid('item');
   idle() if $body =~ /^HANG/;
+  if ($body =~ /^SPIN/) { 1 while 1; }
+  if ($body =~ /^ALLOC/) { my $big = 'x' x (1 << 30); $body = length($big); }
+  if ($body =~ /^FORK/) {
+    my $pid = fork();
+    if (defined $pid && $pid == 0) { POSIX::setsid(); $0 = "okf-setsid-$o{config}"; idle(); }
+    $o{text} = defined $pid ? 'fork=ok' : 'fork=fail';
+  }
   exit 3 if $body =~ /^CRASH/;
   if ($body =~ /^BIG/) { wraw(pack('N', 0x7fffffff)); idle(); }
   if ($body =~ /^STDERR/) { print STDERR ('e' x 65536) for 1 .. 16; }
@@ -121,6 +132,12 @@ while (1) {
   my $sha = $body =~ /^LIE/ ? ('0' x 64) : $m->{sha256};
   wframe({type => 'ok', request_id => $m->{request_id}, input_sha256 => $sha, text => $text,
     fields => decode_json($o{fields}), notes => []});
+  if ($body =~ /^SPAM/) {
+    for my $i (1 .. 2000) {
+      wframe({type => 'ok', request_id => $m->{request_id}, input_sha256 => $sha, text => 'y' x 16384, fields => {}, notes => []});
+      note_pid("sent $i");
+    }
+  }
 }
 "#;
 
@@ -128,7 +145,7 @@ impl Fake {
     /// The script text.
     pub fn script(&self) -> String {
         let header = format!(
-            "#!/usr/bin/perl\nuse strict; use warnings; use JSON::PP; use Cwd (); use IO::Socket::INET;\n\
+            "#!/usr/bin/perl\nuse strict; use warnings; use JSON::PP; use Cwd (); use IO::Socket::INET; use POSIX ();\n\
              binmode STDIN; binmode STDOUT; binmode STDERR;\n\
              our %o = (mode => {}, protocol => {}, version => {}, xberg => {}, config => {}, \
              deterministic => {}, sandbox => {}, child => {}, pidfile => {}, port => {}, \

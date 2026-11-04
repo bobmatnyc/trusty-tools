@@ -147,7 +147,7 @@ fn store_for(a: &Args, root: &Path, now: &str) -> Result<(SourceSpec, PathBuf), 
 /// by the plan. Working directories go under `/tmp`, a fixed path, since
 /// the CLI reads no environment variable (B3). Without the
 /// `extract-worker` feature `--worker` is refused before any write (2).
-fn extractor(a: &Args) -> Result<Box<dyn Extractor>, Fail> {
+fn extractor(a: &Args, ctx: &Ctx<'_>) -> Result<Box<dyn Extractor>, Fail> {
     let Some(path) = a.one("--worker") else {
         return Ok(Box::new(NoWorker));
     };
@@ -155,17 +155,58 @@ fn extractor(a: &Args) -> Result<Box<dyn Extractor>, Fail> {
     {
         use crate::extract::worker::{WorkerConfig, WorkerExtractor};
         let cfg = WorkerConfig::new(path, "/tmp");
-        WorkerExtractor::new(cfg)
-            .map(|w| Box::new(w) as Box<dyn Extractor>)
-            .map_err(|e| Fail::Code(2, e))
+        let mut w = WorkerExtractor::new(cfg).map_err(|e| Fail::Code(2, e))?;
+        if ctx.catch_interrupt {
+            w = w.with_cancel(interrupt::watch().map_err(|e| Fail::Code(2, e))?);
+        }
+        Ok(Box::new(w))
     }
     #[cfg(not(feature = "extract-worker"))]
     {
-        let _ = path;
+        let _ = (path, ctx);
         Err(Fail::Code(
             2,
             "this build has no extract-worker feature; --worker is not available".into(),
         ))
+    }
+}
+
+/// A context that leaves SIGINT alone (`import plan` writes nothing).
+fn no_interrupt() -> Ctx<'static> {
+    Ctx {
+        #[cfg(feature = "search-feed")]
+        sink: None,
+        catch_interrupt: false,
+        _p: std::marker::PhantomData,
+    }
+}
+
+/// #10746 S10 fix: SIGINT becomes the worker run's cancel flag.
+#[cfg(feature = "extract-worker")]
+mod interrupt {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use nix::sys::signal::{SigSet, Signal};
+
+    /// Block SIGINT in this thread (threads it starts later inherit the
+    /// mask) and start a thread that waits for it and sets the flag. Without
+    /// `unsafe`: no handler runs; `sigwait` returns the signal. Errors: the
+    /// mask could not be set; the run is refused before any write, so
+    /// Ctrl-C can never orphan a worker.
+    pub(super) fn watch() -> Result<Arc<AtomicBool>, String> {
+        let mut set = SigSet::empty();
+        set.add(Signal::SIGINT);
+        set.thread_block()
+            .map_err(|e| format!("cannot take over SIGINT: {e}"))?;
+        let flag = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&flag);
+        std::thread::spawn(move || {
+            if set.wait() == Ok(Signal::SIGINT) {
+                seen.store(true, Ordering::SeqCst);
+            }
+        });
+        Ok(flag)
     }
 }
 
@@ -191,7 +232,7 @@ fn prepare(
 pub(crate) fn plan(a: &Args, out: &mut dyn Write) -> Result<i32, Fail> {
     a.only(IMPORT_OPTS).map_err(Fail::Usage)?;
     let root = bundle_root(a, 2)?;
-    let ex = extractor(a)?;
+    let ex = extractor(a, &no_interrupt())?;
     let (_, plan, _) = prepare(a, &root, "", ex.as_ref())?;
     output::plan(out, &plan, a.has("--json"));
     Ok(0)
@@ -207,7 +248,7 @@ pub(crate) fn run(a: &Args, out: &mut dyn Write, ctx: &Ctx<'_>) -> Result<i32, F
     }
     let now = now(a)?;
     let stamp = crate::bundle::record::instant_string(&now);
-    let ex = extractor(a)?;
+    let ex = extractor(a, ctx)?;
     let (mut bundle, plan, mut src) = prepare(a, &root, &stamp, ex.as_ref())?;
     if a.has("--dry-run") {
         output::plan(out, &plan, a.has("--json"));

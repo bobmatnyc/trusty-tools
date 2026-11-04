@@ -211,6 +211,18 @@ pub fn import(
     let profile = Profile::default_profile();
     for p in &plan.items {
         let item = |read: &str, write: &str| ItemReport::new(&p.item_id, p.id.clone(), read, write);
+        // #10746 S10 fix: a cancelled run writes nothing more; earlier items
+        // stay committed (§2.16 "Cancellation, kill and reap").
+        let writes = matches!(
+            p.action,
+            Action::Create | Action::Update | Action::Conflict | Action::Tombstone
+        );
+        if writes && ex.cancelled() {
+            report
+                .items
+                .push(item("skipped", "none").because("cancelled"));
+            continue;
+        }
         let entry = match (p.action, &p.id) {
             (Action::Skip, _) => item("skipped", "none").because(p.reason.as_deref().unwrap_or("")),
             // A collision is an item read and refused before its write.

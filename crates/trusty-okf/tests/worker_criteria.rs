@@ -752,3 +752,203 @@ fn c147_worker_upgrade_keeps_verification_and_text_change_clears_it() {
     let fx = step(fx, v4, "2026-11-04T15:00:00Z");
     assert!(matches!(state(&fx), VerificationState::Unverified { history } if history >= 1));
 }
+
+/// Why: #10746 S10 fix round, finding 1 — a worker that floods frames must
+/// not grow host memory, and a frame nobody asked for is a protocol
+/// violation.
+/// What: after its `ok` reply the double streams 2000 frames of 16 KiB,
+/// logging each; one second later it has sent only a handful (it blocks on
+/// its full pipe); the next item fails `protocol_error`, and every process
+/// is gone after the run.
+/// Test: self-contained.
+#[test]
+fn c102_flooded_frames_are_bounded_and_unsolicited_is_protocol_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let pidfile = dir.join("spam.pids");
+    let fake = Fake {
+        pidfile: Some(pidfile.clone()),
+        ..Fake::default()
+    };
+    let (d, p) = (dir.clone(), pidfile.clone());
+    let (sent, next) = within(S(2 + 1 + 2 + 2 + 5), move || {
+        let ex = local_worker(&d, &fake);
+        let hint = TypeHint::for_path("x.pdf");
+        assert_eq!(ex.extract(b"SPAM", &hint).unwrap().text, "SPAM");
+        std::thread::sleep(S(1));
+        let log = std::fs::read_to_string(&p).unwrap();
+        let sent = log.lines().filter(|l| l.starts_with("sent ")).count();
+        let next = ex.extract(b"next", &hint).unwrap_err().code;
+        assert!(ex.end_run().errors.is_empty());
+        (sent, next)
+    });
+    assert!(sent < 100, "the host buffered {sent} unread frames");
+    assert_eq!(next, "protocol_error");
+    assert!(pids_gone(&pidfile));
+}
+
+/// Why: #10746 S10 fix round, finding 2 — §2.16 requires `RLIMIT_CPU` and
+/// `RLIMIT_AS` where the OS honours them; a runaway item fails alone.
+/// What: a 1 s CPU limit and (not on macOS, which does not honour it) a
+/// 512 MiB address-space limit; a CPU-burning item fails `crashed` long
+/// before its 10 s wall time, a 1 GiB allocation fails `crashed`, and a
+/// normal item after each succeeds on a fresh worker.
+/// Test: self-contained.
+#[test]
+fn rlimits_kill_a_runaway_item_and_spare_the_rest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let mut cfg = config(&dir, &Fake::default(), "worker");
+    cfg.limits.item = S(10);
+    cfg.limits.cpu_seconds = 1;
+    cfg.limits.address_space = 512 << 20;
+    let (spin, took, alloc, fine) = within(S(10 + 2 + 2 + 5), move || {
+        let ex = WorkerExtractor::new(cfg).unwrap();
+        ex.begin_run(&local());
+        let hint = TypeHint::for_path("x.pdf");
+        let t = Instant::now();
+        let spin = ex.extract(b"SPIN", &hint).unwrap_err().code;
+        let took = t.elapsed();
+        let alloc = ex.extract(b"ALLOC", &hint).map(|e| e.text);
+        let fine = ex.extract(b"fine", &hint).unwrap().text;
+        (spin, took, alloc, fine)
+    });
+    assert_eq!(spin, "crashed", "RLIMIT_CPU did not stop the item");
+    assert!(took < S(6), "{took:?}");
+    if cfg!(target_os = "macos") {
+        // macOS does not honour RLIMIT_AS; the wall time is the bound.
+        assert!(alloc.is_ok(), "{alloc:?}");
+    } else {
+        assert_eq!(alloc.unwrap_err().code, "crashed", "RLIMIT_AS did not hold");
+    }
+    assert_eq!(fine, "fine");
+}
+
+/// Kills every leftover `okf-setsid-<marker>` process when dropped.
+struct Sweep(String);
+
+impl Drop for Sweep {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("pkill")
+            .args(["-KILL", "-f", &self.0])
+            .status();
+    }
+}
+
+fn marker_alive(marker: &str) -> bool {
+    let until = Instant::now() + S(3);
+    loop {
+        let found = std::process::Command::new("pgrep")
+            .args(["-f", marker])
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false);
+        if !found || Instant::now() >= until {
+            return found;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Why: #10746 S10 fix round, finding 4 — a sandboxed worker must not leave
+/// a grandchild that `setsid`s out of its process group (and would hold the
+/// host's pipes): macOS denies `fork`, Linux's PID namespace takes the
+/// grandchild down with the worker.
+/// What: under the platform sandbox a double tries to fork a `setsid`
+/// grandchild with a unique name; after the run no such process remains,
+/// and on macOS the fork itself fails.
+/// Test: self-contained.
+#[test]
+fn sandboxed_worker_cannot_fork_a_setsid_grandchild() {
+    let launcher = if cfg!(target_os = "macos") {
+        "/usr/bin/sandbox-exec"
+    } else {
+        "/usr/bin/bwrap"
+    };
+    if !Path::new(launcher).is_file() {
+        eprintln!("setsid: no {launcher}; nothing is sandboxed on this host");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let tag = format!("m{}x{}", std::process::id(), now().timestamp());
+    let marker = format!("okf-setsid-{tag}");
+    let _sweep = Sweep(marker.clone());
+    let fake = Fake {
+        config: tag,
+        ..Fake::default()
+    };
+    let mut cfg = config(&dir, &fake, "worker");
+    cfg.sandbox = SandboxPolicy::Platform;
+    let text = within(S(2 + 1 + 2 + 2 + 5), move || {
+        let ex = WorkerExtractor::new(cfg).unwrap();
+        ex.begin_run(&local());
+        let text = ex
+            .extract(b"FORK", &TypeHint::for_path("x.pdf"))
+            .map(|e| e.text);
+        let _ = ex.end_run();
+        text
+    });
+    let text = text.unwrap();
+    if cfg!(target_os = "macos") {
+        assert_eq!(text, "fork=fail", "the macOS profile allowed fork");
+    }
+    assert!(
+        !marker_alive(&marker),
+        "a setsid grandchild outlived the worker"
+    );
+}
+
+/// Why: #10746 S10 fix round, finding 3 — Ctrl-C on the CLI cancels the
+/// import; the worker's process group is killed and reaped, the report is
+/// printed, and the CLI exits 3 instead of dying with the worker orphaned.
+/// What: the built binary imports a tree whose PDF hangs the worker; once
+/// the worker runs, SIGINT goes to the CLI.
+/// Test: self-contained.
+#[test]
+fn c103_sigint_cancels_the_cli_and_reaps_the_worker() {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    let fx = Fx::new(&[("a.md", "Alpha.\n"), ("b.pdf", "HANG"), ("c.pdf", "C")]);
+    let w = Fake::default().write(fx.tmp.path(), "worker");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_trusty-okf"))
+        .args(["import", "run"])
+        .arg(&fx.root)
+        .arg("--from")
+        .arg(format!("dir:{}", fx.src.display()))
+        .arg("--worker")
+        .arg(&w)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let cli = child.id();
+    let until = Instant::now() + S(10);
+    let worker = loop {
+        let out = std::process::Command::new("pgrep")
+            .args(["-P", &cli.to_string()])
+            .output()
+            .unwrap();
+        let pids = String::from_utf8_lossy(&out.stdout).into_owned();
+        if let Some(p) = pids.split_whitespace().next() {
+            break p.parse::<i32>().unwrap();
+        }
+        assert!(Instant::now() < until, "the CLI started no worker");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // Let the handshake finish and the hanging item go out.
+    std::thread::sleep(Duration::from_millis(1500));
+    kill(Pid::from_raw(cli as i32), Signal::SIGINT).unwrap();
+    let out = within(S(2 + 2 + 5), move || child.wait_with_output().unwrap());
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(3), "{:?} {text}", out.status);
+    assert!(
+        text.contains("item b.pdf: read failed, write none, reason cancelled"),
+        "{text}"
+    );
+    assert!(
+        text.contains("item c.pdf: read skipped, write none, reason cancelled"),
+        "{text}"
+    );
+    assert!(group_gone(worker), "the worker group outlived the CLI");
+}

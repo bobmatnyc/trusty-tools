@@ -124,6 +124,11 @@ pub trait Extractor {
     fn available(&self) -> Result<(), ExtractError> {
         Ok(())
     }
+    /// #10746 S10 fix: whether the run was cancelled; `import` then skips
+    /// every item it has not written yet with `cancelled`. Default: never.
+    fn cancelled(&self) -> bool {
+        false
+    }
     /// #10746 S10: called once by `import` before the first item, with the
     /// run's store. The worker client requires its OS sandbox for every
     /// store that is not a local document tree (§2.16 item 9 B).

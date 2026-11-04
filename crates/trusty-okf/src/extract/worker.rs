@@ -71,6 +71,10 @@ pub const MAX_INPUT_BYTES: u64 = 64 * MIB;
 pub const MAX_OUTPUT_BYTES: u64 = 32 * MIB;
 /// The wall-time ceiling for any one deadline.
 pub const MAX_DEADLINE: Duration = Duration::from_secs(300);
+/// #10746 S10 fix: the `RLIMIT_CPU` ceiling, in seconds.
+pub const MAX_CPU_SECONDS: u64 = 3600;
+/// #10746 S10 fix: the `RLIMIT_AS` ceiling, in bytes.
+pub const MAX_ADDRESS_SPACE: u64 = 16 * 1024 * MIB;
 
 /// The worker's limits and deadlines (§2.16 limits table). Configuration
 /// may lower any of them; [`Limits::check`] refuses one over its ceiling.
@@ -94,6 +98,13 @@ pub struct Limits {
     pub shutdown: Duration,
     /// SIGKILL to a reaped child (default 5 s).
     pub reap: Duration,
+    /// #10746 S10 fix: `RLIMIT_CPU` per worker process, in seconds
+    /// (default 300). The kernel kills a worker that spends it; its item
+    /// fails `crashed` and the next item gets a fresh worker.
+    pub cpu_seconds: u64,
+    /// #10746 S10 fix: `RLIMIT_AS` per worker process, in bytes (default
+    /// 4 GiB). Not applied on macOS, which does not honour it.
+    pub address_space: u64,
 }
 
 impl Default for Limits {
@@ -108,6 +119,8 @@ impl Default for Limits {
             handshake: Duration::from_secs(10),
             shutdown: Duration::from_secs(5),
             reap: Duration::from_secs(5),
+            cpu_seconds: 300,
+            address_space: 4 * 1024 * MIB,
         }
     }
 }
@@ -125,6 +138,8 @@ impl Limits {
         if self.input_bytes > MAX_INPUT_BYTES
             || self.output_bytes > MAX_OUTPUT_BYTES
             || deadlines.iter().any(|d| *d > MAX_DEADLINE)
+            || self.cpu_seconds > MAX_CPU_SECONDS
+            || self.address_space > MAX_ADDRESS_SPACE
         {
             return Err("a worker limit is over its compiled-in ceiling".into());
         }
@@ -233,6 +248,13 @@ impl WorkerExtractor {
     /// its worker is killed and reaped, and no later item is sent.
     pub fn cancel_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancel)
+    }
+
+    /// #10746 S10 fix: use `flag` as the cancel flag (the CLI's SIGINT
+    /// watcher sets it).
+    pub fn with_cancel(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel = flag;
+        self
     }
 
     /// The process group of every worker this client spawned, in order.
@@ -407,6 +429,12 @@ impl WorkerExtractor {
         let Some(mut proc) = st.proc.take() else {
             return Err(err("crashed", "no worker is running"));
         };
+        // #10746 S10 fix: anything the worker sent between requests is a
+        // protocol violation; the worker is killed before this item.
+        if let Some((code, why)) = proc.unsolicited() {
+            self.retire(st, proc, false);
+            return Err(err(code, why));
+        }
         st.next_id += 1;
         let rid = st.next_id;
         let lim = self.cfg.limits.output();
@@ -490,6 +518,10 @@ impl Extractor for WorkerExtractor {
             let _ = self.ensure(&mut st);
         }
         self.version.get().map_or("unavailable", String::as_str)
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
     }
 
     fn available(&self) -> Result<(), ExtractError> {

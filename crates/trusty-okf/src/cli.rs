@@ -115,6 +115,9 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
 pub(crate) struct Ctx<'a> {
     #[cfg(feature = "search-feed")]
     pub sink: Option<&'a dyn crate::feed::IndexFeed>,
+    /// #10746 S10 fix: the process is the `trusty-okf` binary, so SIGINT
+    /// may be taken over to cancel a worker run (never in a library call).
+    pub catch_interrupt: bool,
     _p: std::marker::PhantomData<&'a ()>,
 }
 
@@ -126,6 +129,23 @@ pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let ctx = Ctx {
         #[cfg(feature = "search-feed")]
         sink: None,
+        catch_interrupt: false,
+        _p: std::marker::PhantomData,
+    };
+    run_ctx(args, out, err, &ctx)
+}
+
+/// The binary's entry: [`run`], plus (#10746 S10 fix) Ctrl-C handling. In
+/// an `import run --worker` call, SIGINT cancels the run: the in-flight
+/// worker item fails `cancelled`, the worker's process group is killed and
+/// reaped, later items are skipped `cancelled`, and the report is printed
+/// (exit 3). Only `src/main.rs` calls this.
+/// Test: `c103_sigint_cancels_the_cli_and_reaps_the_worker`.
+pub fn run_binary(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let ctx = Ctx {
+        #[cfg(feature = "search-feed")]
+        sink: None,
+        catch_interrupt: true,
         _p: std::marker::PhantomData,
     };
     run_ctx(args, out, err, &ctx)
@@ -142,6 +162,7 @@ pub fn run_with_feed(
 ) -> i32 {
     let ctx = Ctx {
         sink: Some(sink),
+        catch_interrupt: false,
         _p: std::marker::PhantomData,
     };
     run_ctx(args, out, err, &ctx)
