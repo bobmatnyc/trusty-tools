@@ -380,7 +380,7 @@ pub(crate) fn without_glob_metacharacters(word: &str) -> String {
 /// Programs whose every argument is text they PRINT, never a file they open.
 ///
 /// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`.
-const TEXT_PRINTERS: &[&str] = &["printf", "echo"];
+pub(crate) const TEXT_PRINTERS: &[&str] = &["printf", "echo"];
 
 /// Which tokens of a `printf`/`echo` call are prose it writes into a file
 /// (#8723).
@@ -454,7 +454,7 @@ pub(crate) fn prose_write_indices(segment: &str, argv: &[String]) -> Vec<usize> 
 /// What: unbalanced quoting, a `$` or backtick outside single quotes, or an
 /// unquoted `(` (a subshell or a process substitution).
 /// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`.
-fn runs_a_nested_command(segment: &str) -> bool {
+pub(crate) fn runs_a_nested_command(segment: &str) -> bool {
     let scan = super::shell_lex::QuoteScan::new(segment);
     !scan.balanced
         || segment.bytes().enumerate().any(|(i, b)| {

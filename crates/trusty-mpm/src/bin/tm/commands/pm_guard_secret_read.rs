@@ -401,6 +401,8 @@ use crate::commands::pm_guard_secret_substitution_read::evaluate_substitution_re
 use crate::commands::pm_guard_secret_handling::{
     URL_FETCHERS, body_written_to_a_file, is_tokeninfo_url, refusal_hint, same_class_copy,
 };
+// #10685: the inert operands of a command made only of printer calls.
+use crate::commands::pm_guard_secret_printed_text::{closed_printer_text, inert_operand_indices};
 
 /// Which kind of text a word scan is reading (#7266 round 9).
 ///
@@ -670,12 +672,14 @@ fn evaluate_secret_file_read_command_in(command: &str, cwd: Option<&Path>) -> Op
     // #8723: prose is read as prose only in a one-segment command; a pipe or a
     // wrapper's inner command could hand the printed text to a reader.
     let lone = segments.iter().filter(|s| !s.trim().is_empty()).count() == 1;
+    // #10685: a printer-only command prints its operands and opens none.
+    let printed = closed_printer_text(command);
     for segment in segments {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let named = secret_words_in_segment(trimmed, lone);
+        let named = secret_words_in_segment(trimmed, lone, printed);
         let Some(first) = named.first() else {
             continue;
         };
@@ -788,13 +792,16 @@ pub(crate) fn pattern_argument_index(segment: &str, argv: &[String]) -> Option<u
 /// What: `shlex::split`'s tokens, each run through [`secret_files_named_in`],
 /// minus the one token [`pattern_argument_index`] identifies as a search
 /// pattern, and minus the prose `prose_write_indices` finds when `lone` says
-/// the segment is the whole command (#8723). A segment that does not lex falls back to the raw byte scan, which
+/// the segment is the whole command (#8723), and minus the inert operands
+/// `inert_operand_indices` finds when `printed` says the whole command only
+/// prints (#10685). A segment that does not lex falls back to the raw byte scan, which
 /// is the fail-CLOSED arm — [`segment_only_handles`] can never grant the
 /// allowlist to it either.
 /// Test: `denies_a_name_reassembled_by_quoting_or_escaping`,
 /// `allows_a_secret_name_written_as_a_search_pattern`,
-/// `denies_an_unlexable_segment_that_names_a_secret`.
-fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
+/// `denies_an_unlexable_segment_that_names_a_secret`,
+/// `literal_regex_printf_allows_10685`.
+fn secret_words_in_segment(segment: &str, lone: bool, printed: bool) -> Vec<String> {
     let Ok(argv) = tokenize(segment) else {
         return secret_files_named_in(segment, Scan::Argv);
     };
@@ -807,6 +814,10 @@ fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
     // #8723: so is what a lone `printf`/`echo` writes into a file.
     if lone {
         text_payloads.extend(prose_write_indices(segment, &argv));
+    }
+    // #10685: and a non-path-shaped operand of a printer-only command.
+    if printed {
+        text_payloads.extend(inert_operand_indices(&argv));
     }
     // #7498: the words after `in` are a loop's word LIST, and the words in a
     // ref-creating position are REF names — neither is a path operand list, and

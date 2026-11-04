@@ -267,6 +267,8 @@ pub(crate) mod pm_guard_secret_consumers;
 pub(crate) mod pm_guard_secret_search_loop;
 // #8093, #8110, #8520, #8660: same-class copies, tokeninfo URLs, refusal hints.
 pub(crate) mod pm_guard_secret_handling;
+// #10685: the inert operands of a command that only prints.
+pub(crate) mod pm_guard_secret_printed_text;
 // #8879: the credential rules over the body of a script a command runs.
 pub(crate) mod pm_guard_secret_script;
 pub(crate) mod pm_guard_secret_script_read;
