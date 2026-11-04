@@ -145,7 +145,7 @@ fn copy_dir(from: &Path, to: &Path) {
 fn seed_legacy(root: &Path) {
     // Cargo runs unit tests from the package root.
     let src = Path::new("tests/fixtures/trusty-kb-c1eed98441/kb");
-    copy_dir(&src, root);
+    copy_dir(src, root);
     std::fs::write(
         root.join("notes/hand.md"),
         "---\ntype: Note\nupdated: 2026-07-20T10:00:00Z\nsources:\n- https://example.com/a\n- https://example.com/b\nverified:\n  by: human:jo\n  at: 2026-07-21T10:00:00Z\n---\n\nA hand-written note.\n",
