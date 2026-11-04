@@ -739,3 +739,7 @@ mod substitution_10566_tests;
 #[cfg(test)]
 #[path = "pm_guard_secret_script_node_tests.rs"]
 mod node_10548_tests;
+
+#[cfg(test)]
+#[path = "pm_guard_secret_fp_10685_tests.rs"]
+mod fp_10685_tests;
