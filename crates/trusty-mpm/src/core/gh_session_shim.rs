@@ -255,8 +255,9 @@ pub(crate) fn shim_script(
 /// `exec`, so a terminal and a stream are never held back. Every other call
 /// buffers stdout and stderr in a `mktemp -d` dir (a file, so no size bound;
 /// `exec` when `mktemp` fails). On exit 1 with the rate-limit text and no
-/// `HTTP 403` (that is the REST core quota) it prints one line naming the
-/// primary GraphQL limit and the reset from one bounded
+/// `HTTP <status>` (a REST quota, 403 or 429, passes through; #10550) it
+/// prints one line naming the primary GraphQL limit and the reset from one
+/// bounded
 /// `gh api rate_limit --jq .resources.graphql.reset` (a REST core call), or
 /// "unknown", and exits 1 with no stdout. The call is never retried: the limit
 /// holds until the reset. Otherwise it replays stdout, then stderr, and the
@@ -278,7 +279,7 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
          trap 'exit 143' TERM\n\
          \"$real\" \"$@\" >\"$out/1\" 2>\"$out/2\"\n\
          status=$?\n\
-         if [ \"$status\" -eq 1 ] && grep -Eq 'API rate limit (already )?exceeded' \"$out/2\" && ! grep -q 'HTTP 403' \"$out/2\"; then\n\
+         if [ \"$status\" -eq 1 ] && grep -Eq 'API rate limit (already )?exceeded' \"$out/2\" && ! grep -Eq 'HTTP [0-9][0-9][0-9]' \"$out/2\"; then\n\
          \x20 reset=$(\n\
          \x20   \"$real\" api rate_limit --jq .resources.graphql.reset </dev/null 2>/dev/null &\n\
          \x20   pid=$!\n\
