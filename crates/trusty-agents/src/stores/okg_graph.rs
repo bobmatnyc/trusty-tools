@@ -33,10 +33,10 @@ use crate::assistants::{AssistantHome, OKG_DIR};
 use crate::stores::StoresConfig;
 
 // #10746 (S3): the generic reader and its types moved to trusty-okf
-// (`bundle::graph`, SPEC-OKF-01 §2.7.2) and reach this crate through
-// trusty-kb's re-export until the S11 cut-over. The old names stay, so every
-// caller and `okg_graph_tests` are unchanged.
-pub use trusty_kb::graph::{
+// (`bundle::graph`, SPEC-OKF-01 §2.7.2); S11 imports them from trusty-okf
+// directly. The old names stay, so every caller and `okg_graph_tests` are
+// unchanged.
+pub use trusty_okf::bundle::graph::{
     Definition as OkgDefinition, Graph as OkgGraph, SubjectCount as OkgSubjectCount,
     Triple as OkgTriple, read_graph,
 };

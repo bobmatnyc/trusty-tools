@@ -128,8 +128,9 @@ banned_src() {
   fi
 }
 
-# B1: agent, MCP and connector crates. trusty-kb is the crate being replaced;
-# a dependency on it would carry its MCP server and agent coupling along.
+# B1: agent, MCP and connector crates. trusty-kb is the crate trusty-okf
+# replaced (deleted in #10746 S11); its name stays banned so a crate of that
+# name, with its MCP server and agent coupling, cannot come back as a dep.
 banned_deps c11_no_agent_or_connector_deps "$TMP/all" \
   'trusty-agents|trusty-agents-common|trusty-agents-ui|trusty-mcp|trusty-mcp-services|trusty-gworkspace|trusty-channels|trusty-kb|tc-services'
 

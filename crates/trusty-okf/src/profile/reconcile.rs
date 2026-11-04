@@ -12,8 +12,8 @@
 //! entity's edge fields (any key with an inverse in the profile's edge table)
 //! and returns each `(target, inverse field)` pair; [`add_inverse_link`] unions
 //! a `[[source]]` link into one target's inverse field. Resolving a target to
-//! a file and writing it is the caller's file walk (`Bundle` from slice S3;
-//! trusty-kb's `KbStore::reconcile_entity` until then). Dangling links are
+//! a file and writing it is the caller's file walk (trusty-agents'
+//! `KbStore::reconcile_entity` since #10746 S11). Dangling links are
 //! left for validation to report; targets are never fabricated.
 //!
 //! Test: `inverse_links_follow_profile_and_skip_self`,

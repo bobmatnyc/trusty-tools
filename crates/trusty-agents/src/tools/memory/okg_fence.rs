@@ -49,7 +49,7 @@
 //!
 //! `S-4.6`: a hit from an OKG store whose label cannot be established is
 //! fenced as untrusted. Every failure mode collapses to that in
-//! [`trusty_kb::okg::trust::TrustLabel::of_entity_file`] — missing file,
+//! [`trusty_okf::build::trust::TrustLabel::of_entity_file`] — missing file,
 //! unreadable file, no frontmatter, no `trust` key, unrecognised value. Labels
 //! arrive incrementally over a corpus that already exists, so the entire
 //! pre-#4532 corpus takes this path and must be safe on it.
@@ -69,7 +69,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
-use trusty_kb::okg::trust::TrustLabel;
+use trusty_okf::build::trust::TrustLabel;
 
 use crate::untrusted::KNOWLEDGE_FENCE;
 

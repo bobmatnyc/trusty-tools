@@ -3,10 +3,10 @@
 //! Why: #10746 S4 moved `_sources/registry.toml` into
 //! `trusty_okf::build::registry`, where boundary rule B6 bars connector
 //! variants: every kind but the doc store is `Locator::Connector`. The
-//! trusty-agents connector tools still construct and match the typed mail
-//! and drive locators until slice S11 moves those kinds into trusty-agents
-//! (SPEC-OKF-01 §2.7.2). This module keeps that typed view in trusty-kb, which
-//! retires in S11, and stores every row through trusty-okf.
+//! trusty-agents connector tools construct and match the typed mail and
+//! drive locators, and SPEC-OKF-01 §2.7.2 gives trusty-agents the `gmail`
+//! and `drive` kinds. #10746 S11 moved this typed view here from the deleted
+//! trusty-kb; every row is still stored through trusty-okf.
 //! What: [`Locator`] adds the typed `Gmail` and `Drive` variants to the
 //! doc store and the open `Connector`; [`SourceSpec`] is the row;
 //! [`SourceRegistry`] wraps trusty-okf's registry, so a row this view never

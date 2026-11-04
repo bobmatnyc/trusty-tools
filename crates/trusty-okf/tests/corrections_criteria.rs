@@ -1,7 +1,7 @@
 //! Slice S6 of #10746: the correction lifecycle — supersede, deprecate,
 //! tombstone (SPEC-OKF-01 §2.5, §4.8, §2.10 "Events with no hash"; §6.2
 //! criteria 27, 38, 39, 40, 42, 143). Criterion 37 needs trusty-common and
-//! lives in `crates/trusty-kb/tests/okf_tombstone.rs`.
+//! lives in `crates/trusty-agents/tests/okf_tombstone.rs` (#10746 S11).
 
 mod s6_support;
 

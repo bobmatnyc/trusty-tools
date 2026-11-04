@@ -76,7 +76,6 @@ default-members = [
     "crates/trusty-events",
     "crates/trusty-gworkspace",
     "crates/trusty-installer",
-    "crates/trusty-kb",
     "crates/trusty-mcp",
     "crates/trusty-memory",
     "crates/trusty-mpm",

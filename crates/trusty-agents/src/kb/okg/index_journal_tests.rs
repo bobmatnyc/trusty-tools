@@ -7,12 +7,12 @@
 //! backlog, an edit re-enters it, a tombstone becomes a withdrawal, and a
 //! crash-torn journal line costs one record rather than the file.
 //! What: drives `KbStore::okg_index_backlog` against a real temp tree.
-//! Test: `cargo test -p trusty-kb okg::index_journal`.
+//! Test: `cargo test -p trusty-agents kb::okg::index_journal`.
 
 use super::*;
-use crate::okg::policy::DocStorePolicy;
-use crate::okg::registry::Locator;
-use crate::schema::Profile;
+use crate::kb::okg::registry::Locator;
+use trusty_okf::build::policy::DocStorePolicy;
+use trusty_okf::profile::Profile;
 
 /// A store plus a doc-store corpus directory under one tempdir.
 fn fixture() -> (tempfile::TempDir, KbStore, std::path::PathBuf) {

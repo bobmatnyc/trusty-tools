@@ -11,13 +11,14 @@
 //! TOML and the ledger JSONL read the way a human expects, and that a crashed
 //! run (journal ahead of, or behind, the entities) converges on re-run.
 //!
-//! Test: `cargo test -p trusty-kb --test okg_artifacts`.
+//! Test: `cargo test -p trusty-agents --test kb_okg_artifacts` (#10746 S11
+//! moved it here from the deleted trusty-kb).
 
-use trusty_kb::okg::ledger::Ledger;
-use trusty_kb::okg::policy::DocStorePolicy;
-use trusty_kb::okg::registry::{Locator, SourceRegistry, SourceSpec};
-use trusty_kb::schema::Profile;
-use trusty_kb::store::KbStore;
+use trusty_agents::kb::okg::registry::{Locator, SourceRegistry, SourceSpec};
+use trusty_agents::kb::store::KbStore;
+use trusty_okf::build::ledger::Ledger;
+use trusty_okf::build::policy::DocStorePolicy;
+use trusty_okf::profile::Profile;
 
 /// Build a temp KB tree plus a doc-store corpus beside it.
 fn fixture() -> (tempfile::TempDir, KbStore, std::path::PathBuf) {

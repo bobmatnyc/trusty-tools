@@ -1,24 +1,26 @@
-//! Per-call root resolution + path confinement.
+//! Per-call root resolution + path confinement for the agent's KB trees.
 //!
-//! Why: one MCP service instance serves EVERY assistant's KB tree — there is no
+//! Why: one agent process serves EVERY assistant's KB tree — there is no
 //! single pinned root. Each tool call resolves its own root, and every file
-//! operation must be confined under a knowledge-base directory so a
+//! operation must be confined under the knowledge directory so a
 //! collection/name argument can never traverse out of the tree (`..`, absolute
-//! paths, or a symlink escaping the root).
+//! paths, or a symlink escaping the root). Mapping an agent name to a tree is
+//! agent home layout, which SPEC-OKF-01 §2.7.2 (B3, B4) keeps out of
+//! trusty-okf; #10746 S11 moved this module here from the deleted trusty-kb.
 //!
-//! What: [`Roots`] holds the service defaults (knowledge_dir + default root).
+//! What: [`Roots`] holds the defaults (knowledge_dir + default root).
 //! [`Roots::resolve`] applies the precedence `explicit root arg → agent arg
-//! (mapped to <knowledge_dir>/<agent-slug>) → service default`. [`confine`]
-//! joins caller-supplied relative components under a resolved root, rejecting
-//! any traversal, and [`assert_within`] verifies a canonicalised path stays
-//! under its root (symlinks not followed out).
+//! (mapped to <knowledge_dir>/<agent-slug>) → default`. [`confine`] joins
+//! caller-supplied relative components under a resolved root through
+//! `trusty_okf::bundle::paths::confine`, and [`assert_within`] verifies a
+//! canonicalised path stays under its root (symlinks not followed out).
 //!
 //! Test: `resolve_precedence`, `agent_maps_under_knowledge_dir`,
 //! `confine_rejects_traversal`, `assert_within_blocks_escape`.
 
 use std::path::{Path, PathBuf};
 
-use crate::entity::slugify;
+use trusty_okf::format::concept::slugify;
 
 /// Service-level root configuration, shared across every tool call.
 #[derive(Debug, Clone)]
@@ -74,7 +76,7 @@ impl Roots {
 /// Test: `confine_rejects_traversal`.
 pub fn confine(root: &Path, segments: &[&str]) -> anyhow::Result<PathBuf> {
     // #10746: the lexical check moved to trusty-okf (`bundle::paths::confine`,
-    // SPEC-OKF-01 §2.7.2); this wrapper keeps trusty-kb's anyhow messages.
+    // SPEC-OKF-01 §2.7.2); this wrapper keeps the agent's anyhow messages.
     trusty_okf::bundle::paths::confine(root, segments).map_err(|e| match e {
         trusty_okf::OkfError::PathEscape(seg) if seg.as_os_str().is_empty() => {
             anyhow::anyhow!("empty path segment is not allowed")

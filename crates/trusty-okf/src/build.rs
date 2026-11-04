@@ -14,7 +14,8 @@
 //! (§2.13.1). #10746 S5: an ingest run writes `log.md` once (`LogBatch`);
 //! the machine-local index journal lives in `state::index`. #10746 S6:
 //! [`rebuild`] regenerates ledger-owned concepts under the §4.5 ownership
-//! proof. The store entry points stay in trusty-kb until S11.
+//! proof. #10746 S11: the store entry points moved to trusty-agents
+//! (`kb::okg`) and trusty-kb was deleted.
 //! Test: `golden_registry_loads_every_row`,
 //! `golden_registry_saves_byte_for_byte`,
 //! `golden_ledger_reads_and_appends_in_the_same_format`,

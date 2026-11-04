@@ -14,13 +14,14 @@
 //! a tear mid-UTF-8-codepoint damages only its own line — and reports how many
 //! lines were unusable plus whether the file ends without a newline.
 //! [`Appender`] owns the lazily-opened handle and performs the healing write.
-//! #10746: public, because trusty-kb's index journal still shares it until
-//! its cut-over (S11); errors are [`OkfError`]. The on-disk format is unchanged.
+//! #10746: public, because trusty-agents' in-tree index journal
+//! (`kb::okg::index_journal`, moved from trusty-kb in S11) shares it; errors
+//! are [`OkfError`]. The on-disk format is unchanged.
 //!
 //! Test: the behaviours are pinned by the callers' own suites
 //! (`torn_line_is_skipped_not_fatal`,
 //! `torn_mid_utf8_codepoint_is_skipped_not_fatal` and
-//! `append_after_torn_line_does_not_corrupt_the_new_record`; trusty-kb's
+//! `append_after_torn_line_does_not_corrupt_the_new_record`; trusty-agents'
 //! index-journal suite covers its own use).
 
 use std::fs::{File, OpenOptions};

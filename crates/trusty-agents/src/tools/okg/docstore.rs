@@ -10,9 +10,9 @@
 //! optionally tombstoned, never silently dropped.
 //! Test: `super::tests::docstore_tool_ingests_and_is_idempotent`.
 
+use crate::kb::okg::registry::{Locator, SourceSpec};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use trusty_kb::okg::registry::{Locator, SourceSpec};
 
 use crate::tools::okg::{arg_str, now_iso, ok_json, require_str, resolve_store, with_root};
 use crate::tools::traits::{ToolExecutor, ToolResult};
@@ -80,8 +80,8 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
 /// invoking this shared engine; model tools still use resolve_store above.
 pub(crate) async fn ingest_into_store(
     args: &Value,
-    store: trusty_kb::store::KbStore,
-    policy: &trusty_kb::okg::policy::DocStorePolicy,
+    store: crate::kb::store::KbStore,
+    policy: &trusty_okf::build::policy::DocStorePolicy,
 ) -> anyhow::Result<ToolResult> {
     let source_id = require_str(args, "source_id")?;
     let now = now_iso();

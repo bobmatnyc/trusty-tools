@@ -465,7 +465,7 @@ async fn vector_search_falls_back_when_socket_is_absent() {
 // ---------------------------------------------------------------------------
 
 use crate::untrusted::{KNOWLEDGE_FENCE, MEMORY_FENCE};
-use trusty_kb::okg::trust::TrustLabel;
+use trusty_okf::build::trust::TrustLabel;
 
 /// Stand up a mock trusty-search daemon on a scratch socket, answering
 /// `search.query` with one hit per `(absolute_file, snippet)` pair (#6285).

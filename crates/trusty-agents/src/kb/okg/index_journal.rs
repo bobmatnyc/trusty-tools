@@ -21,7 +21,7 @@
 //! ledger against this journal to produce the work list — everything ingested
 //! but not yet searchable, plus everything tombstoned but not yet withdrawn.
 //!
-//! The push itself is NOT here. This crate is deterministic and network-free;
+//! The push itself is NOT here. This module is deterministic and network-free;
 //! the HTTP call into trusty-search lives in `trusty-agents`
 //! (`crate::stores::index_feed`), exactly like the Gmail/Drive fetchers. This
 //! module is the part that must be unit-testable without a daemon.
@@ -38,12 +38,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::entity::slugify;
-use crate::okg::jsonl::{Appender, read_journal};
-use crate::okg::ledger::{ItemStatus, Ledger};
-use crate::okg::registry::{SOURCES_DIR, SourceSpec};
-use crate::roots::{assert_within, confine};
-use crate::store::KbStore;
+use crate::kb::okg::registry::{SOURCES_DIR, SourceSpec};
+use crate::kb::roots::{assert_within, confine};
+use crate::kb::store::KbStore;
+use trusty_okf::build::jsonl::{Appender, read_journal};
+use trusty_okf::build::ledger::{ItemStatus, Ledger};
+use trusty_okf::format::concept::slugify;
 
 /// What a journal line asserts about an entity's presence in the index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,7 +155,7 @@ impl IndexJournal {
     /// Read a source's index journal into a last-record-wins view.
     ///
     /// Why/What/Test: identical damage tolerance to [`Ledger::load`] — see
-    /// [`crate::okg::jsonl::read_journal`].
+    /// [`trusty_okf::build::jsonl::read_journal`].
     pub fn load(root: &Path, source_id: &str) -> anyhow::Result<Self> {
         let path = Self::path_for(root, source_id)?;
         let load = read_journal::<IndexRecord>(&path)?;
