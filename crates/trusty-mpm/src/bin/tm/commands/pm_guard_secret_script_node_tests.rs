@@ -58,6 +58,7 @@ fn node_check_of_a_member_access_body_allows_10548() {
         "node --check t.mjs",
         "node -c t.mjs",
         "node --check ./t.mjs 2>&1",
+        "node --check t.mjs > out.txt",
     ] {
         assert_eq!(verdict(command, dir.path()), None, "{command}");
     }
@@ -108,18 +109,27 @@ fn a_node_run_beside_a_check_is_judged_10548() {
         ("steal.cjs", "require('fs').readFileSync('.env');\n"),
         ("x.js", "require('fs').readFileSync('server.key');\n"),
     ]);
+    let mut allowed = Vec::new();
     for command in [
         "node --check a.cjs && node a.cjs",
         "node --check a.cjs; node a.cjs",
         "node --check -r ./steal.cjs clean.cjs",
         "node --check --import ./steal.cjs clean.cjs",
         "node --check --inspect a.cjs",
+        // #10548 round 3: only `node --check <one file>`; `inspect` runs a.cjs.
+        "node --check inspect a.cjs",
+        "node -c inspect a.cjs",
+        "node --check a.cjs b.cjs",
+        "node --check --check a.cjs",
         "NODE_OPTIONS='-r ./steal.cjs' node --check a.cjs",
         "env NODE_OPTIONS=-r ./x.js node --check x.js",
         "env NODE_OPTIONS='-r ./steal.cjs' node --check a.cjs",
     ] {
-        assert!(verdict(command, dir.path()).is_some(), "{command}");
+        if verdict(command, dir.path()).is_none() {
+            allowed.push(command);
+        }
     }
+    assert!(allowed.is_empty(), "must refuse: {allowed:#?}");
 }
 
 /// Inline node code naming a secret file refuses (the inline rules).
