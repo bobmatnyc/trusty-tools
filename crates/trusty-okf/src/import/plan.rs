@@ -289,6 +289,37 @@ pub fn plan_import(
     spec: &ImportSpec,
     src: &mut dyn ImportSource,
 ) -> Result<ImportPlan, OkfError> {
+    plan_items(bundle, spec, src, None)
+}
+
+/// Plan one import with the run's worker extractor (#10746 S10, §2.16).
+///
+/// Why: with a worker named, the plan must show an absent worker before any
+/// write (criterion 101), and a worker item counts as current only when the
+/// ledger holds the worker's full fingerprint, so a worker upgrade or a
+/// configuration change re-extracts exactly the items it produced
+/// (criterion 105).
+/// What: as [`plan_import`], except that each item the built-in tier does
+/// not handle is skipped with the code [`Extractor::available`] returns
+/// (`worker_absent`), and is otherwise planned under the fingerprint of
+/// `ex` (which may start the worker for its handshake). Writes nothing.
+/// Test: `c101_absent_worker_is_planned_skipped_and_exits_3`,
+/// `c105_config_change_reextracts_exactly_the_worker_items`.
+pub fn plan_import_with(
+    bundle: &Bundle,
+    spec: &ImportSpec,
+    src: &mut dyn ImportSource,
+    ex: &dyn Extractor,
+) -> Result<ImportPlan, OkfError> {
+    plan_items(bundle, spec, src, Some(ex))
+}
+
+fn plan_items(
+    bundle: &Bundle,
+    spec: &ImportSpec,
+    src: &mut dyn ImportSource,
+    worker: Option<&dyn Extractor>,
+) -> Result<ImportPlan, OkfError> {
     let root = bundle.root();
     preflight(root, spec)?;
     let (include, exclude) = (glob_set(&spec.include)?, glob_set(&spec.exclude)?);
@@ -342,6 +373,12 @@ pub fn plan_import(
             items.push(p);
             continue;
         }
+        // #10746 S10: an absent worker is shown before any write (§2.16).
+        if let (false, Some(Err(e))) = (builtin, worker.map(|w| w.available())) {
+            set(&mut p, Action::Skip, Some(&e.code));
+            items.push(p);
+            continue;
+        }
         let id = match ledger.get(&e.item_id) {
             Some(r) => ConceptId::parse(&r.entity),
             None => concept_id_for_source(&e.item_id),
@@ -372,10 +409,11 @@ pub fn plan_import(
         shas.insert(e.item_id.clone(), sha.clone());
         let current = match ledger.get(&e.item_id) {
             Some(r) if r.status == ItemStatus::Ingested => {
-                if builtin {
-                    r.fingerprint == fingerprint(&bytes, &BuiltinText)
-                } else {
-                    sha_of(&r.fingerprint) == sha
+                match (builtin, worker) {
+                    (true, _) => r.fingerprint == fingerprint(&bytes, &BuiltinText),
+                    // #10746 S10: the full worker fingerprint (§2.16).
+                    (false, Some(w)) => r.fingerprint == fingerprint(&bytes, w),
+                    (false, None) => sha_of(&r.fingerprint) == sha,
                 }
             }
             _ => false,

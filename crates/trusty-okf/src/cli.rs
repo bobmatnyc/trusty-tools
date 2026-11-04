@@ -29,9 +29,10 @@ mod feed_cmd;
 
 /// The usage text printed on a bad call.
 pub const USAGE: &str = "usage:
-  trusty-okf import plan   <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]... [--json]
+  trusty-okf import plan   <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]...
+                           [--worker PATH] [--json]
   trusty-okf import run    <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]...
-                           [--dry-run] [--feed --index ID --state-dir DIR --socket PATH] [--json]
+                           [--dry-run] [--feed --index ID --state-dir DIR --socket PATH] [--worker PATH] [--json]
   trusty-okf import status <bundle-root> [--store ID] [--index ID --state-dir DIR [--socket PATH]] [--json]
   trusty-okf feed          <bundle-root> --index ID --state-dir DIR --socket PATH [--json]
 ";
@@ -45,6 +46,8 @@ const VALUED: &[&str] = &[
     "--index",
     "--state-dir",
     "--socket",
+    // #10746 S10: the extraction worker binary (SPEC-OKF-01 §4.10).
+    "--worker",
     // #10746 S8: test-only. Fixes the run's `now` so a test can compare two
     // runs byte for byte; left out of `USAGE` on purpose (Architect ruling).
     // Without it the CLI takes the system clock.

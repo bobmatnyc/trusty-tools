@@ -17,14 +17,16 @@ publish = false
 
 [features]
 # Both features are off by default. The core is network-free (B8) and never
-# links an extraction backend (B9). `extract-worker` pulls nothing until S10.
+# links an extraction backend (B9).
 default = []
 # Push loop to trusty-search and `search.query` retrieval (SPEC-OKF-01 §5).
 # #10746 S7: the socket client and its async runtime come only with this
 # feature, so `--no-default-features` stays network-free (B8).
 search-feed = ["dep:async-trait", "dep:tokio", "dep:trusty-common"]
 # Client for the out-of-process extraction worker (SPEC-OKF-01 §2.16, App. B).
-extract-worker = []
+# #10746 S10: `nix` sends the process-group signals of the kill sequence; the
+# crate forbids `unsafe`, so it has no raw `libc` call of its own.
+extract-worker = ["dep:nix"]
 
 [dependencies]
 # #10746 S2: the format and profile modules moved from trusty-kb. None of these
@@ -63,6 +65,11 @@ tokio = { workspace = true, optional = true, features = ["macros", "rt"] }
 # The core still links no trusty-common (owner decision D4b open).
 trusty-common = { workspace = true, optional = true, features = ["uds", "knowledge-document"] }
 
+# #10746 S10: feature `extract-worker` only. `killpg` for the worker's
+# process group (SPEC-OKF-01 §2.16 "Cancellation, kill and reap"). The 0.29
+# line trusty-mpm and trusty-search already pin; no network, no runtime.
+nix = { version = "0.29", optional = true, features = ["signal"] }
+
 # #10746 S7: the feed criteria need the `feed` module.
 [[test]]
 name = "feed_criteria"
@@ -75,6 +82,12 @@ required-features = ["search-feed"]
 name = "import_feed_criteria"
 path = "tests/import_feed_criteria.rs"
 required-features = ["search-feed"]
+
+# #10746 S10: the worker criteria need the worker client.
+[[test]]
+name = "worker_criteria"
+path = "tests/worker_criteria.rs"
+required-features = ["extract-worker"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

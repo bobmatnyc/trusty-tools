@@ -12,7 +12,7 @@
 //! [`bundle`]; S6 corrections, migration and `adopt` in [`bundle`] and
 //! `rebuild` in [`build`]; S7 `feed` and `retrieve`; S8 [`import`], the
 //! built-in tier of [`extract`], and the `trusty-okf` command line (`cli`,
-//! `src/main.rs`). Every other module is still empty and its doc states
+//! `src/main.rs`); S10 the extraction-worker client (`extract::worker`). Every other module is still empty and its doc states
 //! what it will hold.
 //!   - [`format`], [`profile`], [`bundle`], [`build`], [`state`], [`import`],
 //!     [`extract`] — the network-free core.
@@ -44,7 +44,7 @@ pub mod import;
 pub mod profile;
 pub mod state;
 
-pub use error::OkfError;
+pub use error::{OkfError, WorkerError};
 
 #[cfg(feature = "search-feed")]
 pub mod feed;

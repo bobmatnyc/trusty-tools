@@ -49,7 +49,7 @@ use crate::bundle::log_md::LogBatch;
 use crate::bundle::ops::{failpoint, io_seam};
 use crate::bundle::put::PutOutcome;
 use crate::bundle::record::instant_string;
-use crate::extract::{BuiltinText, Extractor, TypeHint, fingerprint};
+use crate::extract::{BuiltinText, Extracted, Extractor, TypeHint, fingerprint};
 use crate::format::id::ConceptId;
 use crate::profile::Profile;
 use crate::state::revisions;
@@ -92,9 +92,14 @@ fn source_item(
     fp: String,
     ts: Option<String>,
     ex: &dyn Extractor,
-    mut fields: Mapping,
-    text: String,
+    got: Extracted,
 ) -> (SourceItem, Mapping) {
+    let Extracted {
+        text,
+        mut fields,
+        provenance: derived,
+        ..
+    } = got;
     let stem = rel.rsplit('/').next().unwrap_or(rel);
     let stem = stem.strip_suffix(".md").unwrap_or(stem);
     let title = match fields.remove(Value::String("title".into())) {
@@ -121,6 +126,11 @@ fn source_item(
             Value::String("extracted_by".into()),
             Value::String(format!("{}@{}", ex.id(), ex.version())),
         );
+    }
+    // #10746 S10: the extractor's own provenance (§2.16) replaces the
+    // derived `extracted_by`; the engine places only its provenance keys.
+    for (k, v) in derived {
+        provenance.insert(k, v);
     }
     let item = SourceItem {
         item_id: rel.to_string(),
@@ -189,6 +199,9 @@ pub fn import(
         .filter_map(|p| p.id.clone().map(|id| (p.item_id.clone(), id)))
         .collect();
     let refused = collide::refused(&store.id, &targets, &Pins::load(&root, &store.id)?);
+    // #10746 S10: the worker client learns the store before any item, so
+    // it can require its OS sandbox for a connector store (§2.16 item 9 B).
+    ex.begin_run(&store);
     let batch = LogBatch::begin(&b, log.attempt())?;
     if row_changed {
         log.start(&b, &stamp)?;
@@ -295,15 +308,8 @@ pub fn import(
                         detail: String::new(),
                     });
                 }
-                let (si, provenance) = source_item(
-                    &p.item_id,
-                    id,
-                    fp,
-                    p.timestamp.clone(),
-                    tier,
-                    got.fields,
-                    got.text,
-                );
+                let (si, provenance) =
+                    source_item(&p.item_id, id, fp, p.timestamp.clone(), tier, got);
                 log.start(&b, &stamp)?;
                 let first = !ledger.contains(&p.item_id);
                 match write_item(
@@ -351,6 +357,18 @@ pub fn import(
             }
         };
         report.items.push(entry);
+    }
+    // #10746 S10: the worker shuts down here, and its run-level failures
+    // are reported; the items keep their outcomes (§2.16 "Shutdown").
+    let run = ex.end_run();
+    report.worker_errors = run.errors;
+    if let Some(excerpt) = run.stderr_excerpt {
+        report.findings.push(ImportFinding {
+            severity: "info".into(),
+            kind: "worker_stderr".into(),
+            item_id: String::new(),
+            detail: excerpt,
+        });
     }
     let (_, left) = batch
         .flush_now(&mut b)

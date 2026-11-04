@@ -18,14 +18,21 @@ use crate::OkfError;
 use crate::build::policy::DocStorePolicy;
 use crate::build::registry::{Locator, SourceRegistry, SourceSpec};
 use crate::bundle::Bundle;
-use crate::extract::NoWorker;
+use crate::extract::{Extractor, NoWorker};
 use crate::format::concept::slugify;
 use crate::import::{
-    DocTreeSource, ImportPlan, ImportSpec, import, import_status, is_refusal, plan_import,
+    DocTreeSource, ImportPlan, ImportSpec, import, import_status, is_refusal, plan_import_with,
 };
 use crate::state::{IndexStateDir, LiveIdentity};
 
-const IMPORT_OPTS: &[&str] = &["--from", "--store", "--include", "--exclude", "--json"];
+const IMPORT_OPTS: &[&str] = &[
+    "--from",
+    "--store",
+    "--include",
+    "--exclude",
+    "--json",
+    "--worker",
+];
 const RUN_OPTS: &[&str] = &[
     "--from",
     "--store",
@@ -38,6 +45,7 @@ const RUN_OPTS: &[&str] = &[
     "--state-dir",
     "--socket",
     "--now",
+    "--worker",
 ];
 
 /// A library error as a CLI failure, with its §4.10 code: 2 for a
@@ -131,11 +139,42 @@ fn store_for(a: &Args, root: &Path, now: &str) -> Result<(SourceSpec, PathBuf), 
     Ok((row, dir))
 }
 
+/// The run's extractor for items the built-in tier does not handle:
+/// the worker `--worker` names, else [`NoWorker`] (`worker_absent`).
+///
+/// #10746 S10: the worker is found only at the given path, never through
+/// `PATH` (§2.16 "Absent worker"); a missing file is `worker_absent`, shown
+/// by the plan. Working directories go under `/tmp`, a fixed path, since
+/// the CLI reads no environment variable (B3). Without the
+/// `extract-worker` feature `--worker` is refused before any write (2).
+fn extractor(a: &Args) -> Result<Box<dyn Extractor>, Fail> {
+    let Some(path) = a.one("--worker") else {
+        return Ok(Box::new(NoWorker));
+    };
+    #[cfg(feature = "extract-worker")]
+    {
+        use crate::extract::worker::{WorkerConfig, WorkerExtractor};
+        let cfg = WorkerConfig::new(path, "/tmp");
+        WorkerExtractor::new(cfg)
+            .map(|w| Box::new(w) as Box<dyn Extractor>)
+            .map_err(|e| Fail::Code(2, e))
+    }
+    #[cfg(not(feature = "extract-worker"))]
+    {
+        let _ = path;
+        Err(Fail::Code(
+            2,
+            "this build has no extract-worker feature; --worker is not available".into(),
+        ))
+    }
+}
+
 /// The spec, the plan and the source for `import plan` and `import run`.
 fn prepare(
     a: &Args,
     root: &Path,
     stamp: &str,
+    ex: &dyn Extractor,
 ) -> Result<(Bundle, ImportPlan, DocTreeSource), Fail> {
     let bundle = open(root)?;
     let (store, dir) = store_for(a, root, stamp)?;
@@ -144,7 +183,7 @@ fn prepare(
     spec.exclude = a.all("--exclude");
     let policy = DocStorePolicy::new(vec![dir.clone()]);
     let mut src = DocTreeSource::open(&dir, &policy).map_err(|e| fail(&e))?;
-    let plan = plan_import(&bundle, &spec, &mut src).map_err(|e| fail(&e))?;
+    let plan = plan_import_with(&bundle, &spec, &mut src, ex).map_err(|e| fail(&e))?;
     Ok((bundle, plan, src))
 }
 
@@ -152,7 +191,8 @@ fn prepare(
 pub(crate) fn plan(a: &Args, out: &mut dyn Write) -> Result<i32, Fail> {
     a.only(IMPORT_OPTS).map_err(Fail::Usage)?;
     let root = bundle_root(a, 2)?;
-    let (_, plan, _) = prepare(a, &root, "")?;
+    let ex = extractor(a)?;
+    let (_, plan, _) = prepare(a, &root, "", ex.as_ref())?;
     output::plan(out, &plan, a.has("--json"));
     Ok(0)
 }
@@ -167,12 +207,13 @@ pub(crate) fn run(a: &Args, out: &mut dyn Write, ctx: &Ctx<'_>) -> Result<i32, F
     }
     let now = now(a)?;
     let stamp = crate::bundle::record::instant_string(&now);
-    let (mut bundle, plan, mut src) = prepare(a, &root, &stamp)?;
+    let ex = extractor(a)?;
+    let (mut bundle, plan, mut src) = prepare(a, &root, &stamp, ex.as_ref())?;
     if a.has("--dry-run") {
         output::plan(out, &plan, a.has("--json"));
         return Ok(0);
     }
-    let result = import(&mut bundle, &plan, &mut src, &NoWorker, now);
+    let result = import(&mut bundle, &plan, &mut src, ex.as_ref(), now);
     let mut report = match result {
         Ok(r) => r,
         Err(e) => return Err(fail(&e)),
