@@ -15,8 +15,9 @@
 //! request carrying the store kind, the store selection and the run's
 //! `operator_initiated` value. Frames are a 4-byte big-endian length and a
 //! JSON header, capped at [`MAX_FRAME_BYTES`]. A request past its deadline,
-//! a bad frame or a wrong `request_id` kills the adapter; [`AdapterSource::
-//! cancel`] and `Drop` kill and reap it, so no adapter outlives its source.
+//! a bad frame or a wrong `request_id` kills the adapter;
+//! [`AdapterSource::cancel`] and `Drop` kill and reap it, so no adapter
+//! outlives its source.
 //! Slice S9 of #10746.
 //! Test: `c97_cli_imports_through_an_adapter_process_and_reaps_on_cancel`,
 //! `c139_adapter_gets_exactly_the_caller_environment`,
