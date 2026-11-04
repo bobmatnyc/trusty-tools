@@ -243,6 +243,15 @@ pub(crate) fn io_seam(name: &str) -> Result<(), OkfError> {
     Ok(())
 }
 
+/// #10746 S9: a read seam between resolving a source path and reading its
+/// bytes. Under `cfg(test)` a hook may swap the file at `path`, as a racing
+/// writer would. Compiled to nothing otherwise.
+pub(crate) fn read_seam(path: &std::path::Path) {
+    #[cfg(test)]
+    fail::before_read(path);
+    let _ = path;
+}
+
 /// Bring `rel` to `bytes` (`None` removes it).
 ///
 /// #10746: a removal is the source path of a move whose post-image already
@@ -530,8 +539,10 @@ pub(crate) mod fail {
 
     type Hook = Box<dyn FnMut(&str) -> bool>;
     type Mutate = Box<dyn FnMut(&str, &mut Vec<u8>)>;
+    type ReadHook = Box<dyn FnMut(&std::path::Path)>;
 
     thread_local! {
+        static READ: RefCell<Option<ReadHook>> = const { RefCell::new(None) };
         static MUTATE: RefCell<Option<Mutate>> = const { RefCell::new(None) };
         static IO: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -548,6 +559,20 @@ pub(crate) mod fail {
         HOOK.with(|h| *h.borrow_mut() = None);
         IO.with(|h| *h.borrow_mut() = None);
         MUTATE.with(|h| *h.borrow_mut() = None);
+        READ.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// #10746 S9: install a hook that runs at [`super::read_seam`].
+    pub(crate) fn set_before_read(f: impl FnMut(&std::path::Path) + 'static) {
+        READ.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(crate) fn before_read(path: &std::path::Path) {
+        READ.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(path);
+            }
+        });
     }
 
     /// #10746 S6: install a post-image hook for a migration.

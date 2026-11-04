@@ -11,11 +11,19 @@
 //! name and flag rules) is listed once as `hidden` and not descended; a
 //! symbolic link is listed as `symlink` and never read, even when it points
 //! inside the root; a file over [`MAX_ITEM_BYTES`] is `too_large`. `fetch`
-//! re-checks every segment for a link before it reads, so a link swapped in
-//! after the listing is refused too. Slice S8 of #10746.
+//! re-checks every directory segment for a link, then opens the file once
+//! with `O_NOFOLLOW | O_NONBLOCK` and takes its type and size from that
+//! handle (`fstat`) before it reads the same handle. So a link, FIFO or
+//! larger file swapped in after the listing, or between the check and the
+//! read, is refused or never read. Slice S8 of #10746; race fix in S9.
 //! Test: `c71_import_leaves_the_source_tree_unchanged`,
-//! `c81_symlinks_are_reported_and_never_read`.
+//! `c81_symlinks_are_reported_and_never_read`,
+//! `fetch_never_reads_a_symlink_swapped_in_before_the_read`,
+//! `fetch_never_blocks_on_a_fifo_swapped_in_before_the_read`,
+//! `fetch_size_check_and_read_act_on_one_inode`.
 
+use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use walkdir::WalkDir;
@@ -145,8 +153,9 @@ impl ImportSource for DocTreeSource {
             code: code.to_string(),
             message,
         };
+        let parts: Vec<_> = Path::new(item_id).components().collect();
         let mut probe = self.root.clone();
-        for c in Path::new(item_id).components() {
+        for (i, c) in parts.iter().enumerate() {
             let Component::Normal(part) = c else {
                 return Err(fail(
                     "excluded",
@@ -154,31 +163,83 @@ impl ImportSource for DocTreeSource {
                 ));
             };
             probe.push(part);
+            if i + 1 == parts.len() {
+                break;
+            }
             let meta = std::fs::symlink_metadata(&probe)
                 .map_err(|e| fail("fetch_error", format!("{item_id}: {e}")))?;
             if meta.file_type().is_symlink() {
                 return Err(fail("symlink", format!("{item_id}: crosses a link")));
             }
         }
-        let meta = std::fs::symlink_metadata(&probe)
-            .map_err(|e| fail("fetch_error", format!("{item_id}: {e}")))?;
-        // #10746 S8 fix: a FIFO, socket or device swapped in after the
-        // listing would block the read under the bundle lock; only a regular
-        // file is read.
-        if !meta.file_type().is_file() {
-            return Err(fail(
-                "unsupported_format",
-                format!("{item_id}: not a regular file"),
-            ));
-        }
-        if meta.len() > MAX_ITEM_BYTES {
-            return Err(fail(
-                "too_large",
-                format!("{item_id}: {} bytes", meta.len()),
-            ));
-        }
-        std::fs::read(&probe).map_err(|e| fail("fetch_error", format!("{item_id}: {e}")))
+        // #10746 S9 (S8 race fix): open once without following a final link
+        // and without blocking on a FIFO, then check and read that one
+        // handle. A file swapped in after the open is never read.
+        let file = open_no_follow(&probe).map_err(|e| {
+            let code = open_error_code(&e);
+            fail(code, format!("{item_id}: {e}"))
+        })?;
+        crate::bundle::ops::read_seam(&probe);
+        read_checked(file).map_err(|(code, msg)| fail(code, format!("{item_id}: {msg}")))
     }
+}
+
+/// Open `path` read-only, refusing a final symbolic link and never blocking
+/// on a FIFO (`O_NOFOLLOW | O_NONBLOCK` on Unix).
+fn open_no_follow(path: &Path) -> std::io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(not(unix))]
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(std::io::Error::other("a symbolic link"));
+    }
+    opts.open(path)
+}
+
+/// The report code of a failed open: a final link is `symlink`; a socket
+/// or a FIFO with no writer that the platform refuses to open is
+/// `unsupported_format`; anything else is `fetch_error`.
+fn open_error_code(e: &std::io::Error) -> &'static str {
+    #[cfg(unix)]
+    match e.raw_os_error() {
+        Some(libc::ELOOP) => return "symlink",
+        Some(libc::ENXIO | libc::EOPNOTSUPP) => return "unsupported_format",
+        _ => {}
+    }
+    #[cfg(not(unix))]
+    if e.kind() == std::io::ErrorKind::Other {
+        return "symlink";
+    }
+    "fetch_error"
+}
+
+/// Check the type and size of the open file (`fstat`) and read it, both on
+/// the one handle; the read is bounded so a file that grows after the check
+/// is still refused as `too_large`.
+fn read_checked(file: File) -> Result<Vec<u8>, (&'static str, String)> {
+    let meta = file
+        .metadata()
+        .map_err(|e| ("fetch_error", e.to_string()))?;
+    // #10746 S8 fix, kept: a FIFO, socket or device is never read.
+    if !meta.file_type().is_file() {
+        return Err(("unsupported_format", "not a regular file".into()));
+    }
+    if meta.len() > MAX_ITEM_BYTES {
+        return Err(("too_large", format!("{} bytes", meta.len())));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_ITEM_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ("fetch_error", e.to_string()))?;
+    if bytes.len() as u64 > MAX_ITEM_BYTES {
+        return Err(("too_large", format!("over {MAX_ITEM_BYTES} bytes")));
+    }
+    Ok(bytes)
 }
 
 /// `path` relative to `root`, `/`-separated.
@@ -200,3 +261,7 @@ fn modified_iso(meta: &std::fs::Metadata) -> Option<String> {
     let dt = chrono::DateTime::from_timestamp(i64::try_from(secs).ok()?, 0)?;
     Some(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
+
+#[cfg(all(test, unix))]
+#[path = "source_tests.rs"]
+mod tests;

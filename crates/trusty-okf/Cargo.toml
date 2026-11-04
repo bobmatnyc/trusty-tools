@@ -63,6 +63,11 @@ tokio = { workspace = true, optional = true, features = ["macros", "rt"] }
 # The core still links no trusty-common (owner decision D4b open).
 trusty-common = { workspace = true, optional = true, features = ["uds", "knowledge-document"] }
 
+# #10746 S9: `O_NOFOLLOW`, `O_NONBLOCK` and the `ELOOP`/`ENXIO` codes for the
+# import fetch's single open (S8 race fix). Constants only; no network (B8).
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 # #10746 S7: the feed criteria need the `feed` module.
 [[test]]
 name = "feed_criteria"
