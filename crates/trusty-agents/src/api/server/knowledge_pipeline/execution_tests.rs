@@ -72,6 +72,11 @@ async fn extraction_checkpoint_retries_publication_without_repeating_inference()
                     "synthetic index failure",
                 ));
             }
+            // #10746 S12: trusty-okf's feed counts a put only on the
+            // daemon's `indexed: true` reply (SPEC-OKF-01 §5.4 F4).
+            if method == "search.index.file.put" {
+                return Ok(json!({"indexed": true}));
+            }
             Ok(params)
         })
     })

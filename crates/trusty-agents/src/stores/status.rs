@@ -270,9 +270,9 @@ fn knowledge_dir() -> std::path::PathBuf {
 /// it hold what the tree holds?". Both halves are needed before a card can
 /// honestly say a store is working.
 /// What: resolves the `okg://` tree to a directory and, when that directory has
-/// an OKG source registry, folds its index coverage. Local filesystem work only
-/// — one `stat` per settled entity — and every failure leaves the fields `None`
-/// rather than degrading the connection verdict.
+/// an OKG source registry, folds its index coverage from this machine's index
+/// state (#10746 S12). Local filesystem work only, and every failure leaves the
+/// fields `None` rather than degrading the connection verdict.
 /// Test: `reports_the_unsearchable_backlog_for_a_bound_tree`.
 fn attach_tree_coverage(status: &mut StoreStatus) {
     let Some(tree_path) = super::binding::okg_tree_path(&knowledge_dir(), &status.tree) else {
@@ -284,7 +284,10 @@ fn attach_tree_coverage(status: &mut StoreStatus) {
     }
     let store =
         crate::kb::store::KbStore::new(tree_path, trusty_okf::profile::Profile::default_profile());
-    if let Ok(coverage) = store.okg_index_coverage() {
+    // #10746 S12: this machine's index state for the bound index, never the
+    // synced tree.
+    let state = crate::kb::okg::index_state::IndexStateRef::machine_local(&status.index).ok();
+    if let Ok(coverage) = store.okg_index_coverage(state.as_ref()) {
         status.pending_index = Some(coverage.pending);
         status.synced_index = Some(coverage.synced);
     }

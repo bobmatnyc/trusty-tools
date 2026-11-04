@@ -153,13 +153,9 @@ pub(crate) async fn ingest_into_store(
     // Then make it findable. The tree write above is the durable record; this
     // step is fail-open but never silent — see `tools::okg::index_feed`.
     let spec = store.okg_source(&registered.id)?;
-    let index = crate::tools::okg::index_feed::feed_bound_index(
-        &store,
-        &spec,
-        arg_str(args, "agent"),
-        &now,
-    )
-    .await;
+    let index =
+        crate::tools::okg::index_feed::feed_bound_index(&store, &spec, arg_str(args, "agent"))
+            .await;
 
     Ok(ok_json(&json!({
         "source": registered,

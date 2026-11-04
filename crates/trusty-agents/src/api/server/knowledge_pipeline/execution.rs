@@ -257,19 +257,20 @@ async fn feed(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("trusty-search unavailable"))?;
     indexing::at(&socket, &state.store, true).await?;
-    let report = crate::stores::index_feed::feed_source(
+    // #10746 S12: the pass runs in `trusty_okf::feed` with this machine's
+    // index state; publication completes only when every put and remove of
+    // the pass was confirmed.
+    let index_state =
+        crate::kb::okg::index_state::IndexStateRef::machine_local(&state.store.index_id)?;
+    let report = crate::stores::okg_feed::feed_source(
         store,
         spec,
-        &state.store.index_id,
-        &crate::stores::index_feed_rpc::RpcIndexFeed::new(socket),
-        &Utc::now().to_rfc3339(),
+        &index_state,
+        &trusty_okf::feed::RpcIndexFeed::new(socket),
     )
-    .await?;
+    .await;
     anyhow::ensure!(
-        report.pending == 0
-            && report.errors.is_empty()
-            && report.reason.is_none()
-            && report.index.as_deref() == Some(state.store.index_id.as_str()),
+        report.acknowledged(&state.store.index_id),
         "Index publication not acknowledged: {:?}",
         report
     );
