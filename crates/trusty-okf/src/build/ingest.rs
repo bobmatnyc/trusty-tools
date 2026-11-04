@@ -32,7 +32,8 @@
 //! `merge_folds_chunk_reports`, `per_item_errors_do_not_abort_the_run`,
 //! `reingest_keeps_editorial_and_verification_keys`,
 //! `c116_protected_keys_from_every_input_are_quarantined`,
-//! `c117_planted_verification_hash_never_verifies`.
+//! `c117_planted_verification_hash_never_verifies`,
+//! `reingest_over_a_deprecated_concept_writes_content_and_keeps_status`.
 //!
 //! # Spec References
 //! - SPEC-OKF-01 §2.9 (re-ingest keeps editorial keys), §2.10, §2.13.1.
@@ -49,6 +50,7 @@ use crate::build::ledger::{ItemStatus, Ledger, LedgerRecord, Watermark};
 use crate::build::registry::SourceSpec;
 use crate::build::trust::{TRUST_KEY, TrustLabel};
 use crate::bundle::Bundle;
+use crate::bundle::put::WriteKind;
 use crate::bundle::record::instant_string;
 use crate::format::concept::{Concept, slugify};
 use crate::format::fields::Actor;
@@ -501,7 +503,16 @@ fn write_item(
         next.set("updated", updated.clone());
     }
     let actor = Actor::parse(INGEST_ACTOR);
-    bundle.put_inner(next, &actor, false, WriteMode::Lenient, now, false)?;
+    // #10746: `SourceReingest`, so a deprecated concept takes the new source
+    // content (SPEC-OKF-01 §3 (c2) (i)); §2.10 and `log.md` still apply.
+    bundle.put_inner(
+        next,
+        &actor,
+        false,
+        WriteMode::Lenient,
+        now,
+        WriteKind::SourceReingest,
+    )?;
     Ok((id.as_str().to_string(), quarantine.findings))
 }
 
@@ -531,7 +542,16 @@ fn tombstone_item(
     // A tombstone is a flag, never a deletion: the body and every distilled
     // fact survive.
     let actor = Actor::parse(INGEST_ACTOR);
-    bundle.put_inner(next, &actor, false, WriteMode::Lenient, now, false)?;
+    // #10746: `SourceReingest`, so a deprecated concept takes the new source
+    // content (SPEC-OKF-01 §3 (c2) (i)); §2.10 and `log.md` still apply.
+    bundle.put_inner(
+        next,
+        &actor,
+        false,
+        WriteMode::Lenient,
+        now,
+        WriteKind::SourceReingest,
+    )?;
 
     Ok(Some(LedgerRecord {
         item_id: item_id.to_string(),

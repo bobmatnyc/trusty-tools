@@ -91,6 +91,24 @@ impl HumanConfirmation {
     }
 }
 
+/// Who a crate-private `put_inner` call writes for (#10746).
+///
+/// What: `Caller` is a public `put`; `LinkRewrite` is a `move_concept` link
+/// rewrite (no `log.md` entry; takes a deprecated concept); `SourceReingest`
+/// is the build engine writing a source's new content, which a deprecated
+/// concept also takes (SPEC-OKF-01 §3 (c2) (i)) while §2.10 and the
+/// `log.md` entry still apply.
+/// Test: `reingest_over_a_deprecated_concept_writes_content_and_keeps_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteKind {
+    /// A public `put` or `put_confirmed`.
+    Caller,
+    /// A `move_concept` link rewrite.
+    LinkRewrite,
+    /// The build engine writing a source item.
+    SourceReingest,
+}
+
 /// What a `put` or `verify` did (SPEC-OKF-01 §4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PutOutcome {
@@ -240,7 +258,8 @@ impl Bundle {
         mode: WriteMode,
         now: DateTime<FixedOffset>,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
-        let (outcome, findings, _) = self.put_inner(c, &by, false, mode, &now, false)?;
+        let (outcome, findings, _) =
+            self.put_inner(c, &by, false, mode, &now, WriteKind::Caller)?;
         Ok((outcome, findings))
     }
 
@@ -259,14 +278,14 @@ impl Bundle {
         now: DateTime<FixedOffset>,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
         let HumanConfirmation { _private: () } = confirmation;
-        let (outcome, findings, _) = self.put_inner(c, &by, true, mode, &now, false)?;
+        let (outcome, findings, _) = self.put_inner(c, &by, true, mode, &now, WriteKind::Caller)?;
         Ok((outcome, findings))
     }
 
-    /// `put`; a `link_rewrite` call writes no `log.md` entry, because
-    /// `move_concept` logs once for the whole move. `link_rewrite` marks a
-    /// `move_concept` link rewrite, which is not a caller edit, so a
-    /// deprecated concept still takes it (§4.8 refuses caller edits only).
+    /// `put`; `kind` says who writes (see [`WriteKind`]). A
+    /// `LinkRewrite` writes no `log.md` entry, because `move_concept` logs
+    /// once for the whole move. Only a `Caller` content change to a
+    /// deprecated concept is refused (§4.8 refuses caller edits only).
     /// `confirmed` is true only under a [`HumanConfirmation`].
     /// Returns the outcome, the findings and the target ID.
     pub(crate) fn put_inner(
@@ -276,7 +295,7 @@ impl Bundle {
         confirmed: bool,
         mode: WriteMode,
         now: &DateTime<FixedOffset>,
-        link_rewrite: bool,
+        kind: WriteKind,
     ) -> Result<(PutOutcome, Vec<Finding>, ConceptId), OkfError> {
         let id = match &c.id {
             ConceptRef::Id(id) => id.clone(),
@@ -305,7 +324,9 @@ impl Bundle {
         let mut cleared = 0;
         if let Some(o) = &old {
             let deprecated = matches!(o.frontmatter().status, Field::Valid(Status::Deprecated));
-            if content_changed && deprecated && !link_rewrite {
+            // #10746: §3 (c2) (i) — a source re-ingest writes the new content
+            // and keeps `status: deprecated`; only a caller edit is refused.
+            if content_changed && deprecated && kind == WriteKind::Caller {
                 return Err(conflict(&id, "deprecated"));
             }
             // #10746: §2.4 needs a `human:` actor AND explicit confirmation.
@@ -350,7 +371,7 @@ impl Bundle {
                 verifications_cleared: cleared,
             },
         };
-        let entry = (!link_rewrite)
+        let entry = (kind != WriteKind::LinkRewrite)
             .then(|| prepare_entry(&self.root, now, &log_line(&id, by, &outcome)))
             .transpose()?;
         self.commit_with_record(&id, &lines, &prepared)?;

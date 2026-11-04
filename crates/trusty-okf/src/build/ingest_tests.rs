@@ -487,3 +487,77 @@ fn reingest_keeps_editorial_and_verification_keys() {
         std::fs::read_to_string(store.root.join("_sources/verification/sources/a.jsonl")).unwrap();
     assert!(record.contains("human:jo"), "kept as history: {record}");
 }
+
+/// Why: SPEC-OKF-01 §3 (c2) decided (i) — a source re-ingest over a
+/// deprecated concept writes the new content and keeps `status: deprecated`;
+/// (ii), refuse with `Conflict` on every run, was rejected. #10746: S4 first
+/// shipped (ii) by accident, and a caller that requires an error-free report
+/// retried forever.
+/// What: hand-sets `status: deprecated`, `superseded_by` and a `verified`
+/// event, re-ingests changed content (written, status and editorial keys
+/// kept, event moved to history, one more `log.md` entry), then shows a
+/// plain `put` content change on the same concept is still `deprecated`.
+/// Test: self-contained.
+#[test]
+fn reingest_over_a_deprecated_concept_writes_content_and_keeps_status() {
+    let (_t, store) = store();
+    let spec = spec(false);
+    store
+        .ingest_items(
+            &spec,
+            &[item("d", "h1", "2026-07-01", "old body")],
+            false,
+            "t0",
+        )
+        .unwrap();
+    let path = store.entity_path("sources", "d").unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let edited = text.replacen(
+        "---\n",
+        "---\nstatus: deprecated\nsuperseded_by: /sources/e.md\n\
+         verified:\n- by: human:jo\n  at: 2026-07-24T05:00:00Z\n",
+        1,
+    );
+    std::fs::write(&path, &edited).unwrap();
+    let log_before = std::fs::read_to_string(store.root.join("log.md")).unwrap();
+
+    let r = store
+        .ingest_items(
+            &spec,
+            &[item("d", "h2", "2026-07-02", "new body")],
+            false,
+            "t1",
+        )
+        .unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(r.updated, 1);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("new body") && !text.contains("old body"),
+        "{text}"
+    );
+    assert!(text.contains("status: deprecated"), "{text}");
+    assert!(text.contains("superseded_by: /sources/e.md"), "{text}");
+    assert!(!text.contains("verified:"), "§2.10 clears it: {text}");
+    let record =
+        std::fs::read_to_string(store.root.join("_sources/verification/sources/d.jsonl")).unwrap();
+    assert!(record.contains("human:jo"), "kept as history: {record}");
+    let log_after = std::fs::read_to_string(store.root.join("log.md")).unwrap();
+    assert!(
+        log_after.len() > log_before.len() && log_after.contains("`/sources/d.md`"),
+        "the §2.10 log entry is written: {log_after}"
+    );
+
+    // A caller content change to the deprecated concept is still refused.
+    let mut bundle = Bundle::at(&store.root).unwrap();
+    let id = concept_id_for("sources", "d").unwrap();
+    let mut c = bundle.get(&id).unwrap();
+    c.body = "\ncaller edit\n".to_string();
+    let err = bundle
+        .put(c, Actor::parse("human:jo"), WriteMode::Lenient, t("t2"))
+        .expect_err("a caller edit to a deprecated concept is refused");
+    assert!(
+        matches!(&err, OkfError::Conflict { reason, .. } if reason == "deprecated"),
+        "{err}"
+    );
+}

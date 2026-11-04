@@ -362,8 +362,14 @@ impl Bundle {
                 c
             };
             // #10746: a link rewrite carries no human confirmation (§2.4).
-            let (outcome, findings, id) =
-                self.put_inner(c, &actor, false, WriteMode::Lenient, &now, true)?;
+            let (outcome, findings, id) = self.put_inner(
+                c,
+                &actor,
+                false,
+                WriteMode::Lenient,
+                &now,
+                crate::bundle::put::WriteKind::LinkRewrite,
+            )?;
             report.findings.extend(findings);
             if let PutOutcome::Updated {
                 verifications_cleared,

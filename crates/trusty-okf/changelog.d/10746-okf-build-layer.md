@@ -4,3 +4,4 @@ Added
 - The ingest engine writes through `Bundle::put`: a re-ingest keeps `status`, `supersedes`, `superseded_by`, `stale_after` and the verification keys (§2.9), a content change moves `verified[]` to the verification record (§2.10), and `generated.by` is `process:trusty-okf-ingest`.
 - `format::protected` (§2.13.1): a protected key from a fetcher field, an extractor field or a source file's frontmatter moves unchanged under `source_fields`, and the ingest report lists one `quarantined_key` finding per key and item. `SourceItem::frontmatter` carries structured source frontmatter.
 - `OkfError::PolicyRefused` for a doc-store directory the read policy refuses.
+- A re-ingest over a deprecated concept writes the new source content and keeps `status: deprecated` and the editorial keys (SPEC-OKF-01 §3 (c2) (i)); §2.10 invalidation and the `log.md` entry still apply, and a caller `put` content change to it is still refused with `deprecated`.
