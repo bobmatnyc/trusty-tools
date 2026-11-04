@@ -352,13 +352,13 @@ mod tests {
             },
             "t0",
         );
-        let mut item = ingest::SourceItem {
+        let mut item = trusty_okf::build::ingest::SourceItem {
             item_id: "m1".into(),
             fingerprint: "m1".into(),
             name: "m1".into(),
             title: "m1".into(),
             body: "hello".into(),
-            ..ingest::SourceItem::default()
+            ..trusty_okf::build::ingest::SourceItem::default()
         };
         item.fields.insert("source_status".into(), "deleted".into());
         item.fields
