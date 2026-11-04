@@ -190,12 +190,17 @@ pub(super) async fn keys_survive_root_move(handle: &IndexHandle) -> bool {
 /// Test: `clear_persisted_hashes_empties_store` below;
 /// `generation_changes_when_a_force_reindex_resets_the_index`.
 pub(super) async fn clear_persisted(handle: &IndexHandle) {
-    // #10738: a reset can drop chunks without a per-path remove.
-    crate::service::index_identity::bump_generation_logged(&handle.id.0, "reindex_reset");
     let corpus = {
         let indexer = handle.indexer.read().await;
         indexer.corpus_store()
     };
+    // #10738: a reset can drop chunks without a per-path remove; the pending
+    // marker in the corpus makes a restart retry a bump that failed.
+    crate::service::index_identity::bump_with_pending(
+        &handle.id.0,
+        corpus.as_deref(),
+        "reindex_reset",
+    );
     let Some(corpus) = corpus else {
         return;
     };

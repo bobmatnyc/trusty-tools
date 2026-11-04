@@ -121,8 +121,11 @@ pub(super) async fn resolve_corpus_swap(
             if force && promoted {
                 // #10738: the promoted corpus started empty; raise the generation
                 // before the warm reconcile drops the obsolete chunks.
-                crate::service::index_identity::bump_generation_logged(
+                // #10738: pending marker in the promoted corpus first.
+                let corpus = handle.indexer.read().await.corpus_store();
+                crate::service::index_identity::bump_with_pending(
                     &index_id.0,
+                    corpus.as_deref(),
                     "force_promotion",
                 );
                 super::prune::reconcile_warm_state_to_promoted_corpus(handle, index_id).await;

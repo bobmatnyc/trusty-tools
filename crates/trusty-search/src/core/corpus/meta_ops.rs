@@ -510,10 +510,14 @@ impl CorpusStore {
                 // The end-of-reindex `save_kg_graph` writes both together.
                 // #9169: the reindex stamp too, so a resident index serving
                 // its staging corpus still reports when it was last indexed.
+                // #10738: the identity stamp and a pending bump too, so a
+                // promoted staging corpus keeps (or still owes) the identity.
                 for key in &[
                     META_KEY_INDEXED_ROOT,
                     META_KEY_SCHEMA_VERSION,
                     META_KEY_REINDEXED_UNIX,
+                    super::identity_meta::META_KEY_IDENTITY_STAMP,
+                    super::identity_meta::META_KEY_IDENTITY_BUMP_PENDING,
                 ] {
                     if let Some(val) = src_meta
                         .get(key)

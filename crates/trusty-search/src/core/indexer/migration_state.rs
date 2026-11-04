@@ -147,7 +147,12 @@ impl CodeIndexer {
     /// #10738: a failed migration may not have carried content, so it also
     /// raises the index generation.
     pub(crate) fn record_migration_failure(&self, stage: &'static str, detail: impl Into<String>) {
-        crate::service::index_identity::bump_generation_logged(&self.index_id, stage);
+        // #10738: mark the bump pending in the corpus so a restart retries it.
+        crate::service::index_identity::bump_with_pending(
+            &self.index_id,
+            self.corpus.as_deref(),
+            stage,
+        );
         self.migration_fault.lock().insert(
             stage,
             MigrationFault {

@@ -19,7 +19,8 @@
 //!   it returns.
 //! - A failed bump or retire poisons the index in this process: every read
 //!   answers an error, never the pre-event value, until a bump or retire
-//!   succeeds.
+//!   succeeds. Across a restart the corpus `_meta` stamp and pending marker
+//!   make the next attach bump again ([`reconcile_on_attach`]).
 //!
 //! Test: `service::rpc::identity_10738_tests`,
 //! `service::persistence_loader::identity_10738_tests`.
@@ -114,6 +115,12 @@ fn write(path: &Path, identity: &IndexIdentity) -> Result<()> {
             .with_context(|| format!("fsync {}", tmp.display()))?;
     }
     std::fs::rename(&tmp, path).with_context(|| format!("rename onto {}", path.display()))?;
+    // #10738: fsync the directory so the rename itself survives a crash.
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .with_context(|| format!("fsync {}", dir.display()))?;
+    }
     Ok(())
 }
 
@@ -221,6 +228,101 @@ pub fn retire(index_id: &str) -> Result<()> {
         Err(e) => poisoned.insert(index_id.to_string(), format!("retire failed: {e:#}")),
     };
     result
+}
+
+/// Bump the identity when an attached corpus does not carry the stored one.
+///
+/// Why: the poison of a failed bump is in-memory, so a restart would read the
+/// pre-event identity file back (§5.6 D1). The corpus `_meta` stamp says which
+/// identity the corpus was attached under, and survives the restart.
+/// What: bumps when the corpus was created empty, a bump is pending, or the
+/// stamp is absent, unreadable or differs from the stored identity. Writes the
+/// new stamp only after the bump succeeds; a failed bump leaves the index
+/// poisoned and the stamp unchanged, so the next attach bumps again.
+/// Test: `a_corpus_loss_bump_that_failed_is_retried_after_a_restart`,
+/// `a_pending_bump_that_failed_is_retried_after_a_restart`,
+/// `identity_changes_when_the_corpus_is_recreated_empty`.
+pub(crate) fn reconcile_on_attach(index_id: &str, corpus: &crate::core::corpus::CorpusStore) {
+    let Some(reason) = attach_bump_reason(index_id, corpus) else {
+        return;
+    };
+    bump_and_stamp(index_id, Some(corpus), reason);
+}
+
+/// Why the attach of `corpus` must bump, or `None` when it carries the
+/// stored identity.
+fn attach_bump_reason(
+    index_id: &str,
+    corpus: &crate::core::corpus::CorpusStore,
+) -> Option<&'static str> {
+    if corpus.created_empty() {
+        return Some("corpus_created_empty");
+    }
+    let (stamp, pending) = match corpus.read_identity_meta_sync() {
+        Ok(meta) => meta,
+        Err(e) => {
+            tracing::warn!(index_id, error = %format!("{e:#}"), "identity stamp unreadable (#10738)");
+            return Some("identity_stamp_unreadable");
+        }
+    };
+    if pending {
+        return Some("identity_bump_pending");
+    }
+    let Some(stamp) = stamp.and_then(|raw| serde_json::from_slice::<IndexIdentity>(&raw).ok())
+    else {
+        return Some("identity_stamp_absent");
+    };
+    match current(index_id) {
+        Ok(stored) if stored == stamp => None,
+        _ => Some("identity_stamp_mismatch"),
+    }
+}
+
+/// Bump for an event that keeps the corpus: mark the bump pending in the
+/// corpus first, so a restart retries a bump that did not complete.
+///
+/// Why: a root-move reset, a migration fault or a force reset keeps the corpus
+/// file, so its stamp still matches the pre-event identity file (§5.6 D1).
+/// What: writes `identity_bump_pending` when a corpus is wired, bumps, then
+/// writes the new stamp and clears the marker. With no corpus it only bumps.
+/// Failures are logged; a failed bump leaves the index poisoned.
+/// Test: `a_pending_bump_that_failed_is_retried_after_a_restart`.
+pub(crate) fn bump_with_pending(
+    index_id: &str,
+    corpus: Option<&crate::core::corpus::CorpusStore>,
+    reason: &str,
+) {
+    if let Some(Err(e)) = corpus.map(|c| c.mark_identity_bump_pending_sync(reason)) {
+        tracing::error!(index_id, reason, error = %format!("{e:#}"), "identity bump not marked pending (#10738)");
+    }
+    bump_and_stamp(index_id, corpus, reason);
+}
+
+/// Bump, then stamp `corpus` with the new identity on success.
+fn bump_and_stamp(index_id: &str, corpus: Option<&crate::core::corpus::CorpusStore>, reason: &str) {
+    let identity = match bump_generation(index_id, reason) {
+        Ok(identity) => identity,
+        Err(e) => {
+            tracing::error!(index_id, reason, error = %format!("{e:#}"), "index generation bump failed (#10738)");
+            return;
+        }
+    };
+    let Some(corpus) = corpus else {
+        return;
+    };
+    let stamped = serde_json::to_vec(&identity)
+        .context("serialize index identity")
+        .and_then(|raw| corpus.write_identity_stamp_sync(&raw));
+    if let Err(e) = stamped {
+        // The next attach sees a stale stamp or a pending marker and bumps.
+        tracing::warn!(index_id, reason, error = %format!("{e:#}"), "identity stamp not written (#10738)");
+    }
+}
+
+/// Drop this process's poison for `index_id`, as a daemon restart does.
+#[cfg(test)]
+pub(crate) fn forget_process_state(index_id: &str) {
+    lock().remove(index_id);
 }
 
 /// The `identity` field of a reply: the identity, or `null` plus the reason.

@@ -480,13 +480,8 @@ impl CodeIndexer {
         if self.corpus.is_some() || !self.corpus_open_failed {
             anyhow::bail!("reattach_corpus needs a quarantined index with no corpus wired");
         }
-        // #10738: the reopen may have created an empty corpus.
-        if corpus.created_empty() {
-            crate::service::index_identity::bump_generation_logged(
-                &self.index_id,
-                "corpus_created_empty",
-            );
-        }
+        // #10738: bump unless the reopened corpus carries the stored identity.
+        crate::service::index_identity::reconcile_on_attach(&self.index_id, &corpus);
         self.corpus = Some(corpus);
         match self.load_chunks_from_redb().await {
             Ok(chunks) => {
