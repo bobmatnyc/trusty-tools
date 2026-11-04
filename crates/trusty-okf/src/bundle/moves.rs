@@ -33,7 +33,7 @@ use serde_yaml::Value;
 use crate::OkfError;
 use crate::bundle::Bundle;
 use crate::bundle::log_md::append_entry;
-use crate::bundle::paths::{confined_file, fold_conflict, io_err};
+use crate::bundle::paths::{confined_file, fold_conflict, io_err, restrict_path};
 use crate::bundle::put::{PutOutcome, conflict};
 use crate::bundle::record::record_rel;
 use crate::bundle::walk::scan;
@@ -250,7 +250,8 @@ impl Bundle {
     /// Why/What: see the module doc.
     /// Test: `c09_move_rewrites_every_link_and_logs_one_entry`,
     /// `c55_move_leaves_a_climbing_link_and_reports_it`,
-    /// `c140_fold_collision_on_put_and_move`.
+    /// `c140_fold_collision_on_put_and_move`,
+    /// `a3_every_bundle_write_path_leaves_files_0600`.
     pub fn move_concept(
         &mut self,
         from: &ConceptId,
@@ -343,11 +344,14 @@ impl Bundle {
             std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
         }
         std::fs::rename(&from_path, &to_path).map_err(|e| io_err(&from_path, e))?;
+        // #10746: a file moved to a new bundle path ends up 0600 like any write.
+        restrict_path(&to_path)?;
         if from_record.exists() {
             if let Some(dir) = to_record.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
             }
             std::fs::rename(&from_record, &to_record).map_err(|e| io_err(&from_record, e))?;
+            restrict_path(&to_record)?;
         }
         let actor = Actor::Process("trusty-okf-move".to_string());
         for c in rewrites {

@@ -34,7 +34,7 @@
 //! leave the concept reading Unverified until the put is retried.
 //! Test: `a1_put_never_replaces_an_existing_file_with_a_new_concept`,
 //! `a1_put_refuses_a_stale_write`, `a2_strict_check_runs_on_rendered_values`,
-//! `a3_put_preserves_the_target_file_mode`,
+//! `a3_put_writes_the_concept_0600_whatever_its_prior_mode`,
 //! `c31_body_change_moves_verification_to_the_record`,
 //! `c32_description_change_clears_verification`,
 //! `c33_status_or_stale_after_change_keeps_verification`,

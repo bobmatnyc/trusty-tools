@@ -2,7 +2,7 @@
 //! `Bundle::put` and `Bundle::verify`: verification invalidation (§2.10,
 //! criteria 31-36), malformed owned values (125), `stale_after` extension
 //! (146), and the Architect's S3 acceptance items A1 (no lost data), A2
-//! (strict check on rendered values) and A3 (file mode kept).
+//! (strict check on rendered values) and A3 (every bundle file 0600, #10746).
 
 use std::path::Path;
 
@@ -452,36 +452,68 @@ fn a2_render_never_emits_duplicate_keys() {
     }
 }
 
-/// A3 (gate item): a write keeps the target file's permissions; a 0600
-/// concept stays 0600 and a 0640 one stays 0640.
+/// The permission bits of `root/rel`.
+#[cfg(unix)]
+fn mode_of(root: &Path, rel: &str) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(root.join(rel))
+        .unwrap_or_else(|e| panic!("{rel}: {e}"))
+        .permissions()
+        .mode()
+        & 0o7777
+}
+
+/// Set `root/rel` to `mode`.
+#[cfg(unix)]
+fn chmod(root: &Path, rel: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(root.join(rel), std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Assert each of `rels` under `root` is mode 0600, naming the write path.
+#[cfg(unix)]
+fn assert_0600(root: &Path, step: &str, rels: &[&str]) {
+    for rel in rels {
+        let got = mode_of(root, rel);
+        assert_eq!(got, 0o600, "{step}: {rel} is {got:o}, want 600");
+    }
+}
+
+/// A3, #10746 (SPEC-OKF-01 §3k, §2.15): a bundle can hold secrets, so a
+/// `put` leaves the concept 0600 whatever mode the replaced file had.
 #[cfg(unix)]
 #[test]
-fn a3_put_preserves_the_target_file_mode() {
-    use std::os::unix::fs::PermissionsExt;
-    for mode in [0o600, 0o640] {
+fn a3_put_writes_the_concept_0600_whatever_its_prior_mode() {
+    for mode in [0o600, 0o640, 0o644, 0o664] {
         let (tmp, mut b) = setup("---\ntype: Note\n---\nBody\n");
-        let file = tmp.path().join("a.md");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        chmod(tmp.path(), "a.md", mode);
         let mut c = b.get(&id("a")).unwrap();
         c.set("description", Value::String("changed".into()));
         let (outcome, _) = b.put(c, process(), WriteMode::default(), now()).unwrap();
         assert!(matches!(outcome, PutOutcome::Updated { .. }));
-        let got = std::fs::metadata(&file).unwrap().permissions().mode() & 0o7777;
-        assert_eq!(got, mode, "mode {mode:o} became {got:o}");
+        assert_0600(
+            tmp.path(),
+            &format!("rewrite of a {mode:o} concept"),
+            &["a.md"],
+        );
     }
 }
 
-/// A3: a new concept file gets the documented default create mode, the
-/// mode `std::fs::write` gives a new file in the same directory.
+/// A3, #10746: every path that creates or replaces a bundle file leaves it
+/// 0600: a new concept and `log.md` (temp file then rename, created), a
+/// rewritten concept, `log.md` and `index.md` (temp file then rename over a
+/// 0644 file), the verification record (append, created and existing), and
+/// a moved concept and record. Last, no file in the bundle is wider.
 #[cfg(unix)]
 #[test]
-fn a3_new_file_gets_the_default_create_mode() {
-    use std::os::unix::fs::PermissionsExt;
+fn a3_every_bundle_write_path_leaves_files_0600() {
     let tmp = tempfile::tempdir().unwrap();
-    let probe = tmp.path().join("probe.txt");
-    std::fs::write(&probe, "x").unwrap();
-    let expected = std::fs::metadata(&probe).unwrap().permissions().mode() & 0o7777;
-    let mut b = Bundle::open(tmp.path()).unwrap().0;
+    let r = tmp.path();
+    std::fs::write(r.join("a.md"), VERIFIED).unwrap();
+    chmod(r, "a.md", 0o644);
+    let mut b = Bundle::open(r).unwrap().0;
+
+    // Create: a new concept and a new `log.md`.
     let (outcome, _) = b
         .put(
             new_concept("n", "Note"),
@@ -491,12 +523,56 @@ fn a3_new_file_gets_the_default_create_mode() {
         )
         .unwrap();
     assert_eq!(outcome, PutOutcome::Created);
-    let got = std::fs::metadata(tmp.path().join("n.md"))
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o7777;
-    assert_eq!(got, expected);
+    assert_0600(r, "create", &["n.md", "log.md"]);
+
+    // Rewrite over 0644 files, and a new record through the append path.
+    chmod(r, "log.md", 0o644);
+    let seen = content_hash(&b.get(&id("a")).unwrap());
+    let v = verification(Actor::Human("jo".into()), "2026-11-01T09:00:00Z");
+    b.verify_confirmed(&id("a"), v, &seen, confirm()).unwrap();
+    let record = "_sources/verification/a.jsonl";
+    assert_0600(r, "verify", &["a.md", "log.md", record]);
+
+    // Append to an existing 0644 record; rewrite a 0644 concept.
+    for rel in ["a.md", "log.md", record] {
+        chmod(r, rel, 0o644);
+    }
+    let mut c = b.get(&id("a")).unwrap();
+    c.body = "Changed body\n".into();
+    b.put(c, process(), WriteMode::Lenient, now()).unwrap();
+    assert_0600(r, "put after verify", &["a.md", "log.md", record]);
+
+    // `index.md`: created, then rewritten over a 0644 file.
+    b.regenerate_indexes().unwrap();
+    assert_0600(r, "index create", &["index.md"]);
+    chmod(r, "index.md", 0o644);
+    b.put(
+        new_concept("m", "Note"),
+        process(),
+        WriteMode::default(),
+        now(),
+    )
+    .unwrap();
+    let report = b.regenerate_indexes().unwrap();
+    assert!(report.written.iter().any(|w| w == "index.md"), "{report:?}");
+    assert_0600(r, "index rewrite", &["index.md"]);
+
+    // Move: the concept and its record land at new paths.
+    for rel in ["a.md", record] {
+        chmod(r, rel, 0o644);
+    }
+    b.move_concept(&id("a"), &id("moved/b"), now()).unwrap();
+    assert_0600(
+        r,
+        "move",
+        &["moved/b.md", "_sources/verification/moved/b.jsonl"],
+    );
+
+    for (rel, _) in snapshot(r) {
+        if std::fs::symlink_metadata(r.join(&rel)).unwrap().is_file() {
+            assert_0600(r, "final sweep", &[&rel]);
+        }
+    }
 }
 
 /// Every path under `root` with its bytes (a link's target text), links not

@@ -11,14 +11,15 @@
 //! refuses a path whose existing components include a symbolic link, even
 //! one that resolves inside the root (rule 2); [`atomic_write`] writes
 //! through a `create_new` temporary file in the target's directory and a
-//! rename (rule 3), keeping the replaced file's permissions; [`fold_key`]
+//! rename (rule 3), every file 0600 on Unix (#10746); [`fold_key`]
 //! and `fold_conflict` apply the fold rule.
 //! Residual risk (rule 4): a directory swapped for a link between the check
 //! and the rename is not caught; `openat` with `O_NOFOLLOW` would close it.
 //! Test: `confine_rejects_traversal`, `fold_key_folds_case_and_normalization`,
 //! `c53_put_across_an_in_root_symlink_is_path_escape`,
 //! `c54_open_on_a_missing_root_is_an_error`,
-//! `a3_put_preserves_the_target_file_mode`, `c140_fold_collision_on_put_and_move`.
+//! `a3_put_writes_the_concept_0600_whatever_its_prior_mode`,
+//! `a3_every_bundle_write_path_leaves_files_0600`, `c140_fold_collision_on_put_and_move`.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -94,22 +95,72 @@ pub fn confined_file(root: &Path, rel: &str) -> Result<PathBuf, OkfError> {
     Ok(target)
 }
 
+/// #10746: the mode of every regular file trusty-okf creates or replaces in
+/// a bundle. A bundle can hold secrets (SPEC-OKF-01 §3k, §2.15), so no file
+/// is group- or world-readable, whatever the umask or a prior file's mode.
+#[cfg(unix)]
+pub(crate) const BUNDLE_FILE_MODE: u32 = 0o600;
+
+/// `opts` set to create a file with [`BUNDLE_FILE_MODE`] on Unix, so the new
+/// file is never wider than 0600 from the moment it exists.
+fn bundle_open_options() -> OpenOptions {
+    #[allow(unused_mut)]
+    let mut opts = OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // #10746: 0600 at create time; the umask can only narrow it.
+        opts.mode(BUNDLE_FILE_MODE);
+    }
+    opts
+}
+
+/// Set an open bundle file to exactly [`BUNDLE_FILE_MODE`] on Unix.
+///
+/// What: undoes a narrowing umask on a new file and a wider mode on an
+/// existing one, before any byte is written. A no-op elsewhere.
+fn restrict_file(file: &File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(BUNDLE_FILE_MODE))?;
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    Ok(())
+}
+
+/// Set the bundle file at `path` to [`BUNDLE_FILE_MODE`] on Unix; used by
+/// `move_concept` for a file it renames into a new path. A no-op elsewhere.
+///
+/// The caller has refused a link at `path` through [`confined_file`].
+pub(crate) fn restrict_path(path: &Path) -> Result<(), OkfError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(BUNDLE_FILE_MODE))
+            .map_err(|e| io_err(path, e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// Write `bytes` to `target` through a `create_new` temporary file in the
 /// same directory and a rename (§2.11 rule 3, §4.4).
 ///
 /// Why: a rename replaces a link instead of following it, and a reader never
-/// sees a half-written file. #10746 A3: the replaced file's permissions
-/// survive, so a 0600 concept stays 0600.
-/// What: creates the parent directories; when `target` exists (and is not a
-/// link) its permissions are applied to the temporary file before any byte
-/// is written (on Unix, also at create time), so the content is never
-/// readable under a wider mode. A NEW file gets the platform default for a
-/// newly created file: on Unix 0o666 masked by the process umask, the mode
-/// `std::fs::write` gives. The temporary file is synced, renamed over the
-/// target, and the directory is synced (best effort). On failure only a
+/// sees a half-written file. #10746: a bundle can hold secrets, so the
+/// result is 0600 on Unix.
+/// What: creates the parent directories; refuses a `target` that is a link.
+/// On Unix the temporary file is created with mode 0600 and set to exactly
+/// 0600 before any byte is written, whatever the umask or the replaced
+/// file's mode. Elsewhere a replaced file's permissions (its read-only flag)
+/// are applied after the write. The temporary file is synced, renamed over
+/// the target, and the directory is synced (best effort). On failure only a
 /// temporary file this call created is removed.
-/// Test: `a3_put_preserves_the_target_file_mode`,
-/// `a3_new_file_gets_the_default_create_mode`.
+/// Test: `a3_put_writes_the_concept_0600_whatever_its_prior_mode`,
+/// `a3_every_bundle_write_path_leaves_files_0600`.
 pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), OkfError> {
     let dir = target
         .parent()
@@ -131,13 +182,8 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), OkfError> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!(".{name}.okf-tmp-{}-{n}", std::process::id()));
-    let mut opts = OpenOptions::new();
+    let mut opts = bundle_open_options();
     opts.write(true).create_new(true);
-    #[cfg(unix)]
-    if let Some(p) = &perms {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        opts.mode(p.mode() & 0o7777);
-    }
     // #10746: a failed `create_new` created nothing, so nothing is removed.
     let mut file = opts.open(&tmp).map_err(|e| io_err(&tmp, e))?;
     let result = fill(&mut file, perms.as_ref(), bytes).and_then(|()| {
@@ -158,31 +204,33 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), OkfError> {
     Ok(())
 }
 
-/// Apply `perms`, write and sync. On Unix the mode is set before the bytes
-/// land; elsewhere a read-only flag would block the write, so it is set last.
+/// Set the mode, write and sync. On Unix the file is 0600 before the bytes
+/// land and `perms` is unused; elsewhere a read-only flag would block the
+/// write, so the replaced file's `perms` are applied last.
 fn fill(
     file: &mut File,
     perms: Option<&std::fs::Permissions>,
     bytes: &[u8],
 ) -> std::io::Result<()> {
-    #[cfg(unix)]
-    if let Some(p) = perms {
-        file.set_permissions(p.clone())?;
-    }
+    restrict_file(file)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     #[cfg(not(unix))]
     if let Some(p) = perms {
         file.set_permissions(p.clone())?;
     }
+    #[cfg(unix)]
+    let _ = perms;
     Ok(())
 }
 
 /// Append one line to a bundle-side log file, creating it when absent.
 ///
 /// What: confined like any write; a file that does not end in a newline
-/// (a torn last line) gets one first, so the new line stands alone. Used for
-/// the append-only verification record.
+/// (a torn last line) gets one first, so the new line stands alone. On Unix
+/// the file is created 0600 and set to exactly 0600 before the append
+/// (#10746). Used for the append-only verification record.
+/// Test: `a3_every_bundle_write_path_leaves_files_0600`.
 pub(crate) fn append_line(root: &Path, rel: &str, line: &str) -> Result<(), OkfError> {
     let path = confined_file(root, rel)?;
     if let Some(dir) = path.parent() {
@@ -193,11 +241,13 @@ pub(crate) fn append_line(root: &Path, rel: &str, line: &str) -> Result<(), OkfE
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => return Err(io_err(&path, e)),
     };
-    let mut f = OpenOptions::new()
+    let mut f = bundle_open_options()
         .create(true)
         .append(true)
         .open(&path)
         .map_err(|e| io_err(&path, e))?;
+    // #10746: an existing record keeps no wider mode than 0600.
+    restrict_file(&f).map_err(|e| io_err(&path, e))?;
     let mut out = String::new();
     if needs_newline {
         out.push('\n');
