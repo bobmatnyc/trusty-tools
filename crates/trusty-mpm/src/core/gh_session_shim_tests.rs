@@ -893,12 +893,12 @@ fn a_failed_reset_lookup_still_names_the_limit_and_exits_1() {
 }
 
 /// 🔴 #10550: a call that is not a primary GraphQL refusal keeps its stdout,
-/// stderr and exit status byte for byte — including a REST (HTTP 403) rate
-/// limit, which is a different quota.
+/// stderr and exit status byte for byte — including a REST rate limit (any
+/// `HTTP <status>`: 403 or 429), which is a different quota.
 #[cfg(unix)]
 #[test]
 fn a_call_with_no_rate_limit_passes_output_and_status_through_unchanged() {
-    let cases: [(&str, &[u8], &[u8], i32); 3] = [
+    let cases: [(&str, &[u8], &[u8], i32); 4] = [
         (
             "printf 'a\\tb\\n\\001no-newline'; printf 'warn: x\\n' >&2; exit 3",
             b"a\tb\n\x01no-newline",
@@ -915,6 +915,12 @@ fn a_call_with_no_rate_limit_passes_output_and_status_through_unchanged() {
             "echo 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2; exit 1",
             b"",
             b"gh: API rate limit exceeded for user ID 1. (HTTP 403)\n",
+            1,
+        ),
+        (
+            "printf 'partial\\n'; echo 'gh: API rate limit exceeded for user ID 1. (HTTP 429)' >&2; exit 1",
+            b"partial\n",
+            b"gh: API rate limit exceeded for user ID 1. (HTTP 429)\n",
             1,
         ),
     ];
