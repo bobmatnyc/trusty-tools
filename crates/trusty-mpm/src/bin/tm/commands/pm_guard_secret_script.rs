@@ -70,8 +70,16 @@
 //!     word names no file (#10566): prose and here-documents quote code in
 //!     backticks. A computed, `/dev/fd/` or resolved-variable word refuses.
 //!
+//! 11. A script `node --check` (`-c`) syntax-checks: it is parsed, never run,
+//!     so its body is not judged (#10548). A `NODE_OPTIONS` preload an
+//!     earlier `export` sets is not seen; an inline prefix keeps the judgment.
+//!
 //! Fail-open check: this rule only ADDS refusals and runs after the inline
 //! rules, which still judge the command text. Every [`Unread`] arm refuses.
+//! #10548 narrows two paths: a node body is read as JS first
+//! (`pm_guard_secret_script_node`), and `node --check`/`-c` with no other
+//! option judges no body; both are pinned in
+//! `pm_guard_secret_script_node_tests.rs`.
 //! Test: `pm_guard_secret_script_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_secret_batch.rs`
 //! (`pm_guard_refuses_a_script_whose_body_reads_a_credential_8879`).
@@ -109,6 +117,9 @@ pub(crate) mod tmux_kill;
 // #8878 PR2a: a presence-key Keychain write in a script body is denied too.
 #[path = "pm_guard_secret_script_presence.rs"]
 pub(crate) mod presence_key;
+// #10548: a node body is read as JavaScript first (500-SLOC cap).
+#[path = "pm_guard_secret_script_node.rs"]
+mod node;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;
@@ -358,7 +369,14 @@ fn judge_script(
         .map(str::to_string)
         .unwrap_or_else(|| shebang_interpreter(&body));
     let cwd = bases.first().map_or(Path::new("/"), PathBuf::as_path);
-    let plain = without_comment_lines(&body);
+    let mut plain = without_comment_lines(&body);
+    // #10548: a JS member access (`x.key`) names no file; a body the JS
+    // reader cannot read in full is judged raw.
+    if family_of(&interpreter) == Some(Family::Node)
+        && let Some(read) = node::js_reading(&plain)
+    {
+        plain = read;
+    }
     if let Some(rule) = judge_text(&inline_equivalent(&interpreter, &plain), &plain, cwd) {
         return Some((rule, None));
     }
@@ -537,7 +555,14 @@ fn candidates(argv: &[String]) -> (Vec<Candidate>, bool) {
             } else {
                 basename
             };
-            interpreter_candidates(family, &interpreter, &argv[start + 1..])
+            let args = &argv[start + 1..];
+            // #10548: `node --check <file>` parses the file and never runs it;
+            // a `NODE_OPTIONS` prefix can load code, so it keeps the judgment.
+            let preload = argv[..start].iter().any(|w| w.contains("NODE_OPTIONS="));
+            if family == Family::Node && !preload && node::check_only(args) {
+                return (Vec::new(), exact.is_some());
+            }
+            interpreter_candidates(family, &interpreter, args)
         }
         None if program.contains('/') => vec![Candidate {
             word: program.clone(),
@@ -716,3 +741,7 @@ mod fp_10548_tests;
 #[cfg(test)]
 #[path = "pm_guard_secret_script_10566_tests.rs"]
 mod substitution_10566_tests;
+
+#[cfg(test)]
+#[path = "pm_guard_secret_script_node_tests.rs"]
+mod node_10548_tests;
