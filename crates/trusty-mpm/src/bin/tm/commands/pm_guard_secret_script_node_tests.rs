@@ -115,14 +115,22 @@ fn a_node_body_naming_a_secret_literal_refuses_10548() {
         "fs.readFileSync(`${cfg.dir}/server.key`);\n",
         "const re = /'/;\nfs.readFileSync(\"server.key\");\n",
         "const half = total / 2; const s = 'x';\nfs.readFileSync(\"server.key\");\n",
+        // #10548 round 1: a regex after `)` is not division; the reader fails closed.
+        "if (fs) /[/*]/.test('a'), console.log(fs.readFileSync(\"server.key\")); // */\n",
+        "if (fs) /\"/.test(\"a\"), fs.readFileSync(\"server.key\"); // \"\n",
+        "if (fs) /a\\//.test('b'); fs.readFileSync('.env')\n",
     ];
+    let mut allowed = Vec::new();
     for (i, body) in bodies.iter().enumerate() {
         let name = format!("r{i}.cjs");
         let dir = fixture(&[(&name, body)]);
         for command in [format!("node {name}"), format!("node ./{name}")] {
-            assert!(verdict(&command, dir.path()).is_some(), "{command}: {body}");
+            if verdict(&command, dir.path()).is_none() {
+                allowed.push(format!("{command}: {body}"));
+            }
         }
     }
+    assert!(allowed.is_empty(), "must refuse: {allowed:#?}");
 }
 
 /// Every form that runs the file, or loads code beside it, is still judged.
@@ -132,6 +140,7 @@ fn a_node_run_beside_a_check_is_judged_10548() {
         ("a.cjs", "require('fs').readFileSync('server.key');\n"),
         ("clean.cjs", "console.log(1);\n"),
         ("steal.cjs", "require('fs').readFileSync('.env');\n"),
+        ("x.js", "require('fs').readFileSync('server.key');\n"),
     ]);
     for command in [
         "node --check a.cjs && node a.cjs",
@@ -140,6 +149,8 @@ fn a_node_run_beside_a_check_is_judged_10548() {
         "node --check --import ./steal.cjs clean.cjs",
         "node --check --inspect a.cjs",
         "NODE_OPTIONS='-r ./steal.cjs' node --check a.cjs",
+        "env NODE_OPTIONS=-r ./x.js node --check x.js",
+        "env NODE_OPTIONS='-r ./steal.cjs' node --check a.cjs",
     ] {
         assert!(verdict(command, dir.path()).is_some(), "{command}");
     }
@@ -161,10 +172,34 @@ fn inline_node_code_naming_a_secret_refuses_10548() {
 /// A body that can run its own comments keeps them judged.
 #[test]
 fn a_self_evaluating_body_keeps_its_comments_judged_10548() {
-    let body = "// require('fs').readFileSync('.env')\n\
-                eval(require('fs').readFileSync(__filename, 'utf8').split('\\n')[0].slice(3));\n";
-    let dir = fixture(&[("e.cjs", body)]);
-    assert!(verdict("node e.cjs", dir.path()).is_some());
+    let comment = "// require('fs').readFileSync('.env')\n";
+    let bodies = [
+        "eval(require('fs').readFileSync(__filename, 'utf8').slice(3));\n",
+        // #10548 round 1: a destructured `vm` import, `require.main` and `module.filename`.
+        "const { runInThisContext } = require('vm');\nrunInThisContext(src(__filename));\n",
+        "const { runInThisContext: r } = require(\"node:vm\");\nr(src(__filename));\n",
+        "eval(require('fs').readFileSync(require.main.filename, 'utf8').slice(3));\n",
+        "eval(require('fs').readFileSync(module.filename, 'utf8').slice(3));\n",
+    ];
+    let mut allowed = Vec::new();
+    for (i, body) in bodies.iter().enumerate() {
+        let name = format!("e{i}.cjs");
+        let full = format!("{comment}{body}");
+        let dir = fixture(&[(name.as_str(), full.as_str())]);
+        if verdict(&format!("node {name}"), dir.path()).is_none() {
+            allowed.push(*body);
+        }
+    }
+    assert!(allowed.is_empty(), "must refuse: {allowed:#?}");
+}
+
+/// Ordinary division after `)` still reads as JS: the member access allows.
+#[test]
+fn division_after_a_paren_reads_as_js_10548() {
+    let body = "const avg = (a + b) / 2;\nconsole.log(cfg.key, arr[0] / avg);\n";
+    assert!(node::js_reading(body).is_some());
+    let dir = fixture(&[("avg.cjs", body)]);
+    assert_eq!(verdict("node avg.cjs", dir.path()), None);
 }
 
 /// A body the JS reader cannot read in full is judged raw, as before.
