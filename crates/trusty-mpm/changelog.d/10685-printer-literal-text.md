@@ -1,0 +1,2 @@
+Fixed
+- `tm hook --pm-guard` no longer refuses a command made only of `printf`/`echo` calls whose operands are literal text, such as a regex (`(secret|token|[.]env)`), a regex-escaped name (`process\.env\.TZ`) or Markdown emphasis. An operand made only of path characters (`echo .env`), any pipe, redirect, substitution or non-printer segment, and a CR or other control byte keep the refusal (#10685).
