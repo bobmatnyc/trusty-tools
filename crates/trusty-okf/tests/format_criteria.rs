@@ -37,7 +37,7 @@ fn id(s: &str) -> ConceptId {
 }
 
 /// `Bundle::put` from a process actor at a fixed instant. #10746 S3:
-/// `write_concept` is crate-private; every public write goes through `put`.
+/// `prepare_write` is crate-private; every public write goes through `put`.
 fn put(root: &Path, c: Concept, mode: WriteMode) -> Result<PutOutcome, OkfError> {
     let (mut b, _) = Bundle::open(root).unwrap();
     b.put(

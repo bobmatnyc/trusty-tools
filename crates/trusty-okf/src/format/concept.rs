@@ -280,7 +280,7 @@ pub fn parse_concept_at(id: ConceptRef, text: &str) -> Result<(Concept, Vec<Find
 /// entries and the body keep their bytes. A concept with no stored block
 /// renders key-sorted, `---` on line 1, the body verbatim after the closing
 /// fence; with no values it renders as the body alone. A stored block that
-/// is not patchable renders unchanged; `write_concept` refuses to write it.
+/// is not patchable renders unchanged; `prepare_write` refuses to write it.
 /// Test: `concept_parse_render_is_byte_identical`,
 /// `new_concept_renders_key_sorted`.
 pub fn render_concept(c: &Concept) -> String {

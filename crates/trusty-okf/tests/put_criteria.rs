@@ -479,3 +479,96 @@ fn a3_new_file_gets_the_default_create_mode() {
         & 0o7777;
     assert_eq!(got, expected);
 }
+
+/// Every path under `root` with its bytes (a link's target text), links not
+/// followed, sorted.
+#[cfg(unix)]
+fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            let ft = std::fs::symlink_metadata(&p).unwrap().file_type();
+            if ft.is_symlink() {
+                let t = std::fs::read_link(&p).unwrap();
+                out.push((rel, t.to_string_lossy().into_owned().into_bytes()));
+            } else if ft.is_dir() {
+                out.push((rel, Vec::new()));
+                walk(root, &p, out);
+            } else {
+                out.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// #10746 (§2.10, §4.4, §4.11): when the record append fails, `put` and
+/// `verify` return an error with the concept file unchanged, so the legacy
+/// frontmatter event is not lost. Read-only `_sources/verification` makes
+/// the append fail after every path check passes.
+#[cfg(unix)]
+#[test]
+fn unwritable_record_keeps_the_legacy_event_and_the_concept() {
+    use std::os::unix::fs::PermissionsExt;
+    let (tmp, mut b) = setup(VERIFIED);
+    let dir = tmp.path().join("_sources/verification");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(dir.join("probe"), "x").is_ok() {
+        // Running as a user that ignores modes (root): nothing to prove.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    let before = snapshot(tmp.path());
+
+    let mut c = b.get(&id("a")).unwrap();
+    c.body = "Changed body\n".into();
+    let got = b.put(c, process(), WriteMode::Lenient, now());
+    assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
+    assert_eq!(read(tmp.path()), VERIFIED, "the concept is unchanged");
+    let kept = b.get(&id("a")).unwrap();
+    assert!(
+        kept.get("verified")
+            .and_then(Value::as_sequence)
+            .is_some_and(|s| s.len() == 1),
+        "the legacy event stays in frontmatter: {}",
+        read(tmp.path())
+    );
+    assert_eq!(snapshot(tmp.path()), before, "no file changed");
+
+    let seen = content_hash(&kept);
+    let v = verification(Actor::Human("jo".into()), "2026-11-01T09:00:00Z");
+    let got = b.verify(&id("a"), v, &seen);
+    assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
+    assert_eq!(snapshot(tmp.path()), before, "verify changed no file");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// #10746 (§2.11, §4.4): a `log.md` that is a symbolic link makes `put` and
+/// `verify` return `PathEscape` before any file changes: the concept, the
+/// record and the link's target keep their bytes.
+#[cfg(unix)]
+#[test]
+fn put_and_verify_refuse_a_symlinked_log_with_no_file_changed() {
+    let (tmp, mut b) = setup(VERIFIED);
+    let r = tmp.path();
+    std::fs::write(r.join("elsewhere.txt"), "# Log\n").unwrap();
+    std::os::unix::fs::symlink(r.join("elsewhere.txt"), r.join("log.md")).unwrap();
+    let before = snapshot(r);
+
+    let mut c = b.get(&id("a")).unwrap();
+    c.body = "Changed body\n".into();
+    let got = b.put(c, process(), WriteMode::Lenient, now());
+    assert!(matches!(got, Err(OkfError::PathEscape(_))), "{got:?}");
+    assert_eq!(snapshot(r), before, "put changed no file");
+
+    let seen = content_hash(&b.get(&id("a")).unwrap());
+    let v = verification(Actor::Human("jo".into()), "2026-11-01T09:00:00Z");
+    let got = b.verify(&id("a"), v, &seen);
+    assert!(matches!(got, Err(OkfError::PathEscape(_))), "{got:?}");
+    assert_eq!(snapshot(r), before, "verify changed no file");
+}

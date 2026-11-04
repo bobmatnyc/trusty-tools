@@ -119,17 +119,37 @@ pub(crate) fn fold(lines: Vec<Line>) -> Vec<Line> {
     out
 }
 
-/// Append lines to `id`'s record.
+/// Confine `id`'s record path and create its directory, writing no record
+/// byte.
+///
+/// #10746: `put` and `verify` call this before the concept rename, so a
+/// record path that is a link (`PathEscape`) or a `_sources` that is not a
+/// directory refuses the operation with no concept file changed.
+/// Test: `unwritable_record_keeps_the_legacy_event_and_the_concept`.
+pub(crate) fn prepare_append(b: &Bundle, id: &ConceptId) -> Result<(), OkfError> {
+    let path = confined_file(b.root(), &record_rel(id))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
+    }
+    Ok(())
+}
+
+/// Append lines to `id`'s record in one write. No lines writes nothing.
 pub(crate) fn append(b: &Bundle, id: &ConceptId, lines: &[Line]) -> Result<(), OkfError> {
-    for line in lines {
-        let json = serde_json::to_string(line).map_err(|e| OkfError::Parse {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let json = lines
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| OkfError::Parse {
             path: record_rel(id).into(),
             line: None,
             message: e.to_string(),
         })?;
-        append_line(b.root(), &record_rel(id), &json)?;
-    }
-    Ok(())
+    // #10746: one append for every line, not one per line.
+    append_line(b.root(), &record_rel(id), &json.join("\n"))
 }
 
 /// Whether an event state still attests `current`.

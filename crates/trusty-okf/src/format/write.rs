@@ -6,10 +6,10 @@
 //! leave a half-written file, follow a link out of the bundle, or replace
 //! bytes it did not read.
 //! What: [`check_write`] applies the [`WriteMode`] to the values that will be
-//! rendered; `write_concept` (crate-private since S3; `Bundle::put` is the
+//! rendered; `prepare_write` (crate-private since S3; `Bundle::put` is the
 //! public write) checks, refuses a stale or new-over-existing write, renders
-//! with a re-parse postcondition, compares and writes through
-//! `bundle::paths::atomic_write`.
+//! with a re-parse postcondition and compares; `PreparedWrite::commit` writes
+//! through `bundle::paths::atomic_write`.
 //! Test: `c03_strict_write_refuses_missing_type_and_changes_no_file`,
 //! `c114_unchanged_put_writes_zero_bytes_and_reads_malformed`,
 //! `c115_foreign_paths_read_only_and_write_is_invalid_id`,
@@ -137,7 +137,31 @@ pub(crate) fn check_not_stale(
     }
 }
 
-/// Write a concept under `root`, atomically, only when its bytes change.
+/// A concept write that passed every refusal and has not touched a file.
+///
+/// #10746: split from the old `write_concept` so `Bundle::put` and
+/// `Bundle::verify` can append the verification record between the checks
+/// and the rename (§2.10 "no verification event is lost").
+#[derive(Debug)]
+pub(crate) struct PreparedWrite {
+    target: PathBuf,
+    rendered: String,
+    /// What [`PreparedWrite::commit`] will do.
+    pub(crate) outcome: WriteOutcome,
+}
+
+impl PreparedWrite {
+    /// Replace the target atomically, keeping its mode; an `Unchanged`
+    /// write writes nothing.
+    pub(crate) fn commit(&self) -> Result<(), OkfError> {
+        if self.outcome == WriteOutcome::Unchanged {
+            return Ok(());
+        }
+        atomic_write(&self.target, self.rendered.as_bytes())
+    }
+}
+
+/// Check and render a concept write under `root` without writing a byte.
 ///
 /// Why: the shared core of `Bundle::put` and `Bundle::verify` — strict
 /// refusal, raw-preserving render, zero-byte no-op and atomic replace (§2.2,
@@ -152,16 +176,16 @@ pub(crate) fn check_not_stale(
 /// 5. a stale or new-over-existing write is refused ([`check_not_stale`]);
 /// 6. the render must read back as the checked values ([`render_checked`]).
 ///
-/// Then equal bytes on disk return [`WriteOutcome::Unchanged`] and write
-/// nothing; otherwise `atomic_write` replaces the file, keeping its mode.
+/// Equal bytes on disk give [`WriteOutcome::Unchanged`]. The caller runs
+/// [`PreparedWrite::commit`], which replaces the file through `atomic_write`.
 /// Test: `c03_strict_write_refuses_missing_type_and_changes_no_file`,
 /// `c114_unchanged_put_writes_zero_bytes_and_reads_malformed`,
 /// `c115_foreign_paths_read_only_and_write_is_invalid_id`.
-pub(crate) fn write_concept(
+pub(crate) fn prepare_write(
     root: &Path,
     c: &Concept,
     mode: WriteMode,
-) -> Result<(WriteOutcome, Vec<Finding>), OkfError> {
+) -> Result<(PreparedWrite, Vec<Finding>), OkfError> {
     let id = match &c.id {
         ConceptRef::Id(id) => id.clone(),
         ConceptRef::Foreign(p) => return Err(foreign_refusal(p)),
@@ -180,16 +204,17 @@ pub(crate) fn write_concept(
     let existing = read_existing(&target)?;
     check_not_stale(&id, c, existing.as_deref())?;
     let rendered = render_checked(c)?;
-    if existing.as_deref() == Some(rendered.as_bytes()) {
-        return Ok((WriteOutcome::Unchanged, findings));
-    }
-    atomic_write(&target, rendered.as_bytes())?;
-    let outcome = if existing.is_some() {
-        WriteOutcome::Updated
-    } else {
-        WriteOutcome::Created
+    let outcome = match existing.as_deref() {
+        Some(b) if b == rendered.as_bytes() => WriteOutcome::Unchanged,
+        Some(_) => WriteOutcome::Updated,
+        None => WriteOutcome::Created,
     };
-    Ok((outcome, findings))
+    let prepared = PreparedWrite {
+        target,
+        rendered,
+        outcome,
+    };
+    Ok((prepared, findings))
 }
 
 /// The refusal for a write that targets a foreign file.

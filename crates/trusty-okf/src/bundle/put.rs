@@ -19,8 +19,15 @@
 //! frontmatter, and `generated` becomes `{by, at: now}`. Then the shared
 //! strict write runs, the record is appended and `log.md` gains one entry.
 //! [`Bundle::verify`] binds a new event to the hash the verifier saw.
-//! Residual risk until slice S5's operation journal: a crash between the
-//! file rename and the record or `log.md` append leaves those behind.
+//! Order (#10746, §4.4, §4.11): every refusal, the render, and the
+//! confinement of the record and `log.md` paths run first, with no file
+//! changed. Then the record lines are appended, then the concept is renamed
+//! into place, then `log.md` is written. A failure after the record append
+//! leaves the events as history while the frontmatter still holds them, so
+//! no event is lost. A failure writing `log.md` after the rename fails
+//! closed: the call returns the error, never `Ok`. Residual risk until
+//! slice S5's operation journal: a crash after the rename leaves `log.md`
+//! without the entry.
 //! Test: `a1_put_never_replaces_an_existing_file_with_a_new_concept`,
 //! `a1_put_refuses_a_stale_write`, `a2_strict_check_runs_on_rendered_values`,
 //! `a3_put_preserves_the_target_file_mode`,
@@ -29,14 +36,16 @@
 //! `c33_status_or_stale_after_change_keeps_verification`,
 //! `c35_verify_with_stale_hash_is_conflict_and_writes_nothing`,
 //! `c125_malformed_owned_values_move_to_legacy_keys`,
-//! `c146_stale_after_extension_needs_a_human_or_a_verify`.
+//! `c146_stale_after_extension_needs_a_human_or_a_verify`,
+//! `unwritable_record_keeps_the_legacy_event_and_the_concept`,
+//! `put_and_verify_refuse_a_symlinked_log_with_no_file_changed`.
 
 use chrono::{DateTime, FixedOffset};
 use serde_yaml::{Mapping, Value};
 
 use crate::OkfError;
 use crate::bundle::Bundle;
-use crate::bundle::log_md::append_entry;
+use crate::bundle::log_md::prepare_entry;
 use crate::bundle::paths::{confined_file, fold_conflict};
 use crate::bundle::record::{self, Line, instant_string};
 use crate::format::concept::{Concept, parse_concept};
@@ -45,7 +54,8 @@ use crate::format::hash::{ContentHash, content_hash};
 use crate::format::id::{ConceptId, ConceptRef};
 use crate::format::validate::{Finding, FindingKind, Severity};
 use crate::format::write::{
-    WriteMode, WriteOutcome, check_not_stale, foreign_refusal, read_existing, write_concept,
+    PreparedWrite, WriteMode, WriteOutcome, check_not_stale, foreign_refusal, prepare_write,
+    read_existing,
 };
 
 /// What a `put` or `verify` did (SPEC-OKF-01 §4.2).
@@ -197,18 +207,15 @@ impl Bundle {
         mode: WriteMode,
         now: DateTime<FixedOffset>,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
-        let (outcome, findings, id) = self.put_inner(c, &by, mode, &now, false)?;
-        if outcome != PutOutcome::Unchanged {
-            append_entry(&self.root, &now, &log_line(&id, &by, &outcome))?;
-        }
+        let (outcome, findings, _) = self.put_inner(c, &by, mode, &now, false)?;
         Ok((outcome, findings))
     }
 
-    /// `put` without the `log.md` entry; `move_concept` logs once for the
-    /// whole move. `link_rewrite` marks a `move_concept` link rewrite, which
-    /// is not a caller edit, so a deprecated concept still takes it (§4.8
-    /// refuses caller edits only). Returns the outcome, the findings and the
-    /// target ID.
+    /// `put`; a `link_rewrite` call writes no `log.md` entry, because
+    /// `move_concept` logs once for the whole move. `link_rewrite` marks a
+    /// `move_concept` link rewrite, which is not a caller edit, so a
+    /// deprecated concept still takes it (§4.8 refuses caller edits only).
+    /// Returns the outcome, the findings and the target ID.
     pub(crate) fn put_inner(
         &mut self,
         c: Concept,
@@ -277,18 +284,44 @@ impl Bundle {
         if content_changed {
             next.set("generated", generated_value(by, now));
         }
-        let (written, write_findings) = write_concept(&self.root, &next, mode)?;
+        // #10746: refusals and path checks first, record before the rename.
+        let (prepared, write_findings) = prepare_write(&self.root, &next, mode)?;
         findings.extend(write_findings);
-        record::append(self, &id, &lines)?;
-        let outcome = match written {
-            WriteOutcome::Unchanged => PutOutcome::Unchanged,
+        let outcome = match prepared.outcome {
+            WriteOutcome::Unchanged => return Ok((PutOutcome::Unchanged, findings, id)),
             WriteOutcome::Created => PutOutcome::Created,
             WriteOutcome::Updated => PutOutcome::Updated {
                 content_changed,
                 verifications_cleared: cleared,
             },
         };
+        let entry = (!link_rewrite)
+            .then(|| prepare_entry(&self.root, now, &log_line(&id, by, &outcome)))
+            .transpose()?;
+        self.commit_with_record(&id, &lines, &prepared)?;
+        if let Some(entry) = entry {
+            entry.commit()?;
+        }
         Ok((outcome, findings, id))
+    }
+
+    /// Append `lines` to `id`'s record, then rename the concept into place.
+    ///
+    /// #10746: the record path is confined and its directory created before
+    /// the append, and the append runs before the rename, so a failure at
+    /// any step leaves the concept file unchanged and every event either in
+    /// the frontmatter, in the record, or in both (§2.10, §4.4).
+    fn commit_with_record(
+        &self,
+        id: &ConceptId,
+        lines: &[Line],
+        prepared: &PreparedWrite,
+    ) -> Result<(), OkfError> {
+        if !lines.is_empty() {
+            record::prepare_append(self, id)?;
+            record::append(self, id, lines)?;
+        }
+        prepared.commit()
     }
 
     /// Record a verification of the revision the verifier saw (§2.10).
@@ -301,7 +334,8 @@ impl Bundle {
     /// `Conflict` when that key exists). The event `{by, at}` is appended to
     /// `verified[]`; a `v.stale_after` sets `stale_after` in the same write
     /// and is not projected into the event (§2.4, r7.1). The record gains
-    /// the event bound to `seen`, and `log.md` one entry. The write runs
+    /// the event bound to `seen` before the rename, and `log.md` one entry
+    /// after it (module doc, "Order"). The write runs
     /// `Lenient`: it changes only lifecycle keys, so the content hash is
     /// unchanged. #10746: returns findings beside the outcome, as `put`.
     /// Test: `c35_verify_with_stale_hash_is_conflict_and_writes_nothing`,
@@ -341,8 +375,14 @@ impl Bundle {
             seen,
             "verify changes lifecycle keys only"
         );
-        let (written, write_findings) = write_concept(&self.root, &next, WriteMode::Lenient)?;
+        // #10746: refusals and path checks first, record before the rename.
+        let (prepared, write_findings) = prepare_write(&self.root, &next, WriteMode::Lenient)?;
         findings.extend(write_findings);
+        let entry = prepare_entry(
+            &self.root,
+            &v.at,
+            &format!("**Verified** `/{}` by `{}`", id.file_name(), v.by),
+        )?;
         let line = Line {
             by: v.by.to_string(),
             at,
@@ -351,13 +391,9 @@ impl Bundle {
             invalidated_by_hash: None,
             reason: None,
         };
-        record::append(self, id, &[line])?;
-        append_entry(
-            &self.root,
-            &v.at,
-            &format!("**Verified** `/{}` by `{}`", id.file_name(), v.by),
-        )?;
-        let outcome = match written {
+        self.commit_with_record(id, &[line], &prepared)?;
+        entry.commit()?;
+        let outcome = match prepared.outcome {
             WriteOutcome::Unchanged => PutOutcome::Unchanged,
             WriteOutcome::Created => PutOutcome::Created,
             WriteOutcome::Updated => PutOutcome::Updated {

@@ -11,7 +11,7 @@
 //! Test: `log_entry_inserts_below_todays_heading_or_adds_one`,
 //! `c09_move_rewrites_every_link_and_logs_one_entry`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, FixedOffset};
 
@@ -90,16 +90,36 @@ pub(crate) fn insert(old: &str, date: &str, entry: &str) -> (String, Vec<String>
     }
 }
 
-/// Append one entry to the bundle-root `log.md` for `now`'s date.
+/// A `log.md` entry that is confined, read and rendered but not written.
 ///
-/// What: reads `log.md` (absent is empty), applies [`insert`] and writes it
-/// atomically, keeping its mode. Returns the added lines.
-/// Test: `c09_move_rewrites_every_link_and_logs_one_entry`.
-pub(crate) fn append_entry(
+/// #10746: `put` and `verify` prepare the entry before the concept rename,
+/// so a refused `log.md` path (a link: `PathEscape`) or an unreadable file
+/// stops the operation with no file changed.
+#[derive(Debug)]
+pub(crate) struct PreparedEntry {
+    path: PathBuf,
+    text: String,
+    /// The lines the entry adds.
+    pub(crate) added: Vec<String>,
+}
+
+impl PreparedEntry {
+    /// Write the new `log.md` atomically, keeping its mode.
+    pub(crate) fn commit(&self) -> Result<(), OkfError> {
+        atomic_write(&self.path, self.text.as_bytes())
+    }
+}
+
+/// Confine and read the bundle-root `log.md` and render `entry` for `now`'s
+/// date, writing nothing.
+///
+/// What: `log.md` must pass `confined_file` (no link); absent is empty; then
+/// [`insert`] runs. Test: `put_and_verify_refuse_a_symlinked_log_with_no_file_changed`.
+pub(crate) fn prepare_entry(
     root: &Path,
     now: &DateTime<FixedOffset>,
     entry: &str,
-) -> Result<Vec<String>, OkfError> {
+) -> Result<PreparedEntry, OkfError> {
     let path = confined_file(root, "log.md")?;
     let old = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -107,9 +127,23 @@ pub(crate) fn append_entry(
         Err(e) => return Err(io_err(&path, e)),
     };
     let date = now.format("%Y-%m-%d").to_string();
-    let (new, added) = insert(&old, &date, entry);
-    atomic_write(&path, new.as_bytes())?;
-    Ok(added)
+    let (text, added) = insert(&old, &date, entry);
+    Ok(PreparedEntry { path, text, added })
+}
+
+/// Append one entry to the bundle-root `log.md` for `now`'s date.
+///
+/// What: [`prepare_entry`], then an atomic write keeping the file's mode.
+/// Returns the added lines.
+/// Test: `c09_move_rewrites_every_link_and_logs_one_entry`.
+pub(crate) fn append_entry(
+    root: &Path,
+    now: &DateTime<FixedOffset>,
+    entry: &str,
+) -> Result<Vec<String>, OkfError> {
+    let prepared = prepare_entry(root, now, entry)?;
+    prepared.commit()?;
+    Ok(prepared.added)
 }
 
 #[cfg(test)]
