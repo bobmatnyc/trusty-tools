@@ -35,7 +35,7 @@ pub const USAGE: &str = "usage:
                            [--dry-run] [--feed --index ID --state-dir DIR --socket PATH] [--json]
   trusty-okf import plan|run <bundle-root> --from adapter:<gmail|drive|gdocs> --adapter PATH
                            --select account=LABEL --select KEY=VALUE... [--adapter-arg A]...
-                           [--adapter-env NAME=VALUE]... [--operator-initiated] [--store ID] ...
+                           [--adapter-var NAME=VALUE]... [--operator-initiated] [--store ID] ...
   trusty-okf import status <bundle-root> [--store ID] [--index ID --state-dir DIR [--socket PATH]] [--json]
   trusty-okf feed          <bundle-root> --index ID --state-dir DIR --socket PATH [--json]
 ";
@@ -56,7 +56,7 @@ const VALUED: &[&str] = &[
     // #10746 S9: the adapter process of an authenticated source (3m A).
     "--adapter",
     "--adapter-arg",
-    "--adapter-env",
+    "--adapter-var",
     "--select",
 ];
 /// Options that may repeat.
@@ -64,7 +64,7 @@ const REPEATED: &[&str] = &[
     "--include",
     "--exclude",
     "--adapter-arg",
-    "--adapter-env",
+    "--adapter-var",
     "--select",
 ];
 const FLAGS: &[&str] = &["--json", "--feed", "--dry-run", "--operator-initiated"];

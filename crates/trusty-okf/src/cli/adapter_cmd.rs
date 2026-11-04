@@ -10,7 +10,7 @@
 //! `import-<kind>`. A store ID that names a different source kind is
 //! refused. `--operator-initiated` marks the run (§2.15 "Inbound email").
 //! [`source_for`] checks the selection, then spawns `--adapter` with the
-//! `--adapter-arg` arguments and exactly the `--adapter-env NAME=VALUE`
+//! `--adapter-arg` arguments and exactly the `--adapter-var NAME=VALUE`
 //! list; the CLI reads no environment of its own (B3). Every refusal here
 //! happens before any write (exit 2).
 //! Test: `c97_cli_imports_through_an_adapter_process_and_reaps_on_cancel`,
@@ -96,8 +96,8 @@ pub(crate) fn source_for(a: &Args, spec: &ImportSpec) -> Result<Box<dyn ImportSo
         .into_iter()
         .map(OsString::from)
         .collect();
-    for s in a.all("--adapter-env") {
-        let (k, v) = pair("--adapter-env", &s)?;
+    for s in a.all("--adapter-var") {
+        let (k, v) = pair("--adapter-var", &s)?;
         cmd.environment.push((k.into(), v.into()));
     }
     let src = AdapterSource::spawn(&cmd, spec, AdapterLimits::default()).map_err(|e| fail(&e))?;

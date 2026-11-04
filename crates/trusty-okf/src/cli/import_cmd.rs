@@ -34,7 +34,7 @@ const IMPORT_OPTS: &[&str] = &[
     "--json",
     "--adapter",
     "--adapter-arg",
-    "--adapter-env",
+    "--adapter-var",
     "--select",
     "--operator-initiated",
 ];
@@ -46,7 +46,7 @@ const RUN_OPTS: &[&str] = &[
     "--json",
     "--adapter",
     "--adapter-arg",
-    "--adapter-env",
+    "--adapter-var",
     "--select",
     "--operator-initiated",
     "--dry-run",
@@ -164,7 +164,7 @@ fn prepare(
         let plan = plan_import(&bundle, &spec, src.as_mut()).map_err(|e| fail(&e))?;
         return Ok((bundle, plan, src));
     }
-    for k in ["--adapter", "--adapter-arg", "--adapter-env", "--select"] {
+    for k in ["--adapter", "--adapter-arg", "--adapter-var", "--select"] {
         if a.one(k).is_some() {
             return Err(Fail::Usage(format!("{k} needs --from adapter:<kind>")));
         }

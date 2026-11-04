@@ -551,9 +551,9 @@ fn c97_cli_imports_through_an_adapter_process_and_reaps_on_cancel() {
         .arg("--adapter-arg")
         .arg(&fake.dir)
         .args([
-            "--adapter-env",
+            "--adapter-var",
             "PATH=/usr/bin:/bin",
-            "--adapter-env",
+            "--adapter-var",
             "LC_ALL=C",
         ])
         .args([
