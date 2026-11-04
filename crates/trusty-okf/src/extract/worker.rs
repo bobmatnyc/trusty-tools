@@ -48,6 +48,7 @@ use super::{ExtractError, Extracted, Extractor, RunOutcome, TypeHint};
 use crate::WorkerError;
 use crate::build::registry::{Locator, SourceSpec};
 
+mod cpu;
 mod process;
 mod proto;
 mod sandbox;
@@ -99,8 +100,9 @@ pub struct Limits {
     /// SIGKILL to a reaped child (default 5 s).
     pub reap: Duration,
     /// #10746 S10 fix: `RLIMIT_CPU` per worker process, in seconds
-    /// (default 300). The kernel kills a worker that spends it; its item
-    /// fails `crashed` and the next item gets a fresh worker.
+    /// (default 300). The host recycles a worker that has spent half of it
+    /// (#10746 S10 last change), so an item is killed (`crashed`, fresh
+    /// worker next) only when it alone spends at least half.
     pub cpu_seconds: u64,
     /// #10746 S10 fix: `RLIMIT_AS` per worker process, in bytes (default
     /// 4 GiB). Not applied on macOS, which does not honour it.
@@ -402,6 +404,16 @@ impl WorkerExtractor {
         Ok(())
     }
 
+    /// #10746 S10 last change: whether the worker may take another item.
+    /// `RLIMIT_CPU` counts its whole life, so it is recycled once its spent
+    /// CPU leaves less than half the budget: every item gets at least half
+    /// of `cpu_seconds`, and only an item that alone spends that much is
+    /// killed. An unreadable spend recycles it (fails closed).
+    fn budget_left(&self, proc: &WorkerProcess) -> bool {
+        let budget = self.cfg.limits.cpu_seconds as f64;
+        cpu::spent(proc.pgid()).is_some_and(|used| used + budget / 2.0 <= budget)
+    }
+
     fn provenance(&self, sha: &str) -> Mapping {
         let mut m = Mapping::new();
         if let Some(id) = self.identity.get() {
@@ -469,7 +481,7 @@ impl WorkerExtractor {
         match proto::parse_reply(&frame, rid, sha, lim) {
             Ok(reply) => {
                 st.served += 1;
-                if st.served >= self.cfg.limits.items_per_worker {
+                if st.served >= self.cfg.limits.items_per_worker || !self.budget_left(&proc) {
                     self.retire(st, proc, true);
                 } else {
                     st.proc = Some(proc);

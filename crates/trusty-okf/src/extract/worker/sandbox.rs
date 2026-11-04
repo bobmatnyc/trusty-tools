@@ -7,11 +7,12 @@
 //! never from the worker's word.
 //! What: [`command`] builds the spawn command in two layers, both applied
 //! before the worker binary runs.
-//! 1. Resource limits (#10746 S10 fix round): `/bin/sh -c 'unset PWD
-//!    OLDPWD; ulimit -t <cpu> && ulimit -v <kib> && exec "$@"'` (`/bin/dash`
-//!    on macOS) sets `RLIMIT_CPU` and `RLIMIT_AS`,
-//!    then execs the next layer, which inherits both. A `ulimit` that fails
-//!    ends the shell before `exec`, so the spawn fails before `hello`
+//! 1. Resource limits (#10746 S10 fix round, last change): Linux
+//!    `/usr/bin/prlimit --cpu=<s> --as=<bytes> -- …`, elsewhere `/bin/dash
+//!    -c 'unset PWD OLDPWD; ulimit -t <s> && exec "$@"'`, sets `RLIMIT_CPU`
+//!    and `RLIMIT_AS`, never through `/bin/sh` (see `LIMITER`),
+//!    then execs the next layer, which inherits both. A limit that fails
+//!    ends the limiter before `exec`, so the spawn fails before `hello`
 //!    (fails closed). macOS does not honour `RLIMIT_AS` (its `setrlimit`
 //!    refuses it with `EINVAL`), so on macOS only `RLIMIT_CPU` is set and
 //!    the per-item wall time is the memory-runaway bound, as §2.16 states.
@@ -31,6 +32,7 @@
 //!
 //! Test: `c145_sandbox_evidence_gates_connector_items_and_blocks_io`,
 //! `rlimits_kill_a_runaway_item_and_spare_the_rest`,
+//! `worker_env_is_exact_even_where_sh_is_bash`,
 //! `sandboxed_worker_cannot_fork_a_setsid_grandchild`.
 //!
 //! # Spec References
@@ -54,13 +56,17 @@ pub enum SandboxPolicy {
 /// The host's record of the sandbox it applied: the launcher's name.
 pub type SpawnEvidence = Option<&'static str>;
 
-/// The shell that applies the resource limits; a fixed path. macOS
-/// `/bin/sh` is bash, which exports `SHLVL` into the worker's environment
-/// even after `unset`; dash adds nothing once `PWD` is unset.
-#[cfg(target_os = "macos")]
-const SHELL: &str = "/bin/dash";
-#[cfg(not(target_os = "macos"))]
-const SHELL: &str = "/bin/sh";
+/// The program that applies the resource limits; a fixed path, never
+/// `/bin/sh`. #10746 S10 last change: where `/bin/sh` is bash, bash exports
+/// `SHLVL` into the worker's environment even after `unset`, so no shell
+/// whose identity varies by host may sit in the spawn path. Linux uses
+/// util-linux `prlimit`, which execs the worker with the environment it was
+/// given; other systems use `/bin/dash`, which adds nothing once `PWD` is
+/// unset. A missing launcher fails the spawn (fails closed).
+#[cfg(target_os = "linux")]
+const LIMITER: &str = "/usr/bin/prlimit";
+#[cfg(not(target_os = "linux"))]
+const LIMITER: &str = "/bin/dash";
 
 #[cfg(target_os = "macos")]
 const LAUNCHER: &str = "/usr/bin/sandbox-exec";
@@ -156,19 +162,27 @@ fn wrapped(worker: &Path, cwd: &Path) -> Vec<OsString> {
     c
 }
 
-/// The `ulimit` script: `RLIMIT_CPU` everywhere, `RLIMIT_AS` where the OS
-/// honours it (not macOS); any failure exits before `exec`.
-fn limits_script(cpu_seconds: u64, address_space: u64) -> String {
-    let as_limit = if cfg!(target_os = "macos") {
-        String::new()
+/// The arguments that set `RLIMIT_CPU` everywhere and `RLIMIT_AS` where
+/// the OS honours it (not macOS), then exec the rest of the command line.
+/// A limit that cannot be set ends the spawn before `exec`.
+fn limits_prefix(cpu_seconds: u64, address_space: u64) -> Vec<OsString> {
+    let cpu = cpu_seconds.max(1);
+    if cfg!(target_os = "linux") {
+        vec![
+            LIMITER.into(),
+            format!("--cpu={cpu}").into(),
+            format!("--as={}", address_space.max(1)).into(),
+            "--".into(),
+        ]
     } else {
-        format!(" && ulimit -v {}", (address_space / 1024).max(1))
-    };
-    // The shell's own `PWD` must not reach the worker (§2.16 allow-list).
-    format!(
-        "unset PWD OLDPWD; ulimit -t {}{as_limit} && exec \"$@\"",
-        cpu_seconds.max(1)
-    )
+        // The shell's own `PWD` must not reach the worker (§2.16 allow-list).
+        vec![
+            LIMITER.into(),
+            "-c".into(),
+            format!("unset PWD OLDPWD; ulimit -t {cpu} && exec \"$@\"").into(),
+            "okf-worker".into(),
+        ]
+    }
 }
 
 /// The spawn command for `worker` in `cwd` under the resource limits, and
@@ -190,11 +204,9 @@ pub(crate) fn command(
         } else {
             (vec![worker.into()], None)
         };
-    let mut c = Command::new(SHELL);
-    c.arg("-c")
-        .arg(limits_script(cpu_seconds, address_space))
-        .arg("okf-worker")
-        .args(argv);
+    let prefix = limits_prefix(cpu_seconds, address_space);
+    let mut c = Command::new(&prefix[0]);
+    c.args(&prefix[1..]).args(argv);
     (c, evidence)
 }
 
@@ -202,15 +214,59 @@ pub(crate) fn command(
 mod tests {
     use super::*;
 
-    /// Why: the limits must be set before the worker runs, and a failed
-    /// `ulimit` must stop the spawn; `RLIMIT_AS` only where honoured.
-    /// What: the script chains every `ulimit` with `&&` before `exec`.
+    /// Why: the limits must be set before the worker runs, by a fixed
+    /// program; `RLIMIT_AS` only where honoured.
+    /// What: Linux names `prlimit` with both limits; elsewhere `dash` chains
+    /// the `ulimit` with `&&` before `exec`.
     /// Test: self-contained.
     #[test]
-    fn limits_script_fails_closed_and_skips_as_on_macos() {
-        let s = limits_script(7, 1 << 30);
-        assert!(s.starts_with("unset PWD OLDPWD; ulimit -t 7 && "), "{s}");
-        assert!(s.ends_with("&& exec \"$@\""), "{s}");
-        assert_eq!(s.contains("ulimit -v 1048576"), !cfg!(target_os = "macos"));
+    fn limits_prefix_names_a_fixed_limiter() {
+        let p: Vec<String> = limits_prefix(7, 1 << 30)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(p[0], LIMITER);
+        if cfg!(target_os = "linux") {
+            assert_eq!(&p[1..], ["--cpu=7", "--as=1073741824", "--"]);
+        } else {
+            assert_eq!(p[2], "unset PWD OLDPWD; ulimit -t 7 && exec \"$@\"");
+        }
+    }
+
+    /// Why: #10746 S10 last change — the worker's environment must equal
+    /// the allow-list whatever `/bin/sh` is; bash exports `SHLVL` even after
+    /// `unset`.
+    /// What: the real spawn command (cleared environment plus the
+    /// allow-list) runs a script that prints its environment. Where the
+    /// command goes through `/bin/sh`, it runs under `/bin/bash` instead, as
+    /// on a host whose `/bin/sh` is bash.
+    /// Test: self-contained.
+    #[test]
+    fn worker_env_is_exact_even_where_sh_is_bash() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let script = dir.join("print-vars");
+        std::fs::write(
+            &script,
+            "#!/usr/bin/perl\nprint map { \"$_\\n\" } sort keys %ENV;\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (cmd, _) = command(SandboxPolicy::Off, &script, &dir, 30, 1 << 32);
+        let program = if cmd.get_program() == "/bin/sh" && Path::new("/bin/bash").is_file() {
+            Path::new("/bin/bash").as_os_str()
+        } else {
+            cmd.get_program()
+        };
+        let out = Command::new(program)
+            .args(cmd.get_args())
+            .env_clear()
+            .envs(super::super::process::WORKER_ENV)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "LANG\nTZ\n");
     }
 }

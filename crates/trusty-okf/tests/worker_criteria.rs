@@ -975,3 +975,35 @@ fn c103_sigint_cancels_the_cli_and_reaps_the_worker() {
     );
     assert!(group_gone(worker), "the worker group outlived the CLI");
 }
+
+/// Why: #10746 S10 last change — `RLIMIT_CPU` counts the worker's whole
+/// life, so a run of valid items must never spend it and get a valid item
+/// killed mid-request.
+/// What: a 2 s CPU budget and six items of 0.5 s CPU each; every item
+/// succeeds, on more than one worker (the host recycles before the budget
+/// runs out).
+/// Test: self-contained.
+#[test]
+fn cpu_budget_recycles_before_a_valid_item_is_killed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let mut cfg = config(&dir, &Fake::default(), "worker");
+    cfg.limits.item = S(10);
+    cfg.limits.cpu_seconds = 2;
+    let (codes, groups) = within(S(6 * 10 + 2 + 5), move || {
+        let ex = WorkerExtractor::new(cfg).unwrap();
+        ex.begin_run(&local());
+        let hint = TypeHint::for_path("x.pdf");
+        let codes: Vec<String> = (0..6)
+            .map(|_| match ex.extract(b"BURN", &hint) {
+                Ok(e) => e.text,
+                Err(e) => e.code,
+            })
+            .collect();
+        assert!(ex.end_run().errors.is_empty());
+        (codes, ex.spawned_groups())
+    });
+    assert_eq!(codes, vec!["BURN"; 6], "a valid item was killed");
+    assert!(groups.len() > 1, "the worker was never recycled");
+    assert!(groups.iter().all(|g| group_gone(*g)));
+}

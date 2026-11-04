@@ -9,7 +9,8 @@
 //! `BIG` declares a 2 GiB frame, `LIE` echoes a wrong input hash, `ERR`
 //! answers `extract_error`, `NOTEXT` answers `no_text_layer`, `STDERR`
 //! writes 1 MiB to stderr first, `SPAM` answers then streams 2000 more
-//! frames (logging `sent <n>` to the pidfile), `SPIN` burns CPU, `ALLOC`
+//! frames (logging `sent <n>` to the pidfile), `SPIN` burns CPU, `BURN`
+//! spends 0.5 s of CPU and answers, `ALLOC`
 //! allocates 1.25 GiB, `FORK` forks a `setsid` grandchild named
 //! `okf-setsid-<config>` and answers whether the fork worked. Any other item
 //! is echoed as its text.
@@ -106,6 +107,13 @@ while (1) {
   note_pid('item');
   idle() if $body =~ /^HANG/;
   if ($body =~ /^SPIN/) { 1 while 1; }
+  # User plus system time, polled every 100k iterations: a `times` call per
+  # iteration would itself spend more system time than the loop's user time.
+  if ($body =~ /^BURN/) {
+    my $cpu = sub { my @t = times; $t[0] + $t[1] };
+    my $t0 = $cpu->();
+    while ($cpu->() - $t0 < 0.5) { for (1 .. 100000) { } }
+  }
   # The size is computed at run time: a constant `'x' x (1 << 30)` is folded
   # at compile time and would allocate 1 GiB in every double at startup.
   if ($body =~ /^ALLOC/) { my $n = length($body) << 28; my $big = 'x' x $n; $body = length($big); }
