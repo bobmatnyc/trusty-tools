@@ -82,7 +82,21 @@ impl PathWriteLocks {
     }
 }
 
+/// The guard [`CodeIndexer::lock_path_for_write`] returns (#10738).
+pub(crate) type PathWriteGuard<'a> = tokio::sync::MutexGuard<'a, ()>;
+
 impl CodeIndexer {
+    /// Take `path`'s write lock: the one every incremental write to it holds.
+    ///
+    /// Why (#10738): the put core keeps the path's content hash in step with
+    /// its chunks, so it holds this lock across forget, write and record.
+    /// What: locks the stripe `path` hashes to; not reentrant, so the holder
+    /// writes through [`Self::index_file_outcome_path_locked`].
+    /// Test: `concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks`.
+    pub(crate) async fn lock_path_for_write(&self, path: &str) -> PathWriteGuard<'_> {
+        self.path_write_locks.lock(path).await
+    }
+
     /// Chunk ids the corpus holds for `file_path` that `fresh` does not reuse.
     ///
     /// What: the file's current ids minus `fresh`'s ids. `file_chunk_ids`

@@ -1208,10 +1208,22 @@ impl CodeIndexer {
     /// open is exactly the event that makes writes safe again, so this also
     /// lifts any active write quarantine via `clear_corpus_open_failure`
     /// (a no-op on the healthy-boot path, where the flag is already `false`).
+    /// #10738: a corpus that [`CorpusStore::created_empty`] raises the index
+    /// generation first.
+    ///
+    /// [`CorpusStore::created_empty`]: crate::core::corpus::CorpusStore::created_empty
     /// Test: `tests::test_corpus_store_roundtrip`;
+    /// `identity_changes_when_the_corpus_is_recreated_empty`;
     /// `successful_reopen_lifts_quarantine_and_leaves_corpus_intact` in
     /// `tests/corpus_open_quarantine_4122.rs` covers the recovery transition.
     pub fn set_corpus_store(&mut self, corpus: Arc<crate::core::corpus::CorpusStore>) {
+        // #10738: an empty corpus created in place of the stored one.
+        if corpus.created_empty() {
+            crate::service::index_identity::bump_generation_logged(
+                &self.index_id,
+                "corpus_created_empty",
+            );
+        }
         self.corpus = Some(corpus);
         // #7920: from here on, `corpus == None` means detached, not legacy.
         self.corpus_ever_wired = true;
