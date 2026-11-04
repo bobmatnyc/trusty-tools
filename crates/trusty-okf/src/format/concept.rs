@@ -180,10 +180,7 @@ pub fn parse_concept(id: ConceptId, text: &str) -> Result<(Concept, Vec<Finding>
 /// error finding for a tree read. Each finding carries the concept ID.
 /// Test: `concept_parse_render_is_byte_identical`,
 /// `c114_unchanged_put_writes_zero_bytes_and_reads_malformed`.
-pub fn parse_concept_at(
-    id: ConceptRef,
-    text: &str,
-) -> Result<(Concept, Vec<Finding>), OkfError> {
+pub fn parse_concept_at(id: ConceptRef, text: &str) -> Result<(Concept, Vec<Finding>), OkfError> {
     let path = id.display_path();
     let concept_id = match &id {
         ConceptRef::Id(c) => Some(c.clone()),
@@ -541,6 +538,9 @@ mod tests {
             panic!("mapping")
         };
         let c = Concept::new(id("n"), values, "Body\n".to_string());
-        assert_eq!(render_concept(&c), "---\ndescription: d\ntype: A\n---\nBody\n");
+        assert_eq!(
+            render_concept(&c),
+            "---\ndescription: d\ntype: A\n---\nBody\n"
+        );
     }
 }

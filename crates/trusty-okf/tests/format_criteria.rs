@@ -137,7 +137,11 @@ fn mapping(yaml: &str) -> Mapping {
 #[test]
 fn c01_google_bundles_parse_leniently() {
     let bundles = google_bundles();
-    assert_eq!(bundles.len(), 4, "acme_retail, crypto_bitcoin, ga4, stackoverflow");
+    assert_eq!(
+        bundles.len(),
+        4,
+        "acme_retail, crypto_bitcoin, ga4, stackoverflow"
+    );
     for bundle in bundles {
         let files = concept_files(&bundle);
         assert!(!files.is_empty(), "{bundle:?} has concepts");
@@ -150,7 +154,10 @@ fn c01_google_bundles_parse_leniently() {
                 findings.iter().all(|f| f.severity != Severity::Error),
                 "{rel}: {findings:?}"
             );
-            assert!(conformance_findings(&c.frontmatter, &rel).is_empty(), "{rel}");
+            assert!(
+                conformance_findings(&c.frontmatter, &rel).is_empty(),
+                "{rel}"
+            );
         }
     }
 }
@@ -162,7 +169,9 @@ fn c01_google_bundles_parse_leniently() {
 fn c02_google_bundles_parse_render_parse_round_trip() {
     for bundle in google_bundles() {
         for (rel, text) in concept_files(&bundle) {
-            let c = parse_concept_at(concept_ref_for_path(&rel).0, &text).unwrap().0;
+            let c = parse_concept_at(concept_ref_for_path(&rel).0, &text)
+                .unwrap()
+                .0;
             assert!(c.raw.patchable, "{rel}: block splits into entries");
             let rendered = render_concept(&c);
             assert_eq!(rendered, text, "{rel}: unchanged render is byte-identical");
@@ -173,7 +182,11 @@ fn c02_google_bundles_parse_render_parse_round_trip() {
             let fresh = Concept::new(id("fresh"), c.values().clone(), c.body.clone());
             let sorted = render_concept(&fresh);
             let back = parse_concept(id("fresh"), &sorted).unwrap().0;
-            assert_eq!(back.values(), c.values(), "{rel}: key-sorted render loses nothing");
+            assert_eq!(
+                back.values(),
+                c.values(),
+                "{rel}: key-sorted render loses nothing"
+            );
             let extra: Vec<&String> = c.frontmatter.extra.keys().collect();
             let extra_back: Vec<&String> = back.frontmatter.extra.keys().collect();
             assert_eq!(extra_back, extra, "{rel}: every unknown key survives");
@@ -198,7 +211,10 @@ fn c03_strict_write_refuses_missing_type_and_changes_no_file() {
         }
         other => panic!("expected Conformance, got {other:?}"),
     }
-    assert!(std::fs::read_dir(root).unwrap().next().is_none(), "no file or dir created");
+    assert!(
+        std::fs::read_dir(root).unwrap().next().is_none(),
+        "no file or dir created"
+    );
 
     // An existing concept whose write drops or empties `type`: refused, bytes kept.
     let text = "---\ntype: Metric\ntitle: x\n---\n\nBody\n";
@@ -226,7 +242,8 @@ fn c03_strict_write_refuses_missing_type_and_changes_no_file() {
 /// Criterion 4: a bare `verified` mapping parses as a one-element list.
 #[test]
 fn c04_bare_verified_mapping_is_one_element_list() {
-    let c = parse("---\ntype: A\nverified: { by: human:ahormati, at: 2026-06-25T09:00:00Z }\n---\n");
+    let c =
+        parse("---\ntype: A\nverified: { by: human:ahormati, at: 2026-06-25T09:00:00Z }\n---\n");
     match &c.frontmatter.verified {
         Field::Valid(list) => {
             assert_eq!(list.len(), 1);
@@ -244,11 +261,15 @@ fn c05_trust_tier_follows_okf_5_3() {
     let tier = |fm: &str| trust_tier(&parse(&format!("---\ntype: A\n{fm}---\n")).frontmatter);
     assert_eq!(tier(""), TrustTier::Unverified);
     assert_eq!(
-        tier("verified:\n  - { by: process:nightly, at: 2026-06-26T02:00:00Z }\n  - { by: agent/v1, at: 2026-06-27T02:00:00Z }\n"),
+        tier(
+            "verified:\n  - { by: process:nightly, at: 2026-06-26T02:00:00Z }\n  - { by: agent/v1, at: 2026-06-27T02:00:00Z }\n"
+        ),
         TrustTier::MachineConfirmed
     );
     assert_eq!(
-        tier("verified:\n  - { by: process:nightly, at: 2026-06-26T02:00:00Z }\n  - { by: human:jsmith, at: 2026-06-25T09:00:00Z }\n"),
+        tier(
+            "verified:\n  - { by: process:nightly, at: 2026-06-26T02:00:00Z }\n  - { by: human:jsmith, at: 2026-06-25T09:00:00Z }\n"
+        ),
         TrustTier::HumanReviewed
     );
     assert_eq!(tier("verified: \"yes\"\n"), TrustTier::Unverified);
@@ -262,8 +283,15 @@ fn c06_staleness_unknown_for_date_only_or_offsetless() {
     for value in ["2026-12-01", "2026-12-01T00:00:00"] {
         let text = format!("---\ntype: A\nstale_after: {value}\n---\n");
         let (c, findings) = parse_concept(id("s"), &text).unwrap();
-        assert!(matches!(c.frontmatter.stale_after, Field::Malformed(_)), "{value}");
-        assert_eq!(staleness(&c.frontmatter, now), Staleness::Unknown, "{value}");
+        assert!(
+            matches!(c.frontmatter.stale_after, Field::Malformed(_)),
+            "{value}"
+        );
+        assert_eq!(
+            staleness(&c.frontmatter, now),
+            Staleness::Unknown,
+            "{value}"
+        );
         assert!(
             findings.iter().any(|f| f.severity == Severity::Warning
                 && f.kind == FindingKind::MalformedField
@@ -292,14 +320,27 @@ fn c10_no_public_function_deletes_a_concept_file() {
     for path in files {
         let text = std::fs::read_to_string(&path).unwrap();
         for (n, line) in text.lines().enumerate() {
-            let deletes = ["remove_file", "remove_dir"].iter().any(|t| line.contains(t));
-            if deletes && !line.contains("okf: temp-cleanup") && !line.trim_start().starts_with("//") {
+            let deletes = ["remove_file", "remove_dir"]
+                .iter()
+                .any(|t| line.contains(t));
+            if deletes
+                && !line.contains("okf: temp-cleanup")
+                && !line.trim_start().starts_with("//")
+            {
                 deleting.push(format!("{}:{}: {line}", path.display(), n + 1));
             }
-            assert!(!line.contains("pub fn delete"), "{}:{}", path.display(), n + 1);
+            assert!(
+                !line.contains("pub fn delete"),
+                "{}:{}",
+                path.display(),
+                n + 1
+            );
         }
     }
-    assert!(deleting.is_empty(), "file deletion outside temp cleanup: {deleting:?}");
+    assert!(
+        deleting.is_empty(),
+        "file deletion outside temp cleanup: {deleting:?}"
+    );
 }
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -341,8 +382,11 @@ fn c19_date_only_updated_stays_with_warning() {
     let text = "---\ntype: Person\nupdated: 2026-03-04\n---\n";
     let mut c = parse(text);
     let findings = normalize_v02(&mut c);
-    assert!(findings.iter().any(|f| f.severity == Severity::Warning
-        && f.kind == FindingKind::UnmappedLegacyValue));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.severity == Severity::Warning && f.kind == FindingKind::UnmappedLegacyValue)
+    );
     assert!(c.get("generated").is_none());
     assert_eq!(render_concept(&c), text, "nothing changes");
 }
@@ -401,7 +445,10 @@ fn c21_legacy_keys_byte_identical_after_normalize() {
         "uid",
         "knows",
     ] {
-        assert!(spans(&before).iter().any(|(k, _)| k == key), "fixture has {key}");
+        assert!(
+            spans(&before).iter().any(|(k, _)| k == key),
+            "fixture has {key}"
+        );
     }
 }
 
@@ -460,7 +507,11 @@ fn c114_unchanged_put_writes_zero_bytes_and_reads_malformed() {
         let (outcome, _) = write_concept(tmp.path(), &c, WriteMode::Lenient).unwrap();
         assert_eq!(outcome, WriteOutcome::Unchanged, "{name}");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), text, "{name}");
-        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), mtime, "{name}");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            mtime,
+            "{name}"
+        );
 
         let fm = &c.frontmatter;
         let warned = |kind: FindingKind| {
@@ -494,7 +545,11 @@ fn c114_unchanged_put_writes_zero_bytes_and_reads_malformed() {
             }
             "flow-unknown-with-comment" | "unknown-nested-mapping" => {
                 assert!(findings.is_empty(), "{name}: {findings:?}");
-                assert!(fm.extra.keys().any(|k| k.starts_with("custom_flow") || k == "x_extension"));
+                assert!(
+                    fm.extra
+                        .keys()
+                        .any(|k| k.starts_with("custom_flow") || k == "x_extension")
+                );
             }
             other => panic!("unexpected fixture {other}"),
         }
@@ -524,6 +579,10 @@ fn c115_foreign_paths_read_only_and_write_is_invalid_id() {
             Err(OkfError::InvalidId { rule: got, .. }) => assert_eq!(got, rule, "{rel}"),
             other => panic!("{rel}: expected InvalidId, got {other:?}"),
         }
-        assert_eq!(std::fs::read_to_string(root.join(rel)).unwrap(), text, "{rel}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(rel)).unwrap(),
+            text,
+            "{rel}"
+        );
     }
 }

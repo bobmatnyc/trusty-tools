@@ -168,8 +168,14 @@ mod tests {
         assert_eq!(rule_of("_drafts/x"), 7);
         assert_eq!(rule_of(".git/x"), 7);
         assert_eq!(rule_of("notes/a.md"), 8);
-        assert_eq!(ConceptId::parse("tables/orders").unwrap().as_str(), "tables/orders");
-        assert_eq!(ConceptId::parse("a/_b/.c").unwrap().file_name(), "a/_b/.c.md");
+        assert_eq!(
+            ConceptId::parse("tables/orders").unwrap().as_str(),
+            "tables/orders"
+        );
+        assert_eq!(
+            ConceptId::parse("a/_b/.c").unwrap().file_name(),
+            "a/_b/.c.md"
+        );
         // A multi-byte tail must not panic the rule 8 check.
         assert!(ConceptId::parse("notes/éé").is_ok());
     }

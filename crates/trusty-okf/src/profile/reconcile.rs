@@ -120,12 +120,16 @@ mod tests {
     #[test]
     fn inverse_links_follow_profile_and_skip_self() {
         let p = Profile::default_profile();
-        let ada = entity("title: Ada\nknows: [\"[[Grace]]\", \"[[Ada]]\"]\nparent_of: \"[[Leon]]\"\n");
+        let ada =
+            entity("title: Ada\nknows: [\"[[Grace]]\", \"[[Ada]]\"]\nparent_of: \"[[Leon]]\"\n");
         let mut got = inverse_links(&p, &source_link("ada", &ada), &ada);
         got.sort();
         assert_eq!(
             got,
-            vec![("Grace".to_string(), "knows"), ("Leon".to_string(), "child_of")]
+            vec![
+                ("Grace".to_string(), "knows"),
+                ("Leon".to_string(), "child_of")
+            ]
         );
     }
 
@@ -136,12 +140,22 @@ mod tests {
     #[test]
     fn add_inverse_link_unions_once_and_touches_updated() {
         let mut grace = entity("title: Grace\nknows: \"[[Babbage]]\"\n");
-        assert!(add_inverse_link(&mut grace, "knows", "Ada", "2026-01-01T00:00:00Z"));
+        assert!(add_inverse_link(
+            &mut grace,
+            "knows",
+            "Ada",
+            "2026-01-01T00:00:00Z"
+        ));
         let links = link_values(grace.frontmatter.get("knows").unwrap());
         assert_eq!(links, vec!["Ada".to_string(), "Babbage".to_string()]);
         assert_eq!(grace.get_str("updated"), Some("2026-01-01T00:00:00Z"));
         let before = grace.clone();
-        assert!(!add_inverse_link(&mut grace, "knows", "Ada", "2026-02-02T00:00:00Z"));
+        assert!(!add_inverse_link(
+            &mut grace,
+            "knows",
+            "Ada",
+            "2026-02-02T00:00:00Z"
+        ));
         assert_eq!(grace, before);
     }
 }

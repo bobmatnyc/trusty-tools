@@ -300,8 +300,14 @@ mod tests {
         let profile = Profile::default_profile();
         let ada = loaded("ada", "---\ntitle: Ada\nknows: \"[[Ghost]]\"\n---\n\nx\n");
         let f = lint_entities(&profile, std::slice::from_ref(&ada), &slugs(&["ada"]));
-        assert!(f.iter().any(|x| x.kind == FindingKind::MissingType && x.severity == Severity::Error));
-        assert!(f.iter().any(|x| x.kind == FindingKind::DanglingLink && x.severity == Severity::Info));
+        assert!(
+            f.iter()
+                .any(|x| x.kind == FindingKind::MissingType && x.severity == Severity::Error)
+        );
+        assert!(
+            f.iter()
+                .any(|x| x.kind == FindingKind::DanglingLink && x.severity == Severity::Info)
+        );
         let f = lint_entities(&profile, &[ada], &slugs(&["ada", "ghost"]));
         assert!(!f.iter().any(|x| x.kind == FindingKind::DanglingLink));
     }
@@ -313,12 +319,28 @@ mod tests {
     #[test]
     fn lint_flags_slug_mismatch_and_duplicate_alias() {
         let profile = Profile::default_profile();
-        let a = loaded("wrongname", "---\ntype: Person\ntitle: Ada\naliases: [Countess]\n---\n");
-        let b = loaded("augusta", "---\ntype: Person\ntitle: Augusta\naliases: [Countess]\n---\n");
+        let a = loaded(
+            "wrongname",
+            "---\ntype: Person\ntitle: Ada\naliases: [Countess]\n---\n",
+        );
+        let b = loaded(
+            "augusta",
+            "---\ntype: Person\ntitle: Augusta\naliases: [Countess]\n---\n",
+        );
         let mut f = lint_entities(&profile, &[a, b], &slugs(&["wrongname", "augusta"]));
         sort_findings(&mut f);
-        assert_eq!(f.iter().filter(|x| x.kind == FindingKind::SlugMismatch).count(), 1);
-        assert_eq!(f.iter().filter(|x| x.kind == FindingKind::DuplicateAlias).count(), 2);
+        assert_eq!(
+            f.iter()
+                .filter(|x| x.kind == FindingKind::SlugMismatch)
+                .count(),
+            1
+        );
+        assert_eq!(
+            f.iter()
+                .filter(|x| x.kind == FindingKind::DuplicateAlias)
+                .count(),
+            2
+        );
     }
 
     /// Why: criterion 3's refusal rests on this check.

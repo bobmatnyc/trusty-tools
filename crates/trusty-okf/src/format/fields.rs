@@ -261,7 +261,10 @@ fn verification_of(v: &Value) -> Field<Verification> {
     let Value::Mapping(m) = v else {
         return Field::Malformed(v.clone());
     };
-    match (str_of(m, "by"), str_of(m, "at").as_deref().and_then(parse_instant)) {
+    match (
+        str_of(m, "by"),
+        str_of(m, "at").as_deref().and_then(parse_instant),
+    ) {
         (Some(by), Some(at)) => Field::Valid(Verification {
             by: Actor::parse(&by),
             at,
@@ -340,7 +343,10 @@ impl Frontmatter {
                 .filter_map(|(k, v)| {
                     let key = match k {
                         Value::String(s) => s.clone(),
-                        other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+                        other => serde_yaml::to_string(other)
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string(),
                     };
                     (!KNOWN_KEYS.contains(&key.as_str())).then_some((key, v.clone()))
                 })
@@ -368,11 +374,17 @@ impl Frontmatter {
         for (key, bad) in [
             ("type", matches!(self.r#type, Field::Malformed(_))),
             ("title", matches!(self.title, Field::Malformed(_))),
-            ("description", matches!(self.description, Field::Malformed(_))),
+            (
+                "description",
+                matches!(self.description, Field::Malformed(_)),
+            ),
             ("resource", matches!(self.resource, Field::Malformed(_))),
             ("tags", matches!(self.tags, Field::Malformed(_))),
             ("supersedes", matches!(self.supersedes, Field::Malformed(_))),
-            ("superseded_by", matches!(self.superseded_by, Field::Malformed(_))),
+            (
+                "superseded_by",
+                matches!(self.superseded_by, Field::Malformed(_)),
+            ),
         ] {
             if bad {
                 warn(malformed, key, "OKF §4.1");
@@ -397,7 +409,9 @@ impl Frontmatter {
         }
         match &self.status {
             Field::Malformed(_) => warn(malformed, "status", "OKF §5.4"),
-            Field::Valid(Status::Other(_)) => warn(FindingKind::UnknownStatus, "status", "OKF §5.4"),
+            Field::Valid(Status::Other(_)) => {
+                warn(FindingKind::UnknownStatus, "status", "OKF §5.4")
+            }
             _ => {}
         }
         if matches!(self.stale_after, Field::Malformed(_)) {

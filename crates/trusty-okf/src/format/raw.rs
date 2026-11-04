@@ -65,7 +65,9 @@ pub fn split_raw(text: &str) -> Option<(usize, Range<usize>)> {
     let mut pos = open;
     while pos < text.len() {
         let line_end = text[pos..].find('\n').map_or(text.len(), |i| pos + i + 1);
-        let line = text[pos..line_end].trim_end_matches('\n').trim_end_matches('\r');
+        let line = text[pos..line_end]
+            .trim_end_matches('\n')
+            .trim_end_matches('\r');
         if line == "---" {
             return Some((line_end, open..pos));
         }
@@ -247,7 +249,11 @@ mod tests {
         for e in &raw.entries {
             values.insert(Value::String(e.key.clone()), e.value.clone());
         }
-        assert_eq!(patch(&raw, &values).unwrap(), doc, "no change writes the same bytes");
+        assert_eq!(
+            patch(&raw, &values).unwrap(),
+            doc,
+            "no change writes the same bytes"
+        );
         values.insert("status".into(), "deprecated".into());
         values.shift_remove("tags");
         values.insert("new_key".into(), Value::Bool(true));
