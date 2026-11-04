@@ -22,11 +22,20 @@
 //! The adapter leads its own process group, and every stop kills the group,
 //! so no process it started outlives it. A list reply whose `cursor` is not
 //! a string or null is a protocol error.
+//!
+//! Listing contract (Architect ruling 440388fb9a26, SPEC-OKF-01 §2.13): a
+//! `listing` reply's `complete` describes the whole listing. Every page of
+//! a whole listing, the non-final ones included, sends `complete: true` or
+//! leaves the flag out (absent reads as true). An adapter that cannot show
+//! the listing is whole sends `complete: false` on any page, and that one
+//! page makes the run incomplete, so it tombstones nothing. A non-boolean
+//! `complete` is a protocol error.
 //! Test: `c97_cli_imports_through_an_adapter_process_and_reaps_on_cancel`,
 //! `c139_adapter_gets_exactly_the_caller_environment`,
 //! `c98_acquire_requests_carry_operator_initiated`,
 //! `numeric_cursor_is_a_protocol_error_and_tombstones_nothing`,
-//! `cancel_kills_the_adapter_process_group`
+//! `cancel_kills_the_adapter_process_group`,
+//! `any_incomplete_page_blocks_tombstones`
 //! (`crates/trusty-okf/tests/adapter_criteria.rs`).
 //!
 //! # Spec References
@@ -419,6 +428,20 @@ impl ImportSource for AdapterSource {
                 ));
             }
         };
+        // #10746 S9: an absent `complete` reads as true (the contract: a
+        // non-final page sends true or leaves it out); a non-boolean is a
+        // protocol error.
+        let complete = match &reply["complete"] {
+            Value::Null => true,
+            Value::Bool(b) => *b,
+            other => {
+                self.stop("protocol_error", Duration::ZERO);
+                return Err(io(
+                    &self.program,
+                    format!("adapter list protocol_error: complete {other}"),
+                ));
+            }
+        };
         let entries: Vec<WireEntry> = serde_json::from_value(reply["entries"].clone())
             .map_err(|e| io(&self.program, format!("adapter list protocol_error: {e}")))?;
         Ok(Listing {
@@ -434,7 +457,7 @@ impl ImportSource for AdapterSource {
                 })
                 .collect(),
             cursor,
-            complete: reply["complete"].as_bool().unwrap_or(false),
+            complete,
         })
     }
 

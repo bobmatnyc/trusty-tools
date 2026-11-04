@@ -20,6 +20,9 @@
 //! default policy, the flagged snippet under [`ContentPolicy::AllowSnippet`].
 //! A docs item with only an encoded (base64) export is `unsupported_format`.
 //! Raw MIME and any other record field outside the shape are never read.
+//! The listing side of the contract (`complete` on every page; one
+//! `complete: false` page blocks every tombstone of the run) is in
+//! [`super::adapter`].
 //! Slice S9 of #10746.
 //! Test: `crates/trusty-okf/tests/adapter_criteria.rs` (criteria 86, 88,
 //! 89, 91-93), `record::tests`.

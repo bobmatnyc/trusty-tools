@@ -9,7 +9,8 @@
 //! store needs a child process the spec forbids (`policy_refused`, §2.15)
 //! or when the bundle and source roots overlap (`SourceOverlap`). It reads
 //! every page of the listing (a repeated cursor, or a cursor still left at
-//! [`MAX_LIST_PAGES`], ends it as incomplete), computes
+//! [`MAX_LIST_PAGES`], ends it as incomplete; one page with `complete:
+//! false` makes the whole listing incomplete), computes
 //! `pagination_exhausted` and
 //! `deletion_safe` itself (§2.13), then plans each entry: a listed skip,
 //! an `excluded` glob, a worker item under `child_processes: false`
@@ -23,7 +24,8 @@
 //! `c75_colliding_sources_are_refused_and_pins_hold`,
 //! `c79_vanished_files_tombstone_only_when_deletion_safe`,
 //! `c82_overlapping_roots_are_refused`,
-//! `repeating_or_endless_cursors_end_the_listing_incomplete`.
+//! `repeating_or_endless_cursors_end_the_listing_incomplete`,
+//! `any_incomplete_page_blocks_tombstones`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -309,7 +311,7 @@ pub fn plan_import(
     let (include, exclude) = (glob_set(&spec.include)?, glob_set(&spec.exclude)?);
     let mut entries = Vec::new();
     let mut cursor: Option<String> = None;
-    let mut complete: bool;
+    let mut complete = true;
     // #10746 S9 fix round: every cursor asked for so far, and the page
     // count, so a repeating or endless cursor sequence ends the listing.
     let mut seen = std::collections::BTreeSet::new();
@@ -317,9 +319,9 @@ pub fn plan_import(
     loop {
         pages += 1;
         let page = src.list(cursor.as_deref())?;
-        // #10746 S9: the adapter's flag describes the listing, so the last
-        // page's flag counts; an earlier page is never complete on its own.
-        complete = page.complete;
+        // #10746 S9: Architect ruling 440388fb9a26 (option B, §2.13): one
+        // page that says incomplete makes the whole listing incomplete.
+        complete &= page.complete;
         let room = spec.max_items.saturating_sub(entries.len());
         let cut = page.entries.len() > room;
         entries.extend(page.entries.into_iter().take(room));

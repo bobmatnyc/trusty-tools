@@ -79,19 +79,20 @@ fn fm_str(m: &serde_yaml::Mapping, k: &str) -> Option<String> {
     m.get(k).and_then(|v| v.as_str()).map(str::to_string)
 }
 
-/// Three pages of two mail entries each, and their records.
+/// Three pages of two mail entries each, and their records. Per the
+/// adapter contract every page of a whole listing says `complete: true`.
 fn three_pages(fake: &FakeAdapter) {
     fake.page(
         None,
         json!([msg_entry("m1", "t1"), msg_entry("m2", "t1")]),
         Some("p2"),
-        false,
+        true,
     );
     fake.page(
         Some("p2"),
         json!([msg_entry("m3", "t2"), msg_entry("m4", "t2")]),
         Some("p3"),
-        false,
+        true,
     );
     fake.page(
         Some("p3"),
@@ -869,4 +870,52 @@ fn cancel_kills_the_adapter_process_group() {
         !alive(grandchild)
     });
     assert!(gone, "grandchild {grandchild} outlived cancel");
+}
+
+/// Why: Architect ruling 440388fb9a26 (option B, SPEC-OKF-01 §2.13) — a
+/// page that says `complete: false` makes the whole listing incomplete, so
+/// nothing is tombstoned, whatever the last page says. A page that leaves
+/// the flag out reads as `complete: true`.
+/// What: a recursive docs store imports `gone` and `kept`; the next listing
+/// is two pages without `gone`, the first `complete: false` and the last
+/// `complete: true`. `gone` is `missing`, not tombstoned. As a control, the
+/// same two pages with the first page's flag left out tombstone `gone`.
+/// Test: self-contained.
+#[test]
+fn any_incomplete_page_blocks_tombstones() {
+    let fake = FakeAdapter::new("gdocs");
+    fake.page(
+        None,
+        json!([{"item_id": "gone", "revision": "1"}, {"item_id": "kept", "revision": "1"}]),
+        None,
+        true,
+    );
+    for d in ["gone", "kept"] {
+        fake.item(json!({"item_id": d, "revision": "1", "parts": [{"mime": "text/markdown", "data": "Doc."}]}));
+    }
+    run(&fake, &docs_spec(true)).unwrap();
+    let first = |complete: Option<bool>| {
+        let mut reply = json!({"type": "listing", "request_id": "@RID@",
+            "entries": [{"item_id": "kept", "revision": "1"}], "cursor": "p2"});
+        if let Some(c) = complete {
+            reply["complete"] = json!(c);
+        }
+        reply
+    };
+    fake.page_raw(None, first(Some(false)));
+    fake.page(Some("p2"), json!([]), None, true);
+    let r = run(&fake, &docs_spec(true)).unwrap();
+    assert!(!r.pagination_exhausted && !r.deletion_safe, "{r:?}");
+    assert_eq!(
+        (r.tombstoned, item(&r, "gone").write.as_str()),
+        (0, "missing")
+    );
+
+    fake.page_raw(None, first(None));
+    let r = run(&fake, &docs_spec(true)).unwrap();
+    assert!(r.pagination_exhausted && r.deletion_safe, "{r:?}");
+    assert_eq!(
+        (r.tombstoned, item(&r, "gone").write.as_str()),
+        (1, "tombstoned")
+    );
 }
