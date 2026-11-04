@@ -69,6 +69,19 @@ pub enum OkfError {
         /// Why the write was refused.
         reason: String,
     },
+    /// #10746 S5: an operation of the journal is incomplete and conflicted;
+    /// a write touching one of its paths needs `Bundle::recover` first
+    /// (SPEC-OKF-01 §4.11 rule 2).
+    #[error("operation {op_id} needs an explicit recover; paths {paths:?}")]
+    RecoveryPending {
+        /// The incomplete operation.
+        op_id: String,
+        /// Its file-step paths, bundle-relative.
+        paths: Vec<PathBuf>,
+    },
+    /// #10746 S5: an `IndexStateDir` inside the bundle root (§4.9.1).
+    #[error("index state directory lies inside the bundle root: {0:?}")]
+    StateDirInBundle(PathBuf),
     /// #10746 S4: the doc-store read policy refused a directory; nothing was
     /// read. The display is the reason alone, so a caller that matched
     /// trusty-kb's message text still matches (SPEC-OKF-01 §2.13 reuses

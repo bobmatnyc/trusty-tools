@@ -6,10 +6,10 @@
 //! leave a half-written file, follow a link out of the bundle, or replace
 //! bytes it did not read.
 //! What: [`check_write`] applies the [`WriteMode`] to the values that will be
-//! rendered; `prepare_write` (crate-private since S3; `Bundle::put` is the
+//! rendered; `prepare_write_with` (crate-private; `Bundle::put` is the
 //! public write) checks, refuses a stale or new-over-existing write, renders
-//! with a re-parse postcondition and compares; `PreparedWrite::commit` writes
-//! through `bundle::paths::atomic_write`.
+//! with a re-parse postcondition and compares; the bundle writes the rendered
+//! bytes through the operation journal or `bundle::paths::atomic_write`.
 //! Test: `c03_strict_write_refuses_missing_type_and_changes_no_file`,
 //! `c114_unchanged_put_writes_zero_bytes_and_reads_malformed`,
 //! `c115_foreign_paths_read_only_and_write_is_invalid_id`,
@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::OkfError;
-use crate::bundle::paths::{atomic_write, confined_file};
+use crate::bundle::paths::confined_file;
 use crate::format::concept::{Concept, parse_concept_at, render_concept};
 use crate::format::fields::Frontmatter;
 use crate::format::hash::bytes_hash;
@@ -144,24 +144,21 @@ pub(crate) fn check_not_stale(
 /// and the rename (§2.10 "no verification event is lost").
 #[derive(Debug)]
 pub(crate) struct PreparedWrite {
-    target: PathBuf,
     rendered: String,
-    /// What [`PreparedWrite::commit`] will do.
+    /// What the write would do.
     pub(crate) outcome: WriteOutcome,
 }
 
 impl PreparedWrite {
-    /// Replace the target atomically, keeping its mode; an `Unchanged`
-    /// write writes nothing.
-    pub(crate) fn commit(&self) -> Result<(), OkfError> {
-        if self.outcome == WriteOutcome::Unchanged {
-            return Ok(());
-        }
-        atomic_write(&self.target, self.rendered.as_bytes())
+    /// #10746 S5: the rendered bytes, the post-image of a journaled step.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        self.rendered.as_bytes()
     }
 }
 
-/// Check and render a concept write under `root` without writing a byte.
+/// Check and render a concept write under `root` without writing a byte,
+/// against `existing`, the bytes the target holds (#10746 S5: the caller
+/// reads them, so a move can plan the moved concept at its new path).
 ///
 /// Why: the shared core of `Bundle::put` and `Bundle::verify` — strict
 /// refusal, raw-preserving render, zero-byte no-op and atomic replace (§2.2,
@@ -173,18 +170,21 @@ impl PreparedWrite {
 /// 3. a stored block that is not patchable is refused with
 ///    [`OkfError::Parse`];
 /// 4. the target is confined (`bundle::paths::confined_file`);
-/// 5. a stale or new-over-existing write is refused ([`check_not_stale`]);
+/// 5. a stale or new-over-existing write against `existing` is refused
+///    ([`check_not_stale`]);
 /// 6. the render must read back as the checked values ([`render_checked`]).
 ///
 /// Equal bytes on disk give [`WriteOutcome::Unchanged`]. The caller runs
-/// [`PreparedWrite::commit`], which replaces the file through `atomic_write`.
+/// `PreparedWrite::bytes` and writes them through the operation journal or
+/// `atomic_write`.
 /// Test: `c03_strict_write_refuses_missing_type_and_changes_no_file`,
 /// `c114_unchanged_put_writes_zero_bytes_and_reads_malformed`,
 /// `c115_foreign_paths_read_only_and_write_is_invalid_id`.
-pub(crate) fn prepare_write(
+pub(crate) fn prepare_write_with(
     root: &Path,
     c: &Concept,
     mode: WriteMode,
+    existing: Option<&[u8]>,
 ) -> Result<(PreparedWrite, Vec<Finding>), OkfError> {
     let id = match &c.id {
         ConceptRef::Id(id) => id.clone(),
@@ -192,29 +192,29 @@ pub(crate) fn prepare_write(
     };
     let findings = check_write(c, mode)?;
     if !c.raw().text.is_empty() && !c.raw().patchable {
-        return Err(OkfError::Parse {
-            path: PathBuf::from(c.path()),
-            line: None,
-            message: "frontmatter cannot be split into top-level entries; \
-                      a raw-preserving write is refused (SPEC-OKF-01 §2.2.1)"
-                .to_string(),
-        });
+        return Err(unpatchable(c));
     }
-    let target = confined_file(root, &id.file_name())?;
-    let existing = read_existing(&target)?;
-    check_not_stale(&id, c, existing.as_deref())?;
+    confined_file(root, &id.file_name())?;
+    check_not_stale(&id, c, existing)?;
     let rendered = render_checked(c)?;
-    let outcome = match existing.as_deref() {
+    let outcome = match existing {
         Some(b) if b == rendered.as_bytes() => WriteOutcome::Unchanged,
         Some(_) => WriteOutcome::Updated,
         None => WriteOutcome::Created,
     };
-    let prepared = PreparedWrite {
-        target,
-        rendered,
-        outcome,
-    };
+    let prepared = PreparedWrite { rendered, outcome };
     Ok((prepared, findings))
+}
+
+/// The refusal for a stored block that cannot be patched (§2.2.1).
+fn unpatchable(c: &Concept) -> OkfError {
+    OkfError::Parse {
+        path: PathBuf::from(c.path()),
+        line: None,
+        message: "frontmatter cannot be split into top-level entries; \
+                  a raw-preserving write is refused (SPEC-OKF-01 §2.2.1)"
+            .to_string(),
+    }
 }
 
 /// The refusal for a write that targets a foreign file.

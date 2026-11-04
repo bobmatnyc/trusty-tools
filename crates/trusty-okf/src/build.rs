@@ -11,8 +11,9 @@
 //! registry's connector rows become [`registry::Locator::Connector`] (B6);
 //! the ingest engine writes through `Bundle::put`, keeps editorial and
 //! verification keys across a re-ingest (§2.9) and quarantines protected keys
-//! (§2.13.1). The index journal and `rebuild` come with S5 and S6; the
-//! `okg_*` store entry points stay in trusty-kb until S11.
+//! (§2.13.1). #10746 S5: an ingest run writes `log.md` once (`LogBatch`);
+//! the machine-local index journal lives in `state::index`. `rebuild` comes
+//! with S6; the store entry points stay in trusty-kb until S11.
 //! Test: `golden_registry_loads_every_row`,
 //! `golden_registry_saves_byte_for_byte`,
 //! `golden_ledger_reads_and_appends_in_the_same_format`,

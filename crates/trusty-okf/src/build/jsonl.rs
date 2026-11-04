@@ -2,8 +2,8 @@
 //!
 //! Why: a source keeps TWO append-only journals — the item
 //! [`ledger`](crate::build::ledger) (what was pulled into the tree) and the
-//! index journal (what was pushed into the bound search index; still in
-//! trusty-kb until slice S5 of #10746). Both need the same two hard-won
+//! index journal (what was pushed into the bound search index; since slice
+//! S5 of #10746, `state::index`, outside the bundle). Both need the same two hard-won
 //! behaviours, and duplicating them would let the copies drift: a crash-torn
 //! final line must cost exactly one record rather than bricking the file, and
 //! the first append after such a tear must emit a healing newline or it
@@ -14,8 +14,8 @@
 //! a tear mid-UTF-8-codepoint damages only its own line — and reports how many
 //! lines were unusable plus whether the file ends without a newline.
 //! [`Appender`] owns the lazily-opened handle and performs the healing write.
-//! #10746: public, because trusty-kb's index journal shares it until S5;
-//! errors are [`OkfError`]. The on-disk format is unchanged.
+//! #10746: public, because trusty-kb's index journal still shares it until
+//! its cut-over (S11); errors are [`OkfError`]. The on-disk format is unchanged.
 //!
 //! Test: the behaviours are pinned by the callers' own suites
 //! (`torn_line_is_skipped_not_fatal`,

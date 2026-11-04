@@ -87,6 +87,12 @@ pub enum FindingKind {
     LinkNotRewritten,
     /// #10746 S3: a file in the bundle that could not be read as text.
     UnreadableFile,
+    /// #10746 S5: a legacy `_sources/<id>.index.jsonl`; left unchanged and
+    /// never read as index state (§4.9.1 rule 4).
+    LegacyIndexJournal,
+    /// #10746 S5: an incomplete operation whose files changed outside
+    /// trusty-okf; nothing was overwritten (§4.11 rule 2).
+    RecoveryConflict,
 }
 
 /// One structured validation finding.

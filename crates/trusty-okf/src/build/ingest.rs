@@ -50,6 +50,8 @@ use crate::build::ledger::{ItemStatus, Ledger, LedgerRecord, Watermark};
 use crate::build::registry::SourceSpec;
 use crate::build::trust::{TRUST_KEY, TrustLabel};
 use crate::bundle::Bundle;
+use crate::bundle::commit::LogMode;
+use crate::bundle::log_md::LogBatch;
 use crate::bundle::put::WriteKind;
 use crate::bundle::record::instant_string;
 use crate::format::concept::{Concept, slugify};
@@ -59,6 +61,7 @@ use crate::format::id::ConceptId;
 use crate::format::protected::{SOURCE_FIELDS_KEY, is_protected_key};
 use crate::format::write::WriteMode;
 use crate::profile::Profile;
+use crate::state::revisions::run_id;
 
 /// How many concept paths an [`IngestReport`] lists before truncating.
 const MAX_REPORTED_ENTITIES: usize = 50;
@@ -240,6 +243,8 @@ pub fn ingest_items(
     let mut ledger = Ledger::load(bundle.root(), &spec.id)?;
     let mut report = report_for(spec, items.len());
     let stamp = instant_string(&now);
+    // #10746 S5: the run's `log.md` entries are written once, at the end.
+    let batch = LogBatch::new(run_id("ingest", &[&spec.id, &stamp]));
 
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for item in items {
@@ -251,7 +256,7 @@ pub fn ingest_items(
             continue;
         }
         let first_time = !ledger.contains(&item.item_id);
-        match write_item(&mut bundle, profile, spec, item, &now) {
+        match write_item(&mut bundle, profile, spec, item, &now, &batch) {
             Ok((entity, findings)) => {
                 // Ledger append happens AFTER the concept write and BEFORE
                 // the next item, so a crash can only ever leave a concept
@@ -279,7 +284,15 @@ pub fn ingest_items(
 
     if detect_deletions {
         let present: BTreeSet<String> = seen.iter().map(|s| s.to_string()).collect();
-        sweep_into(&mut bundle, spec, &mut ledger, &present, &now, &mut report)?;
+        sweep_into(
+            &mut bundle,
+            spec,
+            &mut ledger,
+            &present,
+            &now,
+            &batch,
+            &mut report,
+        )?;
     } else {
         report.missing = ledger
             .live_item_ids()
@@ -289,6 +302,8 @@ pub fn ingest_items(
     }
 
     report.watermark = ledger.watermark();
+    // #10746 S5: a failed `log.md` write fails the run closed.
+    batch.flush_now(&mut bundle)?;
     Ok(report)
 }
 
@@ -311,15 +326,18 @@ pub fn sweep_deleted(
     let mut bundle = Bundle::at(root)?;
     let mut ledger = Ledger::load(bundle.root(), &spec.id)?;
     let mut report = report_for(spec, 0);
+    let batch = LogBatch::new(run_id("sweep", &[&spec.id, &instant_string(&now)]));
     sweep_into(
         &mut bundle,
         spec,
         &mut ledger,
         present_ids,
         &now,
+        &batch,
         &mut report,
     )?;
     report.watermark = ledger.watermark();
+    batch.flush_now(&mut bundle)?;
     Ok(report)
 }
 
@@ -330,6 +348,7 @@ fn sweep_into(
     ledger: &mut Ledger,
     present_ids: &BTreeSet<String>,
     now: &DateTime<FixedOffset>,
+    batch: &LogBatch,
     report: &mut IngestReport,
 ) -> Result<(), OkfError> {
     let vanished: Vec<String> = ledger
@@ -342,7 +361,7 @@ fn sweep_into(
         return Ok(());
     }
     for item_id in vanished {
-        match tombstone_item(bundle, spec, ledger, &item_id, now) {
+        match tombstone_item(bundle, spec, ledger, &item_id, now, batch) {
             Ok(Some(record)) => {
                 ledger.append(record)?;
                 report.tombstoned += 1;
@@ -464,6 +483,7 @@ fn write_item(
     spec: &SourceSpec,
     item: &SourceItem,
     now: &DateTime<FixedOffset>,
+    batch: &LogBatch,
 ) -> Result<(String, Vec<IngestFinding>), OkfError> {
     let id = concept_id_for(&spec.collection, &item.name)?;
     let old = existing(bundle, &id)?;
@@ -512,6 +532,7 @@ fn write_item(
         WriteMode::Lenient,
         now,
         WriteKind::SourceReingest,
+        LogMode::Defer(batch),
     )?;
     Ok((id.as_str().to_string(), quarantine.findings))
 }
@@ -527,6 +548,7 @@ fn tombstone_item(
     ledger: &Ledger,
     item_id: &str,
     now: &DateTime<FixedOffset>,
+    batch: &LogBatch,
 ) -> Result<Option<LedgerRecord>, OkfError> {
     let Some(prior) = ledger.get(item_id) else {
         return Ok(None);
@@ -551,6 +573,7 @@ fn tombstone_item(
         WriteMode::Lenient,
         now,
         WriteKind::SourceReingest,
+        LogMode::Defer(batch),
     )?;
 
     Ok(Some(LedgerRecord {

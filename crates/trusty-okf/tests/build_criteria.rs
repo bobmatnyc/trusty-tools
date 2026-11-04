@@ -27,6 +27,7 @@ use trusty_okf::format::concept::Entity;
 use trusty_okf::format::fields::parse_instant;
 use trusty_okf::format::{ConceptId, content_hash};
 use trusty_okf::profile::Profile;
+use trusty_okf::state::{IndexStateDir, LiveIdentity};
 
 const GOLDEN: &str = "tests/fixtures/trusty-kb-c1eed98441/kb";
 
@@ -504,6 +505,7 @@ fn c116_protected_keys_from_every_input_are_quarantined() {
 #[test]
 fn c117_planted_verification_hash_never_verifies() {
     let tmp = tempfile::tempdir().unwrap();
+    let machine = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let spec = mail_spec();
     let id = concept_id_for("mail", "m").unwrap();
@@ -540,6 +542,21 @@ fn c117_planted_verification_hash_never_verifies() {
             "round {round}"
         );
         assert!(bundle.verification_events(&id).unwrap().is_empty());
+        // #10746 S5: criterion 117 holds through `revision_state` (§4.9).
+        let state = IndexStateDir::new(machine.path().join("state"));
+        for live in [
+            LiveIdentity::Unsupported,
+            LiveIdentity::Unreadable("down".into()),
+        ] {
+            assert_eq!(
+                bundle
+                    .revision_state(&id, &state, "kb", &live)
+                    .unwrap()
+                    .verification,
+                VerificationState::Unverified { history: 0 },
+                "round {round}"
+            );
+        }
         let fm = frontmatter(&root, &id);
         assert!(!fm.contains_key("verified"), "{fm:?}");
         assert_eq!(fm["source_fields"]["verification_hash"], hash.as_str());

@@ -11,8 +11,8 @@
 //! once invalidated `invalidated_at`, `invalidated_by_hash` and an optional
 //! `reason` (`legacy_unbound`). The newest line for one `(by, at)` pair is
 //! that event's state. [`Bundle::verification_events`] and
-//! [`Bundle::verification_state`] read it; slice S5's `revision_state`
-//! composes this axis with the save and index axes.
+//! [`Bundle::verification_state`] read it; `Bundle::revision_state`
+//! (#10746 S5) composes this axis with the save and index axes.
 //! Test: `c31_body_change_moves_verification_to_the_record`,
 //! `c36_out_of_band_edit_reads_unverified_with_a_warning`.
 
@@ -22,7 +22,7 @@ use serde_yaml::Value;
 
 use crate::OkfError;
 use crate::bundle::Bundle;
-use crate::bundle::paths::{append_line, confined_file, io_err};
+use crate::bundle::paths::{confined_file, io_err};
 use crate::format::concept::Concept;
 use crate::format::fields::{Actor, Verification, parse_instant};
 use crate::format::hash::{ContentHash, content_hash};
@@ -79,6 +79,23 @@ pub(crate) struct Line {
     pub invalidated_by_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// #10746 S5: the operation-journal op that appended it (§4.11 "Steps").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+    /// #10746 S5: that operation's step index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<usize>,
+}
+
+impl Line {
+    /// The line as a JSON value, for an operation append step.
+    pub(crate) fn value(&self) -> Result<serde_json::Value, OkfError> {
+        serde_json::to_value(self).map_err(|e| OkfError::Parse {
+            path: "_sources/verification".into(),
+            line: None,
+            message: e.to_string(),
+        })
+    }
 }
 
 /// An instant as written into frontmatter and the record: RFC 3339, `Z` for
@@ -117,39 +134,6 @@ pub(crate) fn fold(lines: Vec<Line>) -> Vec<Line> {
         }
     }
     out
-}
-
-/// Confine `id`'s record path and create its directory, writing no record
-/// byte.
-///
-/// #10746: `put` and `verify` call this before the concept rename, so a
-/// record path that is a link (`PathEscape`) or a `_sources` that is not a
-/// directory refuses the operation with no concept file changed.
-/// Test: `unwritable_record_keeps_the_legacy_event_and_the_concept`.
-pub(crate) fn prepare_append(b: &Bundle, id: &ConceptId) -> Result<(), OkfError> {
-    let path = confined_file(b.root(), &record_rel(id))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
-    }
-    Ok(())
-}
-
-/// Append lines to `id`'s record in one write. No lines writes nothing.
-pub(crate) fn append(b: &Bundle, id: &ConceptId, lines: &[Line]) -> Result<(), OkfError> {
-    if lines.is_empty() {
-        return Ok(());
-    }
-    let json = lines
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| OkfError::Parse {
-            path: record_rel(id).into(),
-            line: None,
-            message: e.to_string(),
-        })?;
-    // #10746: one append for every line, not one per line.
-    append_line(b.root(), &record_rel(id), &json.join("\n"))
 }
 
 /// Whether an event state still attests `current`.
@@ -224,6 +208,8 @@ pub(crate) fn invalidation_lines(
             invalidated_at: Some(now.to_string()),
             invalidated_by_hash: Some(new_hash.as_str().to_string()),
             reason,
+            op: None,
+            step: None,
         });
     }
     out

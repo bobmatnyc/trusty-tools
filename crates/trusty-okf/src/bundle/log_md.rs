@@ -3,20 +3,28 @@
 //! Why: every lifecycle event leaves one `log.md` entry, and no trusty-okf
 //! write may remove, rewrite or reorder an existing entry: deleting the
 //! lines an operation added must yield the old file byte for byte.
-//! What: [`append_entry`] inserts `- <entry>` directly below the newest
+//! What: `insert` puts `- <entry>` directly below the newest
 //! `## YYYY-MM-DD` heading when that heading is the entry's date; otherwise
 //! it adds a new heading and the entry above the newest heading, or at the
 //! end when the file has no date heading. A missing `log.md` is created
-//! with a `# Log` title. Returns the added lines.
+//! with a `# Log` title. #10746 S5: `prepare_entry` renders the post-image
+//! of a journaled `log.md` file step (§4.11); an ingest run writes its
+//! entries once through `LogBatch`.
 //! Test: `log_entry_inserts_below_todays_heading_or_adds_one`,
-//! `c09_move_rewrites_every_link_and_logs_one_entry`.
+//! `c09_move_rewrites_every_link_and_logs_one_entry`,
+//! `ingest_run_writes_log_md_once`.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::path::Path;
 
 use chrono::{DateTime, FixedOffset};
+use serde::{Deserialize, Serialize};
 
 use crate::OkfError;
-use crate::bundle::paths::{atomic_write, confined_file, io_err};
+use crate::build::jsonl::read_journal;
+use crate::bundle::Bundle;
+use crate::bundle::ops::{self, OPS_DIR, OpKind, OpPlan, disk_hash};
+use crate::bundle::paths::{append_line, confined_file, io_err, read_rel};
 
 /// Whether `line` is an OKF §9 date heading, returning its date.
 fn date_heading(line: &str) -> Option<&str> {
@@ -97,17 +105,11 @@ pub(crate) fn insert(old: &str, date: &str, entry: &str) -> (String, Vec<String>
 /// stops the operation with no file changed.
 #[derive(Debug)]
 pub(crate) struct PreparedEntry {
-    path: PathBuf,
-    text: String,
-    /// The lines the entry adds.
-    pub(crate) added: Vec<String>,
-}
-
-impl PreparedEntry {
-    /// Write the new `log.md` atomically, keeping its mode.
-    pub(crate) fn commit(&self) -> Result<(), OkfError> {
-        atomic_write(&self.path, self.text.as_bytes())
-    }
+    /// #10746 S5: the bytes read, `None` when absent: the pre-image of an
+    /// operation-journal file step (§4.11).
+    pub(crate) old: Option<Vec<u8>>,
+    /// The new text: the post-image.
+    pub(crate) text: String,
 }
 
 /// Confine and read the bundle-root `log.md` and render `entry` for `now`'s
@@ -121,30 +123,153 @@ pub(crate) fn prepare_entry(
     entry: &str,
 ) -> Result<PreparedEntry, OkfError> {
     let path = confined_file(root, "log.md")?;
-    let old = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+    let old = match std::fs::read(&path) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(io_err(&path, e)),
     };
+    let old_text = String::from_utf8(old.clone().unwrap_or_default()).map_err(|e| {
+        io_err(
+            &path,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        )
+    })?;
     let date = now.format("%Y-%m-%d").to_string();
-    let (text, added) = insert(&old, &date, entry);
-    Ok(PreparedEntry { path, text, added })
+    let (text, _) = insert(&old_text, &date, entry);
+    Ok(PreparedEntry { old, text })
 }
 
-/// Append one entry to the bundle-root `log.md` for `now`'s date.
-///
-/// What: [`prepare_entry`], then an atomic write keeping the file's mode.
-/// Returns the added lines.
-/// Test: `c09_move_rewrites_every_link_and_logs_one_entry`.
-pub(crate) fn append_entry(
-    root: &Path,
-    now: &DateTime<FixedOffset>,
-    entry: &str,
-) -> Result<Vec<String>, OkfError> {
-    let prepared = prepare_entry(root, now, entry)?;
-    prepared.commit()?;
-    Ok(prepared.added)
+/// One pending `log.md` entry of an ingest run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingEntry {
+    /// The concept file the entry describes, bundle-relative.
+    path: String,
+    /// The entry text.
+    entry: String,
+    /// `YYYY-MM-DD` of the write's `now`.
+    date: String,
+    /// The file's byte hash before the write; `None` when it was absent.
+    pre: Option<String>,
 }
+
+/// The `log.md` entries of one ingest run, written to `log.md` once.
+///
+/// Why: #10746 S5 (Architect ruling on log.md cost) — rewriting all of
+/// `log.md` for each item made an N-item run rewrite a growing file N times.
+/// What: [`LogBatch::record`] appends each entry, with the concept file's
+/// pre-image hash, to `_sources/ops/log-<run>.jsonl` before the concept is
+/// written (an O(1) append). [`LogBatch::flush`] keeps each entry whose file
+/// no longer holds its pre-image (the write landed), inserts them in order
+/// with the §4.5 rule, and writes `log.md` once through an `Ingest`
+/// operation with the fixed op ID `<run>-log`, then removes the batch file.
+/// After a crash, `Bundle::open` finishes the operation or flushes the
+/// leftover batch; a batch whose operation already completed is only
+/// removed, so no entry is written twice.
+/// Test: `ingest_run_writes_log_md_once`,
+/// `crash_mid_run_keeps_the_log_entries_of_written_items`.
+#[derive(Debug, Clone)]
+pub(crate) struct LogBatch {
+    run: String,
+}
+
+impl LogBatch {
+    /// A batch for `run`.
+    pub(crate) fn new(run: String) -> Self {
+        Self { run }
+    }
+
+    /// The batch of a leftover `log-<run>.jsonl`.
+    pub(crate) fn resume(run: &str) -> Self {
+        Self::new(run.to_string())
+    }
+
+    /// The run ID; the revision lines of the run carry it.
+    pub(crate) fn run(&self) -> &str {
+        &self.run
+    }
+
+    fn rel(&self) -> String {
+        format!("{OPS_DIR}/log-{}.jsonl", self.run)
+    }
+
+    fn op_id(&self) -> String {
+        format!("{}-log", self.run)
+    }
+
+    /// Record one entry before the concept write.
+    pub(crate) fn record(
+        &self,
+        b: &Bundle,
+        path: &str,
+        entry: &str,
+        now: &DateTime<FixedOffset>,
+        pre: Option<String>,
+    ) -> Result<(), OkfError> {
+        let e = PendingEntry {
+            path: path.to_string(),
+            entry: entry.to_string(),
+            date: now.format("%Y-%m-%d").to_string(),
+            pre,
+        };
+        let json = serde_json::to_string(&e).map_err(|err| OkfError::Parse {
+            path: self.rel().into(),
+            line: None,
+            message: err.to_string(),
+        })?;
+        append_line(b.root(), &self.rel(), &json)
+    }
+
+    /// Write the batch into `log.md` once (see the type doc). `done` holds
+    /// the completed op IDs. Returns the entries written.
+    pub(crate) fn flush(&self, b: &mut Bundle, done: &BTreeSet<String>) -> Result<usize, OkfError> {
+        let rel = self.rel();
+        let mut written = 0;
+        if !done.contains(&self.op_id()) {
+            let path = confined_file(b.root(), &rel)?;
+            let mut kept = Vec::new();
+            for e in read_journal::<PendingEntry>(&path)?.records {
+                if disk_hash(b, &e.path)? != e.pre {
+                    kept.push(e);
+                }
+            }
+            if !kept.is_empty() {
+                let log = confined_file(b.root(), "log.md")?;
+                let old = read_rel(b.root(), "log.md")?;
+                let mut text = String::from_utf8(old.clone().unwrap_or_default()).map_err(|e| {
+                    io_err(
+                        &log,
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+                    )
+                })?;
+                for e in &kept {
+                    text = insert(&text, &e.date, &e.entry).0;
+                }
+                let now = kept.last().map(|e| e.date.clone()).unwrap_or_default();
+                let mut plan =
+                    OpPlan::new(OpKind::Ingest, &now, INGEST_LOG_ACTOR).with_id(self.op_id());
+                plan.file("log.md", old, Some(text.into_bytes()));
+                ops::run(b, plan)?;
+                written = kept.len();
+            }
+        }
+        let path = confined_file(b.root(), &rel)?;
+        let removed = std::fs::remove_file(&path); // okf: temp-cleanup (flushed log batch)
+        match removed {
+            Ok(()) => Ok(written),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(written),
+            Err(e) => Err(io_err(&path, e)),
+        }
+    }
+
+    /// Flush, reading the completed op IDs from the journal.
+    pub(crate) fn flush_now(&self, b: &mut Bundle) -> Result<usize, OkfError> {
+        let (_, done) = crate::bundle::recover::read_ops(b)?;
+        self.flush(b, &done)
+    }
+}
+
+/// The actor an ingest run's `log.md` operation names.
+const INGEST_LOG_ACTOR: &str = "process:trusty-okf-ingest";
 
 #[cfg(test)]
 mod tests {

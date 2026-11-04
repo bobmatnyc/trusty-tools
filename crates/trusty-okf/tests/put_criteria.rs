@@ -597,6 +597,10 @@ fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
     }
     let mut out = Vec::new();
     walk(root, root, &mut out);
+    // #10746 S5: the operation journal under `_sources/ops/` records each
+    // attempt; "no file changed" covers every other file (the §4.11 and
+    // criterion 106 comparison scope).
+    out.retain(|(rel, _)| !rel.starts_with("_sources/ops"));
     out.sort();
     out
 }
