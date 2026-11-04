@@ -934,7 +934,7 @@ fn c103_sigint_cancels_the_cli_and_reaps_the_worker() {
         ..Fake::default()
     }
     .write(fx.tmp.path(), "worker");
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_trusty-okf"))
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_trusty-okf"))
         .args(["import", "run"])
         .arg(&fx.root)
         .arg("--from")
