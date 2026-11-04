@@ -163,7 +163,8 @@ fn extractor(a: &Args, ctx: &Ctx<'_>) -> Result<Box<dyn Extractor>, Fail> {
     }
     #[cfg(not(feature = "extract-worker"))]
     {
-        let _ = (path, ctx);
+        // No worker client in this build, so SIGINT keeps its default.
+        let _ = (path, ctx.catch_interrupt);
         Err(Fail::Code(
             2,
             "this build has no extract-worker feature; --worker is not available".into(),
