@@ -99,7 +99,8 @@ pub struct Ledger {
 impl Ledger {
     /// The confined journal path for a source id under a KB root.
     ///
-    /// Why: the id comes from a tool argument; slugging plus [`confine`] means a
+    /// Why: the id comes from a tool argument; slugging plus
+    /// [`confine`](crate::bundle::paths::confine) means a
     /// hostile id can never name a file outside `_sources/`.
     /// What: `<root>/_sources/<slug(id)>.jsonl`.
     /// Test: exercised by every test here via [`Ledger::load`].
