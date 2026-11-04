@@ -24,7 +24,7 @@ use crate::kb::okg::registry::SourceSpec;
 use crate::kb::store::KbStore;
 use serde_json::{Value, json};
 
-use crate::stores::okg_feed::{IndexFeedReport, feed_source, unfed};
+use crate::stores::okg_feed::{feed_source, unfed};
 
 /// Feed everything this tree owes the agent's bound search index.
 ///
