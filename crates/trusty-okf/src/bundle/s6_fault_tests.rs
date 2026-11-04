@@ -687,3 +687,155 @@ fn unparseable_post_image_refuses_before_any_write() {
         "no backup written"
     );
 }
+
+/// Run a migrate whose audit fails with `notes/alpha.md`'s backup
+/// corrupted, so the operation stays open and conflicted on `b`.
+fn conflicted_migrate(root: &Path, b: &mut Bundle) {
+    fail::set_mutate(|rel, bytes| {
+        if rel == "notes/hand.md" {
+            bytes.extend_from_slice(b"x");
+        }
+    });
+    let r2 = root.to_path_buf();
+    fail::set(move |n| {
+        if n == "staged" {
+            let m = manifest(&r2);
+            let alpha = m.iter().find(|l| l["path"] == "notes/alpha.md").unwrap();
+            std::fs::write(r2.join(alpha["blob"].as_str().unwrap()), b"corrupt").unwrap();
+        }
+        false
+    });
+    let got = op_migrate(b);
+    fail::clear();
+    assert!(matches!(got, Err(OkfError::MigrationLoss(_))), "{got:?}");
+}
+
+/// The legacy tree with a conflicted migrate on the returned handle, and
+/// the tree after it.
+fn pending() -> (
+    tempfile::TempDir,
+    PathBuf,
+    Bundle,
+    BTreeMap<String, Vec<u8>>,
+) {
+    let (t, root) = fresh(seed_legacy);
+    let mut b = Bundle::open(&root).unwrap().0;
+    conflicted_migrate(&root, &mut b);
+    let before = tree(&root);
+    (t, root, b, before)
+}
+
+/// Why: §4.11 rule 2 (#10746 S6 fix round) — while a migrate that holds
+/// `_sources/revisions.jsonl` is conflicted, a `put` to an unrelated
+/// concept, which would append to it, is refused with `RecoveryPending`
+/// and changes no file; a later roll back would drop its revision line.
+/// What: a conflicted migrate, then a `put` on the same handle.
+/// Test: self-contained.
+#[test]
+fn pending_migrate_refuses_an_unrelated_put() {
+    let (_t, root, mut b, before) = pending();
+    let got = b.put(
+        new_concept("fresh", "New.\n"),
+        actor(),
+        WriteMode::Lenient,
+        at("2026-11-04T12:00:00Z"),
+    );
+    assert!(
+        matches!(got, Err(OkfError::RecoveryPending { .. })),
+        "put: {got:?}"
+    );
+    assert_eq!(tree(&root), before, "put changed a file");
+}
+
+/// Why: as above, for `adopt` on the same handle.
+/// What: a conflicted migrate, then a confirmed human `adopt`.
+/// Test: self-contained.
+#[test]
+fn pending_migrate_refuses_adopt() {
+    let (_t, root, mut b, before) = pending();
+    let mail = id("mail/2026-02-01-re-update");
+    let bytes = std::fs::read(root.join(mail.file_name())).unwrap();
+    let pair = vec![(mail, crate::state::ByteHash::of(&bytes))];
+    let confirm = Some(crate::bundle::HumanConfirmation::explicit());
+    let got = b.adopt(
+        &pair,
+        Actor::Human("jo".into()),
+        confirm,
+        at("2026-11-04T12:00:00Z"),
+    );
+    assert!(
+        matches!(got, Err(OkfError::RecoveryPending { .. })),
+        "adopt: {got:?}"
+    );
+    assert_eq!(tree(&root), before, "adopt changed a file");
+}
+
+/// Why: as above, for `rebuild` on a new handle, whose equality proof would
+/// append a revision line with no swap.
+/// What: a conflicted migrate, then a rebuild of the golden mail item.
+/// Test: self-contained.
+#[test]
+fn pending_migrate_refuses_rebuild() {
+    let (_t, root, _b, before) = pending();
+    let mail_spec = crate::build::registry::SourceRegistry::load(&root)
+        .unwrap()
+        .get("sent-mail")
+        .unwrap()
+        .clone();
+    let mail_item = SourceItem {
+        item_id: "18c0ffee".into(),
+        fingerprint: "18c0ffee".into(),
+        name: "mail".into(),
+        title: "Re: プロジェクト — update".into(),
+        timestamp: Some("2026-02-01T09:00:00Z".into()),
+        body: "Thanks — sending the plan.\n\n> quoted inbound line".into(),
+        fields: [
+            ("from", "me@example.com"),
+            ("thread_id", "thread-7"),
+            ("to", "team@example.com"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
+        ..SourceItem::default()
+    };
+    let sources = [(mail_spec, vec![mail_item])];
+    let got = rebuild(
+        &root,
+        &Profile::default_profile(),
+        &sources,
+        at("2026-11-04T12:30:00Z"),
+    );
+    assert!(
+        matches!(got, Err(OkfError::RecoveryPending { .. })),
+        "rebuild: {got:?}"
+    );
+    assert_eq!(tree(&root), before, "rebuild changed a file");
+}
+
+/// Why: the §4.11 rule 2 refusal is scoped: with no pending migrate, a
+/// conflicted operation that does not hold the revision journal still
+/// leaves writes to other paths free (S5 behaviour kept).
+/// What: a completed migrate, then put, adopt and rebuild succeed.
+/// Test: self-contained.
+#[test]
+fn completed_migrate_leaves_writes_free() {
+    let (_t, root) = fresh(seed_legacy);
+    let mut b = Bundle::open(&root).unwrap().0;
+    op_migrate(&mut b).unwrap();
+    b.put(
+        new_concept("fresh", "New.\n"),
+        actor(),
+        WriteMode::Lenient,
+        at("2026-11-04T12:00:00Z"),
+    )
+    .unwrap();
+    let r = rebuild(
+        &root,
+        &Profile::default_profile(),
+        &[],
+        at("2026-11-04T12:30:00Z"),
+    )
+    .unwrap();
+    assert!(r.conflicts.is_empty());
+}

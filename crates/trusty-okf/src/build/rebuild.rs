@@ -195,6 +195,10 @@ pub fn rebuild(
     now: DateTime<FixedOffset>,
 ) -> Result<RebuildReport, OkfError> {
     let mut bundle = Bundle::at(root)?;
+    // #10746: every rebuild write appends the revision journal, the
+    // no-plans proof append included; a pending migrate that holds it
+    // refuses the run before any write (§4.11 rule 2).
+    bundle.check_recovery(&[])?;
     let root = bundle.root().to_path_buf();
     let lines = revisions::read(&root)?;
     let stamp = instant_string(&now);

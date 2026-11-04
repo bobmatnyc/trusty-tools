@@ -71,6 +71,9 @@ impl Bundle {
         }
         // #10746 S6: one writer at a time (§4.4).
         let _lock = self.write_lock()?;
+        // #10746: adopt appends the revision journal; a pending migrate that
+        // holds it refuses the call (§4.11 rule 2).
+        self.check_recovery(&[])?;
         let owned = owned_entities(self.root())?;
         let lines = revisions::read(self.root())?;
         let stamp = instant_string(&now);

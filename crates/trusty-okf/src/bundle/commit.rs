@@ -104,12 +104,19 @@ impl Bundle {
         self.conflicts.retain(|(o, _)| o != op);
     }
 
-    /// Refuse a write to a path of a conflicted operation (§4.11 rule 2).
+    /// Refuse a write to a path of a conflicted operation (§4.11 rule 2), and
+    /// every write while a conflicted operation holds the revision journal.
     ///
-    /// Test: `c109_out_of_band_edit_after_crash_is_a_recovery_conflict`.
+    /// Test: `c109_out_of_band_edit_after_crash_is_a_recovery_conflict`,
+    /// `pending_migrate_refuses_an_unrelated_put`.
     pub(crate) fn check_recovery(&self, paths: &[String]) -> Result<(), OkfError> {
         for (op, held) in &self.conflicts {
-            if paths.iter().any(|p| held.contains(p)) {
+            // #10746: every journaled write appends `_sources/revisions.jsonl`,
+            // so an incomplete op that holds it as a file step (`migrate`)
+            // refuses every write; its roll back would drop their lines
+            // (§4.11 rule 2).
+            let journal = held.iter().any(|h| h == REVISIONS_REL);
+            if journal || paths.iter().any(|p| held.contains(p)) {
                 return Err(OkfError::RecoveryPending {
                     op_id: op.clone(),
                     paths: held.iter().map(PathBuf::from).collect(),
