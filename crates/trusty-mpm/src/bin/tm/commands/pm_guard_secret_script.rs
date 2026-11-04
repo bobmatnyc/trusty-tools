@@ -76,10 +76,10 @@
 //!
 //! Fail-open check: this rule only ADDS refusals and runs after the inline
 //! rules, which still judge the command text. Every [`Unread`] arm refuses.
-//! #10548 narrows two paths: a node body is read as JS first
-//! (`pm_guard_secret_script_node`), and `node --check`/`-c` with no other
-//! option judges no body; both are pinned in
-//! `pm_guard_secret_script_node_tests.rs`.
+//! #10548 narrows one path: `node --check`/`-c` with no other option and no
+//! `NODE_OPTIONS=` prefix judges no body ([`node_check_only`]), pinned in
+//! `pm_guard_secret_script_node_tests.rs`. A node RUN is judged raw, so a JS
+//! member access (`x.key`) still refuses; that stays open on #10548.
 //! Test: `pm_guard_secret_script_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_secret_batch.rs`
 //! (`pm_guard_refuses_a_script_whose_body_reads_a_credential_8879`).
@@ -117,9 +117,6 @@ pub(crate) mod tmux_kill;
 // #8878 PR2a: a presence-key Keychain write in a script body is denied too.
 #[path = "pm_guard_secret_script_presence.rs"]
 pub(crate) mod presence_key;
-// #10548: a node body is read as JavaScript first (500-SLOC cap).
-#[path = "pm_guard_secret_script_node.rs"]
-mod node;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;
@@ -369,15 +366,7 @@ fn judge_script(
         .map(str::to_string)
         .unwrap_or_else(|| shebang_interpreter(&body));
     let cwd = bases.first().map_or(Path::new("/"), PathBuf::as_path);
-    let mut plain = without_comment_lines(&body);
-    // #10548: a JS member access (`x.key`) names no file; a body the JS
-    // reader cannot read in full, or a non-JS file node loads, is judged raw.
-    if family_of(&interpreter) == Some(Family::Node)
-        && node::is_js_file(path, &shebang_interpreter(&body))
-        && let Some(read) = node::js_reading(&plain)
-    {
-        plain = read;
-    }
+    let plain = without_comment_lines(&body);
     if let Some(rule) = judge_text(&inline_equivalent(&interpreter, &plain), &plain, cwd) {
         return Some((rule, None));
     }
@@ -560,7 +549,7 @@ fn candidates(argv: &[String]) -> (Vec<Candidate>, bool) {
             // #10548: `node --check <file>` parses the file and never runs it;
             // a `NODE_OPTIONS` prefix can load code, so it keeps the judgment.
             let preload = argv[..start].iter().any(|w| w.contains("NODE_OPTIONS="));
-            if family == Family::Node && !preload && node::check_only(args) {
+            if family == Family::Node && !preload && node_check_only(args) {
                 return (Vec::new(), exact.is_some());
             }
             interpreter_candidates(family, &interpreter, args)
@@ -634,6 +623,40 @@ fn interpreter_candidates(family: Family, interpreter: &str, args: &[String]) ->
         }
     }
     out
+}
+
+/// Whether node's arguments `args` only syntax-check a script file.
+///
+/// Why: `node --check <file>` (`-c`) parses the file and never runs it, so its
+/// body cannot read a secret (#10548).
+/// What: true when every option before the first operand is `--check` or
+/// `-c`, at least one is, and an operand follows. Any other option (`-r`,
+/// `--import`, `--inspect`, `-e`, `--`), an input redirect or a here-document
+/// answers false, and the file is judged as a run. Output redirects pass.
+/// Test: `node_check_of_a_member_access_body_allows_10548`,
+/// `a_node_run_beside_a_check_is_judged_10548`.
+fn node_check_only(args: &[String]) -> bool {
+    let (mut check, mut i) = (false, 0);
+    while let Some(token) = args.get(i) {
+        i += 1;
+        if token.starts_with("<<") || input_redirect_operand(token).is_some() {
+            return false;
+        }
+        match redirect_role(token) {
+            RedirectRole::None => {}
+            RedirectRole::TargetFollows => {
+                i += 1;
+                continue;
+            }
+            _ => continue,
+        }
+        match token.as_str() {
+            "--check" | "-c" => check = true,
+            t if t.starts_with('-') => return false,
+            _ => return check,
+        }
+    }
+    false
 }
 
 /// Whether option `token` makes `family` run inline code or read stdin.
