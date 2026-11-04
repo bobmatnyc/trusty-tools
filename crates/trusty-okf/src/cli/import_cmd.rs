@@ -21,8 +21,8 @@ use crate::bundle::Bundle;
 use crate::extract::{Extractor, NoWorker};
 use crate::format::concept::slugify;
 use crate::import::{
-    DocTreeSource, ImportPlan, ImportSource, ImportSpec, import, import_status, is_refusal,
-    plan_import, plan_import_with,
+    DocTreeSource, ImportPlan, ImportSource, ImportSpec, RunCancel, import, import_status,
+    is_refusal, plan_import, plan_import_with,
 };
 use crate::state::{IndexStateDir, LiveIdentity};
 
@@ -158,7 +158,9 @@ fn store_for(a: &Args, root: &Path, now: &str) -> Result<(SourceSpec, PathBuf), 
 /// by the plan. Working directories go under `/tmp`, a fixed path, since
 /// the CLI reads no environment variable (B3). Without the
 /// `extract-worker` feature `--worker` is refused before any write (2).
-fn extractor(a: &Args, ctx: &Ctx<'_>) -> Result<Box<dyn Extractor>, Fail> {
+/// S9+S10 merge: the worker watches the run's `cancel`, the same flag the
+/// adapter watches.
+fn extractor(a: &Args, cancel: &RunCancel) -> Result<Box<dyn Extractor>, Fail> {
     let Some(path) = a.one("--worker") else {
         return Ok(Box::new(NoWorker));
     };
@@ -166,16 +168,12 @@ fn extractor(a: &Args, ctx: &Ctx<'_>) -> Result<Box<dyn Extractor>, Fail> {
     {
         use crate::extract::worker::{WorkerConfig, WorkerExtractor};
         let cfg = WorkerConfig::new(path, "/tmp");
-        let mut w = WorkerExtractor::new(cfg).map_err(|e| Fail::Code(2, e))?;
-        if ctx.catch_interrupt {
-            w = w.with_cancel(interrupt::watch().map_err(|e| Fail::Code(2, e))?);
-        }
-        Ok(Box::new(w))
+        let w = WorkerExtractor::new(cfg).map_err(|e| Fail::Code(2, e))?;
+        Ok(Box::new(w.with_cancel(cancel.flag())))
     }
     #[cfg(not(feature = "extract-worker"))]
     {
-        // No worker client in this build, so SIGINT keeps its default.
-        let _ = (path, ctx.catch_interrupt);
+        let _ = (path, cancel);
         Err(Fail::Code(
             2,
             "this build has no extract-worker feature; --worker is not available".into(),
@@ -183,30 +181,44 @@ fn extractor(a: &Args, ctx: &Ctx<'_>) -> Result<Box<dyn Extractor>, Fail> {
     }
 }
 
-/// A context that leaves SIGINT alone (`import plan` writes nothing).
-fn no_interrupt() -> Ctx<'static> {
-    Ctx {
-        #[cfg(feature = "search-feed")]
-        sink: None,
-        catch_interrupt: false,
-        _p: std::marker::PhantomData,
+/// The run's cancel flag (Architect ruling 2c9381bdbdc9, S9+S10 merge).
+///
+/// What: in the binary (`ctx.catch_interrupt`), SIGINT sets it, through
+/// the one waiter [`interrupt::watch`] starts per process; a library call
+/// of [`super::run`] gets a flag nothing sets, so SIGINT keeps its default.
+/// Errors: SIGINT could not be taken over; refused before any write (2).
+fn run_cancel(ctx: &Ctx<'_>) -> Result<RunCancel, Fail> {
+    if !ctx.catch_interrupt {
+        return Ok(RunCancel::default());
     }
+    interrupt::watch()
+        .map(RunCancel::new)
+        .map_err(|e| Fail::Code(2, e))
 }
 
-/// #10746 S10 fix: SIGINT becomes the worker run's cancel flag.
-#[cfg(feature = "extract-worker")]
+/// #10746 S10 fix, moved out of `extractor` at the S9+S10 merge: SIGINT
+/// becomes the run's cancel flag, for the worker and the adapter alike.
+#[cfg(unix)]
 mod interrupt {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, OnceLock};
 
     use nix::sys::signal::{SigSet, Signal};
 
-    /// Block SIGINT in this thread (threads it starts later inherit the
-    /// mask) and start a thread that waits for it and sets the flag. Without
-    /// `unsafe`: no handler runs; `sigwait` returns the signal. Errors: the
-    /// mask could not be set; the run is refused before any write, so
-    /// Ctrl-C can never orphan a worker.
+    /// Block SIGINT in this thread (threads and children it starts later
+    /// inherit the mask) and start one thread that waits for it and sets
+    /// the flag. Without `unsafe`: no handler runs; `sigwait` returns the
+    /// signal. Only SIGINT is blocked, never SIGTERM, since the worker and
+    /// the adapter inherit the mask. A second call returns the first flag,
+    /// so two waiters never race for one signal. Errors: the mask could not
+    /// be set; the run is refused before any write, so Ctrl-C can never
+    /// orphan a child.
     pub(super) fn watch() -> Result<Arc<AtomicBool>, String> {
+        static ONCE: OnceLock<Result<Arc<AtomicBool>, String>> = OnceLock::new();
+        ONCE.get_or_init(start).clone()
+    }
+
+    fn start() -> Result<Arc<AtomicBool>, String> {
         let mut set = SigSet::empty();
         set.add(Signal::SIGINT);
         set.thread_block()
@@ -222,6 +234,17 @@ mod interrupt {
     }
 }
 
+/// No signal mask to take over: SIGINT keeps its default.
+#[cfg(not(unix))]
+mod interrupt {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    pub(super) fn watch() -> Result<Arc<AtomicBool>, String> {
+        Ok(Arc::default())
+    }
+}
+
 /// The spec, the plan and the source for `import plan` and `import run`.
 /// #10746 S9: `--from adapter:<kind>` plans through an adapter process.
 fn prepare(
@@ -229,12 +252,14 @@ fn prepare(
     root: &Path,
     stamp: &str,
     ex: &dyn Extractor,
+    cancel: &RunCancel,
 ) -> Result<(Bundle, ImportPlan, Box<dyn ImportSource>), Fail> {
     let bundle = open(root)?;
     if a.one("--from").is_some_and(|f| f.starts_with("adapter:")) {
         let mut spec = super::adapter_cmd::spec_for(a, root, stamp)?;
         spec.include = a.all("--include");
         spec.exclude = a.all("--exclude");
+        spec.cancel = cancel.clone();
         let mut src = super::adapter_cmd::source_for(a, &spec)?;
         let plan = plan_import(&bundle, &spec, src.as_mut()).map_err(|e| fail(&e))?;
         return Ok((bundle, plan, src));
@@ -248,6 +273,7 @@ fn prepare(
     let mut spec = ImportSpec::new(store);
     spec.include = a.all("--include");
     spec.exclude = a.all("--exclude");
+    spec.cancel = cancel.clone();
     let policy = DocStorePolicy::new(vec![dir.clone()]);
     let mut src = DocTreeSource::open(&dir, &policy).map_err(|e| fail(&e))?;
     let plan = plan_import_with(&bundle, &spec, &mut src, ex).map_err(|e| fail(&e))?;
@@ -258,8 +284,10 @@ fn prepare(
 pub(crate) fn plan(a: &Args, out: &mut dyn Write) -> Result<i32, Fail> {
     a.only(IMPORT_OPTS).map_err(Fail::Usage)?;
     let root = bundle_root(a, 2)?;
-    let ex = extractor(a, &no_interrupt())?;
-    let (_, plan, _) = prepare(a, &root, "", ex.as_ref())?;
+    // `import plan` writes nothing, so SIGINT keeps its default.
+    let cancel = RunCancel::default();
+    let ex = extractor(a, &cancel)?;
+    let (_, plan, _) = prepare(a, &root, "", ex.as_ref(), &cancel)?;
     output::plan(out, &plan, a.has("--json"));
     Ok(0)
 }
@@ -274,8 +302,21 @@ pub(crate) fn run(a: &Args, out: &mut dyn Write, ctx: &Ctx<'_>) -> Result<i32, F
     }
     let now = now(a)?;
     let stamp = crate::bundle::record::instant_string(&now);
-    let ex = extractor(a, ctx)?;
-    let (mut bundle, plan, mut src) = prepare(a, &root, &stamp, ex.as_ref())?;
+    // #10746 S9+S10 merge: one SIGINT path per run, and one flag shared by
+    // the worker client and the adapter.
+    let cancel = run_cancel(ctx)?;
+    let ex = extractor(a, &cancel)?;
+    let (mut bundle, plan, mut src) = match prepare(a, &root, &stamp, ex.as_ref(), &cancel) {
+        Ok(x) => x,
+        // A cancel during an adapter's handshake leaves no plan to report.
+        Err(_) if cancel.is_set() => {
+            return Err(Fail::Code(
+                3,
+                "the import was cancelled before its plan; nothing was written".into(),
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     if a.has("--dry-run") {
         output::plan(out, &plan, a.has("--json"));
         return Ok(0);

@@ -116,6 +116,10 @@ pub(crate) fn report(out: &mut dyn Write, r: &ImportReport, as_json: bool) {
     for e in &r.worker_errors {
         w(out, format!("worker: {e}"));
     }
+    // #10746 S9+S10 merge: a cancelled run says so, even with no item.
+    if r.cancelled {
+        w(out, "run: cancelled".to_string());
+    }
     let complete = if r.complete { "complete" } else { "incomplete" };
     let search = if r.fully_searchable {
         "fully searchable".to_string()

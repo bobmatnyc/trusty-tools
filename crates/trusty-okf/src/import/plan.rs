@@ -29,6 +29,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Serialize;
@@ -55,6 +57,45 @@ pub const MAX_LIST_PAGES: usize = 10_000;
 
 /// The run's item ceiling when a caller names none.
 pub const DEFAULT_MAX_ITEMS: usize = 100_000;
+
+/// The run-level cancel flag (Architect ruling 2c9381bdbdc9, #10746 S9+S10
+/// merge; SPEC-OKF-01 §2.16 "Cancellation, kill and reap").
+///
+/// Why: one SIGINT must cancel every child process of a run, and an
+/// adapter-only run has no worker whose flag `import` could read.
+/// What: one shared flag. The CLI's SIGINT waiter sets it; the worker
+/// client ([`crate::extract::worker::WorkerExtractor::with_cancel`]) and
+/// [`super::adapter::AdapterSource`] watch the same `Arc`; `plan_import`
+/// stops listing (the listing is then incomplete) and `import` writes
+/// nothing more once it is set. It is not part of a spec's identity, so
+/// any two compare equal.
+/// Test: `c97_sigint_cancels_an_adapter_import_and_reaps_its_group`,
+/// `sigint_cancels_an_adapter_import_with_a_worker`.
+#[derive(Debug, Clone, Default)]
+pub struct RunCancel(Arc<AtomicBool>);
+
+impl RunCancel {
+    /// A cancel that reads `flag`.
+    pub fn new(flag: Arc<AtomicBool>) -> RunCancel {
+        RunCancel(flag)
+    }
+
+    /// The shared flag, for a child-process client to watch.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+
+    /// Whether the run was cancelled.
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl PartialEq for RunCancel {
+    fn eq(&self, _: &RunCancel) -> bool {
+        true
+    }
+}
 
 /// What an import copies from a source (§2.15, 3k A). A document tree has
 /// one policy: the full text of each selected item.
@@ -88,6 +129,8 @@ pub struct ImportSpec {
     pub child_processes: bool,
     /// Whether an operator started the run (§2.15 "Inbound email").
     pub operator_initiated: bool,
+    /// #10746 S9+S10 merge: the run's cancel flag; never set by default.
+    pub cancel: RunCancel,
 }
 
 impl ImportSpec {
@@ -103,6 +146,7 @@ impl ImportSpec {
             policy: ContentPolicy::FullText,
             child_processes: true,
             operator_initiated: false,
+            cancel: RunCancel::default(),
         }
     }
 }
@@ -348,8 +392,22 @@ fn plan_items(
     let mut seen = std::collections::BTreeSet::new();
     let mut pages = 0usize;
     loop {
+        // #10746 S9+S10 merge: a cancelled run lists no further page, and a
+        // listing call the cancel broke ends the listing as incomplete, so
+        // the run tombstones nothing and `import` writes nothing.
+        if spec.cancel.is_set() {
+            complete = false;
+            break;
+        }
         pages += 1;
-        let page = src.list(cursor.as_deref())?;
+        let page = match src.list(cursor.as_deref()) {
+            Ok(page) => page,
+            Err(_) if spec.cancel.is_set() => {
+                complete = false;
+                break;
+            }
+            Err(e) => return Err(e),
+        };
         // #10746 S9: Architect ruling 440388fb9a26 (option B, §2.13): one
         // page that says incomplete makes the whole listing incomplete.
         complete &= page.complete;

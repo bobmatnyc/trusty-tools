@@ -213,6 +213,9 @@ pub fn import(
     let profile = Profile::default_profile();
     let family = check_selection(spec)?;
     let mut threads = BTreeSet::new();
+    // #10746 S9+S10 merge (Architect ruling 2c9381bdbdc9): the run-level
+    // flag, so an adapter run with no worker sees the cancel too.
+    let cancelled = || spec.cancel.is_set() || ex.cancelled();
     for p in &plan.items {
         let item = |read: &str, write: &str| ItemReport::new(&p.item_id, p.id.clone(), read, write);
         // #10746 S10 fix: a cancelled run writes nothing more; earlier items
@@ -221,7 +224,7 @@ pub fn import(
             p.action,
             Action::Create | Action::Update | Action::Conflict | Action::Tombstone
         );
-        if writes && ex.cancelled() {
+        if writes && cancelled() {
             report
                 .items
                 .push(item("skipped", "none").because("cancelled"));
@@ -432,6 +435,7 @@ pub fn import(
         write_threads(&mut b, &run, &threads, &mut report.findings)
             .map_err(|e| after_writes(&root, e))?;
     }
+    report.cancelled = cancelled();
     let (_, left) = batch
         .flush_now(&mut b)
         .map_err(|e| after_writes(&root, e))?;

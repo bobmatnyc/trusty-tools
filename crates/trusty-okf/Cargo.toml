@@ -26,7 +26,9 @@ search-feed = ["dep:async-trait", "dep:tokio", "dep:trusty-common"]
 # Client for the out-of-process extraction worker (SPEC-OKF-01 §2.16, App. B).
 # #10746 S10: `nix` sends the process-group signals of the kill sequence; the
 # crate forbids `unsafe`, so it has no raw `libc` call of its own.
-extract-worker = ["dep:nix"]
+# #10746 S9+S10 merge: `nix` is no longer behind this feature; the CLI's
+# SIGINT waiter cancels an adapter import in every build.
+extract-worker = []
 
 [dependencies]
 # #10746 S2: the format and profile modules moved from trusty-kb. None of these
@@ -65,16 +67,18 @@ tokio = { workspace = true, optional = true, features = ["macros", "rt"] }
 # The core still links no trusty-common (owner decision D4b open).
 trusty-common = { workspace = true, optional = true, features = ["uds", "knowledge-document"] }
 
-# #10746 S10: feature `extract-worker` only. `killpg` for the worker's
-# process group (SPEC-OKF-01 §2.16 "Cancellation, kill and reap"). The 0.29
-# line trusty-mpm and trusty-search already pin; no network, no runtime.
-nix = { version = "0.29", optional = true, features = ["signal"] }
-
 # #10746 S9: the import fetch resolves every path component with `openat`
 # and `O_NOFOLLOW` (no symlink followed), and the adapter's process group is
 # killed as one. Safe wrappers; `fs` and `process` only, no network (B8).
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true }
+# #10746 S10: `killpg` for the worker's process group (SPEC-OKF-01 §2.16
+# "Cancellation, kill and reap"). S9+S10 merge (Architect ruling
+# 2c9381bdbdc9): also the CLI's one SIGINT waiter (`sigwait`), which cancels
+# an adapter import with or without the `extract-worker` feature, so it is no
+# longer optional. The 0.29 line trusty-mpm and trusty-search already pin; no
+# network, no runtime.
+nix = { version = "0.29", features = ["signal"] }
 
 # #10746 S7: the feed criteria need the `feed` module.
 [[test]]

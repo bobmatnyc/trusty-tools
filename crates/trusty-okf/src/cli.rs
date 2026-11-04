@@ -133,7 +133,7 @@ pub(crate) struct Ctx<'a> {
     #[cfg(feature = "search-feed")]
     pub sink: Option<&'a dyn crate::feed::IndexFeed>,
     /// #10746 S10 fix: the process is the `trusty-okf` binary, so SIGINT
-    /// may be taken over to cancel a worker run (never in a library call).
+    /// may be taken over to cancel an import run (never in a library call).
     pub catch_interrupt: bool,
     _p: std::marker::PhantomData<&'a ()>,
 }
@@ -153,11 +153,15 @@ pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
 }
 
 /// The binary's entry: [`run`], plus (#10746 S10 fix) Ctrl-C handling. In
-/// an `import run --worker` call, SIGINT cancels the run: the in-flight
-/// worker item fails `cancelled`, the worker's process group is killed and
-/// reaped, later items are skipped `cancelled`, and the report is printed
-/// (exit 3). Only `src/main.rs` calls this.
-/// Test: `c103_sigint_cancels_the_cli_and_reaps_the_worker`.
+/// an `import run` call, SIGINT cancels the run: the in-flight worker or
+/// adapter request fails `cancelled`, that child's process group is killed
+/// and reaped, later items are skipped `cancelled`, and the report is
+/// printed (exit 3). S9+S10 merge (Architect ruling 2c9381bdbdc9): one
+/// SIGINT waiter per process, one flag shared by the worker and the
+/// adapter, with or without `--worker`. Only `src/main.rs` calls this.
+/// Test: `c103_sigint_cancels_the_cli_and_reaps_the_worker`,
+/// `c97_sigint_cancels_an_adapter_import_and_reaps_its_group`,
+/// `sigint_cancels_an_adapter_import_with_a_worker`.
 pub fn run_binary(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let ctx = Ctx {
         #[cfg(feature = "search-feed")]
