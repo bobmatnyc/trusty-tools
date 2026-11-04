@@ -332,8 +332,9 @@ fn judge_script(
     let cwd = bases.first().map_or(Path::new("/"), PathBuf::as_path);
     let mut plain = without_comment_lines(&body);
     // #10548: a JS member access (`x.key`) names no file; a body the JS
-    // reader cannot read in full is judged raw.
+    // reader cannot read in full, or a non-JS file node loads, is judged raw.
     if family_of(&interpreter) == Some(Family::Node)
+        && node::is_js_file(path, &shebang_interpreter(&body))
         && let Some(read) = node::js_reading(&plain)
     {
         plain = read;

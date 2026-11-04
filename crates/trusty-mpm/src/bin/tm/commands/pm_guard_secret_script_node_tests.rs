@@ -175,3 +175,17 @@ fn an_unreadable_js_body_is_judged_raw_10548() {
     let dir = fixture(&[("u.cjs", body)]);
     assert!(verdict("node u.cjs", dir.path()).is_some());
 }
+
+/// A non-JS file node loads or runs is judged raw, as before; a node-shebang
+/// file with no extension is read as JS.
+#[test]
+fn a_non_js_file_node_loads_is_judged_raw_10548() {
+    let dir = fixture(&[
+        ("cat.sh", "cat keys/app.pem\n"),
+        ("tool", "#!/usr/bin/env node\nconsole.log(cfg.key);\n"),
+        ("app.js", "console.log(1);\n"),
+    ]);
+    assert!(verdict("node -r ./cat.sh app.js", dir.path()).is_some());
+    assert!(verdict("node cat.sh", dir.path()).is_some());
+    assert_eq!(verdict("node tool", dir.path()), None);
+}

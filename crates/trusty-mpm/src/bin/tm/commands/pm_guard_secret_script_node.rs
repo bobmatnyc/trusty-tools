@@ -267,3 +267,12 @@ pub(super) fn check_only(args: &[String]) -> bool {
     }
     false
 }
+
+/// Whether `path` is a JavaScript file: a `.js`, `.mjs` or `.cjs` name, or a
+/// body whose `#!` line runs node (`shebang`). A shell file node is told to
+/// load (`node -r ./cat.sh`) keeps the shell judges' raw reading (#10548).
+/// Test: `a_non_js_file_node_loads_is_judged_raw_10548`.
+pub(super) fn is_js_file(path: &std::path::Path, shebang: &str) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str());
+    matches!(ext, Some("js" | "mjs" | "cjs")) || matches!(shebang, "node" | "nodejs")
+}
