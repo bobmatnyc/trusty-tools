@@ -86,14 +86,32 @@ pub struct BaseClient {
     pub(crate) storage: Arc<TokenStorage>,
     oauth: OAuthManager,
     /// #10746 S13: a loopback root every Google API URL is sent to instead,
-    /// set only by [`BaseClient::with_loopback_root`].
+    /// set only by `BaseClient::with_loopback_root` (feature `loopback-seam`
+    /// or this crate's own tests).
     api_root: Option<String>,
 }
 
 impl BaseClient {
     /// Construct with default token storage and refresh manager.
     pub fn new() -> Result<Self> {
-        let storage = Arc::new(TokenStorage::new());
+        Self::with_storage(TokenStorage::new())
+    }
+
+    /// Construct over exactly `storage` (no project-tier store unless it
+    /// names one).
+    ///
+    /// Why: the trusty-okf import adapters must read their credential only
+    /// from the user-tier store under their own `HOME`, never from a
+    /// `./.gworkspace-mcp/tokens.json` in whatever directory they were
+    /// started in, which [`TokenStorage::new`] also reads and lets win
+    /// (#8539 precedence). #10746 S13 fix round.
+    /// What: as [`BaseClient::new`], with the caller's store; callers pass
+    /// `TokenStorage::with_path(<home>/.gworkspace-mcp/tokens.json)`.
+    /// Test: `missing_credentials_fail_closed_before_any_write`,
+    /// `a_cwd_token_store_is_never_read`
+    /// (`crates/trusty-connectors/tests/conformance.rs`).
+    pub fn with_storage(storage: TokenStorage) -> Result<Self> {
+        let storage = Arc::new(storage);
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent("trusty-gworkspace/0.1")
@@ -116,7 +134,11 @@ impl BaseClient {
     /// remote host through it. Each `https://<host>/<path>` URL then goes to
     /// `<root>/<host>/<path>`; a URL that is not `https` is refused.
     /// Errors: any other root.
+    /// #10746 S13 fix round: it exists only under the non-default feature
+    /// `loopback-seam` (and in this crate's own tests), so no default or
+    /// release build can send a bearer token over cleartext HTTP.
     /// Test: `loopback_root_rewrites_google_urls_and_refuses_remote_roots`.
+    #[cfg(any(test, feature = "loopback-seam"))]
     pub fn with_loopback_root(mut self, root: &str) -> Result<Self> {
         let root = root.trim_end_matches('/');
         let host = root.strip_prefix("http://").unwrap_or_default();
@@ -133,7 +155,7 @@ impl BaseClient {
         Ok(self)
     }
 
-    /// The URL a request is actually sent to (see [`Self::with_loopback_root`]).
+    /// The URL a request is actually sent to (see `with_loopback_root`).
     fn route(&self, url: &str) -> Result<String> {
         let Some(root) = &self.api_root else {
             return Ok(url.to_string());

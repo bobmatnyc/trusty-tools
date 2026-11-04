@@ -102,7 +102,7 @@ trusty-search = { path = "../trusty-search", version = "0.62" }
 # `trusty-agents-common` comment below) — trusty-gworkspace is a plain
 # connector library, no cargo-cycle concern.
 trusty-channels = { path = "../trusty-channels", version = "0.2.0" }
-trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.0" }
+trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.1" }
 # trusty-okf: the OKF format, profile, bundle and build layer (source registry,
 # per-item ledger, ingest engine). #10746 S11: it replaces trusty-kb, which is
 # deleted. The agent glue trusty-kb also held (`Roots`, the typed `gmail` and

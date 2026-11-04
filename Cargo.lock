@@ -11381,6 +11381,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "trusty-connectors",
  "trusty-gworkspace",
  "trusty-okf",
  "walkdir",

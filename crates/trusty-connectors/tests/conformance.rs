@@ -645,6 +645,57 @@ fn missing_credentials_fail_closed_before_any_write() {
     );
 }
 
+/// Why: the credential comes only from the user-tier store under the
+/// caller's `HOME`. A `./.gworkspace-mcp/tokens.json` in the directory the
+/// adapter starts in (the trusty-okf CLI sets none) must never be read, even
+/// though trusty-gworkspace's default store lets such a project entry win
+/// (#8539). #10746 S13 fix round.
+/// What: a working directory whose store holds a token for the selected
+/// account while `HOME` holds none fails `auth_required` with no request;
+/// a working directory whose store holds another token for the same account
+/// is ignored, and only the `HOME` token reaches Google.
+/// Test: self-contained.
+#[test]
+fn a_cwd_token_store_is_never_read() {
+    let fake = FakeGoogle::start();
+    mailbox(&fake);
+    let plant = |dir: &std::path::Path, token: &str| {
+        std::fs::create_dir_all(dir.join(".gworkspace-mcp")).unwrap();
+        let store = json!({"work": {
+            "metadata": {"service_name": "work", "created_at": "2026-01-01T00:00:00Z"},
+            "token": {"access_token": token, "expires_at": "2099-01-01T00:00:00Z"}
+        }});
+        std::fs::write(dir.join(".gworkspace-mcp/tokens.json"), store.to_string()).unwrap();
+    };
+    let h = Home::new(Some("other"));
+    let cwd = h.tmp.path().join("project");
+    plant(&cwd, support::TOKEN);
+    let mut cmd = h.cmd(GMAIL, &fake, &[]);
+    cmd.current_dir = Some(cwd.clone());
+    let e = run(&cmd, &h.root, &mail("x", &[])).unwrap_err();
+    assert!(e.to_string().contains("auth_required"), "{e}");
+    assert!(
+        fake.seen().is_empty(),
+        "a cwd token was used: {:?}",
+        fake.seen()
+    );
+
+    let h = Home::new(Some("work"));
+    let cwd = h.tmp.path().join("project");
+    plant(&cwd, "cwd-token");
+    let mut cmd = h.cmd(GMAIL, &fake, &[]);
+    cmd.current_dir = Some(cwd);
+    let r = run(&cmd, &h.root, &mail("x", &[])).unwrap();
+    assert_eq!(r.created, 6, "{r:?}");
+    assert!(
+        fake.seen()
+            .iter()
+            .all(|s| s.auth.as_deref() == Some("Bearer stub-access-token")),
+        "{:?}",
+        fake.seen()
+    );
+}
+
 /// Why: a listing that fails part way is an error, never a short listing
 /// that reads as whole.
 /// What: the second page answers 500; the run fails and writes nothing.

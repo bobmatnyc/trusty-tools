@@ -14,6 +14,13 @@ crate-type = ["rlib"]
 name = "trusty-gworkspace-mcp"
 path = "src/bin/trusty-gworkspace-mcp.rs"
 
+[features]
+# #10746 S13 fix round: `BaseClient::with_loopback_root`, the test seam that
+# sends every Google API call to a loopback HTTP server. Off by default, so no
+# default or release build can send a bearer token over cleartext HTTP; the
+# trusty-connectors conformance suite turns it on.
+loopback-seam = []
+
 [dependencies]
 trusty-common = { path = "../trusty-common", version = "0.67" }
 # JSON-RPC / MCP primitives, extracted from `trusty_common::mcp` by ADR-0040 (#5803).

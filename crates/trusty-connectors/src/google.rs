@@ -16,9 +16,10 @@
 //! (`tests/conformance.rs`).
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+use trusty_gworkspace::api::auth::TokenStorage;
 use trusty_gworkspace::api::client::BaseClient;
 
 use crate::config::Config;
@@ -41,9 +42,20 @@ pub struct Options {
     pub config: Option<PathBuf>,
 }
 
+/// Whether this build carries the loopback test seam (feature
+/// `loopback-seam`, #10746 S13 fix round).
+pub const LOOPBACK_SEAM: bool = cfg!(feature = "loopback-seam");
+
 impl Options {
-    /// Parse `args`. Errors: an unknown argument or a flag with no value.
+    /// Parse `args` in this build ([`LOOPBACK_SEAM`]).
     pub fn parse(args: &[OsString]) -> Result<Options, String> {
+        Options::parse_with(args, LOOPBACK_SEAM)
+    }
+
+    /// Parse `args`; `--api-base` is accepted only when `seam` is true.
+    /// Errors: an unknown argument, a flag with no value, or `--api-base`
+    /// in a build without the seam.
+    pub fn parse_with(args: &[OsString], seam: bool) -> Result<Options, String> {
         let mut o = Options::default();
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -53,6 +65,14 @@ impl Options {
                     .ok_or_else(|| format!("{} needs a value", a.to_string_lossy()))
             };
             match a.to_str() {
+                // #10746 S13 fix round: no default or release build sends a
+                // bearer token to a caller-chosen cleartext port.
+                Some("--api-base") if !seam => {
+                    return Err(
+                        "--api-base is a test seam; this build lacks the loopback-seam feature"
+                            .into(),
+                    );
+                }
                 Some("--api-base") => {
                     o.api_base = Some(
                         value()?
@@ -68,23 +88,47 @@ impl Options {
     }
 }
 
+/// The user-tier token store under `home` (trusty-gworkspace's layout).
+pub fn token_store(home: &Path) -> PathBuf {
+    home.join(".gworkspace-mcp").join("tokens.json")
+}
+
 /// The authenticated Google client of one adapter process.
 pub struct Google {
     pub(crate) client: BaseClient,
 }
 
 impl Google {
-    /// A client over the user's token store, routed to `api_base` when set.
+    /// A client over the user-tier token store under `$HOME`, routed to
+    /// `api_base` when set.
+    ///
+    /// #10746 S13 fix round: never `BaseClient::new`, whose store also
+    /// reads `./.gworkspace-mcp/tokens.json` in the working directory and
+    /// lets it win. Errors: no `HOME`, a refused `api_base`.
     pub fn new(opts: &Options) -> Result<Google, String> {
-        let client = BaseClient::new().map_err(|e| format!("{e:#}"))?;
+        let home = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .ok_or("HOME is not set; the adapter finds its token store under it")?;
+        let storage = TokenStorage::with_path(token_store(Path::new(&home)));
+        let client = BaseClient::with_storage(storage).map_err(|e| format!("{e:#}"))?;
         let client = match &opts.api_base {
-            Some(root) => client
-                .with_loopback_root(root)
-                .map_err(|e| format!("{e:#}"))?,
+            Some(root) => loopback(client, root)?,
             None => client,
         };
         Ok(Google { client })
     }
+}
+
+#[cfg(feature = "loopback-seam")]
+fn loopback(client: BaseClient, root: &str) -> Result<BaseClient, String> {
+    client
+        .with_loopback_root(root)
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[cfg(not(feature = "loopback-seam"))]
+fn loopback(_: BaseClient, _: &str) -> Result<BaseClient, String> {
+    Err("--api-base is a test seam; this build lacks the loopback-seam feature".into())
 }
 
 /// The protocol error code of an API failure.
@@ -179,9 +223,24 @@ mod tests {
         assert_eq!(o.api_base.as_deref(), Some("http://127.0.0.1:1"));
         assert!(Options::parse(&["--token".into(), "x".into()]).is_err());
         assert!(Options::parse(&["--config".into()]).is_err());
+        assert!(
+            LOOPBACK_SEAM,
+            "the test build carries the seam (dev self-dependency)"
+        );
         let remote =
             Options::parse(&["--api-base".into(), "http://example.com:80".into()]).unwrap();
         assert!(Google::new(&remote).is_err(), "a remote root is refused");
+    }
+
+    /// #10746 S13 fix round: a build without `loopback-seam` refuses
+    /// `--api-base`; `Options::parse` uses the build's own flag.
+    #[test]
+    fn a_build_without_the_seam_refuses_api_base() {
+        let args: Vec<OsString> = vec!["--api-base".into(), "http://127.0.0.1:1".into()];
+        let e = Options::parse_with(&args, false).unwrap_err();
+        assert!(e.contains("loopback-seam"), "{e}");
+        assert!(Options::parse_with(&["--config".into(), "c".into()], false).is_ok());
+        assert_eq!(Options::parse(&args).is_ok(), LOOPBACK_SEAM);
     }
 
     #[test]

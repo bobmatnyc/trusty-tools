@@ -23,10 +23,17 @@ path = "src/bin/okf-adapter-gmail.rs"
 name = "okf-adapter-gdocs"
 path = "src/bin/okf-adapter-gdocs.rs"
 
+[features]
+# #10746 S13 fix round: the `--api-base` test seam (loopback-only Google root).
+# Off by default, so a default or release adapter refuses `--api-base` and can
+# never send its bearer token over cleartext HTTP. The conformance suite turns
+# it on through the dev self-dependency below.
+loopback-seam = ["trusty-gworkspace/loopback-seam"]
+
 [dependencies]
 # The shared Google layer: `BaseClient` (token store, refresh) and the bulk
 # listing and fetch plumbing moved out of trusty-agents (`api::bulk`).
-trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.0" }
+trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.1" }
 # The protocol constants and the `SourceRecord` wire shape, so the adapter
 # and the host cannot drift. The edge runs trusty-connectors -> trusty-okf
 # only; scripts/check_okf_boundary.sh bars the reverse (B1).
@@ -40,6 +47,9 @@ toml = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# #10746 S13 fix round: enables `loopback-seam` for this crate's own tests, so
+# the conformance suite drives the binaries against the stubbed Google.
+trusty-connectors = { path = ".", features = ["loopback-seam"] }
 base64 = { workspace = true }
 chrono = { workspace = true }
 serde_yaml = { workspace = true }
