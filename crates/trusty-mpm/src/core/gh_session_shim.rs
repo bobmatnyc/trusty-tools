@@ -11,7 +11,8 @@
 //! script 0755). Each run asks the real gh for `auth token --hostname <host>
 //! --user <login>` under the config dir the launch check verified, bounded,
 //! with every inherited token variable removed; puts the answer in the one
-//! token variable gh reads for that host; and `exec`s the real gh. A spawn env
+//! token variable gh reads for that host; and runs the real gh, refusing a
+//! primary GraphQL rate-limit refusal in one line (#10550). A spawn env
 //! names the dir in [`GH_SHIM_ENV`];
 //! [`crate::core::gh_shim_path::apply_gh_path`] turns that into a `PATH`
 //! prefix where the child is built. [`launch_pinned_login`] is the
@@ -189,8 +190,9 @@ fn valid_login(login: &str) -> bool {
 /// variables removed, killed after `bound_secs`. On failure or empty output it
 /// prints the fix to stderr and exits 1. Otherwise it removes the four token
 /// variables, exports the token as the one gh reads for `host`
-/// ([`token_var_for`]) and `exec`s the real gh with the caller's arguments.
-/// `Err` when a value cannot be quoted safely.
+/// ([`token_var_for`]) and runs the real gh with the caller's arguments
+/// through [`rate_limit_tail`] (#10550). `Err` when a value cannot be quoted
+/// safely.
 /// Test: `the_shim_script_names_the_login_and_never_a_token`,
 /// `a_ghes_shim_exports_gh_enterprise_token`,
 /// `the_shim_refuses_a_login_it_cannot_quote`.
@@ -213,6 +215,8 @@ pub(crate) fn shim_script(
     let unset = TOKEN_VARS.join(" ");
     let env_u = TOKEN_VARS.map(|v| format!("-u {v}")).join(" ");
     let shown = &verified.host;
+    // #10550: the final `exec` becomes the rate-limit-aware tail.
+    let rate_limit = rate_limit_tail(login, shown, bound_secs);
     Ok(format!(
         "#!/bin/sh\n\
          # trusty-mpm gh credential shim (#9750) for gh account '{login}' on {shown}.\n\
@@ -237,8 +241,66 @@ pub(crate) fn shim_script(
          {var}=\"$token\"\n\
          export {var}\n\
          unset token\n\
-         exec \"$real\" \"$@\"\n"
+         {rate_limit}"
     ))
+}
+
+/// The shim's tail: run the real gh, refusing a primary GraphQL rate-limit
+/// refusal cleanly (#10550, ruling D8f, option A).
+///
+/// Why: a refused GraphQL call answers HTTP 200 with an `errors` body; gh
+/// prints a partial body, `API rate limit (already )?exceeded` without a reset
+/// time, and exits 1 — the caller cannot tell when to come back.
+/// What: a tty stdout, `gh run watch` and any `--watch` call keep the plain
+/// `exec`, so a terminal and a stream are never held back. Every other call
+/// buffers stdout and stderr in a `mktemp -d` dir (a file, so no size bound;
+/// `exec` when `mktemp` fails). On exit 1 with the rate-limit text and no
+/// `HTTP 403` (that is the REST core quota) it prints one line naming the
+/// primary GraphQL limit and the reset from one bounded
+/// `gh api rate_limit --jq .resources.graphql.reset` (a REST core call), or
+/// "unknown", and exits 1 with no stdout. The call is never retried: the limit
+/// holds until the reset. Otherwise it replays stdout, then stderr, and the
+/// exit status.
+/// Test: `a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout`,
+/// `a_failed_reset_lookup_still_names_the_limit_and_exits_1`,
+/// `a_call_with_no_rate_limit_passes_output_and_status_through_unchanged`,
+/// `a_large_buffered_output_passes_through_whole`,
+/// `a_watch_command_keeps_the_exec_path`, `a_tty_stdout_keeps_the_exec_path`.
+fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
+    format!(
+        "[ -t 1 ] && exec \"$real\" \"$@\"\n\
+         case \" $* \" in *' --watch '*|*' --watch='*) exec \"$real\" \"$@\" ;; esac\n\
+         [ \"$1 $2\" = 'run watch' ] && exec \"$real\" \"$@\"\n\
+         out=$(mktemp -d 2>/dev/null) || exec \"$real\" \"$@\"\n\
+         trap 'rm -rf \"$out\"' EXIT\n\
+         trap 'exit 129' HUP\n\
+         trap 'exit 130' INT\n\
+         trap 'exit 143' TERM\n\
+         \"$real\" \"$@\" >\"$out/1\" 2>\"$out/2\"\n\
+         status=$?\n\
+         if [ \"$status\" -eq 1 ] && grep -Eq 'API rate limit (already )?exceeded' \"$out/2\" && ! grep -q 'HTTP 403' \"$out/2\"; then\n\
+         \x20 reset=$(\n\
+         \x20   \"$real\" api rate_limit --jq .resources.graphql.reset </dev/null 2>/dev/null &\n\
+         \x20   pid=$!\n\
+         \x20   (sleep {bound_secs}; kill \"$pid\") >/dev/null 2>&1 &\n\
+         \x20   watchdog=$!\n\
+         \x20   wait \"$pid\"\n\
+         \x20   status=$?\n\
+         \x20   kill \"$watchdog\" 2>/dev/null\n\
+         \x20   exit \"$status\"\n\
+         \x20 ) || reset=\n\
+         \x20 case \"$reset\" in\n\
+         \x20   ''|*[!0-9]*) when='the reset time is unknown (gh api rate_limit did not answer)' ;;\n\
+         \x20   *) utc=$(date -u -r \"$reset\" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || date -u -d \"@$reset\" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)\n\
+         \x20      when=\"it resets at ${{utc:-an unknown UTC time}} (epoch $reset)\" ;;\n\
+         \x20 esac\n\
+         \x20 echo \"tm: GitHub refused this gh call on its primary GraphQL rate limit (gh account '{login}' on {shown}); $when. tm did not retry it.\" >&2\n\
+         \x20 exit 1\n\
+         fi\n\
+         cat \"$out/1\"\n\
+         cat \"$out/2\" >&2\n\
+         exit \"$status\"\n"
+    )
 }
 
 /// A stable 64-bit FNV-1a hash of `bytes`, for a shim dir's name.
