@@ -169,12 +169,20 @@ pub(crate) fn render_entry(key: &str, value: &Value) -> String {
 /// Why: §2.2.1 "writes change only owned entries".
 /// What: walks the stored entries in file order. An entry whose value equals
 /// `values[key]` keeps its bytes; a changed one is re-rendered in place; one
-/// absent from `values` is dropped. Keys new to `values` are appended,
+/// absent from `values` is dropped, unless `renames` moves it to a key that
+/// holds the same value: then its bytes stay in place under the new key name
+/// (§2.2.1 "Malformed owned values"). Keys new to `values` are appended,
 /// key-sorted, after the last stored entry. The fences and any text before
 /// the first entry keep their bytes. Returns `None` when `raw` has no block
-/// or is not patchable.
-/// Test: `patch_rewrites_only_changed_entries`.
-pub fn patch(raw: &RawFrontmatter, values: &Mapping) -> Option<String> {
+/// or is not patchable. A key that is not a string is never emitted here; the
+/// caller's render postcondition refuses such a value set (#10746 A2).
+/// Test: `patch_rewrites_only_changed_entries`,
+/// `patch_renames_an_entry_in_place`.
+pub fn patch(
+    raw: &RawFrontmatter,
+    values: &Mapping,
+    renames: &[(String, String)],
+) -> Option<String> {
     if !raw.patchable {
         return None;
     }
@@ -183,12 +191,26 @@ pub fn patch(raw: &RawFrontmatter, values: &Mapping) -> Option<String> {
     let mut out = String::with_capacity(text.len());
     out.push_str(&text[..inner.start]);
     let mut pos = inner.start;
+    // Keys whose entry was written in place (kept, re-rendered or renamed).
+    let mut placed: Vec<&str> = Vec::new();
     for entry in &raw.entries {
         out.push_str(&text[pos..entry.span.start]);
-        match values.get(entry.key.as_str()) {
-            Some(v) if *v == entry.value => out.push_str(&text[entry.span.clone()]),
-            Some(v) => out.push_str(&render_entry(&entry.key, v)),
-            None => {}
+        let renamed = renames
+            .iter()
+            .find(|(from, to)| *from == entry.key && values.get(to.as_str()) == Some(&entry.value))
+            .map(|(_, to)| to.as_str());
+        if let Some(to) = renamed {
+            // The old bytes stay here under the new name; a new value for the
+            // old key is appended below like any new key.
+            out.push_str(&renamed_span(&text[entry.span.clone()], entry, to));
+            placed.push(to);
+        } else {
+            match values.get(entry.key.as_str()) {
+                Some(v) if *v == entry.value => out.push_str(&text[entry.span.clone()]),
+                Some(v) => out.push_str(&render_entry(&entry.key, v)),
+                None => {}
+            }
+            placed.push(entry.key.as_str());
         }
         pos = entry.span.end;
     }
@@ -196,7 +218,7 @@ pub fn patch(raw: &RawFrontmatter, values: &Mapping) -> Option<String> {
     let mut added: Vec<(&str, &Value)> = values
         .iter()
         .filter_map(|(k, v)| k.as_str().map(|k| (k, v)))
-        .filter(|(k, _)| !raw.entries.iter().any(|e| e.key == *k))
+        .filter(|(k, _)| !placed.contains(k))
         .collect();
     added.sort_by(|a, b| a.0.cmp(b.0));
     for (k, v) in added {
@@ -204,6 +226,16 @@ pub fn patch(raw: &RawFrontmatter, values: &Mapping) -> Option<String> {
     }
     out.push_str(&text[inner.end..]);
     Some(out)
+}
+
+/// One entry's span under a new key name: the bytes after the key are kept
+/// when the span starts with the plain key and a colon; a quoted key falls
+/// back to a fresh render of the same value.
+fn renamed_span(span: &str, entry: &RawEntry, to: &str) -> String {
+    match span.strip_prefix(entry.key.as_str()) {
+        Some(rest) if rest.starts_with(':') => format!("{to}{rest}"),
+        _ => render_entry(to, &entry.value),
+    }
 }
 
 #[cfg(test)]
@@ -250,14 +282,14 @@ mod tests {
             values.insert(Value::String(e.key.clone()), e.value.clone());
         }
         assert_eq!(
-            patch(&raw, &values).unwrap(),
+            patch(&raw, &values, &[]).unwrap(),
             doc,
             "no change writes the same bytes"
         );
         values.insert("status".into(), "deprecated".into());
         values.shift_remove("tags");
         values.insert("new_key".into(), Value::Bool(true));
-        let out = patch(&raw, &values).unwrap();
+        let out = patch(&raw, &values, &[]).unwrap();
         assert_eq!(
             out,
             "---\n# lead comment\ntype: A\nodd: {b: 2, a: 1}  # keep me\nstatus: deprecated\nnew_key: true\n---\n"
@@ -272,6 +304,25 @@ mod tests {
     fn unsplittable_frontmatter_is_not_patchable() {
         let raw = read("---\ntype: &t A\nkind: *t\n---\n");
         assert!(!raw.patchable);
-        assert!(patch(&raw, &Mapping::new()).is_none());
+        assert!(patch(&raw, &Mapping::new(), &[]).is_none());
+    }
+
+    /// Why: §2.2.1 — a malformed owned value moves to its `legacy_` key with
+    /// its raw bytes unchanged, in place.
+    /// What: renames `verified` to `legacy_verified` and checks the bytes.
+    /// Test: self-contained.
+    #[test]
+    fn patch_renames_an_entry_in_place() {
+        let doc = "---\ntype: A\nverified: \"yes\"  # odd\nz: b\n---\n";
+        let raw = read(doc);
+        let mut values = Mapping::new();
+        values.insert("type".into(), "A".into());
+        values.insert("z".into(), "b".into());
+        values.insert("legacy_verified".into(), "yes".into());
+        let renames = [("verified".to_string(), "legacy_verified".to_string())];
+        assert_eq!(
+            patch(&raw, &values, &renames).unwrap(),
+            "---\ntype: A\nlegacy_verified: \"yes\"  # odd\nz: b\n---\n"
+        );
     }
 }

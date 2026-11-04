@@ -16,7 +16,7 @@
 //! Test: `resolve_precedence`, `agent_maps_under_knowledge_dir`,
 //! `confine_rejects_traversal`, `assert_within_blocks_escape`.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::entity::slugify;
 
@@ -73,20 +73,17 @@ impl Roots {
 /// error describing the rejected segment otherwise.
 /// Test: `confine_rejects_traversal`.
 pub fn confine(root: &Path, segments: &[&str]) -> anyhow::Result<PathBuf> {
-    let mut out = root.to_path_buf();
-    for seg in segments {
-        if seg.is_empty() {
-            anyhow::bail!("empty path segment is not allowed");
+    // #10746: the lexical check moved to trusty-okf (`bundle::paths::confine`,
+    // SPEC-OKF-01 §2.7.2); this wrapper keeps trusty-kb's anyhow messages.
+    trusty_okf::bundle::paths::confine(root, segments).map_err(|e| match e {
+        trusty_okf::OkfError::PathEscape(seg) if seg.as_os_str().is_empty() => {
+            anyhow::anyhow!("empty path segment is not allowed")
         }
-        let rel = Path::new(seg);
-        for comp in rel.components() {
-            match comp {
-                Component::Normal(part) => out.push(part),
-                other => anyhow::bail!("path segment {seg:?} contains illegal component {other:?}"),
-            }
+        trusty_okf::OkfError::PathEscape(seg) => {
+            anyhow::anyhow!("path segment {seg:?} contains an illegal component")
         }
-    }
-    Ok(out)
+        other => anyhow::Error::from(other),
+    })
 }
 
 /// Assert a (possibly not-yet-existing) path stays under `root` once resolved.

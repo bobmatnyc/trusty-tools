@@ -3,23 +3,26 @@
 //!
 //! Why: a write that breaks OKF §11 must be refused before any byte moves,
 //! a write that changes nothing must write nothing, and a write must never
-//! leave a half-written file or follow a link out of the bundle.
-//! What: [`check_write`] applies the [`WriteMode`]; [`write_concept`] checks,
-//! renders, compares and writes through a `create_new` temporary file and a
-//! rename. `Bundle::put` (slice S3) adds §2.10 and the operation journal on
-//! top of it.
+//! leave a half-written file, follow a link out of the bundle, or replace
+//! bytes it did not read.
+//! What: [`check_write`] applies the [`WriteMode`] to the values that will be
+//! rendered; `write_concept` (crate-private since S3; `Bundle::put` is the
+//! public write) checks, refuses a stale or new-over-existing write, renders
+//! with a re-parse postcondition, compares and writes through
+//! `bundle::paths::atomic_write`.
 //! Test: `c03_strict_write_refuses_missing_type_and_changes_no_file`,
 //! `c114_unchanged_put_writes_zero_bytes_and_reads_malformed`,
-//! `c115_foreign_paths_read_only_and_write_is_invalid_id`.
+//! `c115_foreign_paths_read_only_and_write_is_invalid_id`,
+//! `a1_put_never_replaces_an_existing_file_with_a_new_concept`,
+//! `a1_put_refuses_a_stale_write`, `a2_strict_check_runs_on_rendered_values`.
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
 
 use crate::OkfError;
-use crate::format::concept::{Concept, render_concept};
+use crate::bundle::paths::{atomic_write, confined_file};
+use crate::format::concept::{Concept, parse_concept_at, render_concept};
 use crate::format::fields::Frontmatter;
+use crate::format::hash::bytes_hash;
 use crate::format::id::{ConceptId, ConceptRef};
 use crate::format::validate::{Finding, Severity, conformance_findings};
 
@@ -49,15 +52,18 @@ pub enum WriteOutcome {
 /// Apply `mode` to a concept's findings.
 ///
 /// What: the findings are the §11 conformance check plus the typed view's
-/// read warnings. Under `StrictErrors` any error refuses; under
-/// `StrictWarnings` any error or warning refuses. A refusal is
-/// [`OkfError::Conformance`] holding the blocking findings. Otherwise
-/// returns every finding.
-/// Test: `c03_strict_write_refuses_missing_type_and_changes_no_file`.
+/// read warnings, both computed from `c.values()`, the values the render
+/// writes (#10746 A2), never from a cached view. Under `StrictErrors` any
+/// error refuses; under `StrictWarnings` any error or warning refuses. A
+/// refusal is [`OkfError::Conformance`] holding the blocking findings.
+/// Otherwise returns every finding.
+/// Test: `c03_strict_write_refuses_missing_type_and_changes_no_file`,
+/// `a2_strict_check_runs_on_rendered_values`.
 pub fn check_write(c: &Concept, mode: WriteMode) -> Result<Vec<Finding>, OkfError> {
     let path = c.path();
-    let mut findings = conformance_findings(&c.frontmatter, &path);
-    findings.extend(Frontmatter::from_mapping(c.values(), &path).1);
+    let (view, read) = Frontmatter::from_mapping(c.values(), &path);
+    let mut findings = conformance_findings(&view, &path);
+    findings.extend(read);
     let blocks = |f: &Finding| match mode {
         WriteMode::Lenient => false,
         WriteMode::StrictErrors => f.severity == Severity::Error,
@@ -71,27 +77,87 @@ pub fn check_write(c: &Concept, mode: WriteMode) -> Result<Vec<Finding>, OkfErro
     }
 }
 
+/// Render `c` and prove the text reads back as exactly `c`'s values and body.
+///
+/// Why: #10746 A2 — what is checked must be what is written. A render that
+/// would emit a duplicate key, drop a non-string key or lose a value fails
+/// the re-parse comparison, so it is refused instead of written.
+/// What: renders, re-parses under the same ID, and compares values and body.
+/// A mismatch or a parse failure is [`OkfError::Parse`].
+/// Test: `a2_render_never_emits_duplicate_keys`.
+pub(crate) fn render_checked(c: &Concept) -> Result<String, OkfError> {
+    let rendered = render_concept(c);
+    let refuse = |message: String| OkfError::Parse {
+        path: PathBuf::from(c.path()),
+        line: None,
+        message,
+    };
+    let (back, _) = parse_concept_at(c.id.clone(), &rendered)
+        .map_err(|e| refuse(format!("rendered text does not read back: {e}")))?;
+    if back.values() != c.values() || back.body != c.body {
+        return Err(refuse(
+            "rendered text does not read back as the checked values; write refused \
+             (SPEC-OKF-01 §2.2.1)"
+                .to_string(),
+        ));
+    }
+    Ok(rendered)
+}
+
+/// The bytes on disk at `target`, or `None` when it does not exist.
+pub(crate) fn read_existing(target: &Path) -> Result<Option<Vec<u8>>, OkfError> {
+    match std::fs::read(target) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_err(target, source)),
+    }
+}
+
+/// Refuse a write that would replace bytes the caller never read (#10746 A1).
+///
+/// What: a new concept (no read hash) over an existing file is
+/// `Conflict { reason: "exists" }`; a read concept whose file now holds other
+/// bytes, or no longer exists, is `Conflict { reason: "stale_write" }`.
+/// Test: `a1_put_never_replaces_an_existing_file_with_a_new_concept`,
+/// `a1_put_refuses_a_stale_write`.
+pub(crate) fn check_not_stale(
+    id: &ConceptId,
+    c: &Concept,
+    existing: Option<&[u8]>,
+) -> Result<(), OkfError> {
+    let conflict = |reason: &str| OkfError::Conflict {
+        id: id.clone(),
+        reason: reason.to_string(),
+    };
+    match (existing, c.read_hash()) {
+        (None, None) => Ok(()),
+        (Some(_), None) => Err(conflict("exists")),
+        (Some(bytes), Some(h)) if bytes_hash(bytes) == h => Ok(()),
+        _ => Err(conflict("stale_write")),
+    }
+}
+
 /// Write a concept under `root`, atomically, only when its bytes change.
 ///
-/// Why: the S2 half of `Bundle::put` — strict refusal, raw-preserving render,
-/// zero-byte no-op and atomic replace (§2.2, §2.2.1, §4.4).
+/// Why: the shared core of `Bundle::put` and `Bundle::verify` — strict
+/// refusal, raw-preserving render, zero-byte no-op and atomic replace (§2.2,
+/// §2.2.1, §4.4). Crate-private since S3 (#10746): a public write here would
+/// bypass §2.10 and the fold rule.
 /// What: in order, each step refusing with no file changed:
 /// 1. a foreign concept is refused with [`OkfError::InvalidId`];
 /// 2. [`check_write`] applies `mode`;
 /// 3. a stored block that is not patchable is refused with
 ///    [`OkfError::Parse`];
-/// 4. `root` is canonicalised and must be a directory; every existing
-///    component below it on the way to the target must not be a symbolic
-///    link ([`OkfError::PathEscape`]).
+/// 4. the target is confined (`bundle::paths::confined_file`);
+/// 5. a stale or new-over-existing write is refused ([`check_not_stale`]);
+/// 6. the render must read back as the checked values ([`render_checked`]).
 ///
-/// Then the concept renders; equal bytes on disk return
-/// [`WriteOutcome::Unchanged`] and write nothing. Otherwise the bytes go to a
-/// `create_new` temporary file in the target's directory, are synced, and the
-/// file is renamed over the target. Returns the outcome and every finding.
+/// Then equal bytes on disk return [`WriteOutcome::Unchanged`] and write
+/// nothing; otherwise `atomic_write` replaces the file, keeping its mode.
 /// Test: `c03_strict_write_refuses_missing_type_and_changes_no_file`,
 /// `c114_unchanged_put_writes_zero_bytes_and_reads_malformed`,
 /// `c115_foreign_paths_read_only_and_write_is_invalid_id`.
-pub fn write_concept(
+pub(crate) fn write_concept(
     root: &Path,
     c: &Concept,
     mode: WriteMode,
@@ -101,7 +167,7 @@ pub fn write_concept(
         ConceptRef::Foreign(p) => return Err(foreign_refusal(p)),
     };
     let findings = check_write(c, mode)?;
-    if !c.raw.text.is_empty() && !c.raw.patchable {
+    if !c.raw().text.is_empty() && !c.raw().patchable {
         return Err(OkfError::Parse {
             path: PathBuf::from(c.path()),
             line: None,
@@ -110,13 +176,10 @@ pub fn write_concept(
                 .to_string(),
         });
     }
-    let target = confined_target(root, &id)?;
-    let rendered = render_concept(c);
-    let existing = match std::fs::read(&target) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(source) => return Err(io_err(&target, source)),
-    };
+    let target = confined_file(root, &id.file_name())?;
+    let existing = read_existing(&target)?;
+    check_not_stale(&id, c, existing.as_deref())?;
+    let rendered = render_checked(c)?;
     if existing.as_deref() == Some(rendered.as_bytes()) {
         return Ok((WriteOutcome::Unchanged, findings));
     }
@@ -130,7 +193,7 @@ pub fn write_concept(
 }
 
 /// The refusal for a write that targets a foreign file.
-fn foreign_refusal(p: &Path) -> OkfError {
+pub(crate) fn foreign_refusal(p: &Path) -> OkfError {
     let shown = p.to_string_lossy().into_owned();
     let stem = shown.strip_suffix(".md").unwrap_or(&shown);
     match ConceptId::parse(stem) {
@@ -147,61 +210,4 @@ fn io_err(path: &Path, source: std::io::Error) -> OkfError {
         path: path.to_path_buf(),
         source,
     }
-}
-
-/// Canonicalise `root` and check each existing component from it to the
-/// target of `id` (§2.11 file system rules 1 and 2).
-fn confined_target(root: &Path, id: &ConceptId) -> Result<PathBuf, OkfError> {
-    let root = root.canonicalize().map_err(|e| io_err(root, e))?;
-    if !root.is_dir() {
-        return Err(OkfError::PathEscape(root));
-    }
-    let rel = PathBuf::from(id.file_name());
-    let mut at = root.clone();
-    for comp in rel.components() {
-        let Component::Normal(part) = comp else {
-            return Err(OkfError::PathEscape(rel));
-        };
-        at.push(part);
-        match std::fs::symlink_metadata(&at) {
-            Ok(meta) if meta.file_type().is_symlink() => return Err(OkfError::PathEscape(at)),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
-            Err(e) => return Err(io_err(&at, e)),
-        }
-    }
-    Ok(root.join(rel))
-}
-
-/// Write `bytes` to `target` through a `create_new` temporary file in the
-/// same directory and a rename.
-fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), OkfError> {
-    let dir = target
-        .parent()
-        .ok_or_else(|| OkfError::PathEscape(target.to_path_buf()))?;
-    std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    // Process ID plus a counter: two writes in one process never share a name.
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(".{name}.okf-tmp-{}-{n}", std::process::id()));
-    let result = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .and_then(|mut f| {
-            f.write_all(bytes)?;
-            f.sync_all()
-        })
-        .and_then(|()| std::fs::rename(&tmp, target));
-    if let Err(e) = result {
-        // Removes only the temporary file this call created; a concept file
-        // is never deleted (criterion 10).
-        let _ = std::fs::remove_file(&tmp); // okf: temp-cleanup
-        return Err(io_err(target, e));
-    }
-    Ok(())
 }

@@ -68,6 +68,25 @@ pub enum FindingKind {
     UnmappedLegacyValue,
     /// A `.md` file whose path fails the §2.11 ID rule; read-only.
     ForeignPath,
+    /// #10746 S3: a malformed owned `verified`/`generated` value moved to its
+    /// `legacy_` key with its raw bytes (§2.2.1).
+    LegacyValueMoved,
+    /// #10746 S3: a symbolic link in the bundle; not followed, not read
+    /// (§2.11 file system rule 5).
+    SymlinkSkipped,
+    /// #10746 S3: two existing files share one §2.11 fold key.
+    FoldCollision,
+    /// #10746 S3: an `index.md` without a generator marker; left unchanged
+    /// (§2.3).
+    HandWrittenIndex,
+    /// #10746 S3: the content changed since its recorded verification; the
+    /// verification state reads Unverified (§2.10 "Out-of-band edits").
+    VerificationMismatch,
+    /// #10746 S3: a link `move_concept` left unchanged (§2.11 link rule 2, or
+    /// a foreign or unparseable file).
+    LinkNotRewritten,
+    /// #10746 S3: a file in the bundle that could not be read as text.
+    UnreadableFile,
 }
 
 /// One structured validation finding.
@@ -90,6 +109,24 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// A finding with no concept set.
+    pub fn new(
+        severity: Severity,
+        kind: FindingKind,
+        path: String,
+        message: String,
+        spec_ref: &'static str,
+    ) -> Finding {
+        Finding {
+            severity,
+            kind,
+            path,
+            concept: None,
+            message,
+            spec_ref,
+        }
+    }
+
     /// A parse-error finding for a file whose frontmatter does not parse.
     pub fn parse_error(path: String, message: String) -> Finding {
         Finding {

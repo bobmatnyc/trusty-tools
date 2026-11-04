@@ -3,18 +3,19 @@
 //! mapping and the strict file write (SPEC-OKF-01 §2.2, §2.2.1, §2.4, §2.8,
 //! §2.11).
 //!
-//! No async and no I/O beyond the concept file [`write::write_concept`]
-//! writes. Filled by slice S2 of #10746; the content hash (§2.10) comes with
-//! `Bundle::put` in S3.
+//! No async and no I/O beyond the concept file a crate-private write
+//! touches; `Bundle::put` is the public write. Filled by slices S2 and S3 of
+//! #10746.
 //!
 //! The items SPEC-OKF-01 §4.3 names are re-exported here:
 //! [`ConceptId`], [`Concept`], [`parse_concept`], [`render_concept`],
-//! [`trust_tier`], [`staleness`].
+//! [`content_hash`], [`trust_tier`], [`staleness`].
 
 pub mod concept;
 pub mod container;
 pub mod fields;
 pub mod frontmatter;
+pub mod hash;
 pub mod id;
 pub mod raw;
 pub mod v02;
@@ -26,7 +27,8 @@ pub use fields::{
     Actor, Field, Frontmatter, Generated, Source, Staleness, Status, TrustTier, Verification,
     staleness, trust_tier,
 };
+pub use hash::{ContentHash, LIFECYCLE_KEYS, content_hash};
 pub use id::{ConceptId, ConceptRef, concept_ref_for_path};
 pub use raw::{RawEntry, RawFrontmatter};
 pub use validate::{Finding, FindingKind, Severity};
-pub use write::{WriteMode, WriteOutcome, write_concept};
+pub use write::{WriteMode, WriteOutcome, check_write};

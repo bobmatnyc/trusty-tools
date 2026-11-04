@@ -102,7 +102,7 @@ fn resource_entry(s: String) -> Value {
 /// else gives `None`.
 /// Test: `c22_v01_timestamp_and_citations_read_as_v02`.
 pub fn generated_at(c: &Concept) -> Option<DateTime<FixedOffset>> {
-    match &c.frontmatter.generated {
+    match &c.frontmatter().generated {
         Field::Valid(g) => g.at,
         Field::Absent => c
             .get("timestamp")
@@ -125,7 +125,7 @@ pub fn sources(c: &Concept) -> Vec<Source> {
         title: None,
         author: None,
     };
-    match &c.frontmatter.sources {
+    match &c.frontmatter().sources {
         Field::Valid(list) => list
             .iter()
             .filter_map(|s| match s {

@@ -5,10 +5,13 @@
 //! What: the variants slice S2 of #10746 needs. Later slices add the rest of
 //! the §4.4 list; the enum is `#[non_exhaustive]` so that is not a break.
 //! Test: `c03_strict_write_refuses_missing_type_and_changes_no_file`,
-//! `c115_foreign_paths_read_only_and_write_is_invalid_id`.
+//! `c115_foreign_paths_read_only_and_write_is_invalid_id`,
+//! `c35_verify_with_stale_hash_is_conflict_and_writes_nothing`,
+//! `c140_fold_collision_on_put_and_move`.
 
 use std::path::PathBuf;
 
+use crate::format::id::ConceptId;
 use crate::format::validate::Finding;
 
 /// Why a trusty-okf call failed (SPEC-OKF-01 §4.4).
@@ -50,4 +53,20 @@ pub enum OkfError {
     /// A path leaves the bundle root, or crosses a symbolic link (§2.11).
     #[error("path escapes the bundle root or crosses a link: {0:?}")]
     PathEscape(PathBuf),
+    /// The concept does not exist (§4.4).
+    #[error("concept not found: {0}")]
+    NotFound(ConceptId),
+    /// The write conflicts with the bundle's state; no file changed (§4.4).
+    /// #10746 S3 reasons: `exists`, `stale_write`, `fold_collision`,
+    /// `stale_verify_hash`, `stale_after_extension`, `deprecated`,
+    /// `verified_is_owned_by_verify`, `legacy_verified_exists`,
+    /// `legacy_generated_exists`, `target_exists`,
+    /// `verification_record_exists`.
+    #[error("conflict on {id}: {reason}")]
+    Conflict {
+        /// The concept the write targets.
+        id: ConceptId,
+        /// Why the write was refused.
+        reason: String,
+    },
 }

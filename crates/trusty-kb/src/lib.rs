@@ -65,6 +65,10 @@ pub use trusty_okf::format::concept as entity;
 pub use trusty_okf::format::frontmatter;
 pub use trusty_okf::format::validate;
 pub use trusty_okf::profile::reconcile;
+// #10746 (S3): the graph reader moved from trusty-agents to trusty-okf
+// (SPEC-OKF-01 §2.7.2). trusty-agents reaches it through this re-export,
+// because its only OKF edge is trusty-kb until S11.
+pub use trusty_okf::bundle::graph;
 
 /// The pluggable schema profile and the OKF container rules, now split
 /// between `trusty_okf::profile` and `trusty_okf::format::container`

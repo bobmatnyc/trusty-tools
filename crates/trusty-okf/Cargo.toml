@@ -31,10 +31,17 @@ extract-worker = []
 chrono = { workspace = true }
 # `Finding` serialises; trusty-kb's `kb_validate` returns it as JSON.
 serde = { workspace = true }
+# #10746 S3: one JSON line per verification-record event under `_sources/`
+# (SPEC-OKF-01 §2.10, 3d C).
+serde_json = { workspace = true }
 # Frontmatter parse and render; workspace-standard 0.9 line.
 serde_yaml = { workspace = true }
+# #10746 S3: the §2.10 content hash and the stale-write check (A1).
+sha2 = { workspace = true }
 # `OkfError` (SPEC-OKF-01 §4.4).
 thiserror = { workspace = true }
+# #10746 S3: NFC form of the §2.11 fold key (fold_collision).
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
