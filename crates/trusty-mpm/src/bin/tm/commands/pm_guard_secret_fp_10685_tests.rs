@@ -209,3 +209,22 @@ fn cr_in_printer_text_refuses_10685() {
     let dir = tempfile::tempdir().expect("tempdir");
     assert!(verdict("printf '%s\\n' 'process\\.env\\.TZ\r'", dir.path()).is_some());
 }
+
+/// A path-qualified program is not the shell's printer: `./echo` can be any
+/// executable, so its operands stay screened (#10685 review, MEDIUM). Each
+/// program exists and runs a harmless body, so only the file rule can refuse.
+#[test]
+fn path_qualified_printer_refuses_10685() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = dir.path();
+    for name in ["echo", "bin/printf"] {
+        file(cwd, name, "printf 'hi\\n'\n");
+        let mode = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(cwd.join(name), mode).expect("chmod");
+    }
+    let absolute = format!("{}/bin/printf '.env '", cwd.display());
+    for command in ["./echo '.env '", "bin/printf '.env '", absolute.as_str()] {
+        assert!(verdict(command, cwd).is_some(), "{command:?} must refuse");
+    }
+}
