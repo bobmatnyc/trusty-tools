@@ -659,9 +659,14 @@ fn c144_no_child_processes_skips_worker_items_and_refuses_connectors() {
 
     let mail = Fx::new(&[]);
     let mut spec = mail.spec();
+    // #10746 S9: a connector run needs an account and a selection
+    // (criterion 86), so the store names both.
+    let mut params = ConnectorParams::new();
+    params.insert("account", toml::Value::String("work".into()));
+    params.insert("query", toml::Value::String("in:sent".into()));
     spec.store.locator = Locator::Connector {
         kind: "gmail".into(),
-        params: ConnectorParams::new(),
+        params,
     };
     let before = snapshot(&mail.root);
     let b = Bundle::open(&mail.root).unwrap().0;

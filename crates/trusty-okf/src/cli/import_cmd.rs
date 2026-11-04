@@ -21,17 +21,34 @@ use crate::bundle::Bundle;
 use crate::extract::NoWorker;
 use crate::format::concept::slugify;
 use crate::import::{
-    DocTreeSource, ImportPlan, ImportSpec, import, import_status, is_refusal, plan_import,
+    DocTreeSource, ImportPlan, ImportSource, ImportSpec, import, import_status, is_refusal,
+    plan_import,
 };
 use crate::state::{IndexStateDir, LiveIdentity};
 
-const IMPORT_OPTS: &[&str] = &["--from", "--store", "--include", "--exclude", "--json"];
+const IMPORT_OPTS: &[&str] = &[
+    "--from",
+    "--store",
+    "--include",
+    "--exclude",
+    "--json",
+    "--adapter",
+    "--adapter-arg",
+    "--adapter-env",
+    "--select",
+    "--operator-initiated",
+];
 const RUN_OPTS: &[&str] = &[
     "--from",
     "--store",
     "--include",
     "--exclude",
     "--json",
+    "--adapter",
+    "--adapter-arg",
+    "--adapter-env",
+    "--select",
+    "--operator-initiated",
     "--dry-run",
     "--feed",
     "--index",
@@ -132,12 +149,26 @@ fn store_for(a: &Args, root: &Path, now: &str) -> Result<(SourceSpec, PathBuf), 
 }
 
 /// The spec, the plan and the source for `import plan` and `import run`.
+/// #10746 S9: `--from adapter:<kind>` plans through an adapter process.
 fn prepare(
     a: &Args,
     root: &Path,
     stamp: &str,
-) -> Result<(Bundle, ImportPlan, DocTreeSource), Fail> {
+) -> Result<(Bundle, ImportPlan, Box<dyn ImportSource>), Fail> {
     let bundle = open(root)?;
+    if a.one("--from").is_some_and(|f| f.starts_with("adapter:")) {
+        let mut spec = super::adapter_cmd::spec_for(a, root, stamp)?;
+        spec.include = a.all("--include");
+        spec.exclude = a.all("--exclude");
+        let mut src = super::adapter_cmd::source_for(a, &spec)?;
+        let plan = plan_import(&bundle, &spec, src.as_mut()).map_err(|e| fail(&e))?;
+        return Ok((bundle, plan, src));
+    }
+    for k in ["--adapter", "--adapter-arg", "--adapter-env", "--select"] {
+        if a.one(k).is_some() {
+            return Err(Fail::Usage(format!("{k} needs --from adapter:<kind>")));
+        }
+    }
     let (store, dir) = store_for(a, root, stamp)?;
     let mut spec = ImportSpec::new(store);
     spec.include = a.all("--include");
@@ -145,7 +176,7 @@ fn prepare(
     let policy = DocStorePolicy::new(vec![dir.clone()]);
     let mut src = DocTreeSource::open(&dir, &policy).map_err(|e| fail(&e))?;
     let plan = plan_import(&bundle, &spec, &mut src).map_err(|e| fail(&e))?;
-    Ok((bundle, plan, src))
+    Ok((bundle, plan, Box::new(src)))
 }
 
 /// `import plan`: print the plan; write nothing.
@@ -172,7 +203,7 @@ pub(crate) fn run(a: &Args, out: &mut dyn Write, ctx: &Ctx<'_>) -> Result<i32, F
         output::plan(out, &plan, a.has("--json"));
         return Ok(0);
     }
-    let result = import(&mut bundle, &plan, &mut src, &NoWorker, now);
+    let result = import(&mut bundle, &plan, src.as_mut(), &NoWorker, now);
     let mut report = match result {
         Ok(r) => r,
         Err(e) => return Err(fail(&e)),

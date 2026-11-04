@@ -28,12 +28,14 @@
 //! `crash_at_every_import_boundary_recovers_to_the_uninterrupted_bundle`,
 //! `ledger_append_failure_ends_the_run_and_records_nothing`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, FixedOffset};
 use serde_yaml::{Mapping, Value};
 
+use super::connector::{self, Prepared, ThreadRun, touched_thread, write_threads};
 use super::plan::{Action, ImportPlan, SKIP_CODES, error_code, ownership, preflight};
+use super::record::check_selection;
 use super::report::{ImportFinding, ImportReport, ItemReport, is_refusal};
 use super::runlog::RunLog;
 use super::source::ImportSource;
@@ -196,6 +198,8 @@ pub fn import(
         failpoint("import-registry")?;
     }
     let profile = Profile::default_profile();
+    let family = check_selection(spec)?;
+    let mut threads = BTreeSet::new();
     for p in &plan.items {
         let item = |read: &str, write: &str| ItemReport::new(&p.item_id, p.id.clone(), read, write);
         let entry = match (p.action, &p.id) {
@@ -241,37 +245,68 @@ pub fn import(
                         continue;
                     }
                 };
-                let hint = TypeHint::for_path(&p.item_id);
-                let tier: &dyn Extractor = if BuiltinText::handles(&hint) {
-                    &BuiltinText
-                } else if !spec.child_processes {
-                    report
-                        .items
-                        .push(item("skipped", "none").because("policy_refused"));
-                    continue;
-                } else {
-                    ex
-                };
-                let fp = fingerprint(&bytes, tier);
-                if p.fingerprint.as_ref().is_some_and(|planned| *planned != fp) {
-                    report
-                        .items
-                        .push(item("failed", "none").because("stale_plan"));
-                    continue;
-                }
-                if ledger.is_current(&p.item_id, &fp) {
-                    report.items.push(item("read", "unchanged"));
-                    continue;
-                }
-                let got = match tier.extract(&bytes, &hint) {
-                    Ok(got) => got,
-                    Err(e) if SKIP_CODES.contains(&e.code.as_str()) => {
-                        report.items.push(item("skipped", "none").because(&e.code));
-                        continue;
-                    }
-                    Err(e) => {
-                        report.items.push(item("failed", "none").because(&e.code));
-                        continue;
+                // #10746 S9: a connector record is normalised, not extracted.
+                let prepared = match family {
+                    Some(f) => match connector::prepare(f, spec, p, id, &bytes) {
+                        Ok(x) if ledger.is_current(&p.item_id, &x.item.fingerprint) => {
+                            report.items.push(item("read", "unchanged"));
+                            continue;
+                        }
+                        Ok(x) => x,
+                        Err(r) => {
+                            report.items.push(r);
+                            continue;
+                        }
+                    },
+                    None => {
+                        let hint = TypeHint::for_path(&p.item_id);
+                        let tier: &dyn Extractor = if BuiltinText::handles(&hint) {
+                            &BuiltinText
+                        } else if !spec.child_processes {
+                            report
+                                .items
+                                .push(item("skipped", "none").because("policy_refused"));
+                            continue;
+                        } else {
+                            ex
+                        };
+                        let fp = fingerprint(&bytes, tier);
+                        if p.fingerprint.as_ref().is_some_and(|planned| *planned != fp) {
+                            report
+                                .items
+                                .push(item("failed", "none").because("stale_plan"));
+                            continue;
+                        }
+                        if ledger.is_current(&p.item_id, &fp) {
+                            report.items.push(item("read", "unchanged"));
+                            continue;
+                        }
+                        let got = match tier.extract(&bytes, &hint) {
+                            Ok(got) => got,
+                            Err(e) if SKIP_CODES.contains(&e.code.as_str()) => {
+                                report.items.push(item("skipped", "none").because(&e.code));
+                                continue;
+                            }
+                            Err(e) => {
+                                report.items.push(item("failed", "none").because(&e.code));
+                                continue;
+                            }
+                        };
+                        let (si, provenance) = source_item(
+                            &p.item_id,
+                            id,
+                            fp,
+                            p.timestamp.clone(),
+                            tier,
+                            got.fields,
+                            got.text,
+                        );
+                        Prepared {
+                            item: si,
+                            provenance,
+                            notes: got.notes,
+                            degraded: None,
+                        }
                     }
                 };
                 match ownership(&root, &lines, id) {
@@ -287,7 +322,7 @@ pub fn import(
                         continue;
                     }
                 }
-                for note in &got.notes {
+                for note in &prepared.notes {
                     report.findings.push(ImportFinding {
                         severity: "warning".into(),
                         kind: note.clone(),
@@ -295,15 +330,7 @@ pub fn import(
                         detail: String::new(),
                     });
                 }
-                let (si, provenance) = source_item(
-                    &p.item_id,
-                    id,
-                    fp,
-                    p.timestamp.clone(),
-                    tier,
-                    got.fields,
-                    got.text,
-                );
+                let (si, provenance) = (&prepared.item, &prepared.provenance);
                 log.start(&b, &stamp)?;
                 let first = !ledger.contains(&p.item_id);
                 match write_item(
@@ -311,12 +338,12 @@ pub fn import(
                     &profile,
                     &store,
                     id,
-                    &si,
+                    si,
                     &now,
                     &batch,
                     &Writer {
                         actor: IMPORT_ACTOR,
-                        provenance: &provenance,
+                        provenance,
                     },
                 ) {
                     Ok((outcome, found)) => {
@@ -344,6 +371,12 @@ pub fn import(
                         };
                         let mut r = item("read", write);
                         r.invalidated = cleared > 0;
+                        r.degraded = prepared.degraded.clone();
+                        if write != "unchanged"
+                            && let Some(t) = touched_thread(family, id)
+                        {
+                            threads.insert(t);
+                        }
                         r
                     }
                     Err(e) => item("read", "failed").because(error_code(&e)),
@@ -351,6 +384,18 @@ pub fn import(
             }
         };
         report.items.push(entry);
+    }
+    if !threads.is_empty() {
+        log.start(&b, &stamp)?;
+        let run = ThreadRun {
+            store: &store,
+            ledger: &ledger,
+            lines: &lines,
+            now: &now,
+            batch: &batch,
+        };
+        write_threads(&mut b, &run, &threads, &mut report.findings)
+            .map_err(|e| after_writes(&root, e))?;
     }
     let (_, left) = batch
         .flush_now(&mut b)

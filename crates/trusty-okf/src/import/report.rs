@@ -60,6 +60,9 @@ pub struct ItemReport {
     pub verification: Option<String>,
     /// The concept's old verification events moved to history this run.
     pub invalidated: bool,
+    /// #10746 S9: a recorded loss, for example `snippet_only` (§2.15 item
+    /// 11); counted in [`ImportReport::degraded`].
+    pub degraded: Option<String>,
 }
 
 impl ItemReport {
@@ -73,6 +76,7 @@ impl ItemReport {
             index: None,
             verification: None,
             invalidated: false,
+            degraded: None,
         }
     }
 
@@ -181,6 +185,7 @@ impl ImportReport {
         self.tombstoned = count(&|i| i.write == "tombstoned");
         self.write_failed = count(&|i| i.write == "failed");
         self.missing = count(&|i| i.write == "missing");
+        self.degraded = count(&|i| i.degraded.is_some());
         self.written = self.created + self.updated + self.tombstoned;
         let idx = |name: &str| count(&|i| i.touched() && i.index.as_deref() == Some(name));
         self.acknowledged = idx("acknowledged");
@@ -277,7 +282,7 @@ fn verification_name(v: &VerificationState) -> &'static str {
 ///
 /// What: a report maps through [`ImportReport::exit_code`]. An error
 /// `import` returns only before its first write — `SourceOverlap`,
-/// `PolicyRefused` (run-level `policy_refused`), `RootMismatch`,
+/// `SelectionRequired`, `PolicyRefused` (run-level `policy_refused`), `RootMismatch`,
 /// `StateDirInBundle`, `RecoveryPending`, `InvalidId`, `PathEscape` or
 /// `Parse` (an invalid glob or registry) — is 2. Every other error is 1;
 /// `import` turns a refusal-shaped error raised after its first write into
@@ -297,6 +302,7 @@ pub(crate) fn is_refusal(e: &OkfError) -> bool {
     matches!(
         e,
         OkfError::SourceOverlap { .. }
+            | OkfError::SelectionRequired(_)
             | OkfError::PolicyRefused { .. }
             | OkfError::RootMismatch { .. }
             | OkfError::StateDirInBundle(_)

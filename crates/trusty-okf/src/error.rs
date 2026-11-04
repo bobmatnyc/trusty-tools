@@ -102,6 +102,11 @@ pub enum OkfError {
         /// The canonical bundle root.
         bundle_root: PathBuf,
     },
+    /// #10746 S9: an import over an authenticated source names no account
+    /// or no source selection; refused before any spawn or write (§2.15
+    /// item 1, criterion 86). The string names what is missing.
+    #[error("selection required: {0}")]
+    SelectionRequired(String),
     /// #10746 S5: an `IndexStateDir` inside the bundle root (§4.9.1).
     #[error("index state directory lies inside the bundle root: {0:?}")]
     StateDirInBundle(PathBuf),

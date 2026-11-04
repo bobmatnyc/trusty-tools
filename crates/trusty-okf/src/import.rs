@@ -14,17 +14,25 @@
 //! deletion-safe listing, and returns an [`ImportReport`]. [`DocTreeSource`]
 //! is the one source adapter in this crate (B6); authenticated adapters live
 //! outside it. [`import_status`] reads the per-run start and finish lines.
-//! Slice S8 of #10746.
+//! Slice S8 of #10746. #10746 S9: [`adapter`] spawns an authenticated
+//! source's adapter process with exactly its caller's environment list and
+//! speaks the `acquire` role to it; [`record`] normalises its mail and docs
+//! items under the Appendix C IDs, provenance and body rules.
 //! Test: `crates/trusty-okf/tests/import_criteria.rs` (criteria 71-85, 136,
-//! 137, 144), `import_fault_tests` (crash recovery), and the feed criteria
-//! 85, 129, 135 and 141 in `import_feed_criteria.rs`.
+//! 137, 144), `import_fault_tests` (crash recovery), the feed criteria
+//! 85, 129, 135 and 141 in `import_feed_criteria.rs`, and criteria 86-98
+//! and 132 in `adapter_criteria.rs` (S9).
 //!
 //! # Spec References
-//! - SPEC-OKF-01 §2.13, §2.13.1, §2.14, §4.9, §4.10, Appendix A.
+//! - SPEC-OKF-01 §2.13, §2.13.1, §2.14, §2.15, §4.9, §4.10, Appendix A,
+//!   Appendix C.
 
+pub mod adapter;
 mod apply;
+mod connector;
 pub mod id;
 mod plan;
+pub mod record;
 mod report;
 mod runlog;
 mod source;

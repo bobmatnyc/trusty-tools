@@ -37,7 +37,7 @@ use crate::extract::ExtractError;
 pub const MAX_ITEM_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One listed item (DOC-55 §5.1 descriptor).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListEntry {
     /// The source's immutable item ID; for a tree, the source-relative path.
     pub item_id: String,
@@ -45,6 +45,14 @@ pub struct ListEntry {
     pub timestamp: Option<String>,
     /// Why the item is not read, when it is not (§2.14 rule 8).
     pub skip: Option<String>,
+    /// #10746 S9: the item's group, for mail its thread ID (§2.15 item 6).
+    pub group: Option<String>,
+    /// #10746 S9: the source revision, when the listing reports one (mail:
+    /// the message ID; docs: `version`, else `modifiedTime`). An item with
+    /// a revision equal to its ledger record is not fetched (DOC-55 C2).
+    pub revision: Option<String>,
+    /// #10746 S9: the source marks the item deleted (docs `trashed`).
+    pub deleted: bool,
 }
 
 /// One page of a listing (§2.13 "Listing completeness").
@@ -94,6 +102,7 @@ fn entry(rel: String, timestamp: Option<String>, skip: Option<&str>) -> ListEntr
         item_id: rel,
         timestamp,
         skip: skip.map(str::to_string),
+        ..ListEntry::default()
     }
 }
 

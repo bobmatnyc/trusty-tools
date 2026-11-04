@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Write;
 
+mod adapter_cmd;
 mod import_cmd;
 mod output;
 
@@ -32,6 +33,9 @@ pub const USAGE: &str = "usage:
   trusty-okf import plan   <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]... [--json]
   trusty-okf import run    <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]...
                            [--dry-run] [--feed --index ID --state-dir DIR --socket PATH] [--json]
+  trusty-okf import plan|run <bundle-root> --from adapter:<gmail|drive|gdocs> --adapter PATH
+                           --select account=LABEL --select KEY=VALUE... [--adapter-arg A]...
+                           [--adapter-env NAME=VALUE]... [--operator-initiated] [--store ID] ...
   trusty-okf import status <bundle-root> [--store ID] [--index ID --state-dir DIR [--socket PATH]] [--json]
   trusty-okf feed          <bundle-root> --index ID --state-dir DIR --socket PATH [--json]
 ";
@@ -49,8 +53,21 @@ const VALUED: &[&str] = &[
     // runs byte for byte; left out of `USAGE` on purpose (Architect ruling).
     // Without it the CLI takes the system clock.
     "--now",
+    // #10746 S9: the adapter process of an authenticated source (3m A).
+    "--adapter",
+    "--adapter-arg",
+    "--adapter-env",
+    "--select",
 ];
-const FLAGS: &[&str] = &["--json", "--feed", "--dry-run"];
+/// Options that may repeat.
+const REPEATED: &[&str] = &[
+    "--include",
+    "--exclude",
+    "--adapter-arg",
+    "--adapter-env",
+    "--select",
+];
+const FLAGS: &[&str] = &["--json", "--feed", "--dry-run", "--operator-initiated"];
 
 /// Parsed arguments: positionals in order, and options.
 #[derive(Debug, Default)]
@@ -93,7 +110,7 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
             let v = it.next().ok_or(format!("{a} needs a value"))?;
             let v = v.to_str().ok_or("an argument is not UTF-8")?.to_string();
             let slot = out.opts.entry(a.clone()).or_default();
-            if !slot.is_empty() && a != "--include" && a != "--exclude" {
+            if !slot.is_empty() && !REPEATED.contains(&a.as_str()) {
                 return Err(format!("{a} given twice"));
             }
             slot.push(v);

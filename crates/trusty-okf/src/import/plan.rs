@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Serialize;
 
+use super::connector::{PlanCtx, plan_entry};
 use super::id::concept_id_for_source;
+use super::record::{check_selection, deletion_capable};
 use super::source::ImportSource;
 use crate::OkfError;
 use crate::build::collide::{self, Pins};
@@ -53,6 +55,10 @@ pub enum ContentPolicy {
     /// The full body text, no snippet in place of a body (3k A).
     #[default]
     FullText,
+    /// #10746 S9: the full body text; a mail item with no decodable text
+    /// part writes its snippet, flagged `degraded: snippet_only` (§2.15
+    /// item 11, a per-store policy that allows snippets).
+    AllowSnippet,
 }
 
 /// One import run's request (SPEC-OKF-01 §4.2 `ImportSpec`).
@@ -168,7 +174,9 @@ pub(crate) fn preflight(bundle_root: &Path, spec: &ImportSpec) -> Result<(), Okf
                  allows no child process"
             ),
         }),
-        Locator::Connector { .. } => Ok(()),
+        // #10746 S9: an authenticated source needs an account and a
+        // selection (§2.15 item 1, criterion 86).
+        Locator::Connector { .. } => check_selection(spec).map(|_| ()),
         Locator::DocStore { path, .. } => {
             let canon = |p: &Path| {
                 p.canonicalize()
@@ -230,7 +238,7 @@ fn item(item_id: &str, timestamp: Option<String>) -> PlannedItem {
     }
 }
 
-fn set(p: &mut PlannedItem, action: Action, reason: Option<&str>) {
+pub(crate) fn set(p: &mut PlannedItem, action: Action, reason: Option<&str>) {
     p.action = action;
     p.reason = reason.map(str::to_string);
 }
@@ -297,24 +305,43 @@ pub fn plan_import(
     let mut complete = true;
     loop {
         let page = src.list(cursor.as_deref())?;
-        complete &= page.complete;
+        // #10746 S9: the adapter's flag describes the listing, so the last
+        // page's flag counts; an earlier page is never complete on its own.
+        complete = page.complete;
         let room = spec.max_items.saturating_sub(entries.len());
         let cut = page.entries.len() > room;
         entries.extend(page.entries.into_iter().take(room));
         let stalled = page.cursor.is_some() && page.cursor == cursor;
-        cursor = page.cursor;
-        if cut || stalled || cursor.is_none() {
+        // #10746 S9: a page cut at the ceiling is listed again on resume,
+        // so the reported cursor is the one that asked for it; the ledger
+        // skips the items already taken (§2.15 item 9).
+        if !cut {
+            cursor = page.cursor;
+        }
+        // #10746 S9: a listing that fills the ceiling stops there, so a
+        // page token left over is reported, never followed (criterion 132).
+        let full = entries.len() >= spec.max_items;
+        if cut || full || stalled || cursor.is_none() {
             complete &= !stalled;
             break;
         }
     }
     let listed = entries.len();
     let exhausted = complete && cursor.is_none() && listed < spec.max_items;
-    let deletion_safe = exhausted
-        && matches!(spec.store.locator, Locator::DocStore { .. })
-        && spec.store.tombstone_deleted;
+    // #10746 S9: a recursive docs listing can detect deletions too; mail
+    // never can (Appendix C "Complete listing").
+    let deletion_safe = exhausted && deletion_capable(spec) && spec.store.tombstone_deleted;
+    let family = check_selection(spec)?;
     let ledger = Ledger::load(root, &spec.store.id)?;
     let lines = revisions::read(root)?;
+    let cx = family.map(|family| PlanCtx {
+        family,
+        spec,
+        ledger: &ledger,
+        lines: &lines,
+        root,
+        deletion_safe,
+    });
     let mut items = Vec::new();
     let mut shas: BTreeMap<String, String> = BTreeMap::new();
     for e in &entries {
@@ -327,6 +354,11 @@ pub fn plan_import(
         let path = Path::new(&e.item_id);
         if (!spec.include.is_empty() && !include.is_match(path)) || exclude.is_match(path) {
             set(&mut p, Action::Skip, Some("excluded"));
+            items.push(p);
+            continue;
+        }
+        if let Some(cx) = &cx {
+            plan_entry(cx, src, e, &mut p);
             items.push(p);
             continue;
         }
