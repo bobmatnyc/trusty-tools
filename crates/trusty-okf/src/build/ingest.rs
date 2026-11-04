@@ -133,8 +133,16 @@ pub struct SourceItem {
 
 /// #10746 S8: the provenance keys the engine places from its caller's
 /// [`Writer`] (`sources[]`, §2.14 rule 5; `extracted_by`, DOC-55 Q3); any
-/// other key there is quarantined like a source field (§2.13.1).
-pub const PROVENANCE_KEYS: [&str; 2] = ["sources", "extracted_by"];
+/// other key there is quarantined like a source field (§2.13.1). #10746
+/// S10: plus the worker's §2.16 provenance, which the host derives.
+pub const PROVENANCE_KEYS: [&str; 6] = [
+    "sources",
+    "extracted_by",
+    "extract_protocol",
+    "xberg_version",
+    "extract_config",
+    "extract_input_sha256",
+];
 
 /// #10746 S8: who writes an item: the `generated.by` actor (ingest or
 /// import, §2.14 rule 11) and the provenance the writer itself derives,

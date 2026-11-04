@@ -18,11 +18,11 @@ use crate::OkfError;
 use crate::build::policy::DocStorePolicy;
 use crate::build::registry::{Locator, SourceRegistry, SourceSpec};
 use crate::bundle::Bundle;
-use crate::extract::NoWorker;
+use crate::extract::{Extractor, NoWorker};
 use crate::format::concept::slugify;
 use crate::import::{
     DocTreeSource, ImportPlan, ImportSource, ImportSpec, import, import_status, is_refusal,
-    plan_import,
+    plan_import, plan_import_with,
 };
 use crate::state::{IndexStateDir, LiveIdentity};
 
@@ -37,6 +37,7 @@ const IMPORT_OPTS: &[&str] = &[
     "--adapter-var",
     "--select",
     "--operator-initiated",
+    "--worker",
 ];
 const RUN_OPTS: &[&str] = &[
     "--from",
@@ -55,6 +56,7 @@ const RUN_OPTS: &[&str] = &[
     "--state-dir",
     "--socket",
     "--now",
+    "--worker",
 ];
 
 /// A library error as a CLI failure, with its §4.10 code: 2 for a
@@ -148,12 +150,85 @@ fn store_for(a: &Args, root: &Path, now: &str) -> Result<(SourceSpec, PathBuf), 
     Ok((row, dir))
 }
 
+/// The run's extractor for items the built-in tier does not handle:
+/// the worker `--worker` names, else [`NoWorker`] (`worker_absent`).
+///
+/// #10746 S10: the worker is found only at the given path, never through
+/// `PATH` (§2.16 "Absent worker"); a missing file is `worker_absent`, shown
+/// by the plan. Working directories go under `/tmp`, a fixed path, since
+/// the CLI reads no environment variable (B3). Without the
+/// `extract-worker` feature `--worker` is refused before any write (2).
+fn extractor(a: &Args, ctx: &Ctx<'_>) -> Result<Box<dyn Extractor>, Fail> {
+    let Some(path) = a.one("--worker") else {
+        return Ok(Box::new(NoWorker));
+    };
+    #[cfg(feature = "extract-worker")]
+    {
+        use crate::extract::worker::{WorkerConfig, WorkerExtractor};
+        let cfg = WorkerConfig::new(path, "/tmp");
+        let mut w = WorkerExtractor::new(cfg).map_err(|e| Fail::Code(2, e))?;
+        if ctx.catch_interrupt {
+            w = w.with_cancel(interrupt::watch().map_err(|e| Fail::Code(2, e))?);
+        }
+        Ok(Box::new(w))
+    }
+    #[cfg(not(feature = "extract-worker"))]
+    {
+        // No worker client in this build, so SIGINT keeps its default.
+        let _ = (path, ctx.catch_interrupt);
+        Err(Fail::Code(
+            2,
+            "this build has no extract-worker feature; --worker is not available".into(),
+        ))
+    }
+}
+
+/// A context that leaves SIGINT alone (`import plan` writes nothing).
+fn no_interrupt() -> Ctx<'static> {
+    Ctx {
+        #[cfg(feature = "search-feed")]
+        sink: None,
+        catch_interrupt: false,
+        _p: std::marker::PhantomData,
+    }
+}
+
+/// #10746 S10 fix: SIGINT becomes the worker run's cancel flag.
+#[cfg(feature = "extract-worker")]
+mod interrupt {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use nix::sys::signal::{SigSet, Signal};
+
+    /// Block SIGINT in this thread (threads it starts later inherit the
+    /// mask) and start a thread that waits for it and sets the flag. Without
+    /// `unsafe`: no handler runs; `sigwait` returns the signal. Errors: the
+    /// mask could not be set; the run is refused before any write, so
+    /// Ctrl-C can never orphan a worker.
+    pub(super) fn watch() -> Result<Arc<AtomicBool>, String> {
+        let mut set = SigSet::empty();
+        set.add(Signal::SIGINT);
+        set.thread_block()
+            .map_err(|e| format!("cannot take over SIGINT: {e}"))?;
+        let flag = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&flag);
+        std::thread::spawn(move || {
+            if set.wait() == Ok(Signal::SIGINT) {
+                seen.store(true, Ordering::SeqCst);
+            }
+        });
+        Ok(flag)
+    }
+}
+
 /// The spec, the plan and the source for `import plan` and `import run`.
 /// #10746 S9: `--from adapter:<kind>` plans through an adapter process.
 fn prepare(
     a: &Args,
     root: &Path,
     stamp: &str,
+    ex: &dyn Extractor,
 ) -> Result<(Bundle, ImportPlan, Box<dyn ImportSource>), Fail> {
     let bundle = open(root)?;
     if a.one("--from").is_some_and(|f| f.starts_with("adapter:")) {
@@ -175,7 +250,7 @@ fn prepare(
     spec.exclude = a.all("--exclude");
     let policy = DocStorePolicy::new(vec![dir.clone()]);
     let mut src = DocTreeSource::open(&dir, &policy).map_err(|e| fail(&e))?;
-    let plan = plan_import(&bundle, &spec, &mut src).map_err(|e| fail(&e))?;
+    let plan = plan_import_with(&bundle, &spec, &mut src, ex).map_err(|e| fail(&e))?;
     Ok((bundle, plan, Box::new(src)))
 }
 
@@ -183,7 +258,8 @@ fn prepare(
 pub(crate) fn plan(a: &Args, out: &mut dyn Write) -> Result<i32, Fail> {
     a.only(IMPORT_OPTS).map_err(Fail::Usage)?;
     let root = bundle_root(a, 2)?;
-    let (_, plan, _) = prepare(a, &root, "")?;
+    let ex = extractor(a, &no_interrupt())?;
+    let (_, plan, _) = prepare(a, &root, "", ex.as_ref())?;
     output::plan(out, &plan, a.has("--json"));
     Ok(0)
 }
@@ -198,12 +274,13 @@ pub(crate) fn run(a: &Args, out: &mut dyn Write, ctx: &Ctx<'_>) -> Result<i32, F
     }
     let now = now(a)?;
     let stamp = crate::bundle::record::instant_string(&now);
-    let (mut bundle, plan, mut src) = prepare(a, &root, &stamp)?;
+    let ex = extractor(a, ctx)?;
+    let (mut bundle, plan, mut src) = prepare(a, &root, &stamp, ex.as_ref())?;
     if a.has("--dry-run") {
         output::plan(out, &plan, a.has("--json"));
         return Ok(0);
     }
-    let result = import(&mut bundle, &plan, src.as_mut(), &NoWorker, now);
+    let result = import(&mut bundle, &plan, src.as_mut(), ex.as_ref(), now);
     let mut report = match result {
         Ok(r) => r,
         Err(e) => return Err(fail(&e)),

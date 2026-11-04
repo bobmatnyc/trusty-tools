@@ -158,6 +158,9 @@ pub struct ImportReport {
     pub items: Vec<ItemReport>,
     /// The run's findings.
     pub findings: Vec<ImportFinding>,
+    /// #10746 S10: run-level extraction-worker failures (§2.16). Any entry
+    /// makes the run incomplete and its exit code at least 3.
+    pub worker_errors: Vec<crate::WorkerError>,
 }
 
 fn index_name(s: &IndexState) -> &'static str {
@@ -210,8 +213,13 @@ impl ImportReport {
                 .filter(|i| i.touched())
                 .all(|i| matches!(i.index.as_deref(), Some("searchable" | "withdrawn")));
         self.complete = self.skipped + self.failed + self.write_failed + self.degraded == 0
-            && self.pagination_exhausted;
-        self.exit_code = if self.skipped + self.failed + self.write_failed > 0 {
+            && self.pagination_exhausted
+            && self.worker_errors.is_empty();
+        // #10746 S10: a run-level worker failure is never reported as a
+        // clean run, even when every committed item kept its outcome.
+        self.exit_code = if self.skipped + self.failed + self.write_failed > 0
+            || !self.worker_errors.is_empty()
+        {
             3
         } else if self.fed && !self.fully_searchable {
             4

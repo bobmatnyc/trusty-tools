@@ -160,3 +160,40 @@ pub enum OkfError {
         reason: String,
     },
 }
+
+/// A run-level failure of the extraction worker (SPEC-OKF-01 §2.16, §4.2).
+///
+/// Why: items fail one by one (DOC-55 E3), but a worker that never
+/// finishes its handshake, ignores `shutdown` or cannot be reaped is a fact
+/// about the whole run. The import report records it so the operator sees
+/// it even when every committed item kept its outcome.
+/// What: `Spawn` (the process could not start, or exited before its
+/// `hello`), `HandshakeTimeout`, `Incompatible` (no common protocol, a
+/// non-deterministic worker, a `sandbox` claim that disagrees with the
+/// host's spawn evidence, or a changed worker identity mid-run),
+/// `ShutdownTimeout` and `ReapTimeout`. #10746 S10: carried in
+/// `ImportReport::worker_errors`; never raised as an `OkfError`.
+/// Test: `c121_silent_worker_times_out_its_handshake_and_is_reaped`,
+/// `c123_worker_ignoring_shutdown_is_killed_and_reaped`,
+/// `c124_forced_reap_timeout_returns_within_the_deadline`,
+/// `c100_no_common_protocol_is_incompatible_and_other_items_import`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, thiserror::Error)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
+pub enum WorkerError {
+    /// The worker could not be started, or exited before its `hello`.
+    #[error("worker spawn failed: {0}")]
+    Spawn(String),
+    /// No valid `hello` reply within the handshake deadline.
+    #[error("worker handshake timed out")]
+    HandshakeTimeout,
+    /// The worker cannot serve this host (Appendix B `worker_incompatible`).
+    #[error("worker is incompatible")]
+    Incompatible,
+    /// The worker did not exit within the shutdown deadline.
+    #[error("worker shutdown timed out")]
+    ShutdownTimeout,
+    /// The killed worker was not reaped within the reap deadline; a reaper
+    /// thread keeps waiting.
+    #[error("worker reap timed out")]
+    ReapTimeout,
+}

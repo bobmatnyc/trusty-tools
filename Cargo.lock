@@ -11708,6 +11708,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "globset",
+ "nix 0.29.0",
  "rustix 1.1.4",
  "serde",
  "serde_json",

@@ -643,6 +643,12 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy -p trusty-okf --all-targets --features search-feed -- -D warnings
 
+      # #10746 S10: no crate enables `extract-worker` either; this lints the
+      # worker client and its criteria.
+      - name: cargo clippy -p trusty-okf --features extract-worker -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy -p trusty-okf --all-targets --features extract-worker -- -D warnings
+
       # #10013: trusty-agents builds trusty-memory with only `mcp-schema`, but
       # feature unification turns `server` back on in the `--workspace` run
       # above, so dead code under `mcp-schema` alone reached main unseen. This
@@ -1786,6 +1792,12 @@ jobs:
       - name: cargo test -p trusty-okf --features search-feed
         if: contains(format(' {0} ', matrix.crates), ' trusty-okf ')
         run: cargo test -p trusty-okf --features search-feed --no-fail-fast
+
+      # #10746 S10: the worker criteria (`worker_criteria`) and the worker
+      # unit tests run only with `extract-worker`.
+      - name: cargo test -p trusty-okf --features extract-worker
+        if: contains(format(' {0} ', matrix.crates), ' trusty-okf ')
+        run: cargo test -p trusty-okf --features extract-worker --no-fail-fast
 
   # The single context for this suite. "Must equal success" polarity, as in
   # `test` above, so a failed or skipped plan fails closed.
