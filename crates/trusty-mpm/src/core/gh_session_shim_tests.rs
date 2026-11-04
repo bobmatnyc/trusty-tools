@@ -856,7 +856,8 @@ const GRAPHQL_REFUSAL: &str = "printf '{\"data\":null}\\n'; \
 fn a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout() {
     let calls = tempfile::NamedTempFile::new().expect("call log");
     let log = calls.path().display();
-    let reset = "[ \"$3 $4\" = '--jq .resources.graphql.reset' ] || exit 7; echo 1767225600; exit 0";
+    let reset =
+        "[ \"$3 $4\" = '--jq .resources.graphql.reset' ] || exit 7; echo 1767225600; exit 0";
     let call = format!("echo call >> '{log}'; {GRAPHQL_REFUSAL}");
     let (_tmp, dir) = rate_limit_shim(reset, &call);
     let out = run_shim_args(&dir, &["pr", "list"]);
