@@ -70,8 +70,9 @@ pub struct IndexFeedReport {
     /// Per-path failures and coverage notes, across the tree.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
-    /// This source's own paths that are unreadable or still owe a push or a
-    /// remove after the pass. Internal: the publication gate reads it.
+    /// This source's own paths that failed this pass (probe failures
+    /// aside), are unreadable, or still owe a push or a remove. Internal:
+    /// the publication gate reads it.
     #[serde(skip)]
     source_blocked: Vec<String>,
 }
@@ -94,14 +95,19 @@ impl IndexFeedReport {
     /// The pass covers the whole tree, and §5.4 F2 says one failing concept
     /// does not stop the others, so an unreadable or refused path of
     /// ANOTHER source must not block this one (#10746 S12 fix round).
-    /// What: the pass ran into `index` with no pass-level reason, and no
-    /// path of this source's ledger is unreadable or still owes a push or a
-    /// remove after the pass; a put or remove that failed this pass leaves
-    /// exactly such a task. A failed or owed probe does not block
-    /// (acknowledgement, as before S12). Errors on other paths stay in
-    /// `errors`.
+    /// What: the pass ran into `index` with no pass-level reason; no path
+    /// of this source's ledger failed this pass with anything but a probe
+    /// failure; and the offline read finds none of them unreadable or owing
+    /// a push or a remove. The pass's own errors are needed: after an
+    /// identity change (F14) a refused re-push or old-revision remove
+    /// leaves the earlier acknowledgement at matching bytes, which the
+    /// offline read treats as settled. A failed or owed probe does not
+    /// block (acknowledgement, as before S12). Errors on other paths stay
+    /// in `errors`.
     /// Test: `unrelated_unreadable_concept_does_not_block_publication`,
-    /// `refused_put_of_own_entity_blocks_publication`.
+    /// `refused_put_of_own_entity_blocks_publication`,
+    /// `identity_change_with_refused_own_put_blocks_publication`,
+    /// `identity_change_with_refused_own_remove_blocks_publication`.
     pub fn acknowledged(&self, index: &str) -> bool {
         self.reason.is_none()
             && self.index.as_deref() == Some(index)
@@ -248,6 +254,21 @@ pub async fn feed_source(
     fold(store, spec, state, report)
 }
 
+/// Whether a feed error is a probe failure, not a failed put or remove.
+///
+/// #10746 S12: `trusty_okf::feed::FeedError` carries no kind, so this
+/// matches the exact message prefixes `feed::pass` writes for its probe
+/// arms: `probe ` (`probe failed: …`, `probe could not run: …`),
+/// `withdrawal probe ` and `recheck could not run`. Every other per-path
+/// message (`put not confirmed`, `remove …`, `unreadable: …`) is a task
+/// failure.
+/// Test: `identity_change_with_refused_own_put_blocks_publication`.
+fn is_probe_failure(message: &str) -> bool {
+    ["probe ", "withdrawal probe ", "recheck could not run"]
+        .iter()
+        .any(|p| message.starts_with(p))
+}
+
 /// Fold a finished pass into the agent's report.
 fn fold(
     store: &KbStore,
@@ -288,11 +309,21 @@ fn fold(
         .and_then(|v| store.source_index_state(spec, v.as_ref(), confirmed));
     // An unreadable coverage claims nothing and carries a reason, so
     // `acknowledged` is false (fail closed).
-    // A put or remove that failed this pass leaves its path owing that task,
-    // so `blocking` names it; a failed probe leaves only a probe owed, which
-    // does not block (acknowledgement, as before S12).
+    // #10746 S12: every error this pass raised on one of this source's paths
+    // blocks, except a probe failure (acknowledgement, as before S12). The
+    // offline `blocking` alone misses a refused re-push after an identity
+    // change (F14).
     let (cov, mut blocked, reason) = match read {
-        Ok(st) => (st.coverage, st.blocking, None),
+        Ok(st) => {
+            let mut blocked = st.blocking;
+            blocked.extend(
+                r.errors
+                    .iter()
+                    .filter(|e| st.paths.contains(&e.path) && !is_probe_failure(&e.message))
+                    .map(|e| e.path.clone()),
+            );
+            (st.coverage, blocked, None)
+        }
         Err(e) => (
             crate::kb::okg::IndexCoverage {
                 pending: r.pending,

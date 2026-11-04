@@ -30,6 +30,12 @@ pub(super) struct Fake {
     /// #10746 S12 fix round: `(entered, release)` — the status call signals
     /// `entered`, then waits for `release`, so a test can hold a pass open.
     gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    /// #10746 S12 last change: a D1 index identity `(instance_id,
+    /// generation)`; with one, status, put and `file.status` replies carry
+    /// it and the put reply carries `content_sha256`.
+    identity: Option<(String, u64)>,
+    /// A path whose `file.remove` the daemon refuses.
+    refuse_remove: Option<String>,
     held: Mutex<BTreeMap<String, String>>,
     calls: Mutex<Vec<String>>,
 }
@@ -41,6 +47,8 @@ impl Fake {
             down: false,
             refuse: None,
             gate: None,
+            identity: None,
+            refuse_remove: None,
             held: Mutex::default(),
             calls: Mutex::default(),
         }
@@ -84,8 +92,28 @@ impl trusty_okf::feed::IndexFeed for Fake {
             release.notified().await;
         }
         let path = p["body"]["path"].as_str().unwrap_or_default().to_string();
+        let identity = self
+            .identity
+            .as_ref()
+            .map(|(i, g)| json!({"instance_id": i, "generation": g}));
+        if method == "search.index.file.remove"
+            && self.refuse_remove.as_deref() == Some(path.as_str())
+        {
+            return Err(SearchError {
+                method: method.to_string(),
+                code: Some(-32000),
+                message: "remove refused".into(),
+            });
+        }
         Ok(match method {
-            "search.index.status" => json!({"root_path": self.root}),
+            "search.index.status" => match &identity {
+                Some(i) => json!({"root_path": self.root, "identity": i}),
+                None => json!({"root_path": self.root}),
+            },
+            "search.index.file.status" => match self.held.lock().unwrap().get(&path) {
+                Some(c) => json!({"present": true, "content_sha256": hex(c), "identity": identity}),
+                None => json!({"present": false, "identity": identity}),
+            },
             "search.chunks.list" => {
                 let c = self.under(p["path_prefix"].as_str().unwrap_or_default());
                 json!({"total": c.len(), "chunks": c})
@@ -99,7 +127,12 @@ impl trusty_okf::feed::IndexFeed for Fake {
             "search.index.file.put" => {
                 let content = p["body"]["content"].as_str().unwrap_or_default();
                 self.held.lock().unwrap().insert(path, content.to_string());
-                json!({"indexed": true})
+                match &identity {
+                    Some(i) => {
+                        json!({"indexed": true, "content_sha256": hex(content), "identity": i})
+                    }
+                    None => json!({"indexed": true}),
+                }
             }
             "search.index.file.remove" => {
                 self.held.lock().unwrap().remove(&path);
@@ -108,6 +141,15 @@ impl trusty_okf::feed::IndexFeed for Fake {
             _ => json!({}),
         })
     }
+}
+
+/// Lower-case hex SHA-256, as the D1 wire carries it.
+fn hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// A tree with two ingested entities and a legacy journal claiming both.
@@ -417,4 +459,58 @@ async fn concurrent_feed_calls_run_one_pass() {
     assert!(reason.contains("feed already running"), "{b:?}");
     assert!(other.calls.lock().unwrap().is_empty(), "B started no pass");
     assert_eq!((a.reason, a.indexed), (None, 2), "A ran its pass");
+}
+
+/// Pass 1 under identity `i1` settles both entities; pass 2 runs under a
+/// re-created index (`i2`, F14) whose daemon refuses `notes/one.md` with
+/// `refuse` (put) or `refuse_remove` (the old-revision remove).
+async fn identity_change_pass(refuse_put: bool) -> IndexFeedReport {
+    let (tmp, store, spec) = fixture();
+    let st = IndexStateRef::new(tmp.path().join("state"), "idx");
+    let mut first = Fake::new(&store.root);
+    first.identity = Some(("i1".into(), 1));
+    let r1 = feed_source(&store, &spec, &st, &first).await;
+    assert!(r1.acknowledged("idx"), "pass 1 settles both: {r1:?}");
+    let mut second = Fake::new(&store.root);
+    second.identity = Some(("i2".into(), 1));
+    if refuse_put {
+        second.refuse = Some("notes/one.md".into());
+    } else {
+        second.refuse_remove = Some("notes/one.md".into());
+    }
+    feed_source(&store, &spec, &st, &second).await
+}
+
+/// Why: #10746 S12 last change, HIGH — after an identity change (F14) the
+/// source's own path owes a re-push. A refused put leaves the old
+/// acknowledgement at matching bytes, which an offline read treats as
+/// settled; the pass's own error must still block publication.
+/// What: pass 2 under a new identity refuses the put of `notes/one.md`;
+/// the source is not acknowledged. Test: self-contained.
+#[tokio::test]
+async fn identity_change_with_refused_own_put_blocks_publication() {
+    let r = identity_change_pass(true).await;
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.starts_with("notes/one.md: put not confirmed")),
+        "{r:?}"
+    );
+    assert!(!r.acknowledged("idx"), "{r:?}");
+}
+
+/// Why: the same fail-open shape for a refused remove of the old revision.
+/// What: pass 2 under a new identity refuses the remove before the
+/// re-push of `notes/one.md`; the source is not acknowledged.
+/// Test: self-contained.
+#[tokio::test]
+async fn identity_change_with_refused_own_remove_blocks_publication() {
+    let r = identity_change_pass(false).await;
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.starts_with("notes/one.md: remove of the old revision failed")),
+        "{r:?}"
+    );
+    assert!(!r.acknowledged("idx"), "{r:?}");
 }

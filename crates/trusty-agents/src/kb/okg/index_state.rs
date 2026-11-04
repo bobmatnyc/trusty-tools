@@ -146,6 +146,7 @@ impl KbStore {
             let slug = record.entity.rsplit('/').next().unwrap_or(&record.entity);
             let path = self.entity_path(&spec.collection, slug)?;
             let rel = self.rel(&path).replace('\\', "/");
+            out.paths.insert(rel.clone());
             let live = record.status == ItemStatus::Ingested;
             let unreadable = view.and_then(|v| v.unreadable.iter().find(|u| u.path == rel));
             if live && (!path.is_file() || unreadable.is_some()) {
@@ -194,7 +195,12 @@ impl KbStore {
 pub(crate) struct SourceIndexState {
     /// The caller-facing counts.
     pub(crate) coverage: IndexCoverage,
-    /// Paths still owed a push or a remove, or unreadable.
+    /// Every bundle-relative path this source's ledger names; the
+    /// publication gate matches the pass's errors against it.
+    pub(crate) paths: std::collections::BTreeSet<String>,
+    /// Paths still owed a push or a remove by the OFFLINE read, or
+    /// unreadable. An offline read cannot see an identity change, so this
+    /// alone is not the gate (see `stores::okg_feed`).
     pub(crate) blocking: Vec<String>,
 }
 
