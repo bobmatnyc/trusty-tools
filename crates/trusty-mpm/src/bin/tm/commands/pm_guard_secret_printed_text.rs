@@ -61,13 +61,19 @@ pub(crate) fn closed_printer_text(command: &str) -> bool {
 
 /// Whether one tokenized segment is a printer call that only prints.
 ///
-/// Test: `near_miss_rows_still_refuse_10685`.
+/// Test: `near_miss_rows_still_refuse_10685`, `path_qualified_printer_refuses_10685`.
 fn is_closed_printer_call(segment: &str, argv: &[String]) -> bool {
     let Some(first) = argv.first() else {
         return false;
     };
+    // #10685 review: only the shell's own printer, bare or from a system bin
+    // directory; `./echo` or `x/printf` can be any executable.
     let program = command_basename(first);
-    TEXT_PRINTERS.contains(&program.as_str())
+    let system = ["", "/bin/", "/usr/bin/"]
+        .iter()
+        .any(|dir| first.strip_prefix(dir) == Some(program.as_str()));
+    system
+        && TEXT_PRINTERS.contains(&program.as_str())
         && !runs_a_nested_command(segment)
         && !argv.iter().any(|t| t.contains(['<', '>']))
         && !(program == "printf" && argv.iter().skip(1).any(|t| t.starts_with("-v")))
