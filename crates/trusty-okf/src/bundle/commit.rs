@@ -117,7 +117,8 @@ impl Bundle {
         Ok(())
     }
 
-    /// Write a planned `put` or `verify` (see the module doc).
+    /// Write a planned `put` or `verify` (see the module doc). Returns the
+    /// operation's findings (`staging_left`).
     pub(crate) fn commit_op(
         &mut self,
         plan: PutPlan,
@@ -125,7 +126,7 @@ impl Bundle {
         now: &DateTime<FixedOffset>,
         log: LogMode<'_>,
         kind: OpKind,
-    ) -> Result<(), OkfError> {
+    ) -> Result<Vec<Finding>, OkfError> {
         let file = plan.id.file_name();
         let logged = matches!(log, LogMode::Entry);
         let mut paths = vec![file.clone(), record_rel(&plan.id)];
@@ -155,7 +156,7 @@ impl Bundle {
             }
             revisions::append(self.root(), &rev)?;
             failpoint("after-revision-line")?;
-            return put_file(self, &file, Some(&plan.post));
+            return put_file(self, &file, Some(&plan.post)).map(|()| Vec::new());
         }
         let mut op = OpPlan::new(kind, &instant_string(now), &by.to_string());
         for l in &plan.lines {
@@ -167,6 +168,6 @@ impl Bundle {
             let e = prepare_entry(self.root(), now, &plan.log)?;
             op.file("log.md", e.old, Some(e.text.into_bytes()));
         }
-        ops::run(self, op).map(|_| ())
+        ops::run(self, op)
     }
 }

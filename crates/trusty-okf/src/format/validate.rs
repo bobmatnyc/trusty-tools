@@ -93,6 +93,12 @@ pub enum FindingKind {
     /// #10746 S5: an incomplete operation whose files changed outside
     /// trusty-okf; nothing was overwritten (§4.11 rule 2).
     RecoveryConflict,
+    /// #10746 S5: an incomplete operation, reported by `Bundle::open`
+    /// without the §4.4 lock; `Bundle::recover_interrupted` finishes it.
+    InterruptedOperation,
+    /// #10746 S5: an operation completed but its staging directory under
+    /// `_sources/ops/` was not removed; the next recovery removes it.
+    StagingLeft,
 }
 
 /// One structured validation finding.

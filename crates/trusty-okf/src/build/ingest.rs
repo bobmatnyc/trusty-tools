@@ -244,7 +244,7 @@ pub fn ingest_items(
     let mut report = report_for(spec, items.len());
     let stamp = instant_string(&now);
     // #10746 S5: the run's `log.md` entries are written once, at the end.
-    let batch = LogBatch::new(run_id("ingest", &[&spec.id, &stamp]));
+    let batch = LogBatch::begin(&bundle, &run_id("ingest", &[&spec.id, &stamp]))?;
 
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for item in items {
@@ -303,7 +303,8 @@ pub fn ingest_items(
 
     report.watermark = ledger.watermark();
     // #10746 S5: a failed `log.md` write fails the run closed.
-    batch.flush_now(&mut bundle)?;
+    let (_, left) = batch.flush_now(&mut bundle)?;
+    push_op_findings(&mut report, left);
     Ok(report)
 }
 
@@ -326,7 +327,10 @@ pub fn sweep_deleted(
     let mut bundle = Bundle::at(root)?;
     let mut ledger = Ledger::load(bundle.root(), &spec.id)?;
     let mut report = report_for(spec, 0);
-    let batch = LogBatch::new(run_id("sweep", &[&spec.id, &instant_string(&now)]));
+    let batch = LogBatch::begin(
+        &bundle,
+        &run_id("sweep", &[&spec.id, &instant_string(&now)]),
+    )?;
     sweep_into(
         &mut bundle,
         spec,
@@ -337,7 +341,8 @@ pub fn sweep_deleted(
         &mut report,
     )?;
     report.watermark = ledger.watermark();
-    batch.flush_now(&mut bundle)?;
+    let (_, left) = batch.flush_now(&mut bundle)?;
+    push_op_findings(&mut report, left);
     Ok(report)
 }
 
@@ -594,6 +599,17 @@ fn body_text(body: &str) -> String {
         String::new()
     } else {
         format!("\n{trimmed}\n")
+    }
+}
+
+/// #10746 S5 r2: an operation finding (`staging_left`) as an ingest finding.
+fn push_op_findings(report: &mut IngestReport, found: Vec<crate::format::validate::Finding>) {
+    for f in found {
+        report.findings.push(IngestFinding {
+            kind: format!("{:?}", f.kind),
+            item_id: f.path,
+            key: String::new(),
+        });
     }
 }
 

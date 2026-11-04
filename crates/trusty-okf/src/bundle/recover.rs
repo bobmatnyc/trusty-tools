@@ -5,6 +5,11 @@
 //! next open restores to the state before or after it, losing no
 //! verification event and leaving no link to a missing concept; a file
 //! changed out of band after the crash must keep its bytes.
+//! #10746 S5 r2: without the §4.4 lock, `Bundle::open` only runs
+//! [`scan_interrupted`] (report and refuse, change nothing), because an
+//! incomplete intent may belong to a live writer; recovery runs in
+//! `Bundle::recover_interrupted` and `Bundle::recover`, whose caller is the
+//! only writer.
 //! What: [`recover_on_open`] reads the journal (a torn intent counts as
 //! absent), classifies each file step of every incomplete intent by its disk
 //! byte hash (pre, post or other), and, with no step at other, rolls the
@@ -15,12 +20,12 @@
 //! until [`Bundle::recover`], which first copies each changed file under
 //! `conflict/`. Leftover staging directories and ingest log batches are then
 //! finished or removed. Every step is idempotent, so a crash during recovery
-//! is finished by the next open (criterion 108).
+//! is finished by the next recovery (criterion 108).
 //! Test: `c106_crash_at_every_boundary_rolls_forward_byte_identical`,
 //! `c108_crash_during_recovery_and_torn_intent`,
 //! `c109_out_of_band_edit_after_crash_is_a_recovery_conflict`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::OkfError;
@@ -28,11 +33,11 @@ use crate::build::jsonl::read_journal;
 use crate::bundle::Bundle;
 use crate::bundle::log_md;
 use crate::bundle::ops::{
-    JOURNAL_REL, OPS_DIR, OpKind, Record, RecoveryDirection, Step, append_record, disk_hash,
-    failpoint, put_file, remove_staging, staged_rel,
+    JOURNAL_REL, OPS_DIR, OpKind, Record, RecoveryDirection, Step, append, append_record,
+    disk_hash, failpoint, put_file, remove_staging, staged_rel,
 };
-use crate::bundle::paths::{append_line, confined_file, io_err, read_rel};
-use crate::bundle::record::{Line, fold};
+use crate::bundle::paths::{confined_file, io_err, read_rel};
+use crate::bundle::record::{Line, ROLLED_BACK, fold};
 use crate::format::validate::{Finding, FindingKind, Severity};
 
 /// What `Bundle::recover` did (SPEC-OKF-01 §4.2).
@@ -94,18 +99,27 @@ fn others(b: &Bundle, p: &Pending) -> Result<Vec<String>, OkfError> {
     Ok(out)
 }
 
-/// Whether `file` holds a line written by `op` at `step`.
-fn has_line(b: &Bundle, file: &str, op: &str, step: usize) -> Result<bool, OkfError> {
+/// The newest line `op` wrote at `step` in `file`: `None` when absent,
+/// `Some(true)` when it is a roll-back compensation, `Some(false)` when it is
+/// the step's own line.
+fn line_state(b: &Bundle, file: &str, op: &str, step: usize) -> Result<Option<bool>, OkfError> {
     let Some(bytes) = read_rel(b.root(), file)? else {
-        return Ok(false);
+        return Ok(None);
     };
-    Ok(bytes.split(|c| *c == b'\n').any(|l| {
-        serde_json::from_slice::<serde_json::Value>(l).is_ok_and(|v| {
-            v.get("op").and_then(|x| x.as_str()) == Some(op)
-                && v.get("step").and_then(|x| x.as_u64()) == Some(step as u64)
-        })
-    }))
+    let mut state = None;
+    for l in bytes.split(|c| *c == b'\n') {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(l)
+            && v.get("op").and_then(|x| x.as_str()) == Some(op)
+            && v.get("step").and_then(|x| x.as_u64()) == Some(step as u64)
+        {
+            state = Some(v.get(ROLLBACK_KEY).is_some());
+        }
+    }
+    Ok(state)
 }
+
+/// The key that marks a roll-back compensation line.
+const ROLLBACK_KEY: &str = "rollback";
 
 /// The staged bytes of `path` on `side`.
 fn staged(b: &Bundle, op: &str, side: &str, path: &str) -> Result<Vec<u8>, OkfError> {
@@ -116,9 +130,22 @@ fn staged(b: &Bundle, op: &str, side: &str, path: &str) -> Result<Vec<u8>, OkfEr
     })
 }
 
-/// A verification-record line appended by `op`, restored to the event's
-/// state before `op`, for a roll back. `None` when nothing needs restoring.
-fn compensation(b: &Bundle, file: &str, op: &str, line: &str) -> Result<Option<Line>, OkfError> {
+/// The compensation line that undoes a verification-record line `op`
+/// appended at `step` (#10746 S5 r2).
+///
+/// What: the event's newest state before `op` (lines of other operations
+/// only), or, when `op` introduced the event, a `rolled_back` line that
+/// `record::fold` drops, so the record reads exactly as before `op`. The line
+/// carries `op`, `step` and the roll-back key, so a later roll forward knows
+/// to append the step's own line again. `None` for a line that is not a
+/// record line.
+fn compensation(
+    b: &Bundle,
+    file: &str,
+    op: &str,
+    step: usize,
+    line: &str,
+) -> Result<Option<String>, OkfError> {
     let Ok(appended) = serde_json::from_str::<Line>(line) else {
         return Ok(None);
     };
@@ -134,12 +161,19 @@ fn compensation(b: &Bundle, file: &str, op: &str, line: &str) -> Result<Option<L
     let prior = fold(before)
         .into_iter()
         .find(|l| l.by == appended.by && l.at == appended.at);
-    Ok(Some(prior.unwrap_or(Line {
+    let restore = prior.unwrap_or(Line {
         invalidated_at: None,
         invalidated_by_hash: None,
-        reason: Some("rolled_back".to_string()),
+        reason: Some(ROLLED_BACK.to_string()),
         ..appended
-    })))
+    });
+    let mut v = restore.value()?;
+    if let serde_json::Value::Object(m) = &mut v {
+        m.insert("op".into(), op.into());
+        m.insert("step".into(), step.into());
+        m.insert(ROLLBACK_KEY.into(), true.into());
+    }
+    Ok(Some(v.to_string()))
 }
 
 /// Bring every step of `p` to `dir`, without a pre-image check.
@@ -158,8 +192,10 @@ fn apply(b: &mut Bundle, p: &Pending, dir: RecoveryDirection) -> Result<(), OkfE
                         }
                     }
                     Step::Append { file, line } => {
-                        if !has_line(b, file, &p.op, i)? {
-                            append_line(b.root(), file, line)?;
+                        // Absent, or undone by an interrupted roll back:
+                        // the step's own line goes in (again).
+                        if line_state(b, file, &p.op, i)? != Some(false) {
+                            append(b, file, line)?;
                         }
                     }
                 }
@@ -179,16 +215,10 @@ fn apply(b: &mut Bundle, p: &Pending, dir: RecoveryDirection) -> Result<(), OkfE
                         }
                     }
                     Step::Append { file, line } if file.starts_with("_sources/verification/") => {
-                        if has_line(b, file, &p.op, i)?
-                            && let Some(restore) = compensation(b, file, &p.op, line)?
+                        if line_state(b, file, &p.op, i)? == Some(false)
+                            && let Some(restore) = compensation(b, file, &p.op, i, line)?
                         {
-                            let json =
-                                serde_json::to_string(&restore).map_err(|e| OkfError::Parse {
-                                    path: PathBuf::from(file),
-                                    line: None,
-                                    message: e.to_string(),
-                                })?;
-                            append_line(b.root(), file, &json)?;
+                            append(b, file, &restore)?;
                         }
                     }
                     // A revision line stays: it describes bytes that were
@@ -240,7 +270,47 @@ fn conflict_finding(op: &str, paths: &[String]) -> Finding {
     )
 }
 
-/// Recovery run by `Bundle::open` and the build layer (see the module doc).
+/// What a handle opened without the §4.4 lock does with the journal: it
+/// reads it and changes nothing (#10746 S5 r2).
+///
+/// Why: without the lock an incomplete intent may be a live writer's op in
+/// flight, so neither recovery nor staging cleanup is safe. What: each
+/// incomplete operation's file-step paths are marked on this handle (a write
+/// to them returns `RecoveryPending`), and each is reported: a
+/// `recovery_conflict` when a file step is at neither pre- nor post-image,
+/// else `interrupted_operation`. `Bundle::recover_interrupted` recovers.
+/// Test: `concurrent_open_never_recovers_a_live_op`,
+/// `c109_out_of_band_edit_after_crash_is_a_recovery_conflict`.
+pub(crate) fn scan_interrupted(b: &mut Bundle) -> Result<Vec<Finding>, OkfError> {
+    let mut findings = Vec::new();
+    if !confined_file(b.root(), OPS_DIR)?.is_dir() {
+        return Ok(findings);
+    }
+    let (pending, _) = read_ops(b)?;
+    for p in &pending {
+        let paths: Vec<String> = file_steps(p).map(|(path, _, _)| path.clone()).collect();
+        b.mark_conflict(&p.op, &paths);
+        let other = others(b, p)?;
+        if other.is_empty() {
+            findings.push(Finding::new(
+                Severity::Warning,
+                FindingKind::InterruptedOperation,
+                paths.first().cloned().unwrap_or_default(),
+                format!(
+                    "operation {} is incomplete; Bundle::recover_interrupted finishes it, \
+                     and writes to its paths return RecoveryPending until then",
+                    p.op
+                ),
+                "SPEC-OKF-01 §4.11",
+            ));
+        } else {
+            findings.push(conflict_finding(&p.op, &other));
+        }
+    }
+    Ok(findings)
+}
+
+/// Full recovery (§4.11 "Recovery on open"); the caller is the only writer.
 pub(crate) fn recover_on_open(b: &mut Bundle) -> Result<Vec<Finding>, OkfError> {
     let mut findings = Vec::new();
     let ops = confined_file(b.root(), OPS_DIR)?;
@@ -266,30 +336,62 @@ pub(crate) fn recover_on_open(b: &mut Bundle) -> Result<Vec<Finding>, OkfError> 
         }
     }
     // Staging with no live intent: a torn intent, or a completed op whose
-    // cleanup did not run. Ingest log batches are finished.
+    // cleanup did not run.
     let entries = std::fs::read_dir(&ops).map_err(|e| io_err(&ops, e))?;
-    let mut batches = BTreeMap::new();
     for e in entries {
         let e = e.map_err(|e| io_err(&ops, e))?;
         let name = e.file_name().to_string_lossy().into_owned();
+        if e.path().is_dir() && !kept.contains(&name) {
+            remove_staging(b, &name)?;
+        }
+    }
+    finish_batches(b)?;
+    Ok(findings)
+}
+
+/// Write every leftover ingest log batch. A batch whose `log.md` write is
+/// refused with `RecoveryPending` stays for a later recovery (§4.11 rule 2);
+/// any other error fails.
+fn finish_batches(b: &mut Bundle) -> Result<(), OkfError> {
+    let ops = confined_file(b.root(), OPS_DIR)?;
+    let mut runs = Vec::new();
+    for e in std::fs::read_dir(&ops).map_err(|e| io_err(&ops, e))? {
+        let name = e.map_err(|e| io_err(&ops, e))?.file_name();
+        let name = name.to_string_lossy();
         if let Some(run) = name
             .strip_prefix("log-")
             .and_then(|r| r.strip_suffix(".jsonl"))
         {
-            batches.insert(run.to_string(), ());
-        } else if e.path().is_dir() && !kept.contains(&name) {
-            remove_staging(b, &name)?;
+            runs.push(run.to_string());
         }
     }
-    // Read again: the loop above completed operations, a batch's included.
+    runs.sort();
     let (_, done) = read_ops(b)?;
-    for run in batches.keys() {
-        log_md::LogBatch::resume(run).flush(b, &done)?;
+    for run in runs {
+        match log_md::LogBatch::resume(&run).flush(b, &done) {
+            Ok(_) | Err(OkfError::RecoveryPending { .. }) => {}
+            Err(e) => return Err(e),
+        }
     }
-    Ok(findings)
+    Ok(())
 }
 
 impl Bundle {
+    /// Recover every interrupted operation (SPEC-OKF-01 §4.11 "Recovery on
+    /// open").
+    ///
+    /// Why: #10746 S5 r2 — without the §4.4 lock, `open` cannot tell a
+    /// crashed operation from a live writer's, so it only reports them. What:
+    /// rolls each incomplete operation whose files are all at pre- or
+    /// post-image in its kind's direction, reports the others as
+    /// `recovery_conflict`, removes staging with no live intent, and writes
+    /// leftover ingest log batches. The caller must be the only writer.
+    /// Test: `c106_crash_at_every_boundary_rolls_forward_byte_identical`,
+    /// `c108_crash_during_recovery_and_torn_intent`.
+    pub fn recover_interrupted(&mut self) -> Result<Vec<Finding>, OkfError> {
+        recover_on_open(self)
+    }
+
     /// Resolve a conflicted operation by explicit choice (SPEC-OKF-01 §4.11
     /// rule 2).
     ///
@@ -321,6 +423,9 @@ impl Bundle {
             }
         }
         apply(self, &p, dir)?;
+        // #10746 S5 r2: an ingest batch refused while this op held `log.md`
+        // is written now (§4.11 rule 2).
+        finish_batches(self)?;
         Ok(RecoveryReport {
             op_id: p.op.clone(),
             kind: p.kind,

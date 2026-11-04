@@ -27,6 +27,7 @@ use crate::OkfError;
 use crate::bundle::Bundle;
 use crate::bundle::paths::{append_line, atomic_write, confined_file, io_err, read_rel};
 use crate::format::hash::bytes_hash;
+use crate::format::validate::{Finding, FindingKind, Severity};
 use crate::state::revisions::run_id;
 
 /// The staging and journal directory (§4.11 "Location").
@@ -214,7 +215,28 @@ pub(crate) fn staged_rel(op: &str, side: &str, rel: &str) -> String {
 
 /// Byte hash of the file at `rel`, or `None` when absent.
 pub(crate) fn disk_hash(b: &Bundle, rel: &str) -> Result<Option<String>, OkfError> {
+    io_seam(&format!("read:{rel}"))?;
     Ok(read_rel(b.root(), rel)?.map(|x| bytes_hash(&x)))
+}
+
+/// Append one line to a journal file of an operation (synced).
+pub(crate) fn append(b: &Bundle, file: &str, line: &str) -> Result<(), OkfError> {
+    io_seam(file)?;
+    append_line(b.root(), file, line)
+}
+
+/// An I/O-error seam: under `cfg(test)` a hook may fail the named file
+/// access with a real error (not a crash). Compiled to nothing otherwise.
+pub(crate) fn io_seam(name: &str) -> Result<(), OkfError> {
+    #[cfg(test)]
+    if fail::io_hit(name) {
+        return Err(OkfError::Io {
+            path: PathBuf::from(name),
+            source: std::io::Error::other("injected i/o error"),
+        });
+    }
+    let _ = name;
+    Ok(())
 }
 
 /// Bring `rel` to `bytes` (`None` removes it).
@@ -224,6 +246,7 @@ pub(crate) fn disk_hash(b: &Bundle, rel: &str) -> Result<Option<String>, OkfErro
 /// back reverses; never a concept's only copy.
 pub(crate) fn put_file(b: &Bundle, rel: &str, bytes: Option<&[u8]>) -> Result<(), OkfError> {
     let path = confined_file(b.root(), rel)?;
+    io_seam(rel)?;
     #[cfg(test)]
     fail::count_write(rel);
     match bytes {
@@ -243,6 +266,7 @@ pub(crate) fn put_file(b: &Bundle, rel: &str, bytes: Option<&[u8]>) -> Result<()
 /// directory when nothing else is left. A `conflict/` copy stays, so an
 /// out-of-band edit survives recovery (§4.11 rule 2, criterion 109).
 pub(crate) fn remove_staging(b: &Bundle, op: &str) -> Result<(), OkfError> {
+    io_seam(&format!("remove-staging:{op}"))?;
     let dir = confined_file(b.root(), &format!("{OPS_DIR}/{op}"))?;
     for side in ["new", "old"] {
         let sub = dir.join(side);
@@ -271,7 +295,7 @@ pub(crate) fn append_record(b: &Bundle, r: &Record) -> Result<(), OkfError> {
         line: None,
         message: e.to_string(),
     })?;
-    append_line(b.root(), JOURNAL_REL, &json)
+    append(b, JOURNAL_REL, &json)
 }
 
 /// A crash seam: under `cfg(test)` a hook may stop the operation here, as a
@@ -288,10 +312,18 @@ pub(crate) fn failpoint(name: &str) -> Result<(), OkfError> {
     Ok(())
 }
 
-/// Run a plan (see the module doc). Returns the op ID.
+/// Run a plan (see the module doc). Returns the findings of the run: a
+/// `staging_left` warning when the staging directory could not be removed
+/// after the completion record (the write itself succeeded).
 ///
-/// Test: `c106_crash_at_every_boundary_rolls_forward_byte_identical`.
-pub(crate) fn run(b: &mut Bundle, plan: OpPlan) -> Result<String, OkfError> {
+/// #10746 S5 r2: every failure after the intent goes through `abort` (roll
+/// back now) or, once every step ran, marks the operation conflicted and
+/// returns `RecoveryPending`, so this handle never writes over an
+/// operation that a later `recover` would replay.
+/// Test: `c106_crash_at_every_boundary_rolls_forward_byte_identical`,
+/// `precheck_read_error_aborts_the_operation`,
+/// `completion_failure_marks_conflict_and_staging_failure_is_a_finding`.
+pub(crate) fn run(b: &mut Bundle, plan: OpPlan) -> Result<Vec<Finding>, OkfError> {
     // Every path is confined (no link, no escape) before any byte moves, so
     // a refused path stops the operation with no file changed.
     for s in &plan.steps {
@@ -347,7 +379,11 @@ pub(crate) fn run(b: &mut Bundle, plan: OpPlan) -> Result<String, OkfError> {
     for (i, (planned, line)) in plan.steps.iter().zip(&lines).enumerate() {
         match (planned, line) {
             (Planned::File { path, pre, post }, _) => {
-                if disk_hash(b, path)? != pre.as_deref().map(bytes_hash) {
+                let disk = match disk_hash(b, path) {
+                    Ok(h) => h,
+                    Err(e) => return Err(abort(b, &op, plan.kind, &steps, e)),
+                };
+                if disk != pre.as_deref().map(bytes_hash) {
                     let paths = plan.file_paths();
                     b.mark_conflict(&op, &paths);
                     return Err(OkfError::RecoveryPending {
@@ -360,7 +396,7 @@ pub(crate) fn run(b: &mut Bundle, plan: OpPlan) -> Result<String, OkfError> {
                 }
             }
             (Planned::Append { file, .. }, Some(line)) => {
-                if let Err(e) = append_line(b.root(), file, line) {
+                if let Err(e) = append(b, file, line) {
                     return Err(abort(b, &op, plan.kind, &steps, e));
                 }
             }
@@ -375,15 +411,35 @@ pub(crate) fn run(b: &mut Bundle, plan: OpPlan) -> Result<String, OkfError> {
         failpoint(&format!("step-{i}"))?;
     }
     failpoint("before-complete")?;
-    append_record(
-        b,
-        &Record::Complete {
-            op: op.clone(),
-            direction: None,
-        },
-    )?;
-    remove_staging(b, &op)?;
-    Ok(op)
+    let complete = Record::Complete {
+        op: op.clone(),
+        direction: None,
+    };
+    if append_record(b, &complete).is_err() {
+        // Every step ran but the journal does not say so: a later recover
+        // would replay it, so this handle stops writing to its paths.
+        return Err(pending(b, &op, &plan.file_paths()));
+    }
+    let mut findings = Vec::new();
+    if let Err(e) = remove_staging(b, &op) {
+        findings.push(Finding::new(
+            Severity::Warning,
+            FindingKind::StagingLeft,
+            format!("{OPS_DIR}/{op}"),
+            format!("operation {op} completed; its staging was not removed: {e}"),
+            "SPEC-OKF-01 §4.11",
+        ));
+    }
+    Ok(findings)
+}
+
+/// Mark `op` conflicted on this handle and build its `RecoveryPending`.
+fn pending(b: &mut Bundle, op: &str, paths: &[String]) -> OkfError {
+    b.mark_conflict(op, paths);
+    OkfError::RecoveryPending {
+        op_id: op.to_string(),
+        paths: paths.iter().map(PathBuf::from).collect(),
+    }
 }
 
 /// A step failed in-process (not a crash): roll the operation back now, so
@@ -403,11 +459,7 @@ fn abort(b: &mut Bundle, op: &str, kind: OpKind, steps: &[Step], e: OkfError) ->
                     Step::Append { .. } => None,
                 })
                 .collect();
-            b.mark_conflict(op, &paths);
-            OkfError::RecoveryPending {
-                op_id: op.to_string(),
-                paths: paths.into_iter().map(PathBuf::from).collect(),
-            }
+            pending(b, op, &paths)
         }
     }
 }
@@ -421,6 +473,7 @@ pub(crate) mod fail {
     type Hook = Box<dyn FnMut(&str) -> bool>;
 
     thread_local! {
+        static IO: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static WRITES: RefCell<BTreeMap<String, usize>> = const { RefCell::new(BTreeMap::new()) };
     }
@@ -430,9 +483,19 @@ pub(crate) mod fail {
         HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
     }
 
-    /// Remove the hook.
+    /// Remove both hooks.
     pub(crate) fn clear() {
         HOOK.with(|h| *h.borrow_mut() = None);
+        IO.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// Install an I/O hook; it returns true to fail the named access.
+    pub(crate) fn set_io(f: impl FnMut(&str) -> bool + 'static) {
+        IO.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(crate) fn io_hit(name: &str) -> bool {
+        IO.with(|h| h.borrow_mut().as_mut().is_some_and(|f| f(name)))
     }
 
     pub(crate) fn hit(name: &str) -> bool {

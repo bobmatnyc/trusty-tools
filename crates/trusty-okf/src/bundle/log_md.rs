@@ -25,6 +25,7 @@ use crate::build::jsonl::read_journal;
 use crate::bundle::Bundle;
 use crate::bundle::ops::{self, OPS_DIR, OpKind, OpPlan, disk_hash};
 use crate::bundle::paths::{append_line, confined_file, io_err, read_rel};
+use crate::format::validate::Finding;
 
 /// Whether `line` is an OKF §9 date heading, returning its date.
 fn date_heading(line: &str) -> Option<&str> {
@@ -173,8 +174,34 @@ pub(crate) struct LogBatch {
 }
 
 impl LogBatch {
+    /// A new batch for `base`: the run is `<base>-<n>` with the smallest `n`
+    /// that no batch file and no journaled operation uses yet.
+    ///
+    /// #10746 S5 r2: a chunked source calls `ingest_items` once per chunk
+    /// with one `now`, and a retry repeats it; a run ID of `base` alone made
+    /// every later call find the first call's completed `<run>-log` and drop
+    /// its entries. The suffix is unique per attempt and stays deterministic
+    /// for recovery, which reads the run from the batch file name.
+    /// Test: `two_ingest_calls_with_one_now_log_every_entry`.
+    pub(crate) fn begin(b: &Bundle, base: &str) -> Result<Self, OkfError> {
+        let (pending, done) = crate::bundle::recover::read_ops(b)?;
+        let used = |id: &str| done.contains(id) || pending.iter().any(|p| p.op == id);
+        let mut n: u64 = 0;
+        loop {
+            let batch = Self::new(format!("{base}-{n}"));
+            if !used(&batch.op_id()) && read_rel(b.root(), &batch.rel())?.is_none() {
+                return Ok(batch);
+            }
+            n = n.checked_add(1).ok_or_else(|| OkfError::Parse {
+                path: OPS_DIR.into(),
+                line: None,
+                message: format!("no free run suffix for {base}"),
+            })?;
+        }
+    }
+
     /// A batch for `run`.
-    pub(crate) fn new(run: String) -> Self {
+    fn new(run: String) -> Self {
         Self { run }
     }
 
@@ -221,10 +248,18 @@ impl LogBatch {
 
     /// Write the batch into `log.md` once (see the type doc). `done` holds
     /// the completed op IDs. Returns the entries written.
-    pub(crate) fn flush(&self, b: &mut Bundle, done: &BTreeSet<String>) -> Result<usize, OkfError> {
+    pub(crate) fn flush(
+        &self,
+        b: &mut Bundle,
+        done: &BTreeSet<String>,
+    ) -> Result<(usize, Vec<Finding>), OkfError> {
         let rel = self.rel();
         let mut written = 0;
+        let mut findings = Vec::new();
         if !done.contains(&self.op_id()) {
+            // #10746 S5 r2: a conflicted operation owns `log.md`; writing now
+            // would be overwritten by its recovery. Keep the batch file.
+            b.check_recovery(&["log.md".to_string()])?;
             let path = confined_file(b.root(), &rel)?;
             let mut kept = Vec::new();
             for e in read_journal::<PendingEntry>(&path)?.records {
@@ -248,21 +283,21 @@ impl LogBatch {
                 let mut plan =
                     OpPlan::new(OpKind::Ingest, &now, INGEST_LOG_ACTOR).with_id(self.op_id());
                 plan.file("log.md", old, Some(text.into_bytes()));
-                ops::run(b, plan)?;
+                findings = ops::run(b, plan)?;
                 written = kept.len();
             }
         }
         let path = confined_file(b.root(), &rel)?;
         let removed = std::fs::remove_file(&path); // okf: temp-cleanup (flushed log batch)
         match removed {
-            Ok(()) => Ok(written),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(written),
+            Ok(()) => Ok((written, findings)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((written, findings)),
             Err(e) => Err(io_err(&path, e)),
         }
     }
 
     /// Flush, reading the completed op IDs from the journal.
-    pub(crate) fn flush_now(&self, b: &mut Bundle) -> Result<usize, OkfError> {
+    pub(crate) fn flush_now(&self, b: &mut Bundle) -> Result<(usize, Vec<Finding>), OkfError> {
         let (_, done) = crate::bundle::recover::read_ops(b)?;
         self.flush(b, &done)
     }

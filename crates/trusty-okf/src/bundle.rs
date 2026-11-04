@@ -12,8 +12,9 @@
 //! `verify`, §2.10), [`moves`] (`move_concept`), [`index_md`]
 //! (`regenerate_indexes`), [`log_md`], [`record`] (the verification record
 //! and axis), [`paths`] (§2.11), [`graph`] (graph read). Slice S3 of #10746.
-//! S5: [`ops`] (the §4.11 operation journal) and [`recover`] (recovery on
-//! open and `Bundle::recover`); `open` and the build layer recover first.
+//! S5: [`ops`] (the §4.11 operation journal) and [`recover`]
+//! (`recover_interrupted`, `Bundle::recover`); `open` and the build layer
+//! report and refuse interrupted operations without recovering them.
 //! `create`, `supersede`, `deprecate`, `adopt` and `migrate` come with S6.
 //! Test: `c01_bundle_open_is_ok_on_the_google_bundles`,
 //! `c54_open_on_a_missing_root_is_an_error`,
@@ -79,8 +80,10 @@ impl Bundle {
             root: paths::canonical_root(root)?,
             conflicts: Vec::new(),
         };
-        // #10746 S5: recovery runs before the read (§4.11).
-        let mut findings = recover::recover_on_open(&mut bundle)?;
+        // #10746 S5 r2: without the §4.4 lock an incomplete operation may be
+        // a live writer's, so `open` only reports it and marks its paths;
+        // `recover_interrupted` recovers (§4.11).
+        let mut findings = recover::scan_interrupted(&mut bundle)?;
         findings.extend(legacy_index_journals(&bundle.root)?);
         let scan = walk::scan(&bundle.root)?;
         findings.extend(scan.findings);
@@ -141,8 +144,9 @@ impl Bundle {
             root: paths::canonical_root(root)?,
             conflicts: Vec::new(),
         };
-        // #10746 S5: the build layer writes too, so it recovers first.
-        recover::recover_on_open(&mut bundle)?;
+        // #10746 S5 r2: as `open`, report-only; an operation in flight keeps
+        // its paths refused to this handle.
+        recover::scan_interrupted(&mut bundle)?;
         Ok(bundle)
     }
 

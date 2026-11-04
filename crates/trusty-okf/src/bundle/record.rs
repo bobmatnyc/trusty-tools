@@ -124,7 +124,13 @@ pub(crate) fn read_lines(b: &Bundle, id: &ConceptId) -> Result<Vec<Line>, OkfErr
         .collect())
 }
 
-/// The newest state of each `(by, at)` event, in first-seen order.
+/// The `reason` of a line that undoes an event a rolled-back operation
+/// introduced (#10746 S5 r2); `fold` drops such an event.
+pub(crate) const ROLLED_BACK: &str = "rolled_back";
+
+/// The newest state of each `(by, at)` event, in first-seen order. An event
+/// whose newest state is `rolled_back` is dropped: the operation that added
+/// it was rolled back, so it never happened.
 pub(crate) fn fold(lines: Vec<Line>) -> Vec<Line> {
     let mut out: Vec<Line> = Vec::new();
     for line in lines {
@@ -133,6 +139,7 @@ pub(crate) fn fold(lines: Vec<Line>) -> Vec<Line> {
             None => out.push(line),
         }
     }
+    out.retain(|l| l.reason.as_deref() != Some(ROLLED_BACK));
     out
 }
 

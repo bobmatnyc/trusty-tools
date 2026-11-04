@@ -456,7 +456,7 @@ impl Bundle {
             op.file(&record_rel(from), Some(bytes), None);
         }
         self.check_recovery(&op.file_paths())?;
-        ops::run(self, op)?;
+        report.findings.extend(ops::run(self, op)?);
         Ok(report)
     }
 }

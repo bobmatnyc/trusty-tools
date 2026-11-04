@@ -296,9 +296,10 @@ impl Bundle {
         log: LogMode<'_>,
     ) -> Result<(PutOutcome, Vec<Finding>, ConceptId), OkfError> {
         let plan = self.plan_put(c, by, confirmed, mode, now, kind, None)?;
-        let out = (plan.outcome, plan.findings.clone(), plan.id.clone());
+        let mut out = (plan.outcome, plan.findings.clone(), plan.id.clone());
         if plan.outcome != PutOutcome::Unchanged {
-            self.commit_op(plan, by, now, log, OpKind::Correct)?;
+            out.1
+                .extend(self.commit_op(plan, by, now, log, OpKind::Correct)?);
         }
         Ok(out)
     }
@@ -530,7 +531,7 @@ impl Bundle {
             lines: vec![line],
             log: format!("**Verified** `/{}` by `{}`", id.file_name(), v.by),
         };
-        self.commit_op(plan, &v.by, &v.at, LogMode::Entry, OpKind::Verify)?;
+        findings.extend(self.commit_op(plan, &v.by, &v.at, LogMode::Entry, OpKind::Verify)?);
         Ok((outcome, findings))
     }
 }

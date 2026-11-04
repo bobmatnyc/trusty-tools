@@ -17,7 +17,7 @@ use crate::OkfError;
 use crate::build::ingest::{SourceItem, ingest_items};
 use crate::build::registry::{ConnectorParams, Locator, SourceSpec};
 use crate::bundle::recover::read_ops;
-use crate::bundle::{Bundle, RecoveryDirection};
+use crate::bundle::{Bundle, RecoveryDirection, VerificationEvent, VerificationState};
 use crate::format::concept::Concept;
 use crate::format::fields::{Actor, Verification};
 use crate::format::hash::content_hash;
@@ -180,6 +180,14 @@ fn boundaries(op: Op) -> Vec<String> {
     seen.borrow().clone()
 }
 
+/// Open, then recover every interrupted operation as the only writer would
+/// (#10746 S5 r2: `open` without the lock only reports).
+fn recover_all(root: &Path) -> Result<Vec<crate::format::validate::Finding>, OkfError> {
+    let (mut b, mut found) = Bundle::open(root)?;
+    found.extend(b.recover_interrupted()?);
+    Ok(found)
+}
+
 /// Crash `op` at the `nth` hit of `name`.
 fn crash_at(root: &Path, op: Op, name: &str) {
     let target = name.to_string();
@@ -215,7 +223,7 @@ fn c106_crash_at_every_boundary_rolls_forward_byte_identical() {
         for name in &names {
             let (_t, root) = fresh();
             crash_at(&root, op, name);
-            let (_, findings) = Bundle::open(&root).unwrap();
+            let findings = recover_all(&root).unwrap();
             assert!(
                 findings
                     .iter()
@@ -255,10 +263,10 @@ fn c108_crash_during_recovery_and_torn_intent() {
         crash_at(&root, op_move, "step-2");
         let target = format!("recover-step-{j}");
         fail::set(move |n| n == target);
-        let first = Bundle::open(&root);
+        let first = recover_all(&root);
         fail::clear();
         assert!(first.is_err(), "recovery crash {j}");
-        Bundle::open(&root).unwrap();
+        recover_all(&root).unwrap();
         assert_eq!(tree(&root), clean, "recovery crash at step {j}");
     }
 
@@ -270,7 +278,7 @@ fn c108_crash_during_recovery_and_torn_intent() {
     let mut text = std::fs::read_to_string(&journal).unwrap_or_default();
     text.push_str("{\"rec\":\"intent\",\"op\":\"move-0");
     std::fs::write(&journal, text).unwrap();
-    Bundle::open(&root).unwrap();
+    recover_all(&root).unwrap();
     assert_eq!(tree(&root), before);
     assert!(
         !root
@@ -508,8 +516,8 @@ fn crash_mid_run_keeps_the_log_entries_of_written_items() {
         fail::clear();
         assert!(got.is_err(), "{name}: the run fails closed");
         assert!(!root.join("log.md").exists());
-        Bundle::open(&root).unwrap();
-        Bundle::open(&root).unwrap();
+        recover_all(&root).unwrap();
+        recover_all(&root).unwrap();
         let log = std::fs::read_to_string(root.join("log.md")).unwrap();
         assert_eq!(log.matches("**Created**").count(), 3, "{name}");
         let left: Vec<_> = std::fs::read_dir(root.join("_sources/ops"))
@@ -519,4 +527,298 @@ fn crash_mid_run_keeps_the_log_entries_of_written_items() {
             .collect();
         assert!(left.is_empty(), "{name}: {left:?}");
     }
+}
+
+// ---- #10746 S5 fix round (r2) ----
+
+fn op_verify_c(b: &mut Bundle) -> Result<(), OkfError> {
+    let h = content_hash(&b.get(&id("c"))?);
+    let v = Verification {
+        by: Actor::Process("second".into()),
+        at: at("2026-11-04T11:00:00Z"),
+        stale_after: None,
+    };
+    b.verify(&id("c"), v, &h).map(|_| ())
+}
+
+/// `fresh()` plus an unverified concept `c`.
+fn fresh_with_c() -> (tempfile::TempDir, std::path::PathBuf) {
+    let (t, root) = fresh();
+    let mut b = Bundle::open(&root).unwrap().0;
+    b.put(
+        new_concept("c", "Gamma\n"),
+        actor(),
+        WriteMode::Lenient,
+        at("2026-11-04T10:10:00Z"),
+    )
+    .unwrap();
+    (t, root)
+}
+
+fn verification_of(root: &Path, name: &str) -> (VerificationState, Vec<VerificationEvent>) {
+    let b = raw(root);
+    (
+        b.verification_state(&id(name)).unwrap(),
+        b.verification_events(&id(name)).unwrap(),
+    )
+}
+
+/// Why: r2 #1 — a chunked source calls `ingest_items` once per chunk with
+/// one `now`; every call's entries must reach `log.md`, and a retry too.
+/// What: two calls and a retry with the same spec and `now`.
+/// Test: self-contained.
+#[test]
+fn two_ingest_calls_with_one_now_log_every_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let when = "2026-11-04T10:00:00Z";
+    ingest(&root, &[item(0, "a"), item(1, "a")], when).unwrap();
+    ingest(&root, &[item(2, "a"), item(3, "a")], when).unwrap();
+    ingest(&root, &[item(0, "b")], when).unwrap();
+    let log = std::fs::read_to_string(root.join("log.md")).unwrap();
+    assert_eq!(log.matches("**Created**").count(), 4, "{log}");
+    assert_eq!(log.matches("**Updated**").count(), 1, "{log}");
+}
+
+/// Why: r2 #2 — a verify that failed mid-write and was rolled back in
+/// process leaves the concept in its pre-operation verification state.
+/// What: an I/O error on the concept write of a verify of unverified `c`.
+/// Test: self-contained.
+#[test]
+fn aborted_verify_reads_its_pre_op_state() {
+    let (_t, root) = fresh_with_c();
+    let before = verification_of(&root, "c");
+    fail::set_io(|n| n == "c.md");
+    let got = op_verify_c(&mut Bundle::open(&root).unwrap().0);
+    fail::clear();
+    assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
+    assert_eq!(verification_of(&root, "c"), before);
+    assert!(read_ops(&raw(&root)).unwrap().0.is_empty(), "rolled back");
+}
+
+/// Why: r2 #2 — `recover(RollBack)` of an interrupted verify leaves the
+/// concept in its pre-operation verification state.
+/// What: crash a verify of `c` after its record line, then roll back.
+/// Test: self-contained.
+#[test]
+fn recover_roll_back_of_verify_reads_pre_op_state() {
+    let (_t, root) = fresh_with_c();
+    let before = verification_of(&root, "c");
+    crash_at(&root, op_verify_c, "step-0");
+    let op = pending_op(&root);
+    raw(&root)
+        .recover(&op, RecoveryDirection::RollBack)
+        .unwrap();
+    assert_eq!(verification_of(&root, "c"), before);
+}
+
+/// Why: r2 #2 — a roll back interrupted after its compensation line, then
+/// rolled forward, reads exactly as the uninterrupted operation: the
+/// step's own record line wins again, with no `verification_mismatch`.
+/// What: an I/O error on the concept write of a content put on verified
+/// `a` makes `run` roll back; a crash stops that roll back after its
+/// compensation; recovery then rolls forward.
+/// Test: self-contained.
+#[test]
+fn roll_forward_after_interrupted_roll_back_is_consistent() {
+    let (_t1, clean_root) = fresh();
+    op_put(&mut Bundle::open(&clean_root).unwrap().0).unwrap();
+    let (_t, root) = fresh();
+    fail::set_io(|n| n == "a.md");
+    fail::set(|n| n == "recover-step-0");
+    let got = op_put(&mut Bundle::open(&root).unwrap().0);
+    fail::clear();
+    assert!(
+        matches!(got, Err(OkfError::RecoveryPending { .. })),
+        "{got:?}"
+    );
+    recover_all(&root).unwrap();
+    let (_, findings) = Bundle::open(&root).unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.kind != FindingKind::VerificationMismatch),
+        "{findings:?}"
+    );
+    assert_eq!(events(&root), events(&clean_root));
+    assert_eq!(
+        verification_of(&root, "a"),
+        verification_of(&clean_root, "a")
+    );
+    for f in ["a.md", "log.md"] {
+        assert_eq!(tree(&root)[f], tree(&clean_root)[f], "{f}");
+    }
+}
+
+/// Why: r2 #2 — rolling back the `legacy_unbound` invalidation of an event
+/// that lived only in frontmatter adds no history.
+/// What: an I/O error on the concept write of a content put on a concept
+/// with a hashless frontmatter event.
+/// Test: self-contained.
+#[test]
+fn aborted_put_keeps_a_legacy_event_out_of_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::write(
+        root.join("l.md"),
+        "---\ntype: Note\nverified:\n  - { by: human:old, at: 2026-01-01T00:00:00Z }\n---\nBody\n",
+    )
+    .unwrap();
+    let before = verification_of(&root, "l");
+    let mut b = Bundle::open(&root).unwrap().0;
+    let mut c = b.get(&id("l")).unwrap();
+    c.body = "Changed\n".into();
+    fail::set_io(|n| n == "l.md");
+    let got = b.put(c, actor(), WriteMode::Lenient, at("2026-11-04T11:00:00Z"));
+    fail::clear();
+    assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
+    assert_eq!(verification_of(&root, "l"), before);
+}
+
+/// Why: r2 #3 — an ingest flush must not write `log.md` while a conflicted
+/// operation owns it; the batch stays and is written after `recover`.
+/// What: a put crashed after its revision line, `a.md` edited by hand, an
+/// ingest run, then `recover` forward.
+/// Test: self-contained.
+#[test]
+fn ingest_flush_waits_for_a_conflicted_log_op() {
+    let (_t, root) = fresh();
+    crash_at(&root, op_put, "step-1");
+    let op = pending_op(&root);
+    std::fs::write(root.join("a.md"), "---\ntype: Note\n---\nby hand\n").unwrap();
+    let items: Vec<SourceItem> = (0..3).map(|n| item(n, "one")).collect();
+    let got = ingest(&root, &items, "2026-11-04T12:00:00Z");
+    assert!(
+        matches!(got, Err(OkfError::RecoveryPending { .. })),
+        "{got:?}"
+    );
+    let batches = || {
+        std::fs::read_dir(root.join("_sources/ops"))
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("log-")
+            })
+            .count()
+    };
+    assert_eq!(batches(), 1, "the batch is kept");
+    let (mut b, _) = Bundle::open(&root).unwrap();
+    b.recover(&op, RecoveryDirection::RollForward).unwrap();
+    let log = std::fs::read_to_string(root.join("log.md")).unwrap();
+    assert_eq!(log.matches("**Created** `/mail/").count(), 3, "{log}");
+    assert_eq!(batches(), 0);
+}
+
+/// Why: r2 #4 — without the lock, a reader's `open` must neither remove a
+/// live writer's staging (a later crash would then be unrecoverable) nor
+/// complete its operation under it.
+/// What: a reader opens the bundle at the writer's `staged` boundary (the
+/// writer then crashes) and at its `intent` boundary (the writer goes on).
+/// Test: self-contained.
+#[test]
+fn concurrent_open_never_recovers_a_live_op() {
+    let (_t1, clean_root) = fresh();
+    op_put(&mut Bundle::open(&clean_root).unwrap().0).unwrap();
+    let clean = tree(&clean_root);
+
+    let (_t, root) = fresh();
+    let r = root.clone();
+    fail::set(move |n| {
+        if n == "staged" {
+            Bundle::open(&r).unwrap();
+        }
+        n == "step-1"
+    });
+    let got = op_put(&mut Bundle::open(&root).unwrap().0);
+    fail::clear();
+    assert!(got.is_err());
+    recover_all(&root).unwrap();
+    assert_eq!(tree(&root), clean, "staged reader");
+
+    let (_t, root) = fresh();
+    let r = root.clone();
+    fail::set(move |n| {
+        if n == "intent" {
+            Bundle::open(&r).unwrap();
+        }
+        false
+    });
+    let got = op_put(&mut Bundle::open(&root).unwrap().0);
+    fail::clear();
+    assert!(got.is_ok(), "{got:?}");
+    assert_eq!(tree(&root), clean, "intent reader");
+}
+
+/// Why: r2 #5 — a read error in the pre-image check after earlier steps
+/// rolls the operation back instead of leaving it half done.
+/// What: the first read of `a.md` during a content put fails.
+/// Test: self-contained.
+#[test]
+fn precheck_read_error_aborts_the_operation() {
+    let (_t, root) = fresh();
+    let before = verification_of(&root, "a");
+    let before_a = tree(&root)["a.md"].clone();
+    let mut fired = false;
+    fail::set_io(move |n| {
+        let hit = n == "read:a.md" && !fired;
+        fired |= hit;
+        hit
+    });
+    let got = op_put(&mut Bundle::open(&root).unwrap().0);
+    fail::clear();
+    assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
+    assert_eq!(verification_of(&root, "a"), before);
+    assert_eq!(tree(&root)["a.md"], before_a);
+    assert!(read_ops(&raw(&root)).unwrap().0.is_empty());
+}
+
+/// Why: r2 #5 — when every step ran but the completion record failed, the
+/// handle must stop writing to the operation's paths; when only the
+/// staging cleanup failed, the write succeeded and says so in a finding.
+/// What: the second journal append fails, then a later put on the same
+/// handle; then the staging removal fails.
+/// Test: self-contained.
+#[test]
+fn completion_failure_marks_conflict_and_staging_failure_is_a_finding() {
+    let (_t, root) = fresh();
+    let mut b = Bundle::open(&root).unwrap().0;
+    let mut appends = 0;
+    fail::set_io(move |n| {
+        if n == "_sources/ops/journal.jsonl" {
+            appends += 1;
+            return appends == 2;
+        }
+        false
+    });
+    let got = op_put(&mut b);
+    fail::clear();
+    assert!(
+        matches!(got, Err(OkfError::RecoveryPending { .. })),
+        "{got:?}"
+    );
+    let mut c = b.get(&id("a")).unwrap();
+    c.body = "later\n".into();
+    let got = b.put(c, actor(), WriteMode::Lenient, at("2026-11-04T12:00:00Z"));
+    assert!(
+        matches!(got, Err(OkfError::RecoveryPending { .. })),
+        "{got:?}"
+    );
+
+    let (_t, root) = fresh();
+    let mut b = Bundle::open(&root).unwrap().0;
+    let mut c = b.get(&id("b")).unwrap();
+    c.body = "changed\n".into();
+    fail::set_io(|n| n.starts_with("remove-staging:"));
+    let got = b.put(c, actor(), WriteMode::Lenient, at("2026-11-04T12:00:00Z"));
+    fail::clear();
+    let (_, findings) = got.unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| format!("{:?}", f.kind) == "StagingLeft"),
+        "{findings:?}"
+    );
 }
