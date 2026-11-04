@@ -26,6 +26,7 @@
 //! `c140_fold_collision_on_put_and_move`.
 
 use std::ops::Range;
+use std::path::Path;
 
 use chrono::{DateTime, FixedOffset};
 use serde_yaml::Value;
@@ -340,19 +341,11 @@ impl Bundle {
             rewrites.push(c);
         }
         // Execute: the file and its record move first, then the rewrites.
-        if let Some(dir) = to_path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
-        }
-        std::fs::rename(&from_path, &to_path).map_err(|e| io_err(&from_path, e))?;
-        // #10746: a file moved to a new bundle path ends up 0600 like any write.
-        restrict_path(&to_path)?;
+        let mut pairs = vec![(from_path.as_path(), to_path.as_path())];
         if from_record.exists() {
-            if let Some(dir) = to_record.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
-            }
-            std::fs::rename(&from_record, &to_record).map_err(|e| io_err(&from_record, e))?;
-            restrict_path(&to_record)?;
+            pairs.push((from_record.as_path(), to_record.as_path()));
         }
+        relocate(&pairs)?;
         let actor = Actor::Process("trusty-okf-move".to_string());
         for c in rewrites {
             let c = if matches!(&c.id, ConceptRef::Id(id) if id == from) {
@@ -398,9 +391,56 @@ impl Bundle {
     }
 }
 
+/// Rename each `(from, to)` pair, every source restricted to 0600 first.
+///
+/// #10746: a chmod that fails (EPERM on another user's file in a shared
+/// bundle) must fail before any rename, so the move leaves no partial state.
+/// What: restricts every source, then creates each target's directory and
+/// renames. The caller has confined and link-checked every path.
+/// Test: `relocate_restricts_every_source_before_any_rename`.
+fn relocate(pairs: &[(&Path, &Path)]) -> Result<(), OkfError> {
+    for (from, _) in pairs {
+        restrict_path(from)?;
+    }
+    for (from, to) in pairs {
+        if let Some(dir) = to.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
+        }
+        std::fs::rename(from, to).map_err(|e| io_err(from, e))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why: a failed restrict must leave the bundle unmoved (#10746).
+    /// What: the second source is missing, so its restrict fails; the first
+    /// pair is not renamed. With both present, both land 0600.
+    /// Test: self-contained.
+    #[cfg(unix)]
+    #[test]
+    fn relocate_restricts_every_source_before_any_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let r = tmp.path();
+        let (a, a2) = (r.join("a.md"), r.join("d/a.md"));
+        let (rec, rec2) = (r.join("a.jsonl"), r.join("d/a.jsonl"));
+        std::fs::write(&a, "x").unwrap();
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let got = relocate(&[(a.as_path(), a2.as_path()), (rec.as_path(), rec2.as_path())]);
+        assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
+        assert!(a.is_file() && !a2.exists(), "no rename ran");
+
+        std::fs::write(&rec, "y").unwrap();
+        relocate(&[(a.as_path(), a2.as_path()), (rec.as_path(), rec2.as_path())]).unwrap();
+        for p in [&a2, &rec2] {
+            let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, 0o600, "{p:?}");
+        }
+        assert!(!a.exists() && !rec.exists());
+    }
 
     fn id(s: &str) -> ConceptId {
         ConceptId::parse(s).unwrap()

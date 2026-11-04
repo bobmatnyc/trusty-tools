@@ -310,7 +310,7 @@ impl Bundle {
             }
             // #10746: §2.4 needs a `human:` actor AND explicit confirmation.
             if extends_stale_after(o, &next)
-                && !(confirmed && matches!(by, Actor::Human(_)))
+                && !(confirmed && is_human(by))
                 && matches!(
                     record::state_for(self, &id, o)?,
                     record::VerificationState::Verified { human: true, .. }
@@ -432,7 +432,7 @@ impl Bundle {
         confirmed: bool,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
         // #10746: a `human:` actor alone is not explicit confirmation (§2.4).
-        if matches!(v.by, Actor::Human(_)) && !confirmed {
+        if is_human(&v.by) && !confirmed {
             return Err(conflict(id, "human_not_confirmed"));
         }
         let c = self.get(id)?;
@@ -510,4 +510,15 @@ fn log_line(id: &ConceptId, by: &Actor, outcome: &PutOutcome) -> String {
             id.file_name()
         ),
     }
+}
+
+/// Whether `by` is a human, by the test the record reader applies.
+///
+/// #10746: the record stores `by.to_string()` and `record::state_of` reads
+/// it back with `Actor::parse`, so `Other("human:jo")` or a producer named
+/// `human:jo` is a human there; the §2.4 gate must agree.
+/// Test: `human_verify_refuses_an_other_actor_with_a_human_prefix`,
+/// `human_verify_refuses_a_producer_named_human`.
+fn is_human(by: &Actor) -> bool {
+    matches!(Actor::parse(&by.to_string()), Actor::Human(_))
 }

@@ -731,3 +731,37 @@ fn human_verify_without_confirmation_is_refused() {
     let v = verification(process(), "2026-11-01T09:00:00Z");
     b.verify(&id("a"), v, &seen).unwrap();
 }
+
+/// #10746 (§2.4): `verify` refuses, with no file changed, an actor that the
+/// record reader parses back as `human:` (`Actor::parse(&by.to_string())`).
+#[cfg(unix)]
+fn assert_parsed_human_is_refused(by: Actor) {
+    let (tmp, mut b) = setup("---\ntype: Note\n---\nBody\n");
+    let before = snapshot(tmp.path());
+    let seen = content_hash(&b.get(&id("a")).unwrap());
+    let v = verification(by.clone(), "2026-11-01T09:00:00Z");
+    assert_eq!(
+        conflict_reason(b.verify(&id("a"), v, &seen)),
+        "human_not_confirmed",
+        "{by:?}"
+    );
+    assert_eq!(snapshot(tmp.path()), before, "{by:?}: no file changed");
+}
+
+/// #10746: `Other("human:jo")` is stored as `human:jo` and read as a human.
+#[cfg(unix)]
+#[test]
+fn human_verify_refuses_an_other_actor_with_a_human_prefix() {
+    assert_parsed_human_is_refused(Actor::Other("human:jo".into()));
+}
+
+/// #10746: a producer named `human:jo` is stored as `human:jo/1` and read as
+/// a human.
+#[cfg(unix)]
+#[test]
+fn human_verify_refuses_a_producer_named_human() {
+    assert_parsed_human_is_refused(Actor::Producer {
+        name: "human:jo".into(),
+        version: "1".into(),
+    });
+}
