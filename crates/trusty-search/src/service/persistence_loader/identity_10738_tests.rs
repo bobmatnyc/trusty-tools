@@ -107,3 +107,158 @@ async fn identity_changes_when_the_corpus_is_recreated_empty() {
     );
     drop(rebuilt);
 }
+
+/// Makes a directory read-only, so a write and a remove in it both fail;
+/// restores it on drop.
+struct ReadOnly(std::path::PathBuf);
+impl ReadOnly {
+    fn new(dir: std::path::PathBuf) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make the identity dir read-only");
+        Self(dir)
+    }
+}
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// The `identity` and `identity_error` fields a reply would carry now.
+fn reply_fields(id: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    index_identity::insert_into(id, &mut body);
+    body
+}
+
+/// A daemon restart: the process-local poison is gone; reload from the entry.
+async fn restart(entry: &PersistedIndex) -> CodeIndexer {
+    index_identity::forget_process_state(&entry.id);
+    load(entry).await
+}
+
+/// Load an index, put one file, and return the identity it then reports.
+async fn seeded(id: &str, root: &std::path::Path) -> (PersistedIndex, IndexIdentity) {
+    let mut entry = PersistedIndex::new(id.to_string(), root.to_path_buf());
+    entry.colocated = true;
+    let indexer = load(&entry).await;
+    indexer
+        .index_file("src/lib.rs", "pub fn handler_10738() -> u32 { 7 }\n")
+        .await
+        .expect("index a file");
+    let first = index_identity::current(id).expect("first identity");
+    (entry, first)
+}
+
+/// Why: H2 — a corpus-loss bump that fails leaves the pre-event identity
+/// file, and the recreated corpus exists at the next restart, so nothing
+/// re-detected the loss and the stale identity was served beside it.
+/// What: an old-format corpus is recreated empty while the identity dir is
+/// read-only; after a restart with the dir still read-only the reply carries
+/// `identity: null`; after a restart with it writable the identity is new,
+/// and a further plain restart keeps that new value.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_corpus_loss_bump_that_failed_is_retried_after_a_restart() {
+    // Root ignores directory permissions, so nothing would fail.
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let isolated = IsolatedDataDir::new();
+    let root = tempfile::tempdir().expect("root");
+    let id = "identity-corpus-loss-restart-10738";
+    let (entry, first) = seeded(id, root.path()).await;
+    let redb = corpus_redb_path_for_entry(&entry).expect("redb path");
+
+    plant_old_format_corpus(&redb);
+    let guard = ReadOnly::new(isolated.path().join("index-identity"));
+    let recreated = load(&entry).await;
+    assert!(
+        redb.with_file_name("index.redb.v2-incompatible").exists(),
+        "precondition: the old-format corpus was moved aside"
+    );
+    index_identity::current(id).expect_err("precondition: the bump failed");
+    drop(recreated);
+
+    let reloaded = restart(&entry).await;
+    let body = reply_fields(id);
+    assert!(
+        body["identity"].is_null(),
+        "a restart must not serve the pre-event identity: {body:?} (was {first:?})"
+    );
+    assert!(body["identity_error"].is_string(), "{body:?}");
+    drop(reloaded);
+
+    drop(guard);
+    let healed = restart(&entry).await;
+    let after = index_identity::current(id).expect("a writable dir bumps");
+    assert_ne!(after, first, "the healed identity must be new");
+    drop(healed);
+    let reopened = restart(&entry).await;
+    assert_eq!(
+        index_identity::current(id).expect("identity after a plain restart"),
+        after,
+        "a plain restart keeps the healed identity"
+    );
+    drop(reopened);
+}
+
+/// Why: H2 — an event that keeps the corpus (here a migration fault) leaves
+/// the corpus stamp equal to the pre-event identity file when its bump fails,
+/// so only the `identity_bump_pending` marker can tell a restart.
+/// What: a migration fault is recorded while the identity dir is read-only;
+/// a restart with the dir still read-only answers `identity: null`; a
+/// restart with it writable raises the generation, and a plain restart
+/// keeps that value.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_pending_bump_that_failed_is_retried_after_a_restart() {
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let isolated = IsolatedDataDir::new();
+    let root = tempfile::tempdir().expect("root");
+    let id = "identity-pending-restart-10738";
+    let (entry, first) = seeded(id, root.path()).await;
+
+    let indexer = restart(&entry).await;
+    assert_eq!(
+        index_identity::current(id).expect("identity after a plain restart"),
+        first,
+        "precondition: a plain restart keeps the identity"
+    );
+    let guard = ReadOnly::new(isolated.path().join("index-identity"));
+    indexer.record_migration_failure("test_stage_10738", "injected fault");
+    index_identity::current(id).expect_err("precondition: the bump failed");
+    drop(indexer);
+
+    let reloaded = restart(&entry).await;
+    let body = reply_fields(id);
+    assert!(
+        body["identity"].is_null(),
+        "a restart must not serve the pre-event identity: {body:?} (was {first:?})"
+    );
+    assert!(body["identity_error"].is_string(), "{body:?}");
+    drop(reloaded);
+
+    drop(guard);
+    let healed = restart(&entry).await;
+    let after = index_identity::current(id).expect("a writable dir bumps");
+    assert_eq!(after.instance_id, first.instance_id);
+    assert!(
+        after.generation > first.generation,
+        "{first:?} -> {after:?}"
+    );
+    drop(healed);
+    let reopened = restart(&entry).await;
+    assert_eq!(
+        index_identity::current(id).expect("identity after a plain restart"),
+        after,
+        "a plain restart keeps the raised generation"
+    );
+    drop(reopened);
+}
