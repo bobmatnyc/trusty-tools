@@ -32,7 +32,7 @@ fn walked(state: &Arc<SearchAppState>, id: &str, root: &Path) -> BTreeSet<&'stat
 fn admitted(state: &Arc<SearchAppState>, id: &str) -> BTreeSet<&'static str> {
     PATHS
         .into_iter()
-        .filter(|rel| path_admits_report(state, id, rel).expect("answer").admitted)
+        .filter(|rel| path_admits_report(state, id, rel).expect("answer").admitted == Some(true))
         .collect()
 }
 
@@ -102,7 +102,7 @@ async fn path_admits_names_the_refusing_rule() {
     ] {
         let answer = path_admits_report(&state, id, path).expect("answer");
         assert_eq!(answer.reason, reason, "{id} {path}: {answer:?}");
-        assert_eq!(answer.admitted, reason == "admitted", "{id} {path}");
+        assert_eq!(answer.admitted, Some(reason == "admitted"), "{id} {path}");
     }
 }
 
@@ -116,4 +116,57 @@ async fn path_admits_refuses_an_unknown_index() {
     ));
     let (status, _) = path_admits_report(&state, "ghost", INDEX).expect_err("unknown");
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Register a bare handle for `root` excluding `exclude_globs`.
+fn bare_state(id: &str, root: &Path, exclude_globs: &[&str]) -> Arc<SearchAppState> {
+    let indexer = Arc::new(tokio::sync::RwLock::new(crate::core::CodeIndexer::new(
+        id, root,
+    )));
+    let mut handle =
+        crate::core::registry::IndexHandle::bare(IndexId::new(id), indexer, root.to_path_buf());
+    handle.exclude_globs = exclude_globs.iter().map(|g| g.to_string()).collect();
+    let registry = crate::core::registry::IndexRegistry::new();
+    registry.register(handle);
+    Arc::new(SearchAppState::new(registry))
+}
+
+/// #10739: an undecided answer (filesystem error, held index) never reads as
+/// excluded on the wire: `admitted` is `null`, not `false`, so a caller
+/// proving §5.3.1 rule 4 exclusion cannot take it as proof.
+/// Test: this test.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::parallel]
+async fn path_admits_never_reports_an_undecided_answer_as_excluded() {
+    let (_dir, root) = bundle();
+    // A self-referential symlink: on disk, but `canonicalize` fails (`ELOOP`),
+    // the deterministic stand-in for `EACCES` / `ESTALE`.
+    std::os::unix::fs::symlink("loop.md", root.join("loop.md")).expect("symlink");
+    let undecided = bare_state("adm-loop", &root, &["_sources/**", "_state/**"]);
+    // An exclude glob that does not parse holds the index (#9059).
+    let held = bare_state("adm-held", &root, &["_sources/[**"]);
+
+    // Every arm is checked before failing, so a regression names each one.
+    let wrong: Vec<String> = [
+        (&undecided, "adm-loop", "loop.md", "undetermined"),
+        (&held, "adm-held", REGISTRY, "index_held"),
+        (&held, "adm-held", INDEX, "index_held"),
+    ]
+    .into_iter()
+    .filter_map(|(state, id, path, reason)| {
+        let wire = serde_json::to_value(path_admits_report(state, id, path).expect("answer"))
+            .expect("json");
+        (wire["reason"] != reason || !wire["admitted"].is_null()).then(|| format!("{wire}"))
+    })
+    .collect();
+    assert!(
+        wrong.is_empty(),
+        "an undecided answer must carry `admitted: null`: {wrong:#?}"
+    );
+    // A decided exclusion still says `false`.
+    let wire =
+        serde_json::to_value(path_admits_report(&undecided, "adm-loop", REGISTRY).expect("answer"))
+            .expect("json");
+    assert_eq!(wire["admitted"], serde_json::Value::Bool(false), "{wire}");
 }
