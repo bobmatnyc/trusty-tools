@@ -10,7 +10,7 @@
 //! answers `extract_error`, `NOTEXT` answers `no_text_layer`, `STDERR`
 //! writes 1 MiB to stderr first, `SPAM` answers then streams 2000 more
 //! frames (logging `sent <n>` to the pidfile), `SPIN` burns CPU, `ALLOC`
-//! allocates 1 GiB, `FORK` forks a `setsid` grandchild named
+//! allocates 1.25 GiB, `FORK` forks a `setsid` grandchild named
 //! `okf-setsid-<config>` and answers whether the fork worked. Any other item
 //! is echoed as its text.
 
@@ -106,7 +106,9 @@ while (1) {
   note_pid('item');
   idle() if $body =~ /^HANG/;
   if ($body =~ /^SPIN/) { 1 while 1; }
-  if ($body =~ /^ALLOC/) { my $big = 'x' x (1 << 30); $body = length($big); }
+  # The size is computed at run time: a constant `'x' x (1 << 30)` is folded
+  # at compile time and would allocate 1 GiB in every double at startup.
+  if ($body =~ /^ALLOC/) { my $n = length($body) << 28; my $big = 'x' x $n; $body = length($big); }
   if ($body =~ /^FORK/) {
     my $pid = fork();
     if (defined $pid && $pid == 0) { POSIX::setsid(); $0 = "okf-setsid-$o{config}"; idle(); }
