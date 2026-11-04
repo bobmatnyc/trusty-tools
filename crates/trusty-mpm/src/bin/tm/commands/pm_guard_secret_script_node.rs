@@ -18,12 +18,13 @@
 //! judged raw, as before: an unterminated string, template, regex or block
 //! comment, a newline in a quoted string, or an unbalanced brace. A body that
 //! can run its own text (`eval`, `Function`, `vm` beside `__filename`,
-//! `import.meta` or `process.argv`) keeps its comments.
+//! `require.main`, `module.filename`, `import.meta` or `process.argv`) keeps
+//! its comments. A `/` after `)`, `]` or `}` is division or a regex, and only
+//! a parser can tell which (`(a+b)/2` against `if (x) /re/`); when a regex
+//! could close on that line, the reader answers `None`.
 //!
-//! Residuals: a regex literal written after `)` or `]` is read as division
-//! (`if (x) /re/`), which can misread the rest; a misread almost always ends
-//! in an unterminated literal and answers `None`. A file name built at run
-//! time (`'.e' + 'nv'`) is open, as it is in the shell judges.
+//! Residual: a file name built at run time (`'.e' + 'nv'`) is open, as it is
+//! in the shell judges.
 //! Test: `pm_guard_secret_script_node_tests.rs`.
 
 /// One lexer frame: code with its open-brace depth, or a template's text.
@@ -51,10 +52,19 @@ const REGEX_AFTER: &[&str] = &[
 ];
 
 /// Words that let a body run its own source text.
-const SELF_EVAL: &[&str] = &["eval", "Function", "vm."];
+// #10548 round 1: a destructured `require('vm')` has no `vm.` in it.
+const SELF_EVAL: &[&str] = &[
+    "eval", "Function", "vm.", "'vm'", "\"vm\"", "`vm`", "node:vm",
+];
 
 /// Words that locate a body's own source.
-const SELF_PATH: &[&str] = &["__filename", "import.meta", "process.argv"];
+const SELF_PATH: &[&str] = &[
+    "__filename",
+    "import.meta",
+    "process.argv",
+    "require.main",
+    "module.filename",
+];
 
 /// Read `body` as JS: member-access dots in code joined, comments blanked;
 /// `None` for a body the lexer cannot read in full. See the module doc.
@@ -67,7 +77,8 @@ const SELF_PATH: &[&str] = &["__filename", "import.meta", "process.argv"];
 /// Test: `a_node_run_of_member_accesses_allows_10548`,
 /// `a_node_body_naming_a_secret_literal_refuses_10548`,
 /// `a_self_evaluating_body_keeps_its_comments_judged_10548`,
-/// `an_unreadable_js_body_is_judged_raw_10548`.
+/// `an_unreadable_js_body_is_judged_raw_10548`,
+/// `division_after_a_paren_reads_as_js_10548`.
 pub(super) fn js_reading(body: &str) -> Option<String> {
     let keep_comments =
         SELF_EVAL.iter().any(|w| body.contains(w)) && SELF_PATH.iter().any(|w| body.contains(w));
@@ -75,6 +86,8 @@ pub(super) fn js_reading(body: &str) -> Option<String> {
     let mut out = String::with_capacity(body.len());
     let mut stack = vec![Frame::Code(0)];
     let (mut i, mut regex_ok, mut word) = (0, true, String::new());
+    // The last code token was `)`, `]` or `}`: a `/` there is ambiguous.
+    let mut after_close = false;
     while let Some(&ch) = c.get(i) {
         let next = c.get(i + 1).copied();
         if let Some(Frame::Template) = stack.last() {
@@ -87,7 +100,8 @@ pub(super) fn js_reading(body: &str) -> Option<String> {
                 '`' => {
                     out.push(ch);
                     stack.pop();
-                    (i, regex_ok) = (i + 1, false);
+                    // A closed template is an operand: a `/` after it divides.
+                    (i, regex_ok, after_close) = (i + 1, false, false);
                 }
                 '$' if next == Some('{') => {
                     out.push_str("${");
@@ -102,6 +116,7 @@ pub(super) fn js_reading(body: &str) -> Option<String> {
             continue;
         }
         if is_ident(ch) {
+            after_close = false;
             word.push(ch);
             out.push(ch);
             i += 1;
@@ -124,26 +139,30 @@ pub(super) fn js_reading(body: &str) -> Option<String> {
                 comment(&mut out, &c[i..end], keep_comments);
                 end
             }
-            '/' if regex_ok => {
+            // #10548 round 1: division or a regex; fail closed when it could be a regex.
+            '/' if after_close && regex_end(&c, i).is_some() => return None,
+            '/' if regex_ok && !after_close => {
                 let end = regex_end(&c, i)?;
-                regex_ok = false;
+                (regex_ok, after_close) = (false, false);
                 out.extend(&c[i..end]);
                 end
             }
             '\'' | '"' => {
                 let end = string_end(&c, i)?;
-                regex_ok = false;
+                (regex_ok, after_close) = (false, false);
                 out.extend(&c[i..end]);
                 end
             }
             '`' => {
                 out.push(ch);
                 stack.push(Frame::Template);
+                after_close = false;
                 i + 1
             }
             '.' if is_member_access(&out, next) => {
                 // #10548: `x.key` is a property, never the `*.key` file class.
                 out.push('_');
+                after_close = false;
                 i + 1
             }
             _ => {
@@ -159,6 +178,7 @@ pub(super) fn js_reading(body: &str) -> Option<String> {
                     _ => {}
                 }
                 if !ch.is_whitespace() {
+                    after_close = matches!(ch, ')' | ']' | '}');
                     regex_ok = !matches!(ch, ')' | ']');
                 }
                 out.push(ch);
