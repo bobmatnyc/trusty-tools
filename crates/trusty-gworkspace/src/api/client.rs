@@ -85,6 +85,9 @@ pub struct BaseClient {
     http: reqwest::Client,
     pub(crate) storage: Arc<TokenStorage>,
     oauth: OAuthManager,
+    /// #10746 S13: a loopback root every Google API URL is sent to instead,
+    /// set only by [`BaseClient::with_loopback_root`].
+    api_root: Option<String>,
 }
 
 impl BaseClient {
@@ -98,7 +101,47 @@ impl BaseClient {
                 .context("build reqwest client")?,
             storage,
             oauth: OAuthManager::new(),
+            api_root: None,
         })
+    }
+
+    /// Send every Google API request to a loopback HTTP server instead.
+    ///
+    /// Why: the OKF import adapters (`trusty-connectors`, #10746 S13) run
+    /// their conformance suite as real binaries against a stubbed Google
+    /// HTTP layer; the service functions build their URLs from fixed
+    /// constants, so the stub needs one rewrite point.
+    /// What: accepts only `http://127.0.0.1:<port>`, `http://localhost:<port>`
+    /// or `http://[::1]:<port>`, so a bearer token can never be sent to a
+    /// remote host through it. Each `https://<host>/<path>` URL then goes to
+    /// `<root>/<host>/<path>`; a URL that is not `https` is refused.
+    /// Errors: any other root.
+    /// Test: `loopback_root_rewrites_google_urls_and_refuses_remote_roots`.
+    pub fn with_loopback_root(mut self, root: &str) -> Result<Self> {
+        let root = root.trim_end_matches('/');
+        let host = root.strip_prefix("http://").unwrap_or_default();
+        let name = host.rsplit_once(':').map_or("", |(h, _)| h);
+        let port_ok = host
+            .rsplit_once(':')
+            .is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if !(matches!(name, "127.0.0.1" | "localhost" | "[::1]") && port_ok) {
+            return Err(anyhow!(
+                "api root {root:?} is not a loopback http://host:port root"
+            ));
+        }
+        self.api_root = Some(root.to_string());
+        Ok(self)
+    }
+
+    /// The URL a request is actually sent to (see [`Self::with_loopback_root`]).
+    fn route(&self, url: &str) -> Result<String> {
+        let Some(root) = &self.api_root else {
+            return Ok(url.to_string());
+        };
+        let rest = url
+            .strip_prefix("https://")
+            .ok_or_else(|| anyhow!("refusing non-https url {url} under a loopback root"))?;
+        Ok(format!("{root}/{rest}"))
     }
 
     /// Expose storage for tools that list profiles.
@@ -122,6 +165,7 @@ impl BaseClient {
             http: reqwest::Client::new(),
             storage: Arc::new(storage),
             oauth: OAuthManager::new(),
+            api_root: None,
         }
     }
 
@@ -239,6 +283,10 @@ impl BaseClient {
         body: ReqBody<'_>,
         account: Option<&str>,
     ) -> Result<reqwest::Response> {
+        // #10746 S13: a loopback root (tests only) rewrites the URL here, the
+        // one point every request passes.
+        let routed = self.route(url)?;
+        let url = routed.as_str();
         let token = self.get_access_token(account).await?;
         let req = body.apply(self.http.request(method.clone(), url).bearer_auth(&token));
         debug!(method = %method, url = %url, "google api request");
@@ -410,5 +458,44 @@ impl BaseClient {
             return Ok(serde_json::json!({ "error": text, "status": status.as_u16() }));
         }
         Err(anyhow!("google api delete error {status}: {text}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_root_rewrites_google_urls_and_refuses_remote_roots() {
+        let c = BaseClient::new()
+            .unwrap()
+            .with_loopback_root("http://127.0.0.1:4567/")
+            .unwrap();
+        assert_eq!(
+            c.route("https://www.googleapis.com/drive/v3/files")
+                .unwrap(),
+            "http://127.0.0.1:4567/www.googleapis.com/drive/v3/files"
+        );
+        assert!(c.route("http://www.googleapis.com/x").is_err());
+        assert_eq!(
+            BaseClient::new()
+                .unwrap()
+                .route("https://a.example/x")
+                .unwrap(),
+            "https://a.example/x"
+        );
+        for bad in [
+            "https://127.0.0.1:1",
+            "http://example.com:80",
+            "http://127.0.0.1",
+            "http://127.0.0.1:x",
+            "http://127.0.0.1.evil.com:80",
+            "",
+        ] {
+            assert!(
+                BaseClient::new().unwrap().with_loopback_root(bad).is_err(),
+                "{bad} accepted"
+            );
+        }
     }
 }

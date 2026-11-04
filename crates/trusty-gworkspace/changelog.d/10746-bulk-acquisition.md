@@ -1,0 +1,3 @@
+Added
+- `api::bulk`: Gmail and Drive bulk acquisition moved from trusty-agents (#10746 S13): `gmail_list_page` and `DriveWalk::next_page` list one page and return the page token they did not follow, `gmail_list_ids` and `drive_list_files` list to a ceiling, `message_bodies`, `message_header` and `message_attachments` read a `format=full` message, and `drive_file` and `drive_export` read one Drive file. `DRIVE_FIELDS` now asks for `createdTime`.
+- `BaseClient::with_loopback_root`: sends every Google API request to a loopback `http://127.0.0.1:<port>` root instead, for tests against a stubbed Google; any other root is refused.

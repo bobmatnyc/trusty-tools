@@ -31,6 +31,7 @@ versions, publishability, and targets.
 | `trusty-code-gui` | [`crates/trusty-code-gui/`](../../crates/trusty-code-gui/) | library, `trusty-code-gui` | [crate README](../../crates/trusty-code-gui/README.md) |
 | `trusty-code-tui` | [`crates/trusty-code-tui/`](../../crates/trusty-code-tui/) | library | [crate README](../../crates/trusty-code-tui/README.md) |
 | `trusty-common` | [`crates/trusty-common/`](../../crates/trusty-common/) | library, supporting binaries | [crate README](../../crates/trusty-common/README.md), [extended docs](../trusty-common/README.md) |
+| `trusty-connectors` | [`crates/trusty-connectors/`](../../crates/trusty-connectors/) | library, `okf-adapter-gmail`, `okf-adapter-gdocs`; `publish = false`; the trusty-okf import adapter programs, which hold the Google credential (#10746) | [`CHANGELOG.md`](../../crates/trusty-connectors/CHANGELOG.md) |
 | `trusty-console` | [`crates/trusty-console/`](../../crates/trusty-console/) | library, `trusty-console` | [crate README](../../crates/trusty-console/README.md), [extended docs](../trusty-console/README.md) |
 | `trusty-crate-contracts` | [`crates/trusty-crate-contracts/`](../../crates/trusty-crate-contracts/) | test-only, never published — the home for tests spanning two production crates (#8341) | [crate README](../../crates/trusty-crate-contracts/README.md) |
 | `trusty-cto-db` | [`crates/trusty-cto-db/`](../../crates/trusty-cto-db/) | library | [crate README](../../crates/trusty-cto-db/README.md), [extended docs](../trusty-cto-db/README.md) |

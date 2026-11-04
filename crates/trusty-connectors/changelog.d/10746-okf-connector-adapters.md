@@ -1,0 +1,5 @@
+Added
+- `okf-adapter-gmail` and `okf-adapter-gdocs`: the trusty-okf import adapter programs (SPEC-OKF-01 §3 (m) A, Appendix B "Acquire role", Appendix C, #10746 S13). Start them with `trusty-okf import run --from adapter:<gmail|gdocs> --adapter PATH --adapter-var HOME=...`; each reads the Google credential from the trusty-gworkspace token store under that `HOME` and from nothing else.
+- Gmail reads SENT mail only unless the run is operator-initiated, the selection says `mailbox=all`, and the adapter's `~/.config/trusty-connectors/config.toml` (or `--config`) holds an `[[inbound_grant]]` row for the store and account; the listing query is `in:sent (<query>)`, and a message without the `SENT` label is refused per item.
+- Every listing page sends `complete`; a page cut at the adapter's own ceiling (`max_items`, default 5,000) returns the page token it did not follow with `complete: false`. Every Google failure is a protocol error code (`auth_required`, `permission_denied`, `not_found`, `fetch_error`, `policy_refused`), never an empty page.
+- The adapters exit on `shutdown` and on stdin EOF, also while a Google call is in flight.

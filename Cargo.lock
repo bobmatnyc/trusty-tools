@@ -11369,6 +11369,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-connectors"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "trusty-gworkspace",
+ "trusty-okf",
+ "walkdir",
+]
+
+[[package]]
 name = "trusty-console"
 version = "0.13.0"
 dependencies = [
@@ -11491,7 +11509,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-gworkspace"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

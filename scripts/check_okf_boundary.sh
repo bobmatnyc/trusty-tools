@@ -30,6 +30,11 @@
 #     b9_no_extraction_backend         B9  graph has no xberg, ort, candle-core
 #     b2_trusty_agents_depends_on_okf  B2  `cargo tree -i trusty-okf` lists
 #                                          trusty-agents (#10746 S11)
+#     b11_agents_do_not_link_connectors    trusty-agents' graph (all
+#                                          features, normal+dev+build) has
+#                                          no trusty-connectors, so the
+#                                          adapters' credentials stay out of
+#                                          the agent core (#10746 S13)
 #   Printed as `note:` lines: B10 (child-process environment; a cargo test
 #   since S9/S10, #10746). Criterion 13's registry.toml load is a cargo test
 #   since S4 (#10746): build_criteria.rs golden_registry_loads_every_row.
@@ -48,6 +53,7 @@
 #   OKF_TREE_ALL    read this file as the all-features tree instead of cargo
 #   OKF_TREE_CORE   read this file as the --no-default-features tree
 #   OKF_TREE_INV    read this file as the `cargo tree -i trusty-okf` output
+#   OKF_TREE_AGENTS read this file as trusty-agents' all-features tree
 #   OKF_SKIP_BUILD  1 skips the `cargo check --no-default-features` build
 # Exit: 0 clean; 1 on any finding.
 # Test: scripts/check_okf_boundary_selftest.sh.
@@ -133,8 +139,10 @@ banned_src() {
 # B1: agent, MCP and connector crates. trusty-kb is the crate trusty-okf
 # replaced (deleted in #10746 S11); its name stays banned so a crate of that
 # name, with its MCP server and agent coupling, cannot come back as a dep.
+# #10746 S13: trusty-connectors holds the import adapters and their Google
+# credential; the edge runs trusty-connectors -> trusty-okf only.
 banned_deps c11_no_agent_or_connector_deps "$TMP/all" \
-  'trusty-agents|trusty-agents-common|trusty-agents-ui|trusty-mcp|trusty-mcp-services|trusty-gworkspace|trusty-channels|trusty-kb|tc-services'
+  'trusty-agents|trusty-agents-common|trusty-agents-ui|trusty-mcp|trusty-mcp-services|trusty-gworkspace|trusty-channels|trusty-kb|tc-services|trusty-connectors'
 
 # B3 (env/home), B4 (agent home layout), B5 (index lifecycle and names).
 # #10746 H2: B3 bars deriving a path from an environment variable, so the bare
@@ -196,6 +204,22 @@ if awk '{print $1}' "$TMP/inv.raw" | grep -qx 'trusty-agents'; then
   echo "ok   b2_trusty_agents_depends_on_okf"
 else
   fail b2_trusty_agents_depends_on_okf "cargo tree -i trusty-okf lists no trusty-agents"
+fi
+
+# #10746 S13: the connector crate holds the adapters' credentials, so the
+# agent core never links it, under any feature or edge kind.
+if [ -n "${OKF_TREE_AGENTS:-}" ]; then
+  cp "$OKF_TREE_AGENTS" "$TMP/agents.raw"
+else
+  cargo tree -q --locked -p trusty-agents -e normal,dev,build --target all \
+    --all-features --prefix none --format '{p}' > "$TMP/agents.raw"
+fi
+if [ "$(head -n 1 "$TMP/agents.raw" | awk '{print $1}')" != "trusty-agents" ]; then
+  fail b11_agents_do_not_link_connectors "trusty-agents' dependency tree does not start at trusty-agents"
+elif awk '{print $1}' "$TMP/agents.raw" | grep -qx 'trusty-connectors'; then
+  fail b11_agents_do_not_link_connectors "trusty-agents depends on trusty-connectors"
+else
+  echo "ok   b11_agents_do_not_link_connectors"
 fi
 
 echo "note: B10 (child-process environment) is the tests c139_adapter_gets_exactly_the_caller_environment (crates/trusty-okf/tests/adapter_criteria.rs) and c104_worker_env_is_the_allow_list_and_cwd_is_empty (crates/trusty-okf/tests/worker_criteria.rs)"
