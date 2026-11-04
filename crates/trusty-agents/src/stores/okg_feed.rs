@@ -70,8 +70,8 @@ pub struct IndexFeedReport {
     /// Per-path failures and coverage notes, across the tree.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
-    /// This source's own paths that failed this pass or still owe a push
-    /// or a remove. Internal: the publication gate reads it.
+    /// This source's own paths that are unreadable or still owe a push or a
+    /// remove after the pass. Internal: the publication gate reads it.
     #[serde(skip)]
     source_blocked: Vec<String>,
 }
@@ -95,9 +95,11 @@ impl IndexFeedReport {
     /// does not stop the others, so an unreadable or refused path of
     /// ANOTHER source must not block this one (#10746 S12 fix round).
     /// What: the pass ran into `index` with no pass-level reason, and no
-    /// path of this source's ledger failed this pass or still owes a push
-    /// or a remove. A probe still owed does not block (acknowledgement, as
-    /// before S12). Errors on other paths stay in `errors`.
+    /// path of this source's ledger is unreadable or still owes a push or a
+    /// remove after the pass; a put or remove that failed this pass leaves
+    /// exactly such a task. A failed or owed probe does not block
+    /// (acknowledgement, as before S12). Errors on other paths stay in
+    /// `errors`.
     /// Test: `unrelated_unreadable_concept_does_not_block_publication`,
     /// `refused_put_of_own_entity_blocks_publication`.
     pub fn acknowledged(&self, index: &str) -> bool {
@@ -286,17 +288,11 @@ fn fold(
         .and_then(|v| store.source_index_state(spec, v.as_ref(), confirmed));
     // An unreadable coverage claims nothing and carries a reason, so
     // `acknowledged` is false (fail closed).
+    // A put or remove that failed this pass leaves its path owing that task,
+    // so `blocking` names it; a failed probe leaves only a probe owed, which
+    // does not block (acknowledgement, as before S12).
     let (cov, mut blocked, reason) = match read {
-        Ok(st) => {
-            let mut blocked = st.blocking;
-            blocked.extend(
-                r.errors
-                    .iter()
-                    .filter(|e| st.paths.contains(&e.path))
-                    .map(|e| e.path.clone()),
-            );
-            (st.coverage, blocked, None)
-        }
+        Ok(st) => (st.coverage, st.blocking, None),
         Err(e) => (
             crate::kb::okg::IndexCoverage {
                 pending: r.pending,
