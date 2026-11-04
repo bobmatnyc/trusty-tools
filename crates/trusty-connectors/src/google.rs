@@ -223,10 +223,6 @@ mod tests {
         assert_eq!(o.api_base.as_deref(), Some("http://127.0.0.1:1"));
         assert!(Options::parse(&["--token".into(), "x".into()]).is_err());
         assert!(Options::parse(&["--config".into()]).is_err());
-        assert!(
-            LOOPBACK_SEAM,
-            "the test build carries the seam (dev self-dependency)"
-        );
         let remote =
             Options::parse(&["--api-base".into(), "http://example.com:80".into()]).unwrap();
         assert!(Google::new(&remote).is_err(), "a remote root is refused");

@@ -107,9 +107,8 @@ impl BaseClient {
     /// (#8539 precedence). #10746 S13 fix round.
     /// What: as [`BaseClient::new`], with the caller's store; callers pass
     /// `TokenStorage::with_path(<home>/.gworkspace-mcp/tokens.json)`.
-    /// Test: `missing_credentials_fail_closed_before_any_write`,
-    /// `a_cwd_token_store_is_never_read`
-    /// (`crates/trusty-connectors/tests/conformance.rs`).
+    /// Test: the trusty-connectors conformance suite,
+    /// `crates/trusty-connectors/tests/conformance.rs`.
     pub fn with_storage(storage: TokenStorage) -> Result<Self> {
         let storage = Arc::new(storage);
         Ok(Self {
