@@ -342,3 +342,75 @@ fn indentation_off_lists_flat_in_poll_order() {
         .collect();
     assert_eq!(depths, vec![(0, 0), (1, 0), (2, 0)]);
 }
+
+/// The owner bars of `rows`: `(id, shown name, project count, expanded)`.
+fn owner_bars(rows: &[TreeRow]) -> Vec<(NodeId, String, usize, bool)> {
+    rows.iter()
+        .filter_map(|r| match &r.kind {
+            TreeRowKind::Owner {
+                name,
+                projects,
+                expanded,
+                ..
+            } => Some((r.id.clone(), name.clone(), *projects, *expanded)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn case_only_owner_variants_group_as_one_owner() {
+    let projects = vec![
+        project("a", "https://github.com/BTA-agent-AI/a"),
+        project("b", "https://github.com/bta-agent-ai/b"),
+        project("c", "https://github.com/bta-agent/c"),
+    ];
+    let rows = build_tree(
+        &projects,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        true,
+        &aliases(),
+    );
+    assert_eq!(
+        owner_bars(&rows),
+        vec![
+            (owner("bta-agent"), "bta-agent".to_string(), 1, false),
+            (owner("bta-agent-ai"), "BTA-agent-AI".to_string(), 2, false),
+        ],
+        "case-only variants share one bar showing the first-seen spelling; \
+         an owner differing by more than case stays separate"
+    );
+}
+
+#[test]
+fn owner_expand_state_survives_first_seen_spelling_change() {
+    let upper = project("a", "https://github.com/BTA-agent-AI/a");
+    let lower = project("b", "https://github.com/bta-agent-ai/b");
+    let expanded: BTreeSet<NodeId> = [owner("bta-agent-ai")].into_iter().collect();
+    let empty = BTreeMap::new();
+    let first = build_tree(
+        &[upper.clone(), lower.clone()],
+        &empty,
+        &expanded,
+        true,
+        &aliases(),
+    );
+    let second = build_tree(&[lower, upper], &empty, &expanded, true, &aliases());
+    assert_eq!(
+        owner_bars(&first),
+        vec![(owner("bta-agent-ai"), "BTA-agent-AI".to_string(), 2, true)]
+    );
+    assert_eq!(
+        owner_bars(&second),
+        vec![(owner("bta-agent-ai"), "bta-agent-ai".to_string(), 2, true)]
+    );
+    assert_eq!(
+        ids(&first)[1..],
+        [proj("bta-agent-ai", "a"), proj("bta-agent-ai", "b")]
+    );
+    assert_eq!(
+        ids(&second)[1..],
+        [proj("bta-agent-ai", "b"), proj("bta-agent-ai", "a")]
+    );
+}
