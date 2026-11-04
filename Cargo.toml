@@ -305,6 +305,9 @@ toml = "0.8"
 # not reflow the operator's comments and unrelated tables.
 toml_edit = "0.22"
 libc = "0.2"
+# #10746 S9: trusty-okf's safe `openat` directory walk and adapter process-group
+# kill (the crate forbids unsafe). Already in the lockfile through other crates.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
 # #7520 S2: trusty-secrets zeroes a cached secret value when it is dropped
 # (ruling Dd8). Already in the lockfile through other crates.
 zeroize = "1"

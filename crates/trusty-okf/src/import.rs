@@ -42,7 +42,9 @@ mod status;
 mod import_fault_tests;
 
 pub use apply::import;
-pub use plan::{Action, ContentPolicy, ImportPlan, ImportSpec, PlannedItem, plan_import};
+pub use plan::{
+    Action, ContentPolicy, ImportPlan, ImportSpec, MAX_LIST_PAGES, PlannedItem, plan_import,
+};
 pub(crate) use report::is_refusal;
 pub use report::{ImportFinding, ImportReport, ItemReport, exit_code};
 pub use source::{DocTreeSource, ImportSource, ListEntry, Listing};

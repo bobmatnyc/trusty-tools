@@ -19,9 +19,14 @@
 //! [`AdapterSource::cancel`] and `Drop` kill and reap it, so no adapter
 //! outlives its source.
 //! Slice S9 of #10746.
+//! The adapter leads its own process group, and every stop kills the group,
+//! so no process it started outlives it. A list reply whose `cursor` is not
+//! a string or null is a protocol error.
 //! Test: `c97_cli_imports_through_an_adapter_process_and_reaps_on_cancel`,
 //! `c139_adapter_gets_exactly_the_caller_environment`,
-//! `c98_acquire_requests_carry_operator_initiated`
+//! `c98_acquire_requests_carry_operator_initiated`,
+//! `numeric_cursor_is_a_protocol_error_and_tombstones_nothing`,
+//! `cancel_kills_the_adapter_process_group`
 //! (`crates/trusty-okf/tests/adapter_criteria.rs`).
 //!
 //! # Spec References
@@ -77,7 +82,8 @@ impl AdapterCommand {
 
     /// Start the program with exactly [`Self::environment`]: the inherited
     /// environment is cleared first (B10). stdin and stdout are pipes;
-    /// stderr is inherited, diagnostic only.
+    /// stderr is inherited, diagnostic only. On Unix the child leads a new
+    /// process group.
     pub fn spawn(&self) -> std::io::Result<Child> {
         let mut c = Command::new(&self.program);
         // #10746: B10 — clear, then the caller's list and nothing else.
@@ -89,6 +95,13 @@ impl AdapterCommand {
             .stderr(Stdio::inherit());
         if let Some(dir) = &self.current_dir {
             c.current_dir(dir);
+        }
+        // #10746 S9 fix round: its own process group, so a stop kills every
+        // process the adapter started, not the adapter alone.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            c.process_group(0);
         }
         c.spawn()
     }
@@ -344,13 +357,32 @@ impl AdapterSource {
         let until = Instant::now() + grace;
         while Instant::now() < until {
             if let Ok(Some(status)) = child.try_wait() {
+                // A clean exit can leave group members behind.
+                kill_group(&child);
                 return Some(status);
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        kill_group(&child);
         let _ = child.kill();
         child.wait().ok()
     }
+}
+
+/// #10746 S9 fix round: SIGKILL the adapter's whole process group, so a
+/// grandchild holding stdout open cannot outlive it or keep the frame
+/// reader blocked. The group outlives a reaped leader while a member lives,
+/// so its ID cannot be reused while there is anything left to kill.
+fn kill_group(child: &Child) {
+    #[cfg(unix)]
+    if let Some(pid) = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child;
 }
 
 fn io(program: &std::path::Path, why: String) -> OkfError {
@@ -374,6 +406,19 @@ impl ImportSource for AdapterSource {
         let reply = self
             .acquire("list", json!({ "cursor": cursor }))
             .map_err(|(code, msg)| io(&self.program, format!("adapter list {code}: {msg}")))?;
+        // #10746 S9 fix round: a cursor that is neither a string nor null is
+        // a protocol error, never "no more pages".
+        let cursor = match &reply["cursor"] {
+            Value::Null => None,
+            Value::String(c) => Some(c.clone()),
+            other => {
+                self.stop("protocol_error", Duration::ZERO);
+                return Err(io(
+                    &self.program,
+                    format!("adapter list protocol_error: cursor {other}"),
+                ));
+            }
+        };
         let entries: Vec<WireEntry> = serde_json::from_value(reply["entries"].clone())
             .map_err(|e| io(&self.program, format!("adapter list protocol_error: {e}")))?;
         Ok(Listing {
@@ -388,7 +433,7 @@ impl ImportSource for AdapterSource {
                     deleted: w.deleted,
                 })
                 .collect(),
-            cursor: reply["cursor"].as_str().map(str::to_string),
+            cursor,
             complete: reply["complete"].as_bool().unwrap_or(false),
         })
     }

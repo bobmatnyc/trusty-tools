@@ -65,7 +65,7 @@ fn release_fifo(path: &Path) {
     use std::os::unix::fs::OpenOptionsExt;
     let _ = std::fs::OpenOptions::new()
         .write(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
         .open(path);
 }
 
@@ -160,4 +160,41 @@ fn fetch_refuses_a_link_or_fifo_at_the_path_without_blocking() {
     swap_in(&a, mkfifo);
     let got = fetch_with_swap(&t, |_| {});
     assert_eq!(got.unwrap_err().code, "unsupported_format");
+}
+
+/// Why: #10746 S9 fix round — a parent directory swapped for a symbolic
+/// link between the walk and the leaf open must not lead outside the root.
+/// What: `sub/a.txt` ("original"); at the walk seam the hook renames `sub`
+/// away and puts a link to an outside directory holding `a.txt` ("SECRET")
+/// in its place. The fetch reads the directory it resolved, never the
+/// link's target; with the link already in place, the fetch is refused.
+/// Test: self-contained.
+#[test]
+fn fetch_never_reads_through_a_parent_swapped_for_a_symlink() {
+    let t = tree();
+    let sub = t.root.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("a.txt"), "original").unwrap();
+    let evil = t.outside.with_file_name("evil");
+    std::fs::create_dir_all(&evil).unwrap();
+    std::fs::write(evil.join("a.txt"), "SECRET").unwrap();
+    let (moved, target) = (t.root.join("sub.old"), evil.clone());
+    fail::set_before_walk(move |leaf| {
+        let parent = leaf.parent().unwrap().to_path_buf();
+        std::fs::rename(&parent, &moved).unwrap();
+        std::os::unix::fs::symlink(&target, &parent).unwrap();
+    });
+    let got = DocTreeSource {
+        root: t.root.clone(),
+    }
+    .fetch("sub/a.txt");
+    fail::clear();
+    let got = got.expect("the resolved directory is read");
+    assert_ne!(got, b"SECRET", "read through a swapped-in parent link");
+    assert_eq!(got, b"original");
+    let again = DocTreeSource {
+        root: t.root.clone(),
+    }
+    .fetch("sub/a.txt");
+    assert_eq!(again.unwrap_err().code, "symlink");
 }

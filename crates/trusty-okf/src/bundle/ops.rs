@@ -252,6 +252,15 @@ pub(crate) fn read_seam(path: &std::path::Path) {
     let _ = path;
 }
 
+/// #10746 S9 fix round: a seam after a source path's directories are
+/// resolved and before its leaf is opened. Under `cfg(test)` a hook may
+/// swap a parent directory, as a racing writer would.
+pub(crate) fn walk_seam(path: &std::path::Path) {
+    #[cfg(test)]
+    fail::before_walk(path);
+    let _ = path;
+}
+
 /// Bring `rel` to `bytes` (`None` removes it).
 ///
 /// #10746: a removal is the source path of a move whose post-image already
@@ -543,6 +552,7 @@ pub(crate) mod fail {
 
     thread_local! {
         static READ: RefCell<Option<ReadHook>> = const { RefCell::new(None) };
+        static WALK: RefCell<Option<ReadHook>> = const { RefCell::new(None) };
         static MUTATE: RefCell<Option<Mutate>> = const { RefCell::new(None) };
         static IO: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -560,6 +570,20 @@ pub(crate) mod fail {
         IO.with(|h| *h.borrow_mut() = None);
         MUTATE.with(|h| *h.borrow_mut() = None);
         READ.with(|h| *h.borrow_mut() = None);
+        WALK.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// #10746 S9 fix round: install a hook that runs at [`super::walk_seam`].
+    pub(crate) fn set_before_walk(f: impl FnMut(&std::path::Path) + 'static) {
+        WALK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(crate) fn before_walk(path: &std::path::Path) {
+        WALK.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(path);
+            }
+        });
     }
 
     /// #10746 S9: install a hook that runs at [`super::read_seam`].

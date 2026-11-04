@@ -7,7 +7,9 @@
 //! `list_<cursor|start>.json`, a `fetch` from `fetch_<item>.json` (an
 //! `error` frame when the file is missing), substitutes the request ID for
 //! `@RID@`, and writes its PID to `pid`. A `hang_<op>` file makes it sleep
-//! on that op; a `die_after` file holding N makes it exit after N fetches.
+//! on that op; a `die_after` file holding N makes it exit after N fetches;
+//! a `spawn_grandchild` file makes it start a background `sleep` that holds
+//! stdout open and writes its PID to `grandchild`.
 
 #![allow(dead_code)]
 
@@ -21,6 +23,7 @@ use trusty_okf::import::adapter::AdapterCommand;
 pub const SCRIPT: &str = r#"#!/bin/sh
 d="$1"
 echo $$ > "$d/pid"
+if [ -f "$d/spawn_grandchild" ]; then sleep 600 & echo $! > "$d/grandchild"; fi
 fetches=0
 emit() {
   n=$(printf %s "$1" | wc -c | tr -d ' ')
@@ -102,6 +105,19 @@ impl FakeAdapter {
             &json!({"type": "listing", "request_id": "@RID@", "entries": entries,
                     "cursor": next, "complete": complete}),
         );
+    }
+
+    /// A raw listing reply for `cursor`, any shape.
+    pub fn page_raw(&self, cursor: Option<&str>, reply: Value) {
+        let name = format!("list_{}.json", cursor.unwrap_or("start"));
+        self.put(&name, &reply);
+    }
+
+    /// The PID the fake's background grandchild wrote, when it started one.
+    pub fn grandchild(&self) -> Option<u32> {
+        std::fs::read_to_string(self.dir.join("grandchild"))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
     }
 
     /// The record served for its `item_id`.

@@ -11,18 +11,20 @@
 //! name and flag rules) is listed once as `hidden` and not descended; a
 //! symbolic link is listed as `symlink` and never read, even when it points
 //! inside the root; a file over [`MAX_ITEM_BYTES`] is `too_large`. `fetch`
-//! re-checks every directory segment for a link, then opens the file once
-//! with `O_NOFOLLOW | O_NONBLOCK` and takes its type and size from that
+//! opens each directory relative to the previous directory handle with
+//! `O_NOFOLLOW | O_DIRECTORY`, then the leaf relative to the last one with
+//! `O_NOFOLLOW | O_NONBLOCK`, and takes the leaf's type and size from that
 //! handle (`fstat`) before it reads the same handle. So a link, FIFO or
-//! larger file swapped in after the listing, or between the check and the
-//! read, is refused or never read. Slice S8 of #10746; race fix in S9.
+//! larger file swapped in after the listing, or a parent directory swapped
+//! for a link, is refused or never read. Slice S8 of #10746; race fix in S9.
 //! Test: `c71_import_leaves_the_source_tree_unchanged`,
 //! `c81_symlinks_are_reported_and_never_read`,
 //! `fetch_never_reads_a_symlink_swapped_in_before_the_read`,
 //! `fetch_never_blocks_on_a_fifo_swapped_in_before_the_read`,
-//! `fetch_size_check_and_read_act_on_one_inode`.
+//! `fetch_size_check_and_read_act_on_one_inode`,
+//! `fetch_never_reads_through_a_parent_swapped_for_a_symlink`.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -162,69 +164,79 @@ impl ImportSource for DocTreeSource {
             code: code.to_string(),
             message,
         };
-        let parts: Vec<_> = Path::new(item_id).components().collect();
-        let mut probe = self.root.clone();
-        for (i, c) in parts.iter().enumerate() {
+        let mut parts = Vec::new();
+        for c in Path::new(item_id).components() {
             let Component::Normal(part) = c else {
                 return Err(fail(
                     "excluded",
                     format!("{item_id}: not a plain relative path"),
                 ));
             };
-            probe.push(part);
-            if i + 1 == parts.len() {
-                break;
-            }
-            let meta = std::fs::symlink_metadata(&probe)
-                .map_err(|e| fail("fetch_error", format!("{item_id}: {e}")))?;
-            if meta.file_type().is_symlink() {
-                return Err(fail("symlink", format!("{item_id}: crosses a link")));
-            }
+            parts.push(part);
         }
-        // #10746 S9 (S8 race fix): open once without following a final link
-        // and without blocking on a FIFO, then check and read that one
-        // handle. A file swapped in after the open is never read.
-        let file = open_no_follow(&probe).map_err(|e| {
-            let code = open_error_code(&e);
-            fail(code, format!("{item_id}: {e}"))
-        })?;
-        crate::bundle::ops::read_seam(&probe);
+        // #10746 S9 fix round: every component is opened relative to the
+        // previous directory handle, never followed through a link, and the
+        // leaf is checked and read on the one handle it opened.
+        let file = open_beneath(&self.root, &parts)
+            .map_err(|(code, e)| fail(code, format!("{item_id}: {e}")))?;
+        crate::bundle::ops::read_seam(&self.root.join(item_id));
         read_checked(file).map_err(|(code, msg)| fail(code, format!("{item_id}: {msg}")))
     }
 }
 
-/// Open `path` read-only, refusing a final symbolic link and never blocking
-/// on a FIFO (`O_NOFOLLOW | O_NONBLOCK` on Unix).
-fn open_no_follow(path: &Path) -> std::io::Result<File> {
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+type OpenFail = (&'static str, std::io::Error);
+
+/// Open `root/<parts>` for reading without following any symbolic link:
+/// each directory is opened relative to the previous one with
+/// `O_NOFOLLOW | O_DIRECTORY`, then the leaf with `O_NOFOLLOW | O_NONBLOCK`
+/// (so a FIFO never blocks). A directory swapped for a link after an earlier
+/// check is refused, and one swapped after it was opened is never left.
+/// Errors carry the report code: a link is `symlink`; a socket or FIFO the
+/// platform refuses to open is `unsupported_format`; else `fetch_error`.
+#[cfg(unix)]
+fn open_beneath(root: &Path, parts: &[&std::ffi::OsStr]) -> Result<File, OpenFail> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    use rustix::io::Errno;
+    let io = |code: &'static str, e: Errno| (code, std::io::Error::from(e));
+    let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let Some((leaf, dirs)) = parts.split_last() else {
+        return Err(("unsupported_format", std::io::Error::other("not a file")));
+    };
+    let mut dir = open(root, dir_flags, Mode::empty()).map_err(|e| io("fetch_error", e))?;
+    for d in dirs {
+        dir = openat(&dir, *d, dir_flags | OFlags::NOFOLLOW, Mode::empty()).map_err(|e| {
+            let code = match e {
+                Errno::LOOP | Errno::NOTDIR => "symlink",
+                _ => "fetch_error",
+            };
+            io(code, e)
+        })?;
     }
-    #[cfg(not(unix))]
-    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(std::io::Error::other("a symbolic link"));
-    }
-    opts.open(path)
+    crate::bundle::ops::walk_seam(&parts.iter().fold(root.to_path_buf(), |p, s| p.join(s)));
+    let leaf_flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = openat(&dir, *leaf, leaf_flags, Mode::empty()).map_err(|e| {
+        let code = match e {
+            Errno::LOOP => "symlink",
+            Errno::NXIO | Errno::OPNOTSUPP => "unsupported_format",
+            _ => "fetch_error",
+        };
+        io(code, e)
+    })?;
+    Ok(File::from(fd))
 }
 
-/// The report code of a failed open: a final link is `symlink`; a socket
-/// or a FIFO with no writer that the platform refuses to open is
-/// `unsupported_format`; anything else is `fetch_error`.
-fn open_error_code(e: &std::io::Error) -> &'static str {
-    #[cfg(unix)]
-    match e.raw_os_error() {
-        Some(libc::ELOOP) => return "symlink",
-        Some(libc::ENXIO | libc::EOPNOTSUPP) => return "unsupported_format",
-        _ => {}
+/// The portable fallback: refuse a link on any component, then open.
+#[cfg(not(unix))]
+fn open_beneath(root: &Path, parts: &[&std::ffi::OsStr]) -> Result<File, OpenFail> {
+    let mut probe = root.to_path_buf();
+    for part in parts {
+        probe.push(part);
+        let meta = std::fs::symlink_metadata(&probe).map_err(|e| ("fetch_error", e))?;
+        if meta.file_type().is_symlink() {
+            return Err(("symlink", std::io::Error::other("crosses a link")));
+        }
     }
-    #[cfg(not(unix))]
-    if e.kind() == std::io::ErrorKind::Other {
-        return "symlink";
-    }
-    "fetch_error"
+    File::open(&probe).map_err(|e| ("fetch_error", e))
 }
 
 /// Check the type and size of the open file (`fstat`) and read it, both on

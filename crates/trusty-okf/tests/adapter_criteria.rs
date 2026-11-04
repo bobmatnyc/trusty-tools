@@ -744,3 +744,129 @@ fn c139_adapter_gets_exactly_the_caller_environment() {
     assert_eq!(capture(&list), want);
     assert!(capture(&[]).is_empty(), "trusty-okf added a variable");
 }
+
+/// Why: #10746 S9 fix round — a list reply whose `cursor` is neither a
+/// string nor null must not read as "no more pages", or a complete flag
+/// beside it would make the listing deletion-safe.
+/// What: a recursive docs store imports `gone`; the next listing omits it
+/// and carries `cursor: 5` with `complete: true`. The run fails with a
+/// protocol error and `gone` is not tombstoned.
+/// Test: self-contained.
+#[test]
+fn numeric_cursor_is_a_protocol_error_and_tombstones_nothing() {
+    let fake = FakeAdapter::new("gdocs");
+    fake.page(
+        None,
+        json!([{"item_id": "gone", "revision": "1"}]),
+        None,
+        true,
+    );
+    fake.item(json!({"item_id": "gone", "revision": "1", "parts": [{"mime": "text/markdown", "data": "Gone."}]}));
+    run(&fake, &docs_spec(true)).unwrap();
+    fake.page_raw(
+        None,
+        json!({"type": "listing", "request_id": "@RID@", "entries": [], "cursor": 5, "complete": true}),
+    );
+    let got = run(&fake, &docs_spec(true));
+    assert!(format!("{got:?}").contains("protocol_error"), "{got:?}");
+    let fm = frontmatter(&fake.root, "docs/docs-src/gone.md");
+    assert_eq!(
+        fm_str(&fm, "source_status"),
+        None,
+        "tombstoned on a bad cursor"
+    );
+}
+
+/// A source whose cursors repeat (`A -> B -> A`) or never end; it errs
+/// after `guard` calls so a looping plan fails instead of hanging.
+struct Cursors {
+    endless: bool,
+    calls: usize,
+    guard: usize,
+}
+
+impl trusty_okf::import::ImportSource for Cursors {
+    fn list(&mut self, _cursor: Option<&str>) -> Result<trusty_okf::import::Listing, OkfError> {
+        self.calls += 1;
+        if self.calls > self.guard {
+            return Err(OkfError::Io {
+                path: "cursors".into(),
+                source: std::io::Error::other("listing never ended"),
+            });
+        }
+        let next = if self.endless {
+            format!("c{}", self.calls)
+        } else if self.calls % 2 == 1 {
+            "A".to_string()
+        } else {
+            "B".to_string()
+        };
+        Ok(trusty_okf::import::Listing {
+            entries: Vec::new(),
+            cursor: Some(next),
+            complete: true,
+        })
+    }
+    fn fetch(&mut self, _: &str) -> Result<Vec<u8>, trusty_okf::extract::ExtractError> {
+        panic!("nothing is listed")
+    }
+}
+
+/// Why: #10746 S9 fix round — a cursor sequence that repeats or never ends
+/// must not loop forever; the listing ends as incomplete.
+/// What: `A -> B -> A` and an endless `c1, c2, ...` source; each plan ends
+/// with `pagination_exhausted: false`, the endless one within the page cap.
+/// Test: self-contained.
+#[test]
+fn repeating_or_endless_cursors_end_the_listing_incomplete() {
+    // `trusty_okf::import::MAX_LIST_PAGES`, spelled out so the test also
+    // builds against the code before the fix.
+    const MAX_LIST_PAGES: usize = 10_000;
+    let fake = FakeAdapter::new("gdocs");
+    let b = Bundle::open(&fake.root).unwrap().0;
+    for endless in [false, true] {
+        let mut src = Cursors {
+            endless,
+            calls: 0,
+            guard: MAX_LIST_PAGES + 10,
+        };
+        let plan = plan_import(&b, &docs_spec(true), &mut src)
+            .unwrap_or_else(|e| panic!("endless={endless}: {e}"));
+        assert!(
+            !plan.pagination_exhausted && !plan.deletion_safe,
+            "endless={endless}"
+        );
+        assert!(
+            src.calls <= MAX_LIST_PAGES,
+            "endless={endless}: {} pages",
+            src.calls
+        );
+    }
+}
+
+/// Why: #10746 S9 fix round — a grandchild that holds the adapter's stdout
+/// open must not outlive a stop.
+/// What: the fake starts a background `sleep`; `cancel` returns within its
+/// bound and the grandchild is gone afterwards.
+/// Test: self-contained.
+#[test]
+fn cancel_kills_the_adapter_process_group() {
+    let fake = FakeAdapter::new("gmail");
+    fake.flag("spawn_grandchild", "");
+    let mut src =
+        AdapterSource::spawn(&fake.cmd(), &mail_spec(), AdapterLimits::default()).unwrap();
+    let grandchild = fake.grandchild().expect("grandchild started");
+    assert!(alive(grandchild));
+    let started = std::time::Instant::now();
+    assert!(src.cancel().is_some(), "not reaped");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "cancel took {:?}",
+        started.elapsed()
+    );
+    let gone = (0..100).any(|_| {
+        std::thread::sleep(Duration::from_millis(20));
+        !alive(grandchild)
+    });
+    assert!(gone, "grandchild {grandchild} outlived cancel");
+}

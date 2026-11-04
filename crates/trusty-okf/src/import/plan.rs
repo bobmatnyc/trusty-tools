@@ -8,7 +8,9 @@
 //! What: [`plan_import`] refuses a run before reading anything when the
 //! store needs a child process the spec forbids (`policy_refused`, §2.15)
 //! or when the bundle and source roots overlap (`SourceOverlap`). It reads
-//! every page of the listing, computes `pagination_exhausted` and
+//! every page of the listing (a repeated cursor, or a cursor still left at
+//! [`MAX_LIST_PAGES`], ends it as incomplete), computes
+//! `pagination_exhausted` and
 //! `deletion_safe` itself (§2.13), then plans each entry: a listed skip,
 //! an `excluded` glob, a worker item under `child_processes: false`
 //! (`policy_refused`), an ID (pinned by the ledger, else §2.14 rule 3), the
@@ -20,7 +22,8 @@
 //! Test: `c72_plan_writes_nothing_and_lists_every_item`,
 //! `c75_colliding_sources_are_refused_and_pins_hold`,
 //! `c79_vanished_files_tombstone_only_when_deletion_safe`,
-//! `c82_overlapping_roots_are_refused`.
+//! `c82_overlapping_roots_are_refused`,
+//! `repeating_or_endless_cursors_end_the_listing_incomplete`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -43,6 +46,10 @@ use crate::extract::{BuiltinText, Extractor, TypeHint, fingerprint};
 use crate::format::hash::bytes_hash;
 use crate::format::id::ConceptId;
 use crate::state::revisions::{self, run_id};
+
+/// #10746 S9 fix round: the most pages one listing reads. A source still
+/// returning a cursor at this page ends the listing as incomplete.
+pub const MAX_LIST_PAGES: usize = 10_000;
 
 /// The run's item ceiling when a caller names none.
 pub const DEFAULT_MAX_ITEMS: usize = 100_000;
@@ -303,7 +310,12 @@ pub fn plan_import(
     let mut entries = Vec::new();
     let mut cursor: Option<String> = None;
     let mut complete: bool;
+    // #10746 S9 fix round: every cursor asked for so far, and the page
+    // count, so a repeating or endless cursor sequence ends the listing.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pages = 0usize;
     loop {
+        pages += 1;
         let page = src.list(cursor.as_deref())?;
         // #10746 S9: the adapter's flag describes the listing, so the last
         // page's flag counts; an earlier page is never complete on its own.
@@ -311,7 +323,11 @@ pub fn plan_import(
         let room = spec.max_items.saturating_sub(entries.len());
         let cut = page.entries.len() > room;
         entries.extend(page.entries.into_iter().take(room));
-        let stalled = page.cursor.is_some() && page.cursor == cursor;
+        let stalled = page
+            .cursor
+            .as_ref()
+            .is_some_and(|c| !seen.insert(c.clone()))
+            || (pages >= MAX_LIST_PAGES && page.cursor.is_some());
         // #10746 S9: a page cut at the ceiling is listed again on resume,
         // so the reported cursor is the one that asked for it; the ledger
         // skips the items already taken (§2.15 item 9).
