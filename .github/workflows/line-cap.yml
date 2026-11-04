@@ -15,6 +15,9 @@
 # dev/build dependencies reach a workspace crate its normal dependencies do not.
 # It is the one gate here that needs cargo (`cargo metadata --no-deps`, offline),
 # which is why it is a separate job rather than another step above.
+#
+# A third job, `okf-boundary` (#10746), checks trusty-okf's boundary rules
+# (SPEC-OKF-01 §2.7.1). It also needs cargo, for `cargo tree`.
 name: Line cap
 
 on:
@@ -131,3 +134,23 @@ jobs:
 
       - name: No crate's dev/build deps reach outside its normal tree
         run: bash scripts/check_dev_dep_edges.sh
+
+  # #10746: trusty-okf boundary rules B1-B10 (SPEC-OKF-01 §2.7.1). Needs cargo
+  # for `cargo tree` and a no-default-features `cargo check` of trusty-okf, so
+  # it is its own job, like dev-dep-edges above. Selftest first: the gate must
+  # still reject a banned crate, a banned literal and an empty scan.
+  okf-boundary:
+    name: trusty-okf boundary (B1-B10)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (1.94)
+        uses: dtolnay/rust-toolchain@1.94
+
+      - name: OKF boundary selftest (must reject a banned dep or literal)
+        run: bash scripts/check_okf_boundary_selftest.sh
+
+      - name: trusty-okf keeps its boundary
+        run: bash scripts/check_okf_boundary.sh

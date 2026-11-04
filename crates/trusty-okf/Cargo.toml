@@ -1,0 +1,27 @@
+[package]
+name = "trusty-okf"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Builds and maintains OKF (Open Knowledge Format) bundles: format, profiles, bundle operations, build pipeline and import."
+# #10746: not published, per SPEC-OKF-01 §3 (h) A. The OKF schema is still
+# moving; trusty-kb, which this crate replaces, is `publish = false` too.
+publish = false
+
+# #10746: no `[[bin]]` and no `src/main.rs`. The crate has no MCP surface and no
+# stdio server (SPEC-OKF-01 §2.7.1 B7); scripts/check_okf_boundary.sh enforces it.
+
+[features]
+# Both features are off by default. The core is network-free (B8) and never
+# links an extraction backend (B9). Neither feature pulls a dependency yet; the
+# slices that fill `feed`/`retrieve` (S7) and `extract::worker` (S10) add them.
+default = []
+# Push loop to trusty-search and `search.query` retrieval (SPEC-OKF-01 §5).
+search-feed = []
+# Client for the out-of-process extraction worker (SPEC-OKF-01 §2.16, App. B).
+extract-worker = []
+
+[dependencies]
