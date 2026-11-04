@@ -265,8 +265,8 @@ fn update_without_a_ref_moves_the_pin_to_the_newest_release() {
 }
 
 /// "Latest" is a published release. A pre-release with the highest version
-/// is passed over for the next one down. A draft has no release GitHub will
-/// show (a 404), so a draft tag at the top fails the update and the pin stays.
+/// is passed over for the next one down, and so is a draft, which GitHub
+/// answers with a 404 (#10749).
 #[test]
 fn update_never_installs_a_draft_or_a_pre_release() {
     let cache = tempfile::tempdir().unwrap();
@@ -280,8 +280,11 @@ fn update_never_installs_a_draft_or_a_pre_release() {
 
     src.publish("content-v0.9.0");
     src.drafts.insert("content-v0.9.0".to_owned());
-    let err = update(cache.path(), &src, None).expect_err("a draft is a 404");
-    assert!(matches!(err, CacheError::Network { .. }), "{err:?}");
+    let out = update(cache.path(), &src, None).expect("a draft is passed over");
+    assert_eq!(
+        (out.tag.as_str(), out.action),
+        (A, UpdateAction::AlreadyCurrent)
+    );
     assert_eq!(pinned(cache.path()).tag(), A);
 }
 
@@ -819,8 +822,9 @@ fn github_source_reads_a_rate_limited_or_5xx_response_as_a_failure() {
     }
 }
 
-/// The repository always exists, so a 404 listing, or a tag with no release,
-/// is a failure, not "none".
+/// The repository always exists, so a 404 listing is a failure, not "none".
+/// A tag with no release (404) is passed over (#10749); with no other tag
+/// left it is `NoReleases`, and nothing is pinned.
 #[test]
 fn github_source_reads_a_404_tag_listing_as_a_failure() {
     let (base, _) = serve_recording(vec![]);
@@ -829,7 +833,58 @@ fn github_source_reads_a_404_tag_listing_as_a_failure() {
     let (base, _) = serve_recording(vec![route(REFS, 200, refs(&[A]))]);
     let cache = tempfile::tempdir().unwrap();
     let err = update(cache.path(), &github(&base), None).expect_err("no release for the tag");
-    assert!(matches!(err, CacheError::Network { .. }), "{err:?}");
+    assert!(matches!(err, CacheError::NoReleases), "{err:?}");
+    assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+}
+
+/// #10749: a highest stable tag whose release lookup answers 404 (a draft,
+/// or a tag with no release) is passed over and the next stable release
+/// installs. A 403 or 5xx on that lookup still fails the update, pins
+/// nothing, and never falls through to the lower tag.
+#[test]
+fn update_passes_over_a_404_top_tag_but_not_a_403_or_5xx() {
+    for (status, want) in [(404, Some(A)), (403, None), (503, None)] {
+        let bytes = bundle(A, 1, A.as_bytes());
+        let (base, _) = serve_recording(vec![
+            route(REFS, 200, refs(&[A, B])),
+            route(
+                &format!("/releases/tags/{B}"),
+                status,
+                r#"{"message":"no"}"#,
+            ),
+            route(
+                &format!("/releases/tags/{A}"),
+                200,
+                release_json(A, false, false),
+            ),
+            route(&format!("/dl/{A}/{A}.tar.gz"), 200, bytes.clone()),
+            route(
+                &format!("/dl/{A}/{A}.tar.gz.sha256"),
+                200,
+                sidecar(A, &bytes),
+            ),
+        ]);
+        let cache = tempfile::tempdir().unwrap();
+        let got = update(cache.path(), &github(&base), None);
+        match want {
+            Some(tag) => {
+                let out = got.unwrap_or_else(|e| panic!("{status}: {e:?}"));
+                assert_eq!(
+                    (out.tag.as_str(), out.action),
+                    (tag, UpdateAction::Installed)
+                );
+                assert_eq!(pinned(cache.path()).tag(), tag, "{status}");
+            }
+            None => {
+                let err = got.expect_err("a 403 or 5xx is not passed over");
+                assert!(
+                    matches!(err, CacheError::Network { .. }),
+                    "{status}: {err:?}"
+                );
+                assert!(!cache.path().join(LOCK_FILE_NAME).exists(), "{status}");
+            }
+        }
+    }
 }
 
 #[test]
