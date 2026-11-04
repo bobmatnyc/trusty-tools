@@ -6,11 +6,13 @@
 //! the policy the reindex walk, the watcher and pushed writes already share.
 //! What: [`path_admits_report`] answers `{admitted, reason}` for an
 //! index-relative (or absolute in-root) path through
-//! [`crate::service::write_admission::admits_pushed`]; the `reason` names the
-//! first rule that refuses it. [`under_any_root`] is the subtree test the
+//! [`crate::service::write_admission::admits_pushed`]; `admitted` is
+//! `true`, `false` or `null` (undecided), and the `reason` names the first
+//! rule that refuses it. [`under_any_root`] is the subtree test the
 //! `include_paths` purge shares.
 //! Test: `path_admits_agrees_with_the_reindex_walk`,
-//! `path_admits_names_the_refusing_rule`, `path_admits_refuses_an_unknown_index`.
+//! `path_admits_names_the_refusing_rule`, `path_admits_refuses_an_unknown_index`,
+//! `path_admits_never_reports_an_undecided_answer_as_excluded`.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -36,8 +38,11 @@ pub struct PathAdmitsParams {
 
 /// The reply: whether the index admits `path`, and why.
 ///
-/// What: `reason` is `admitted`; `index_held` or `undetermined` (never
-/// admitted, never a proof of exclusion); or the refusing rule:
+/// What: `admitted` is tri-state on the wire. `true`: the live policy indexes
+/// the path. `false`: the policy decided it does not, a proof of exclusion.
+/// `null`: the daemon did not decide (`reason` is `index_held` or
+/// `undetermined`), which is neither admission nor exclusion; retry later.
+/// `reason` is `admitted`; `index_held` or `undetermined`; or the refusing rule:
 /// `path_escapes_root`, `outside_include_paths`, `exclude_globs`, `filters`
 /// (extensions, `path_filter`, tombstone) or `walker` (built-in and extra skip
 /// dirs, ignore files, docs, size caps, unsupported file types).
@@ -47,8 +52,11 @@ pub struct PathAdmission {
     pub index_id: String,
     /// The path as the caller sent it.
     pub path: String,
-    /// True only when the live policy indexes the path.
-    pub admitted: bool,
+    /// `Some(true)` admitted, `Some(false)` excluded, `None` (`null`)
+    /// undecided.
+    // #10739: `null`, not `false`, so an undecided answer is never read as an
+    // exclusion proof (SPEC-OKF-01 §5.3.1 rule 4).
+    pub admitted: Option<bool>,
     /// See the type doc.
     pub reason: String,
 }
@@ -73,8 +81,10 @@ pub(crate) fn under_any_root(roots: &[PathBuf], abs: &Path) -> bool {
 /// What: `404` for an unknown index, `400` for an empty path; otherwise the
 /// verdict of `admits_pushed` (content length 0, so no size cap applies to a
 /// file that is not on disk), with the reason from [`refusal_reason`].
+/// `Undetermined` answers `admitted: None`.
 /// Test: `path_admits_agrees_with_the_reindex_walk`,
-/// `path_admits_refuses_an_unknown_index`.
+/// `path_admits_refuses_an_unknown_index`,
+/// `path_admits_never_reports_an_undecided_answer_as_excluded`.
 pub(crate) fn path_admits_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -105,7 +115,12 @@ pub(crate) fn path_admits_report(
     Ok(PathAdmission {
         index_id: index_id.0,
         path: path.to_string(),
-        admitted: verdict == Admission::Included,
+        // #10739: an undecided verdict is `None`, never `Some(false)`.
+        admitted: match verdict {
+            Admission::Included => Some(true),
+            Admission::Excluded => Some(false),
+            Admission::Undetermined => None,
+        },
         reason: reason.to_string(),
     })
 }
