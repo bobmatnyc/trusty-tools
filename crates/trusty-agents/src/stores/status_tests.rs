@@ -468,7 +468,7 @@ async fn reports_the_unsearchable_backlog_for_a_bound_tree() {
         .okg_ingest_docstore(
             "corpus",
             &trusty_kb::okg::policy::DocStorePolicy::new(vec![tmp.canonicalize().unwrap()]),
-            "t0",
+            "2026-07-24T00:00:00Z",
         )
         .unwrap();
 

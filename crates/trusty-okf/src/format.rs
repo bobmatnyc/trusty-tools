@@ -5,7 +5,7 @@
 //!
 //! No async and no I/O beyond the concept file a crate-private write
 //! touches; `Bundle::put` is the public write. Filled by slices S2 and S3 of
-//! #10746.
+//! #10746; S4 adds the §2.13.1 protected key set.
 //!
 //! The items SPEC-OKF-01 §4.3 names are re-exported here:
 //! [`ConceptId`], [`Concept`], [`parse_concept`], [`render_concept`],
@@ -17,6 +17,8 @@ pub mod fields;
 pub mod frontmatter;
 pub mod hash;
 pub mod id;
+// #10746 S4: the §2.13.1 protected key set the ingest boundary reads.
+pub mod protected;
 pub mod raw;
 pub mod v02;
 pub mod validate;
@@ -29,6 +31,7 @@ pub use fields::{
 };
 pub use hash::{ContentHash, LIFECYCLE_KEYS, content_hash};
 pub use id::{ConceptId, ConceptRef, concept_ref_for_path};
+pub use protected::{PROTECTED_KEYS, SOURCE_FIELDS_KEY, is_protected_key};
 pub use raw::{RawEntry, RawFrontmatter};
 pub use validate::{Finding, FindingKind, Severity};
 pub use write::{WriteMode, WriteOutcome, check_write};

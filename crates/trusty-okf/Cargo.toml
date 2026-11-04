@@ -40,8 +40,13 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 # `OkfError` (SPEC-OKF-01 §4.4).
 thiserror = { workspace = true }
+# #10746 S4: `_sources/registry.toml`, moved with the build layer from
+# trusty-kb (SPEC-OKF-01 §2.7.2). Pure parsing; no network (B8).
+toml = { workspace = true }
 # #10746 S3: NFC form of the §2.11 fold key (fold_collision).
 unicode-normalization = { workspace = true }
+# #10746 S4: the doc-store walk (`build::docstore`), moved from trusty-kb.
+walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

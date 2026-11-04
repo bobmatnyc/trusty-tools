@@ -5,9 +5,9 @@
 //! properties at once: idempotent (re-running an ingest changes nothing),
 //! additive (registering a new doc store, or reaching further back in time,
 //! appends and never rebuilds), and crash-convergent (a killed run re-runs to
-//! the same state). This module is the machinery for all three; the entity
-//! writes themselves reuse [`KbStore::put_entity`] rather than inventing a
-//! second KB format.
+//! the same state). This module is the machinery for all three. #10746 S4:
+//! the engine and its parts live in `trusty_okf::build`, and concept writes
+//! go through `trusty_okf::bundle::Bundle::put`.
 //!
 //! What:
 //!   - [`registry`] — `_sources/registry.toml`, the human-readable source list.
@@ -32,16 +32,17 @@
 //! [`KbStore::okg_ingest_docstore`].
 //!
 //! Test: `register_is_additive_across_sources`,
-//! `docstore_ingest_is_idempotent_end_to_end`.
+//! `docstore_ingest_is_idempotent_end_to_end`,
+//! `ingest_rejects_a_now_that_is_not_an_instant`.
 
-pub mod docstore;
+// #10746 S4: registry, ledger, jsonl, ingest, docstore, policy and trust
+// moved to `trusty_okf::build` (SPEC-OKF-01 §2.7.2). trusty-kb re-exports the
+// five that need no agent view and keeps thin `ingest` and `registry` layers
+// for trusty-agents until S11; the index journal stays here until S5.
+pub use trusty_okf::build::{docstore, jsonl, ledger, policy, trust};
 pub mod index_journal;
 pub mod ingest;
-mod jsonl;
-pub mod ledger;
-pub mod policy;
 pub mod registry;
-pub mod trust;
 
 use serde::Serialize;
 use serde_json::Value as Json;
@@ -113,6 +114,8 @@ impl KbStore {
     pub fn okg_register_source(&self, spec: SourceSpec) -> anyhow::Result<RegisterOutcome> {
         let mut reg = SourceRegistry::load(&self.root)?;
         let id = spec.id.clone();
+        // #10746: only this row passes through the typed view; every other
+        // row is saved exactly as trusty-okf read it.
         let (created, changed) = reg.upsert(spec);
         let wrote = reg.save(&self.root)?;
         Ok(RegisterOutcome {
@@ -127,7 +130,6 @@ impl KbStore {
     pub fn okg_source(&self, source_id: &str) -> anyhow::Result<SourceSpec> {
         SourceRegistry::load(&self.root)?
             .get(source_id)
-            .cloned()
             .ok_or_else(|| anyhow::anyhow!("no source registered with id {source_id:?}"))
     }
 
@@ -146,9 +148,9 @@ impl KbStore {
     /// Test: `register_is_additive_across_sources`,
     /// `sources_report_index_coverage`.
     pub fn okg_sources(&self) -> anyhow::Result<Vec<SourceStatus>> {
-        let reg = SourceRegistry::load(&self.root)?;
-        let mut out = Vec::with_capacity(reg.sources.len());
-        for spec in &reg.sources {
+        let sources = SourceRegistry::load(&self.root)?.sources();
+        let mut out = Vec::with_capacity(sources.len());
+        for spec in &sources {
             let watermark = Ledger::load(&self.root, &spec.id)?.watermark();
             let backlog = self.okg_index_backlog(spec)?;
             out.push(SourceStatus {
@@ -181,7 +183,7 @@ impl KbStore {
     /// Test: `sources_report_index_coverage`.
     pub fn okg_index_coverage(&self) -> anyhow::Result<IndexCoverage> {
         let mut total = IndexCoverage::default();
-        for spec in &SourceRegistry::load(&self.root)?.sources {
+        for spec in &SourceRegistry::load(&self.root)?.sources() {
             let backlog = self.okg_index_backlog(spec)?;
             total.synced += backlog.synced;
             total.pending += backlog.tasks.len() + backlog.notes.len();
@@ -287,7 +289,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .okg_ingest_docstore("docs", &policy(&tmp), "t0")
+                .okg_ingest_docstore("docs", &policy(&tmp), "2026-07-24T00:00:00Z")
                 .unwrap()
                 .ingested,
             1
@@ -296,7 +298,7 @@ mod tests {
         // The same registered row, now outside the permitted roots.
         let narrowed = DocStorePolicy::new(vec![tmp.path().join("somewhere-else")]);
         let err = store
-            .okg_ingest_docstore("docs", &narrowed, "t1")
+            .okg_ingest_docstore("docs", &narrowed, "2026-07-24T01:00:00Z")
             .expect_err("a registered row must not bypass the policy");
         assert!(
             err.to_string().contains("outside every configured"),
@@ -305,9 +307,80 @@ mod tests {
 
         // And an empty policy denies it too — the gate fails closed.
         let err = store
-            .okg_ingest_docstore("docs", &DocStorePolicy::default(), "t2")
+            .okg_ingest_docstore("docs", &DocStorePolicy::default(), "2026-07-24T02:00:00Z")
             .expect_err("unconfigured policy must deny");
         assert!(err.to_string().contains("no doc-store roots"), "{err}");
+    }
+
+    /// Why: #10746 — the engine moved to trusty-okf writes `generated.at`
+    /// and never invents a time (SPEC-OKF-01 §2.8), so an ingest time that is
+    /// not an instant with an offset is refused, not guessed.
+    /// What: registers a doc store and ingests with a date-only `now`.
+    /// Test: self-contained.
+    #[test]
+    fn ingest_rejects_a_now_that_is_not_an_instant() {
+        let (tmp, store) = store();
+        let corpus = tmp.path().join("corpus");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(corpus.join("a.md"), "alpha").unwrap();
+        store
+            .okg_register_source(SourceSpec::new(
+                "docs",
+                Some("notes"),
+                Locator::DocStore {
+                    path: corpus.to_string_lossy().to_string(),
+                    extensions: vec![],
+                    recursive: true,
+                },
+                "t0",
+            ))
+            .unwrap();
+        let err = store
+            .okg_ingest_docstore("docs", &policy(&tmp), "2026-07-24")
+            .expect_err("a date is not an instant");
+        assert!(err.to_string().contains("not an ISO 8601 instant"), "{err}");
+    }
+
+    /// Why: criterion 116 (SPEC-OKF-01 §2.13.1) — a source that plants
+    /// `source_status: deleted` must not make its concept a tombstone for
+    /// trusty-common's `is_tombstone`, which search uses to hide retired
+    /// claims. trusty-okf cannot link trusty-common (B8), so the real
+    /// predicate is checked here. #10746.
+    /// What: ingests one item whose fields plant the tombstone keys.
+    /// Test: self-contained.
+    #[test]
+    fn planted_source_status_is_not_a_tombstone() {
+        let (_tmp, store) = store();
+        let spec = SourceSpec::new(
+            "mail",
+            Some("mail"),
+            Locator::Gmail {
+                query: "in:sent".into(),
+                after: None,
+                before: None,
+            },
+            "t0",
+        );
+        let mut item = ingest::SourceItem {
+            item_id: "m1".into(),
+            fingerprint: "m1".into(),
+            name: "m1".into(),
+            title: "m1".into(),
+            body: "hello".into(),
+            ..ingest::SourceItem::default()
+        };
+        item.fields.insert("source_status".into(), "deleted".into());
+        item.fields
+            .insert("tombstoned".into(), "2026-01-01T00:00:00Z".into());
+        let report = store
+            .ingest_items(&spec, &[item], false, "2026-11-04T00:00:00Z")
+            .unwrap();
+        assert_eq!(report.findings.len(), 2, "{report:?}");
+        let text = std::fs::read_to_string(store.root.join("mail/m1.md")).unwrap();
+        assert!(
+            !trusty_common::knowledge_document::is_tombstone(&text),
+            "{text}"
+        );
     }
 
     /// Why: Bob's core requirement — "I can add a new doc store" — must not
@@ -337,7 +410,7 @@ mod tests {
             .unwrap();
         assert!(first.created && first.changed);
         store
-            .okg_ingest_docstore("docs", &policy(&tmp), "t0")
+            .okg_ingest_docstore("docs", &policy(&tmp), "2026-07-24T00:00:00Z")
             .unwrap();
 
         let before = store.okg_sources().unwrap();
@@ -413,7 +486,7 @@ mod tests {
         store.okg_register_source(spec).unwrap();
 
         let first = store
-            .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
             .unwrap();
         assert_eq!((first.ingested, first.updated, first.skipped), (2, 0, 0));
         assert_eq!(first.scanned, 2, ".bin filtered by extension");
@@ -426,7 +499,7 @@ mod tests {
 
         // Re-run: nothing changes.
         let second = store
-            .okg_ingest_docstore("corpus", &policy(&tmp), "t1")
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T01:00:00Z")
             .unwrap();
         assert_eq!(
             (
@@ -442,7 +515,7 @@ mod tests {
         // Edit one file: exactly one entity re-ingests.
         std::fs::write(docs.join("one.md"), "first note, revised").unwrap();
         let third = store
-            .okg_ingest_docstore("corpus", &policy(&tmp), "t2")
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T02:00:00Z")
             .unwrap();
         assert_eq!((third.ingested, third.updated, third.skipped), (0, 1, 1));
         assert!(
@@ -453,7 +526,7 @@ mod tests {
         // Delete one file: tombstoned, content preserved.
         std::fs::remove_file(docs.join("sub/two.txt")).unwrap();
         let fourth = store
-            .okg_ingest_docstore("corpus", &policy(&tmp), "t3")
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T03:00:00Z")
             .unwrap();
         assert_eq!(fourth.tombstoned, 1);
         let two = std::fs::read_to_string(store.entity_path("notes", "sub/two").unwrap()).unwrap();
@@ -492,7 +565,7 @@ mod tests {
             ))
             .unwrap();
         store
-            .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
             .unwrap();
 
         let status = store.okg_sources().unwrap();

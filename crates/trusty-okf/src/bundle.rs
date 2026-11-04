@@ -118,6 +118,17 @@ impl Bundle {
         Ok((bundle, findings))
     }
 
+    /// A bundle at an existing root, without the full-tree read `open` does.
+    ///
+    /// #10746 S4: the build layer writes one concept at a time through `put`
+    /// and needs no findings, so it skips the scan. The root rule is the same
+    /// (§2.11 rule 1).
+    pub(crate) fn at(root: &Path) -> Result<Bundle, OkfError> {
+        Ok(Bundle {
+            root: paths::canonical_root(root)?,
+        })
+    }
+
     /// The canonical root directory.
     pub fn root(&self) -> &Path {
         &self.root

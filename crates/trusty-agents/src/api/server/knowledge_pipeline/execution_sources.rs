@@ -310,6 +310,8 @@ pub(super) fn event_inputs(
             timestamp: Some(event.ts),
             body,
             fields: BTreeMap::from([("content_scope".into(), "persisted event excerpt".into())]),
+            // #10746: no structured frontmatter for an event excerpt.
+            frontmatter: Default::default(),
             volatile: false,
         });
     }

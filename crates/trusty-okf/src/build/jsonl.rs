@@ -1,19 +1,21 @@
-//! Append-only JSONL journal mechanics, shared by every OKG journal.
+//! Append-only JSONL journal mechanics, shared by every build journal.
 //!
-//! Why: the OKG now keeps TWO append-only journals per source — the item
-//! [`ledger`](crate::okg::ledger) (what was pulled into the tree) and the
-//! [`index journal`](crate::okg::index_journal) (what was pushed into the bound
-//! search index). Both need the same two hard-won behaviours, and duplicating
-//! them would let the copies drift: a crash-torn final line must cost exactly
-//! one record rather than bricking the file, and the first append after such a
-//! tear must emit a healing newline or it silently concatenates into the torn
-//! fragment and loses the NEW record too (the bug fixed by
-//! `append_after_torn_line_does_not_corrupt_the_new_record`).
+//! Why: a source keeps TWO append-only journals — the item
+//! [`ledger`](crate::build::ledger) (what was pulled into the tree) and the
+//! index journal (what was pushed into the bound search index; still in
+//! trusty-kb until slice S5 of #10746). Both need the same two hard-won
+//! behaviours, and duplicating them would let the copies drift: a crash-torn
+//! final line must cost exactly one record rather than bricking the file, and
+//! the first append after such a tear must emit a healing newline or it
+//! silently concatenates into the torn fragment and loses the NEW record too
+//! (the bug fixed by `append_after_torn_line_does_not_corrupt_the_new_record`).
 //!
 //! What: [`read_journal`] parses a whole file BYTE-wise — decoding per line, so
 //! a tear mid-UTF-8-codepoint damages only its own line — and reports how many
 //! lines were unusable plus whether the file ends without a newline.
 //! [`Appender`] owns the lazily-opened handle and performs the healing write.
+//! #10746: public, because trusty-kb's index journal shares it until S5;
+//! errors are [`OkfError`]. The on-disk format is unchanged.
 //!
 //! Test: the behaviours are pinned by the callers' own suites
 //! (`torn_line_is_skipped_not_fatal`,
@@ -28,8 +30,11 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::OkfError;
+use crate::bundle::paths::io_err;
+
 /// The outcome of reading one journal file.
-pub(crate) struct JournalLoad<T> {
+pub struct JournalLoad<T> {
     /// Every record that parsed, in file order.
     pub records: Vec<T>,
     /// Lines that could not be used (bad JSON or invalid UTF-8).
@@ -57,17 +62,17 @@ impl<T> Default for JournalLoad<T> {
 ///
 /// The parse is deliberately BYTE-oriented. Reading the file as a `String`
 /// first fails the WHOLE load on invalid UTF-8, and a crash mid-write lands
-/// mid-codepoint whenever the record carries non-ASCII text — which for this
-/// crate is the common case (a Gmail subject with an em-dash, a Drive filename
-/// in kana), not the exotic one.
+/// mid-codepoint whenever the record carries non-ASCII text — a mail subject
+/// with an em-dash, a filename in kana — the common case, not the exotic one.
 /// What: splits on `b'\n'`, tolerates CRLF and blank lines, and parses each
 /// line independently.
 /// Test: see the module doc.
-pub(crate) fn read_journal<T: DeserializeOwned>(path: &Path) -> anyhow::Result<JournalLoad<T>> {
-    if !path.exists() {
-        return Ok(JournalLoad::default());
-    }
-    let bytes = std::fs::read(path)?;
+pub fn read_journal<T: DeserializeOwned>(path: &Path) -> Result<JournalLoad<T>, OkfError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(JournalLoad::default()),
+        Err(e) => return Err(io_err(path, e)),
+    };
     let mut out = JournalLoad {
         needs_newline: !bytes.is_empty() && bytes.last() != Some(&b'\n'),
         ..JournalLoad::default()
@@ -88,7 +93,7 @@ pub(crate) fn read_journal<T: DeserializeOwned>(path: &Path) -> anyhow::Result<J
 }
 
 /// A lazily-opened, per-item-durable appender for one journal file.
-pub(crate) struct Appender {
+pub struct Appender {
     path: PathBuf,
     handle: Option<File>,
     needs_newline: bool,
@@ -96,7 +101,7 @@ pub(crate) struct Appender {
 
 impl Appender {
     /// Build an appender for `path`, healing a torn final line on first write.
-    pub(crate) fn new(path: PathBuf, needs_newline: bool) -> Self {
+    pub fn new(path: PathBuf, needs_newline: bool) -> Self {
         Self {
             path,
             handle: None,
@@ -110,31 +115,38 @@ impl Appender {
     /// is flushed AND `sync_data`'d before returning, so a process killed
     /// immediately after has lost nothing it already reported.
     /// What: opens (once) in append mode, heals a torn final line, writes one
-    /// line, syncs best-effort.
+    /// line, syncs best-effort. A record that does not serialise is
+    /// [`OkfError::Parse`]; a file error is [`OkfError::Io`].
     /// Test: see the module doc.
-    pub(crate) fn append<T: Serialize>(&mut self, record: &T) -> anyhow::Result<()> {
+    pub fn append<T: Serialize>(&mut self, record: &T) -> Result<(), OkfError> {
+        let line = serde_json::to_string(record).map_err(|e| OkfError::Parse {
+            path: self.path.clone(),
+            line: None,
+            message: format!("journal record does not serialise: {e}"),
+        })?;
+        let path = self.path.clone();
+        let io = |e: std::io::Error| io_err(&path, e);
         if self.handle.is_none() {
             if let Some(parent) = self.path.parent() {
-                std::fs::create_dir_all(parent)?;
+                std::fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
             }
             self.handle = Some(
                 OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&self.path)?,
+                    .open(&self.path)
+                    .map_err(io)?,
             );
         }
-        let line = serde_json::to_string(record)?;
-        let file = self
-            .handle
-            .as_mut()
-            .expect("handle just opened above; None is unreachable");
+        let Some(file) = self.handle.as_mut() else {
+            return Err(io(std::io::Error::other("journal handle not open")));
+        };
         if self.needs_newline {
-            writeln!(file)?;
+            writeln!(file).map_err(io)?;
             self.needs_newline = false;
         }
-        writeln!(file, "{line}")?;
-        file.flush()?;
+        writeln!(file, "{line}").map_err(io)?;
+        file.flush().map_err(io)?;
         // Best-effort durability: a filesystem that cannot fsync must not fail
         // the run — the line is already flushed to the OS at this point.
         let _ = file.sync_data();

@@ -22,15 +22,16 @@
 //! 1. **A connector cannot mark its own output trusted.** The label is derived
 //!    from the registered [`SourceSpec`] — operator-authored configuration —
 //!    never from the fetched item. [`super::ingest`] writes it into the
-//!    frontmatter envelope BEFORE merging connector-supplied fields, and that
-//!    merge already skips keys the envelope claimed, so a fetcher emitting
-//!    `trust: user-authored` is shadowed out rather than honoured.
+//!    frontmatter envelope, and #10746 quarantines every protected key a
+//!    fetcher, extractor or source file supplies under `source_fields`, so a
+//!    fetcher emitting `trust: user-authored` never reaches the top level
+//!    (SPEC-OKF-01 §2.13.1).
 //!    Test: `connector_cannot_override_the_trust_label`.
 //! 2. **Untrusted is the default, and the only default.** Every source kind is
 //!    [`TrustLabel::UntrustedExternal`] unless the operator explicitly
 //!    designated a *directory* source user-authored
 //!    ([`SourceSpec::user_authored`]). A remote source can never be
-//!    user-authored, whatever its row says — including a Gmail SENT-only
+//!    user-authored, whatever its row says — including a `gmail` SENT-only
 //!    window, which DOC-63 §6.4 `S-4.8` documents as signal quality, never a
 //!    trust boundary.
 //!    Test: `only_a_designated_directory_is_user_authored`,
@@ -132,9 +133,14 @@ impl TrustLabel {
     /// `user_authored` flag on a remote row is ignored, not honoured, because
     /// no remote corpus has an enforceable author constraint (DOC-63 §6.4
     /// `S-4.8`, §6.4 `S-4.9`).
+    /// #10746: every [`Locator::Connector`] row, whatever its kind, is
+    /// untrusted. That covers a SENT-only `gmail` refresh (S-4.8) and an
+    /// operator-initiated inbound import, which DOC-63 S-3.3 as amended
+    /// 2026-11-03 labels `UntrustedExternal` (SPEC-OKF-01 §3 (l) C).
     /// Test: `only_a_designated_directory_is_user_authored`,
     /// `remote_kinds_are_always_untrusted`,
-    /// `undesignated_directory_is_untrusted`.
+    /// `undesignated_directory_is_untrusted`,
+    /// `connector_rows_are_untrusted_even_when_marked_user_authored`.
     pub fn for_source(spec: &SourceSpec) -> Self {
         match spec.locator {
             Locator::DocStore { .. } if spec.user_authored => TrustLabel::UserAuthored,
@@ -165,7 +171,7 @@ impl TrustLabel {
     /// resolves to [`TrustLabel::UntrustedExternal`]. There is no error
     /// return, because there is no caller for whom "I could not tell" should
     /// mean anything other than "fence it".
-    /// What: reads the file and parses its frontmatter via [`crate::entity`],
+    /// What: reads the file and parses its frontmatter via [`crate::format::concept`],
     /// then defers to [`Self::from_frontmatter`], defaulting on `None`.
     /// Test: `reads_the_label_off_disk`, `missing_file_reads_back_untrusted`,
     /// `unlabelled_entity_reads_back_untrusted`,
@@ -183,12 +189,12 @@ impl TrustLabel {
     /// Why: the retrieval path sometimes holds the bytes and never the path
     /// (and tests always do), and duplicating the fail-closed ladder for that
     /// case is exactly how the two would drift apart.
-    /// What: parses frontmatter via [`crate::entity::Entity::from_content`],
+    /// What: parses frontmatter via [`crate::format::concept::Entity::from_content`],
     /// defaulting to untrusted on any failure.
     /// Test: `unparseable_frontmatter_reads_back_untrusted`,
     /// `reads_the_label_out_of_frontmatter`.
     pub fn of_entity_text(text: &str) -> Self {
-        crate::entity::Entity::from_content(text)
+        crate::format::concept::Entity::from_content(text)
             .ok()
             .and_then(|e| Self::from_frontmatter(&e.frontmatter))
             .unwrap_or(TrustLabel::UntrustedExternal)

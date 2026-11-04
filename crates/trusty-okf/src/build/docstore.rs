@@ -23,8 +23,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-use crate::okg::ingest::SourceItem;
-use crate::okg::policy::DocStorePolicy;
+use crate::OkfError;
+use crate::build::ingest::SourceItem;
+use crate::build::policy::DocStorePolicy;
+use crate::bundle::paths::io_err;
 
 /// Extensions treated as text when a source names none.
 pub const DEFAULT_EXTENSIONS: &[&str] = &[
@@ -68,7 +70,7 @@ pub fn scan(
     recursive: bool,
     chunk_chars: usize,
     policy: &DocStorePolicy,
-) -> anyhow::Result<ScanOutcome> {
+) -> Result<ScanOutcome, OkfError> {
     // Walk the RESOLVED path the policy returned, never the caller's spelling.
     let dir = &policy.permit(dir)?;
     let accepted: Vec<String> = if extensions.is_empty() {
@@ -134,12 +136,17 @@ pub fn scan(
 }
 
 /// Read a file as UTF-8 text plus its content hash, or `None` when binary.
-fn read_text(path: &Path) -> anyhow::Result<Option<(String, String)>> {
-    let len = std::fs::metadata(path)?.len();
+fn read_text(path: &Path) -> Result<Option<(String, String)>, OkfError> {
+    let len = std::fs::metadata(path).map_err(|e| io_err(path, e))?.len();
     if len > MAX_FILE_BYTES {
-        anyhow::bail!("file is {len} bytes, over the {MAX_FILE_BYTES}-byte scan limit");
+        return Err(io_err(
+            path,
+            std::io::Error::other(format!(
+                "file is {len} bytes, over the {MAX_FILE_BYTES}-byte scan limit"
+            )),
+        ));
     }
-    let bytes = std::fs::read(path)?;
+    let bytes = std::fs::read(path).map_err(|e| io_err(path, e))?;
     // A NUL byte is the classic binary tell and catches UTF-16 too, which would
     // otherwise decode as text-with-nulls and produce an unreadable entity.
     if bytes.contains(&0) {
@@ -199,6 +206,9 @@ fn chunk_items(
                 timestamp: timestamp.map(str::to_string),
                 body,
                 fields,
+                // #10746: the scan keeps a file's text whole; slice S8's
+                // import splits a source file's own frontmatter out (§2.14).
+                frontmatter: serde_yaml::Mapping::new(),
                 // A content hash is a real change signal, so never volatile.
                 volatile: false,
             }

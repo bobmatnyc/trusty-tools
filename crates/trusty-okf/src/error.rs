@@ -69,4 +69,15 @@ pub enum OkfError {
         /// Why the write was refused.
         reason: String,
     },
+    /// #10746 S4: the doc-store read policy refused a directory; nothing was
+    /// read. The display is the reason alone, so a caller that matched
+    /// trusty-kb's message text still matches (SPEC-OKF-01 §2.13 reuses
+    /// `DocStorePolicy`; §2.14 names the item skip `policy_refused`).
+    #[error("{reason}")]
+    PolicyRefused {
+        /// The directory as given, or as resolved when resolution succeeded.
+        path: PathBuf,
+        /// Why it is not permitted.
+        reason: String,
+    },
 }
