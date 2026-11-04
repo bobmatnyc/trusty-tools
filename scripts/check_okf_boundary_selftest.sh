@@ -198,6 +198,17 @@ run_case "connector crate in trusty-okf fails c11" 1 "banned dependency: trusty-
 d="$(new_fixture agents-connector-dep)"
 printf 'trusty-connectors v0.1.0 (/x/crates/trusty-connectors)\n' >> "$d/agents.txt"
 run_case "connector crate in trusty-agents fails" 1 "FAIL b11_agents_do_not_link_connectors" "$d"
+# #10746 S13 fix round: the edge is found whatever the tree's size. With the
+# edge near the top and over 64 KiB of tree after it, `awk | grep -q` under
+# pipefail exited 141 (SIGPIPE) and the check printed ok.
+d="$(new_fixture agents-connector-dep-large)"
+printf 'trusty-agents v0.39.4 (/x/crates/trusty-agents)\ntrusty-connectors v0.1.0 (/x/crates/trusty-connectors)\n' > "$d/agents.txt"
+awk 'BEGIN { for (i = 0; i < 20000; i++) printf "padding-crate-%06d v1.0.0\n", i }' >> "$d/agents.txt"
+run_case "connector crate in a large trusty-agents tree fails" 1 "FAIL b11_agents_do_not_link_connectors" "$d"
+d="$(new_fixture agents-dependent-large)"
+printf '%s\ntrusty-agents v0.39.4 (/x/crates/trusty-agents)\n' "$TREE_HEAD" > "$d/inv.txt"
+awk 'BEGIN { for (i = 0; i < 20000; i++) printf "padding-crate-%06d v1.0.0\n", i }' >> "$d/inv.txt"
+run_case "trusty-agents found in a large inverse tree" 0 "ok   b2_trusty_agents_depends_on_okf" "$d"
 d="$(new_fixture agents-tree-root)"
 printf 'serde v1.0.0\n' > "$d/agents.txt"
 run_case "agents tree not rooted at trusty-agents fails" 1 "does not start at trusty-agents" "$d"

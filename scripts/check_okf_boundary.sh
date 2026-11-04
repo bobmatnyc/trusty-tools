@@ -200,7 +200,9 @@ else
   cargo tree -q --locked --workspace -i trusty-okf -e normal \
     --prefix none --format '{p}' > "$TMP/inv.raw"
 fi
-if awk '{print $1}' "$TMP/inv.raw" | grep -qx 'trusty-agents'; then
+# #10746 S13 fix round: one awk with no early-exit pipe. `awk | grep -q`
+# under pipefail can return 141 (SIGPIPE) on a large tree, whatever grep found.
+if awk '$1 == "trusty-agents" { f = 1 } END { exit !f }' "$TMP/inv.raw"; then
   echo "ok   b2_trusty_agents_depends_on_okf"
 else
   fail b2_trusty_agents_depends_on_okf "cargo tree -i trusty-okf lists no trusty-agents"
@@ -216,7 +218,7 @@ else
 fi
 if [ "$(head -n 1 "$TMP/agents.raw" | awk '{print $1}')" != "trusty-agents" ]; then
   fail b11_agents_do_not_link_connectors "trusty-agents' dependency tree does not start at trusty-agents"
-elif awk '{print $1}' "$TMP/agents.raw" | grep -qx 'trusty-connectors'; then
+elif awk '$1 == "trusty-connectors" { f = 1 } END { exit !f }' "$TMP/agents.raw"; then
   fail b11_agents_do_not_link_connectors "trusty-agents depends on trusty-connectors"
 else
   echo "ok   b11_agents_do_not_link_connectors"
