@@ -9,14 +9,17 @@
 //! is the caller's [`IndexStateDir`] journal and the identity check; [`read`]
 //! composes them into [`RevisionState`] and [`StateSummary`]. Slice S5 of
 //! #10746. No I/O beyond bundle files and the caller's state directory; no
-//! network (B8): the caller passes the live identity it read.
+//! network (B8): the caller passes the live identity it read. S7 adds
+//! [`backlog`], the pure diff the feed drains (§5.4).
 //! Test: `c118_copied_bundle_reads_pending_on_another_machine`,
 //! `c119_index_state_never_lives_in_the_bundle`.
 
+pub mod backlog;
 pub mod index;
 pub mod read;
 pub(crate) mod revisions;
 
+pub use backlog::{IndexBacklog, IndexTask, TaskOp, Unreadable};
 pub use index::{IndexIdentity, IndexJournal, IndexRecord, IndexStateDir, LiveIdentity};
 pub use read::{RevisionState, StateSummary};
 
