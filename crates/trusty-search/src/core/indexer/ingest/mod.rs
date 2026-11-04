@@ -402,6 +402,27 @@ impl CodeIndexer {
         file_path: &str,
         content: &str,
     ) -> Result<IndexFileOutcome> {
+        // #8959: one write per path at a time, from the superseded-id snapshot
+        // through the commit; otherwise two writes each removed only the ids
+        // they saw and both versions stayed indexed.
+        let path_lock = self.lock_path_for_write(file_path).await;
+        self.index_file_outcome_path_locked(file_path, content, &path_lock)
+            .await
+    }
+
+    /// [`Self::index_file_outcome`] for a caller that already holds
+    /// `file_path`'s lock from [`Self::lock_path_for_write`] (#10738).
+    ///
+    /// Why: the put core forgets and records the path's content hash; both
+    /// must sit under the same lock as the write, or two puts interleave and
+    /// the stored hash names content whose chunks were replaced.
+    /// Test: `concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks`.
+    pub(crate) async fn index_file_outcome_path_locked(
+        &self,
+        file_path: &str,
+        content: &str,
+        _path_lock: &supersede::PathWriteGuard<'_>,
+    ) -> Result<IndexFileOutcome> {
         // #8167: a handle that outlived DELETE must not write into it.
         self.refuse_if_deleted()?;
         // #9459: a corpus closed for shutdown would take this write in memory
@@ -416,12 +437,8 @@ impl CodeIndexer {
             );
         }
         // #10159: active from here, embed included, so the ticker's quiet
-        // rebuild cannot fire mid-write. Declared first, so it drops last.
+        // rebuild cannot fire mid-write.
         let _active_write = self.begin_active_write();
-        // #8959: one write per path at a time, from the superseded-id snapshot
-        // below through the commit; otherwise two writes each removed only
-        // the ids they saw and both versions stayed indexed.
-        let _path_lock = self.path_write_locks.lock(file_path).await;
         if trusty_common::knowledge_document::is_tombstone(content) {
             // #8959: a failed redb delete fails the write with the ids still in
             // memory, so a retry removes them instead of a reopen loading them.

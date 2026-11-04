@@ -275,3 +275,83 @@ async fn file_status_for_an_unknown_path_or_index_never_fabricates_a_hash() {
     .await;
     assert_eq!(outside.code, CODE_INVALID_PARAMS, "{outside:?}");
 }
+
+/// The variant number whose chunks the index holds for `path`; chunk ids carry
+/// the symbol name, and each variant defines `variant_<n>_10738`.
+async fn committed_variant(state: &SearchAppState, id: &str, path: &str) -> Vec<usize> {
+    let handle = state.registry.get(&IndexId::new(id)).expect("registered");
+    let indexer = handle.indexer.read().await;
+    let ids = indexer.file_chunk_ids(path).await.expect("chunk ids");
+    (0..VARIANTS)
+        .filter(|n| {
+            let name = format!("variant_{n}_10738");
+            ids.iter().any(|c| c.contains(&name))
+        })
+        .collect()
+}
+
+const VARIANTS: usize = 8;
+
+fn variant(n: usize) -> String {
+    format!("fn variant_{n}_10738(x: u32) -> u32 {{ x + {n} }}\n")
+}
+
+/// Why: H3 — the put core forgot and recorded the path's hash outside the
+/// per-path write lock, so two puts to one path could leave one's hash beside
+/// the other's chunks (SPEC-OKF-01 criterion 133).
+/// What: with the path's write lock held, a queued put must not touch the
+/// stored hash, so `file.status` still names the committed content's hash;
+/// then eight concurrent puts finish, and the stored hash equals the hash of
+/// the one variant whose chunks the index holds.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks() {
+    let id = "identity-put-race-10738";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = tempfile::tempdir().expect("store");
+    let (state, rpc) = served(registry_with(id, tmp.path(), Some(store.path()))).await;
+    let rpc = Arc::new(rpc);
+    put(&rpc, id, FILE, &variant(0)).await;
+
+    let handle = state.registry.get(&IndexId::new(id)).expect("registered");
+    let indexer = handle.indexer.read().await;
+    let held = indexer.lock_path_for_write(FILE).await;
+    let queued = {
+        let rpc = Arc::clone(&rpc);
+        tokio::spawn(async move { put(&rpc, id, FILE, &variant(1)).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let during = file_status(&rpc, id, FILE).await;
+    assert_eq!(during["present"], true, "{during}");
+    assert_eq!(
+        during["content_sha256"],
+        sha256_hex(&variant(0)),
+        "a put waiting on the path lock must not change the stored hash: {during}"
+    );
+    drop(held);
+    drop(indexer);
+    queued.await.expect("queued put");
+    assert_eq!(
+        file_status(&rpc, id, FILE).await["content_sha256"],
+        sha256_hex(&variant(1))
+    );
+
+    let puts: Vec<_> = (0..VARIANTS)
+        .map(|n| {
+            let rpc = Arc::clone(&rpc);
+            tokio::spawn(async move { put(&rpc, id, FILE, &variant(n)).await })
+        })
+        .collect();
+    for p in puts {
+        p.await.expect("concurrent put");
+    }
+    let committed = committed_variant(&state, id, FILE).await;
+    assert_eq!(committed.len(), 1, "one variant's chunks: {committed:?}");
+    let status = file_status(&rpc, id, FILE).await;
+    assert_eq!(
+        status["content_sha256"],
+        sha256_hex(&variant(committed[0])),
+        "the stored hash must name the committed chunks' content: {status}"
+    );
+}

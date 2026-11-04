@@ -35,6 +35,9 @@ pub struct CorpusStore {
     /// `--force` reindex swap (issue #28, Phase 4) knows which file to rename
     /// without the caller having to pass the path back in.
     path: std::path::PathBuf,
+    /// #10738: this open created an empty database — no file was there, or an
+    /// old-format one was moved aside — rather than reopening a stored one.
+    created_empty: bool,
 }
 
 impl CorpusStore {
@@ -80,7 +83,10 @@ impl CorpusStore {
         // #4227: a GENUINELY CORRUPT file is moved aside but NOT replaced — it
         // errors instead, so the loader quarantines the index rather than
         // serving a healthy-looking empty corpus a watcher can rebuild over.
-        let db = open_corpus_db_or_recreate(path, cache_bytes)?;
+        // #10738: an absent file, or a recreate, is an empty corpus in place of
+        // whatever the index held; `created_empty` lets the identity say so.
+        let existed = path.exists();
+        let (db, recreated) = open_corpus_db_or_recreate(path, cache_bytes)?;
         // Materialize both tables in a committed write txn so later read-only
         // transactions can `open_table` them even on a brand-new database.
         {
@@ -119,7 +125,18 @@ impl CorpusStore {
         Ok(Self {
             db,
             path: path.to_path_buf(),
+            created_empty: !existed || recreated,
         })
+    }
+
+    /// Whether this open created an empty database instead of reopening one
+    /// (#10738): the file was absent, or an old format was moved aside.
+    ///
+    /// Why: a corpus created empty lost every chunk with no per-path remove,
+    /// so the index identity must change when it is attached (§5.6 D1).
+    /// Test: `identity_changes_when_the_corpus_is_recreated_empty`.
+    pub fn created_empty(&self) -> bool {
+        self.created_empty
     }
 
     /// Open a fresh (truncated) redb corpus at `path`, discarding any existing

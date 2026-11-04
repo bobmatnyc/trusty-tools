@@ -624,3 +624,6 @@ mod tests_3659;
 // #8600: the bounded warm-boot lock retry.
 #[cfg(test)]
 mod tests_8600;
+// #10738: a corpus created empty changes the index identity.
+#[cfg(test)]
+mod identity_10738_tests;

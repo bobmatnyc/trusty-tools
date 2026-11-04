@@ -38,6 +38,7 @@ use super::state::SearchAppState;
 /// `content_sha256` (the indexed bytes) and the index `identity`.
 /// Test: `index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510`,
 /// `put_reply_carries_the_sha256_of_the_content_and_the_identity`,
+/// `concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks`,
 /// `index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`,
 /// `index_file_excluded_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`,
 /// `index_file_refuses_an_absolute_path_outside_the_root_9510`,
@@ -106,13 +107,16 @@ pub(crate) async fn index_file_report(
     super::remove_path::purge_verbatim_key(&indexer, &index_id, &req.path, &key)
         .await
         .map_err(failed)?;
+    // #10738: forget, write and record under the path's write lock, so two
+    // puts to one path cannot leave the hash of one beside the other's chunks.
+    let path_lock = indexer.lock_path_for_write(&key).await;
     // #10738: forget the old hash first, so a write that fails part-way never
     // leaves a hash naming content its chunks no longer hold.
     crate::service::reindex::hash::forget_file_hash(&index_id, &indexer, &key)
         .await
         .map_err(failed)?;
     let outcome = indexer
-        .index_file_outcome(&key, &req.content)
+        .index_file_outcome_path_locked(&key, &req.content, &path_lock)
         .await
         .map_err(failed)?;
     // #8922: sops content is refused like an excluded path, not a quiet 200.
@@ -125,6 +129,7 @@ pub(crate) async fn index_file_report(
         super::file_status::record_put_hash(&index_id, &indexer, &key, &req.content, &outcome)
             .await
             .map_err(failed)?;
+    drop(path_lock);
     // #8976: `indexed` follows the outcome; `chunks`/`reason` are additive.
     let mut body = serde_json::Map::new();
     body.insert("index_id".into(), index_id.0.clone().into());
