@@ -21,6 +21,8 @@ trusty-channels	trusty-channels	telegram-mcp	src/bin/telegram-mcp.rs	-	no	-	-	-
 trusty-code-gui	trusty-code-gui	trusty-code-gui	src/main.rs	-	no	-	-	-
 trusty-common	trusty-common	candle_metal_bench	src/bin/candle_metal_bench.rs	embedder-candle	no	-	-	-
 trusty-common	trusty-common	tickets-mcp	src/bin/tickets_mcp.rs	tickets	no	-	-	-
+trusty-connectors	trusty-connectors	okf-adapter-gdocs	src/bin/okf-adapter-gdocs.rs	-	no	-	-	-
+trusty-connectors	trusty-connectors	okf-adapter-gmail	src/bin/okf-adapter-gmail.rs	-	no	-	-	-
 trusty-gworkspace	trusty-gworkspace	trusty-gworkspace-mcp	src/bin/trusty-gworkspace-mcp.rs	-	no	-	-	-
 trusty-publish-guard	trusty-publish-guard	publish-guard	src/main.rs	-	no	-	-	-
 trusty-sld-lint	trusty-sld-lint	sld-lint	src/main.rs	-	no	-	-	-

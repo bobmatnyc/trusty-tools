@@ -12,7 +12,8 @@
 //! authenticated `trusty-gworkspace` client, filters them against the ledger,
 //! fetches only the unseen ones, and hands them to the ingest engine with
 //! deletion detection OFF — a windowed pull can never prove a message is gone.
-//! Test: `super::tests::gmail_query_*`, `message_to_item_*`.
+//! Test: `super::tests::message_to_item_*`; the query composition moved to
+//! trusty-gworkspace with `gmail_query` (#10746 S13).
 
 use crate::kb::okg::registry::{Locator, SourceSpec};
 use async_trait::async_trait;

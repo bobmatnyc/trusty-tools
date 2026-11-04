@@ -85,12 +85,32 @@ pub struct BaseClient {
     http: reqwest::Client,
     pub(crate) storage: Arc<TokenStorage>,
     oauth: OAuthManager,
+    /// #10746 S13: a loopback root every Google API URL is sent to instead,
+    /// set only by `BaseClient::with_loopback_root` (feature `loopback-seam`
+    /// or this crate's own tests).
+    api_root: Option<String>,
 }
 
 impl BaseClient {
     /// Construct with default token storage and refresh manager.
     pub fn new() -> Result<Self> {
-        let storage = Arc::new(TokenStorage::new());
+        Self::with_storage(TokenStorage::new())
+    }
+
+    /// Construct over exactly `storage` (no project-tier store unless it
+    /// names one).
+    ///
+    /// Why: the trusty-okf import adapters must read their credential only
+    /// from the user-tier store under their own `HOME`, never from a
+    /// `./.gworkspace-mcp/tokens.json` in whatever directory they were
+    /// started in, which [`TokenStorage::new`] also reads and lets win
+    /// (#8539 precedence). #10746 S13 fix round.
+    /// What: as [`BaseClient::new`], with the caller's store; callers pass
+    /// `TokenStorage::with_path(<home>/.gworkspace-mcp/tokens.json)`.
+    /// Test: the trusty-connectors conformance suite,
+    /// `crates/trusty-connectors/tests/conformance.rs`.
+    pub fn with_storage(storage: TokenStorage) -> Result<Self> {
+        let storage = Arc::new(storage);
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent("trusty-gworkspace/0.1")
@@ -98,7 +118,51 @@ impl BaseClient {
                 .context("build reqwest client")?,
             storage,
             oauth: OAuthManager::new(),
+            api_root: None,
         })
+    }
+
+    /// Send every Google API request to a loopback HTTP server instead.
+    ///
+    /// Why: the OKF import adapters (`trusty-connectors`, #10746 S13) run
+    /// their conformance suite as real binaries against a stubbed Google
+    /// HTTP layer; the service functions build their URLs from fixed
+    /// constants, so the stub needs one rewrite point.
+    /// What: accepts only `http://127.0.0.1:<port>`, `http://localhost:<port>`
+    /// or `http://[::1]:<port>`, so a bearer token can never be sent to a
+    /// remote host through it. Each `https://<host>/<path>` URL then goes to
+    /// `<root>/<host>/<path>`; a URL that is not `https` is refused.
+    /// Errors: any other root.
+    /// #10746 S13 fix round: it exists only under the non-default feature
+    /// `loopback-seam` (and in this crate's own tests), so no default or
+    /// release build can send a bearer token over cleartext HTTP.
+    /// Test: `loopback_root_rewrites_google_urls_and_refuses_remote_roots`.
+    #[cfg(any(test, feature = "loopback-seam"))]
+    pub fn with_loopback_root(mut self, root: &str) -> Result<Self> {
+        let root = root.trim_end_matches('/');
+        let host = root.strip_prefix("http://").unwrap_or_default();
+        let name = host.rsplit_once(':').map_or("", |(h, _)| h);
+        let port_ok = host
+            .rsplit_once(':')
+            .is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if !(matches!(name, "127.0.0.1" | "localhost" | "[::1]") && port_ok) {
+            return Err(anyhow!(
+                "api root {root:?} is not a loopback http://host:port root"
+            ));
+        }
+        self.api_root = Some(root.to_string());
+        Ok(self)
+    }
+
+    /// The URL a request is actually sent to (see `with_loopback_root`).
+    fn route(&self, url: &str) -> Result<String> {
+        let Some(root) = &self.api_root else {
+            return Ok(url.to_string());
+        };
+        let rest = url
+            .strip_prefix("https://")
+            .ok_or_else(|| anyhow!("refusing non-https url {url} under a loopback root"))?;
+        Ok(format!("{root}/{rest}"))
     }
 
     /// Expose storage for tools that list profiles.
@@ -122,6 +186,7 @@ impl BaseClient {
             http: reqwest::Client::new(),
             storage: Arc::new(storage),
             oauth: OAuthManager::new(),
+            api_root: None,
         }
     }
 
@@ -239,6 +304,10 @@ impl BaseClient {
         body: ReqBody<'_>,
         account: Option<&str>,
     ) -> Result<reqwest::Response> {
+        // #10746 S13: a loopback root (tests only) rewrites the URL here, the
+        // one point every request passes.
+        let routed = self.route(url)?;
+        let url = routed.as_str();
         let token = self.get_access_token(account).await?;
         let req = body.apply(self.http.request(method.clone(), url).bearer_auth(&token));
         debug!(method = %method, url = %url, "google api request");
@@ -410,5 +479,44 @@ impl BaseClient {
             return Ok(serde_json::json!({ "error": text, "status": status.as_u16() }));
         }
         Err(anyhow!("google api delete error {status}: {text}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_root_rewrites_google_urls_and_refuses_remote_roots() {
+        let c = BaseClient::new()
+            .unwrap()
+            .with_loopback_root("http://127.0.0.1:4567/")
+            .unwrap();
+        assert_eq!(
+            c.route("https://www.googleapis.com/drive/v3/files")
+                .unwrap(),
+            "http://127.0.0.1:4567/www.googleapis.com/drive/v3/files"
+        );
+        assert!(c.route("http://www.googleapis.com/x").is_err());
+        assert_eq!(
+            BaseClient::new()
+                .unwrap()
+                .route("https://a.example/x")
+                .unwrap(),
+            "https://a.example/x"
+        );
+        for bad in [
+            "https://127.0.0.1:1",
+            "http://example.com:80",
+            "http://127.0.0.1",
+            "http://127.0.0.1:x",
+            "http://127.0.0.1.evil.com:80",
+            "",
+        ] {
+            assert!(
+                BaseClient::new().unwrap().with_loopback_root(bad).is_err(),
+                "{bad} accepted"
+            );
+        }
     }
 }

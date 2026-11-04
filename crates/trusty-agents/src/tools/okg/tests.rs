@@ -613,39 +613,8 @@ async fn docstore_tool_reports_actionable_errors() {
 }
 
 // ───────────────────────── pure Gmail adapters ─────────────────────────
-
-/// Why: the window lives structurally in the registry so it can be widened
-/// later; this is where it recombines into a query, and it must be stable.
-/// What: asserts both bounds are appended in a fixed order.
-/// Test: self-contained.
-#[test]
-fn gmail_query_appends_window() {
-    assert_eq!(
-        gapi::gmail_query("in:sent", Some("2026/01/01"), Some("2026/07/01")),
-        "in:sent after:2026/01/01 before:2026/07/01"
-    );
-    assert_eq!(
-        gapi::gmail_query("in:sent", Some("2024/01/01"), None),
-        "in:sent after:2024/01/01",
-        "widening backwards only changes the after: term"
-    );
-}
-
-/// Why: a source with no window must not emit stray operators.
-/// What: asserts empty/absent bounds are omitted and whitespace is trimmed.
-/// Test: self-contained.
-#[test]
-fn gmail_query_without_window() {
-    assert_eq!(gapi::gmail_query("in:sent", None, None), "in:sent");
-    assert_eq!(
-        gapi::gmail_query("  in:sent  ", Some("  "), None),
-        "in:sent"
-    );
-    assert_eq!(
-        gapi::gmail_query("", Some("2026/01/01"), None),
-        "after:2026/01/01"
-    );
-}
+// #10746 S13: the query, body-decoding, soft-error and encoder tests moved
+// with that code to trusty-gworkspace (`api::bulk::tests`).
 
 /// Why: the message id doubles as the fingerprint — that is precisely what
 /// makes "pull exactly once, ever" hold when a widened window re-lists a
@@ -716,51 +685,6 @@ fn message_to_item_degrades_without_body_or_id() {
     assert!(gapi::message_to_item(&json!({ "snippet": "x" })).is_none());
 }
 
-/// Why: an HTML-only newsletter must still yield text, but plain text wins when
-/// both are present.
-/// What: asserts the preference and the nested walk.
-/// Test: self-contained.
-#[test]
-fn decode_body_prefers_plain_text() {
-    let enc =
-        |s: &str| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, s);
-    let both = json!({
-        "parts": [
-            { "mimeType": "text/html", "body": { "data": enc("<p>html</p>") } },
-            { "mimeType": "text/plain", "body": { "data": enc("plain") } },
-        ]
-    });
-    assert_eq!(gapi::decode_body(&both).as_deref(), Some("plain"));
-
-    let html_only = json!({
-        "parts": [{ "mimeType": "text/html", "body": { "data": enc("<p>html</p>") } }]
-    });
-    assert_eq!(
-        gapi::decode_body(&html_only).as_deref(),
-        Some("<p>html</p>")
-    );
-
-    assert!(gapi::decode_body(&json!({})).is_none());
-}
-
-/// Why: real Gmail nests text parts inside `multipart/mixed` wrappers; a
-/// non-recursive walk would return an empty body for most mail with attachments.
-/// What: asserts a doubly-nested plain part is found.
-/// Test: self-contained.
-#[test]
-fn decode_body_walks_nested_parts() {
-    let enc =
-        |s: &str| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, s);
-    let nested = json!({
-        "mimeType": "multipart/mixed",
-        "parts": [{
-            "mimeType": "multipart/alternative",
-            "parts": [{ "mimeType": "text/plain", "body": { "data": enc("deep text") } }]
-        }]
-    });
-    assert_eq!(gapi::decode_body(&nested).as_deref(), Some("deep text"));
-}
-
 // ───────────────────────── pure Drive adapters ─────────────────────────
 
 /// Why: unlike Gmail, Drive content mutates under a stable id — so a new
@@ -814,37 +738,4 @@ fn drive_item_falls_back_to_mtime() {
     assert!(item.timestamp.is_none());
 
     assert!(gapi::drive_item(&json!({ "name": "no id" }), String::new()).is_none());
-}
-
-// ───────────────────────── shared HTTP helpers ─────────────────────────
-
-/// Why: 403/404 come back from `BaseClient` as a SUCCESS value carrying an
-/// `error` key. Treating that as an empty page would report "0 new items" for a
-/// permission failure — a silent fallback this codebase forbids.
-/// What: asserts detection, message extraction, and the clean-response case.
-/// Test: self-contained.
-#[test]
-fn api_error_detects_soft_failure() {
-    let soft = json!({ "error": { "message": "Insufficient Permission" }, "status": 403 });
-    assert_eq!(
-        gapi::api_error(&soft).as_deref(),
-        Some("Insufficient Permission (status 403)")
-    );
-    assert!(gapi::api_error(&json!({ "messages": [] })).is_none());
-    assert!(gapi::api_error(&json!({ "error": "raw string" })).is_some());
-}
-
-/// Why: we build our own URLs to get pagination, so the encoder must handle a
-/// real Gmail query's spaces, colons, and slashes.
-/// What: asserts the RFC 3986 unreserved set survives and everything else is
-/// escaped.
-/// Test: self-contained.
-#[test]
-fn pct_encode_escapes_reserved() {
-    assert_eq!(
-        gapi::pct_encode("in:sent after:2026/01/01"),
-        "in%3Asent%20after%3A2026%2F01%2F01"
-    );
-    assert_eq!(gapi::pct_encode("a-b_c.d~e9"), "a-b_c.d~e9");
-    assert_eq!(gapi::pct_encode("café"), "caf%C3%A9");
 }
