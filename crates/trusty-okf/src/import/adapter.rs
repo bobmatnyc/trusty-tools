@@ -24,18 +24,21 @@
 //! a string or null is a protocol error.
 //!
 //! Listing contract (Architect ruling 440388fb9a26, SPEC-OKF-01 §2.13): a
-//! `listing` reply's `complete` describes the whole listing. Every page of
-//! a whole listing, the non-final ones included, sends `complete: true` or
-//! leaves the flag out (absent reads as true). An adapter that cannot show
-//! the listing is whole sends `complete: false` on any page, and that one
-//! page makes the run incomplete, so it tombstones nothing. A non-boolean
-//! `complete` is a protocol error.
+//! `listing` reply's `complete` describes the whole listing. A non-final
+//! page (one that returns a cursor) sends `complete: true` or leaves the
+//! flag out, which reads as true. The final page (no cursor) must send
+//! `complete: true` explicitly; a final page that leaves it out reads as
+//! false. An adapter that cannot show the listing is whole sends
+//! `complete: false` on any page, and that one page makes the run
+//! incomplete, so it tombstones nothing. A non-boolean `complete` is a
+//! protocol error.
 //! Test: `c97_cli_imports_through_an_adapter_process_and_reaps_on_cancel`,
 //! `c139_adapter_gets_exactly_the_caller_environment`,
 //! `c98_acquire_requests_carry_operator_initiated`,
 //! `numeric_cursor_is_a_protocol_error_and_tombstones_nothing`,
 //! `cancel_kills_the_adapter_process_group`,
-//! `any_incomplete_page_blocks_tombstones`
+//! `any_incomplete_page_blocks_tombstones`,
+//! `final_page_without_a_flag_tombstones_nothing`
 //! (`crates/trusty-okf/tests/adapter_criteria.rs`).
 //!
 //! # Spec References
@@ -428,11 +431,13 @@ impl ImportSource for AdapterSource {
                 ));
             }
         };
-        // #10746 S9: an absent `complete` reads as true (the contract: a
-        // non-final page sends true or leaves it out); a non-boolean is a
-        // protocol error.
+        // #10746 S9: an absent `complete` reads as true on a page with a
+        // cursor and false on the final page; a non-boolean is a protocol
+        // error.
         let complete = match &reply["complete"] {
-            Value::Null => true,
+            // #10746 S9: only a page that names a next page may leave the
+            // flag out; a final page must say `true` itself (§2.13).
+            Value::Null => cursor.is_some(),
             Value::Bool(b) => *b,
             other => {
                 self.stop("protocol_error", Duration::ZERO);

@@ -919,3 +919,36 @@ fn any_incomplete_page_blocks_tombstones() {
         (1, "tombstoned")
     );
 }
+
+/// Why: §2.13 "the adapter's complete flag alone never makes it true" — an
+/// adapter that stops at its own ceiling and returns no cursor and no flag
+/// must not make the run deletion-safe.
+/// What: a recursive docs store imports `gone` and `kept`; the next listing
+/// is one final page (no cursor) holding `kept` and no `complete` field.
+/// `gone` stays `missing`, and the run is not deletion-safe.
+/// Test: self-contained.
+#[test]
+fn final_page_without_a_flag_tombstones_nothing() {
+    let fake = FakeAdapter::new("gdocs");
+    fake.page(
+        None,
+        json!([{"item_id": "gone", "revision": "1"}, {"item_id": "kept", "revision": "1"}]),
+        None,
+        true,
+    );
+    for d in ["gone", "kept"] {
+        fake.item(json!({"item_id": d, "revision": "1", "parts": [{"mime": "text/markdown", "data": "Doc."}]}));
+    }
+    run(&fake, &docs_spec(true)).unwrap();
+    fake.page_raw(
+        None,
+        json!({"type": "listing", "request_id": "@RID@",
+            "entries": [{"item_id": "kept", "revision": "1"}]}),
+    );
+    let r = run(&fake, &docs_spec(true)).unwrap();
+    assert!(!r.pagination_exhausted && !r.deletion_safe, "{r:?}");
+    assert_eq!(
+        (r.tombstoned, item(&r, "gone").write.as_str()),
+        (0, "missing")
+    );
+}
