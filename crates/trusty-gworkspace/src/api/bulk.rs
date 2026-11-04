@@ -17,7 +17,9 @@
 //! ([`gmail_list_ids`], [`drive_list_files`]), and fetches one message
 //! ([`gmail_message`]), one file's metadata ([`drive_file`]) or its content
 //! ([`drive_export`], [`drive_content`]).
-//! Test: `bulk_tests` beside this file.
+//! Test: `gmail_list_ids_follows_pages_through_a_loopback_root`,
+//! `drive_walk_resumes_from_its_serialised_state` and the converter tests in
+//! `bulk_tests.rs` beside this file.
 
 use std::collections::BTreeSet;
 
