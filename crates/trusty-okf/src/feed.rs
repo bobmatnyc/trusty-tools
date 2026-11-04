@@ -27,10 +27,13 @@ use crate::OkfError;
 
 mod pass;
 pub(crate) mod probe;
+// #10746 S8: the §5.3.1 rule 4 scope proof before a full reindex.
+mod reindex;
 mod rpc;
 pub(crate) mod wire;
 
 pub use pass::feed;
+pub use reindex::{ReindexDecision, reindex_after_rebuild};
 pub use rpc::{PUSH_TIMEOUT, RpcIndexFeed};
 pub use wire::live_identity;
 

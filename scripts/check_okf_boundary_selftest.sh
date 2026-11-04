@@ -145,9 +145,27 @@ run_case "keychain dependency fails" 1 "FAIL b6_no_credential_deps" "$d"
 d="$(new_fixture bin-target)"
 printf '[[bin]]\nname = "trusty-okf"\n' >> "$d/crates/trusty-okf/Cargo.toml"
 run_case "bin target fails" 1 "declares a [[bin]] target" "$d"
+# #10746 S8: src/main.rs is the CLI; it may read its arguments and nothing
+# else of the environment, and it may not serve stdio.
 d="$(new_fixture main-rs)"
-printf 'fn main() {}\n' > "$d/crates/trusty-okf/src/main.rs"
-run_case "main.rs fails" 1 "src/main.rs exists" "$d"
+printf 'fn main() {\n    let a: Vec<_> = std::env::args_os().collect();\n    drop(a);\n}\n' \
+  > "$d/crates/trusty-okf/src/main.rs"
+run_case "CLI main.rs reading its arguments passes" 0 "check_okf_boundary: OK" "$d"
+d="$(new_fixture main-rs-env-var)"
+printf 'fn main() {\n    let _ = std::env::args_os();\n    let _ = std::env::var("HOME");\n}\n' \
+  > "$d/crates/trusty-okf/src/main.rs"
+run_case "env::var in main.rs fails" 1 "main.rs:3:" "$d"
+d="$(new_fixture args-in-lib)"
+add_src "$d" 'pub fn a() -> usize { std::env::args_os().count() }'
+run_case "args_os outside main.rs fails" 1 "FAIL c12_no_agent_paths_or_index_names" "$d"
+d="$(new_fixture main-rs-stdio)"
+printf 'fn main() {\n    let _ = std::env::args_os();\n    let _ = "serve";\n}\n' \
+  > "$d/crates/trusty-okf/src/main.rs"
+run_case "main.rs with a serve verb fails" 1 "FAIL c14_no_mcp_surface" "$d"
+d="$(new_fixture bin-dir)"
+mkdir -p "$d/crates/trusty-okf/src/bin"
+printf 'fn main() {}\n' > "$d/crates/trusty-okf/src/bin/x.rs"
+run_case "src/bin/ fails" 1 "src/bin/ exists" "$d"
 d="$(new_fixture tool-descriptor)"
 add_src "$d" 'pub const T: &str = "tools/list";'
 run_case "MCP tool descriptor fails" 1 "FAIL c14_no_mcp_surface" "$d"

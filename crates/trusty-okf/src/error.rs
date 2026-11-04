@@ -93,6 +93,15 @@ pub enum OkfError {
         /// `not_human` or `not_confirmed`.
         reason: String,
     },
+    /// #10746 S8: the bundle root and an import's source root contain one
+    /// another; the import refused before any write (§2.14 rule 1).
+    #[error("source root {source_root:?} and bundle root {bundle_root:?} overlap")]
+    SourceOverlap {
+        /// The canonical source root.
+        source_root: PathBuf,
+        /// The canonical bundle root.
+        bundle_root: PathBuf,
+    },
     /// #10746 S5: an `IndexStateDir` inside the bundle root (§4.9.1).
     #[error("index state directory lies inside the bundle root: {0:?}")]
     StateDirInBundle(PathBuf),

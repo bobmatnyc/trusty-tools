@@ -20,6 +20,8 @@ pub mod id;
 // #10746 S4: the §2.13.1 protected key set the ingest boundary reads.
 pub mod protected;
 pub mod raw;
+// #10746 S8: the §4.8 tombstone detection rule, restated locally.
+pub mod tombstone;
 pub mod v02;
 pub mod validate;
 pub mod write;
@@ -33,5 +35,6 @@ pub use hash::{ContentHash, LIFECYCLE_KEYS, content_hash};
 pub use id::{ConceptId, ConceptRef, concept_ref_for_path};
 pub use protected::{PROTECTED_KEYS, SOURCE_FIELDS_KEY, is_protected_key};
 pub use raw::{RawEntry, RawFrontmatter};
+pub use tombstone::is_detectable_tombstone;
 pub use validate::{Finding, FindingKind, Severity};
 pub use write::{WriteMode, WriteOutcome, check_write};

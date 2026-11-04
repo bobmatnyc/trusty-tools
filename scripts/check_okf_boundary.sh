@@ -20,8 +20,10 @@
 #                                          `okg` path word, index name
 #     c13_no_connector_locator_variants B6  src/ names no Gmail/Drive variant
 #     b6_no_credential_deps            B6  graph has no OAuth/token/keychain crate
-#     c14_no_mcp_surface               B7  no bin target, main.rs, src/bin/, MCP
-#                                          tool descriptor or stdio server
+#     c14_no_mcp_surface               B7  no `[[bin]]` table, src/bin/, MCP
+#                                          tool descriptor or stdio server; the
+#                                          one binary is src/main.rs, the CLI
+#                                          (#10746 S8, SPEC-OKF-01 §4.10)
 #     c15_core_network_free            B8  --no-default-features graph has no
 #                                          async runtime or socket client, and
 #                                          the core builds that way
@@ -32,7 +34,9 @@
 #   since S4 (#10746): build_criteria.rs golden_registry_loads_every_row.
 #
 #   The src/ greps read raw text, comments included, matching the spec's
-#   "a grep of crates/trusty-okf/src". Fails closed: a missing src/, a src/
+#   "a grep of crates/trusty-okf/src". #10746 S8: one exception, in
+#   src/main.rs only: the exact call `std::env::args_os()`, the CLI's argument
+#   list, is removed before the match. Every other `env` route there fails. Fails closed: a missing src/, a src/
 #   with no .rs file, a dependency tree that does not start at trusty-okf, or
 #   a source scan whose find/xargs/perl exits non-zero or writes to stderr is
 #   a failure.
@@ -107,8 +111,12 @@ banned_deps() {
 # exits 0 on no match, so any non-zero status or stderr output is an error.
 banned_src() {
   local name="$1" re="$2" hits
+  # #10746 S8: the CLI reads its arguments; `std::env::args_os()` in
+  # src/main.rs is the one allowed `env` route (see the header).
   if ! hits="$(find "$SRC" -name '*.rs' -type f | sort |
-    OKF_RE="$re" xargs perl -ne 'print "$ARGV:$.: $_" if /$ENV{OKF_RE}/; close ARGV if eof' \
+    OKF_RE="$re" OKF_MAIN="$SRC/main.rs" xargs perl -ne 'my $l = $_;
+      $l =~ s/\Qstd::env::args_os()\E//g if $ARGV eq $ENV{OKF_MAIN};
+      print "$ARGV:$.: $_" if $l =~ /$ENV{OKF_RE}/; close ARGV if eof' \
       2> "$TMP/scan.err")" || [ -s "$TMP/scan.err" ]; then
     fail "$name" "source scan failed; the check cannot pass$nl$(cat "$TMP/scan.err")"
     return
@@ -141,12 +149,12 @@ banned_src c13_no_connector_locator_variants '\bGmail\b|\bDrive\b'
 banned_deps b6_no_credential_deps "$TMP/all" \
   'oauth2|yup-oauth2|gcp_auth|keyring|security-framework|secret-service|trusty-secrets|google-[a-z0-9_-]+'
 
-# B7: no MCP surface and no stdio server binary.
+# B7: no MCP surface and no stdio server binary. #10746 S8: src/main.rs is
+# the CLI (SPEC-OKF-01 §4.10); it is scanned like every other file below.
 mcp_hits=""
 if grep -qE '^\[\[bin\]\]' "$CRATE_DIR/Cargo.toml"; then
   mcp_hits="$CRATE_DIR/Cargo.toml declares a [[bin]] target$nl"
 fi
-[ -e "$SRC/main.rs" ] && mcp_hits="$mcp_hits$SRC/main.rs exists$nl"
 [ -e "$SRC/bin" ] && mcp_hits="$mcp_hits$SRC/bin/ exists$nl"
 if grep -qE '^(rmcp|trusty-mcp)$' "$TMP/all"; then
   mcp_hits="${mcp_hits}MCP framework crate in the dependency graph$nl"
@@ -154,7 +162,7 @@ fi
 if [ -n "$mcp_hits" ]; then
   fail c14_no_mcp_surface "${mcp_hits%$nl}"
 else
-  banned_src c14_no_mcp_surface '"tools/list"|"tools/call"|inputSchema|--stdio|run_stdio_loop'
+  banned_src c14_no_mcp_surface '"tools/list"|"tools/call"|inputSchema|--stdio|run_stdio_loop|"serve"'
 fi
 
 # B8: the core (no features) has no async runtime and no socket client.

@@ -25,11 +25,15 @@
 //! - SPEC-OKF-01 §2.7.2 (module mapping), §2.9, §2.13.1, §6.2 criteria 13,
 //!   116, 117.
 
+// #10746 S8: path collisions shared by build, rebuild and import (§2.9).
+pub(crate) mod collide;
 pub mod docstore;
 pub mod ingest;
 pub mod jsonl;
 pub mod ledger;
 pub mod policy;
+// #10746 S8: split from `ingest` (file-size cap).
+pub(crate) mod quarantine;
 pub mod rebuild;
 pub mod registry;
 pub mod trust;

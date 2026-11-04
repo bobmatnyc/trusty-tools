@@ -46,19 +46,23 @@ use serde::Serialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::OkfError;
+use crate::build::collide::{self, Pins, targets_for};
 use crate::build::ledger::{ItemStatus, Ledger, LedgerRecord, Watermark};
+use crate::build::quarantine::Quarantine;
 use crate::build::registry::SourceSpec;
 use crate::build::trust::{TRUST_KEY, TrustLabel};
 use crate::bundle::Bundle;
 use crate::bundle::commit::LogMode;
 use crate::bundle::log_md::LogBatch;
-use crate::bundle::put::WriteKind;
+use crate::bundle::ops::OpKind;
+use crate::bundle::put::{PutOutcome, WriteKind};
 use crate::bundle::record::instant_string;
 use crate::format::concept::{Concept, slugify};
 use crate::format::fields::Actor;
 use crate::format::hash::content_hash;
 use crate::format::id::ConceptId;
 use crate::format::protected::{SOURCE_FIELDS_KEY, is_protected_key};
+use crate::format::tombstone::is_detectable_tombstone;
 use crate::format::write::WriteMode;
 use crate::profile::Profile;
 use crate::state::revisions::run_id;
@@ -127,6 +131,28 @@ pub struct SourceItem {
     pub volatile: bool,
 }
 
+/// #10746 S8: the provenance keys the engine places from its caller's
+/// [`Writer`] (`sources[]`, §2.14 rule 5; `extracted_by`, DOC-55 Q3); any
+/// other key there is quarantined like a source field (§2.13.1).
+pub const PROVENANCE_KEYS: [&str; 2] = ["sources", "extracted_by"];
+
+/// #10746 S8: who writes an item: the `generated.by` actor (ingest or
+/// import, §2.14 rule 11) and the provenance the writer itself derives,
+/// never a source value. Kept apart from [`SourceItem`] so callers that
+/// build items (trusty-agents through trusty-kb) are unchanged.
+pub(crate) struct Writer<'a> {
+    pub actor: &'a str,
+    pub provenance: &'a Mapping,
+}
+
+/// The ingest engine's writer: [`INGEST_ACTOR`], no provenance.
+pub(crate) fn ingest_writer(empty: &Mapping) -> Writer<'_> {
+    Writer {
+        actor: INGEST_ACTOR,
+        provenance: empty,
+    }
+}
+
 /// One report finding (§2.13.1, Appendix A).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IngestFinding {
@@ -136,6 +162,15 @@ pub struct IngestFinding {
     pub item_id: String,
     /// The key that was quarantined.
     pub key: String,
+}
+
+/// #10746 S8: one item refused before any write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ItemFailure {
+    /// The item.
+    pub item_id: String,
+    /// Why: `collision` (§2.9 "Path collisions").
+    pub reason: String,
 }
 
 /// What one ingest run did.
@@ -167,6 +202,10 @@ pub struct IngestReport {
     pub entities_truncated: bool,
     /// Per-item failures. An item that fails does not abort the run.
     pub errors: Vec<String>,
+    /// #10746 S8: items refused before any write, each with its reason
+    /// (`collision`, §2.9). Counted as failed, never as written.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<ItemFailure>,
     /// #10746: one `quarantined_key` finding per key and item (§2.13.1).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<IngestFinding>,
@@ -191,6 +230,7 @@ impl IngestReport {
         self.tombstoned += other.tombstoned;
         self.missing.extend(other.missing);
         self.errors.extend(other.errors);
+        self.failed.extend(other.failed);
         self.findings.extend(other.findings);
         for entity in other.entities {
             push_entity(self, entity);
@@ -202,8 +242,10 @@ impl IngestReport {
 
 /// The concept a source's item is written to: `<collection>/<slug(name)>`.
 ///
-/// #10746: unchanged addressing from trusty-kb; slice S8 replaces it with the
-/// §2.14 ID rule and full-ID addressing (criteria 136, 138).
+/// #10746: trusty-kb's addressing, for an item with no ledger record. An
+/// item the ledger knows keeps the full ID its record pins (§2.13 "Full-ID
+/// addressing"); import assigns IDs by the §2.14 rule instead
+/// (`import::id`).
 pub fn concept_id_for(collection: &str, name: &str) -> Result<ConceptId, OkfError> {
     ConceptId::parse(&format!("{collection}/{}", slugify(name)))
 }
@@ -246,6 +288,12 @@ pub fn ingest_items(
     // #10746 S5: the run's `log.md` entries are written once, at the end.
     let batch = LogBatch::begin(&bundle, &run_id("ingest", &[&spec.id, &stamp]))?;
 
+    // #10746 S8: map every item to its concept before any write; a
+    // colliding item is refused and counted as failed (§2.9).
+    let (targets, bad_ids) = targets_for(&ledger, spec, items);
+    let refused = collide::refused(&spec.id, &targets, &Pins::load(bundle.root(), &spec.id)?);
+    let target_of: BTreeMap<&str, &ConceptId> =
+        targets.iter().map(|(i, id)| (i.as_str(), id)).collect();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for item in items {
         seen.insert(item.item_id.as_str());
@@ -255,9 +303,31 @@ pub fn ingest_items(
             report.skipped += 1;
             continue;
         }
+        if let Some(e) = bad_ids.get(item.item_id.as_str()) {
+            report.errors.push(format!("{}: {e}", item.item_id));
+            continue;
+        }
+        if refused.contains(&item.item_id) {
+            report.failed.push(ItemFailure {
+                item_id: item.item_id.clone(),
+                reason: "collision".to_string(),
+            });
+            continue;
+        }
+        let id = target_of[item.item_id.as_str()];
         let first_time = !ledger.contains(&item.item_id);
-        match write_item(&mut bundle, profile, spec, item, &now, &batch) {
-            Ok((entity, findings)) => {
+        match write_item(
+            &mut bundle,
+            profile,
+            spec,
+            id,
+            item,
+            &now,
+            &batch,
+            &ingest_writer(&Mapping::new()),
+        ) {
+            Ok((_, findings)) => {
+                let entity = id.as_str().to_string();
                 // Ledger append happens AFTER the concept write and BEFORE
                 // the next item, so a crash can only ever leave a concept
                 // whose ledger line is missing — which the next run simply
@@ -366,9 +436,10 @@ fn sweep_into(
         return Ok(());
     }
     for item_id in vanished {
-        match tombstone_item(bundle, spec, ledger, &item_id, now, batch) {
-            Ok(Some(record)) => {
+        match tombstone_item(bundle, ledger, &item_id, now, batch, INGEST_ACTOR) {
+            Ok(Some((record, findings))) => {
                 ledger.append(record)?;
+                report.findings.extend(findings);
                 report.tombstoned += 1;
             }
             // The ledger names a concept that is no longer on disk —
@@ -389,55 +460,17 @@ fn existing(bundle: &Bundle, id: &ConceptId) -> Result<Option<Concept>, OkfError
     }
 }
 
-/// Quarantined values for one item, plus the findings they produce.
-#[derive(Default)]
-struct Quarantine {
-    values: Mapping,
-    /// Keys whose entry already holds a list of distinct source values.
-    multi: BTreeSet<String>,
-    findings: Vec<IngestFinding>,
-}
-
-impl Quarantine {
-    /// Move `key: value` under `source_fields`, unchanged. A second distinct
-    /// value for one key turns the entry into a list of the values, so
-    /// nothing is dropped.
-    fn hold(&mut self, item_id: &str, key: String, value: Value) {
-        let k = Value::String(key.clone());
-        match self.values.get_mut(&k) {
-            None => {
-                self.values.insert(k, value);
-            }
-            Some(prior) if *prior == value => {}
-            Some(prior) => {
-                if self.multi.insert(key.clone()) {
-                    let first = std::mem::take(prior);
-                    *prior = Value::Sequence(vec![first, value]);
-                } else if let Value::Sequence(list) = prior
-                    && !list.contains(&value)
-                {
-                    list.push(value);
-                }
-            }
-        }
-        let finding = IngestFinding {
-            kind: "quarantined_key".to_string(),
-            item_id: item_id.to_string(),
-            key,
-        };
-        if !self.findings.contains(&finding) {
-            self.findings.push(finding);
-        }
-    }
-}
-
 /// The source-derived top-level keys of one item, after the §2.13.1 check.
 ///
 /// What: the envelope (`title`, `source_*`, `trust`) first; then `fields`,
 /// then `frontmatter`. A protected key, an envelope key, or a key an earlier
 /// input already set is quarantined; every other key is kept (unknown-key
 /// preservation runs only after the check).
-fn source_values(spec: &SourceSpec, item: &SourceItem) -> (Mapping, Quarantine) {
+fn source_values(
+    spec: &SourceSpec,
+    item: &SourceItem,
+    provenance: &Mapping,
+) -> (Mapping, Quarantine) {
     let mut top = Mapping::new();
     let mut q = Quarantine::default();
     top.insert(s("title"), s(&item.title));
@@ -451,10 +484,22 @@ fn source_values(spec: &SourceSpec, item: &SourceItem) -> (Mapping, Quarantine) 
     if let Some(ts) = item.timestamp.as_deref() {
         top.insert(s("source_timestamp"), s(ts));
     }
-    let inputs = item
-        .fields
-        .iter()
-        .map(|(k, v)| (s(k), s(v)))
+    // #10746 S8: the importer's own provenance is placed before any source
+    // value; a key outside `PROVENANCE_KEYS` falls through to the check.
+    let mut rest = Mapping::new();
+    for (k, v) in provenance {
+        match k.as_str() {
+            Some(key) if PROVENANCE_KEYS.contains(&key) && !top.contains_key(k) => {
+                top.insert(k.clone(), v.clone());
+            }
+            _ => {
+                rest.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    let inputs = rest
+        .into_iter()
+        .chain(item.fields.iter().map(|(k, v)| (s(k), s(v))))
         .chain(item.frontmatter.iter().map(|(k, v)| (k.clone(), v.clone())));
     for (k, v) in inputs {
         let key = match &k {
@@ -474,7 +519,7 @@ fn source_values(spec: &SourceSpec, item: &SourceItem) -> (Mapping, Quarantine) 
     (top, q)
 }
 
-/// Write one item as a concept, returning its `<collection>/<slug>` and the
+/// Write one item as concept `id`, returning the put outcome and the
 /// item's findings.
 ///
 /// Overwrite (not merge) of the source-derived keys is deliberate: a
@@ -482,21 +527,25 @@ fn source_values(spec: &SourceSpec, item: &SourceItem) -> (Mapping, Quarantine) 
 /// from an earlier version cannot linger. #10746: [`PRESERVED_ON_REINGEST`]
 /// survives; a legacy `updated` survives only when the content is unchanged
 /// (a content change gets `generated` instead).
-fn write_item(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_item(
     bundle: &mut Bundle,
     profile: &Profile,
     spec: &SourceSpec,
+    id: &ConceptId,
     item: &SourceItem,
     now: &DateTime<FixedOffset>,
     batch: &LogBatch,
-) -> Result<(String, Vec<IngestFinding>), OkfError> {
-    let id = concept_id_for(&spec.collection, &item.name)?;
-    let old = existing(bundle, &id)?;
-    let (next, findings) = next_concept(old.as_ref(), &id, profile, spec, item);
-    let actor = Actor::parse(INGEST_ACTOR);
+    by: &Writer<'_>,
+) -> Result<(PutOutcome, Vec<IngestFinding>), OkfError> {
+    let old = existing(bundle, id)?;
+    let (next, findings) = next_concept(old.as_ref(), id, profile, spec, item, by.provenance);
+    // #10746 S8: `generated.by` names the caller: ingest or import (§2.14
+    // rule 11).
+    let actor = Actor::parse(by.actor);
     // #10746: `SourceReingest`, so a deprecated concept takes the new source
     // content (SPEC-OKF-01 §3 (c2) (i)); §2.10 and `log.md` still apply.
-    bundle.put_inner(
+    let (outcome, _, _) = bundle.put_inner(
         next,
         &actor,
         false,
@@ -505,7 +554,7 @@ fn write_item(
         WriteKind::SourceReingest,
         LogMode::Defer(batch),
     )?;
-    Ok((id.as_str().to_string(), findings))
+    Ok((outcome, findings))
 }
 
 /// The concept a source item renders to over `old` (#10746 S6: shared by
@@ -518,8 +567,9 @@ pub(crate) fn next_concept(
     profile: &Profile,
     spec: &SourceSpec,
     item: &SourceItem,
+    provenance: &Mapping,
 ) -> (Concept, Vec<IngestFinding>) {
-    let (top, quarantine) = source_values(spec, item);
+    let (top, quarantine) = source_values(spec, item, provenance);
     let mut next = match old {
         Some(c) => c.clone(),
         None => Concept::new(id.clone(), Mapping::new(), String::new()),
@@ -557,25 +607,29 @@ pub(crate) fn next_concept(
     (next, quarantine.findings)
 }
 
-/// Mark a vanished item's concept, returning the ledger line to append.
+/// Mark a vanished item's concept, returning the ledger line to append and
+/// the tombstone's findings.
 ///
 /// Returns `Ok(None)` when the concept is already gone from disk — there is
 /// nothing to mark, and inventing a record would misreport the tree. A
 /// tombstone changes lifecycle keys only, so §2.10 keeps `verified`.
-fn tombstone_item(
+/// #10746 S8: the concept is the full ID the ledger record pins (§2.13
+/// "Full-ID addressing", criterion 136). The rendered bytes are checked with
+/// the §4.8 detection rule before the rename; an undetectable tombstone
+/// still lands, with a `tombstone_undetectable` error finding (criterion
+/// 141).
+pub(crate) fn tombstone_item(
     bundle: &mut Bundle,
-    spec: &SourceSpec,
     ledger: &Ledger,
     item_id: &str,
     now: &DateTime<FixedOffset>,
     batch: &LogBatch,
-) -> Result<Option<LedgerRecord>, OkfError> {
+    actor: &str,
+) -> Result<Option<(LedgerRecord, Vec<IngestFinding>)>, OkfError> {
     let Some(prior) = ledger.get(item_id) else {
         return Ok(None);
     };
-    // #10746: trusty-kb's last-segment addressing, kept until S8 (crit. 136).
-    let slug = prior.entity.rsplit('/').next().unwrap_or(&prior.entity);
-    let id = ConceptId::parse(&format!("{}/{slug}", spec.collection))?;
+    let id = ConceptId::parse(&prior.entity)?;
     let Some(mut next) = existing(bundle, &id)? else {
         return Ok(None);
     };
@@ -583,28 +637,39 @@ fn tombstone_item(
     next.set("tombstoned", s(&instant_string(now)));
     // A tombstone is a flag, never a deletion: the body and every distilled
     // fact survive.
-    let actor = Actor::parse(INGEST_ACTOR);
+    let actor = Actor::parse(actor);
     // #10746: `SourceReingest`, so a deprecated concept takes the new source
     // content (SPEC-OKF-01 §3 (c2) (i)); §2.10 and `log.md` still apply.
-    bundle.put_inner(
-        next,
-        &actor,
-        false,
-        WriteMode::Lenient,
-        now,
-        WriteKind::SourceReingest,
-        LogMode::Defer(batch),
-    )?;
-
-    Ok(Some(LedgerRecord {
-        item_id: item_id.to_string(),
-        fingerprint: prior.fingerprint.clone(),
-        entity: prior.entity.clone(),
-        ingested_at: instant_string(now),
-        timestamp: prior.timestamp.clone(),
-        status: ItemStatus::Tombstoned,
-    }))
+    let kind = WriteKind::SourceReingest;
+    let plan = bundle.plan_put(next, &actor, false, WriteMode::Lenient, now, kind, None)?;
+    let mut findings = Vec::new();
+    if !is_detectable_tombstone(&String::from_utf8_lossy(&plan.post)) {
+        findings.push(IngestFinding {
+            kind: TOMBSTONE_UNDETECTABLE.to_string(),
+            item_id: item_id.to_string(),
+            key: String::new(),
+        });
+    }
+    if plan.outcome != PutOutcome::Unchanged {
+        let left = bundle.commit_op(plan, &actor, now, LogMode::Defer(batch), OpKind::Correct)?;
+        findings.extend(op_findings(left));
+    }
+    Ok(Some((
+        LedgerRecord {
+            item_id: item_id.to_string(),
+            fingerprint: prior.fingerprint.clone(),
+            entity: prior.entity.clone(),
+            ingested_at: instant_string(now),
+            timestamp: prior.timestamp.clone(),
+            status: ItemStatus::Tombstoned,
+        },
+        findings,
+    )))
 }
+
+/// #10746 S8: the finding kind of a tombstone trusty-search will not detect
+/// (§4.8); its severity is error.
+pub const TOMBSTONE_UNDETECTABLE: &str = "tombstone_undetectable";
 
 /// The stored body for an item: trusty-kb's form, a blank line after the
 /// fence and one trailing newline, or empty.
@@ -619,13 +684,19 @@ fn body_text(body: &str) -> String {
 
 /// #10746 S5 r2: an operation finding (`staging_left`) as an ingest finding.
 fn push_op_findings(report: &mut IngestReport, found: Vec<crate::format::validate::Finding>) {
-    for f in found {
-        report.findings.push(IngestFinding {
+    report.findings.extend(op_findings(found));
+}
+
+/// Operation findings as ingest findings.
+pub(crate) fn op_findings(found: Vec<crate::format::validate::Finding>) -> Vec<IngestFinding> {
+    found
+        .into_iter()
+        .map(|f| IngestFinding {
             kind: format!("{:?}", f.kind),
             item_id: f.path,
             key: String::new(),
-        });
-    }
+        })
+        .collect()
 }
 
 /// Record a concept path in the report, respecting the listing cap.

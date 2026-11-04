@@ -813,6 +813,42 @@ fn pending_migrate_refuses_rebuild() {
     assert_eq!(tree(&root), before, "rebuild changed a file");
 }
 
+/// Why: as above, for `import` (#10746 S8): every import write appends the
+/// revision journal, so a pending migrate refuses the run before any write,
+/// and the refusal maps to exit code 2 (SPEC-OKF-01 §4.10).
+/// What: a conflicted migrate, then a plan and an import of a one-file tree.
+/// Test: self-contained.
+#[test]
+fn pending_migrate_refuses_import() {
+    let (_t, root, _b, before) = pending();
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().canonicalize().unwrap();
+    std::fs::write(src.join("new.md"), "New.\n").unwrap();
+    let locator = Locator::DocStore {
+        path: src.to_string_lossy().into_owned(),
+        extensions: Vec::new(),
+        recursive: true,
+    };
+    let spec = crate::import::ImportSpec::new(SourceSpec::new("tree", None, locator, "t"));
+    let policy = crate::build::policy::DocStorePolicy::new(vec![src.clone()]);
+    let mut source = crate::import::DocTreeSource::open(&src, &policy).unwrap();
+    let plan =
+        crate::import::plan_import(&Bundle::open(&root).unwrap().0, &spec, &mut source).unwrap();
+    let got = crate::import::import(
+        &mut Bundle::open(&root).unwrap().0,
+        &plan,
+        &mut source,
+        &crate::extract::NoWorker,
+        at("2026-11-04T12:30:00Z"),
+    );
+    assert!(
+        matches!(got, Err(OkfError::RecoveryPending { .. })),
+        "import: {got:?}"
+    );
+    assert_eq!(crate::import::exit_code(&got), 2);
+    assert_eq!(tree(&root), before, "import changed a file");
+}
+
 /// Why: the §4.11 rule 2 refusal is scoped: with no pending migrate, a
 /// conflicted operation that does not hold the revision journal still
 /// leaves writes to other paths free (S5 behaviour kept).

@@ -181,7 +181,8 @@ const EXCLUDED_SEGMENT_NAMES: &[&str] = &["Library"];
 /// refused.
 /// Test: `ssh_style_dotdir_is_rejected`, `macos_library_is_rejected`,
 /// `platform_hidden_flag_is_rejected`.
-fn hidden_segment_below(root: &Path, resolved: &Path) -> Option<String> {
+/// #10746 S8: also the import walk's `hidden` rule (§2.14 rule 9).
+pub(crate) fn hidden_segment_below(root: &Path, resolved: &Path) -> Option<String> {
     let relative = resolved.strip_prefix(root).ok()?;
     let mut probe = root.to_path_buf();
     for component in relative.components() {

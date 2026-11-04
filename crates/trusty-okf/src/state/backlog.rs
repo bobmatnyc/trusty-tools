@@ -24,7 +24,7 @@ use crate::state::index::{
     Folded, IndexIdentity, IndexJournal, IndexRecord, IndexStateDir, LiveIdentity, fold,
     journaled_paths,
 };
-use crate::state::read::withdraw_intended;
+use crate::state::read::{undetectable_tombstone, withdraw_intended};
 
 /// What one task asks of the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +146,10 @@ pub(crate) fn backlog_from(
             }
         };
         let f = fold(records, &path);
-        let op = if withdraw_intended(&c) {
+        // #10746 S8: an undetectable tombstone is removed on every pass.
+        let op = if undetectable_tombstone(&c, &String::from_utf8_lossy(&bytes)) {
+            Some(TaskOp::Remove)
+        } else if withdraw_intended(&c) {
             Some(withdraw_op(&f, live))
         } else {
             live_op(&f, &bytes_hash(&bytes), live)

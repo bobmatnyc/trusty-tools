@@ -11,8 +11,9 @@ description = "Builds and maintains OKF (Open Knowledge Format) bundles: format,
 # moving; trusty-kb, which this crate replaces, is `publish = false` too.
 publish = false
 
-# #10746: no `[[bin]]` and no `src/main.rs`. The crate has no MCP surface and no
-# stdio server (SPEC-OKF-01 §2.7.1 B7); scripts/check_okf_boundary.sh enforces it.
+# #10746: no `[[bin]]` table. #10746 S8: the one binary is `src/main.rs`, the
+# `trusty-okf` CLI (SPEC-OKF-01 §4.10, 3g B). The crate has no MCP surface and
+# no stdio server (§2.7.1 B7); scripts/check_okf_boundary.sh enforces it.
 
 [features]
 # Both features are off by default. The core is network-free (B8) and never
@@ -35,6 +36,9 @@ serde = { workspace = true }
 # #10746 S3: one JSON line per verification-record event under `_sources/`
 # (SPEC-OKF-01 §2.10, 3d C).
 serde_json = { workspace = true }
+# #10746 S8: the import's include and exclude globs (SPEC-OKF-01 §2.14 rule
+# 9). Pure matching; no I/O, no network (B8).
+globset = { workspace = true }
 # Frontmatter parse and render; workspace-standard 0.9 line.
 serde_yaml = { workspace = true }
 # #10746 S3: the §2.10 content hash and the stale-write check (A1).
@@ -54,12 +58,22 @@ walkdir = { workspace = true }
 # async trait, and the runtime its client and the feed tests run on.
 async-trait = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["macros", "rt"] }
-trusty-common = { workspace = true, optional = true, features = ["uds"] }
+# #10746 S8: `knowledge-document` lets the `search-feed` tests pin the local
+# §4.8 tombstone rule (`format::tombstone`) to trusty-common's `is_tombstone`.
+# The core still links no trusty-common (owner decision D4b open).
+trusty-common = { workspace = true, optional = true, features = ["uds", "knowledge-document"] }
 
 # #10746 S7: the feed criteria need the `feed` module.
 [[test]]
 name = "feed_criteria"
 path = "tests/feed_criteria.rs"
+required-features = ["search-feed"]
+
+# #10746 S8: the import feed criteria need the `feed` module and the CLI's
+# feed paths.
+[[test]]
+name = "import_feed_criteria"
+path = "tests/import_feed_criteria.rs"
 required-features = ["search-feed"]
 
 [dev-dependencies]

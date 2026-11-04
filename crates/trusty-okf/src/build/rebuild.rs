@@ -35,6 +35,7 @@ use chrono::{DateTime, FixedOffset};
 use serde_yaml::{Mapping, Value};
 
 use crate::OkfError;
+use crate::build::collide::{self, Pins, targets_for};
 use crate::build::ingest::{INGEST_ACTOR, SourceItem, next_concept};
 use crate::build::jsonl::read_journal;
 use crate::build::ledger::{ItemStatus, Ledger, LedgerRecord};
@@ -85,14 +86,15 @@ pub struct RebuildReport {
 }
 
 /// How the bytes on disk relate to the revision journal (§4.5).
-enum Owner {
+/// #10746 S8: shared with import's re-import check (§2.14 rule 7).
+pub(crate) enum Owner {
     Engine,
     Unproven,
     Caller,
     HandEdit,
 }
 
-fn owner(lines: &[RevisionLine], id: &ConceptId, disk: Option<&[u8]>) -> Owner {
+pub(crate) fn owner(lines: &[RevisionLine], id: &ConceptId, disk: Option<&[u8]>) -> Owner {
     let Some(bytes) = disk else {
         // The ledger names a concept that is gone: nothing to protect.
         return Owner::Engine;
@@ -176,6 +178,29 @@ fn json(v: &RevisionLine) -> Result<serde_json::Value, OkfError> {
     })
 }
 
+/// #10746 S8: the items of `spec` that collide (§2.9), each reported as a
+/// `collision` conflict at its target. An item whose computed target does
+/// not parse has no ledger record, so the loop skips it.
+fn refuse_collisions(
+    root: &Path,
+    ledger: &Ledger,
+    spec: &SourceSpec,
+    items: &[SourceItem],
+    report: &mut RebuildReport,
+) -> Result<std::collections::BTreeSet<String>, OkfError> {
+    let (targets, _) = targets_for(ledger, spec, items);
+    let refused = collide::refused(&spec.id, &targets, &Pins::load(root, &spec.id)?);
+    for (item, id) in &targets {
+        if refused.contains(item) {
+            report.conflicts.push(RebuildConflict {
+                id: id.clone(),
+                reason: "collision".to_string(),
+            });
+        }
+    }
+    Ok(refused)
+}
+
 /// Regenerate every ledger-owned concept from store contents (SPEC-OKF-01
 /// §4.3, §4.5).
 ///
@@ -209,7 +234,12 @@ pub fn rebuild(
     let mut plans: Vec<PutPlan> = Vec::new();
     for (spec, items) in sources {
         let ledger = Ledger::load(&root, &spec.id)?;
+        // #10746 S8: the §2.9 collision rule binds `rebuild` as `build`.
+        let refused = refuse_collisions(&root, &ledger, spec, items, &mut report)?;
         for item in items {
+            if refused.contains(&item.item_id) {
+                continue;
+            }
             let Some(rec) = ledger.get(&item.item_id) else {
                 continue;
             };
@@ -246,7 +276,7 @@ pub fn rebuild(
                 Some(b) => Some(parse_concept(id.clone(), &String::from_utf8_lossy(b))?.0),
                 None => None,
             };
-            let (next, _) = next_concept(old.as_ref(), &id, profile, spec, item);
+            let (next, _) = next_concept(old.as_ref(), &id, profile, spec, item, &Mapping::new());
             let kind = WriteKind::SourceReingest;
             // #10746 S6: a `Conflict` refusal of one concept is reported and
             // the run goes on (§4.5); any other error fails the run.

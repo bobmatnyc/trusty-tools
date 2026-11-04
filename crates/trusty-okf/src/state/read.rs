@@ -94,6 +94,14 @@ pub(crate) fn withdraw_intended(c: &Concept) -> bool {
         || c.get("source_status").and_then(|v| v.as_str()) == Some("deleted")
 }
 
+/// #10746 S8: a tombstone trusty-search will not detect (§4.8): it never
+/// reads Withdrawn, and every feed pass removes it again (F9).
+/// Test: `c141_overgrown_tombstone_lands_undetectable_and_never_withdrawn`.
+pub(crate) fn undetectable_tombstone(c: &Concept, text: &str) -> bool {
+    c.get("source_status").and_then(|v| v.as_str()) == Some("deleted")
+        && !crate::format::tombstone::is_detectable_tombstone(text)
+}
+
 /// The journals read once for a whole-bundle pass.
 pub(crate) struct Loaded {
     revisions: Vec<RevisionLine>,
@@ -147,13 +155,17 @@ impl Bundle {
         Ok(RevisionState {
             id: id.clone(),
             save: revisions::save_state(&loaded.revisions, id.as_str(), &disk),
-            index: index_state(
-                &loaded.records,
-                &id.file_name(),
-                &disk,
-                withdraw_intended(&c),
-                live,
-            ),
+            index: if undetectable_tombstone(&c, &text) {
+                IndexState::WithdrawPending
+            } else {
+                index_state(
+                    &loaded.records,
+                    &id.file_name(),
+                    &disk,
+                    withdraw_intended(&c),
+                    live,
+                )
+            },
             verification: record::state_of(&events, &revision),
             okf_tier: trust_tier(c.frontmatter()),
             revision,
