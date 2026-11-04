@@ -244,26 +244,30 @@ pub fn thread_of(id: &ConceptId) -> Option<ConceptId> {
     }
 }
 
+/// The content of a normalised item's concept.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalConcept {
+    /// The title.
+    pub title: String,
+    /// The Markdown body.
+    pub body: String,
+    /// The `source_timestamp`, ISO-8601.
+    pub timestamp: Option<String>,
+    /// Engine-placed provenance keys.
+    pub provenance: Mapping,
+    /// Source fields, checked against the protected set.
+    pub fields: Mapping,
+    /// A recorded loss written with the concept.
+    pub degraded: Option<String>,
+    /// Adapter notes, reported as findings.
+    pub notes: Vec<String>,
+}
+
 /// A normalised item, or the reason it yields no concept.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Normalised {
     /// The concept's content.
-    Concept {
-        /// The title.
-        title: String,
-        /// The Markdown body.
-        body: String,
-        /// The `source_timestamp`, ISO-8601.
-        timestamp: Option<String>,
-        /// Engine-placed provenance keys.
-        provenance: Mapping,
-        /// Source fields, checked against the protected set.
-        fields: Mapping,
-        /// A recorded loss written with the concept.
-        degraded: Option<String>,
-        /// Adapter notes, reported as findings.
-        notes: Vec<String>,
-    },
+    Concept(Box<NormalConcept>),
     /// Read, but no concept is written: a recorded loss (`snippet_only`).
     Degraded(String),
     /// Not read further: a §2.14 rule 8 reason.
@@ -347,7 +351,7 @@ pub fn normalise(family: ConnectorKind, rec: &SourceRecord, policy: ContentPolic
         .ok()
         .and_then(|v| v.as_mapping().cloned())
         .unwrap_or_default();
-    Normalised::Concept {
+    Normalised::Concept(Box::new(NormalConcept {
         title: rec
             .title
             .clone()
@@ -359,7 +363,7 @@ pub fn normalise(family: ConnectorKind, rec: &SourceRecord, policy: ContentPolic
         fields,
         degraded,
         notes: rec.notes.clone(),
-    }
+    }))
 }
 
 #[cfg(test)]

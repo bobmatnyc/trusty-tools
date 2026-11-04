@@ -28,7 +28,9 @@ use serde_yaml::{Mapping, Value};
 
 use super::apply::IMPORT_ACTOR;
 use super::plan::{Action, ImportSpec, PlannedItem, SKIP_CODES, error_code, ownership, set};
-use super::record::{ConnectorKind, Normalised, SourceRecord, concept_id, normalise, thread_of};
+use super::record::{
+    ConnectorKind, NormalConcept, Normalised, SourceRecord, concept_id, normalise, thread_of,
+};
 use super::report::{ImportFinding, ItemReport};
 use super::source::{ImportSource, ListEntry};
 use crate::OkfError;
@@ -160,30 +162,33 @@ pub(crate) fn prepare(
             r.degraded = Some(why);
             Err(r)
         }
-        Normalised::Concept {
-            title,
-            body,
-            timestamp,
-            provenance,
-            fields,
-            degraded,
-            notes,
-        } => Ok(Prepared {
-            item: SourceItem {
-                item_id: p.item_id.clone(),
-                fingerprint: fp,
-                name: id.as_str().to_string(),
+        Normalised::Concept(c) => {
+            let NormalConcept {
                 title,
-                timestamp: timestamp.or_else(|| p.timestamp.clone()),
                 body,
-                fields: Default::default(),
-                frontmatter: fields,
-                volatile: false,
-            },
-            provenance,
-            notes,
-            degraded,
-        }),
+                timestamp,
+                provenance,
+                fields,
+                degraded,
+                notes,
+            } = *c;
+            Ok(Prepared {
+                item: SourceItem {
+                    item_id: p.item_id.clone(),
+                    fingerprint: fp,
+                    name: id.as_str().to_string(),
+                    title,
+                    timestamp: timestamp.or_else(|| p.timestamp.clone()),
+                    body,
+                    fields: Default::default(),
+                    frontmatter: fields,
+                    volatile: false,
+                },
+                provenance,
+                notes,
+                degraded,
+            })
+        }
     }
 }
 

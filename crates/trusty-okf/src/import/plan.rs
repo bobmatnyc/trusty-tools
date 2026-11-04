@@ -302,7 +302,7 @@ pub fn plan_import(
     let (include, exclude) = (glob_set(&spec.include)?, glob_set(&spec.exclude)?);
     let mut entries = Vec::new();
     let mut cursor: Option<String> = None;
-    let mut complete = true;
+    let mut complete: bool;
     loop {
         let page = src.list(cursor.as_deref())?;
         // #10746 S9: the adapter's flag describes the listing, so the last
