@@ -6,8 +6,9 @@
 //! result for an image-only page and for a page whose content stream fails
 //! to decode, so the label must not rest on xberg's empty text alone. Any
 //! case this module cannot prove is `extract_error`, which the host retries.
-//! What: [`no_text_layer`] is `true` only when the PDF loads inside a parse
-//! budget, every node of its page tree resolves to a page or a page-tree
+//! What: [`no_text_layer`] is `true` only when the bytes hold no `/Encrypt`
+//! (lopdf's encrypted load path bypasses the budget), the PDF loads inside a
+//! parse budget, every node of its page tree resolves to a page or a page-tree
 //! node and there is at least one page, every content stream of every page
 //! decodes in full (no filter, or `FlateDecode` only, with no `DecodeParms`)
 //! and parses in full into operators, no page shows text (`Tj`, `TJ`, `'`,
@@ -53,6 +54,10 @@ thread_local! {
 
 /// Whether `bytes` is a PDF with pages, every page readable, and no text.
 pub fn no_text_layer(bytes: &[u8]) -> bool {
+    // #10746: lopdf's encrypted load path skips the budget filter; refuse it.
+    if bytes.windows(8).any(|w| w == b"/Encrypt") {
+        return false;
+    }
     // #10746: a parse that could pass RLIMIT_AS is refused before it starts.
     let Some(left) = parse_budget().checked_sub(parse_cost(bytes)) else {
         return false;
@@ -472,6 +477,31 @@ mod tests {
         content.extend_from_slice(b"n\n");
         let z = zlib(&content, Compression::best());
         assert!(!no_text_layer(&one_page("/Filter /FlateDecode", &z)));
+    }
+
+    /// Why: #10746 — lopdf loads an encrypted file on a path that never
+    /// calls the load filter, so its object streams escape the budget.
+    /// What: the image-only page, encrypted by lopdf with the empty user
+    /// password (RC4, 128-bit), is not proof.
+    /// Test: self-contained.
+    #[test]
+    fn encrypted_pdf_is_not_proof() {
+        use lopdf::{Document, EncryptionState, EncryptionVersion, Object, Permissions};
+        let mut doc = Document::load_mem(&one_page("", IMAGE_OPS)).unwrap();
+        let id = Object::string_literal(b"0123456789abcdef".to_vec());
+        doc.trailer.set("ID", Object::Array(vec![id.clone(), id]));
+        let state = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "owner",
+            user_password: "",
+            key_length: 128,
+            permissions: Permissions::all(),
+        })
+        .unwrap();
+        doc.encrypt(&state).unwrap();
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        assert!(!no_text_layer(&bytes));
     }
 
     /// Why: #10746 finding 4 — the budget must sit below the worker's real
