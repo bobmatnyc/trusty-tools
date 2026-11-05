@@ -22,6 +22,7 @@
 //! - SPEC-OKF-01 §2.16, Appendix B.
 
 mod extract;
+mod pdf_check;
 mod proto;
 mod sandbox;
 
@@ -63,7 +64,7 @@ fn serve(input: &mut dyn io::Read, output: &mut dyn io::Write) -> Result<(), Str
         Some(other) => return Err(format!("first frame is not hello: {other:?}")),
         None => return Ok(()),
     }
-    proto::write_frame(output, &hello(&engine.config_hash(), sandbox::detect()))
+    proto::write_frame(output, &hello(engine.config_hash(), sandbox::detect()))
         .map_err(|e| e.to_string())?;
     loop {
         match proto::read_request(input).map_err(|e| e.to_string())? {

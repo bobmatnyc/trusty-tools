@@ -214,6 +214,36 @@ fn scanned_pdf_is_empty_text_with_a_note() {
     );
 }
 
+/// Why: #10746 S10b fix round — `no_text_layer` is an `Ok` the host
+/// fingerprints, so an item labelled with it is never extracted again. Only
+/// a PDF that has pages and an empty text layer may get it; any other empty
+/// PDF must fail `extract_error`, so a later worker retries it.
+/// What: a valid PDF with `/Count 0` and a one-page PDF whose content
+/// stream is not valid deflate each fail `extract_error` with a fixed
+/// message, and the next item still extracts.
+/// Test: self-contained.
+#[test]
+fn empty_pdf_without_a_readable_page_is_an_extract_error() {
+    let mut out = extract_all(vec![
+        ("zero.pdf", docs::zero_page_pdf()),
+        ("inflate.pdf", docs::broken_deflate_pdf()),
+        ("report.pdf", docs::text_pdf()),
+    ]);
+    assert!(text(out.pop().unwrap()).contains("Aardvark"));
+    for (name, r) in ["zero.pdf", "inflate.pdf"].iter().zip(out) {
+        match r {
+            Err(e) => {
+                assert_eq!(e.code, "extract_error", "{name}: {}", e.message);
+                assert!(e.message.starts_with("xberg: "), "{name}: {}", e.message);
+            }
+            Ok(e) => panic!(
+                "{name}: expected extract_error, got Ok with notes {:?}",
+                e.notes
+            ),
+        }
+    }
+}
+
 /// Why: Appendix B "Corrupt PDF" — `extract_error`, other items continue.
 /// What: on one worker, the corrupt PDF fails `extract_error` with a fixed
 /// message, and the next item still extracts.

@@ -128,6 +128,28 @@ pub fn scanned_pdf() -> Vec<u8> {
     pdf_pages(&["q 400 0 0 400 100 200 cm /Im1 Do Q\n".to_string()])
 }
 
+/// #10746: a well-formed PDF (valid xref) whose page tree has `/Count 0`.
+pub fn zero_page_pdf() -> Vec<u8> {
+    pdf_from(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [] /Count 0 >>".to_vec(),
+    ])
+}
+
+/// #10746: a one-page PDF whose only content stream claims `/FlateDecode`
+/// but holds bytes that are not a deflate stream.
+pub fn broken_deflate_pdf() -> Vec<u8> {
+    pdf_from(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+          /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>"
+            .to_vec(),
+        stream("/Filter /FlateDecode", &[0xde, 0xad, 0xbe, 0xef].repeat(32)),
+    ])
+}
+
 /// A PDF header followed by no valid object, cross-reference or trailer.
 pub fn corrupt_pdf() -> Vec<u8> {
     let mut b = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R".to_vec();

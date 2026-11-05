@@ -7,7 +7,8 @@
 //! runtime. [`Engine::reply`] answers one request: the format comes from the
 //! hint's extension, else its MIME type (`unsupported_format` otherwise);
 //! xberg extracts Markdown from the bytes in memory; a PDF with no text is
-//! `no_text_layer`; an xberg error is `extract_error` with a fixed message
+//! `no_text_layer` only when `pdf_check` proves it has pages and no text
+//! layer, else `extract_error`; an xberg error is `extract_error` with a fixed message
 //! naming only the error kind (no content excerpt, DOC-55 E4). An `ok` reply
 //! echoes the worker's own SHA-256 of the bytes and carries the fields
 //! `document_mime`, `page_count` and, for a workbook, `sheet_names`. Output
@@ -80,14 +81,17 @@ pub fn config() -> ExtractionConfig {
 /// xberg version, the feature list and the serialized configuration. Any
 /// change to one of them changes the hash, so the host re-extracts exactly
 /// the items this worker produced (§2.16 "Provenance and errors").
-pub fn config_hash(cfg: &ExtractionConfig) -> String {
+/// Errors: the configuration does not serialize.
+pub fn config_hash(cfg: &ExtractionConfig) -> serde_json::Result<String> {
+    // #10746: a serialization failure is an error, never a hash of no bytes.
+    let serialized = serde_json::to_vec(cfg)?;
     let mut h = Sha256::new();
     h.update(XBERG_VERSION.as_bytes());
     h.update(b"\0");
     h.update(FEATURES.join(",").as_bytes());
     h.update(b"\0");
-    h.update(serde_json::to_vec(cfg).unwrap_or_default());
-    hex(&h.finalize())[..16].to_string()
+    h.update(serialized);
+    Ok(hex(&h.finalize())[..16].to_string())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -133,21 +137,26 @@ fn cut_past(s: &mut String, limit: u64) {
 /// The worker's extraction engine.
 pub struct Engine {
     cfg: ExtractionConfig,
+    hash: String,
     rt: tokio::runtime::Runtime,
 }
 
 impl Engine {
-    /// The engine with [`config`]. Errors: the runtime cannot start.
+    /// The engine with [`config`]. Errors: the runtime cannot start, or the
+    /// configuration hash cannot be computed.
     pub fn new() -> std::io::Result<Self> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()?;
-        Ok(Engine { cfg: config(), rt })
+        let cfg = config();
+        // #10746: no worker starts without a real configuration hash.
+        let hash = config_hash(&cfg).map_err(std::io::Error::other)?;
+        Ok(Engine { cfg, hash, rt })
     }
 
     /// The configuration hash for the `hello` reply.
-    pub fn config_hash(&self) -> String {
-        config_hash(&self.cfg)
+    pub fn config_hash(&self) -> &str {
+        &self.hash
     }
 
     /// The reply to one `extract` request: an `ok` or an `error` header.
@@ -159,6 +168,8 @@ impl Engine {
             return error("unsupported_format", "no handler for this type");
         };
         let sha = hex(&Sha256::digest(&bytes));
+        // #10746: kept for the no-text-layer proof below.
+        let pdf = (ext == "pdf").then(|| bytes.clone());
         let input = ExtractInput::from_bytes(bytes, mime, Some(format!("input.{ext}")));
         let result = match self.rt.block_on(xberg::extract(input, &self.cfg)) {
             Ok(r) => r,
@@ -171,8 +182,20 @@ impl Engine {
             return error("extract_error", "xberg: no document extracted");
         };
         let mut text = doc.content;
-        if ext == "pdf" && text.trim().is_empty() {
-            return error("no_text_layer", "the PDF has no text layer");
+        // #10746: `no_text_layer` is an Ok the host fingerprints. Only a PDF
+        // proven to have pages and no text layer gets it; any other empty PDF
+        // (no pages, an undecodable content stream) is `extract_error`.
+        if let Some(pdf) = pdf
+            && text.trim().is_empty()
+        {
+            return if crate::pdf_check::no_text_layer(&pdf) {
+                error("no_text_layer", "the PDF has no text layer")
+            } else {
+                error(
+                    "extract_error",
+                    "xberg: no text from a PDF not proven image-only",
+                )
+            };
         }
         let mut fields = Map::new();
         let mut notes: Vec<String> = Vec::new();
@@ -270,11 +293,11 @@ mod tests {
     /// Test: self-contained.
     #[test]
     fn config_hash_is_stable() {
-        let a = config_hash(&config());
-        assert_eq!(a, config_hash(&config()));
+        let a = config_hash(&config()).unwrap();
+        assert_eq!(a, config_hash(&config()).unwrap());
         assert_eq!(a.len(), 16);
         let mut other = config();
         other.output_format = OutputFormat::Plain;
-        assert_ne!(a, config_hash(&other));
+        assert_ne!(a, config_hash(&other).unwrap());
     }
 }
