@@ -841,6 +841,26 @@ fn command_substitution_executed_is_refused() {
     assert!(script_body_flagged("x=$(echo tmux kill-server)\n$x\n"));
 }
 
+/// #10706 C1: printed output a redirect sends to a file a shell then runs,
+/// a process substitution, or a coprocess runs the kill, as a pipe does.
+#[test]
+fn inert_output_redirected_to_shell_is_refused() {
+    for command in [
+        "{ echo 'tmux kill-server'; } > x.sh; sh x.sh",
+        "for i in 1; do echo 'tmux kill-server'; done > >(sh)",
+        "{ cat <<EOF\ntmux kill-server\nEOF\n} > x.sh; sh x.sh",
+        "exec > >(sh); echo 'tmux kill-server'",
+        "coproc sh; echo 'tmux kill-server' >&\"${COPROC[1]}\"",
+    ] {
+        assert!(logged(command), "{command} must not be allowed");
+        assert!(!refused(command), "{command} is log-only (ruling Dac)");
+        assert!(
+            script_body_flagged(&format!("{command}\n")),
+            "{command} must not be allowed as a script body"
+        );
+    }
+}
+
 /// #10706 C1: printed text that reaches no shell keeps its verdict: a
 /// here-document to stdout or a reader, and a commit message substitution,
 /// stay allowed; a here-document to a file stays a log-only would-refuse.

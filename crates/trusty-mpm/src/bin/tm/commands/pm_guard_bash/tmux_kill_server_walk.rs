@@ -16,17 +16,19 @@
 //! `--pre`, a `sed -n` without `-i` that only prints, `cat`, `git` with the
 //! words only in the `-m` value of a subcommand that takes a message, #10706
 //! H2), in a text whose every pipe feeds a reader (`head`, `wc`, …) that
-//! writes and runs nothing (#10706 H1: `readers`). A here-document body
-//! counts as an argument of the program its operator line feeds; a
-//! substitution's output counts only while every substitution is an inert
-//! program's argument (#10706 C1). A fleet kill is `Err`; anything else is
-//! noted in [`Walk::soft`] and the walk goes on.
+//! writes and runs nothing (#10706 H1: `readers`), and where no group
+//! closer, `exec` or `coproc` sends output on (#10706 C1: `output_redirected`).
+//! A here-document body counts as an argument of the program its operator
+//! line feeds; a substitution's output counts only while every substitution is
+//! an inert program's argument (#10706 C1). A fleet kill is `Err`; anything
+//! else is noted in [`Walk::soft`] and the walk goes on.
 //! Test: `a_kill_word_no_tmux_hit_accounts_for_is_log_only`,
 //! `a_kill_word_in_an_inert_argument_is_allowed`,
 //! `wrapped_nested_and_chained_kills_are_refused`,
 //! `inert_output_reaching_no_shell_keeps_its_verdict`, `heredoc_piped_to_shell_is_refused`,
 //! `command_group_piped_to_shell_is_refused`, `loop_piped_to_shell_is_refused`,
-//! `command_substitution_executed_is_refused`.
+//! `command_substitution_executed_is_refused`,
+//! `inert_output_redirected_to_shell_is_refused`.
 
 use super::super::super::architect_pane_parse::{quote_escaped_semicolons, tmux_hits};
 use super::super::super::command_substitutions;
@@ -89,7 +91,9 @@ impl<'a> Walk<'a> {
         // #10706 C1: printed text is inert only while no pipe in the text
         // feeds a non-reader (`{ echo …; } | sh`), and substitution output
         // only while each substitution is an inert program's argument.
-        let readers_only = pipes_into_readers_only(&segs);
+        // #10706 C1: nor while a redirect sends it on (`{ …; } > x.sh`,
+        // `done > >(sh)`, `exec > >(sh)`, `coproc`).
+        let readers_only = pipes_into_readers_only(&segs) && !output_redirected(&segs);
         let subs_printed = readers_only && substitutions_printed_only(&segs);
         for body in scan.bodies() {
             let (start, end) = body.span;
@@ -275,6 +279,24 @@ fn pipes_into_readers_only(segs: &[Segment]) -> bool {
     })
 }
 
+/// #10706 C1: whether a redirect sends earlier segments' output to a file, a
+/// process substitution or a descriptor: one on a group or loop closer (`}`,
+/// `)`, `done`, `fi`, `esac`) or on `exec`, or any `coproc`.
+fn output_redirected(segs: &[Segment]) -> bool {
+    segs.iter().any(|s| {
+        let text = s.text.trim_start();
+        let word = text
+            .split(|c: char| c.is_whitespace() || "<>&|;".contains(c))
+            .next()
+            .unwrap_or("");
+        match word {
+            "coproc" => true,
+            "exec" | "done" | "fi" | "esac" => writes_file(text),
+            _ => text.starts_with(['}', ')']) && writes_file(text),
+        }
+    })
+}
+
 /// #10706 C1: whether every segment holding a command substitution is a
 /// known-inert program, so substitution output is only printed. An
 /// assignment (`x=$(…)`, run later as `$x`), `eval "$(…)"` or `sh <(…)` is
@@ -372,7 +394,9 @@ fn only_in_messages(args: &[String]) -> bool {
 }
 
 /// Whether segment `text` redirects output to a file: an unquoted `>` whose
-/// target is not `/dev/null`, `/dev/stdout`, `/dev/stderr` or a descriptor.
+/// target is not `/dev/null`, `/dev/stdout`, `/dev/stderr`, `&1`, `&2` or
+/// `&-`. #10706 C1: any other descriptor (`>&3`, `>&"${COPROC[1]}"`) may
+/// reach a file or a shell, so it writes.
 fn writes_file(text: &str) -> bool {
     let quotes = QuoteScan::new(text);
     text.match_indices('>').any(|(at, _)| {
@@ -381,6 +405,7 @@ fn writes_file(text: &str) -> bool {
         }
         let rest = text[at + 1..].trim_start_matches(['>', '|']).trim_start();
         let target = rest.split_whitespace().next().unwrap_or("");
-        !(target.starts_with('&') || matches!(target, "/dev/null" | "/dev/stdout" | "/dev/stderr"))
+        let target = target.trim_end_matches([')', '`']);
+        !matches!(target, "&1" | "&2" | "&-" | "/dev/null" | "/dev/stdout" | "/dev/stderr")
     })
 }
