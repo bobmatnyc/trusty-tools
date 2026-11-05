@@ -3180,6 +3180,7 @@ dependencies = [
 name = "trusty-okf-xberg-worker"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "lopdf",
  "serde",
  "serde_json",

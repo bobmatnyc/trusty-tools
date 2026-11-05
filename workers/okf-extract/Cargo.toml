@@ -38,6 +38,9 @@ serde_json = "1"
 # says `no_text_layer` (src/pdf_check.rs). The exact version and feature set
 # xberg's `pdf-native` already builds, so it adds no crate to the graph.
 lopdf = { version = "=0.45.0", default-features = false }
+# #10746: strict FlateDecode for `pdf_check` (lopdf returns a partial inflate
+# as Ok). The version and default features lopdf already builds: no new crate.
+flate2 = "=1.1.10"
 # The echoed input SHA-256 and the configuration hash (Appendix B).
 sha2 = "0.10"
 
