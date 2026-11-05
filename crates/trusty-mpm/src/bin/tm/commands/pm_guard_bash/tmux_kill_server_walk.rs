@@ -420,6 +420,9 @@ fn writes_file(text: &str) -> bool {
         let rest = text[at + 1..].trim_start_matches(['>', '|']).trim_start();
         let target = rest.split_whitespace().next().unwrap_or("");
         let target = target.trim_end_matches([')', '`']);
-        !matches!(target, "&1" | "&2" | "&-" | "/dev/null" | "/dev/stdout" | "/dev/stderr")
+        !matches!(
+            target,
+            "&1" | "&2" | "&-" | "/dev/null" | "/dev/stdout" | "/dev/stderr"
+        )
     })
 }
