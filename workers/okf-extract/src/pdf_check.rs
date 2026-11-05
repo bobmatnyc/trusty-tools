@@ -6,8 +6,8 @@
 //! result for an image-only page and for a page whose content stream fails
 //! to decode, so the label must not rest on xberg's empty text alone. Any
 //! case this module cannot prove is `extract_error`, which the host retries.
-//! What: [`no_text_layer`] is `true` only when the bytes hold no `/Encrypt`
-//! (lopdf's encrypted load path bypasses the budget), the PDF loads inside a
+//! What: [`no_text_layer`] is `true` only when no name in the bytes decodes
+//! to one starting `Encrypt` (lopdf's encrypted load path bypasses the budget), the PDF loads inside a
 //! parse budget, every node of its page tree resolves to a page or a page-tree
 //! node and there is at least one page, every content stream of every page
 //! decodes in full (no filter, or `FlateDecode` only, with no `DecodeParms`)
@@ -54,8 +54,9 @@ thread_local! {
 
 /// Whether `bytes` is a PDF with pages, every page readable, and no text.
 pub fn no_text_layer(bytes: &[u8]) -> bool {
-    // #10746: lopdf's encrypted load path skips the budget filter; refuse it.
-    if bytes.windows(8).any(|w| w == b"/Encrypt") {
+    // #10746: lopdf's encrypted load path skips the budget filter; refuse it,
+    // matching the key after lopdf's `#hh` name decoding.
+    if names_encrypt(bytes) {
         return false;
     }
     // #10746: a parse that could pass RLIMIT_AS is refused before it starts.
@@ -82,6 +83,53 @@ pub fn no_text_layer(bytes: &[u8]) -> bool {
         && pages
             .iter()
             .all(|&page| page_has_no_text(&doc, page, left, &mut decoded_left))
+}
+
+/// Whether any name token in `bytes`, decoded as lopdf 0.45.0's `name`
+/// parser does, starts with `Encrypt`. A name is `/` then any run of `#`
+/// with two hex digits (one byte) or a regular byte other than `#`; it ends
+/// at the first byte that is neither, so a `#` without two hex digits ends
+/// it, as in lopdf. One pass; each byte is read at most twice.
+fn names_encrypt(bytes: &[u8]) -> bool {
+    const KEY: &[u8] = b"Encrypt";
+    let regular = |c: u8| !b" \t\n\r\0\x0C()<>[]{}/%".contains(&c);
+    let hex = |h: &[u8]| {
+        std::str::from_utf8(h)
+            .ok()
+            .and_then(|s| u8::from_str_radix(s, 16).ok())
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'/' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let mut matched = 0;
+        let mut prefix = true;
+        loop {
+            let (byte, len) = match bytes.get(i) {
+                Some(b'#') => match bytes
+                    .get(i + 1..i + 3)
+                    .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+                {
+                    Some(h) => (hex(h), 3),
+                    None => break,
+                },
+                Some(&c) if regular(c) => (Some(c), 1),
+                _ => break,
+            };
+            if prefix && matched < KEY.len() {
+                prefix = byte == Some(KEY[matched]);
+                matched += 1;
+            }
+            i += len;
+        }
+        if prefix && matched == KEY.len() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Load filter: charges each object stream's parse cost before lopdf
@@ -486,6 +534,67 @@ mod tests {
     /// Test: self-contained.
     #[test]
     fn encrypted_pdf_is_not_proof() {
+        assert!(!no_text_layer(&encrypted_image_pdf()));
+    }
+
+    /// Why: #10746 — lopdf decodes `#hh` in names, so `/Encr#79pt` is still
+    /// the trailer's `/Encrypt` key and still selects the encrypted load.
+    /// What: the encrypted PDF with its trailer key written `/Encr#79pt` (the
+    /// trailer follows the xref, so no offset moves) is not proof.
+    /// Test: self-contained.
+    #[test]
+    fn encrypted_pdf_with_an_escaped_key_is_not_proof() {
+        let bytes = encrypted_image_pdf();
+        let at = bytes.windows(8).position(|w| w == b"/Encrypt").unwrap();
+        assert!(bytes[..at].windows(7).any(|w| w == b"trailer"));
+        let mut escaped = bytes[..at].to_vec();
+        escaped.extend_from_slice(b"/Encr#79pt");
+        escaped.extend_from_slice(&bytes[at + 8..]);
+        assert!(!escaped.windows(8).any(|w| w == b"/Encrypt"));
+        assert!(!no_text_layer(&escaped));
+    }
+
+    /// Why: #10746 — the `/Encrypt` guard must read a name as lopdf does.
+    /// What: escaped and prefixed spellings match; a `#` without two hex
+    /// digits ends the name as in lopdf, so `/Encr#7` (truncated) and
+    /// `/Encr#7gpt` decode to `Encr` and do not match.
+    /// Test: self-contained.
+    #[test]
+    fn encrypt_guard_decodes_names_like_lopdf() {
+        for hit in [
+            &b"<< /Encrypt 5 0 R >>"[..],
+            b"/#45ncrypt 5 0 R",
+            b"/Encryp#74",
+            b"/Encr#79pt",
+            b"/#45#6e#63#72#79#70#74",
+            b"/EncryptMetadata false",
+        ] {
+            assert!(
+                super::names_encrypt(hit),
+                "{}",
+                String::from_utf8_lossy(hit)
+            );
+        }
+        for miss in [
+            &b"/Encr#7"[..],
+            b"/Encr#",
+            b"/Encr#7gpt",
+            b"/Encr ypt",
+            b"/Encryp",
+            b"Encrypt",
+            b"/",
+            b"",
+        ] {
+            assert!(
+                !super::names_encrypt(miss),
+                "{}",
+                String::from_utf8_lossy(miss)
+            );
+        }
+    }
+
+    /// The image-only page, encrypted by lopdf with the empty user password.
+    fn encrypted_image_pdf() -> Vec<u8> {
         use lopdf::{Document, EncryptionState, EncryptionVersion, Object, Permissions};
         let mut doc = Document::load_mem(&one_page("", IMAGE_OPS)).unwrap();
         let id = Object::string_literal(b"0123456789abcdef".to_vec());
@@ -501,7 +610,7 @@ mod tests {
         doc.encrypt(&state).unwrap();
         let mut bytes = Vec::new();
         doc.save_to(&mut bytes).unwrap();
-        assert!(!no_text_layer(&bytes));
+        bytes
     }
 
     /// Why: #10746 finding 4 — the budget must sit below the worker's real
