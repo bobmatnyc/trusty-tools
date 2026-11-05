@@ -20,7 +20,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::api::auth::TokenStorage;
-use crate::api::auth::oauth::{DefaultMode, flow, persist_profile_client, run_consent};
+use crate::api::auth::oauth::{
+    DefaultMode, ScopePreset, flow, persist_profile_client, run_consent,
+};
 
 /// `trusty-gworkspace-mcp` — Google Workspace MCP server + onboarding CLI.
 ///
@@ -81,6 +83,13 @@ pub enum Command {
         /// every future refresh for this profile.
         #[arg(long = "oauth-client", value_name = "PATH")]
         oauth_client: Option<PathBuf>,
+        /// Request a named scope preset instead of the full default set.
+        /// The only preset is `readonly`: `openid`, `userinfo.email`,
+        /// `gmail.readonly`, `drive.readonly` and `documents.readonly`. Any
+        /// other value is refused.
+        // #10746: ok-T20 read-only scope preset
+        #[arg(long, value_name = "PRESET", value_parser = parse_scope_preset)]
+        scopes: Option<ScopePreset>,
     },
     /// Check OAuth client credentials and token state.
     Doctor,
@@ -112,6 +121,16 @@ pub enum AccountsAction {
     },
 }
 
+/// clap value parser for `setup --scopes`, backed by the preset allow-list.
+///
+/// Why: The CLI and the `add_account` tool must refuse the same values.
+/// What: Delegates to [`ScopePreset::parse`].
+/// Test: `setup_scopes_readonly_parses`, `setup_unknown_scopes_preset_is_refused`.
+// #10746: ok-T20 read-only scope preset
+fn parse_scope_preset(value: &str) -> Result<ScopePreset, String> {
+    ScopePreset::parse(Some(value)).map_err(|e| e.to_string())
+}
+
 /// Execute the parsed subcommand.
 ///
 /// Why: Single dispatch point the binary calls when a subcommand is present.
@@ -128,6 +147,7 @@ pub async fn dispatch(command: Command) -> Result<()> {
             make_default,
             no_browser,
             oauth_client,
+            scopes,
         } => {
             let profile = flow::effective_profile(profile.as_deref());
             if let Some(path) = &oauth_client {
@@ -145,7 +165,9 @@ pub async fn dispatch(command: Command) -> Result<()> {
             } else {
                 DefaultMode::Auto
             };
-            let outcome = run_consent(&storage, &profile, mode, !no_browser).await?;
+            // #10746: ok-T20 read-only scope preset; no option keeps `Full`.
+            let preset = scopes.unwrap_or_default();
+            let outcome = run_consent(&storage, &profile, mode, !no_browser, preset).await?;
             let suffix = if outcome.default_applied {
                 " (default)"
             } else {
@@ -199,6 +221,7 @@ mod tests {
                 make_default: false,
                 no_browser: false,
                 oauth_client: None,
+                scopes: None,
             }) if p == "work"
         ));
 
@@ -239,6 +262,7 @@ mod tests {
                 make_default: false,
                 no_browser: false,
                 oauth_client: None,
+                scopes: None,
             })
         ));
     }
@@ -255,6 +279,7 @@ mod tests {
                 make_default: true,
                 no_browser: false,
                 oauth_client: None,
+                scopes: None,
             })
         ));
     }
@@ -311,5 +336,28 @@ mod tests {
                 ..
             }) if p.as_path() == std::path::Path::new("/tmp/client.json")
         ));
+    }
+
+    // #10746: ok-T20 read-only scope preset
+    #[test]
+    fn setup_scopes_readonly_parses() {
+        let cli = Cli::try_parse_from(["gworkspace-mcp", "setup", "--scopes", "readonly"])
+            .expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Setup {
+                scopes: Some(ScopePreset::ReadOnly),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn setup_unknown_scopes_preset_is_refused() {
+        for bad in ["write", "https://www.googleapis.com/auth/drive", ""] {
+            let err = Cli::try_parse_from(["gworkspace-mcp", "setup", "--scopes", bad])
+                .expect_err("unknown preset must be refused");
+            assert!(err.to_string().contains("unknown scope preset"), "{err}");
+        }
     }
 }

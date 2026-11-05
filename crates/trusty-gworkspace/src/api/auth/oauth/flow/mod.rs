@@ -22,11 +22,10 @@ use tracing::{info, warn};
 use super::callback;
 use super::errors::{redact_token_response, sanitize_oauth_error};
 use super::pkce::{self, Pkce};
+use super::scope_preset::ScopePreset;
 use crate::api::auth::models::{OAuthToken, StoredToken, TokenMetadata};
 use crate::api::auth::storage::TokenStorage;
-use crate::api::constants::{
-    DEFAULT_PROFILE, OAUTH_AUTH_URL, OAUTH_SCOPES, OAUTH_TOKEN_URL, USERINFO_URL,
-};
+use crate::api::constants::{DEFAULT_PROFILE, OAUTH_AUTH_URL, OAUTH_TOKEN_URL, USERINFO_URL};
 
 /// Resolved OAuth client credentials for the installed-app flow.
 ///
@@ -190,11 +189,14 @@ pub(super) fn parse_client_creds_json(data: &str) -> Result<ClientCreds> {
 /// Assemble the space-delimited scope string for the authorization request.
 ///
 /// Why: Google expects one `scope` param with space-separated values, and the
-/// set must match [`OAUTH_SCOPES`] to stay token-compatible with Python.
-/// What: Joins [`OAUTH_SCOPES`] with a single space.
+/// default set must match [`crate::api::constants::OAUTH_SCOPES`] to stay
+/// token-compatible with Python.
+/// What: The default preset's scope string ([`ScopePreset::Full`]). A consent
+/// run with another preset uses [`ScopePreset::scope_string`] instead.
 /// Test: `scope_string_matches_constant_set`.
 pub fn assemble_scope_string() -> String {
-    OAUTH_SCOPES.join(" ")
+    // #10746: ok-T20 read-only scope preset
+    ScopePreset::Full.scope_string()
 }
 
 /// Build the full authorization-endpoint URL for the browser to open.
@@ -307,6 +309,7 @@ fn consent_prompt_lines(auth_url: &str, open_browser: bool, timeout_secs: u64) -
 /// wire-compatible `StoredToken`. The default-profile decision is resolved up
 /// front (from on-disk state, before any network call) so a would-be-displaced
 /// default can be warned about immediately.
+/// `preset` picks the scope set the consent requests (#10746 ok-T20).
 /// Test: Deferred (needs a live Google client + browser). Constituent pure
 /// helpers are unit-tested (`consent_prompt_url_is_identical_regardless_of_browser_mode`).
 pub async fn run_consent(
@@ -314,12 +317,14 @@ pub async fn run_consent(
     profile: &str,
     default_mode: DefaultMode,
     open_browser: bool,
+    preset: ScopePreset,
 ) -> Result<ConsentOutcome> {
     run_consent_with(
         storage,
         profile,
         default_mode,
         open_browser,
+        preset,
         CONSENT_TIMEOUT,
         |auth_url| {
             for line in consent_prompt_lines(auth_url, open_browser, CONSENT_TIMEOUT.as_secs()) {
@@ -345,7 +350,8 @@ pub async fn run_consent(
 /// `CONSENT_TIMEOUT` for the browser-redirect wait, and `on_auth_url` runs
 /// synchronously with the built URL (before the browser is opened) instead
 /// of the hardcoded print. [`run_consent`] is just this function called with
-/// the default timeout and its stderr-printing closure.
+/// the default timeout and its stderr-printing closure. `preset` sets the
+/// requested scopes, which reach both the auth URL and the stored token.
 /// Test: Live browser round-trip stays deferred for both entry points; the
 /// pure helpers (`build_auth_url`, `consent_prompt_lines`, `should_set_default`)
 /// this calls are unit-tested.
@@ -354,6 +360,7 @@ pub async fn run_consent_with(
     profile: &str,
     default_mode: DefaultMode,
     open_browser: bool,
+    preset: ScopePreset,
     timeout: std::time::Duration,
     on_auth_url: impl FnOnce(&str),
 ) -> Result<ConsentOutcome> {
@@ -386,7 +393,8 @@ pub async fn run_consent_with(
 
     let listener = callback::bind_loopback()?;
     let redirect_uri = callback::redirect_uri(&listener)?;
-    let scope = assemble_scope_string();
+    // #10746: ok-T20 read-only scope preset
+    let scope = preset.scope_string();
     let auth_url = build_auth_url(
         &creds.client_id,
         &redirect_uri,

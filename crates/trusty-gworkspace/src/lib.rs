@@ -18,5 +18,7 @@
 pub mod api;
 pub mod cli;
 pub mod openrpc;
+// #10746: ok-T20 read-only scope preset
+pub mod scope_guard;
 pub mod server;
 pub mod tools;
