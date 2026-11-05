@@ -690,7 +690,11 @@ fn c142_frontmatter_only_hashless_events_count_as_history() {
     let un = |history| VerificationState::Unverified { history };
     assert_eq!(read("fm"), un(2), "frontmatter-only hashless events count");
     assert_eq!(read("both"), un(1), "an event in both places counts once");
-    assert_eq!(read("hashed"), un(0), "a hashed frontmatter event is not hashless");
+    assert_eq!(
+        read("hashed"),
+        un(0),
+        "a hashed frontmatter event is not hashless"
+    );
     let mut b = Bundle::open(&root).unwrap().0;
     let h = content_hash(&b.get(&id("fm")).unwrap());
     let v = Verification {
@@ -703,7 +707,11 @@ fn c142_frontmatter_only_hashless_events_count_as_history() {
     assert!(
         matches!(
             read("fm"),
-            VerificationState::Verified { human: true, events: 1, history: 2 }
+            VerificationState::Verified {
+                human: true,
+                events: 1,
+                history: 2
+            }
         ),
         "{:?}",
         read("fm")
