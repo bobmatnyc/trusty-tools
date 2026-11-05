@@ -109,7 +109,16 @@ impl Google {
         let home = std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .ok_or("HOME is not set; the adapter finds its token store under it")?;
-        let storage = TokenStorage::with_path(token_store(Path::new(&home)));
+        Google::with_home(Path::new(&home), opts)
+    }
+
+    // #10746: ok-T21 S13 live lane, criterion 148 pre-check
+    /// A client over the user-tier token store under `home`, routed to
+    /// `api_base` when set. [`Google::new`] with `home` from `$HOME`; the
+    /// live lane's pre-check names the home explicitly instead of reading
+    /// the process environment.
+    pub fn with_home(home: &Path, opts: &Options) -> Result<Google, String> {
+        let storage = TokenStorage::with_path(token_store(home));
         let client = BaseClient::with_storage(storage).map_err(|e| format!("{e:#}"))?;
         let client = match &opts.api_base {
             Some(root) => loopback(client, root)?,

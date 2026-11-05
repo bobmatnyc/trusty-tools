@@ -10,6 +10,9 @@
 //! `files.export` by MIME type). It answers 401 to any request without the
 //! seeded bearer token, records every request, can hold a request whose
 //! URL contains a marker until released, and can fail one with a status.
+//! It also answers `oauth2.googleapis.com/tokeninfo` with
+//! [`State::tokeninfo_scope`], reading the token from the form body
+//! (#10746 ok-T21, criterion 148's pre-check).
 
 #![allow(dead_code)]
 
@@ -62,6 +65,8 @@ pub struct State {
     pub ignore_sent: bool,
     /// The most entries one list page returns, below the asked size.
     pub page_cap: Option<usize>,
+    /// The `scope` tokeninfo reports for [`TOKEN`]; `None` omits the field.
+    pub tokeninfo_scope: Option<String>,
     pub seen: Vec<Seen>,
 }
 
@@ -134,6 +139,21 @@ fn respond(st: &State, path: &str, q: &BTreeMap<String, String>) -> (u16, &'stat
                 .into_bytes(),
         )
     };
+    // #10746: ok-T21 S13 live lane, criterion 148 pre-check
+    if path == "/oauth2.googleapis.com/tokeninfo" {
+        if q.get("access_token").map(String::as_str) != Some(TOKEN) {
+            return (
+                400,
+                "application/json",
+                b"{\"error\":\"invalid_token\"}".to_vec(),
+            );
+        }
+        let mut v = json!({"aud": "stub-client", "expires_in": "3599"});
+        if let Some(scope) = &st.tokeninfo_scope {
+            v["scope"] = json!(scope);
+        }
+        return js(v);
+    }
     let gmail = "/gmail.googleapis.com/gmail/v1/users/me/messages";
     let drive = "/www.googleapis.com/drive/v3/files";
     if path == gmail {
@@ -220,22 +240,29 @@ fn serve(stream: TcpStream, state: Arc<Mutex<State>>) {
         return;
     }
     let target = line.split_whitespace().nth(1).unwrap_or("/").to_string();
-    let mut auth = None;
+    let (mut auth, mut length) = (None, 0usize);
     loop {
         let mut h = String::new();
         if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
             break;
         }
-        if let Some((k, v)) = h.split_once(':')
-            && k.eq_ignore_ascii_case("authorization")
-        {
-            auth = Some(v.trim().to_string());
+        if let Some((k, v)) = h.split_once(':') {
+            if k.eq_ignore_ascii_case("authorization") {
+                auth = Some(v.trim().to_string());
+            } else if k.eq_ignore_ascii_case("content-length") {
+                length = v.trim().parse().unwrap_or(0);
+            }
         }
     }
+    // #10746 ok-T21: a form body (tokeninfo) is read as more query pairs.
+    let mut body = vec![0u8; length];
+    let _ = std::io::Read::read_exact(&mut r, &mut body);
+    let form = String::from_utf8(body).unwrap_or_default();
     let (path, raw_q) = target.split_once('?').unwrap_or((&target, ""));
     let path = decode(path);
     let query: BTreeMap<String, String> = raw_q
         .split('&')
+        .chain(form.split('&'))
         .filter(|p| !p.is_empty())
         .map(|p| {
             let (k, v) = p.split_once('=').unwrap_or((p, ""));

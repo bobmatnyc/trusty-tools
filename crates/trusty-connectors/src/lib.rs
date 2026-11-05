@@ -14,7 +14,8 @@
 //! `trusty_gworkspace::api::bulk` through [`google`], which builds the
 //! `BaseClient` from the adapter's own token store and maps every API
 //! failure to a protocol error code. [`config`] reads the adapter's grant
-//! file. The binaries `okf-adapter-gmail` and `okf-adapter-gdocs` call
+//! file. [`live`] holds the live lane's tokeninfo scope pre-check
+//! (criterion 148). The binaries `okf-adapter-gmail` and `okf-adapter-gdocs` call
 //! [`gmail::main`] and [`gdocs::main`].
 //! Listing contract (from `trusty_okf::import::adapter`): every page sends
 //! `complete` explicitly; a page cut at the adapter's own ceiling sends
@@ -35,5 +36,7 @@ pub mod config;
 pub mod gdocs;
 pub mod gmail;
 pub mod google;
+// #10746: ok-T21 S13 live lane, criterion 148 pre-check
+pub mod live;
 pub mod server;
 pub mod wire;
