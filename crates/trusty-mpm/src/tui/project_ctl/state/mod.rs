@@ -336,7 +336,7 @@ pub struct ProjectCtlState {
     /// `GET /api/v1/sessions/managed/fleet` poll per tick rather than a
     /// per-project round trip.
     pub sessions_by_project: BTreeMap<String, Vec<SessionRow>>,
-    /// #10476: the tree pane's rows, selection, expanded set and details
+    /// #10476: the tree pane's rows, selection, collapsed set and details
     /// overlay (see [`tree_nav`]).
     pub tree: TreeView,
     /// Which pane currently has keyboard focus.

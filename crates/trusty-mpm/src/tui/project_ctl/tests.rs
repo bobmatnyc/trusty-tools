@@ -98,10 +98,15 @@ fn seeded_state() -> ProjectCtlState {
         group.sessions.into_iter().map(session_to_row).collect(),
     );
     // #10476: open on the trusty-tools project node, as the tree would.
-    state.select_node(NodeId::Project {
+    let project = NodeId::Project {
         owner: "acme".to_string(),
         name: "trusty-tools".to_string(),
-    });
+    };
+    state.select_node(project.clone());
+    // #10476: tree starts expanded (Bob 11-05 17:30Z); these tests drive the
+    // open/close keys, so the project starts closed here.
+    state.tree.collapsed.insert(project);
+    state.rebuild_tree();
     state
 }
 
@@ -558,7 +563,7 @@ async fn click_reaches_the_tree_through_the_loop_10476() {
     let mut opened = Vec::new();
     let mut draw = |state: &mut ProjectCtlState| -> anyhow::Result<()> {
         terminal.draw(|f| super::layout::render(f, state))?;
-        opened.push(state.tree.expanded.contains(&project));
+        opened.push(state.tree.is_expanded(&project));
         Ok(())
     };
     let mut client = DaemonClient::new("http://127.0.0.1:1".to_string());

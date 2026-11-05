@@ -155,7 +155,7 @@ mod tests {
                 .collect(),
         );
         state.select_node(project("alpha"));
-        state.tree.expanded.insert(project("alpha"));
+        state.tree.collapsed.remove(&project("alpha"));
         state.rebuild_tree();
         state.select_node(owner());
         state
@@ -221,12 +221,12 @@ mod tests {
         let mut state = state_with(2);
         draw(&mut state, 80, 24);
         let row = screen_row(&state, index_of(&state, &owner()));
-        assert!(state.tree.expanded.contains(&owner()));
+        assert!(state.tree.is_expanded(&owner()));
         assert_eq!(click(&mut state, 5, row), None);
-        assert!(!state.tree.expanded.contains(&owner()), "click closes");
+        assert!(!state.tree.is_expanded(&owner()), "click closes");
         draw(&mut state, 80, 24);
         click(&mut state, 5, row);
-        assert!(state.tree.expanded.contains(&owner()), "click reopens");
+        assert!(state.tree.is_expanded(&owner()), "click reopens");
     }
 
     #[test]
@@ -236,7 +236,7 @@ mod tests {
         let row = screen_row(&state, index_of(&state, &project("alpha")));
         assert_eq!(click(&mut state, 5, row), None);
         assert_eq!(state.selected_node(), Some(&project("alpha")));
-        assert!(!state.tree.expanded.contains(&project("alpha")));
+        assert!(!state.tree.is_expanded(&project("alpha")));
     }
 
     /// #10476: the session goes while its overlay is open. The overlay draws
@@ -269,15 +269,12 @@ mod tests {
                 Some(&owner()),
                 "{kind:?} is consumed"
             );
-            assert!(
-                state.tree.expanded.contains(&owner()),
-                "{kind:?} is consumed"
-            );
+            assert!(state.tree.is_expanded(&owner()), "{kind:?} is consumed");
 
             draw(&mut state, 80, 24);
             click(&mut state, 5, row);
             assert!(
-                !state.tree.expanded.contains(&owner()),
+                !state.tree.is_expanded(&owner()),
                 "the click after {kind:?} toggles"
             );
         }
@@ -298,12 +295,12 @@ mod tests {
         let mut state = state_with(2);
         draw(&mut state, 80, 24);
         let before = state.selected_node().cloned();
-        let expanded = state.tree.expanded.clone();
+        let expanded = state.tree.collapsed.clone();
         // Rows 0-3 hold owner, project and two sessions; the next one is blank.
         let blank = screen_row(&state, state.tree.rows.len());
         assert_eq!(click(&mut state, 5, blank), None);
         assert_eq!(state.selected_node().cloned(), before);
-        assert_eq!(state.tree.expanded, expanded);
+        assert_eq!(state.tree.collapsed, expanded);
         assert_eq!(state.tree.details, None);
     }
 
@@ -447,10 +444,7 @@ mod tests {
         assert_eq!(state.selected_node(), Some(&project("alpha")));
         handle_mouse(&mut state, at(MouseEventKind::ScrollUp, 5, row));
         assert_eq!(state.selected_node(), Some(&owner()));
-        assert!(
-            state.tree.expanded.contains(&owner()),
-            "the wheel only moves"
-        );
+        assert!(state.tree.is_expanded(&owner()), "the wheel only moves");
 
         // Over the Activity strip the wheel does nothing.
         let below = state.tree.hit.tree_rows.bottom() + 2;
@@ -472,7 +466,7 @@ mod tests {
             assert_eq!(handle_mouse(&mut state, at(kind, 5, row)), None);
         }
         assert_eq!(state.selected_node(), Some(&owner()));
-        assert!(state.tree.expanded.contains(&project("alpha")));
+        assert!(state.tree.is_expanded(&project("alpha")));
     }
 
     /// The hit test uses the list's real offset: on a short terminal, with the

@@ -2,10 +2,10 @@
 //! (#10476).
 //!
 //! Why: the poll replaces the project and session lists on every tick. The
-//! selection and the expanded set must survive that, so they name nodes by
+//! selection and the collapsed set must survive that, so they name nodes by
 //! [`NodeId`], never by row index, and the rows are rebuilt after every poll
 //! and every toggle. Kept apart from `state/mod.rs`, which is near its cap.
-//! What: [`TreeView`] holds the rows, the selection, the expanded set, the
+//! What: [`TreeView`] holds the rows, the selection, the collapsed set, the
 //! worker-indent toggle and the open details overlay. The
 //! [`ProjectCtlState`] methods below move, toggle and clamp the selection.
 //! Test: `selection_and_expanded_survive_repoll`,
@@ -29,8 +29,10 @@ pub struct TreeView {
     /// The selected node. Kept while the tree is empty (a down daemon), so a
     /// recovered poll restores it.
     pub selected: Option<NodeId>,
-    /// The owners and projects drawn open. Everything starts collapsed.
-    pub expanded: BTreeSet<NodeId>,
+    /// The owners and projects the operator closed. Everything else draws
+    /// open, including a node first seen on a later poll.
+    // #10476: tree starts expanded (Bob 11-05 17:30Z)
+    pub collapsed: BTreeSet<NodeId>,
     /// `true` after `g` turned worker indentation off (default: indented).
     pub flat_workers: bool,
     /// Highlight and scroll offset for the rendered list.
@@ -78,6 +80,13 @@ fn aliases() -> &'static SshHostAliases {
     })
 }
 
+impl TreeView {
+    /// True when `id` draws open: it is not in [`TreeView::collapsed`].
+    pub fn is_expanded(&self, id: &NodeId) -> bool {
+        !self.collapsed.contains(id)
+    }
+}
+
 impl ProjectCtlState {
     /// The selected tree node, if any.
     pub fn selected_node(&self) -> Option<&NodeId> {
@@ -88,15 +97,16 @@ impl ProjectCtlState {
     ///
     /// Why: the one path both the poller and every toggle use, so a repoll
     /// and a key press can never disagree about which rows exist.
-    /// What: [`build_tree`] over the current lists and expanded set, then
+    /// What: [`build_tree`] over the current lists and collapsed set, then
     /// [`ProjectCtlState::clamp_selection`].
-    /// Test: `selection_and_expanded_survive_repoll`.
+    /// Test: `selection_and_expanded_survive_repoll`,
+    /// `collapse_survives_a_rebuild`, `node_added_on_a_later_poll_starts_expanded`.
     pub fn rebuild_tree(&mut self) {
         // #10476: owner/project/session rows replace the two flat lists.
         self.tree.rows = build_tree(
             &self.projects,
             &self.sessions_by_project,
-            &self.tree.expanded,
+            &self.tree.collapsed,
             !self.tree.flat_workers,
             aliases(),
         );
@@ -176,7 +186,7 @@ impl ProjectCtlState {
         let mut ancestor = id.parent();
         while let Some(node) = ancestor {
             ancestor = node.parent();
-            self.tree.expanded.insert(node);
+            self.tree.collapsed.remove(&node);
         }
         self.rebuild_tree();
         if self.row_index(&id).is_some() {
@@ -221,7 +231,7 @@ impl ProjectCtlState {
         let Some(id) = self.tree.selected.clone() else {
             return;
         };
-        if id.is_expandable() && self.tree.expanded.remove(&id) {
+        if id.is_expandable() && self.tree.collapsed.insert(id.clone()) {
             self.rebuild_tree();
         } else if let Some(parent) = id.parent() {
             self.set_selected(parent);
@@ -236,7 +246,7 @@ impl ProjectCtlState {
         if !id.is_expandable() {
             return;
         }
-        if self.tree.expanded.insert(id.clone()) {
+        if self.tree.collapsed.remove(&id) {
             self.rebuild_tree();
         } else if let Some(i) = self.row_index(&id)
             && let Some(child) = self.tree.rows.get(i + 1)
@@ -254,8 +264,8 @@ impl ProjectCtlState {
         if !id.is_expandable() {
             return;
         }
-        if !self.tree.expanded.remove(&id) {
-            self.tree.expanded.insert(id);
+        if !self.tree.collapsed.remove(&id) {
+            self.tree.collapsed.insert(id);
         }
         self.rebuild_tree();
     }

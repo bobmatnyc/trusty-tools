@@ -90,6 +90,10 @@ fn seeded_state() -> ProjectCtlState {
     );
     // #10476: open on the alpha project node — the old Projects-pane default.
     state.select_node(project_node("alpha"));
+    // #10476: tree starts expanded (Bob 11-05 17:30Z); these tests drive the
+    // open/close keys, so alpha starts closed here.
+    state.tree.collapsed.insert(project_node("alpha"));
+    state.rebuild_tree();
     state
 }
 
@@ -153,29 +157,23 @@ fn enter_on_owner_and_project_toggles() {
     let mut state = seeded_state();
     let alpha = project_node("alpha");
     assert!(handle_key(&mut state, key(KeyCode::Enter)).is_none());
-    assert!(
-        state.tree.expanded.contains(&alpha),
-        "Enter opens a project"
-    );
+    assert!(state.tree.is_expanded(&alpha), "Enter opens a project");
     assert!(state.tree.rows.iter().any(|r| matches!(&r.id,
         NodeId::Session { id, .. } if id == "sess-1")));
     handle_key(&mut state, key(KeyCode::Enter));
-    assert!(
-        !state.tree.expanded.contains(&alpha),
-        "Enter closes it again"
-    );
+    assert!(!state.tree.is_expanded(&alpha), "Enter closes it again");
 
     let acme = NodeId::Owner("acme".to_string());
     state.select_node(acme.clone());
     handle_key(&mut state, key(KeyCode::Enter));
-    assert!(!state.tree.expanded.contains(&acme));
+    assert!(!state.tree.is_expanded(&acme));
     assert_eq!(
         state.tree.rows.len(),
         1,
         "a closed owner hides its projects"
     );
     handle_key(&mut state, key(KeyCode::Enter));
-    assert!(state.tree.expanded.contains(&acme));
+    assert!(state.tree.is_expanded(&acme));
     assert!(state.tree.details.is_none(), "toggling never opens details");
 }
 
