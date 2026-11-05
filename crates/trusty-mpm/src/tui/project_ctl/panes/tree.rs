@@ -128,7 +128,8 @@ pub fn row_line(state: &ProjectCtlState, row: &TreeRow) -> Line<'static> {
 /// Draw the tree pane into `area`.
 ///
 /// What: a bordered list titled `OWNERS / PROJECTS / SESSIONS (<n> owners)`,
-/// cyan while focused, with the selected row highlighted.
+/// cyan while focused, with the selected row highlighted and the
+/// [`crate::tui::VERSION_LABEL`] right-aligned on the top border.
 pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState) {
     let focused = state.focus == Pane::Tree;
     let owners = state
@@ -152,7 +153,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState) {
     };
     let title =
         Line::from(format!("OWNERS / PROJECTS / SESSIONS ({owners} owners)")).style(title_style);
-    let block = Block::default().borders(Borders::ALL).title(title);
+    // #10476: version in tui header (Bob 11-05)
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title(Line::from(crate::tui::VERSION_LABEL).right_aligned());
     // #10476: record the rows' rectangle for the mouse hit test.
     state.tree.hit.tree_rows = block.inner(area);
     let list = List::new(items)
@@ -271,5 +276,25 @@ mod tests {
         assert!(text.contains("alpha  3 sessions, 2 live"));
         assert!(text.contains("parent deadbeef (not listed)"));
         assert!(text.contains("OWNERS / PROJECTS / SESSIONS (1 owners)"));
+    }
+
+    // #10476: version in tui header (Bob 11-05)
+    #[test]
+    fn projects_view_top_line_shows_tm_version_at_80_columns() {
+        let version = format!("tm {}", env!("CARGO_PKG_VERSION"));
+        let mut state = state();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test backend");
+        terminal
+            .draw(|f| crate::tui::project_ctl::layout::render(f, &mut state))
+            .expect("draw the projects view");
+        let buffer = terminal.backend().buffer();
+        let top: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect();
+        assert!(top.contains(&version), "top line lacks {version}: {top:?}");
+        assert!(
+            top.contains("OWNERS / PROJECTS / SESSIONS (1 owners)"),
+            "title displaced: {top:?}"
+        );
     }
 }
