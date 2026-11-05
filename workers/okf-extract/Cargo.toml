@@ -1,0 +1,53 @@
+[package]
+name = "trusty-okf-xberg-worker"
+version = "0.1.0"
+edition = "2024"
+# #10746 S10b: xberg 1.3.10 declares rust-version 1.92, so the worker keeps the
+# workspace MSRV (ADR-0029) even though it builds outside the workspace.
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/bobmatnyc/trusty-tools"
+authors = ["Bob Matsuoka <bob@matsuoka.com>"]
+description = "The trusty-okf extraction worker: xberg behind the SPEC-OKF-01 Appendix B process protocol."
+# #10746 S10b: ships only beside the trusty-okf CLI, never on crates.io
+# (SPEC-OKF-01 §3 (h) A covers trusty-okf; the worker follows it).
+publish = false
+
+# #10746 S10b: its own workspace root, so the root `[workspace] exclude` keeps
+# it out of the trusty-tools workspace (SPEC-OKF-01 §3 (n) B). Guard:
+# scripts/check_worker_dir_excluded.sh.
+[workspace]
+
+[[bin]]
+name = "trusty-okf-xberg-worker"
+path = "src/main.rs"
+
+[dependencies]
+# #10746 S10b: pinned exactly (SPEC-OKF-01 §2.16, D19). No default features:
+# the defaults add nothing these four formats need. `pdf`, `office` and `excel`
+# are the Appendix B fixture formats (PDF, DOCX, PPTX, XLSX). No OCR, model,
+# URL, network or archive feature (§2.16 "Local-only configuration", §3 (p) A);
+# `cargo tree -e features` on this crate is the reviewer check.
+xberg = { version = "=1.3.10", default-features = false, features = ["pdf", "office", "excel"] }
+# The current-thread runtime that drives xberg's async `extract`. `rt` and
+# `time` only: no `net`, no `process`, no `fs`.
+tokio = { version = "1.53.2", default-features = false, features = ["rt", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The echoed input SHA-256 and the configuration hash (Appendix B).
+sha2 = "0.10"
+
+[dev-dependencies]
+# #10746 S10b: the Appendix B fixtures run against this worker through the S10
+# client (`WorkerExtractor`), exactly as an import does. Test-only edge; the
+# worker binary links no trusty-okf code.
+trusty-okf = { path = "../../crates/trusty-okf", features = ["extract-worker"] }
+# Builds the DOCX, XLSX, PPTX and zip-bomb fixtures in the test (all fixtures
+# are generated in the repo, Appendix B). The 9 line xberg itself uses.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+serde_yaml = "0.9"
+tempfile = "3"
+
+[lints.rust]
+# One reviewed `unsafe` call site: the macOS `sandbox_check` probe (src/sandbox.rs).
+unsafe_code = "deny"

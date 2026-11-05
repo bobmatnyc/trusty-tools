@@ -1,0 +1,6 @@
+# #10746 S10b: the worker's own toolchain file (SPEC-OKF-01 §3 (n) B). The
+# crate's floor is `rust-version` in Cargo.toml (1.94); this pins the toolchain
+# a build from inside this directory uses, matching CI's clippy pin.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
