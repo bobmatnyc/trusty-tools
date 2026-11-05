@@ -16,8 +16,8 @@
 //! `--pre`, a `sed -n` without `-i` that only prints, `cat`, `git` with the
 //! words only in the `-m` value of a subcommand that takes a message, #10706
 //! H2), in a text whose every pipe feeds a reader (`head`, `wc`, …) that
-//! writes and runs nothing (#10706 H1: `readers`), and where no group
-//! closer, `exec` or `coproc` sends output on (#10706 C1: `output_redirected`).
+//! writes and runs nothing (#10706 H1: `readers`), and where no other
+//! segment writes and no `coproc` runs (#10706 C1: `output_redirected`).
 //! A here-document body counts as an argument of the program its operator
 //! line feeds; a substitution's output counts only while every substitution is
 //! an inert program's argument (#10706 C1). A fleet kill is `Err`; anything
@@ -28,11 +28,14 @@
 //! `inert_output_reaching_no_shell_keeps_its_verdict`, `heredoc_piped_to_shell_is_refused`,
 //! `command_group_piped_to_shell_is_refused`, `loop_piped_to_shell_is_refused`,
 //! `command_substitution_executed_is_refused`,
-//! `inert_output_redirected_to_shell_is_refused`.
+//! `inert_output_redirected_to_shell_is_refused`,
+//! `subshell_output_redirected_to_shell_is_logged`,
+//! `function_call_output_redirected_to_shell_is_logged`,
+//! `grouped_exec_output_to_shell_is_logged`.
 
 use super::super::super::architect_pane_parse::{quote_escaped_semicolons, tmux_hits};
 use super::super::super::command_substitutions;
-use super::super::super::floor_d4::{Segment, program_positions, segments};
+use super::super::super::floor_d4::{Segment, grammar_prefix, program_positions, segments};
 use super::super::super::heredoc::{HeredocBodies, blank_spans};
 use super::super::super::shell_lex::{QuoteScan, WrappedCommand, wrapped_command};
 use super::readers::{reader_is_safe, sed_prints_only};
@@ -91,8 +94,8 @@ impl<'a> Walk<'a> {
         // #10706 C1: printed text is inert only while no pipe in the text
         // feeds a non-reader (`{ echo …; } | sh`), and substitution output
         // only while each substitution is an inert program's argument.
-        // #10706 C1: nor while a redirect sends it on (`{ …; } > x.sh`,
-        // `done > >(sh)`, `exec > >(sh)`, `coproc`).
+        // #10706 C1: nor while a redirect may send it on (`{ …; } > x.sh`,
+        // `true) > x.sh`, `f > >(sh)`, `{ exec > >(sh); }`, `coproc`).
         let readers_only = pipes_into_readers_only(&segs) && !output_redirected(&segs);
         let subs_printed = readers_only && substitutions_printed_only(&segs);
         for body in scan.bodies() {
@@ -279,22 +282,30 @@ fn pipes_into_readers_only(segs: &[Segment]) -> bool {
     })
 }
 
-/// #10706 C1: whether a redirect sends earlier segments' output to a file, a
-/// process substitution or a descriptor: one on a group or loop closer (`}`,
-/// `)`, `done`, `fi`, `esac`) or on `exec`, or any `coproc`.
+/// #10706 C1: whether a redirect may send printed output to a file, a process
+/// substitution or a descriptor: any segment that writes and is not itself
+/// an inert program naming the kill word (a group or loop closer, `exec`, a
+/// function call, a subshell's last command), or any `coproc`.
 fn output_redirected(segs: &[Segment]) -> bool {
+    // #10706 C1: no match on the first word, which missed `true) > x.sh`,
+    // `f > >(sh)` and `{ exec > >(sh)`; the extra records are accepted.
     segs.iter().any(|s| {
-        let text = s.text.trim_start();
-        let word = text
-            .split(|c: char| c.is_whitespace() || "<>&|;".contains(c))
-            .next()
-            .unwrap_or("");
-        match word {
-            "coproc" => true,
-            "exec" | "done" | "fi" | "esac" => writes_file(text),
-            _ => text.starts_with(['}', ')']) && writes_file(text),
-        }
+        let text = s.text.trim();
+        opens_coproc(text)
+            || (writes_file(text) && !(names_whole_server_kill(text) && prints(text)))
     })
+}
+
+/// #10706 C1: whether segment `text` starts a coprocess: `coproc` among its
+/// leading shell grammar ([`grammar_prefix`]) or as the word after it. A
+/// segment that does not lex is read word by word, failing closed.
+fn opens_coproc(text: &str) -> bool {
+    let is_coproc = |w: &str| w.trim_start_matches(['(', '{']) == "coproc";
+    let Some(argv) = shlex::split(text) else {
+        return text.split_whitespace().any(is_coproc);
+    };
+    let lead = grammar_prefix(&argv);
+    argv.iter().take(lead + 1).any(|w| is_coproc(w.as_str()))
 }
 
 /// #10706 C1: whether every segment holding a command substitution is a
@@ -318,15 +329,18 @@ fn single_program(argv: &[String]) -> Option<(usize, String)> {
 /// Whether segment `text` runs a known-inert program that prints the kill
 /// word to stdout, never running or keeping it (see the module doc).
 fn inert(text: &str) -> bool {
+    !writes_file(text) && prints(text)
+}
+
+/// Whether segment `text` runs a known-inert program, its redirects aside
+/// (#10706 C1: `output_redirected` reads those).
+fn prints(text: &str) -> bool {
     let Some(argv) = shlex::split(text) else {
         return false;
     };
     let Some((pos, program)) = single_program(&argv) else {
         return false;
     };
-    if writes_file(text) {
-        return false;
-    }
     let args = argv.get(pos + 1..).unwrap_or_default();
     match program.as_str() {
         "echo" | "cat" | "grep" | "egrep" | "fgrep" => true,

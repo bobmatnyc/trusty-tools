@@ -881,3 +881,49 @@ fn inert_output_reaching_no_shell_keeps_its_verdict() {
     let to_file = "cat <<EOF > file.txt\ntmux kill-server\nEOF";
     assert!(logged(to_file) && !refused(to_file));
 }
+
+/// #10706 C1: `logged` inline, not refused, and flagged as a script body.
+fn assert_logged_inline_and_as_body(command: &str) {
+    assert!(logged(command), "{command} must not be allowed");
+    assert!(!refused(command), "{command} is log-only (ruling Dac)");
+    assert!(
+        script_body_flagged(&format!("{command}\n")),
+        "{command} must not be allowed as a script body"
+    );
+}
+
+/// #10706 C1: a subshell's `)` shares a segment with its last command, whose
+/// redirect sends the whole subshell's output on.
+#[test]
+fn subshell_output_redirected_to_shell_is_logged() {
+    for command in [
+        "(echo 'tmux kill-server'; true) > x.sh; sh x.sh",
+        "(echo 'tmux kill-server'; :) > >(sh)",
+        "(cat <<EOF\ntmux kill-server\nEOF\ntrue) > x.sh; sh x.sh",
+    ] {
+        assert_logged_inline_and_as_body(command);
+    }
+}
+
+/// #10706 C1: a redirect on a function call sends the body's output on.
+#[test]
+fn function_call_output_redirected_to_shell_is_logged() {
+    for command in [
+        "f() { echo 'tmux kill-server'; }; f > x.sh; sh x.sh",
+        "f() { echo 'tmux kill-server'; }; f > >(sh)",
+    ] {
+        assert_logged_inline_and_as_body(command);
+    }
+}
+
+/// #10706 C1: `exec` behind a group opener redirects every later command.
+#[test]
+fn grouped_exec_output_to_shell_is_logged() {
+    for command in [
+        "{ exec > >(sh); }; echo 'tmux kill-server'",
+        "if :; then exec > >(sh); fi; echo 'tmux kill-server'",
+        "for i in 1; do exec > >(sh); done; echo 'tmux kill-server'",
+    ] {
+        assert_logged_inline_and_as_body(command);
+    }
+}
