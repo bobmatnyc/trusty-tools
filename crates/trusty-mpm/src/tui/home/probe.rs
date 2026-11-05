@@ -53,6 +53,19 @@ pub fn classify(observation: Observation, installed: bool) -> TileHealth {
     }
 }
 
+/// Fold the service's lifecycle into an [`Observation`]: for a service whose
+/// [`ServiceId::silent_is_on_demand`] holds, `Silent` becomes `OnDemand`.
+///
+/// Test: `an_idle_analyze_reads_as_on_demand_not_down`,
+/// `an_answering_analyze_still_reads_as_up`.
+pub fn on_demand_when_idle(id: ServiceId, observation: Observation) -> Observation {
+    match observation {
+        // #10476: analyze is on demand; idle is not down (Bob 11-05)
+        Observation::Silent(_) if id.silent_is_on_demand() => Observation::OnDemand,
+        other => other,
+    }
+}
+
 /// Run `observe` under `deadline`; an overrun is [`TileHealth::Timeout`].
 ///
 /// Test: `a_probe_past_its_deadline_reads_as_timeout`.
@@ -69,13 +82,15 @@ where
 /// Probe one service once, bounded by `deadline`.
 ///
 /// Why: the poller's one call per tick; it always yields a renderable state.
-/// What: the binary check, then the service's [`ProbeKind`] under
-/// [`with_deadline`].
-/// Test: the pieces are covered by `classify_*` and the deadline test; the
-/// live dials are the console's own probes, exercised by the smoke run.
+/// What: the binary check, then the service's [`ProbeKind`] folded through
+/// [`on_demand_when_idle`], under [`with_deadline`].
+/// Test: the pieces are covered by `classify_*`, the `*_analyze_*` tests and
+/// the deadline test; the live dials are the console's own probes, exercised
+/// by the smoke run.
 pub async fn probe_service(id: ServiceId, deadline: Duration) -> TileHealth {
     let installed = binary_on_path(id.binary());
-    with_deadline(observe(id, deadline), installed, deadline).await
+    let observed = async move { on_demand_when_idle(id, observe(id, deadline).await) };
+    with_deadline(observed, installed, deadline).await
 }
 
 /// Observe one service through its [`ProbeKind`].

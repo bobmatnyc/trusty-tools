@@ -8,7 +8,9 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use trusty_common::console_metrics::{ConsoleMetricsReport, ServiceHealth};
 
-use super::probe::{Observation, classify, fetch_metrics, spawn_health_poller, with_deadline};
+use super::probe::{
+    Observation, classify, fetch_metrics, on_demand_when_idle, spawn_health_poller, with_deadline,
+};
 use super::render::{metric_lines, render, service_lines};
 use super::services::ServiceId;
 use super::state::{
@@ -212,6 +214,47 @@ fn classify_maps_each_observation_to_a_tile_state() {
     for (observation, installed, want) in cases {
         assert_eq!(classify(observation, installed), want);
     }
+}
+
+/// #10476: trusty-analyze is on demand, so an installed analyze with nothing
+/// on its socket is idle, not down. Every other service keeps Silent as Down.
+#[test]
+fn an_idle_analyze_reads_as_on_demand_not_down() {
+    let silent = || Observation::Silent("no socket".into());
+    let seen = |id| classify(on_demand_when_idle(id, silent()), true);
+    assert_eq!(seen(ServiceId::Analyze), TileHealth::OnDemand);
+    for id in [ServiceId::Search, ServiceId::Memory, ServiceId::Mpm] {
+        assert_eq!(
+            seen(id),
+            TileHealth::Down {
+                reason: "no socket".into()
+            },
+            "{id:?}"
+        );
+    }
+    assert_eq!(
+        classify(on_demand_when_idle(ServiceId::Analyze, silent()), false),
+        TileHealth::Absent,
+        "an analyze that is not installed is still absent"
+    );
+}
+
+/// #10476: an analyze that answers health is still Up, and one that answers
+/// badly is still Degraded.
+#[test]
+fn an_answering_analyze_still_reads_as_up() {
+    let healthy = Observation::Healthy(Some("0.9.0".into()));
+    assert_eq!(
+        classify(on_demand_when_idle(ServiceId::Analyze, healthy), true),
+        TileHealth::Up {
+            version: Some("0.9.0".into())
+        }
+    );
+    let unhealthy = Observation::Unhealthy("x".into());
+    assert_eq!(
+        classify(on_demand_when_idle(ServiceId::Analyze, unhealthy), true),
+        TileHealth::Degraded { reason: "x".into() }
+    );
 }
 
 #[tokio::test]
