@@ -46,6 +46,7 @@
 mod support;
 
 use std::collections::BTreeMap;
+use std::env::VarError;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -370,18 +371,59 @@ fn docs_outcomes(l: &Lane) {
     println!("(8) rich Doc keeps heading, list, table, link");
 }
 
+// #10746: ok-T21 fix round, a set-but-empty profile must not skip
+/// The lane's profile from `std::env::var(OKF_LIVE_PROFILE)`.
+///
+/// Why: only an absent variable may skip the lane. A set-but-empty or
+/// non-UTF-8 value is a mistake by the owner, and reading it as "unset"
+/// would pass a lane that never ran.
+/// What: `NotPresent` gives `None` (skip). `NotUnicode`, an empty value and
+/// a whitespace-only value panic, naming the variable. Any other value is
+/// the trimmed profile name.
+/// Test: `live_profile_skips_only_when_unset`.
+fn live_profile(var: Result<String, VarError>) -> Option<String> {
+    match var {
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(_)) => panic!("{PROFILE_VAR} is set but is not valid UTF-8"),
+        Ok(p) if p.trim().is_empty() => panic!("{PROFILE_VAR} is set but empty"),
+        Ok(p) => Some(p.trim().to_string()),
+    }
+}
+
+/// Why: a skip must mean the variable is absent, never that it is blank.
+/// What: unset skips; empty and whitespace panic naming the variable; a
+/// name runs.
+/// Test: this test.
+#[test]
+fn live_profile_skips_only_when_unset() {
+    assert_eq!(live_profile(Err(VarError::NotPresent)), None);
+    for blank in ["", "   "] {
+        let got = std::panic::catch_unwind(|| live_profile(Ok(blank.to_string())));
+        let msg = got
+            .err()
+            .and_then(|e| e.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| panic!("{blank:?} must panic, not skip or run"));
+        assert!(msg.contains("OKF_LIVE_PROFILE is set but empty"), "{msg}");
+    }
+    let bad = std::os::unix::ffi::OsStringExt::from_vec(vec![0xff]);
+    let got = std::panic::catch_unwind(|| live_profile(Err(VarError::NotUnicode(bad))));
+    assert!(got.is_err(), "a non-UTF-8 value must panic");
+    assert_eq!(
+        live_profile(Ok(" r-1mc-readonly ".to_string())).as_deref(),
+        Some("r-1mc-readonly")
+    );
+}
+
 /// Why: criterion 148 — the lane is off unless `OKF_LIVE_PROFILE` is set,
 /// and then runs against the owner's real account.
-/// What: unset or empty, prints the skip and passes. Set, requires
-/// `OKF_LIVE_DRIVE_FOLDER` and `HOME`, and runs [`run_lane`]; a pre-check
-/// refusal or a failed outcome fails the test.
+/// What: unset, prints the skip and passes; set but empty or not UTF-8,
+/// panics (`live_profile`). Set, requires `OKF_LIVE_DRIVE_FOLDER` and
+/// `HOME`, and runs [`run_lane`]; a pre-check refusal or a failed outcome
+/// fails the test.
 /// Test: this test (live in the owner channel only; skipped elsewhere).
 #[test]
 fn live_lane_against_the_owner_account() {
-    let Some(profile) = std::env::var(PROFILE_VAR)
-        .ok()
-        .filter(|p| !p.trim().is_empty())
-    else {
+    let Some(profile) = live_profile(std::env::var(PROFILE_VAR)) else {
         println!(
             "skipped: {PROFILE_VAR} is not set, so the S13 live lane (criterion 148) did not run"
         );
