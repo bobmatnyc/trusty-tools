@@ -35,7 +35,7 @@ pub const OWNER_HINT: &str =
 pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [n] new  [l] launch  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
 /// Key-hint text while the session column has focus.
 // #10754: De1 key map (Bob 11-06)
-pub const SESSIONS_HINT: &str = "[Enter] open  [→] details  [←] collapse/projects  [r] rename  [R] resume  [n] new  [f] focus  [l] launch  [k] kill  [d] decommission  [a] attach-cmd  [q] quit";
+pub const SESSIONS_HINT: &str = "[Enter] open  [→] details  [←] collapse/projects  [f] focus  [r] rename  [R] resume  [n] new  [l] launch  [k] kill  [d] decommission  [a] attach-cmd  [q] quit";
 /// Key-hint text shown while the Activity pane has focus (no verbs bound
 /// there — it is a read-only status strip).
 pub const ACTIVITY_HINT: &str = "[Tab] switch pane  [q] quit";
