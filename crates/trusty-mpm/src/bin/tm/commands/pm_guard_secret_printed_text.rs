@@ -27,19 +27,26 @@ use crate::commands::pm_guard_secret_words::is_path_byte;
 /// bash s.sh`), so the release needs a command that has no writer and no
 /// reader at all (design rule A).
 /// What: `false` unless the command carries no C0 control byte other than
-/// LF and TAB (rule D), and every non-empty segment of [`split_shell_segments`]
+/// LF and TAB (rule D), no shell comment or unclosed quote
+/// ([`has_comment_or_open_quote`]), and every non-empty segment of [`split_shell_segments`]
 /// tokenizes, has a [`TEXT_PRINTERS`] basename as its first word, runs nothing
 /// nested ([`runs_a_nested_command`]), has no token carrying `<` or `>`, and,
 /// for `printf`, carries no `-v`. At least one printer call is required.
 /// Test: `near_miss_rows_still_refuse_10685`,
 /// `cr_in_printer_text_refuses_10685`,
 /// `unbalanced_quote_printer_refuses_10685`,
-/// `multi_line_printer_script_allows_10685`.
+/// `multi_line_printer_script_allows_10685`,
+/// `comment_hidden_reader_refuses_10685`.
 pub(crate) fn closed_printer_text(command: &str) -> bool {
     if command
         .bytes()
         .any(|b| b < 0x20 && b != b'\n' && b != b'\t')
     {
+        return false;
+    }
+    // #10685 review H1: a `'` or `"` inside a shell comment is no quote, so the
+    // quote-only scan and the segment split misread the lines after it.
+    if has_comment_or_open_quote(command) {
         return false;
     }
     let mut printers = 0usize;
@@ -57,6 +64,43 @@ pub(crate) fn closed_printer_text(command: &str) -> bool {
         printers += 1;
     }
     printers > 0
+}
+
+/// Whether `command` has an unquoted word-initial `#` or a quote it never closes.
+///
+/// Why: `QuoteScan` and the segment split know `'` and `"` but not comments,
+/// so `echo x # it's⏎dd if=.env⏎# '` reads as one printer segment while the
+/// shell runs `dd` (#10685 review H1). Any comment withdraws the release.
+/// What: a comment-aware walk over `'`, `"` and `\`; `#` opens a comment
+/// when it starts a word (after start, whitespace or `;&|()<>`). An open
+/// quote at the end also answers `true` (fail closed).
+/// Test: `comment_hidden_reader_refuses_10685`,
+/// `trailing_comment_printer_release_withdrawn_10685`.
+fn has_comment_or_open_quote(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match quote {
+            Some(b'"') if b == b'\\' => i += 1,
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'\\' => i += 1,
+            None if b == b'\'' || b == b'"' => quote = Some(b),
+            None if b == b'#' => {
+                let word_start = i == 0
+                    || bytes[i - 1].is_ascii_whitespace()
+                    || b";&|()<>".contains(&bytes[i - 1]);
+                if word_start {
+                    return true;
+                }
+            }
+            None => {}
+        }
+        i += 1;
+    }
+    quote.is_some()
 }
 
 /// Whether one tokenized segment is a printer call that only prints.
