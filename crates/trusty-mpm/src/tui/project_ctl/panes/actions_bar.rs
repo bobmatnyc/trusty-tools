@@ -31,10 +31,11 @@ use crate::tui::project_ctl::state::{NodeId, Pane, PendingConfirm, ProjectCtlSta
 pub const OWNER_HINT: &str =
     "[Enter/←→] expand  [↑↓] select  [g] workers  [Tab] switch pane  [q] quit";
 /// Key-hint text while a project is selected in the left column.
-pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [l] launch  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
+// #10754: De1 key map (Bob 11-06)
+pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [n] new  [l] launch  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
 /// Key-hint text while the session column has focus.
-// #10754: inline session details (Bob 11-06)
-pub const SESSIONS_HINT: &str = "[Enter/→] details  [←/Esc] collapse  [f] focus  [l] launch  [k] kill  [r] resume  [d] decommission  [a] attach-cmd  [q] quit";
+// #10754: De1 key map (Bob 11-06)
+pub const SESSIONS_HINT: &str = "[Enter] open  [→] details  [←] collapse/projects  [r] rename  [R] resume  [n] new  [f] focus  [l] launch  [k] kill  [d] decommission  [a] attach-cmd  [q] quit";
 /// Key-hint text shown while the Activity pane has focus (no verbs bound
 /// there — it is a read-only status strip).
 pub const ACTIVITY_HINT: &str = "[Tab] switch pane  [q] quit";
@@ -236,9 +237,18 @@ mod tests {
         assert!(projects.contains("[c] config"));
         assert!(!sessions.contains("[c] config"));
 
-        // #10754: the session hint carries the keys the overlay showed.
-        assert!(sessions.contains("[Enter/→] details"));
-        assert!(sessions.contains("[←/Esc] collapse"));
+        // #10754: De1 key map (Bob 11-06)
+        for keys in [
+            "[Enter] open",
+            "[→] details",
+            "[←] collapse/projects",
+            "[r] rename",
+            "[R] resume",
+            "[n] new",
+        ] {
+            assert!(sessions.contains(keys), "{keys}");
+        }
+        assert!(projects.contains("[n] new"));
         assert!(sessions.contains("[a] attach-cmd"));
         let mut expanded = state_at(Some(session_node()));
         assert!(expanded.toggle_session_details());

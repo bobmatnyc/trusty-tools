@@ -1,6 +1,7 @@
 //! The `tm ls` session actions, registered as the tui's session hooks.
 //!
-//! #10754: S3 tm ls actions plumbing (keys wait on De1).
+//! #10754: De1 key map (Bob 11-06) — Enter, `r` and `n` in `tm tui` reach
+//! these hooks.
 //!
 //! Why: the lib's `tm tui` cannot import this binary, so it takes the `tm ls`
 //! operations as function pointers
@@ -8,7 +9,8 @@
 //! What: each hook wraps the function `tm ls` itself calls, with no logic of
 //! its own beyond the lookup that turns the tui's argument into that
 //! function's input: open → `guided_resume::resume_guided_session`, rename →
-//! `rename::do_rename_request`, new → `guided_launch::launch_new_session_and_attach`
+//! `rename::rename_request_quiet` (#10754: a refusal is the returned error,
+//! never a stderr line on the tui's screen), new → `guided_launch::launch_new_session_and_attach`
 //! on the project's checkout from `new_session::request_for_registered`,
 //! delete → `picker_delete::route_delete_for_state` (state from
 //! `managed_state_for_delete`, as `tm session delete` does; no `force`).
@@ -60,7 +62,8 @@ fn open(client: DaemonClient, id: String) -> SessionOpFuture {
 
 fn rename(client: DaemonClient, id: String, name: String) -> SessionOpFuture {
     Box::pin(async move {
-        let msg = super::rename::do_rename_request(&client, &id, &id, name).await?;
+        // #10754: De1 key map (Bob 11-06) — the quiet form; the tui shows it.
+        let msg = super::rename::rename_request_quiet(&client, &id, &id, name).await?;
         Ok(SessionOpOutcome::Done(msg))
     })
 }

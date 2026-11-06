@@ -4,8 +4,9 @@
 //! column and the selected node's sessions are the right one. Every key the
 //! old Projects and Sessions panes bound keeps its meaning: the project verbs
 //! (`l`/`c`/`v`) and the tree's own keys live in [`tree`], the session verbs
-//! (`f`/`k`/`r`/`d`/`a`, Enter/Right to expand a session in place) in
-//! [`session_keys`]. The pane-scoped wording below predates the columns: read
+//! in [`session_keys`]. #10754: De1 key map (Bob 11-06) — on a session row,
+//! Enter opens, Right expands in place, `r` renames (a fourth modal, checked
+//! after the config form), `R` resumes and `n` starts a new session. The pane-scoped wording below predates the columns: read
 //! "Projects pane" as the left column and "Sessions pane" as the right one.
 //!
 //! Why: separating "a key arrives → mutate state, maybe request an async
@@ -93,7 +94,9 @@ mod mouse;
 mod mouse_cols;
 mod session_keys;
 mod tree;
-use modal::{handle_config_form_key, handle_confirm_key, handle_deliverable_view_key};
+use modal::{
+    handle_config_form_key, handle_confirm_key, handle_deliverable_view_key, handle_rename_key,
+};
 pub use mouse::handle_mouse;
 
 /// An action a key press requested that needs an async daemon round trip.
@@ -114,7 +117,7 @@ pub enum PendingAction {
     Launch(String),
     /// `k` in the Sessions pane — runtime-stop the given session.
     Kill(String),
-    /// `r` in the Sessions pane — resume the given session.
+    /// `R` in the session column — resume the given session.
     Resume(String),
     /// `d` in the Sessions pane — decommission the given session.
     Decommission(String),
@@ -127,15 +130,16 @@ pub enum PendingAction {
     /// #10476: `f` on a session — move to its existing tmux window or iTerm2
     /// tab (by tmux session name); never opens a new one.
     Focus(String),
-    // #10754: S3 tm ls actions plumbing (keys wait on De1). No key produces
-    // these four yet; `super::session_ops` dispatches them through the hooks.
-    /// Open the session (resume if needed, then attach), as `tm ls` Enter.
+    // #10754: De1 key map (Bob 11-06) — Enter, the rename modal and `n`
+    // produce the first three; `super::session_ops` dispatches them through
+    // the hooks. No key produces `DeleteSession`: `d` stays decommission.
+    /// Enter on a session — open it (resume if needed, then attach), as `tm ls`.
     OpenSession(String),
-    /// Rename the session `(id, new_name)`, as `tm ls` `r`.
+    /// The rename modal's Enter — rename the session `(id, new_name)`.
     RenameSession(String, String),
-    /// Start a new session in the named project, as `tm ls` `n`.
+    /// `n` — start a new session in the named project, as `tm ls` `n`.
     NewSession(String),
-    /// Delete the session by its state's route, as `tm ls` `d`.
+    /// Delete the session by its state's route, as `tm ls` `d` (code only).
     DeleteSession(String),
 }
 
@@ -193,7 +197,8 @@ pub fn is_quit(key: &KeyEvent) -> bool {
 /// [`ProjectCtlState::config_form`] is `Some`, through
 /// [`handle_config_form_key`] (#2120 — checked THIRD, see the module doc for
 /// why this ordering makes the three modals mutually exclusive by
-/// construction). Otherwise: Ctrl-C / `q` set
+/// construction); else when [`ProjectCtlState::rename`] is `Some` (#10754),
+/// through [`handle_rename_key`]. Otherwise: Ctrl-C / `q` set
 /// `should_exit`. Tab/Shift+Tab cycle pane focus. Esc clears any shown
 /// notice and, in the session column, collapses an expanded session
 /// (#10754). With the tree focused, every other key goes to
@@ -219,6 +224,11 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
 
     if state.config_form.is_some() {
         return handle_config_form_key(state, key);
+    }
+
+    // #10754: De1 key map (Bob 11-06)
+    if state.rename.is_some() {
+        return handle_rename_key(state, key);
     }
 
     if is_quit(&key) {
@@ -284,7 +294,7 @@ fn request_kill(state: &mut ProjectCtlState) -> Option<PendingAction> {
     }
 }
 
-/// `r` in the Sessions pane: resume the selected session.
+/// `R` in the session column: resume the selected session (`r` before De1).
 ///
 /// Why (#2595): a session flagged `unresumable` — `stopped`/`errored` with no
 /// `last_cwd`/`workspace_path`/`cwd` candidate left on disk — can never

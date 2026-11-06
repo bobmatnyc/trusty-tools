@@ -46,7 +46,7 @@ pub(crate) struct TerminalEvents;
 
 /// What [`drive`] draws on, and lends out around an attach.
 ///
-/// #10754: S3 tm ls actions plumbing (keys wait on De1).
+/// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 /// Why: the draw closure holds the only `&mut Terminal`, and the open and
 /// new-session actions must suspend and resume that same terminal. One value
 /// that does all three gives the dispatcher the terminal without a second

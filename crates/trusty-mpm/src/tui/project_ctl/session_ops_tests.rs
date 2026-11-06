@@ -1,4 +1,4 @@
-//! #10754: S3 tm ls actions plumbing (keys wait on De1) — the hook dispatch.
+//! #10754: S3 tm ls actions; De1 key map (Bob 11-06) — the hook dispatch.
 //!
 //! The stubs are plain `fn`s (the hook type), so they record into a
 //! thread-local log; the screen records into the same log, which is what
@@ -218,4 +218,39 @@ async fn new_session_in_an_unknown_project_runs_no_hook() {
         );
     })
     .await;
+}
+
+/// #10754: De1 key map (Bob 11-06) — Enter on a session row asks to open it,
+/// and the dispatch runs suspend, the open hook and resume, in that order.
+#[tokio::test]
+async fn enter_on_a_session_opens_it_between_suspend_and_resume() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::events::handle_key;
+    use super::state::SessionRow;
+
+    take_log();
+    let mut state = state();
+    state.sessions_by_project.insert(
+        "alpha".to_string(),
+        vec![SessionRow {
+            id: "s1".to_string(),
+            name: "boss".to_string(),
+            state: "stopped".to_string(),
+            ..Default::default()
+        }],
+    );
+    state.rebuild_tree();
+    assert!(state.focus_session("s1"));
+    let action = handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert_eq!(action, Some(PendingAction::OpenSession("s1".to_string())));
+    with_test_hooks(STUBS, async {
+        run(&mut state, action.expect("Enter opens")).await;
+    })
+    .await;
+    assert_eq!(take_log(), ["suspend", "open:s1", "resume"]);
+    assert_eq!(state.notice.as_deref(), Some("did open:s1"));
 }

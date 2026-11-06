@@ -325,7 +325,7 @@ pub(crate) mod sync_assets;
 pub(crate) mod telegram;
 pub(crate) mod ticket;
 pub(crate) mod tmux_attach;
-// #10754: S3 tm ls actions plumbing (keys wait on De1).
+// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 pub(crate) mod tui_session_hooks;
 // #5843: the condition-poll wait primitive that replaces backgrounding.
 pub(crate) mod wait;

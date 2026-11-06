@@ -4,7 +4,8 @@
 //! comment 2). #10754: inline session details (Bob 11-06) — they now draw
 //! under the session's row in the session column, replacing the modal
 //! overlay (Architect Q2). They show what the poll already holds and make no
-//! daemon call of their own.
+//! daemon call of their own. #10754: De1 key map (Bob 11-06) — Right now
+//! toggles them; Enter opens the session.
 //! What: [`detail_lines`] is the pure field projection; the session column
 //! (`state::session_col`) inserts its lines as rows and
 //! `panes::session_list` draws them.

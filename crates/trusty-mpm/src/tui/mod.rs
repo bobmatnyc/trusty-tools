@@ -25,7 +25,7 @@ pub mod home;
 pub mod focus;
 pub mod iterm2;
 pub mod project_ctl;
-// #10754: S3 tm ls actions plumbing (keys wait on De1).
+// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 pub mod session_hooks;
 pub mod terminal;
 

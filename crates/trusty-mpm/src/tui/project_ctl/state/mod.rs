@@ -35,7 +35,7 @@ pub use modals::{
     ConfigFormField, ConfigFormFocus, ConfigFormTags, ConfigFormView, DeliverableView,
 };
 // #10476: the tree model and its navigation, kept out of this file (SLOC cap).
-// #10754: S3 tm ls actions plumbing (keys wait on De1).
+// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 pub mod rename;
 pub mod session_col;
 pub mod tree;
@@ -428,6 +428,9 @@ pub struct ProjectCtlState {
     ///
     /// [`handle_key`]: super::events::handle_key
     pub config_form: Option<ConfigFormView>,
+    /// #10754: De1 key map (Bob 11-06) — the rename modal `r` opens on a
+    /// session row. While `Some`, it takes every key (see `events::modal`).
+    pub rename: Option<rename::RenameModal>,
     /// Set when a mutating action just succeeded and the operator should see
     /// the fleet refreshed without waiting for the next timer tick.
     ///

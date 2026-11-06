@@ -1,6 +1,6 @@
 //! Dispatch of the `tm ls` session actions through the binary's hooks.
 //!
-//! #10754: S3 tm ls actions plumbing (keys wait on De1).
+//! #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 //!
 //! Why: open, rename, new and delete must do in the tui exactly what they do
 //! in `tm ls`, and that code lives in the `tm` binary; see

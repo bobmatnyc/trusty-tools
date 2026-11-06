@@ -227,7 +227,7 @@ mod tests {
         assert!(state.session_col.expanded.is_empty());
     }
 
-    /// #10754: a session row click expands it in place, as Enter does.
+    /// #10754: a session row click expands it in place, as Right does (De1).
     #[test]
     fn click_session_toggles_details() {
         let mut state = state_with(2);

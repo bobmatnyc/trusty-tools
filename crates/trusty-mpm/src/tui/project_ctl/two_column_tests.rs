@@ -9,7 +9,9 @@
 //! session verbs act on the right column's session. S2 — a session row
 //! expands in place (render, repoll, keys, clicks, no popup) and the
 //! session order does not follow the poll order; plus the column's edge
-//! cases (headers, blank clicks, narrow widths).
+//! cases (headers, blank clicks, narrow widths). S3 — #10754: De1 key map
+//! (Bob 11-06): Right toggles details and Enter does not; `r` renames
+//! through a pre-filled modal; `n` starts a new session.
 //! Test: this file is the test.
 
 use std::collections::BTreeMap;
@@ -340,7 +342,7 @@ fn session_verbs_act_on_the_right_column_session() {
         Some(PendingAction::Attach("w1".to_string()))
     );
     assert_eq!(
-        press(&mut state, KeyCode::Char('r')),
+        press(&mut state, KeyCode::Char('R')),
         Some(PendingAction::Resume("w1".to_string()))
     );
     assert_eq!(
@@ -391,14 +393,15 @@ fn line_of(lines: &[String], needle: &str) -> usize {
         .unwrap_or_else(|| panic!("no line with {needle:?}:\n{}", lines.join("\n")))
 }
 
-/// S2 (a): Enter on a session expands it in place. Its fields draw on the
-/// lines under its row, inside the right column; a second Enter collapses it.
+/// S2 (a): Right on a session expands it in place (#10754: De1 key map (Bob
+/// 11-06), Enter before). Its fields draw on the lines under its row, inside
+/// the right column; a second Right collapses it.
 #[test]
-fn enter_expands_a_session_and_details_render_under_it() {
+fn right_expands_a_session_and_details_render_under_it() {
     let mut state = polled();
     press(&mut state, KeyCode::Tab);
     assert_eq!(selected_id(&state).as_deref(), Some("m1"));
-    assert_eq!(press(&mut state, KeyCode::Enter), None, "no daemon call");
+    assert_eq!(press(&mut state, KeyCode::Right), None, "no daemon call");
     let buffer = draw(&mut state, 100, 30);
     assert!(
         !region(&buffer, 0, 30).contains("id:"),
@@ -429,7 +432,7 @@ fn enter_expands_a_session_and_details_render_under_it() {
     }
     assert!(lines[boss + 12].contains("↳ ○ helper"), "{lines:#?}");
 
-    press(&mut state, KeyCode::Enter);
+    press(&mut state, KeyCode::Right);
     let lines = right_lines(&mut state, 30);
     assert!(lines[line_of(&lines, "● boss") + 1].contains("↳ ○ helper"));
     assert!(!lines.join("\n").contains("id:"), "collapsed");
@@ -441,7 +444,7 @@ fn enter_expands_a_session_and_details_render_under_it() {
 fn expansion_survives_a_reordering_repoll() {
     let mut state = polled();
     assert!(state.focus_session("w1"));
-    press(&mut state, KeyCode::Enter);
+    press(&mut state, KeyCode::Right);
     let mut reordered = alpha_sessions();
     reordered.reverse();
     reordered.insert(0, session("n1", "newcomer", "active", None));
@@ -470,7 +473,7 @@ fn expansion_survives_a_reordering_repoll() {
 fn up_and_down_skip_detail_lines() {
     let mut state = polled();
     press(&mut state, KeyCode::Tab);
-    press(&mut state, KeyCode::Enter);
+    press(&mut state, KeyCode::Right);
     press(&mut state, KeyCode::Down);
     assert_eq!(
         selected_id(&state).as_deref(),
@@ -514,7 +517,7 @@ fn up_and_down_skip_detail_lines() {
 fn clicking_a_detail_line_selects_its_session() {
     let mut state = polled();
     press(&mut state, KeyCode::Tab);
-    press(&mut state, KeyCode::Enter);
+    press(&mut state, KeyCode::Right);
     assert!(state.focus_session("w1"));
     let buffer = draw(&mut state, 100, 30);
     click(
@@ -543,13 +546,13 @@ fn clicking_a_detail_line_selects_its_session() {
     assert!(find(&buffer, "id:          w1").is_none(), "and closes");
 }
 
-/// S2 (e): the modal overlay is gone. Enter draws no popup and leaves every
+/// S2 (e): the modal overlay is gone. Right draws no popup and leaves every
 /// other key live, quit included.
 #[test]
-fn enter_never_opens_a_popup() {
+fn right_never_opens_a_popup() {
     let mut state = polled();
     press(&mut state, KeyCode::Tab);
-    press(&mut state, KeyCode::Enter);
+    press(&mut state, KeyCode::Right);
     let buffer = draw(&mut state, 100, 30);
     assert!(find(&buffer, "Session — boss").is_none(), "no popup title");
     assert!(find(&buffer, "[Esc] close").is_none(), "no popup keys");
@@ -670,4 +673,105 @@ fn session_column_edge_cases() {
         assert_eq!(selected_id(&state).as_deref(), Some(want), "{label}");
         assert_eq!(state.focus, super::state::Pane::Sessions, "{label}");
     }
+}
+
+/// S3 (b): Right toggles the details; Enter opens the session instead and
+/// leaves them alone.
+#[test]
+fn right_toggles_details_and_enter_does_not() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(
+        press(&mut state, KeyCode::Enter),
+        Some(PendingAction::OpenSession("m1".to_string()))
+    );
+    assert!(!right_lines(&mut state, 30).join("\n").contains("id:"));
+    press(&mut state, KeyCode::Right);
+    assert!(
+        right_lines(&mut state, 30)
+            .join("\n")
+            .contains("id:          m1")
+    );
+    assert_eq!(
+        press(&mut state, KeyCode::Enter),
+        Some(PendingAction::OpenSession("m1".to_string()))
+    );
+    assert!(
+        right_lines(&mut state, 30)
+            .join("\n")
+            .contains("id:          m1"),
+        "Enter leaves the details open"
+    );
+    press(&mut state, KeyCode::Right);
+    assert!(!right_lines(&mut state, 30).join("\n").contains("id:"));
+}
+
+/// S3 (c): `r` opens the rename modal with the current name typed. Typing
+/// edits it, and Enter submits `RenameSession(id, new)`.
+#[test]
+fn r_opens_the_rename_modal_prefilled_and_enter_submits() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(press(&mut state, KeyCode::Char('r')), None, "no call yet");
+    let buffer = draw(&mut state, 100, 30);
+    assert!(
+        find(&buffer, "Rename — boss").is_some(),
+        "the modal is drawn"
+    );
+    assert!(find(&buffer, "new:     boss_").is_some(), "pre-filled");
+    // The modal takes every key: `q` and `k` type, they do not act.
+    for c in ['-', 'q', 'k'] {
+        assert_eq!(press(&mut state, KeyCode::Char(c)), None);
+    }
+    assert!(!state.should_exit && state.pending_confirm.is_none());
+    press(&mut state, KeyCode::Backspace);
+    assert_eq!(
+        press(&mut state, KeyCode::Enter),
+        Some(PendingAction::RenameSession(
+            "m1".to_string(),
+            "boss-q".to_string()
+        ))
+    );
+    let buffer = draw(&mut state, 100, 30);
+    assert!(find(&buffer, "Rename — boss").is_none(), "the modal closed");
+}
+
+/// S3 (c): Esc closes the rename modal and dispatches nothing.
+#[test]
+fn esc_closes_the_rename_modal_with_no_action() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    press(&mut state, KeyCode::Char('r'));
+    press(&mut state, KeyCode::Char('x'));
+    assert_eq!(press(&mut state, KeyCode::Esc), None);
+    let buffer = draw(&mut state, 100, 30);
+    assert!(find(&buffer, "Rename — boss").is_none(), "closed");
+    assert_eq!(state.notice.as_deref(), Some("rename cancelled"));
+    assert_eq!(
+        press(&mut state, KeyCode::Char('a')),
+        Some(PendingAction::Attach("m1".to_string()))
+    );
+}
+
+/// S3 (f): `n` starts a new session in the left column's project, or, with an
+/// owner selected, in the selected session's project.
+#[test]
+fn n_starts_a_new_session_in_the_project_from_either_column() {
+    let mut state = polled();
+    assert_eq!(
+        press(&mut state, KeyCode::Char('n')),
+        Some(PendingAction::NewSession("alpha".to_string()))
+    );
+    state.select_node(owner_node());
+    assert_eq!(press(&mut state, KeyCode::Char('n')), None);
+    assert_eq!(state.notice.as_deref(), Some("no project selected"));
+    press(&mut state, KeyCode::Tab);
+    for _ in 0..4 {
+        press(&mut state, KeyCode::Down);
+    }
+    assert_eq!(selected_id(&state).as_deref(), Some("b1"), "beta's session");
+    assert_eq!(
+        press(&mut state, KeyCode::Char('n')),
+        Some(PendingAction::NewSession("beta".to_string()))
+    );
 }

@@ -12,7 +12,7 @@
 //! shown when there is nothing to list. [`render`] draws the column and
 //! records its rows' rectangle for the mouse.
 //! Test: `worker_rows_indent_and_anchor_is_dim`, `empty_hint_names_the_case`;
-//! `two_column_tests.rs` (`enter_expands_a_session_and_details_render_under_it`).
+//! `two_column_tests.rs` (`right_expands_a_session_and_details_render_under_it`).
 
 use ratatui::{
     Frame,

@@ -25,7 +25,7 @@ pub mod events;
 pub mod layout;
 pub mod panes;
 pub mod poll;
-// #10754: S3 tm ls actions plumbing (keys wait on De1).
+// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 mod session_ops;
 #[cfg(test)]
 mod session_ops_tests;

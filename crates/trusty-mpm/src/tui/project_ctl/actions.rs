@@ -70,7 +70,7 @@ pub(crate) async fn dispatch_on(
     action: PendingAction,
     screen: &mut dyn ScreenHandoff,
 ) -> anyhow::Result<()> {
-    // #10754: S3 tm ls actions plumbing (keys wait on De1).
+    // #10754: S3 tm ls actions; De1 key map (Bob 11-06).
     let op = match action {
         PendingAction::OpenSession(id) => SessionOp::Open(id),
         PendingAction::RenameSession(id, name) => SessionOp::Rename(id, name),

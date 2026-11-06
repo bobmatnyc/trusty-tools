@@ -6,12 +6,15 @@
 //! climbs to it; Right expands an owner or steps into its first project;
 //! Enter toggles an owner. #10754: two-column MPM pane (Bob 11-06) — Right
 //! or Enter on a project moves focus into the session column. `g` toggles
-//! worker indentation. `c`/`v` act on a project node, `l` on its project.
-//! The session verbs `f`/`k`/`r`/`d`/`a` belong to the session column; here
-//! they set a notice and act on nothing. `request_launch` and
-//! `request_focus` are shared with the session column.
+//! worker indentation. `c`/`v` act on a project node, `l` and `n` on its
+//! project (#10754: De1 key map (Bob 11-06) — `n` starts a new session, as in
+//! `tm ls`). The session verbs `f`/`k`/`r`/`R`/`d`/`a` belong to the session
+//! column; here they set a notice and act on nothing. `request_launch`,
+//! `request_new_session` and `request_focus` are shared with the session
+//! column.
 //! Test: `events::tests` (`enter_on_owner_toggles_and_on_project_enters_sessions`,
-//! `kill_resume_decommission_attach_on_bar_or_project_act_on_nothing`).
+//! `kill_resume_decommission_attach_on_bar_or_project_act_on_nothing`),
+//! `two_column_tests` (`n_starts_a_new_session_in_the_project_from_either_column`).
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -28,9 +31,13 @@ pub(super) fn handle_tree_key(state: &mut ProjectCtlState, key: KeyEvent) -> Opt
         KeyCode::Enter => enter(state),
         KeyCode::Char('g') => state.toggle_worker_indent(),
         KeyCode::Char('l') => return request_launch(state),
+        // #10754: De1 key map (Bob 11-06)
+        KeyCode::Char('n') => return request_new_session(state),
         // #10754: two-column MPM pane (Bob 11-06) — the session verbs act on
         // the right column only, so a key here never hits a session unseen.
-        KeyCode::Char('f' | 'k' | 'r' | 'd' | 'a') => state.set_notice("select a session first"),
+        KeyCode::Char('f' | 'k' | 'r' | 'R' | 'd' | 'a') => {
+            state.set_notice("select a session first")
+        }
         KeyCode::Char('c') => {
             if let Some(name) = project_node_name(state) {
                 state.open_config_form(name);
@@ -76,6 +83,21 @@ fn enter(state: &mut ProjectCtlState) {
 /// #10754: in the session column the target is the selected session's
 /// project when the left column has an owner selected.
 pub(super) fn request_launch(state: &mut ProjectCtlState) -> Option<PendingAction> {
+    project_action(state, PendingAction::Launch)
+}
+
+/// `n`: start a new session in the selected project and attach, as `tm ls`.
+///
+/// #10754: De1 key map (Bob 11-06) — same target as [`request_launch`].
+pub(super) fn request_new_session(state: &mut ProjectCtlState) -> Option<PendingAction> {
+    project_action(state, PendingAction::NewSession)
+}
+
+/// The left column's project, else the selected session's project, as `build(name)`.
+fn project_action(
+    state: &mut ProjectCtlState,
+    build: fn(String) -> PendingAction,
+) -> Option<PendingAction> {
     let project = state
         .selected_project_name()
         .map(str::to_string)
@@ -88,7 +110,7 @@ pub(super) fn request_launch(state: &mut ProjectCtlState) -> Option<PendingActio
                 .map(|(name, _)| name.clone())
         });
     match project {
-        Some(name) => Some(PendingAction::Launch(name)),
+        Some(name) => Some(build(name)),
         None => {
             state.set_notice("no project selected");
             None

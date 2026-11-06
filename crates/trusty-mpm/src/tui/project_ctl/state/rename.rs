@@ -1,7 +1,7 @@
 //! The rename text-entry modal for a session row.
 //!
-//! #10754: S3 tm ls actions plumbing (keys wait on De1). No key opens this
-//! modal yet; the key map waits on an owner decision.
+//! #10754: De1 key map (Bob 11-06) — `r` on a session row opens it through
+//! [`RenameModal::prefilled`], with the current name in the buffer.
 //!
 //! Why: `tm ls` renames a session from a typed name, checked by the same
 //! `validate_session_name` the daemon runs, so a bad name is refused at Enter
@@ -10,7 +10,8 @@
 //! buffer. [`RenameModal::apply`] takes one key and returns a [`RenameStep`];
 //! a valid, changed name on Enter becomes
 //! [`PendingAction::RenameSession`] with the trimmed name.
-//! Test: `rename_modal_types_and_backspaces`,
+//! Test: `rename_modal_prefilled_starts_from_the_current_name`,
+//! `rename_modal_types_and_backspaces`,
 //! `rename_modal_enter_submits_the_trimmed_validated_name`,
 //! `rename_modal_enter_refuses_an_invalid_name`,
 //! `rename_modal_enter_on_the_unchanged_name_cancels`,
@@ -56,6 +57,13 @@ impl RenameModal {
             typed: String::new(),
             error: None,
         }
+    }
+
+    /// Open the modal with the session's current name already typed.
+    pub fn prefilled(session_id: impl Into<String>, current_name: impl Into<String>) -> Self {
+        let mut modal = Self::open(session_id, current_name);
+        modal.typed = modal.current_name.clone();
+        modal
     }
 
     /// Apply one key, as `tm ls`'s rename overlay does.
@@ -113,6 +121,20 @@ mod tests {
         for c in text.chars() {
             assert_eq!(modal.apply(key(KeyCode::Char(c))), RenameStep::Redraw);
         }
+    }
+
+    #[test]
+    fn rename_modal_prefilled_starts_from_the_current_name() {
+        let mut modal = RenameModal::prefilled("id-1", "old");
+        assert_eq!(modal.typed, "old");
+        type_str(&mut modal, "-2");
+        assert_eq!(
+            modal.apply(key(KeyCode::Enter)),
+            RenameStep::Submit(PendingAction::RenameSession(
+                "id-1".to_string(),
+                "old-2".to_string()
+            ))
+        );
     }
 
     #[test]

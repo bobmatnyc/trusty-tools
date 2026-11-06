@@ -19,7 +19,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
 };
 
-use super::panes::{actions_bar, activity, config_form, deliverables_view, session_list, tree};
+use super::panes::{
+    actions_bar, activity, config_form, deliverables_view, rename_view, session_list, tree,
+};
 use super::state::{Pane, ProjectCtlState};
 
 /// Minimum height (rows, including the two border rows) of the main tree row.
@@ -81,7 +83,8 @@ pub fn main_columns(area: Rect, focus: Pane) -> (Option<Rect>, Option<Rect>) {
 /// never replacing a pane, mirroring the dashboard help-overlay's "draw base
 /// frame, then float overlay" sequencing. The two are mutually exclusive by
 /// construction (see `events`'s module doc), so at most one overlay ever
-/// renders in a given frame. #10754: inline session details (Bob 11-06) —
+/// renders in a given frame. #10754: the rename modal
+/// ([`ProjectCtlState::rename`]) floats the same way. Inline details (Bob 11-06) —
 /// session details draw inside the session column, so no session overlay
 /// remains.
 pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
@@ -112,6 +115,10 @@ pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
     }
     if let Some(view) = &state.config_form {
         config_form::render(frame, view);
+    }
+    // #10754: De1 key map (Bob 11-06)
+    if let Some(modal) = &state.rename {
+        rename_view::render(frame, modal);
     }
 }
 

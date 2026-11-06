@@ -194,13 +194,13 @@ fn enter_on_owner_toggles_and_on_project_enters_sessions() {
 }
 
 /// REGRESSION (#10476): before the tree, Enter on a session did nothing
-/// (`events/mod.rs` bound Enter on the Projects pane only). #10754: Enter
-/// expands the session in place.
+/// (`events/mod.rs` bound Enter on the Projects pane only). #10754: De1 key
+/// map (Bob 11-06) — Right expands the session in place; Enter opens it.
 #[test]
-fn enter_on_session_expands_details_and_returns_no_pending_action() {
+fn right_on_session_expands_details_and_returns_no_pending_action() {
     let mut state = seeded_state();
     on_session(&mut state);
-    let action = handle_key(&mut state, key(KeyCode::Enter));
+    let action = handle_key(&mut state, key(KeyCode::Right));
     assert!(action.is_none(), "details are read-only: {action:?}");
     assert!(state.session_col.expanded.contains("sess-1"));
     assert!(
@@ -219,7 +219,7 @@ fn enter_on_session_expands_details_and_returns_no_pending_action() {
 fn esc_collapses_details() {
     let mut state = seeded_state();
     on_session(&mut state);
-    handle_key(&mut state, key(KeyCode::Enter));
+    handle_key(&mut state, key(KeyCode::Right));
     assert!(handle_key(&mut state, key(KeyCode::Esc)).is_none());
     assert!(state.session_col.expanded.is_empty());
     assert_eq!(state.selected_session().unwrap().id, "sess-1");
@@ -230,7 +230,7 @@ fn esc_collapses_details() {
 fn f_on_an_expanded_session_returns_focus() {
     let mut state = seeded_state();
     on_session(&mut state);
-    handle_key(&mut state, key(KeyCode::Enter));
+    handle_key(&mut state, key(KeyCode::Right));
     assert_eq!(
         handle_key(&mut state, key(KeyCode::Char('f'))),
         Some(PendingAction::Focus("alpha-session".to_string()))
@@ -259,7 +259,7 @@ fn f_on_a_session_node_returns_focus_and_on_a_project_does_nothing() {
 fn expanded_session_drops_out_when_it_leaves() {
     let mut state = seeded_state();
     on_session(&mut state);
-    handle_key(&mut state, key(KeyCode::Enter));
+    handle_key(&mut state, key(KeyCode::Right));
     let rows = state.sessions_by_project["alpha"].clone();
     let other = SessionRow {
         id: "sess-2".to_string(),
@@ -280,7 +280,7 @@ fn expanded_session_drops_out_when_it_leaves() {
 fn expanded_session_keeps_the_session_verbs() {
     let mut state = seeded_state();
     on_session(&mut state);
-    handle_key(&mut state, key(KeyCode::Enter));
+    handle_key(&mut state, key(KeyCode::Right));
     assert_eq!(
         handle_key(&mut state, key(KeyCode::Char('a'))),
         Some(PendingAction::Attach("sess-1".to_string()))
@@ -346,7 +346,7 @@ fn existing_bindings_unchanged() {
 
     on_session(&mut state);
     assert_eq!(
-        handle_key(&mut state, key(KeyCode::Char('r'))),
+        handle_key(&mut state, key(KeyCode::Char('R'))),
         Some(PendingAction::Resume("sess-1".to_string()))
     );
     assert_eq!(
@@ -387,7 +387,7 @@ fn resume_and_attach_target_selected_session_immediately() {
     let mut state = seeded_state();
     on_session(&mut state);
     assert_eq!(
-        handle_key(&mut state, key(KeyCode::Char('r'))),
+        handle_key(&mut state, key(KeyCode::Char('R'))),
         Some(PendingAction::Resume("sess-1".to_string()))
     );
     assert!(state.pending_confirm.is_none());
@@ -398,7 +398,7 @@ fn resume_and_attach_target_selected_session_immediately() {
     assert!(state.pending_confirm.is_none());
 }
 
-/// #2595: `r` on a session flagged `unresumable` must NOT fire
+/// #2595: `R` (#10754: De1 key map (Bob 11-06), `r` before) on a session flagged `unresumable` must NOT fire
 /// `PendingAction::Resume` — its workspace is gone for good, so the daemon
 /// round trip can only 422 (#2594). Mirrors the CLI picker's
 /// `PickerDecision::Unresumable` guard, adapted to the TUI's notice idiom: no
@@ -409,7 +409,7 @@ fn resume_on_unresumable_session_is_blocked() {
     on_session(&mut state);
     state.sessions_by_project.get_mut("alpha").unwrap()[0].unresumable = true;
 
-    let action = handle_key(&mut state, key(KeyCode::Char('r')));
+    let action = handle_key(&mut state, key(KeyCode::Char('R')));
     assert!(
         action.is_none(),
         "a dead session must never produce PendingAction::Resume"
@@ -433,8 +433,10 @@ fn resume_on_unresumable_session_is_blocked() {
 fn resume_on_healthy_session_fires_immediately() {
     let mut state = seeded_state();
     on_session(&mut state);
+    // A terminal reports `R` with SHIFT held.
+    let shifted = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
     assert_eq!(
-        handle_key(&mut state, key(KeyCode::Char('r'))),
+        handle_key(&mut state, shifted),
         Some(PendingAction::Resume("sess-1".to_string()))
     );
     assert!(state.notice.is_none());

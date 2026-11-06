@@ -1,6 +1,6 @@
 //! The `tm ls` session actions, lent to the tui by the `tm` binary.
 //!
-//! #10754: S3 tm ls actions plumbing (keys wait on De1).
+//! #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 //!
 //! Why: `tm ls` opens (resume + attach), renames, creates and deletes a
 //! session through functions in the `tm` binary (`guided_resume`, `rename`,

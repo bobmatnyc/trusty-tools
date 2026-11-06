@@ -15,7 +15,7 @@
 //! Test: `two_column_tests.rs` (`render_100x30_shows_both_columns`,
 //! `owner_selected_groups_sessions_by_project`,
 //! `session_selection_survives_repoll_and_clamps_when_it_vanishes`,
-//! `enter_expands_a_session_and_details_render_under_it`,
+//! `right_expands_a_session_and_details_render_under_it`,
 //! `expansion_survives_a_reordering_repoll`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -333,7 +333,8 @@ impl ProjectCtlState {
         Some(own_row)
     }
 
-    /// Enter / Right / a row click: expand the selected session in place, or
+    /// Right / a row click (#10754: De1 key map (Bob 11-06), Enter before):
+    /// expand the selected session in place, or
     /// collapse it when it is already expanded.
     ///
     /// Why: the owner asked for details under the row, not in a popup
@@ -342,7 +343,7 @@ impl ProjectCtlState {
     /// rebuilds the rows. An expansion scrolls the list, at most up to the
     /// session's own row, so its detail lines show in the last frame's
     /// viewport. `false`, changing nothing, when no session is selected.
-    /// Test: `enter_expands_a_session_and_details_render_under_it`,
+    /// Test: `right_expands_a_session_and_details_render_under_it`,
     /// `up_and_down_skip_detail_lines`.
     pub fn toggle_session_details(&mut self) -> bool {
         // #10754: inline session details (Bob 11-06)
