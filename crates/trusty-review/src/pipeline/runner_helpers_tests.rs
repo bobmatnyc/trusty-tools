@@ -139,7 +139,9 @@ fn head_is_fork_compares_label_owners() {
 
 // ── #10762: every finding gets an inline anchor or an unanchored reason ──────
 
-/// A diff whose new side is a context line 1, added lines 2..=10, context 11.
+/// A diff whose new side is a context line 1, added lines 2..=10, context 11,
+/// plus a second hunk whose removed line has old-side number 21 (#10762: the
+/// LEFT anchor). New-side 29 is the second hunk's only commentable line.
 const PARTITION_DIFF: &str = "\
 diff --git a/src/a.rs b/src/a.rs
 --- a/src/a.rs
@@ -156,6 +158,9 @@ diff --git a/src/a.rs b/src/a.rs
 +// nit 9
 +// nit 10
  fn tail() {}
+@@ -20,2 +29,1 @@
+ fn before() {}
+-fn gone() {}
 ";
 
 /// A finding on `src/a.rs` at `line` with `effort` and description `desc`.
@@ -165,8 +170,9 @@ fn finding(line: Option<u32>, effort: crate::models::Effort, desc: &str) -> crat
     f
 }
 
-/// The #10762 closure fixture: an added-line, a context-line, an off-diff and
-/// a no-line finding, eight on-diff nits, and two withheld findings.
+/// The #10762 closure fixture: an added-line, a context-line, a deleted-line
+/// (old-side 21, index 12), an off-diff and a no-line finding, eight on-diff
+/// nits, and two withheld findings.
 fn partition_fixture() -> ReviewResult {
     use crate::models::{Effort, WithheldFinding};
     use crate::pipeline::verify_posted::{NO_VERIFIER_REASON, REFUTED_REASON};
@@ -185,6 +191,10 @@ fn partition_fixture() -> ReviewResult {
     result
         .findings
         .extend((3..=10).map(|l| finding(Some(l), Effort::Low, &format!("nit {l}"))));
+    // #10762: the removed line's old-side number; no new-side line matches it.
+    result
+        .findings
+        .push(finding(Some(21), Effort::Medium, "deleted"));
     for reason in [REFUTED_REASON, NO_VERIFIER_REASON] {
         result.withheld_findings.push(WithheldFinding {
             finding: finding(Some(2), Effort::High, "withheld"),
@@ -200,13 +210,13 @@ fn partition_fixture() -> ReviewResult {
 /// Why: the closure condition of #10762 — no finding is in neither list, and
 /// none is in both.
 /// What: attaches the closure fixture and asserts every combined index
-/// `0..12+2` appears exactly once across the two lists, with the expected
+/// `0..13+2` appears exactly once across the two lists, with the expected
 /// reason per unanchored entry, and that the three capped nits are still
 /// rendered in the summary body.
 /// Test: this test itself.
 #[test]
 fn partition_invariant_with_fixture() {
-    use crate::models::UnanchoredReason;
+    use crate::models::{AnchorSide, UnanchoredReason};
 
     let mut result = partition_fixture();
     let total = result.findings.len() + result.withheld_findings.len();
@@ -236,9 +246,15 @@ fn partition_invariant_with_fixture() {
         .collect();
     assert_eq!(
         inline,
-        vec![0, 1, 4, 5, 6, 7, 8],
-        "added, context, first five nits"
+        vec![0, 1, 4, 5, 6, 7, 8, 12],
+        "added, context, first five nits, deleted"
     );
+    let deleted = result
+        .inline_comments
+        .iter()
+        .find(|c| c.finding_index == 12)
+        .expect("deleted-line finding is inline");
+    assert_eq!((deleted.line, deleted.side), (21, AnchorSide::Left));
     assert_eq!(result.inline_finding_indices, inline);
     let reasons: Vec<(usize, UnanchoredReason)> = result
         .unanchored
@@ -254,8 +270,8 @@ fn partition_invariant_with_fixture() {
             (9, UnanchoredReason::NitCap),
             (10, UnanchoredReason::NitCap),
             (11, UnanchoredReason::NitCap),
-            (12, withheld("refuted")),
-            (13, withheld("no_verifier")),
+            (13, withheld("refuted")),
+            (14, withheld("no_verifier")),
         ]
     );
 
