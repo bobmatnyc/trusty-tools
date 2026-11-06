@@ -107,14 +107,13 @@ pub use mouse::handle_mouse;
 /// What: one variant per lettered verb (DOC-35 §5 keybinding table) plus
 /// [`PendingAction::SubmitConfig`] for the #2120 config form's submit
 /// (opening the form is a pure state mutation — see the module doc — so
-/// there is no `Config` variant here anymore). `Launch` and `SubmitConfig`
+/// there is no `Config` variant here anymore). `NewSession` and `SubmitConfig`
 /// carry the target project name (`SubmitConfig` also carries the built
-/// [`PatchProjectArgs`]); the rest carry the target session id.
+/// [`PatchProjectArgs`]); the rest carry the target session id. #10754: no
+/// `Launch` variant — `l` produces `NewSession` until a launch form exists.
 /// Test: `handle_key_*` in `super::tests`.
 #[derive(Debug, Clone)]
 pub enum PendingAction {
-    /// `l` in the Sessions pane — launch a new session for the given project.
-    Launch(String),
     /// `k` in the Sessions pane — runtime-stop the given session.
     Kill(String),
     /// `R` in the session column — resume the given session.
@@ -137,7 +136,7 @@ pub enum PendingAction {
     OpenSession(String),
     /// The rename modal's Enter — rename the session `(id, new_name)`.
     RenameSession(String, String),
-    /// `n` — start a new session in the named project, as `tm ls` `n`.
+    /// `n` or `l` — start a new session in the named project, as `tm ls` `n`.
     NewSession(String),
     /// Delete the session by its state's route, as `tm ls` `d` (code only).
     DeleteSession(String),
@@ -153,7 +152,6 @@ pub enum PendingAction {
 impl PartialEq for PendingAction {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Launch(a), Self::Launch(b)) => a == b,
             (Self::Kill(a), Self::Kill(b)) => a == b,
             (Self::Resume(a), Self::Resume(b)) => a == b,
             (Self::Decommission(a), Self::Decommission(b)) => a == b,

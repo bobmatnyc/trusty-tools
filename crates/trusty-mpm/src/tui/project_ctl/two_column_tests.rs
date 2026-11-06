@@ -775,3 +775,37 @@ fn n_starts_a_new_session_in_the_project_from_either_column() {
         Some(PendingAction::NewSession("beta".to_string()))
     );
 }
+
+/// #10754: `n` and `l` in an EMPTY session column start a new session in the
+/// project selected in the tree, and the empty column advertises `[n]`.
+#[test]
+fn n_and_l_in_an_empty_session_column_start_a_new_session() {
+    let mut fetch = fleet(alpha_sessions());
+    if let Some((projects, _, _)) = fetch.fleet.as_mut() {
+        projects.push(project("qaempty"));
+    }
+    let mut state = ProjectCtlState::default();
+    apply_core(&mut state, fetch);
+    state.select_node(project_node("qaempty"));
+    press(&mut state, KeyCode::Tab);
+    assert!(state.session_col.rows.is_empty(), "qaempty has no sessions");
+    assert_eq!(selected_id(&state), None);
+    assert_eq!(
+        super::panes::session_list::empty_hint(&state),
+        "no sessions in qaempty — [n] new session"
+    );
+    for code in [KeyCode::Char('n'), KeyCode::Char('l')] {
+        state.set_notice("stale notice");
+        assert_eq!(
+            press(&mut state, code),
+            Some(PendingAction::NewSession("qaempty".to_string())),
+            "{code:?} in the empty column"
+        );
+    }
+    // The tree's own `l` takes the same path.
+    press(&mut state, KeyCode::BackTab);
+    assert_eq!(
+        press(&mut state, KeyCode::Char('l')),
+        Some(PendingAction::NewSession("qaempty".to_string()))
+    );
+}

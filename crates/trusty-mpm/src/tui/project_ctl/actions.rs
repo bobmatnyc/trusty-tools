@@ -6,13 +6,9 @@
 //! result into a notice, mirroring `tui::coordinator`'s
 //! `dispatch_submitted_line` split between pure routing and async dispatch.
 //!
-//! **Launch is a stub, by design** (documented per the issue's request):
-//! spawning a managed session requires a `task` description and a `git_ref`
-//! (see [`crate::client::ManagedSpawnRequest`]) that a 4-pane skeleton has no
-//! text-entry surface to collect — building that form is explicitly out of
-//! scope here. Rather than silently doing nothing, `l` shows a notice
-//! pointing at the existing `tm sessions new` CLI verb, which already does
-//! the real work. Config (`c`) is NO LONGER a stub — #2120 replaced it with a
+//! **No launch stub** (#10754): `l` used to set a notice pointing at
+//! `tm sessions new`; it now produces the same `NewSession` as `n`, which
+//! the `tm ls` new-session hook runs. Config (`c`) is NO LONGER a stub — #2120 replaced it with a
 //! real fixed-field form; see [`PendingAction::SubmitConfig`]'s handling
 //! below.
 //!
@@ -44,8 +40,7 @@ use crate::tui::session_hooks::ScreenHandoff;
 ///
 /// Why: the single async seam the run loop calls after `handle_key` returns
 /// `Some(action)`.
-/// What: `Launch` is a stub — see the module doc — that sets an explanatory
-/// notice with no daemon call. `Kill`/`Resume` call the matching mutating
+/// What: `Kill`/`Resume` call the matching mutating
 /// endpoint directly; `Decommission` goes through
 /// [`CommandExecutor::decommission_managed_id`], the shared implementation
 /// that also repairs the base repo's worktree bookkeeping (#5913). All three,
@@ -104,11 +99,6 @@ async fn dispatch_daemon(
     action: PendingAction,
 ) {
     match action {
-        PendingAction::Launch(project) => {
-            state.set_notice(format!(
-                "launch form not built yet — run `tm sessions new --repo-url <url> --task <task>` for '{project}' (see actions.rs doc)"
-            ));
-        }
         PendingAction::Kill(id) => {
             let result = client.runtime_stop_managed_session(&id).await;
             apply_mutation_result(state, result, "killed");

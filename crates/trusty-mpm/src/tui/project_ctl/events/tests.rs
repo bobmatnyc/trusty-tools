@@ -302,15 +302,15 @@ fn g_toggles_worker_indentation() {
 }
 
 #[test]
-fn launch_targets_the_selected_nodes_project() {
+fn l_starts_a_new_session_in_the_selected_nodes_project() {
     let mut state = seeded_state();
     on_session(&mut state);
     let action = handle_key(&mut state, key(KeyCode::Char('l')));
-    assert_eq!(action, Some(PendingAction::Launch("alpha".to_string())));
+    assert_eq!(action, Some(PendingAction::NewSession("alpha".to_string())));
 
     state.select_node(project_node("beta"));
     let action = handle_key(&mut state, key(KeyCode::Char('l')));
-    assert_eq!(action, Some(PendingAction::Launch("beta".to_string())));
+    assert_eq!(action, Some(PendingAction::NewSession("beta".to_string())));
 
     state.select_node(NodeId::Owner("acme".to_string()));
     assert!(handle_key(&mut state, key(KeyCode::Char('l'))).is_none());

@@ -1,0 +1,2 @@
+Fixed
+- In `tm tui`, `n` and `l` in an empty sessions column now start a new session in the project selected on the left, as they do on that project's row. The empty column now reads `no sessions in <project> — [n] new session`. `l` starts a new session through the same `tm ls` hook as `n` in both columns, in place of the old notice that pointed at `tm sessions new`, and the key hints show `[n/l] new` (Refs [#10754](https://github.com/bobmatnyc/trusty-tools/issues/10754))

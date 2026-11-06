@@ -107,7 +107,10 @@ fn source_name(state: &ProjectCtlState) -> Option<String> {
 pub fn empty_hint(state: &ProjectCtlState) -> String {
     let name = source_name(state).unwrap_or_default();
     match state.selected_node() {
-        Some(NodeId::Project { .. }) => format!("no sessions in {name} — [l] launch one"),
+        Some(NodeId::Project { .. }) => {
+            // #10754: `n` (and `l`) start a session here; there is no launch form.
+            format!("no sessions in {name} — [n] new session")
+        }
         Some(NodeId::Owner(_)) => format!("no sessions under {name}"),
         None => "no project selected".to_string(),
     }
@@ -253,7 +256,7 @@ mod tests {
             name: "beta".to_string(),
         });
         assert!(state.session_col.rows.is_empty());
-        assert_eq!(empty_hint(&state), "no sessions in beta — [l] launch one");
+        assert_eq!(empty_hint(&state), "no sessions in beta — [n] new session");
         state.sessions_by_project.clear();
         state.select_node(NodeId::Owner("acme".to_string()));
         assert_eq!(empty_hint(&state), "no sessions under acme");

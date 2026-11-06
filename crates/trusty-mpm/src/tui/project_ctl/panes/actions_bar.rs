@@ -31,11 +31,11 @@ use crate::tui::project_ctl::state::{NodeId, Pane, PendingConfirm, ProjectCtlSta
 pub const OWNER_HINT: &str =
     "[Enter/←→] expand  [↑↓] select  [g] workers  [Tab] switch pane  [q] quit";
 /// Key-hint text while a project is selected in the left column.
-// #10754: De1 key map (Bob 11-06)
-pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [n] new  [l] launch  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
+// #10754: De1 key map (Bob 11-06); `l` is `n` until a launch form exists.
+pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [n/l] new  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
 /// Key-hint text while the session column has focus.
 // #10754: De1 key map (Bob 11-06)
-pub const SESSIONS_HINT: &str = "[Enter] open  [→] details  [←] collapse/projects  [f] focus  [r] rename  [R] resume  [n] new  [l] launch  [k] kill  [d] decommission  [a] attach-cmd  [q] quit";
+pub const SESSIONS_HINT: &str = "[Enter] open  [→] details  [←] collapse/projects  [f] focus  [r] rename  [R] resume  [n/l] new  [k] kill  [d] decommission  [a] attach-cmd  [q] quit";
 /// Key-hint text shown while the Activity pane has focus (no verbs bound
 /// there — it is a read-only status strip).
 pub const ACTIVITY_HINT: &str = "[Tab] switch pane  [q] quit";
@@ -244,11 +244,11 @@ mod tests {
             "[←] collapse/projects",
             "[r] rename",
             "[R] resume",
-            "[n] new",
+            "[n/l] new",
         ] {
             assert!(sessions.contains(keys), "{keys}");
         }
-        assert!(projects.contains("[n] new"));
+        assert!(projects.contains("[n/l] new"));
         assert!(sessions.contains("[a] attach-cmd"));
         let mut expanded = state_at(Some(session_node()));
         assert!(expanded.toggle_session_details());
