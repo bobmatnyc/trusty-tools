@@ -248,7 +248,7 @@ impl ProjectCtlState {
         let next = match (current, down) {
             (None, _) => it.next(),
             (Some(c), true) => it.find(|&i| i > c).or(Some(c)),
-            (Some(c), false) => it.filter(|&i| i < c).last().or(Some(c)),
+            (Some(c), false) => it.rev().find(|&i| i < c).or(Some(c)),
         };
         self.select_session_index(next);
     }
