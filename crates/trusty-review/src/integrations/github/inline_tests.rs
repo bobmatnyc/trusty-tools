@@ -595,14 +595,20 @@ fn unanchored_reason_enum_covers_no_line_off_diff_nit_cap_withheld() {
             at(MAX_INLINE_NITS + 2, UnanchoredReason::NitCap),
         ]
     );
-    assert_eq!(plan.inline_indices.len() + plan.unanchored.len(), findings.len());
+    assert_eq!(
+        plan.inline_indices.len() + plan.unanchored.len(),
+        findings.len()
+    );
 
     let cases = [
         (UnanchoredReason::OffDiff, "off_diff"),
         (UnanchoredReason::NoLine, "no_line"),
         (UnanchoredReason::DeletedLine, "deleted_line"),
         (UnanchoredReason::NitCap, "nit_cap"),
-        (UnanchoredReason::Withheld("refuted".into()), "withheld:refuted"),
+        (
+            UnanchoredReason::Withheld("refuted".into()),
+            "withheld:refuted",
+        ),
     ];
     for (reason, text) in cases {
         let json = serde_json::to_value(&reason).expect("serialize");
@@ -690,7 +696,10 @@ fn removed_line_with_no_new_side_match_is_not_off_diff() {
     assert!(c.contains_removed("src/del.rs", 6));
     // The `deleted file mode` header after the hunk is not a context line 6.
     assert!(!c.contains("src/del.rs", 6), "line 6 has no new-side match");
-    assert!(!c.contains_removed("src/del.rs", 4), "a context line is not removed");
+    assert!(
+        !c.contains_removed("src/del.rs", 4),
+        "a context line is not removed"
+    );
     assert!(c.contains_removed("src/gone.rs", 2));
 
     let mut removed_only = finding_at("src/del.rs", Some(6));
@@ -699,7 +708,10 @@ fn removed_line_with_no_new_side_match_is_not_off_diff() {
     both_sides.citation_partial = true;
     let plan = build_inline_plan(&[removed_only, both_sides], &c);
 
-    assert!(plan.comments.is_empty(), "a partial citation never posts inline");
+    assert!(
+        plan.comments.is_empty(),
+        "a partial citation never posts inline"
+    );
     assert_eq!(
         plan.unanchored,
         vec![

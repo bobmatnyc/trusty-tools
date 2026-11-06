@@ -159,11 +159,7 @@ diff --git a/src/a.rs b/src/a.rs
 ";
 
 /// A finding on `src/a.rs` at `line` with `effort` and description `desc`.
-fn finding(
-    line: Option<u32>,
-    effort: crate::models::Effort,
-    desc: &str,
-) -> crate::models::Finding {
+fn finding(line: Option<u32>, effort: crate::models::Effort, desc: &str) -> crate::models::Finding {
     let mut f = crate::models::Finding::new("src/a.rs", "bug", desc, "fix", 0.9, effort);
     f.line = line;
     f
@@ -216,7 +212,10 @@ fn partition_invariant_with_fixture() {
     let total = result.findings.len() + result.withheld_findings.len();
     attach_inline_comments(&mut result, PARTITION_DIFF);
 
-    assert_eq!(result.inline_comments.len() + result.unanchored.len(), total);
+    assert_eq!(
+        result.inline_comments.len() + result.unanchored.len(),
+        total
+    );
     let mut seen: Vec<usize> = result
         .inline_comments
         .iter()
@@ -224,14 +223,22 @@ fn partition_invariant_with_fixture() {
         .chain(result.unanchored.iter().map(|u| u.finding_index))
         .collect();
     seen.sort_unstable();
-    assert_eq!(seen, (0..total).collect::<Vec<_>>(), "no index duplicated or missing");
+    assert_eq!(
+        seen,
+        (0..total).collect::<Vec<_>>(),
+        "no index duplicated or missing"
+    );
 
     let inline: Vec<usize> = result
         .inline_comments
         .iter()
         .map(|c| c.finding_index)
         .collect();
-    assert_eq!(inline, vec![0, 1, 4, 5, 6, 7, 8], "added, context, first five nits");
+    assert_eq!(
+        inline,
+        vec![0, 1, 4, 5, 6, 7, 8],
+        "added, context, first five nits"
+    );
     assert_eq!(result.inline_finding_indices, inline);
     let reasons: Vec<(usize, UnanchoredReason)> = result
         .unanchored
@@ -256,7 +263,10 @@ fn partition_invariant_with_fixture() {
     assert_eq!(result.suppressed_nits, 3);
     let body = crate::integrations::github::posting::build_review_comment_body(&result);
     for nit in ["nit 8", "nit 9", "nit 10"] {
-        assert!(body.contains(&format!("   - {nit}\n")), "{nit} missing: {body}");
+        assert!(
+            body.contains(&format!("   - {nit}\n")),
+            "{nit} missing: {body}"
+        );
     }
 }
 
@@ -288,14 +298,20 @@ fn inline_entry_carries_severity_source_finding_index() {
     assert_eq!(entry.category, FindingCategory::MethodConformance);
     assert_eq!(entry.severity, Some(Severity::High));
     crate::pipeline::severity::stamp_severities(&mut result);
-    assert_eq!(entry.severity, result.findings[1].severity, "matches the stamp");
+    assert_eq!(
+        entry.severity, result.findings[1].severity,
+        "matches the stamp"
+    );
 
     let json = serde_json::to_value(&entry).expect("serialize");
     assert_eq!(json["finding_index"], 1);
     assert_eq!(json["side"], "RIGHT");
     assert_eq!(json["severity"], "high");
     assert_eq!(json["category"], "method-conformance");
-    assert!(json.get("source").is_none(), "no producing-stage field exists");
+    assert!(
+        json.get("source").is_none(),
+        "no producing-stage field exists"
+    );
 }
 
 /// REGRESSION (#10762): withheld findings are partitioned with no survivor.
@@ -326,7 +342,10 @@ fn attach_inline_comments_partitions_withheld_findings() {
             (1, "withheld:no_verifier".to_string()),
         ]
     );
-    assert!(matches!(result.unanchored[0].reason, UnanchoredReason::Withheld(_)));
+    assert!(matches!(
+        result.unanchored[0].reason,
+        UnanchoredReason::Withheld(_)
+    ));
 }
 
 /// #10762: the anchor plan does not depend on live or dry-run mode.
@@ -345,9 +364,7 @@ fn inline_and_unanchored_json_identical_live_and_dry() {
     attach_inline_comments(&mut dry, PARTITION_DIFF);
     attach_inline_comments(&mut live, PARTITION_DIFF);
 
-    let lists = |r: &ReviewResult| {
-        serde_json::json!({ "inline": r.inline_comments, "unanchored": r.unanchored })
-    };
+    let lists = |r: &ReviewResult| serde_json::json!({ "inline": r.inline_comments, "unanchored": r.unanchored });
     assert_eq!(lists(&dry), lists(&live));
     assert!(!dry.unanchored.is_empty() && !dry.inline_comments.is_empty());
 }
