@@ -228,3 +228,40 @@ fn path_qualified_printer_refuses_10685() {
         assert!(verdict(command, cwd).is_some(), "{command:?} must refuse");
     }
 }
+
+/// A quote inside a shell comment is no quote: `# it's` hides the next line
+/// from the quote scan, but the shell runs it (#10685 review, H1). The glob
+/// rows use `if=.en?`: a bare `cat .en[!x]` is allowed with or without a
+/// comment, because `!` cuts the word before the bracket class is read.
+#[test]
+fn comment_hidden_reader_refuses_10685() {
+    let rows = [
+        "echo x # it's\ndd if=.env\n# '",
+        "echo x # it's\ndd if=.en?\n# '",
+        "echo x # it\"s\ndd if=.env\n# \"",
+        "echo x # it\"s\ndd if=.en?\n# \"",
+        "printf 'a' # it's\ncat .env\n# '",
+    ];
+    let dir = tempfile::tempdir().expect("tempdir");
+    file(dir.path(), ".env", "PLACEHOLDER=dummy\n");
+    let allowed: Vec<&str> = rows
+        .iter()
+        .copied()
+        .filter(|c| verdict(c, dir.path()).is_none())
+        .collect();
+    assert!(allowed.is_empty(), "must refuse: {allowed:#?}");
+}
+
+/// A trailing comment withdraws the printer release (conservative): a
+/// secret-shaped literal is screened again and refuses, while a printer whose
+/// operands name nothing secret still allows.
+#[test]
+fn trailing_comment_printer_release_withdrawn_10685() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let command = "printf '%s\\n' '(secret|[.]env)' # note";
+    assert!(
+        verdict(command, dir.path()).is_some(),
+        "{command:?} must refuse"
+    );
+    assert_allows("echo 'hello world' # note");
+}
