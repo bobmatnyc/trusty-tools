@@ -36,9 +36,9 @@ pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [n/l] new  [c] config  [v
 /// Key-hint text while the session column has focus.
 // #10754: De1 key map (Bob 11-06)
 pub const SESSIONS_HINT: &str = "[Enter] open  [→] details  [←] collapse/projects  [f] focus  [r] rename  [R] resume  [n/l] new  [k] kill  [d] decommission  [a] attach-cmd  [q] quit";
-/// Key-hint text shown while the Activity pane has focus (no verbs bound
-/// there — it is a read-only status strip).
-pub const ACTIVITY_HINT: &str = "[Tab] switch pane  [q] quit";
+/// Key-hint text shown while the Activity pane has focus. It is a read-only
+/// status strip; #10754: `n`/`l` start a new session from it, as elsewhere.
+pub const ACTIVITY_HINT: &str = "[n/l] new  [Tab] switch pane  [q] quit";
 
 /// The indicator shown when the daemon answered its last health probe.
 pub const DAEMON_REACHABLE: &str = "daemon ●";
@@ -249,6 +249,7 @@ mod tests {
             assert!(sessions.contains(keys), "{keys}");
         }
         assert!(projects.contains("[n/l] new"));
+        assert!(activity.contains("[n/l] new"));
         assert!(sessions.contains("[a] attach-cmd"));
         let mut expanded = state_at(Some(session_node()));
         assert!(expanded.toggle_session_details());

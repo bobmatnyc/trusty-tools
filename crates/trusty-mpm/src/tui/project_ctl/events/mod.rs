@@ -208,8 +208,8 @@ pub fn is_quit(key: &KeyEvent) -> bool {
 /// project is selected, else sets the same explanatory notice. `k`/`d` (see
 /// [`request_kill`] / [`request_decommission`]) open the confirm gate instead
 /// of returning an action directly, except a `k` on a non-Active session,
-/// which is not destructive-pending and fires immediately. The Activity pane
-/// binds nothing.
+/// which is not destructive-pending and fires immediately. With the activity pane
+/// focused, `handle_activity_key` (#10754).
 /// Test: `super::tests`.
 pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingAction> {
     if state.pending_confirm.is_some() {
@@ -254,7 +254,37 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
         _ if state.focus == Pane::Tree => tree::handle_tree_key(state, key),
         // #10754: two-column MPM pane (Bob 11-06)
         _ if state.focus == Pane::Sessions => session_keys::handle_session_key(state, key),
-        _ => None,
+        _ => handle_activity_key(state, key),
+    }
+}
+
+/// Notice for an unbound key while the activity pane has focus.
+const ACTIVITY_NOTICE: &str =
+    "the activity pane has no actions — Tab to the projects or sessions pane";
+
+/// Route one key while the activity pane has focus and no modal is open.
+///
+/// #10754: the old `_ => None` dropped every key here silently, so `n` after
+/// two Tabs looked like a hang. `n`/`l` take the same path as the columns;
+/// navigation keys stay silent no-ops; any other key says how to leave.
+/// Test: `activity_focus_n_and_l_start_a_new_session_and_other_keys_notice`.
+fn handle_activity_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingAction> {
+    match key.code {
+        KeyCode::Char('n' | 'l') => tree::request_new_session(state),
+        KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::Modifier(_)
+        | KeyCode::Null => None,
+        _ => {
+            state.set_notice(ACTIVITY_NOTICE);
+            None
+        }
     }
 }
 

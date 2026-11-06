@@ -22,7 +22,9 @@ use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Color};
 use super::events::{PendingAction, handle_key, handle_mouse};
 use super::layout;
 use super::poll::tick::{CoreFetch, apply_core};
-use super::state::{ConfirmKind, NodeId, ProjectCtlState, ProjectRow, SessionColRow, SessionRow};
+use super::state::{
+    ConfirmKind, NodeId, Pane, ProjectCtlState, ProjectRow, SessionColRow, SessionRow,
+};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -808,4 +810,44 @@ fn n_and_l_in_an_empty_session_column_start_a_new_session() {
         press(&mut state, KeyCode::Char('l')),
         Some(PendingAction::NewSession("qaempty".to_string()))
     );
+}
+
+/// #10754: with focus in the activity pane, `n` and `l` start a new session
+/// in the tree's project, and any other unbound key says where to go.
+#[test]
+fn activity_focus_n_and_l_start_a_new_session_and_other_keys_notice() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(state.focus, Pane::Activity);
+    for code in [KeyCode::Char('n'), KeyCode::Char('l')] {
+        assert_eq!(
+            press(&mut state, code),
+            Some(PendingAction::NewSession("alpha".to_string())),
+            "{code:?} with activity focus"
+        );
+    }
+    for code in [KeyCode::Char('x'), KeyCode::Char('k'), KeyCode::Enter] {
+        state.clear_notice();
+        assert_eq!(press(&mut state, code), None, "{code:?}");
+        let notice = state.notice.clone().unwrap_or_default();
+        assert!(
+            notice.contains("Tab to the projects or sessions pane"),
+            "{code:?}: {notice}"
+        );
+    }
+    // Navigation keys stay silent; Esc, Tab and quit keep their meaning.
+    state.clear_notice();
+    assert_eq!(press(&mut state, KeyCode::Down), None);
+    assert_eq!(state.notice, None, "Down is not an error");
+    press(&mut state, KeyCode::Char('x'));
+    press(&mut state, KeyCode::Esc);
+    assert_eq!(state.notice, None, "Esc clears the notice");
+    assert_eq!(state.focus, Pane::Activity);
+    // No project selected: the same notice the other panes give.
+    state.select_node(owner_node());
+    assert_eq!(press(&mut state, KeyCode::Char('n')), None);
+    assert_eq!(state.notice.as_deref(), Some("no project selected"));
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(state.focus, Pane::Tree, "Tab still cycles out");
 }
