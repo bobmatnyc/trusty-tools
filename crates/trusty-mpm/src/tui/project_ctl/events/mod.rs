@@ -4,7 +4,7 @@
 //! column and the selected node's sessions are the right one. Every key the
 //! old Projects and Sessions panes bound keeps its meaning: the project verbs
 //! (`l`/`c`/`v`) and the tree's own keys live in [`tree`], the session verbs
-//! (`f`/`k`/`r`/`d`/`a`, Enter for the read-only details overlay) in
+//! (`f`/`k`/`r`/`d`/`a`, Enter/Right to expand a session in place) in
 //! [`session_keys`]. The pane-scoped wording below predates the columns: read
 //! "Projects pane" as the left column and "Sessions pane" as the right one.
 //!
@@ -179,10 +179,10 @@ pub fn is_quit(key: &KeyEvent) -> bool {
 /// [`ProjectCtlState::config_form`] is `Some`, through
 /// [`handle_config_form_key`] (#2120 — checked THIRD, see the module doc for
 /// why this ordering makes the three modals mutually exclusive by
-/// construction); else, #10476, when the session details overlay is open,
-/// through `tree::handle_details_key`. Otherwise: Ctrl-C / `q` set
+/// construction). Otherwise: Ctrl-C / `q` set
 /// `should_exit`. Tab/Shift+Tab cycle pane focus. Esc clears any shown
-/// notice. With the tree focused, every other key goes to
+/// notice and, in the session column, collapses an expanded session
+/// (#10754). With the tree focused, every other key goes to
 /// `tree::handle_tree_key`; with the session column focused (#10754), to
 /// `session_keys::handle_session_key` (see their module docs). `l`/`r`/`a` return the matching [`PendingAction`]
 /// immediately when a target is selected, else set an explanatory notice and
@@ -207,11 +207,6 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
         return handle_config_form_key(state, key);
     }
 
-    // #10476: the read-only session details overlay is the fourth modal.
-    if state.tree.details.is_some() {
-        return tree::handle_details_key(state, key);
-    }
-
     if is_quit(&key) {
         state.should_exit = true;
         return None;
@@ -228,6 +223,10 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
         }
         KeyCode::Esc => {
             state.clear_notice();
+            // #10754: inline session details (Bob 11-06)
+            if state.focus == Pane::Sessions {
+                state.collapse_selected_session();
+            }
             None
         }
         _ if state.focus == Pane::Tree => tree::handle_tree_key(state, key),

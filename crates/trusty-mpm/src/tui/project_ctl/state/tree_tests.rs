@@ -334,7 +334,7 @@ fn indentation_off_lists_flat_in_poll_order() {
         .filter_map(|r| match r {
             SessionColRow::Session { index, depth, .. } => Some((*index, *depth)),
             SessionColRow::Anchor { .. } => panic!("no anchor without indentation"),
-            SessionColRow::Header { .. } => None,
+            SessionColRow::Header { .. } | SessionColRow::Detail { .. } => None,
         })
         .collect();
     assert_eq!(depths, vec![(0, 0), (1, 0), (2, 0)]);

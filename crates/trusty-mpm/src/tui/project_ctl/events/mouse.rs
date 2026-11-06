@@ -10,8 +10,7 @@
 //! [`handle_key`], so the two cannot diverge. The wheel moves the selection
 //! of the column under the cursor.
 //! Everything else does nothing: a blank row, another pane, a button release,
-//! and any event under a modal. The details overlay is the one modal that takes
-//! a click, on its own focus button only.
+//! and any event under a modal.
 //! Test: `tests` below.
 //!
 //! [`HitMap`]: crate::tui::project_ctl::state::HitMap
@@ -19,7 +18,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{PendingAction, handle_key, mouse_cols, tree};
+use super::{PendingAction, handle_key, mouse_cols};
 use crate::tui::project_ctl::state::ProjectCtlState;
 
 /// The tree row drawn at `(column, row)`, by index into the visible rows.
@@ -33,19 +32,13 @@ pub(crate) fn row_at(rows: Rect, offset: usize, column: u16, row: u16) -> Option
         .then(|| offset + usize::from(row - rows.y))
 }
 
-/// Is `(column, row)` on a live focus button?
-///
-/// While the details overlay covers the point, only the overlay's own button
-/// counts; the action bar may lie under it on a short terminal.
+/// Is `(column, row)` on the action bar's live focus button?
 fn on_focus_button(state: &ProjectCtlState, column: u16, row: u16) -> bool {
-    let hit = state.tree.hit;
-    let at = Position::new(column, row);
-    let inside = |rect: Option<Rect>| rect.is_some_and(|r| r.contains(at));
-    if inside(hit.details) {
-        inside(hit.details_focus)
-    } else {
-        inside(hit.bar_focus)
-    }
+    state
+        .tree
+        .hit
+        .bar_focus
+        .is_some_and(|r| r.contains(Position::new(column, row)))
 }
 
 /// Route one mouse event, returning any action that needs a daemon call.
@@ -55,20 +48,15 @@ fn on_focus_button(state: &ProjectCtlState, column: u16, row: u16) -> bool {
 /// operator saw.
 /// What: see the module doc.
 /// Test: `click_owner_toggles`, `click_project_selects_and_focuses_tree`,
-/// `click_session_opens_details`, `click_blank_space_ignored`,
+/// `click_session_toggles_details`, `click_blank_space_ignored`,
 /// `click_outside_pane_ignored`, `click_under_modal_ignored`,
 /// `click_focus_button_returns_focus`, `wheel_moves_selection`,
-/// `click_hits_the_drawn_row_when_scrolled`,
-/// `mouse_closes_details_when_session_leaves`.
+/// `click_hits_the_drawn_row_when_scrolled`.
 pub fn handle_mouse(state: &mut ProjectCtlState, mouse: MouseEvent) -> Option<PendingAction> {
     if state.pending_confirm.is_some()
         || state.deliverable_view.is_some()
         || state.config_form.is_some()
     {
-        return None;
-    }
-    // #10476: a stale overlay draws nothing, so it must not swallow the mouse.
-    if tree::close_stale_details(state) {
         return None;
     }
     let (column, row) = (mouse.column, mouse.row);
@@ -77,16 +65,12 @@ pub fn handle_mouse(state: &mut ProjectCtlState, mouse: MouseEvent) -> Option<Pe
             if on_focus_button(state, column, row) {
                 return handle_key(state, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
             }
-            if state.tree.details.is_none() {
-                mouse_cols::click_row(state, column, row);
-            }
+            mouse_cols::click_row(state, column, row);
             None
         }
         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-            if state.tree.details.is_none() {
-                let down = mouse.kind == MouseEventKind::ScrollDown;
-                mouse_cols::wheel(state, column, row, down);
-            }
+            let down = mouse.kind == MouseEventKind::ScrollDown;
+            mouse_cols::wheel(state, column, row, down);
             None
         }
         _ => None,
@@ -240,52 +224,12 @@ mod tests {
         assert_eq!(click(&mut state, 5, row), None);
         assert_eq!(state.selected_node(), Some(&project("alpha")));
         assert_eq!(state.focus, Pane::Tree);
-        assert!(state.tree.details.is_none());
+        assert!(state.session_col.expanded.is_empty());
     }
 
-    /// #10476: the session goes while its overlay is open. The overlay draws
-    /// nothing, so a click or the wheel closes it as a key does, consumes the
-    /// event, and the next click acts on the tree.
+    /// #10754: a session row click expands it in place, as Enter does.
     #[test]
-    fn mouse_closes_details_when_session_leaves() {
-        for kind in [
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::ScrollDown,
-        ] {
-            let mut state = state_with(1);
-            select_session(&mut state, "s0");
-            assert!(state.open_details());
-            state.sessions_by_project.get_mut("alpha").unwrap().clear();
-            state.rebuild_tree();
-            state.select_node(owner());
-            draw(&mut state, 80, 24);
-            let row = screen_row(&state, index_of(&state, &owner()));
-
-            assert_eq!(handle_mouse(&mut state, at(kind, 5, row)), None);
-            assert_eq!(state.tree.details, None, "{kind:?} closes the details");
-            assert_eq!(
-                state.notice.as_deref(),
-                Some("that session is no longer listed"),
-                "{kind:?} sets the key path's notice"
-            );
-            assert_eq!(
-                state.selected_node(),
-                Some(&owner()),
-                "{kind:?} is consumed"
-            );
-            assert!(state.tree.is_expanded(&owner()), "{kind:?} is consumed");
-
-            draw(&mut state, 80, 24);
-            click(&mut state, 5, row);
-            assert!(
-                !state.tree.is_expanded(&owner()),
-                "the click after {kind:?} toggles"
-            );
-        }
-    }
-
-    #[test]
-    fn click_session_opens_details() {
+    fn click_session_toggles_details() {
         let mut state = state_with(2);
         draw(&mut state, 80, 24);
         let (column, row) = session_cell(&state, "s1");
@@ -296,7 +240,7 @@ mod tests {
         );
         assert_eq!(selected_session_id(&state).as_deref(), Some("s1"));
         assert_eq!(state.focus, Pane::Sessions);
-        assert_eq!(state.tree.details.as_deref(), Some("s1"));
+        assert!(state.session_col.expanded.contains("s1"));
     }
 
     #[test]
@@ -310,7 +254,7 @@ mod tests {
         assert_eq!(click(&mut state, 5, blank), None);
         assert_eq!(state.selected_node().cloned(), before);
         assert_eq!(state.tree.collapsed, expanded);
-        assert_eq!(state.tree.details, None);
+        assert!(state.session_col.expanded.is_empty());
     }
 
     #[test]
@@ -376,20 +320,8 @@ mod tests {
             let wheel = at(MouseEventKind::ScrollDown, column, row);
             assert_eq!(handle_mouse(&mut state, wheel), None);
             assert_eq!(selected_session_id(&state).as_deref(), Some("s0"));
-            assert_eq!(state.tree.details, None);
+            assert!(state.session_col.expanded.is_empty());
         }
-
-        // The details overlay swallows row clicks and the wheel too.
-        let mut state = state_with(2);
-        select_session(&mut state, "s0");
-        draw(&mut state, 80, 24);
-        let (column, row) = session_cell(&state, "s1");
-        assert!(state.open_details());
-        draw(&mut state, 80, 24);
-        assert_eq!(click(&mut state, column, row), None);
-        handle_mouse(&mut state, at(MouseEventKind::ScrollDown, column, row));
-        assert_eq!(selected_session_id(&state).as_deref(), Some("s0"));
-        assert_eq!(state.tree.details.as_deref(), Some("s0"));
     }
 
     #[test]
@@ -408,40 +340,19 @@ mod tests {
         let expected = handle_key(&mut state.clone(), f);
         assert!(matches!(expected, Some(PendingAction::Focus(_))));
         assert_eq!(click(&mut state, button.x, button.y), expected);
-        assert_eq!(state.tree.details, None);
+        assert!(state.session_col.expanded.is_empty());
 
-        // The overlay's own button, likewise; the overlay stays open.
-        assert!(state.open_details());
+        // #10754: with the session expanded the button still fires.
+        assert!(state.toggle_session_details());
         draw(&mut state, 100, 24);
-        let button = state.tree.hit.details_focus.expect("the overlay's button");
-        let expected = handle_key(&mut state.clone(), f);
-        assert!(matches!(expected, Some(PendingAction::Focus(_))));
+        let button = state.tree.hit.bar_focus.expect("the bar's button");
         assert_eq!(click(&mut state, button.x, button.y), expected);
-        assert_eq!(state.tree.details.as_deref(), Some("s0"));
-
-        // Elsewhere in the overlay, a click is nothing.
-        let overlay = state.tree.hit.details.expect("the overlay");
-        assert_eq!(click(&mut state, overlay.x, overlay.y), None);
+        assert!(state.session_col.expanded.contains("s0"), "and stays open");
 
         // An owner or project has no button, as `f` has nothing to focus.
         let mut state = state_with(1);
         draw(&mut state, 100, 24);
         assert_eq!(state.tree.hit.bar_focus, None);
-    }
-
-    /// A short terminal puts the bar under the overlay: the bar's button is
-    /// then under a modal and must not fire.
-    #[test]
-    fn bar_button_under_the_overlay_is_ignored() {
-        let mut state = state_with(1);
-        select_session(&mut state, "s0");
-        assert!(state.open_details());
-        // Narrower and shorter than the overlay, which then fills the frame.
-        draw(&mut state, 60, 13);
-        let button = state.tree.hit.bar_focus.expect("the bar still records it");
-        let overlay = state.tree.hit.details.expect("the overlay");
-        assert!(overlay.contains(Position::new(button.x, button.y)));
-        assert_eq!(click(&mut state, button.x, button.y), None);
     }
 
     #[test]
@@ -510,6 +421,7 @@ mod tests {
         assert!(line.contains(&format!("name-{number}")), "{line:?}");
 
         click(&mut state, rows.x + 2, screen);
-        assert_eq!(state.tree.details.as_deref(), Some(id.as_str()));
+        assert_eq!(selected_session_id(&state), Some(id.clone()));
+        assert!(state.session_col.expanded.contains(&id));
     }
 }

@@ -3,13 +3,18 @@
 //! Why: the session verbs act on the session selected in the right column
 //! (#10754 S1), so they live with that column's own motion keys. Kept apart
 //! from `events/tree.rs`, which owns the left column.
-//! What: [`handle_session_key`] — Up/Down move between session rows; Left
-//! returns focus to the left column; Enter opens the read-only details
-//! overlay; `f`/`k`/`r`/`d`/`a` focus, kill, resume, decommission and
-//! attach-cmd the selected session, through the same gates as before; `l`
-//! launches in the selected project; `g` toggles worker indentation.
+//! What: [`handle_session_key`] — Up/Down move between session rows, over
+//! headers and detail lines. #10754: inline session details (Bob 11-06) —
+//! Enter or Right expands the selected session in place, or collapses it;
+//! Left collapses an expanded session, else returns focus to the left
+//! column (Esc also collapses, in `handle_key`). `f`/`k`/`r`/`d`/`a` focus,
+//! kill, resume, decommission and attach-cmd the selected session, through
+//! the same gates as before; `l` launches in the selected project; `g`
+//! toggles worker indentation.
 //! Test: `two_column_tests.rs` (`tab_and_arrows_move_focus_between_columns`,
-//! `session_verbs_act_on_the_right_column_session`).
+//! `session_verbs_act_on_the_right_column_session`,
+//! `enter_expands_a_session_and_details_render_under_it`,
+//! `up_and_down_skip_detail_lines`).
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -27,9 +32,14 @@ pub(super) fn handle_session_key(
     match key.code {
         KeyCode::Up => state.session_step(false),
         KeyCode::Down => state.session_step(true),
-        KeyCode::Left => state.focus = Pane::Tree,
-        KeyCode::Enter => {
-            if !state.open_details() {
+        KeyCode::Left => {
+            if !state.collapse_selected_session() {
+                state.focus = Pane::Tree;
+            }
+        }
+        KeyCode::Enter | KeyCode::Right => {
+            // #10754: inline session details (Bob 11-06)
+            if !state.toggle_session_details() {
                 state.set_notice("select a session first");
             }
         }

@@ -7,8 +7,8 @@
 //! What: [`tree`] (#10476: the Owner -> Project tree, the left column of the
 //! MPM pane), [`session_list`] (#10754: two-column MPM pane (Bob 11-06) — the
 //! right column, the selected node's sessions), [`sessions`] (the session row
-//! builders the session column reuses), [`session_details`] (the read-only
-//! session overlay Enter opens), [`activity`] (bottom strip, live `/activity`-endpoint wiring per #2119),
+//! builders the session column reuses), [`session_details`] (the field lines
+//! an expanded session row shows, #10754), [`activity`] (bottom strip, live `/activity`-endpoint wiring per #2119),
 //! [`actions_bar`] (the 1-row key-hint / notice line), [`deliverables_view`]
 //! (a centred overlay, the read-only Deliverable/Milestone view reachable
 //! from the Projects pane, DOC-35 §10.8 `show`, #2383), and [`config_form`]

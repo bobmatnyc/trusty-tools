@@ -15,7 +15,7 @@
 //! Test: this file is the test.
 
 use super::*;
-use crate::tui::project_ctl::state::{NodeId, ProjectRow};
+use crate::tui::project_ctl::state::{NodeId, ProjectRow, SessionColRow};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -170,7 +170,10 @@ fn enter_on_owner_toggles_and_on_project_enters_sessions() {
         Some("sess-1")
     );
     assert_eq!(state.selected_node(), Some(&project_node("alpha")));
-    assert!(state.tree.details.is_none(), "entering opens no details");
+    assert!(
+        state.session_col.expanded.is_empty(),
+        "entering opens no details"
+    );
     state.focus = Pane::Tree;
 
     let acme = NodeId::Owner("acme".to_string());
@@ -184,35 +187,47 @@ fn enter_on_owner_toggles_and_on_project_enters_sessions() {
     );
     handle_key(&mut state, key(KeyCode::Enter));
     assert!(state.tree.is_expanded(&acme));
-    assert!(state.tree.details.is_none(), "toggling never opens details");
+    assert!(
+        state.session_col.expanded.is_empty(),
+        "toggling never opens details"
+    );
 }
 
 /// REGRESSION (#10476): before the tree, Enter on a session did nothing
-/// (`events/mod.rs` bound Enter on the Projects pane only).
+/// (`events/mod.rs` bound Enter on the Projects pane only). #10754: Enter
+/// expands the session in place.
 #[test]
-fn enter_on_session_opens_details_and_returns_no_pending_action() {
+fn enter_on_session_expands_details_and_returns_no_pending_action() {
     let mut state = seeded_state();
     on_session(&mut state);
     let action = handle_key(&mut state, key(KeyCode::Enter));
     assert!(action.is_none(), "details are read-only: {action:?}");
-    assert_eq!(state.tree.details.as_deref(), Some("sess-1"));
-    let (project, shown) = state.details_session().expect("details show the session");
-    assert_eq!((project, shown.id.as_str()), ("alpha", "sess-1"));
+    assert!(state.session_col.expanded.contains("sess-1"));
+    assert!(
+        state
+            .session_col
+            .rows
+            .iter()
+            .any(|r| matches!(r, SessionColRow::Detail { id, text, .. }
+                if id == "sess-1" && text == "project:     alpha")),
+        "the details follow the row"
+    );
     assert!(state.pending_confirm.is_none());
 }
 
 #[test]
-fn esc_closes_details() {
+fn esc_collapses_details() {
     let mut state = seeded_state();
     on_session(&mut state);
     handle_key(&mut state, key(KeyCode::Enter));
     assert!(handle_key(&mut state, key(KeyCode::Esc)).is_none());
-    assert!(state.tree.details.is_none());
+    assert!(state.session_col.expanded.is_empty());
     assert_eq!(state.selected_session().unwrap().id, "sess-1");
+    assert_eq!(state.focus, Pane::Sessions, "Esc keeps the column");
 }
 
 #[test]
-fn f_in_details_returns_focus() {
+fn f_on_an_expanded_session_returns_focus() {
     let mut state = seeded_state();
     on_session(&mut state);
     handle_key(&mut state, key(KeyCode::Enter));
@@ -221,8 +236,8 @@ fn f_in_details_returns_focus() {
         Some(PendingAction::Focus("alpha-session".to_string()))
     );
     assert!(
-        state.tree.details.is_some(),
-        "focus leaves the overlay open"
+        state.session_col.expanded.contains("sess-1"),
+        "focus leaves the details open"
     );
 }
 
@@ -238,31 +253,31 @@ fn f_on_a_session_node_returns_focus_and_on_a_project_does_nothing() {
     );
 }
 
+/// #10754: an expanded session that leaves the poll leaves the expanded set,
+/// and returns closed.
 #[test]
-fn details_swallow_quit_and_close_when_session_leaves() {
+fn expanded_session_drops_out_when_it_leaves() {
     let mut state = seeded_state();
     on_session(&mut state);
     handle_key(&mut state, key(KeyCode::Enter));
-    handle_key(&mut state, key(KeyCode::Char('q')));
-    handle_key(&mut state, ctrl_c());
-    assert!(
-        !state.should_exit,
-        "quit is swallowed while details are open"
-    );
-    assert!(state.tree.details.is_some());
-
-    state.sessions_by_project.get_mut("alpha").unwrap().clear();
+    let rows = state.sessions_by_project["alpha"].clone();
+    let other = SessionRow {
+        id: "sess-2".to_string(),
+        name: "other".to_string(),
+        ..Default::default()
+    };
+    state
+        .sessions_by_project
+        .insert("alpha".to_string(), vec![other]);
     state.rebuild_tree();
-    handle_key(&mut state, key(KeyCode::Char('x')));
-    assert!(state.tree.details.is_none());
-    assert_eq!(
-        state.notice.as_deref(),
-        Some("that session is no longer listed")
-    );
+    assert!(state.session_col.expanded.is_empty());
+    state.sessions_by_project.insert("alpha".to_string(), rows);
+    state.rebuild_tree();
+    assert!(state.session_col.expanded.is_empty(), "returns closed");
 }
 
 #[test]
-fn details_forward_the_session_verbs() {
+fn expanded_session_keeps_the_session_verbs() {
     let mut state = seeded_state();
     on_session(&mut state);
     handle_key(&mut state, key(KeyCode::Enter));

@@ -1,4 +1,4 @@
-//! Keys for the tree (left) column and the details overlay (#10476).
+//! Keys for the tree (left) column (#10476).
 //!
 //! Why: the tree replaced the Projects pane (Architect Q9). Kept apart from
 //! `events/mod.rs`, which owns the modal precedence chain.
@@ -8,18 +8,14 @@
 //! or Enter on a project moves focus into the session column. `g` toggles
 //! worker indentation. `c`/`v` act on a project node, `l` on its project.
 //! The session verbs `f`/`k`/`r`/`d`/`a` belong to the session column; here
-//! they set a notice and act on nothing. [`handle_details_key`] is the
-//! overlay's modal handler.
+//! they set a notice and act on nothing. `request_launch` and
+//! `request_focus` are shared with the session column.
 //! Test: `events::tests` (`enter_on_owner_toggles_and_on_project_enters_sessions`,
-//! `enter_on_session_opens_details_and_returns_no_pending_action`,
-//! `esc_closes_details`, `f_in_details_returns_focus`,
 //! `kill_resume_decommission_attach_on_bar_or_project_act_on_nothing`).
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::{
-    PendingAction, request_decommission, request_kill, request_resume, selected_session_action,
-};
+use super::PendingAction;
 use crate::tui::project_ctl::state::{NodeId, ProjectCtlState};
 
 /// Route one key while the tree pane has focus and no modal is open.
@@ -108,55 +104,5 @@ pub(super) fn request_focus(state: &mut ProjectCtlState) -> Option<PendingAction
             state.set_notice("select a session first");
             None
         }
-    }
-}
-
-/// Close a details overlay whose session has left the fleet; `true` if it did.
-///
-/// #10476: the overlay draws nothing for that session, so the key and mouse
-/// paths share this one rule and neither leaves the input dead.
-/// Test: `details_swallow_quit_and_close_when_session_leaves`,
-/// `mouse_closes_details_when_session_leaves`.
-pub(super) fn close_stale_details(state: &mut ProjectCtlState) -> bool {
-    if state.tree.details.is_none() {
-        return false;
-    }
-    let shown = state.details_session().map(|(_, s)| s.id.clone());
-    let selected = state.selected_session().map(|s| s.id.clone());
-    if shown.is_some() && shown == selected {
-        return false;
-    }
-    state.close_details();
-    state.set_notice("that session is no longer listed");
-    true
-}
-
-/// Route one key while the read-only details overlay is open.
-///
-/// What: the overlay is modal, like the other three: `Esc` (or Enter) closes
-/// it, `f` focuses the session, `k`/`r`/`d`/`a` act on the shown session
-/// exactly as in the tree, and every other key (quit included) is
-/// swallowed. When the shown session has left the fleet, any key closes the
-/// overlay with a notice.
-/// Test: `esc_closes_details`, `f_in_details_returns_focus`,
-/// `details_swallow_quit_and_close_when_session_leaves`.
-pub(super) fn handle_details_key(
-    state: &mut ProjectCtlState,
-    key: KeyEvent,
-) -> Option<PendingAction> {
-    if close_stale_details(state) {
-        return None;
-    }
-    match key.code {
-        KeyCode::Esc | KeyCode::Enter => {
-            state.close_details();
-            None
-        }
-        KeyCode::Char('f') => request_focus(state),
-        KeyCode::Char('k') => request_kill(state),
-        KeyCode::Char('r') => request_resume(state),
-        KeyCode::Char('d') => request_decommission(state),
-        KeyCode::Char('a') => selected_session_action(state, PendingAction::Attach),
-        _ => None,
     }
 }

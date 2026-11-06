@@ -155,9 +155,9 @@ pub struct SessionRow {
     /// #10476: the session that launched this one, from the daemon's
     /// `parent_session_id`. Drives the tree's worker indentation.
     pub parent_session_id: Option<String>,
-    /// The session's workspace (worktree) path, for the details overlay.
+    /// The session's workspace (worktree) path, for the inline details.
     pub workspace_path: Option<String>,
-    /// When the session was last active, for the details overlay.
+    /// When the session was last active, for the inline details.
     pub last_activity_at: Option<String>,
 }
 
@@ -342,8 +342,8 @@ pub struct ProjectCtlState {
     /// `GET /api/v1/sessions/managed/fleet` poll per tick rather than a
     /// per-project round trip.
     pub sessions_by_project: BTreeMap<String, Vec<SessionRow>>,
-    /// #10476: the tree pane's rows, selection, collapsed set and details
-    /// overlay (see [`tree_nav`]).
+    /// #10476: the tree pane's rows, selection and collapsed set
+    /// (see [`tree_nav`]).
     pub tree: TreeView,
     /// #10754: the session column's rows and selection (see [`session_col`]).
     pub session_col: SessionColumn,

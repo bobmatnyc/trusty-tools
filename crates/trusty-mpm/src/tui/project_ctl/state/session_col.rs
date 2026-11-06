@@ -4,20 +4,26 @@
 //! the right (Bob 11-06 00:47Z). The right column is a pure projection of the
 //! polled session lists and the left selection, so it is rebuilt with the
 //! tree and keeps its own selection by session id across a repoll.
-//! What: [`SessionColumn`] holds the rows, the selected session id and the
-//! list highlight. [`build_session_rows`] lists a project's sessions with
-//! worker indentation, or an owner's sessions grouped under project header
-//! lines (Architect Q1). The [`ProjectCtlState`] methods below move, clamp and
-//! read the selection, and move focus between the columns.
+//! What: [`SessionColumn`] holds the rows, the selected session id, the
+//! expanded session ids and the list highlight. [`build_session_rows`] lists
+//! a project's sessions with worker indentation, or an owner's sessions
+//! grouped under project header lines (Architect Q1). #10754: inline session
+//! details (Bob 11-06) — an expanded session is followed by one
+//! [`SessionColRow::Detail`] line per `detail_lines` field. The
+//! [`ProjectCtlState`] methods below move, clamp and read the selection,
+//! expand and collapse rows, and move focus between the columns.
 //! Test: `two_column_tests.rs` (`render_100x30_shows_both_columns`,
 //! `owner_selected_groups_sessions_by_project`,
-//! `session_selection_survives_repoll_and_clamps_when_it_vanishes`).
+//! `session_selection_survives_repoll_and_clamps_when_it_vanishes`,
+//! `enter_expands_a_session_and_details_render_under_it`,
+//! `expansion_survives_a_reordering_repoll`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::tree::{NodeId, Placement, counters, session_placements};
 use super::{Pane, ProjectCtlState, ProjectRow, SessionRow};
 use crate::tui::coordinator::nav::ListNav;
+use crate::tui::project_ctl::panes::session_details::detail_lines;
 
 /// One line of the session column, in draw order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,13 +44,30 @@ pub enum SessionColRow {
     },
     /// The dimmed line standing in for a parent the project does not list.
     Anchor { parent: String, depth: usize },
+    /// One field line of the expanded session `id`, drawn under its row at
+    /// the row's `depth`. Never selectable.
+    // #10754: inline session details (Bob 11-06)
+    Detail {
+        id: String,
+        depth: usize,
+        text: String,
+    },
 }
 
 impl SessionColRow {
-    /// The session id of a session row; `None` for a header or an anchor.
+    /// The session id of a session row; `None` for a header, an anchor or a
+    /// detail line, so the selection never lands on one.
     pub fn session_id(&self) -> Option<&str> {
         match self {
             SessionColRow::Session { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The session a session row or one of its detail lines belongs to.
+    pub fn owning_session(&self) -> Option<&str> {
+        match self {
+            SessionColRow::Session { id, .. } | SessionColRow::Detail { id, .. } => Some(id),
             _ => None,
         }
     }
@@ -57,7 +80,9 @@ impl SessionColRow {
 /// What: `selected` is `None` until the operator enters the column, so an
 /// unvisited column asks the daemon for no `/activity`. `source` is the left
 /// node the rows were built for; a change of it drops the selection.
-/// Test: `session_selection_survives_repoll_and_clamps_when_it_vanishes`.
+/// `expanded` names the sessions drawn with their detail lines (#10754 S2).
+/// Test: `session_selection_survives_repoll_and_clamps_when_it_vanishes`,
+/// `expansion_survives_a_reordering_repoll`.
 #[derive(Debug, Clone, Default)]
 pub struct SessionColumn {
     /// The drawn rows.
@@ -65,6 +90,9 @@ pub struct SessionColumn {
     /// The selected session id. Kept while the rows are empty (a down
     /// daemon), so a recovered poll restores it.
     pub selected: Option<String>,
+    /// The session ids drawn expanded. Kept by id across a repoll; an id the
+    /// poll no longer lists is dropped (#10754 S2).
+    pub expanded: BTreeSet<String>,
     /// Highlight and scroll offset for the rendered list.
     pub nav: ListNav,
     /// The left node `rows` were built for.
@@ -134,6 +162,51 @@ pub(crate) fn build_session_rows(
     rows
 }
 
+/// Put every project's sessions in a stable order: by name, then by id.
+///
+/// Why: the daemon lists sessions in no fixed order, so the column reordered
+/// between polls (Architect 01:42Z).
+/// What: sorts each list in place before [`session_placements`] runs, which
+/// then places managers before their workers. Names tie-break on the id, so
+/// the result does not depend on the input order.
+/// Test: `session_order_is_stable_when_the_input_is_shuffled`.
+pub(crate) fn sort_sessions(sessions_by_project: &mut BTreeMap<String, Vec<SessionRow>>) {
+    // #10754: stable session order
+    for sessions in sessions_by_project.values_mut() {
+        sessions.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    }
+}
+
+/// `rows` with the [`SessionColRow::Detail`] lines of each session in
+/// `expanded` inserted under its row.
+fn with_details(
+    rows: Vec<SessionColRow>,
+    expanded: &BTreeSet<String>,
+    details: impl Fn(&str, usize) -> Vec<String>,
+) -> Vec<SessionColRow> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let open = match &row {
+            SessionColRow::Session {
+                project,
+                id,
+                index,
+                depth,
+            } if expanded.contains(id) => Some((id.clone(), *depth, details(project, *index))),
+            _ => None,
+        };
+        out.push(row);
+        if let Some((id, depth, lines)) = open {
+            out.extend(lines.into_iter().map(|text| SessionColRow::Detail {
+                id: id.clone(),
+                depth,
+                text,
+            }));
+        }
+    }
+    out
+}
+
 /// Append one project's session rows (and anchors) to `rows`.
 fn push_project(
     rows: &mut Vec<SessionColRow>,
@@ -180,8 +253,12 @@ impl ProjectCtlState {
     /// selection change, so the column always shows the selected node.
     /// What: a changed left node drops the selection. Empty rows keep the
     /// selection (a down daemon). A selected id that left the rows moves to
-    /// the session row nearest its old position, or to none.
-    /// Test: `session_selection_survives_repoll_and_clamps_when_it_vanishes`.
+    /// the session row nearest its old position, or to none. #10754 S2: an
+    /// expanded id the poll no longer lists leaves the expanded set (a down
+    /// daemon, which lists nothing, keeps it), and each expanded session gets
+    /// its detail lines.
+    /// Test: `session_selection_survives_repoll_and_clamps_when_it_vanishes`,
+    /// `expansion_survives_a_reordering_repoll`.
     pub(crate) fn rebuild_session_col(&mut self) {
         let source = self.tree.selected.clone();
         let rows = build_session_rows(
@@ -191,7 +268,26 @@ impl ProjectCtlState {
             !self.tree.flat_workers,
             |name| self.owner_of_project(name),
         );
+        // #10754: inline session details (Bob 11-06)
+        let listed: BTreeSet<&str> = self
+            .sessions_by_project
+            .values()
+            .flatten()
+            .map(|s| s.id.as_str())
+            .collect();
+        let mut expanded = std::mem::take(&mut self.session_col.expanded);
+        if !listed.is_empty() {
+            expanded.retain(|id| listed.contains(id.as_str()));
+        }
+        let rows = with_details(rows, &expanded, |project, index| {
+            self.sessions_by_project
+                .get(project)
+                .and_then(|rows| rows.get(index))
+                .map(|s| detail_lines(self, project, s))
+                .unwrap_or_default()
+        });
         let col = &mut self.session_col;
+        col.expanded = expanded;
         if col.source != source {
             col.source = source;
             col.selected = None;
@@ -222,19 +318,81 @@ impl ProjectCtlState {
         }
     }
 
-    /// Select the session row at `index`; `false` (no change) on any other row.
+    /// Select the session drawn at row `index`: its own row, or one of its
+    /// detail lines. `None` (no change) on a header, an anchor or past the
+    /// end; else `Some(true)` when `index` is the session's own row.
     ///
-    /// Test: `click_selects_and_focuses_either_column`.
-    pub(crate) fn select_session_row(&mut self, index: usize) -> bool {
-        let is_session = self
-            .session_col
-            .rows
-            .get(index)
-            .is_some_and(|r| r.session_id().is_some());
-        if is_session {
-            self.select_session_index(Some(index));
+    /// Test: `click_selects_and_focuses_either_column`,
+    /// `clicking_a_detail_line_selects_its_session`.
+    pub(crate) fn select_session_row(&mut self, index: usize) -> Option<bool> {
+        let row = self.session_col.rows.get(index)?;
+        let own_row = row.session_id().is_some();
+        let id = row.owning_session()?.to_string();
+        let at = self.session_col.index_of(&id);
+        self.select_session_index(at);
+        Some(own_row)
+    }
+
+    /// Enter / Right / a row click: expand the selected session in place, or
+    /// collapse it when it is already expanded.
+    ///
+    /// Why: the owner asked for details under the row, not in a popup
+    /// (#10754, Bob 11-06; Architect Q2).
+    /// What: flips the selected id in [`SessionColumn::expanded`] and
+    /// rebuilds the rows. An expansion scrolls the list, at most up to the
+    /// session's own row, so its detail lines show in the last frame's
+    /// viewport. `false`, changing nothing, when no session is selected.
+    /// Test: `enter_expands_a_session_and_details_render_under_it`,
+    /// `up_and_down_skip_detail_lines`.
+    pub fn toggle_session_details(&mut self) -> bool {
+        // #10754: inline session details (Bob 11-06)
+        let Some(id) = self.selected_session().map(|s| s.id.clone()) else {
+            return false;
+        };
+        let opened = self.session_col.expanded.insert(id.clone());
+        if !opened {
+            self.session_col.expanded.remove(&id);
         }
-        is_session
+        self.rebuild_session_col();
+        if opened {
+            self.reveal_details(&id);
+        }
+        true
+    }
+
+    /// Left / Esc: collapse the selected session; `false` when it is not
+    /// expanded (or nothing is selected).
+    ///
+    /// Test: `up_and_down_skip_detail_lines`.
+    pub fn collapse_selected_session(&mut self) -> bool {
+        let Some(id) = self.selected_session().map(|s| s.id.clone()) else {
+            return false;
+        };
+        let closed = self.session_col.expanded.remove(&id);
+        if closed {
+            self.rebuild_session_col();
+        }
+        closed
+    }
+
+    /// Scroll so the detail lines of `id` fit the last drawn viewport, never
+    /// past the session's own row.
+    fn reveal_details(&mut self, id: &str) {
+        let col = &mut self.session_col;
+        let height = usize::from(self.tree.hit.session_rows.height);
+        let Some(row) = col.index_of(id) else {
+            return;
+        };
+        let last = col.rows[row..]
+            .iter()
+            .take_while(|r| r.owning_session() == Some(id))
+            .count()
+            + row
+            - 1;
+        let offset = col.nav.offset();
+        if height > 0 && last >= offset + height {
+            *col.nav.state_mut().offset_mut() = (last + 1 - height).min(row);
+        }
     }
 
     /// Move the session selection to the next session row down or up,

@@ -19,9 +19,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
 };
 
-use super::panes::{
-    actions_bar, activity, config_form, deliverables_view, session_details, session_list, tree,
-};
+use super::panes::{actions_bar, activity, config_form, deliverables_view, session_list, tree};
 use super::state::{Pane, ProjectCtlState};
 
 /// Minimum height (rows, including the two border rows) of the main tree row.
@@ -60,7 +58,9 @@ pub fn main_columns(area: Rect, focus: Pane) -> (Option<Rect>, Option<Rect>) {
             (Some(area), None)
         };
     }
-    let left = (area.width * 3 / 10).max(LEFT_MIN_COLS);
+    // #10754: u32 math, so a very wide terminal cannot overflow u16.
+    let tenths = u16::try_from(u32::from(area.width) * 3 / 10).unwrap_or(area.width);
+    let left = tenths.max(LEFT_MIN_COLS);
     let [l, r] = Layout::horizontal([Constraint::Length(left), Constraint::Min(0)]).areas(area);
     (Some(l), Some(r))
 }
@@ -81,9 +81,9 @@ pub fn main_columns(area: Rect, focus: Pane) -> (Option<Rect>, Option<Rect>) {
 /// never replacing a pane, mirroring the dashboard help-overlay's "draw base
 /// frame, then float overlay" sequencing. The two are mutually exclusive by
 /// construction (see `events`'s module doc), so at most one overlay ever
-/// renders in a given frame. The #10476 session details overlay is the
-/// fourth, drawn when [`crate::tui::project_ctl::state::TreeView::details`]
-/// is `Some`.
+/// renders in a given frame. #10754: inline session details (Bob 11-06) —
+/// session details draw inside the session column, so no session overlay
+/// remains.
 pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -113,9 +113,6 @@ pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
     if let Some(view) = &state.config_form {
         config_form::render(frame, view);
     }
-    if state.tree.details.is_some() {
-        session_details::render(frame, state);
-    }
 }
 
 #[cfg(test)]
@@ -136,5 +133,9 @@ mod tests {
         assert_eq!(main_columns(narrow, Pane::Tree), (Some(narrow), None));
         assert_eq!(main_columns(narrow, Pane::Activity), (Some(narrow), None));
         assert_eq!(main_columns(narrow, Pane::Sessions), (None, Some(narrow)));
+        // #10754: the 30% split cannot overflow on the widest terminal.
+        let (l, r) = main_columns(Rect::new(0, 0, u16::MAX, 20), Pane::Tree);
+        assert_eq!(l.unwrap().width, 19660);
+        assert_eq!(r.unwrap().width, u16::MAX - 19660);
     }
 }

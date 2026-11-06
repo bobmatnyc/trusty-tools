@@ -5,11 +5,15 @@
 //! rectangles the last frame recorded, so a column not drawn (below 60
 //! terminal columns) has no target. Kept out of `events/mouse.rs` (cap).
 //! What: [`click_row`] selects the row under the cursor in either column and
-//! focuses that column. An owner click toggles it and a session click opens
-//! the details overlay, as Enter does; a project click only selects.
-//! [`wheel`] moves the selection of the column under the cursor.
+//! focuses that column. An owner click toggles it; a project click only
+//! selects. #10754: inline session details (Bob 11-06) — a session row click
+//! expands or collapses that session, as Enter does, and a click on one of
+//! its detail lines selects it without toggling. A header or a blank line
+//! does nothing. [`wheel`] moves the selection of the column under the
+//! cursor.
 //! Test: `two_column_tests.rs` (`click_selects_and_focuses_either_column`,
-//! `wheel_scrolls_the_column_under_the_cursor`); `events::mouse::tests`.
+//! `wheel_scrolls_the_column_under_the_cursor`,
+//! `clicking_a_detail_line_selects_its_session`); `events::mouse::tests`.
 
 use ratatui::layout::Position;
 
@@ -29,12 +33,15 @@ pub(super) fn click_row(state: &mut ProjectCtlState, column: u16, row: u16) {
         return;
     }
     let offset = state.session_col.nav.offset();
-    if let Some(index) = row_at(hit.session_rows, offset, column, row)
-        && state.select_session_row(index)
-    {
-        // #10754: two-column MPM pane (Bob 11-06)
+    let Some(index) = row_at(hit.session_rows, offset, column, row) else {
+        return;
+    };
+    // #10754: inline session details (Bob 11-06)
+    if let Some(own_row) = state.select_session_row(index) {
         state.focus = Pane::Sessions;
-        state.open_details();
+        if own_row {
+            state.toggle_session_details();
+        }
     }
 }
 

@@ -1,12 +1,15 @@
-//! Two-column MPM pane tests (#10754 S1).
+//! Two-column MPM pane tests (#10754 S1, S2).
 //!
 //! Why: the main row split into an owner/project column and a session column.
 //! These tests drive the real key, mouse and render paths and read the drawn
 //! buffer, so each one checks what the operator sees.
-//! What: (a) both columns at 100x30, (b) an owner's sessions grouped by
+//! What: S1 — (a) both columns at 100x30, (b) an owner's sessions grouped by
 //! project, (c) focus moves by Tab, arrows and clicks, (d) the session
 //! selection across a repoll, (e) one column below 60 columns, (f) the
-//! session verbs act on the right column's session.
+//! session verbs act on the right column's session. S2 — a session row
+//! expands in place (render, repoll, keys, clicks, no popup) and the
+//! session order does not follow the poll order; plus the column's edge
+//! cases (headers, blank clicks, narrow widths).
 //! Test: this file is the test.
 
 use std::collections::BTreeMap;
@@ -17,7 +20,7 @@ use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Color};
 use super::events::{PendingAction, handle_key, handle_mouse};
 use super::layout;
 use super::poll::tick::{CoreFetch, apply_core};
-use super::state::{ConfirmKind, NodeId, ProjectCtlState, ProjectRow, SessionRow};
+use super::state::{ConfirmKind, NodeId, ProjectCtlState, ProjectRow, SessionColRow, SessionRow};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -232,12 +235,12 @@ fn click_selects_and_focuses_either_column() {
         find(&buffer, "helper").expect("helper is drawn"),
     );
     assert_eq!(selected_id(&state).as_deref(), Some("w1"));
-    assert_eq!(
-        state.tree.details.as_deref(),
-        Some("w1"),
+    assert!(
+        state.session_col.expanded.contains("w1"),
         "a click is Enter"
     );
     press(&mut state, KeyCode::Esc);
+    assert!(state.session_col.expanded.is_empty(), "Esc collapses");
     assert!(focused_title(&draw(&mut state, 100, 30)).starts_with("SESSIONS"));
 
     let buffer = draw(&mut state, 100, 30);
@@ -369,4 +372,302 @@ fn session_verbs_act_on_the_right_column_session() {
         assert!(state.pending_confirm.is_none(), "{verb} opened a gate");
     }
     assert_eq!(state.notice.as_deref(), Some("select a session first"));
+}
+
+/// The lines of the right column (columns 30..100) of a 100-wide frame.
+fn right_lines(state: &mut ProjectCtlState, height: u16) -> Vec<String> {
+    let buffer = draw(state, 100, height);
+    region(&buffer, 30, 100)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The index of the first line containing `needle`.
+fn line_of(lines: &[String], needle: &str) -> usize {
+    lines
+        .iter()
+        .position(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no line with {needle:?}:\n{}", lines.join("\n")))
+}
+
+/// S2 (a): Enter on a session expands it in place. Its fields draw on the
+/// lines under its row, inside the right column; a second Enter collapses it.
+#[test]
+fn enter_expands_a_session_and_details_render_under_it() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(selected_id(&state).as_deref(), Some("m1"));
+    assert_eq!(press(&mut state, KeyCode::Enter), None, "no daemon call");
+    let buffer = draw(&mut state, 100, 30);
+    assert!(
+        !region(&buffer, 0, 30).contains("id:"),
+        "nothing spills into the left column"
+    );
+    let lines = right_lines(&mut state, 30);
+    let boss = line_of(&lines, "● boss");
+    let fields = [
+        "name:        boss",
+        "id:          m1",
+        "project:     alpha",
+        "state:       active",
+        "branch:      -",
+        "task:        -",
+        "parent:      -",
+        "decision:    -",
+        "deliverable: -",
+        "workspace:   -",
+        "last active: -",
+    ];
+    for (offset, field) in fields.iter().enumerate() {
+        let line = &lines[boss + 1 + offset];
+        assert!(line.contains(field), "{field:?} on {line:?}");
+        assert!(
+            line.starts_with("│    "),
+            "indented under the row: {line:?}"
+        );
+    }
+    assert!(lines[boss + 12].contains("↳ ○ helper"), "{lines:#?}");
+
+    press(&mut state, KeyCode::Enter);
+    let lines = right_lines(&mut state, 30);
+    assert!(lines[line_of(&lines, "● boss") + 1].contains("↳ ○ helper"));
+    assert!(!lines.join("\n").contains("id:"), "collapsed");
+}
+
+/// S2 (b): the expansion is keyed by session id. A repoll that reorders the
+/// input keeps it; a session that vanishes drops out and comes back closed.
+#[test]
+fn expansion_survives_a_reordering_repoll() {
+    let mut state = polled();
+    assert!(state.focus_session("w1"));
+    press(&mut state, KeyCode::Enter);
+    let mut reordered = alpha_sessions();
+    reordered.reverse();
+    reordered.insert(0, session("n1", "newcomer", "active", None));
+    apply_core(&mut state, fleet(reordered));
+    assert_eq!(selected_id(&state).as_deref(), Some("w1"));
+    let lines = right_lines(&mut state, 30);
+    let helper = line_of(&lines, "↳ ○ helper");
+    assert!(lines[helper + 2].contains("id:          w1"), "{lines:#?}");
+    assert!(
+        !lines.join("\n").contains("id:          m1"),
+        "only w1 opened"
+    );
+
+    apply_core(
+        &mut state,
+        fleet(vec![session("m1", "boss", "active", None)]),
+    );
+    apply_core(&mut state, fleet(alpha_sessions()));
+    let lines = right_lines(&mut state, 30);
+    assert!(!lines.join("\n").contains("id:"), "w1 returned closed");
+}
+
+/// S2 (c): detail lines cannot be selected. Up and Down step over them, and
+/// the selected row stays drawn when the rows above it expand.
+#[test]
+fn up_and_down_skip_detail_lines() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    press(&mut state, KeyCode::Enter);
+    press(&mut state, KeyCode::Down);
+    assert_eq!(
+        selected_id(&state).as_deref(),
+        Some("w1"),
+        "over m1's details"
+    );
+    press(&mut state, KeyCode::Down);
+    assert_eq!(selected_id(&state).as_deref(), Some("w1"), "saturates");
+    // A short frame: m1's 11 detail lines push helper below the fold.
+    let lines = right_lines(&mut state, 14);
+    assert!(lines.join("\n").contains("helper"), "{lines:#?}");
+    // Expanding the bottom row brings its first fields into view.
+    press(&mut state, KeyCode::Right);
+    let lines = right_lines(&mut state, 14);
+    assert!(lines.join("\n").contains("id:          w1"), "{lines:#?}");
+    press(&mut state, KeyCode::Up);
+    assert_eq!(
+        selected_id(&state).as_deref(),
+        Some("m1"),
+        "over the details"
+    );
+    // Left collapses an expanded row before it leaves the column.
+    press(&mut state, KeyCode::Left);
+    assert!(
+        !right_lines(&mut state, 30)
+            .join("\n")
+            .contains("id:          m1")
+    );
+    press(&mut state, KeyCode::Esc);
+    assert!(
+        right_lines(&mut state, 30)
+            .join("\n")
+            .contains("id:          w1"),
+        "Esc on m1 leaves w1 open"
+    );
+}
+
+/// S2 (d): a click on a detail line selects its session without collapsing
+/// it; a click on a session row toggles that row.
+#[test]
+fn clicking_a_detail_line_selects_its_session() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    press(&mut state, KeyCode::Enter);
+    assert!(state.focus_session("w1"));
+    let buffer = draw(&mut state, 100, 30);
+    click(
+        &mut state,
+        find(&buffer, "id:          m1").expect("m1's id"),
+    );
+    assert_eq!(selected_id(&state).as_deref(), Some("m1"));
+    let buffer = draw(&mut state, 100, 30);
+    assert!(find(&buffer, "id:          m1").is_some(), "still open");
+
+    click(
+        &mut state,
+        find(&buffer, "helper").expect("helper is drawn"),
+    );
+    assert_eq!(selected_id(&state).as_deref(), Some("w1"));
+    let buffer = draw(&mut state, 100, 30);
+    assert!(
+        find(&buffer, "id:          w1").is_some(),
+        "a row click opens"
+    );
+    click(
+        &mut state,
+        find(&buffer, "helper").expect("helper is drawn"),
+    );
+    let buffer = draw(&mut state, 100, 30);
+    assert!(find(&buffer, "id:          w1").is_none(), "and closes");
+}
+
+/// S2 (e): the modal overlay is gone. Enter draws no popup and leaves every
+/// other key live, quit included.
+#[test]
+fn enter_never_opens_a_popup() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    press(&mut state, KeyCode::Enter);
+    let buffer = draw(&mut state, 100, 30);
+    assert!(find(&buffer, "Session — boss").is_none(), "no popup title");
+    assert!(find(&buffer, "[Esc] close").is_none(), "no popup keys");
+    press(&mut state, KeyCode::Char('q'));
+    assert!(state.should_exit, "no modal swallows quit");
+}
+
+/// S2 (f): the rows do not follow the poll order. Every shuffle of the same
+/// sessions draws managers before their workers, then by name, then by id.
+#[test]
+fn session_order_is_stable_when_the_input_is_shuffled() {
+    let sessions = vec![
+        session("m1", "boss", "active", None),
+        session("w1", "helper", "stopped", Some("m1")),
+        session("m2", "alice", "active", None),
+        session("w2", "zed", "active", Some("m2")),
+        session("m0", "boss", "active", None),
+    ];
+    let expected = ["m2", "w2", "m0", "m1", "w1"];
+    for shift in 0..sessions.len() {
+        for reverse in [false, true] {
+            let mut input = sessions.clone();
+            input.rotate_left(shift);
+            if reverse {
+                input.reverse();
+            }
+            let mut state = ProjectCtlState::default();
+            apply_core(&mut state, fleet(input));
+            state.select_node(project_node("alpha"));
+            let ids: Vec<&str> = state
+                .session_col
+                .rows
+                .iter()
+                .filter_map(|r| r.session_id())
+                .collect();
+            assert_eq!(ids, expected, "shift {shift}, reverse {reverse}");
+        }
+    }
+}
+
+/// One step of [`session_column_edge_cases`].
+enum Edge {
+    /// Press Down in the session column.
+    Down,
+    /// Click the line just below the last row.
+    ClickBelowLastRow,
+    /// Click the `beta` project header.
+    ClickHeader,
+    /// Draw at this width and 30 rows.
+    Render(u16),
+}
+
+/// #10754 S1 critic LOWs: in the owner view Down skips the project headers,
+/// a click below the last row or on a header changes nothing, and the pane
+/// draws at widths 0, 23 and 59 (one column).
+#[test]
+fn session_column_edge_cases() {
+    let mut state = polled();
+    state.select_node(owner_node());
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(
+        selected_id(&state).as_deref(),
+        Some("m1"),
+        "past alpha's header"
+    );
+    let cases = [
+        (Edge::Down, "w1"),
+        (Edge::Down, "b1"),
+        (Edge::Down, "b1"),
+        (Edge::ClickBelowLastRow, "b1"),
+        (Edge::ClickHeader, "b1"),
+        (Edge::Render(0), "b1"),
+        (Edge::Render(23), "b1"),
+        (Edge::Render(59), "b1"),
+    ];
+    for (step, want) in cases {
+        let label = match &step {
+            Edge::Down => "Down".to_string(),
+            Edge::ClickBelowLastRow => "click below".to_string(),
+            Edge::ClickHeader => "click header".to_string(),
+            Edge::Render(w) => format!("render {w}"),
+        };
+        match step {
+            Edge::Down => {
+                press(&mut state, KeyCode::Down);
+            }
+            Edge::ClickBelowLastRow => {
+                draw(&mut state, 100, 30);
+                let rows = state.tree.hit.session_rows;
+                let below = rows.y + state.session_col.rows.len() as u16;
+                assert!(below < rows.bottom(), "the frame has a blank line");
+                click(&mut state, (rows.x + 2, below));
+            }
+            Edge::ClickHeader => {
+                // The tree draws the same counters; aim at the right column.
+                draw(&mut state, 100, 30);
+                let header = state
+                    .session_col
+                    .rows
+                    .iter()
+                    .position(
+                        |r| matches!(r, SessionColRow::Header { project, .. } if project == "beta"),
+                    )
+                    .expect("beta's header");
+                let rows = state.tree.hit.session_rows;
+                click(&mut state, (rows.x + 2, rows.y + header as u16));
+            }
+            Edge::Render(width) => {
+                let buffer = draw(&mut state, width, 30);
+                assert_eq!(buffer.area.width, width);
+                if width > 0 {
+                    let all = region(&buffer, 0, width);
+                    assert!(all.contains("SESSIONS"), "focused column:\n{all}");
+                    assert!(!all.contains("OWNERS"), "one column:\n{all}");
+                }
+            }
+        }
+        assert_eq!(selected_id(&state).as_deref(), Some(want), "{label}");
+        assert_eq!(state.focus, super::state::Pane::Sessions, "{label}");
+    }
 }
