@@ -454,7 +454,8 @@ pub(super) async fn abort_dry(
 /// from `result.findings`, and stores the inline comments as `InlineCommentOut` on
 /// the result plus the suppressed-nit count (#1420).  Findings that fall back to the
 /// summary stay in `result.findings` (the body renders the non-inline ones).
-/// #10762: each inline entry carries its finding's index, severity and category;
+/// #10762: each inline entry carries its finding's index, severity and category,
+/// and the plan's `side` and `subject_type`;
 /// every other finding, and every withheld finding (index `n + i`, reason
 /// `withheld:<class>`), goes to `result.unanchored`. A no-op only when both
 /// `findings` and `withheld_findings` are empty.
@@ -480,6 +481,9 @@ pub(super) fn attach_inline_comments(result: &mut ReviewResult, raw_diff: &str) 
         .map(|(c, &idx)| InlineCommentOut {
             path: c.path,
             line: c.line,
+            // #10762: LEFT for a removed line; `file` for a file-level anchor.
+            side: c.side,
+            subject_type: c.subject_type,
             severity: findings.get(idx).map(effective_severity),
             category: findings.get(idx).map(|f| f.category).unwrap_or_default(),
             finding_index: idx,

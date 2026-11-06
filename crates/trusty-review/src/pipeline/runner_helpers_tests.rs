@@ -180,7 +180,11 @@ fn partition_fixture() -> ReviewResult {
         finding(Some(2), Effort::Medium, "added"),
         finding(Some(1), Effort::Medium, "context"),
         finding(Some(50), Effort::Medium, "off diff"),
-        finding(None, Effort::Medium, "no line"),
+        // #10762: off the diff, so it stays `no_line` rather than file-level.
+        crate::models::Finding {
+            file: "src/other.rs".to_string(),
+            ..finding(None, Effort::Medium, "no line")
+        },
     ];
     result
         .findings
@@ -346,4 +350,30 @@ fn inline_and_unanchored_json_identical_live_and_dry() {
     };
     assert_eq!(lists(&dry), lists(&live));
     assert!(!dry.unanchored.is_empty() && !dry.inline_comments.is_empty());
+}
+
+/// REGRESSION (#10762): a no-line finding on an in-diff file anchors file-level.
+///
+/// Why: a finding that names a file the diff changes, but no line, went to the
+/// summary as `no_line`, though GitHub accepts a `subject_type: file` comment.
+/// What: attaches a no-line finding on `src/a.rs` and asserts one inline entry
+/// with `subject_type: file`, line 0, side `RIGHT` and finding index 0, no
+/// `unanchored` entry, and `"subject_type": "file"` in the JSON.
+/// Test: this test itself.
+#[test]
+fn file_level_anchor_for_in_diff_file_without_line() {
+    use crate::models::{AnchorSide, Effort, SubjectType};
+
+    let mut result = ReviewResult::new("o", "r", 1, "t", "u");
+    result.findings = vec![finding(None, Effort::Medium, "file-wide")];
+    attach_inline_comments(&mut result, PARTITION_DIFF);
+
+    assert!(result.unanchored.is_empty(), "{:?}", result.unanchored);
+    assert_eq!(result.inline_finding_indices, vec![0]);
+    let entry = &result.inline_comments[0];
+    assert_eq!(entry.subject_type, Some(SubjectType::File));
+    assert_eq!((entry.path.as_str(), entry.line), ("src/a.rs", 0));
+    assert_eq!((entry.side, entry.finding_index), (AnchorSide::Right, 0));
+    let json = serde_json::to_value(entry).expect("serialize");
+    assert_eq!(json["subject_type"], "file");
 }

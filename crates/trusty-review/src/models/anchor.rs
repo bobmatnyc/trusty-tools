@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// The diff side an inline anchor addresses (#10762).
 ///
 /// What: `RIGHT` is the new side (added and context lines); `LEFT` is the
-/// old side, for a deleted line. Only `RIGHT` is produced today.
+/// old side, for a deleted line with no new-side match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum AnchorSide {

@@ -597,12 +597,12 @@ impl Finding {
 pub struct InlineCommentOut {
     /// Changed file path (new side), e.g. `src/db.rs`.
     pub path: String,
-    /// Line number the comment anchors to, on `side`.
+    /// Line number the comment anchors to, on `side`; 0 for a file-level anchor.
     pub line: u32,
     /// First line of a multi-line anchor; `None` for a single line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_line: Option<u32>,
-    /// Diff side the anchor addresses; always `RIGHT` today.
+    /// Diff side the anchor addresses; `LEFT` for a deleted line (#10762).
     #[serde(default)]
     pub side: AnchorSide,
     /// `file` for a file-level anchor; `None` for a line anchor.

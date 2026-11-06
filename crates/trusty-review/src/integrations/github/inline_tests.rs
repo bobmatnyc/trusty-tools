@@ -135,8 +135,9 @@ fn build_inline_plan_posts_a_partial_citation_in_the_body() {
 #[test]
 fn build_inline_plan_no_line_falls_back() {
     let c = CommentableLines::from_unified_diff(sample_diff());
-    // File-level / general finding (no line) → summary body.
-    let findings = vec![finding_at("src/db.rs", None)];
+    // General finding (no line) on a file outside the diff → summary body.
+    // #10762: a no-line finding on an in-diff file now anchors file-level.
+    let findings = vec![finding_at("src/other.rs", None)];
     let plan = build_inline_plan(&findings, &c);
     assert!(plan.comments.is_empty());
     assert_eq!(plan.summary_findings.len(), 1);
@@ -578,6 +579,8 @@ fn unanchored_reason_enum_covers_no_line_off_diff_nit_cap_withheld() {
     let c = CommentableLines::from_unified_diff(&diff_with_n_added(20));
     let mut findings = vec![nit_at(1), nit_at(99)];
     findings[0].line = None;
+    // #10762: off the diff, so the no-line finding stays `no_line`, not file-level.
+    findings[0].file = "src/other.rs".to_string();
     findings.extend((2..=MAX_INLINE_NITS as u32 + 2).map(nit_at));
     let plan = build_inline_plan(&findings, &c);
     let at = |finding_index, reason| UnanchoredFinding {
@@ -609,4 +612,139 @@ fn unanchored_reason_enum_covers_no_line_off_diff_nit_cap_withheld() {
     }
     let future: UnanchoredReason = serde_json::from_str("\"left_only\"").expect("tolerated");
     assert_eq!(future, UnanchoredReason::Unknown);
+}
+
+// ─── #10762: LEFT-side and file-level anchors ─────────────────────────────────
+
+/// `src/del.rs` deletes old lines 5 and 6 (new line 5 is the context `tail`),
+/// and `src/gone.rs` is deleted outright.
+const DELETION_DIFF: &str = "\
+diff --git a/src/del.rs b/src/del.rs
+--- a/src/del.rs
++++ b/src/del.rs
+@@ -4,4 +4,2 @@
+ fn keep() {}
+-fn dropped_a() {}
+-fn dropped_b() {}
+ fn tail() {}
+diff --git a/src/gone.rs b/src/gone.rs
+deleted file mode 100644
+--- a/src/gone.rs
++++ /dev/null
+@@ -1,2 +0,0 @@
+-fn gone() {}
+-fn also_gone() {}
+";
+
+/// REGRESSION (#10762): a finding at a removed line anchors on the LEFT side.
+///
+/// Why: removed lines were skipped and the old-side counter was not kept, so
+/// a finding at a deleted line read as `off_diff`.
+/// What: plans findings at a removed-only line, a deleted file's line, and a
+/// removed line whose number is also a new-side line; asserts `LEFT` with the
+/// old-side number for the first two and `RIGHT` for the third (new side
+/// first), with nothing unanchored.
+/// Test: this test itself.
+#[test]
+fn deleted_line_finding_anchors_left() {
+    let c = CommentableLines::from_unified_diff(DELETION_DIFF);
+    let findings = vec![
+        finding_at("src/del.rs", Some(6)),
+        finding_at("src/gone.rs", Some(1)),
+        finding_at("src/del.rs", Some(5)),
+    ];
+    let plan = build_inline_plan(&findings, &c);
+
+    assert!(plan.unanchored.is_empty(), "{:?}", plan.unanchored);
+    assert_eq!(plan.inline_indices, vec![0, 1, 2]);
+    let anchors: Vec<(&str, u32, AnchorSide)> = plan
+        .comments
+        .iter()
+        .map(|c| (c.path.as_str(), c.line, c.side))
+        .collect();
+    assert_eq!(
+        anchors,
+        vec![
+            ("src/del.rs", 6, AnchorSide::Left),
+            ("src/gone.rs", 1, AnchorSide::Left),
+            ("src/del.rs", 5, AnchorSide::Right),
+        ]
+    );
+    assert!(plan.comments.iter().all(|c| c.subject_type.is_none()));
+    let json = serde_json::to_value(AnchorSide::Left).expect("serialize");
+    assert_eq!(json, "LEFT");
+}
+
+/// REGRESSION (#10762): a removed line that cannot anchor reads `deleted_line`.
+///
+/// Why: with no old-side index, every finding at a removed line read as
+/// `off_diff`, though the line is in the diff.
+/// What: indexes the deletion diff (removed old lines 5 and 6, context 4 not
+/// removed); plans a `citation_partial` finding at removed-only line 6
+/// (`deleted_line`) and one at line 5, which has a new-side match
+/// (`off_diff`, as before).
+/// Test: this test itself.
+#[test]
+fn removed_line_with_no_new_side_match_is_not_off_diff() {
+    let c = CommentableLines::from_unified_diff(DELETION_DIFF);
+    assert!(c.contains_removed("src/del.rs", 6));
+    // The `deleted file mode` header after the hunk is not a context line 6.
+    assert!(!c.contains("src/del.rs", 6), "line 6 has no new-side match");
+    assert!(!c.contains_removed("src/del.rs", 4), "a context line is not removed");
+    assert!(c.contains_removed("src/gone.rs", 2));
+
+    let mut removed_only = finding_at("src/del.rs", Some(6));
+    removed_only.citation_partial = true;
+    let mut both_sides = finding_at("src/del.rs", Some(5));
+    both_sides.citation_partial = true;
+    let plan = build_inline_plan(&[removed_only, both_sides], &c);
+
+    assert!(plan.comments.is_empty(), "a partial citation never posts inline");
+    assert_eq!(
+        plan.unanchored,
+        vec![
+            UnanchoredFinding {
+                finding_index: 0,
+                reason: UnanchoredReason::DeletedLine,
+            },
+            UnanchoredFinding {
+                finding_index: 1,
+                reason: UnanchoredReason::OffDiff,
+            },
+        ]
+    );
+    assert_eq!(plan.summary_findings.len(), 2);
+}
+
+/// REGRESSION (#10762): a no-line finding off the diff stays `no_line`.
+///
+/// Why: the file-level anchor applies only to a file the diff names; a
+/// no-line finding on any other file must still read `no_line`.
+/// What: asserts the diff names `src/db.rs` and not `src/other.rs`, then
+/// plans a no-line finding on each: the first anchors file-level, the second
+/// is `no_line` and goes to the summary.
+/// Test: this test itself.
+#[test]
+fn no_line_and_file_not_in_diff_is_unanchored_no_line() {
+    let c = CommentableLines::from_unified_diff(sample_diff());
+    assert!(c.contains_file("src/db.rs"));
+    assert!(!c.contains_file("src/other.rs"));
+
+    let findings = vec![
+        finding_at("src/db.rs", None),
+        finding_at("src/other.rs", None),
+    ];
+    let plan = build_inline_plan(&findings, &c);
+
+    assert_eq!(plan.inline_indices, vec![0]);
+    assert_eq!(plan.comments[0].subject_type, Some(SubjectType::File));
+    assert_eq!(
+        plan.unanchored,
+        vec![UnanchoredFinding {
+            finding_index: 1,
+            reason: UnanchoredReason::NoLine,
+        }]
+    );
+    assert_eq!(plan.summary_findings.len(), 1);
+    assert_eq!(plan.summary_findings[0].file, "src/other.rs");
 }
