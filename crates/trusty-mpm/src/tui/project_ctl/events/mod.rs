@@ -1,11 +1,12 @@
 //! Key dispatch for the `tm projects` TUI (#2118).
 //!
-//! **Tree (#10476)**: the Owner -> Project -> Sessions tree replaced the
-//! Projects and Sessions panes (Architect Q9). Every key those panes bound
-//! keeps its meaning and now acts on the selected tree node; the tree's own
-//! keys (arrows, Enter, `f`, `g`) and its read-only details overlay live in
-//! [`tree`]. The pane-scoped wording below predates the tree: read "Projects
-//! pane" as a project node and "Sessions pane" as a session node.
+//! **Two columns (#10754, Bob 11-06)**: the Owner -> Project tree is the left
+//! column and the selected node's sessions are the right one. Every key the
+//! old Projects and Sessions panes bound keeps its meaning: the project verbs
+//! (`l`/`c`/`v`) and the tree's own keys live in [`tree`], the session verbs
+//! (`f`/`k`/`r`/`d`/`a`, Enter for the read-only details overlay) in
+//! [`session_keys`]. The pane-scoped wording below predates the columns: read
+//! "Projects pane" as the left column and "Sessions pane" as the right one.
 //!
 //! Why: separating "a key arrives → mutate state, maybe request an async
 //! action" from the terminal pump keeps the dispatch pure and unit-testable,
@@ -89,6 +90,8 @@ use super::state::{ConfirmKind, Pane, ProjectCtlState, SessionRow};
 
 mod modal;
 mod mouse;
+mod mouse_cols;
+mod session_keys;
 mod tree;
 use modal::{handle_config_form_key, handle_confirm_key, handle_deliverable_view_key};
 pub use mouse::handle_mouse;
@@ -180,8 +183,8 @@ pub fn is_quit(key: &KeyEvent) -> bool {
 /// through `tree::handle_details_key`. Otherwise: Ctrl-C / `q` set
 /// `should_exit`. Tab/Shift+Tab cycle pane focus. Esc clears any shown
 /// notice. With the tree focused, every other key goes to
-/// `tree::handle_tree_key` (arrows, Enter, `f`, `g` and the lettered verbs —
-/// see its module doc). `l`/`r`/`a` return the matching [`PendingAction`]
+/// `tree::handle_tree_key`; with the session column focused (#10754), to
+/// `session_keys::handle_session_key` (see their module docs). `l`/`r`/`a` return the matching [`PendingAction`]
 /// immediately when a target is selected, else set an explanatory notice and
 /// return `None`. `c` calls [`ProjectCtlState::open_config_form`] directly (a
 /// pure state mutation, NOT a [`PendingAction`] — see the module doc) when a
@@ -228,6 +231,8 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
             None
         }
         _ if state.focus == Pane::Tree => tree::handle_tree_key(state, key),
+        // #10754: two-column MPM pane (Bob 11-06)
+        _ if state.focus == Pane::Sessions => session_keys::handle_session_key(state, key),
         _ => None,
     }
 }

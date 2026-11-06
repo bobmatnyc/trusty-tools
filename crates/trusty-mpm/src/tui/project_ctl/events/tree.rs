@@ -1,18 +1,16 @@
-//! Keys for the tree pane and its details overlay (#10476).
+//! Keys for the tree (left) column and the details overlay (#10476).
 //!
-//! Why: the tree replaced the Projects and Sessions panes (Architect Q9), so
-//! the keys those panes split between them now act on the selected tree node.
-//! Kept apart from `events/mod.rs`, which owns the modal precedence chain.
-//! What: [`handle_tree_key`] — Up/Down move; Left collapses or climbs to the
-//! parent; Right expands or steps into the first child; Enter toggles an
-//! owner or project and opens the details overlay on a session; `f` focuses
-//! the session's existing window; `g` toggles worker indentation. The verbs
-//! are unchanged: `c`/`v` act on a project node (as in the Projects pane),
-//! `l` on the selected node's project, and
-//! `k`/`r`/`d`/`a` act only on a session node (on an owner, project or
-//! anchor they set a notice and act on nothing). [`handle_details_key`] is
-//! the overlay's modal handler.
-//! Test: `events::tests` (`enter_on_owner_and_project_toggles`,
+//! Why: the tree replaced the Projects pane (Architect Q9). Kept apart from
+//! `events/mod.rs`, which owns the modal precedence chain.
+//! What: [`handle_tree_key`] — Up/Down move; Left collapses an owner or
+//! climbs to it; Right expands an owner or steps into its first project;
+//! Enter toggles an owner. #10754: two-column MPM pane (Bob 11-06) — Right
+//! or Enter on a project moves focus into the session column. `g` toggles
+//! worker indentation. `c`/`v` act on a project node, `l` on its project.
+//! The session verbs `f`/`k`/`r`/`d`/`a` belong to the session column; here
+//! they set a notice and act on nothing. [`handle_details_key`] is the
+//! overlay's modal handler.
+//! Test: `events::tests` (`enter_on_owner_toggles_and_on_project_enters_sessions`,
 //! `enter_on_session_opens_details_and_returns_no_pending_action`,
 //! `esc_closes_details`, `f_in_details_returns_focus`,
 //! `kill_resume_decommission_attach_on_bar_or_project_act_on_nothing`).
@@ -32,21 +30,11 @@ pub(super) fn handle_tree_key(state: &mut ProjectCtlState, key: KeyEvent) -> Opt
         KeyCode::Left => state.tree_left(),
         KeyCode::Right => state.tree_right(),
         KeyCode::Enter => enter(state),
-        KeyCode::Char('f') => return request_focus(state),
         KeyCode::Char('g') => state.toggle_worker_indent(),
-        KeyCode::Char('l') => {
-            return match state.selected_project_name() {
-                Some(name) => Some(PendingAction::Launch(name.to_string())),
-                None => {
-                    state.set_notice("no project selected");
-                    None
-                }
-            };
-        }
-        KeyCode::Char('k') => return request_kill(state),
-        KeyCode::Char('r') => return request_resume(state),
-        KeyCode::Char('d') => return request_decommission(state),
-        KeyCode::Char('a') => return selected_session_action(state, PendingAction::Attach),
+        KeyCode::Char('l') => return request_launch(state),
+        // #10754: two-column MPM pane (Bob 11-06) — the session verbs act on
+        // the right column only, so a key here never hits a session unseen.
+        KeyCode::Char('f' | 'k' | 'r' | 'd' | 'a') => state.set_notice("select a session first"),
         KeyCode::Char('c') => {
             if let Some(name) = project_node_name(state) {
                 state.open_config_form(name);
@@ -69,7 +57,6 @@ pub(super) fn handle_tree_key(state: &mut ProjectCtlState, key: KeyEvent) -> Opt
 fn project_node_name(state: &mut ProjectCtlState) -> Option<String> {
     match state.selected_node() {
         Some(NodeId::Project { name, .. }) => Some(name.clone()),
-        Some(NodeId::Session { .. } | NodeId::Anchor { .. }) => None,
         Some(NodeId::Owner(_)) | None => {
             state.set_notice("no project selected");
             None
@@ -77,23 +64,44 @@ fn project_node_name(state: &mut ProjectCtlState) -> Option<String> {
     }
 }
 
-/// Enter: toggle an owner or project; open details on a session.
+/// Enter: toggle an owner; on a project, enter the session column.
 ///
-/// #10476: before the tree, Enter on a session did nothing. A click on a row
-/// runs this too (`events::mouse`).
-pub(super) fn enter(state: &mut ProjectCtlState) {
+/// #10754: two-column MPM pane (Bob 11-06) — a project has no children left.
+fn enter(state: &mut ProjectCtlState) {
     match state.selected_node() {
-        Some(NodeId::Owner(_) | NodeId::Project { .. }) => state.toggle_selected(),
-        Some(NodeId::Session { .. }) => {
-            state.open_details();
-        }
-        Some(NodeId::Anchor { .. }) => state.set_notice("this parent session is not listed"),
+        Some(NodeId::Owner(_)) => state.toggle_selected(),
+        Some(NodeId::Project { .. }) => state.focus_sessions(),
         None => {}
     }
 }
 
+/// `l`: launch a session in the selected project, from either column.
+///
+/// #10754: in the session column the target is the selected session's
+/// project when the left column has an owner selected.
+pub(super) fn request_launch(state: &mut ProjectCtlState) -> Option<PendingAction> {
+    let project = state
+        .selected_project_name()
+        .map(str::to_string)
+        .or_else(|| {
+            let id = state.selected_session()?.id.clone();
+            state
+                .sessions_by_project
+                .iter()
+                .find(|(_, rows)| rows.iter().any(|s| s.id == id))
+                .map(|(name, _)| name.clone())
+        });
+    match project {
+        Some(name) => Some(PendingAction::Launch(name)),
+        None => {
+            state.set_notice("no project selected");
+            None
+        }
+    }
+}
+
 /// `f`: focus the selected session's existing tmux window or iTerm2 tab.
-fn request_focus(state: &mut ProjectCtlState) -> Option<PendingAction> {
+pub(super) fn request_focus(state: &mut ProjectCtlState) -> Option<PendingAction> {
     match state.selected_session() {
         Some(session) => Some(PendingAction::Focus(session.name.clone())),
         None => {

@@ -8,8 +8,10 @@
 //! What: [`TreeView`] holds the rows, the selection, the collapsed set, the
 //! worker-indent toggle and the open details overlay. The
 //! [`ProjectCtlState`] methods below move, toggle and clamp the selection.
+//! #10754: two-column MPM pane (Bob 11-06) — the tree is the left column; a
+//! selection change rebuilds the session column (`super::session_col`).
 //! Test: `selection_and_expanded_survive_repoll`,
-//! `removed_selected_session_clamps_to_project`, `left_on_child_goes_to_parent`.
+//! `removed_selected_project_clamps_to_owner`, `left_on_child_goes_to_parent`.
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -55,6 +57,8 @@ pub struct TreeView {
 pub struct HitMap {
     /// The tree list's rows: its area without the borders.
     pub tree_rows: Rect,
+    /// #10754: the session column's rows, when that column is drawn.
+    pub session_rows: Rect,
     /// The action bar's `[f] focus` label, when the bar shows it.
     pub bar_focus: Option<Rect>,
     /// The details overlay's whole area, when it is drawn.
@@ -98,30 +102,30 @@ impl ProjectCtlState {
     /// Why: the one path both the poller and every toggle use, so a repoll
     /// and a key press can never disagree about which rows exist.
     /// What: [`build_tree`] over the current lists and collapsed set, then
-    /// [`ProjectCtlState::clamp_selection`].
+    /// [`ProjectCtlState::clamp_selection`], then the session column.
     /// Test: `selection_and_expanded_survive_repoll`,
     /// `collapse_survives_a_rebuild`, `node_added_on_a_later_poll_starts_expanded`.
     pub fn rebuild_tree(&mut self) {
-        // #10476: owner/project/session rows replace the two flat lists.
+        // #10476: owner/project rows replace the Projects list.
         self.tree.rows = build_tree(
             &self.projects,
             &self.sessions_by_project,
             &self.tree.collapsed,
-            !self.tree.flat_workers,
             aliases(),
         );
         self.clamp_selection();
+        // #10754: two-column MPM pane (Bob 11-06)
+        self.rebuild_session_col();
     }
 
     /// Keep the selection on a visible row.
     ///
-    /// Why: a selected session can be decommissioned, and a project can leave
-    /// the registry, between two polls. The operator should land on the
+    /// Why: a project can leave the registry between two polls. The operator should land on the
     /// nearest surviving ancestor, not on an unrelated row.
     /// What: an empty tree keeps the selection untouched. Otherwise the
     /// selection walks [`NodeId::parent`] until it names a visible row; when
     /// nothing in its chain is visible, the first row is selected.
-    /// Test: `removed_selected_session_clamps_to_project`,
+    /// Test: `removed_selected_project_clamps_to_owner`,
     /// `empty_tree_keeps_the_selection_for_recovery`.
     fn clamp_selection(&mut self) {
         if self.tree.rows.is_empty() {
@@ -162,11 +166,13 @@ impl ProjectCtlState {
             .unwrap_or(0);
         self.tree.nav.sync_len(self.tree.rows.len());
         self.tree.nav.select(index);
+        // #10754: two-column MPM pane (Bob 11-06)
+        self.rebuild_session_col();
     }
 
     /// Select the visible row at `index`; `false` when there is no such row.
     ///
-    /// Test: `click_blank_space_ignored`, `click_session_opens_details`.
+    /// Test: `click_blank_space_ignored`, `click_project_selects_and_focuses_tree`.
     pub(crate) fn select_row(&mut self, index: usize) -> bool {
         // #10476: a click names a row by position; the selection stays a NodeId.
         match self.tree.rows.get(index).map(|row| row.id.clone()) {
@@ -238,12 +244,17 @@ impl ProjectCtlState {
         }
     }
 
-    /// Right: expand a closed owner or project, else step into its first child.
+    /// Right: expand a closed owner, else step into its first child; on a
+    /// project (a leaf) move focus into the session column.
+    ///
+    /// Test: `left_collapses_then_right_expands`, `tab_and_arrows_move_focus_between_columns`.
     pub fn tree_right(&mut self) {
         let Some(id) = self.tree.selected.clone() else {
             return;
         };
         if !id.is_expandable() {
+            // #10754: two-column MPM pane (Bob 11-06)
+            self.focus_sessions();
             return;
         }
         if self.tree.collapsed.remove(&id) {
@@ -256,7 +267,7 @@ impl ProjectCtlState {
         }
     }
 
-    /// Enter on an owner or project: flip it open or closed.
+    /// Enter on an owner: flip it open or closed.
     pub fn toggle_selected(&mut self) {
         let Some(id) = self.tree.selected.clone() else {
             return;

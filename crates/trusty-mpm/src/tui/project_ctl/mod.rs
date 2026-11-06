@@ -30,6 +30,9 @@ mod trace;
 
 #[cfg(test)]
 mod tests;
+// #10754: two-column MPM pane (Bob 11-06)
+#[cfg(test)]
+mod two_column_tests;
 
 use std::io::Stdout;
 use std::time::Duration;

@@ -4,9 +4,11 @@
 //! like `f` (#10476 comment 2). The handler stays pure, like `handle_key`, so
 //! every branch is testable with synthetic events.
 //! What: [`handle_mouse`] reads the rectangles the last frame recorded in
-//! [`HitMap`] and routes one event. A click on a tree row selects it and then
-//! does what Enter does. A click on a focus button sends an `f` key through
-//! [`handle_key`], so the two cannot diverge. The wheel moves the selection.
+//! [`HitMap`] and routes one event. #10754: two-column MPM pane (Bob 11-06) —
+//! a row click in either column selects the row and focuses its column
+//! (`super::mouse_cols`). A click on a focus button sends an `f` key through
+//! [`handle_key`], so the two cannot diverge. The wheel moves the selection
+//! of the column under the cursor.
 //! Everything else does nothing: a blank row, another pane, a button release,
 //! and any event under a modal. The details overlay is the one modal that takes
 //! a click, on its own focus button only.
@@ -17,8 +19,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{PendingAction, handle_key, tree};
-use crate::tui::project_ctl::state::{Pane, ProjectCtlState};
+use super::{PendingAction, handle_key, mouse_cols, tree};
+use crate::tui::project_ctl::state::ProjectCtlState;
 
 /// The tree row drawn at `(column, row)`, by index into the visible rows.
 ///
@@ -52,7 +54,7 @@ fn on_focus_button(state: &ProjectCtlState, column: u16, row: u16) -> bool {
 /// run loop draws between any two events, so a click always maps to what the
 /// operator saw.
 /// What: see the module doc.
-/// Test: `click_owner_toggles`, `click_project_toggles`,
+/// Test: `click_owner_toggles`, `click_project_selects_and_focuses_tree`,
 /// `click_session_opens_details`, `click_blank_space_ignored`,
 /// `click_outside_pane_ignored`, `click_under_modal_ignored`,
 /// `click_focus_button_returns_focus`, `wheel_moves_selection`,
@@ -75,30 +77,15 @@ pub fn handle_mouse(state: &mut ProjectCtlState, mouse: MouseEvent) -> Option<Pe
             if on_focus_button(state, column, row) {
                 return handle_key(state, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
             }
-            if state.tree.details.is_some() {
-                return None;
-            }
-            let index = row_at(
-                state.tree.hit.tree_rows,
-                state.tree.nav.offset(),
-                column,
-                row,
-            )?;
-            if state.select_row(index) {
-                state.focus = Pane::Tree;
-                tree::enter(state);
+            if state.tree.details.is_none() {
+                mouse_cols::click_row(state, column, row);
             }
             None
         }
         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-            let in_tree = state
-                .tree
-                .hit
-                .tree_rows
-                .contains(Position::new(column, row));
-            if in_tree && state.tree.details.is_none() {
-                state.focus = Pane::Tree;
-                state.tree_step(mouse.kind == MouseEventKind::ScrollDown);
+            if state.tree.details.is_none() {
+                let down = mouse.kind == MouseEventKind::ScrollDown;
+                mouse_cols::wheel(state, column, row, down);
             }
             None
         }
@@ -111,7 +98,7 @@ mod tests {
     use super::*;
     use crate::project::Project;
     use crate::tui::project_ctl::layout;
-    use crate::tui::project_ctl::state::{ConfirmKind, NodeId, ProjectRow, SessionRow};
+    use crate::tui::project_ctl::state::{ConfirmKind, NodeId, Pane, ProjectRow, SessionRow};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn owner() -> NodeId {
@@ -125,12 +112,13 @@ mod tests {
         }
     }
 
-    fn session(id: &str) -> NodeId {
-        NodeId::Session {
-            owner: "acme".to_string(),
-            project: "alpha".to_string(),
-            id: id.to_string(),
-        }
+    /// #10754: select session `id` in the right column (alpha on the left).
+    fn select_session(state: &mut ProjectCtlState, id: &str) {
+        assert!(state.focus_session(id), "{id} is listed");
+    }
+
+    fn selected_session_id(state: &ProjectCtlState) -> Option<String> {
+        state.selected_session().map(|s| s.id.clone())
     }
 
     /// acme/alpha with `sessions` sessions, opened, with the owner selected.
@@ -189,6 +177,18 @@ mod tests {
         state.tree.hit.tree_rows.y + (index - state.tree.nav.offset()) as u16
     }
 
+    /// #10754: the screen cell showing session `id` in the right column.
+    fn session_cell(state: &ProjectCtlState, id: &str) -> (u16, u16) {
+        let col = &state.session_col;
+        let index = col
+            .rows
+            .iter()
+            .position(|r| r.session_id() == Some(id))
+            .expect("a drawn session row");
+        let rows = state.tree.hit.session_rows;
+        (rows.x + 2, rows.y + (index - col.nav.offset()) as u16)
+    }
+
     fn index_of(state: &ProjectCtlState, id: &NodeId) -> usize {
         state
             .tree
@@ -229,14 +229,18 @@ mod tests {
         assert!(state.tree.is_expanded(&owner()), "click reopens");
     }
 
+    /// #10754: a project is a leaf now; a click selects it and focuses the
+    /// left column.
     #[test]
-    fn click_project_toggles() {
+    fn click_project_selects_and_focuses_tree() {
         let mut state = state_with(2);
+        state.focus = Pane::Activity;
         draw(&mut state, 80, 24);
         let row = screen_row(&state, index_of(&state, &project("alpha")));
         assert_eq!(click(&mut state, 5, row), None);
         assert_eq!(state.selected_node(), Some(&project("alpha")));
-        assert!(!state.tree.is_expanded(&project("alpha")));
+        assert_eq!(state.focus, Pane::Tree);
+        assert!(state.tree.details.is_none());
     }
 
     /// #10476: the session goes while its overlay is open. The overlay draws
@@ -249,7 +253,7 @@ mod tests {
             MouseEventKind::ScrollDown,
         ] {
             let mut state = state_with(1);
-            state.select_node(session("s0"));
+            select_session(&mut state, "s0");
             assert!(state.open_details());
             state.sessions_by_project.get_mut("alpha").unwrap().clear();
             state.rebuild_tree();
@@ -284,9 +288,14 @@ mod tests {
     fn click_session_opens_details() {
         let mut state = state_with(2);
         draw(&mut state, 80, 24);
-        let row = screen_row(&state, index_of(&state, &session("s1")));
-        assert_eq!(click(&mut state, 5, row), None, "details need no daemon");
-        assert_eq!(state.selected_node(), Some(&session("s1")));
+        let (column, row) = session_cell(&state, "s1");
+        assert_eq!(
+            click(&mut state, column, row),
+            None,
+            "details need no daemon"
+        );
+        assert_eq!(selected_session_id(&state).as_deref(), Some("s1"));
+        assert_eq!(state.focus, Pane::Sessions);
         assert_eq!(state.tree.details.as_deref(), Some("s1"));
     }
 
@@ -296,7 +305,7 @@ mod tests {
         draw(&mut state, 80, 24);
         let before = state.selected_node().cloned();
         let expanded = state.tree.collapsed.clone();
-        // Rows 0-3 hold owner, project and two sessions; the next one is blank.
+        // Rows 0-1 hold the owner and the project; the next one is blank.
         let blank = screen_row(&state, state.tree.rows.len());
         assert_eq!(click(&mut state, 5, blank), None);
         assert_eq!(state.selected_node().cloned(), before);
@@ -350,9 +359,9 @@ mod tests {
                     project_key: None,
                 },
             );
-            state.select_node(session("s0"));
+            select_session(&mut state, "s0");
             draw(&mut state, 80, 24);
-            let row = screen_row(&state, index_of(&state, &session("s1")));
+            let (column, row) = session_cell(&state, "s1");
             let button = state.tree.hit.bar_focus.expect("the bar's button");
             open(&mut state);
             assert!(
@@ -362,23 +371,24 @@ mod tests {
                 "the modal must really be open"
             );
 
-            assert_eq!(click(&mut state, 5, row), None);
+            assert_eq!(click(&mut state, column, row), None);
             assert_eq!(click(&mut state, button.x, button.y), None);
-            let wheel = at(MouseEventKind::ScrollDown, 5, row);
+            let wheel = at(MouseEventKind::ScrollDown, column, row);
             assert_eq!(handle_mouse(&mut state, wheel), None);
-            assert_eq!(state.selected_node(), Some(&session("s0")));
+            assert_eq!(selected_session_id(&state).as_deref(), Some("s0"));
             assert_eq!(state.tree.details, None);
         }
 
         // The details overlay swallows row clicks and the wheel too.
         let mut state = state_with(2);
-        state.select_node(session("s0"));
+        select_session(&mut state, "s0");
+        draw(&mut state, 80, 24);
+        let (column, row) = session_cell(&state, "s1");
         assert!(state.open_details());
         draw(&mut state, 80, 24);
-        let row = screen_row(&state, index_of(&state, &session("s1")));
-        assert_eq!(click(&mut state, 5, row), None);
-        handle_mouse(&mut state, at(MouseEventKind::ScrollDown, 5, row));
-        assert_eq!(state.selected_node(), Some(&session("s0")));
+        assert_eq!(click(&mut state, column, row), None);
+        handle_mouse(&mut state, at(MouseEventKind::ScrollDown, column, row));
+        assert_eq!(selected_session_id(&state).as_deref(), Some("s0"));
         assert_eq!(state.tree.details.as_deref(), Some("s0"));
     }
 
@@ -386,7 +396,7 @@ mod tests {
     fn click_focus_button_returns_focus() {
         let f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
         let mut state = state_with(1);
-        state.select_node(session("s0"));
+        select_session(&mut state, "s0");
         draw(&mut state, 100, 24);
 
         // The action bar's button: same result as the key, and no details.
@@ -424,7 +434,7 @@ mod tests {
     #[test]
     fn bar_button_under_the_overlay_is_ignored() {
         let mut state = state_with(1);
-        state.select_node(session("s0"));
+        select_session(&mut state, "s0");
         assert!(state.open_details());
         // Narrower and shorter than the overlay, which then fills the frame.
         draw(&mut state, 60, 13);
@@ -471,14 +481,16 @@ mod tests {
 
     /// The hit test uses the list's real offset: on a short terminal, with the
     /// selection scrolled far down, a click lands on the row drawn under it.
+    /// #10754: the session list is the right column now.
     #[test]
     fn click_hits_the_drawn_row_when_scrolled() {
         let mut state = state_with(30);
-        state.select_node(session("s29"));
+        select_session(&mut state, "s29");
         let terminal = draw(&mut state, 80, 14);
-        assert!(state.tree.nav.offset() > 0, "the tree must have scrolled");
+        let offset = state.session_col.nav.offset();
+        assert!(offset > 0, "the session column must have scrolled");
 
-        let rows = state.tree.hit.tree_rows;
+        let rows = state.tree.hit.session_rows;
         let screen = rows.y + 1;
         let line: String = (rows.x..rows.right())
             .map(|x| {
@@ -487,8 +499,11 @@ mod tests {
                     .to_string()
             })
             .collect();
-        let expected = state.tree.nav.offset() + 1;
-        let NodeId::Session { id, .. } = state.tree.rows[expected].id.clone() else {
+        let expected = offset + 1;
+        let Some(id) = state.session_col.rows[expected]
+            .session_id()
+            .map(str::to_string)
+        else {
             panic!("row {expected} should be a session");
         };
         let number = id.trim_start_matches('s');

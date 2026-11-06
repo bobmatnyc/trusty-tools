@@ -105,7 +105,8 @@ fn project_node(name: &str) -> NodeId {
     }
 }
 
-/// Select alpha's lone session — what focusing the Sessions pane used to mean.
+/// Select alpha's lone session in the right column, focusing that column
+/// (#10754: two-column MPM pane).
 fn on_session(state: &mut ProjectCtlState) {
     assert!(state.focus_session("sess-1"));
 }
@@ -125,12 +126,17 @@ fn quit_on_bare_q_and_ctrl_c() {
 fn tab_cycles_focus_forward_and_back() {
     let mut state = seeded_state();
     assert_eq!(state.focus, Pane::Tree);
+    // #10754: two-column MPM pane (Bob 11-06)
+    handle_key(&mut state, key(KeyCode::Tab));
+    assert_eq!(state.focus, Pane::Sessions);
     handle_key(&mut state, key(KeyCode::Tab));
     assert_eq!(state.focus, Pane::Activity);
     handle_key(&mut state, key(KeyCode::Tab));
     assert_eq!(state.focus, Pane::Tree);
     handle_key(&mut state, key(KeyCode::BackTab));
     assert_eq!(state.focus, Pane::Activity);
+    handle_key(&mut state, key(KeyCode::BackTab));
+    assert_eq!(state.focus, Pane::Sessions);
 }
 
 #[test]
@@ -152,16 +158,20 @@ fn arrow_keys_do_nothing_in_the_activity_pane() {
     assert_eq!(state.selected_project().unwrap().name, "alpha");
 }
 
+/// #10754: a project is a leaf of the left column; Enter on it moves focus
+/// into the session column, which then selects the project's first session.
 #[test]
-fn enter_on_owner_and_project_toggles() {
+fn enter_on_owner_toggles_and_on_project_enters_sessions() {
     let mut state = seeded_state();
-    let alpha = project_node("alpha");
     assert!(handle_key(&mut state, key(KeyCode::Enter)).is_none());
-    assert!(state.tree.is_expanded(&alpha), "Enter opens a project");
-    assert!(state.tree.rows.iter().any(|r| matches!(&r.id,
-        NodeId::Session { id, .. } if id == "sess-1")));
-    handle_key(&mut state, key(KeyCode::Enter));
-    assert!(!state.tree.is_expanded(&alpha), "Enter closes it again");
+    assert_eq!(state.focus, Pane::Sessions, "Enter enters the sessions");
+    assert_eq!(
+        state.selected_session().map(|s| s.id.as_str()),
+        Some("sess-1")
+    );
+    assert_eq!(state.selected_node(), Some(&project_node("alpha")));
+    assert!(state.tree.details.is_none(), "entering opens no details");
+    state.focus = Pane::Tree;
 
     let acme = NodeId::Owner("acme".to_string());
     state.select_node(acme.clone());

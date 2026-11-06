@@ -7,8 +7,9 @@
 //! change with [`Pane`] focus, not read as one fixed string: showing
 //! `[k] kill  [d] decommission  …` while the Projects or Activity pane is
 //! focused would be misleading — those keys are no-ops there.
-//! #10476: in the tree, the hint also follows the selected node's kind,
-//! because the tree holds owners, projects and sessions in one pane.
+//! #10476: in the tree, the hint also follows the selected node's kind.
+//! #10754: two-column MPM pane (Bob 11-06) — the session column has its own
+//! hint, which carries the session verbs.
 //! What: [`focus_hint`] / [`confirm_prompt_text`] / [`bar_text`] are pure
 //! builders (unit tested without a terminal); [`render`] draws the result
 //! reversed, matching every other TUI screen's status bar.
@@ -26,13 +27,13 @@ use ratatui::{
 use super::session_details::DETAILS_KEYS;
 use crate::tui::project_ctl::state::{NodeId, Pane, PendingConfirm, ProjectCtlState};
 
-/// Key-hint text while an owner bar is selected.
+/// Key-hint text while an owner bar is selected in the left column.
 pub const OWNER_HINT: &str =
     "[Enter/←→] expand  [↑↓] select  [g] workers  [Tab] switch pane  [q] quit";
-/// Key-hint text while a project node is selected.
-pub const PROJECTS_HINT: &str = "[Enter/←→] expand  [l] launch  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
-/// Key-hint text while a session node is selected.
-pub const SESSIONS_HINT: &str = "[Enter] details  [f] focus  [l] launch  [k] kill  [r] resume  [d] decommission  [a] attach-cmd  [←] up  [q] quit";
+/// Key-hint text while a project is selected in the left column.
+pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [l] launch  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
+/// Key-hint text while the session column has focus.
+pub const SESSIONS_HINT: &str = "[Enter] details  [f] focus  [l] launch  [k] kill  [r] resume  [d] decommission  [a] attach-cmd  [←] projects  [q] quit";
 /// Key-hint text shown while the Activity pane has focus (no verbs bound
 /// there — it is a read-only status strip).
 pub const ACTIVITY_HINT: &str = "[Tab] switch pane  [q] quit";
@@ -46,10 +47,10 @@ pub const DAEMON_UNREACHABLE: &str = "daemon ✗";
 ///
 /// Why: pulled out of [`bar_text`] so the mapping is directly unit-testable
 /// without going through the notice/confirm precedence chain.
-/// What: [`ACTIVITY_HINT`] for the Activity pane. In the tree (#10476): the
-/// details overlay's keys while it is open, else [`OWNER_HINT`] /
-/// [`PROJECTS_HINT`] / [`SESSIONS_HINT`] by the selected node (an anchor
-/// reads as a project; nothing selected reads as an owner).
+/// What: [`ACTIVITY_HINT`] for the Activity pane; the details overlay's keys
+/// while it is open; [`SESSIONS_HINT`] for the session column (#10754); in
+/// the tree, [`OWNER_HINT`] / [`PROJECTS_HINT`] by the selected node (nothing
+/// selected reads as an owner).
 /// Test: `focus_hint_differs_per_node_kind`.
 pub fn focus_hint(state: &ProjectCtlState) -> &'static str {
     if state.focus == Pane::Activity {
@@ -58,9 +59,12 @@ pub fn focus_hint(state: &ProjectCtlState) -> &'static str {
     if state.tree.details.is_some() {
         return DETAILS_KEYS;
     }
+    // #10754: two-column MPM pane (Bob 11-06)
+    if state.focus == Pane::Sessions {
+        return SESSIONS_HINT;
+    }
     match state.selected_node() {
-        Some(NodeId::Session { .. }) => SESSIONS_HINT,
-        Some(NodeId::Project { .. } | NodeId::Anchor { .. }) => PROJECTS_HINT,
+        Some(NodeId::Project { .. }) => PROJECTS_HINT,
         Some(NodeId::Owner(_)) | None => OWNER_HINT,
     }
 }
@@ -167,8 +171,9 @@ mod tests {
     use super::*;
     use crate::tui::project_ctl::state::ConfirmKind;
 
-    /// acme/alpha with one session, selected at `node`.
-    fn state_at(node: Option<NodeId>) -> ProjectCtlState {
+    /// acme/alpha with one session, selected at `node` (a session id selects
+    /// it in the right column and focuses that column).
+    fn state_at(node: Option<Node>) -> ProjectCtlState {
         let mut state = ProjectCtlState {
             projects: vec![crate::tui::project_ctl::state::ProjectRow {
                 name: "alpha".to_string(),
@@ -185,25 +190,28 @@ mod tests {
             }],
         );
         match node {
-            Some(node) => state.select_node(node),
+            Some(Node::Tree(node)) => state.select_node(node),
+            Some(Node::Session(id)) => assert!(state.focus_session(id)),
             None => state.rebuild_tree(),
         }
         state
     }
 
-    fn project_node() -> NodeId {
-        NodeId::Project {
-            owner: "acme".to_string(),
-            name: "alpha".to_string(),
-        }
+    /// Where a test state's selection sits.
+    enum Node {
+        Tree(NodeId),
+        Session(&'static str),
     }
 
-    fn session_node() -> NodeId {
-        NodeId::Session {
+    fn project_node() -> Node {
+        Node::Tree(NodeId::Project {
             owner: "acme".to_string(),
-            project: "alpha".to_string(),
-            id: "s1".to_string(),
-        }
+            name: "alpha".to_string(),
+        })
+    }
+
+    fn session_node() -> Node {
+        Node::Session("s1")
     }
 
     #[test]
