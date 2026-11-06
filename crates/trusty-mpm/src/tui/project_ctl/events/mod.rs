@@ -127,6 +127,16 @@ pub enum PendingAction {
     /// #10476: `f` on a session — move to its existing tmux window or iTerm2
     /// tab (by tmux session name); never opens a new one.
     Focus(String),
+    // #10754: S3 tm ls actions plumbing (keys wait on De1). No key produces
+    // these four yet; `super::session_ops` dispatches them through the hooks.
+    /// Open the session (resume if needed, then attach), as `tm ls` Enter.
+    OpenSession(String),
+    /// Rename the session `(id, new_name)`, as `tm ls` `r`.
+    RenameSession(String, String),
+    /// Start a new session in the named project, as `tm ls` `n`.
+    NewSession(String),
+    /// Delete the session by its state's route, as `tm ls` `d`.
+    DeleteSession(String),
 }
 
 /// Manual `PartialEq` (not derived): [`PatchProjectArgs`] — a contract type
@@ -145,6 +155,10 @@ impl PartialEq for PendingAction {
             (Self::Decommission(a), Self::Decommission(b)) => a == b,
             (Self::Attach(a), Self::Attach(b)) => a == b,
             (Self::Focus(a), Self::Focus(b)) => a == b,
+            (Self::OpenSession(a), Self::OpenSession(b)) => a == b,
+            (Self::RenameSession(a, x), Self::RenameSession(b, y)) => a == b && x == y,
+            (Self::NewSession(a), Self::NewSession(b)) => a == b,
+            (Self::DeleteSession(a), Self::DeleteSession(b)) => a == b,
             (Self::SubmitConfig(name_a, args_a), Self::SubmitConfig(name_b, args_b)) => {
                 name_a == name_b
                     && serde_json::to_value(args_a).ok() == serde_json::to_value(args_b).ok()

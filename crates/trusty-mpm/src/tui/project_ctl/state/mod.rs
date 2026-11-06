@@ -35,6 +35,8 @@ pub use modals::{
     ConfigFormField, ConfigFormFocus, ConfigFormTags, ConfigFormView, DeliverableView,
 };
 // #10476: the tree model and its navigation, kept out of this file (SLOC cap).
+// #10754: S3 tm ls actions plumbing (keys wait on De1).
+pub mod rename;
 pub mod session_col;
 pub mod tree;
 pub mod tree_nav;

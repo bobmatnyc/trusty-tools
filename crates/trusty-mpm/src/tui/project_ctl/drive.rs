@@ -26,6 +26,8 @@ use super::poll::tick::{HealthCadence, PollOutcome, PollRequest, apply_tick, req
 use super::state::ProjectCtlState;
 use super::trace::TuiTrace;
 use crate::client::DaemonClient;
+use crate::tui::session_hooks::ScreenHandoff;
+use crate::tui::terminal::TuiTerminal;
 
 /// How long [`drive`] blocks waiting for an event before redrawing.
 ///
@@ -41,6 +43,57 @@ pub(crate) trait EventSource {
 
 /// The real terminal's events, through crossterm.
 pub(crate) struct TerminalEvents;
+
+/// What [`drive`] draws on, and lends out around an attach.
+///
+/// #10754: S3 tm ls actions plumbing (keys wait on De1).
+/// Why: the draw closure holds the only `&mut Terminal`, and the open and
+/// new-session actions must suspend and resume that same terminal. One value
+/// that does all three gives the dispatcher the terminal without a second
+/// borrow, for both the standalone and the console-home entry points.
+/// What: a plain draw closure is a `Screen` whose hand-off does nothing (the
+/// tests' screens); [`TerminalScreen`] is the real one.
+/// Test: `open_suspends_and_resumes_around_the_hook`.
+pub(crate) trait Screen: ScreenHandoff {
+    /// Draw one frame of `state`.
+    fn draw(&mut self, state: &mut ProjectCtlState) -> anyhow::Result<()>;
+}
+
+impl<F: FnMut(&mut ProjectCtlState) -> anyhow::Result<()>> ScreenHandoff for F {
+    fn suspend(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn resume(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<F: FnMut(&mut ProjectCtlState) -> anyhow::Result<()>> Screen for F {
+    fn draw(&mut self, state: &mut ProjectCtlState) -> anyhow::Result<()> {
+        self(state)
+    }
+}
+
+/// The real terminal: ratatui draws, `tui::terminal` suspends and resumes.
+pub(crate) struct TerminalScreen<'a>(pub(crate) &'a mut TuiTerminal);
+
+impl ScreenHandoff for TerminalScreen<'_> {
+    fn suspend(&mut self) -> std::io::Result<()> {
+        crate::tui::terminal::suspend(self.0)
+    }
+
+    fn resume(&mut self) -> std::io::Result<()> {
+        crate::tui::terminal::resume(self.0)
+    }
+}
+
+impl Screen for TerminalScreen<'_> {
+    fn draw(&mut self, state: &mut ProjectCtlState) -> anyhow::Result<()> {
+        self.0.draw(|frame| super::layout::render(frame, state))?;
+        Ok(())
+    }
+}
 
 /// Is this event pointer motion, which nothing in the projects view acts on?
 ///
@@ -92,7 +145,7 @@ pub(crate) async fn drive<D, E, P, F>(
     trace: &mut TuiTrace,
 ) -> anyhow::Result<()>
 where
-    D: FnMut(&mut ProjectCtlState) -> anyhow::Result<()>,
+    D: Screen,
     E: EventSource,
     P: Fn(DaemonClient, PollRequest) -> F,
     F: Future<Output = PollOutcome> + Send + 'static,
@@ -104,7 +157,7 @@ where
 
     let result = loop {
         let frame_start = Instant::now();
-        if let Err(e) = draw(&mut state) {
+        if let Err(e) = draw.draw(&mut state) {
             break Err(e);
         }
         trace.draw(frame_start.elapsed());
@@ -116,8 +169,10 @@ where
             Err(e) => break Err(e.into()),
             Ok(Some(Event::Key(key))) => {
                 key_at = Some(Instant::now());
-                if let Some(action) = handle_key(&mut state, key) {
-                    actions::dispatch(&mut state, client, action).await;
+                if let Some(action) = handle_key(&mut state, key)
+                    && let Err(e) = actions::dispatch_on(&mut state, client, action, draw).await
+                {
+                    break Err(e);
                 }
                 if state.should_exit {
                     break Ok(());
@@ -126,8 +181,10 @@ where
             // #10476: a click can request the same actions a key can.
             Ok(Some(Event::Mouse(mouse))) => {
                 key_at = Some(Instant::now());
-                if let Some(action) = handle_mouse(&mut state, mouse) {
-                    actions::dispatch(&mut state, client, action).await;
+                if let Some(action) = handle_mouse(&mut state, mouse)
+                    && let Err(e) = actions::dispatch_on(&mut state, client, action, draw).await
+                {
+                    break Err(e);
                 }
             }
             Ok(_) => {}

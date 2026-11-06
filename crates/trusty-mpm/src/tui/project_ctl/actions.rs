@@ -36,9 +36,11 @@
 use crate::client::{CommandExecutor, DaemonClient};
 
 use super::events::PendingAction;
+use super::session_ops::{self, SessionOp};
 use super::state::ProjectCtlState;
+use crate::tui::session_hooks::ScreenHandoff;
 
-/// Route one [`PendingAction`] to its `DaemonClient` call and update `state`.
+/// Route one [`PendingAction`] to its handler and update `state`.
 ///
 /// Why: the single async seam the run loop calls after `handle_key` returns
 /// `Some(action)`.
@@ -58,7 +60,45 @@ use super::state::ProjectCtlState;
 /// explicit #2120 requirement that a rejected submit never discards the
 /// operator's other unsaved edits. `Focus` (#10476) runs
 /// [`crate::tui::focus::focus_session`] and shows its one-line result.
+/// #10754: the four `tm ls` verbs (`OpenSession`, `RenameSession`,
+/// `NewSession`, `DeleteSession`) go to [`super::session_ops::run`] with
+/// `screen`, which hands the terminal over around an attach. Only a failed
+/// terminal resume is an `Err`.
+pub(crate) async fn dispatch_on(
+    state: &mut ProjectCtlState,
+    client: &DaemonClient,
+    action: PendingAction,
+    screen: &mut dyn ScreenHandoff,
+) -> anyhow::Result<()> {
+    // #10754: S3 tm ls actions plumbing (keys wait on De1).
+    let op = match action {
+        PendingAction::OpenSession(id) => SessionOp::Open(id),
+        PendingAction::RenameSession(id, name) => SessionOp::Rename(id, name),
+        PendingAction::NewSession(project) => SessionOp::New(project),
+        PendingAction::DeleteSession(id) => SessionOp::Delete(id),
+        other => {
+            dispatch_daemon(state, client, other).await;
+            return Ok(());
+        }
+    };
+    session_ops::run(state, client, op, screen).await
+}
+
+/// [`dispatch_on`] with no terminal to hand over, for tests that drive one
+/// daemon verb.
+#[cfg(test)]
 pub(crate) async fn dispatch(
+    state: &mut ProjectCtlState,
+    client: &DaemonClient,
+    action: PendingAction,
+) {
+    let mut none = session_ops::NoHandoff;
+    // NoHandoff never fails, so neither does this.
+    let _ = dispatch_on(state, client, action, &mut none).await;
+}
+
+/// The daemon-call verbs of [`dispatch_on`].
+async fn dispatch_daemon(
     state: &mut ProjectCtlState,
     client: &DaemonClient,
     action: PendingAction,
@@ -109,6 +149,11 @@ pub(crate) async fn dispatch(
                 Err(e) => state.set_config_form_error(format!("{e}")),
             }
         }
+        // Routed to `session_ops` by `dispatch_on` before this match.
+        PendingAction::OpenSession(_)
+        | PendingAction::RenameSession(..)
+        | PendingAction::NewSession(_)
+        | PendingAction::DeleteSession(_) => {}
     }
 }
 
