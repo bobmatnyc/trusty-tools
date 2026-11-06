@@ -576,12 +576,18 @@ fn config_form_swallows_quit_and_pane_keys() {
 fn lettered_actions_are_ignored_outside_their_pane() {
     let mut state = seeded_state();
     on_session(&mut state);
-    // #10476: the Activity pane binds no verb (no action, no notice).
+    // #10754: the Activity pane binds only `n`/`l`; every other verb acts on
+    // nothing and says how to leave, instead of dropping silently.
     state.focus = Pane::Activity;
-    for verb in ['l', 'k', 'r', 'd', 'a', 'c', 'v', 'f', 'g'] {
+    for verb in ['k', 'r', 'd', 'a', 'c', 'v', 'f', 'g'] {
+        state.clear_notice();
         assert!(handle_key(&mut state, key(KeyCode::Char(verb))).is_none());
+        let notice = state.notice.as_deref().unwrap_or_default();
+        assert!(
+            notice.contains("Tab to the projects or sessions pane"),
+            "{verb}"
+        );
     }
-    assert!(state.notice.is_none());
     assert!(state.pending_confirm.is_none());
     assert!(!state.tree.flat_workers);
 }
