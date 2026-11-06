@@ -24,8 +24,12 @@
   "inline_comments": [
     {
       "body": "**overflow** — `amounts.iter().sum::<u64>()` can overflow [gh: #42 — \"overflow fixed by checked_add in billing\"].\n",
+      "category": "correctness",
+      "finding_index": 0,
       "line": 10,
-      "path": "src/billing.rs"
+      "path": "src/billing.rs",
+      "severity": "medium",
+      "side": "RIGHT"
     }
   ],
   "inline_finding_indices": [

@@ -30,7 +30,9 @@
 
 use std::collections::HashSet;
 
-use crate::models::{Effort, Finding, FindingCategory, VerifyOutcome};
+use crate::models::{
+    Effort, Finding, FindingCategory, UnanchoredFinding, UnanchoredReason, VerifyOutcome,
+};
 
 // ─── Tuning constants ─────────────────────────────────────────────────────────
 
@@ -262,8 +264,11 @@ pub struct InlineComment {
 /// became an inline comment, so downstream code can partition by finding identity
 /// rather than by `(file, line)` coordinate (two distinct findings can share the
 /// same anchor — coordinate matching silently drops one); `suppressed_nits`
-/// is the count of low-severity findings rolled up past the inline cap (#1420).
-/// Test: `build_inline_plan_*` tests in `inline_tests.rs`.
+/// is the count of low-severity findings rolled up past the inline cap (#1420);
+/// `unanchored` names every finding not placed inline, with its reason
+/// (#10762), so `inline_indices` and `unanchored` partition the input.
+/// Test: `build_inline_plan_*` tests in `inline_tests.rs`,
+/// `unanchored_reason_enum_covers_no_line_off_diff_nit_cap_withheld`.
 #[derive(Debug, Clone, Default)]
 pub struct InlinePlan {
     /// Inline comments to post (each anchored to a diff line).
@@ -280,6 +285,8 @@ pub struct InlinePlan {
     pub inline_indices: Vec<usize>,
     /// Count of low-severity nits suppressed past the inline cap (#1420).
     pub suppressed_nits: usize,
+    /// #10762: every finding not placed inline, indexed into the input slice.
+    pub unanchored: Vec<UnanchoredFinding>,
 }
 
 impl InlinePlan {
@@ -319,10 +326,13 @@ impl InlinePlan {
 /// inline placements are not emitted inline — they increment `suppressed_nits`
 /// instead.  Higher-severity findings are never suppressed.  Input order is
 /// preserved. A `citation_partial` finding always goes to the summary (#8949).
+/// #10762: each finding not placed inline is recorded in `unanchored` as
+/// `no_line`, `off_diff` (a `citation_partial` finding included) or `nit_cap`.
 /// Test: `build_inline_plan_maps_on_diff_finding`,
 /// `build_inline_plan_off_diff_falls_back`, `build_inline_plan_no_line_falls_back`,
 /// `nit_cap_rolls_up_overflow`, `nit_cap_does_not_suppress_high_severity`,
-/// `build_inline_plan_posts_a_partial_citation_in_the_body`.
+/// `build_inline_plan_posts_a_partial_citation_in_the_body`,
+/// `unanchored_reason_enum_covers_no_line_off_diff_nit_cap_withheld`.
 pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -> InlinePlan {
     let mut plan = InlinePlan::default();
     let mut inline_nits = 0usize;
@@ -337,6 +347,16 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
         let Some(line) = anchor else {
             // No usable diff anchor → summary body (never fails the post).
             plan.summary_findings.push(finding.clone());
+            // #10762: a partial citation has a line, but no verified anchor.
+            let reason = if finding.line.is_none() {
+                UnanchoredReason::NoLine
+            } else {
+                UnanchoredReason::OffDiff
+            };
+            plan.unanchored.push(UnanchoredFinding {
+                finding_index: idx,
+                reason,
+            });
             continue;
         };
 
@@ -344,6 +364,11 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
         if finding.effort == Effort::Low {
             if inline_nits >= MAX_INLINE_NITS {
                 plan.suppressed_nits += 1;
+                // #10762: the overflow nit is named, not only counted.
+                plan.unanchored.push(UnanchoredFinding {
+                    finding_index: idx,
+                    reason: UnanchoredReason::NitCap,
+                });
                 continue;
             }
             inline_nits += 1;

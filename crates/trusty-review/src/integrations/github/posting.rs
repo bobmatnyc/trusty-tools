@@ -501,6 +501,7 @@ mod tests {
                 path: "src/db.rs".to_string(),
                 line: 42,
                 body: "**security** — SQL injection".to_string(),
+                ..Default::default() // #10762
             });
         result.inline_finding_indices = vec![0];
         let body = build_review_comment_body(&result);
@@ -541,6 +542,7 @@ mod tests {
                 path: "src/db.rs".to_string(),
                 line: 42,
                 body: "**security** — SQL injection".to_string(),
+                ..Default::default() // #10762
             });
         result.inline_finding_indices = vec![0];
 
@@ -573,6 +575,7 @@ mod tests {
                 path: "src/db.rs".to_string(),
                 line: 42,
                 body: "**security** — use a bind param".to_string(),
+                ..Default::default() // #10762
             });
         let payload = build_inline_comments_payload(&result);
         assert_eq!(payload.len(), 1);

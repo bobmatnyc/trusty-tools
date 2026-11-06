@@ -561,3 +561,52 @@ fn render_leaves_confirmed_and_unjudged_findings_unmarked() {
         "a confirmed finding stands unqualified"
     );
 }
+
+/// REGRESSION (#10762): every finding not placed inline carries its reason.
+///
+/// Why: a finding that fell back to the summary, or past the nit cap, left no
+/// reason, so a consumer could not tell an off-diff line from a suppressed nit.
+/// What: plans a no-line, an off-diff and six on-diff nits, asserting
+/// `no_line`, `off_diff` and one `nit_cap` entry with their indices; then
+/// round-trips every reason string, `withheld:<class>` included, and reads an
+/// unknown string as `Unknown`.
+/// Test: this test itself.
+#[test]
+fn unanchored_reason_enum_covers_no_line_off_diff_nit_cap_withheld() {
+    use crate::models::{UnanchoredFinding, UnanchoredReason};
+
+    let c = CommentableLines::from_unified_diff(&diff_with_n_added(20));
+    let mut findings = vec![nit_at(1), nit_at(99)];
+    findings[0].line = None;
+    findings.extend((2..=MAX_INLINE_NITS as u32 + 2).map(nit_at));
+    let plan = build_inline_plan(&findings, &c);
+    let at = |finding_index, reason| UnanchoredFinding {
+        finding_index,
+        reason,
+    };
+    assert_eq!(
+        plan.unanchored,
+        vec![
+            at(0, UnanchoredReason::NoLine),
+            at(1, UnanchoredReason::OffDiff),
+            at(MAX_INLINE_NITS + 2, UnanchoredReason::NitCap),
+        ]
+    );
+    assert_eq!(plan.inline_indices.len() + plan.unanchored.len(), findings.len());
+
+    let cases = [
+        (UnanchoredReason::OffDiff, "off_diff"),
+        (UnanchoredReason::NoLine, "no_line"),
+        (UnanchoredReason::DeletedLine, "deleted_line"),
+        (UnanchoredReason::NitCap, "nit_cap"),
+        (UnanchoredReason::Withheld("refuted".into()), "withheld:refuted"),
+    ];
+    for (reason, text) in cases {
+        let json = serde_json::to_value(&reason).expect("serialize");
+        assert_eq!(json, text);
+        let back: UnanchoredReason = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, reason);
+    }
+    let future: UnanchoredReason = serde_json::from_str("\"left_only\"").expect("tolerated");
+    assert_eq!(future, UnanchoredReason::Unknown);
+}
