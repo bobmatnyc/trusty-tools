@@ -45,6 +45,14 @@ use dashboard::{ChatMessage, DashboardState};
 use event_loop::run_loop;
 use health::{Daemon, HealthScreen, HealthUpdate};
 
+// #10476: version in tui header (Bob 11-05)
+/// The `tm <version>` label every TUI header shows, so an operator can tell
+/// which build is running.
+///
+/// Test: `home_header_shows_tm_version_at_80_columns`,
+/// `projects_view_top_line_shows_tm_version_at_80_columns`.
+pub const VERSION_LABEL: &str = concat!("tm ", env!("CARGO_PKG_VERSION"));
+
 /// Which top-level screen the TUI is currently showing.
 ///
 /// Why: the TUI now hosts two surfaces — the coordinator chat (`[1]`) and the

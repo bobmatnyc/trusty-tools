@@ -299,3 +299,35 @@ fn service_view_shows_unavailable_metrics() {
     assert!(metrics.contains(&"  index_count: 3".to_string()));
     assert!(metrics.contains(&"  indexes: [2 items]".to_string()));
 }
+
+/// Row `y` of a drawn `TestBackend` buffer as text.
+fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol())
+        .collect()
+}
+
+// #10476: version in tui header (Bob 11-05)
+#[test]
+fn home_header_shows_tm_version_at_80_columns() {
+    let version = format!("tm {}", env!("CARGO_PKG_VERSION"));
+    let mut state = HomeState::default();
+    for view in [View::Home, View::Service(ServiceId::Search)] {
+        state.view = view;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test backend");
+        terminal
+            .draw(|f| render(f, &state))
+            .expect("draw the home screen");
+        let top = buffer_row(&terminal, 0);
+        assert!(
+            top.contains(&version),
+            "{view:?} header lacks {version}: {top:?}"
+        );
+        let title = match view {
+            View::Home => "trusty console — services".to_string(),
+            View::Service(id) => format!("trusty console › {}", id.id()),
+        };
+        assert!(top.starts_with(&title), "{view:?} title displaced: {top:?}");
+    }
+}
