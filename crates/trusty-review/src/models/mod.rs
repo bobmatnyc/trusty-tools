@@ -470,6 +470,18 @@ pub struct Finding {
     /// deserialising as `false`.
     #[serde(default)]
     pub code_provable: bool,
+    /// #10782: code copied verbatim from `file` at `line`, the quote the
+    /// line-citation gate places the finding on.
+    ///
+    /// Why: the quote used to be a convention inside `body`, so a "confirm X"
+    /// note with nothing to quote reached the gate and was withheld there.
+    /// What: set by the reviewer's `quoted_snippet` field, or, for a reviewer
+    /// that omits it, from the first code the body quotes
+    /// (`quote_admission::admit_quoted_findings`); a finding with neither is
+    /// withheld before the gate. Absent from the JSON when `None`.
+    /// Test: `a_finding_without_a_quote_is_withheld_before_the_gate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted_snippet: Option<String>,
     // ── Transient pipeline state ──────────────────────────────────────────
     /// Verification outcome; `None` before the verification round.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -556,6 +568,7 @@ impl Finding {
             category: FindingCategory::Correctness,
             source_citation: None,
             code_provable: false,
+            quoted_snippet: None, // #10782
             verified: None,
             issue_eligible: false,
             citation_correction: None,
@@ -778,6 +791,30 @@ pub struct ReviewResult {
     /// `result_without_unanchored_field_still_deserializes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unanchored: Vec<UnanchoredFinding>,
+    /// #10782: the reviewer's "confirm / check / verify X" notes, which quote
+    /// no code and so are not findings.
+    ///
+    /// Why: emitted as findings, they were withheld by the line-citation gate
+    /// and turned an APPROVE into `all_withheld`.
+    /// What: copied from the reply's `questions` array, blanks dropped. No
+    /// gate, grade or verdict reads it. Absent from the JSON when empty.
+    /// Test: `parse_questions_are_kept_apart_from_findings`,
+    /// `run_review_questions_never_shape_the_verdict`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<String>,
+    /// #10782: an APPROVE with no surviving finding whose every withhold is
+    /// `no_quote_pregate`.
+    ///
+    /// Why: Architect ruling 09:02Z counts pregate drops apart from gate
+    /// withholds. Such a review is `parsed`, not `all_withheld`, and this
+    /// flag names it without a caller re-deriving the rule.
+    /// What: set by `withheld_contract::sync_withheld_counts`. The pregate
+    /// count is `withheld_by_reason["no_quote_pregate"]`; the gate count is
+    /// `withheld_count` minus it. Absent from the JSON when false.
+    /// Test: `run_review_pregate_only_approve_is_parsed_not_all_withheld`,
+    /// `run_review_mixed_pregate_and_gate_withholds_are_all_withheld`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pregate_only_approve: bool,
     /// Indices (into `findings`) of the findings that were placed inline (#1414).
     ///
     /// Why: the summary body must render exactly the findings that did NOT land
@@ -941,6 +978,8 @@ impl ReviewResult {
             verdict_status: None,
             inline_comments: Vec::new(),
             unanchored: Vec::new(),
+            questions: Vec::new(),       // #10782
+            pregate_only_approve: false, // #10782
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,
             shallow_clean_review: false,

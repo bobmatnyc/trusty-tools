@@ -752,6 +752,7 @@ async fn run_pipeline(
     // author already addressed; `None` leaves the verifier prompt unchanged.
     result.verdict = final_verdict;
     result.findings = parsed.findings;
+    result.questions = parsed.questions; // #10782: never graded or gated
     let author_rationale = build_author_rationale(
         input.caller_context.pr_description.as_deref(),
         input.caller_context.pr_discussion.as_deref(),
