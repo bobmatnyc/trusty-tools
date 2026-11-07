@@ -287,15 +287,27 @@ def test_relay_sends_an_expired_ruling_relayed_as_history_10780(tmp_path):
     _sent_and_logged(tmp_path, text, "dashboard D70")
 
 
-def test_relay_never_takes_the_architects_relayed_note_as_owner_words_10780(tmp_path):
+@pytest.mark.parametrize("note", ["Relayed 2026-11-06T23:39Z: two helpers",
+                                  # #10780: an Architect outcome note with no "Relayed" prefix
+                                  "Outcome: pace set to two helpers, one per track"])
+def test_relay_never_takes_the_architects_answer_note_as_owner_words_10780(tmp_path, note):
     import dashboard_store as ds
     ds.Store(os.environ["DASHBOARD_ROOT"]).set("items", "D71", {
-        "kind": "question", "status": "answered", "title": "pace", "answer": "yes",
-        "answer_note": "Relayed 2026-11-06T23:39Z: two helpers"})
+        "kind": "question", "status": "answered", "title": "pace", "answer": "yes", "answer_note": note})
     text = '[Ada Architect 06:10Z] User ruling (Ada): "two helpers" (owner turn: dashboard D71)'
     stub = Stub(tmp_path, [box(), box(text)])
     out = stub.run(RELAY, "tm-api", text)
     assert out.returncode == 3 and "is not in the owner turn" in out.stdout, out
+
+
+def test_relay_sends_a_quote_from_the_items_answer_10780(tmp_path):
+    """The passing case beside it: the quote is in the owner's `answer`, not the note."""
+    import dashboard_store as ds
+    ds.Store(os.environ["DASHBOARD_ROOT"]).set("items", "D72", {
+        "kind": "question", "status": "answered", "title": "pace", "answer": "Four helpers until Monday",
+        "answer_note": "Outcome: relayed"})
+    text = '[Ada Architect 06:10Z] User ruling (Ada): "Four helpers until Monday" (owner turn: dashboard D72)'
+    _sent_and_logged(tmp_path, text, "dashboard D72")
 
 
 class FakeMemory:

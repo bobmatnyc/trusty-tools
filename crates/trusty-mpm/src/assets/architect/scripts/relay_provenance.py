@@ -12,7 +12,8 @@ in <text>. Each one must be followed by the owner's words in double quotes, then
   chat <YYYY-MM-DDTHH:MMZ>   an owner turn in the Architect chat, read from the owner-turn record that
                              pending_hook_dedupe.py writes (inbox/owner-turns.jsonl; turns within 2 min)
   dashboard <id>             a dashboard item, Intent Ledger steer, session command or goal (bare or
-                             S-qualified id); the owner-written fields of that document
+                             S-qualified id); the owner-written fields of that document (an item's
+                             `answer`, never the Architect's `answer_note`)
 A `palace ...` cite refuses (round 2): the Architect writes every palace drawer and trusty-memory marks no
 owner author, so a drawer can hold an Architect inference. A ruling known only from the palace goes out as
 `Architect note: ... (basis: palace <id>)`.
@@ -105,13 +106,14 @@ def chat_turns(at):
 
 
 def _owner_fields(coll, data):
-    """The owner-written strings of one dashboard document (never the Architect's `Relayed ...` notes)."""
+    """The owner-written strings of one dashboard document: an item's `answer`, the notes its owner buttons
+    write, and its steer texts. `answer_note` never counts: the Architect writes it ("Relayed 16:08Z", outcomes).
+
+    Test: test_relay_never_takes_the_architects_answer_note_as_owner_words_10780
+    """
     out = []
     if coll == "items":
-        out += [data.get("answer"), data.get("cancel_note")]
-        note = data.get("answer_note")
-        if isinstance(note, str) and not note.lstrip().startswith(("Relayed", "Acknowledged")):
-            out.append(note)
+        out += [data.get("answer"), data.get("cancel_note")]   # #10780: no answer_note, whatever its prefix
         for key in ("wont_do", "feedback"):
             if isinstance(data.get(key), dict):
                 out.append(data[key].get("note"))
