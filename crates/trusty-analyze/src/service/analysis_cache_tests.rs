@@ -210,7 +210,7 @@ async fn a_cold_walk_past_warm_wait_answers_warming() {
         if let Ok(hit) = cache.get(&client, "idx").await {
             assert!(hit.stale_reason.is_none());
             assert_eq!(
-                chunk_calls(&search),
+                chunk_calls(search),
                 1,
                 "one background walk served both calls"
             );

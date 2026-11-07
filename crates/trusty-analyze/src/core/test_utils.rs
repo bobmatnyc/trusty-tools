@@ -115,50 +115,6 @@ pub(crate) fn chunks_from_dir(dir: &Path, ext: &str) -> anyhow::Result<Vec<CodeC
     Ok(out)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use tempfile::TempDir;
-
-    #[test]
-    fn chunks_from_file_produces_windows() {
-        let tmp = TempDir::new().unwrap();
-        let p = tmp.path().join("a.rs");
-        // 100 lines of trivial content.
-        let mut body = String::new();
-        for i in 0..100 {
-            body.push_str(&format!("let x{i} = {i};\n"));
-        }
-        let mut f = fs::File::create(&p).unwrap();
-        f.write_all(body.as_bytes()).unwrap();
-
-        let chunks = chunks_from_file(&p).unwrap();
-        assert!(!chunks.is_empty());
-        // First window spans lines 1..=40.
-        assert_eq!(chunks[0].start_line, 1);
-        assert!(chunks[0].end_line >= 40);
-        // ids are collision-safe.
-        let ids: std::collections::HashSet<_> = chunks.iter().map(|c| c.id.clone()).collect();
-        assert_eq!(ids.len(), chunks.len());
-    }
-
-    #[test]
-    fn chunks_from_dir_collects_rs_files() {
-        let tmp = TempDir::new().unwrap();
-        let sub = tmp.path().join("sub");
-        fs::create_dir(&sub).unwrap();
-
-        fs::write(tmp.path().join("a.rs"), "fn a() {}\n").unwrap();
-        fs::write(sub.join("b.rs"), "fn b() {}\n").unwrap();
-        fs::write(tmp.path().join("c.txt"), "not rust\n").unwrap();
-
-        let chunks = chunks_from_dir(tmp.path(), ".rs").unwrap();
-        let files: std::collections::HashSet<_> = chunks.iter().map(|c| c.file.clone()).collect();
-        assert_eq!(files.len(), 2, "expected 2 rust files, got {files:?}");
-    }
-}
-
 /// Block a synchronous fake reply for `delay`, so the client's call times out.
 ///
 /// Why: a plain `thread::sleep` keeps the worker's queued tasks — the
@@ -215,5 +171,49 @@ impl Drop for IsolatedFake {
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn chunks_from_file_produces_windows() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("a.rs");
+        // 100 lines of trivial content.
+        let mut body = String::new();
+        for i in 0..100 {
+            body.push_str(&format!("let x{i} = {i};\n"));
+        }
+        let mut f = fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+
+        let chunks = chunks_from_file(&p).unwrap();
+        assert!(!chunks.is_empty());
+        // First window spans lines 1..=40.
+        assert_eq!(chunks[0].start_line, 1);
+        assert!(chunks[0].end_line >= 40);
+        // ids are collision-safe.
+        let ids: std::collections::HashSet<_> = chunks.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(ids.len(), chunks.len());
+    }
+
+    #[test]
+    fn chunks_from_dir_collects_rs_files() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+
+        fs::write(tmp.path().join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(sub.join("b.rs"), "fn b() {}\n").unwrap();
+        fs::write(tmp.path().join("c.txt"), "not rust\n").unwrap();
+
+        let chunks = chunks_from_dir(tmp.path(), ".rs").unwrap();
+        let files: std::collections::HashSet<_> = chunks.iter().map(|c| c.file.clone()).collect();
+        assert_eq!(files.len(), 2, "expected 2 rust files, got {files:?}");
     }
 }

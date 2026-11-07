@@ -164,13 +164,14 @@ async fn a_failed_scope_walk_fails_the_request() {
     let (index, search, dir) = fixture();
     index.chunks_fail.store(true, Ordering::SeqCst);
     let state = state(&search, &dir);
-    let err = smells(
+    let Err(err) = smells(
         &state,
         req::<SmellsRequest>(json!({ "index_id": "idx", "paths": ["src/a.rs"] })),
     )
     .await
-    .err()
-    .expect("a failed walk is an error");
+    else {
+        panic!("a failed walk is an error");
+    };
     assert_eq!(err.kind, ApiErrorKind::BadGateway);
     assert!(err.message.contains("src/a.rs"), "{}", err.message);
 }
