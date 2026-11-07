@@ -165,7 +165,8 @@ class ProvenanceCase(unittest.TestCase):
         for text in ("User ruling (Ada): two helpers", "owner instruction: stop", "basis: the two-helper ruling",
                      "TWO helpers only (Ada 23:39Z)",
                      'User ruling (Ada): "two helpers" (owner turn: chat 2026-11-06T20:48Z)',   # quote not in the turn
-                     "User ruling (Ada): two helpers (owner turn: chat 2026-11-06T20:48Z)"):     # no quote at all
+                     "User ruling (Ada): two helpers (owner turn: chat 2026-11-06T20:48Z)",      # no quote at all
+                     'User ruling (Ada): "unleash two more agents" (owner turn: palace a5f3053b)'):  # round 2
             self.assertTrue(datg.unsourced_claim(text), text)
         for text in ('User ruling (Ada): "unleash two more agents" (owner turn: chat 2026-11-06T20:48Z)',
                      "Architect answer: pace",

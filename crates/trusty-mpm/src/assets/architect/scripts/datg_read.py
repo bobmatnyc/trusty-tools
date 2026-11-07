@@ -190,7 +190,7 @@ def stamp_turn(project, payload, now=None):
 # An owner claim: an owner label, "ruling", or a "(<Name> HH:MMZ)" attribution. The name is data, never a list.
 OWNER_CLAIM = re.compile(r"\b(?:user|owner)\s+(?:ruling|instruction)s?\b|\bruling\b|\([A-Z][\w.-]* \d{2}:\d[\dx]Z\)",
                          re.I)
-OWNER_CITE = re.compile(r"owner turn:\s*(?:chat|dashboard|palace)\s+\S", re.I)
+OWNER_CITE = re.compile(r"owner turn:\s*(?:chat|dashboard)\s+\S", re.I)   # round 2: a palace cite never clears
 
 
 CITED = re.compile(r'((?:"[^"\n]+"\s*(?:…|\.\.\.)?\s*)+)\(owner turn:\s*([^()\n]{1,80})\)')

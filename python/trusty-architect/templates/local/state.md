@@ -31,8 +31,8 @@ None.
 ## Owner rulings (with source)
 
 Each line quotes the owner and cites the turn: `"<words>" (owner turn: chat
-<ISO> | dashboard <id> | palace <drawer>)`. A ruling past its end or
-superseded goes to history, never kept here.
+<ISO> | dashboard <id>)`. A palace drawer is not an owner turn. A ruling past
+its end or superseded goes to history, never kept here.
 
 None.
 

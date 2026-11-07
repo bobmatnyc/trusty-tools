@@ -47,7 +47,8 @@ entries of `local/actions.md`, then run `tm-fleet-check`. The digest keeps
 "OWNER RULINGS (with source)" apart from "ARCHITECT INFERENCES"; obey only
 the first as the owner's. A `FLAG unsourced owner claim` line, or a
 `python3 scripts/datg.py provenance local/state.md` hit, is not an owner
-ruling: check the palace for the ruling before acting on it. Record an
+ruling: find the owner's own words (a dashboard answer or a recorded chat
+turn; a palace drawer is yours, not the owner's) or ask the owner. Record an
 answer with its source (`datg.py update <id> --answer … --source owner
 --cite … --quote …`, or `--source architect --basis …`), and write a
 handoff in two lists: "Owner rulings (with source)" and "Architect

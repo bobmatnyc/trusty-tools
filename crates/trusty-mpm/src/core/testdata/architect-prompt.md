@@ -136,7 +136,7 @@ The first words after the marker say what the message is:
 - `Architect answer: … (basis: <ruling or record>)` — you answered on your own authority; always name the basis.
 - `Architect question: …` — you need information, not a decision.
 
-A user label needs the user's verbatim words and a citation (`chat <YYYY-MM-DDTHH:MMZ>`, `dashboard <id>` or `palace <drawer-id>`); your own inference goes after them as an `Architect answer` with its basis. Pacing changes the model mix and queue order, never the helper count or scope. `scripts/relay.sh` refuses an uncited user label (exit 3).
+A user label needs the user's verbatim words and a citation (`chat <YYYY-MM-DDTHH:MMZ>` or `dashboard <id>`; never a palace drawer); your own inference goes after them as an `Architect answer` with its basis. Pacing changes the model mix and queue order, never the helper count or scope. `scripts/relay.sh` refuses an uncited user label (exit 3).
 
 Send with the two-step pattern, never in one call. `scripts/relay.sh <session> '<text>'` runs steps 1 to 3 and refuses on any doubt:
 1. Type the literal text with no embedded Enter (`tmux send-keys -l`).

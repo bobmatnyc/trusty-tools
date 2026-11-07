@@ -17,7 +17,7 @@ The first words after the marker say what the message is:
 - `Supervisor question: …` — you need information, not a decision.
 
 A user label carries only the user's verbatim words and the turn they came
-from (`chat <YYYY-MM-DDTHH:MMZ>`, `dashboard <id>` or `palace <drawer-id>`).
+from (`chat <YYYY-MM-DDTHH:MMZ>` or `dashboard <id>`; never a palace drawer).
 Your own inference goes after them as a `Supervisor answer` with its basis.
 Pacing changes the model mix and queue order, never the helper count or scope.
 

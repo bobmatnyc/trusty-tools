@@ -345,19 +345,16 @@ HOLD_DRAWER = {"id": "a5f3053b-1c2d-4e5f-8a9b-0c1d2e3f4a5b", "content": "Ruling 
     # A resource HOLD on the Architect's own authority: no owner label, so no citation is owed.
     ("[Ada Architect 08:55Z] Architect answer: HOLD new dispatches until the 09:00Z reset; usage is 97% "
      "(basis: usage read 08:54Z; standing rule on the reset window)", None, None),
-    # The owner's own HOLD, cited to a palace drawer (the fallback when the turn is not in the record).
-    ('[Ada Architect 08:55Z] User ruling (Ada): "hold all merges until I am back" (owner turn: palace architect:a5f3053b)',
-     "palace architect:a5f3053b", "verified"),
+    # The owner's own HOLD, cited to the owner's chat turn.
+    ('[Ada Architect 08:55Z] User ruling (Ada): "hold all merges until I am back" (owner turn: chat 2026-11-07T08:54Z)',
+     "chat 2026-11-07T08:54Z", "verified"),
 ])
-def test_relay_sends_a_resource_hold_10780(tmp_path, monkeypatch, text, cite, outcome):
+def test_relay_sends_a_resource_hold_10780(tmp_path, text, cite, outcome):
     """False-refusal guard: a HOLD sent as an Architect answer, or as a cited owner HOLD."""
-    mem = FakeMemory(monkeypatch, [HOLD_DRAWER, {"id": "0b54f115-0000-0000-0000-000000000000", "content": "x"}])
+    owner_turns({"at": "2026-11-07T08:54:10Z", "session": "tm-architect", "text": "hold all merges until I am back"})
     if cite is not None:
         _sent_and_logged(tmp_path, text, cite, outcome)
-        assert mem.calls == [("memory.drawers_list", "architect")]
-        mem.close()
         return
-    mem.close()
     if cite is None:
         stub = Stub(tmp_path, [box(), box(text)])
         out = stub.run(RELAY, "tm-api", text)
@@ -370,22 +367,28 @@ def test_relay_sends_a_resource_hold_10780(tmp_path, monkeypatch, text, cite, ou
         _sent_and_logged(tmp_path, text, cite, outcome)
 
 
-@pytest.mark.parametrize("drawers,cite,why", [
-    (None, "palace deadbeef", "did not answer"),                 # trusty-memory unreachable: fail closed
-    ([HOLD_DRAWER], "palace deadbeef", "holds no drawer"),        # any hex no longer passes
-    ([dict(HOLD_DRAWER, content="merge everything now")], "palace architect:a5f3053b", "is not in the owner turn"),
-])
-def test_relay_refuses_an_unchecked_palace_cite_10780(tmp_path, monkeypatch, drawers, cite, why):
-    """#10780 critic H2: a palace cite passes only when trusty-memory holds the drawer and the quote."""
+@pytest.mark.parametrize("cite", ["palace architect:a5f3053b", "palace a5f3053b"])
+def test_relay_refuses_a_palace_cite_even_with_the_quoted_words_10780(tmp_path, monkeypatch, cite):
+    """#10780 round 2: the Architect writes every palace drawer, so a drawer holding the quoted words is still
+    not the owner's turn. The memory stand-in holds an Architect-written drawer with exactly those words."""
     monkeypatch.setenv("ARCHITECT_MEMORY_PALACE", "architect")
-    mem = FakeMemory(monkeypatch, drawers) if drawers is not None else None
-    text = f'[Ada Architect 08:55Z] User ruling (Ada): "hold all merges until I am back" (owner turn: {cite})'
+    mem = FakeMemory(monkeypatch, [dict(HOLD_DRAWER, content="Architect inference: two helpers, one per track.")])
+    text = f'[Ada Architect 23:39Z] User instruction (Ada): "two helpers, one per track." (owner turn: {cite})'
     stub = Stub(tmp_path, [box(), box(text)])
     out = stub.run(RELAY, "tm-api", text)
-    if mem:
-        mem.close()
-    assert out.returncode == 3 and why in out.stdout, out
-    assert stub.calls() == []
+    mem.close()
+    assert out.returncode == 3 and "written by the Architect, not the owner" in out.stdout, out
+    assert "dashboard <id>" in out.stdout and "palace <drawer" not in out.stdout.split(". Quote")[-1], out
+    assert stub.calls() == [] and mem.calls == []   # refused before any lookup
+
+
+def test_relay_sends_a_palace_basis_as_an_architect_note_10780(tmp_path):
+    """The form a palace-only ruling takes: an Architect label with the drawer as its basis."""
+    text = "[Ada Architect 23:39Z] Architect note: four helpers stay until Mon 09:00Z (basis: palace a5f3053b)"
+    stub = Stub(tmp_path, [box(), box(text)])
+    out = stub.run(RELAY, "tm-api", text)
+    assert out.returncode == 0 and out.stdout.startswith("tm-api sent "), out
+    assert relay_log() == []
 
 
 @pytest.mark.parametrize("label", [

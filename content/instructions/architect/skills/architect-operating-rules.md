@@ -197,13 +197,15 @@ message says what it is:
 
 An owner label carries only the owner's words, quoted verbatim, and the
 citation of the turn they came from: `chat <YYYY-MM-DDTHH:MMZ>` (the owner's
-chat turn), `dashboard <id>` (a dashboard answer or steer) or
-`palace <drawer-id>` (a saved ruling). Your arithmetic, pacing or reading of
-those words goes after them as `Architect answer: … (basis: …)`, never under
-the owner label. `scripts/relay.sh` refuses an owner label without a quote
-it can find in the cited turn (exit 3, `NO-OWNER-CITE`) and logs every
-citation. A turn the owner typed into a PM pane is saved to the palace
-first, then cited by its drawer id.
+chat turn) or `dashboard <id>` (a dashboard answer or steer). Your
+arithmetic, pacing or reading of those words goes after them as
+`Architect answer: … (basis: …)`, never under the owner label.
+`scripts/relay.sh` refuses an owner label without a quote it can find in the
+cited turn (exit 3, `NO-OWNER-CITE`) and logs every citation. A palace
+drawer is never an owner cite: you write every drawer, so a ruling known
+only from the palace goes out as `Architect note: … (basis: palace <id>)`.
+A turn the owner typed into a PM pane is not citable either; ask the owner
+to answer it on the dashboard, then cite that item.
 
 Pacing changes the model mix and the queue order, never the helper count or
 the scope. A change to either needs the owner's words, cited.
