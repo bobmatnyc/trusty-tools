@@ -341,6 +341,7 @@ impl SessionManager {
             deliverable_id: None,
             pane_id,
             tmux_server,
+            tmux_socket: None,
             injection_status: Default::default(),
             // #3649: owner-unknown by default. The two real provisioning call
             // sites (`spawn_managed_inproject`, `spawn_managed_on_main` in

@@ -1,0 +1,2 @@
+Changed
+- Every `TmuxDriver` tmux call now builds its argv through one server-aware builder, so a driver aimed at a workspace `-L` server sends every call there, including server start, session creation, pane listings and pane reads. Calls on the default server spawn the same argv as before. Session records gain an optional `tmux_socket` path, absent on every existing record; nothing writes it yet (#10101).

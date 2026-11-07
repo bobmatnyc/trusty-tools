@@ -431,7 +431,7 @@ fn ensure_server_up_retries_then_succeeds() {
     );
     let bin = write_fake_tmux(dir.path(), "fake-tmux-retry", &script);
 
-    let result = ensure_server_up(&bin);
+    let result = ensure_server_up(&bin, None);
 
     assert!(
         result.is_ok(),
@@ -454,7 +454,7 @@ fn ensure_server_up_fails_loudly_after_exhausting_retries() {
         "#!/bin/sh\necho 'error connecting to socket (No such file or directory)' >&2\nexit 1\n";
     let bin = write_fake_tmux(dir.path(), "fake-tmux-always-fails", script);
 
-    let result = ensure_server_up(&bin);
+    let result = ensure_server_up(&bin, None);
 
     assert!(
         result.is_err(),
@@ -473,7 +473,7 @@ fn probe_history_limit_reads_back_configured_value() {
     let script = "#!/bin/sh\necho 100000\nexit 0\n";
     let bin = write_fake_tmux(dir.path(), "fake-tmux-show-options", script);
 
-    assert_eq!(probe_history_limit(&bin), Ok(100_000));
+    assert_eq!(probe_history_limit(&bin, None), Ok(100_000));
 }
 
 #[serial_test::serial]
@@ -483,7 +483,7 @@ fn probe_history_limit_errors_on_unparsable_output() {
     let script = "#!/bin/sh\necho 'not-a-number'\nexit 0\n";
     let bin = write_fake_tmux(dir.path(), "fake-tmux-bad-output", script);
 
-    let result = probe_history_limit(&bin);
+    let result = probe_history_limit(&bin, None);
     assert!(
         result.is_err(),
         "unparsable show-options output must error loudly, not silently pass verification"
@@ -497,7 +497,7 @@ fn probe_history_limit_errors_on_nonzero_exit() {
     let script = "#!/bin/sh\necho 'no server running' >&2\nexit 1\n";
     let bin = write_fake_tmux(dir.path(), "fake-tmux-show-options-fails", script);
 
-    assert!(probe_history_limit(&bin).is_err());
+    assert!(probe_history_limit(&bin, None).is_err());
 }
 
 // ── #5151: alternate-screen probe ───────────────────────────────────
@@ -521,7 +521,7 @@ fn probe_alternate_screen_reads_back_on() {
         "fake-tmux-alt-on",
         "#!/bin/sh\necho on\nexit 0\n",
     );
-    assert_eq!(probe_alternate_screen(&bin), Ok(true));
+    assert_eq!(probe_alternate_screen(&bin, None), Ok(true));
 }
 
 #[serial_test::serial]
@@ -533,7 +533,7 @@ fn probe_alternate_screen_reads_back_off() {
         "fake-tmux-alt-off",
         "#!/bin/sh\necho off\nexit 0\n",
     );
-    assert_eq!(probe_alternate_screen(&bin), Ok(false));
+    assert_eq!(probe_alternate_screen(&bin, None), Ok(false));
 }
 
 #[serial_test::serial]
@@ -547,7 +547,7 @@ fn probe_alternate_screen_errors_on_unrecognised_value() {
         "fake-tmux-alt-garbage",
         "#!/bin/sh\necho maybe\nexit 0\n",
     );
-    assert!(probe_alternate_screen(&bin).is_err());
+    assert!(probe_alternate_screen(&bin, None).is_err());
 }
 
 #[serial_test::serial]
@@ -559,7 +559,7 @@ fn probe_alternate_screen_errors_on_nonzero_exit() {
         "fake-tmux-alt-fails",
         "#!/bin/sh\necho 'no server running' >&2\nexit 1\n",
     );
-    assert!(probe_alternate_screen(&bin).is_err());
+    assert!(probe_alternate_screen(&bin, None).is_err());
 }
 
 #[serial_test::serial]
@@ -578,7 +578,7 @@ fn probe_alternate_screen_queries_the_window_scope() {
     );
     let bin = write_fake_tmux(dir.path(), "fake-tmux-alt-argv", &script);
 
-    assert_eq!(probe_alternate_screen(&bin), Ok(false));
+    assert_eq!(probe_alternate_screen(&bin, None), Ok(false));
     assert_eq!(
         std::fs::read_to_string(&log).unwrap().trim(),
         "show-options -wg -v alternate-screen"
@@ -751,8 +751,8 @@ fn a_fresh_server_gets_the_options_before_the_first_pane() {
         "10000",
         "the first pane on a fresh server must be born with the configured history-limit"
     );
-    assert_eq!(probe_history_limit(&bin), Ok(10_000));
-    assert_eq!(probe_alternate_screen(&bin), Ok(false));
+    assert_eq!(probe_history_limit(&bin, None), Ok(10_000));
+    assert_eq!(probe_alternate_screen(&bin, None), Ok(false));
     assert!(
         outcome.options_verified,
         "options that landed on the fresh server must report verified"
@@ -787,7 +787,7 @@ fn a_failed_option_still_creates_the_pane_unverified() {
         "a chain that failed before new-session must never report verified"
     );
     // The re-apply after creation still repairs the server globals.
-    assert_eq!(probe_history_limit(&bin), Ok(10_000));
+    assert_eq!(probe_history_limit(&bin, None), Ok(10_000));
 }
 
 /// Why (#9461): a `new-session` tmux refuses (the #3707 exclusive create on a
@@ -834,7 +834,7 @@ fn apply_and_verify_scrollback_options_succeeds_on_second_attempt() {
     let bin = write_fake_tmux(dir.path(), "fake-tmux-verify-retry", &script);
     let options = trusty_common::tmux::scrollback_option_commands(100_000, true, true);
 
-    let verified = apply_and_verify_scrollback_options(&bin, &options, 100_000, true);
+    let verified = apply_and_verify_scrollback_options(&bin, None, &options, 100_000, true);
 
     assert!(
         verified,
@@ -864,7 +864,7 @@ fn apply_and_verify_scrollback_options_returns_false_after_exhausting_retries() 
     let bin = write_fake_tmux(dir.path(), "fake-tmux-verify-always-wrong", &script);
     let options = trusty_common::tmux::scrollback_option_commands(100_000, true, true);
 
-    let verified = apply_and_verify_scrollback_options(&bin, &options, 100_000, true);
+    let verified = apply_and_verify_scrollback_options(&bin, None, &options, 100_000, true);
 
     assert!(
         !verified,
@@ -897,7 +897,7 @@ fn apply_and_verify_scrollback_options_fails_when_only_alternate_screen_is_wrong
     let bin = write_fake_tmux(dir.path(), "fake-tmux-alt-mismatch", &script);
     let options = trusty_common::tmux::scrollback_option_commands(100_000, true, false);
 
-    let verified = apply_and_verify_scrollback_options(&bin, &options, 100_000, false);
+    let verified = apply_and_verify_scrollback_options(&bin, None, &options, 100_000, false);
 
     assert!(
         !verified,
@@ -920,7 +920,7 @@ fn apply_and_verify_scrollback_options_verifies_alternate_screen_off() {
     let options = trusty_common::tmux::scrollback_option_commands(100_000, true, false);
 
     assert!(apply_and_verify_scrollback_options(
-        &bin, &options, 100_000, false
+        &bin, None, &options, 100_000, false
     ));
 }
 
@@ -942,7 +942,7 @@ fn apply_and_verify_probes_the_same_scope_it_sets() {
     let options = trusty_common::tmux::scrollback_option_commands(100_000, true, false);
 
     assert!(apply_and_verify_scrollback_options(
-        &bin, &options, 100_000, false
+        &bin, None, &options, 100_000, false
     ));
 
     let calls = std::fs::read_to_string(&log).unwrap();

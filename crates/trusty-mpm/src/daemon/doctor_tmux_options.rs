@@ -175,9 +175,9 @@ fn probe_mouse(bin: &str) -> Option<bool> {
 pub(super) fn check_tmux_options() -> DoctorCheck {
     let bin = crate::core::tmux::resolve_tmux_binary_or_bare();
     let observed = ObservedTmuxOptions {
-        history_limit: crate::core::tmux::probe_history_limit(&bin).ok(),
+        history_limit: crate::core::tmux::probe_history_limit(&bin, None).ok(),
         mouse: probe_mouse(&bin),
-        alternate_screen: crate::core::tmux::probe_alternate_screen(&bin).ok(),
+        alternate_screen: crate::core::tmux::probe_alternate_screen(&bin, None).ok(),
     };
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let expected = crate::core::trusty_tools_config::resolve_tmux_options(&config);
