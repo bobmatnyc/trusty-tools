@@ -42,7 +42,10 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   datg.py write followed, append {ts, session, kind: stale_il, n} to log.jsonl (n = consecutive
   stale turns) and record stamp.json changed_epoch for `fresh`.
 Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
-intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD); a failure is logged, never fatal.
+intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD). Exit 3 means the ledger was saved
+but at least one notification was not confirmed; stderr lists each queue outcome. Do not
+replay the write/batch: reconcile delivery and retry only the needed notification. Exit 0
+confirms the sender succeeded, not that the Architect read or acted on the message.
 A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
 dispatch whose prompt lacks "Goal: <code>-G<hex2>" naming an active goal; config.mode
@@ -299,7 +302,7 @@ def main(argv=None):
             entry.update({VERB_KEY: "update", "id": a.id})
             evs, st = write_ops_ev(a.project, [entry])
             print(", ".join(e["id"] for e in evs))
-            notify_escalations(a.project, evs, st)
+            return notify_escalations(a.project, evs, st)
         elif a.verb == "close":
             print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome}]))
         elif a.verb == "batch":
@@ -311,7 +314,7 @@ def main(argv=None):
                 raise DatgError("batch input must be a JSON list")
             evs, st = write_ops_ev(a.project, ops)
             print(", ".join(e["id"] for e in evs))
-            notify_escalations(a.project, evs, st)
+            return notify_escalations(a.project, evs, st)
         elif a.verb == "session":
             print(write_ops(a.project, [session_op(a)]))
         elif a.verb == "prune":

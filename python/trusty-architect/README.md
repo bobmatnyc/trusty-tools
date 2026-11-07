@@ -333,3 +333,28 @@ The script is idempotent. Pass `--interval N` to change the cycle length.
   `local/actions.md`.
 
 When a step fails, report it to the owner. Do not start a second Architect.
+
+## Intent Ledger notification results
+
+`datg.py update --esc architect` and escalation entries in `datg.py batch`
+save the ledger before calling the notification sender. Exit 0 means every
+requested sender call succeeded (or no notification was requested); it does
+not prove the Architect read or acted on a message. Exit 2 retains the existing
+invalid-write contract. Exit 3 means **the ledger was saved, but notification
+queueing was not confirmed for every escalation** (#10718).
+
+The stdout item IDs are unchanged. On exit 3, stderr lists each escalation's
+sender outcome, including successful sends in a mixed batch. The `esc` field
+records requested routing; it is not proof of delivery. Nonzero sender exits
+and timeouts can occur after queueing, so reconcile the intake/log before
+retrying only the needed notification. Do not replay the saved update or batch:
+it may contain committed additions and successful notifications. No automatic
+retry or rollback occurs. Notification failures still append `notify_failure`
+when the log is writable.
+
+This result contract covers the Python CLI and its bundled script copies. The
+Rust ledger writer records `escalated` events and journals outbox records with
+the ledger commit instead of invoking this Python sender. Its exit 3 covers
+lock/I/O errors, not this Python partial-success contract. Outbox commit alone
+is not evidence of Architect ingestion or acknowledgement; migration to that
+writer requires separate delivery verification.
