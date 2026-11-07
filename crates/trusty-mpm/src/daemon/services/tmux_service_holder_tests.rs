@@ -45,6 +45,7 @@ fn fixture(
 /// Error arm (Fail-Open Check): a session only a workspace server holds is
 /// reached there, never on the default server. Red on 420b3717bf, whose
 /// capture/send/input-box always used the default server.
+#[serial_test::serial]
 #[test]
 fn a_by_name_call_reaches_the_server_that_holds_the_session() {
     let (dir, _l, driver) = fixture(
@@ -66,6 +67,7 @@ fn a_by_name_call_reaches_the_server_that_holds_the_session() {
 }
 
 /// Error arm (Fail-Open Check): a name two servers hold is refused.
+#[serial_test::serial]
 #[test]
 fn a_by_name_call_refuses_a_name_on_two_servers() {
     let (dir, _l, driver) = fixture(&["tm-ws-a"], &["tm-pm"], &[("tm-ws-a", &["tm-pm"])]);

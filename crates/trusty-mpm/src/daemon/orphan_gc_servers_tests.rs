@@ -17,6 +17,7 @@ impl ChildLivenessProbe for NoChild {
 /// Error arm (Fail-Open Check): an untracked idle pane on a workspace server
 /// is reaped on that server after the two-pass debounce, and a tracked one is
 /// kept. Red on 420b3717bf, whose sweep listed only the default server.
+#[serial_test::serial]
 #[test]
 fn an_orphan_on_a_workspace_server_is_reaped_there() {
     let dir = crate::test_support::hermetic_temp_dir();

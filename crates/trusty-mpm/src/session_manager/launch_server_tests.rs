@@ -31,6 +31,7 @@ fn scratch_data_dir(dir: &std::path::Path) -> PathBuf {
     data
 }
 
+#[serial_test::serial]
 #[test]
 fn the_opt_out_keeps_the_default_server() {
     let (dir, _log, tmux) = real_driver();
@@ -53,6 +54,7 @@ fn the_opt_out_keeps_the_default_server() {
 /// nowhere else, and stores the server's socket on the record; the record
 /// then routes to that server. Red on 420b3717bf, which created every session
 /// on the default server and stored no socket.
+#[serial_test::serial]
 #[tokio::test]
 async fn a_fresh_launch_creates_its_session_on_the_workspace_server() {
     let (dir, log, tmux) = real_driver();
@@ -109,6 +111,7 @@ async fn a_fresh_launch_creates_its_session_on_the_workspace_server() {
 /// socket that refuses (ECONNREFUSED). Resume starts that server again, reads
 /// it as empty and recreates the pane on it. Red on 420b3717bf, where the
 /// refused listing failed the resume.
+#[serial_test::serial]
 #[tokio::test]
 async fn resuming_on_a_crashed_workspace_server_restarts_it_and_recreates_the_pane() {
     let dir = crate::test_support::hermetic_temp_dir();
