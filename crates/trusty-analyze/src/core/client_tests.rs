@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::core::fake_search::FakeSearchSocket;
+use crate::core::test_utils::IsolatedFake;
 use std::collections::HashMap;
 
 #[test]
@@ -309,4 +310,162 @@ async fn repeated_cursor_stops_the_walk_instead_of_spinning() {
         .await
         .expect_err("a non-advancing cursor is a failed walk, not a complete one");
     assert!(format!("{err:#}").contains("incomplete"), "got: {err:#}");
+}
+
+// ─── #10781: fingerprint, scoped walk, page retry ───────────────────────────
+
+/// A retry policy fast enough for a test: a 150 ms call bound, no backoff.
+fn fast_retry(attempts: u32) -> PageRetryPolicy {
+    PageRetryPolicy {
+        call_timeout: Duration::from_millis(150),
+        attempts,
+        min_limit: 100,
+        backoff: Duration::ZERO,
+    }
+}
+
+/// Hold the reply past the client's call bound, so the client times out.
+///
+/// See [`crate::core::test_utils::stall_reply`].
+fn stall() {
+    crate::core::test_utils::stall_reply(Duration::from_millis(400));
+}
+
+#[tokio::test]
+async fn fingerprint_reads_last_indexed_chunk_count_and_status() {
+    let search = FakeSearchSocket::serve(|method, params| match method {
+        "search.index.status" => Ok(serde_json::json!({
+            "index_id": params["index_id"], "chunk_count": 7,
+            "last_indexed": "2026-11-07T00:00:00Z", "status": "ready", "root_path": "/x"
+        })),
+        other => Err((-32601, format!("unexpected {other}"))),
+    });
+    let fp = TrustySearchClient::new(search.path())
+        .index_fingerprint("idx")
+        .await
+        .expect("fingerprint");
+    assert_eq!(fp.chunk_count, Some(7));
+    assert_eq!(fp.last_indexed.as_deref(), Some("2026-11-07T00:00:00Z"));
+    assert_eq!(fp.status.as_deref(), Some("ready"));
+    assert!(fp.is_verifiable());
+    let empty: IndexFingerprint = serde_json::from_value(serde_json::json!({})).expect("decode");
+    assert!(!empty.is_verifiable(), "no change signal is not verifiable");
+}
+
+/// A scoped walk carries `path_prefix` on every page and accepts the echo.
+#[tokio::test]
+async fn scoped_walk_sends_the_prefix_on_every_page() {
+    let search = FakeSearchSocket::serve(|_, params| {
+        let after = params["after"].as_str().unwrap_or_default();
+        let mut body = if after.is_empty() {
+            page(2, &["a:1:2"], Some("a:1:2"))
+        } else {
+            page(2, &["b:1:2"], None)
+        };
+        body["path_prefix"] = params["path_prefix"].clone();
+        Ok(body)
+    });
+    let chunks = TrustySearchClient::new(search.path())
+        .get_chunks_under("idx", "src/lib.rs")
+        .await
+        .expect("scoped walk");
+    assert_eq!(chunks.len(), 2);
+    let calls = search.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|(_, p)| p["path_prefix"] == "src/lib.rs"));
+}
+
+/// #10781: a daemon that ignores `path_prefix` answers unscoped pages; the
+/// walk must refuse after page one instead of paging the whole corpus.
+#[tokio::test]
+async fn a_daemon_that_ignores_path_prefix_is_refused() {
+    let search = spawn_chunks_stub(vec![("", page(315_000, &["a:1:2"], Some("a:1:2")))]);
+    let err = TrustySearchClient::new(search.path())
+        .get_chunks_under("idx", "src/lib.rs")
+        .await
+        .expect_err("an unscoped answer to a scoped request is refused");
+    assert!(
+        format!("{err:#}").contains("did not apply path_prefix"),
+        "got: {err:#}"
+    );
+    assert_eq!(search.calls().len(), 1, "no second page is fetched");
+}
+
+/// #10781: one page that times out once is retried at a smaller limit and
+/// the walk completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_page_that_times_out_once_still_completes_the_walk() {
+    let stalled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&stalled);
+    let isolated = IsolatedFake::serve(move |_, params| {
+        let after = params["after"].as_str().unwrap_or_default();
+        if after.is_empty() {
+            return Ok(page(2, &["a:1:2"], Some("a:1:2")));
+        }
+        if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            stall();
+        }
+        Ok(page(2, &["b:1:2"], None))
+    });
+    let search = isolated.get();
+    let chunks = TrustySearchClient::new(search.path())
+        .with_page_retry(fast_retry(3))
+        .get_chunks("idx")
+        .await
+        .expect("one timeout must not discard the walk");
+    let ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, vec!["a:1:2", "b:1:2"]);
+    let limits: Vec<u64> = search
+        .calls()
+        .iter()
+        .filter(|(_, p)| p["after"] == "a:1:2")
+        .map(|(_, p)| p["limit"].as_u64().unwrap_or_default())
+        .collect();
+    assert_eq!(limits, vec![1000, 500], "the retry halves the page limit");
+}
+
+/// #10781: a page that always times out fails after the bounded attempts,
+/// naming the cursor, and the walk returns no partial corpus.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_page_that_always_times_out_fails_naming_its_cursor() {
+    let isolated = IsolatedFake::serve(|_, params| {
+        if params["after"].as_str().unwrap_or_default().is_empty() {
+            return Ok(page(2, &["a:1:2"], Some("a:1:2")));
+        }
+        stall();
+        Ok(page(2, &["b:1:2"], None))
+    });
+    let search = isolated.get();
+    let err = TrustySearchClient::new(search.path())
+        .with_page_retry(fast_retry(3))
+        .get_chunks("idx")
+        .await
+        .expect_err("a page that never answers fails the walk");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("after cursor \"a:1:2\"") && msg.contains("attempt 3 of 3"),
+        "got: {msg}"
+    );
+    let tries = search
+        .calls()
+        .iter()
+        .filter(|(_, p)| p["after"] == "a:1:2")
+        .count();
+    assert_eq!(tries, 3, "bounded at the policy's attempts");
+}
+
+/// A page the daemon answered with an error is not retried.
+#[tokio::test]
+async fn a_daemon_error_page_is_not_retried() {
+    let search = FakeSearchSocket::serve(|_, _| Err((-32004, "no index".to_string())));
+    let err = TrustySearchClient::new(search.path())
+        .with_page_retry(fast_retry(4))
+        .get_chunks("idx")
+        .await
+        .expect_err("a daemon error fails the walk");
+    assert!(
+        format!("{err:#}").contains("attempt 1 of 4"),
+        "got: {err:#}"
+    );
+    assert_eq!(search.calls().len(), 1);
 }

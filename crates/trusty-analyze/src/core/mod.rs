@@ -39,7 +39,7 @@ pub mod tool_impls;
 pub mod tool_registry;
 pub mod tools;
 
-pub use client::{IndexSummary, TrustySearchClient};
+pub use client::{IndexFingerprint, IndexSummary, PageRetryPolicy, TrustySearchClient};
 pub use complexity::compute_complexity_for;
 pub use concept_cluster::{bow_embedding, cluster, ClusterResult, ConceptCluster};
 pub use deadlines::{
