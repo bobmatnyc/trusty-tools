@@ -17,7 +17,7 @@
 //! destructive action (the workspace is deleted); a confirmation modal would
 //! be a reasonable fast-follow but is out of scope for this skeleton.
 //!
-//! What: [`dispatch`] matches a [`PendingAction`] to its `DaemonClient` call
+//! What: [`dispatch_on`] matches a [`PendingAction`] to its `DaemonClient` call
 //! and calls [`ProjectCtlState::set_notice`] with the outcome, requesting an
 //! immediate re-poll after any action that changed the fleet.
 //! Test: the pure notice text is not independently unit-tested (it is a

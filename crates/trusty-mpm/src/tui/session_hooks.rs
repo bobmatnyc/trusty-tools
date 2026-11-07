@@ -75,7 +75,7 @@ pub fn set_session_hooks(hooks: SessionHooks) -> bool {
 
 /// The registered hooks, if the binary set them.
 ///
-/// In this crate's own tests, a thread's stub from [`with_test_hooks`] wins.
+/// In this crate's own tests, a thread's stub from `with_test_hooks` (test-only) wins.
 pub fn session_hooks() -> Option<SessionHooks> {
     #[cfg(test)]
     if let Some(stub) = TEST_HOOKS.with(std::cell::Cell::get) {

@@ -102,7 +102,7 @@ pub use mouse::handle_mouse;
 /// An action a key press requested that needs an async daemon round trip.
 ///
 /// Why: [`handle_key`] must stay a pure, terminal-free, IO-free function to
-/// remain unit-testable; the actual HTTP calls live in [`super::actions::dispatch`],
+/// remain unit-testable; the actual HTTP calls live in [`super::actions::dispatch_on`],
 /// which the run loop awaits after `handle_key` returns.
 /// What: one variant per lettered verb (DOC-35 §5 keybinding table) plus
 /// [`PendingAction::SubmitConfig`] for the #2120 config form's submit
@@ -123,7 +123,7 @@ pub enum PendingAction {
     /// `a` in the Sessions pane — fetch and display the attach command.
     Attach(String),
     /// The config form's submit key (DOC-35 §6, #2120) — PATCHes the built
-    /// args for the named project; see [`super::actions::dispatch`] for the
+    /// args for the named project; see [`super::actions::dispatch_on`] for the
     /// success/error handling (close-on-success, inline-error-on-failure).
     SubmitConfig(String, PatchProjectArgs),
     /// #10476: `f` on a session — move to its existing tmux window or iTerm2
