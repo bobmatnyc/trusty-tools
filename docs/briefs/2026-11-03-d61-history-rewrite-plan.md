@@ -74,7 +74,7 @@ Post-restore check, all four must hold: empty diff for each of the three files; 
 ```
 git ls-remote origin 'refs/heads/*' 'refs/tags/*' | grep -v '\^{}' | awk '{split($2,a,"/");c[a[2]]++} END{for(k in c)print k,c[k]}'
 ```
-Read-only baseline at 09:55Z: heads 52, tags 931. Expected delta: zero heads, zero tags (replacement, no add or delete). A nonzero delta fails the push step and triggers rollback review. Rewritten-ref count = `wc -l refs-to-rewrite.txt` (161 on 11-02; about 34 heads + 127 tags), and every one must show a new SHA in the after list while the other 52+931-161 refs keep theirs. Save before and after lists as `refs-count-before.txt` and `refs-count-after.txt`.
+Read-only baseline at 09:55Z: heads 52, tags 931 (re-read 16:06Z 11-03: same). Expected after the D7d push (patch-cut plan section 10): heads 52 (delta zero), tags 870 (931 minus the 61 release tags deleted inside the atomic push). `run-push-window.sh` r2 checks both and exits 4 on any other count; a mismatch fails the push step and triggers rollback review. Pushed refs = `refs-98.txt` (38 heads + 60 tags, each must show its rewritten SHA in the after list) plus 61 deletes (`step-d-61.tsv`, each must be absent); the 6 `content-v*` tags keep their old SHAs until Gate B; the other 52+931-98-61-6 refs keep theirs. Save before and after lists as `refs-count-before.txt` and `refs-count-after.txt`.
 
 ## 5. Execution (executor tm-trusty-issues, Architect GO per step)
 1. F0: freeze message and acks (B4); install gate; confirm no auto-merge; `gh pr list` inventory.
@@ -82,14 +82,14 @@ Read-only baseline at 09:55Z: heads 52, tags 931. Expected delta: zero heads, ze
 3. Dry run on a copy (`work.git`): filter-cmd.sh, gen_tagmap.py. Require exit 0, `--contains 26c066888a` empty, 1 differing path, tag-map 127 lines, commit-map about 1140 rows.
 4. `scan_post-20261102-1636.py ... --paths --expect-diff-paths 1` must exit 0 PASS; the negative control on the unrewritten mirror must exit 1.
 5. (Waits for B1, B3, B4.) Save JSON, start the wrapper, disable the workflows, Bob disables rulesets and lifts main force-push on the dashboard.
-6. Push (Architect GO, tm-dogfood reviews the command first): `gen_push.py` output, one atomic push, `--force-with-lease=<ref>:<old>` per ref, heads then 127 tags then main, no `--mirror`/`--all`/refs/pull, no `--no-verify`.
+6. Push (Architect GO, tm-dogfood reviews the command first): `d7d-scripts/push-cmd-98.sh` (98 updates + 61 deletes, patch-cut plan section 10), one atomic push, `--force-with-lease=<ref>:<old>` per ref; refspec order does not matter in an atomic push (`main` is row 33 of `refs-98.txt`); no `--mirror`/`--all`/refs/pull, no `--no-verify`.
 7. Fresh mirror of origin, rerun the scan, after-count; Bob restores; wrapper check; re-enable workflows; unfreeze message by tm-dogfood only after all pass.
 8. CI on new main: one-shot `gh api actions/runs?head_sha=`; six required checks green.
 9. Support request: sent by Bob from his account (not the executor, not the PM), one ticket, runbook s9 text: list C (about 4,744 commits), 17 blob ids, De8 38, Ded 564, 23 old-head commits, refs/pull cached views, 8 public forks. refs/pull/* cannot be pushed to, so old SHAs stay fetchable by SHA until Support acts.
 10. Keep the gate until `for-each-ref --contains 26c066888a` is empty in every clone.
 
 ## 6. Verify
-Scan PASS on the fresh clone (14 blobs unreachable, 0 long-line blobs, 127/127 tags mapped); old vs new main tree differs in 1 path; `git log -S` and `git grep` for the De8 id on main print nothing; commit count equal to old main (5227 at last read); ref-count delta zero (section 4); CI green. Known residue: crates.io sources (trusty-architect 0.1.0/0.2.0, trusty-mpm 1.7.10 to 1.11.1) hold one 9-char path-like token each; not rewritable.
+Scan PASS on the fresh clone (14 blobs unreachable, 0 long-line blobs, 60/60 pushed tags mapped; of the tag map's 127, 61 are deleted in the push and 6 `content-v*` are the Gate A residue until Gate B); old vs new main tree differs in 1 path; `git log -S` and `git grep` for the De8 id on main print nothing; commit count equal to old main (5227 at last read); ref counts heads 52 (delta zero), tags 870 (delta -61) (section 4); CI green. Known residue: crates.io sources (trusty-architect 0.1.0/0.2.0, trusty-mpm 1.7.10 to 1.11.1) hold one 9-char path-like token each; not rewritable.
 
 ## 7. Downstream
 This checkout: `.git` 23 GB, 213 worktrees, 663 local heads containing 26c, 950 tags, 5 local docs commits on main. Cheapest path: new clone, then `git rebase --onto origin/main <old-base> <branch>` per live branch (old base = merge-base with OLD_MAIN, taken before fetch; for pushed branches `git branch SAVE` then `reset --hard origin/<branch>`).
@@ -100,7 +100,7 @@ This checkout: `.git` 23 GB, 213 worktrees, 663 local heads containing 26c, 950 
 Release tags move once (#6178 exception); crates.io unaffected; no tag is cut before the rewrite.
 
 ## 8. Rollback
-Valid until Support purges: `gen_push.py restore-test.git refs-to-rewrite.txt refs-after-sha.txt <url>` sends old objects from the bundle clone, atomic and leased, inside the same wrapper (B1 and B3 apply again). After the purge only the bundle restores. Any stale-info rejection or partial write: stop, refreeze, redo from F1.
+Valid until Support purges: `run-rollback-window.sh` (sha256 16792564…) runs `rollback-98.sh` (sha256 5b91057e…). It pushes the 98 refs back to their old SHAs, atomic and leased at the NEW SHAs (B1 and B3 apply again). The 61 deleted release tags are not restorable this way (GH013 refuses re-creation). The 165-ref `gen_push.py restore-test.git …` command is retired: GH013 rejects it. The rollback route owes its `--recheck` at window open (df-D94). After the purge only the bundle restores. Any stale-info rejection or partial write: stop, refreeze, redo from F1.
 
 ## 9. Open questions
 1. D: Is the rewrite scope still D8d/D19 only (fixture, De8, Ded)? Recommend yes; no source ties df-A04 keys to this rewrite.

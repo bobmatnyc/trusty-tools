@@ -181,10 +181,10 @@ Files, all under `/Users/masa/d19-private/d7d-scripts/` (outside the repo, writt
 | `step-d-61.sh` | `97c132e53488900d5f54a1a26c2510e6e9efae7feb4b057b1ebbf71041af634d` | r2: release DELETE only (`--releases-only` mandatory for the 61), 200/404/stop status branch, copy-2 marker checked by hash; dry by default |
 | `step-d-content-6.tsv` | `1be731fe84072e023b6dbf07d2d2a30a37152d90d8026897719faad15aba96d9` | same columns, 6 content-v* rows, separate |
 | `refs-98.txt` | `5e4328cbb9246b2315b0488d5c49bd3375b708325ef18a861bd82168c6d5132f` | 98 refs (38 heads, 60 tags): ref, lease (old SHA), rewritten SHA |
-| `push-cmd-98.sh` | `c95eb94c0a317f76c2c9853ed762412ef5bf94ce15a75d786a4887d63233eda7` | r2: print, recheck, dry-run, and `--execute` (always 98 updates + 61 tag deletes = 159 refspecs; only under the wrapper) |
+| `push-cmd-98.sh` | `7742346f92f803aae95e203004e249714659de8b9a8b00d47f23820f76c5deff` | r3 (df-D99: recheck fails closed off 52/931; was r2 `c95eb94c…`): print, recheck, dry-run, and `--execute` (always 98 updates + 61 tag deletes = 159 refspecs; only under the wrapper) |
 | `asset-copy-2.sh` | `7c9f5eb51d2969d1d2e7d14cbe353b20e8db2b053d548c3a9f32da1c534cd9d0` | r2: copy 2 of all 67 releases (442 assets + 2 metadata) in `d7d-assets/`, whole-copy re-hash; marker `.verified-ok` sha256 `856f1cbcac50465d373d992d218acc5e939726e49dc1906a934165009bae5270` |
 | `drafts-cleanup-61.sh` | `cbb4eb408f6cb9b888e313c72416c35075c2fefab9618ed63c252aca9f82ae93` | r2: delete the 61 `-r` drafts after the copy-2 hash check; 200/404/stop status branch |
-| `run-push-window.sh` (in `/Users/masa/d19-private/`) | `39b7d06a421992a08d6a4e07903d6933f6dca7190c7e9d1ee5822583ce464515` | r3 wrapper: pre-D recheck, step D, post-D checks, push, ref-count check, M2 watchdog; `wrapper-r2.diff`, `wrapper-r3.diff` |
+| `run-push-window.sh` (in `/Users/masa/d19-private/`) | `dc1706b9e54480223478d57329da973b4d5a004896e4acfb184d0d114d922d48` | r4 wrapper (df-D99 re-pin; was r3 `39b7d06a…`; ran step D 2026-11-07T01:25Z): pre-D recheck, step D, post-D checks, push, ref-count check, M2 watchdog; `wrapper-r2.diff`, `wrapper-r3.diff` |
 
 Checks done while writing (read-only): the 61 + 6 split equals `gh013-tags.txt` (67); release ids come from the live API; leases equal the step-5 `ls-remote-before-step5.txt` for all 165 refs; every one of the 98 refs in `/Users/masa/d19-run/work.git` equals the rewritten SHA in `refs-after-sha.txt` (0 mismatches); no rewritten SHA equals its old SHA.
 
