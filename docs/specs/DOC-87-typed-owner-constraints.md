@@ -96,6 +96,16 @@ Why the mirror: PMs and other palaces read the palace, not the Architect ledger.
 
 Rejected: palace-only. No schema, no machine check, and the #10780 failure (palace ruling beaten by a handoff line) was a precedence bug that typed records remove.
 
+### 3.3a User-facing layer: Architect Instructions
+
+The dashboard "Instructions" section (many owner prompts distilled into one evolving instruction, amend vs supersede, sources kept) is specified in `SPEC-ARCHITECT-INSTRUCTIONS.md`, Architect repo, path `/Users/masa/trusty-mpm-projects/architect/docs/specs/SPEC-ARCHITECT-INSTRUCTIONS.md` (outside this repo; in progress at 2026-11-07, plain-text reference). It is the user-facing layer over this spec and owns the distilled view and how amend and supersede are presented. DOC-87 owns the data and enforcement underneath. The Instructions spec consumes from DOC-87:
+
+- constraint records (§3.2), including `quote`, `cite` and `owner`;
+- supersession (§5, §9.4): the `supersedes` / `ended_by` links, so a distilled instruction can show what replaced what;
+- sources (§9.2): `source=owner|architect`, so owner words and Architect inference stay apart in the view.
+
+DOC-87 does not specify the distilled view or the amend-vs-supersede presentation; the two specs must agree on the record fields above. The digest "Active owner constraints" block (§4) stays here as the plain resume surface.
+
 ### 3.4 Pacing boundary
 
 Pacing and queue weights ("licensing least important", "target 1.75%/h") are Architect policy, not constraints. They may reorder the ready queue and pick the model within any `model` constraint. They cannot read a `limit` as a suggestion: `helpers exact 4` holds regardless of the usage rate.
@@ -262,15 +272,23 @@ Per stage, report in order: (a) source merge: PR, merge SHA, CI result; (b) inst
 
 **ID:** SPEC-OWNERCON-11~draft
 
-1. Id prefix: reuse `D`/`A` families or add a new prefix (`C`)? r-039 fixes the current set.
-2. Action parsing in `relay.sh`: structured relay header (`action:` line) or text matching on helper/hold keywords? Structured is reliable but changes every relay.
-3. Who writes: only the Architect, or may a PM propose a constraint from an owner pane turn it witnessed?
-4. Fleet-scope constraints: which ledger holds them when no single project owns the fleet?
-5. Does `ask` block or time out to `deny`? A blocked PM idled 17 min in #10780.
-6. Is the 24 h "expired" display window right, or should expiry notify the owner once?
-7. Where the checker runs: Python script now, Rust in `trusty-architect` later; which is the contract? Proposal: the shared vector file (§9.6) is the contract; both implementations must pass it.
-8. Is a shadow period (§10 Stage 1) of one day of fleet traffic enough, or one release?
-9. Supersession key (§9.4): is `(kind, scope, resource)` enough for free-text owner turns, or must the owner turn be classified by a human-confirmed step first?
-10. Citation window (§9.6): drop the 2-minute window entirely in favour of ledger ids, or keep it as a fast path for live chat?
-11. Delivery evidence (§9.5): who verifies `delivered` for a pane target (PM capture or Architect capture)?
-12. Does G-1 bind the human-facing dashboard answers, which are already owner-authored, or only chat/pane relays? (Assumed: dashboard answers are verified by channel.)
+Engineering defaults (recorded; change by spec edit, no owner decision needed):
+
+1. Id prefix: new `C` prefix, one counter (as stated in §3.2). Default.
+2. Action parsing in `relay.sh`: structured `action:` header, with a one-release text-match fallback that logs a warning. Default.
+3. (Owner policy, open: Q-A below.)
+4. Fleet-scope constraints: held in the `trusty-architect` ledger, scope `fleet`. Default.
+5. (Owner policy, open: Q-B below.)
+6. (Owner policy, open: Q-C below.)
+7. Checker contract: the shared vector file (§9.6); Python now, Rust later, both must pass it. Default.
+8. Shadow period (§10 Stage 1): one day of fleet traffic and at least one session that hits each guardrail; extend if a false refusal appears. Default.
+9. Supersession key (§9.4): `(kind, scope, resource)` from a human-confirmed record; free-text turns are not auto-classified, so an unclassified later turn yields `ask`, not a refusal. Default.
+10. Citation window (§9.6): ledger id or visible timestamp is the proof; the 2-minute window stays only as a fast path for live chat when the cite shows the owner-turn timestamp. Default.
+11. Delivery evidence (§9.5): the sender's own capture (PM for a pane target, Architect for its relays) proves `delivered`; only a recipient-authored reply proves `acknowledged`. Default.
+12. G-1 and dashboard answers: dashboard answers are verified by channel and need no quote check; chat and pane relays do. Default.
+
+Owner-policy questions (go to the owner; answers recorded here):
+
+- Q-A (was 3). Who may record an owner decision: only the Architect, or a PM that witnessed the owner's pane turn?
+- Q-B (was 5). When a check cannot tell if an action is allowed (`ask`), does the work wait for the owner or time out to refused?
+- Q-C (was 6). When a standing owner rule expires, is the owner told once, or does it lapse silently?
