@@ -205,12 +205,12 @@ impl Fixture {
         std::fs::create_dir_all(&data).expect("data dir");
         let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy().into_owned())
             .with_floor(ArchitectFloor::for_data_dir(&data));
-        let mgr = SessionManager::new(
-            &data,
-            Arc::new(RealTmuxDriver::from_driver_for_test(driver)),
-        )
-        .await
-        .expect("manager");
+        // #10101: a reconcile lists workspace servers in this scratch dir only.
+        let driver = RealTmuxDriver::from_driver_for_test(driver)
+            .with_socket_dir_for_test(dir.path().to_path_buf());
+        let mgr = SessionManager::new(&data, Arc::new(driver))
+            .await
+            .expect("manager");
         Self { dir, bin, mgr }
     }
 

@@ -32,6 +32,9 @@ use super::manager::{ManagedError, ManagedTmuxDriver};
 /// Test: `real_tmux_constructs`.
 pub struct RealTmuxDriver {
     driver: TmuxDriver,
+    /// #10101: where [`ManagedTmuxDriver::workspace_servers`] looks for
+    /// `tm-ws-*` sockets; `None` is this process's socket directory.
+    socket_dir: Option<std::path::PathBuf>,
 }
 
 impl RealTmuxDriver {
@@ -45,7 +48,10 @@ impl RealTmuxDriver {
     pub fn discover() -> Result<Self, ManagedError> {
         let driver =
             TmuxDriver::discover().map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
-        Ok(Self { driver })
+        Ok(Self {
+            driver,
+            socket_dir: None,
+        })
     }
 
     /// [`ManagedTmuxDriver::pane_claude`] on a named server (#10101): the
@@ -66,7 +72,18 @@ impl RealTmuxDriver {
     /// Wrap an already-built driver — tests only, for a scripted fake tmux.
     #[cfg(test)]
     pub(crate) fn from_driver_for_test(driver: TmuxDriver) -> Self {
-        Self { driver }
+        Self {
+            driver,
+            socket_dir: None,
+        }
+    }
+
+    /// List workspace servers in `dir`, never the process's socket directory
+    /// — tests only, so a reconcile reads a scratch directory (#10101).
+    #[cfg(test)]
+    pub(crate) fn with_socket_dir_for_test(mut self, dir: std::path::PathBuf) -> Self {
+        self.socket_dir = Some(dir);
+        self
     }
 }
 
@@ -397,12 +414,16 @@ impl ManagedTmuxDriver for RealTmuxDriver {
     fn on_server(&self, server: &str) -> Option<std::sync::Arc<dyn ManagedTmuxDriver>> {
         Some(std::sync::Arc::new(Self {
             driver: self.driver.on_server(server),
+            socket_dir: self.socket_dir.clone(),
         }))
     }
 
-    /// #10101: the live `tm-ws-*` servers in this process's socket directory.
+    /// #10101: the live `tm-ws-*` servers in this driver's socket directory.
     fn workspace_servers(&self) -> Result<Vec<String>, ManagedError> {
-        let dir = crate::core::tmux_server::ambient_socket_dir();
+        let dir = self
+            .socket_dir
+            .clone()
+            .unwrap_or_else(crate::core::tmux_server::ambient_socket_dir);
         crate::core::tmux_server::live_workspace_servers(&dir).map_err(|e| {
             ManagedError::TmuxUnavailable(format!(
                 "cannot list workspace tmux servers in {}: {e}",

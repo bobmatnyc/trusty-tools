@@ -9,10 +9,11 @@ use super::*;
 /// The workspace server every record here lives on.
 const NAMED: &str = "tm-ws-10101-route";
 
-/// Point `id`'s record at the [`NAMED`] server's socket.
+/// Point `id`'s record at a [`NAMED`] socket inside the fixture's scratch
+/// dir, so no liveness probe reaches a real socket directory.
 async fn put_on_named_server(f: &Fixture, id: &ManagedSessionId) {
     let mut record = f.mgr.get(id).await.expect("record");
-    record.tmux_socket = Some(PathBuf::from(format!("/tmp/tmux-10101/{NAMED}")));
+    record.tmux_socket = Some(f.dir.path().join(NAMED));
     f.mgr
         .store
         .write()
