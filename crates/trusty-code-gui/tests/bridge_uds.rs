@@ -1,24 +1,28 @@
-//! The webview's requests reach the `tcode` daemon over its Unix socket (#6637).
+//! The webview's requests reach the `tcode` daemon over its Unix socket (#6637),
+//! through the two in-process entry points the webview uses (#10166).
 //!
-//! Why: the daemon's TCP listener is what PR 2c deletes, and every `fetch()` and
-//! `EventSource` in `ui/src` now points at this bridge instead. These cases
-//! drive the REAL router against a stub daemon socket, which is the only way to
-//! prove the whole path: guard stack, route, mapping table, RPC exchange, and
-//! the SSE bridge.
+//! Why: every `fetch()` in `ui/src` goes through the `tcode-bridge://` scheme
+//! handler, and both event streams through the `open_daemon_stream` command.
+//! These cases drive the REAL router, entered exactly that way, against a stub
+//! daemon socket — the only way to prove the whole path: scheme dispatch or
+//! stream pump, guard stack, route, mapping table, RPC exchange, and the SSE
+//! encoding.
 //!
 //! What: one stub socket per case, a `build_router` pointed at it through
-//! `BridgeState::with_socket`, and one assertion per behaviour the webview
-//! depends on — including the four ways this bridge is allowed to fail.
+//! `BridgeState::with_socket`, unary requests sent through
+//! `bridge::scheme::dispatch` and streams opened through `bridge::channel`,
+//! and one assertion per behaviour the webview depends on — including each way
+//! this bridge is allowed to fail.
 //! Test: this file IS the test.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
+use axum::http::{self, StatusCode};
 use serde_json::{Value, json};
-use tower::ServiceExt;
+use trusty_code_gui::bridge::channel::{self, StreamEvent};
 use trusty_code_gui::bridge::routes::{BridgeState, build_router};
+use trusty_code_gui::bridge::scheme;
 use trusty_common::server::DaemonAuth;
 
 /// The credential every case presents, except the one that presents none.
@@ -121,7 +125,11 @@ async fn through_router(
     send(router, method, uri, body, Some(TOKEN), None).await
 }
 
-/// One request with full control over the credential and `Origin` header.
+/// One request through the scheme handler, with full control over the
+/// credential and `Origin` header.
+///
+/// `uri` is a path; it is sent as `tcode-bridge://localhost{uri}`, the form the
+/// webview's `fetch()` produces.
 async fn send(
     router: axum::Router,
     method: &str,
@@ -130,9 +138,27 @@ async fn send(
     token: Option<&str>,
     origin: Option<&str>,
 ) -> (StatusCode, String, String) {
-    let mut builder = Request::builder()
+    let (status, content_type, bytes) =
+        send_bytes(router, method, uri, body.as_bytes().to_vec(), token, origin).await;
+    (
+        status,
+        content_type,
+        String::from_utf8_lossy(&bytes).to_string(),
+    )
+}
+
+/// [`send`] with a raw body, for the body-limit case.
+async fn send_bytes(
+    router: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Vec<u8>,
+    token: Option<&str>,
+    origin: Option<&str>,
+) -> (StatusCode, String, Vec<u8>) {
+    let mut builder = http::Request::builder()
         .method(method)
-        .uri(uri)
+        .uri(format!("{}{uri}", scheme::SCHEME_ORIGIN))
         .header("content-type", "application/json");
     if let Some(token) = token {
         builder = builder.header("authorization", format!("Bearer {token}"));
@@ -140,21 +166,66 @@ async fn send(
     if let Some(origin) = origin {
         builder = builder.header("origin", origin);
     }
-    let request = builder.body(Body::from(body.to_string())).expect("request");
-    let resp = router.oneshot(request).await.expect("response");
-    let status = resp.status();
+    let request = builder.body(body).expect("request");
+    let resp = tokio::time::timeout(Duration::from_secs(30), scheme::dispatch(router, request))
+        .await
+        .expect("the scheme handler must answer");
     let content_type = resp
         .headers()
-        .get(axum::http::header::CONTENT_TYPE)
+        .get(http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
-    (
-        status,
-        content_type,
-        String::from_utf8_lossy(&bytes).to_string(),
+    (resp.status(), content_type, resp.into_body())
+}
+
+/// Mint a ticket for `path` through the scheme, as `daemon-auth.ts` does.
+async fn mint(router: &axum::Router, path: &str) -> String {
+    let (status, _, body) = send(
+        router.clone(),
+        "POST",
+        &format!("/auth/sse-ticket?path={}", path.replace('/', "%2F")),
+        "",
+        Some(TOKEN),
+        Some("tauri://localhost"),
     )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    serde_json::from_str::<Value>(&body).expect("json")["ticket"]
+        .as_str()
+        .expect("a ticket")
+        .to_string()
+}
+
+/// Open `path` the way `open_daemon_stream` does and collect every event until
+/// the stream's `End`.
+async fn stream_events(router: axum::Router, path: &str) -> Vec<StreamEvent> {
+    let ticket = mint(&router, path).await;
+    let body = channel::open(router, path, &ticket)
+        .await
+        .expect("the stream must open");
+    let mut seen = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        channel::pump(body, |e| {
+            seen.push(e);
+            true
+        }),
+    )
+    .await
+    .expect("the stream must end");
+    seen
+}
+
+/// The `data` of every message in `events`.
+fn messages(events: &[StreamEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::Message { data } => Some(data.clone()),
+            StreamEvent::End { .. } => None,
+        })
+        .collect()
 }
 
 // ─── the unary path ──────────────────────────────────────────────────────────
@@ -282,14 +353,38 @@ async fn the_markdown_route_404s_an_unknown_session() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
 
+/// Why (the fail-open check): a body over the socket's frame budget must be
+/// refused before it is framed, with a status — not truncated and forwarded,
+/// and not left unanswered.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_body_is_refused_before_it_reaches_the_daemon() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |_| {
+        panic!("an oversized body must never reach the daemon")
+    });
+    let (router, _) = router_for(socket);
+    let too_big = vec![b' '; trusty_common::uds::MAX_FRAME_BYTES as usize + 1];
+    let (status, _, _) = send_bytes(
+        router,
+        "POST",
+        "/workstreams",
+        too_big,
+        Some(TOKEN),
+        Some("tauri://localhost"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 // ─── the two event streams ───────────────────────────────────────────────────
 
 /// Why: the activity pane replays a session's ring buffer and then tails it, and
-/// every frame has to reach the browser as the `data:` line the daemon's own SSE
-/// route wrote — the webview parses the envelope, not a re-shaped wrapper.
+/// every frame has to reach the webview as the `data:` payload the daemon's own
+/// SSE route wrote — the webview parses the envelope, not a re-shaped wrapper.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_stream_reaches_the_browser_frame_for_frame() {
+async fn a_stream_reaches_the_webview_frame_for_frame() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let socket = stub_daemon(tmp.path(), |req| {
         assert_eq!(req["method"], "session.events");
@@ -301,20 +396,26 @@ async fn a_stream_reaches_the_browser_frame_for_frame() {
             end_frame(),
         ]
     });
-    let (status, content_type, body) =
-        through_router(socket, "GET", "/sessions/s-1/events", "").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(content_type, "text/event-stream");
+    let (router, _) = router_for(socket);
+    let events = stream_events(router, "/sessions/s-1/events").await;
     assert_eq!(
-        body, "data: {\"kind\":\"turn\",\"seq\":1}\n\ndata: {\"kind\":\"turn\",\"seq\":2}\n\n",
-        "each item must be exactly one SSE frame"
+        events,
+        vec![
+            StreamEvent::Message {
+                data: "{\"kind\":\"turn\",\"seq\":1}".to_string()
+            },
+            StreamEvent::Message {
+                data: "{\"kind\":\"turn\",\"seq\":2}".to_string()
+            },
+            StreamEvent::End { error: None },
+        ],
+        "each item must be exactly one message, then one end"
     );
 }
 
 /// Why (the fail-open check): a stream that dies mid-tail must say so. The
-/// webview reads a CLOSED stream as a drop to reconnect through and a closed one
-/// carrying no error as a stream that simply ended — so a silent close would
-/// report a broken tail as a finished one.
+/// webview reads the channel's `end` as a drop to reconnect through, and the
+/// error event before it is what tells a broken tail from a finished one.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mid_stream_failure_becomes_an_error_event() {
@@ -325,30 +426,46 @@ async fn a_mid_stream_failure_becomes_an_error_event() {
             stream_error_frame(-32603, "the producer went away"),
         ]
     });
-    let (status, _, body) = through_router(socket, "GET", "/sessions/s-1/events", "").await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the head was already written: {body}"
-    );
-    assert!(body.starts_with("data: {\"seq\":1}\n\n"), "{body}");
+    let (router, _) = router_for(socket);
+    let events = stream_events(router, "/sessions/s-1/events").await;
+    let data = messages(&events);
+    assert_eq!(data[0], "{\"seq\":1}", "{events:?}");
     assert!(
-        body.contains(r#""type":"error""#),
-        "a truncated stream must carry a terminal error event: {body}"
+        data[1].contains(r#""type":"error""#) && data[1].contains("the producer went away"),
+        "a truncated stream must carry a terminal error event: {events:?}"
     );
-    assert!(body.contains("the producer went away"), "{body}");
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "the stream must end, not hang: {events:?}"
+    );
+}
+
+/// Why: the daemon closing the socket with no `end` frame is the other way a
+/// stream drops midway, and it must not read as a clean finish either.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_that_hangs_up_midway_is_an_error_event_then_end() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |_| vec![item_frame(json!({ "seq": 1 }))]);
+    let (router, _) = router_for(socket);
+    let events = stream_events(router, "/sessions/s-1/events").await;
+    let data = messages(&events);
+    assert_eq!(data[0], "{\"seq\":1}", "{events:?}");
+    assert!(
+        data.iter().any(|d| d.contains(r#""type":"error""#)),
+        "a hang-up without an end frame must surface as an error: {events:?}"
+    );
+    assert!(matches!(events.last(), Some(StreamEvent::End { .. })));
 }
 
 /// Why: `workstream.events` is a pure live tail — a healthy stream on a quiet
 /// workstream sends NOTHING until something happens. A bridge that read the
-/// first frame before choosing a status would withhold the response head for as
-/// long as that took, and the webview's `EventSource` reads a head that never
-/// arrives as a connection that never opened, then reconnect-loops. Measured on
-/// a real `tcode serve`: `curl` on a freshly created workstream got zero bytes
-/// and no status line. This is the arm that pins the fix.
+/// first frame before answering would hold the open for as long as that took.
+/// Measured on a real `tcode serve`: `curl` on a freshly created workstream got
+/// zero bytes and no status line. This is the arm that pins the fix.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_healthy_but_silent_stream_gets_its_head_immediately() {
+async fn a_healthy_but_silent_stream_opens_immediately() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     // Accepts the open, then says nothing at all — the quiet-workstream case.
     let socket = stub_daemon(tmp.path(), |req| {
@@ -356,36 +473,22 @@ async fn a_healthy_but_silent_stream_gets_its_head_immediately() {
         Vec::new()
     });
     let (router, _) = router_for(socket);
-    let request = Request::builder()
-        .method("GET")
-        .uri("/workstreams/w-1/events")
-        .header("authorization", format!("Bearer {TOKEN}"))
-        .body(Body::empty())
-        .expect("request");
-
-    // The HEAD must arrive without waiting for a first frame. Only the head is
-    // awaited here; collecting the body would wait out the (silent) stream.
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), router.oneshot(request))
-        .await
-        .expect("the response head must not wait for a first frame")
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(
-        resp.headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok()),
-        Some("text/event-stream")
-    );
+    let ticket = mint(&router, "/workstreams/w-1/events").await;
+    let _stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        channel::open(router, "/workstreams/w-1/events", &ticket),
+    )
+    .await
+    .expect("the open must not wait for a first frame")
+    .expect("a silent stream is a healthy one");
 }
 
 /// Why: a streaming method can refuse AT OPEN — `workstream.events` answers
 /// `not_found` for an unknown id — and the socket contract sends that as the
-/// stream's first `"stream":"error"` frame rather than as an ordinary response.
-/// Since the head is already written by then (see the test above for why it has
-/// to be), the refusal reaches the browser as the terminal error event
-/// `sse_tail` renders. What must NOT happen is a silent close: the webview would
-/// read that as a tail that simply ended.
+/// stream's first `"stream":"error"` frame. The open has already succeeded by
+/// then (see the test above for why it has to), so the refusal reaches the
+/// webview as the terminal error event `sse_tail` renders. What must NOT happen
+/// is a silent close.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stream_refusal_at_open_becomes_a_terminal_error_event() {
@@ -394,22 +497,58 @@ async fn a_stream_refusal_at_open_becomes_a_terminal_error_event() {
         assert_eq!(req["method"], "workstream.events");
         vec![stream_error_frame(-32002, "no workstream 'w-9'")]
     });
-    let (status, content_type, body) =
-        through_router(socket, "GET", "/workstreams/w-9/events", "").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(content_type, "text/event-stream", "{body}");
+    let (router, _) = router_for(socket);
+    let events = stream_events(router, "/workstreams/w-9/events").await;
+    let data = messages(&events);
     assert!(
-        body.contains(r#""type":"error""#),
-        "the refusal must not close silently: {body}"
+        data.iter()
+            .any(|d| d.contains(r#""type":"error""#) && d.contains("w-9")),
+        "the refusal must not close silently: {events:?}"
     );
-    assert!(body.contains("w-9"), "{body}");
+}
+
+/// Why (the fail-open check): a stream whose daemon socket is absent must fail
+/// to open with the gateway status, not open as an empty stream that reads as a
+/// quiet one.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_on_a_dead_socket_does_not_open() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (router, _) = router_for(tmp.path().join("absent.sock"));
+    let ticket = mint(&router, "/sessions/s-1/events").await;
+    let err = channel::open(router, "/sessions/s-1/events", &ticket)
+        .await
+        .expect_err("an absent socket must not open");
+    assert!(err.contains("502"), "{err}");
+}
+
+/// Why: a scheme response is one buffered body and a stream never ends. A
+/// stream path fetched over the scheme must be refused promptly, or the
+/// webview's `fetch()` would hang for the stream's life.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_fetched_over_the_scheme_is_refused_not_hung() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |_| Vec::new());
+    let (router, _) = router_for(socket);
+    let (status, _, body) = send(
+        router,
+        "GET",
+        "/workstreams/w-1/events",
+        "",
+        Some(TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("open_daemon_stream"), "{body}");
 }
 
 // ─── the guard stack ─────────────────────────────────────────────────────────
 
-/// Why (the fail-open check): the bridge is a TCP listener on loopback, so any
-/// local process can reach it. The per-launch token is the whole of what stops
-/// one — an unauthenticated request must reach no daemon method at all.
+/// Why (the fail-open check): the per-launch token is kept as defence in depth
+/// (owner ruling Q3, #10166) — any other content that can reach the scheme must
+/// still present it, so an unauthenticated request reaches no daemon method.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_without_the_token_is_unauthorized() {
@@ -442,11 +581,11 @@ async fn a_wrong_token_is_unauthorized_too() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-/// Why (the fail-open check): a page the operator visits in an ordinary browser
-/// can POST at loopback. The credential stops it, but the origin guard is the
-/// layer that stops it BEFORE the credential is even considered — which is what
-/// makes a cross-origin write a `403` rather than a `401` a page could go and
-/// try to satisfy.
+/// Why (the fail-open check): a request carrying a foreign `Origin` — content
+/// from anywhere but this app's webview — must be refused by the origin guard
+/// BEFORE the credential is even considered, which is what makes a
+/// cross-origin write a `403` rather than a `401` a page could go and try to
+/// satisfy.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cross_origin_write_is_rejected() {
@@ -490,9 +629,9 @@ async fn the_tauri_webviews_own_origin_is_allowed() {
 
 // ─── the SSE ticket ──────────────────────────────────────────────────────────
 
-/// Why: `EventSource` cannot send a header, so a ticket in the query string is
-/// the only way it opens a guarded stream. Single use is what keeps a ticket
-/// read from a log worthless.
+/// Why: the stream command opens a guarded stream with a ticket minted over the
+/// scheme (owner ruling Q3 keeps the flow). Single use is what keeps a ticket
+/// read from a log worthless, and both entry points must share one ticket table.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_ticket_opens_one_stream_then_is_spent() {
@@ -502,32 +641,30 @@ async fn a_ticket_opens_one_stream_then_is_spent() {
     });
     let (router, _) = router_for(socket);
 
-    let (status, _, body) = send(
-        router.clone(),
-        "POST",
-        "/auth/sse-ticket?path=%2Fsessions%2Fs-1%2Fevents",
-        "",
-        Some(TOKEN),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let ticket = serde_json::from_str::<Value>(&body).expect("json")["ticket"]
-        .as_str()
-        .expect("a ticket")
-        .to_string();
+    let ticket = mint(&router, "/sessions/s-1/events").await;
+    let _stream = channel::open(router.clone(), "/sessions/s-1/events", &ticket)
+        .await
+        .expect("the ticket must open the stream");
 
-    let uri = format!("/sessions/s-1/events?ticket={ticket}");
-    let (first, content_type, _) = send(router.clone(), "GET", &uri, "", None, None).await;
-    assert_eq!(first, StatusCode::OK, "the ticket must open the stream");
-    assert_eq!(content_type, "text/event-stream");
+    let err = channel::open(router, "/sessions/s-1/events", &ticket)
+        .await
+        .expect_err("a spent ticket must not open a second stream");
+    assert!(err.contains("401"), "{err}");
+}
 
-    let (second, _, _) = send(router, "GET", &uri, "", None, None).await;
-    assert_eq!(
-        second,
-        StatusCode::UNAUTHORIZED,
-        "a spent ticket must not open a second stream"
-    );
+/// Why: a ticket is bound to the path it was minted for; presenting it for a
+/// different stream must not open that one.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ticket_does_not_open_another_stream() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |_| vec![end_frame()]);
+    let (router, _) = router_for(socket);
+    let ticket = mint(&router, "/sessions/s-1/events").await;
+    let err = channel::open(router, "/sessions/s-2/events", &ticket)
+        .await
+        .expect_err("a ticket for s-1 must not open s-2");
+    assert!(err.contains("401"), "{err}");
 }
 
 /// Why: a ticket minted for an arbitrary path would buy one arbitrary
@@ -571,4 +708,61 @@ async fn minting_a_ticket_requires_the_token() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ─── page reload ─────────────────────────────────────────────────────────────
+
+/// Why (#10166): a reloaded page never closes its streams. `close_all` must
+/// drop the daemon connection itself; the stub sees it as a failed write. (The
+/// quiet, heartbeat-only case is the unit test in `bridge::channel`.)
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_all_drops_the_daemon_connection_of_a_quiet_stream() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("tcode.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+    let (hung_up, mut hung_up_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let (mut conn, _) = listener.accept().await.expect("accept");
+        let (rx, mut tx) = conn.split();
+        let mut reader = tokio::io::BufReader::new(rx);
+        let mut request = Vec::new();
+        reader
+            .read_until(b'\n', &mut request)
+            .await
+            .expect("request");
+        // The client half-closes after its request, so EOF proves nothing;
+        // keep writing until the write fails, which only a dropped read side
+        // does.
+        loop {
+            let frame = format!("{}\n", item_frame(json!({"seq": 1})));
+            if tx.write_all(frame.as_bytes()).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = hung_up.send(());
+    });
+
+    let (router, _) = router_for(socket);
+    let ticket = mint(&router, "/workstreams/w-1/events").await;
+    let registry = channel::StreamRegistry::default();
+    registry
+        .open(router, "/workstreams/w-1/events", &ticket, |_| true)
+        .await
+        .expect("the stream opens");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut hung_up_rx)
+            .await
+            .is_err(),
+        "the daemon connection must stay up while the stream is open"
+    );
+
+    assert_eq!(registry.close_all(), 1);
+    tokio::time::timeout(Duration::from_secs(5), hung_up_rx)
+        .await
+        .expect("the daemon must see the connection close")
+        .expect("stub alive");
+    assert_eq!(registry.live(), 0);
 }

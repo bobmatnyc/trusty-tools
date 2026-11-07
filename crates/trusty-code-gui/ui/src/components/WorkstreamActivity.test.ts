@@ -19,12 +19,17 @@
 // `GET /sessions/{id}/transcript`, and `POST /sessions/{id}/cancel`.
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TOKEN_STORAGE_KEY, resetDaemonTokenCache } from '../lib/daemon-auth';
+import { resetDaemonTokenCache } from '../lib/daemon-auth';
+import { enterTauri, fakeTauri, leaveTauri, type FakeStream } from '../lib/tauri-fake';
 import { mount, unmount } from 'svelte';
 import WorkstreamActivity from './WorkstreamActivity.svelte';
 import { activeWorkstreamState, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
 import { clearPendingWorkstream, setPendingWorkstream } from '../lib/pending-workstream.svelte';
 import type { Workstream } from '../lib/workstreams';
+
+// #10166: the event streams open through the Rust side's IPC channel; the
+// stream cases below run in Tauri mode against this stand-in.
+vi.mock('@tauri-apps/api/core', () => import('../lib/tauri-fake'));
 
 let target: HTMLDivElement;
 let instance: Record<string, unknown> | null = null;
@@ -137,8 +142,7 @@ function fakeDaemon(opts: {
         json: async () => ({ ...found, status: cancelled.has(found.id) ? 'cancelled' : found.status }),
       } as Response;
     }
-    // #5439: the SSE routes are opened through a single-use ticket minted
-    // here, because EventSource cannot carry an Authorization header.
+    // #5439/#10166: a stream is opened with a single-use ticket minted here.
     if (url.includes('/auth/sse-ticket') && method === 'POST') {
       return { ok: true, status: 200, json: async () => ({ ticket: 'test-ticket' }) } as Response;
     }
@@ -147,12 +151,10 @@ function fakeDaemon(opts: {
   return fetchMock;
 }
 
-// #5439: every daemon request now carries a credential, and the SSE routes
-// take a ticket minted with it. Seeding the plain-browser override (jsdom has
-// no Tauri runtime) is what keeps these component tests exercising the real
-// transport rather than the no-credential fallback.
+// #10166: outside Tauri no stream can be opened, so most cases here are
+// poll-only; the stream cases call `enterTauri()` and read `fakeTauri.streams`.
 beforeEach(() => {
-  localStorage.setItem(TOKEN_STORAGE_KEY, 'a'.repeat(64));
+  fakeTauri.reset();
   resetDaemonTokenCache();
   target = document.createElement('div');
   document.body.appendChild(target);
@@ -170,6 +172,7 @@ afterEach(() => {
     instance = null;
   }
   target.remove();
+  leaveTauri();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
@@ -595,26 +598,13 @@ describe('WorkstreamActivity auto-scroll with scroll-lock (issue #3446)', () => 
 // `EventSource`) on EVERY tick, not only when the id actually changed. Fixed
 // by routing the effect through `activeWorkstreamId`, a `$derived` PRIMITIVE
 // (Svelte 5 suppresses a dependent's re-run when a `$derived` recomputes to
-// the SAME primitive value). jsdom has no real `EventSource`, so this stubs a
-// minimal fake on `globalThis` and counts constructions across several
-// same-active-id poll ticks (fake timers advance past POLL_MS repeatedly).
+// the SAME primitive value). Since #10166 the stream opens through the
+// shell's IPC channel, so this runs in Tauri mode and counts
+// `open_daemon_stream` calls across several same-active-id poll ticks (fake
+// timers advance past POLL_MS repeatedly).
 describe('WorkstreamActivity SSE subscription reactivity (code-critic PR #3392 review, HIGH)', () => {
-  class FakeEventSource {
-    static instances: FakeEventSource[] = [];
-    url: string;
-    onmessage: ((e: MessageEvent) => void) | null = null;
-    constructor(url: string) {
-      this.url = url;
-      FakeEventSource.instances.push(this);
-    }
-    close() {
-      /* no-op */
-    }
-  }
-
-  it('does not reopen the EventSource on repeated poll ticks that report the SAME active workstream id', async () => {
-    FakeEventSource.instances = [];
-    vi.stubGlobal('EventSource', FakeEventSource);
+  it('does not reopen the stream on repeated poll ticks that report the SAME active workstream id', async () => {
+    enterTauri();
     vi.useFakeTimers();
     try {
       vi.stubGlobal(
@@ -628,11 +618,10 @@ describe('WorkstreamActivity SSE subscription reactivity (code-critic PR #3392 r
 
       instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
 
-      // Flush the initial mount tick (poll #1) and let the SSE effect's own
-      // async IIFE (apiBase() -> new EventSource()) settle.
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(FakeEventSource.instances.length).toBe(1);
+      // Flush the initial mount tick (poll #1) and let the stream effect's
+      // own async IIFE (mint -> open_daemon_stream) settle.
+      for (let i = 0; i < 5; i += 1) await vi.advanceTimersByTimeAsync(0);
+      expect(fakeTauri.streams.length).toBe(1);
 
       // Three more poll ticks (POLL_MS = 5000), each returning a BRAND NEW
       // `activeWorkstream` object with the identical id — the exact
@@ -642,7 +631,7 @@ describe('WorkstreamActivity SSE subscription reactivity (code-critic PR #3392 r
         await vi.advanceTimersByTimeAsync(0);
       }
 
-      expect(FakeEventSource.instances.length).toBe(1);
+      expect(fakeTauri.streams.length).toBe(1);
     } finally {
       vi.useRealTimers();
     }
@@ -653,27 +642,13 @@ describe('WorkstreamActivity SSE subscription reactivity (code-critic PR #3392 r
 // /sessions/{id}/events` delta stream, gated behind `VITE_TCODE_SSE`
 // (`vi.stubEnv` — Vitest reflects a stubbed env var onto `import.meta.env` the
 // same way Vite's dev/build modes do, so this exercises the exact
-// `SSE_ENABLED` check the component reads). Reuses the same
-// stub-`globalThis.EventSource` technique as the reactivity describe block
-// above, but this fake also exposes `emit` so the test can push a fabricated
-// `SessionEventEnvelope` frame through `onmessage` the way a real SSE
-// connection would deliver one.
+// `SSE_ENABLED` check the component reads). Runs in Tauri mode like the
+// reactivity block above; `FakeStream.emit` pushes a fabricated
+// `SessionEventEnvelope` through the channel the way the Rust pump delivers
+// one (#10166).
 describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, Slice 3)', () => {
-  class FakeEventSource {
-    static instances: FakeEventSource[] = [];
-    url: string;
-    onmessage: ((e: MessageEvent) => void) | null = null;
-    constructor(url: string) {
-      this.url = url;
-      FakeEventSource.instances.push(this);
-    }
-    close() {
-      /* no-op */
-    }
-    emit(data: unknown) {
-      this.onmessage?.({ data: JSON.stringify(data) } as MessageEvent);
-    }
-  }
+  const sessionStream = (): FakeStream | undefined =>
+    fakeTauri.streams.find((s) => s.path === '/sessions/bound-session/events');
 
   function agentMessageDeltaEnvelope(seq: number, overrides: Record<string, unknown> = {}) {
     return {
@@ -692,11 +667,10 @@ describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, S
   }
 
   beforeEach(() => {
-    FakeEventSource.instances = [];
+    enterTauri();
   });
 
-  it('stays poll-only (no session-scoped EventSource) when VITE_TCODE_SSE is unset (default OFF)', async () => {
-    vi.stubGlobal('EventSource', FakeEventSource);
+  it('stays poll-only (no session-scoped stream) when VITE_TCODE_SSE is unset (default OFF)', async () => {
     vi.stubGlobal(
       'fetch',
       fakeDaemon({
@@ -708,14 +682,11 @@ describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, S
     instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
 
     await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
-    expect(
-      FakeEventSource.instances.some((s) => s.url.includes('/sessions/bound-session/events')),
-    ).toBe(false);
+    expect(sessionStream()).toBeUndefined();
   });
 
   it('renders incremental text as deltas arrive, then finalizes the bubble on done:true', async () => {
     vi.stubEnv('VITE_TCODE_SSE', 'true');
-    vi.stubGlobal('EventSource', FakeEventSource);
     vi.stubGlobal(
       'fetch',
       fakeDaemon({
@@ -727,12 +698,8 @@ describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, S
     instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
 
     await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
-    await waitFor(() =>
-      FakeEventSource.instances.some((s) => s.url.includes('/sessions/bound-session/events')),
-    );
-    const sessionSource = FakeEventSource.instances.find((s) =>
-      s.url.includes('/sessions/bound-session/events'),
-    )!;
+    await waitFor(() => sessionStream() !== undefined);
+    const sessionSource = sessionStream()!;
 
     sessionSource.emit(agentMessageDeltaEnvelope(1, { delta: 'Hel', done: false }));
     await waitFor(() => target.textContent?.includes('Hel') ?? false);
@@ -748,7 +715,6 @@ describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, S
 
   it('ignores envelopes that are not agent_message_delta and malformed frames, without throwing', async () => {
     vi.stubEnv('VITE_TCODE_SSE', 'true');
-    vi.stubGlobal('EventSource', FakeEventSource);
     vi.stubGlobal(
       'fetch',
       fakeDaemon({
@@ -760,14 +726,10 @@ describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, S
     instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
 
     await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
-    await waitFor(() =>
-      FakeEventSource.instances.some((s) => s.url.includes('/sessions/bound-session/events')),
-    );
-    const sessionSource = FakeEventSource.instances.find((s) =>
-      s.url.includes('/sessions/bound-session/events'),
-    )!;
+    await waitFor(() => sessionStream() !== undefined);
+    const sessionSource = sessionStream()!;
 
-    expect(() => sessionSource.onmessage?.({ data: 'not json' } as MessageEvent)).not.toThrow();
+    expect(() => sessionSource.emit('not json')).not.toThrow();
     expect(() =>
       sessionSource.emit({ seq: 1, event: { type: 'tool_called', session_id: 'bound-session' } }),
     ).not.toThrow();
