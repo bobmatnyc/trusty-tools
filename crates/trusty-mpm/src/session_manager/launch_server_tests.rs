@@ -96,3 +96,94 @@ async fn a_fresh_launch_creates_its_session_on_the_workspace_server() {
         "the record routes to its server"
     );
 }
+
+/// Error arm (Fail-Open Check): a workspace server that crashed leaves a
+/// socket that refuses (ECONNREFUSED). Resume starts that server again, reads
+/// it as empty and recreates the pane on it. Red on 420b3717bf, where the
+/// refused listing failed the resume.
+#[tokio::test]
+async fn resuming_on_a_crashed_workspace_server_restarts_it_and_recreates_the_pane() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let workdir = std::fs::canonicalize(dir.path()).expect("canonical");
+    let log = dir.path().join("calls.log");
+    let up = dir.path().join("server-up");
+    let bin = dir.path().join("fake-tmux");
+    let server = "tm-ws-10101-crashed";
+    let script = format!(
+        "#!/bin/sh\necho \"$*\" >> '{log}'\n\
+         if [ \"$1\" = -L ] && [ \"$3\" = start-server ]; then touch '{up}'; exit 0; fi\n\
+         if [ \"$1\" = -L ] && [ \"$3\" = list-sessions ] && [ ! -f '{up}' ]; then \
+         echo 'error connecting to /tmp/{server} (Connection refused)' >&2; exit 1; fi\n\
+         case \"$*\" in *pane_current_path*) echo '{wd}';; esac\nexit 0\n",
+        log = log.display(),
+        up = up.display(),
+        wd = workdir.display(),
+    );
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+    let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy().into_owned());
+    let driver =
+        RealTmuxDriver::from_driver_for_test(driver).with_socket_dir_for_test(dir.path().into());
+    let mgr = SessionManager::new(&dir.path().join("data"), Arc::new(driver))
+        .await
+        .expect("manager");
+    let id = crate::session_manager::ManagedSessionId::new();
+    let record: crate::session_manager::SessionRecord = serde_json::from_value(serde_json::json!({
+        "id": id.to_string(), "task": "t", "tmux_name": "tm-crashed",
+        "cwd": workdir, "state": "stopped", "created_at": "2026-11-07T00:00:00Z",
+        "tmux_socket": dir.path().join(server),
+    }))
+    .expect("record");
+    mgr.store.write().await.upsert(record).await.expect("seed");
+
+    let resumed = mgr.resume(&id).await.expect("resume after a server crash");
+
+    assert_eq!(
+        resumed.state,
+        crate::session_manager::ManagedSessionState::Active
+    );
+    let calls = std::fs::read_to_string(&log).expect("log");
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with(&format!("-L {server} ")) && l.contains("new-session")),
+        "the pane was not recreated on its server: {calls}"
+    );
+}
+
+/// Error arm (Fail-Open Check): boot adoption reads every workspace server; a
+/// session found only on one is adopted with that server's socket, so later
+/// calls reach it there. Red on 420b3717bf, which adopted from the default
+/// server only.
+#[tokio::test]
+async fn boot_reconcile_adopts_a_workspace_servers_session_with_its_socket() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let workdir = std::fs::canonicalize(dir.path()).expect("canonical");
+    let server = "tm-ws-10101-adopt";
+    let _live = std::os::unix::net::UnixListener::bind(dir.path().join(server)).expect("bind");
+    let bin = dir.path().join("fake-tmux");
+    let script = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = -L ] && [ \"$2\" = '{server}' ]; then shift 2; \
+         if [ \"$1\" = list-sessions ]; then echo 'tm-adoptee:1700000000:0'; exit 0; fi; \
+         case \"$*\" in *pane_current_path*) echo '{wd}';; esac; exit 0; fi\nexit 0\n",
+        wd = workdir.display(),
+    );
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+    let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy().into_owned());
+    let driver =
+        RealTmuxDriver::from_driver_for_test(driver).with_socket_dir_for_test(dir.path().into());
+    let mgr = SessionManager::new(&dir.path().join("data"), Arc::new(driver))
+        .await
+        .expect("manager");
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(report.external_adopted, vec!["tm-adoptee".to_owned()]);
+    let adopted = mgr
+        .list()
+        .await
+        .into_iter()
+        .find(|r| r.tmux_name == "tm-adoptee")
+        .expect("adopted record");
+    assert_eq!(adopted.tmux_socket, Some(dir.path().join(server)));
+}

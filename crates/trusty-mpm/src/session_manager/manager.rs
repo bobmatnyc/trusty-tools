@@ -888,7 +888,10 @@ impl SessionManager {
         // session holds the name now, so it never pairs the pane with a
         // server: the record stays unverifiable and every pane gate refuses.
         if record.pane_id.is_none() {
-            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
+            // See #10101: read on the record's own server, or not at all.
+            record.pane_id = super::tmux_route::route(self.tmux.as_ref(), &record)
+                .ok()
+                .and_then(|tmux| tmux.get_pane_id(&record.tmux_name));
         }
         // #9034: re-check under a fresh guard; a failed re-check writes nothing.
         let mut guard = self.store.write().await;
@@ -930,12 +933,11 @@ impl SessionManager {
         // `tmux show-environment` even though the process-env export never
         // landed. Best-effort — never fails the reap. #9101: never into a
         // session whose pane is not proven this record's.
+        // See #10101: the record's own server; an unreachable one is skipped.
         if owned.is_some()
-            && let Err(e) = self.tmux.set_environment(
-                &record.tmux_name,
-                "TM_MANAGED_SESSION_ID",
-                &id.to_string(),
-            )
+            && let Ok(tmux) = super::tmux_route::route(self.tmux.as_ref(), &record)
+            && let Err(e) =
+                tmux.set_environment(&record.tmux_name, "TM_MANAGED_SESSION_ID", &id.to_string())
         {
             warn!(
                 id = %id,

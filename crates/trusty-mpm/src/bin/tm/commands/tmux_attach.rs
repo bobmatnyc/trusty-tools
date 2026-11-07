@@ -652,8 +652,14 @@ fn switch_client_to_with(name: &str, quiet: bool) -> anyhow::Result<AttachOutcom
 /// fail-closed/loop-termination decision via
 /// `attach_outcome_ends_interactive_loop_matrix`.
 pub(crate) fn tmux_attach(name: &str) -> anyhow::Result<AttachOutcome> {
+    use super::tmux_attach_server as server;
+    // #10101 (Dc3): the server holding `name`; a refusal stops the attach.
+    let socket = server::target_socket(name)?;
     if inside_tmux() {
-        return switch_client_to(name);
+        if server::same_server(std::env::var("TMUX").ok().as_deref(), &socket) {
+            return switch_client_to(name);
+        }
+        return new_window_attach(name, &socket);
     }
     eprintln!("tm: attaching to session '{name}'");
     // #2398: resolves the binary through the crate's shared resolver rather
@@ -665,13 +671,35 @@ pub(crate) fn tmux_attach(name: &str) -> anyhow::Result<AttachOutcome> {
     // the full scope note).
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
     let status = std::process::Command::new(&tmux_bin)
-        .args(attach_argv(name))
+        .args(server::attach_argv_on(&socket, name))
         .status()
         .context("failed to invoke tmux")?;
     if !status.success() {
         anyhow::bail!("tmux attach-session exited with failure");
     }
     Ok(AttachOutcome::Attached)
+}
+
+/// Dc3 (#10101): a target on another tmux server opens a window in the
+/// caller's session that runs the attach there; no switch-client crosses
+/// servers. No `$TMUX_PANE` to place the window fails closed.
+/// Test: `a_cross_server_attach_opens_a_window_running_the_attach`.
+fn new_window_attach(name: &str, socket: &std::path::Path) -> anyhow::Result<AttachOutcome> {
+    let Some(pane) = tmux_pane_id_from_env(std::env::var("TMUX_PANE").ok()) else {
+        print_fail_closed_hint(name);
+        return Ok(AttachOutcome::TargetUnresolved);
+    };
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let argv = super::tmux_attach_server::new_window_attach_argv(&pane, &tmux_bin, socket, name);
+    eprintln!("tm: opening a window attached to '{name}' on its own tmux server");
+    let output = std::process::Command::new(&tmux_bin)
+        .args(argv)
+        .output()
+        .context("failed to invoke tmux")?;
+    if !output.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(AttachOutcome::Switched)
 }
 
 /// The tui's Focus hook: move this terminal's tmux client to session `name`.

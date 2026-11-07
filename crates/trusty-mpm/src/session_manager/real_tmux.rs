@@ -438,6 +438,11 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         })
     }
 
+    /// #10101: the pane's pid on this driver's server.
+    fn pane_pid(&self, pane_id: &str) -> Option<u32> {
+        self.driver.pane_pid(pane_id).ok()
+    }
+
     /// #10101: this driver's socket directory, the one `-L` resolves in.
     fn socket_dir(&self) -> Option<std::path::PathBuf> {
         Some(

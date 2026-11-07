@@ -16,6 +16,7 @@ use std::process::Command;
 use crate::core::external_session::ExternalSession;
 use crate::core::session::Session;
 use crate::core::tmux::TmuxTarget;
+use crate::core::tmux_server::ambient_socket_dir;
 
 use crate::daemon::error::DaemonError;
 use crate::daemon::tmux::{AdoptedSession, SessionSnapshot, TmuxDriver};
@@ -101,6 +102,14 @@ impl TmuxService {
     pub fn capture(session: &Session, lines: u32) -> String {
         match TmuxDriver::discover() {
             Ok(driver) => {
+                // See #10101: the server that holds the session.
+                let driver = match holder_of(&driver, &ambient_socket_dir(), &session.tmux_name) {
+                    Ok(driver) => driver,
+                    Err(e) => {
+                        tracing::warn!("tmux capture skipped for {}: {e}", session.tmux_name);
+                        return String::new();
+                    }
+                };
                 let target = TmuxTarget::session(&session.tmux_name);
                 match driver.capture(&target, Some(lines)) {
                     Ok(text) => text,
@@ -134,6 +143,14 @@ impl TmuxService {
     pub fn input_box(session: &Session) -> Option<crate::core::input_box::InputBox> {
         let target = TmuxTarget::session(&session.tmux_name).as_target();
         let start = format!("-{INPUT_BOX_PROBE_LINES}");
+        // See #10101: the server that holds the session; unknown refuses.
+        let holder = holder_of(
+            &TmuxDriver::discover().ok()?,
+            &ambient_socket_dir(),
+            &session.tmux_name,
+        )
+        .inspect_err(|e| tracing::warn!("input box unreadable for {}: {e}", session.tmux_name))
+        .ok()?;
         let argv: Vec<String> = [
             "-u",
             "capture-pane",
@@ -146,6 +163,7 @@ impl TmuxService {
         ]
         .map(str::to_string)
         .to_vec();
+        let argv = crate::core::tmux_server::server_argv(holder.server(), argv);
         input_box_from(&session.tmux_name, crate::core::tmux::run_tmux_argv(&argv))
     }
 
@@ -158,6 +176,14 @@ impl TmuxService {
     pub fn send_command(session: &Session, command: &str) {
         match TmuxDriver::discover() {
             Ok(driver) => {
+                // See #10101: the server that holds the session.
+                let driver = match holder_of(&driver, &ambient_socket_dir(), &session.tmux_name) {
+                    Ok(driver) => driver,
+                    Err(e) => {
+                        tracing::warn!("tmux command for {} not sent: {e}", session.tmux_name);
+                        return;
+                    }
+                };
                 let target = TmuxTarget::session(&session.tmux_name);
                 if let Err(e) = driver.send_line(&target, command) {
                     tracing::warn!("tmux send_line failed for {}: {e}", session.tmux_name);
@@ -376,6 +402,50 @@ pub(crate) fn snapshot_on_any_server(
                 on.join(", ")
             )))
         }
+    }
+}
+
+/// The driver on the one tmux server holding session `name`: the default
+/// server or a live workspace server (#10101).
+///
+/// Why: a by-name daemon call (capture, input box, send) carries no record,
+/// so it cannot read a stored socket; it must still never reach a same-named
+/// session on the wrong server.
+/// What: the default server when it alone holds `name`, or when no server
+/// does (its own "no session" error then reaches the caller); the one
+/// workspace server that holds it otherwise.
+///
+/// # Errors
+///
+/// Two or more servers hold `name`, or a server cannot be listed: the holder
+/// is unknown and no server is picked.
+///
+/// Test: `a_by_name_call_reaches_the_server_that_holds_the_session`,
+/// `a_by_name_call_refuses_a_name_on_two_servers`.
+pub fn holder_of(driver: &TmuxDriver, socket_dir: &Path, name: &str) -> Result<TmuxDriver, String> {
+    let servers = crate::core::tmux_server::live_workspace_servers(socket_dir)
+        .map_err(|e| format!("cannot list workspace tmux servers: {e}"))?;
+    let holds = |d: &TmuxDriver| {
+        d.list_sessions()
+            .map(|all| all.iter().any(|s| s.name == name))
+            .map_err(|e| e.to_string())
+    };
+    let mut holders = Vec::new();
+    if holds(driver)? {
+        holders.push(driver.clone());
+    }
+    for server in servers {
+        let named = driver.on_server(&server);
+        if holds(&named)? {
+            holders.push(named);
+        }
+    }
+    match holders.len() {
+        0 => Ok(driver.clone()),
+        1 => Ok(holders.remove(0)),
+        n => Err(format!(
+            "tmux session {name} is on {n} servers; refusing to pick one"
+        )),
     }
 }
 
@@ -786,3 +856,8 @@ mod tests {
 #[cfg(test)]
 #[path = "tmux_service_8928_tests.rs"]
 mod workspace_server_tests;
+
+// #10101: by-name calls reach the server that holds the session (fake tmux).
+#[cfg(test)]
+#[path = "tmux_service_holder_tests.rs"]
+mod holder_tests;

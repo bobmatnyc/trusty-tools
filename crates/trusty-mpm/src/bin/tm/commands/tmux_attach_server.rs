@@ -1,0 +1,164 @@
+//! Attaching to a session on its own tmux server (#10101, ruling Dc3).
+//!
+//! Why: a fresh PM runs on its workspace's private server. `attach-session`
+//! with no socket reaches only the default server, and `switch-client` cannot
+//! move a client to another server. Ruling Dc3 (2026-10-20): from inside tmux,
+//! a target on another server opens a NEW window in the caller's session that
+//! runs the attach; no switch-client crosses servers.
+//! What: [`target_socket`] finds the one server holding the session;
+//! [`attach_argv_on`] is the outside-tmux argv (`-S <socket>` for a workspace
+//! server, today's argv for the default one); [`same_server`] compares the
+//! caller's `$TMUX` socket with the target's; [`new_window_attach_argv`] is the
+//! cross-server window.
+//! Test: the tests at the end of this file.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+
+/// The default server's socket name in tmux's socket directory.
+const DEFAULT_SERVER: &str = "default";
+
+/// The socket of the one tmux server that holds session `name`: the default
+/// server's (`<socket dir>/default`) or a live workspace server's.
+///
+/// What: the default server is asked by name (`-L default`), so a caller inside
+/// a workspace server's client still reaches the real default server.
+///
+/// # Errors
+///
+/// tmux cannot be found, a server cannot be listed, or two servers hold
+/// `name`; no server is guessed.
+pub(crate) fn target_socket(name: &str) -> anyhow::Result<PathBuf> {
+    use trusty_mpm::daemon::services::tmux_service::holder_of;
+    let driver = trusty_mpm::daemon::tmux::TmuxDriver::discover()
+        .context("tmux is not available to attach with")?;
+    let dir = trusty_mpm::core::tmux_server::ambient_socket_dir();
+    let holder = holder_of(&driver.on_server(DEFAULT_SERVER), &dir, name)
+        .map_err(|e| anyhow::anyhow!("cannot tell which tmux server holds '{name}': {e}"))?;
+    let server = holder.server().unwrap_or(DEFAULT_SERVER);
+    Ok(trusty_mpm::core::tmux_server::server_socket_path(
+        &dir, server,
+    ))
+}
+
+/// Whether `socket` is the default server's.
+fn is_default(socket: &Path) -> bool {
+    socket.file_name().is_some_and(|n| n == DEFAULT_SERVER)
+}
+
+/// The outside-tmux attach argv for `session` on the server at `socket`:
+/// [`super::tmux_attach::attach_argv`], behind `-S <socket>` for a workspace
+/// server, unchanged for the default server.
+/// Test: `attach_argv_on_prefixes_only_a_workspace_socket`.
+pub(crate) fn attach_argv_on(socket: &Path, session: &str) -> Vec<String> {
+    let mut argv = Vec::new();
+    if !is_default(socket) {
+        argv.push("-S".to_owned());
+        argv.push(socket.to_string_lossy().into_owned());
+    }
+    argv.extend(super::tmux_attach::attach_argv(session));
+    argv
+}
+
+/// Whether the caller's tmux client (its `$TMUX`, `<socket>,<pid>,<index>`)
+/// is on the server at `target`. An unreadable `$TMUX` is not the same server.
+/// Test: `same_server_reads_the_socket_field_of_tmux`.
+pub(crate) fn same_server(caller_tmux: Option<&str>, target: &Path) -> bool {
+    let Some(socket) = caller_tmux
+        .and_then(|v| v.split(',').next())
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(Path::new(socket)) == canon(target)
+}
+
+/// POSIX single-quoting for one shell word.
+fn quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// `new-window -a -t <caller_pane> -n <session> <command>` on the caller's
+/// server, where the command attaches to `session` on the server at `socket`
+/// with `$TMUX`/`$TMUX_PANE` unset (tmux refuses a nested attach otherwise).
+/// Test: `a_cross_server_attach_opens_a_window_running_the_attach`.
+pub(crate) fn new_window_attach_argv(
+    caller_pane: &str,
+    tmux_bin: &str,
+    socket: &Path,
+    session: &str,
+) -> Vec<String> {
+    let attach = format!(
+        "env -u TMUX -u TMUX_PANE {} -S {} attach-session -t {}",
+        quote(tmux_bin),
+        quote(&socket.to_string_lossy()),
+        trusty_common::tmux::shell_exact_session_target(session)
+    );
+    vec![
+        "new-window".to_owned(),
+        "-a".to_owned(),
+        "-t".to_owned(),
+        caller_pane.to_owned(),
+        "-n".to_owned(),
+        session.to_owned(),
+        attach,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_argv_on_prefixes_only_a_workspace_socket() {
+        assert_eq!(
+            attach_argv_on(Path::new("/tmp/tmux-501/default"), "tm-a"),
+            vec!["attach-session", "-t", "=tm-a"]
+        );
+        assert_eq!(
+            attach_argv_on(Path::new("/tmp/tmux-501/tm-ws-x"), "tm-a"),
+            vec![
+                "-S",
+                "/tmp/tmux-501/tm-ws-x",
+                "attach-session",
+                "-t",
+                "=tm-a"
+            ]
+        );
+    }
+
+    #[test]
+    fn same_server_reads_the_socket_field_of_tmux() {
+        let target = Path::new("/nonexistent/tmux-501/tm-ws-x");
+        assert!(same_server(
+            Some("/nonexistent/tmux-501/tm-ws-x,123,0"),
+            target
+        ));
+        assert!(!same_server(
+            Some("/nonexistent/tmux-501/default,123,0"),
+            target
+        ));
+        assert!(!same_server(None, target));
+        assert!(!same_server(Some(""), target));
+    }
+
+    #[test]
+    fn a_cross_server_attach_opens_a_window_running_the_attach() {
+        let argv = new_window_attach_argv(
+            "%7",
+            "/opt/homebrew/bin/tmux",
+            Path::new("/tmp/tmux-501/tm-ws-x"),
+            "tm-a",
+        );
+        assert_eq!(&argv[..6], ["new-window", "-a", "-t", "%7", "-n", "tm-a"]);
+        assert_eq!(
+            argv[6],
+            "env -u TMUX -u TMUX_PANE '/opt/homebrew/bin/tmux' -S '/tmp/tmux-501/tm-ws-x' \
+             attach-session -t '=tm-a'"
+        );
+        // Never a switch-client across servers.
+        assert!(argv.iter().all(|w| !w.contains("switch-client")));
+    }
+}

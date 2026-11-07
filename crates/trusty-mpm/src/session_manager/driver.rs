@@ -584,6 +584,13 @@ pub trait ManagedTmuxDriver: Send + Sync {
         None
     }
 
+    /// The pid of pane `pane_id`'s process, read on this driver's server
+    /// (#10101); `None` when it cannot be read. `RealTmuxDriver` asks tmux.
+    /// Test: `a_named_server_teardown_signals_the_claude_read_through_its_server`.
+    fn pane_pid(&self, _pane_id: &str) -> Option<u32> {
+        None
+    }
+
     /// Whether a tmux session with this name currently exists, keeping
     /// "confirmed absent" and "could not tell" apart (#5859).
     ///
