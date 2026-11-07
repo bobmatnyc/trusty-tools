@@ -49,9 +49,17 @@
 #   binds no TCP port, so no TRUSTY_MPM_ADDR is passed and --port is ignored.
 #   Output names variables and the paths this script chose; it never prints a
 #   value it inherited.
+#   Binary freshness (#10755): the script prints the binary's path and mtime.
+#   A cargo build artifact older than the newest tracked tm source refuses
+#   (scripts/lib/bin_fresh.sh); an installed binary gets a notice instead.
+#   Sources: crates/{trusty-mpm,trusty-common}/{src,build.rs,Cargo.toml} and
+#   Cargo.lock under SANDBOX_SRC_ROOT (default: this script's checkout).
 #
-# Usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR] [--dry-run]
-#   --bin PATH  the tm binary (default: `tm` on PATH)
+# Usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR]
+#                                  [--allow-stale] [--dry-run]
+#   --bin PATH  the tm binary (default: `tm` on PATH). A build-lease slot's
+#               binary is <slot>/debug/tm; the lease prints <slot> on stderr
+#   --allow-stale  run a build artifact older than its sources, with a warning
 #   --port N    ignored, with a notice (#6288 S3a: the daemon binds no TCP
 #               port); accepted so an older invocation still starts
 #   --dir DIR   an existing sandbox directory (default: a new `mktemp -d`);
@@ -66,6 +74,13 @@
 # #7812: re-exec under bash when started from zsh (the harness shell).
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/bin_fresh.sh
+. "$SCRIPT_DIR/lib/bin_fresh.sh"
+# #10755: what a tm build compiles; see bin_fresh.sh for why only these.
+TM_SOURCES="crates/trusty-mpm/src crates/trusty-mpm/build.rs crates/trusty-mpm/Cargo.toml \
+crates/trusty-common/src crates/trusty-common/build.rs crates/trusty-common/Cargo.toml Cargo.lock"
 
 # Always set by this script. Keep in step with the exec below.
 # #9178: TRUSTY_SANDBOX=1 stops trusty-common loading any `.env.local`.
@@ -83,7 +98,7 @@ die() {
 }
 
 usage() {
-  echo "usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR] [--dry-run]" >&2
+  echo "usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR] [--allow-stale] [--dry-run]" >&2
   exit 2
 }
 
@@ -105,6 +120,7 @@ resolve() {
 BIN=""
 DIR=""
 DRY_RUN=0
+ALLOW_STALE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bin) [ "$#" -ge 2 ] || usage; BIN="$2"; shift 2 ;;
@@ -115,6 +131,7 @@ while [ "$#" -gt 0 ]; do
       shift 2 ;;
     --dir) [ "$#" -ge 2 ] || usage; DIR="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --allow-stale) ALLOW_STALE=1; shift ;;
     -h|--help) usage ;;
     *) echo "sandbox_daemon: unknown argument: $1" >&2; usage ;;
   esac
@@ -129,6 +146,9 @@ fi
 BIN_DIR="$(resolve "$(dirname "$BIN")")"
 [ -n "$BIN_DIR" ] || die "cannot resolve the directory of --bin: $BIN"
 BIN="$BIN_DIR/$(basename "$BIN")"
+# #10755: refuse a stale build artifact before anything is created.
+# shellcheck disable=SC2086  # TM_SOURCES is a word list of pathspecs
+bin_fresh_check sandbox_daemon "$BIN" "$ALLOW_STALE" "${SANDBOX_SRC_ROOT:-$SCRIPT_DIR/..}" $TM_SOURCES || exit 1
 
 REAL_HOME="$(real_home)"
 [ -n "$REAL_HOME" ] || die "the password database names no home for this user"

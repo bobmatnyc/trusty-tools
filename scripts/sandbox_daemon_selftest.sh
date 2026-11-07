@@ -50,6 +50,11 @@
 #     teardown      after the daemon exits, the launcher runs
 #                   `tmux -S <dir>/data/tmux/tmux-<uid>/default kill-server`
 #                   and no other tmux call (#9557); skips without python3
+#     bin-fresh-*   (#10755) against a temp git source root (SANDBOX_SRC_ROOT):
+#                   a build-artifact stub older than its source refuses, in a
+#                   dry run and in a real run that starts nothing; a fresh one
+#                   passes; --allow-stale passes; an installed-style stub
+#                   outside a target dir passes with a notice
 #   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
@@ -92,8 +97,10 @@ chmod +x "$STUB"
 
 # The launcher, run from a cleared environment carrying fake secrets, two
 # forwardable names, and an `LC_`-prefixed name that is no locale category.
+# SRC_ROOT_ENV: extra env words, set by the bin-fresh cases only.
+SRC_ROOT_ENV=()
 run_launcher() {
-  env -i PATH="$PATH" LANG=C RUST_LOG=warn LC_API_KEY="$FAKE_LC" \
+  env -i PATH="$PATH" ${SRC_ROOT_ENV[@]+"${SRC_ROOT_ENV[@]}"} LANG=C RUST_LOG=warn LC_API_KEY="$FAKE_LC" \
     TELEGRAM_BOT_TOKEN="$FAKE_TOKEN" OPENAI_API_KEY="$FAKE_KEY" \
     SELFTEST_SECRET_TOKEN="$FAKE_TOKEN" bash "$LAUNCHER" "$@"
 }
@@ -390,6 +397,36 @@ if command -v python3 >/dev/null 2>&1; then
 else
   echo "skip teardown: no python3 to bind a fake socket"
 fi
+
+# 11. bin-fresh (#10755): a temp source root, so the real tree cannot change
+# the answer. The stale stub predates main.rs; the fresh one postdates it.
+SRC11="$TMP_ROOT/src11"
+TGT11="$TMP_ROOT/tgt11"
+mkdir -p "$SRC11/crates/trusty-mpm/src" "$TGT11/debug" "$TGT11/release"
+echo "fn main() {}" > "$SRC11/crates/trusty-mpm/src/main.rs"
+touch -d 2020-06-01T00:00:00 "$SRC11/crates/trusty-mpm/src/main.rs"
+git -C "$SRC11" init -q
+git -C "$SRC11" add crates
+: > "$TGT11/CACHEDIR.TAG"
+cp "$STUB" "$TGT11/debug/tm"
+touch -d 2020-01-01T00:00:00 "$TGT11/debug/tm"
+cp "$STUB" "$TGT11/release/tm"
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11")
+expect_refusal bin-fresh-stale-dry-run 1 \
+  "is older than its newest source $SRC11/crates/trusty-mpm/src/main.rs" \
+  --bin "$TGT11/debug/tm" --dir "$DIR2" --dry-run
+DIR11="$TMP_ROOT/case11"
+mkdir -p "$DIR11"
+expect_refusal bin-fresh-stale 1 "refused: stale build artifact $TGT11/debug/tm" \
+  --bin "$TGT11/debug/tm" --dir "$DIR11"
+[ ! -e "$DIR11/home" ] || fail bin-fresh-stale "the launcher created <dir>/home"
+expect_refusal bin-fresh-fresh 0 "fresh: build artifact" \
+  --bin "$TGT11/release/tm" --dir "$DIR2" --dry-run
+expect_refusal bin-fresh-allow-stale 0 "warning: --allow-stale" \
+  --bin "$TGT11/debug/tm" --dir "$DIR2" --dry-run --allow-stale
+expect_refusal bin-fresh-installed 0 "notice: installed binary (not under a cargo target dir)" \
+  --bin "$STUB" --dir "$DIR2" --dry-run
+SRC_ROOT_ENV=()
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

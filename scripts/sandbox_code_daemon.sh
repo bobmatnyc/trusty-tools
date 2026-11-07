@@ -53,12 +53,23 @@
 #   never uses pkill, killall, a name match or launchctl.
 #   Output names variables and the paths this script chose; it prints a value
 #   only for the names it pins or forwards.
+#   Binary freshness (#10755): the script prints the binary's path and mtime.
+#   A cargo build artifact older than the newest tracked tcode source refuses
+#   (scripts/lib/bin_fresh.sh); an installed binary gets a notice instead. The
+#   ambient $CARGO_TARGET_DIR default is the likeliest stale one: the build
+#   lease points cargo at a pool slot only in the build child. Sources:
+#   {src,build.rs,Cargo.toml} of trusty-code and its workspace deps
+#   (trusty-code-tui, trusty-common, trusty-mcp, trusty-agents-common) plus
+#   Cargo.lock, under SANDBOX_SRC_ROOT (default: this script's checkout).
 #
 # Usage: scripts/sandbox_code_daemon.sh [--bin PATH] [--dir DIR]
-#                                       [--project PATH] [--dry-run]
+#                                       [--project PATH] [--allow-stale]
+#                                       [--dry-run]
 #        scripts/sandbox_code_daemon.sh --stop DIR
 #   --bin PATH      the tcode binary (default: target/debug/tcode under
-#                   $CARGO_TARGET_DIR, else `tcode` on PATH)
+#                   $CARGO_TARGET_DIR, else `tcode` on PATH). A build-lease
+#                   slot's binary is <slot>/debug/tcode
+#   --allow-stale   run a build artifact older than its sources, with a warning
 #   --dir DIR       an existing sandbox directory (default: a new `mktemp -d`);
 #                   must not be, or resolve to, the real home
 #   --project PATH  an existing project directory (default: <dir>/project)
@@ -73,6 +84,15 @@
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/bin_fresh.sh
+. "$SCRIPT_DIR/lib/bin_fresh.sh"
+# #10755: what a tcode build compiles; see bin_fresh.sh for why only these.
+TCODE_SOURCES="Cargo.lock"
+for c in trusty-code trusty-code-tui trusty-common trusty-mcp trusty-agents-common; do
+  TCODE_SOURCES="$TCODE_SOURCES crates/$c/src crates/$c/build.rs crates/$c/Cargo.toml"
+done
+
 # Passed through from the caller only when exported — never a credential.
 FORWARDED="RUST_LOG TCODE_MOCK_LLM TCODE_PERMISSION_MODE LANG LC_ALL TMPDIR"
 SANDBOX_PATH="/usr/bin:/bin"
@@ -84,7 +104,7 @@ die() {
 }
 
 usage() {
-  echo "usage: scripts/sandbox_code_daemon.sh [--bin PATH] [--dir DIR] [--project PATH] [--dry-run]" >&2
+  echo "usage: scripts/sandbox_code_daemon.sh [--bin PATH] [--dir DIR] [--project PATH] [--allow-stale] [--dry-run]" >&2
   echo "       scripts/sandbox_code_daemon.sh --stop DIR" >&2
   exit 2
 }
@@ -186,6 +206,7 @@ DIR=""
 PROJECT=""
 STOP_DIR=""
 DRY_RUN=0
+ALLOW_STALE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bin) [ "$#" -ge 2 ] || usage; BIN="$2"; shift 2 ;;
@@ -193,6 +214,7 @@ while [ "$#" -gt 0 ]; do
     --project) [ "$#" -ge 2 ] || usage; PROJECT="$2"; shift 2 ;;
     --stop) [ "$#" -ge 2 ] || usage; STOP_DIR="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --allow-stale) ALLOW_STALE=1; shift ;;
     -h|--help) usage ;;
     *) echo "sandbox_code_daemon: unknown argument: $1" >&2; usage ;;
   esac
@@ -221,6 +243,9 @@ esac
 resolve "$BIN_DIR"
 [ -n "$RESOLVED" ] || die "cannot resolve the directory of --bin: $BIN"
 BIN="$RESOLVED/${BIN##*/}"
+# #10755: refuse a stale build artifact before anything is created.
+# shellcheck disable=SC2086  # TCODE_SOURCES is a word list of pathspecs
+bin_fresh_check sandbox_code_daemon "$BIN" "$ALLOW_STALE" "${SANDBOX_SRC_ROOT:-$SCRIPT_DIR/..}" $TCODE_SOURCES || exit 1
 
 REAL_HOME="$(real_home)"
 [ -n "$REAL_HOME" ] || die "the password database names no home for this user"

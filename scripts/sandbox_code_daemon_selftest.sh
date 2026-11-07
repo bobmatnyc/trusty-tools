@@ -22,6 +22,11 @@
 #     stop-owned  `--stop DIR` ends the recorded pid and removes sandbox.pid
 #     stop-decoy  `--stop DIR` refuses a recorded pid whose argv lacks the
 #                 project token and leaves that process alive
+#     bin-fresh-*  (#10755) against a temp git source root (SANDBOX_SRC_ROOT):
+#                 a build-artifact stub older than its source refuses and
+#                 starts nothing; a fresh one passes; --allow-stale passes;
+#                 an installed-style stub outside a target dir passes with a
+#                 notice
 #
 # Usage: ./scripts/sandbox_code_daemon_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -128,6 +133,41 @@ printf '%s\n' "$D4/project" > "$D4/sandbox.project"
 rc=0; "$LAUNCHER" --stop "$D4" >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 1 ] || fail "stop-decoy (exit $rc, want 1)"
 kill -0 "$DECOY" 2>/dev/null || fail "stop-decoy (decoy was signalled)"
+
+# bin-fresh (#10755): a temp source root, so the real tree cannot change the
+# answer. The stale stub predates lib.rs; the fresh one postdates it.
+SRC="$WORK/src"
+TGT="$WORK/tgt"
+mkdir -p "$SRC/crates/trusty-code/src" "$TGT/debug" "$TGT/release"
+echo "pub fn f() {}" > "$SRC/crates/trusty-code/src/lib.rs"
+touch -d 2020-06-01T00:00:00 "$SRC/crates/trusty-code/src/lib.rs"
+git -C "$SRC" init -q
+git -C "$SRC" add crates
+: > "$TGT/.rustc_info.json"
+cp "$STUB" "$TGT/debug/tcode"
+touch -d 2020-01-01T00:00:00 "$TGT/debug/tcode"
+# Exits at once, so a launcher that wrongly starts it fails instead of hanging.
+printf "#!/bin/sh\n: > \"\$HOME/../stub-ran\"\n" > "$TGT/debug/tcode-mark"
+chmod +x "$TGT/debug/tcode-mark"
+touch -d 2020-01-01T00:00:00 "$TGT/debug/tcode-mark"
+cp "$STUB" "$TGT/release/tcode"
+D5="$WORK/d5"; mkdir -p "$D5"
+rc=0; out="$(SANDBOX_SRC_ROOT="$SRC" "$LAUNCHER" --bin "$TGT/debug/tcode" --dir "$D5" --dry-run 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || fail "bin-fresh-stale-dry-run (exit $rc, want 1)"
+case "$out" in *"is older than its newest source $SRC/crates/trusty-code/src/lib.rs"*) ;; *) fail "bin-fresh-stale-dry-run (no source named): $out" ;; esac
+rc=0; out="$(SANDBOX_SRC_ROOT="$SRC" "$LAUNCHER" --bin "$TGT/debug/tcode-mark" --dir "$D5" 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || fail "bin-fresh-stale (exit $rc, want 1)"
+case "$out" in *"refused: stale build artifact $TGT/debug/tcode-mark"*) ;; *) fail "bin-fresh-stale (no refusal): $out" ;; esac
+[ ! -e "$D5/home" ] && [ ! -e "$D5/stub-ran" ] || fail "bin-fresh-stale (the launcher started or created something)"
+rc=0; out="$(SANDBOX_SRC_ROOT="$SRC" "$LAUNCHER" --bin "$TGT/release/tcode" --dir "$D5" --dry-run 2>&1)" || rc=$?
+[ "$rc" -eq 0 ] || fail "bin-fresh-fresh (exit $rc, want 0)"
+case "$out" in *"fresh: build artifact"*) ;; *) fail "bin-fresh-fresh (no verdict): $out" ;; esac
+rc=0; out="$(SANDBOX_SRC_ROOT="$SRC" "$LAUNCHER" --bin "$TGT/debug/tcode" --dir "$D5" --dry-run --allow-stale 2>&1)" || rc=$?
+[ "$rc" -eq 0 ] || fail "bin-fresh-allow-stale (exit $rc, want 0)"
+case "$out" in *"warning: --allow-stale"*) ;; *) fail "bin-fresh-allow-stale (no warning): $out" ;; esac
+rc=0; out="$(SANDBOX_SRC_ROOT="$SRC" "$LAUNCHER" --bin "$STUB" --dir "$D5" --dry-run 2>&1)" || rc=$?
+[ "$rc" -eq 0 ] || fail "bin-fresh-installed (exit $rc, want 0)"
+case "$out" in *"notice: installed binary (not under a cargo target dir)"*) ;; *) fail "bin-fresh-installed (no notice): $out" ;; esac
 
 if [ -n "$FAILED" ]; then
   echo "sandbox_code_daemon_selftest: FAILED:$FAILED" >&2

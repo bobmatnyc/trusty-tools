@@ -21,7 +21,12 @@ Work runs in one of two lanes. The lane decides what counts as evidence.
 
 **Dev lane** (changes being made, PR open):
 
-- Live checks run the build slot's debug `tm`.
+- Live checks run the build slot's debug `tm`. The build lease prints the
+  slot path on stderr; pass that binary explicitly, e.g.
+  `scripts/sandbox_daemon.sh --bin <slot>/debug/tm` (or
+  `scripts/sandbox_code_daemon.sh --bin <slot>/debug/tcode`). Both launchers
+  refuse a build artifact older than its newest tracked source, and print the
+  path and mtime of whatever they run (#10755). `--allow-stale` overrides.
 - Local gates are set by the change's test ladder rung. Targeted tests are
   enough; there is no local `cargo doc` run.
 - CI's full suite is the backstop on every PR. Nothing in this lane removes a
