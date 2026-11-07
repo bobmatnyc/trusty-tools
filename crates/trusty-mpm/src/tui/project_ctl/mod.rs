@@ -25,11 +25,18 @@ pub mod events;
 pub mod layout;
 pub mod panes;
 pub mod poll;
+// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
+mod session_ops;
+#[cfg(test)]
+mod session_ops_tests;
 pub mod state;
 mod trace;
 
 #[cfg(test)]
 mod tests;
+// #10754: two-column MPM pane (Bob 11-06)
+#[cfg(test)]
+mod two_column_tests;
 
 use std::io::Stdout;
 use std::time::Duration;
@@ -160,12 +167,9 @@ async fn run_loop(
     state: ProjectCtlState,
     interval_ms: u64,
 ) -> anyhow::Result<()> {
-    let mut draw = |state: &mut ProjectCtlState| -> anyhow::Result<()> {
-        terminal.draw(|frame| layout::render(frame, state))?;
-        Ok(())
-    };
+    // #10754: one value draws AND lends the terminal out around an attach.
     drive::drive(
-        &mut draw,
+        &mut drive::TerminalScreen(terminal),
         &mut drive::TerminalEvents,
         poll::tick::fetch_tick,
         client,
