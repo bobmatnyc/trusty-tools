@@ -74,7 +74,7 @@ use super::state::ProjectCtlState;
 /// `state.sessions_by_project`; on a transport error or an unreachable daemon
 /// it clears both and sets `daemon_reachable = false`. Always rebuilds the
 /// tree (#10476, [`ProjectCtlState::rebuild_tree`]), which keeps the
-/// selection and expanded set across a refresh and clamps a vanished
+/// selection and collapsed set across a refresh and clamps a vanished
 /// selection to its nearest surviving ancestor. Finally refreshes
 /// [`ProjectCtlState::activity`] for whichever session is selected AFTER the
 /// project/session refresh above (see [`refresh_activity`]).

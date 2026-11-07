@@ -67,24 +67,25 @@ fn polled(ids: &[&str]) -> ProjectCtlState {
 }
 
 #[test]
-fn first_poll_selects_the_first_owner_bar_collapsed() {
+fn first_poll_selects_the_first_owner_bar_expanded() {
+    // #10476: tree starts expanded (Bob 11-05 17:30Z)
     let state = polled(&["s1"]);
     assert_eq!(state.selected_node(), Some(&acme()));
-    assert_eq!(state.tree.rows.len(), 1, "owners start collapsed");
+    assert_eq!(state.tree.rows.len(), 4, "acme, alpha, s1, beta all open");
 }
 
 #[test]
 fn selection_and_expanded_survive_repoll() {
     let mut state = polled(&["s1", "s2"]);
     state.select_node(session_node("s2"));
-    let expanded = state.tree.expanded.clone();
-    assert!(expanded.contains(&acme()) && expanded.contains(&alpha()));
+    let expanded = state.tree.collapsed.clone();
+    assert!(state.tree.is_expanded(&acme()) && state.tree.is_expanded(&alpha()));
 
     apply_core(&mut state, fleet(&["s0", "s1", "s2"]));
     apply_core(&mut state, fleet(&["s0", "s1", "s2"]));
 
     assert_eq!(state.selected_node(), Some(&session_node("s2")));
-    assert_eq!(state.tree.expanded, expanded);
+    assert_eq!(state.tree.collapsed, expanded);
     let row = state.tree.nav.selected();
     assert_eq!(state.tree.rows[row].id, session_node("s2"));
 }
@@ -111,9 +112,12 @@ fn empty_tree_keeps_the_selection_for_recovery() {
 #[test]
 fn select_node_expands_ancestors() {
     let mut state = polled(&["s1"]);
+    state.tree.collapsed.extend([acme(), alpha()]);
+    state.rebuild_tree();
+    assert_eq!(state.tree.rows.len(), 1, "both ancestors closed");
     state.select_node(session_node("s1"));
-    assert!(state.tree.expanded.contains(&acme()));
-    assert!(state.tree.expanded.contains(&alpha()));
+    assert!(state.tree.is_expanded(&acme()));
+    assert!(state.tree.is_expanded(&alpha()));
     assert_eq!(state.selected_session().map(|s| s.id.as_str()), Some("s1"));
 }
 
@@ -126,7 +130,7 @@ fn left_on_child_goes_to_parent() {
     // An open project collapses first, then Left climbs to the owner.
     state.tree_left();
     assert_eq!(state.selected_node(), Some(&alpha()));
-    assert!(!state.tree.expanded.contains(&alpha()));
+    assert!(!state.tree.is_expanded(&alpha()));
     state.tree_left();
     assert_eq!(state.selected_node(), Some(&acme()));
 }
@@ -134,12 +138,19 @@ fn left_on_child_goes_to_parent() {
 #[test]
 fn left_collapses_then_right_expands() {
     let mut state = polled(&["s1"]);
+    state.tree_left();
+    assert!(!state.tree.is_expanded(&acme()));
+    assert_eq!(state.tree.rows.len(), 1);
     state.tree_right();
-    assert!(state.tree.expanded.contains(&acme()));
-    assert_eq!(state.tree.rows.len(), 3, "acme, alpha, beta");
+    assert!(state.tree.is_expanded(&acme()));
+    assert_eq!(state.tree.rows.len(), 4, "acme, alpha, s1, beta");
     // Right on an open owner steps into its first project.
     state.tree_right();
     assert_eq!(state.selected_node(), Some(&alpha()));
+    // Left on the open project closes it, then climbs to the owner.
+    state.tree_left();
+    assert_eq!(state.selected_node(), Some(&alpha()));
+    assert_eq!(state.tree.rows.len(), 3, "acme, alpha, beta");
     state.tree_left();
     assert_eq!(state.selected_node(), Some(&acme()));
     state.tree_left();

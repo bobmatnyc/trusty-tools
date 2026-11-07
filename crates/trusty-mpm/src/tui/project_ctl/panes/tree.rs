@@ -240,7 +240,8 @@ mod tests {
         let lines = texts(&state);
         assert_eq!(lines[0], "▾ acme  2 projects · 3 sessions, 2 live");
         assert_eq!(lines[1], "  ▾ alpha  3 sessions, 2 live");
-        assert_eq!(lines.last().unwrap(), "  ▸ beta  0 sessions, 0 live");
+        // #10476: tree starts expanded (Bob 11-05 17:30Z), so beta draws open.
+        assert_eq!(lines.last().unwrap(), "  ▾ beta  0 sessions, 0 live");
     }
 
     #[test]

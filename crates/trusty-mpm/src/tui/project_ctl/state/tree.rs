@@ -2,7 +2,7 @@
 //!
 //! Why: the tree pane replaces the Projects and Sessions panes (Architect Q9).
 //! The poll rebuilds the project and session lists on every tick, so the tree
-//! is a pure projection of them plus the operator's expanded set. Keeping it
+//! is a pure projection of them plus the operator's collapsed set. Keeping it
 //! pure makes the counters, the collapse rules and the worker indentation
 //! testable without a terminal or a daemon.
 //! What: [`NodeId`] names a node by value, so a repoll keeps the same id.
@@ -30,7 +30,7 @@ const MANAGER_TOKENS: &[&str] = &["manager", "lead", "orchestrator"];
 /// One node of the tree, named by value.
 ///
 /// Why: rows are rebuilt from scratch on every poll, so the selection and the
-/// expanded set must name nodes by what they are, not by row index. Each
+/// collapsed set must name nodes by what they are, not by row index. Each
 /// variant carries its ancestors, so a vanished node can still name the node
 /// the selection falls back to.
 /// What: owners, projects, sessions, and the dimmed anchor drawn for a parent
@@ -164,18 +164,20 @@ fn is_live(state: &str) -> bool {
 /// row list; one pure builder keeps them in agreement.
 /// What: projects group by [`owner_key`]; an owner row shows the first-seen
 /// spelling and its [`NodeId`] carries the key. Owners are sorted by key with
-/// [`LOCAL_OWNER`] last; projects keep registry order inside their owner. An owner or project is expanded only
-/// when its [`NodeId`] is in `expanded`. Counters count the polled (non-
+/// [`LOCAL_OWNER`] last; projects keep registry order inside their owner. An
+/// owner or project is expanded unless its [`NodeId`] is in `collapsed`, so a
+/// node first seen on any poll starts open. Counters count the polled (non-
 /// terminal) session rows: `total` is all of them, `live` those `active` or
 /// `provisioning`; an owner sums its projects. With `indent_workers`, sessions
 /// follow [`session_placements`]; without it, they list flat in poll order.
 /// Test: `counts_total_and_live_per_project_and_owner`,
 /// `collapsed_owner_hides_projects`, `collapsed_project_hides_sessions`,
-/// `owner_expand_state_survives_first_seen_spelling_change`.
+/// `owner_expand_state_survives_first_seen_spelling_change`,
+/// `fresh_state_shows_every_node_expanded_with_sessions`.
 pub(crate) fn build_tree(
     projects: &[ProjectRow],
     sessions_by_project: &BTreeMap<String, Vec<SessionRow>>,
-    expanded: &BTreeSet<NodeId>,
+    collapsed: &BTreeSet<NodeId>,
     indent_workers: bool,
     aliases: &SshHostAliases,
 ) -> Vec<TreeRow> {
@@ -201,7 +203,8 @@ pub(crate) fn build_tree(
             .map(|p| counters(sessions_by_project.get(&p.name).unwrap_or(&empty)))
             .collect();
         let owner_id = NodeId::Owner(owner.clone());
-        let owner_open = expanded.contains(&owner_id);
+        // #10476: tree starts expanded (Bob 11-05 17:30Z)
+        let owner_open = !collapsed.contains(&owner_id);
         rows.push(TreeRow {
             id: owner_id,
             kind: TreeRowKind::Owner {
@@ -220,7 +223,7 @@ pub(crate) fn build_tree(
                 owner: owner.clone(),
                 name: project.name.clone(),
             };
-            let project_open = expanded.contains(&project_id);
+            let project_open = !collapsed.contains(&project_id);
             rows.push(TreeRow {
                 id: project_id,
                 kind: TreeRowKind::Project {
