@@ -110,6 +110,14 @@ impl ServiceId {
         }
     }
 
+    /// Whether a probe that found nothing listening means "idle on demand",
+    /// not "down". trusty-console's analyze connector makes the same call
+    /// (#6350, #6416); any other probe failure is still down.
+    pub fn not_listening_is_on_demand(self) -> bool {
+        // #10476: analyze is on demand; not listening is idle, not down
+        matches!(self, ServiceId::Analyze)
+    }
+
     /// The stdio MCP command trusty-console spawns to call `console_metrics`
     /// (`trusty-console/src/server/mod.rs`), or `None` when the service
     /// offers no such tool. trusty-mpm returns `None` because its Enter opens
