@@ -34,6 +34,8 @@ pub(crate) mod body;
 // #8614: the failing/running checks gate `tm pr merge` applies.
 pub(crate) mod check_gate;
 pub(crate) mod cleanup;
+// #10724: the code-critic BLOCK gate `tm pr merge` applies.
+pub(crate) mod critic_verdict;
 pub(crate) mod merge;
 pub(crate) mod metadata;
 pub(crate) mod metadata_apply;
