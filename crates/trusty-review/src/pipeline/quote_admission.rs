@@ -45,6 +45,7 @@ pub const NO_QUOTE_PREGATE_REASON: &str =
 /// Postcondition: every finding left in `findings` has `quoted_snippet` set.
 /// Test: `a_finding_without_a_quote_is_withheld_before_the_gate`,
 /// `a_blank_or_unspecific_quote_counts_as_no_quote`,
+/// `a_bare_identifier_quote_counts_as_no_quote`,
 /// `a_reply_without_the_field_takes_its_quote_from_the_body`,
 /// `a_structured_quote_is_kept_as_sent`.
 pub fn admit_quoted_findings(

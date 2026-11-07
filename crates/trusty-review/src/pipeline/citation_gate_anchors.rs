@@ -110,19 +110,25 @@ impl Anchors {
         }
     }
 
-    /// Classify one backtick span as a path, a bare identifier, or code; only
-    /// code is kept. #9188 E (Architect ruling): a bare identifier such as
-    /// `step_4` or `run()` names code without quoting it, so it anchors nothing.
+    /// Keep one backtick span or structured quote only when it quotes code
+    /// ([`quotes_code`]).
     fn add_code_span(&mut self, span: String) {
-        if span.len() < 2 || is_path_like(&span) {
-            return;
-        }
-        let bare = span.strip_suffix("()").unwrap_or(&span);
-        let is_ident = IDENT_RE.find(bare).is_some_and(|m| m.len() == bare.len());
-        if !is_ident {
+        if quotes_code(&span) {
             self.add_snippet(span);
         }
     }
+}
+
+/// Classify a span as a path, a bare identifier, or code; only code is a
+/// quote. #9188 E (Architect ruling): a bare identifier such as `step_4` or
+/// `run()` names code without quoting it, so it anchors nothing.
+/// Test: `a_bare_identifier_quote_counts_as_no_quote`.
+fn quotes_code(span: &str) -> bool {
+    if span.len() < 2 || is_path_like(span) {
+        return false;
+    }
+    let bare = span.strip_suffix("()").unwrap_or(span);
+    !IDENT_RE.find(bare).is_some_and(|m| m.len() == bare.len())
 }
 
 /// #8905 row 3: a snippet anchors a citation only when it is long enough to be
@@ -163,9 +169,10 @@ pub(super) fn same_file(a: &str, b: &str) -> bool {
 /// here only when its locator names `f.file`.
 pub(super) fn finding_anchors(f: &Finding) -> Anchors {
     let mut anchors = Anchors::default();
-    // #10782: the structured quote is quoted code like any other snippet.
+    // #10782: the structured quote is classified like a backtick span, so a
+    // bare identifier or path quotes nothing (#9188 E).
     if let Some(quote) = f.quoted_snippet.as_deref() {
-        anchors.add_snippet(normalize(quote));
+        anchors.add_code_span(normalize(quote));
     }
     for text in [f.description.as_str(), f.consequence.as_str()] {
         for caps in CODE_CITATION_RE.captures_iter(text) {
@@ -201,15 +208,16 @@ pub(super) fn finding_anchors(f: &Finding) -> Anchors {
 ///
 /// What: the structured quote alone when the finding carries one, so the
 /// cited line must hold THAT code; otherwise every anchor of the finding, as
-/// before #10782. A quote too short to be specific places nothing, and the
-/// gate drops the finding as quoting no code.
-/// Test: `a_quote_off_its_cited_line_is_not_held_by_another_snippet`.
+/// before #10782. A quote too short to be specific, a bare identifier or a
+/// path places nothing, and the gate drops the finding as quoting no code.
+/// Test: `a_quote_off_its_cited_line_is_not_held_by_another_snippet`,
+/// `a_bare_identifier_quote_on_its_cited_line_places_nothing`.
 pub(super) fn placing_anchors(f: &Finding, all: Anchors) -> Anchors {
     let Some(quote) = f.quoted_snippet.as_deref() else {
         return all;
     };
     let mut placing = Anchors::default();
-    placing.add_snippet(normalize(quote));
+    placing.add_code_span(normalize(quote)); // #10782: same rule as a backtick span
     placing
 }
 
@@ -231,10 +239,12 @@ pub(crate) fn text_quote(f: &Finding) -> Option<String> {
         .next()
 }
 
-/// Whether `quote` is specific enough to place a finding (#10782).
+/// Whether `quote` is code specific enough to place a finding (#10782).
+/// #10782: a bare identifier or path is no quote ([`quotes_code`]).
+/// Test: `a_bare_identifier_quote_counts_as_no_quote`.
 pub(crate) fn is_usable_quote(quote: &str) -> bool {
     let quote = normalize(quote);
-    !quote.is_empty() && is_specific(&quote)
+    quotes_code(&quote) && is_specific(&quote)
 }
 
 /// The snippets a `[code: …]` bracket quotes after its locator. #8905 row 3:

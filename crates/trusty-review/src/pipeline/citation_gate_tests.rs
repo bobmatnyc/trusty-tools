@@ -891,3 +891,25 @@ fn a_body_snippet_absent_beside_a_holding_quote_is_withheld() {
         Some("ledger.flush_all()")
     );
 }
+
+/// #10782 keeps #9188 E: a bare-identifier quote places nothing, even on a
+/// line that holds the identifier, so the gate withholds the finding.
+#[test]
+fn a_bare_identifier_quote_on_its_cited_line_places_nothing() {
+    for (line, quote) in [(4, "step_4"), (4, "step_4()"), (SUM_LINE, "amounts")] {
+        let mut findings = vec![quoted(Some(line), quote, "Confirm it is pure.")];
+        assert_eq!(gate(&mut findings, &billing_index()), (1, 0), "{quote:?}");
+    }
+}
+
+/// #10782: a real code quote on that same cited line still holds.
+#[test]
+fn a_code_quote_on_a_bare_identifier_line_still_holds() {
+    let mut findings = vec![quoted(
+        Some(4),
+        "let value_4 = step_4(input);",
+        "Confirm it is pure.",
+    )];
+    assert_eq!(gate(&mut findings, &billing_index()), (0, 0));
+    assert_eq!(findings[0].line, Some(4));
+}

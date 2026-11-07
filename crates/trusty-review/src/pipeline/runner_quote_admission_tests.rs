@@ -252,6 +252,32 @@ async fn run_review_questions_never_shape_the_verdict() {
     assert_eq!(json["verdict_status"], "parsed", "{json}");
 }
 
+/// #10782 keeps #9188 E, the critic's scenario: an APPROVE whose one
+/// finding quotes only the bare identifier its cited line holds. The quote
+/// is no quote, so the finding is withheld `no_quote_pregate`, never posted,
+/// and the review is a pregate-only `parsed` APPROVE.
+#[tokio::test]
+async fn run_review_withholds_a_bare_identifier_quote_on_its_line() {
+    let mut note = finding("pure", "Confirm step_4 is pure.", Some("step_4"));
+    note["line"] = serde_json::json!(4); // holds `let value_4 = step_4(input);`
+    let result = review(serde_json::json!({
+        "verdict": "APPROVE",
+        "grade": "A",
+        "summary": "Looks fine.",
+        "findings": [note],
+    }))
+    .await;
+    let json = json_of(&result);
+    assert!(result.findings.is_empty(), "{json}");
+    assert_eq!(
+        json["withheld_by_reason"],
+        serde_json::json!({"no_quote_pregate": 1}),
+        "{json}"
+    );
+    assert_eq!(json["verdict_status"], "parsed", "{json}");
+    assert_eq!(json["pregate_only_approve"], true, "{json}");
+}
+
 /// Collects formatted log output (the `runner_credential_url_tests` pattern).
 #[derive(Clone, Default)]
 struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);

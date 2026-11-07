@@ -72,3 +72,30 @@ fn a_structured_quote_is_kept_as_sent() {
     assert!(admit(&mut findings).is_empty());
     assert_eq!(findings[0].quoted_snippet.as_deref(), Some(quote));
 }
+
+/// #10782 keeps #9188 E: a structured quote that is a bare identifier, an
+/// `ident()` call or a path names code without quoting it, so it is no
+/// quote. With no body quote the finding is withheld `no_quote_pregate`;
+/// with one, the body quote replaces it (the existing fallback order).
+#[test]
+fn a_bare_identifier_quote_counts_as_no_quote() {
+    for sent in ["step_4", "run()", "compute_value", "src/a.rs"] {
+        assert!(!is_usable_quote(sent), "{sent:?}");
+        let mut findings = vec![finding("Confirm compute_value is pure.", Some(sent))];
+        let withheld = admit(&mut findings);
+        assert!(findings.is_empty(), "{sent:?}");
+        assert_eq!(reason_class(&withheld[0].reason), "no_quote_pregate");
+        assert_eq!(withheld[0].finding.quoted_snippet.as_deref(), Some(sent));
+
+        let mut findings = vec![finding(
+            "`amounts.iter().sum::<u64>()` overflows.",
+            Some(sent),
+        )];
+        assert!(admit(&mut findings).is_empty(), "{sent:?}");
+        assert_eq!(
+            findings[0].quoted_snippet.as_deref(),
+            Some("amounts.iter().sum::<u64>()"),
+            "{sent:?}"
+        );
+    }
+}
