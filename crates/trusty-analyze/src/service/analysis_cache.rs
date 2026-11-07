@@ -47,7 +47,7 @@ pub const HOTSPOT_CACHE_CAP: usize = 1000;
 /// What: the quality aggregate, the top [`HOTSPOT_CACHE_CAP`] hotspots, and
 /// every smelly chunk with its smells, all computed by the same `quality`
 /// functions the uncached handlers called.
-/// Test: `cached_results_match_a_direct_computation`.
+/// Test: `unscoped_results_match_the_uncached_computation`.
 #[derive(Debug)]
 pub struct CorpusAnalysis {
     pub quality: QualityReport,
