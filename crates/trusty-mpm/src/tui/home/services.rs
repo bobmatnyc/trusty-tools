@@ -110,10 +110,11 @@ impl ServiceId {
         }
     }
 
-    /// Whether a silent health probe means "idle on demand", not "down".
-    /// trusty-console's analyze connector makes the same call (#6350, #6416).
-    pub fn silent_is_on_demand(self) -> bool {
-        // #10476: analyze is on demand; idle is not down (Bob 11-05)
+    /// Whether a probe that found nothing listening means "idle on demand",
+    /// not "down". trusty-console's analyze connector makes the same call
+    /// (#6350, #6416); any other probe failure is still down.
+    pub fn not_listening_is_on_demand(self) -> bool {
+        // #10476: analyze is on demand; not listening is idle, not down
         matches!(self, ServiceId::Analyze)
     }
 

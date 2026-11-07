@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use trusty_common::console_metrics::{ConsoleMetricsReport, ServiceHealth};
 
 use super::probe::{
-    Observation, classify, fetch_metrics, on_demand_when_idle, spawn_health_poller, with_deadline,
+    Observation, classify, fetch_metrics, on_demand_when_idle, spawn_health_poller,
+    transport_failure, with_deadline,
 };
 use super::render::{metric_lines, render, service_lines};
 use super::services::ServiceId;
@@ -203,6 +204,18 @@ fn classify_maps_each_observation_to_a_tile_state() {
             false,
             TileHealth::Absent,
         ),
+        (
+            Observation::NotListening("idle".into()),
+            true,
+            TileHealth::Down {
+                reason: "idle".into(),
+            },
+        ),
+        (
+            Observation::NotListening("idle".into()),
+            false,
+            TileHealth::Absent,
+        ),
         (Observation::OnDemand, true, TileHealth::OnDemand),
         (Observation::OnDemand, false, TileHealth::Absent),
         (
@@ -217,11 +230,13 @@ fn classify_maps_each_observation_to_a_tile_state() {
 }
 
 /// #10476: trusty-analyze is on demand, so an installed analyze with nothing
-/// on its socket is idle, not down. Every other service keeps Silent as Down.
+/// listening is idle, not down. Every other service keeps not-listening as
+/// Down, and a `Silent` failure (an unresolvable socket path included) is
+/// Down for analyze too.
 #[test]
 fn an_idle_analyze_reads_as_on_demand_not_down() {
-    let silent = || Observation::Silent("no socket".into());
-    let seen = |id| classify(on_demand_when_idle(id, silent()), true);
+    let idle = || Observation::NotListening("no socket".into());
+    let seen = |id| classify(on_demand_when_idle(id, idle()), true);
     assert_eq!(seen(ServiceId::Analyze), TileHealth::OnDemand);
     for id in [ServiceId::Search, ServiceId::Memory, ServiceId::Mpm] {
         assert_eq!(
@@ -233,10 +248,108 @@ fn an_idle_analyze_reads_as_on_demand_not_down() {
         );
     }
     assert_eq!(
-        classify(on_demand_when_idle(ServiceId::Analyze, silent()), false),
+        classify(on_demand_when_idle(ServiceId::Analyze, idle()), false),
         TileHealth::Absent,
         "an analyze that is not installed is still absent"
     );
+    let unresolved = Observation::Silent("analyze socket unresolved".into());
+    assert_eq!(
+        classify(on_demand_when_idle(ServiceId::Analyze, unresolved), true),
+        TileHealth::Down {
+            reason: "analyze socket unresolved".into()
+        },
+        "an unresolvable analyze socket path is down"
+    );
+}
+
+/// #10476: only a dial that found no listener is `NotListening`; every other
+/// transport failure is `Silent`, so an on-demand analyze still reads Down.
+#[test]
+fn transport_failures_split_not_listening_from_broken() {
+    use std::io::{Error, ErrorKind};
+    use std::path::PathBuf;
+    use trusty_common::uds::{UdsRpcError, UdsSecurityError};
+
+    let path = || PathBuf::from("/run/analyze.sock");
+    let dial = |source| UdsRpcError::Dial {
+        path: path(),
+        source,
+    };
+    let connect = |kind| {
+        dial(UdsSecurityError::Connect {
+            path: path(),
+            source: Error::from(kind),
+        })
+    };
+    let stat = |kind| {
+        dial(UdsSecurityError::StatForConnect {
+            path: path(),
+            source: Error::from(kind),
+        })
+    };
+    let retried = |last| UdsRpcError::ConnectRetriesExhausted {
+        path: path(),
+        attempts: 3,
+        source: Box::new(last),
+    };
+    let not_listening = [
+        stat(ErrorKind::NotFound),
+        connect(ErrorKind::NotFound),
+        connect(ErrorKind::ConnectionRefused),
+        retried(connect(ErrorKind::ConnectionRefused)),
+    ];
+    for err in not_listening {
+        assert!(
+            matches!(transport_failure(&err), Observation::NotListening(_)),
+            "{err}"
+        );
+    }
+    let decode_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+    let broken = [
+        stat(ErrorKind::PermissionDenied),
+        connect(ErrorKind::PermissionDenied),
+        dial(UdsSecurityError::UntrustedSocket {
+            path: path(),
+            reason: "socket is mode 0644, not 0600".into(),
+        }),
+        retried(connect(ErrorKind::PermissionDenied)),
+        UdsRpcError::Write {
+            path: path(),
+            source: Error::from(ErrorKind::BrokenPipe),
+        },
+        UdsRpcError::Read {
+            path: path(),
+            source: Error::from(ErrorKind::Other),
+        },
+        UdsRpcError::HalfClose {
+            path: path(),
+            source: Error::from(ErrorKind::Other),
+        },
+        UdsRpcError::NoResponse { path: path() },
+        UdsRpcError::FrameTooLarge {
+            path: path(),
+            limit: 16,
+        },
+        UdsRpcError::Decode {
+            path: path(),
+            source: decode_error,
+        },
+        UdsRpcError::Timeout {
+            path: path(),
+            timeout: Duration::from_millis(5),
+        },
+    ];
+    for err in broken {
+        let observed = transport_failure(&err);
+        assert!(matches!(observed, Observation::Silent(_)), "{err}");
+        assert!(
+            matches!(
+                classify(on_demand_when_idle(ServiceId::Analyze, observed), true),
+                TileHealth::Down { .. }
+            ),
+            "{err}"
+        );
+    }
 }
 
 /// #10476: an analyze that answers health is still Up, and one that answers

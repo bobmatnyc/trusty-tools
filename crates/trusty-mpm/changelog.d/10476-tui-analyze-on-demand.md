@@ -1,2 +1,3 @@
 Fixed
 - `tm tui` home screen: an installed trusty-analyze with no running server now shows ON DEMAND instead of DOWN, because trusty-analyze runs on demand and has no resident daemon. It still shows up when its health check answers, degraded when the answer is not health, and not installed when the binary is missing (#10476).
+- `tm tui` home screen: ON DEMAND for trusty-analyze now means only that nothing listens on its socket (the socket file is absent, or the connect is refused). A trusty-analyze whose socket fails verification, hangs up, sends an unreadable answer, times out or cannot be resolved shows DOWN (#10476).
