@@ -53,6 +53,33 @@ Non-goals:
 
 **ID:** SPEC-OWNERCON-03~draft
 
+### 3.0 Terms (the owner's entity definitions)
+
+Owner definitions (Bob via Codex, 2026-11-07 17:02Z, relayed by the Architect 17:03Z), quoted as given:
+
+- INSTRUCTION = user request to act (distilled, evolving)
+- DECISION = LLM-asked clarification the user resolves
+- TASK = work unit the LLM sets up
+- BLOCKER = LLM cannot execute a task
+- Q&A = user asks for information, not an action
+
+Sequence: instruction -> decision -> task -> blocker, Q&A separate. These are relationships, not mandatory stages. Instructions are grouped by project (`scope=project:<slug>` is the default; `session` and `fleet` are exceptions).
+
+DOC-87 uses these words from here on. Former wording is kept below as an alias only.
+
+| DOC-87 earlier wording | Term | Note |
+|---|---|---|
+| "owner ruling", "owner turn", "User ruling/instruction" label | INSTRUCTION | An owner request to act, from a verified source. An owner turn is the evidence for it. |
+| Constraint record (all six kinds, §3.1) | INSTRUCTION | A typed, enforceable INSTRUCTION. `kind` says what it limits. A `kind=note` is stored prose, not enforced. |
+| Supersession, reversal, amendment (§5, §9.4) | An evolving INSTRUCTION | Amend or supersede is a change to the same INSTRUCTION, with the earlier text and source kept. Presentation: see §3.3a. |
+| `ask(C..)` check result, ambiguous turn, conflict with a written rule | DECISION | The system asks; the owner resolves it. The resolution is itself an INSTRUCTION with its own cite. |
+| Requested outcome and the prepared / sent / delivered / acknowledged states (§9.5) | TASK | States attach to the work unit that carries the INSTRUCTION out. |
+| `deny(C..)` refusal, fail-closed result, refused relay or dispatch | BLOCKER | The work cannot run. The BLOCKER names the INSTRUCTION it hit. |
+| Owner asks for information ("what is the cap?") | Q&A | Never creates a constraint. |
+| Architect inference, pacing target, proposed record (`source=architect`) | Not an owner entity | Kept (§3.2, §9.2). It may feed a DECISION or a TASK. It never becomes an INSTRUCTION without an owner source. |
+
+The checker tokens `allow | deny | ask` (§4) stay as wire values; `deny` surfaces as a BLOCKER and `ask` as a DECISION.
+
 ### 3.1 Kinds
 
 | `kind` | Param schema | Example (#10780) |
@@ -289,6 +316,6 @@ Engineering defaults (recorded; change by spec edit, no owner decision needed):
 
 Owner-policy questions (go to the owner; answers recorded here):
 
-- Q-A (was 3). Who may record an owner decision: only the Architect, or a PM that witnessed the owner's pane turn?
-- Q-B (was 5). When a check cannot tell if an action is allowed (`ask`), does the work wait for the owner or time out to refused?
-- Q-C (was 6). When a standing owner rule expires, is the owner told once, or does it lapse silently?
+- Q-A (was 3; filed as dashboard D00). Who may record an owner decision: only the Architect, or a PM that witnessed the owner's pane turn?
+- Q-B (was 5; filed as dashboard D02). When a check cannot tell if an action is allowed (`ask`), does the work wait for the owner or time out to refused?
+- Q-C (was 6; filed as dashboard D09). When a standing owner rule expires, is the owner told once, or does it lapse silently?
