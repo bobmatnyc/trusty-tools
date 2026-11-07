@@ -1,3 +1,0 @@
-Added
-- Every finding and withheld finding now lands in exactly one of `inline_comments` or the new `unanchored` list. An `unanchored` entry is `{finding_index, reason}`, with `reason` one of `off_diff`, `no_line`, `deleted_line`, `nit_cap` or `withheld:<class>`; nits past the inline cap are named as `nit_cap` and still render in the summary (#10762).
-- Each `inline_comments` entry now carries `side` (`RIGHT`), `severity`, `category` and `finding_index`, plus an optional `start_line` and `subject_type`. `finding_index` counts `findings` first, then `withheld_findings`. All new fields are additive, so 0.39 JSON still parses (#10762).
