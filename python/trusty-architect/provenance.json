@@ -10,7 +10,7 @@
     "schemas/dashboard/goal_reorders.schema.json": "ec35fdca01ef31a5a0a1f0a336bd9f356ef04537009bf8b9fc46fe223ea3cd32",
     "schemas/dashboard/goals.schema.json": "62b41362c0b6dd3b1105536c7aa638ae48f86c5ccdc451147ef243ff3940beac",
     "schemas/dashboard/il_steers.schema.json": "ef242e5d8c4d614fa4df94a195dbfcdaafffc24829458e00c0d9e64c702edb2a",
-    "schemas/dashboard/items.schema.json": "c1fd1f672b6db9744c5b004f121a5c67eb84301bcfd1bdd9f5d4e6f389880ad6",
+    "schemas/dashboard/items.schema.json": "ac6a9c6e014c74ecf1ae4479080f93e46936e55e789f35d60fe3470255415f43",
     "schemas/dashboard/media.schema.json": "7e3d2102fb908aaaf49731b85db85d045e053dae87b5fbd4bb26f79195e47568",
     "schemas/dashboard/meta-gh_track.schema.json": "24b7158bb052bee864664cc22408d3fbb780f6217cf124367ea5aec0ab3aec0a",
     "schemas/dashboard/meta-seen.schema.json": "05dca1877d05807a571b3eab831f6d9dfca294a521ffb4b275069e3221a56ef4",
