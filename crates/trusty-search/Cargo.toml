@@ -200,6 +200,11 @@ path = "tests/no_tcp_search_client_9214.rs"
 name = "reindex_stage_profile"
 path = "tests/reindex_stage_profile.rs"
 
+# #10203: hybrid search vs ripgrep parity (live test needs a sandbox daemon).
+[[test]]
+name = "rg_parity_10203"
+path = "tests/rg_parity_10203.rs"
+
 [[test]]
 name = "test_daemon_exit_8900"
 path = "tests/test_daemon_exit_8900.rs"
