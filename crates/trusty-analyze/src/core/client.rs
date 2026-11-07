@@ -117,6 +117,34 @@ impl IndexFingerprint {
     }
 }
 
+/// The `search.index.status` fields a scoped walk is checked against (#10781).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ScopeBounds {
+    #[serde(default)]
+    pub root_path: Option<String>,
+    #[serde(default)]
+    pub chunk_count: Option<u64>,
+}
+
+/// A scoped walk whose first page matched every chunk of the index (#10781).
+///
+/// Why: trusty-search normalizes an absolute prefix naming its root to `""`,
+/// which matches every chunk, while still echoing the prefix it was sent. The
+/// echo check cannot see that; the count can.
+/// What: carried inside the walk's `anyhow::Error`; a caller downcasts it to
+/// tell a widened scope from an upstream failure.
+/// Test: `a_scope_the_daemon_widens_to_the_corpus_is_refused`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "index '{index_id}': path_prefix {prefix:?} selects all {total} chunks of the index; a \
+     scope covers part of the index, so omit it for the corpus-wide result"
+)]
+pub struct ScopeSelectsWholeIndex {
+    pub index_id: String,
+    pub prefix: String,
+    pub total: usize,
+}
+
 /// Client for the trusty-search daemon's Unix socket.
 ///
 /// Cheap to clone — it holds only the socket path and the page retry policy;
@@ -290,6 +318,19 @@ impl TrustySearchClient {
         .await
     }
 
+    /// `search.index.status` — what a scoped walk is checked against (#10781).
+    ///
+    /// What: the index's `root_path` and `chunk_count`; an absent field is
+    /// `None`. A failed call is `Err`.
+    /// Test: `an_absolute_scope_naming_the_root_is_refused`.
+    pub async fn index_scope_bounds(&self, index_id: &str) -> Result<ScopeBounds> {
+        self.call(
+            search_rpc::METHOD_INDEX_STATUS,
+            json!({ "index_id": index_id }),
+        )
+        .await
+    }
+
     /// `search.chunks.list` scoped to one `path_prefix` (#10781).
     ///
     /// Why: a PR review needs the changed files, not the corpus. trusty-search
@@ -299,10 +340,22 @@ impl TrustySearchClient {
     /// [`Self::get_chunks`], with `path_prefix` on every page. A page that does
     /// not echo the prefix came from a daemon that ignored the filter; the
     /// walk is refused rather than allowed to page the whole corpus.
+    ///
+    /// #10781: `corpus_chunks` is the index's chunk count. A first page whose
+    /// `total` equals it means the daemon matched every chunk — a prefix it
+    /// normalized to the root — so the walk stops with
+    /// [`ScopeSelectsWholeIndex`] before paging the corpus.
     /// Test: `scoped_walk_sends_the_prefix_on_every_page`,
-    /// `a_daemon_that_ignores_path_prefix_is_refused`.
-    pub async fn get_chunks_under(&self, index_id: &str, prefix: &str) -> Result<Vec<CodeChunk>> {
-        self.walk_chunks(index_id, Some(prefix)).await
+    /// `a_daemon_that_ignores_path_prefix_is_refused`,
+    /// `a_scope_the_daemon_widens_to_the_corpus_is_refused`.
+    pub async fn get_chunks_under(
+        &self,
+        index_id: &str,
+        prefix: &str,
+        corpus_chunks: Option<u64>,
+    ) -> Result<Vec<CodeChunk>> {
+        self.walk_chunks(index_id, Some(prefix), corpus_chunks)
+            .await
     }
 
     /// `search.chunks.list` — bulk export of every chunk for `index_id`.
@@ -340,12 +393,18 @@ impl TrustySearchClient {
     /// `export_without_total_makes_no_completeness_claim`,
     /// `a_page_that_times_out_once_still_completes_the_walk` (#10781 retry).
     pub async fn get_chunks(&self, index_id: &str) -> Result<Vec<CodeChunk>> {
-        self.walk_chunks(index_id, None).await
+        self.walk_chunks(index_id, None, None).await
     }
 
     /// The cursor walk behind [`Self::get_chunks`] and
-    /// [`Self::get_chunks_under`]; `prefix` scopes every page.
-    async fn walk_chunks(&self, index_id: &str, prefix: Option<&str>) -> Result<Vec<CodeChunk>> {
+    /// [`Self::get_chunks_under`]; `prefix` scopes every page, and
+    /// `corpus_chunks` bounds a scoped first page's `total`.
+    async fn walk_chunks(
+        &self,
+        index_id: &str,
+        prefix: Option<&str>,
+        corpus_chunks: Option<u64>,
+    ) -> Result<Vec<CodeChunk>> {
         let mut all_chunks: Vec<CodeChunk> = Vec::new();
         // An empty cursor means "start from the first chunk" — trusty-search
         // treats `after: ""` as present-but-unset, which is how cursor mode is
@@ -368,6 +427,19 @@ impl TrustySearchClient {
                          page the whole corpus and is refused",
                         page.path_prefix
                     );
+                }
+                // #10781: backstop for a prefix the daemon normalized to "".
+                if let (true, Some(total), Some(corpus)) =
+                    (cursor.is_empty(), page.total, corpus_chunks)
+                {
+                    if corpus > 0 && total as u64 == corpus {
+                        return Err(ScopeSelectsWholeIndex {
+                            index_id: index_id.to_string(),
+                            prefix: p.to_string(),
+                            total,
+                        }
+                        .into());
+                    }
                 }
             }
             if let Some(total) = page.total {

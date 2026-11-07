@@ -51,6 +51,9 @@ pub struct IndexRequest {
 #[derive(Debug, Deserialize)]
 pub struct QualityRequest {
     pub index_id: String,
+    /// #10781: opt in to `-32007` `analysis_warming` on a cold cache.
+    #[serde(default)]
+    pub allow_warming: bool,
     #[serde(flatten)]
     pub scope: ScopeParams,
 }
@@ -60,6 +63,9 @@ pub struct HotspotsRequest {
     pub index_id: String,
     #[serde(default = "default_top_n")]
     pub top_n: usize,
+    /// #10781: opt in to `-32007` `analysis_warming` on a cold cache.
+    #[serde(default)]
+    pub allow_warming: bool,
     /// #10781: optional `paths` / `path_prefix`.
     #[serde(flatten)]
     pub scope: ScopeParams,
@@ -106,10 +112,22 @@ pub struct SmellsRequest {
     /// keep response size bounded. Set to false to include full source text.
     #[serde(default = "default_omit_content")]
     pub omit_content: bool,
+    /// #10781: opt in to `-32007` `analysis_warming` on a cold cache.
+    #[serde(default)]
+    pub allow_warming: bool,
     /// #10781: optional `paths` / `path_prefix`.
     #[serde(flatten)]
     pub scope: ScopeParams,
 }
+
+// #10781 `allow_warming`: an unscoped call on a cold cache waits for the one
+// shared corpus walk and returns its result, as before #10781. With
+// `allow_warming: true` it waits at most `CacheConfig::warm_wait`, then
+// answers `-32007` with `data.kind: "analysis_warming"` and
+// `retryable: true`. A warm or stale cache answers at once either way.
+// Test: `an_old_shape_cold_call_waits_for_the_walk`,
+// `an_opted_in_cold_call_answers_warming`,
+// `concurrent_cold_calls_share_one_walk`.
 
 /// Merge `extra`'s keys into the object `body` (#10781: additive fields).
 fn with_fields(mut body: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
@@ -170,7 +188,7 @@ impl SmellItem {
 /// What: scoped, ranks only the scope's chunks and echoes `scope`. Unscoped,
 /// serves the cached top [`HOTSPOT_CACHE_CAP`] truncated to `top_n` — the
 /// same rows the direct ranking returns — plus `cache`; a `top_n` above the
-/// cap adds `hotspots_capped_at`.
+/// cap adds `hotspots_capped_at`. A cold cache follows `allow_warming`.
 /// Test: `scoped_hotspots_fetch_only_the_scope`,
 /// `unscoped_results_match_the_uncached_computation`.
 pub async fn complexity_hotspots(
@@ -190,7 +208,7 @@ pub async fn complexity_hotspots(
     }
     let hit = state
         .analysis_cache
-        .get(&state.search, &req.index_id)
+        .get_with(&state.search, &req.index_id, req.allow_warming)
         .await?;
     let cached = &hit.entry.analysis.hotspots;
     let hotspots: Vec<&quality::HotspotItem> = cached.iter().take(req.top_n).collect();
@@ -246,7 +264,8 @@ pub async fn complexity_distribution(
 /// paginate.
 ///
 /// #10781: scoped, detects over the scope's chunks and adds `scoped`/`scope`;
-/// unscoped, pages the cached smell list and adds `scoped`/`cache`.
+/// unscoped, pages the cached smell list and adds `scoped`/`cache`; a cold
+/// cache follows `allow_warming`.
 /// Test: `smells_carry_their_detected_categories`;
 /// `unscoped_results_match_the_uncached_computation`.
 pub async fn smells(
@@ -264,7 +283,7 @@ pub async fn smells(
     }
     let hit = state
         .analysis_cache
-        .get(&state.search, &req.index_id)
+        .get_with(&state.search, &req.index_id, req.allow_warming)
         .await?;
     let body = smells_page(&req, &hit.entry.analysis.smells);
     Ok(with_fields(
@@ -392,7 +411,8 @@ fn min_severity_label(s: &Severity) -> &'static str {
 /// Why (#10781): the unscoped call walked the whole corpus per request.
 /// What: the `QualityReport` fields as before, plus `scoped` and either
 /// `scope` (the scope's own grade) or `cache` (the cached corpus grade). A
-/// caller wanting both runs one scoped and one unscoped call.
+/// caller wanting both runs one scoped and one unscoped call. A cold cache
+/// follows `allow_warming`.
 /// Test: `scoped_quality_grades_only_the_scope`,
 /// `unscoped_results_match_the_uncached_computation`.
 pub async fn quality_report(
@@ -412,7 +432,7 @@ pub async fn quality_report(
     }
     let hit = state
         .analysis_cache
-        .get(&state.search, &req.index_id)
+        .get_with(&state.search, &req.index_id, req.allow_warming)
         .await?;
     let body = to_value(&hit.entry.analysis.quality)?;
     Ok(with_fields(

@@ -185,8 +185,8 @@ async fn cold_status_failure_is_an_error_and_starts_no_walk() {
     assert_eq!(chunk_calls(&search), 0);
 }
 
-/// A cold call whose walk outlasts `warm_wait` answers the retryable
-/// warming error; the walk finishes in the background.
+/// An `allow_warming` cold call whose walk outlasts `warm_wait` answers the
+/// retryable warming error; the walk finishes in the background.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cold_walk_past_warm_wait_answers_warming() {
     let index = Arc::new(FakeIndex::default());
@@ -197,7 +197,9 @@ async fn a_cold_walk_past_warm_wait_answers_warming() {
     let client = TrustySearchClient::new(search.path());
     let cache = cache(Duration::from_millis(50));
 
-    let err = failure(&cache, &client).await;
+    let Err(err) = cache.get_with(&client, "idx", true).await else {
+        panic!("an opted-in cold call past warm_wait is not served");
+    };
     assert_eq!(err.kind, ApiErrorKind::Warming, "{}", err.message);
     let wire = trusty_common::uds::server::RpcError::from(err);
     assert_eq!(wire.code, crate::service::events::CODE_ANALYSIS_WARMING);
@@ -262,4 +264,67 @@ async fn an_entry_past_max_age_is_stale() {
         .stale_reason
         .as_deref()
         .is_some_and(|r| r.contains("maximum age")));
+}
+
+/// #10781 error arm: a status read that fails — not found or broken — never
+/// leaves a slot behind, however many unknown ids are asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_index_ids_leave_no_slot() {
+    let search = FakeSearchSocket::serve(|method, params| match method {
+        "search.index.status"
+            if params["index_id"]
+                .as_str()
+                .is_some_and(|i| i.starts_with("gone")) =>
+        {
+            Err((-32004, "index not found".to_string()))
+        }
+        _ => Err((-32603, "status broke".to_string())),
+    });
+    let client = TrustySearchClient::new(search.path());
+    let cache = AnalysisCache::default();
+    for i in 0..8 {
+        let id = if i % 2 == 0 {
+            format!("gone-{i}")
+        } else {
+            format!("broken-{i}")
+        };
+        assert!(cache.get(&client, &id).await.is_err(), "{id} is unknown");
+    }
+    assert_eq!(
+        lock(&cache.slots).len(),
+        0,
+        "no slot for an unreadable index"
+    );
+}
+
+/// #10781 error arm: once trusty-search reports an index as not found, its
+/// slot — and the entry it held — is removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_vanished_index_loses_its_slot() {
+    let gone = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&gone);
+    let search = FakeSearchSocket::serve(move |method, _| match method {
+        "search.index.status" if flag.load(Ordering::SeqCst) => {
+            Err((-32004, "index not found".to_string()))
+        }
+        "search.index.status" => Ok(serde_json::json!({
+            "chunk_count": 2, "last_indexed": "2026-11-07T00:00:00Z", "status": "ready"
+        })),
+        _ => Ok(serde_json::json!({ "total": 2, "chunks": corpus(), "next_cursor": null })),
+    });
+    let client = TrustySearchClient::new(search.path());
+    let cache = AnalysisCache::default();
+    assert!(cache.get(&client, "idx").await.is_ok());
+    assert_eq!(lock(&cache.slots).len(), 1);
+
+    gone.store(true, Ordering::SeqCst);
+    let Err(err) = cache.get(&client, "idx").await else {
+        panic!("a vanished index is not served from its old entry");
+    };
+    assert_eq!(err.kind, ApiErrorKind::NotFound, "{}", err.message);
+    assert_eq!(
+        lock(&cache.slots).len(),
+        0,
+        "the vanished index's slot is gone"
+    );
 }

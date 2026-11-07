@@ -11,11 +11,13 @@
 //! Test: `analysis_scope_tests.rs`.
 
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 
 use futures::stream::{self, StreamExt, TryStreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::core::ScopeSelectsWholeIndex;
 use crate::service::events::{AnalyzerAppState, ApiError};
 use crate::types::CodeChunk;
 
@@ -57,16 +59,58 @@ pub(crate) struct ScopedChunks {
     pub unmatched: Vec<String>,
 }
 
-/// True for an entry that names the index root, which would page the corpus.
+/// `path` with `.` dropped and `..` popped, compared by components.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// True for an entry that names the root with no index root to compare:
+/// one that normalizes to nothing (`""`, `.`, `./.`, `a/..`) or to `/`.
 fn names_the_root(entry: &str) -> bool {
-    matches!(entry, "" | "." | "./" | "/")
+    let normal = lexical(Path::new(entry));
+    normal.as_os_str().is_empty() || normal == Path::new("/")
+}
+
+/// True when absolute `entry` resolves to `root`.
+///
+/// Why (#10781): trusty-search strips its root from an absolute prefix, so
+/// `/repo`, `/repo/`, `/repo/.` and a symlinked spelling all become `""`,
+/// which matches every chunk.
+/// What: compares lexical components, then canonical paths where both exist.
+/// Test: `an_absolute_scope_naming_the_root_is_refused`.
+fn resolves_to_root(entry: &str, root: &Path) -> bool {
+    let (entry, root) = (lexical(Path::new(entry)), lexical(root));
+    entry == root
+        || matches!(
+            (std::fs::canonicalize(&entry), std::fs::canonicalize(&root)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
+/// The `bad_request` for a scope entry naming the index root.
+fn root_refusal(raw: &str, field: &str) -> ApiError {
+    ApiError::bad_request(format!(
+        "`{field}` entry {raw:?} names the index root; omit the scope for a corpus-wide result"
+    ))
 }
 
 impl ScopeParams {
     /// Validate into a [`Scope`], or `None` when the request is unscoped.
     ///
-    /// What: trims each entry; refuses an empty or root-naming entry and more
-    /// than [`MAX_SCOPE_ENTRIES`] entries as `bad_request`; drops duplicates.
+    /// What: trims each entry; refuses an entry that normalizes to the root
+    /// and more than [`MAX_SCOPE_ENTRIES`] entries as `bad_request`; drops
+    /// duplicates. An absolute entry is checked against the index root later,
+    /// in [`fetch_scoped`].
     /// Test: `scope_validation_refuses_root_and_oversized_scopes`.
     pub(crate) fn resolve(&self) -> Result<Option<Scope>, ApiError> {
         if self.paths.is_none() && self.path_prefix.is_none() {
@@ -75,10 +119,7 @@ impl ScopeParams {
         let check = |raw: &str, field: &str| -> Result<String, ApiError> {
             let entry = raw.trim();
             if names_the_root(entry) {
-                return Err(ApiError::bad_request(format!(
-                    "`{field}` entry {raw:?} names the index root; omit the scope for a \
-                     corpus-wide result"
-                )));
+                return Err(root_refusal(raw, field));
             }
             Ok(entry.to_string())
         };
@@ -114,6 +155,30 @@ impl Scope {
             .collect()
     }
 
+    /// Refuse an absolute entry that resolves to the index root (#10781).
+    ///
+    /// What: an absolute entry needs `root` to be checked; with none it is
+    /// refused as `bad_gateway`, because it cannot be shown to be a subset.
+    /// Test: `an_absolute_scope_naming_the_root_is_refused`.
+    fn refuse_root(&self, root: Option<&str>) -> Result<(), ApiError> {
+        let fields = self.path_prefix.iter().map(|p| (p, "path_prefix"));
+        for (entry, field) in fields.chain(self.paths.iter().map(|p| (p, "paths"))) {
+            if !entry.starts_with('/') {
+                continue;
+            }
+            let Some(root) = root else {
+                return Err(ApiError::bad_gateway(format!(
+                    "`{field}` entry {entry:?} is absolute, but search.index.status carries \
+                     no root_path to check it against"
+                )));
+            };
+            if resolves_to_root(entry, Path::new(root)) {
+                return Err(root_refusal(entry, field));
+            }
+        }
+        Ok(())
+    }
+
     /// The `scope` object a scoped response echoes.
     pub(crate) fn echo(&self, unmatched: &[String]) -> Value {
         json!({
@@ -126,25 +191,48 @@ impl Scope {
 
 /// Fetch only the chunks `scope` selects.
 ///
-/// What: one `get_chunks_under` walk per entry, at most
-/// [`SCOPE_CONCURRENCY`] at a time; chunks are de-duplicated by id and kept
-/// in id order, the order a corpus walk yields. Any walk failure fails the
-/// request as `bad_gateway` naming the entry, so a partial scope is never
-/// reported as the whole scope.
+/// What: reads `search.index.status` once and refuses an entry resolving to
+/// the index root (#10781). Then one `get_chunks_under` walk per entry, at
+/// most [`SCOPE_CONCURRENCY`] at a time, each bounded by the index's chunk
+/// count; a walk that selects every chunk is `bad_request`. Chunks are
+/// de-duplicated by id and kept in id order, the order a corpus walk yields.
+/// Any other walk failure fails the request as `bad_gateway` naming the
+/// entry, so a partial scope is never reported as the whole scope.
 /// Test: `scoped_hotspots_fetch_only_the_scope`,
-/// `a_failed_scope_walk_fails_the_request`.
+/// `a_failed_scope_walk_fails_the_request`,
+/// `an_absolute_scope_naming_the_root_is_refused`,
+/// `a_scope_the_daemon_widens_to_the_corpus_is_refused`.
 pub(crate) async fn fetch_scoped(
     state: &AnalyzerAppState,
     index_id: &str,
     scope: &Scope,
 ) -> Result<ScopedChunks, ApiError> {
-    let walks: Vec<(String, Vec<CodeChunk>)> = stream::iter(scope.entries())
+    let entries = scope.entries();
+    let mut corpus_chunks = None;
+    if !entries.is_empty() {
+        let bounds = state
+            .search
+            .index_scope_bounds(index_id)
+            .await
+            .map_err(|e| {
+                ApiError::bad_gateway(format!(
+                    "index '{index_id}': cannot read search.index.status to check the scope \
+                     against the index root: {e:#}"
+                ))
+            })?;
+        scope.refuse_root(bounds.root_path.as_deref())?;
+        corpus_chunks = bounds.chunk_count;
+    }
+    let walks: Vec<(String, Vec<CodeChunk>)> = stream::iter(entries)
         .map(|entry| async move {
             let chunks = state
                 .search
-                .get_chunks_under(index_id, &entry)
+                .get_chunks_under(index_id, &entry, corpus_chunks)
                 .await
                 .map_err(|e| {
+                    if let Some(widened) = e.downcast_ref::<ScopeSelectsWholeIndex>() {
+                        return ApiError::bad_request(widened.to_string());
+                    }
                     tracing::warn!("scoped get_chunks({index_id}, {entry:?}) failed: {e:#}");
                     ApiError::bad_gateway(format!("get_chunks({index_id}) under {entry:?}: {e:#}"))
                 })?;

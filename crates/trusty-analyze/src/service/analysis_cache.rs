@@ -2,18 +2,20 @@
 //!
 //! Why: `analyze.complexity_hotspots`, `analyze.smells` and `analyze.quality`
 //! paged the whole index on every call — about two minutes on a 315K-chunk
-//! index, against a 60 s client budget. An unscoped call must answer from a
-//! result computed earlier, and must never wait on a full walk in its own
-//! request.
+//! index, against a 60 s client budget. An unscoped call answers from a
+//! result computed earlier whenever one exists.
 //!
 //! What: one slot per index id. A slot holds the last good [`CorpusAnalysis`],
 //! the [`IndexFingerprint`] it was computed against, and at most one
 //! background refresh. The cache key is the index id; an entry is current
 //! only while trusty-search's fingerprint for that index equals the stored
 //! one and the entry is younger than [`CacheConfig::max_age`]. Anything else
-//! is served marked stale and starts a refresh. A cold slot waits at most
-//! [`CacheConfig::warm_wait`] for its refresh, then answers a retryable
-//! "warming" error.
+//! is served marked stale and starts a refresh. A cold slot waits for its
+//! refresh to finish, as the pre-#10781 in-request walk did; only a caller
+//! that opts in (`allow_warming`) waits at most [`CacheConfig::warm_wait`]
+//! and then answers a retryable "warming" error. Concurrent callers share
+//! one refresh. A slot exists only for an index whose status was read; one
+//! trusty-search reports as not found is removed.
 //!
 //! Test: `analysis_cache_tests.rs`.
 
@@ -29,6 +31,7 @@ use crate::core::{IndexFingerprint, TrustySearchClient};
 use crate::service::events::ApiError;
 use crate::types::complexity::CodeSmell;
 use crate::types::CodeChunk;
+use trusty_common::search_rpc::SearchRpcError;
 
 #[cfg(test)]
 #[path = "analysis_cache_tests.rs"]
@@ -111,7 +114,7 @@ pub struct CacheConfig {
     /// An entry older than this is stale even when the fingerprint matches.
     /// It bounds how long an edit the fingerprint cannot see stays "fresh".
     pub max_age: Duration,
-    /// How long a cold call waits for its refresh before answering "warming".
+    /// How long an `allow_warming` cold call waits before answering "warming".
     pub warm_wait: Duration,
     /// After a failed refresh, no new refresh starts for this long.
     pub retry_cooldown: Duration,
@@ -157,31 +160,58 @@ impl AnalysisCache {
         }
     }
 
-    /// Serve `index_id`'s corpus-wide analysis without walking in-request.
-    ///
-    /// Why: see the module doc. Every branch that cannot prove an entry
-    /// current marks it stale; none returns an unverified entry as fresh.
-    /// What: reads the fingerprint, then — current entry: fresh hit. Stale or
-    /// unverifiable entry: stale hit, plus a refresh when the fingerprint was
-    /// readable. No entry: start a refresh, wait up to `warm_wait`, then
-    /// answer the result, the refresh's failure (`bad_gateway`), or
-    /// `warming`. A fingerprint read that fails with no entry is
-    /// `bad_gateway` and starts no refresh, because its result could not be
-    /// keyed.
-    /// Test: `second_call_is_served_without_a_page_fetch`,
-    /// `a_changed_fingerprint_is_never_served_as_fresh`,
-    /// `status_failure_marks_the_entry_stale`,
-    /// `a_cold_walk_past_warm_wait_answers_warming`,
-    /// `a_failed_refresh_is_an_error_not_an_empty_result`.
+    /// Test shorthand: [`Self::get_with`] without `allow_warming`.
+    #[cfg(test)]
     pub(crate) async fn get(
         &self,
         search: &TrustySearchClient,
         index_id: &str,
     ) -> Result<CacheHit, ApiError> {
+        self.get_with(search, index_id, false).await
+    }
+
+    /// Serve `index_id`'s corpus-wide analysis.
+    ///
+    /// Why: see the module doc. Every branch that cannot prove an entry
+    /// current marks it stale; none returns an unverified entry as fresh.
+    /// What: reads the fingerprint, then — current entry: fresh hit. Stale or
+    /// unverifiable entry: stale hit, plus a refresh when the fingerprint was
+    /// readable. No entry: start or join the refresh and wait for it — up to
+    /// `warm_wait` when `allow_warming`, else until it ends — then answer
+    /// the result, the refresh's failure (`bad_gateway`), or `warming`. A
+    /// failed fingerprint read creates no slot: with no entry it is
+    /// `bad_gateway` and starts no refresh, because its result could not be
+    /// keyed; a not-found answer also removes the slot (`not_found`).
+    /// Test: `second_call_is_served_without_a_page_fetch`,
+    /// `a_changed_fingerprint_is_never_served_as_fresh`,
+    /// `status_failure_marks_the_entry_stale`,
+    /// `a_cold_walk_past_warm_wait_answers_warming`,
+    /// `a_failed_refresh_is_an_error_not_an_empty_result`,
+    /// `unknown_index_ids_leave_no_slot`,
+    /// `a_vanished_index_loses_its_slot`.
+    pub(crate) async fn get_with(
+        &self,
+        search: &TrustySearchClient,
+        index_id: &str,
+        allow_warming: bool,
+    ) -> Result<CacheHit, ApiError> {
         let fingerprint = search.index_fingerprint(index_id).await;
         let waiter = {
             let mut slots = lock(&self.slots);
-            let slot = slots.entry(index_id.to_string()).or_default();
+            // #10781: a failed status read never creates a slot.
+            let slot = match &fingerprint {
+                Ok(_) => slots.entry(index_id.to_string()).or_default(),
+                Err(e) if is_not_found(e) => {
+                    slots.remove(index_id);
+                    return Err(ApiError::not_found(format!(
+                        "index '{index_id}' not found in trusty-search: {e:#}"
+                    )));
+                }
+                Err(e) => match slots.get_mut(index_id) {
+                    Some(slot) => slot,
+                    None => return Err(unkeyable(index_id, e)),
+                },
+            };
             if let Some(entry) = slot.entry.clone() {
                 let stale_reason = self.stale_reason(&entry, &fingerprint);
                 if stale_reason.is_some() {
@@ -197,16 +227,17 @@ impl AnalysisCache {
             }
             match &fingerprint {
                 Ok(fp) => self.ensure_refresh(slot, search, index_id, fp.clone()),
-                Err(e) => {
-                    return Err(ApiError::bad_gateway(format!(
-                        "index '{index_id}': cannot read search.index.status to key the \
-                         analysis cache: {e:#}"
-                    )))
-                }
+                Err(e) => return Err(unkeyable(index_id, e)),
             }
         };
         if let Some(mut rx) = waiter {
-            let _ = tokio::time::timeout(self.config.warm_wait, rx.wait_for(|done| *done)).await;
+            if allow_warming {
+                let _ =
+                    tokio::time::timeout(self.config.warm_wait, rx.wait_for(|done| *done)).await;
+            } else {
+                // #10781: the pre-#10781 shape walked to completion in-request.
+                let _ = rx.wait_for(|done| *done).await;
+            }
         }
         let slots = lock(&self.slots);
         let slot = slots.get(index_id);
@@ -220,6 +251,11 @@ impl AnalysisCache {
         if let Some((_, err)) = slot.and_then(|s| s.last_error.as_ref()) {
             return Err(ApiError::bad_gateway(format!(
                 "index '{index_id}': corpus analysis refresh failed: {err}"
+            )));
+        }
+        if !allow_warming {
+            return Err(ApiError::internal(format!(
+                "index '{index_id}': corpus analysis refresh ended without a result"
             )));
         }
         Err(ApiError::warming(format!(
@@ -285,11 +321,25 @@ impl AnalysisCache {
     }
 }
 
+/// True when trusty-search answered that the index does not exist.
+fn is_not_found(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<SearchRpcError>()
+        .is_some_and(SearchRpcError::is_not_found)
+}
+
+/// The `bad_gateway` for a status read that cannot key the cache.
+fn unkeyable(index_id: &str, e: &anyhow::Error) -> ApiError {
+    ApiError::bad_gateway(format!(
+        "index '{index_id}': cannot read search.index.status to key the analysis cache: {e:#}"
+    ))
+}
+
 /// Walk the corpus, compute, and store the result or the failure.
 ///
 /// What: `fingerprint` is the one read BEFORE the walk, so an index that
 /// changes mid-walk reads as changed on the next call and refreshes again.
-/// A failed walk keeps the previous entry and records the error.
+/// A failed walk keeps the previous entry and records the error. A slot
+/// removed meanwhile (the index vanished) is not re-created.
 async fn refresh(
     slots: Slots,
     search: TrustySearchClient,
@@ -305,7 +355,12 @@ async fn refresh(
     };
     {
         let mut slots = lock(&slots);
-        let slot = slots.entry(index_id.clone()).or_default();
+        // #10781: never re-create a slot `get_with` removed.
+        let Some(slot) = slots.get_mut(&index_id) else {
+            drop(slots);
+            let _ = done.send(true);
+            return;
+        };
         slot.in_flight = None;
         match outcome {
             Ok(analysis) => {

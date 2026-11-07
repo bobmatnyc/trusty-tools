@@ -285,11 +285,13 @@ pub const CODE_LSP_ERROR: i64 = -32006;
 /// JSON-RPC code for "the corpus-wide result is still being computed" (#10781).
 ///
 /// Why: an unscoped `analyze.complexity_hotspots`, `analyze.smells` or
-/// `analyze.quality` on a cold cache must not walk the corpus in-request, and
-/// a caller must tell "retry shortly" from an outage without parsing prose.
+/// `analyze.quality` that passes `allow_warming: true` does not wait out a
+/// cold corpus walk, and must tell "retry shortly" from an outage without
+/// parsing prose. A call without the field waits for the walk instead.
 /// What: `-32007`, the next code in the implementation-defined band; `data`
 /// carries `{"kind": "analysis_warming", "retryable": true}`.
-/// Test: `a_cold_walk_past_warm_wait_answers_warming`.
+/// Test: `a_cold_walk_past_warm_wait_answers_warming`,
+/// `an_opted_in_cold_call_answers_warming`.
 pub const CODE_ANALYSIS_WARMING: i64 = -32007;
 
 /// What kind of failure a handler is reporting.

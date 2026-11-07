@@ -366,7 +366,7 @@ async fn scoped_walk_sends_the_prefix_on_every_page() {
         Ok(body)
     });
     let chunks = TrustySearchClient::new(search.path())
-        .get_chunks_under("idx", "src/lib.rs")
+        .get_chunks_under("idx", "src/lib.rs", None)
         .await
         .expect("scoped walk");
     assert_eq!(chunks.len(), 2);
@@ -381,7 +381,7 @@ async fn scoped_walk_sends_the_prefix_on_every_page() {
 async fn a_daemon_that_ignores_path_prefix_is_refused() {
     let search = spawn_chunks_stub(vec![("", page(315_000, &["a:1:2"], Some("a:1:2")))]);
     let err = TrustySearchClient::new(search.path())
-        .get_chunks_under("idx", "src/lib.rs")
+        .get_chunks_under("idx", "src/lib.rs", None)
         .await
         .expect_err("an unscoped answer to a scoped request is refused");
     assert!(
