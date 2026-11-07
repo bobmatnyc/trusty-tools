@@ -1357,3 +1357,46 @@ fn reserved_name(tag: &str) -> String {
         trusty_common::session_naming::RESERVED_TEST_PREFIX
     )
 }
+
+/// Error arm (Fail-Open Check): boot adoption reads every workspace server; a
+/// session found only on one is adopted with that server's socket, so later
+/// calls reach it there. Red on 420b3717bf, which adopted from the default
+/// server only.
+#[serial_test::serial]
+#[tokio::test]
+async fn boot_reconcile_adopts_a_workspace_servers_session_with_its_socket() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(dir.path());
+    let workdir = std::fs::canonicalize(dir.path()).expect("canonical");
+    let server = "tm-ws-10101-adopt";
+    let _live = std::os::unix::net::UnixListener::bind(dir.path().join(server)).expect("bind");
+    let bin = dir.path().join("fake-tmux");
+    let script = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = -L ] && [ \"$2\" = '{server}' ]; then shift 2; \
+         if [ \"$1\" = list-sessions ]; then echo 'tm-adoptee:1700000000:0'; exit 0; fi; \
+         case \"$*\" in *pane_current_path*) echo '{wd}';; esac; exit 0; fi\nexit 0\n",
+        wd = workdir.display(),
+    );
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+    let driver = crate::daemon::tmux::TmuxDriver::with_tmux_path_for_test(
+        bin.to_string_lossy().into_owned(),
+    );
+    let driver = crate::session_manager::RealTmuxDriver::from_driver_for_test(driver)
+        .with_socket_dir_for_test(dir.path().into());
+    let mgr = SessionManager::new(&dir.path().join("data"), std::sync::Arc::new(driver))
+        .await
+        .expect("manager");
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(report.external_adopted, vec!["tm-adoptee".to_owned()]);
+    let adopted = mgr
+        .list()
+        .await
+        .into_iter()
+        .find(|r| r.tmux_name == "tm-adoptee")
+        .expect("adopted record");
+    assert_eq!(adopted.tmux_socket, Some(dir.path().join(server)));
+}

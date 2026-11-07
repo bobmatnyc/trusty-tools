@@ -23,6 +23,14 @@ fn real_driver() -> (tempfile::TempDir, PathBuf, RealTmuxDriver) {
     (dir, log, driver)
 }
 
+/// The manager's data dir under a scratch framework root (`<dir>/.trusty-mpm`),
+/// so nothing the manager deploys reaches the operator's home.
+fn scratch_data_dir(dir: &std::path::Path) -> PathBuf {
+    let data = dir.join(".trusty-mpm").join("session-manager");
+    std::fs::create_dir_all(&data).expect("data dir");
+    data
+}
+
 #[test]
 fn the_opt_out_keeps_the_default_server() {
     let (dir, _log, tmux) = real_driver();
@@ -51,7 +59,7 @@ async fn a_fresh_launch_creates_its_session_on_the_workspace_server() {
     let workspace = dir.path().join("repo");
     std::fs::create_dir_all(&workspace).expect("workspace");
     let server = crate::core::tmux_server::workspace_server_name(&workspace);
-    let data = dir.path().join("data");
+    let data = scratch_data_dir(dir.path());
     let mgr = SessionManager::new(&data, Arc::new(tmux))
         .await
         .expect("manager");
@@ -123,7 +131,7 @@ async fn resuming_on_a_crashed_workspace_server_restarts_it_and_recreates_the_pa
     let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy().into_owned());
     let driver =
         RealTmuxDriver::from_driver_for_test(driver).with_socket_dir_for_test(dir.path().into());
-    let mgr = SessionManager::new(&dir.path().join("data"), Arc::new(driver))
+    let mgr = SessionManager::new(&scratch_data_dir(dir.path()), Arc::new(driver))
         .await
         .expect("manager");
     let id = crate::session_manager::ManagedSessionId::new();
@@ -148,42 +156,4 @@ async fn resuming_on_a_crashed_workspace_server_restarts_it_and_recreates_the_pa
             .any(|l| l.starts_with(&format!("-L {server} ")) && l.contains("new-session")),
         "the pane was not recreated on its server: {calls}"
     );
-}
-
-/// Error arm (Fail-Open Check): boot adoption reads every workspace server; a
-/// session found only on one is adopted with that server's socket, so later
-/// calls reach it there. Red on 420b3717bf, which adopted from the default
-/// server only.
-#[tokio::test]
-async fn boot_reconcile_adopts_a_workspace_servers_session_with_its_socket() {
-    let dir = crate::test_support::hermetic_temp_dir();
-    let workdir = std::fs::canonicalize(dir.path()).expect("canonical");
-    let server = "tm-ws-10101-adopt";
-    let _live = std::os::unix::net::UnixListener::bind(dir.path().join(server)).expect("bind");
-    let bin = dir.path().join("fake-tmux");
-    let script = format!(
-        "#!/bin/sh\n\
-         if [ \"$1\" = -L ] && [ \"$2\" = '{server}' ]; then shift 2; \
-         if [ \"$1\" = list-sessions ]; then echo 'tm-adoptee:1700000000:0'; exit 0; fi; \
-         case \"$*\" in *pane_current_path*) echo '{wd}';; esac; exit 0; fi\nexit 0\n",
-        wd = workdir.display(),
-    );
-    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
-    let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy().into_owned());
-    let driver =
-        RealTmuxDriver::from_driver_for_test(driver).with_socket_dir_for_test(dir.path().into());
-    let mgr = SessionManager::new(&dir.path().join("data"), Arc::new(driver))
-        .await
-        .expect("manager");
-
-    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
-
-    assert_eq!(report.external_adopted, vec!["tm-adoptee".to_owned()]);
-    let adopted = mgr
-        .list()
-        .await
-        .into_iter()
-        .find(|r| r.tmux_name == "tm-adoptee")
-        .expect("adopted record");
-    assert_eq!(adopted.tmux_socket, Some(dir.path().join(server)));
 }

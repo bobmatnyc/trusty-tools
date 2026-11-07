@@ -7,7 +7,7 @@
 //! runs the attach; no switch-client crosses servers.
 //! What: [`target_socket`] finds the one server holding the session;
 //! [`attach_argv_on`] is the outside-tmux argv (`-S <socket>` for a workspace
-//! server, today's argv for the default one); [`same_server`] compares the
+//! server, today's argv for the default one); [`on_other_server`] compares the
 //! caller's `$TMUX` socket with the target's; [`new_window_attach_argv`] is the
 //! cross-server window.
 //! Test: the tests at the end of this file.
@@ -62,9 +62,11 @@ pub(crate) fn attach_argv_on(socket: &Path, session: &str) -> Vec<String> {
 }
 
 /// Whether the caller's tmux client (its `$TMUX`, `<socket>,<pid>,<index>`)
-/// is on the server at `target`. An unreadable `$TMUX` is not the same server.
-/// Test: `same_server_reads_the_socket_field_of_tmux`.
-pub(crate) fn same_server(caller_tmux: Option<&str>, target: &Path) -> bool {
+/// is known to be on another server than the one at `target`. An unreadable
+/// `$TMUX` is not known to be another server, so the caller keeps today's
+/// guarded switch, which fails closed on its own.
+/// Test: `on_other_server_reads_the_socket_field_of_tmux`.
+pub(crate) fn on_other_server(caller_tmux: Option<&str>, target: &Path) -> bool {
     let Some(socket) = caller_tmux
         .and_then(|v| v.split(',').next())
         .filter(|s| !s.is_empty())
@@ -72,7 +74,7 @@ pub(crate) fn same_server(caller_tmux: Option<&str>, target: &Path) -> bool {
         return false;
     };
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    canon(Path::new(socket)) == canon(target)
+    canon(Path::new(socket)) != canon(target)
 }
 
 /// POSIX single-quoting for one shell word.
@@ -130,18 +132,19 @@ mod tests {
     }
 
     #[test]
-    fn same_server_reads_the_socket_field_of_tmux() {
+    fn on_other_server_reads_the_socket_field_of_tmux() {
         let target = Path::new("/nonexistent/tmux-501/tm-ws-x");
-        assert!(same_server(
+        assert!(!on_other_server(
             Some("/nonexistent/tmux-501/tm-ws-x,123,0"),
             target
         ));
-        assert!(!same_server(
+        assert!(on_other_server(
             Some("/nonexistent/tmux-501/default,123,0"),
             target
         ));
-        assert!(!same_server(None, target));
-        assert!(!same_server(Some(""), target));
+        // Unknown is not "another server": today's guarded switch decides.
+        assert!(!on_other_server(None, target));
+        assert!(!on_other_server(Some(""), target));
     }
 
     #[test]

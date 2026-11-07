@@ -656,10 +656,10 @@ pub(crate) fn tmux_attach(name: &str) -> anyhow::Result<AttachOutcome> {
     // #10101 (Dc3): the server holding `name`; a refusal stops the attach.
     let socket = server::target_socket(name)?;
     if inside_tmux() {
-        if server::same_server(std::env::var("TMUX").ok().as_deref(), &socket) {
-            return switch_client_to(name);
+        if server::on_other_server(std::env::var("TMUX").ok().as_deref(), &socket) {
+            return new_window_attach(name, &socket);
         }
-        return new_window_attach(name, &socket);
+        return switch_client_to(name);
     }
     eprintln!("tm: attaching to session '{name}'");
     // #2398: resolves the binary through the crate's shared resolver rather

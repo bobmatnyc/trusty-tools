@@ -26,7 +26,7 @@ fn an_orphan_on_a_workspace_server_is_reaped_there() {
     let script = format!(
         "#!/bin/sh\necho \"$*\" >> '{}'\n\
          if [ \"$1\" = -L ] && [ \"$2\" = tm-ws-a ] && [ \"$3\" = list-panes ]; then\n\
-         printf 'tm-orphan\\tzsh\\t\\t%%1\\t/tmp\\ntm-kept\\tzsh\\t\\t%%2\\t/tmp\\n'; fi\nexit 0\n",
+         printf 'tm-orphan\\tzsh\\t99991\\t%%1\\t/tmp\\ntm-kept\\tzsh\\t99992\\t%%2\\t/tmp\\n'; fi\nexit 0\n",
         log.display()
     );
     trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
