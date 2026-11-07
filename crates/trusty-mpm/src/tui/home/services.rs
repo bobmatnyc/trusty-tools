@@ -6,7 +6,8 @@
 //! health methods, socket paths and `console_metrics` launch commands — are
 //! ported here as data, not imported.
 //! What: [`ServiceId`] and the per-service [`ProbeKind`] and socket resolver.
-//! Test: `roster_matches_the_console_order`.
+//! Test: `roster_lists_mpm_first_then_the_console_order`,
+//! `home_opens_with_mpm_first_and_selected`.
 
 use std::path::PathBuf;
 
@@ -45,13 +46,14 @@ pub enum ProbeKind {
 }
 
 impl ServiceId {
-    /// Every service, in the console's `all_connectors` order.
+    /// Every service: MPM first, then the console's `all_connectors` order.
+    // #10476: MPM tile first and selected on launch
     pub const ALL: [ServiceId; 8] = [
+        ServiceId::Mpm,
         ServiceId::Search,
         ServiceId::Memory,
         ServiceId::Analyze,
         ServiceId::Review,
-        ServiceId::Mpm,
         ServiceId::Agents,
         ServiceId::Events,
         ServiceId::Console,
