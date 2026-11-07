@@ -1751,3 +1751,41 @@ async fn mapreduce_mechanical_summary_never_contains_model_prose() {
 // #9310 ruling 50: a chunk or synthesis D/F grade is a hard verdict floor.
 #[path = "runner_mapreduce_grade_floor_tests.rs"]
 mod grade_floor;
+
+/// REGRESSION (#10762): the "assessed no files" abort partitions its findings.
+///
+/// Why: this exit returns through `abort_dry`, which never attached the
+/// inline plan, so a withheld finding on it sat in neither `inline_comments`
+/// nor `unanchored`.
+/// What: marks a result holding one withheld finding as assessing no files;
+/// asserts the fail-closed `Unknown` verdict, no inline entry, and one
+/// `withheld:refuted` entry at index 0.
+/// Test: this test itself.
+#[test]
+fn mapreduce_no_files_reviewed_abort_partitions_withheld() {
+    use crate::models::{
+        Effort, Finding, ReviewResult, UnanchoredFinding, UnanchoredReason, WithheldFinding,
+    };
+    use crate::pipeline::verify_posted::REFUTED_REASON;
+
+    let mut result = ReviewResult::new("o", "r", 1, "t", "u");
+    let mut finding = Finding::new("src/a.rs", "bug", "withheld", "fix", 0.9, Effort::High);
+    finding.line = Some(1);
+    result.withheld_findings.push(WithheldFinding {
+        finding,
+        reason: REFUTED_REASON.to_string(),
+        missing_fragment: None,
+    });
+    let raw_diff = "+++ b/src/a.rs\n@@ -0,0 +1,1 @@\n+fn a() {}\n";
+    super::mark_no_files_reviewed(&mut result, raw_diff);
+
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert!(result.inline_comments.is_empty());
+    assert_eq!(
+        result.unanchored,
+        vec![UnanchoredFinding {
+            finding_index: 0,
+            reason: UnanchoredReason::Withheld("refuted".to_string()),
+        }]
+    );
+}
