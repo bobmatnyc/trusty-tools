@@ -26,6 +26,7 @@ scripts/posted.sh
 scripts/quiet-sessions.py
 scripts/relay-marker.py
 scripts/relay.sh
+scripts/relay_provenance.py
 scripts/self-ctx.py
 scripts/start-fleet-poll.sh
 

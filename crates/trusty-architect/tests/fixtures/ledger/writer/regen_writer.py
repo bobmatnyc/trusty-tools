@@ -8,7 +8,8 @@ the one argument (-B -I, sys.dont_write_bytecode). For each scrubbed store in
 `../<store>/`, copies it into a system tempdir as `datg/<store>/` and runs one
 chain of verbs through `datg.main` with a pinned clock (one minute per step):
 add, update, close, batch (add, update, session), a batch that crosses the
-8 KB bar, prune --dry-run and prune two days on, and show. `DATG_NOTIFY_CMD` is `true`, so no escalation reaches pm-notify.
+8 KB bar, answers with an owner and an Architect source and two refused
+sources (#10780), prune --dry-run and prune two days on, and show. `DATG_NOTIFY_CMD` is `true`, so no escalation reaches pm-notify.
 Writes `corpus.jsonl` (one line per step: the batch ops the CLI built, exit
 code, stdout, the bytes appended to `log.jsonl` and `archive.jsonl`, and the
 `state.json` length and `v`) and `<store>.state.json` (the final snapshot).
@@ -54,9 +55,21 @@ class FixedTime:
         return NOW[0].timestamp()
 
 
-datg.datetime = FixedDatetime
-datg.time = FixedTime
-datg.now_iso = lambda: NOW[0].strftime("%Y-%m-%dT%H:%MZ")
+def fixed_now_iso():
+    return NOW[0].strftime("%Y-%m-%dT%H:%MZ")
+
+
+# #10780: since the #10161 split the clock is read in the datg_* modules, each
+# holding its own binding of `datetime`, `time` and `now_iso`; pin every one.
+for mod in [datg] + [sys.modules[m] for m in ("datg_store", "datg_ops", "datg_log", "datg_read") if m in sys.modules]:
+    for name, fixed in (("datetime", FixedDatetime), ("time", FixedTime), ("now_iso", fixed_now_iso)):
+        if hasattr(mod, name):
+            setattr(mod, name, fixed)
+    # The corpus pins the Rust writer's 8 KB / 16 KB bars (limits.rs); the
+    # shipped Python reads its bar from the instance config (D74: 64 KB).
+    for name, bar in (("SIZE_WARN", 8 * 1024), ("SIZE_REFUSE", 16 * 1024)):
+        if hasattr(mod, name):
+            setattr(mod, name, bar)
 
 
 def chain(code, goal):
@@ -89,6 +102,18 @@ def chain(code, goal):
            "opts": [{"l": LABEL[:160], "rec": False} for _ in range(4)]}]),
         ("add", ["add", "A", "--title", "elit", "--goal", goal], [{"op": "add", "kind": "A", "title": "elit", "goal": goal}]),
         ("update", ["update", "{A}", "--answer", "magna"], [{"op": "update", "id": "{A}", "answer": "magna"}]),
+        # #10780: an answer's source: an owner ruling with an end, an Architect inference, a refused owner
+        # source with no quote, and an inference that carries an owner quote (refused).
+        ("update", ["update", "{A}", "--answer", "magna", "--source", "owner", "--cite", "chat 2026-10-21T10:12Z",
+                    "--quote", "magna elit", "--until", "2026-10-22T09:00Z"],
+         [{"op": "update", "id": "{A}", "answer": "magna", "source": {
+             "by": "owner", "cite": "chat 2026-10-21T10:12Z", "quote": "magna elit", "until": "2026-10-22T09:00Z"}}]),
+        ("update", ["update", "{A}", "--answer", "sit", "--source", "architect", "--basis", "lorem arithmetic"],
+         [{"op": "update", "id": "{A}", "answer": "sit", "source": {"by": "architect", "basis": "lorem arithmetic"}}]),
+        ("update", ["update", "{A}", "--answer", "sit", "--source", "owner", "--cite", "chat 2026-10-21T10:12Z"],
+         [{"op": "update", "id": "{A}", "answer": "sit", "source": {"by": "owner", "cite": "chat 2026-10-21T10:12Z"}}]),
+        ("update", ["update", "{A}", "--answer", "sit", "--source", "architect", "--basis", "x", "--quote", "magna"],
+         [{"op": "update", "id": "{A}", "answer": "sit", "source": {"by": "architect", "basis": "x", "quote": "magna"}}]),
         ("prune", ["prune", "--dry-run"], [{"op": "prune", "dry_run": True}]),
         ("prune", ["prune"], [{"op": "prune"}]),
         ("show", ["show", "--brief"], []),

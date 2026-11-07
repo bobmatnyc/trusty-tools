@@ -10,6 +10,9 @@ when user_state is given, then the pending line), or None when the pending set a
 items are open asks, not answers to relay, and are dropped. main() reads the hook JSON on stdin and
 prints the hookSpecificOutput JSON when decide() returns a line. Never raises; a state-file error
 means "emit".
+#10780: an owner prompt is also appended, verbatim, to the owner-turn record ({at, session, text} per line in
+inbox/owner-turns.jsonl, or $ARCHITECT_OWNER_TURNS), which relay_provenance.py checks a `User ruling` quote
+against; the record keeps its newest half once it passes OWNER_TURNS_MAX bytes.
 main() also appends pm_cursor.inject_block() (unread PM wake messages, repeated every call, D39) to the same
 additionalContext and echoes the hook's own hook_event_name (PostToolUse or UserPromptSubmit).
 Test: scripts/test_pending_answers_hook.py, scripts/test_user_state.py, scripts/test_pm_cursor.py
@@ -86,6 +89,31 @@ def owner_prompt(d):
     return bool(p) and not p.startswith(("[poll ", "<", "/"))
 
 
+OWNER_TURNS_MAX = 1024 * 1024
+OWNER_TURN_TEXT_MAX = 8000
+
+
+def record_owner_turn(d, now=None):
+    """#10780: append the owner's prompt to the owner-turn record; never raises (a write error goes to stderr)."""
+    path = os.environ.get("ARCHITECT_OWNER_TURNS") or os.path.join(ROOT, "inbox", "owner-turns.jsonl")
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() if now is None else now))
+    rec = {"at": at, "session": os.environ.get("ARCHITECT_SESSION") or "tm-architect",
+           "text": str(d.get("prompt") or "")[:OWNER_TURN_TEXT_MAX]}
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if os.path.getsize(path) > OWNER_TURNS_MAX:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(lines[len(lines) // 2:])
+            os.replace(tmp, path)
+    except OSError as e:
+        sys.stderr.write(f"owner turn not recorded: {e!r}\n")
+
+
 def build_output(d, now=None):
     """The hook's JSON-able output for hook input `d`, or None. Subagent calls (agent_id) are skipped."""
     if not isinstance(d, dict) or d.get("agent_id"):
@@ -98,6 +126,8 @@ def build_output(d, now=None):
         user_state = None
     try:
         qroot = os.path.join(ROOT, "local", "owner-queue")
+        if owner_prompt(d):
+            record_owner_turn(d, now)   # #10780: whether or not user_state is installed
         try:  # a signal write must never block a tool call or hide the state line
             if user_state is None:
                 raise LookupError("user_state not installed")

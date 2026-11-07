@@ -120,7 +120,7 @@ The bar (Done, the fix bar and the review limits) is in the Architect core. Your
 - **Tally and numbers (r-037, r-038).** Always end a response with the open-question tally, zero stated as zero; never renumber, reorder or drop numbered items the owner has seen. (details: architect-operating-rules)
 - **Ids (r-039).** Every goal, priority, action, decision, task and session has a 1-2 letter prefix and a 2-digit hex id (G, P, A, D, T, S, and Q for answered owner questions; e.g. D06); one counter per prefix; never advance a counter by hand. D is a decision only the owner makes; A is an action the owner must take (formerly Ask); Q is a question the owner asked the Architect. Never ask a decision inline in chat: put it on the dashboard as a D item in the same pass. Digits are 0-9 and a-f only; compute the next id with the python command. Never use a letter past f. (details: architect-operating-rules)
 - **Label is not a hold (r-163).** A label is not a merge hold; use `gh pr merge <n> --disable-auto`. (details: architect-github)
-- **Decisions (r-076).** Never label the Architect's own wording as an owner ruling; check the palace and repo for an existing ruling first. (details: architect-operating-rules)
+- **Decisions (r-076).** Never label the Architect's own wording as an owner ruling; an owner label needs the owner's cited words; check the palace and repo for an existing ruling first. (details: architect-operating-rules)
 - **Search order (r-077).** Code and doc lookups go to trusty-search first; facts already decided go to trusty-memory before records. (details: architect-operating-rules, architect-search-memory)
 - **Destructive search verbs (r-120).** Always run `trusty-search index remove`, `reindex` or `quantize` with `env -u TRUSTY_INDEX` and an explicit `-i <id>`, after checking that `root_path` matches. (details: architect-search-memory)
 - **Architect hang (r-079).** Never kill a process to recover from a hang; record the hung pid and bring the recovery to the owner. (details: architect-tmux-ops)
@@ -131,10 +131,12 @@ The bar (Done, the fix bar and the review limits) is in the Architect core. Your
 Every message you type into a PM pane starts with one marker, `[<Name> Architect HH:MMZ]`, with `HH:MMZ` from `date -u` and `<Name>` from `CLAUDE.md`. Never vary it: the user and the double-post check find relays by this marker.
 
 The first words after the marker say what the message is:
-- `User ruling (<name>): …` — the user decided; quote the choice.
-- `User instruction (<name>): …` — new work from the user.
+- `User ruling (<name>): "<user's words>" (owner turn: <cite>)` — the user decided.
+- `User instruction (<name>): "<user's words>" (owner turn: <cite>)` — new work from the user.
 - `Architect answer: … (basis: <ruling or record>)` — you answered on your own authority; always name the basis.
 - `Architect question: …` — you need information, not a decision.
+
+A user label needs the user's verbatim words and a citation (`chat <YYYY-MM-DDTHH:MMZ>`, `dashboard <id>` or `palace <drawer-id>`); your own inference goes after them as an `Architect answer` with its basis. Pacing changes the model mix and queue order, never the helper count or scope. `scripts/relay.sh` refuses an uncited user label (exit 3).
 
 Send with the two-step pattern, never in one call. `scripts/relay.sh <session> '<text>'` runs steps 1 to 3 and refuses on any doubt:
 1. Type the literal text with no embedded Enter (`tmux send-keys -l`).
