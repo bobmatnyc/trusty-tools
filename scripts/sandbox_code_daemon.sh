@@ -54,13 +54,12 @@
 #   Output names variables and the paths this script chose; it prints a value
 #   only for the names it pins or forwards.
 #   Binary freshness (#10755): the script prints the binary's path and mtime.
-#   A cargo build artifact older than the newest tracked tcode source refuses
+#   A cargo build artifact older than the newest tcode source refuses
 #   (scripts/lib/bin_fresh.sh); an installed binary gets a notice instead. The
 #   ambient $CARGO_TARGET_DIR default is the likeliest stale one: the build
-#   lease points cargo at a pool slot only in the build child. Sources:
-#   {src,build.rs,Cargo.toml} of trusty-code and its workspace deps
-#   (trusty-code-tui, trusty-common, trusty-mcp, trusty-agents-common) plus
-#   Cargo.lock, under SANDBOX_SRC_ROOT (default: this script's checkout).
+#   lease points cargo at a pool slot only in the build child. Sources: the
+#   workspace crates `cargo tree -p trusty-code` names, under SANDBOX_SRC_ROOT
+#   (default: this script's checkout); see bin_fresh.sh.
 #
 # Usage: scripts/sandbox_code_daemon.sh [--bin PATH] [--dir DIR]
 #                                       [--project PATH] [--allow-stale]
@@ -87,11 +86,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bin_fresh.sh
 . "$SCRIPT_DIR/lib/bin_fresh.sh"
-# #10755: what a tcode build compiles; see bin_fresh.sh for why only these.
-TCODE_SOURCES="Cargo.lock"
-for c in trusty-code trusty-code-tui trusty-common trusty-mcp trusty-agents-common; do
-  TCODE_SOURCES="$TCODE_SOURCES crates/$c/src crates/$c/build.rs crates/$c/Cargo.toml"
-done
 
 # Passed through from the caller only when exported — never a credential.
 FORWARDED="RUST_LOG TCODE_MOCK_LLM TCODE_PERMISSION_MODE LANG LC_ALL TMPDIR"
@@ -244,8 +238,7 @@ resolve "$BIN_DIR"
 [ -n "$RESOLVED" ] || die "cannot resolve the directory of --bin: $BIN"
 BIN="$RESOLVED/${BIN##*/}"
 # #10755: refuse a stale build artifact before anything is created.
-# shellcheck disable=SC2086  # TCODE_SOURCES is a word list of pathspecs
-bin_fresh_check sandbox_code_daemon "$BIN" "$ALLOW_STALE" "${SANDBOX_SRC_ROOT:-$SCRIPT_DIR/..}" $TCODE_SOURCES || exit 1
+bin_fresh_check sandbox_code_daemon "$BIN" "$ALLOW_STALE" "${SANDBOX_SRC_ROOT:-$SCRIPT_DIR/..}" trusty-code || exit 1
 
 REAL_HOME="$(real_home)"
 [ -n "$REAL_HOME" ] || die "the password database names no home for this user"

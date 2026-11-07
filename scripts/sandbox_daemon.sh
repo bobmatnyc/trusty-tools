@@ -50,10 +50,11 @@
 #   Output names variables and the paths this script chose; it never prints a
 #   value it inherited.
 #   Binary freshness (#10755): the script prints the binary's path and mtime.
-#   A cargo build artifact older than the newest tracked tm source refuses
+#   A cargo build artifact older than the newest tm source refuses
 #   (scripts/lib/bin_fresh.sh); an installed binary gets a notice instead.
-#   Sources: crates/{trusty-mpm,trusty-common}/{src,build.rs,Cargo.toml} and
-#   Cargo.lock under SANDBOX_SRC_ROOT (default: this script's checkout).
+#   Sources: the workspace crates `cargo tree -p trusty-mpm` names, plus
+#   crates/trusty-mpm/examples/issue-state (include_str!), under
+#   SANDBOX_SRC_ROOT (default: this script's checkout); see bin_fresh.sh.
 #
 # Usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR]
 #                                  [--allow-stale] [--dry-run]
@@ -78,9 +79,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bin_fresh.sh
 . "$SCRIPT_DIR/lib/bin_fresh.sh"
-# #10755: what a tm build compiles; see bin_fresh.sh for why only these.
-TM_SOURCES="crates/trusty-mpm/src crates/trusty-mpm/build.rs crates/trusty-mpm/Cargo.toml \
-crates/trusty-common/src crates/trusty-common/build.rs crates/trusty-common/Cargo.toml Cargo.lock"
 
 # Always set by this script. Keep in step with the exec below.
 # #9178: TRUSTY_SANDBOX=1 stops trusty-common loading any `.env.local`.
@@ -147,8 +145,9 @@ BIN_DIR="$(resolve "$(dirname "$BIN")")"
 [ -n "$BIN_DIR" ] || die "cannot resolve the directory of --bin: $BIN"
 BIN="$BIN_DIR/$(basename "$BIN")"
 # #10755: refuse a stale build artifact before anything is created.
-# shellcheck disable=SC2086  # TM_SOURCES is a word list of pathspecs
-bin_fresh_check sandbox_daemon "$BIN" "$ALLOW_STALE" "${SANDBOX_SRC_ROOT:-$SCRIPT_DIR/..}" $TM_SOURCES || exit 1
+# examples/issue-state is compiled in by include_str! outside src/.
+bin_fresh_check sandbox_daemon "$BIN" "$ALLOW_STALE" "${SANDBOX_SRC_ROOT:-$SCRIPT_DIR/..}" \
+  trusty-mpm crates/trusty-mpm/examples/issue-state || exit 1
 
 REAL_HOME="$(real_home)"
 [ -n "$REAL_HOME" ] || die "the password database names no home for this user"
