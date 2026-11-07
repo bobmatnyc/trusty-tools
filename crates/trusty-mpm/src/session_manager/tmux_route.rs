@@ -34,15 +34,19 @@ use super::record::SessionRecord;
 ///
 /// Test: `a_socket_path_names_its_server`, `an_unnamed_socket_path_refuses`.
 pub(crate) fn record_server(record: &SessionRecord) -> Result<Option<String>, ManagedError> {
-    let Some(socket) = record.tmux_socket.as_deref() else {
+    socket_server(&record.tmux_name, record.tmux_socket.as_deref())
+}
+
+/// [`record_server`] for session `tmux_name` whose socket is `socket`.
+fn socket_server(tmux_name: &str, socket: Option<&Path>) -> Result<Option<String>, ManagedError> {
+    let Some(socket) = socket else {
         return Ok(None);
     };
     match socket.file_name().and_then(|n| n.to_str()) {
         Some(name) if !name.is_empty() => Ok(Some(name.to_owned())),
         _ => Err(ManagedError::TmuxUnavailable(format!(
-            "session '{}' records tmux socket {} with no server name; its server \
+            "session '{tmux_name}' records tmux socket {} with no server name; its server \
              cannot be reached",
-            record.tmux_name,
             socket.display()
         ))),
     }
@@ -93,30 +97,40 @@ pub(crate) fn route<'a>(
     tmux: &'a dyn ManagedTmuxDriver,
     record: &SessionRecord,
 ) -> Result<RoutedTmux<'a>, ManagedError> {
-    let Some(server) = record_server(record)? else {
+    route_to(tmux, &record.tmux_name, record.tmux_socket.as_deref())
+}
+
+/// [`route`] for session `tmux_name` whose stored socket is `socket`, for a
+/// caller holding the socket but no record (a resume grant, #10101).
+///
+/// # Errors
+///
+/// As [`route`].
+///
+/// Test: `a_resume_rebind_reads_the_claude_on_the_grants_own_server`.
+pub(crate) fn route_to<'a>(
+    tmux: &'a dyn ManagedTmuxDriver,
+    tmux_name: &str,
+    socket: Option<&Path>,
+) -> Result<RoutedTmux<'a>, ManagedError> {
+    let Some(server) = socket_server(tmux_name, socket)? else {
         return Ok(RoutedTmux::Default(tmux));
     };
     // #10101: `-L` resolves `server` in the driver's socket directory, so a
     // record whose socket lives elsewhere (`TMUX_TMPDIR` changed) is refused
     // rather than re-aimed at a same-named server there.
-    if !in_socket_dir(record, tmux.socket_dir().as_deref()) {
+    if !socket_in_dir(socket, tmux.socket_dir().as_deref()) {
         return Err(ManagedError::TmuxUnavailable(format!(
-            "session '{}' records tmux socket {} outside this process's tmux \
+            "session '{tmux_name}' records tmux socket {} outside this process's tmux \
              socket directory; its server cannot be reached by name",
-            record.tmux_name,
-            record
-                .tmux_socket
-                .as_deref()
-                .unwrap_or(Path::new(""))
-                .display()
+            socket.unwrap_or(Path::new("")).display()
         )));
     }
     tmux.on_server(&server)
         .map(RoutedTmux::Named)
         .ok_or_else(|| {
             ManagedError::TmuxUnavailable(format!(
-                "session '{}' is on tmux server '{server}', which this driver cannot reach",
-                record.tmux_name
+                "session '{tmux_name}' is on tmux server '{server}', which this driver cannot reach"
             ))
         })
 }
@@ -151,8 +165,13 @@ pub(crate) fn session_exists_on_own_server(
 
 /// Whether `record`'s socket sits in `socket_dir`; `None` checks nothing
 /// (a driver with no socket directory, i.e. a test fake).
-fn in_socket_dir(record: &SessionRecord, socket_dir: Option<&Path>) -> bool {
-    match (socket_dir, record.tmux_socket.as_deref()) {
+pub(crate) fn in_socket_dir(record: &SessionRecord, socket_dir: Option<&Path>) -> bool {
+    socket_in_dir(record.tmux_socket.as_deref(), socket_dir)
+}
+
+/// [`in_socket_dir`] for a bare socket path.
+fn socket_in_dir(socket: Option<&Path>, socket_dir: Option<&Path>) -> bool {
+    match (socket_dir, socket) {
         (Some(dir), Some(socket)) => socket.parent() == Some(dir),
         _ => true,
     }
@@ -278,7 +297,8 @@ pub(crate) fn live_sessions_of(tmux: &dyn ManagedTmuxDriver) -> Result<LiveSessi
 /// What: an unreadable server directory sets `named_unlisted`; a server `tmux`
 /// cannot reach, whose listing fails, or that does not answer in time is
 /// `unknown`. A listing that outlives the budget keeps its thread until tmux
-/// returns.
+/// returns, and holds its server: the next observation reads it `unknown`
+/// without listing again.
 /// Test: `one_unlistable_server_degrades_only_its_own_records`,
 /// `a_stuck_workspace_server_is_bounded_and_unknown`.
 pub(crate) fn observe_workspace_servers(
@@ -299,7 +319,8 @@ pub(crate) fn observe_workspace_servers(
         }
     };
     for server in servers {
-        match bounded_list(tmux.on_server(&server)) {
+        let key = live.socket_dir.as_deref().map(|d| d.join(&server));
+        match bounded_list(tmux.on_server(&server), key.as_deref()) {
             Some(names) => {
                 live.named.insert(server, names);
             }
@@ -315,17 +336,25 @@ pub(crate) fn observe_workspace_servers(
 }
 
 /// The managed names `driver` lists within the probe budget; `None` on no
-/// driver, an error, or expiry.
-fn bounded_list(driver: Option<Arc<dyn ManagedTmuxDriver>>) -> Option<HashSet<String>> {
+/// driver, an error, expiry, or a listing of `key`'s server still in flight.
+///
+/// What: #10101 — through [`crate::core::tmux_server::bounded_probe`] keyed on
+/// the server's socket, so a hung server holds one blocked listing, never one
+/// per call. A driver with no socket directory (a test fake) has no `key` and
+/// is only bounded.
+/// Test: `a_hung_workspace_server_is_listed_once_across_observations`.
+fn bounded_list(
+    driver: Option<Arc<dyn ManagedTmuxDriver>>,
+    key: Option<&Path>,
+) -> Option<HashSet<String>> {
+    use crate::core::tmux_server::{PROBE_BUDGET, bounded_call, bounded_probe};
     let driver = driver?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(driver.list_sessions());
-    });
-    let names = rx
-        .recv_timeout(crate::core::tmux_server::PROBE_BUDGET)
-        .ok()?
-        .ok()?;
+    let list = move || driver.list_sessions();
+    let names = match key {
+        Some(key) => bounded_probe(key, PROBE_BUDGET, list),
+        None => bounded_call(PROBE_BUDGET, list),
+    }?
+    .ok()?;
     Some(
         names
             .into_iter()

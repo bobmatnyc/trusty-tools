@@ -328,3 +328,93 @@ fn a_named_real_driver_sends_every_call_to_its_server() {
     );
     assert!(calls.contains("rename-session"), "{calls}");
 }
+
+/// A server whose listing blocks until the test releases it, counting every
+/// listing started.
+struct HungDriver {
+    started: Arc<std::sync::atomic::AtomicUsize>,
+    release: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl ManagedTmuxDriver for HungDriver {
+    fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _n: &str, _t: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.release.lock().map(|rx| rx.recv());
+        Ok(Vec::new())
+    }
+}
+
+/// Error arm (Fail-Open Check): a workspace server whose listing hangs is
+/// listed once across repeated observations. Each observation returns within
+/// the probe budget with the server `unknown`, and no second listing starts
+/// while the first is blocked. Red on 2df3760494, which started one listing
+/// (one thread and one tmux client) per observation.
+#[test]
+fn a_hung_workspace_server_is_listed_once_across_observations() {
+    struct Host {
+        dir: PathBuf,
+        hung: Arc<dyn ManagedTmuxDriver>,
+    }
+    impl ManagedTmuxDriver for Host {
+        fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn send_line(&self, _n: &str, _t: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(Vec::new())
+        }
+        fn on_server(&self, _server: &str) -> Option<Arc<dyn ManagedTmuxDriver>> {
+            Some(Arc::clone(&self.hung))
+        }
+        fn workspace_servers(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(names(&["tm-ws-hung"]))
+        }
+        fn socket_dir(&self) -> Option<PathBuf> {
+            Some(self.dir.clone())
+        }
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (release, rx) = std::sync::mpsc::channel::<()>();
+    let host = Host {
+        dir: dir.path().to_path_buf(),
+        hung: Arc::new(HungDriver {
+            started: Arc::clone(&started),
+            release: Arc::new(std::sync::Mutex::new(rx)),
+        }),
+    };
+    let budget = crate::core::tmux_server::PROBE_BUDGET + std::time::Duration::from_secs(1);
+    for round in 0..3 {
+        let clock = std::time::Instant::now();
+        let live = observe_workspace_servers(&host, HashSet::new());
+        assert!(clock.elapsed() < budget, "round {round} was not bounded");
+        assert_eq!(live.unknown, HashSet::from(["tm-ws-hung".to_owned()]));
+    }
+    assert_eq!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a listing started while one was still blocked"
+    );
+    drop(release);
+}

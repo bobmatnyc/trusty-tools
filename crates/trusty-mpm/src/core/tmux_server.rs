@@ -107,22 +107,114 @@ pub fn server_argv(server: Option<&str>, command: impl IntoIterator<Item = Strin
 /// before the server reads as unknown (#10101).
 pub const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The tmux servers with a probe in flight, by socket path (#10101).
+static PROBES_IN_FLIGHT: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Holds `key` in [`PROBES_IN_FLIGHT`]; dropping it, on return or unwind,
+/// frees the server for its next probe.
+struct InFlight(PathBuf);
+
+impl InFlight {
+    /// Claim `key`; `None` when a probe of that server is already in flight.
+    fn claim(key: &Path) -> Option<Self> {
+        let mut held = PROBES_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.insert(key.to_path_buf())
+            .then(|| Self(key.to_path_buf()))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        PROBES_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+/// Whether a probe of the server at socket `key` is in flight (#10101).
+/// Test: `a_server_with_a_probe_in_flight_is_not_probed_again`.
+pub fn probe_in_flight(key: &Path) -> bool {
+    PROBES_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(key)
+}
+
+/// Run `probe` of the tmux server at socket `key` within `budget`, at most
+/// one at a time per server process-wide (#10101).
+///
+/// Why: a probe that outlives its budget is abandoned with its thread and its
+/// tmux client still blocked. Against a hung server, one new probe per reap
+/// tick, dedup check or by-name call would pile up threads and clients
+/// without bound.
+/// What: `None` at once, with nothing spawned, while an earlier probe of
+/// `key` is still running; otherwise `probe` runs on its own thread and this
+/// waits at most `budget`, `None` on expiry or a thread that cannot start.
+/// The server is freed when `probe` returns, before its answer is sent.
+/// Test: `a_server_with_a_probe_in_flight_is_not_probed_again`,
+/// `a_hung_workspace_server_holds_one_probe_and_refuses_the_call`.
+pub fn bounded_probe<T: Send + 'static>(
+    key: &Path,
+    budget: std::time::Duration,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let held = InFlight::claim(key)?;
+    bounded_call(budget, move || {
+        let _held = held;
+        probe()
+    })
+}
+
+/// `call` on its own thread, waited on for at most `budget`; `None` on expiry
+/// or a thread that cannot start. Not limited per server: a caller that names
+/// a server uses [`bounded_probe`].
+/// Test: `a_server_with_a_probe_in_flight_is_not_probed_again`.
+pub fn bounded_call<T: Send + 'static>(
+    budget: std::time::Duration,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("tmux-probe".to_owned())
+        .spawn(move || {
+            let _ = tx.send(call());
+        })
+        .ok()?;
+    rx.recv_timeout(budget).ok()
+}
+
 /// Whether the Unix socket at `path` accepts a connection within `budget`:
-/// `Some(true)` it did, `Some(false)` it refused (no server), `None` it did not
-/// answer in time (#10101).
+/// `Some(true)` it did, `Some(false)` no server listens there,
+/// `None` it did not answer in time or the connect failed some other way
+/// (#10101).
 ///
 /// Why: a stuck server can hold a blocking `connect` without bound, and every
 /// caller of this probe runs on a path that must not hang on tmux.
-/// What: the connect runs on its own thread; this waits at most `budget`. A
-/// thread that outlives the budget is left to finish on its own.
+/// What: the connect runs through [`bounded_probe`] keyed on `path`, so a
+/// server with a probe in flight reads `None` without another connect.
 /// Test: `a_socket_probe_answers_and_refuses`.
 pub fn socket_answers(path: &Path, budget: std::time::Duration) -> Option<bool> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let path = path.to_path_buf();
-    std::thread::spawn(move || {
-        let _ = tx.send(std::os::unix::net::UnixStream::connect(&path).is_ok());
-    });
-    rx.recv_timeout(budget).ok()
+    let target = path.to_path_buf();
+    bounded_probe(path, budget, move || {
+        match std::os::unix::net::UnixStream::connect(&target) {
+            Ok(_) => Some(true),
+            // No server: refused, gone, or a socket of another type (EPROTOTYPE).
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) || e.raw_os_error() == Some(nix::libc::EPROTOTYPE) =>
+            {
+                Some(false)
+            }
+            Err(_) => None,
+        }
+    })
+    .flatten()
 }
 
 /// The workspace servers in `socket_dir` that accept a connection, by name.

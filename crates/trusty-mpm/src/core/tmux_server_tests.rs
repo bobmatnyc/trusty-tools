@@ -127,3 +127,46 @@ fn a_socket_probe_answers_and_refuses() {
         Some(false)
     );
 }
+
+/// Error arm (Fail-Open Check): while a probe of one server is in flight, a
+/// second probe of that server answers `None` at once and never runs; another
+/// server is probed as usual, and the first server is free once its probe
+/// returns. Red on 2df3760494, whose every probe spawned a new thread.
+#[test]
+fn a_server_with_a_probe_in_flight_is_not_probed_again() {
+    let (_dir, root) = scratch();
+    let hung = root.join("tm-ws-hung-1");
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let started = std::time::Instant::now();
+    let first = bounded_probe(&hung, std::time::Duration::from_millis(100), move || {
+        let _ = wait.recv();
+    });
+    assert_eq!(first, None, "the hung probe expired");
+    assert!(
+        probe_in_flight(&hung),
+        "the hung probe still holds its server"
+    );
+
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&ran);
+    let second = bounded_probe(&hung, PROBE_BUDGET, move || {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    assert_eq!(second, None);
+    assert!(
+        !ran.load(std::sync::atomic::Ordering::SeqCst),
+        "a second probe of a server with one in flight ran"
+    );
+    assert!(started.elapsed() < PROBE_BUDGET, "the second probe waited");
+    assert_eq!(
+        bounded_probe(&root.join("tm-ws-other-2"), PROBE_BUDGET, || 7),
+        Some(7)
+    );
+
+    release.send(()).expect("release the hung probe");
+    let freed = std::time::Instant::now();
+    while probe_in_flight(&hung) && freed.elapsed() < PROBE_BUDGET {
+        std::thread::yield_now();
+    }
+    assert_eq!(bounded_probe(&hung, PROBE_BUDGET, || 1), Some(1));
+}

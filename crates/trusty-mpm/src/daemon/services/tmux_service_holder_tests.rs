@@ -74,3 +74,40 @@ fn a_by_name_call_refuses_a_name_on_two_servers() {
     let err = holder_of(&driver, dir.path(), "tm-pm").expect_err("two holders");
     assert!(err.contains("2 servers"), "{err}");
 }
+
+/// Error arm (Fail-Open Check): a workspace server whose `list-sessions`
+/// hangs makes every by-name lookup refuse within the probe budget, and only
+/// one listing of it is ever started while it hangs. Red on 2df3760494, whose
+/// lookup listed the server with no bound and blocked on it.
+#[serial_test::serial]
+#[test]
+fn a_hung_workspace_server_holds_one_probe_and_refuses_the_call() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let _live = UnixListener::bind(dir.path().join("tm-ws-hung")).expect("bind");
+    let hang = crate::test_support::HangFifo::new(dir.path());
+    let starts = dir.path().join("starts");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = -L ] && [ \"$3\" = list-sessions ]; then\n\
+         echo x >> '{}'; read _ < '{}'; exit 0; fi\n\
+         if [ \"$1\" = list-sessions ]; then echo 'tm-other:1700000000:0'; fi\nexit 0\n",
+        starts.display(),
+        hang.path().display()
+    );
+    let bin = dir.path().join("fake-tmux");
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+    let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy().into_owned());
+    let budget = crate::core::tmux_server::PROBE_BUDGET + std::time::Duration::from_secs(1);
+
+    for round in 0..3 {
+        let (d, socket_dir) = (driver.clone(), dir.path().to_path_buf());
+        let answer = crate::core::tmux_server::bounded_call(budget, move || {
+            holder_of(&d, &socket_dir, "tm-pm").map(|h| h.server().map(str::to_owned))
+        });
+        let err = answer
+            .unwrap_or_else(|| panic!("round {round} was not bounded"))
+            .expect_err("unknown holder");
+        assert!(err.contains("tm-ws-hung"), "{err}");
+    }
+    let started = std::fs::read_to_string(&starts).expect("starts");
+    assert_eq!(started.lines().count(), 1, "listings started: {started:?}");
+}

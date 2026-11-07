@@ -584,6 +584,40 @@ pub(crate) fn self_describing_identity(
     }
 }
 
+/// A FIFO a fake tmux reads from to hang until the test ends (#10101).
+///
+/// What: dropping it opens the FIFO for writing (non-blocking, so with no
+/// reader it does nothing), which ends a blocked `read < fifo` with EOF; a
+/// failed assertion therefore leaves no fake tmux behind.
+#[cfg(unix)]
+pub(crate) struct HangFifo(std::path::PathBuf);
+
+#[cfg(unix)]
+impl HangFifo {
+    /// A FIFO named `hang` in `dir`.
+    pub(crate) fn new(dir: &Path) -> Self {
+        let path = dir.join("hang");
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+        Self(path)
+    }
+
+    /// The FIFO's path, for the fake tmux script.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HangFifo {
+    fn drop(&mut self) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// #9101: the identity the fake derives names the session the pane id

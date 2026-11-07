@@ -54,3 +54,53 @@ fn an_orphan_on_a_workspace_server_is_reaped_there() {
         "{calls}"
     );
 }
+
+/// Error arm (Fail-Open Check): a workspace server whose `list-panes` hangs
+/// is skipped within the probe budget on every sweep, and only one listing of
+/// it is ever started while it hangs. Red on 2df3760494, whose sweep listed
+/// the server with no bound and held the orphan-GC worker on it.
+#[serial_test::serial]
+#[test]
+fn a_hung_workspace_server_is_listed_once_across_sweeps() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let _live = UnixListener::bind(dir.path().join("tm-ws-hung")).expect("bind");
+    let hang = crate::test_support::HangFifo::new(dir.path());
+    let starts = dir.path().join("starts");
+    let bin = dir.path().join("fake-tmux");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = -L ] && [ \"$3\" = list-panes ]; then\n\
+         echo x >> '{}'; read _ < '{}'; fi\nexit 0\n",
+        starts.display(),
+        hang.path().display()
+    );
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+    let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy().into_owned());
+    let budget = crate::core::tmux_server::PROBE_BUDGET + std::time::Duration::from_secs(1);
+
+    let socket_dir = dir.path().to_path_buf();
+    let swept = crate::core::tmux_server::bounded_call(budget * 3, move || {
+        let mtmux = RealTmuxDriver::from_driver_for_test(driver.clone());
+        let mut gc = WorkspaceServerGc::default();
+        (0..3)
+            .map(|_| {
+                let clock = std::time::Instant::now();
+                let reaped = gc.sweep_in(
+                    &socket_dir,
+                    &TrackedNames::default(),
+                    &NoChild,
+                    &driver,
+                    &mtmux,
+                );
+                (reaped, clock.elapsed())
+            })
+            .collect::<Vec<_>>()
+    })
+    .expect("the sweeps were not bounded");
+
+    for (round, (reaped, took)) in swept.iter().enumerate() {
+        assert_eq!(*reaped, 0, "round {round} reaped on an unlisted server");
+        assert!(*took < budget, "round {round} took {took:?}");
+    }
+    let started = std::fs::read_to_string(&starts).expect("starts");
+    assert_eq!(started.lines().count(), 1, "listings started: {started:?}");
+}
