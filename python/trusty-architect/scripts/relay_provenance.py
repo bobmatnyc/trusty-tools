@@ -14,6 +14,11 @@ in <text>. Each one must be followed by the owner's words in double quotes, then
   dashboard <id>             a dashboard item, Intent Ledger steer, session command or goal (bare or
                              S-qualified id); the owner-written fields of that document (an item's
                              `answer`, never the Architect's `answer_note`)
+Residual risk (see #10800): the dashboard store has no field-level write authorization, so `answer`,
+`cancel_note`, `wont_do.note`, `feedback.note`, `steer_requests[].text`, `il_steers`, `command` and
+`goals.done_note` are trusted as owner-written without a writer check; the change-log actor check is
+#10800. The owner's dashboard Other/Done/Do notes land in `answer_note`, so they are not citable; relay one
+as `Architect note: ... (basis: dashboard <id>)`.
 A `palace ...` cite refuses (round 2): the Architect writes every palace drawer and trusty-memory marks no
 owner author, so a drawer can hold an Architect inference. A ruling known only from the palace goes out as
 `Architect note: ... (basis: palace <id>)`.
@@ -107,7 +112,9 @@ def chat_turns(at):
 
 def _owner_fields(coll, data):
     """The owner-written strings of one dashboard document: an item's `answer`, the notes its owner buttons
-    write, and its steer texts. `answer_note` never counts: the Architect writes it ("Relayed 16:08Z", outcomes).
+    write, and its steer texts. `answer_note` never counts: the Architect writes it ("Relayed 16:08Z", outcomes),
+    and the owner's Other/Done/Do notes that also land there go out as `Architect note: ... (basis: dashboard <id>)`.
+    These fields are trusted without a writer check (no field-level write authorization; see #10800).
 
     Test: test_relay_never_takes_the_architects_answer_note_as_owner_words_10780
     """

@@ -197,7 +197,9 @@ message says what it is:
 
 An owner label carries only the owner's words, quoted verbatim, and the
 citation of the turn they came from: `chat <YYYY-MM-DDTHH:MMZ>` (the owner's
-chat turn) or `dashboard <id>` (a dashboard answer or steer). Your
+chat turn) or `dashboard <id>` (a dashboard answer or steer; an Other, Done
+or Do note is not citable: send it as `Architect note: … (basis: dashboard
+<id>)`). Your
 arithmetic, pacing or reading of those words goes after them as
 `Architect answer: … (basis: …)`, never under the owner label.
 `scripts/relay.sh` refuses an owner label without a quote it can find in the
