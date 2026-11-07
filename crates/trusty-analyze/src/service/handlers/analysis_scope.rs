@@ -107,11 +107,13 @@ fn root_refusal(raw: &str, field: &str) -> ApiError {
 impl ScopeParams {
     /// Validate into a [`Scope`], or `None` when the request is unscoped.
     ///
-    /// What: trims each entry; refuses an entry that normalizes to the root
-    /// and more than [`MAX_SCOPE_ENTRIES`] entries as `bad_request`; drops
+    /// What: trims each entry; refuses an entry that normalizes to the root,
+    /// an absolute entry containing `..`, and more than
+    /// [`MAX_SCOPE_ENTRIES`] entries as `bad_request`; drops
     /// duplicates. An absolute entry is checked against the index root later,
     /// in [`fetch_scoped`].
-    /// Test: `scope_validation_refuses_root_and_oversized_scopes`.
+    /// Test: `scope_validation_refuses_root_and_oversized_scopes`,
+    /// `an_absolute_scope_with_a_parent_dir_segment_is_refused`.
     pub(crate) fn resolve(&self) -> Result<Option<Scope>, ApiError> {
         if self.paths.is_none() && self.path_prefix.is_none() {
             return Ok(None);
@@ -120,6 +122,15 @@ impl ScopeParams {
             let entry = raw.trim();
             if names_the_root(entry) {
                 return Err(root_refusal(raw, field));
+            }
+            // #10781: `lexical` drops `..` as text, but trusty-search resolves
+            // a symlink before `..`, so `/tmp/s/..` can name the root.
+            let absolute = Path::new(entry);
+            if absolute.is_absolute() && absolute.components().any(|c| c == Component::ParentDir) {
+                return Err(ApiError::bad_request(format!(
+                    "`{field}` entry {raw:?} is absolute and contains `..`; \
+                     spell it without parent-directory segments"
+                )));
             }
             Ok(entry.to_string())
         };

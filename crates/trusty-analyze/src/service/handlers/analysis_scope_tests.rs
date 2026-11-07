@@ -250,11 +250,12 @@ fn daemon_normalize(prefix: &str, root: &std::path::Path) -> String {
         .map_or(prefix.to_string(), |r| r.to_string_lossy().into_owned())
 }
 
-/// A fake trusty-search rooted at `root` that filters like the real daemon.
-fn rooted_search(root: std::path::PathBuf) -> FakeSearchSocket {
+/// A fake trusty-search rooted at `root` that filters like the real daemon;
+/// `search.index.status` reports `chunk_count`.
+fn rooted_search(root: std::path::PathBuf, chunk_count: usize) -> FakeSearchSocket {
     FakeSearchSocket::serve(move |method, params| match method {
         "search.index.status" => Ok(json!({
-            "root_path": root.to_string_lossy(), "chunk_count": 2,
+            "root_path": root.to_string_lossy(), "chunk_count": chunk_count,
             "last_indexed": "2026-11-07T00:00:00Z", "status": "ready"
         })),
         "search.chunks.list" => {
@@ -286,7 +287,7 @@ async fn an_absolute_scope_naming_the_root_is_refused() {
     std::fs::create_dir_all(&root).expect("root");
     let link = tmp.path().join("link");
     std::os::unix::fs::symlink(&root, &link).expect("symlink");
-    let search = rooted_search(root.clone());
+    let search = rooted_search(root.clone(), 2);
     let dir = TempDir::new().expect("tempdir");
     let state = state(&search, &dir);
 
@@ -328,6 +329,49 @@ async fn an_absolute_scope_naming_the_root_is_refused() {
     )
     .await);
     assert_eq!(body["hotspots"].as_array().map(Vec::len), Some(1));
+}
+
+/// #10781: an absolute entry with `..` is `invalid_params` and walks nothing.
+/// `<tmp>/s/..` with `s -> <root>/src` reads as `<tmp>` lexically, but the
+/// daemon resolves the symlink first and lands on the root. The status count
+/// (3) differs from the walk total (2), so the whole-index backstop misses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_absolute_scope_with_a_parent_dir_segment_is_refused() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join("src")).expect("root/src");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside");
+    let link = outside.join("s");
+    std::os::unix::fs::symlink(root.join("src"), &link).expect("symlink");
+    let search = rooted_search(root.clone(), 3);
+    let dir = TempDir::new().expect("tempdir");
+    let state = state(&search, &dir);
+
+    let entry = format!("{}/..", link.to_string_lossy());
+    for field in ["paths", "path_prefix"] {
+        let value = if field == "paths" {
+            json!([entry])
+        } else {
+            json!(entry)
+        };
+        let res = complexity_hotspots(
+            &state,
+            req::<HotspotsRequest>(json!({ "index_id": "idx", field: value })),
+        )
+        .await;
+        let Err(err) = res else {
+            panic!("{field} {entry:?} resolves to the root and is refused");
+        };
+        assert_eq!(
+            err.kind,
+            ApiErrorKind::BadRequest,
+            "{field}: {}",
+            err.message
+        );
+        assert!(err.message.contains("`..`"), "{field}: {}", err.message);
+    }
+    assert_eq!(chunk_calls(&search), 0, "a parent-dir scope walks nothing");
 }
 
 /// #10781 backstop: a prefix the daemon widens to the whole index — here an
