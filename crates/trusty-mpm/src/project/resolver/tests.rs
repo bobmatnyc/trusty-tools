@@ -467,7 +467,8 @@ fn resolver_session_unregistered_url_returns_none() {
 }
 
 /// Per #1532 item 5: when the same repo_url appears under two project names,
-/// the first project in the slice wins (tie-break by ordering).
+/// one wins. #10476: `alpha` wins by name order, not by slice position; see
+/// `resolver_session_url_tie_break_is_name_order_not_insertion_order`.
 #[test]
 fn resolver_session_url_tie_break_first_wins() {
     let projects = vec![
@@ -482,7 +483,58 @@ fn resolver_session_url_tie_break_first_wins() {
     );
 }
 
+/// #10476 (D64): the winner among registrations of one repo is the smallest
+/// name by `(lowercase, raw)`, whatever order the registry `HashMap` yields.
+#[test]
+fn resolver_session_url_tie_break_is_name_order_not_insertion_order() {
+    let forward = vec![
+        proj("beta", "https://github.com/org/shared-repo"),
+        proj("Alpha", "https://github.com/org/Shared-Repo.git/"),
+    ];
+    let reversed: Vec<Project> = forward.iter().rev().cloned().collect();
+    let session = session_with_repo("https://github.com/org/shared-repo");
+    for projects in [&forward, &reversed] {
+        let bound = resolve_session_project(&session, projects).expect("tie-break");
+        assert_eq!(bound.name, "Alpha", "name order wins in {projects:?}");
+    }
+}
+
 // ---- fleet_by_project ----
+
+/// #10476 (D64): one project per repo. Registrations of the trusty-tools repo
+/// that differ by case, trailing `/` and `.git` (the live session form is the
+/// plain https URL) collapse into one group, and each matching session sits in
+/// it exactly once.
+#[test]
+fn resolver_fleet_shared_repo_url_one_group_all_sessions() {
+    let projects = vec![
+        proj("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+        proj("other", "https://github.com/bobmatnyc/other"),
+        proj(
+            "Trusty-Tools",
+            "https://github.com/bobmatnyc/Trusty-Tools.git/",
+        ),
+        proj(
+            "trusty-tools-2",
+            "https://github.com/bobmatnyc/trusty-tools/",
+        ),
+    ];
+    let sessions = vec![
+        session_with_repo("https://github.com/bobmatnyc/trusty-tools"),
+        session_with_repo("https://github.com/bobmatnyc/trusty-tools"),
+        session_with_repo("https://github.com/bobmatnyc/trusty-tools.git"),
+        session_no_repo(),
+    ];
+    let fleet = fleet_by_project(&sessions, &projects);
+    let names: Vec<&str> = fleet.iter().map(|f| f.project.name.as_str()).collect();
+    assert_eq!(names, vec!["Trusty-Tools", "other"], "one group per repo");
+    let mut ids: Vec<String> = fleet[0].sessions.iter().map(|s| s.id.to_string()).collect();
+    ids.sort();
+    let mut want: Vec<String> = sessions[..3].iter().map(|s| s.id.to_string()).collect();
+    want.sort();
+    assert_eq!(ids, want, "every matching session exactly once");
+    assert!(fleet[1].sessions.is_empty());
+}
 
 #[test]
 fn resolver_fleet_by_project_basic() {
