@@ -34,7 +34,12 @@ impl CriticGh {
     }
 
     fn with_verdict_read(read: GhRun) -> Self {
-        let view = serde_json::json!({"number": 42, "title": "fix: x",
+        Self::with_parts(HEAD, read)
+    }
+
+    /// `view_head` is the `headRefOid` the merge-decision read reports.
+    fn with_parts(view_head: &str, read: GhRun) -> Self {
+        let view = serde_json::json!({"number": 42, "title": "fix: x", "headRefOid": view_head,
             "body": ATTRIBUTION_FOOTER, "state": "OPEN", "headRefName": "fix/x",
             "baseRefName": "main", "mergeable": "MERGEABLE",
             "statusCheckRollup": [{"__typename": "CheckRun", "name": "CI gate",
@@ -88,13 +93,19 @@ fn args() -> PrMergeArgs {
 /// A COMMENT-type review on `commit` whose body opens with `verdict_line`.
 fn review(verdict_line: &str, commit: &str, at: &str) -> serde_json::Value {
     serde_json::json!({"id": format!("PRR_{at}"), "author": {"login": "critic"},
-        "state": "COMMENTED", "submittedAt": at, "commit": {"oid": commit},
+        "authorAssociation": "OWNER", "state": "COMMENTED", "submittedAt": at, "commit": {"oid": commit},
         "body": format!("{verdict_line}\n\n## Findings\n\n| CRITICAL | a.rs | 1 |")})
 }
 
-/// A plain PR comment with `body`.
+/// A plain PR comment with `body`, by the repo owner.
 fn comment(body: &str, at: &str) -> serde_json::Value {
-    serde_json::json!({"author": {"login": "critic"}, "createdAt": at, "body": body,
+    comment_as(body, at, "OWNER")
+}
+
+/// A plain PR comment with `body`, by an author with `association`.
+fn comment_as(body: &str, at: &str, association: &str) -> serde_json::Value {
+    serde_json::json!({"author": {"login": "critic"}, "authorAssociation": association,
+        "createdAt": at, "body": body,
         "url": format!("https://github.com/o/r/pull/42#issuecomment-{at}")})
 }
 
@@ -114,9 +125,10 @@ fn pr_10724_a_block_pinned_to_the_head_refuses() {
     assert!(!gh.merged(), "{:?}", gh.seen.borrow());
 }
 
-/// A BLOCK on an older head is not a hold; it is a warning (#10724).
+/// FAILS BEFORE the #10796 review fix (H3a): a push after a BLOCK turned it
+/// into a warning and the merge went through.
 #[test]
-fn pr_10724_a_block_on_an_old_head_does_not_refuse() {
+fn pr_10724_a_block_on_an_old_head_refuses() {
     let gh = CriticGh::new(verdicts(
         &[],
         &[review(
@@ -125,8 +137,44 @@ fn pr_10724_a_block_on_an_old_head_does_not_refuse() {
             "2026-11-01T10:00:00Z",
         )],
     ));
-    assert_eq!(merge::run(&gh, &args()).expect("runs"), EXIT_OK);
-    assert!(gh.merged(), "{:?}", gh.seen.borrow());
+    assert_eq!(merge::run(&gh, &args()).expect("runs"), EXIT_BLOCKED);
+    assert!(!gh.merged(), "{:?}", gh.seen.borrow());
+}
+
+/// FAILS BEFORE the #10796 review fix (H1): on a public repo any GitHub user
+/// could post the clearing comment the refusal text spells out.
+#[test]
+fn pr_10724_an_untrusted_approve_comment_does_not_clear_a_head_block() {
+    let gh = CriticGh::new(verdicts(
+        &[comment_as(
+            &format!("## Verdict: APPROVE, pinned to {HEAD}"),
+            "2026-11-01T11:00:00Z",
+            "NONE",
+        )],
+        &[review("## Verdict: BLOCK", HEAD, "2026-11-01T10:00:00Z")],
+    ));
+    assert_eq!(merge::run(&gh, &args()).expect("runs"), EXIT_BLOCKED);
+    assert!(!gh.merged(), "{:?}", gh.seen.borrow());
+}
+
+/// FAILS BEFORE the #10796 review fix (MEDIUM): the checks were judged on the
+/// first read's head and the merge was pinned to the verdict read's head.
+#[test]
+fn pr_10724_a_head_that_moved_between_the_reads_refuses() {
+    let gh = CriticGh::with_parts(
+        OLD_HEAD,
+        GhRun {
+            success: true,
+            stdout: verdicts(
+                &[],
+                &[review("## Verdict: APPROVE", HEAD, "2026-11-01T10:00:00Z")],
+            )
+            .to_string(),
+            stderr: String::new(),
+        },
+    );
+    assert_eq!(merge::run(&gh, &args()).expect("runs"), EXIT_BLOCKED);
+    assert!(!gh.merged(), "{:?}", gh.seen.borrow());
 }
 
 /// A later APPROVE on the same head resolves the BLOCK (#10724).
@@ -184,6 +232,12 @@ fn pr_10724_each_decorated_block_on_the_head_refuses() {
         "**Verdict:** BLOCK",
         "## Verdict: **BLOCK**",
         "```rust\nlet x = 1;\n## Verdict: BLOCK",
+        // #10796 review (H2): decorations that parsed to no verdict.
+        "**Verdict**: BLOCK",
+        "- **Verdict:** BLOCK",
+        "Verdict: `BLOCK`",
+        "## Verdict: \u{274c} BLOCK",
+        "## Verdict: Block",
     ] {
         let gh = CriticGh::new(verdicts(&[], &[review(line, HEAD, "2026-11-01T10:00:00Z")]));
         assert_eq!(

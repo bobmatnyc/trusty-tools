@@ -6,26 +6,34 @@ use super::*;
 const HEAD: &str = "0a400b509db40cb102929fa28341367b1ddc8840";
 const OLD_HEAD: &str = "608d739081ed23fbc8703847ff08d17adeaeaa74";
 
+/// A review by a trusted (`OWNER`) critic. Built through serde so the
+/// payload shape, `authorAssociation` included, is what `gh` returns.
 fn review(line: &str, commit: &str, at: &str) -> Review {
-    Review {
-        id: format!("PRR_{at}"),
-        author: Some(Author {
-            login: "critic".to_string(),
-        }),
-        body: format!("{line}\n\n## Findings"),
-        submitted_at: at.to_string(),
-        commit: Some(CommitRef {
-            oid: commit.to_string(),
-        }),
-    }
+    review_as(line, commit, at, "OWNER")
 }
 
+/// A review whose author carries `association`.
+fn review_as(line: &str, commit: &str, at: &str, association: &str) -> Review {
+    serde_json::from_value(serde_json::json!({"id": format!("PRR_{at}"),
+        "author": {"login": "critic"}, "authorAssociation": association,
+        "body": format!("{line}\n\n## Findings"), "submittedAt": at,
+        "commit": {"oid": commit}}))
+    .expect("review fixture parses")
+}
+
+/// A comment by a trusted (`OWNER`) author.
 fn comment(body: &str, at: &str) -> Comment {
-    Comment {
-        body: body.to_string(),
-        created_at: at.to_string(),
-        url: format!("https://github.com/o/r/pull/42#issuecomment-{at}"),
+    comment_as(body, at, Some("OWNER"))
+}
+
+/// A comment whose author carries `association`; `None` omits the field.
+fn comment_as(body: &str, at: &str, association: Option<&str>) -> Comment {
+    let mut c = serde_json::json!({"author": {"login": "someone"}, "body": body,
+        "createdAt": at, "url": format!("https://github.com/o/r/pull/42#issuecomment-{at}")});
+    if let Some(a) = association {
+        c["authorAssociation"] = serde_json::json!(a);
     }
+    serde_json::from_value(c).expect("comment fixture parses")
 }
 
 fn view(comments: Vec<Comment>, reviews: Vec<Review>) -> VerdictView {
@@ -41,8 +49,6 @@ fn pr_10724_prose_and_fenced_lines_are_not_verdicts() {
     for prose in [
         "verdict BLOCK from trusty-review",
         "said Verdict: BLOCK, pinned to 0a400b509d",
-        "## verdict: BLOCK",
-        "## Verdict: Block",
         "## Verdict: BLOCKED",
         "**Verdict:** BLOCKING",
         "## Verdict: <APPROVE|WARN|BLOCK>",
@@ -83,6 +89,40 @@ fn pr_10724_decorated_verdict_lines_parse() {
 }
 
 /// FAILS BEFORE the #10724 fix: an unclosed fence hid every later line.
+/// FAILS BEFORE the #10796 review fix (H2): each of these BLOCK forms parsed
+/// to no verdict, so the merge went through. APPROVE and WARN stay strict:
+/// an unread APPROVE already fails closed.
+#[test]
+fn pr_10724_decorated_block_forms_fail_closed() {
+    for line in [
+        "**Verdict**: BLOCK",
+        "- **Verdict:** BLOCK",
+        "Verdict: `BLOCK`",
+        "## Verdict: \u{274c} BLOCK",
+        "## Verdict: Block",
+        "## verdict: BLOCK",
+        "_Verdict_: block",
+        "Verdict: BLOCK \u{274c}",
+    ] {
+        assert_eq!(
+            parse_verdict_line(line),
+            Some((Verdict::Block, None)),
+            "{line:?}"
+        );
+    }
+    assert_eq!(
+        parse_verdict_line("- **Verdict:** \u{274c} Block, pinned to `0A400B509D`"),
+        Some((Verdict::Block, Some("0a400b509d".to_string())))
+    );
+    for strict in [
+        "## Verdict: Approve",
+        "## Verdict: \u{2705} APPROVE",
+        "- **Verdict:** WARN",
+    ] {
+        assert_eq!(parse_verdict_line(strict), None, "{strict:?}");
+    }
+}
+
 #[test]
 fn pr_10724_an_unclosed_fence_does_not_hide_a_later_block() {
     // The BLOCK sits after a fence that never closes: fail closed.
@@ -127,11 +167,11 @@ fn pr_10724_the_head_block_refusal_names_source_and_sha() {
 }
 
 #[test]
-fn pr_10724_an_old_head_block_warns_that_no_verdict_covers_the_head() {
+fn pr_10724_an_old_head_approve_warns_that_no_verdict_covers_the_head() {
     let a = assess(&view(
         vec![],
         vec![review(
-            "## Verdict: BLOCK",
+            "## Verdict: APPROVE",
             OLD_HEAD,
             "2026-11-01T10:00:00Z",
         )],
@@ -140,6 +180,36 @@ fn pr_10724_an_old_head_block_warns_that_no_verdict_covers_the_head() {
     let w = a.warning.expect("warned");
     assert!(w.contains("no code-critic verdict covers the head"), "{w}");
     assert!(w.contains(HEAD) && w.contains(OLD_HEAD), "{w}");
+}
+
+/// FAILS BEFORE the #10796 review fix (H3a): any push turned a BLOCK on the
+/// reviewed head into a warning.
+#[test]
+fn pr_10724_an_old_head_block_refuses_until_a_later_verdict() {
+    let block = || review("## Verdict: BLOCK", OLD_HEAD, "2026-11-01T10:00:00Z");
+    let r = assess(&view(vec![], vec![block()]))
+        .refusal
+        .expect("an earlier-head BLOCK refuses");
+    assert!(r.contains(OLD_HEAD) && r.contains(HEAD), "{r}");
+    // A later APPROVE on any commit resolves it; on an older head it warns.
+    let a = assess(&view(
+        vec![],
+        vec![
+            block(),
+            review("## Verdict: APPROVE", OLD_HEAD, "2026-11-01T11:00:00Z"),
+        ],
+    ));
+    assert_eq!(a.refusal, None, "{a:?}");
+    assert!(a.warning.is_some(), "{a:?}");
+    // A later WARN on the head resolves it outright.
+    let a = assess(&view(
+        vec![],
+        vec![
+            block(),
+            review("## Verdict: WARN", HEAD, "2026-11-01T11:00:00Z"),
+        ],
+    ));
+    assert_eq!(a, Assessment::default());
 }
 
 #[test]
@@ -205,6 +275,70 @@ fn pr_10724_verdicts_without_a_head_sha_refuse() {
     );
     v.head = String::new();
     assert!(assess(&v).refusal.is_some());
+}
+
+/// FAILS BEFORE the #10796 review fix (H1): any GitHub user's APPROVE
+/// cleared a BLOCK, because no author filter applied.
+#[test]
+fn pr_10724_an_untrusted_approve_does_not_clear_a_head_block() {
+    let block = || review("## Verdict: BLOCK", HEAD, "2026-11-01T10:00:00Z");
+    let clearing = format!("## Verdict: APPROVE, pinned to {HEAD}");
+    for (association, case) in [
+        (Some("NONE"), "stranger"),
+        (Some("CONTRIBUTOR"), "contributor"),
+        (Some("FIRST_TIME_CONTRIBUTOR"), "first-timer"),
+        (None, "no association reported"),
+    ] {
+        let a = assess(&view(
+            vec![comment_as(&clearing, "2026-11-01T11:00:00Z", association)],
+            vec![block()],
+        ));
+        assert!(a.refusal.is_some(), "{case}: {a:?}");
+    }
+    let a = assess(&view(
+        vec![],
+        vec![
+            block(),
+            review_as("## Verdict: APPROVE", HEAD, "2026-11-01T11:00:00Z", "NONE"),
+        ],
+    ));
+    assert!(a.refusal.is_some(), "untrusted review: {a:?}");
+    // The trusted roles still clear it.
+    for association in ["OWNER", "MEMBER", "COLLABORATOR"] {
+        let a = assess(&view(
+            vec![comment_as(
+                &clearing,
+                "2026-11-01T11:00:00Z",
+                Some(association),
+            )],
+            vec![block()],
+        ));
+        assert_eq!(a, Assessment::default(), "{association}");
+    }
+}
+
+/// An untrusted BLOCK neither holds nor counts; a BLOCK whose payload names no
+/// association still holds, so a payload missing the field fails closed.
+#[test]
+fn pr_10724_an_untrusted_block_is_ignored_and_an_unknown_one_holds() {
+    let a = assess(&view(
+        vec![comment_as(
+            "## Verdict: BLOCK",
+            "2026-11-01T10:00:00Z",
+            Some("NONE"),
+        )],
+        vec![],
+    ));
+    assert_eq!(a, Assessment::default());
+    let a = assess(&view(
+        vec![comment_as(
+            "## Verdict: BLOCK",
+            "2026-11-01T10:00:00Z",
+            None,
+        )],
+        vec![],
+    ));
+    assert!(a.refusal.is_some(), "{a:?}");
 }
 
 struct OneShot(GhRun);
