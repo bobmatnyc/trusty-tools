@@ -71,6 +71,19 @@ summary instead of as inline comments. The result JSON still reports them in
 The new fields are additive. A consumer written for the older JSON keeps
 working.
 
+## Every finding quotes its code
+
+Each finding carries `quoted_snippet`: the code it is about, copied from its
+cited `file` at `line`. The cited line must hold that code. If it does not, the
+finding moves to the one line that does, or it is withheld.
+
+A note the reviewer cannot quote code for, such as "confirm X is imported", is
+not a finding. It goes in the result's `questions` list. No grade or verdict
+reads that list. A finding with no quote is withheld before grading, and
+`withheld_by_reason` counts it as `no_quote_pregate`.
+
+Both fields are additive and absent when empty.
+
 ## Standards that live in the repo
 
 Drop a `.trusty-review.toml` at your repository root and every contributor and

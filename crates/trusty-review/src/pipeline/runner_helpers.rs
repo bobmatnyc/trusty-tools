@@ -583,13 +583,15 @@ pub(super) async fn finalize_run(
 ///      cited path or quoted content the diff does not contain (#2881, #4042).
 ///   3. `absence_claim::drop_refuted_absence_claims` — drop any finding whose
 ///      premise is that a file is missing from a diff that contains it (#1873).
-///   4. `finding_hygiene::relax_verdict_if_evidence_wiped` — when 1–3 removed
+///   4. `quote_admission::admit_quoted_findings` — withhold any finding that
+///      quotes no code, class `no_quote_pregate` (#10782).
+///   5. `finding_hygiene::relax_verdict_if_evidence_wiped` — when 1–4 removed
 ///      every finding, the model's own verdict rested on the same evidence and
 ///      is relaxed with it (#4042, #4044).
 ///
-/// Returns every finding passes 1–3 dropped, each with its reason, for the
+/// Returns every finding passes 1–4 dropped, each with its reason, for the
 /// caller to record in `ReviewResult::withheld_findings` (#4044; owner ruling
-/// on #8905, 2026-09-30), and the model's verdict when pass 4 relaxed it, for
+/// on #8905, 2026-09-30), and the model's verdict when pass 5 relaxed it, for
 /// `settle_no_survivors` (#9188, option A).
 /// Test: `run_review_outer_and_embedded_verdict_agree_after_severity_floor`,
 /// `unified_path_emits_no_finding_citing_a_path_outside_the_diff`,
@@ -616,6 +618,8 @@ pub(super) fn ground_parsed_findings(
         &cite_index,
         &mut withheld,
     );
+    // #10782: a finding that quotes no code never reaches grading or the gate.
+    crate::pipeline::quote_admission::admit_quoted_findings(&mut parsed.findings, &mut withheld);
 
     let wiped_model_verdict = crate::pipeline::finding_hygiene::relax_wiped_verdict(
         &mut parsed.verdict,

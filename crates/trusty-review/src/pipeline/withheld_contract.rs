@@ -40,6 +40,7 @@ use crate::pipeline::{
     grade::derive_verdict,
     letter_grade::{default_grade_for_verdict, reconcile_grade_with_verdict},
     mapreduce::reduce::{DUPLICATE_REASON, OVER_MAX_FINDINGS_REASON},
+    quote_admission::NO_QUOTE_PREGATE_REASON,
     summary_template::verified_summary,
     verify_posted::{
         NO_VERIFIER_REASON, OVER_CAP_REASON, REFUTED_REASON, UNCONFIRMED_REASON, UNJUDGED_REASON,
@@ -59,8 +60,9 @@ pub const UNRESOLVED_AT_HEAD_REASON: &str = "#9188 does not resolve at the head"
 /// line-gate reason (#8905), whose text varies, is `line_citation`.
 /// Test: `reason_class_names_every_producer`.
 pub fn reason_class(reason: &str) -> &'static str {
-    let prefixed: [(&str, &'static str); 4] = [
+    let prefixed: [(&str, &'static str); 5] = [
         (CITATION_REASON, "citation_integrity"),
+        (NO_QUOTE_PREGATE_REASON, "no_quote_pregate"), // #10782
         (SELF_NEGATED_REASON, "self_negated"),
         (ABSENCE_REASON, "absence_claim"),
         (UNRESOLVED_AT_HEAD_REASON, "unresolved_at_head"),
@@ -100,6 +102,7 @@ fn class_phrase(class: &str) -> &str {
         "citation_integrity" => "cited code not in the diff",
         "self_negated" => "self-negated",
         "absence_claim" => "refuted absence claim",
+        "no_quote_pregate" => "quotes no code", // #10782
         "unresolved_at_head" => "citation does not resolve at the head",
         "duplicate" => "duplicate",
         "over_max_findings" => "over the findings cap",
