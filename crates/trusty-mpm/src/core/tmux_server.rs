@@ -87,6 +87,22 @@ pub fn server_args(name: &str) -> [String; 2] {
     ["-L".to_owned(), name.to_owned()]
 }
 
+/// The whole tmux argv for `command` on `server` (#10101).
+///
+/// Why: a call that builds its own argv can forget the `-L` prefix and reach
+/// the default server, where the Architect's pane lives. One builder for every
+/// `TmuxDriver` call and every core spawn helper leaves no such path.
+/// What: [`server_args`] then `command` when `server` is `Some`; `command`
+/// unchanged when `None`, so a default-server call is byte-identical to the
+/// argv it had before this function existed.
+/// Test: `server_argv_prefixes_only_a_named_server`, and the per-method
+/// `*_reaches_the_named_server` tests in `daemon/tmux_tests.rs`.
+pub fn server_argv(server: Option<&str>, command: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut argv: Vec<String> = server.into_iter().flat_map(server_args).collect();
+    argv.extend(command);
+    argv
+}
+
 /// The workspace servers in `socket_dir` that accept a connection, by name.
 ///
 /// What: entries named [`WORKSPACE_SERVER_PREFIX`]`*` that are sockets and

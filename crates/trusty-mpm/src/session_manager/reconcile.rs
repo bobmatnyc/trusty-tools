@@ -492,6 +492,7 @@ impl SessionManager {
                 // immediately, mirroring `adopt.rs`'s explicit adoption path.
                 pane_id,
                 tmux_server,
+                tmux_socket: None,
                 injection_status: Default::default(),
                 worktree_owner: None,
                 terminal_at: None,
