@@ -267,6 +267,13 @@ fn scratch_server(server: &[String], env: &ServerEnv) -> Result<(), Miss> {
         return fleet_label(label, env).map_err(Miss::fleet);
     };
     let path = Path::new(socket);
+    // #10706 M1: `..` resolves at run time (`/tmp/n/../tmux-501/default`);
+    // judge the text before `canonical` can follow it.
+    if has_parent_dir(path) {
+        return Err(Miss::fleet(
+            "gives an `-S` path with a `..` component, which may reach the default socket",
+        ));
+    }
     if !path.is_absolute() {
         // #10665 (ruling Dac): log-only, the guard cannot place it.
         return Err(Miss::soft(
@@ -326,6 +333,12 @@ fn fleet_label(label: &str, env: &ServerEnv) -> Result<(), &'static str> {
 fn same_ci(a: &Path, b: &Path) -> bool {
     a.to_string_lossy()
         .eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+/// Whether `path` has a `..` component, read as text (#10706 M1).
+fn has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
 /// `path` with its symlinks followed: its longest existing ancestor

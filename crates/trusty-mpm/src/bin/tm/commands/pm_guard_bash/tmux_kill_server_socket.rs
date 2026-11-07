@@ -18,7 +18,7 @@ use std::path::Path;
 
 use super::super::super::architect_pane_env::moves_server_env;
 use super::super::super::floor_d4::{grammar_prefix, segments};
-use super::{ServerEnv, canonical};
+use super::{ServerEnv, canonical, has_parent_dir};
 use crate::commands::hook_rewrite::is_env_assignment;
 use trusty_mpm::core::tmux_server::socket_dir;
 
@@ -86,10 +86,13 @@ struct EnvPrefix {
 
 impl EnvPrefix {
     /// The scratch directory tmux finds its server in: `TMUX` removed and
-    /// `TMUX_TMPDIR` a literal absolute directory other than `/tmp`.
+    /// `TMUX_TMPDIR` a literal absolute directory other than `/tmp`, with no
+    /// `..` component (#10706 M1: judged as text, before `canonical`).
     fn cleared_tmpdir(self) -> Option<String> {
         let dir = self.tmpdir.filter(|_| self.reset || self.unsets_tmux)?;
-        let literal = dir.starts_with('/') && !dir.contains(['$', '`', '~']);
+        let literal = dir.starts_with('/')
+            && !dir.contains(['$', '`', '~'])
+            && !has_parent_dir(Path::new(&dir));
         let real = canonical(Path::new(&dir));
         let tmp = real == Path::new("/tmp") || real == Path::new("/private/tmp");
         (literal && !tmp).then_some(dir)
@@ -171,12 +174,22 @@ fn variable(word: &str) -> Option<&str> {
 
 /// The path `script` gives `name`: its one assignment, when `name` is
 /// written nowhere else, a literal absolute path or a `mktemp` value.
+/// #10706 H3: an occurrence joined to an option cluster (`printf -vSOCK`,
+/// `read -aSOCK`) is a write too; a longer name (`DAEMON_SOCK`) is not.
 fn assigned_path(name: &str, script: &str) -> Option<String> {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let writes = script.match_indices(name).filter(|(at, _)| {
-        let before = script[..*at].chars().next_back();
+        let head = &script[..*at];
+        let before = head.chars().next_back();
         let after = script[at + name.len()..].chars().next();
-        let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-        !word(before) && !word(after) && !matches!(before, Some('$' | '{' | '#' | '!' | '-'))
+        if after.is_some_and(is_word) {
+            return false;
+        }
+        if before.is_some_and(is_word) {
+            let run = head.trim_end_matches(is_word);
+            return run.ends_with('-');
+        }
+        !matches!(before, Some('$' | '{' | '#' | '!' | '-'))
     });
     if writes.count() != 1 {
         return None;

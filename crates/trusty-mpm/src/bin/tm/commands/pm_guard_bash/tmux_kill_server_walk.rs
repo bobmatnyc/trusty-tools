@@ -13,7 +13,8 @@
 //! (`scratch_server`) with each command-string argument judged in turn; a
 //! shell `-c` string or `eval` text, judged in turn; or a known-inert program
 //! printing to stdout (`echo`, `printf` without `-v`, `grep`/`rg`, `sed -n`
-//! without `-i`, `cat`, `git` with the words only in a `-m` value), piped
+//! without `-i`, `cat`, `git` with the words only in the `-m` value of a
+//! subcommand that takes a message, #10706 H2), piped
 //! only into readers (`head`, `wc`, …). A here-document body counts as an
 //! argument of the program its operator line feeds. A fleet kill is `Err`;
 //! anything else is noted in [`Walk::soft`] and the walk goes on.
@@ -291,10 +292,41 @@ fn inert(text: &str) -> bool {
     }
 }
 
-/// Whether every `git` argument naming a kill is a `-m`/`--message` value.
+/// `git` subcommands whose `-m` takes a message (#10706 H2); for `rebase`,
+/// `-m` is `--merge` and the next word is read as an option.
+const MESSAGE_SUBCOMMANDS: &[&str] = &["commit", "tag", "merge", "notes", "stash"];
+
+/// `git` global options that take the next word as their value.
+const GIT_VALUE_OPTIONS: &[&str] = &[
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+];
+
+/// Whether every `git` argument naming a kill is a `-m`/`--message` value of
+/// a [`MESSAGE_SUBCOMMANDS`] subcommand; every other argument is read.
 fn only_in_messages(args: &[String]) -> bool {
+    let mut at = 0;
+    while let Some(arg) = args.get(at).filter(|a| a.starts_with('-')) {
+        at += 1 + usize::from(GIT_VALUE_OPTIONS.contains(&arg.as_str()));
+    }
+    let at = at.min(args.len());
+    // #10706 H2: the global options, their values and the subcommand are read.
+    let head = &args[..(at + 1).min(args.len())];
+    if head.iter().any(|a| names_whole_server_kill(a)) {
+        return false;
+    }
+    let Some((subcommand, rest)) = args[at..].split_first() else {
+        return true;
+    };
+    if !MESSAGE_SUBCOMMANDS.contains(&subcommand.as_str()) {
+        return !rest.iter().any(|a| names_whole_server_kill(a));
+    }
     let mut value = false;
-    for arg in args {
+    for arg in rest {
         if std::mem::take(&mut value) {
             continue;
         }
