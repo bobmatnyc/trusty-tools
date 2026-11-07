@@ -14,7 +14,10 @@
 //! withheld with [`NO_QUOTE_PREGATE_REASON`], reason class
 //! `no_quote_pregate`, so `withheld_by_reason` still counts it. The quote is
 //! then checked by the gate: it must hold the cited line, or the finding
-//! moves to its one occurrence, or is withheld (`citation_gate`).
+//! moves to its one occurrence, or is withheld (`citation_gate`). An APPROVE
+//! whose only withholds are pregate drops reads `parsed`, flagged
+//! `pregate_only_approve`; any gate withhold beside them keeps `all_withheld`
+//! (Architect ruling 09:02Z, `verdict_status::withheld_outcome`).
 //! Test: `quote_admission_tests.rs`; end to end in
 //! `runner_quote_admission_tests.rs`.
 
@@ -71,6 +74,20 @@ pub fn admit_quoted_findings(
     debug_assert!(kept.iter().all(|f| f.quoted_snippet.is_some()));
     *findings = kept;
     withheld.len() - before
+}
+
+/// How many of `withheld` the pre-gate quote admission dropped (#10782).
+///
+/// Why: Architect ruling 09:02Z counts pregate drops apart from gate
+/// withholds; `verdict_status::withheld_outcome` and the per-review log read
+/// this count. The gate-withhold count is `withheld.len()` minus it.
+/// Test: `withheld_outcome_counts_pregate_drops_apart_from_gate_withholds`,
+/// `run_review_pregate_only_approve_is_parsed_not_all_withheld`.
+pub fn pregate_withheld_count(withheld: &[WithheldFinding]) -> usize {
+    withheld
+        .iter()
+        .filter(|w| w.reason.starts_with(NO_QUOTE_PREGATE_REASON))
+        .count()
 }
 
 #[cfg(test)]

@@ -457,12 +457,15 @@ async fn run_review_all_withheld_request_changes_is_suppressed_reject() {
 /// An APPROVE graded `grade` whose one high-severity finding the #8905 gate
 /// withholds (#9310).
 async fn approve_graded_with_its_finding_withheld(grade: &str) -> ReviewResult {
-    let bug = billing_finding(
+    let mut bug = billing_finding(
         "data-loss",
         "`flush_all()` loses the total.",
         "high",
         SUM_LINE,
     );
+    // #10782: a usable quote absent from the file, so the gate withholds it,
+    // not the pregate (a pregate-only APPROVE is `parsed`, not `all_withheld`).
+    bug["quoted_snippet"] = serde_json::json!("ledger.flush_all().await?;");
     review_payload(
         "The flush loses data.",
         "APPROVE",
@@ -508,6 +511,7 @@ async fn run_review_all_withheld_approve_graded_a_stays_approve() {
     assert!(!fails, "{:?}", result.error);
     assert_eq!(json["verdict_status"], "all_withheld", "{json}");
     assert_eq!(json["withheld_count"], 1, "{json}");
+    assert_eq!(json["withheld_by_reason"]["line_citation"], 1, "{json}");
 }
 
 /// #9188 (Architect ruling, option A), single-pass path: a REQUEST_CHANGES

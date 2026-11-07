@@ -802,6 +802,19 @@ pub struct ReviewResult {
     /// `run_review_questions_never_shape_the_verdict`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<String>,
+    /// #10782: an APPROVE with no surviving finding whose every withhold is
+    /// `no_quote_pregate`.
+    ///
+    /// Why: Architect ruling 09:02Z counts pregate drops apart from gate
+    /// withholds. Such a review is `parsed`, not `all_withheld`, and this
+    /// flag names it without a caller re-deriving the rule.
+    /// What: set by `withheld_contract::sync_withheld_counts`. The pregate
+    /// count is `withheld_by_reason["no_quote_pregate"]`; the gate count is
+    /// `withheld_count` minus it. Absent from the JSON when false.
+    /// Test: `run_review_pregate_only_approve_is_parsed_not_all_withheld`,
+    /// `run_review_mixed_pregate_and_gate_withholds_are_all_withheld`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pregate_only_approve: bool,
     /// Indices (into `findings`) of the findings that were placed inline (#1414).
     ///
     /// Why: the summary body must render exactly the findings that did NOT land
@@ -965,7 +978,8 @@ impl ReviewResult {
             verdict_status: None,
             inline_comments: Vec::new(),
             unanchored: Vec::new(),
-            questions: Vec::new(), // #10782
+            questions: Vec::new(),       // #10782
+            pregate_only_approve: false, // #10782
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,
             shallow_clean_review: false,

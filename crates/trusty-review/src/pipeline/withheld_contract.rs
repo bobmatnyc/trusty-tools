@@ -28,7 +28,7 @@
 
 use std::collections::BTreeMap;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::models::{Finding, ReviewResult, Verdict, VerdictStatus, WithheldFinding};
 use crate::pipeline::{
@@ -40,7 +40,7 @@ use crate::pipeline::{
     grade::derive_verdict,
     letter_grade::{default_grade_for_verdict, reconcile_grade_with_verdict},
     mapreduce::reduce::{DUPLICATE_REASON, OVER_MAX_FINDINGS_REASON},
-    quote_admission::NO_QUOTE_PREGATE_REASON,
+    quote_admission::{NO_QUOTE_PREGATE_REASON, pregate_withheld_count},
     summary_template::verified_summary,
     verify_posted::{
         NO_VERIFIER_REASON, OVER_CAP_REASON, REFUTED_REASON, UNCONFIRMED_REASON, UNJUDGED_REASON,
@@ -154,13 +154,34 @@ pub(crate) fn prepend_withheld_headline(result: &mut ReviewResult) {
 /// the two counts stay absent from the JSON when nothing was withheld. A
 /// status a stage set (`parse_failed`, `all_withheld`, `suppressed_reject`,
 /// or `no_reviewer_output` from `abort_dry`) is kept; otherwise the review is
-/// `parsed` (#9310).
+/// `parsed` (#9310). Sets `pregate_only_approve` and logs the pregate drop
+/// count once, at info, beside the gate-withhold count (#10782).
 /// Test: `a_withheld_review_reports_typed_withheld_counts`,
-/// `sync_withheld_counts_keeps_a_stage_status_and_defaults_to_parsed`.
+/// `sync_withheld_counts_keeps_a_stage_status_and_defaults_to_parsed`,
+/// `run_review_logs_the_pregate_drop_count_once`.
 pub fn sync_withheld_counts(result: &mut ReviewResult) {
     result.withheld_count = result.withheld_findings.len();
     result.withheld_by_reason = withheld_by_reason(&result.withheld_findings);
-    result.verdict_status.get_or_insert(VerdictStatus::Parsed); // #9310
+    let status = *result.verdict_status.get_or_insert(VerdictStatus::Parsed); // #9310
+    // #10782 (Architect ruling 09:02Z): pregate drops counted apart from gate withholds.
+    let pregate = pregate_withheld_count(&result.withheld_findings);
+    result.pregate_only_approve = pregate > 0
+        && pregate == result.withheld_count
+        && result.findings.is_empty()
+        && status == VerdictStatus::Parsed
+        && matches!(
+            result.verdict,
+            Verdict::Approve | Verdict::ApproveWithReservations
+        );
+    info!(
+        owner = %result.owner,
+        repo = %result.repo,
+        pr = result.pr_number,
+        pregate_withheld = pregate,
+        gate_withheld = result.withheld_count - pregate,
+        pregate_only_approve = result.pregate_only_approve,
+        "quote-admission: pregate drop count for this review (#10782)"
+    );
 }
 
 /// Withhold every survivor that does not resolve at the head (#9188 L).

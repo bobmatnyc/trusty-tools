@@ -82,7 +82,14 @@ not a finding. It goes in the result's `questions` list. No grade or verdict
 reads that list. A finding with no quote is withheld before grading, and
 `withheld_by_reason` counts it as `no_quote_pregate`.
 
-Both fields are additive and absent when empty.
+A pregate drop is not a gate withhold. An APPROVE with no surviving finding
+whose only withholds are `no_quote_pregate` reads `verdict_status: parsed`
+and carries `pregate_only_approve: true`. `all_withheld` still means a gate
+withheld at least one finding, alone or beside pregate drops. A review that
+asks for changes stays `suppressed_reject` whatever the reason. The gate
+count is `withheld_count` minus `withheld_by_reason.no_quote_pregate`.
+
+These fields are additive and absent when empty or false.
 
 ## Standards that live in the repo
 

@@ -103,10 +103,11 @@ async fn run_review_posts_a_finding_with_its_quoted_snippet() {
 
 /// #10782 closures 2-3, the duetto#11211 shape: an APPROVE whose every
 /// finding is a "confirm X" note with nothing to quote. The notes are
-/// withheld before the gate under `no_quote_pregate`, never `line_citation`,
-/// and the #9310 outcome holds: APPROVE, `all_withheld`.
+/// withheld before the gate under `no_quote_pregate`, never `line_citation`.
+/// Architect ruling 09:02Z: pregate-only drops are not `all_withheld`; the
+/// review is a `parsed` APPROVE flagged `pregate_only_approve`.
 #[tokio::test]
-async fn run_review_no_quote_notes_are_withheld_before_the_gate() {
+async fn run_review_pregate_only_approve_is_parsed_not_all_withheld() {
     let result = review(serde_json::json!({
         "verdict": "APPROVE",
         "grade": "A",
@@ -127,11 +128,61 @@ async fn run_review_no_quote_notes_are_withheld_before_the_gate() {
         "{json}"
     );
     assert_eq!(json["verdict"], "APPROVE", "{json}");
+    assert_eq!(json["verdict_status"], "parsed", "{json}");
+    assert_eq!(json["pregate_only_approve"], true, "{json}");
+}
+
+/// #10782 ruling 09:02Z, unchanged arm: an APPROVE whose only withhold is a
+/// gate withhold (`line_citation`) keeps `all_withheld`, and is not flagged.
+#[tokio::test]
+async fn run_review_gate_only_all_withheld_approve_is_unchanged() {
+    let result = review(serde_json::json!({
+        "verdict": "APPROVE",
+        "grade": "A",
+        "summary": "Looks fine.",
+        "findings": [finding("lost-write", "The ledger write is lost.", Some("ledger.flush_all().await?;"))],
+    }))
+    .await;
+    let json = json_of(&result);
+    assert!(result.findings.is_empty(), "{json}");
+    assert_eq!(
+        json["withheld_by_reason"],
+        serde_json::json!({"line_citation": 1}),
+        "{json}"
+    );
+    assert_eq!(json["verdict"], "APPROVE", "{json}");
     assert_eq!(json["verdict_status"], "all_withheld", "{json}");
+    assert!(json.get("pregate_only_approve").is_none(), "{json}");
+}
+
+/// #10782 ruling 09:02Z, the mixed rule: pregate drops beside any gate
+/// withhold, with nothing surviving, still count as `all_withheld`.
+#[tokio::test]
+async fn run_review_mixed_pregate_and_gate_withholds_are_all_withheld() {
+    let result = review(serde_json::json!({
+        "verdict": "APPROVE",
+        "grade": "A",
+        "summary": "Looks fine.",
+        "findings": [
+            finding("confirm", "Confirm the flush is awaited.", None),
+            finding("lost-write", "The ledger write is lost.", Some("ledger.flush_all().await?;")),
+        ],
+    }))
+    .await;
+    let json = json_of(&result);
+    assert!(result.findings.is_empty(), "{json}");
+    assert_eq!(
+        json["withheld_by_reason"],
+        serde_json::json!({"line_citation": 1, "no_quote_pregate": 1}),
+        "{json}"
+    );
+    assert_eq!(json["verdict_status"], "all_withheld", "{json}");
+    assert!(json.get("pregate_only_approve").is_none(), "{json}");
 }
 
 /// #10782 keeps #9188 A / #9310: a blocking review whose every finding is
-/// withheld before the gate is never APPROVE — it is `suppressed_reject`.
+/// withheld before the gate is never APPROVE — it is `suppressed_reject`,
+/// whatever the withhold reason, and is not flagged `pregate_only_approve`.
 #[tokio::test]
 async fn run_review_blocking_review_of_no_quote_notes_is_suppressed_reject() {
     let result = review(serde_json::json!({
@@ -146,6 +197,7 @@ async fn run_review_blocking_review_of_no_quote_notes_is_suppressed_reject() {
     assert_eq!(json["verdict"], "REQUEST_CHANGES", "{json}");
     assert_eq!(json["verdict_status"], "suppressed_reject", "{json}");
     assert_eq!(json["withheld_by_reason"]["no_quote_pregate"], 1, "{json}");
+    assert!(json.get("pregate_only_approve").is_none(), "{json}");
 }
 
 /// #10782 error arm: a structured quote that is not in the cited file is
@@ -198,4 +250,63 @@ async fn run_review_questions_never_shape_the_verdict() {
         assert_eq!(json[key], plain[key], "{key}: {json}");
     }
     assert_eq!(json["verdict_status"], "parsed", "{json}");
+}
+
+/// Collects formatted log output (the `runner_credential_url_tests` pattern).
+#[derive(Clone, Default)]
+struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+    type Writer = Capture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// #10782 ruling 09:02Z: one info event per review carries the pregate drop
+/// count beside the gate-withhold count.
+#[tokio::test]
+async fn run_review_logs_the_pregate_drop_count_once() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .finish();
+    let _result = {
+        // A current-thread runtime runs every task on this thread.
+        let _guard = tracing::subscriber::set_default(subscriber);
+        review(serde_json::json!({
+            "verdict": "APPROVE",
+            "grade": "A",
+            "summary": "Looks fine.",
+            "findings": [
+                finding("confirm", "Confirm the flush is awaited.", None),
+                finding("check", "Check that the caller handles an empty list.", None),
+                finding("lost-write", "The ledger write is lost.", Some("ledger.flush_all().await?;")),
+            ],
+        }))
+        .await
+    };
+    let log = String::from_utf8(capture.0.lock().expect("capture lock").clone()).expect("utf8");
+    let events: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("pregate drop count for this review"))
+        .collect();
+    assert_eq!(events.len(), 1, "{log}");
+    let event = events[0];
+    assert!(event.contains(" INFO "), "{event}");
+    assert!(event.contains("pregate_withheld=2"), "{event}");
+    assert!(event.contains("gate_withheld=1"), "{event}");
+    assert!(event.contains("pregate_only_approve=false"), "{event}");
 }
