@@ -93,8 +93,6 @@ pub(crate) struct Author {
 /// A PR comment.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct Comment {
-    #[serde(default)]
-    pub(crate) author: Option<Author>,
     /// `OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE`, ...
     #[serde(default, rename = "authorAssociation")]
     pub(crate) author_association: String,
