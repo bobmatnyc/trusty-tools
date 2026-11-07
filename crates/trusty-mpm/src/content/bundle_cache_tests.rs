@@ -839,19 +839,22 @@ fn github_source_reads_a_404_tag_listing_as_a_failure() {
 
 /// #10749: a highest stable tag whose release lookup answers 404 (a draft,
 /// or a tag with no release) is passed over and the next stable release
-/// installs. A 403 or 5xx on that lookup still fails the update, pins
-/// nothing, and never falls through to the lower tag.
+/// installs. A 403, a 5xx, or a 200 whose body is not a release (an error
+/// with no status) still fails the update, pins nothing, and never falls
+/// through to the lower tag.
 #[test]
 fn update_passes_over_a_404_top_tag_but_not_a_403_or_5xx() {
-    for (status, want) in [(404, Some(A)), (403, None), (503, None)] {
+    let no = r#"{"message":"no"}"#;
+    for (status, body, want) in [
+        (404, no, Some(A)),
+        (403, no, None),
+        (503, no, None),
+        (200, "<html>busy</html>", None),
+    ] {
         let bytes = bundle(A, 1, A.as_bytes());
         let (base, _) = serve_recording(vec![
             route(REFS, 200, refs(&[A, B])),
-            route(
-                &format!("/releases/tags/{B}"),
-                status,
-                r#"{"message":"no"}"#,
-            ),
+            route(&format!("/releases/tags/{B}"), status, body),
             route(
                 &format!("/releases/tags/{A}"),
                 200,
@@ -876,7 +879,7 @@ fn update_passes_over_a_404_top_tag_but_not_a_403_or_5xx() {
                 assert_eq!(pinned(cache.path()).tag(), tag, "{status}");
             }
             None => {
-                let err = got.expect_err("a 403 or 5xx is not passed over");
+                let err = got.expect_err("a 403, 5xx or malformed answer is not passed over");
                 assert!(
                     matches!(err, CacheError::Network { .. }),
                     "{status}: {err:?}"
