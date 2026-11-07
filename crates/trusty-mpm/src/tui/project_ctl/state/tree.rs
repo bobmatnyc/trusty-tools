@@ -143,6 +143,16 @@ pub(crate) fn owner_of_repo_url(repo_url: &str, aliases: &SshHostAliases) -> Str
         .unwrap_or_else(|| LOCAL_OWNER.to_string())
 }
 
+/// The grouping key for an owner name: the name lowercased.
+///
+/// Why: GitHub owner names (and hosts) are case-insensitive, so
+/// `BTA-agent-AI` and `bta-agent-ai` are one owner (#10476, ruling D1c).
+/// What: [`NodeId`] owner fields carry this key; the row shows a spelling.
+/// Test: `case_only_owner_variants_group_as_one_owner`.
+pub(crate) fn owner_key(owner: &str) -> String {
+    owner.to_lowercase()
+}
+
 /// True when a session's lifecycle state counts as live for a counter.
 fn is_live(state: &str) -> bool {
     matches!(state, "active" | "provisioning")
@@ -152,14 +162,16 @@ fn is_live(state: &str) -> bool {
 ///
 /// Why: the pane, the key handler and the selection clamp all need the same
 /// row list; one pure builder keeps them in agreement.
-/// What: owners are sorted by name with [`LOCAL_OWNER`] last; projects keep
-/// registry order inside their owner. An owner or project is expanded only
+/// What: projects group by [`owner_key`]; an owner row shows the first-seen
+/// spelling and its [`NodeId`] carries the key. Owners are sorted by key with
+/// [`LOCAL_OWNER`] last; projects keep registry order inside their owner. An owner or project is expanded only
 /// when its [`NodeId`] is in `expanded`. Counters count the polled (non-
 /// terminal) session rows: `total` is all of them, `live` those `active` or
 /// `provisioning`; an owner sums its projects. With `indent_workers`, sessions
 /// follow [`session_placements`]; without it, they list flat in poll order.
 /// Test: `counts_total_and_live_per_project_and_owner`,
-/// `collapsed_owner_hides_projects`, `collapsed_project_hides_sessions`.
+/// `collapsed_owner_hides_projects`, `collapsed_project_hides_sessions`,
+/// `owner_expand_state_survives_first_seen_spelling_change`.
 pub(crate) fn build_tree(
     projects: &[ProjectRow],
     sessions_by_project: &BTreeMap<String, Vec<SessionRow>>,
@@ -167,20 +179,23 @@ pub(crate) fn build_tree(
     indent_workers: bool,
     aliases: &SshHostAliases,
 ) -> Vec<TreeRow> {
-    let mut by_owner: BTreeMap<String, Vec<&ProjectRow>> = BTreeMap::new();
+    // #10476: D1c — case-only owner variants group as one owner
+    let mut by_owner: BTreeMap<String, (String, Vec<&ProjectRow>)> = BTreeMap::new();
     for project in projects {
+        let shown = owner_of_repo_url(&project.repo_url, aliases);
         by_owner
-            .entry(owner_of_repo_url(&project.repo_url, aliases))
-            .or_default()
+            .entry(owner_key(&shown))
+            .or_insert_with(|| (shown, Vec::new()))
+            .1
             .push(project);
     }
-    let mut owners: Vec<(String, Vec<&ProjectRow>)> = by_owner.into_iter().collect();
+    let mut owners: Vec<(String, (String, Vec<&ProjectRow>))> = by_owner.into_iter().collect();
     // `(local)` sorts before letters; it belongs last.
     owners.sort_by_key(|(owner, _)| (owner == LOCAL_OWNER, owner.clone()));
 
     let empty = Vec::new();
     let mut rows = Vec::new();
-    for (owner, owner_projects) in owners {
+    for (owner, (shown, owner_projects)) in owners {
         let counts: Vec<(usize, usize)> = owner_projects
             .iter()
             .map(|p| counters(sessions_by_project.get(&p.name).unwrap_or(&empty)))
@@ -190,7 +205,7 @@ pub(crate) fn build_tree(
         rows.push(TreeRow {
             id: owner_id,
             kind: TreeRowKind::Owner {
-                name: owner.clone(),
+                name: shown,
                 projects: owner_projects.len(),
                 total: counts.iter().map(|c| c.0).sum(),
                 live: counts.iter().map(|c| c.1).sum(),
