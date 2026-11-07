@@ -103,10 +103,32 @@ pub fn server_argv(server: Option<&str>, command: impl IntoIterator<Item = Strin
     argv
 }
 
+/// How long one tmux server probe (a socket connect, or one listing) may take
+/// before the server reads as unknown (#10101).
+pub const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether the Unix socket at `path` accepts a connection within `budget`:
+/// `Some(true)` it did, `Some(false)` it refused (no server), `None` it did not
+/// answer in time (#10101).
+///
+/// Why: a stuck server can hold a blocking `connect` without bound, and every
+/// caller of this probe runs on a path that must not hang on tmux.
+/// What: the connect runs on its own thread; this waits at most `budget`. A
+/// thread that outlives the budget is left to finish on its own.
+/// Test: `a_socket_probe_answers_and_refuses`.
+pub fn socket_answers(path: &Path, budget: std::time::Duration) -> Option<bool> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::os::unix::net::UnixStream::connect(&path).is_ok());
+    });
+    rx.recv_timeout(budget).ok()
+}
+
 /// The workspace servers in `socket_dir` that accept a connection, by name.
 ///
 /// What: entries named [`WORKSPACE_SERVER_PREFIX`]`*` that are sockets and
-/// answer a connect, sorted. A missing directory has none; a socket that
+/// answer a connect, or do not answer within [`PROBE_BUDGET`], sorted. A missing directory has none; a socket that
 /// refuses (a server that exited) is skipped.
 ///
 /// # Errors
@@ -130,7 +152,9 @@ pub fn live_workspace_servers(socket_dir: &Path) -> std::io::Result<Vec<String>>
             continue;
         }
         let is_socket = entry.file_type().is_ok_and(|t| t.is_socket());
-        if is_socket && std::os::unix::net::UnixStream::connect(entry.path()).is_ok() {
+        // #10101: a socket that does not answer in time is a live, stuck
+        // server — listed, so its sessions read as unknown, never gone.
+        if is_socket && socket_answers(&entry.path(), PROBE_BUDGET) != Some(false) {
             names.push(name);
         }
     }

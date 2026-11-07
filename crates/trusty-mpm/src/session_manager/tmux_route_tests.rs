@@ -99,6 +99,7 @@ fn live_sessions_hold_a_record_only_on_its_own_server() {
     let live = LiveSessions {
         default: HashSet::from(["tm-a".to_owned()]),
         named: HashMap::from([("tm-ws-x".to_owned(), HashSet::from(["tm-b".to_owned()]))]),
+        ..LiveSessions::default()
     };
     assert!(live.holds(&record("tm-a", None)));
     assert!(live.holds(&record("tm-b", Some("/s/tm-ws-x"))));
@@ -140,17 +141,159 @@ fn live_sessions_list_every_workspace_server() {
     );
 }
 
-/// Error arm (Fail-Open Check): a live server the driver cannot reach makes
-/// the whole observation unknown, never a set read as complete without it.
+/// Error arm (Fail-Open Check): a live server the driver cannot reach
+/// degrades only its own records to unknown (read as live); the default
+/// server and the other workspace servers still reconcile. Red on 420b3717bf,
+/// where the whole observation was `Err`.
 #[test]
-fn an_unreachable_workspace_server_makes_liveness_unknown() {
+fn one_unlistable_server_degrades_only_its_own_records() {
     let tmux = ListingDriver {
         names: names(&["tm-a"]),
-        servers: HashMap::new(),
-        live: names(&["tm-ws-gone"]),
+        servers: HashMap::from([("tm-ws-ok".to_owned(), names(&["tm-b"]))]),
+        live: names(&["tm-ws-gone", "tm-ws-ok"]),
     };
-    let err = live_sessions_of(&tmux).expect_err("unknown");
-    assert!(err.to_string().contains("tm-ws-gone"), "{err}");
+    let live = live_sessions_of(&tmux).expect("the default server was observed");
+    assert_eq!(live.unknown, HashSet::from(["tm-ws-gone".to_owned()]));
+    // The unlistable server's record is unknown: live, never decommissioned.
+    let stuck = record("tm-z", Some("/s/tm-ws-gone"));
+    assert!(live.holds(&stuck));
+    assert!(!live.server_lost(&stuck));
+    // Everything else still reconciles.
+    assert!(live.holds(&record("tm-b", Some("/s/tm-ws-ok"))));
+    assert!(!live.holds(&record("tm-c", Some("/s/tm-ws-ok"))));
+    assert!(!live.holds(&record("tm-c", None)));
+}
+
+/// Error arm (Fail-Open Check): an unreadable server directory makes every
+/// named record unknown, and the default server still reconciles.
+#[test]
+fn an_unreadable_server_directory_leaves_named_records_unknown() {
+    struct NoDir;
+    impl ManagedTmuxDriver for NoDir {
+        fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn send_line(&self, _n: &str, _t: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(names(&["tm-a"]))
+        }
+        fn workspace_servers(&self) -> Result<Vec<String>, ManagedError> {
+            Err(ManagedError::TmuxUnavailable("unreadable".into()))
+        }
+    }
+    let live = live_sessions_of(&NoDir).expect("default observed");
+    assert!(live.named_unlisted);
+    assert!(live.holds(&record("tm-z", Some("/s/tm-ws-x"))));
+    assert!(!live.server_lost(&record("tm-z", Some("/s/tm-ws-x"))));
+    assert!(!live.holds(&record("tm-c", None)));
+}
+
+/// A driver whose every listing blocks far past the probe budget.
+struct StuckDriver;
+
+impl ManagedTmuxDriver for StuckDriver {
+    fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _n: &str, _t: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        Ok(Vec::new())
+    }
+}
+
+/// Error arm (Fail-Open Check): a workspace server whose listing hangs is
+/// abandoned at the probe budget and reads as unknown. Red on 420b3717bf,
+/// whose untimed listing held the caller for the full hang.
+#[test]
+fn a_stuck_workspace_server_is_bounded_and_unknown() {
+    struct Host;
+    impl ManagedTmuxDriver for Host {
+        fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn send_line(&self, _n: &str, _t: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(names(&["tm-a"]))
+        }
+        fn on_server(&self, _server: &str) -> Option<Arc<dyn ManagedTmuxDriver>> {
+            Some(Arc::new(StuckDriver))
+        }
+        fn workspace_servers(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(names(&["tm-ws-stuck"]))
+        }
+    }
+    let started = std::time::Instant::now();
+    let live = live_sessions_of(&Host).expect("default observed");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the probe was not bounded: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(live.unknown, HashSet::from(["tm-ws-stuck".to_owned()]));
+    assert!(live.holds(&record("tm-z", Some("/s/tm-ws-stuck"))));
+}
+
+/// Error arm (Fail-Open Check): a record whose socket is outside the
+/// driver's socket directory (`TMUX_TMPDIR` changed since launch) is refused
+/// by the router, and liveness reads it by its own socket, never by the
+/// same-named server in the current directory. Red on 420b3717bf, which
+/// routed `-L <name>` to the current directory's server.
+#[test]
+fn a_socket_outside_the_socket_dir_is_refused_and_reads_unknown() {
+    use crate::session_manager::RealTmuxDriver;
+    let dir = crate::test_support::hermetic_temp_dir();
+    let current = dir.path().join("now");
+    let old = dir.path().join("then");
+    std::fs::create_dir_all(&current).expect("current");
+    std::fs::create_dir_all(&old).expect("old");
+    let driver = crate::daemon::tmux::TmuxDriver::with_tmux_path_for_test("/nonexistent/tmux");
+    let tmux =
+        RealTmuxDriver::from_driver_for_test(driver).with_socket_dir_for_test(current.clone());
+
+    // A record launched under the old TMUX_TMPDIR, still running there.
+    let socket = old.join("tm-ws-x");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+    let rec = record("tm-a", socket.to_str());
+    let err = route(&tmux, &rec).err().expect("refused");
+    assert!(err.to_string().contains("outside"), "{err}");
+    let here = record("tm-a", current.join("tm-ws-x").to_str());
+    assert!(route(&tmux, &here).expect("in the dir").is_named());
+
+    // The current directory's same-named server lists nothing for it.
+    let live = LiveSessions {
+        named: HashMap::from([("tm-ws-x".to_owned(), HashSet::new())]),
+        socket_dir: Some(current),
+        ..LiveSessions::default()
+    };
+    assert!(live.holds(&rec), "its own socket answers, so it is live");
+    drop(listener);
+    let _ = std::fs::remove_file(&socket);
+    assert!(!live.holds(&rec), "its own server is gone");
 }
 
 /// A named `RealTmuxDriver` sends its rename and its harness probe to its own

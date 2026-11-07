@@ -112,3 +112,18 @@ fn live_servers_are_listed_and_dead_ones_skipped() {
         vec!["tm-ws-a-1".to_owned(), "tm-ws-b-2".to_owned()]
     );
 }
+
+#[test]
+fn a_socket_probe_answers_and_refuses() {
+    let (_dir, root) = scratch();
+    let live = root.join("tm-ws-live-1");
+    let _listener = UnixListener::bind(&live).expect("bind");
+    assert_eq!(socket_answers(&live, PROBE_BUDGET), Some(true));
+    let dead = root.join("tm-ws-dead-2");
+    dead_socket(&dead);
+    assert_eq!(socket_answers(&dead, PROBE_BUDGET), Some(false));
+    assert_eq!(
+        socket_answers(&root.join("absent"), PROBE_BUDGET),
+        Some(false)
+    );
+}
