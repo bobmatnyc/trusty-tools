@@ -160,3 +160,27 @@ async fn resuming_on_a_crashed_workspace_server_restarts_it_and_recreates_the_pa
         "the pane was not recreated on its server: {calls}"
     );
 }
+
+/// Error arm (Fail-Open Check): two PMs of one project, each in its own
+/// worktree, launch on one server named for the project root; a PM of another
+/// project launches on another server. Red on 26474c385d, which named the
+/// server after each session's worktree.
+#[serial_test::serial]
+#[test]
+fn two_worktrees_of_one_project_share_one_server() {
+    let (dir, _log, tmux) = real_driver();
+    let one = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let other = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let first = one.add_worktree("pm-a-10101");
+    let second = one.add_worktree("pm-b-10101");
+    let elsewhere = other.add_worktree("pm-c-10101");
+
+    let socket = |cwd: &std::path::Path| launch_target_with(&tmux, cwd, None).expect("server").1;
+
+    let expected = dir
+        .path()
+        .join(crate::core::tmux_server::workspace_server_name(&one.repo));
+    assert_eq!(socket(&first), expected, "named after the project root");
+    assert_eq!(socket(&second), expected, "the second PM shares the server");
+    assert_ne!(socket(&elsewhere), expected, "another project has its own");
+}

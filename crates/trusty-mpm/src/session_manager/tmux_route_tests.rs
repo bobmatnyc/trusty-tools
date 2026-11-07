@@ -418,3 +418,84 @@ fn a_hung_workspace_server_is_listed_once_across_observations() {
     );
     drop(release);
 }
+
+/// Error arm (Fail-Open Check), the Architect's ruling on #10101, arm (a): a
+/// workspace server that vanished with its socket (a clean exit, a kill of
+/// its last session, `kill-server`) was stopped on purpose, so its record is
+/// not lost and is not auto-resumed. Red on 26474c385d, which read every
+/// vanished server as lost.
+#[test]
+fn a_vanished_server_with_no_socket_is_a_deliberate_stop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let live = LiveSessions {
+        socket_dir: Some(dir.path().to_path_buf()),
+        ..LiveSessions::default()
+    };
+    let rec = record("tm-a", dir.path().join("tm-ws-gone").to_str());
+    assert!(!live.holds(&rec));
+    assert!(
+        !live.server_lost(&rec),
+        "a socket-less server reads as a kill"
+    );
+}
+
+/// Arm (b): a workspace server whose socket is still on disk but refuses a
+/// connection crashed, so its record is lost and auto-resumes. This
+/// behaviour is unchanged from 26474c385d; its red proof reverts the
+/// socket-present decision in the new code.
+#[test]
+fn a_vanished_server_whose_socket_refuses_is_lost() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("tm-ws-crashed");
+    // A datagram socket refuses a stream connect, as a dead server's does.
+    drop(std::os::unix::net::UnixDatagram::bind(&socket).expect("bind"));
+    let live = LiveSessions {
+        socket_dir: Some(dir.path().to_path_buf()),
+        ..LiveSessions::default()
+    };
+    let rec = record("tm-a", socket.to_str());
+    assert!(!live.holds(&rec));
+    assert!(live.server_lost(&rec), "a crashed server's record is lost");
+}
+
+/// Arm (c): a record whose tmux server started before the last host boot was
+/// lost to the reboot, even when its server is up again and lists another
+/// PM's session (which otherwise reads as a targeted kill). A record started
+/// after the boot keeps the targeted-kill reading. Red on 26474c385d, which
+/// read the pre-boot record as a targeted kill.
+#[test]
+fn a_record_started_before_the_last_boot_is_lost() {
+    let live = LiveSessions {
+        named: HashMap::from([("tm-ws-x".to_owned(), HashSet::from(["tm-other".to_owned()]))]),
+        boot: Some(2_000),
+        ..LiveSessions::default()
+    };
+    let mut before = record("tm-a", Some("/s/tm-ws-x"));
+    before.tmux_server = Some("4242:1000".to_owned());
+    let mut after = before.clone();
+    after.tmux_server = Some("4242:3000".to_owned());
+    assert!(!live.holds(&before));
+    assert!(live.server_lost(&before), "the reboot took it");
+    assert!(
+        !live.server_lost(&after),
+        "a kill after the boot is deliberate"
+    );
+}
+
+/// The critic's LOW on #10101: a listed server whose every session is
+/// unmanaged is up, so a managed record missing from it was killed, not lost
+/// with its server. Red on 26474c385d, which judged the filtered (managed)
+/// set and read the server as empty.
+#[test]
+fn a_server_listing_only_unmanaged_sessions_is_not_lost() {
+    let tmux = ListingDriver {
+        names: names(&["tm-a"]),
+        servers: HashMap::from([("tm-ws-x".to_owned(), names(&["scratch"]))]),
+        live: names(&["tm-ws-x"]),
+    };
+    let mut live = live_sessions_of(&tmux).expect("observed");
+    live.boot = None;
+    let rec = record("tm-c", Some("/s/tm-ws-x"));
+    assert!(!live.holds(&rec));
+    assert!(!live.server_lost(&rec));
+}

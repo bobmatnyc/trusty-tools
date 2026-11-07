@@ -32,11 +32,13 @@ fn opted_out(value: Option<&str>) -> bool {
 ///
 /// What: `None` when [`WORKSPACE_TMUX_ENV`] is `0`, `tmux` has no socket
 /// directory, or `tmux` cannot reach a named server. Otherwise the server is
-/// [`crate::core::tmux_server::workspace_server_name`] for `workspace` and the
+/// [`crate::core::tmux_server::workspace_server_name`] for the project root
+/// that owns `workspace` ([`server_workspace`]) and the
 /// socket is that name in `tmux`'s socket directory, the path the routing
 /// accepts (`tmux_route::route`).
 /// Test: `a_fresh_launch_creates_its_session_on_the_workspace_server`,
-/// `the_opt_out_keeps_the_default_server`.
+/// `the_opt_out_keeps_the_default_server`,
+/// `two_worktrees_of_one_project_share_one_server`.
 pub(crate) fn launch_target(
     tmux: &dyn ManagedTmuxDriver,
     workspace: &Path,
@@ -56,12 +58,21 @@ fn launch_target_with(
         return None;
     }
     let dir = tmux.socket_dir()?;
-    let name = crate::core::tmux_server::workspace_server_name(workspace);
+    let name = crate::core::tmux_server::workspace_server_name(&server_workspace(workspace));
     let driver = tmux.on_server(&name)?;
     Some((
         driver,
         crate::core::tmux_server::server_socket_path(&dir, &name),
     ))
+}
+
+/// The workspace whose server a session at `cwd` launches on: the project
+/// root that owns `cwd`'s git worktree registry, so every PM of one project
+/// shares one server; `cwd` itself outside a repository (#10101, ruling Dc1
+/// of 2026-10-20, per-workspace `tmux -L`).
+/// Test: `two_worktrees_of_one_project_share_one_server`.
+fn server_workspace(cwd: &Path) -> PathBuf {
+    super::worktree_scope::project_root_for(cwd).unwrap_or_else(|| cwd.to_path_buf())
 }
 
 #[cfg(test)]

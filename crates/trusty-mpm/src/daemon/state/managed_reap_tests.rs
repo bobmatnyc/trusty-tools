@@ -83,10 +83,11 @@ async fn the_reaper_never_stops_a_live_pm_on_a_workspace_server() {
     let killed = mgr.get(&ids[1]).await.expect("killed");
     assert_eq!(killed.state, ManagedSessionState::Stopped);
     assert_eq!(killed.stop_cause, Some(StopCause::Deliberate));
-    // Its server is gone: a whole-server loss stays auto-resumable.
+    // Its server is gone with its socket: a clean exit or a kill of its last
+    // session, so a decision, never auto-resumed (#10101 ruling, arm a).
     let lost = mgr.get(&ids[2]).await.expect("lost");
     assert_eq!(lost.state, ManagedSessionState::Stopped);
-    assert_eq!(lost.stop_cause, Some(StopCause::Unexpected));
+    assert_eq!(lost.stop_cause, Some(StopCause::Deliberate));
 }
 
 /// Error arm (Fail-Open Check): a workspace server that could not be listed

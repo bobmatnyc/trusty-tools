@@ -75,7 +75,10 @@ impl DaemonState {
     /// last session dies, so killing the only session and killing the server
     /// produce the identical observation — and it is resolved toward restoring
     /// the fleet, the more recoverable of the two mistakes (`tm session stop`
-    /// still records Deliberate on that host and still sticks).
+    /// still records Deliberate on that host and still sticks). #10101: a
+    /// vanished WORKSPACE server is judged by its socket instead (absent:
+    /// Deliberate; present but refusing: Unexpected), and a record started
+    /// before the last host boot is Unexpected ([`LiveSet::server_lost`]).
     ///
     /// #8233 — a session whose resume is IN FLIGHT is skipped entirely. See the
     /// guard's own comment in the body for why a missing `tmux_name` proves

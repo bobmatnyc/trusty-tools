@@ -197,6 +197,12 @@ pub(crate) struct LiveSessions {
     /// Where the named servers were listed; `None` checks no record's socket
     /// directory.
     pub(crate) socket_dir: Option<PathBuf>,
+    /// Listed named servers whose every session is unmanaged: `named` holds
+    /// none of their names, yet the server is up.
+    pub(crate) unmanaged_only: HashSet<String>,
+    /// When the host last booted, Unix seconds; `None` checks no record's
+    /// start against it.
+    pub(crate) boot: Option<u64>,
 }
 
 /// A set that answers whether a record's session is live (#10101).
@@ -243,20 +249,51 @@ impl LiveSet for LiveSessions {
         })
     }
 
-    /// What: the default server is lost when it lists nothing; a named server
-    /// when it was listed with nothing, or not listed and not unknown.
-    /// Test: `the_reaper_never_stops_a_live_pm_on_a_workspace_server`.
+    /// What: the default server is lost when it lists nothing. A named
+    /// server whose state is unknown is never lost. Otherwise, per the
+    /// Architect's ruling on #10101: a record started before the last host
+    /// boot was lost to the reboot; a listed server is lost when it listed no
+    /// session of any kind; a server that was not listed is lost when its
+    /// socket is still on disk (it crashed), and not when the socket is gone
+    /// (it exited cleanly or was killed: a decision, #6194).
+    /// Test: `the_reaper_never_stops_a_live_pm_on_a_workspace_server`,
+    /// `a_vanished_server_with_no_socket_is_a_deliberate_stop`,
+    /// `a_vanished_server_whose_socket_refuses_is_lost`,
+    /// `a_record_started_before_the_last_boot_is_lost`,
+    /// `a_server_listing_only_unmanaged_sessions_is_not_lost`.
     fn server_lost(&self, record: &SessionRecord) -> bool {
-        match record_server(record) {
-            Ok(None) => self.default.is_empty(),
-            Ok(Some(server)) => {
-                !self.named_unlisted
-                    && !self.unknown.contains(&server)
-                    && self.named.get(&server).is_none_or(HashSet::is_empty)
-            }
-            Err(_) => false,
+        let server = match record_server(record) {
+            Ok(None) => return self.default.is_empty(),
+            Ok(Some(server)) => server,
+            Err(_) => return false,
+        };
+        if self.named_unlisted || self.unknown.contains(&server) {
+            return false;
         }
+        if self.boot.is_some_and(|boot| started_at(record) < boot) {
+            return true;
+        }
+        if in_socket_dir(record, self.socket_dir.as_deref())
+            && let Some(names) = self.named.get(&server)
+        {
+            return names.is_empty() && !self.unmanaged_only.contains(&server);
+        }
+        record
+            .tmux_socket
+            .as_deref()
+            .is_some_and(|socket| socket.symlink_metadata().is_ok())
     }
+}
+
+/// When `record`'s tmux server started, Unix seconds: the `<pid>:<start>`
+/// identity its pane was read on, else the record's creation (#10101).
+fn started_at(record: &SessionRecord) -> u64 {
+    record
+        .tmux_server
+        .as_deref()
+        .and_then(|id| id.rsplit_once(':'))
+        .and_then(|(_, start)| start.parse().ok())
+        .unwrap_or_else(|| u64::try_from(record.created_at.timestamp()).unwrap_or(0))
 }
 
 impl LiveSet for HashSet<String> {
@@ -308,6 +345,7 @@ pub(crate) fn observe_workspace_servers(
     let mut live = LiveSessions {
         default,
         socket_dir: tmux.socket_dir(),
+        boot: crate::core::tmux_server::last_host_boot(),
         ..LiveSessions::default()
     };
     let servers = match tmux.workspace_servers() {
@@ -321,7 +359,10 @@ pub(crate) fn observe_workspace_servers(
     for server in servers {
         let key = live.socket_dir.as_deref().map(|d| d.join(&server));
         match bounded_list(tmux.on_server(&server), key.as_deref()) {
-            Some(names) => {
+            Some((names, any)) => {
+                if names.is_empty() && any {
+                    live.unmanaged_only.insert(server.clone());
+                }
                 live.named.insert(server, names);
             }
             None => {
@@ -335,8 +376,9 @@ pub(crate) fn observe_workspace_servers(
     live
 }
 
-/// The managed names `driver` lists within the probe budget; `None` on no
-/// driver, an error, expiry, or a listing of `key`'s server still in flight.
+/// The managed names `driver` lists within the probe budget, and whether it
+/// listed any session at all; `None` on no driver, an error, expiry, or a
+/// listing of `key`'s server still in flight.
 ///
 /// What: #10101 — through [`crate::core::tmux_server::bounded_probe`] keyed on
 /// the server's socket, so a hung server holds one blocked listing, never one
@@ -346,7 +388,7 @@ pub(crate) fn observe_workspace_servers(
 fn bounded_list(
     driver: Option<Arc<dyn ManagedTmuxDriver>>,
     key: Option<&Path>,
-) -> Option<HashSet<String>> {
+) -> Option<(HashSet<String>, bool)> {
     use crate::core::tmux_server::{PROBE_BUDGET, bounded_call, bounded_probe};
     let driver = driver?;
     let list = move || driver.list_sessions();
@@ -355,12 +397,12 @@ fn bounded_list(
         None => bounded_call(PROBE_BUDGET, list),
     }?
     .ok()?;
-    Some(
-        names
-            .into_iter()
-            .filter(|n| crate::core::names::is_managed_session_name(n))
-            .collect(),
-    )
+    let any = !names.is_empty();
+    let managed = names
+        .into_iter()
+        .filter(|n| crate::core::names::is_managed_session_name(n))
+        .collect();
+    Some((managed, any))
 }
 
 #[cfg(test)]

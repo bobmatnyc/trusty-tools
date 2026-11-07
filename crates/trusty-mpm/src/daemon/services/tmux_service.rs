@@ -341,9 +341,12 @@ impl TmuxService {
 /// name held by two servers is refused, so a same-named session on another
 /// server never stands in for the one the caller meant. No holder returns
 /// the default server's error. A socket directory that cannot be read is
-/// logged and adds no servers.
+/// logged and adds no servers. Each workspace server is asked through
+/// [`crate::core::tmux_server::bounded_probe`]; one that does not answer in
+/// time refuses the snapshot.
 /// Test: `a_snapshot_finds_a_session_on_a_workspace_server`,
-/// `a_name_on_two_servers_is_refused`.
+/// `a_name_on_two_servers_is_refused`,
+/// `a_hung_workspace_server_bounds_the_snapshot`.
 pub(crate) fn snapshot_on_any_server(
     driver: &TmuxDriver,
     socket_dir: &Path,
@@ -362,10 +365,26 @@ pub(crate) fn snapshot_on_any_server(
         Ok(snapshot) => (vec![("the default server".to_owned(), snapshot)], None),
         Err(e) => (Vec::new(), Some(e)),
     };
-    holders.extend(servers.iter().filter_map(|server| {
-        let snapshot = driver.on_server(server).monitor_session(name, lines).ok()?;
-        Some((format!("server {server}"), snapshot))
-    }));
+    for server in &servers {
+        // See #10101: bounded, one in flight per server; a server that does
+        // not answer in time leaves the holder unknown, so nothing is picked.
+        let named = driver.on_server(server);
+        let wanted = name.to_owned();
+        let key = crate::core::tmux_server::server_socket_path(socket_dir, server);
+        match crate::core::tmux_server::bounded_probe(
+            &key,
+            crate::core::tmux_server::PROBE_BUDGET,
+            move || named.monitor_session(&wanted, lines).ok(),
+        ) {
+            Some(Some(snapshot)) => holders.push((format!("server {server}"), snapshot)),
+            Some(None) => {}
+            None => {
+                return Err(crate::core::Error::Protocol(format!(
+                    "tmux server {server} did not answer in time; the holder of {name} is unknown"
+                )));
+            }
+        }
+    }
     match holders.len() {
         0 => Err(default_err.unwrap_or_else(|| {
             crate::core::Error::Protocol(format!("no tmux server holds session {name}"))

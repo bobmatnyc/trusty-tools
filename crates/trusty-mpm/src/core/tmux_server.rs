@@ -217,6 +217,50 @@ pub fn socket_answers(path: &Path, budget: std::time::Duration) -> Option<bool> 
     .flatten()
 }
 
+/// When this host last booted, in Unix seconds; `None` when it cannot be read
+/// (#10101).
+///
+/// Why: a reboot that wipes `/tmp` takes every workspace server's socket with
+/// it, which reads like a deliberate kill; a session started before the boot
+/// was lost to the reboot instead.
+/// What: read once per process (the boot time does not change while it
+/// runs): `btime` in `/proc/stat` on Linux, `sysctl -n kern.boottime` on
+/// macOS.
+/// Test: `boot_time_is_parsed_from_proc_stat_and_sysctl`.
+pub fn last_host_boot() -> Option<u64> {
+    static BOOT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *BOOT.get_or_init(|| {
+        if cfg!(target_os = "linux") {
+            parse_proc_stat_btime(&std::fs::read_to_string("/proc/stat").ok()?)
+        } else {
+            let out = std::process::Command::new("sysctl")
+                .args(["-n", "kern.boottime"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())?;
+            parse_kern_boottime(&String::from_utf8_lossy(&out.stdout))
+        }
+    })
+}
+
+/// The `btime <secs>` line of `/proc/stat`.
+fn parse_proc_stat_btime(text: &str) -> Option<u64> {
+    text.lines()
+        .find_map(|l| l.strip_prefix("btime "))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// The `sec = N` field of `{ sec = N, usec = M } <date>`.
+fn parse_kern_boottime(text: &str) -> Option<u64> {
+    let digits: String = text
+        .split_once("sec = ")?
+        .1
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
 /// The workspace servers in `socket_dir` that accept a connection, by name.
 ///
 /// What: entries named [`WORKSPACE_SERVER_PREFIX`]`*` that are sockets and

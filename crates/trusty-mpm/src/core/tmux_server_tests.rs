@@ -170,3 +170,17 @@ fn a_server_with_a_probe_in_flight_is_not_probed_again() {
     }
     assert_eq!(bounded_probe(&hung, PROBE_BUDGET, || 1), Some(1));
 }
+
+#[test]
+fn boot_time_is_parsed_from_proc_stat_and_sysctl() {
+    assert_eq!(
+        parse_proc_stat_btime("cpu  1 2 3\nbtime 1762500000\nprocesses 9\n"),
+        Some(1_762_500_000)
+    );
+    assert_eq!(parse_proc_stat_btime("cpu 1\n"), None);
+    assert_eq!(
+        parse_kern_boottime("{ sec = 1762500000, usec = 12 } Fri Nov  7 08:00:00 2026"),
+        Some(1_762_500_000)
+    );
+    assert_eq!(parse_kern_boottime("garbage"), None);
+}
