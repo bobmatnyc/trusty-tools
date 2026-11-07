@@ -700,10 +700,12 @@ impl SessionManager {
             self.require_live_harness(&record, &pane)?;
         }
         let name = record.tmux_name.as_str();
+        // See #10101: type on the server the gate proved the pane on.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
         let result = match submit {
-            Submit::Enter => self.tmux.send_line_to_pane(name, &pane, text),
-            Submit::NoSubmit => self.tmux.send_keys_literal_to_pane(name, &pane, text),
-            Submit::Interrupt => self.tmux.send_interrupt_to_pane(name, &pane),
+            Submit::Enter => tmux.send_line_to_pane(name, &pane, text),
+            Submit::NoSubmit => tmux.send_keys_literal_to_pane(name, &pane, text),
+            Submit::Interrupt => tmux.send_interrupt_to_pane(name, &pane),
         };
         result.map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         // #9167 AC5: typed text is one `message` event; Ctrl-C carries none.
@@ -743,11 +745,12 @@ impl SessionManager {
     ) -> Result<crate::core::sm::control::RawObservation, ManagedError> {
         let record = self.get(id).await?;
         let pane = self.owned_pane(id, &record)?;
-        let raw_pane = self
-            .tmux
+        // See #10101: the record's own server.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
+        let raw_pane = tmux
             .capture_pane(&record.tmux_name, &pane, lines)
             .unwrap_or_default();
-        let runtime_active = self.tmux.session_exists(&record.tmux_name);
+        let runtime_active = tmux.session_exists(&record.tmux_name);
         Ok(crate::core::sm::control::RawObservation {
             raw_pane,
             runtime_active,
@@ -1076,7 +1079,9 @@ impl SessionManager {
         // branch below KILLS the session and rebuilds the pane, so an
         // undeterminable probe answering `false` destroyed a live pane. Refuse
         // the resume instead — the operator can retry once tmux answers.
-        if self.tmux.session_exists_checked(&record.tmux_name)? {
+        // See #10101: probe, and recreate, on the record's own server.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
+        if tmux.session_exists_checked(&record.tmux_name)? {
             // Sibling-window hijack fix (follow-up to #2456): `session_exists`
             // only proves SOME pane in this tmux session is alive — it says
             // nothing about whether it is the SPECIFIC pane this record is
@@ -1102,11 +1107,7 @@ impl SessionManager {
             // Create a fresh tmux session rooted at the EXISTING workspace, then
             // verify tmux didn't silently fall back to $HOME (#2250). No
             // re-clone — workspace_path is reused as-is.
-            resume_workdir::create_and_verify_pane(
-                self.tmux.as_ref(),
-                &record.tmux_name,
-                &workdir,
-            )?;
+            resume_workdir::create_and_verify_pane(&*tmux, &record.tmux_name, &workdir)?;
             // #2453 review finding 1 (round 2): the recreated pane is a BRAND
             // NEW tmux pane — the record's previously-captured `pane_id` now
             // refers to the DESTROYED pane and must be refreshed, or the
@@ -1116,7 +1117,7 @@ impl SessionManager {
             // every other `get_pane_id` call site.
             // #9004: the new pane with the server it was read on.
             (record.pane_id, record.tmux_server, record.tmux_session_id) =
-                super::pane_identity::capture(self.tmux.as_ref(), &record.tmux_name);
+                super::pane_identity::capture(&*tmux, &record.tmux_name);
             info!(
                 id = %id,
                 name = %record.tmux_name,
@@ -1301,7 +1302,9 @@ impl SessionManager {
         let text = match record {
             Some(record) => {
                 let pane = self.owned_pane(&record.id, &record).ok()?;
-                self.tmux.capture_pane(tmux_name, &pane, lines).ok()?
+                // See #10101: the record's own server.
+                let tmux = super::tmux_route::route(self.tmux.as_ref(), &record).ok()?;
+                tmux.capture_pane(tmux_name, &pane, lines).ok()?
             }
             None => self.tmux.capture(tmux_name, lines).ok()?,
         };

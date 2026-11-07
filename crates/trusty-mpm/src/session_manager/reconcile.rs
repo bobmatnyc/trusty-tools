@@ -98,6 +98,7 @@ use tracing::{info, warn};
 
 use super::manager::{ManagedError, ReconcileReport, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
+use super::tmux_route::LiveSet;
 
 impl SessionManager {
     /// Reconcile daemon state against live tmux sessions after a restart.
@@ -166,7 +167,7 @@ impl SessionManager {
         // #5856: an unobservable tmux is not an empty tmux. `None` means tmux
         // was never successfully asked — it is NOT a set of zero live
         // sessions, and no record's state may be derived from it.
-        let live_names: Option<std::collections::HashSet<String>> =
+        let live_names: Option<super::tmux_route::LiveSessions> =
             match self.observed_live_managed_names() {
                 Ok(names) => Some(names),
                 Err(e) => {
@@ -214,9 +215,7 @@ impl SessionManager {
                 // is the EXPECTED state — the record is dropped while the
                 // orphan-GC still has two sweeps of work to do on the pane —
                 // and the advice to reactivate it is exactly wrong.
-                if live_names
-                    .as_ref()
-                    .is_some_and(|live| live.contains(&record.tmux_name))
+                if live_names.as_ref().is_some_and(|live| live.holds(&record))
                     && !record.is_leaked_test_adoption()
                 {
                     warn!(
@@ -300,7 +299,7 @@ impl SessionManager {
                 continue;
             };
 
-            if live_names.contains(&record.tmux_name) {
+            if live_names.holds(&record) {
                 // #9850: a live name is not a launch approval — a held Stopped
                 // or Errored record keeps its state (the rebind pass skips it
                 // too).
@@ -368,7 +367,8 @@ impl SessionManager {
         if let Err(why) = &sidecars {
             warn!("reconcile: external adoption skipped this pass (#8942) — {why}");
         }
-        for name in live_names.iter().flatten() {
+        // See #10101: external adoption reads the default server only.
+        for name in live_names.iter().flat_map(|live| live.default.iter()) {
             let Ok(sidecars) = &sidecars else { break };
             let role = super::ArchitectFloor::sidecar_role(sidecars, name);
             if known_names.contains(name) {
