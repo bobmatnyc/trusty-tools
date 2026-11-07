@@ -52,6 +52,9 @@ struct FakeTmux {
     /// What tmux answers once a `send-keys` reached it — the state the
     /// post-grace re-check sees — or `None` to keep the answers above.
     after_signal: Option<AfterSignal>,
+    /// #10101: answer only calls to this `-L` server; `None` answers only the
+    /// default server.
+    only_server: Option<&'static str>,
 }
 
 impl Default for FakeTmux {
@@ -64,6 +67,7 @@ impl Default for FakeTmux {
             pane_command: None,
             pane_command_fails: false,
             after_signal: None,
+            only_server: None,
         }
     }
 }
@@ -171,8 +175,15 @@ impl Fixture {
         let command = answer.map_or(String::new(), |answer| {
             format!("case \"$*\" in *display-message*pane_current_command*) {answer};; esac")
         });
+        // #10101: a call to any other server than the fake's gets no answer.
+        let route = match fake.only_server {
+            Some(server) => format!(
+                "if [ \"$1\" = -L ] && [ \"$2\" = '{server}' ]; then shift 2; else exit 0; fi"
+            ),
+            None => "if [ \"$1\" = -L ]; then exit 0; fi".to_owned(),
+        };
         let script = format!(
-            "#!/bin/sh\necho \"$*\" >> '{log}'\n\
+            "#!/bin/sh\necho \"$*\" >> '{log}'\n{route}\n\
              if [ \"$1\" = send-keys ]; then touch '{signalled}'; fi\n\
              if [ -f '{signalled}' ]; then :; {after}\nfi\n\
              if [ \"$1\" = list-sessions ]; then {sessions}; fi\n\
@@ -1107,3 +1118,7 @@ async fn live_a_record_on_its_own_server_is_killed_by_session_id() {
 // #9101: the pane operations reuse this fixture, so they live in a child module.
 #[path = "pane_ops_identity_tests.rs"]
 mod pane_ops;
+
+// #10101: a record on a named tmux server is reached on that server only.
+#[path = "server_route_tests.rs"]
+mod server_route;

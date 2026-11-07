@@ -70,3 +70,24 @@ fn a_driver_on_a_named_server_reads_only_that_server() {
         .unwrap_or_default();
     assert!(default.iter().all(|s| s.name != name), "{default:?}");
 }
+
+/// Error arm (Fail-Open Check, #10101): a name held by the default server and
+/// by a workspace server is refused, never answered from the default server.
+#[serial_test::serial]
+#[test]
+fn a_name_on_two_servers_is_refused() {
+    if !ScratchTmuxSession::tmux_available("tmux") {
+        eprintln!("tmux not available; skipping");
+        return;
+    }
+    let server = format!("{WORKSPACE_SERVER_PREFIX}10101-{}", std::process::id());
+    let _kill = KillServer(server.clone());
+    let name = reserved_session_name("10101-twice");
+    let _named = ScratchTmuxSession::spawn_on_socket("tmux", Some(&server), &name, "sleep 600");
+    let _default = ScratchTmuxSession::spawn_on_socket("tmux", None, &name, "sleep 600");
+    let driver = TmuxDriver::with_tmux_path_for_test("tmux");
+    assert!(driver.monitor_session(&name, 5).is_ok(), "precondition");
+    let err =
+        snapshot_on_any_server(&driver, &ambient_socket_dir(), &name, 5).expect_err("two holders");
+    assert!(err.to_string().contains("more than one server"), "{err}");
+}

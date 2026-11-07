@@ -48,6 +48,21 @@ impl RealTmuxDriver {
         Ok(Self { driver })
     }
 
+    /// [`ManagedTmuxDriver::pane_claude`] on a named server (#10101): the
+    /// core probes read the default server, so the session's pane pid is read
+    /// through this driver. An unreadable pane is `Unknown`.
+    /// Test: `a_named_real_driver_sends_every_call_to_its_server`.
+    fn named_pane_claude(&self, name: &str) -> crate::core::process::PaneClaude {
+        let pid = self
+            .driver
+            .pane_id(name)
+            .and_then(|pane| self.driver.pane_pid(&pane).ok());
+        match pid {
+            Some(pid) => crate::core::process::harness_under_pane(pid, "claude"),
+            None => crate::core::process::PaneClaude::Unknown,
+        }
+    }
+
     /// Wrap an already-built driver — tests only, for a scripted fake tmux.
     #[cfg(test)]
     pub(crate) fn from_driver_for_test(driver: TmuxDriver) -> Self {
@@ -123,8 +138,12 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             old: old.to_string(),
             new: new.to_string(),
         };
-        let output = crate::core::tmux::run_tmux(&cmd)
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        // See #10101: a named-server driver renames on its own server.
+        let output = match self.driver.server() {
+            Some(_) => self.driver.rename_session_output(old, new),
+            None => crate::core::tmux::run_tmux(&cmd),
+        }
+        .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         if output.status.success() {
             Ok(())
         } else {
@@ -360,12 +379,36 @@ impl ManagedTmuxDriver for RealTmuxDriver {
     /// Test: exercised by the `#[ignore]` live integration test (requires a real
     /// `tmux` + `claude`); the pure retry loop is unit-tested against the fake.
     fn runtime_ready(&self, name: &str) -> bool {
+        if self.driver.server().is_some() {
+            return self.named_pane_claude(name) == crate::core::process::PaneClaude::Present;
+        }
         crate::core::process::find_claude_pid_in_tmux(name, 1, std::time::Duration::ZERO).is_some()
     }
 
     /// #8942: the tri-state probe, pane process included.
     fn pane_claude(&self, name: &str) -> crate::core::process::PaneClaude {
+        if self.driver.server().is_some() {
+            return self.named_pane_claude(name);
+        }
         crate::core::process::pane_claude(name)
+    }
+
+    /// #10101: a driver on the named server `server`.
+    fn on_server(&self, server: &str) -> Option<std::sync::Arc<dyn ManagedTmuxDriver>> {
+        Some(std::sync::Arc::new(Self {
+            driver: self.driver.on_server(server),
+        }))
+    }
+
+    /// #10101: the live `tm-ws-*` servers in this process's socket directory.
+    fn workspace_servers(&self) -> Result<Vec<String>, ManagedError> {
+        let dir = crate::core::tmux_server::ambient_socket_dir();
+        crate::core::tmux_server::live_workspace_servers(&dir).map_err(|e| {
+            ManagedError::TmuxUnavailable(format!(
+                "cannot list workspace tmux servers in {}: {e}",
+                dir.display()
+            ))
+        })
     }
 
     /// #10127: the owned pane's pid through this driver's tmux, then the
