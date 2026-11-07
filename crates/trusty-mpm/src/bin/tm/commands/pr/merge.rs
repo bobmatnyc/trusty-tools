@@ -53,8 +53,9 @@ pub(crate) struct Label {
 ///
 /// Why: every field here is either an input to the squash commit message
 /// (`title`, `body`) or one of the documented hold signals, so a single
-/// `gh pr view` answers the whole decision — no second round trip can observe
-/// a different PR state than the one that was judged.
+/// `gh pr view` answers the whole decision. The #10724 verdict read is a
+/// second round trip; `headRefOid` binds the two, and [`run`] refuses when
+/// they report different heads (#10796 review).
 /// What: the `gh pr view --json` payload, every field defaulted so a payload
 /// missing one (an unreviewed PR reports `reviewDecision: null`) still parses.
 /// Test: `merge_valid_body_merges`, `merge_refuses_draft`.
@@ -92,6 +93,9 @@ pub(crate) struct MergeView {
     /// The head branch, named in the merge output.
     #[serde(default, rename = "headRefName")]
     pub(crate) head_ref_name: String,
+    /// The head commit the checks and hold signals were read on (#10796 review).
+    #[serde(default, rename = "headRefOid")]
+    pub(crate) head_ref_oid: String,
     /// `OPEN`, `CLOSED` or `MERGED` at the START of this invocation (#7945).
     ///
     /// Why: the post-failure re-read cannot tell "this command's merge landed"
@@ -283,9 +287,10 @@ fn pr_view<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<MergeView>
     // #7945: `state` joins the set so `decide` can refuse a PR that is not OPEN.
     // #8614: `statusCheckRollup` feeds the checks gate; `baseRefName` names
     // the branch whose protection lists the required checks.
+    // #10796 review: `headRefOid` binds this read to the verdict read.
     a.push(
         "number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName,\
-         state,statusCheckRollup,baseRefName"
+         headRefOid,state,statusCheckRollup,baseRefName"
             .to_string(),
     );
     let stdout = gh.run(&a)?.stdout_ok(&a)?;
@@ -425,9 +430,11 @@ fn merged_after_failure<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> Option<Merge
 /// #10724: between [`decide`] and the checks gate, [`critic_verdict::assess`]
 /// refuses an unresolved code-critic BLOCK on the head; a failed verdict read
 /// refuses too. The read's `headRefOid` becomes `--match-head-commit`, so a
-/// push after the read is refused by GitHub. Known limit: a raw
-/// `gh pr merge` skips this gate entirely.
+/// push after the read is refused by GitHub. A head that differs between the
+/// decision read and the verdict read refuses (#10796 review). Known limit: a
+/// raw `gh pr merge` skips this gate entirely.
 /// Test: `pr_10724_a_block_pinned_to_the_head_refuses`,
+/// `pr_10724_a_head_that_moved_between_the_reads_refuses`,
 /// `pr_10724_the_merge_call_matches_the_assessed_head`,
 /// `pr_10724_a_verdict_read_failure_refuses`,
 /// `merge_refuses_without_calling_gh_merge`,
@@ -471,13 +478,25 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
     // unreadable verdict set fails closed.
     let mut verdict_read = argv(&["pr", "view", &args.pr.to_string()]);
     push_repo(&mut verdict_read, args);
-    let (critic, head_oid) = match critic_verdict::read(gh, verdict_read) {
-        Ok(v) => (critic_verdict::assess(&v), v.head_oid()),
+    let verdicts = match critic_verdict::read(gh, verdict_read) {
+        Ok(v) => v,
         Err(e) => {
             let reason = format!("cannot read the code-critic verdicts ({e:#})");
             return Ok(refuse(args.pr, &reason));
         }
     };
+    // #10796 review: the checks were judged on `view`'s head; the merge is
+    // pinned to the verdict read's head. They must be one commit.
+    let (decided, assessed) = (view.head_ref_oid.trim(), verdicts.head.trim());
+    if !decided.eq_ignore_ascii_case(assessed) {
+        let reason = format!(
+            "the head moved between reads — the checks were read on `{decided}` and the \
+             code-critic verdicts on `{assessed}`; re-run `tm pr merge {}`",
+            args.pr
+        );
+        return Ok(refuse(args.pr, &reason));
+    }
+    let (critic, head_oid) = (critic_verdict::assess(&verdicts), verdicts.head_oid());
     if let Some(reason) = critic.refusal {
         return Ok(refuse(args.pr, &reason));
     }

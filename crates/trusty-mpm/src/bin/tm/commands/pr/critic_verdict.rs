@@ -5,15 +5,19 @@
 //! `reviewDecision` never reflects a BLOCK and an unresolved BLOCK merged.
 //!
 //! What: [`read`] fetches the head sha with every comment and review in one
-//! `gh pr view`; [`assess`] finds each canonical verdict line, pins it to a
-//! commit, and refuses while the latest verdict pinned to the head is a BLOCK,
-//! or while a BLOCK that names no commit is not followed by an APPROVE or WARN
-//! pinned to the head. A verdict set that covers only older heads is a warning.
+//! `gh pr view`; [`assess`] keeps the verdicts of trusted authors, pins each
+//! to a commit, and refuses while the latest verdict pinned to the head is a
+//! BLOCK, while a BLOCK that names no commit is not followed by an APPROVE or
+//! WARN pinned to the head, or while a BLOCK on an earlier commit is not
+//! followed by any APPROVE or WARN. An APPROVE or WARN that covers only older
+//! heads is a warning.
 //!
 //! The verdict line is the `code-review-standards` Output Format heading,
-//! `## Verdict: <APPROVE|WARN|BLOCK>`, matched case-sensitively at the start of
-//! a line outside a code fence; leading `#` marks and `**` bold are optional.
-//! A review is pinned to its own `commit.oid`; a
+//! `## Verdict: <APPROVE|WARN|BLOCK>`, at the start of a line outside a code
+//! fence. APPROVE and WARN match case-sensitively, with optional leading `#`
+//! marks and `**` bold; a BLOCK matches in any case and decoration, so an
+//! unread BLOCK cannot let a merge through. A review is pinned to its own
+//! `commit.oid`; a
 //! `pinned to <sha>` clause on the verdict line overrides that, and is the only
 //! pin a plain comment can carry.
 //!
@@ -31,6 +35,9 @@ const BOLD: &str = "**";
 
 /// The clause that pins a verdict line to a commit.
 const PIN_CLAUSE: &str = "pinned to ";
+
+/// The `authorAssociation` roles whose verdicts count (#10796 review, H1).
+const TRUSTED: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
 
 /// One code-critic verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +94,11 @@ pub(crate) struct Author {
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct Comment {
     #[serde(default)]
+    pub(crate) author: Option<Author>,
+    /// `OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE`, ...
+    #[serde(default, rename = "authorAssociation")]
+    pub(crate) author_association: String,
+    #[serde(default)]
     pub(crate) body: String,
     #[serde(default, rename = "createdAt")]
     pub(crate) created_at: String,
@@ -108,6 +120,9 @@ pub(crate) struct Review {
     pub(crate) id: String,
     #[serde(default)]
     pub(crate) author: Option<Author>,
+    /// The author's role on the repo, as on [`Comment`].
+    #[serde(default, rename = "authorAssociation")]
+    pub(crate) author_association: String,
     #[serde(default)]
     pub(crate) body: String,
     #[serde(default, rename = "submittedAt")]
@@ -196,11 +211,20 @@ pub(crate) fn parse_verdict_line(body: &str) -> Option<(Verdict, Option<String>)
 
 /// The verdict on one trimmed line, decorated or not.
 ///
+/// What: the strict form first, then [`loose_block`].
+/// Test: `pr_10724_decorated_verdict_lines_parse`,
+/// `pr_10724_decorated_block_forms_fail_closed`.
+fn verdict_on_line(line: &str) -> Option<(Verdict, Option<String>)> {
+    strict_verdict(line).or_else(|| loose_block(line))
+}
+
+/// The strict verdict form, the only one an APPROVE or WARN may take.
+///
 /// What: strips leading `#` marks and `**` around the label and the value,
 /// then requires `Verdict:` followed by exactly `APPROVE`, `WARN` or `BLOCK`
 /// ending at a non-letter. The sha is the 7-40 hex token after `pinned to `.
 /// Test: `pr_10724_decorated_verdict_lines_parse`.
-fn verdict_on_line(line: &str) -> Option<(Verdict, Option<String>)> {
+fn strict_verdict(line: &str) -> Option<(Verdict, Option<String>)> {
     let line = line.trim_start_matches('#').trim_start();
     let line = line.strip_prefix(BOLD).unwrap_or(line);
     let rest = line.strip_prefix(VERDICT_LABEL)?;
@@ -218,6 +242,53 @@ fn verdict_on_line(line: &str) -> Option<(Verdict, Option<String>)> {
     Some((verdict, pin(&rest[end..])))
 }
 
+/// A BLOCK in any case and decoration (#10796 review, H2).
+///
+/// Why: a BLOCK the parser cannot read lets the merge through, so BLOCK
+/// matching is lenient while APPROVE and WARN stay strict.
+/// What: drops leading marks that are not letters or digits (a `>` quote
+/// excepted, so a quoted verdict stays inert), then wants a case-insensitive
+/// `verdict` label, a separator of non-alphanumerics holding a `:`, and the
+/// word `block` ending at a non-alphanumeric.
+/// Test: `pr_10724_decorated_block_forms_fail_closed`,
+/// `pr_10724_prose_and_fenced_lines_are_not_verdicts`.
+fn loose_block(line: &str) -> Option<(Verdict, Option<String>)> {
+    let line = line.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '>');
+    let label = "verdict";
+    if !line.get(..label.len())?.eq_ignore_ascii_case(label) {
+        return None;
+    }
+    let rest = &line[label.len()..];
+    let word_at = rest.find(char::is_alphanumeric)?;
+    if !rest[..word_at].contains(':') {
+        return None;
+    }
+    let rest = &rest[word_at..];
+    let word = "block";
+    if !rest.get(..word.len())?.eq_ignore_ascii_case(word) {
+        return None;
+    }
+    let tail = &rest[word.len()..];
+    if tail.chars().next().is_some_and(char::is_alphanumeric) {
+        return None;
+    }
+    Some((Verdict::Block, pin(tail)))
+}
+
+/// Whether a verdict by an author with `association` counts (#10796 review, H1).
+///
+/// Why: the repo is public, so any GitHub user can post a verdict line.
+/// What: a [`TRUSTED`] role always counts; an APPROVE or WARN from anyone else
+/// never does; a BLOCK counts when the payload names no role at all, so a
+/// payload missing the field fails closed.
+/// Test: `pr_10724_an_untrusted_approve_does_not_clear_a_head_block`,
+/// `pr_10724_an_untrusted_block_is_ignored_and_an_unknown_one_holds`.
+fn admits(verdict: Verdict, association: &str) -> bool {
+    let role = association.trim();
+    TRUSTED.iter().any(|t| role.eq_ignore_ascii_case(t))
+        || (verdict == Verdict::Block && role.is_empty())
+}
+
 /// The sha after `pinned to ` in `tail`, lowercased, when it is 7-40 hex.
 fn pin(tail: &str) -> Option<String> {
     let after = &tail[tail.find(PIN_CLAUSE)? + PIN_CLAUSE.len()..];
@@ -231,11 +302,13 @@ fn pin(tail: &str) -> Option<String> {
         .then(|| token.to_ascii_lowercase())
 }
 
-/// Every verdict on the PR, oldest first.
+/// Every verdict on the PR that [`admits`] lets count, oldest first.
 fn collect(view: &VerdictView) -> Vec<Posted> {
     let mut out: Vec<Posted> = Vec::new();
     for c in &view.comments {
-        if let Some((verdict, sha)) = parse_verdict_line(&c.body) {
+        if let Some((verdict, sha)) = parse_verdict_line(&c.body)
+            && admits(verdict, &c.author_association)
+        {
             out.push(Posted {
                 verdict,
                 sha,
@@ -245,7 +318,9 @@ fn collect(view: &VerdictView) -> Vec<Posted> {
         }
     }
     for r in &view.reviews {
-        if let Some((verdict, text_pin)) = parse_verdict_line(&r.body) {
+        if let Some((verdict, text_pin)) = parse_verdict_line(&r.body)
+            && admits(verdict, &r.author_association)
+        {
             let oid = r.commit.as_ref().and_then(|c| pin_oid(&c.oid));
             let by = r.author.as_ref().map_or("", |a| a.login.as_str());
             out.push(Posted {
@@ -269,16 +344,18 @@ fn pin_oid(oid: &str) -> Option<String> {
 
 /// Judge the PR's code-critic verdicts against its head.
 ///
-/// Why: a BLOCK holds the commit it reviewed; a later push makes it stale but
-/// not resolved, so it warns instead of refusing. A BLOCK that names no commit
-/// cannot be shown stale, so it fails closed.
-/// What: refuses when the latest verdict pinned to the head is a BLOCK, or
-/// when an unpinned BLOCK has no later APPROVE/WARN pinned to the head, or
+/// Why: a push does not resolve a BLOCK — the fix-round push, an unrelated
+/// commit or `gh pr update-branch` all move the head (#10796 review, H3a). A
+/// BLOCK that names no commit cannot be matched to one, so it fails closed.
+/// What: refuses when the latest verdict pinned to the head is a BLOCK, when
+/// an unpinned BLOCK has no later APPROVE/WARN pinned to the head, when a
+/// BLOCK on an earlier commit has no later APPROVE/WARN on any commit, or
 /// when verdicts exist and `headRefOid` is empty. Warns when verdicts exist
 /// and none is pinned to the head. No verdict at all: neither.
 ///
 /// Test: `pr_10724_the_head_block_refusal_names_source_and_sha`,
-/// `pr_10724_an_old_head_block_warns_that_no_verdict_covers_the_head`,
+/// `pr_10724_an_old_head_approve_warns_that_no_verdict_covers_the_head`,
+/// `pr_10724_an_old_head_block_refuses_until_a_later_verdict`,
 /// `pr_10724_a_later_warn_resolves_a_head_block`,
 /// `pr_10724_a_head_block_after_an_approve_refuses`,
 /// `pr_10724_an_unpinned_block_names_the_fix`,
@@ -301,16 +378,21 @@ pub(crate) fn assess(view: &VerdictView) -> Assessment {
     let covers = |sha: &str| head.starts_with(sha);
     let mut last_on_head: Option<&Posted> = None;
     let mut open_unpinned: Option<&Posted> = None;
+    // #10796 review (H3a): a BLOCK on an earlier commit, not yet answered.
+    let mut open_earlier: Option<&Posted> = None;
     for p in &posted {
         match (&p.sha, p.verdict) {
             (Some(sha), v) if covers(sha) => {
                 last_on_head = Some(p);
                 if v != Verdict::Block {
                     open_unpinned = None;
+                    open_earlier = None;
                 }
             }
+            (Some(_), Verdict::Block) => open_earlier = Some(p),
+            (Some(_), _) => open_earlier = None,
             (None, Verdict::Block) => open_unpinned = Some(p),
-            _ => {}
+            (None, _) => {}
         }
     }
     if let Some(p) = last_on_head.filter(|p| p.verdict == Verdict::Block) {
@@ -324,7 +406,16 @@ pub(crate) fn assess(view: &VerdictView) -> Assessment {
         return refuse(format!(
             "a code-critic BLOCK names no commit sha ({}), so it holds the merge — post a later \
              APPROVE or WARN pinned to the head {head}: a COMMENT review on that commit, or a \
-             comment whose verdict line reads `## Verdict: APPROVE, pinned to {head}`",
+             comment whose verdict line reads `## Verdict: APPROVE, pinned to {head}`, by an \
+             OWNER, MEMBER or COLLABORATOR",
+            p.source
+        ));
+    }
+    if let Some(p) = open_earlier {
+        return refuse(format!(
+            "a code-critic BLOCK on the earlier commit {} ({}) has no later APPROVE or WARN — a \
+             push does not resolve it; get a code-critic verdict on the head {head}",
+            p.sha.as_deref().unwrap_or_default(),
             p.source
         ));
     }
