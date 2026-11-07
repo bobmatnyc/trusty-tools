@@ -244,6 +244,16 @@ impl OrchestratorBackend for MockBackend {
         Ok(json!({ "recipient": recipient, "question": question, "options": options }))
     }
 
+    // #10423: echoes its arguments so dispatch's wiring is observable.
+    async fn channel_send(
+        &self,
+        user: &str,
+        text: &str,
+        via_org: Option<String>,
+    ) -> Result<Value, String> {
+        Ok(json!({ "user": user, "text": text, "via_org": via_org }))
+    }
+
     // #9979: echoes the turn it received so the pass-through is observable.
     async fn sessions_chat(&self, turn: Value) -> Result<Value, String> {
         Ok(json!({ "reply": "ok", "turn": turn }))
@@ -464,7 +474,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 39);
+    assert_eq!(tools.as_array().unwrap().len(), 40);
     assert!(
         tools
             .as_array()
@@ -1793,6 +1803,26 @@ async fn dispatch_ask_owner_tool() {
         assert_eq!(result["isError"], true, "{args}");
         let text = result["content"][0]["text"].as_str().expect("text");
         assert!(text.contains("missing required string argument"), "{text}");
+    }
+}
+
+/// #10423: `channel_send` passes user, text and the optional org pin; a
+/// missing argument fails before the daemon is asked.
+#[tokio::test]
+async fn dispatch_channel_send_tool() {
+    let args = json!({ "user": "bob-duetto", "text": "hi", "via_org": "duetto" });
+    let resp = dispatch(&MockBackend, call("channel_send", args)).await;
+    let result = resp.result.expect("a result");
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(
+        text.contains("bob-duetto") && text.contains("duetto"),
+        "{text}"
+    );
+    for args in [json!({ "user": "u" }), json!({ "text": "t" })] {
+        let resp = dispatch(&MockBackend, call("channel_send", args.clone())).await;
+        let result = resp.result.expect("a result");
+        assert_eq!(result["isError"], true, "{args}");
     }
 }
 

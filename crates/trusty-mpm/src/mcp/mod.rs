@@ -187,6 +187,24 @@ pub trait OrchestratorBackend: Send + Sync {
         options: Vec<String>,
     ) -> Result<Value, String>;
 
+    // ── #10423: the staged org send ──────────────────────────────────────────
+
+    /// Back `channel_send`: stage `text` to `user` behind the owner's Approve.
+    ///
+    /// Why: #10423 S1b: the daemon owns every outward send (D9a, Dd9).
+    /// What: returns `{ id, digest, org, approval }` or the rule's text. The
+    /// default refuses, for a backend with no channels.
+    /// Test: `dispatch_channel_send_tool` (mock); the daemon body in
+    /// `daemon/managed_routes/channel_send_tests.rs`.
+    async fn channel_send(
+        &self,
+        _user: &str,
+        _text: &str,
+        _via_org: Option<String>,
+    ) -> Result<Value, String> {
+        Err("channel_send: this backend has no channels".to_owned())
+    }
+
     // ── #9979: the coordinator chat turn ─────────────────────────────────────
 
     /// Back `sessions_chat`: one coordinator chat turn, as `mpm.sessions.chat`.
@@ -771,6 +789,17 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
                 backend.ask_owner(&recipient, &question, options).await
             }
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
+        },
+        // #10423: staged only; the daemon posts after the owner's Approve.
+        "channel_send" => match (required_str(&args, "user"), required_str(&args, "text")) {
+            (Ok(user), Ok(text)) => {
+                let via_org = args
+                    .get("via_org")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                backend.channel_send(&user, &text, via_org).await
+            }
+            (Err(e), _) | (_, Err(e)) => Err(e),
         },
         // #9979: the `mpm.sessions.chat` request, passed through whole.
         "sessions_chat" => match required_str(&args, "message") {
