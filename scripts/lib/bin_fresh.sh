@@ -16,10 +16,13 @@
 #     with a refusal naming both mtimes and that file on stderr, unless
 #     ALLOW_STALE is 1, which warns and returns 0.
 #   - Sources: every workspace crate in `cargo tree -p PACKAGE -e normal,build`
-#     (run offline and locked in SRC_ROOT; BIN_FRESH_SOURCES_CMD replaces it in
-#     tests), each contributing src/, build.rs, Cargo.toml, help.yaml and
+#     (run offline and locked in SRC_ROOT), each contributing src/, build.rs, Cargo.toml, help.yaml and
 #     assets/, plus Cargo.lock and the EXTRA_PATHSPECs. Cargo.lock is
 #     workspace-wide, so any dependency bump anywhere makes a binary stale.
+#   - Test override: BIN_FRESH_SOURCES_CMD replaces `cargo tree` only when
+#     BIN_FRESH_TEST=1 is also set, and is then announced on stderr. Set
+#     alone (a leaked export), it is ignored with a warning, so it cannot
+#     pass a stale binary as fresh.
 #     Only compiled inputs count: a changelog fragment does not trigger a
 #     rebuild, so counting it would refuse a binary cargo considers current.
 #     A failed or empty derivation, or no source file, returns 1 (freshness
@@ -91,11 +94,12 @@ bin_fresh_under() {
   done
 }
 
-# bin_fresh_crate_dirs PACKAGE ROOT: the root-relative dirs of the workspace
-# crates PACKAGE builds from, one per line. Returns 1 with a reason on stderr.
+# bin_fresh_crate_dirs PACKAGE ROOT USE_OVERRIDE: the root-relative dirs of
+# the workspace crates PACKAGE builds from, one per line. USE_OVERRIDE 1 runs
+# BIN_FRESH_SOURCES_CMD instead of cargo. Returns 1 with a reason on stderr.
 bin_fresh_crate_dirs() {
   local pkg="$1" root="$2" out dirs
-  if [ -n "${BIN_FRESH_SOURCES_CMD:-}" ]; then
+  if [ "$3" = 1 ]; then
     out="$(cd "$root" && sh -c "$BIN_FRESH_SOURCES_CMD" 2>&1)" || {
       echo "BIN_FRESH_SOURCES_CMD failed: $out" >&2; return 1; }
   else
@@ -123,7 +127,7 @@ bin_fresh_unknown() {
 }
 
 bin_fresh_check() {
-  local prefix="$1" link="$2" allow="$3" root="$4" pkg="$5" bin bin_m newest src_m src dirs d cargo_bin
+  local prefix="$1" link="$2" allow="$3" root="$4" pkg="$5" bin bin_m newest src_m src dirs d cargo_bin use_override
   shift 5
   bin="$(bin_fresh_resolve "$link")" || {
     echo "$prefix: refused: cannot resolve the symlink chain of $link" >&2; return 1; }
@@ -152,7 +156,17 @@ bin_fresh_check() {
   src="$(cd "$root" 2>/dev/null && pwd -P)" || {
     bin_fresh_unknown "$prefix" "$bin" "$allow" "the source root $root is not a directory"; return; }
   root="$src"
-  dirs="$(bin_fresh_crate_dirs "$pkg" "$root" 2>&1)" || {
+  # The override is test-only and never silent (#10755).
+  use_override=0
+  if [ -n "${BIN_FRESH_SOURCES_CMD:-}" ]; then
+    if [ "${BIN_FRESH_TEST:-}" = 1 ]; then
+      use_override=1
+      echo "$prefix: sources from BIN_FRESH_SOURCES_CMD override: $BIN_FRESH_SOURCES_CMD" >&2
+    else
+      echo "$prefix: warning: BIN_FRESH_SOURCES_CMD is set but ignored (it needs BIN_FRESH_TEST=1); deriving sources with cargo tree" >&2
+    fi
+  fi
+  dirs="$(bin_fresh_crate_dirs "$pkg" "$root" "$use_override" 2>&1)" || {
     bin_fresh_unknown "$prefix" "$bin" "$allow" "$dirs"; return; }
   set -- Cargo.lock "$@"
   while IFS= read -r d; do

@@ -58,7 +58,9 @@
 #                   crate or an untracked module; the newest of several
 #                   sources is named; a failed derivation or no source
 #                   refuses; a fresh one and --allow-stale pass; an
-#                   installed-style stub passes with a notice
+#                   installed-style stub passes with a notice; the override
+#                   is announced, and ignored with a warning unless
+#                   BIN_FRESH_TEST=1
 #   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
@@ -440,7 +442,7 @@ printf '%s\n' '#!/bin/sh' 'echo "trusty-mpm v0.0.0 ($(pwd -P)/crates/trusty-mpm)
 printf '%s\n' '#!/bin/sh' 'echo "trusty-mpm v0.0.0 ($(pwd -P)/crates/trusty-mpm)"' \
   'echo "trusty-secrets v0.0.0 ($(pwd -P)/crates/trusty-secrets) (*)"' > "$TREE11-deps"
 chmod +x "$TREE11" "$TREE11-deps"
-SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_SOURCES_CMD=$TREE11")
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=$TREE11")
 expect_refusal bin-fresh-newest-of-several 1 \
   "is older than its newest source $SRC11/crates/trusty-mpm/src/main.rs" \
   --bin "$TGT11/debug/tm" --dir "$DIR2" --dry-run
@@ -468,15 +470,26 @@ expect_refusal bin-fresh-untracked 1 \
   "is older than its newest source $SRC11/crates/trusty-mpm/src/new_mod.rs" \
   --bin "$TGT11/debug/tm-mid" --dir "$DIR2" --dry-run
 rm "$SRC11/crates/trusty-mpm/src/new_mod.rs"
-SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_SOURCES_CMD=$TREE11-deps")
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=$TREE11-deps")
 expect_refusal bin-fresh-dependency 1 \
   "is older than its newest source $SRC11/crates/trusty-secrets/src/lib.rs" \
   --bin "$TGT11/debug/tm-mid" --dir "$DIR2" --dry-run
-SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_SOURCES_CMD=false")
+# The override is announced; without BIN_FRESH_TEST it is ignored with a
+# warning, so a stub that would mark tm-mid fresh does not, and a stale binary
+# is still refused by the real derivation (cargo cannot read this root).
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=$TREE11")
+expect_refusal bin-fresh-override-notice 0 "sources from BIN_FRESH_SOURCES_CMD override: $TREE11" \
+  --bin "$TGT11/debug/tm-mid" --dir "$DIR2" --dry-run
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_SOURCES_CMD=$TREE11")
+expect_refusal bin-fresh-override-ignored 1 "warning: BIN_FRESH_SOURCES_CMD is set but ignored" \
+  --bin "$TGT11/debug/tm-mid" --dir "$DIR2" --dry-run
+expect_refusal bin-fresh-override-ignored-stale 1 "refused: cannot judge the freshness of $TGT11/debug/tm" \
+  --bin "$TGT11/debug/tm" --dir "$DIR2" --dry-run
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=false")
 expect_refusal bin-fresh-derive-fails 1 "cannot judge the freshness" \
   --bin "$TGT11/release/tm" --dir "$DIR2" --dry-run
 mkdir -p "$TMP_ROOT/not-a-repo"
-SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$TMP_ROOT/not-a-repo" "BIN_FRESH_SOURCES_CMD=$TREE11")
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$TMP_ROOT/not-a-repo" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=$TREE11")
 expect_refusal bin-fresh-no-source 1 "no source file of trusty-mpm found by git" \
   --bin "$TGT11/release/tm" --dir "$DIR2" --dry-run
 SRC_ROOT_ENV=()

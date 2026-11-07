@@ -28,6 +28,8 @@
 #                 symlink, a custom profile dir, or a newer dependency crate;
 #                 a missing source refuses; a fresh one and --allow-stale
 #                 pass; an installed-style stub passes with a notice
+#                 the override is announced, and ignored with a warning
+#                 unless BIN_FRESH_TEST=1
 #
 # Usage: ./scripts/sandbox_code_daemon_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -171,7 +173,7 @@ D5="$WORK/d5"; mkdir -p "$D5"
 fresh_case() {
   local name="$1" want="$2" needle="$3" tree="$4" root="$5" rc=0 out
   shift 5
-  out="$(SANDBOX_SRC_ROOT="$root" BIN_FRESH_SOURCES_CMD="$tree" "$LAUNCHER" "$@" 2>&1)" || rc=$?
+  out="$(SANDBOX_SRC_ROOT="$root" BIN_FRESH_TEST=1 BIN_FRESH_SOURCES_CMD="$tree" "$LAUNCHER" "$@" 2>&1)" || rc=$?
   [ "$rc" -eq "$want" ] || fail "$name (exit $rc, want $want)"
   case "$out" in *"$needle"*) ;; *) fail "$name (output lacks '$needle'): $out" ;; esac
 }
@@ -192,6 +194,16 @@ fresh_case bin-fresh-allow-stale 0 "warning: --allow-stale" \
   "$TREE" "$SRC" --bin "$TGT/debug/tcode" --dir "$D5" --dry-run --allow-stale
 fresh_case bin-fresh-installed 0 "notice: installed binary (not under a cargo target dir)" \
   "$TREE" "$SRC" --bin "$STUB" --dir "$D5" --dry-run
+fresh_case bin-fresh-override-notice 0 "sources from BIN_FRESH_SOURCES_CMD override: $TREE" \
+  "$TREE" "$SRC" --bin "$TGT/debug/tcode-mid" --dir "$D5" --dry-run
+# Without BIN_FRESH_TEST the stub (which marks tcode-mid fresh) is ignored
+# with a warning, and the real derivation refuses (cargo cannot read $SRC).
+rc=0; out="$(SANDBOX_SRC_ROOT="$SRC" BIN_FRESH_SOURCES_CMD="$TREE" "$LAUNCHER" --bin "$TGT/debug/tcode-mid" --dir "$D5" --dry-run 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || fail "bin-fresh-override-ignored (exit $rc, want 1)"
+case "$out" in *"warning: BIN_FRESH_SOURCES_CMD is set but ignored"*) ;; *) fail "bin-fresh-override-ignored (no warning): $out" ;; esac
+rc=0; out="$(SANDBOX_SRC_ROOT="$SRC" BIN_FRESH_SOURCES_CMD="$TREE" "$LAUNCHER" --bin "$TGT/debug/tcode" --dir "$D5" --dry-run 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || fail "bin-fresh-override-ignored-stale (exit $rc, want 1)"
+case "$out" in *"refused: cannot judge the freshness of $TGT/debug/tcode"*) ;; *) fail "bin-fresh-override-ignored-stale (no refusal): $out" ;; esac
 mkdir -p "$WORK/not-a-repo"
 fresh_case bin-fresh-no-source 1 "no source file of trusty-code found by git" \
   "$TREE" "$WORK/not-a-repo" --bin "$TGT/release/tcode" --dir "$D5" --dry-run
