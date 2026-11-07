@@ -151,6 +151,8 @@ One checker, `ownercon check --action <json>`, returns `allow | deny(C..) | ask(
 | pm-guard | `crates/trusty-mpm` pm-guard | Hook-level deny for spawn beyond a `limit`, and for merge or publish under a `gate` or `hold`. The deny names the constraint id and quote. |
 | Digest / resume | `datg*.py`, handoff template | The digest has an "Active owner constraints" block rendered from the ledger, each line with id, quote, cite, effective window. Resume reads that block first. A handoff prose line that conflicts with it is flagged, not obeyed. |
 
+**`ask` timeout (owner answer D02).** A DECISION raised by `ask` makes the work wait up to 10 minutes. At 10 minutes the action is refused (`deny`, surfaced as a BLOCKER) and the owner is told on the dashboard. A reply inside the window resolves it either way. The wait is per action and does not hold other work.
+
 Fail mode: if the ledger is unreadable, `deny` for `hold` and `gate` actions, `ask` for `limit`, `allow` otherwise, and the failure is logged. A constraint store outage never silently allows a release.
 
 Every check writes an audit line: action, result, constraint ids, caller.
@@ -159,9 +161,9 @@ Every check writes an audit line: action, result, constraint ids, caller.
 
 **ID:** SPEC-OWNERCON-05~draft
 
-- **Create.** From an owner turn only. The Architect proposes a record (`status=proposed`, quote and cite filled) and the 1.12.1 provenance check validates the cite. Chat or pane turns activate on cite verification. Dashboard answers activate directly. An ambiguous turn becomes a D item with options, recommendation first (r-039).
+- **Create.** From an owner turn only. **Only the Architect writes constraint records** (owner answer D00), and only after verifying the owner's actual message with the 1.12.1 provenance check. A PM or other agent that witnessed an owner turn may report it to the Architect; that is information, not a write path, and the ledger refuses a record whose writer is not the Architect. The Architect first writes `status=proposed` with quote and cite filled. Chat or pane turns activate on cite verification. Dashboard answers activate directly. An ambiguous turn becomes a D item with options, recommendation first (r-039).
 - **Reverse.** A new owner turn that states the opposite creates a record with `supersedes=[C..]`. The old record becomes `superseded` with `ended_by` set. "Return to two helpers after Monday" is one record with `effective.until`, not a reversal. Silence, pacing and Architect inference never reverse.
-- **Expire.** `effective.until` as a time or an event. A sweeper marks `expired` and writes an audit line. An expired constraint stays queryable and renders in the digest for 24 h as "expired" so the Architect does not re-apply it from memory.
+- **Expire.** `effective.until` as a time or an event. A sweeper marks `expired` and writes an audit line. An expired constraint stays queryable and renders in the digest for 24 h as "expired" so the Architect does not re-apply it from memory. On expiry the owner gets **one short dashboard note** (owner answer D09), written once by the sweeper; no repeat, no renewal prompt.
 - **Supersede.** The newer owner record wins for the same `(kind, scope, resource)` key. Narrower scope (session) overrides broader (project, fleet) only when it is also an owner record and names the broader one or does not conflict; otherwise the check returns `ask`.
 - **Conflict with written rules.** A constraint against project CLAUDE.md text returns `ask`; the owner resolves it. The Architect cites the rule it applies (second instance in #10780).
 - **Withdrawal by the owner of an Architect proposal.** `status=withdrawn`, no effect on enforcement.
@@ -186,6 +188,9 @@ Unit (ledger, checker):
 - T2. Supersession key resolution and the narrower-scope `ask` case.
 - T3. Expiry by time and by event; expired records render for 24 h and are not enforced.
 - T4. Fail mode on an unreadable ledger per §4.
+- T5. (D00) A constraint write by a PM or any non-Architect writer is refused; the same record from the Architect with a verified cite is accepted. A PM report of an owner turn creates no record.
+- T6. (D02) An `ask` with no owner reply: the action waits, is refused at 10 min with a BLOCKER naming the constraint, and a dashboard owner notice exists. An owner reply at 4 min resolves it and no refusal or notice follows. Other work in the same session is not blocked during the wait.
+- T7. (D09) A time-limited constraint reaching `until` produces exactly one dashboard note, shows `expired` for 24 h, then drops from the digest; a second sweep adds no second note.
 
 Regression, four-to-two (#10780):
 
@@ -303,10 +308,10 @@ Engineering defaults (recorded; change by spec edit, no owner decision needed):
 
 1. Id prefix: new `C` prefix, one counter (as stated in §3.2). Default.
 2. Action parsing in `relay.sh`: structured `action:` header, with a one-release text-match fallback that logs a warning. Default.
-3. (Owner policy, open: Q-A below.)
+3. Answered, Q-A below.
 4. Fleet-scope constraints: held in the `trusty-architect` ledger, scope `fleet`. Default.
-5. (Owner policy, open: Q-B below.)
-6. (Owner policy, open: Q-C below.)
+5. Answered, Q-B below.
+6. Answered, Q-C below.
 7. Checker contract: the shared vector file (§9.6); Python now, Rust later, both must pass it. Default.
 8. Shadow period (§10 Stage 1): one day of fleet traffic and at least one session that hits each guardrail; extend if a false refusal appears. Default.
 9. Supersession key (§9.4): `(kind, scope, resource)` from a human-confirmed record; free-text turns are not auto-classified, so an unclassified later turn yields `ask`, not a refusal. Default.
@@ -314,8 +319,10 @@ Engineering defaults (recorded; change by spec edit, no owner decision needed):
 11. Delivery evidence (§9.5): the sender's own capture (PM for a pane target, Architect for its relays) proves `delivered`; only a recipient-authored reply proves `acknowledged`. Default.
 12. G-1 and dashboard answers: dashboard answers are verified by channel and need no quote check; chat and pane relays do. Default.
 
-Owner-policy questions (go to the owner; answers recorded here):
+Owner-policy questions, answered (Bob, dashboard, 2026-11-07 22:26-22:27Z, relayed by the Architect 22:28Z):
 
-- Q-A (was 3; filed as dashboard D00). Who may record an owner decision: only the Architect, or a PM that witnessed the owner's pane turn?
-- Q-B (was 5; filed as dashboard D02). When a check cannot tell if an action is allowed (`ask`), does the work wait for the owner or time out to refused?
-- Q-C (was 6; filed as dashboard D09). When a standing owner rule expires, is the owner told once, or does it lapse silently?
+- Q-A (was 3; dashboard D00). Answered: only the Architect records "the owner decided X", after checking the owner's actual message. PM proposals are not a write path. Requirement: §5 Create; test T5.
+- Q-B (was 5; dashboard D02). Answered: when it is unclear whether an action breaks a rule, the work waits up to 10 minutes, then the action is refused and the owner is told. Requirement: §4 `ask` timeout; test T6.
+- Q-C (was 6; dashboard D09). Answered: a lapsed time-limited rule gets one short dashboard note, then shows as expired for a day. Requirement: §5 Expire; test T7.
+
+No owner-policy question is open.
