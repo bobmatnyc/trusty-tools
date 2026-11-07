@@ -23,6 +23,19 @@ OWNER = {"by": "owner", "cite": "chat 2026-11-06T20:48Z",
 INFERENCE = {"by": "architect", "basis": "1.75%/h pace arithmetic after the 23:38Z reset"}
 
 
+TURNS = [{"at": "2026-11-06T20:48:30Z", "session": "tm-architect",
+          "text": "OK, unleash two more agents and don't stop at 98%. Tell me right before the allocation runs out."},
+         {"at": "2026-11-05T23:14:47Z", "session": "tm-architect",
+          "text": "Keep one helper on the rules and one on the restructure."}]
+
+
+def record_turns():
+    """The owner turns the sources below cite, in the per-test record conftest points at."""
+    with open(os.environ["ARCHITECT_OWNER_TURNS"], "a", encoding="utf-8") as f:
+        for t in TURNS:
+            f.write(json.dumps(t) + "\n")
+
+
 def cli(project, args, stdin=None):
     return subprocess.run([sys.executable, DATG, "--project", project, *args], input=stdin,
                           capture_output=True, text=True)
@@ -33,6 +46,7 @@ class Base(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.p = self._tmp.name
+        record_turns()
         datg.op_init(self.p, "ar")
         datg.write_ops(self.p, [{"op": "add", "kind": "G", "title": "use the reset by Monday"},
                                 {"op": "add", "kind": "D", "title": "helpers until Monday", "goal": "ar-G01"},
@@ -61,7 +75,11 @@ class SourceCase(Base):
         for src in ({"by": "owner", "cite": "chat 2026-11-06T23:38Z"},           # no quote
                     {"by": "architect", "basis": "x", "quote": "two helpers"},   # an inference with an owner quote
                     {"by": "the owner", "quote": "x", "cite": "y"},
-                    dict(OWNER, until="Monday")):
+                    dict(OWNER, until="Monday"),
+                    # critic H3: a quote the cited turn does not hold, and a turn that is not recorded
+                    dict(OWNER, quote="two helpers until Monday"),
+                    dict(OWNER, cite="chat 2026-11-06T23:00Z"),
+                    dict(OWNER, cite="palace deadbeef")):
             with self.assertRaises(datg.DatgError, msg=src):
                 datg.write_ops(self.p, [{"op": "update", "id": "ar-D01", "answer": "x", "source": src}])
         with self.assertRaises(datg.DatgError):
@@ -98,14 +116,16 @@ class ResumeCase(Base):
             {"op": "update", "id": "ar-D01", "answer": "four helpers, two per track, until Mon 09:00Z", "source": OWNER},
             {"op": "update", "id": "ar-D02", "answer": "two helpers, one per track", "source": INFERENCE},
             {"op": "update", "id": "ar-D03", "answer": "one helper per track",
-             "source": dict(OWNER, cite="dashboard D70", quote="Keep one helper on the rules", until="2026-11-06T20:48Z")},
+             "source": dict(OWNER, cite="chat 2026-11-05T23:14Z", quote="Keep one helper on the rules", until="2026-11-06T20:48Z")},
             {"op": "update", "id": "ar-D04", "answer": "two helpers"}])
         # The /clear: a fresh session's SessionStart context is all it has.
         ctx = datg.session_start_context(datg.load_state(self.p), self.p)
         sec = self.sections(ctx)
         owner = "\n".join(sec["OWNER RULINGS (with source)"])
-        self.assertIn("ar-D01", owner)
-        self.assertIn('owner turn: chat 2026-11-06T20:48Z "OK, unleash two more agents', owner)
+        # critic H3: the ruling is the owner's quote; our free-text answer is shown only as our reading.
+        self.assertIn('ar-D01 helpers until Monday | ruling: "OK, unleash two more agents and don\'t stop at 98%." '
+                      "(owner turn: chat 2026-11-06T20:48Z) | Architect reading: four helpers", owner)
+        self.assertNotIn("answer:", owner)
         for iid in ("ar-D02", "ar-D03", "ar-D04"):
             self.assertNotIn(iid, owner)
         self.assertIn("ar-D02", "\n".join(sec["ARCHITECT INFERENCES (not owner rulings)"]))
@@ -118,28 +138,37 @@ class ResumeCase(Base):
             f.write("## Handoff 03:21Z\n"
                     "- USAGE 4% at 03:04Z. Two helpers, one per track (Ada 23:39Z).\n"
                     "- two-helper ruling 2026-11-06T23:3xZ stays the limit\n"
-                    "- Owner ruling: four helpers until Mon (owner turn: chat 2026-11-06T20:48Z)\n"
+                    '- Owner ruling: "unleash two more agents" (owner turn: chat 2026-11-06T20:48Z)\n'
+                    '- Owner ruling: "four helpers until Mon" (owner turn: chat 2026-11-06T20:48Z)\n'
                     "- Architect inference: pace 1.75%/h\n")
         datg.write_ops(self.p, [{"op": "session", "task": "pace the reset", "next": "keep four busy",
                                  "hold": "User instruction (Ada): two helpers max", "refs": [{"key": "handoff", "value": "state.md"}]}])
         dig = self.digest()
         flags = [ln for ln in dig.splitlines() if "FLAG unsourced owner claim" in ln]
-        self.assertEqual(len(flags), 3, dig)
+        self.assertEqual(len(flags), 4, dig)
         self.assertTrue(any(ln.startswith("  FLAG") and "hold:" in ln for ln in flags))
         self.assertTrue(any("state.md:2" in ln for ln in flags) and any("state.md:3" in ln for ln in flags))
-        self.assertFalse(any("state.md:4" in ln or "state.md:5" in ln for ln in flags))
+        # critic H3: a cite clears the flag only when its quote is in the cited turn (line 5 is not).
+        self.assertTrue(any("state.md:5" in ln for ln in flags))
+        self.assertFalse(any("state.md:4" in ln or "state.md:6" in ln for ln in flags))
         r = cli(self.p, ["provenance", state_md])
         self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertEqual([ln.split(":")[1] for ln in r.stdout.splitlines()], ["2", "3"])
+        self.assertEqual([ln.split(":")[1] for ln in r.stdout.splitlines()], ["2", "3", "5"])
         self.assertEqual(cli(self.p, ["provenance", os.path.join(self.p, "nope.md")]).returncode, 2)
 
 
 class ProvenanceCase(unittest.TestCase):
+    def setUp(self):
+        record_turns()
+
     def test_claim_detection(self):
         for text in ("User ruling (Ada): two helpers", "owner instruction: stop", "basis: the two-helper ruling",
-                     "TWO helpers only (Ada 23:39Z)"):
+                     "TWO helpers only (Ada 23:39Z)",
+                     'User ruling (Ada): "two helpers" (owner turn: chat 2026-11-06T20:48Z)',   # quote not in the turn
+                     "User ruling (Ada): two helpers (owner turn: chat 2026-11-06T20:48Z)"):     # no quote at all
             self.assertTrue(datg.unsourced_claim(text), text)
-        for text in ("User ruling (Ada): \"x\" (owner turn: chat 2026-11-06T20:48Z)", "Architect answer: pace",
+        for text in ('User ruling (Ada): "unleash two more agents" (owner turn: chat 2026-11-06T20:48Z)',
+                     "Architect answer: pace",
                      "[Ada Architect 23:39Z] sent", "rule r-075"):
             self.assertFalse(datg.unsourced_claim(text), text)
 

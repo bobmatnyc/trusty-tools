@@ -138,7 +138,8 @@ def apply_add(st, a):
 
 
 def _source(src):
-    """The stored provenance of an answer (#10780); DatgError unless it is one of the two shapes.
+    """The stored provenance of an answer (#10780); DatgError unless it is one of the two shapes and an owner
+    quote is in its cited turn (verify_owner_quote).
 
     Why: after a /clear a fresh session could not tell an owner ruling from an Architect inference, and
     restored the inference as a ruling. What: {by: owner, cite, quote[, until]} (cite one line <= 80,
@@ -159,7 +160,25 @@ def _source(src):
         out["until"] = _lim(src["until"], "source.until", 20, True)
         if parse_ts(out["until"]) is None:
             raise DatgError("source.until must be YYYY-MM-DDTHH:MMZ")
+    verify_owner_quote(out["cite"], out["quote"])
     return out
+
+
+def verify_owner_quote(cite, quote):
+    """#10780 critic H3: an owner source is written only when its quote is in the cited owner turn.
+
+    What: relay_provenance.verify (the relay gate's own check) beside this file; its refusal, or the
+    module missing, raises DatgError, so nothing unverified is stored as the owner's.
+    Test: tests/test_datg_provenance.py SourceCase
+    """
+    try:
+        import relay_provenance
+    except ImportError as e:
+        raise DatgError(f"source by owner cannot be checked: relay_provenance.py is missing ({e})")
+    try:
+        relay_provenance.verify(cite, [quote])
+    except relay_provenance.Refused as e:
+        raise DatgError(f"source by owner refused: {e}")
 
 
 def apply_update(st, a):

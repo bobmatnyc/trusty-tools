@@ -37,6 +37,10 @@ LABEL = ("lorem ipsum dolor sit amet elit sed tempor magna " * 4)[:160]
 if len(sys.argv) != 2:
     sys.exit("usage: regen_writer.py <prototype-dir>")
 os.environ["DATG_NOTIFY_CMD"] = "true"
+# #10780 critic H3: no owner turn is on record, so every owner source is refused, as the Rust writer
+# refuses one; the Architect-sourced step is the one that writes.
+os.environ["ARCHITECT_OWNER_TURNS"] = os.path.join(tempfile.gettempdir(), "regen-writer-no-owner-turns.jsonl")
+os.environ["ARCHITECT_MEMORY_SOCKET"] = os.path.join(tempfile.gettempdir(), "regen-writer-no-memory.sock")
 spec = importlib.util.spec_from_file_location("datg", os.path.join(sys.argv[1], "datg.py"))
 datg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(datg)
@@ -102,8 +106,8 @@ def chain(code, goal):
            "opts": [{"l": LABEL[:160], "rec": False} for _ in range(4)]}]),
         ("add", ["add", "A", "--title", "elit", "--goal", goal], [{"op": "add", "kind": "A", "title": "elit", "goal": goal}]),
         ("update", ["update", "{A}", "--answer", "magna"], [{"op": "update", "id": "{A}", "answer": "magna"}]),
-        # #10780: an answer's source: an owner ruling with an end, an Architect inference, a refused owner
-        # source with no quote, and an inference that carries an owner quote (refused).
+        # #10780: an answer's source: an owner ruling with an end (refused: no owner turn on record), an
+        # Architect inference, an owner source with no quote, and an inference with an owner quote (refused).
         ("update", ["update", "{A}", "--answer", "magna", "--source", "owner", "--cite", "chat 2026-10-21T10:12Z",
                     "--quote", "magna elit", "--until", "2026-10-22T09:00Z"],
          [{"op": "update", "id": "{A}", "answer": "magna", "source": {

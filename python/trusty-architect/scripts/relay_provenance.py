@@ -13,21 +13,30 @@ in <text>. Each one must be followed by the owner's words in double quotes, then
                              pending_hook_dedupe.py writes (inbox/owner-turns.jsonl; turns within 2 min)
   dashboard <id>             a dashboard item, Intent Ledger steer, session command or goal (bare or
                              S-qualified id); the owner-written fields of that document
-  palace <drawer-id>         a memory palace drawer (8-64 hex); the quote is logged, not checked here
-Each quote (split on an ellipsis) must appear in the cited turn, case and whitespace aside. A quote that
+  palace [<palace>:]<drawer> a memory palace drawer: an 8-64 hex prefix of one drawer id in <palace> (default:
+                             memory_palace in local/architect.json), read through trusty-memory's
+                             read-only `memory.drawers_list` on its Unix socket; unreachable, missing or
+                             ambiguous refuses
+The text is NFKC-normalised first. Any owner claim, `user|owner` then `ruling|instruction|decision` in any
+case, that is not exactly one of the two labels refuses, and so does unlabelled text between the relay
+marker and the first owner label. Each quote (split on an ellipsis) must appear in the cited turn, case and whitespace aside. A quote that
 is in the turn but does not say the relayed thing cannot pass: the owner label carries only the quote,
 and the Architect's reading of it goes after `Architect answer:` with its basis. Text with no owner
 label passes untouched; so does a quoted owner ruling relayed as history once it is cited.
 Every labelled relay checked, passed or refused, is appended to inbox/relay-provenance.jsonl.
 Exit 0: no owner label, or every label verified (one `cite ok` line each). Exit 3: refused (the reason,
 and how to resend as an Architect answer). Exit 2: usage. Paths: ARCHITECT_OWNER_TURNS,
-ARCHITECT_RELAY_LOG and DASHBOARD_ROOT override the record, the log and the dashboard store.
+ARCHITECT_RELAY_LOG and DASHBOARD_ROOT override the record, the log and the dashboard store;
+ARCHITECT_MEMORY_SOCKET names trusty-memory's socket (default: `trusty-memory port`).
 Test: tests/test_relay.py (through relay.sh)
 """
 import json
 import os
 import re
+import socket
+import subprocess
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,10 +52,16 @@ CITE = re.compile(r"\s*\(owner turn: ([^()\n]{1,80})\)")
 TAIL = re.compile(r"[\s.;,-]*")
 CHAT = re.compile(r"^chat (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z)$")
 DASH = re.compile(r"^dashboard ((?:S[0-9a-f]{2}:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,79})$")
-PALACE = re.compile(r"^palace ([0-9a-f]{8,64})$")
+PALACE = re.compile(r"^palace (?:([A-Za-z0-9][A-Za-z0-9._-]{0,63}):)?([0-9a-f]{8,64})$")
+# #10780 critic H1: an owner claim in any spelling; only the two exact labels may make one.
+CLAIM = re.compile(r"\b(?:user|owner)\s+(?:ruling|instruction|decision)s?\b", re.I)
+MARKER = re.compile(r"^\[[^\]\n]*Architect [0-9]{2}:[0-9][0-9x]Z\]")
+ARCH_LABEL = re.compile(r"\s*Architect (?:answer|note|question|proposal):")
+MEMORY_TIMEOUT = 10
+DRAWER_WINDOW = 10000
 WINDOW = timedelta(minutes=2)
 HOW = ("Quote the owner verbatim and cite the turn: User ruling (<owner>): \"<owner's words>\" "
-       "(owner turn: chat <YYYY-MM-DDTHH:MMZ> | dashboard <id> | palace <drawer-id>). "
+       "(owner turn: chat <YYYY-MM-DDTHH:MMZ> | dashboard <id> | palace [<palace>:]<drawer-id>). "
        "For your own reading or arithmetic send `Architect answer: ... (basis: ...)` instead.")
 FOLD = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
 
@@ -56,7 +71,7 @@ class Refused(Exception):
 
 
 def _norm(s):
-    return " ".join(str(s).translate(FOLD).split()).casefold()
+    return " ".join(unicodedata.normalize("NFKC", str(s)).translate(FOLD).split()).casefold()
 
 
 def owner_turns_path():
@@ -131,6 +146,60 @@ def dashboard_turns(ref):
     return out
 
 
+def _memory_socket():
+    sock = os.environ.get("ARCHITECT_MEMORY_SOCKET")
+    if sock:
+        return sock
+    try:
+        out = subprocess.run(["trusty-memory", "port"], capture_output=True, text=True, timeout=MEMORY_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Refused(f"trusty-memory is unreachable ({type(e).__name__}); a palace cite cannot be checked")
+    lines = [ln.strip() for ln in out.stdout.splitlines() if ln.strip().startswith("/")]
+    if out.returncode != 0 or not lines:
+        raise Refused("trusty-memory has no socket; a palace cite cannot be checked")
+    return lines[-1]
+
+
+def palace_turns(palace, prefix):
+    """The content of the one drawer in `palace` whose id starts with `prefix` (hyphens aside); Refused otherwise.
+
+    Why: critic H2, any hex string passed as a palace cite. What: one read-only `memory.drawers_list` call
+    (newline JSON-RPC on the daemon's Unix socket), newest DRAWER_WINDOW drawers. Fails closed.
+    Test: test_relay_sends_a_resource_hold_10780, test_relay_refuses_an_unchecked_palace_cite_10780
+    """
+    if not palace:
+        try:
+            import architect_config
+            palace = architect_config.load().memory_palace
+        except Exception as e:  # noqa: BLE001 - any config fault leaves the palace unknown, which refuses
+            raise Refused(f"the memory palace is not configured ({type(e).__name__})")
+    if not palace:
+        raise Refused("the memory palace is not configured; cite `palace <palace>:<drawer-id>`")
+    req = {"jsonrpc": "2.0", "id": 1, "method": "memory.drawers_list",
+           "params": {"palace_id": palace, "limit": DRAWER_WINDOW, "sort": "created_desc"}}
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(MEMORY_TIMEOUT)
+            s.connect(_memory_socket())
+            s.sendall((json.dumps(req) + "\n").encode())
+            s.shutdown(socket.SHUT_WR)
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(1 << 16)
+                if not chunk:
+                    break
+                buf += chunk
+        drawers = json.loads(buf.decode("utf-8"))["result"]
+    except Refused:
+        raise
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise Refused(f"trusty-memory did not answer for palace {palace!r} ({type(e).__name__}); fail closed")
+    hits = [d for d in drawers if isinstance(d, dict) and str(d.get("id", "")).replace("-", "").startswith(prefix)]
+    if len(hits) != 1:
+        raise Refused(f"palace {palace!r} holds {'no' if not hits else len(hits)} drawer(s) with id {prefix}")
+    return [str(hits[0].get("content") or "")]
+
+
 def _quoted_in(quote, texts):
     parts = [p for p in re.split(r"…|\.\.\.", _norm(quote)) if p.strip(" ,;")]
     for text in map(_norm, texts):
@@ -168,14 +237,14 @@ def check_segment(seg):
 
 
 def verify(cite, quotes):
-    """'chat' / 'dashboard' when every quote is in the cited turn, 'palace' (logged, not checked)."""
+    """'chat', 'dashboard' or 'palace' when every quote is in the cited turn; Refused otherwise."""
     m = CHAT.match(cite)
     if m:
         turns, kind = chat_turns(m.group(1)), "chat"
     elif DASH.match(cite):
         turns, kind = dashboard_turns(DASH.match(cite).group(1)), "dashboard"
     elif PALACE.match(cite):
-        return "palace"
+        turns, kind = palace_turns(PALACE.match(cite).group(1), PALACE.match(cite).group(2)), "palace"
     else:
         raise Refused(f"citation {cite!r} is not `chat <YYYY-MM-DDTHH:MMZ>`, `dashboard <id>` or `palace <drawer-id>`")
     if not turns:
@@ -188,8 +257,18 @@ def verify(cite, quotes):
 
 def check(text):
     """[(label, name, cite, kind, quotes)] for every owner label in `text`; Refused on the first bad one."""
-    text = text.replace("\u201c", '"').replace("\u201d", '"')   # curly quote delimiters count as straight ones
+    text = unicodedata.normalize("NFKC", text).replace("\u201c", '"').replace("\u201d", '"')   # #10780 H1
     marks = list(LABEL.finditer(text))
+    starts = {m.start() for m in marks}
+    for c in CLAIM.finditer(text):   # #10780 H1: an owner claim in any other spelling is not a label
+        if c.start() not in starts:
+            raise Refused(f"`{text[c.start():c.end() + 16].strip()}` is not an owner label; write exactly "
+                          "`User ruling (<owner>):` or `User instruction (<owner>):`")
+    if marks:
+        m0 = MARKER.match(text)
+        lead = text[m0.end() if m0 else 0:marks[0].start()]
+        if lead.strip() and not ARCH_LABEL.match(lead):
+            raise Refused("text before the first owner label is not the owner's; label it `Architect answer: ...`")
     out = []
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
@@ -225,8 +304,7 @@ def main(argv):
         print(f"NO-OWNER-CITE: {e}. {HOW}")
         return 3
     for label, _, cite, kind, quotes in found:
-        log(session, "verified" if kind != "palace" else "palace-unchecked",
-            {"label": label, "cite": cite, "quotes": [q[:300] for q in quotes]})
+        log(session, "verified", {"kind": kind, "label": label, "cite": cite, "quotes": [q[:300] for q in quotes]})
         print(f"cite ok: {label} {cite} ({kind})")
     return 0
 

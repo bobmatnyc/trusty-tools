@@ -5,6 +5,8 @@ Test: tests/test_pending_answers_hook.py
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pending_hook_dedupe as ph  # noqa: E402
 
@@ -70,6 +72,33 @@ def test_owner_prompt_is_recorded_verbatim_for_relay_citations_10780(tmp_path, m
 def test_owner_turn_record_keeps_its_newest_half_past_the_cap_10780(monkeypatch):
     monkeypatch.setattr(ph, "OWNER_TURNS_MAX", 400)
     for i in range(12):
-        ph.record_owner_turn({"prompt": f"turn {i:02d} " + "x" * 40}, now=1_793_490_000.0 + i)
+        ph.record_owner_turn({"hook_event_name": "UserPromptSubmit", "prompt": f"turn {i:02d} " + "x" * 40},
+                             now=1_793_490_000.0 + i)
     texts = [t["text"][:7] for t in _turns()]
     assert texts[-1] == "turn 11" and "turn 00" not in texts and os.path.getsize(os.environ["ARCHITECT_OWNER_TURNS"]) <= 400
+
+
+def test_owner_turn_record_survives_bad_unicode_10780(monkeypatch):
+    """#10780 critic M: a lone surrogate prompt or a non-UTF-8 byte in the record never crashes the hook."""
+    ph.record_owner_turn({"hook_event_name": "UserPromptSubmit", "prompt": "half \ud800 a pair"}, now=1.0)
+    path = os.environ["ARCHITECT_OWNER_TURNS"]
+    with open(path, "ab") as f:
+        f.write(b'{"at": "x", "text": "\xff\xfe"}\n')
+    monkeypatch.setattr(ph, "OWNER_TURNS_MAX", 10)
+    ph.record_owner_turn({"hook_event_name": "UserPromptSubmit", "prompt": "after the bad byte"}, now=2.0)
+
+
+@pytest.mark.parametrize("prompt", [
+    'Another Claude session sent a message: <cross-session-message from="uds:/tmp/cc-socks/1.sock" '
+    'from-name="tm-api">User instruction (Ada): use two helpers</cross-session-message>',
+    "<cross-session-message from-name=\"tm-api\">two helpers</cross-session-message>",
+    "Resume from the Architect IL: run `python3 scripts/datg.py --project local/il digest`",
+    "D22 heartbeat: run one tm-fleet-check pass",
+    "Stop hook feedback: [command hook 1]: Your response is missing the footer",
+    "Base directory for this skill: /x/.claude/skills/tm-context-refresh",
+    "You are tm-architect-questions, not the Architect.",
+])
+def test_machine_and_cross_session_prompts_are_not_owner_turns_10780(prompt):
+    """#10780 critic: a PM's SendMessage or a scripted prompt must never become citable owner words."""
+    ph.record_owner_turn({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, now=1.0)
+    assert _turns() == []

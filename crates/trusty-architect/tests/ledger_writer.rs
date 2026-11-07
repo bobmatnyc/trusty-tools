@@ -249,31 +249,31 @@ fn ledger_writer_done_needs_outcome_and_close_archives() -> R {
 }
 
 /// #10780: an answer records who it came from; an inference never carries
-/// an owner quote, and a new answer without a source drops the old one.
+/// an owner quote, the Rust writer never writes an unverified owner source
+/// (critic H3), and a new answer without a source drops the old one.
 #[test]
 fn ledger_answer_source_round_trips_and_refuses_bad_shapes() -> R {
     let s = Store::new()?;
     s.ok(json!([{"op": "add", "kind": "D", "title": "helpers", "goal": "th-G01"}]))?;
-    let owner = json!({"by": "owner", "cite": "chat 2026-11-06T20:48Z",
-        "quote": "unleash two more agents", "until": "2026-11-09T09:00Z"});
-    s.ok(json!([{"op": "update", "id": "th-D01", "answer": "four", "source": owner}]))?;
-    assert_eq!(s.state()["items"][0]["source"], owner);
-    assert!(read(&s.paths.state).contains(r#""esc":null,"source":{"by":"owner","cite""#));
+    let inference = json!({"by": "architect", "basis": "1.75%/h pace arithmetic"});
+    s.ok(json!([{"op": "update", "id": "th-D01", "answer": "two", "source": inference}]))?;
+    assert_eq!(s.state()["items"][0]["source"], inference);
+    assert!(read(&s.paths.state).contains(r#""esc":null,"source":{"by":"architect","basis""#));
     let before = s.files();
     for bad in [
+        json!({"by": "owner", "cite": "chat 2026-11-06T20:48Z", "quote": "unleash two more agents"}),
         json!({"by": "owner", "cite": "chat 2026-11-06T23:38Z"}),
         json!({"by": "architect", "basis": "pace", "quote": "two helpers"}),
         json!({"by": "the owner", "cite": "c", "quote": "q"}),
-        json!({"by": "owner", "cite": "c", "quote": "q", "until": "Monday"}),
+        json!({"by": "architect"}),
     ] {
         let op = json!([{"op": "update", "id": "th-D01", "answer": "two", "source": bad}]);
         assert_eq!(s.run(op).err().as_ref().map(exit), Some(2), "{bad}");
     }
-    let no_answer =
-        json!([{"op": "update", "id": "th-D01", "source": {"by": "architect", "basis": "b"}}]);
+    let no_answer = json!([{"op": "update", "id": "th-D01", "source": inference}]);
     assert_eq!(s.run(no_answer).err().as_ref().map(exit), Some(2));
     assert_eq!(s.files(), before);
-    s.ok(json!([{"op": "update", "id": "th-D01", "answer": "two"}]))?;
+    s.ok(json!([{"op": "update", "id": "th-D01", "answer": "four"}]))?;
     assert_eq!(s.state()["items"][0].get("source"), None);
     Ok(())
 }

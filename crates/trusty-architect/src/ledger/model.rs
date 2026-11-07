@@ -126,7 +126,8 @@ pub struct Item {
 /// Why: after a /clear a fresh session restored an Architect inference as an
 /// owner ruling; the record now says which it is.
 /// What: `{by: owner, cite, quote, until?}` or `{by: architect, basis}`, in
-/// the prototype's key order; the writer checks the shape (`ops`).
+/// the prototype's key order. The Rust writer writes only the Architect
+/// shape (`ops::source`); an owner source is read and kept as stored.
 /// Test: `ledger_writer_matches_prototype_bytes`, `ledger_answer_source_round_trips_and_refuses_bad_shapes`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnswerSource {

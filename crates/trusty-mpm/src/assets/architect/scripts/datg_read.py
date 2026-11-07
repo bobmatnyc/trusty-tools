@@ -193,10 +193,30 @@ OWNER_CLAIM = re.compile(r"\b(?:user|owner)\s+(?:ruling|instruction)s?\b|\brulin
 OWNER_CITE = re.compile(r"owner turn:\s*(?:chat|dashboard|palace)\s+\S", re.I)
 
 
+CITED = re.compile(r'((?:"[^"\n]+"\s*(?:…|\.\.\.)?\s*)+)\(owner turn:\s*([^()\n]{1,80})\)')
+
+
+def _cite_verified(text):
+    """True when every `"<quote>" (owner turn: <cite>)` in `text` checks out (critic H3: a cite alone is not enough)."""
+    found = CITED.findall(text)
+    if not found:
+        return False
+    try:
+        import relay_provenance
+        for quotes, cite in found:
+            relay_provenance.verify(cite.strip(), re.findall(r'"([^"\n]+)"', quotes))
+    except Exception:  # noqa: BLE001 - a refusal, a missing module or an unreachable store keeps the flag
+        return False
+    return True
+
+
 def unsourced_claim(text):
-    """True when `text` claims an owner ruling and names no `owner turn: <cite>` (Test: tests/test_datg_provenance.py)."""
+    """True when `text` claims an owner ruling without a verified `"<quote>" (owner turn: <cite>)`.
+
+    Test: tests/test_datg_provenance.py
+    """
     t = str(text or "")
-    return bool(OWNER_CLAIM.search(t)) and not OWNER_CITE.search(t)
+    return bool(OWNER_CLAIM.search(t)) and not (OWNER_CITE.search(t) and _cite_verified(t))
 
 
 def provenance_flags(path):
@@ -226,10 +246,11 @@ def _ruling_sections(items, now):
             continue
         src = i.get("source") if isinstance(i.get("source"), dict) else {}
         line = f"  {i['id']} {i['title']} | answer: {i.get('answer', '')}"
-        if src.get("by") == "owner":
+        if src.get("by") == "owner":   # #10780 H3: the owner's words are the ruling; the answer is our reading
             until = parse_ts(src.get("until")) if src.get("until") else None
-            line += f' | owner turn: {src.get("cite")} "{src.get("quote")}"' + (f" | until {src['until']}" if until else "")
-            (old if until and until <= now else cur).append(line)
+            (old if until and until <= now else cur).append(
+                f'  {i["id"]} {i["title"]} | ruling: "{src.get("quote")}" (owner turn: {src.get("cite")})'
+                + (f" | until {src['until']}" if until else "") + f" | Architect reading: {i.get('answer', '')}")
         elif src.get("by") == "architect":
             inf.append(line + f" | basis: {src.get('basis')}")
         else:
