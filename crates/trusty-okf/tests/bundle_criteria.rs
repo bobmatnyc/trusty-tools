@@ -492,3 +492,19 @@ fn move_reports_a_link_in_a_non_utf8_file_as_unreadable() {
     assert!(matches!(got, Err(OkfError::Parse { .. })), "{got:?}");
     assert_eq!(tree(r), before, "no file changed");
 }
+
+/// #10746: a UTF-8 source whose YAML does not parse is refused with
+/// `Parse` before the journaled operation runs: no empty concept at the
+/// new ID, no `log.md` entry, no conflict mark; the tree is byte-identical.
+#[test]
+fn move_refuses_an_unparseable_source_with_no_file_changed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let r = tmp.path();
+    write(r, "linker.md", "---\ntype: Note\n---\n[s](src.md)\n");
+    let mut b = open(r);
+    write(r, "src.md", "---\ntype: [unclosed\n---\nBody\n");
+    let before = tree(r);
+    let got = b.move_concept(&id("src"), &id("dst"), now());
+    assert!(matches!(got, Err(OkfError::Parse { .. })), "{got:?}");
+    assert_eq!(tree(r), before, "no file changed, no conflict mark");
+}

@@ -27,6 +27,7 @@
 //! `c115_bundle_open_reads_foreign_files_and_writes_never_touch_them`,
 //! `c140_fold_collision_on_put_and_move`,
 //! `move_reports_a_link_in_a_non_utf8_file_as_unreadable`,
+//! `move_refuses_an_unparseable_source_with_no_file_changed`,
 //! `c106_crash_at_every_boundary_rolls_forward_byte_identical`.
 
 use std::ops::Range;
@@ -352,11 +353,18 @@ impl Bundle {
                 }
             };
             let is_moved = &id == from;
-            let Ok((mut c, _)) = parse_concept(id.clone(), &text) else {
-                for t in plan_body(&text, dir_of(&id), from, to, None).to_old {
-                    report.unmoved.push(unmoved(&entry.rel, &t, "unparseable"));
+            let (mut c, _) = match parse_concept(id.clone(), &text) {
+                Ok(parsed) => parsed,
+                // #10746: an unparseable source would leave `moved_text`
+                // empty and the op would write an empty concept at the new
+                // ID; refuse before `ops::run`, as the non-UTF-8 arm does.
+                Err(e) if is_moved => return Err(e),
+                Err(_) => {
+                    for t in plan_body(&text, dir_of(&id), from, to, None).to_old {
+                        report.unmoved.push(unmoved(&entry.rel, &t, "unparseable"));
+                    }
+                    continue;
                 }
-                continue;
             };
             if is_moved {
                 moved_text = text.clone();
