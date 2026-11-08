@@ -4,8 +4,11 @@
 //! are a table of `%N` → (server, session). No tmux binary runs, and the
 //! fake fails any rename or kill it is asked for.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use super::pane_identity::PaneIdentity;
 use super::tests::make_active_test_record;
@@ -36,6 +39,13 @@ struct PaneTmux {
     claude_unreadable: bool,
     /// Every kill or rename asked for. The fix must never ask.
     mutations: Mutex<Vec<String>>,
+    /// #10101: the named (`-L`) servers this driver reaches, by name.
+    servers: HashMap<String, Arc<PaneTmux>>,
+    /// #10101: how many times `list_sessions` was asked.
+    lists: AtomicUsize,
+    /// #10101: `list_sessions` blocks until the sender is dropped (a hung
+    /// server).
+    hang: Option<Mutex<mpsc::Receiver<()>>>,
 }
 
 impl PaneTmux {
@@ -77,6 +87,10 @@ impl ManagedTmuxDriver for PaneTmux {
         Ok(String::new())
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        self.lists.fetch_add(1, Ordering::SeqCst);
+        if let Some(hang) = &self.hang {
+            let _ = hang.lock().unwrap().recv();
+        }
         if self.list_fails {
             return Err(ManagedError::TmuxUnavailable("fake: no server".into()));
         }
@@ -91,6 +105,11 @@ impl ManagedTmuxDriver for PaneTmux {
     }
     fn pane_exists_checked(&self, name: &str, pane_id: &str) -> Option<bool> {
         Some(self.panes.get(pane_id).is_some_and(|(_, s)| s == name))
+    }
+    fn on_server(&self, server: &str) -> Option<Arc<dyn ManagedTmuxDriver>> {
+        self.servers
+            .get(server)
+            .map(|s| Arc::clone(s) as Arc<dyn ManagedTmuxDriver>)
     }
     fn pane_identity(&self, pane_id: &str) -> Result<PaneIdentity, ManagedError> {
         let (server, session) = self.panes.get(pane_id).ok_or_else(|| {
@@ -517,4 +536,220 @@ async fn a_pane_the_probe_could_not_read_is_reported_unchecked() {
     let row = check_session_names(&mgr).await;
     assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
     assert!(row.message.contains("tm-blind"), "{}", row.message);
+}
+
+/// The server instance a workspace server's panes were captured on.
+const WS_SERVER: &str = "6161:1750000000";
+
+/// A fake with `sessions` and `panes`, reaching `servers` by name (#10101).
+fn host(
+    sessions: &[&str],
+    panes: &[(&str, &str, &str)],
+    servers: Vec<(&str, Arc<PaneTmux>)>,
+) -> Arc<PaneTmux> {
+    let base = PaneTmux::new(sessions, panes);
+    Arc::new(PaneTmux {
+        sessions: base.sessions.clone(),
+        panes: base.panes.clone(),
+        servers: servers
+            .into_iter()
+            .map(|(n, s)| (n.to_owned(), s))
+            .collect(),
+        ..PaneTmux::default()
+    })
+}
+
+/// [`seed`] for a record on the workspace server whose socket is `socket`.
+async fn seed_on(mgr: &SessionManager, name: &str, pane: &str, socket: &Path) -> ManagedSessionId {
+    let mut record = make_active_test_record(name, "t", "/tmp");
+    record.pane_id = Some(pane.into());
+    record.tmux_server = Some(WS_SERVER.into());
+    record.tmux_socket = Some(socket.to_path_buf());
+    let id = record.id;
+    mgr.store.write().await.upsert(record).await.expect("seed");
+    id
+}
+
+/// A socket path for server `server` in `dir`, unique per test so the
+/// process-wide in-flight probe set never joins two tests.
+fn socket(dir: &tempfile::TempDir, server: &str) -> PathBuf {
+    dir.path().join(server)
+}
+
+/// #10101 criteria 1, 2 and 3: a PM on a workspace server renamed in tmux is
+/// followed by its pane on that server; the default server's own record, whose
+/// pane carries the same `%3` id, is followed on the default server. Each
+/// server is listed once for two records on it.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_renamed_workspace_server_record_is_followed_on_its_own_server() {
+    let ws = PaneTmux::new(
+        &["tm-pm", "tm-peer"],
+        &[("%3", WS_SERVER, "tm-pm"), ("%4", WS_SERVER, "tm-peer")],
+    );
+    let tmux = host(
+        &["tm-other"],
+        &[("%3", SERVER, "tm-other")],
+        vec![("tm-ws-a", Arc::clone(&ws))],
+    );
+    let (dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let sock = socket(&dir, "tm-ws-a");
+    let on_ws = seed_on(&mgr, "tm-pm-01", "%3", &sock).await;
+    let peer = seed_on(&mgr, "tm-peer", "%4", &sock).await;
+    let on_default = seed(
+        &mgr,
+        "tm-def-01",
+        ManagedSessionState::Active,
+        "%3",
+        Some(SERVER),
+    )
+    .await;
+
+    let followed = mgr.follow_tmux_renames().await;
+
+    assert_eq!(followed.len(), 2, "{followed:?}");
+    assert_eq!(mgr.get(&on_ws).await.expect("ws").tmux_name, "tm-pm");
+    assert_eq!(
+        mgr.get(&on_default).await.expect("default").tmux_name,
+        "tm-other"
+    );
+    assert_eq!(mgr.get(&peer).await.expect("peer").tmux_name, "tm-peer");
+    assert_eq!(ws.lists.load(Ordering::SeqCst), 1, "one listing per server");
+    assert!(ws.mutations.lock().unwrap().is_empty());
+    assert!(tmux.mutations.lock().unwrap().is_empty());
+}
+
+/// #10101 criterion 3: another server listing a session under the record's
+/// old name does not read as the record being live; only its own server's
+/// listing counts.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_same_named_session_on_another_server_does_not_hide_a_rename() {
+    let ws_a = PaneTmux::new(&["tm-y"], &[("%3", WS_SERVER, "tm-y")]);
+    let ws_b = PaneTmux::new(&["tm-x"], &[("%3", OTHER_SERVER, "tm-x")]);
+    let tmux = host(
+        &["tm-x"],
+        &[("%3", SERVER, "tm-x")],
+        vec![("tm-ws-a", ws_a), ("tm-ws-b", Arc::clone(&ws_b))],
+    );
+    let (dir, mgr) = manager(tmux).await;
+    let id = seed_on(&mgr, "tm-x", "%3", &socket(&dir, "tm-ws-a")).await;
+
+    mgr.follow_tmux_renames().await;
+
+    assert_eq!(mgr.get(&id).await.expect("record").tmux_name, "tm-y");
+    assert_eq!(ws_b.lists.load(Ordering::SeqCst), 0, "no record on ws-b");
+}
+
+/// #10101 criterion 2: the reaper follows a workspace-server rename before
+/// its name check, so the PM stays Active under its current name.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn the_reaper_follows_a_workspace_server_rename_instead_of_stopping_it() {
+    let ws = PaneTmux::new(&["tm-arch"], &[("%5", WS_SERVER, "tm-arch")]);
+    let tmux = host(&["tm-unrelated"], &[], vec![("tm-ws-a", Arc::clone(&ws))]);
+    let (dir, mgr) = manager(tmux).await;
+    let id = seed_on(&mgr, "tm-sup", "%5", &socket(&dir, "tm-ws-a")).await;
+    let state = DaemonState::with_session_manager(Arc::clone(&mgr));
+    let live = crate::session_manager::tmux_route::LiveSessions {
+        default: HashSet::from(["tm-unrelated".to_owned()]),
+        named: HashMap::from([("tm-ws-a".to_owned(), HashSet::from(["tm-arch".to_owned()]))]),
+        ..Default::default()
+    };
+
+    state.reap_managed_against(&live).await;
+
+    let record = mgr.get(&id).await.expect("record");
+    assert_eq!(record.state, ManagedSessionState::Active);
+    assert_eq!(record.tmux_name, "tm-arch");
+    assert!(
+        ws.mutations.lock().unwrap().is_empty(),
+        "nothing was killed"
+    );
+}
+
+/// #10101 criterion 2 (Fail-Open Check): a hung workspace server bounds the
+/// pass, holds one listing across passes, and leaves its records as they
+/// are — not renamed, not stopped, not dropped.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_hung_workspace_server_is_skipped_and_its_records_kept() {
+    let (release, rx) = mpsc::channel::<()>();
+    let ws = Arc::new(PaneTmux {
+        sessions: vec!["tm-new".to_owned()],
+        panes: HashMap::from([("%3".to_owned(), (WS_SERVER.to_owned(), "tm-new".to_owned()))]),
+        hang: Some(Mutex::new(rx)),
+        ..PaneTmux::default()
+    });
+    let tmux = host(
+        &["tm-new"],
+        &[("%3", WS_SERVER, "tm-new")],
+        vec![("tm-ws-hung", Arc::clone(&ws))],
+    );
+    let (dir, mgr) = manager(tmux).await;
+    let id = seed_on(&mgr, "tm-old", "%3", &socket(&dir, "tm-ws-hung")).await;
+
+    let started = Instant::now();
+    assert!(mgr.follow_tmux_renames().await.is_empty());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "pass not bounded"
+    );
+    let again = Instant::now();
+    assert!(mgr.follow_tmux_renames().await.is_empty());
+    assert!(
+        again.elapsed() < Duration::from_secs(1),
+        "in-flight server re-probed"
+    );
+    assert_eq!(ws.lists.load(Ordering::SeqCst), 1, "one blocked listing");
+
+    let state = DaemonState::with_session_manager(Arc::clone(&mgr));
+    let live = crate::session_manager::tmux_route::LiveSessions {
+        default: HashSet::from(["tm-new".to_owned()]),
+        unknown: HashSet::from(["tm-ws-hung".to_owned()]),
+        ..Default::default()
+    };
+    state.reap_managed_against(&live).await;
+
+    let record = mgr.get(&id).await.expect("record kept");
+    assert_eq!(record.tmux_name, "tm-old");
+    assert_eq!(record.state, ManagedSessionState::Active);
+    drop(release);
+}
+
+/// #10101 criteria 2 and 4 (Fail-Open Check): a workspace server the driver
+/// cannot reach, and one whose listing fails, skip their records; neither is
+/// looked up on the default server, whose `%3` sits in a live session.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn an_unreachable_or_failing_workspace_server_is_skipped_never_defaulted() {
+    let failing = Arc::new(PaneTmux {
+        sessions: vec!["tm-new".to_owned()],
+        panes: HashMap::from([("%3".to_owned(), (WS_SERVER.to_owned(), "tm-new".to_owned()))]),
+        list_fails: true,
+        ..PaneTmux::default()
+    });
+    let tmux = host(
+        &["tm-wrong"],
+        &[("%3", WS_SERVER, "tm-wrong")],
+        vec![("tm-ws-fail", failing)],
+    );
+    let (dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let gone = seed_on(&mgr, "tm-a-01", "%3", &socket(&dir, "tm-ws-gone")).await;
+    let fail = seed_on(&mgr, "tm-b-01", "%3", &socket(&dir, "tm-ws-fail")).await;
+
+    assert_eq!(mgr.name_drifts().await.expect("default listed"), Vec::new());
+    assert!(mgr.follow_tmux_renames().await.is_empty());
+
+    for (id, name) in [(gone, "tm-a-01"), (fail, "tm-b-01")] {
+        let record = mgr.get(&id).await.expect("record kept");
+        assert_eq!(record.tmux_name, name);
+        assert_eq!(record.state, ManagedSessionState::Active);
+    }
+    assert!(tmux.mutations.lock().unwrap().is_empty());
 }

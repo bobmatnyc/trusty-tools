@@ -1,0 +1,2 @@
+Fixed
+- A PM on its workspace tmux server whose session is renamed in tmux is now followed by its pane on that server, as default-server PMs already were, so the reaper no longer stops it and `tm ls` lists it under its current name. Each workspace server is listed once per pass within the probe budget; a hung, vanished or unreachable server leaves its records unchanged for that pass and is never looked up on the default server (#10101).
