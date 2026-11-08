@@ -125,7 +125,8 @@ async fn dispatch_daemon(
         },
         // #10476: the plan is pure; the tmux branch runs the bin's guarded,
         // quiet switch on the blocking pool, the iTerm2 branch a 5 s-bounded
-        // osascript. Nothing here can create a session, window or tab.
+        // osascript. Nothing here can create a session or tab; #10101: Dc3
+        // opens an attach window only for a session on another tmux server.
         PendingAction::Focus(name) => {
             state.set_notice(crate::tui::focus::focus_session(&name).await);
         }

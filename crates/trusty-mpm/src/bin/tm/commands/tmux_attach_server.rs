@@ -67,14 +67,20 @@ pub(crate) fn attach_argv_on(socket: &Path, session: &str) -> Vec<String> {
 /// guarded switch, which fails closed on its own.
 /// Test: `on_other_server_reads_the_socket_field_of_tmux`.
 pub(crate) fn on_other_server(caller_tmux: Option<&str>, target: &Path) -> bool {
-    let Some(socket) = caller_tmux
-        .and_then(|v| v.split(',').next())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(socket) = caller_socket(caller_tmux) else {
         return false;
     };
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    canon(Path::new(socket)) != canon(target)
+    canon(socket) != canon(target)
+}
+
+/// The socket field of the caller's `$TMUX`; `None` when unset or empty.
+/// Test: `on_other_server_reads_the_socket_field_of_tmux`.
+pub(crate) fn caller_socket(caller_tmux: Option<&str>) -> Option<&Path> {
+    caller_tmux
+        .and_then(|v| v.split(',').next())
+        .filter(|s| !s.is_empty())
+        .map(Path::new)
 }
 
 /// POSIX single-quoting for one shell word.
@@ -82,13 +88,36 @@ fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-/// `new-window -a -t <caller_pane> -n <session> <command>` on the caller's
+/// The `@N` id of the window holding pane `pane`, read on the caller's server;
+/// `None` when tmux prints no window id.
+///
+/// # Errors
+///
+/// tmux cannot be run, or exits non-zero.
+///
+/// Test: `a_cross_server_focus_opens_the_attach_window`,
+/// `a_caller_pane_with_no_window_moves_nothing`.
+pub(crate) fn window_of_pane(tmux_bin: &str, pane: &str) -> anyhow::Result<Option<String>> {
+    let target = trusty_common::tmux::exact_window_target(pane);
+    let output = std::process::Command::new(tmux_bin)
+        .args(["display-message", "-p", "-t", &target, "#{window_id}"])
+        .output()
+        .context("failed to invoke tmux")?;
+    if !output.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok(id.starts_with('@').then_some(id))
+}
+
+/// `new-window -a -t <caller_window> -n <session> <command>` on the caller's
 /// server, where the command attaches to `session` on the server at `socket`
 /// with `$TMUX`/`$TMUX_PANE` unset (tmux refuses a nested attach otherwise).
+/// `caller_window` is a window id (`@N`): tmux 3.6 refuses a `%N` pane id here.
 /// Test: `a_cross_server_attach_opens_a_window_running_the_attach`,
 /// `a_cross_server_window_target_is_exact`.
 pub(crate) fn new_window_attach_argv(
-    caller_pane: &str,
+    caller_window: &str,
     tmux_bin: &str,
     socket: &Path,
     session: &str,
@@ -103,8 +132,8 @@ pub(crate) fn new_window_attach_argv(
         "new-window".to_owned(),
         "-a".to_owned(),
         "-t".to_owned(),
-        // #8443: a %N id passes through; anything else is pinned exact.
-        trusty_common::tmux::exact_window_target(caller_pane),
+        // #8443: an @N id passes through; anything else is pinned exact.
+        trusty_common::tmux::exact_window_target(caller_window),
         "-n".to_owned(),
         session.to_owned(),
         attach,
@@ -147,17 +176,22 @@ mod tests {
         // Unknown is not "another server": today's guarded switch decides.
         assert!(!on_other_server(None, target));
         assert!(!on_other_server(Some(""), target));
+        assert_eq!(
+            caller_socket(Some("/s/tm-ws-x,1,0")),
+            Some(Path::new("/s/tm-ws-x"))
+        );
+        assert_eq!(caller_socket(Some(",1,0")), None);
     }
 
     #[test]
     fn a_cross_server_attach_opens_a_window_running_the_attach() {
         let argv = new_window_attach_argv(
-            "%7",
+            "@7",
             "/opt/homebrew/bin/tmux",
             Path::new("/tmp/tmux-501/tm-ws-x"),
             "tm-a",
         );
-        assert_eq!(&argv[..6], ["new-window", "-a", "-t", "%7", "-n", "tm-a"]);
+        assert_eq!(&argv[..6], ["new-window", "-a", "-t", "@7", "-n", "tm-a"]);
         assert_eq!(
             argv[6],
             "env -u TMUX -u TMUX_PANE '/opt/homebrew/bin/tmux' -S '/tmp/tmux-501/tm-ws-x' \
@@ -172,7 +206,7 @@ mod tests {
         let socket = Path::new("/tmp/tmux-501/tm-ws-x");
         let by_name = new_window_attach_argv("main", "tmux", socket, "tm-a");
         assert_eq!(by_name[3], "=main:");
-        let by_id = new_window_attach_argv("%12", "tmux", socket, "tm-a");
-        assert_eq!(by_id[3], "%12");
+        let by_id = new_window_attach_argv("@12", "tmux", socket, "tm-a");
+        assert_eq!(by_id[3], "@12");
     }
 }
