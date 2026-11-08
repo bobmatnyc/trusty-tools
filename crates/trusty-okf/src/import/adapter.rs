@@ -20,7 +20,10 @@
 //! outlives its source.
 //! Slice S9 of #10746.
 //! The adapter leads its own process group, and every stop kills the group,
-//! so no process it started outlives it. A list reply whose `cursor` is not
+//! so no process it started outlives it. #10746 S9+S10 merge: the source
+//! watches the spec's run-level cancel ([`super::RunCancel`]); once it is
+//! set, the request in flight and every later one fail `cancelled`, and the
+//! group is killed and reaped at once. A list reply whose `cursor` is not
 //! a string or null is a protocol error.
 //!
 //! Listing contract (Architect ruling 440388fb9a26, SPEC-OKF-01 §2.13): a
@@ -48,6 +51,8 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -166,7 +171,11 @@ pub struct AdapterSource {
     limits: AdapterLimits,
     next_id: u64,
     dead: Option<String>,
+    cancel: Arc<AtomicBool>,
 }
+
+/// How often a wait for a reply re-checks the cancel flag.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
 
 impl std::fmt::Debug for AdapterSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -248,6 +257,7 @@ impl AdapterSource {
             limits,
             next_id: 0,
             dead: None,
+            cancel: spec.cancel.flag(),
         };
         me.handshake()
             .map_err(|why| io(&me.program, format!("adapter {why}")))?;
@@ -299,16 +309,37 @@ impl AdapterSource {
         })
     }
 
+    /// A cancelled run: kill and reap the group now.
+    fn cancelled(&mut self) -> Option<String> {
+        if !self.cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.stop("cancelled", Duration::ZERO);
+        Some("cancelled: the import was cancelled".into())
+    }
+
     fn recv(&mut self, within: Duration, late: &str) -> Result<Value, String> {
-        let frame = match self.frames.recv_timeout(within) {
-            Ok(Ok(frame)) => frame,
-            Ok(Err(why)) => {
-                self.stop("crashed", Duration::ZERO);
+        let until = Instant::now() + within;
+        // #10746 S9+S10 merge: wait in short slices, so a cancel stops a
+        // blocked request within one slice instead of at its deadline.
+        let frame = loop {
+            if let Some(why) = self.cancelled() {
                 return Err(why);
             }
-            Err(_) => {
-                self.stop(late, Duration::ZERO);
-                return Err(late.to_string());
+            let slice = until
+                .saturating_duration_since(Instant::now())
+                .min(CANCEL_POLL);
+            match self.frames.recv_timeout(slice) {
+                Ok(Ok(frame)) => break frame,
+                Ok(Err(why)) => {
+                    self.stop("crashed", Duration::ZERO);
+                    return Err(why);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < until => {}
+                Err(_) => {
+                    self.stop(late, Duration::ZERO);
+                    return Err(late.to_string());
+                }
             }
         };
         serde_json::from_slice(&frame).map_err(|e| {
@@ -321,6 +352,9 @@ impl AdapterSource {
     fn acquire(&mut self, op: &str, extra: Value) -> Result<Value, (String, String)> {
         if let Some(why) = &self.dead {
             return Err((why.clone(), "the adapter is not running".into()));
+        }
+        if self.cancelled().is_some() {
+            return Err(("cancelled".into(), "the import was cancelled".into()));
         }
         self.next_id += 1;
         let id = self.next_id;

@@ -51,7 +51,7 @@ use crate::bundle::log_md::LogBatch;
 use crate::bundle::ops::{failpoint, io_seam};
 use crate::bundle::put::PutOutcome;
 use crate::bundle::record::instant_string;
-use crate::extract::{BuiltinText, Extractor, TypeHint, fingerprint};
+use crate::extract::{BuiltinText, Extracted, Extractor, TypeHint, fingerprint};
 use crate::format::id::ConceptId;
 use crate::profile::Profile;
 use crate::state::revisions;
@@ -94,9 +94,14 @@ fn source_item(
     fp: String,
     ts: Option<String>,
     ex: &dyn Extractor,
-    mut fields: Mapping,
-    text: String,
+    got: Extracted,
 ) -> (SourceItem, Mapping) {
+    let Extracted {
+        text,
+        mut fields,
+        provenance: derived,
+        ..
+    } = got;
     let stem = rel.rsplit('/').next().unwrap_or(rel);
     let stem = stem.strip_suffix(".md").unwrap_or(stem);
     let title = match fields.remove(Value::String("title".into())) {
@@ -123,6 +128,11 @@ fn source_item(
             Value::String("extracted_by".into()),
             Value::String(format!("{}@{}", ex.id(), ex.version())),
         );
+    }
+    // #10746 S10: the extractor's own provenance (§2.16) replaces the
+    // derived `extracted_by`; the engine places only its provenance keys.
+    for (k, v) in derived {
+        provenance.insert(k, v);
     }
     let item = SourceItem {
         item_id: rel.to_string(),
@@ -191,6 +201,9 @@ pub fn import(
         .filter_map(|p| p.id.clone().map(|id| (p.item_id.clone(), id)))
         .collect();
     let refused = collide::refused(&store.id, &targets, &Pins::load(&root, &store.id)?);
+    // #10746 S10: the worker client learns the store before any item, so
+    // it can require its OS sandbox for a connector store (§2.16 item 9 B).
+    ex.begin_run(&store);
     let batch = LogBatch::begin(&b, log.attempt())?;
     if row_changed {
         log.start(&b, &stamp)?;
@@ -200,8 +213,23 @@ pub fn import(
     let profile = Profile::default_profile();
     let family = check_selection(spec)?;
     let mut threads = BTreeSet::new();
+    // #10746 S9+S10 merge (Architect ruling 2c9381bdbdc9): the run-level
+    // flag, so an adapter run with no worker sees the cancel too.
+    let cancelled = || spec.cancel.is_set() || ex.cancelled();
     for p in &plan.items {
         let item = |read: &str, write: &str| ItemReport::new(&p.item_id, p.id.clone(), read, write);
+        // #10746 S10 fix: a cancelled run writes nothing more; earlier items
+        // stay committed (§2.16 "Cancellation, kill and reap").
+        let writes = matches!(
+            p.action,
+            Action::Create | Action::Update | Action::Conflict | Action::Tombstone
+        );
+        if writes && cancelled() {
+            report
+                .items
+                .push(item("skipped", "none").because("cancelled"));
+            continue;
+        }
         let entry = match (p.action, &p.id) {
             (Action::Skip, _) => item("skipped", "none").because(p.reason.as_deref().unwrap_or("")),
             // A collision is an item read and refused before its write.
@@ -281,7 +309,7 @@ pub fn import(
                             report.items.push(item("read", "unchanged"));
                             continue;
                         }
-                        let got = match tier.extract(&bytes, &hint) {
+                        let mut got = match tier.extract(&bytes, &hint) {
                             Ok(got) => got,
                             Err(e) if SKIP_CODES.contains(&e.code.as_str()) => {
                                 report.items.push(item("skipped", "none").because(&e.code));
@@ -292,19 +320,15 @@ pub fn import(
                                 continue;
                             }
                         };
-                        let (si, provenance) = source_item(
-                            &p.item_id,
-                            id,
-                            fp,
-                            p.timestamp.clone(),
-                            tier,
-                            got.fields,
-                            got.text,
-                        );
+                        // S9+S10 merge: S10's `source_item` takes the whole
+                        // `Extracted` (its provenance); S9 reports its notes.
+                        let notes = std::mem::take(&mut got.notes);
+                        let (si, provenance) =
+                            source_item(&p.item_id, id, fp, p.timestamp.clone(), tier, got);
                         Prepared {
                             item: si,
                             provenance,
-                            notes: got.notes,
+                            notes,
                             degraded: None,
                         }
                     }
@@ -385,6 +409,20 @@ pub fn import(
         };
         report.items.push(entry);
     }
+    // #10746 S10: the worker shuts down here, and its run-level failures
+    // are reported; the items keep their outcomes (§2.16 "Shutdown").
+    // S9+S10 merge: before the S9 thread pass, which needs no worker, so a
+    // thread-write error cannot skip the shutdown.
+    let run = ex.end_run();
+    report.worker_errors = run.errors;
+    if let Some(excerpt) = run.stderr_excerpt {
+        report.findings.push(ImportFinding {
+            severity: "info".into(),
+            kind: "worker_stderr".into(),
+            item_id: String::new(),
+            detail: excerpt,
+        });
+    }
     if !threads.is_empty() {
         log.start(&b, &stamp)?;
         let run = ThreadRun {
@@ -397,6 +435,7 @@ pub fn import(
         write_threads(&mut b, &run, &threads, &mut report.findings)
             .map_err(|e| after_writes(&root, e))?;
     }
+    report.cancelled = cancelled();
     let (_, left) = batch
         .flush_now(&mut b)
         .map_err(|e| after_writes(&root, e))?;

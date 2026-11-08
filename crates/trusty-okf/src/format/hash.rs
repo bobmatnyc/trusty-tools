@@ -26,10 +26,10 @@ use crate::format::frontmatter::sort_value;
 /// Keys that describe a concept's state, not its claims (§2.10). A change
 /// to one of them alone is not a content change.
 ///
-/// #10746: the §2.16 input SHA-256 key and the verification-record keys have
-/// no fixed name yet; slice S10 adds the first, and S3 writes no record key
-/// into frontmatter.
-pub const LIFECYCLE_KEYS: [&str; 21] = [
+/// #10746: S3 writes no verification-record key into frontmatter. #10746
+/// S10: the §2.16 input SHA-256 key is `extract_input_sha256`; like the
+/// other extraction provenance keys it is not content (item 21 B).
+pub const LIFECYCLE_KEYS: [&str; 22] = [
     "generated",
     "verified",
     "stale_after",
@@ -51,6 +51,7 @@ pub const LIFECYCLE_KEYS: [&str; 21] = [
     "extract_protocol",
     "xberg_version",
     "extract_config",
+    "extract_input_sha256",
 ];
 
 /// A §2.10 content hash, `sha256:<hex>`.

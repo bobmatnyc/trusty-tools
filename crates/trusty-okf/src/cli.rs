@@ -30,9 +30,10 @@ mod feed_cmd;
 
 /// The usage text printed on a bad call.
 pub const USAGE: &str = "usage:
-  trusty-okf import plan   <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]... [--json]
+  trusty-okf import plan   <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]...
+                           [--worker PATH] [--json]
   trusty-okf import run    <bundle-root> --from dir:<path> [--store ID] [--include G]... [--exclude G]...
-                           [--dry-run] [--feed --index ID --state-dir DIR --socket PATH] [--json]
+                           [--dry-run] [--feed --index ID --state-dir DIR --socket PATH] [--worker PATH] [--json]
   trusty-okf import plan|run <bundle-root> --from adapter:<gmail|drive|gdocs> --adapter PATH
                            --select account=LABEL --select KEY=VALUE... [--adapter-arg A]...
                            [--adapter-var NAME=VALUE]... [--operator-initiated] [--store ID] ...
@@ -49,6 +50,8 @@ const VALUED: &[&str] = &[
     "--index",
     "--state-dir",
     "--socket",
+    // #10746 S10: the extraction worker binary (SPEC-OKF-01 §4.10).
+    "--worker",
     // #10746 S8: test-only. Fixes the run's `now` so a test can compare two
     // runs byte for byte; left out of `USAGE` on purpose (Architect ruling).
     // Without it the CLI takes the system clock.
@@ -129,6 +132,9 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
 pub(crate) struct Ctx<'a> {
     #[cfg(feature = "search-feed")]
     pub sink: Option<&'a dyn crate::feed::IndexFeed>,
+    /// #10746 S10 fix: the process is the `trusty-okf` binary, so SIGINT
+    /// may be taken over to cancel an import run (never in a library call).
+    pub catch_interrupt: bool,
     _p: std::marker::PhantomData<&'a ()>,
 }
 
@@ -140,6 +146,27 @@ pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let ctx = Ctx {
         #[cfg(feature = "search-feed")]
         sink: None,
+        catch_interrupt: false,
+        _p: std::marker::PhantomData,
+    };
+    run_ctx(args, out, err, &ctx)
+}
+
+/// The binary's entry: [`run`], plus (#10746 S10 fix) Ctrl-C handling. In
+/// an `import run` call, SIGINT cancels the run: the in-flight worker or
+/// adapter request fails `cancelled`, that child's process group is killed
+/// and reaped, later items are skipped `cancelled`, and the report is
+/// printed (exit 3). S9+S10 merge (Architect ruling 2c9381bdbdc9): one
+/// SIGINT waiter per process, one flag shared by the worker and the
+/// adapter, with or without `--worker`. Only `src/main.rs` calls this.
+/// Test: `c103_sigint_cancels_the_cli_and_reaps_the_worker`,
+/// `c97_sigint_cancels_an_adapter_import_and_reaps_its_group`,
+/// `sigint_cancels_an_adapter_import_with_a_worker`.
+pub fn run_binary(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let ctx = Ctx {
+        #[cfg(feature = "search-feed")]
+        sink: None,
+        catch_interrupt: true,
         _p: std::marker::PhantomData,
     };
     run_ctx(args, out, err, &ctx)
@@ -156,6 +183,7 @@ pub fn run_with_feed(
 ) -> i32 {
     let ctx = Ctx {
         sink: Some(sink),
+        catch_interrupt: false,
         _p: std::marker::PhantomData,
     };
     run_ctx(args, out, err, &ctx)

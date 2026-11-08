@@ -29,8 +29,8 @@
 #                                          the core builds that way
 #     b9_no_extraction_backend         B9  graph has no xberg, ort, candle-core
 #   Not checkable at S1, printed as `note:` lines: B2's inverse half
-#   (`cargo tree -i trusty-okf` lists trusty-agents; S11), B10 (no spawn code
-#   exists until S9/S10). Criterion 13's registry.toml load is a cargo test
+#   (`cargo tree -i trusty-okf` lists trusty-agents; S11), B10 (child-process
+#   environment; a cargo test since S9/S10, #10746). Criterion 13's registry.toml load is a cargo test
 #   since S4 (#10746): build_criteria.rs golden_registry_loads_every_row.
 #
 #   The src/ greps read raw text, comments included, matching the spec's
@@ -182,7 +182,7 @@ fi
 banned_deps b9_no_extraction_backend "$TMP/all" 'xberg|ort|ort-sys|candle-core'
 
 echo "note: B2 inverse half (cargo tree -i trusty-okf lists trusty-agents) is checked from S11"
-echo "note: B10 (child-process environment) has no spawn code to check until S9/S10"
+echo "note: B10 (child-process environment) is the tests c139_adapter_gets_exactly_the_caller_environment (crates/trusty-okf/tests/adapter_criteria.rs) and c104_worker_env_is_the_allow_list_and_cwd_is_empty (crates/trusty-okf/tests/worker_criteria.rs)"
 echo "note: criterion 13 registry.toml load is the test golden_registry_loads_every_row (crates/trusty-okf/tests/build_criteria.rs)"
 
 if [ "$STATUS" -eq 0 ]; then

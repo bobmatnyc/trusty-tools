@@ -78,8 +78,9 @@ fn cli_import_run_reports_each_axis_and_exits_3_on_a_skip() {
 /// Why: §4.10 code 2 — a bad call is refused before any write, with usage.
 /// What: unknown options, an unsupported source, a missing root, `--feed`
 /// without its arguments, and (#10746 S8 fix) a state directory inside the
-/// bundle or an index ID that is not one path segment; the bundle and
-/// source snapshots stay equal.
+/// bundle or an index ID that is not one path segment, and (#10746 S10)
+/// `--worker` in a core build or given twice; the bundle and source
+/// snapshots stay equal.
 /// Test: self-contained.
 #[test]
 fn cli_refuses_bad_calls_with_2_before_any_write() {
@@ -119,7 +120,16 @@ fn cli_refuses_bad_calls_with_2_before_any_write() {
             "--socket",
             sock,
         ],
-        vec!["import", "run", &root, "--from", &from, "--worker", "/x"],
+        // #10746 S10: `--worker` is an option only under `extract-worker`;
+        // the core build refuses it with 2, and either build refuses it
+        // given twice.
+        if cfg!(feature = "extract-worker") {
+            vec![
+                "import", "run", &root, "--from", &from, "--worker", "/x", "--worker", "/y",
+            ]
+        } else {
+            vec!["import", "run", &root, "--from", &from, "--worker", "/x"]
+        },
         vec!["import", "run", &root, "--from", "gmail"],
         vec!["import", "run", &root],
         vec!["import", "run", &missing, "--from", &from],

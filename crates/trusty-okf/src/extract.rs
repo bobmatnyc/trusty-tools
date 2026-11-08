@@ -14,7 +14,9 @@
 //! stands where no worker is configured: every item fails `worker_absent`.
 //! [`fingerprint`] is the DOC-55 §4.5 tag, so an extractor change
 //! re-extracts the items it produced. Slice S8 of #10746; the worker client
-//! is `extract::worker` (feature `extract-worker`, slice S10).
+//! is `extract::worker` (feature `extract-worker`, slice S10), which also
+//! uses [`Extractor::available`], [`Extractor::begin_run`] and
+//! [`Extractor::end_run`] and fills [`Extracted::provenance`].
 //! Test: `builtin_tier_splits_markdown_and_refuses_binary`,
 //! `c144_no_child_processes_skips_worker_items_and_refuses_connectors`.
 //!
@@ -25,6 +27,7 @@ use serde_yaml::{Mapping, Value};
 use sha2::{Digest, Sha256};
 
 use crate::build::docstore::DEFAULT_EXTENSIONS;
+use crate::build::registry::SourceSpec;
 use crate::format::frontmatter;
 
 #[cfg(feature = "extract-worker")]
@@ -70,6 +73,22 @@ pub struct Extracted {
     pub fields: Mapping,
     /// Bounded notes for the report, never written into the bundle.
     pub notes: Vec<String>,
+    /// #10746 S10: provenance the extractor itself derives (`extracted_by`,
+    /// `extract_protocol`, `xberg_version`, `extract_config`,
+    /// `extract_input_sha256`, §2.16). The import places only the engine's
+    /// provenance keys from it; any other key is quarantined (§2.13.1).
+    pub provenance: Mapping,
+}
+
+/// #10746 S10: what an extractor reports about a whole run, read once when
+/// the run ends (§2.16, Appendix B per-run codes).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunOutcome {
+    /// Run-level worker failures, in the order they happened.
+    pub errors: Vec<crate::WorkerError>,
+    /// The worker's stderr, capped at 64 KiB; for the report only, never
+    /// written into the bundle (DOC-55 E4).
+    pub stderr_excerpt: Option<String>,
 }
 
 /// A per-item extraction failure; never ends the run (DOC-55 E3).
@@ -82,7 +101,8 @@ pub struct ExtractError {
 }
 
 impl ExtractError {
-    fn new(code: &str, message: &str) -> Self {
+    /// An error with this code and a bounded message.
+    pub fn new(code: &str, message: &str) -> Self {
         Self {
             code: code.to_string(),
             message: message.to_string(),
@@ -98,6 +118,26 @@ pub trait Extractor {
     fn version(&self) -> &str;
     /// Extract one item. The bytes are the whole file (§2.14 rule 3).
     fn extract(&self, bytes: &[u8], hint: &TypeHint) -> Result<Extracted, ExtractError>;
+    /// #10746 S10: whether the extractor can run at all, checked at plan
+    /// time without starting anything; `Err` carries the skip code
+    /// (`worker_absent`). The default is available.
+    fn available(&self) -> Result<(), ExtractError> {
+        Ok(())
+    }
+    /// #10746 S10 fix: whether the run was cancelled; `import` then skips
+    /// every item it has not written yet with `cancelled`. Default: never.
+    fn cancelled(&self) -> bool {
+        false
+    }
+    /// #10746 S10: called once by `import` before the first item, with the
+    /// run's store. The worker client requires its OS sandbox for every
+    /// store that is not a local document tree (§2.16 item 9 B).
+    fn begin_run(&self, _store: &SourceSpec) {}
+    /// #10746 S10: called once by `import` after the last item. The worker
+    /// client shuts its process down here and reports run-level failures.
+    fn end_run(&self) -> RunOutcome {
+        RunOutcome::default()
+    }
 }
 
 /// The in-process tier: UTF-8 text and Markdown (§2.16 "Tiers", 3o A).
@@ -159,12 +199,12 @@ impl Extractor for BuiltinText {
             Ok(Value::Mapping(fields)) => Ok(Extracted {
                 text: split.body,
                 fields,
-                notes: Vec::new(),
+                ..Extracted::default()
             }),
             _ => Ok(Extracted {
                 text: text.to_string(),
-                fields: Mapping::new(),
                 notes: vec!["malformed_frontmatter".to_string()],
+                ..Extracted::default()
             }),
         }
     }
@@ -185,6 +225,10 @@ impl Extractor for NoWorker {
     }
 
     fn extract(&self, _bytes: &[u8], _hint: &TypeHint) -> Result<Extracted, ExtractError> {
+        self.available().map(|()| Extracted::default())
+    }
+
+    fn available(&self) -> Result<(), ExtractError> {
         Err(ExtractError::new(
             "worker_absent",
             "no extraction worker is configured",

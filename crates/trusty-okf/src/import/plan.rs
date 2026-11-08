@@ -29,6 +29,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Serialize;
@@ -55,6 +57,46 @@ pub const MAX_LIST_PAGES: usize = 10_000;
 
 /// The run's item ceiling when a caller names none.
 pub const DEFAULT_MAX_ITEMS: usize = 100_000;
+
+/// The run-level cancel flag (Architect ruling 2c9381bdbdc9, #10746 S9+S10
+/// merge; SPEC-OKF-01 §2.16 "Cancellation, kill and reap").
+///
+/// Why: one SIGINT must cancel every child process of a run, and an
+/// adapter-only run has no worker whose flag `import` could read.
+/// What: one shared flag. The CLI's SIGINT waiter sets it; the worker
+/// client (`extract::worker::WorkerExtractor::with_cancel`, feature
+/// `extract-worker`) and
+/// [`super::adapter::AdapterSource`] watch the same `Arc`; `plan_import`
+/// stops listing (the listing is then incomplete) and `import` writes
+/// nothing more once it is set. It is not part of a spec's identity, so
+/// any two compare equal.
+/// Test: `c97_sigint_cancels_an_adapter_import_and_reaps_its_group`,
+/// `sigint_cancels_an_adapter_import_with_a_worker`.
+#[derive(Debug, Clone, Default)]
+pub struct RunCancel(Arc<AtomicBool>);
+
+impl RunCancel {
+    /// A cancel that reads `flag`.
+    pub fn new(flag: Arc<AtomicBool>) -> RunCancel {
+        RunCancel(flag)
+    }
+
+    /// The shared flag, for a child-process client to watch.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+
+    /// Whether the run was cancelled.
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl PartialEq for RunCancel {
+    fn eq(&self, _: &RunCancel) -> bool {
+        true
+    }
+}
 
 /// What an import copies from a source (§2.15, 3k A). A document tree has
 /// one policy: the full text of each selected item.
@@ -88,6 +130,8 @@ pub struct ImportSpec {
     pub child_processes: bool,
     /// Whether an operator started the run (§2.15 "Inbound email").
     pub operator_initiated: bool,
+    /// #10746 S9+S10 merge: the run's cancel flag; never set by default.
+    pub cancel: RunCancel,
 }
 
 impl ImportSpec {
@@ -103,6 +147,7 @@ impl ImportSpec {
             policy: ContentPolicy::FullText,
             child_processes: true,
             operator_initiated: false,
+            cancel: RunCancel::default(),
         }
     }
 }
@@ -306,6 +351,37 @@ pub fn plan_import(
     spec: &ImportSpec,
     src: &mut dyn ImportSource,
 ) -> Result<ImportPlan, OkfError> {
+    plan_items(bundle, spec, src, None)
+}
+
+/// Plan one import with the run's worker extractor (#10746 S10, §2.16).
+///
+/// Why: with a worker named, the plan must show an absent worker before any
+/// write (criterion 101), and a worker item counts as current only when the
+/// ledger holds the worker's full fingerprint, so a worker upgrade or a
+/// configuration change re-extracts exactly the items it produced
+/// (criterion 105).
+/// What: as [`plan_import`], except that each item the built-in tier does
+/// not handle is skipped with the code [`Extractor::available`] returns
+/// (`worker_absent`), and is otherwise planned under the fingerprint of
+/// `ex` (which may start the worker for its handshake). Writes nothing.
+/// Test: `c101_absent_worker_is_planned_skipped_and_exits_3`,
+/// `c105_config_change_reextracts_exactly_the_worker_items`.
+pub fn plan_import_with(
+    bundle: &Bundle,
+    spec: &ImportSpec,
+    src: &mut dyn ImportSource,
+    ex: &dyn Extractor,
+) -> Result<ImportPlan, OkfError> {
+    plan_items(bundle, spec, src, Some(ex))
+}
+
+fn plan_items(
+    bundle: &Bundle,
+    spec: &ImportSpec,
+    src: &mut dyn ImportSource,
+    worker: Option<&dyn Extractor>,
+) -> Result<ImportPlan, OkfError> {
     let root = bundle.root();
     preflight(root, spec)?;
     let (include, exclude) = (glob_set(&spec.include)?, glob_set(&spec.exclude)?);
@@ -317,8 +393,22 @@ pub fn plan_import(
     let mut seen = std::collections::BTreeSet::new();
     let mut pages = 0usize;
     loop {
+        // #10746 S9+S10 merge: a cancelled run lists no further page, and a
+        // listing call the cancel broke ends the listing as incomplete, so
+        // the run tombstones nothing and `import` writes nothing.
+        if spec.cancel.is_set() {
+            complete = false;
+            break;
+        }
         pages += 1;
-        let page = src.list(cursor.as_deref())?;
+        let page = match src.list(cursor.as_deref()) {
+            Ok(page) => page,
+            Err(_) if spec.cancel.is_set() => {
+                complete = false;
+                break;
+            }
+            Err(e) => return Err(e),
+        };
         // #10746 S9: Architect ruling 440388fb9a26 (option B, §2.13): one
         // page that says incomplete makes the whole listing incomplete.
         complete &= page.complete;
@@ -392,6 +482,12 @@ pub fn plan_import(
             items.push(p);
             continue;
         }
+        // #10746 S10: an absent worker is shown before any write (§2.16).
+        if let (false, Some(Err(e))) = (builtin, worker.map(|w| w.available())) {
+            set(&mut p, Action::Skip, Some(&e.code));
+            items.push(p);
+            continue;
+        }
         let id = match ledger.get(&e.item_id) {
             Some(r) => ConceptId::parse(&r.entity),
             None => concept_id_for_source(&e.item_id),
@@ -422,10 +518,11 @@ pub fn plan_import(
         shas.insert(e.item_id.clone(), sha.clone());
         let current = match ledger.get(&e.item_id) {
             Some(r) if r.status == ItemStatus::Ingested => {
-                if builtin {
-                    r.fingerprint == fingerprint(&bytes, &BuiltinText)
-                } else {
-                    sha_of(&r.fingerprint) == sha
+                match (builtin, worker) {
+                    (true, _) => r.fingerprint == fingerprint(&bytes, &BuiltinText),
+                    // #10746 S10: the full worker fingerprint (§2.16).
+                    (false, Some(w)) => r.fingerprint == fingerprint(&bytes, w),
+                    (false, None) => sha_of(&r.fingerprint) == sha,
                 }
             }
             _ => false,

@@ -12,7 +12,7 @@
 //! [`ImportReport::apply_index_states`] reads this machine's index states
 //! after one (§4.9.1, §4.9.2). [`exit_code`] maps a result to §4.10: a
 //! refusal before any write is 2; any other error 1; a report 3 when an
-//! item was skipped or failed, else 4 when a feed pass ran and a touched
+//! item was skipped or failed or the run was cancelled, else 4 when a feed pass ran and a touched
 //! concept is not Searchable (or Withdrawn), else 0. Slice S8 of #10746.
 //! Test: `c80_every_item_is_reported_once_with_a_reason`,
 //! `c85_failed_feed_reports_not_fully_searchable_and_exits_4`,
@@ -158,6 +158,12 @@ pub struct ImportReport {
     pub items: Vec<ItemReport>,
     /// The run's findings.
     pub findings: Vec<ImportFinding>,
+    /// #10746 S10: run-level extraction-worker failures (§2.16). Any entry
+    /// makes the run incomplete and its exit code at least 3.
+    pub worker_errors: Vec<crate::WorkerError>,
+    /// #10746 S9+S10 merge: the run was cancelled (SIGINT on the CLI). A
+    /// cancelled run is incomplete and exits 3, even with no item listed.
+    pub cancelled: bool,
 }
 
 fn index_name(s: &IndexState) -> &'static str {
@@ -210,8 +216,15 @@ impl ImportReport {
                 .filter(|i| i.touched())
                 .all(|i| matches!(i.index.as_deref(), Some("searchable" | "withdrawn")));
         self.complete = self.skipped + self.failed + self.write_failed + self.degraded == 0
-            && self.pagination_exhausted;
-        self.exit_code = if self.skipped + self.failed + self.write_failed > 0 {
+            && self.pagination_exhausted
+            && self.worker_errors.is_empty()
+            && !self.cancelled;
+        // #10746 S10: a run-level worker failure is never reported as a
+        // clean run, even when every committed item kept its outcome.
+        self.exit_code = if self.skipped + self.failed + self.write_failed > 0
+            || !self.worker_errors.is_empty()
+            || self.cancelled
+        {
             3
         } else if self.fed && !self.fully_searchable {
             4

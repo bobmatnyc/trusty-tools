@@ -594,6 +594,61 @@ fn c97_cli_imports_through_an_adapter_process_and_reaps_on_cancel() {
     assert!(!alive(pid), "a timed-out adapter was not reaped");
 }
 
+/// Why: criterion 97 with Ctrl-C (Architect ruling 2c9381bdbdc9, S9+S10
+/// merge) — SIGINT to the CLI cancels an adapter import, the adapter's
+/// whole process group is reaped, and the report is printed with exit 3.
+/// What: the fake starts a grandchild, then hangs, first in a `list` call
+/// (planning), then in a `fetch` call (the first of three items). After one
+/// SIGINT the CLI exits 3 with a JSON report marked `cancelled`, and the
+/// adapter, its grandchild and its process group are gone. In the fetch
+/// run the in-flight item fails `cancelled` and the later two are skipped
+/// `cancelled`, though no worker runs (the run-level flag, not the
+/// extractor's). The `--worker` variant is
+/// `sigint_cancels_an_adapter_import_with_a_worker` (`worker_criteria.rs`).
+/// Test: self-contained.
+#[test]
+fn c97_sigint_cancels_an_adapter_import_and_reaps_its_group() {
+    let fake = FakeAdapter::new("gmail");
+    let entries = json!([
+        msg_entry("c1", "t1"),
+        msg_entry("c2", "t2"),
+        msg_entry("c3", "t3")
+    ]);
+    fake.page(None, entries, None, true);
+    for (n, t) in ["c1", "c2", "c3"].iter().zip(["t1", "t2", "t3"]) {
+        fake.item(msg(n, t, 1_767_225_600_000, n, "Body."));
+    }
+    let listing = s9_support::interrupt_cli(&fake, "list", &[]);
+    assert_eq!(listing.code, Some(3), "{listing:?}");
+    let report = listing.report.as_ref().expect("no report printed");
+    assert_eq!(report["cancelled"], true, "{report}");
+    assert_eq!(report["written"], 0, "{report}");
+    assert!(
+        !listing.adapter_left && !listing.grandchild_left && !listing.group_left,
+        "{listing:?}"
+    );
+
+    let fetching = s9_support::interrupt_cli(&fake, "fetch", &[]);
+    assert_eq!(fetching.code, Some(3), "{fetching:?}");
+    let report = fetching.report.as_ref().expect("no report printed");
+    assert_eq!(report["cancelled"], true, "{report}");
+    let cancelled = |r: &str, w: &str| (r.into(), w.into(), "cancelled".to_string());
+    assert_eq!(
+        s9_support::outcome_of(report, "c1"),
+        cancelled("failed", "none")
+    );
+    for later in ["c2", "c3"] {
+        assert_eq!(
+            s9_support::outcome_of(report, later),
+            cancelled("skipped", "none")
+        );
+    }
+    assert!(
+        !fetching.adapter_left && !fetching.grandchild_left && !fetching.group_left,
+        "{fetching:?}"
+    );
+}
+
 /// Why: criterion 98, host half (Appendix B "Acquire role") — every
 /// `acquire` request carries the store selection and the run's
 /// `operator_initiated`, false unless the caller set it. The adapter half

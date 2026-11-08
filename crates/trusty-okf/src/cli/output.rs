@@ -101,13 +101,24 @@ pub(crate) fn report(out: &mut dyn Write, r: &ImportReport, as_json: bool) {
         );
     }
     for f in &r.findings {
+        // #10746 S10: the stderr excerpt is up to 64 KiB; the text report
+        // gives its size, the JSON report the bytes.
+        let detail = if f.kind == "worker_stderr" {
+            format!("{} bytes", f.detail.len())
+        } else {
+            f.detail.clone()
+        };
         w(
             out,
-            format!(
-                "finding {} {} {} {}",
-                f.severity, f.kind, f.item_id, f.detail
-            ),
+            format!("finding {} {} {} {detail}", f.severity, f.kind, f.item_id),
         );
+    }
+    for e in &r.worker_errors {
+        w(out, format!("worker: {e}"));
+    }
+    // #10746 S9+S10 merge: a cancelled run says so, even with no item.
+    if r.cancelled {
+        w(out, "run: cancelled".to_string());
     }
     let complete = if r.complete { "complete" } else { "incomplete" };
     let search = if r.fully_searchable {
