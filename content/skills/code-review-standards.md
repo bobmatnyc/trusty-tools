@@ -44,12 +44,17 @@ preferences are **LOW at most**, never MEDIUM, HIGH, or CRITICAL, regardless
 of how strongly the reviewer feels about them. Inflating a style nit to HIGH
 to make the review look more rigorous is itself a review defect.
 
-**Criterion-fail tag (#10803).** Keep the native severity and append `criterion-fail: "<verbatim quote>" (source: <issue #N body | brief | owner ruling <ref>>)` to
-any finding that directly fails a stated acceptance criterion. A stated acceptance criterion is written in the issue body (whoever wrote it), the dispatch brief, or a recorded owner ruling; a criterion the reviewer infers, a design preference, or a paraphrase with no owner source is not stated, and an Architect restatement with no owner source counts only as a brief criterion. "Directly fails" means the finding shows the criterion is unmet, or undemonstrated where the criterion asks for proof; a chain of reasoning does not qualify. The tag
-does not raise severity; dashboards and counts show the native grade. A finding
-with no quote and source is an ordinary finding at its native severity. The
-criteria come from the brief; a brief with no criteria yields no criterion-fail
-findings.
+**Criterion-fail tag (#10803).** Keep the native severity and append
+`criterion-fail: "<verbatim quote>" (source: <issue #N body | brief | owner
+ruling <ref>>)` to any finding that directly fails a stated acceptance
+criterion: one written in the issue body (by anyone), the dispatch brief, or a
+recorded owner ruling. An inferred criterion, a design preference, or a
+paraphrase with no owner source is not stated; an Architect restatement with no
+owner source counts only as a brief criterion. "Directly fails" means the
+finding shows the criterion unmet, or unproven where it asks for proof; a chain
+of reasoning does not qualify. The tag does not raise severity; dashboards and
+counts show the native grade. An untagged finding is ordinary. A brief with no
+criteria yields no criterion-fail findings.
 
 ## The 80% Confidence Filter
 
@@ -58,8 +63,7 @@ more than 80% confidence?* If not:
 - Downgrade the severity, or
 - Drop the finding entirely.
 
-The filter runs first: a candidate criterion-fail finding you are not more than
-80% sure of is dropped like any other.
+It runs first, on criterion-fail candidates too.
 
 A review full of speculative "this might be a problem" findings is worse than
 a shorter review of confirmed issues — it forces the reader to re-triage the
@@ -79,7 +83,9 @@ finding that doesn't obviously fit the first two.
    causes, or leaves unguarded, wrong behaviour against the acceptance
    criteria, a security or credential exposure, data loss or corruption, a
    crash, hang or leaked process, a resource pileup, or a broken gate or CI.
-   A finding of any severity that directly fails a stated acceptance criterion of the brief or issue blocks; its fix uses the one fix round (no extra round). A criterion-fail fix and a fix-bar fix share the one fix round.
+   A finding of any severity that directly fails a stated acceptance criterion
+   of the brief or issue blocks; its fix uses the one fix round (no extra
+   round). Fix-bar fixes share that round.
 2. **`Parent`** — kept with the work already in flight, in ONE PR comment or a
    checklist item on the parent issue. The default for every other finding,
    missing tests on non-safety paths included. It starts no fix round.
@@ -93,8 +99,7 @@ finding that doesn't obviously fit the first two.
 
 **An APPROVE verdict does not generate tickets.** Approving means zero CRITICAL
 and zero HIGH findings; the MEDIUM/LOW observations that remain default to
-`Parent`, or `Fix here` only when one meets the fix bar. `Promote` on an approved review is a recommendation for
-someone else to decide, never an instruction to file.
+`Parent`, or `Fix here` only when one meets the fix bar.
 
 ## Fail-Open Check
 
@@ -268,39 +273,22 @@ correct, and complete outcome — do not manufacture findings to look thorough.
   findings must be tracked: attach the finding table to the next handoff
   (typically Documentation) rather than discarding it.
 - **BLOCK** — any CRITICAL finding, or any criterion-fail finding (a valid
-  `criterion-fail:` tag, after the 80% filter) regardless of its severity. Halt immediately. Surface the verdict and
-  finding table to the user verbatim and await explicit direction
-  (fix-and-retry, override, abandon). Never auto-re-delegate back to the
-  implementer without that direction.
+  `criterion-fail:` tag, after the 80% filter) regardless of its severity.
+  Halt immediately. Surface the verdict and finding table to the user
+  verbatim and await explicit direction (fix-and-retry, override, abandon).
+  Never auto-re-delegate back to the implementer without that direction.
 
 ## What NOT To Do
 
-- Do not inflate severity to appear rigorous. Calibrate strictly to the
-  taxonomy above.
 - Do not flag unchanged code unless it contains a CRITICAL security issue.
 - Do not consolidate findings into vague summaries — every finding needs
   file + line + fix, individually.
-- Do not skip the 80% confidence filter to manufacture findings where none
-  exist.
-- Do not flag style preferences (whitespace, naming aesthetic, import order)
-  as HIGH or CRITICAL — see the guard rail above. LOW at most.
-- Do not leave a finding without a disposition. "Noted" is not one of the
-  three.
-- Do not default LOW/MEDIUM polish to `Promote` because it's easier than
-  deciding — the default is `Parent` or dropped; `Promote` is for defects
-  that are genuinely separable, schedulable work, not a catch-all.
-- Do not file an issue yourself, under any disposition, and do not instruct
-  anyone else to file one. `Promote` is a recommendation to the PM — never an
-  action the critic takes.
-- A zero-finding APPROVE is correct and complete. Do not feel pressure to
-  find issues that aren't there.
 
 ## Handoff Protocol
 
 - **APPROVE** → report verdict to the PM; PM proceeds to the next stage
-  (typically Security). Any `Promote` rows go to the PM as recommendations,
-  not as filed issues.
+  (typically Security).
 - **WARN** → report verdict + findings to the PM; PM proceeds AND attaches
   the finding table, dispositions included, to the Documentation handoff.
 - **BLOCK** → report verdict + findings to the PM; PM halts the pipeline and
-  surfaces to the user. Do not auto-route back to the implementer.
+  surfaces to the user.
