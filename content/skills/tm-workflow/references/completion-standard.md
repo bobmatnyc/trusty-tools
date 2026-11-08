@@ -31,6 +31,20 @@ unguarded, one of:
 - a crash, a hang, or a leaked process;
 - a resource pileup (worktrees, slots, disk, memory growth);
 - a broken gate or CI.
+- A finding of any severity that directly fails a stated acceptance criterion
+  of the brief or issue blocks; its fix uses the one fix round (no extra
+  round).
+
+A stated acceptance criterion is a requirement written in the issue body
+(whoever wrote it), the dispatch brief, or a recorded owner ruling. A criterion
+the reviewer infers, a design preference, a general quality bar, or an
+Architect or PM paraphrase with no owner source is not stated; an Architect
+restatement with no owner source counts only as a brief criterion. A finding
+directly fails a criterion when it shows the criterion is unmet, or undemonstrated
+where the criterion asks for proof; a chain of reasoning is not direct. The
+review quotes the criterion and its source (`criterion-fail: "<quote>" (source:
+<issue #N body | brief | owner ruling <ref>>)`); check the quote in one lookup.
+Only the owner or a recorded owner ruling removes or relaxes a criterion. (#10803)
 
 Everything else (other MEDIUM and LOW findings, missing tests on non-safety
 paths, edge cases that do not break daily use, style, docs, table rows) goes as
@@ -39,8 +53,9 @@ and no fix round for it, unless the user asks.
 
 **Limits.**
 
-- Rounds: after the first review, at most one fix round and one delta review.
-  If a blocking finding remains after that, stop and bring it to the Architect:
+- Rounds: after the first review, at most one fix round and one delta review;
+  a criterion-fail fix uses that one round, and a review round may hold both
+  fix-bar and criterion-fail findings. If a blocking finding remains after that, stop and bring it to the Architect:
   close-and-fold, re-scope, or ask the user. Do not start a third round on your
   own. A session no Architect watches brings it to the user. Worked example of
   a branch that should have folded: #4202 → #4207.

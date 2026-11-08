@@ -29,16 +29,23 @@ standard to a PM that does not follow it.
 - **Good enough.** A finding blocks only if it causes or leaves unguarded:
   wrong behaviour against the acceptance criteria, a security or credential
   exposure, data loss, a crash, hang or leaked process, a resource pileup, or
-  a broken gate or CI. Everything else is one comment on the PR or the
-  existing issue: no new round, no new issue, no fix round.
+  a broken gate or CI. A finding of any severity that directly fails a stated
+  acceptance criterion of the brief or issue blocks; its fix uses the one fix
+  round (no extra round). A stated criterion is written in the issue body
+  (whoever wrote it), the dispatch brief, or a recorded owner ruling; your own
+  restatement with no owner source counts only as a brief criterion. Everything
+  else is one comment on the PR or the existing issue: no new round, no new
+  issue, no fix round.
 <!-- rule:r-044 -->
 - **Limits.** After the first review: at most one fix round and one delta
-  review. A blocker left after that comes to you, and you decide between
+  review; a criterion-fail fix uses that one round. A blocker left after that
+  comes to you, and you decide between
   close-and-fold, a re-scope, or a question to the owner. No scope widening,
   no hunting adjacent bugs. Progress is user impact, not issue counts.
 <!-- rule:r-045 -->
 - **Your clearance.** Clear on Done items 1 to 3. Never make a non-blocking
-  MEDIUM or LOW a clearance condition, and name over-polishing (repeated
+  MEDIUM or LOW a clearance condition (a criterion-fail finding is blocking,
+  not a non-blocking MEDIUM or LOW), and name over-polishing (repeated
   rounds, non-blocking fix rounds, edge-case issues) as drift in your report.
   Anything beyond this standard needs the owner's explicit request. A project
   ruling that sets a stricter bar stays in force for that project only.
@@ -47,7 +54,10 @@ standard to a PM that does not follow it.
 **The fix bar decides, not the tool's severity.** The owner's fix bar
 decides BLOCK, not a review tool's severity label. A finding in the fix-bar
 class (a crash, hang, data loss, leaked process, overcommit or pileup, a
-fail-open restart, a broken gate) blocks even when graded HIGH or MEDIUM.
+fail-open restart, a broken gate) blocks even when graded HIGH or MEDIUM, and
+so does the criterion-fail class: a finding of any severity that directly
+fails a stated acceptance criterion of the brief or issue blocks; its fix uses
+the one fix round (no extra round).
 Critic briefs carry the issue and the required behaviour, not the
 implementer's design summary. A missing error-arm test on a new failure
 branch blocks (the Fail-Open check): a fail-open arm is the hang, leak or

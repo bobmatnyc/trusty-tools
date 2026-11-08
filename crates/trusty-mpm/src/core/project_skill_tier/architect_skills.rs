@@ -127,6 +127,13 @@ const STRATEGY: ShippedSkill = ShippedSkill {
     ],
 };
 
+/// `architect-completion-standard`, edited since its first release.
+const COMPLETION_STANDARD: ShippedSkill = ShippedSkill {
+    stem: "architect-completion-standard",
+    // #10803: the U1b text, before the fix bar's acceptance-criterion class.
+    previous: &["5e8aac79b0d9b187a46418d0e9443188e439474b40fed535b71379ceeeb34374"],
+};
+
 /// `architect-project-provision`, edited since its first release.
 const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
     stem: "architect-project-provision",
@@ -172,7 +179,7 @@ pub const SHIPPED: &[ShippedSkill] = &[
     first_release("architect-search-memory"),
     first_release("architect-github"),
     STRATEGY,
-    first_release("architect-completion-standard"),
+    COMPLETION_STANDARD,
     first_release("architect-owner-model"),
     // #10161 D2: the review, drift, provisioning, macOS, improvement and
     // host-administration skills, rewritten into trusty-tools form.
