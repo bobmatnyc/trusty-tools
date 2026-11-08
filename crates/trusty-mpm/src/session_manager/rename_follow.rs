@@ -111,9 +111,12 @@ fn drift_of(
 /// routed to, whose listing fails, that does not answer in time, or that
 /// another probe holds yields no drift for any of its records: they are left
 /// as they are this pass, and its socket is in the returned skip set so the
-/// reaper holds them too. The default server is never asked.
+/// reaper holds them too — except a failed listing whose socket is gone: that
+/// server exited, and its records are left to the reaper's own judgement. The
+/// default server is never asked.
 /// Test: `a_renamed_workspace_server_record_is_followed_on_its_own_server`,
 /// `the_reaper_holds_a_pm_whose_server_the_follow_could_not_probe`,
+/// `a_pm_whose_server_socket_is_gone_is_still_stopped_deliberate`,
 /// `a_same_named_session_on_another_server_does_not_hide_a_rename`,
 /// `a_hung_workspace_server_is_skipped_and_its_records_kept`,
 /// `an_unreachable_or_failing_workspace_server_is_skipped_never_defaulted`.
@@ -169,7 +172,12 @@ fn workspace_drifts(
                     socket = %key.display(),
                     "rename follow skipped {count} record(s): their tmux server could not be listed ({e}) (#10101)"
                 );
-                skipped.insert(key);
+                // #10101: an exited server removes its socket and its listing
+                // errors; that is gone (ruling arm a), not held. The same test
+                // `LiveSet::server_lost` uses.
+                if key.symlink_metadata().is_ok() {
+                    skipped.insert(key);
+                }
             }
             None => {
                 warn!(

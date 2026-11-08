@@ -1,7 +1,7 @@
 //! #10101: the tmux-gone reaper judges each record on its own tmux server.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::DaemonState;
@@ -11,13 +11,19 @@ use crate::session_manager::{
     SessionManager, StopCause,
 };
 
-/// [`FakeNoopTmuxDriver`] that also reaches every named server, each an empty
-/// [`FakeNoopTmuxDriver`] (a vanished `-L` server lists no session).
+/// [`FakeNoopTmuxDriver`] that also reaches every named server, on the
+/// socket `/tmp/tmux-0/<server>` the records below store.
 ///
 /// Why: #10101 — the reaper holds a record whose server the rename follow
 /// could not read, so a driver that reaches no named server would hold every
 /// workspace-server record and the stop arms below would never run.
-struct RoutingNoop;
+/// What: `None` is the default server. A named server lists no session when
+/// its socket exists, and otherwise fails as tmux does for an exited server
+/// (`error connecting to <socket> (No such file or directory)`).
+struct RoutingNoop(Option<PathBuf>);
+
+/// Where [`RoutingNoop`]'s named servers' sockets live.
+const SOCKET_DIR: &str = "/tmp/tmux-0";
 
 impl ManagedTmuxDriver for RoutingNoop {
     fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
@@ -39,7 +45,15 @@ impl ManagedTmuxDriver for RoutingNoop {
         FakeNoopTmuxDriver.capture(name, lines)
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-        FakeNoopTmuxDriver.list_sessions()
+        match &self.0 {
+            Some(socket) if socket.symlink_metadata().is_err() => {
+                Err(ManagedError::TmuxUnavailable(format!(
+                    "error connecting to {} (No such file or directory)",
+                    socket.display()
+                )))
+            }
+            _ => FakeNoopTmuxDriver.list_sessions(),
+        }
     }
     fn get_pane_id(&self, name: &str) -> Option<String> {
         FakeNoopTmuxDriver.get_pane_id(name)
@@ -62,8 +76,10 @@ impl ManagedTmuxDriver for RoutingNoop {
     fn pane_harness(&self, n: &str, p: &str, h: &str) -> crate::core::process::PaneClaude {
         FakeNoopTmuxDriver.pane_harness(n, p, h)
     }
-    fn on_server(&self, _server: &str) -> Option<Arc<dyn ManagedTmuxDriver>> {
-        Some(Arc::new(FakeNoopTmuxDriver))
+    fn on_server(&self, server: &str) -> Option<Arc<dyn ManagedTmuxDriver>> {
+        Some(Arc::new(RoutingNoop(Some(
+            Path::new(SOCKET_DIR).join(server),
+        ))))
     }
 }
 
@@ -78,7 +94,7 @@ async fn seeded(
 ) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mgr = Arc::new(
-        SessionManager::new(tmp.path(), Arc::new(RoutingNoop))
+        SessionManager::new(tmp.path(), Arc::new(RoutingNoop(None)))
             .await
             .expect("session manager"),
     );
@@ -169,4 +185,27 @@ async fn an_unlistable_workspace_server_leaves_its_records_alone() {
         mgr.get(&ids[1]).await.expect("gone").state,
         ManagedSessionState::Stopped
     );
+}
+
+/// #10101 ruling arm (a): a workspace server that exited removed its socket,
+/// so the rename follow's listing fails. That is a gone server, not an
+/// unreadable one: the reaper still stops its PM as Deliberate.
+#[tokio::test]
+async fn a_pm_whose_server_socket_is_gone_is_still_stopped_deliberate() {
+    let socket = Path::new(SOCKET_DIR).join("tm-ws-ended-10101");
+    assert!(
+        socket.symlink_metadata().is_err(),
+        "the socket must be absent"
+    );
+    let (_tmp, mgr, state, ids) = seeded(&[("ended", socket.to_str())]).await;
+    let live = LiveSessions {
+        default: HashSet::from(["tm-someone-else".to_owned()]),
+        ..LiveSessions::default()
+    };
+
+    state.reap_managed_against(&live).await;
+
+    let ended = mgr.get(&ids[0]).await.expect("ended");
+    assert_eq!(ended.state, ManagedSessionState::Stopped);
+    assert_eq!(ended.stop_cause, Some(StopCause::Deliberate));
 }
