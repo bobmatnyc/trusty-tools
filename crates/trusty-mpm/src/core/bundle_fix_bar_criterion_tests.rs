@@ -100,7 +100,10 @@ fn fix_bar_criterion_architect_skill_copies_are_identical() {
         repo_root().join("python/trusty-architect/skills/architect-completion-standard.md"),
     )
     .expect("python copy");
-    assert_eq!(shipped, source, "the two skill copies must stay byte-identical");
+    assert_eq!(
+        shipped, source,
+        "the two skill copies must stay byte-identical"
+    );
 }
 
 #[test]
@@ -151,15 +154,24 @@ fn fix_bar_criterion_rubric_fixtures_f1_to_f5() {
         criterion_source,
     };
     // F1: "quoted lines stay inert" has no test; MEDIUM with a valid tag blocks.
-    assert_eq!(verdict(&[f("MEDIUM", 90, Some("issue #10780 body"))]), "BLOCK");
+    assert_eq!(
+        verdict(&[f("MEDIUM", 90, Some("issue #10780 body"))]),
+        "BLOCK"
+    );
     // F2: the criterion is inferred by the reviewer; an ordinary MEDIUM.
-    assert_eq!(verdict(&[f("MEDIUM", 90, Some("reviewer inference"))]), "APPROVE");
+    assert_eq!(
+        verdict(&[f("MEDIUM", 90, Some("reviewer inference"))]),
+        "APPROVE"
+    );
     // F3: a LOW naming nit with no criterion does not block.
     assert_eq!(verdict(&[f("LOW", 90, None)]), "APPROVE");
     // F4: a tagged finding at 70% confidence is dropped by the 80% filter.
     assert_eq!(verdict(&[f("MEDIUM", 70, Some("brief"))]), "APPROVE");
     // F5: the criterion appears only in an Architect paraphrase; ordinary.
-    assert_eq!(verdict(&[f("LOW", 90, Some("architect paraphrase"))]), "APPROVE");
+    assert_eq!(
+        verdict(&[f("LOW", 90, Some("architect paraphrase"))]),
+        "APPROVE"
+    );
 
     // The rubric text carries each rule the model above encodes.
     for path in [SENTENCE_SURFACES[5], SENTENCE_SURFACES[6]] {
