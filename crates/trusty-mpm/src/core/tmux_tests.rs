@@ -157,7 +157,12 @@ fn cli_launch_paths_type_through_the_guard() {
         ("src/bin/tm/commands/launch.rs", spec_send, 2),
         ("src/bin/tm/commands/session/start.rs", spec_send, 1),
         ("src/client/http_client/session_connect.rs", spec_send, 1),
-        ("src/bin/tm/commands/fleet/launch.rs", spec_send, 1),
+        // #8878: the fleet path binds itself, so it sends unbound.
+        (
+            "src/bin/tm/commands/fleet/launch.rs",
+            "cli_launch::send_spec_launch_unbound(",
+            1,
+        ),
         ("src/runtime/cli_launch.rs", "tmux::send_launch_line(", 1),
     ] {
         let src = std::fs::read_to_string(root.join(file)).unwrap();

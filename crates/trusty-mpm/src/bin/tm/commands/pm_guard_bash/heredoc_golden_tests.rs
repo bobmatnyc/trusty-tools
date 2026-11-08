@@ -8,6 +8,8 @@
 //! `contains`, `suppresses_separator` and `shell_body_starting_at`, and the
 //! pm-guard, credential-print and egress verdicts (reasons hashed) — and
 //! compares each line with `heredoc_golden_9720.txt`, recorded on f7d0c6f54c.
+//! #8878 re-recorded cases 106, 112, 173, 236, 262, 321, 414, 458 and 513: an
+//! open-quote line that opens no body no longer abandons the scan.
 //! The corpus is the here-document cases of the existing suites plus 500
 //! commands drawn by a fixed generator from shell tokens and lines.
 //! Test: `heredoc_scan_matches_the_pre_9720_golden_table`.
