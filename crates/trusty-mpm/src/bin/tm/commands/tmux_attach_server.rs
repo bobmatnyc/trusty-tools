@@ -85,7 +85,8 @@ fn quote(word: &str) -> String {
 /// `new-window -a -t <caller_pane> -n <session> <command>` on the caller's
 /// server, where the command attaches to `session` on the server at `socket`
 /// with `$TMUX`/`$TMUX_PANE` unset (tmux refuses a nested attach otherwise).
-/// Test: `a_cross_server_attach_opens_a_window_running_the_attach`.
+/// Test: `a_cross_server_attach_opens_a_window_running_the_attach`,
+/// `a_cross_server_window_target_is_exact`.
 pub(crate) fn new_window_attach_argv(
     caller_pane: &str,
     tmux_bin: &str,
@@ -102,7 +103,8 @@ pub(crate) fn new_window_attach_argv(
         "new-window".to_owned(),
         "-a".to_owned(),
         "-t".to_owned(),
-        caller_pane.to_owned(),
+        // #8443: a %N id passes through; anything else is pinned exact.
+        trusty_common::tmux::exact_window_target(caller_pane),
         "-n".to_owned(),
         session.to_owned(),
         attach,
@@ -163,5 +165,14 @@ mod tests {
         );
         // Never a switch-client across servers.
         assert!(argv.iter().all(|w| !w.contains("switch-client")));
+    }
+
+    #[test]
+    fn a_cross_server_window_target_is_exact() {
+        let socket = Path::new("/tmp/tmux-501/tm-ws-x");
+        let by_name = new_window_attach_argv("main", "tmux", socket, "tm-a");
+        assert_eq!(by_name[3], "=main:");
+        let by_id = new_window_attach_argv("%12", "tmux", socket, "tm-a");
+        assert_eq!(by_id[3], "%12");
     }
 }
