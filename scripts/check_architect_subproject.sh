@@ -190,6 +190,7 @@ schemas/dashboard/sessions.schema.json|crates/trusty-mpm/src/assets/architect/sc
 schemas/dashboard/step_progress.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/step_progress.schema.json
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
 scripts/relay.sh|crates/trusty-mpm/src/assets/architect/scripts/relay.sh
+scripts/relay_provenance.py|crates/trusty-mpm/src/assets/architect/scripts/relay_provenance.py
 scripts/posted.sh|crates/trusty-mpm/src/assets/architect/scripts/posted.sh
 scripts/relay-marker.py|crates/trusty-mpm/src/assets/architect/scripts/relay-marker.py
 scripts/architect_config.py|crates/trusty-mpm/src/assets/architect/scripts/architect_config.py

@@ -1,29 +1,32 @@
 //! The socket a tmux kill reaches when its argv does not spell it (#10665 r3).
 //!
 //! Why: Architect ruling df-D77. `env -u TMUX TMUX_TMPDIR=<dir> tmux
-//! kill-server` reaches `<dir>/tmux-<uid>/default`, and the sandbox scripts
-//! stop their server with `env -i … tmux -S "$SOCK" kill-server`. Neither
-//! spells a literal `-S`, so the floor would refuse both.
+//! kill-server` reaches `<dir>/tmux-<uid>/default`, and `-S "$SOCK"` names
+//! the socket through a variable. Neither spells a literal `-S`, so the floor
+//! would refuse both.
 //! What: [`explicit_argv`] writes the socket into the tmux argv as a literal
 //! `-S`, which `scratch_server` then judges: the default socket of a scratch
 //! `TMUX_TMPDIR` that `env` sets while it removes `TMUX` (`-u TMUX` or `-i`),
 //! when `env` runs tmux directly and nothing else in the command sets `TMUX`;
 //! and for `-S "$VAR"`, the one literal absolute path the command assigns to
-//! `VAR`, or [`FRESH_SCRATCH`] for a `mktemp` value or, under `env -i`, any
-//! value. Anything else is left as written, and refuses.
+//! `VAR`, or [`FRESH_SCRATCH`] for a `mktemp` value. Anything else is left as
+//! written, and refuses. #10706 C2: `env -i` no longer vouches for any
+//! `$VAR` — the outer shell expands it first; the sandbox scripts are
+//! trusted by repo and content instead (`pm_guard_secret_script::tmux_kill`).
 //! Test: `env_cleared_scratch_tmpdir_kills_are_allowed`,
-//! `a_socket_variable_is_read_from_its_one_assignment`.
+//! `a_socket_variable_is_read_from_its_one_assignment`,
+//! `deny_env_i_with_preexpanded_socket`.
 
 use std::path::Path;
 
 use super::super::super::architect_pane_env::moves_server_env;
 use super::super::super::floor_d4::{grammar_prefix, segments};
-use super::{ServerEnv, canonical};
+use super::{ServerEnv, canonical, has_parent_dir};
 use crate::commands::hook_rewrite::is_env_assignment;
 use trusty_mpm::core::tmux_server::socket_dir;
 
 /// A path no tmux server listens on, outside every socket directory: the
-/// socket of a server the command creates fresh (`mktemp`, `env -i`).
+/// socket of a server the command creates fresh (`mktemp`).
 const FRESH_SCRATCH: &str = "/nonexistent/tm-guard-fresh-scratch.sock";
 
 /// `argv` with the socket its tmux (at `pos`) reaches written as a literal
@@ -37,7 +40,6 @@ pub(super) fn explicit_argv(
 ) -> Vec<String> {
     let mut argv = argv.to_vec();
     let prefix = env_prefix(&argv, pos);
-    let reset = prefix.as_ref().is_some_and(|p| p.reset);
     let mut has_server = false;
     let mut i = pos + 1;
     while let Some(word) = argv.get(i) {
@@ -51,11 +53,12 @@ pub(super) fn explicit_argv(
             .map(|(k, c)| (c, word[k + c.len_utf8()..].is_empty()));
         if let Some((c, separate)) = option {
             has_server |= c == 'L' || c == 'S';
+            // #10706 C2: no `env -i` fallback — the outer shell expands the
+            // variable before `env` runs, so `env -i` says nothing about it.
             if c == 'S'
                 && separate
                 && let Some(name) = argv.get(i + 1).and_then(|v| variable(v))
-                && let Some(path) =
-                    assigned_path(name, script).or_else(|| reset.then(|| FRESH_SCRATCH.into()))
+                && let Some(path) = assigned_path(name, script)
             {
                 argv[i + 1] = path;
             }
@@ -86,10 +89,13 @@ struct EnvPrefix {
 
 impl EnvPrefix {
     /// The scratch directory tmux finds its server in: `TMUX` removed and
-    /// `TMUX_TMPDIR` a literal absolute directory other than `/tmp`.
+    /// `TMUX_TMPDIR` a literal absolute directory other than `/tmp`, with no
+    /// `..` component (#10706 M1: judged as text, before `canonical`).
     fn cleared_tmpdir(self) -> Option<String> {
         let dir = self.tmpdir.filter(|_| self.reset || self.unsets_tmux)?;
-        let literal = dir.starts_with('/') && !dir.contains(['$', '`', '~']);
+        let literal = dir.starts_with('/')
+            && !dir.contains(['$', '`', '~'])
+            && !has_parent_dir(Path::new(&dir));
         let real = canonical(Path::new(&dir));
         let tmp = real == Path::new("/tmp") || real == Path::new("/private/tmp");
         (literal && !tmp).then_some(dir)
@@ -171,12 +177,22 @@ fn variable(word: &str) -> Option<&str> {
 
 /// The path `script` gives `name`: its one assignment, when `name` is
 /// written nowhere else, a literal absolute path or a `mktemp` value.
+/// #10706 H3: an occurrence joined to an option cluster (`printf -vSOCK`,
+/// `read -aSOCK`) is a write too; a longer name (`DAEMON_SOCK`) is not.
 fn assigned_path(name: &str, script: &str) -> Option<String> {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let writes = script.match_indices(name).filter(|(at, _)| {
-        let before = script[..*at].chars().next_back();
+        let head = &script[..*at];
+        let before = head.chars().next_back();
         let after = script[at + name.len()..].chars().next();
-        let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-        !word(before) && !word(after) && !matches!(before, Some('$' | '{' | '#' | '!' | '-'))
+        if after.is_some_and(is_word) {
+            return false;
+        }
+        if before.is_some_and(is_word) {
+            let run = head.trim_end_matches(is_word);
+            return run.ends_with('-');
+        }
+        !matches!(before, Some('$' | '{' | '#' | '!' | '-'))
     });
     if writes.count() != 1 {
         return None;

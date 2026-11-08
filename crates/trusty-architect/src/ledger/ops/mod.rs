@@ -12,6 +12,8 @@
 
 // #9758: the session op lives in its own file to keep each under the SLOC cap.
 mod session;
+// #10780: an answer's provenance check.
+mod source;
 
 use std::collections::BTreeMap;
 
@@ -83,6 +85,7 @@ pub(crate) fn apply(
                 answer: None,
                 to: None,
                 note: None,
+                source: None,
             };
             Ok((apply_update(st, &u)?, Vec::new()))
         }
@@ -200,6 +203,7 @@ fn apply_add(st: &mut State, a: &AddOp) -> Result<BatchEvent, LedgerError> {
                 answer,
                 outcome,
                 esc,
+                source: None,
                 extra,
             });
         }
@@ -274,6 +278,10 @@ fn find<'a>(st: &'a mut State, id: &str) -> Result<Found<'a>, LedgerError> {
 fn apply_update(st: &mut State, u: &UpdateOp) -> Result<Vec<BatchEvent>, LedgerError> {
     let mut found = find(st, &u.id)?;
     let mut evs = Vec::new();
+    // #10780: a source describes one answer.
+    if u.source.is_some() && u.answer.is_none() {
+        return Err(bad("source needs an answer in the same update"));
+    }
     if let Some(t) = &u.title {
         let t = check_title(t)?.to_owned();
         match &mut found {
@@ -306,6 +314,8 @@ fn apply_update(st: &mut State, u: &UpdateOp) -> Result<Vec<BatchEvent>, LedgerE
         };
         i.answer = check_paragraph("answer", answer, PARAGRAPH_MAX)?.to_owned();
         i.status = ItemStatus::Answered;
+        // #10780: a new answer with no source drops the old answer's source.
+        i.source = u.source.as_ref().map(source::check).transpose()?;
         evs.push("answered");
     }
     if let Some(to) = &u.to {

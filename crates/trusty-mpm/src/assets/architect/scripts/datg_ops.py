@@ -11,7 +11,9 @@ import re
 import time
 
 from datg_store import (CODE_RE, DEFAULT_BLOCK_AFTER, ID_RE, PREFIXES, SESSION_MAX, STATUS, TITLE_MAX, VAGUE,
-                        WHO, DatgError, Locked, commit, load_state, now_iso, paths)
+                        WHO, DatgError, Locked, commit, load_state, now_iso, parse_ts, paths)
+
+SOURCE_KEYS = {"owner": ("by", "cite", "quote", "until"), "architect": ("by", "basis")}
 
 def _title(t):
     t = (t or "").strip()
@@ -135,9 +137,55 @@ def apply_add(st, a):
     return {"id": new_id, "ev": ev, "note": title}
 
 
+def _source(src):
+    """The stored provenance of an answer (#10780); DatgError unless it is one of the two shapes and an owner
+    quote is in its cited turn (verify_owner_quote).
+
+    Why: after a /clear a fresh session could not tell an owner ruling from an Architect inference, and
+    restored the inference as a ruling. What: {by: owner, cite, quote[, until]} (cite one line <= 80,
+    quote one line <= 300, until an ISO minute) or {by: architect, basis} (one line <= 200). An
+    inference never carries an owner quote. Keys are written in that order.
+    Test: tests/test_datg_provenance.py SourceCase, ledger_writer_matches_prototype_bytes
+    """
+    by = src.get("by") if isinstance(src, dict) else None
+    if by not in SOURCE_KEYS:
+        raise DatgError("source.by must be owner or architect")
+    if set(src) - set(SOURCE_KEYS[by]):
+        raise DatgError(f"source by {by} takes only {', '.join(SOURCE_KEYS[by][1:])}")
+    if by == "architect":
+        return {"by": by, "basis": _lim(src.get("basis"), "source.basis", 200, True)}
+    out = {"by": by, "cite": _lim(src.get("cite"), "source.cite", 80, True),
+           "quote": _lim(src.get("quote"), "source.quote", 300, True)}
+    if src.get("until") is not None:
+        out["until"] = _lim(src["until"], "source.until", 20, True)
+        if parse_ts(out["until"]) is None:
+            raise DatgError("source.until must be YYYY-MM-DDTHH:MMZ")
+    verify_owner_quote(out["cite"], out["quote"])
+    return out
+
+
+def verify_owner_quote(cite, quote):
+    """#10780 critic H3: an owner source is written only when its quote is in the cited owner turn.
+
+    What: relay_provenance.verify (the relay gate's own check) beside this file; its refusal, or the
+    module missing, raises DatgError, so nothing unverified is stored as the owner's.
+    Test: tests/test_datg_provenance.py SourceCase
+    """
+    try:
+        import relay_provenance
+    except ImportError as e:
+        raise DatgError(f"source by owner cannot be checked: relay_provenance.py is missing ({e})")
+    try:
+        relay_provenance.verify(cite, [quote])
+    except relay_provenance.Refused as e:
+        raise DatgError(f"source by owner refused: {e}")
+
+
 def apply_update(st, a):
     pre, o = _find(st, a.get("id"))
     evs = []
+    if a.get("source") is not None and a.get("answer") is None:
+        raise DatgError("source needs an answer in the same update")   # #10780: a source describes one answer
     if a.get("title") is not None:
         o["title"] = _title(a["title"])
     if a.get("rank") is not None:
@@ -156,6 +204,10 @@ def apply_update(st, a):
             raise DatgError("answer applies to D/A")
         o["answer"] = _lim(a["answer"], "answer", 300, ml=True)
         o["status"] = "answered"
+        if a.get("source") is not None:
+            o["source"] = _source(a["source"])
+        else:
+            o.pop("source", None)   # #10780: a new answer with no source is unsourced, never the old answer's source
         evs.append("answered")
     if a.get("to") is not None:
         if pre != "T":

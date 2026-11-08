@@ -12,7 +12,9 @@
 //! iTerm2 (select-only AppleScript, exact unique tab name, 5 s bound). Both
 //! run off the async worker. Outside both, the result is a one-line
 //! notice. Every path returns the notice text the action bar shows. No path
-//! creates a tmux session or window, or an iTerm2 tab or window.
+//! creates a tmux session, or an iTerm2 tab or window. One path opens a tmux
+//! window: #10101 ruling Dc3, a session on another tmux server, where the
+//! binary's hook opens the window `tm attach` opens for it.
 //! Test: `plan_table_tmux_iterm_neither`, `no_plan_contains_spawn_class_argv`,
 //! `focus_outside_tmux_and_iterm2_is_a_notice_only`,
 //! `unset_hook_is_a_notice_not_a_panic`, `iterm_tab_not_found_is_a_notice`.

@@ -19,9 +19,14 @@
 //! `credential_print_tests::denies_the_sibling_credential_clis_8677`,
 //! `credential_print_tests::allows_the_8677_neighbours`.
 
+// #10734: a sibling credential call written as an argv list.
+#[path = "credential_print_argv.rs"]
+mod credential_print_argv;
+
 use super::credential_print_programs::basename;
 use super::credential_print_redirect::{Routed, redirect_target_sink};
 use super::{Emitted, Lifted, MARK, Refusal, Sink, carries, route};
+use credential_print_argv::names_argv_trigger;
 
 /// Word sequences, in order, that name a sibling credential call.
 const WORD_TRIGGERS: &[&[&str]] = &[
@@ -61,15 +66,24 @@ const RUN_TIME_PREFIXES: &[&[&str]] = &[
 
 /// Whether the quote-stripped, lowercased `flat` text names an interactive
 /// `security`, a [`WORD_TRIGGERS`] sequence, or a [`RUN_TIME_PREFIXES`] entry
-/// followed by a `$` or backtick (`gh auth -hgithub.com$T`).
-/// Test: `credential_print_tests::denies_a_cli_subcommand_chosen_at_run_time_8677`.
-pub(super) fn names_cli_trigger(flat: &str) -> bool {
+/// followed by a `$` or backtick (`gh auth -hgithub.com$T`); or `text`, quotes
+/// kept, names one as an argv list ([`names_argv_trigger`], #10734).
+/// Test: `credential_print_tests::denies_a_cli_subcommand_chosen_at_run_time_8677`,
+/// `credential_print_tests::denies_a_credential_call_written_as_an_argv_list_10734`.
+pub(super) fn names_cli_trigger(flat: &str, text: &str) -> bool {
     let words: Vec<String> = flat
         .replace(['$', '`'], " $ ")
         .split(|c: char| c.is_whitespace() || ";|&()<>{}".contains(c))
         .filter(|w| !w.is_empty())
         .map(basename)
         .collect();
+    names_trigger_words(&words) || names_argv_trigger(text)
+}
+
+/// Whether `words`, in order, name an interactive `security`, a
+/// [`WORD_TRIGGERS`] sequence, or a [`RUN_TIME_PREFIXES`] entry followed by a
+/// `$` word. Shared with the argv-list reading (#10734).
+fn names_trigger_words(words: &[String]) -> bool {
     let interactive = words
         .iter()
         .enumerate()

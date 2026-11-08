@@ -2055,7 +2055,11 @@ fn fallback_tmux_bin() -> String {
 /// What: watches the default server for sessions whose pane sits under the
 /// fixture root, runs the fallback through [`run_fallback`], then asserts the
 /// launch reached tmux on the private server, created nothing under the root on
-/// the default server, and left no private session alive. `NestedTmuxPaneEnv`
+/// the default server, and left no private session alive. #10101: the launch
+/// names its workspace server (`-L tm-ws-…`) after the shim's `-L`, so its
+/// session lands there, in this process's relocated tmux directory; the test
+/// counts that server's sessions with the private ones and kills it after.
+/// `NestedTmuxPaneEnv`
 /// keeps the launched session alive past `launch()` so the first assertion has
 /// something to see; the default-server watch still reaps on drop if the second
 /// assertion fails.
@@ -2106,6 +2110,27 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     )
     .await;
 
+    // #10101: the PM's workspace server, named for the base clone that owns
+    // the session worktree; empty under `TM_WORKSPACE_TMUX=0`.
+    let workspace = trusty_mpm::session_manager::launch_server::cli_launch_server(&base)
+        .map(|(server, _)| server);
+    let workspace_sessions: Vec<String> = workspace
+        .iter()
+        .flat_map(|server| {
+            let out = std::process::Command::new(&tmux)
+                .args(["-L", server, "list-sessions", "-F", "#{session_name}"])
+                .output()
+                .expect("list the workspace server");
+            let _ = std::process::Command::new(&tmux)
+                .args(["-L", server, "kill-server"])
+                .output();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     let leaked = default_server.spawned();
     assert!(
         leaked.is_empty(),
@@ -2114,7 +2139,7 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
         repos_root_path.display()
     );
     assert!(
-        !run.private_sessions.is_empty(),
+        !run.private_sessions.is_empty() || !workspace_sessions.is_empty(),
         "fixture precondition: the fallback must have launched a tmux session on \
          the private server, or the assertions around it prove nothing. \
          `NestedTmuxPaneEnv::pin` sets $TMUX_PANE so `tmux_attach` takes its \

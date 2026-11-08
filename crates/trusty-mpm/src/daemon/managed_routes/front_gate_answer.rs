@@ -36,7 +36,9 @@ pub async fn spawn_runtime_for(
     record: &SessionRecord,
 ) -> Result<(), String> {
     let mgr = state.session_manager().await;
-    let adapter = build_adapter(record.runtime, mgr.tmux_driver(), state.framework_root());
+    // See #10101: the record's own server.
+    let tmux = mgr.tmux_driver_for(record).map_err(|e| e.to_string())?;
+    let adapter = build_adapter(record.runtime, tmux, state.framework_root());
     let gh_env = super::lifecycle::resolve_gh_env(state, &launch_workspace(record)).await;
     let spec_dir = crate::runtime::launch_spec::LaunchSpec::root();
     launch_withheld(&mgr, record, adapter.as_ref(), &gh_env, spec_dir.as_deref()).await
@@ -98,7 +100,7 @@ pub(crate) async fn launch_withheld(
         return Err(e.to_string());
     }
     // #8233: an accepted keystroke is not a started runtime.
-    let tmux = mgr.tmux_driver();
+    let tmux = mgr.tmux_driver_for(record).map_err(|e| e.to_string())?;
     // #9843: a runtime that never came up is a failed launch, not a delivered one.
     match super::launch_verify::record_spawn_outcome_in(mgr, tmux.as_ref(), record, spec_dir).await
     {

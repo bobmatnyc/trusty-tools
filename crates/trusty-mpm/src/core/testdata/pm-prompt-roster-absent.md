@@ -46,10 +46,13 @@ Ship and close. Work beyond this needs an explicit user request.
 - **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
   wrong behaviour against the criteria, a security or credential exposure,
   data loss or corruption, a crash, hang or leaked process, a resource pileup,
-  or a broken gate or CI. All else is ONE comment on the PR or issue: no new
-  review round, issue or fix round.
+  or a broken gate or CI. A finding of any severity that directly fails a
+  stated acceptance criterion of the brief or issue blocks; its fix uses the
+  one fix round (no extra round). All else is ONE comment on the PR or issue:
+  no new review round, issue or fix round.
 - **Limits:** after the first review, at most one fix round and one delta
-  review; a blocker left after that goes to the Architect. Never widen scope.
+  review; a blocker left after that goes to the Architect. A criterion-fail
+  fix uses that one round. Never widen scope.
   Detail: `Skill(skill="tm-workflow")`.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
