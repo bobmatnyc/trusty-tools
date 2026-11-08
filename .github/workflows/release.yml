@@ -90,8 +90,10 @@
 #   existed solely for a neural clustering embedder no caller selected, and
 #   loading that model stalled daemon boot on an untimed network call. With
 #   the embedder removed the crate links no ONNX Runtime, so it takes the
-#   ordinary glibc-2.17 zigbuild legs and publishes no AL2023 variant.
-#   `trusty-search` is the only ORT-bundling crate left.
+#   ordinary glibc-2.17 zigbuild legs. `trusty-search` is the only
+#   ORT-bundling crate left. df-Da9: trusty-analyze again publishes the two
+#   AL2023 assets, built with DEFAULT features (no load-dynamic) and REQUIRED
+#   rather than best-effort — see its block in "Resolve per-crate config".
 #
 # 2533: THE ARM64 LINUX LEG IS BLOCKING, AND MISSING ASSETS ARE AUDITED.
 #   The arm64 leg used to be `best_effort` (continue-on-error). Because a
@@ -307,6 +309,8 @@ jobs:
       #   al2023_variant – "true" to ALSO build the AL2023 load-dynamic asset
       #   al2023_no_default_features – "true" for the AL2023 build
       #   al2023_features – --features value for the AL2023 build
+      #   al2023_best_effort – "false" makes the AL2023 legs required
+      #     (default "true", set before the crate blocks)
       #
       # NOTE (#5682): `native_linux_link` and `al2023_variant` are INDEPENDENT.
       # Until #5682 the single `al2023_variant` flag answered both "does this
@@ -325,6 +329,9 @@ jobs:
         shell: bash
         run: |
           CRATE="${{ steps.parse.outputs.crate }}"
+          # df-Da9: AL2023 legs are best-effort unless a crate block says
+          # otherwise; only read when AL2023_VARIANT is "true".
+          AL2023_BEST_EFFORT="true"
 
           if [[ "$CRATE" == "trusty-search" ]]; then
             # Binaries: trusty-search + trusty-embedderd + trusty-embedderd-py
@@ -402,20 +409,29 @@ jobs:
             # UI-embedding crate: SKIP_UI_BUILD=1
             # No ORT bundling since #5067 removed the unused neural clustering
             # embedder along with the bundled-ort/load-dynamic/cuda features, so
-            # there is no longer a load-dynamic build to publish and the Linux
-            # asset is an ordinary zigbuild with the 2.17 glibc baseline. The
-            # installer dropped trusty-analyze from ORT_CRATES in the same change;
-            # re-enabling AL2023_VARIANT here without restoring load-dynamic would
-            # fail the build.
+            # the gnu Linux assets are ordinary zigbuilds with the 2.17 glibc
+            # baseline.
+            #
+            # df-Da9: the AL2023 assets are back, but as a plain DEFAULT-feature
+            # build inside the amazonlinux:2023 container — there is no
+            # load-dynamic feature to select, so AL2023_NO_DEFAULT/FEATURES stay
+            # empty. The existing dnf set covers every native build input:
+            # tree-sitter grammars (cc, already built there for trusty-search)
+            # and aws-lc-sys 0.45 via the `bedrock` feature, which takes its
+            # cc_builder with pregenerated bindings on x86_64/aarch64 linux-gnu
+            # (no cmake, clang or nasm). REQUIRED, not best-effort: the GCC 11
+            # failure that makes trusty-search's AL2023 legs best-effort is in
+            # numkong, which this crate does not link.
             CARGO_PKG="trusty-analyze"
             BINARIES="trusty-analyze"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
             NATIVE_LINUX_LINK="false"
-            AL2023_VARIANT="false"
+            AL2023_VARIANT="true"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
+            AL2023_BEST_EFFORT="false"
 
           elif [[ "$CRATE" == "trusty-review" ]]; then
             # Binaries: trusty-review
@@ -565,6 +581,7 @@ jobs:
             echo "al2023_variant=$AL2023_VARIANT"
             echo "al2023_no_default=$AL2023_NO_DEFAULT"
             echo "al2023_features=$AL2023_FEATURES"
+            echo "al2023_best_effort=$AL2023_BEST_EFFORT"
             echo "bundled=false"
           } >> "$GITHUB_OUTPUT"
 
@@ -586,7 +603,7 @@ jobs:
       #    uses the load-dynamic feature set, same as the AL2023 variant below,
       #    since bundled-ort has no aarch64 build-time binary to download)
       #
-      # AL2023 variant (ORT crates only):
+      # AL2023 variant (crates with AL2023_VARIANT=true: trusty-search, trusty-analyze):
       #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: al2023   }
       #   (built inside an amazonlinux:2023 container; named …-x86_64-linux-al2023)
       #
@@ -611,7 +628,8 @@ jobs:
           AL2023_VARIANT:       ${{ steps.config.outputs.al2023_variant }}
           AL2023_NO_DEFAULT:    ${{ steps.config.outputs.al2023_no_default }}
           AL2023_FEATURES:      ${{ steps.config.outputs.al2023_features }}
-          CRATE:                ${{ steps.parse.outputs.crate }}
+          AL2023_BEST_EFFORT:   ${{ steps.config.outputs.al2023_best_effort }}
+          CRATE:               ${{ steps.parse.outputs.crate }}
           VERSION:              ${{ steps.parse.outputs.version }}
         run: |
           import json, os
@@ -629,6 +647,8 @@ jobs:
           native_link  = os.environ["NATIVE_LINUX_LINK"] == "true"
           al_no_def    = os.environ["AL2023_NO_DEFAULT"] == "true"
           al_feats     = os.environ["AL2023_FEATURES"]
+          # df-Da9: per-crate; anything but "false" keeps the best-effort default.
+          al_best_eff  = os.environ["AL2023_BEST_EFFORT"] != "false"
 
           common = dict(
               crate=crate,
@@ -844,7 +864,8 @@ jobs:
                       "no_default_features": al_no_def,
                       "container": "amazonlinux:2023",
                       "zig_target": "",
-                      "best_effort": True,
+                      # df-Da9: per-crate (trusty-analyze's are required).
+                      "best_effort": al_best_eff,
                       "al2023_no_default": al_no_def,
                       "al2023_features": al_feats,
                   })
@@ -1150,7 +1171,9 @@ jobs:
       # <= 2.27 and loads on AL2023 (glibc 2.34). ORT_VERSION comes from the
       # job-level `env:` above (#8612).
       - name: Download ONNX Runtime ${{ env.ORT_VERSION }} (AL2023 load-dynamic)
-        if: matrix.variant == 'al2023'
+        # df-Da9: only load-dynamic builds dlopen() ORT; trusty-analyze's
+        # default-feature AL2023 build links none, so it skips this download.
+        if: matrix.variant == 'al2023' && contains(matrix.cargo_features, 'load-dynamic')
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -1336,7 +1359,7 @@ jobs:
       #   macOS:        trusty-search-0.5.0-aarch64-apple-darwin.tar.gz
       #   Linux x86_64: trusty-search-0.5.0-x86_64-unknown-linux-gnu.tar.gz  (glibc 2.17 baseline)
       #   Linux arm64:  trusty-search-0.5.0-aarch64-unknown-linux-gnu.tar.gz (glibc 2.17 baseline, best-effort — issue #2037)
-      #   AL2023 amd64: trusty-search-0.5.0-x86_64-linux-al2023.tar.gz  (ORT crates only)
+      #   AL2023 amd64: trusty-search-0.5.0-x86_64-linux-al2023.tar.gz  (AL2023_VARIANT crates only)
       #   AL2023 arm64: trusty-search-0.5.0-aarch64-linux-al2023.tar.gz  (2533 follow-up)
       - name: Strip, package, and checksum
         id: package
@@ -1396,7 +1419,7 @@ jobs:
           # build-time binary to download; see file-header comment).
           # The exact --features flag varies by crate:
           #   trusty-search:  --no-default-features --features load-dynamic
-          #   trusty-analyze: --no-default-features --features http-server,load-dynamic
+          #   (trusty-analyze's AL2023 build uses default features, no ORT, no note)
           # matrix.cargo_features holds the correct value for this matrix entry.
           LOAD_DYNAMIC_BUILD_FEATURES="${{ matrix.cargo_features }}"
           if [[ "${LOAD_DYNAMIC_BUILD_FEATURES}" == *"load-dynamic"* ]]; then
