@@ -150,12 +150,7 @@ pub(super) async fn run_mapreduce_branch(
             skipped = reduced.stats.files_skipped,
             "map-reduce branch: no chunk was reviewed — failing CLOSED to UNKNOWN (#1639 backstop)"
         );
-        result.verdict = crate::models::Verdict::Unknown;
-        result.error = Some(
-            "map-reduce review assessed no files (all chunks failed or were skipped) — \
-             could not review"
-                .to_string(),
-        );
+        mark_no_files_reviewed(&mut result, &run.raw_diff); // #10762
         return abort_dry(result, config, input, deps, DedupClaim::Held).await;
     }
 
@@ -543,6 +538,25 @@ async fn fold_reduced_into_result(
         &result.review_body,
         &result.verdict,
     );
+}
+
+/// Fail a map-reduce review that assessed no file CLOSED, partitioned (#10762).
+///
+/// Why: this exit returns through `abort_dry`, which never calls
+/// `attach_inline_comments`, yet the result already holds the run's
+/// `withheld_findings`; without the attach they sat in neither
+/// `inline_comments` nor `unanchored`.
+/// What: sets the verdict to `Unknown` and the "assessed no files" error
+/// (#1639 backstop), then attaches the inline plan against `raw_diff`.
+/// Test: `mapreduce_no_files_reviewed_abort_partitions_withheld`.
+fn mark_no_files_reviewed(result: &mut ReviewResult, raw_diff: &str) {
+    result.verdict = crate::models::Verdict::Unknown;
+    result.error = Some(
+        "map-reduce review assessed no files (all chunks failed or were skipped) — \
+         could not review"
+            .to_string(),
+    );
+    attach_inline_comments(result, raw_diff);
 }
 
 /// Flag and grade-cap a suspiciously shallow clean review on the map-reduce path.

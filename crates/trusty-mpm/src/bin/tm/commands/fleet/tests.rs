@@ -817,6 +817,7 @@ fn the_relay_scripts_and_the_voice_guide_are_seeded() {
         ("scripts/relay.sh", true),
         ("scripts/posted.sh", true),
         ("scripts/relay-marker.py", false),
+        ("scripts/relay_provenance.py", false), // #10780
         ("docs/architect/voice.md", false),
     ] {
         let meta = std::fs::metadata(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));

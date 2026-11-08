@@ -88,6 +88,9 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
   its rung's live check; (4) shipped, and the issue closed with evidence.
 - **Fix bar:** a finding blocks only if it causes or leaves unguarded wrong
   behaviour, a security or credential exposure, data loss, a crash, hang or
-  leaked process, a resource pileup, or a broken gate or CI.
+  leaked process, a resource pileup, or a broken gate or CI. A finding of any
+  severity that directly fails a stated acceptance criterion of the brief or
+  issue blocks; its fix uses the one fix round (no extra round).
 - **Limits:** after the first review, a PR gets at most one fix round and one
-  delta review. A blocker left after that comes to you.
+  delta review (a criterion-fail fix uses that one round). A blocker left after
+  that comes to you.

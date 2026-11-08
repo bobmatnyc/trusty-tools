@@ -605,6 +605,12 @@ pub struct RegisterSession {
     #[serde(default)]
     #[schema(value_type = Option<String>)]
     pub workdir: Option<PathBuf>,
+    /// The socket of the tmux server the caller created the session on
+    /// (#10101: a CLI launch's workspace server); `None` is the default
+    /// server. Stored on the record so every later tmux call reaches it.
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub tmux_socket: Option<PathBuf>,
 }
 
 /// `POST /sessions` — register a new managed session, returning its id.

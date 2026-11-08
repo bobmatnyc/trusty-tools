@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.67.5] — 2026-11-07
+
+### Added
+
+- `search_rpc::METHOD_PROJECT_ENSURE`, `ensure_project_params` and `ensure_project_blocking` call the daemon's `search.project.ensure` (#10531).
+- `search_index::best_effort_trigger_reindex` is public, so a caller that found an index through `search.project.ensure` can run the freshness-gated reindex trigger (#10531).
+- `FastEmbedder::fallback_reason` returns the primary model's init error when the embedder fell back to the other model, and the fp32 reference test prints it (#10639).
+- `embedder::retry_transient_init` and `embedder::InitRetryPolicy`, moved from trusty-agents so `FastEmbedder` and the trusty-agents embedder share one transient-error classifier and backoff (#10662).
+
+### Fixed
+
+- `bind_singleton_hardened` now releases its bind lock explicitly, so a child forked during the bind no longer leaves the next binder refused with `BindInProgress` (#10661).
+- `FastEmbedder` no longer loads the other model when the primary model's init fails on an error the classifier treats as transient: a held hf-hub blob lock, HTTP 429, 500, 502, 503 or 504, a timeout, or a reset, refused or failed connection, a failed DNS lookup or unresolved host, an unreachable network, no route to host, or a stalled body read. It makes up to 5 attempts, then fails with a named `embedder init failed` error (#10662).
+- An offline host with only the INT8 model cached now fails with that error after its attempts instead of loading INT8. If connects hang rather than fail fast, a daemon's `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` bound (default 180 s) can fire first (#10662).
+- Any other init error, including HTTP 401, 403 and 404 and a CoreML hang, is not retried and takes the same fallback path as before (#10662).
+
 ## [0.67.4] — 2026-10-30
 
 ### Added

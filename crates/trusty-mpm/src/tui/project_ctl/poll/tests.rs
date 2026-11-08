@@ -550,6 +550,56 @@ async fn tui_fleet_fetch_sends_slim_and_other_callers_do_not() {
     );
 }
 
+/// #10476 (D64): two registrations of one repo (differing by case and `.git`)
+/// give ONE project row, named by the same winner the fleet groups under, with
+/// each session counted once. The fake daemon answers what the daemon's
+/// `fleet_by_project` now emits: one group for the repo.
+#[tokio::test]
+async fn poll_collapses_duplicate_repo_registrations_to_one_row() {
+    use std::future::IntoFuture;
+
+    let projects_body = serde_json::json!({"projects": [
+        {"name": "bta-agent-ai", "repo_url": "https://github.com/travel-bta/bta-agent-ai",
+         "default_branch": "main"},
+        {"name": "widget", "repo_url": "https://github.com/acme/widget",
+         "default_branch": "main"},
+        {"name": "BTA-agent-AI", "repo_url": "https://github.com/travel-bta/BTA-agent-AI.git",
+         "default_branch": "main"},
+    ]});
+    let fleet_body = serde_json::json!({"projects": [
+        {"project_name": "BTA-agent-AI",
+         "repo_url": "https://github.com/travel-bta/BTA-agent-AI.git",
+         "sessions": [
+            {"id": "00000000-0000-0000-0000-0000000000a1", "name": "s-a", "state": "active"},
+            {"id": "00000000-0000-0000-0000-0000000000a2", "name": "s-b", "state": "stopped"},
+         ]},
+        {"project_name": "widget", "repo_url": "https://github.com/acme/widget", "sessions": []},
+    ]});
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/projects",
+            axum::routing::get(move || std::future::ready(axum::Json(projects_body.clone()))),
+        )
+        .route(
+            "/api/v1/sessions/managed/fleet",
+            axum::routing::get(move || std::future::ready(axum::Json(fleet_body.clone()))),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
+    let client = DaemonClient::new(format!("http://{addr}"));
+
+    let (rows, sessions_by_project, _full) =
+        fetch_projects_and_sessions(&client, &mut CallTimings::new())
+            .await
+            .expect("tui fetch");
+
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["BTA-agent-AI", "widget"], "one row per repo");
+    assert_eq!((rows[0].total_count, rows[0].live_count), (2, 1));
+    assert_eq!(sessions_by_project["BTA-agent-AI"].len(), 2);
+}
+
 /// #10476: the selected session's `/activity` is due on a new selection or
 /// once `ACTIVITY_REFRESH` has passed, never on a tick in between.
 #[test]

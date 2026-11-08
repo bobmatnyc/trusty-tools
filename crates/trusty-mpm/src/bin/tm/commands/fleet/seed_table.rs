@@ -334,6 +334,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     // #9997: the two-step relay send and the double-post guard the manual names.
     embedded!("scripts/relay.sh", "scripts/relay.sh", true),
     embedded!("scripts/posted.sh", "scripts/posted.sh", true),
+    // #10780: relay.sh runs this sibling by path to check an owner label's citation.
+    embedded!(
+        "scripts/relay_provenance.py",
+        "scripts/relay_provenance.py",
+        false
+    ),
     // posted.sh runs this sibling by path.
     embedded!("scripts/relay-marker.py", "scripts/relay-marker.py", false),
     // See #10161: the `local/architect.json` loader; a module, not a command.

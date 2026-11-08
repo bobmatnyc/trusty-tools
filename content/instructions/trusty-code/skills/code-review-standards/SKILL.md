@@ -44,6 +44,11 @@ preferences are **LOW at most**, never MEDIUM, HIGH, or CRITICAL, regardless
 of how strongly the reviewer feels about them. Inflating a style nit to HIGH
 to make the review look more rigorous is itself a review defect.
 
+**Criterion-fail tag (#10803).** Keep the native severity and append `criterion-fail: "<verbatim quote>" (source: <issue #N body | brief | owner ruling <ref>>)` to
+any finding that directly fails a stated acceptance criterion. A stated acceptance criterion is written in the issue body (whoever wrote it), the dispatch brief, or a recorded owner ruling; a criterion the reviewer infers, a design preference, or a paraphrase with no owner source is not stated, and an Architect restatement with no owner source counts only as a brief criterion. "Directly fails" means the finding shows the criterion is unmet, or undemonstrated where the criterion asks for proof; a chain of reasoning does not qualify. The tag
+does not raise severity. A finding with no quote and source is an ordinary
+finding at its native severity.
+
 ## The 80% Confidence Filter
 
 For every candidate finding, ask: *can I assert this is a real issue with
@@ -66,7 +71,7 @@ every LOW or MEDIUM finding that doesn't obviously fit the first two.
 
 1. **`Fix here`** — corrected in the surfacing PR. The default for correctness,
    security, acceptance criteria, regression coverage, and any small in-scope
-   repair.
+   repair. A finding of any severity that directly fails a stated acceptance criterion of the brief or issue blocks; its fix uses the one fix round (no extra round).
 2. **`Parent`** — kept with the work already in flight, as a PR comment or a
    checklist item on the parent issue. No durable artifact is created.
 3. **`Promote`** — reserved for a defect that is genuinely separable work
@@ -137,7 +142,8 @@ correct, and complete outcome — do not manufacture findings to look thorough.
 - **WARN** — zero CRITICAL, one or more HIGH findings. Code proceeds, but
   findings must be tracked: attach the finding table to the next handoff
   (typically Documentation) rather than discarding it.
-- **BLOCK** — any CRITICAL finding. Halt immediately. Surface the verdict and
+- **BLOCK** — any CRITICAL finding, or any criterion-fail finding (a valid
+  `criterion-fail:` tag, after the 80% filter) regardless of its severity. Halt immediately. Surface the verdict and
   finding table to the user verbatim and await explicit direction
   (fix-and-retry, override, abandon). Never auto-re-delegate back to the
   implementer without that direction.

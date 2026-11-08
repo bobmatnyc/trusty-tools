@@ -318,7 +318,9 @@ pub async fn session_activity(
         .capture_pane(&id, usize::try_from(lines).unwrap_or(usize::MAX))
         .await
         .unwrap_or_default();
-    let runtime_active = mgr.tmux_driver().session_exists(&record.tmux_name);
+    let runtime_active = mgr
+        .tmux_driver_for(&record)
+        .is_ok_and(|t| t.session_exists(&record.tmux_name));
     Ok(json!({
         "id": record.id.to_string(),
         "name": record.tmux_name,
