@@ -94,7 +94,11 @@ pub(super) struct PruneOutcome {
 /// Applies ONLY to the NON-force incremental path (corpus_swap_tmp.is_some()
 /// && !force && !memory_aborted); the caller already gates it.
 ///
+/// #10738: before the first removal it writes the identity bump marker into
+/// the staging corpus, so the promotion raises the generation; a failed marker
+/// write prunes nothing and counts as one failure.
 /// Test: `prune_pass_removes_deleted_file_from_staged_corpus`,
+/// `a_prune_that_removes_a_pushed_path_raises_the_generation`,
 /// `disk_existence_guard_skips_live_file` and
 /// `reindex_prunes_a_file_that_became_excluded_and_sops_content` in `prune_tests.rs`;
 /// the refused arm by `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps`;
@@ -176,6 +180,8 @@ pub(super) async fn prune_deleted_files_from_staging(
     let mut total_pruned_chunks: usize = 0;
     let mut pruned_paths_for_hash: Vec<String> = Vec::new();
     let mut failed_count: usize = 0;
+    // #10738: set once the staging corpus carries the prune's bump marker.
+    let mut bump_marked = false;
 
     // #7434: an additional root absent at walk time contributed no files, so
     // every one of its keys is "unwalked". That is the same evidence an absent
@@ -230,6 +236,19 @@ pub(super) async fn prune_deleted_files_from_staging(
             continue;
         }
 
+        // #10738: a prune removes a path no caller asked to remove (a pushed
+        // path not on disk among them); mark staging so its promotion bumps.
+        // Fail closed: no marker, no removal; the next walk retries.
+        if !bump_marked {
+            let corpus = handle.indexer.read().await.corpus_store();
+            if let Err(e) = crate::service::index_identity::mark_staging_before_prune(corpus).await
+            {
+                tracing::warn!("reindex[{}]: prune pass skipped: {e:#}", index_id.0);
+                failed_count += 1;
+                break;
+            }
+            bump_marked = true;
+        }
         let n = {
             let indexer = handle.indexer.read().await;
             match indexer.remove_file_no_kg_rebuild(file_path).await {
