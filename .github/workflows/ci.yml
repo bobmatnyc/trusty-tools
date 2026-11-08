@@ -1793,10 +1793,21 @@ jobs:
         if: contains(format(' {0} ', matrix.crates), ' trusty-okf ')
         run: cargo test -p trusty-okf --features search-feed --no-fail-fast
 
+      # #10746: the sandboxed worker tests need `/usr/bin/bwrap`. The probe
+      # fails the step here if the runner cannot start a bwrap sandbox.
+      - name: Install bubblewrap (trusty-okf sandbox tests)
+        if: contains(format(' {0} ', matrix.crates), ' trusty-okf ')
+        run: |
+          bash scripts/ci-apt-install.sh bubblewrap
+          /usr/bin/bwrap --ro-bind / / --new-session /bin/true
+
       # #10746 S10: the worker criteria (`worker_criteria`) and the worker
-      # unit tests run only with `extract-worker`.
+      # unit tests run only with `extract-worker`. TRUSTY_OKF_REQUIRE_SANDBOX
+      # turns a missing launcher into a failure instead of a skip.
       - name: cargo test -p trusty-okf --features extract-worker
         if: contains(format(' {0} ', matrix.crates), ' trusty-okf ')
+        env:
+          TRUSTY_OKF_REQUIRE_SANDBOX: "1"
         run: cargo test -p trusty-okf --features extract-worker --no-fail-fast
 
   # The single context for this suite. "Must equal success" polarity, as in

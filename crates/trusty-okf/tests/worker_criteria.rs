@@ -48,6 +48,26 @@ fn quick() -> Limits {
     }
 }
 
+/// This host's platform sandbox launcher, and whether it exists.
+///
+/// #10746: with `TRUSTY_OKF_REQUIRE_SANDBOX=1` (set in CI) a missing
+/// launcher fails the test instead of letting it skip, so the sandboxed
+/// tests cannot pass silently on a runner without bubblewrap.
+fn sandbox_launcher() -> (&'static str, bool) {
+    let launcher = if cfg!(target_os = "macos") {
+        "/usr/bin/sandbox-exec"
+    } else {
+        "/usr/bin/bwrap"
+    };
+    let present = Path::new(launcher).is_file();
+    let required = std::env::var_os("TRUSTY_OKF_REQUIRE_SANDBOX").is_some_and(|v| v == "1");
+    assert!(
+        present || !required,
+        "TRUSTY_OKF_REQUIRE_SANDBOX=1 but {launcher} is missing"
+    );
+    (launcher, present)
+}
+
 fn config(dir: &Path, fake: &Fake, name: &str) -> WorkerConfig {
     let mut cfg = WorkerConfig::new(fake.write(dir, name), dir);
     cfg.sandbox = SandboxPolicy::Off;
@@ -601,12 +621,8 @@ fn c145_sandbox_evidence_gates_connector_items_and_blocks_io() {
         "the host sent an item to a lying worker"
     );
 
-    let launcher = if cfg!(target_os = "macos") {
-        "/usr/bin/sandbox-exec"
-    } else {
-        "/usr/bin/bwrap"
-    };
-    if !Path::new(launcher).is_file() {
+    let (launcher, present) = sandbox_launcher();
+    if !present {
         // No launcher on this host: the evidence shows no sandbox, so the
         // Platform policy is the Off case above. Pin that, and say so.
         eprintln!("c145: no {launcher}; sandboxed half covered by the no-evidence path");
@@ -922,12 +938,8 @@ fn marker_alive(marker: &str) -> bool {
 /// Test: self-contained.
 #[test]
 fn sandboxed_worker_cannot_fork_a_setsid_grandchild() {
-    let launcher = if cfg!(target_os = "macos") {
-        "/usr/bin/sandbox-exec"
-    } else {
-        "/usr/bin/bwrap"
-    };
-    if !Path::new(launcher).is_file() {
+    let (launcher, present) = sandbox_launcher();
+    if !present {
         eprintln!("setsid: no {launcher}; nothing is sandboxed on this host");
         return;
     }
@@ -989,7 +1001,8 @@ fn on_pty(cmd: &str) -> (std::process::ExitStatus, String) {
 #[test]
 fn sandboxed_worker_has_no_controlling_tty() {
     let tools = ["/usr/bin/bwrap", "/usr/bin/script"];
-    if !cfg!(target_os = "linux") || !tools.iter().all(|t| Path::new(t).is_file()) {
+    // #10746: `sandbox_launcher` fails here, not skips, under CI's flag.
+    if !cfg!(target_os = "linux") || !sandbox_launcher().1 || !Path::new(tools[1]).is_file() {
         eprintln!("tty: needs Linux with {tools:?}; nothing is checked on this host");
         return;
     }
@@ -1043,16 +1056,8 @@ fn c103_sigint_cancels_the_cli_and_reaps_the_worker() {
     let fx = Fx::new(&[("a.md", "Alpha.\n"), ("b.pdf", "HANG"), ("c.pdf", "C")]);
     // The CLI applies the platform sandbox when its launcher exists; the
     // double's `hello` must agree with that spawn evidence.
-    let launcher = if cfg!(target_os = "macos") {
-        "/usr/bin/sandbox-exec"
-    } else {
-        "/usr/bin/bwrap"
-    };
-    let claim = if Path::new(launcher).is_file() {
-        "platform"
-    } else {
-        "none"
-    };
+    let (_, present) = sandbox_launcher();
+    let claim = if present { "platform" } else { "none" };
     let w = Fake {
         sandbox: claim.into(),
         ..Fake::default()
@@ -1163,12 +1168,8 @@ fn cpu_budget_recycles_before_a_valid_item_is_killed() {
 /// Test: self-contained.
 #[test]
 fn cpu_budget_recycles_a_sandboxed_worker() {
-    let launcher = if cfg!(target_os = "macos") {
-        "/usr/bin/sandbox-exec"
-    } else {
-        "/usr/bin/bwrap"
-    };
-    if !Path::new(launcher).is_file() {
+    let (launcher, present) = sandbox_launcher();
+    if !present {
         eprintln!("cpu: no {launcher}; nothing is sandboxed on this host");
         return;
     }
