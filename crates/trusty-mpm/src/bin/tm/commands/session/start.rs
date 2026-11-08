@@ -408,6 +408,12 @@ async fn start_session_in_place(
         &spec,
         &spec_dir,
     );
+    // #8878: an Architect `claude` the start could not bind is reported.
+    if let Ok(binding) = &sent
+        && let Some(warning) = binding.warning(&body.name)
+    {
+        eprintln!("{warning}");
+    }
     if let Err(e) = sent {
         // Only a session this start created reaches here (D3c guard above).
         host.kill(&body.name);

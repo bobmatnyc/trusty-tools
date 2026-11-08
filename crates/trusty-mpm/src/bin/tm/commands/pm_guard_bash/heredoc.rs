@@ -285,7 +285,10 @@ impl HeredocBodies {
                     // #9150: an unclosed quote in a delimiter word is a
                     // delimiter the shell reads past this line.
                     let read = delimiters_on(operator_line, (start, 0), &own, ops);
-                    if !own.balanced && read.is_some() {
+                    // #8878: only a line that opens a body; a line starting a
+                    // multi-line `"…"` opens none, and abandoning there left a
+                    // quoted body's `(` live (Architect `cat >> … <<'EOF'`).
+                    if !own.balanced && read.as_ref().is_some_and(|d| !d.is_empty()) {
                         return Err(Abandon::NoConfidence(Partial { expanding, bodies }));
                     }
                     read

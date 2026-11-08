@@ -264,9 +264,27 @@ pub fn pane_line(wrapper_bin: &str, spec_path: &Path) -> String {
 /// ([`crate::core::spawn_disclaim::launch_wrapper_bin`]), then
 /// [`send_spec_launch_with`] on the resolved tmux, on the named (`-L`)
 /// `server` the session lives on, or the default server for `None` (#10101).
+/// #8878: then binds an Architect `claude` it started
+/// ([`super::architect_bind::bind_live`]); the caller reports a
+/// [`Binding`](super::architect_bind::Binding) that is not bound.
 /// Test: `send_spec_launch_types_a_short_line_naming_a_readable_spec`,
-/// `a_launch_line_for_a_named_server_is_typed_there`.
+/// `a_launch_line_for_a_named_server_is_typed_there`,
+/// `every_architect_spawn_site_binds_8878`.
 pub fn send_spec_launch(
+    server: Option<&str>,
+    session: &str,
+    spec: &LaunchSpec,
+    spec_dir: &Path,
+) -> Result<super::architect_bind::Binding, CliLaunchError> {
+    send_spec_launch_unbound(server, session, spec, spec_dir)?;
+    Ok(super::architect_bind::bind_live(server, session, spec))
+}
+
+/// [`send_spec_launch`] without the bind, for `tm fleet init|relaunch` only:
+/// that path binds through `architect_session::bind_architect` under its own
+/// home and stops an Architect it cannot bind (#8878, #10448).
+/// Test: `every_architect_spawn_site_binds_8878`.
+pub fn send_spec_launch_unbound(
     server: Option<&str>,
     session: &str,
     spec: &LaunchSpec,

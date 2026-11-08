@@ -393,11 +393,18 @@ pub(crate) async fn launch(
         &claude_spec,
         &spec_dir,
     );
-    if let Err(e) = sent {
-        let e = anyhow::anyhow!(
-            "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
-        );
-        return Err(registered.fail(e).await);
+    match sent {
+        Err(e) => {
+            let e = anyhow::anyhow!(
+                "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
+            );
+            return Err(registered.fail(e).await);
+        }
+        // #8878: an Architect `claude` the launch could not bind is reported.
+        Ok(binding) => binding
+            .warning(&tmux_name)
+            .into_iter()
+            .for_each(|w| eprintln!("{w}")),
     }
 
     // 13b. Find the claude process PID inside the tmux pane and report it to
@@ -662,6 +669,13 @@ pub(crate) async fn connect(
                 anyhow::anyhow!(
                     "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
                 )
+            })
+            // #8878: an Architect `claude` the connect could not bind is reported.
+            .map(|binding| {
+                binding
+                    .warning(&tmux_name)
+                    .into_iter()
+                    .for_each(|w| eprintln!("{w}"))
             })
         })();
         if let Err(e) = started {

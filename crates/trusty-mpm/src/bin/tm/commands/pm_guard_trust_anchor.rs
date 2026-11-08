@@ -713,3 +713,7 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_egress_tests.rs"]
 mod egress_tests;
+
+#[cfg(test)]
+#[path = "pm_guard_trust_anchor_heredoc_tests.rs"]
+mod heredoc_tests;
