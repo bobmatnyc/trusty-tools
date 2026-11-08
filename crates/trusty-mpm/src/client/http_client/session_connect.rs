@@ -10,8 +10,6 @@
 //! Test: `launch_session_errors_when_daemon_unreachable`,
 //! `connect_session_errors_when_daemon_unreachable` in `tests.rs`.
 
-use serde::Deserialize;
-
 use super::DaemonClient;
 
 impl DaemonClient {
@@ -25,14 +23,17 @@ impl DaemonClient {
     /// (deployed agents + project `CLAUDE.md`) prepared before launch.
     /// What: probes `GET /health`, runs
     /// [`crate::core::session_launch::prepare_session`] (deploy agents + merge
-    /// `CLAUDE.md`), builds the `claude` line, POSTs `{project, project_path}`
+    /// `CLAUDE.md`), builds the `claude` line, POSTs `{project, project_path, name, tmux_socket}`
     /// to `/sessions`, then creates a detached tmux session via
     /// `tmux new-session` and starts `claude` in it via `tmux send-keys`.
     /// Returns the daemon-assigned tmux session name. The daemon only registers
     /// session state; the prep and launch (tmux + process) are owned by the
     /// client, exactly as the CLI does it. #8719: an unreachable daemon fails
     /// the probe before prep writes anything, and a fatal prep failure returns
-    /// before the POST; only a tmux failure follows the registration.
+    /// before the POST; only a tmux failure follows the registration. #10101
+    /// D3c: the CLI's name rule runs before prep (a `Stopped`/`Errored` holder
+    /// is resumed, a live holder refuses), and the PM lands on its workspace
+    /// server through [`Self::start_on_workspace_server`].
     /// Test: `launch_session_errors_when_daemon_unreachable`,
     /// `launch_session_writes_nothing_when_daemon_unreachable`,
     /// `launch_session_prepares_under_the_pinned_home_before_tmux`,
@@ -43,6 +44,11 @@ impl DaemonClient {
         // #8719: probe first, so an unreachable daemon fails the launch before
         // prep writes anything to the project or the home.
         self.get("/health").send().await?.error_for_status()?;
+        // #10101: D3c — the CLI's name rule, before prep writes anything.
+        let dir = std::path::Path::new(workdir);
+        if let Some(name) = self.settle_claim(dir).await? {
+            return Ok(name);
+        }
 
         // Prepare the custom instructions Claude Code reads at startup: deploy
         // composed agents to `~/.claude/agents/` and merge the project
@@ -56,7 +62,6 @@ impl DaemonClient {
             crate::core::paths::FrameworkPaths::under,
         );
         let native = crate::core::output_style::claude_supports_native_output_style();
-        let dir = std::path::Path::new(workdir);
         // #9999: the user tier `CLAUDE_CONFIG_DIR` names, unless a test pinned the home.
         let config_dir = crate::core::session_launch::user_tier_config_dir(
             self.home.as_deref(),
@@ -115,49 +120,8 @@ impl DaemonClient {
 
         // #8719: register only once prep and the line are ready, so the
         // POST-to-tmux window holds nothing that can fail slowly.
-        #[derive(Deserialize)]
-        struct Body {
-            #[serde(default)]
-            name: String,
-        }
-        let body: Body = self
-            .post("/sessions")
-            .json(&serde_json::json!({
-                "project": workdir,
-                "project_path": workdir,
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        // #2398: routes through `core::tmux::create_managed_session`, the
-        // crate's single session-creation choke point, so the configured
-        // scrollback/mouse ergonomics are applied before the pane exists (a
-        // bare `tmux new-session` here would silently bypass them — the
-        // exact QA-caught regression this consolidation closes).
-        let new_session =
-            crate::core::tmux::create_managed_session(None, &body.name, Some(workdir));
-        match new_session {
-            Ok(outcome) if outcome.output.status.success() => {
-                // #3386 review: operator-visible (not just grep-able) notice
-                // — this client is shared by the TUI/bot surfaces, so the
-                // `tracing::error!` `warn_if_options_unverified` emits is the
-                // channel every one of them can observe.
-                crate::core::tmux::warn_if_options_unverified(&outcome, &body.name);
-                // #8308: the launch travels in a spec; the pane types a short line.
-                self.send_client_spec(&body.name, &claude_spec)?;
-            }
-            Ok(_) | Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "failed to create tmux session {} in {}",
-                    body.name,
-                    workdir
-                ));
-            }
-        }
-        Ok(body.name)
+        self.start_on_workspace_server("/sessions", workdir, &claude_spec)
+            .await
     }
 
     /// Connect to — or start — a Claude Code session in `workdir` *without*
@@ -170,14 +134,18 @@ impl DaemonClient {
     /// skips all of that — it assumes the framework is already deployed (or that
     /// the operator does not want it touched) and only wants the daemon to know
     /// about the session and the tmux host to be running.
-    /// What: POSTs `{project, project_path}` to `/api/v1/sessions/connect`, then
+    /// What: POSTs `{project, project_path, name, tmux_socket}` to `/api/v1/sessions/connect`, then
     /// runs `tmux new-session -A` (idempotent — creates the session when absent,
     /// no-ops when it already exists). When the session is freshly created it
     /// starts `claude` in it via `tmux send-keys`; an already-running session is
     /// left untouched. The system-prompt file is still built and passed so a
     /// freshly-started `claude` is a configured PM — that is prompt composition,
     /// not artifact deployment. Returns the daemon-assigned tmux session name.
-    /// Test: `connect_session_errors_when_daemon_unreachable`.
+    /// #10101 D3c: the same name rule and workspace server as `launch_session`.
+    /// Test: `connect_session_errors_when_daemon_unreachable`,
+    /// `the_tui_connect_launches_on_the_workspace_server_10101`,
+    /// `a_live_legacy_record_refuses_the_launch_10101`,
+    /// `the_tui_resumes_a_stopped_holder_10101`.
     pub async fn connect_session(&self, workdir: &str) -> anyhow::Result<String> {
         // #8405: the operator's config decides the renderer (see `client_claude_spec`).
         let config_root = crate::core::alt_screen::operator_config_root();
@@ -194,69 +162,137 @@ impl DaemonClient {
             config_root.as_deref(),
             "connect",
         )?;
-        #[derive(Deserialize)]
+        // #10101: D3c — the CLI's name rule, after the #10459 floor check.
+        if let Some(name) = self.settle_claim(std::path::Path::new(workdir)).await? {
+            return Ok(name);
+        }
+        self.start_on_workspace_server("/api/v1/sessions/connect", workdir, &claude_spec)
+            .await
+    }
+
+    /// Act on the CLI's name rule for a TUI launch in `dir` (#10101 D3c).
+    ///
+    /// What: [`DaemonClient::claim_launch_name`] for `dir`'s session name. A
+    /// `Stopped`/`Errored` holder is resumed through the daemon's resume
+    /// route and its name answered; this directory's running legacy session
+    /// answers its name, untouched; `None` means launch fresh.
+    ///
+    /// # Errors
+    ///
+    /// The daemon cannot be read, a live record holds the name, or the
+    /// resume failed or left the record errored.
+    async fn settle_claim(&self, dir: &std::path::Path) -> anyhow::Result<Option<String>> {
+        use super::launch_claim::LaunchClaim;
+        let name = crate::core::names::name_from_dir(dir);
+        match self.claim_launch_name(&name, dir).await? {
+            LaunchClaim::Free => Ok(None),
+            LaunchClaim::Running { name, .. } => Ok(Some(name)),
+            LaunchClaim::Resume(holder) => {
+                let resumed = self.resume_managed_session(&holder.id).await?;
+                if resumed.state == "errored" {
+                    anyhow::bail!(
+                        "session {} ({}) could not be resumed: the daemon left it errored",
+                        resumed.name,
+                        resumed.id
+                    );
+                }
+                Ok(Some(resumed.name))
+            }
+        }
+    }
+
+    /// Register a fresh PM for `workdir` through `route`, then create its
+    /// tmux session on the workspace server and start `claude` (#10101).
+    ///
+    /// Why: the TUI `/connect` and `/launch` paths launch where the CLI does,
+    /// by the same rule ([`crate::session_manager::launch_server::cli_launch_server`]),
+    /// and never type into a session they did not create.
+    /// What: POSTs `{project, project_path, name, tmux_socket}`; probes
+    /// `has-session` on the server; creates (`-A`) there; starts `claude`
+    /// only in a session it created. A failure after the registration kills
+    /// a session it created and removes the registration ([`super::launch_claim::Registered`]).
+    /// Returns the registered tmux name.
+    /// Test: `the_tui_connect_launches_on_the_workspace_server_10101`,
+    /// `the_tui_launch_never_types_into_a_session_it_did_not_create_10101`,
+    /// `a_failed_tui_create_removes_the_registration_10101`.
+    async fn start_on_workspace_server(
+        &self,
+        route: &str,
+        workdir: &str,
+        spec: &crate::runtime::launch_spec::LaunchSpec,
+    ) -> anyhow::Result<String> {
+        let dir = std::path::Path::new(workdir);
+        let host = crate::session_manager::launch_server::cli_launch_server(dir);
+        let server = host.as_ref().map(|(server, _)| server.as_str());
+        #[derive(serde::Deserialize)]
         struct Body {
             #[serde(default)]
             name: String,
+            id: Option<crate::core::session::SessionId>,
         }
-        let url = "/api/v1/sessions/connect".to_string();
         let body: Body = self
-            .post(&url)
+            .post(route)
             .json(&serde_json::json!({
                 "project": workdir,
                 "project_path": workdir,
+                "name": crate::core::names::name_from_dir(dir),
+                "tmux_socket": host.as_ref().map(|(_, socket)| socket),
             }))
             .send()
             .await?
             .error_for_status()?
             .json()
             .await?;
-
-        // `tmux new-session -A` is idempotent: it attaches to the session when
-        // it already exists and creates it (detached, `-d`) otherwise. The
-        // `has-session` probe distinguishes the two so `claude` is started only
-        // for a freshly-created session — an already-running one is left alone.
-        // #2398: routes through the crate's single tmux entry point.
-        let already_running =
-            crate::core::tmux::run_tmux(&crate::core::tmux::TmuxCommand::HasSession {
-                name: body.name.clone(),
-            })
-            .map(|output| output.status.success())
-            .unwrap_or(false);
-
-        // #2398: routes through `core::tmux::create_managed_session`, the
-        // crate's single session-creation choke point, so the configured
-        // scrollback/mouse ergonomics are applied before the pane exists.
-        let new_session =
-            crate::core::tmux::create_managed_session(None, &body.name, Some(workdir));
-        match new_session {
+        let name = body.name;
+        let probe = crate::core::tmux::TmuxCommand::HasSession { name: name.clone() };
+        let already_running = crate::core::tmux::run_tmux_on(
+            &crate::core::tmux::resolve_tmux_binary_or_bare(),
+            server,
+            &probe,
+        )
+        .is_ok_and(|o| o.status.success());
+        // A registration for a session that already ran is kept, as in `tm connect`.
+        let registered =
+            super::launch_claim::Registered::new(self, body.id.filter(|_| !already_running));
+        // #2398: the crate's single session-creation choke point.
+        match crate::core::tmux::create_managed_session_on(None, server, &name, Some(workdir), true)
+        {
+            // #3386 review: operator-visible through the tracing channel.
             Ok(outcome) if outcome.output.status.success() => {
-                // #3386 review: see `launch_session`'s identical notice above.
-                crate::core::tmux::warn_if_options_unverified(&outcome, &body.name);
-                if !already_running {
-                    // #8308: same spec carrier as `launch_session`.
-                    self.send_client_spec(&body.name, &claude_spec)?;
-                }
+                crate::core::tmux::warn_if_options_unverified(&outcome, &name);
             }
             Ok(_) | Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "failed to create tmux session {} in {}",
-                    body.name,
-                    workdir
-                ));
+                let e = anyhow::anyhow!(
+                    "failed to create tmux session {name} in {workdir} on tmux server {}",
+                    server.unwrap_or("default")
+                );
+                return Err(registered.fail(e).await);
             }
         }
-        Ok(body.name)
+        if already_running {
+            return Ok(name);
+        }
+        if let Err(e) = self.send_client_spec(server, &name, spec) {
+            let kill = crate::core::tmux::TmuxCommand::KillSession { name: name.clone() };
+            let _ = crate::core::tmux::run_tmux_on(
+                &crate::core::tmux::resolve_tmux_binary_or_bare(),
+                server,
+                &kill,
+            );
+            return Err(registered.fail(e).await);
+        }
+        Ok(name)
     }
 
     /// Write `spec` under this client's home and start `claude` in `session`
-    /// from it (#8308).
+    /// on `server` (#8308, #10101).
     ///
     /// What: [`crate::runtime::cli_launch::send_spec_launch`] into the spec
     /// directory under the pinned home (#8545) or the process home; the error
     /// names the session and the step that failed.
     fn send_client_spec(
         &self,
+        server: Option<&str>,
         session: &str,
         spec: &crate::runtime::launch_spec::LaunchSpec,
     ) -> anyhow::Result<()> {
@@ -264,9 +300,9 @@ impl DaemonClient {
         let spec_dir = crate::runtime::cli_launch::spec_dir(home.as_deref()).ok_or_else(|| {
             anyhow::anyhow!("tmux session {session} created but no home holds its launch spec")
         })?;
-        crate::runtime::cli_launch::send_spec_launch(None, session, spec, &spec_dir).map_err(|e| {
-            anyhow::anyhow!("tmux session {session} created but failed to start claude: {e}")
-        })
+        crate::runtime::cli_launch::send_spec_launch(server, session, spec, &spec_dir).map_err(
+            |e| anyhow::anyhow!("tmux session {session} created but failed to start claude: {e}"),
+        )
     }
 }
 

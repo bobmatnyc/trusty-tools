@@ -6,17 +6,20 @@
 //! picks, and every later tmux call for it must reach that server: the
 //! default server can hold an unrelated session with the same name.
 //! What: [`LaunchHost`] is the chosen server and its socket, with the tmux
-//! calls a launch makes on it; [`refuse_held_name`] refuses a name a managed
-//! record holds (Architect ruling, 2026-11-08 14:47Z, matching the rename
-//! check); [`LaunchSessionGuard`] kills a half-launched session on its server.
+//! calls a launch makes on it; [`settle_claim`] acts on the shared name rule
+//! (`trusty_mpm::client::http_client::launch_claim`, #10101 D3c);
+//! [`LaunchSessionGuard`] kills a half-launched session on its server.
 //! Test: `launch_host_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::client::DaemonClient;
-use trusty_mpm::client::ManagedSessionSummary;
+// #10101 D3c: the name rule and the rollback live in the library, shared with
+// the TUI `/connect` path.
+pub(crate) use trusty_mpm::client::http_client::launch_claim::{LaunchClaim, Registered};
 use trusty_mpm::core::tmux::{TmuxCommand, resolve_tmux_binary_or_bare, run_tmux_on};
-use trusty_mpm::session_manager::ManagedSessionState;
+
+use crate::commands::launch_handoff::Handoff;
 
 /// The tmux server one CLI launch creates its PM on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -58,6 +61,16 @@ impl LaunchHost {
             server,
             socket: socket.map(Path::to_path_buf),
         })
+    }
+
+    /// The server that holds session `name` now, as `tmux attach` finds it.
+    ///
+    /// # Errors
+    ///
+    /// tmux cannot be listed, or no single server holds `name`.
+    pub(crate) fn holding(name: &str) -> anyhow::Result<Self> {
+        let socket = crate::commands::tmux_attach_server::target_socket(name)?;
+        Self::of_socket(Some(&socket))
     }
 
     /// The `-L` server name; `None` is the default server.
@@ -201,116 +214,75 @@ impl Drop for LaunchSessionGuard {
     }
 }
 
-/// The non-terminal managed record that holds tmux name `name`, if any.
+/// Hand over what [`DaemonClient::claim_launch_name`] answered, or report
+/// that the caller launches fresh (#10101 D3c).
 ///
-/// What: the rename rule (`rename.rs`, a name any other non-terminal record
-/// holds is refused) over the daemon's wire summaries. The raw persisted
-/// state decides (#3531); a state word this build does not know is treated
-/// as live, so an unknown never frees the name.
-/// Test: `a_live_managed_record_holds_its_name`.
-pub(crate) fn name_holder<'a>(
-    sessions: &'a [ManagedSessionSummary],
-    name: &str,
-) -> Option<&'a ManagedSessionSummary> {
-    sessions.iter().find(|s| {
-        let state = s.persisted_state.as_deref().unwrap_or(&s.state);
-        s.name == name && !ManagedSessionState::from_wire(state).is_some_and(|st| st.is_terminal())
-    })
-}
-
-/// Refuse a fresh CLI launch under a name a managed record holds (#10101).
-///
-/// Why: the Architect's 14:47Z ruling — a CLI launch whose name collides with
-/// an existing managed record is refused, fail closed: two sessions of one
-/// name on two servers leave every by-name lookup unable to pick one.
-/// What: reads `GET /api/v1/sessions/managed`. A holder is an error naming
-/// it. A daemon that cannot be reached returns `Ok`: the launch then runs
-/// unregistered, as before, and the record list it would check is not
-/// readable. Any other read failure refuses.
+/// Why: `tm launch`, `tm connect` and the in-place `tm session start` share
+/// one rule (the claim) and one way to act on it. A `Stopped`/`Errored`
+/// managed holder is resumed (owner ruling 2026-11-08 17:41Z), never
+/// launched over; a running legacy session of this directory is handed
+/// over, never registered again or typed into.
+/// What: [`LaunchClaim::Free`] answers `Ok(false)`: the caller launches.
+/// [`LaunchClaim::Resume`] resumes the record through the daemon's resume
+/// route (the one `tm session resume` uses), so it keeps its id and its
+/// server, then hands it over. [`LaunchClaim::Running`] hands over the
+/// running session on its server. `handoff` `None` (the in-place start)
+/// prints one line instead. Both answer `Ok(true)`.
 ///
 /// # Errors
 ///
-/// The name is held, or the daemon answered but the list could not be read.
+/// The resume failed (nothing was created or registered here), or the
+/// handover failed.
 ///
-/// Test: `a_held_name_refuses_the_launch_before_tmux_or_registration`.
-pub(crate) async fn refuse_held_name(daemon: &DaemonClient, name: &str) -> anyhow::Result<()> {
-    let sessions = match daemon.list_managed_sessions().await {
-        Ok(sessions) => sessions,
-        Err(e) if unreachable(&e) => return Ok(()),
-        Err(e) => anyhow::bail!(
-            "cannot check whether a managed session already holds the name {name}: {e:#}; \
-             refusing to launch under it (#10101)"
-        ),
-    };
-    if let Some(holder) = name_holder(&sessions, name) {
-        anyhow::bail!(
-            "tmux session name {name} is already held by managed session {} (state {}); \
-             refusing to launch a second session under it. Stop or rename that session \
-             (`tm session rename`), or launch from another directory.",
-            holder.id,
-            holder.persisted_state.as_deref().unwrap_or(&holder.state)
-        );
-    }
-    Ok(())
-}
-
-/// Whether `err` is a failure to reach the daemon at all, on either
-/// transport (`DaemonCallError::Unreachable`).
-fn unreachable(err: &anyhow::Error) -> bool {
-    use trusty_mpm::client::http_client::DaemonCallError;
-    err.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<DaemonCallError>(),
-            Some(DaemonCallError::Unreachable { .. })
-        )
-    })
-}
-
-/// A registration to undo when the launch fails after it (#10101).
-///
-/// Why: a record left behind names a session that never ran; the failure
-/// must say what it left, or leave nothing.
-/// What: [`Self::fail`] sends `DELETE /sessions/{id}` and returns `err`
-/// extended with the outcome. No id (the daemon was not reached, or the
-/// session already existed) undoes nothing.
-/// Test: `a_failed_create_removes_the_registration`.
-pub(crate) struct Registered<'a> {
-    daemon: &'a DaemonClient,
-    id: Option<trusty_mpm::core::session::SessionId>,
-}
-
-impl<'a> Registered<'a> {
-    /// The registration `id` made through `daemon`.
-    pub(crate) fn new(
-        daemon: &'a DaemonClient,
-        id: Option<trusty_mpm::core::session::SessionId>,
-    ) -> Self {
-        Self { daemon, id }
-    }
-
-    /// `err`, after removing the registration; the message names what is left.
-    pub(crate) async fn fail(&self, err: anyhow::Error) -> anyhow::Error {
-        let Some(id) = &self.id else {
-            return err;
-        };
-        let removed = match self
-            .daemon
-            .delete(format!("/sessions/{}", id.0))
-            .send()
-            .await
-        {
-            Ok(resp) => resp.error_for_status().map(drop),
-            Err(e) => Err(e.into()),
-        };
-        match removed {
-            Ok(()) => anyhow::anyhow!("{err:#}; its registration {} was removed", id.0),
-            Err(e) => anyhow::anyhow!(
-                "{err:#}; its registration {} could not be removed ({e:#}), so the daemon \
-                 still lists it",
-                id.0
-            ),
+/// Test: `a_stopped_holder_is_resumed_not_launched_10101`,
+/// `a_failed_resume_reports_and_creates_nothing_10101`.
+pub(crate) async fn settle_claim(
+    daemon: &DaemonClient,
+    claim: LaunchClaim,
+    workdir: &str,
+    handoff: Option<Handoff>,
+) -> anyhow::Result<bool> {
+    let (name, socket) = match claim {
+        LaunchClaim::Free => return Ok(false),
+        LaunchClaim::Resume(holder) => {
+            eprintln!(
+                "tm: tmux session name {} is held by managed session {} ({}); resuming it \
+                 instead of launching a new one",
+                holder.name,
+                holder.id,
+                holder.persisted_state.as_deref().unwrap_or(&holder.state)
+            );
+            let resumed =
+                crate::commands::guided_resume::restart_via_daemon(daemon, &holder).await?;
+            if handoff.is_none() {
+                println!(
+                    "resumed {} ({}) [{}]",
+                    resumed.name, resumed.id, resumed.state
+                );
+                return Ok(true);
+            }
+            (resumed.name, None)
         }
-    }
+        LaunchClaim::Running { name, socket } => {
+            if handoff.is_none() {
+                println!("session {name} is already running; left in place");
+                return Ok(true);
+            }
+            (name, Some(socket))
+        }
+    };
+    let Some(handoff) = handoff else {
+        return Ok(true);
+    };
+    handoff.announce_reconnect(workdir, &name);
+    // Only a detached handover reads the pane through the host.
+    let host = match (handoff, socket) {
+        (Handoff::Attach, _) => LaunchHost::default(),
+        (Handoff::Detach, Some(socket)) => LaunchHost::of_socket(socket.as_deref())?,
+        (Handoff::Detach, None) => LaunchHost::holding(&name)?,
+    };
+    handoff.hand_over(&host, &name)?;
+    Ok(true)
 }
 
 #[cfg(test)]

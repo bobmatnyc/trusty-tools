@@ -10,7 +10,7 @@
 use serde::Deserialize;
 use trusty_mpm::client::DaemonClient;
 
-use crate::commands::launch_host::{LaunchHost, LaunchSessionGuard, refuse_held_name};
+use crate::commands::launch_host::{LaunchHost, LaunchSessionGuard, settle_claim};
 use crate::commands::{launch_handoff::Handoff, launch_home::launch_files, project::resolve_dir};
 use crate::formatters::banner::{fallback_session_name, normalize_workdir};
 
@@ -71,6 +71,10 @@ pub(crate) async fn launch(
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
     let live_path = live_path.canonicalize().unwrap_or(live_path);
+    // #10101: D3c — an unreachable daemon refuses before the git init, the
+    // alias write or any tmux call: a launch it cannot register never runs.
+    let daemon = DaemonClient::with_client(client.clone(), url);
+    daemon.require_reachable().await?;
 
     // #6274: a plain directory becomes a git project here, so step 2 below reads
     // the origin remote of a real repository instead of failing on "not a git
@@ -139,11 +143,13 @@ pub(crate) async fn launch(
         handoff.announce_reconnect(&live_workdir, &existing);
         return handoff.hand_over(&host, &existing);
     }
-    // #10101: a fresh launch under a name a managed record holds is refused
-    // before anything is provisioned.
+    // #10101: a fresh launch under a name a live record holds is refused
+    // before anything is provisioned. D3c: a Stopped/Errored holder resumes.
     let folder_name = fallback_session_name(&live_path);
-    let daemon = DaemonClient::with_client(client.clone(), url);
-    refuse_held_name(&daemon, &folder_name).await?;
+    let claim = daemon.claim_launch_name(&folder_name, &live_path).await?;
+    if settle_claim(&daemon, claim, &live_workdir, Some(handoff)).await? {
+        return Ok(());
+    }
 
     // #9091: a broken `[accounts]` table refuses before provisioning.
     super::run_target::accounts_preflight(None, &origin_url)?;
@@ -345,15 +351,16 @@ pub(crate) async fn launch(
                 Ok(body) => (folder_name.clone(), body.id),
                 _ => (folder_name.clone(), None),
             },
-            Err(err) => {
-                eprintln!("warning: daemon rejected session registration: {err}");
-                (folder_name.clone(), None)
-            }
+            // #10101: D3c — a launch the daemon did not register never runs.
+            Err(err) => anyhow::bail!(
+                "the daemon rejected the registration of session {folder_name}: {err}; \
+                 nothing was launched"
+            ),
         },
-        Err(err) => {
-            eprintln!("warning: daemon unreachable ({err}); launching without registration");
-            (folder_name.clone(), None)
-        }
+        Err(err) => anyhow::bail!(
+            "the daemon could not be reached to register session {folder_name} ({err}); \
+             nothing was launched"
+        ),
     };
 
     // 11. Print the full-screen robot splash then the rich info panel.
@@ -465,9 +472,13 @@ pub(crate) async fn launch(
 /// or, under [`Handoff::Detach`] (`tm launch --detach` on a checkout with no
 /// origin, #8406), prints the session name and pane id and returns. #10101:
 /// the same name refusal, workspace server and failure cleanup as [`launch`].
+/// D3c: an unreachable daemon refuses before any write; a `Stopped`/`Errored`
+/// managed holder of the name is resumed ([`settle_claim`]); a failed
+/// registration refuses rather than starting unregistered.
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir`;
 /// `a_cli_create_reaches_the_workspace_server_only` for the server;
-/// `a_connect_failing_after_registration_rolls_it_back_10101` for the rollback.
+/// `a_connect_failing_after_registration_rolls_it_back_10101` for the rollback;
+/// `connect_refuses_an_unreachable_daemon_before_any_write_10101` for D3c.
 pub(crate) async fn connect(
     client: &reqwest::Client,
     url: &str,
@@ -482,6 +493,10 @@ pub(crate) async fn connect(
     trusty_mpm::core::architect_claude_version::require_for_dir(&path)?;
     let workdir = path.to_string_lossy().to_string();
 
+    // #10101: D3c — an unreachable daemon refuses before the alias write.
+    let daemon = DaemonClient::with_client(client.clone(), url);
+    daemon.require_reachable().await?;
+
     // Auto-register the git project root as a local path alias (non-fatal, silent).
     super::managed_root::try_register_alias(&path);
 
@@ -494,10 +509,14 @@ pub(crate) async fn connect(
         handoff.announce_reconnect(&workdir, &existing); // #8406
         return handoff.hand_over(&host, &existing);
     }
-    // #10101: a name a managed record holds is refused before any prep write.
+    // #10101: a name a live record holds is refused before any prep write.
+    // D3c: a Stopped/Errored holder resumes; this directory's running legacy
+    // session is handed over.
     let folder_name = fallback_session_name(&path);
-    let daemon = DaemonClient::with_client(client.clone(), url);
-    refuse_held_name(&daemon, &folder_name).await?;
+    let claim = daemon.claim_launch_name(&folder_name, &path).await?;
+    if settle_claim(&daemon, claim, &workdir, Some(handoff)).await? {
+        return Ok(());
+    }
 
     // 1c. Deploy the framework directly into the live checkout — agents,
     //     skills, the project-tier output-style, and the
@@ -552,9 +571,8 @@ pub(crate) async fn connect(
     let cli = trusty_mpm::core::session_launch::cli_launch(&content, &path, None);
     let prompt_path = connect_prompt_file(&std::env::temp_dir(), &cli.prompt, &path)?;
 
-    // 2. Register the session with the daemon via the connect endpoint. When
-    //    the daemon is unreachable we still bring the session up under the
-    //    folder-derived name.
+    // 2. Register the session with the daemon via the connect endpoint.
+    //    #10101 D3c: a failed registration refuses; nothing runs unregistered.
     #[derive(Deserialize)]
     struct Body {
         #[serde(default)]
@@ -580,15 +598,16 @@ pub(crate) async fn connect(
                 Ok(body) => (folder_name.clone(), body.id),
                 _ => (folder_name.clone(), None),
             },
-            Err(err) => {
-                eprintln!("warning: daemon rejected session registration: {err}");
-                (folder_name.clone(), None)
-            }
+            // #10101: D3c — a connect the daemon did not register never runs.
+            Err(err) => anyhow::bail!(
+                "the daemon rejected the registration of session {folder_name}: {err}; \
+                 nothing was started"
+            ),
         },
-        Err(err) => {
-            eprintln!("warning: daemon unreachable ({err}); connecting without registration");
-            (folder_name.clone(), None)
-        }
+        Err(err) => anyhow::bail!(
+            "the daemon could not be reached to register session {folder_name} ({err}); \
+             nothing was started"
+        ),
     };
 
     // 3. Print the full-screen robot splash + rich info panel before tmux takes over.
