@@ -26,8 +26,17 @@
 # extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see
 # #10019. Review by 2026-11-20 (Architect ruling df-D59); the date also sits in
 # each id's `deny.toml` reason.
+#
+# RUSTSEC-2026-0429 — zip `ZipArchive::extract` aborts on a symlink entry with a
+# large declared size; patched only in zip >= 9.0.0. Opt-in crates pinned below
+# zip 9: candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional
+# candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0).
+# No call to extract() on zip < 9 is reachable from a shipped crate. EXPIRES
+# 2026-12-07 (Architect ruling df-D97). See #10651 (move to zip 9 when upstream
+# releases; re-check on expiry) and #10788. Same reason as in `deny.toml`.
 ignore = [
   "RUSTSEC-2026-0258",
+  "RUSTSEC-2026-0429",
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",

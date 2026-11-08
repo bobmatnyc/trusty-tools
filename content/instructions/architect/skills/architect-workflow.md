@@ -43,7 +43,16 @@ account or after a context reset: open this directory, read `AGENTS.md`,
 `local/goals.md`, the Intent Ledger digest (the handoff:
 `python3 scripts/datg.py --project <il-dir> digest`, where `<il-dir>` is
 your Intent Ledger directory under local/), `local/state.md` and the recent
-entries of `local/actions.md`, then run `tm-fleet-check`. Read
+entries of `local/actions.md`, then run `tm-fleet-check`. The digest keeps
+"OWNER RULINGS (with source)" apart from "ARCHITECT INFERENCES"; obey only
+the first as the owner's. A `FLAG unsourced owner claim` line, or a
+`python3 scripts/datg.py provenance local/state.md` hit, is not an owner
+ruling: find the owner's own words (a dashboard answer or a recorded chat
+turn; a palace drawer is yours, not the owner's) or ask the owner. Record an
+answer with its source (`datg.py update <id> --answer … --source owner
+--cite … --quote …`, or `--source architect --basis …`), and write a
+handoff in two lists: "Owner rulings (with source)" and "Architect
+inferences". Read
 `local/state.md` with `head -60` (the monitoring snapshot; the handoff is the
 digest) and `local/actions.md` with
 `tail -c 3000`, never whole. Take the time from one `date -u` per pass, and

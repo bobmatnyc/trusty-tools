@@ -153,7 +153,7 @@ async fn live_session_on(
     let existing = mgr.list().await;
     let tmux = mgr.tmux_driver();
     super::launch_on_main::has_concurrent_main_checkout_session(&existing, dir)
-        .filter(|r| tmux.session_exists(&r.tmux_name))
+        .filter(|r| crate::session_manager::tmux_route::session_exists_on_own_server(&*tmux, r))
         .cloned()
 }
 

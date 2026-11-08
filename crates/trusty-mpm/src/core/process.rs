@@ -113,7 +113,7 @@ fn tmux_target_pid(target: &crate::core::tmux::TmuxTarget) -> Option<u32> {
 /// wrapper is ever present, so this reduces to the original direct-child scan.
 /// Test: `find_claude_pid_returns_none_for_nonexistent_session`;
 /// `claude_pid_resolves_through_disclaim_wrapper` (`#[ignore]`, real tmux).
-fn claude_child_of(shell_pid: u32) -> Option<u32> {
+pub(crate) fn claude_child_of(shell_pid: u32) -> Option<u32> {
     let children = child_pids_of(shell_pid);
     // Direct child (the pre-#2997 / non-macOS / disclaim-disabled shape).
     if let Some(pid) = children

@@ -42,6 +42,11 @@ token and shares the live port and data — start one with
 `tm daemon` equivalent, `sandbox_secrets_console.sh` the trusty-secrets and
 console one, #9793).
 
+🟡 **A live check on a stale binary** — the build lease writes to a pool slot,
+so `tm` on PATH or the ambient `$CARGO_TARGET_DIR/debug/tcode` can predate
+your change. Pass `--bin <slot>/debug/<bin>` to the sandbox launchers, which
+refuse a stale build artifact (#10755).
+
 🔴 **Adding `axum` as an unconditional dependency in a library crate** — put it
 behind the `axum-server` feature flag, matching the pattern in `trusty-common`.
 Otherwise every library consumer pulls in the full axum + tower stack.

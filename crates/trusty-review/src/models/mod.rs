@@ -14,11 +14,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod anchor; // #10762
 // #9192: the optional-context ledger `run_review_with` returns.
 pub mod context_source;
 pub mod severity; // #9310
 pub mod status;
 pub mod verdict_status; // #9310
+pub use anchor::{AnchorSide, SubjectType, UnanchoredFinding, UnanchoredReason};
 pub use context_source::{ContextItemRecord, ContextSourceRecord, SourceState};
 pub use severity::Severity;
 pub use status::ReviewStatus;
@@ -585,14 +587,36 @@ impl Finding {
 /// the GitHub review and (b) the dry-run / MCP response can preview exactly what
 /// would be posted.  It is a flat, owned projection (no borrows, serde-friendly)
 /// distinct from the posting-layer's internal `InlineComment` type.
-/// What: `path` + `line` are the new-side anchor; `body` is the rendered markdown.
-/// Test: `inline_comment_out_serde_roundtrip`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// What: `path` + `line` + `side` are the anchor; `body` is the rendered
+/// markdown. #10762: `finding_index` names the finding (see
+/// [`anchor`]), and `severity` and `category` copy it. Every #10762 field
+/// defaults on deserialize, so a 0.39 entry still parses.
+/// Test: `inline_comment_out_serde_roundtrip`,
+/// `inline_entry_carries_severity_source_finding_index`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InlineCommentOut {
     /// Changed file path (new side), e.g. `src/db.rs`.
     pub path: String,
-    /// New-side line number the comment anchors to.
+    /// Line number the comment anchors to, on `side`; 0 for a file-level anchor.
     pub line: u32,
+    /// First line of a multi-line anchor; `None` for a single line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    /// Diff side the anchor addresses; `LEFT` for a deleted line (#10762).
+    #[serde(default)]
+    pub side: AnchorSide,
+    /// `file` for a file-level anchor; `None` for a line anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_type: Option<SubjectType>,
+    /// The finding's severity, as `finalize_review` stamps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    /// The finding's category.
+    #[serde(default)]
+    pub category: FindingCategory,
+    /// Index of the finding in `findings`.
+    #[serde(default)]
+    pub finding_index: usize,
     /// Rendered inline-comment markdown body.
     pub body: String,
 }
@@ -743,6 +767,17 @@ pub struct ReviewResult {
     /// result deserialising with an empty list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_comments: Vec<InlineCommentOut>,
+    /// Every finding with no inline anchor, and why (#10762).
+    ///
+    /// Why: with `inline_comments`, this accounts for every entry of
+    /// `findings` and `withheld_findings`, so a consumer need not re-derive
+    /// the anchoring.
+    /// What: written by `attach_inline_comments`; each finding index appears
+    /// in exactly one of the two lists. Absent from the JSON when empty.
+    /// Test: `partition_invariant_with_fixture`,
+    /// `result_without_unanchored_field_still_deserializes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unanchored: Vec<UnanchoredFinding>,
     /// Indices (into `findings`) of the findings that were placed inline (#1414).
     ///
     /// Why: the summary body must render exactly the findings that did NOT land
@@ -905,6 +940,7 @@ impl ReviewResult {
             withheld_by_reason: BTreeMap::new(),
             verdict_status: None,
             inline_comments: Vec::new(),
+            unanchored: Vec::new(),
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,
             shallow_clean_review: false,

@@ -6,13 +6,9 @@
 //! result into a notice, mirroring `tui::coordinator`'s
 //! `dispatch_submitted_line` split between pure routing and async dispatch.
 //!
-//! **Launch is a stub, by design** (documented per the issue's request):
-//! spawning a managed session requires a `task` description and a `git_ref`
-//! (see [`crate::client::ManagedSpawnRequest`]) that a 4-pane skeleton has no
-//! text-entry surface to collect — building that form is explicitly out of
-//! scope here. Rather than silently doing nothing, `l` shows a notice
-//! pointing at the existing `tm sessions new` CLI verb, which already does
-//! the real work. Config (`c`) is NO LONGER a stub — #2120 replaced it with a
+//! **No launch stub** (#10754): `l` used to set a notice pointing at
+//! `tm sessions new`; it now produces the same `NewSession` as `n`, which
+//! the `tm ls` new-session hook runs. Config (`c`) is NO LONGER a stub — #2120 replaced it with a
 //! real fixed-field form; see [`PendingAction::SubmitConfig`]'s handling
 //! below.
 //!
@@ -21,7 +17,7 @@
 //! destructive action (the workspace is deleted); a confirmation modal would
 //! be a reasonable fast-follow but is out of scope for this skeleton.
 //!
-//! What: [`dispatch`] matches a [`PendingAction`] to its `DaemonClient` call
+//! What: [`dispatch_on`] matches a [`PendingAction`] to its `DaemonClient` call
 //! and calls [`ProjectCtlState::set_notice`] with the outcome, requesting an
 //! immediate re-poll after any action that changed the fleet.
 //! Test: the pure notice text is not independently unit-tested (it is a
@@ -36,14 +32,15 @@
 use crate::client::{CommandExecutor, DaemonClient};
 
 use super::events::PendingAction;
+use super::session_ops::{self, SessionOp};
 use super::state::ProjectCtlState;
+use crate::tui::session_hooks::ScreenHandoff;
 
-/// Route one [`PendingAction`] to its `DaemonClient` call and update `state`.
+/// Route one [`PendingAction`] to its handler and update `state`.
 ///
 /// Why: the single async seam the run loop calls after `handle_key` returns
 /// `Some(action)`.
-/// What: `Launch` is a stub — see the module doc — that sets an explanatory
-/// notice with no daemon call. `Kill`/`Resume` call the matching mutating
+/// What: `Kill`/`Resume` call the matching mutating
 /// endpoint directly; `Decommission` goes through
 /// [`CommandExecutor::decommission_managed_id`], the shared implementation
 /// that also repairs the base repo's worktree bookkeeping (#5913). All three,
@@ -58,17 +55,50 @@ use super::state::ProjectCtlState;
 /// explicit #2120 requirement that a rejected submit never discards the
 /// operator's other unsaved edits. `Focus` (#10476) runs
 /// [`crate::tui::focus::focus_session`] and shows its one-line result.
+/// #10754: the four `tm ls` verbs (`OpenSession`, `RenameSession`,
+/// `NewSession`, `DeleteSession`) go to [`super::session_ops::run`] with
+/// `screen`, which hands the terminal over around an attach. Only a failed
+/// terminal resume is an `Err`.
+pub(crate) async fn dispatch_on(
+    state: &mut ProjectCtlState,
+    client: &DaemonClient,
+    action: PendingAction,
+    screen: &mut dyn ScreenHandoff,
+) -> anyhow::Result<()> {
+    // #10754: S3 tm ls actions; De1 key map (Bob 11-06).
+    let op = match action {
+        PendingAction::OpenSession(id) => SessionOp::Open(id),
+        PendingAction::RenameSession(id, name) => SessionOp::Rename(id, name),
+        PendingAction::NewSession(project) => SessionOp::New(project),
+        PendingAction::DeleteSession(id) => SessionOp::Delete(id),
+        other => {
+            dispatch_daemon(state, client, other).await;
+            return Ok(());
+        }
+    };
+    session_ops::run(state, client, op, screen).await
+}
+
+/// [`dispatch_on`] with no terminal to hand over, for tests that drive one
+/// daemon verb.
+#[cfg(test)]
 pub(crate) async fn dispatch(
     state: &mut ProjectCtlState,
     client: &DaemonClient,
     action: PendingAction,
 ) {
+    let mut none = session_ops::NoHandoff;
+    // NoHandoff never fails, so neither does this.
+    let _ = dispatch_on(state, client, action, &mut none).await;
+}
+
+/// The daemon-call verbs of [`dispatch_on`].
+async fn dispatch_daemon(
+    state: &mut ProjectCtlState,
+    client: &DaemonClient,
+    action: PendingAction,
+) {
     match action {
-        PendingAction::Launch(project) => {
-            state.set_notice(format!(
-                "launch form not built yet — run `tm sessions new --repo-url <url> --task <task>` for '{project}' (see actions.rs doc)"
-            ));
-        }
         PendingAction::Kill(id) => {
             let result = client.runtime_stop_managed_session(&id).await;
             apply_mutation_result(state, result, "killed");
@@ -95,7 +125,8 @@ pub(crate) async fn dispatch(
         },
         // #10476: the plan is pure; the tmux branch runs the bin's guarded,
         // quiet switch on the blocking pool, the iTerm2 branch a 5 s-bounded
-        // osascript. Nothing here can create a session, window or tab.
+        // osascript. Nothing here can create a session or tab; #10101: Dc3
+        // opens an attach window only for a session on another tmux server.
         PendingAction::Focus(name) => {
             state.set_notice(crate::tui::focus::focus_session(&name).await);
         }
@@ -109,6 +140,11 @@ pub(crate) async fn dispatch(
                 Err(e) => state.set_config_form_error(format!("{e}")),
             }
         }
+        // Routed to `session_ops` by `dispatch_on` before this match.
+        PendingAction::OpenSession(_)
+        | PendingAction::RenameSession(..)
+        | PendingAction::NewSession(_)
+        | PendingAction::DeleteSession(_) => {}
     }
 }
 
