@@ -49,6 +49,35 @@ def test_append_failure_exits_2_with_no_queue_claim(tmp_path):
     assert "not queued" in r.stderr
 
 
+def _notify_in_process(inbox, monkeypatch, capsys):
+    """Run notify in this process so os.write / os.pread can be patched; (exit, stdout, stderr)."""
+    monkeypatch.setenv("ARCHITECT_INBOX_DIR", str(inbox))
+    code = 0
+    try:
+        pm_intake.notify(["--kind", "decision", "--session", "tm-a", "pick A"])
+    except SystemExit as e:
+        code = e.code
+    out, err = capsys.readouterr()
+    return code, out, err
+
+
+def _assert_not_queued(code, out, err):
+    assert code == 2, (code, out, err)
+    assert "not queued" in err, err
+    assert "queued" not in out, out  # no `queued-local` (or bare `queued`) claim
+
+
+def test_short_write_exits_2_with_no_queue_claim(tmp_path, monkeypatch, capsys):
+    real_write = os.write
+    monkeypatch.setattr(pm_intake.os, "write", lambda fd, data: real_write(fd, data[:-1]))
+    _assert_not_queued(*_notify_in_process(tmp_path, monkeypatch, capsys))
+
+
+def test_read_back_mismatch_exits_2_with_no_queue_claim(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_intake.os, "pread", lambda fd, n, off: b"x" * n)
+    _assert_not_queued(*_notify_in_process(tmp_path, monkeypatch, capsys))
+
+
 def test_receipt_is_unconfirmed_until_the_architect_acks(tmp_path):
     mid = _notify(tmp_path).stdout.split()[1].rstrip(":")
     r = _intake(tmp_path, "receipt", mid)
