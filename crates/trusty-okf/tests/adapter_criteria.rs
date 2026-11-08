@@ -1007,3 +1007,87 @@ fn final_page_without_a_flag_tombstones_nothing() {
         (0, "missing")
     );
 }
+
+/// `import run --from adapter:gdocs` through the CLI with `select` pairs.
+fn cli_docs(fake: &FakeAdapter, select: &[&str]) -> std::process::Output {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_trusty-okf"));
+    cmd.args(["import", "run"])
+        .arg(&fake.root)
+        .args(["--from", "adapter:gdocs", "--adapter", "/bin/sh"])
+        .arg("--adapter-arg")
+        .arg(fake.script())
+        .arg("--adapter-arg")
+        .arg(&fake.dir)
+        .args(["--adapter-var", "PATH=/usr/bin:/bin"])
+        .args(["--now", "2026-11-04T12:00:00Z", "--json"]);
+    for s in select {
+        cmd.args(["--select", s]);
+    }
+    cmd.output().unwrap()
+}
+
+/// Why: #10746 review (PR 10816) — the default adapter store ID is
+/// `import-<kind>` whatever the selection, and a run replaces the stored
+/// selection, so a docs import of folder B (or of another account) over
+/// folder A's store tombstoned every A item.
+/// What: a recursive import of folder A writes `d1` and `d2`; runs of folder
+/// B, and of folder A under another account, each list only `d3` as a
+/// complete listing. Each is refused (exit 2) before any write, `d1` and
+/// `d2` stay live, and a second run of folder A still uses the A store.
+/// Test: self-contained.
+#[test]
+fn another_selection_never_reuses_an_adapter_store() {
+    let fake = FakeAdapter::new("gdocs");
+    let doc = |d: &str| json!({"item_id": d, "revision": "1", "parts": [{"mime": "text/markdown", "data": "Doc."}]});
+    fake.page(
+        None,
+        json!([{"item_id": "d1", "revision": "1"}, {"item_id": "d2", "revision": "1"}]),
+        None,
+        true,
+    );
+    for d in ["d1", "d2", "d3"] {
+        fake.item(doc(d));
+    }
+    let a = ["account=work", "folder_id=A", "recursive=true"];
+    let out = cli_docs(&fake, &a);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+
+    fake.page(
+        None,
+        json!([{"item_id": "d3", "revision": "1"}]),
+        None,
+        true,
+    );
+    for other in [
+        ["account=work", "folder_id=B", "recursive=true"],
+        ["account=home", "folder_id=A", "recursive=true"],
+    ] {
+        let before = tree(&fake.root);
+        let out = cli_docs(&fake, &other);
+        assert_eq!(out.status.code(), Some(2), "{other:?}: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("another selection"),
+            "{out:?}"
+        );
+        assert_eq!(tree(&fake.root), before, "{other:?} wrote");
+    }
+    for d in ["d1", "d2"] {
+        let fm = frontmatter(&fake.root, &format!("docs/import-gdocs/{d}.md"));
+        assert_ne!(
+            fm_str(&fm, "source_status").as_deref(),
+            Some("deleted"),
+            "{d}"
+        );
+    }
+
+    fake.page(
+        None,
+        json!([{"item_id": "d1", "revision": "1"}, {"item_id": "d2", "revision": "1"}]),
+        None,
+        true,
+    );
+    let out = cli_docs(&fake, &a);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["tombstoned"], 0, "{report}");
+}
