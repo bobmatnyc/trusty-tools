@@ -255,3 +255,92 @@ async fn config_set_refuses_an_include_path_outside_the_root() {
         serde_json::json!(["notes"])
     );
 }
+
+/// A directory outside any index root holding one marked Markdown file.
+#[cfg(unix)]
+fn outside_tree() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("outside dir");
+    let real = dir.path().canonicalize().expect("canonical outside dir");
+    std::fs::write(real.join("outside.md"), format!("# Outside\n{OUTSIDE}\n")).expect("write");
+    (dir, real)
+}
+
+/// Content that only the out-of-root file carries.
+#[cfg(unix)]
+const OUTSIDE: &str = "outsidemarker10739 private content";
+
+/// #10739: an include path that is a symlink to a directory outside the
+/// root, or a dangling symlink, is refused at PATCH time and changes nothing.
+/// Test: this test. A lexical-only check accepts both links.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn config_set_refuses_an_include_path_symlinked_outside_the_root() {
+    let _data = IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = bundle();
+    let (_outside, outside) = outside_tree();
+    std::os::unix::fs::symlink(&outside, root.join("linked")).expect("symlink");
+    std::os::unix::fs::symlink(root.join("gone"), root.join("dangling")).expect("symlink");
+    let id = "inc-symlink";
+    create(
+        &state,
+        id,
+        &root,
+        Some(vec!["notes".into()]),
+        okf_excludes(),
+    )
+    .await;
+    for bad in ["linked", "dangling"] {
+        let req =
+            serde_json::from_value(serde_json::json!({ "include_paths": ["notes", bad] })).unwrap();
+        let (status, body) = patch_index_config_report(&state, id, req)
+            .await
+            .expect_err("refused");
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert_eq!(body["error"], "invalid_include_path", "{bad}: {body}");
+    }
+    assert_eq!(
+        config(&state, id)["include_paths"],
+        serde_json::json!(["notes"])
+    );
+}
+
+/// #10739: an include path absent at PATCH time that later becomes a symlink
+/// to outside the root is not walked, so the reindex indexes no file from it.
+/// Test: this test. Without the walk guard, `outside.md` is indexed.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_later_out_of_root_symlink_include_path_indexes_nothing_outside() {
+    let _data = IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = bundle();
+    let (_outside, outside) = outside_tree();
+    let id = "inc-late-link";
+    create(&state, id, &root, None, okf_excludes()).await;
+    // Absent at PATCH time, so the PATCH admits it.
+    patch(
+        &state,
+        id,
+        serde_json::json!({ "include_paths": ["notes", "later"] }),
+    )
+    .await;
+    std::os::unix::fs::symlink(&outside, root.join("later")).expect("symlink");
+
+    reindex(&state, id).await;
+    // The reindex ran: the in-root include path is indexed.
+    assert!(chunks_of(&state, id, NOTE).await > 0);
+    let handle = state.registry.get(&IndexId::new(id)).expect("handle");
+    let leaked: Vec<String> = handle
+        .indexer
+        .read()
+        .await
+        .all_chunks()
+        .await
+        .into_iter()
+        .filter(|c| c.content.contains("outsidemarker10739"))
+        .map(|c| c.file.clone())
+        .collect();
+    assert!(leaked.is_empty(), "out-of-root files indexed: {leaked:?}");
+}

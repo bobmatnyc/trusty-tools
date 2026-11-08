@@ -62,6 +62,13 @@ pub(crate) fn walk_roots(handle: &IndexHandle) -> (walker::WalkResult, Vec<PathB
     let mut total_skipped_dirs: usize = 0;
     let walk_opts = walk_options(handle);
     for subtree in &include_paths {
+        // #10739: an include path can become an out-of-root symlink after the
+        // PATCH admitted it, and the walker canonicalises its start path.
+        if handle.include_paths.contains(subtree)
+            && !include_root_admitted(&handle.root_path, subtree)
+        {
+            continue;
+        }
         let w = walk_source_files_with_options(subtree, &walk_opts);
         walked_files.extend(w.files);
         total_skipped_dirs = total_skipped_dirs.saturating_add(w.skipped_dirs);
@@ -79,6 +86,48 @@ pub(crate) fn walk_roots(handle: &IndexHandle) -> (walker::WalkResult, Vec<PathB
     };
     (walked, missing)
 }
+
+/// Does the include path `path` really resolve under the index `root` (#10739)?
+///
+/// Why: a lexical check passes `<root>/notes` when `notes` is a symlink to a
+/// directory outside the root, and the walker follows its start path.
+/// What: canonicalises both and tests containment. Any I/O error (a missing
+/// path, a dangling link, a permission failure) is `Err`, which callers treat
+/// as a refusal.
+/// Test: `config_set_refuses_an_include_path_symlinked_outside_the_root`,
+/// `a_later_out_of_root_symlink_include_path_indexes_nothing_outside`.
+pub(crate) fn resolves_inside_root(root: &Path, path: &Path) -> std::io::Result<bool> {
+    let real_root = std::fs::canonicalize(root)?;
+    Ok(std::fs::canonicalize(path)?.starts_with(&real_root))
+}
+
+/// Should the walk start at include path `subtree` of `root` (#10739)?
+///
+/// What: `false`, with a logged reason, when the subtree resolves outside the
+/// root or cannot be resolved. Fail-closed: an error never admits.
+/// Test: `a_later_out_of_root_symlink_include_path_indexes_nothing_outside`.
+fn include_root_admitted(root: &Path, subtree: &Path) -> bool {
+    match resolves_inside_root(root, subtree) {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::warn!(
+                path = %subtree.display(),
+                root = %root.display(),
+                "include path resolves outside the index root; not walked"
+            );
+            false
+        }
+        Err(err) => {
+            tracing::warn!(
+                path = %subtree.display(),
+                %err,
+                "include path could not be resolved; not walked"
+            );
+            false
+        }
+    }
+}
+
 /// The per-index filters the walker applies after the walk: tombstones,
 /// `exclude_globs`, `extensions` and `path_filter`.
 pub(crate) fn configured_file(handle: &IndexHandle, path: &Path) -> bool {

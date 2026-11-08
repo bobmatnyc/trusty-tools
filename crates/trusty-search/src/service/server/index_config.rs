@@ -620,7 +620,8 @@ fn relative_include_paths(handle: &IndexHandle) -> Vec<String> {
 /// What: trims, drops blanks and `.` (both mean the whole root), joins the
 /// rest to `root`, de-duplicates. `400 invalid_include_path` names the first
 /// entry that escapes the root.
-/// Test: `config_set_refuses_an_include_path_outside_the_root`.
+/// Test: `config_set_refuses_an_include_path_outside_the_root`,
+/// `config_set_refuses_an_include_path_symlinked_outside_the_root`.
 fn resolve_include_paths(
     root: &std::path::Path,
     paths: &[String],
@@ -632,10 +633,13 @@ fn resolve_include_paths(
             continue;
         }
         let given = std::path::Path::new(p);
+        // #10739: also refuse a path whose real target leaves the root.
+        let abs = root.join(given);
         let escapes = given
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
-            || (given.is_absolute() && !given.starts_with(root));
+            || (given.is_absolute() && !given.starts_with(root))
+            || !really_inside(root, &abs);
         if escapes {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -645,12 +649,26 @@ fn resolve_include_paths(
                 }),
             ));
         }
-        let abs = root.join(given);
         if !out.contains(&abs) {
             out.push(abs);
         }
     }
     Ok(out)
+}
+
+/// Does an existing include path `abs` really resolve under `root` (#10739)?
+///
+/// What: a path that does not exist yet passes (the walk re-checks it); one
+/// that exists, even as a dangling link, must canonicalise under the root.
+/// Any other I/O error refuses.
+/// Test: `config_set_refuses_an_include_path_symlinked_outside_the_root`.
+fn really_inside(root: &std::path::Path, abs: &std::path::Path) -> bool {
+    // #10739: the lexical check alone admitted a symlink to outside the root.
+    match std::fs::symlink_metadata(abs) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+        Ok(_) => crate::service::index_admission::resolves_inside_root(root, abs).unwrap_or(false),
+    }
 }
 
 /// Add `catch_up_reindex` to a PATCH body when the PATCH released a hold (#9059).
