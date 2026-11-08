@@ -946,3 +946,244 @@ fn missing_hunk_count_means_one_line() {
     assert!(c.contains("b.sql", 1) && c.contains("b.sql", 2));
     assert_eq!(c.len(), 3);
 }
+
+// ─── #10762: hunks whose @@ counts are wrong ──────────────────────────────────
+
+/// Plan one line finding per `(file, line)` against `diff`.
+fn plan_lines(diff: &str, at: &[(&str, u32)]) -> InlinePlan {
+    let c = CommentableLines::from_unified_diff(diff);
+    let findings: Vec<Finding> = at.iter().map(|&(f, n)| finding_at(f, Some(n))).collect();
+    build_inline_plan(&findings, &c)
+}
+
+/// Each unanchored finding's index, in plan order; every one is `off_diff`.
+fn off_diff(plan: &InlinePlan) -> Vec<usize> {
+    assert!(
+        plan.unanchored
+            .iter()
+            .all(|u| u.reason == UnanchoredReason::OffDiff),
+        "{:?}",
+        plan.unanchored
+    );
+    plan.unanchored.iter().map(|u| u.finding_index).collect()
+}
+
+/// REGRESSION (#10762): a `--- `/`+++ `/`@@` triple ends an overstated hunk.
+///
+/// Why: `a.rs`'s hunk claims 3 lines a side but has 2; with no `diff ` line
+/// before `b.rs`, its `--- a/b.rs`/`+++ b/b.rs` headers were read as body
+/// lines: `a.rs:3` was invented and `b.rs` lost.
+/// What: asserts `b.rs` is in the file index and `a.rs:3` on neither side,
+/// and that findings anchor `RIGHT` a.rs 1 and 2 and `RIGHT` b.rs 1, with
+/// `a.rs:3` `off_diff`, as the pre-#10762 walk placed them.
+/// Test: this test itself.
+#[test]
+fn overstated_hunk_ends_at_file_header_triple() {
+    let diff = "\
+--- a/a.rs
++++ b/a.rs
+@@ -1,3 +1,3 @@
+ x
+-y
++z
+--- a/b.rs
++++ b/b.rs
+@@ -1 +1 @@
+-q
++r
+";
+    let c = CommentableLines::from_unified_diff(diff);
+    assert!(c.contains_file("b.rs"), "the next file is indexed");
+    assert!(!c.contains("a.rs", 3) && !c.contains_removed("a.rs", 3));
+    assert!(c.contains_removed("b.rs", 1));
+    assert_eq!(c.len(), 3);
+
+    let plan = plan_lines(diff, &[("a.rs", 1), ("a.rs", 2), ("a.rs", 3), ("b.rs", 1)]);
+    assert_eq!(off_diff(&plan), vec![2], "a.rs:3 is not in the diff");
+    assert_eq!(
+        placed(&plan),
+        vec![
+            ("a.rs", 1, AnchorSide::Right),
+            ("a.rs", 2, AnchorSide::Right),
+            ("b.rs", 1, AnchorSide::Right),
+        ]
+    );
+}
+
+/// REGRESSION (#10762): a `diff --git` line ends an overstated hunk.
+///
+/// Why: a line no body line can start with must end the hunk and be read as
+/// the next file's header.
+/// What: `a.rs`'s hunk claims 4 lines a side but has 2; asserts `a.rs:3`
+/// is `off_diff`, and that `b.rs`'s hunk anchors `RIGHT` 7 and 8 and indexes
+/// removed line 7 under its own path.
+/// Test: this test itself.
+#[test]
+fn overstated_hunk_ends_at_diff_line() {
+    let diff = "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,4 +1,4 @@
+ x
++y
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -7,2 +7,2 @@
+-old
++new
+ keep
+";
+    let at = [
+        ("a.rs", 2),
+        ("a.rs", 3),
+        ("b.rs", 7),
+        ("b.rs", 8),
+        ("b.rs", 9),
+    ];
+    let plan = plan_lines(diff, &at);
+    assert_eq!(off_diff(&plan), vec![1, 4]);
+    assert_eq!(
+        placed(&plan),
+        vec![
+            ("a.rs", 2, AnchorSide::Right),
+            ("b.rs", 7, AnchorSide::Right),
+            ("b.rs", 8, AnchorSide::Right),
+        ]
+    );
+    let c = CommentableLines::from_unified_diff(diff);
+    assert!(c.contains_removed("b.rs", 7) && !c.contains_removed("a.rs", 2));
+}
+
+/// REGRESSION (#10762): a second `@@` ends an overstated hunk in the same file.
+///
+/// Why: the next hunk's header must reseed both counters, or its lines would
+/// be numbered on from the first hunk.
+/// What: the first hunk claims 5 lines a side but has 2; asserts line 3 is
+/// `off_diff` and that the second hunk anchors `RIGHT` 20 and 21 and `LEFT`
+/// 22.
+/// Test: this test itself.
+#[test]
+fn overstated_hunk_ends_at_next_hunk() {
+    let diff = "\
+--- a/s.rs
++++ b/s.rs
+@@ -1,5 +1,5 @@
+ a
+ b
+@@ -20,3 +20,2 @@
+ c
+-d
+-e
++f
+";
+    let at = [
+        ("s.rs", 2),
+        ("s.rs", 3),
+        ("s.rs", 20),
+        ("s.rs", 21),
+        ("s.rs", 22),
+    ];
+    let plan = plan_lines(diff, &at);
+    assert_eq!(off_diff(&plan), vec![1]);
+    assert_eq!(
+        placed(&plan),
+        vec![
+            ("s.rs", 2, AnchorSide::Right),
+            ("s.rs", 20, AnchorSide::Right),
+            ("s.rs", 21, AnchorSide::Right),
+            ("s.rs", 22, AnchorSide::Left),
+        ]
+    );
+}
+
+/// REGRESSION (#10762): edge-case hunk shapes anchor as the diff says.
+///
+/// Why: the count-driven walk must keep every shape the pre-#10762 walk
+/// handled: zero-count sides, `\ No newline`, a stripped empty context line,
+/// CRLF, an understated count, a malformed header, a diff with no hunk.
+/// What: per case, plans line findings and asserts each `(path, line, side)`
+/// and which findings are `off_diff`.
+/// Test: this test itself.
+#[test]
+fn edge_case_hunks_anchor_by_their_counts() {
+    use AnchorSide::{Left as L, Right as R};
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        Vec<(&'a str, u32)>,
+        Vec<(&'a str, u32, AnchorSide)>,
+        Vec<usize>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "new file, @@ -0,0",
+            "--- /dev/null\n+++ b/n.rs\n@@ -0,0 +1,3 @@\n+a\n+b\n+c\n",
+            vec![("n.rs", 1), ("n.rs", 3), ("n.rs", 4)],
+            vec![("n.rs", 1, R), ("n.rs", 3, R)],
+            vec![2],
+        ),
+        (
+            "deleted file, +0,0",
+            "--- a/d.rs\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-a\n-b\n-c\n",
+            vec![("d.rs", 1), ("d.rs", 3), ("d.rs", 4)],
+            vec![("d.rs", 1, L), ("d.rs", 3, L)],
+            vec![2],
+        ),
+        (
+            "no newline marker inside the body",
+            "--- a/e.rs\n+++ b/e.rs\n@@ -1,3 +1,2 @@\n a\n-b\n-c\n\\ No newline at end of file\n+d\n\\ No newline at end of file\n",
+            vec![("e.rs", 2), ("e.rs", 3), ("e.rs", 4)],
+            vec![("e.rs", 2, R), ("e.rs", 3, L)],
+            vec![2],
+        ),
+        (
+            "empty context line, space stripped",
+            "--- a/m.rs\n+++ b/m.rs\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n",
+            vec![("m.rs", 2), ("m.rs", 3), ("m.rs", 4)],
+            vec![("m.rs", 2, R), ("m.rs", 3, R)],
+            vec![2],
+        ),
+        (
+            "CRLF line endings",
+            "--- a/w.rs\r\n+++ b/w.rs\r\n@@ -1,3 +1,2 @@\r\n a\r\n--- note\r\n-b\r\n+c\r\n",
+            vec![("w.rs", 2), ("w.rs", 3), ("w.rs", 4)],
+            vec![("w.rs", 2, R), ("w.rs", 3, L)],
+            vec![2],
+        ),
+        (
+            "understated count, rest read in the tail",
+            "--- a/u.rs\n+++ b/u.rs\n@@ -1 +1 @@\n a\n-b\n-c\n+d\n",
+            vec![("u.rs", 2), ("u.rs", 3), ("u.rs", 4)],
+            vec![("u.rs", 2, R), ("u.rs", 3, L)],
+            vec![2],
+        ),
+        (
+            "unparseable @@ start: the hunk is skipped",
+            "--- a/p.rs\n+++ b/p.rs\n@@ -x +y @@\n+a\n",
+            vec![("p.rs", 1)],
+            vec![],
+            vec![0],
+        ),
+        (
+            "unparseable @@ counts: read in the tail",
+            "--- a/q.rs\n+++ b/q.rs\n@@ -1,x +1,y @@\n a\n+b\n",
+            vec![("q.rs", 1), ("q.rs", 2), ("q.rs", 3)],
+            vec![("q.rs", 1, R), ("q.rs", 2, R)],
+            vec![2],
+        ),
+        (
+            "rename-only and binary diffs, no hunks",
+            "diff --git a/old.rs b/new.rs\nsimilarity index 100%\nrename from old.rs\nrename to new.rs\ndiff --git a/i.png b/i.png\nBinary files a/i.png and b/i.png differ\n",
+            vec![("new.rs", 1), ("i.png", 1)],
+            vec![],
+            vec![0, 1],
+        ),
+    ];
+    for (name, diff, at, want, off) in cases {
+        let plan = plan_lines(diff, &at);
+        assert_eq!(placed(&plan), want, "{name}");
+        assert_eq!(off_diff(&plan), off, "{name}");
+    }
+}

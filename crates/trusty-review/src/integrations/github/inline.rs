@@ -142,9 +142,10 @@ impl CommentableLines {
     /// `removed_line_with_no_new_side_match_is_not_off_diff`,
     /// `sql_comment_removed_line_does_not_end_the_hunk`.
     pub fn from_unified_diff(diff: &str) -> Self {
+        let lines: Vec<&str> = diff.lines().collect();
         let mut walk = HunkWalk::default();
-        for line in diff.lines() {
-            walk.step(line);
+        for (i, line) in lines.iter().enumerate() {
+            walk.step(line, &lines[i + 1..]);
         }
         walk.index
     }
@@ -204,7 +205,7 @@ enum HunkState {
     Outside,
     /// In a hunk body, with `old`/`new` lines still owed by its `@@` header.
     Body { old: u32, new: u32 },
-    /// Past a hunk's counts, or in a hunk whose counts did not parse. A header
+    /// Past a hunk's counts, ended early, or in a hunk whose counts did not parse. A header
     /// line is read as a header first; any other line is indexed as a body line,
     /// as the pre-#10762 walk did, so a fixture with wrong counts keeps its anchors.
     Tail,
@@ -247,13 +248,14 @@ impl BodyLine {
         }
     }
 
-    /// The `(old, new)` counts still owed after this line.
-    fn consume(self, old: u32, new: u32) -> (u32, u32) {
+    /// The `(old, new)` counts still owed after this line; `None` when a side
+    /// it occupies owes nothing, so the `@@` counts cannot account for it.
+    fn consume(self, old: u32, new: u32) -> Option<(u32, u32)> {
         match self {
-            Self::Removed => (old.saturating_sub(1), new),
-            Self::Added => (old, new.saturating_sub(1)),
-            Self::Context => (old.saturating_sub(1), new.saturating_sub(1)),
-            Self::NoNewline => (old, new),
+            Self::Removed => Some((old.checked_sub(1)?, new)),
+            Self::Added => Some((old, new.checked_sub(1)?)),
+            Self::Context => Some((old.checked_sub(1)?, new.checked_sub(1)?)),
+            Self::NoNewline => Some((old, new)),
         }
     }
 }
@@ -267,13 +269,17 @@ impl BodyLine {
 /// What: an `@@ -a,b +c,d @@` header opens [`HunkState::Body`] with the `b`
 /// and `d` counts (a missing count is 1). In the body every line is classified
 /// by its first character and spends its side's count; only once both counts
-/// are spent are `diff `, `--- `, `+++ ` and `@@` lines read as headers. A
-/// line no body line can start with ends an overstated hunk early and is then
-/// read as a header.
+/// are spent are `diff `, `--- `, `+++ ` and `@@` lines read as headers. Three
+/// lines end an overstated hunk early, to be read as in the pre-#10762 walk:
+/// a line no body line can start with, a line whose side owes nothing, and a
+/// `--- ` line that opens a `--- `/`+++ `/`@@` triple, which is a file header
+/// even while counts remain.
 /// Test: `sql_comment_removed_line_does_not_end_the_hunk`,
 /// `plus_plus_added_line_does_not_end_the_hunk`,
 /// `sql_comment_at_hunk_end_then_next_file_headers`,
-/// `missing_hunk_count_means_one_line`.
+/// `missing_hunk_count_means_one_line`,
+/// `overstated_hunk_ends_at_file_header_triple`,
+/// `overstated_hunk_ends_at_diff_line`, `overstated_hunk_ends_at_next_hunk`.
 #[derive(Debug, Default)]
 struct HunkWalk {
     index: CommentableLines,
@@ -289,21 +295,26 @@ struct HunkWalk {
 }
 
 impl HunkWalk {
-    /// Consume one diff line.
+    /// Consume one diff line; `ahead` is every line after it.
     ///
     /// Why: the hunk body must be read before any header test (#10762).
-    /// What: in `Body`, a classifiable line is indexed and spends its count; an
-    /// unclassifiable one drops to `Tail` and falls through. Then header lines
-    /// are applied; outside a hunk anything else is ignored; in `Tail` a
-    /// non-header line is indexed as before (`index ` and `\ No newline` skipped).
+    /// What: in `Body`, a line is indexed and spends its count when it is
+    /// classifiable, its side still owes a line, and it does not open a file
+    /// header triple ([`opens_file_header`]); any other line drops to `Tail`
+    /// and falls through. Then header lines are applied; outside a hunk
+    /// anything else is ignored; in `Tail` a non-header line is indexed as
+    /// before (`index ` and `\ No newline` skipped).
     /// Test: `sql_comment_removed_line_does_not_end_the_hunk`,
-    /// `sql_comment_at_hunk_end_then_next_file_headers`.
-    fn step(&mut self, line: &str) {
+    /// `sql_comment_at_hunk_end_then_next_file_headers`,
+    /// `overstated_hunk_ends_at_file_header_triple`.
+    fn step(&mut self, line: &str, ahead: &[&str]) {
         // #10762: drive hunks from @@ counts
         if let HunkState::Body { old, new } = self.state {
-            if let Some(kind) = BodyLine::classify(line) {
+            let owed = BodyLine::classify(line)
+                .filter(|_| !opens_file_header(line, ahead))
+                .and_then(|kind| kind.consume(old, new).map(|owed| (kind, owed)));
+            if let Some((kind, (old, new))) = owed {
                 self.record(kind);
-                let (old, new) = kind.consume(old, new);
                 self.state = HunkState::owing(old, new);
                 return;
             }
@@ -400,6 +411,21 @@ impl HunkWalk {
             }
         }
     }
+}
+
+/// Whether `line` and the two lines after it read `--- `, `+++ `, `@@` (#10762).
+///
+/// Why: a hunk whose `@@` counts overstate its body, followed by the next
+/// file's headers with no `diff ` line between, would otherwise have those
+/// headers read as body lines: anchors invented in this file, the next lost.
+/// What: a pure three-line prefix test. Git writes a file's `--- ` line
+/// directly before its `+++ ` line, so a `+++ ` header always pairs with the
+/// line before it; a lone `--- `/`+++ ` body line forms no triple.
+/// Test: `overstated_hunk_ends_at_file_header_triple`,
+/// `missing_hunk_count_means_one_line`.
+fn opens_file_header(line: &str, ahead: &[&str]) -> bool {
+    line.starts_with("--- ")
+        && matches!(ahead, [plus, hunk, ..] if plus.starts_with("+++ ") && hunk.starts_with("@@"))
 }
 
 /// Parse the `(old, new)` line counts from the remainder of an `@@` header (#10762).
