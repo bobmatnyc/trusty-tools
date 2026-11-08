@@ -37,6 +37,9 @@ use trusty_mpm::core::tmux_server::socket_dir;
 mod socket;
 #[path = "tmux_kill_server_walk.rs"]
 mod walk;
+// #10706 H1: the reader options that write or run.
+#[path = "tmux_kill_server_readers.rs"]
+mod readers;
 
 /// The rule name recorded with a whole-server kill deny.
 pub(crate) const TMUX_KILL_SERVER_RULE: &str = "tmux-kill-server";
