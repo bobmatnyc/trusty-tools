@@ -933,6 +933,23 @@ fn a_call_with_no_rate_limit_passes_output_and_status_through_unchanged() {
     }
 }
 
+/// 🔴 #10550: a GraphQL error that is not a rate limit — the auto-merge
+/// refusal GitHub returned at 13:28Z — keeps stderr byte for byte, an empty
+/// stdout and exit 1.
+#[cfg(unix)]
+#[test]
+fn a_non_rate_limit_graphql_error_passes_through_unchanged() {
+    // #10550: the shim's exit-1 arm must not rewrite a GraphQL error that lacks the rate-limit text.
+    const REFUSAL: &str = "GraphQL: Failed to add PR #10842: expected head oid does not match \
+                           the current head oid (enablePullRequestAutoMerge)";
+    let call = format!("echo '{REFUSAL}' >&2; exit 1");
+    let (_tmp, dir) = rate_limit_shim("echo 1767225600; exit 0", &call);
+    let out = run_shim_args(&dir, &["pr", "merge", "10842", "--auto", "--squash"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert_eq!(out.stderr, format!("{REFUSAL}\n").as_bytes(), "{out:?}");
+}
+
 /// #10550 item 4: a large buffered output (`--paginate` on a big set) comes
 /// through whole — the buffer is a temp file, so no size bound drops bytes.
 #[cfg(unix)]

@@ -265,6 +265,7 @@ pub(crate) fn shim_script(
 /// Test: `a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout`,
 /// `a_failed_reset_lookup_still_names_the_limit_and_exits_1`,
 /// `a_call_with_no_rate_limit_passes_output_and_status_through_unchanged`,
+/// `a_non_rate_limit_graphql_error_passes_through_unchanged`,
 /// `a_large_buffered_output_passes_through_whole`,
 /// `a_watch_command_keeps_the_exec_path`, `a_tty_stdout_keeps_the_exec_path`.
 fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
