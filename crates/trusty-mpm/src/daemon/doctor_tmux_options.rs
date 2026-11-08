@@ -207,20 +207,64 @@ pub(super) fn fold_server_checks(mut checks: Vec<(String, DoctorCheck)>) -> Doct
 /// Read-only — it never sets an option and never starts a server, so a quiet
 /// host stays quiet and reports `Unknown`.
 /// Test: the decision is covered by `build_tmux_options_check`'s and
-/// `fold_server_checks`'s tests; this wrapper is process execution.
+/// `fold_server_checks`'s tests; the per-server bound by
+/// `a_hung_workspace_server_reads_unknown_within_the_budget`.
 pub(super) fn check_tmux_options() -> DoctorCheck {
     let bin = crate::core::tmux::resolve_tmux_binary_or_bare();
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let expected = crate::core::trusty_tools_config::resolve_tmux_options(&config);
     let socket_dir = crate::core::tmux_server::ambient_socket_dir();
+    tmux_options_row(
+        &bin,
+        &socket_dir,
+        &expected,
+        crate::core::tmux_server::PROBE_BUDGET,
+    )
+}
+
+/// [`check_tmux_options`] over a given tmux binary, socket directory and
+/// per-server probe budget (#10101).
+///
+/// Why: a hung workspace server would block an unbounded `show-options` and
+/// with it the whole `tm doctor` run.
+/// What: the default server is probed as before. Each live workspace server
+/// in `socket_dir` is probed through
+/// [`crate::core::tmux_server::bounded_probe`] keyed on its socket: within
+/// `budget`, and not at all while an earlier probe of it is still blocked.
+/// Such a server's clause is `Unknown` naming the server (#4005: a probe that
+/// timed out learned nothing), so the row is never `Ok`.
+/// Test: `a_hung_workspace_server_reads_unknown_within_the_budget`.
+pub(super) fn tmux_options_row(
+    bin: &str,
+    socket_dir: &std::path::Path,
+    expected: &ResolvedTmuxOptions,
+    budget: std::time::Duration,
+) -> DoctorCheck {
     // An unreadable socket directory adds no servers; the default row stands.
-    let servers = crate::core::tmux_server::live_workspace_servers(&socket_dir).unwrap_or_default();
+    let servers = crate::core::tmux_server::live_workspace_servers(socket_dir).unwrap_or_default();
     let mut checks = vec![(
         "default server".to_owned(),
-        build_tmux_options_check(observe_server(&bin, None), &expected),
+        build_tmux_options_check(observe_server(bin, None), expected),
     )];
     checks.extend(servers.into_iter().map(|server| {
-        let check = build_tmux_options_check(observe_server(&bin, Some(&server)), &expected);
+        let key = crate::core::tmux_server::server_socket_path(socket_dir, &server);
+        let (probe_bin, probe_server) = (bin.to_owned(), server.clone());
+        // #10101: bounded, one in flight per server.
+        let observed = crate::core::tmux_server::bounded_probe(&key, budget, move || {
+            observe_server(&probe_bin, Some(&probe_server))
+        });
+        let check = match observed {
+            Some(observed) => build_tmux_options_check(observed, expected),
+            None => DoctorCheck::new(
+                CHECK_NAME,
+                CheckStatus::Unknown,
+                format!(
+                    "tmux server '{server}' did not answer within {}s; its options were not \
+                     checked",
+                    budget.as_secs_f32()
+                ),
+            ),
+        };
         (server, check)
     }));
     fold_server_checks(checks)
@@ -252,6 +296,47 @@ mod tests {
         ]);
         assert_eq!(folded.status, CheckStatus::Warn);
         assert_eq!(folded.message, "default server: fine | tm-ws-x: drifted");
+    }
+
+    /// #10101 error arm (Fail-Open Check): a live workspace server whose
+    /// `show-options` hangs. The row returns within the budget, reads
+    /// `Unknown` naming the server, and a second run while the first probe
+    /// still blocks spawns no second tmux client. Red on ed04279554, whose
+    /// unbounded probe waited out every hung call.
+    #[test]
+    fn a_hung_workspace_server_reads_unknown_within_the_budget() {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let server = "tm-ws-10101d-opts";
+        // A socket that accepts a connect, so the server reads live.
+        let _listener =
+            std::os::unix::net::UnixListener::bind(dir.path().join(server)).expect("bind");
+        let log = dir.path().join("calls.log");
+        let bin = dir.path().join("fake-tmux");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = -L ]; then sleep 3; fi\nexit 1\n",
+            log.display()
+        );
+        trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+        let bin = bin.to_string_lossy().into_owned();
+        let budget = std::time::Duration::from_millis(300);
+
+        let started = std::time::Instant::now();
+        let row = tmux_options_row(&bin, dir.path(), &spec(), budget);
+        let took = started.elapsed();
+
+        assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+        assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+        assert!(
+            row.message
+                .contains(&format!("{server}: tmux server '{server}' did not answer")),
+            "{}",
+            row.message
+        );
+        let again = tmux_options_row(&bin, dir.path(), &spec(), budget);
+        assert_eq!(again.status, CheckStatus::Unknown, "{}", again.message);
+        let calls = std::fs::read_to_string(&log).expect("log");
+        let on_server = calls.lines().filter(|l| l.starts_with("-L ")).count();
+        assert_eq!(on_server, 1, "the hung server was probed again: {calls}");
     }
 
     /// The spec these tests compare against — tm's shipped defaults.
