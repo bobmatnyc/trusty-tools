@@ -312,3 +312,47 @@ async fn do_rename_request_reports_bare_status_when_500_body_is_empty() {
         "must say the daemon sent nothing rather than print an empty reason: {msg}"
     );
 }
+
+/// Set in the child run of the test below, which makes it the probe.
+const RENAME_CHILD_ENV: &str = "TM_TEST_10754_RENAME_CHILD";
+
+/// #10754: De1 key map (Bob 11-06) — the tui's rename hook returns a 400's
+/// text as its error, which the tui shows as a notice, and writes nothing to
+/// stderr, where it would land on the tui's screen.
+///
+/// The probe runs in a child copy of this test binary, so the parent reads
+/// the child's real stderr; libtest's capture would hide an `eprintln!`.
+#[tokio::test]
+async fn tui_rename_hook_returns_the_refusal_and_writes_no_stderr() {
+    const REFUSAL: &str = "name 'x y' is not a valid session name";
+    if std::env::var_os(RENAME_CHILD_ENV).is_some() {
+        let url = spawn_mock_rename_daemon("400 Bad Request", REFUSAL).await;
+        let client = trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), url);
+        let hook = crate::commands::tui_session_hooks::HOOKS.rename;
+        let err = hook(client, "sess-1".to_string(), "x y".to_string())
+            .await
+            .expect_err("a 400 is a refusal");
+        println!("HOOK-ERROR<{err:#}>");
+        return;
+    }
+    let name = format!(
+        "{}::tui_rename_hook_returns_the_refusal_and_writes_no_stderr",
+        module_path!().split_once("::").map_or("", |(_, rest)| rest)
+    );
+    let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(RENAME_CHILD_ENV, "1")
+        .output()
+        .expect("run the child probe");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "child failed:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains(&format!("HOOK-ERROR<rename rejected: {REFUSAL}>")),
+        "the refusal is the returned text: {stdout}"
+    );
+    assert!(
+        !stderr.contains(REFUSAL),
+        "the hook wrote to stderr: {stderr}"
+    );
+}

@@ -9,9 +9,10 @@
 //! What: [`ProjectCtlState`] plus its row types ([`ProjectRow`],
 //! [`SessionRow`]) and the [`Pane`] focus enum. Sessions are keyed by owning
 //! project name in [`ProjectCtlState::sessions_by_project`]; #10476's
-//! [`tree`] projects both lists into the Owner -> Project -> Sessions tree,
-//! and [`tree_nav`] holds its selection, so moving through the tree never
-//! needs a daemon round trip. [`ConfirmKind`] /
+//! [`tree`] projects both lists into the Owner -> Project tree, and
+//! [`tree_nav`] holds its selection, so moving through the tree never
+//! needs a daemon round trip. #10754: two-column MPM pane (Bob 11-06) —
+//! [`session_col`] holds the right column's rows and its own selection. [`ConfirmKind`] /
 //! [`PendingConfirm`] are the shared confirmation-gate mechanism DOC-35 §5.2
 //! requires before `k` (kill, when Active) or `d` (decommission, always) may
 //! execute.
@@ -34,23 +35,29 @@ pub use modals::{
     ConfigFormField, ConfigFormFocus, ConfigFormTags, ConfigFormView, DeliverableView,
 };
 // #10476: the tree model and its navigation, kept out of this file (SLOC cap).
+// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
+pub mod rename;
+pub mod session_col;
 pub mod tree;
 pub mod tree_nav;
+pub use session_col::{SessionColRow, SessionColumn};
 pub use tree::{NodeId, TreeRow, TreeRowKind};
 pub use tree_nav::{HitMap, TreeView};
 
-/// Which of the two navigable panes currently has keyboard focus.
+/// Which navigable pane currently has keyboard focus.
 ///
-/// Why: Tab/Shift+Tab cycle focus between the panes (DOC-35 §5). #10476: the
-/// Owner -> Project -> Sessions tree replaced the Projects and Sessions panes
-/// (Architect Q9), so the cycle is the tree and the Activity strip.
-/// What: two variants in cycle order; [`Pane::next`] / [`Pane::prev`] wrap.
+/// Why: Tab/Shift+Tab cycle focus between the panes (DOC-35 §5).
+/// #10754: two-column MPM pane (Bob 11-06) — the owner/project tree, the
+/// session column beside it, and the Activity strip.
+/// What: three variants in cycle order; [`Pane::next`] / [`Pane::prev`] wrap.
 /// Test: `pane_cycle_wraps_forward_and_backward`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pane {
-    /// The Owner -> Project -> Sessions tree.
+    /// The left column: the Owner -> Project tree.
     #[default]
     Tree,
+    /// The right column: the selected node's sessions.
+    Sessions,
     /// The bottom activity strip for the selected session.
     Activity,
 }
@@ -59,14 +66,15 @@ impl Pane {
     /// Advance to the next pane in the cycle, wrapping after Activity.
     pub fn next(self) -> Self {
         match self {
-            Pane::Tree => Pane::Activity,
+            Pane::Tree => Pane::Sessions,
+            Pane::Sessions => Pane::Activity,
             Pane::Activity => Pane::Tree,
         }
     }
 
-    /// Step back to the previous pane in the cycle; with two panes, the other.
+    /// Step back to the previous pane in the cycle, wrapping before Tree.
     pub fn prev(self) -> Self {
-        self.next()
+        self.next().next()
     }
 }
 
@@ -149,9 +157,9 @@ pub struct SessionRow {
     /// #10476: the session that launched this one, from the daemon's
     /// `parent_session_id`. Drives the tree's worker indentation.
     pub parent_session_id: Option<String>,
-    /// The session's workspace (worktree) path, for the details overlay.
+    /// The session's workspace (worktree) path, for the inline details.
     pub workspace_path: Option<String>,
-    /// When the session was last active, for the details overlay.
+    /// When the session was last active, for the inline details.
     pub last_activity_at: Option<String>,
 }
 
@@ -336,9 +344,11 @@ pub struct ProjectCtlState {
     /// `GET /api/v1/sessions/managed/fleet` poll per tick rather than a
     /// per-project round trip.
     pub sessions_by_project: BTreeMap<String, Vec<SessionRow>>,
-    /// #10476: the tree pane's rows, selection, collapsed set and details
-    /// overlay (see [`tree_nav`]).
+    /// #10476: the tree pane's rows, selection and collapsed set
+    /// (see [`tree_nav`]).
     pub tree: TreeView,
+    /// #10754: the session column's rows and selection (see [`session_col`]).
+    pub session_col: SessionColumn,
     /// Which pane currently has keyboard focus.
     pub focus: Pane,
     /// Whether the daemon answered its last health probe.
@@ -418,6 +428,9 @@ pub struct ProjectCtlState {
     ///
     /// [`handle_key`]: super::events::handle_key
     pub config_form: Option<ConfigFormView>,
+    /// #10754: De1 key map (Bob 11-06) — the rename modal `r` opens on a
+    /// session row. While `Some`, it takes every key (see `events::modal`).
+    pub rename: Option<rename::RenameModal>,
     /// Set when a mutating action just succeeded and the operator should see
     /// the fleet refreshed without waiting for the next timer tick.
     ///
@@ -441,9 +454,8 @@ impl ProjectCtlState {
     ///
     /// Why: the Activity pane, the Deliverables fetch and the `l`/`c`/`v`
     /// actions all need to know which project is selected.
-    /// What: #10476 — the project of the selected tree node: a project node
-    /// itself, or the project a session or anchor sits under. `None` on an
-    /// owner bar or with nothing selected.
+    /// What: #10476 — the selected tree node when it is a project. `None` on
+    /// an owner bar or with nothing selected.
     /// Test: `selected_project_follows_the_tree_node`.
     pub fn selected_project(&self) -> Option<&ProjectRow> {
         let name = self.tree.selected.as_ref()?.project_name()?;
@@ -465,21 +477,6 @@ impl ProjectCtlState {
             .and_then(|name| self.sessions_by_project.get(name))
             .map(Vec::as_slice)
             .unwrap_or(&[])
-    }
-
-    /// The currently selected session row, if any.
-    ///
-    /// #10476: only a session node yields one, so kill/resume/decommission/
-    /// attach on an owner, project or anchor act on nothing.
-    /// Test: `selected_session_is_none_on_owner_and_project_nodes`.
-    pub fn selected_session(&self) -> Option<&SessionRow> {
-        let NodeId::Session { project, id, .. } = self.tree.selected.as_ref()? else {
-            return None;
-        };
-        self.sessions_by_project
-            .get(project)?
-            .iter()
-            .find(|s| &s.id == id)
     }
 
     /// The live [`ActivityInfo`] for the currently selected session, only
@@ -519,54 +516,6 @@ impl ProjectCtlState {
             return false;
         };
         self.activity_failures.is_unavailable_for(selected_id)
-    }
-
-    /// Cycle focus forward (Tree → Activity → …).
-    pub fn cycle_focus_next(&mut self) {
-        self.focus = self.focus.next();
-    }
-
-    /// Cycle focus backward.
-    pub fn cycle_focus_prev(&mut self) {
-        self.focus = self.focus.prev();
-    }
-
-    /// Select the tree node of `session_id`, opening its owner and project.
-    ///
-    /// Why: #6483 routes `tm attach <target>` at this multipane dashboard
-    /// instead of the single-pane chat. That command resolves a session id and
-    /// expects the TUI to open ON that session; without this the operator
-    /// would land on whichever owner sorts first and have to hunt for it.
-    /// What: scans `projects` in registry order for the first project whose
-    /// `sessions_by_project` entry contains `session_id`, selects that session
-    /// node through [`Self::select_node`] (#10476) and focuses the tree.
-    /// Returns `false` (leaving the selection untouched) when the id is
-    /// unknown — the fleet may not have polled it yet.
-    /// Test: `focus_session_selects_owning_project_and_row`,
-    /// `focus_session_is_a_noop_for_an_unknown_id`.
-    pub fn focus_session(&mut self, session_id: &str) -> bool {
-        let Some(project) = self
-            .projects
-            .iter()
-            .find(|p| {
-                self.sessions_by_project
-                    .get(&p.name)
-                    .is_some_and(|rows| rows.iter().any(|s| s.id == session_id))
-            })
-            .map(|p| p.name.clone())
-        else {
-            return false;
-        };
-        let Some(owner) = self.owner_of_project(&project) else {
-            return false;
-        };
-        self.select_node(NodeId::Session {
-            owner,
-            project,
-            id: session_id.to_string(),
-        });
-        self.focus = Pane::Tree;
-        true
     }
 
     /// Set the transient action-bar notice.
@@ -690,10 +639,13 @@ mod tests {
 
     #[test]
     fn pane_cycle_wraps_forward_and_backward() {
-        assert_eq!(Pane::Tree.next(), Pane::Activity);
+        // #10754: two-column MPM pane (Bob 11-06)
+        assert_eq!(Pane::Tree.next(), Pane::Sessions);
+        assert_eq!(Pane::Sessions.next(), Pane::Activity);
         assert_eq!(Pane::Activity.next(), Pane::Tree);
         assert_eq!(Pane::Tree.prev(), Pane::Activity);
-        assert_eq!(Pane::Activity.prev(), Pane::Tree);
+        assert_eq!(Pane::Sessions.prev(), Pane::Tree);
+        assert_eq!(Pane::Activity.prev(), Pane::Sessions);
     }
 
     #[test]
@@ -915,7 +867,7 @@ mod tests {
     fn focus_session_selects_owning_project_and_row() {
         // #6483: `tm attach <target>` opens THIS dashboard, so the resolved
         // session id must select its owning project AND its row, with keyboard
-        // focus on the tree (#10476: was the Sessions pane).
+        // focus on the session column (#10754: two-column MPM pane).
         let mut state = ProjectCtlState {
             projects: vec![row("a"), row("b")],
             ..Default::default()
@@ -931,7 +883,7 @@ mod tests {
         assert!(state.focus_session("bbbbbbbb2222"));
         assert_eq!(state.selected_project().unwrap().name, "b");
         assert_eq!(state.selected_session().unwrap().id, "bbbbbbbb2222");
-        assert_eq!(state.focus, Pane::Tree);
+        assert_eq!(state.focus, Pane::Sessions);
     }
 
     #[test]
