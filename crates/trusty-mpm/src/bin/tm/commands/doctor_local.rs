@@ -35,7 +35,8 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// operator can confirm — or fix — a broken install at a glance. It is a
 /// one-shot CLI diagnostic: it never runs inside the daemon, and a missing
 /// daemon costs it exactly one row rather than the whole report (#6336).
-/// What: runs the check battery in-process via [`local_report`], prints one
+/// What: runs the check battery in-process via [`local_report`], prints the
+/// [`project_header`] line naming the project it checked (#10565), one
 /// status-tagged line per check, appends the daemon rows from
 /// [`daemon_rows`] and the `gcloud_auth` row (#8371, which spawns `gcloud`
 /// only under `--network`), the `hook-interpreter` and `notify-supervisor-asset`
@@ -50,7 +51,10 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// Test: `cli_parses_doctor` / `cli_parses_doctor_prune_stale_skills` cover
 /// parsing; `tm_doctor_reports_every_local_check_with_no_daemon` covers the
 /// daemonless path end to end; `tm_doctor_never_spawns_gcloud_without_network`
-/// covers the opt-in gate; the stale-daemon comparison logic is covered by
+/// covers the opt-in gate; `tm_doctor_names_the_cwd_project_it_checked`,
+/// `tm_doctor_dir_names_the_target_project_not_the_cwd` and
+/// `tm_doctor_fix_dry_run_names_the_project_it_checked` cover the project
+/// line; the stale-daemon comparison logic is covered by
 /// `core::version_staleness`'s own unit tests.
 pub(crate) async fn doctor(
     daemon: &trusty_mpm::client::DaemonClient,
@@ -61,6 +65,11 @@ pub(crate) async fn doctor(
     let report = local_report(project_dir.as_deref()).await?;
 
     println!("trusty-mpm doctor");
+    // #10565: name the project every project-scoped row below was read from.
+    println!(
+        "{}",
+        project_header(project_dir.as_deref(), flags.dir.is_some())
+    );
     let mut overall = report.overall;
     for check in &report.checks {
         print_check(check);
@@ -155,6 +164,23 @@ fn resolve_project_dir(dir: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
     Ok(Some(resolved))
 }
 
+/// The report line naming the project the check battery was scoped to.
+///
+/// Why (#10565): project-scoped rows such as `deployment` FAIL in a directory
+/// with no project settings, and a report that never named the directory read
+/// as a broken install — or, for `--fix`, hid which project it would repair.
+/// What: `project: <path> (--dir)` or `project: <path> (cwd)`, by where the
+/// path came from; `project: none (cwd unreadable)` with no path.
+/// Test: `project_header_names_a_dir_flag_target`,
+/// `project_header_names_the_cwd`, `project_header_says_none_without_a_path`.
+fn project_header(project_dir: Option<&Path>, from_dir_flag: bool) -> String {
+    match project_dir {
+        Some(dir) if from_dir_flag => format!("project: {} (--dir)", dir.display()),
+        Some(dir) => format!("project: {} (cwd)", dir.display()),
+        None => "project: none (cwd unreadable)".to_string(),
+    }
+}
+
 /// The rows that depend on a daemon answering, in the order they print.
 ///
 /// Why: exactly one row reports whether the daemon is there (#6336). The other
@@ -247,5 +273,26 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let err = resolve_project_dir(Some(&file)).unwrap_err();
         assert!(err.to_string().contains("not a directory"), "{err}");
+    }
+
+    // #10565: one test per `project_header` arm.
+    #[test]
+    fn project_header_names_a_dir_flag_target() {
+        let got = project_header(Some(Path::new("/srv/acme")), true);
+        assert_eq!(got, "project: /srv/acme (--dir)");
+    }
+
+    #[test]
+    fn project_header_names_the_cwd() {
+        let got = project_header(Some(Path::new("/srv/acme")), false);
+        assert_eq!(got, "project: /srv/acme (cwd)");
+    }
+
+    #[test]
+    fn project_header_says_none_without_a_path() {
+        assert_eq!(
+            project_header(None, false),
+            "project: none (cwd unreadable)"
+        );
     }
 }
