@@ -1,4 +1,4 @@
-//! Frontmatter split + deterministic YAML render.
+//! Frontmatter split + deterministic YAML render (moved from trusty-kb, #10746).
 //!
 //! Why: markdown-with-frontmatter files are only "deterministic" if the same
 //! logical frontmatter always serialises to byte-identical YAML. serde_yaml
@@ -11,11 +11,20 @@
 //! the body; [`parse`] turns the YAML text into a [`serde_yaml::Value`];
 //! [`sort_value`] recursively key-sorts mappings; [`render`] re-assembles a
 //! sorted-frontmatter + body document with a normalised trailing newline.
+//! These are the v0.1 canonical-render primitives the legacy [`Entity`] model
+//! writes with. The raw-preserving read and patch-render of SPEC-OKF-01
+//! §2.2.1 live in [`super::raw`].
+//!
+//! [`Entity`]: super::concept::Entity
 //!
 //! Test: `split_roundtrips_frontmatter`, `split_handles_no_frontmatter`,
 //! `render_is_key_sorted_and_stable`, `render_without_frontmatter_omits_fence`.
 
+use std::path::PathBuf;
+
 use serde_yaml::{Mapping, Value};
+
+use crate::OkfError;
 
 /// The result of splitting a document into optional frontmatter + body.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,17 +91,27 @@ pub fn split(content: &str) -> Split {
 /// Why: an empty or whitespace-only block is common (a file with a bare fence)
 /// and must parse to an empty mapping, not an error or `Null`.
 /// What: returns a [`Value::Mapping`]; a non-mapping top-level YAML document is
-/// an error (frontmatter must be a key/value map).
-/// Test: `render_is_key_sorted_and_stable`.
-pub fn parse(yaml: &str) -> anyhow::Result<Value> {
+/// an error (frontmatter must be a key/value map). The error is
+/// [`OkfError::Parse`] with an empty path; a caller that knows the file sets it.
+/// Test: `render_is_key_sorted_and_stable`, `parse_rejects_non_mapping`.
+pub fn parse(yaml: &str) -> Result<Value, OkfError> {
     if yaml.trim().is_empty() {
         return Ok(Value::Mapping(Mapping::new()));
     }
-    let value: Value = serde_yaml::from_str(yaml)?;
+    // #10746: OkfError replaces anyhow; trusty-kb's anyhow callers still use `?`.
+    let value: Value = serde_yaml::from_str(yaml).map_err(|e| OkfError::Parse {
+        path: PathBuf::new(),
+        line: e.location().map(|l| l.line()),
+        message: e.to_string(),
+    })?;
     match value {
         Value::Mapping(_) => Ok(value),
         Value::Null => Ok(Value::Mapping(Mapping::new())),
-        other => anyhow::bail!("frontmatter must be a YAML mapping, got {other:?}"),
+        other => Err(OkfError::Parse {
+            path: PathBuf::new(),
+            line: None,
+            message: format!("frontmatter must be a YAML mapping, got {other:?}"),
+        }),
     }
 }
 
@@ -226,6 +245,14 @@ mod tests {
         // `name` sorts before `type`.
         assert!(ra.find("name:").unwrap() < ra.find("type:").unwrap());
         assert!(ra.ends_with("body\n"));
+    }
+
+    /// Why: a sequence or scalar is not frontmatter; the error must name it.
+    /// What: asserts a top-level list returns `OkfError::Parse`.
+    /// Test: self-contained.
+    #[test]
+    fn parse_rejects_non_mapping() {
+        assert!(matches!(parse("- a\n- b\n"), Err(OkfError::Parse { .. })));
     }
 
     /// Why: an empty frontmatter mapping must not emit an empty `---\n---` fence.

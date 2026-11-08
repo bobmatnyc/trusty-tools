@@ -6,8 +6,10 @@
 //! the crate knows no agent layout, holds no credential, has no MCP surface,
 //! and its core is network-free.
 //!
-//! What: the module tree of SPEC-OKF-01 §4.1. This is the S1 scaffold of epic
-//! #10746: each module is empty and its doc states what it will hold.
+//! What: the module tree of SPEC-OKF-01 §4.1. Slice S2 of epic #10746 fills
+//! [`format`](mod@format) and [`profile`] (moved from trusty-kb) and the [`OkfError`]
+//! type; every other module is still empty and its doc states what it will
+//! hold.
 //!   - [`format`](mod@format), [`profile`], [`bundle`], [`build`], [`state`], [`import`],
 //!     [`extract`] — the network-free core.
 //!   - `feed` and `retrieve` — behind the cargo feature `search-feed`.
@@ -28,11 +30,14 @@
 
 pub mod build;
 pub mod bundle;
+pub mod error;
 pub mod extract;
 pub mod format;
 pub mod import;
 pub mod profile;
 pub mod state;
+
+pub use error::OkfError;
 
 #[cfg(feature = "search-feed")]
 pub mod feed;
