@@ -49,7 +49,7 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   (exit 1 when one is found).
 Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
 intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD); a failure is logged, never fatal.
-Hold file (ar-T8a): a `hold` set or cleared on an Architect's own ledger (<arch>/local/il) is mirrored to its
+Hold file (#10857, ar-T8a): a `hold` set or cleared on an Architect's own ledger (<arch>/local/il) is mirrored to its
 inbox/hold.json (source "ledger"), the hold fleet-poll.py reads before it wakes the Architect.
 A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a

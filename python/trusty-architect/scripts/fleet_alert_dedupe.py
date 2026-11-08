@@ -1,4 +1,4 @@
-"""fleet_alert_dedupe.py — host-alert severity, dedupe and hold gating for fleet-poll.py (ar-T8a).
+"""fleet_alert_dedupe.py — host-alert severity, dedupe and hold gating for fleet-poll.py (#10857, ar-T8a).
 
 Why: an unchanged swap alert (constant fingerprint "swap", re-emitted every 30 min) woke a paused
 Architect 16 times between 14:21Z and 21:52Z on 2026-11-08. load and disk had the same constant key.
@@ -105,7 +105,8 @@ def _migrate(seen, ck, a):
 
 
 def _decide_classed(prev, a, now, every, held):
-    """(fire, entry) for one classed alert against its stored entry (None: first sight)."""
+    """(fire, entry) for one classed alert against its stored entry (None: first sight).
+    The stored severity and bucket only ratchet up within an entry's life; they reset when the entry clears."""
     sev, bucket = a["severity"], a["bucket"]
     key = f"{a['kind']}|{sev}|b{bucket}"
     if prev is None:

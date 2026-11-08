@@ -82,11 +82,11 @@ def hold_covers(hold, kind):
     return kind in (kinds if isinstance(kinds, list) else ["idle"])
 
 
-# --- urgent classes and the Architect-wide hold file (ar-T8a) --------------------
+# --- urgent classes and the Architect-wide hold file (#10857) --------------------
 
 # Alert kinds that wake the Architect even while it is held. The poller (fleet_alert_dedupe.py) reads this one set.
-URGENT_KINDS = {"permission_prompt", "dialog", "question", "exited", "session_exited", "self_ctx",
-                "architect_dead", "architect_silent", "architect_frozen"}
+URGENT_KINDS = {"permission_prompt", "agent_needs_input", "dialog", "question", "exited", "session_exited",
+                "self_ctx", "architect_dead", "architect_silent", "architect_frozen"}
 URGENT_SEVERITY_KINDS = {"swap", "disk"}   # urgent only at severity "critical"
 PM_WAKE_KINDS = {"decision", "blocker", "head", "done"}   # pm_intake.WAKE_MSG_KINDS
 HOLD_FILE = "hold.json"

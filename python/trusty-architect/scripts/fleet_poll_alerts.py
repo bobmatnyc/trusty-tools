@@ -120,7 +120,7 @@ def owner_answer_alerts(now, dry_run=False, root=None, ever_read=True):
     return out, None
 
 
-USER_STATE_HOLD = ("away", "sleeping")   # ar-T8a: the owner states that hold the Architect's non-urgent alerts
+USER_STATE_HOLD = ("away", "sleeping")   # #10857: the owner states that hold the Architect's non-urgent alerts
 
 
 def user_state_hold(dry_run=False, root=None):

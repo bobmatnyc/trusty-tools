@@ -189,6 +189,16 @@ def test_release_emits_one_digest_and_no_replay(fleet):
     assert fleet["wakes"] == [1]
 
 
+def test_agent_needs_input_wakes_while_held(fleet):
+    """#10857: a PM agent waiting on input has permission_prompt's shape: it wakes through a hold."""
+    _hold(fleet["hold"])
+    fleet["host"] = [fp.alert("agent_needs_input", "ev1", "agent waits for input", "tm-x", "%1", now=T0),
+                     host("swap", "warn", 3)]
+    fp.cycle({}, now=T0)
+    assert fleet["wakes"] == [1]
+    assert [a["kind"] for a in _written(fleet["alerts"]) if a.get("held")] == ["swap"]
+
+
 def test_urgent_classes_wake_while_held():
     at = fp.alert_triage
     for a in (fp.alert("owner_answer_error", "x", "d"), fp.alert("architect_frozen", "x", "d"),

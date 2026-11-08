@@ -102,8 +102,8 @@ find_box, _screen_lines = fleet_classify.find_box, fleet_classify._screen_lines
 parse_pane, evaluate = fleet_classify.parse_pane, fleet_classify.evaluate
 fleet_plan_alerts, dedup = fleet_classify.fleet_plan_alerts, fleet_classify.dedup
 clean = fleet_classify.clean
-alert_dedupe = fleet_classify.alert_dedupe          # ar-T8a: host severity/bucket, hold gating
-alert_triage = alert_dedupe.alert_triage            # ar-T8a: is_urgent, the hold file
+alert_dedupe = fleet_classify.alert_dedupe          # #10857: host severity/bucket, hold gating
+alert_triage = alert_dedupe.alert_triage            # #10857: is_urgent, the hold file
 
 self_ctx = _load_by_path("self_ctx", "self-ctx.py")
 quiet_sessions = _load_by_path("quiet_sessions", "quiet-sessions.py")
@@ -207,7 +207,7 @@ def cycle(state, dry_run=False, now=None):
         k: v for k, v in state.get("alerts", {}).items() if k.startswith(ANSWER_KEY)}
     quiet = quiet_sessions.read_quiet_sessions(QUIET_SESSIONS_FILE)
     candidates = [a for a in candidates if not (a["kind"] == "idle" and a["session"] in quiet)]
-    # ar-T8a: the hold (user_state and ledger writers) gates non-urgent alerts; a bad hold file is not held.
+    # #10857: the hold (user_state and ledger writers) gates non-urgent alerts; a bad hold file is not held.
     user_state_hold(dry_run)
     hold = alert_triage.read_hold(HOLD, now)
     if hold["error"]:

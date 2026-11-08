@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 IDLE_AFTER = 600          # seconds an idle pane waits before it alerts
-# ar-T8a: load, disk and swap are keyed kind|severity|bucket (fleet_alert_dedupe.py) and only remind daily.
+# #10857: load, disk and swap are keyed kind|severity|bucket (fleet_alert_dedupe.py) and only remind daily.
 REEMIT = {"idle": 1800, "ctx": 1800, "load": 86400, "disk": 86400, "swap": 86400,
           "self_ctx": 1800, "architect_dead": 1800, "architect_silent": 1800,
           "architect_frozen": 1800,  # #10571: the watchdog's alerts re-emit as the prototype's do
@@ -47,7 +47,7 @@ def _load_by_path(name, filename):
 
 
 input_state = _load_by_path("input_state", "input-state.py")
-alert_dedupe = _load_by_path("fleet_alert_dedupe", "fleet_alert_dedupe.py")  # ar-T8a
+alert_dedupe = _load_by_path("fleet_alert_dedupe", "fleet_alert_dedupe.py")  # #10857
 
 # --- pane parsing (pure) ----------------------------------------------------
 

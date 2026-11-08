@@ -196,7 +196,9 @@ def swap_used_mb():
 
 
 PSI_FULL_CRITICAL = 10.0   # Linux: /proc/pressure/memory "full avg10" at or above this is critical
-_SWAP_PREV = []           # ar-T8a: the previous cycle's (ins, outs), for swap activity
+# #10857: the previous cycle's (ins, outs). Swap activity needs a previous sample, so the first cycle after a
+# start, and every --once run, reads activity as unknown (logged as info, never an alert).
+_SWAP_PREV = []
 
 
 def _swap_counters():

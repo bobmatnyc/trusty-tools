@@ -17,7 +17,7 @@ ALERTS = os.path.join(INBOX, "alerts.jsonl")
 STATE = os.path.join(INBOX, "poll-state.json")
 LOG = os.path.join(INBOX, "poll.log")
 LOCK = os.path.join(INBOX, "poll.lock")  # #10571: one live poller per inbox
-HOLD = os.path.join(INBOX, "hold.json")  # ar-T8a: the Architect-wide hold (alert_triage.read_hold)
+HOLD = os.path.join(INBOX, "hold.json")  # #10857: the Architect-wide hold (alert_triage.read_hold)
 SOCKET = os.environ.get("TMUX_SOCKET", "")
 # #8928 step 4: the name prefix of a workspace's private tmux server.
 WORKSPACE_PREFIX = "tm-ws-"
