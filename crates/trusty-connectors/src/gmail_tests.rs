@@ -71,6 +71,7 @@ fn inbound_needs_an_operator_run_and_a_grant() {
             account: "work".into(),
             review: "DOC-63 S-4.4 review 1".into(),
         }],
+        ..Config::default()
     });
     let none: Result<Config, String> = Ok(Config::default());
     let broken: Result<Config, String> = Err("config x: bad".into());

@@ -426,11 +426,20 @@ impl Home {
 
     /// Write the adapter's default grant file.
     pub fn grant(&self, store: &str, account: &str) {
+        self.grant_table("inbound_grant", store, account);
+    }
+
+    /// #10746: write a default grant file with one native-Doc export grant.
+    pub fn docs_grant(&self, store: &str, account: &str) {
+        self.grant_table("gdocs_grant", store, account);
+    }
+
+    fn grant_table(&self, table: &str, store: &str, account: &str) {
         let p = self.home.join(".config/trusty-connectors/config.toml");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(
             p,
-            format!("[[inbound_grant]]\nstore = \"{store}\"\naccount = \"{account}\"\nreview = \"DOC-63 S-4.4 test review\"\n"),
+            format!("[[{table}]]\nstore = \"{store}\"\naccount = \"{account}\"\nreview = \"DOC-63 S-4.4 test review\"\n"),
         )
         .unwrap();
     }
