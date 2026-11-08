@@ -10,14 +10,127 @@ use std::path::{Path, PathBuf};
 /// `include_paths` narrow WITHIN the primary root only; an additional root is
 /// always walked whole. One list, so the reindex walk, live admission, the
 /// rescan and pushed-write admission cannot disagree about which roots count.
+///
+/// #10739: an include path whose real path leaves the primary root, or that
+/// cannot be resolved, is dropped, so none of those consumers admits it.
 pub(crate) fn configured_roots(handle: &IndexHandle) -> Vec<PathBuf> {
-    let mut roots = if handle.include_paths.is_empty() {
-        vec![handle.root_path.clone()]
-    } else {
-        handle.include_paths.clone()
+    checked_roots(handle)
+        .into_iter()
+        .filter(|r| !r.include || matches!(r.resolution, RootResolution::Inside(_)))
+        .map(|r| r.raw)
+        .collect()
+}
+
+/// One configured root after the #10739 containment check.
+struct CheckedRoot {
+    /// The root as configured.
+    raw: PathBuf,
+    /// An `include_paths` entry, the only kind the check confines (#10739).
+    include: bool,
+    resolution: RootResolution,
+}
+
+/// Where a configured root really is (#10739).
+enum RootResolution {
+    /// Its real path; for an include path, one under the primary root's.
+    Inside(PathBuf),
+    /// An include path whose real path is outside the primary root.
+    Outside,
+    /// Resolution failed; an include path in this state is refused.
+    Unresolved(std::io::Error),
+}
+
+/// [`configured_roots`] before the filter: each root with its real path (#10739).
+///
+/// Why: the containment check has to run where every consumer reads the
+/// roots, or the walk, the watcher, the prune, the rescan and pushed writes
+/// disagree about an include path symlinked out of the root.
+/// What: the primary root (when no include path narrows it) and each
+/// additional root are canonicalised and exempt. Each include path resolves
+/// through [`resolve_existing_prefix`] and must land under the primary root's
+/// real path; an I/O error on either side is `Unresolved`.
+/// Test: `a_watcher_event_under_an_out_of_root_symlink_include_path_is_not_indexed`.
+fn checked_roots(handle: &IndexHandle) -> Vec<CheckedRoot> {
+    let exempt = |raw: &PathBuf| CheckedRoot {
+        raw: raw.clone(),
+        include: false,
+        resolution: match raw.canonicalize() {
+            Ok(real) => RootResolution::Inside(real),
+            Err(err) => RootResolution::Unresolved(err),
+        },
     };
-    roots.extend(handle.additional_roots.iter().cloned());
+    let mut roots = Vec::new();
+    if handle.include_paths.is_empty() {
+        roots.push(exempt(&handle.root_path));
+    } else {
+        let real_root = handle.root_path.canonicalize();
+        for raw in &handle.include_paths {
+            let resolution = match &real_root {
+                Err(err) => RootResolution::Unresolved(std::io::Error::new(
+                    err.kind(),
+                    format!("index root: {err}"),
+                )),
+                Ok(real_root) => include_resolution(real_root, raw),
+            };
+            roots.push(CheckedRoot {
+                raw: raw.clone(),
+                include: true,
+                resolution,
+            });
+        }
+    }
+    roots.extend(handle.additional_roots.iter().map(exempt));
     roots
+}
+
+/// Resolve include path `raw` against the primary root's real path (#10739).
+///
+/// What: `Inside(real)` when it lands under `real_root`; `Outside` or
+/// `Unresolved` otherwise, each logged, since either refuses the path.
+fn include_resolution(real_root: &Path, raw: &Path) -> RootResolution {
+    match resolve_existing_prefix(raw) {
+        Ok(real) if real.starts_with(real_root) => RootResolution::Inside(real),
+        Ok(real) => {
+            tracing::warn!(
+                path = %raw.display(),
+                real = %real.display(),
+                "include path resolves outside the index root; refused"
+            );
+            RootResolution::Outside
+        }
+        Err(err) => {
+            tracing::warn!(path = %raw.display(), %err, "include path could not be resolved; refused");
+            RootResolution::Unresolved(err)
+        }
+    }
+}
+
+/// The real path of `path`, resolving its longest existing prefix (#10739).
+///
+/// Why: an include path that does not exist yet can still sit under a
+/// symlinked parent, so a plain "missing means fine" check would admit it.
+/// What: canonicalises the deepest ancestor that exists (a dangling link
+/// counts as existing and fails), then appends the missing tail. A `..` or
+/// root-only tail, or any I/O error other than not-found, is `Err`.
+fn resolve_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
+    let mut tail = Vec::new();
+    let mut cur = path;
+    loop {
+        match cur.symlink_metadata() {
+            Ok(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let (Some(parent), Some(name)) = (cur.parent(), cur.file_name()) else {
+                    return Err(err);
+                };
+                tail.push(name.to_owned());
+                cur = parent;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    let mut real = cur.canonicalize()?;
+    real.extend(tail.iter().rev());
+    Ok(real)
 }
 
 /// The walker options an index's hygiene knobs resolve to.
@@ -54,21 +167,22 @@ pub(crate) fn walk_roots(handle: &IndexHandle) -> (walker::WalkResult, Vec<PathB
         .filter(|r| !r.is_dir())
         .cloned()
         .collect();
-    let include_paths: Vec<PathBuf> = configured_roots(handle)
+    // #10739: walk the real path the containment check returned, so a link
+    // swapped in after the check is not followed; refused include paths are
+    // skipped (the check logged why).
+    let include_paths: Vec<PathBuf> = checked_roots(handle)
         .into_iter()
-        .filter(|r| !missing.contains(r))
+        .filter(|r| !missing.contains(&r.raw))
+        .filter_map(|r| match r.resolution {
+            RootResolution::Inside(real) => Some(real),
+            RootResolution::Unresolved(_) if !r.include => Some(r.raw),
+            _ => None,
+        })
         .collect();
     let mut walked_files: Vec<PathBuf> = Vec::new();
     let mut total_skipped_dirs: usize = 0;
     let walk_opts = walk_options(handle);
     for subtree in &include_paths {
-        // #10739: an include path can become an out-of-root symlink after the
-        // PATCH admitted it, and the walker canonicalises its start path.
-        if handle.include_paths.contains(subtree)
-            && !include_root_admitted(&handle.root_path, subtree)
-        {
-            continue;
-        }
         let w = walk_source_files_with_options(subtree, &walk_opts);
         walked_files.extend(w.files);
         total_skipped_dirs = total_skipped_dirs.saturating_add(w.skipped_dirs);
@@ -94,38 +208,10 @@ pub(crate) fn walk_roots(handle: &IndexHandle) -> (walker::WalkResult, Vec<PathB
 /// What: canonicalises both and tests containment. Any I/O error (a missing
 /// path, a dangling link, a permission failure) is `Err`, which callers treat
 /// as a refusal.
-/// Test: `config_set_refuses_an_include_path_symlinked_outside_the_root`,
-/// `a_later_out_of_root_symlink_include_path_indexes_nothing_outside`.
+/// Test: `config_set_refuses_an_include_path_symlinked_outside_the_root`.
 pub(crate) fn resolves_inside_root(root: &Path, path: &Path) -> std::io::Result<bool> {
     let real_root = std::fs::canonicalize(root)?;
     Ok(std::fs::canonicalize(path)?.starts_with(&real_root))
-}
-
-/// Should the walk start at include path `subtree` of `root` (#10739)?
-///
-/// What: `false`, with a logged reason, when the subtree resolves outside the
-/// root or cannot be resolved. Fail-closed: an error never admits.
-/// Test: `a_later_out_of_root_symlink_include_path_indexes_nothing_outside`.
-fn include_root_admitted(root: &Path, subtree: &Path) -> bool {
-    match resolves_inside_root(root, subtree) {
-        Ok(true) => true,
-        Ok(false) => {
-            tracing::warn!(
-                path = %subtree.display(),
-                root = %root.display(),
-                "include path resolves outside the index root; not walked"
-            );
-            false
-        }
-        Err(err) => {
-            tracing::warn!(
-                path = %subtree.display(),
-                %err,
-                "include path could not be resolved; not walked"
-            );
-            false
-        }
-    }
 }
 
 /// The per-index filters the walker applies after the walk: tombstones,
@@ -289,16 +375,17 @@ pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> Admission {
     if !configured_file(handle, &path) {
         return Admission::Excluded;
     }
-    let roots = configured_roots(handle);
     let opts = walk_options(handle);
     // #7396: a root we could not resolve is not evidence that the file left the
     // index, so it downgrades the fall-through answer rather than being skipped.
     let mut undecided = false;
-    for root in roots {
-        let root = match root.canonicalize() {
-            Ok(root) => root,
-            Err(err) => {
-                undecided |= resolve_failure(&root, &err) == Admission::Undetermined;
+    // #10739: an include path resolving outside the primary root admits nothing.
+    for checked in checked_roots(handle) {
+        let root = match checked.resolution {
+            RootResolution::Inside(root) => root,
+            RootResolution::Outside => continue,
+            RootResolution::Unresolved(err) => {
+                undecided |= resolve_failure(&checked.raw, &err) == Admission::Undetermined;
                 continue;
             }
         };

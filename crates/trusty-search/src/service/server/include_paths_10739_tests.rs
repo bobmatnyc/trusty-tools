@@ -344,3 +344,63 @@ async fn a_later_out_of_root_symlink_include_path_indexes_nothing_outside() {
         .collect();
     assert!(leaked.is_empty(), "out-of-root files indexed: {leaked:?}");
 }
+
+/// #10739: a watcher event for a file under an include path that is a
+/// symlink to outside the root is not indexed, and the root's own include
+/// path still is, through the same `apply_modified` the watcher calls.
+/// Test: this test. When `admits` resolves the include root to its real path
+/// and admits files there, `later/outside.md` gets chunks.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::parallel]
+async fn a_watcher_event_under_an_out_of_root_symlink_include_path_is_not_indexed() {
+    use crate::core::registry::{IndexHandle, IndexRegistry};
+    use crate::core::CodeIndexer;
+    use crate::service::index_admission::apply_modified;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("notes")).unwrap();
+    std::fs::write(root.join(NOTE), "# Note\na note about sprockets\n").unwrap();
+    let (_outside, outside) = outside_tree();
+    std::os::unix::fs::symlink(&outside, root.join("later")).expect("symlink");
+
+    let id = IndexId::new("inc-watch-link");
+    let indexer = Arc::new(tokio::sync::RwLock::new(CodeIndexer::new(
+        "inc-watch-link",
+        &root,
+    )));
+    let registry = IndexRegistry::new();
+    let mut handle = IndexHandle::bare(id.clone(), indexer.clone(), root.clone());
+    handle.include_paths = vec![root.join("notes"), root.join("later")];
+    registry.register(handle);
+    let files = crate::service::IndexedFiles::new();
+    let watched = crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
+    for rel in [NOTE, "later/outside.md"] {
+        apply_modified(
+            &registry,
+            &id,
+            &root.join(rel),
+            &watched,
+            &indexer,
+            &files,
+            None,
+        )
+        .await;
+    }
+    let indexer = indexer.read().await;
+    assert!(!indexer.chunk_ids_for_file(NOTE).await.is_empty());
+    assert!(
+        indexer
+            .chunk_ids_for_file("later/outside.md")
+            .await
+            .is_empty(),
+        "out-of-root file indexed through the watcher"
+    );
+    let leaked = indexer
+        .all_chunks()
+        .await
+        .into_iter()
+        .filter(|c| c.content.contains("outsidemarker10739"))
+        .count();
+    assert_eq!(leaked, 0, "out-of-root content indexed");
+}
