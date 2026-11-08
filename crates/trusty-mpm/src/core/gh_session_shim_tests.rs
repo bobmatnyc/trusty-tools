@@ -814,3 +814,208 @@ fn a_refused_pinned_relaunch_is_the_launch_refusal() {
         crate::core::gh_login_verify::launch_refusal("octo", "github.com", "printed no token")
     );
 }
+
+/// A fake real gh for the #10550 rate-limit arm: `auth token` prints a token,
+/// `api rate_limit` runs `reset_step`, every other call runs `call_step`.
+#[cfg(unix)]
+fn rate_limit_shim(reset_step: &str, call_step: &str) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let gh_dir = tmp.path().join("gh-config");
+    let real = tmp.path().join("bin").join("gh");
+    let body = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = auth ] && [ \"$2\" = token ]; then echo tok; exit 0; fi\n\
+         if [ \"$1\" = api ] && [ \"$2\" = rate_limit ]; then {reset_step}; fi\n\
+         {call_step}\n"
+    );
+    write_script(&real, &body);
+    let dir =
+        write_gh_shim(tmp.path(), &verified("github.com", &gh_dir), &real, 5).expect("written");
+    (tmp, dir)
+}
+
+/// Run `<shim_dir>/gh <args>` with piped stdout and stderr.
+#[cfg(unix)]
+fn run_shim_args(shim_dir: &Path, args: &[&str]) -> std::process::Output {
+    let mut cmd = std::process::Command::new(shim_dir.join("gh"));
+    cmd.args(args).stdin(std::process::Stdio::null());
+    output_past_etxtbsy(&mut cmd)
+}
+
+/// A gh call GitHub refused on its primary GraphQL limit: a partial stdout
+/// body, gh's error line, exit 1.
+#[cfg(unix)]
+const GRAPHQL_REFUSAL: &str = "printf '{\"data\":null}\\n'; \
+     echo 'GraphQL: API rate limit already exceeded for user ID 1.' >&2; exit 1";
+
+/// 🔴 #10550: a primary GraphQL rate-limit refusal is one stderr line naming
+/// the limit and its reset (epoch and UTC), exit 1, and no partial stdout. The
+/// reset lookup asks `.resources.graphql.reset`, and nothing is retried.
+#[cfg(unix)]
+#[test]
+fn a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout() {
+    let calls = tempfile::NamedTempFile::new().expect("call log");
+    let log = calls.path().display();
+    let reset =
+        "[ \"$3 $4\" = '--jq .resources.graphql.reset' ] || exit 7; echo 1767225600; exit 0";
+    let call = format!("echo call >> '{log}'; {GRAPHQL_REFUSAL}");
+    let (_tmp, dir) = rate_limit_shim(reset, &call);
+    let out = run_shim_args(&dir, &["pr", "list"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "partial stdout leaked: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    for part in [
+        "primary GraphQL rate limit",
+        "2026-01-01 00:00:00 UTC",
+        "1767225600",
+    ] {
+        assert!(stderr.contains(part), "{part} missing: {stderr}");
+    }
+    // #10550 item 5: zero retries — the refused call ran once.
+    let ran = std::fs::read_to_string(calls.path()).expect("call log");
+    assert_eq!(ran, "call\n", "the refused call was retried");
+}
+
+/// 🔴 #10550: a reset lookup that fails still names the primary GraphQL limit,
+/// says the reset is unknown, and exits 1.
+#[cfg(unix)]
+#[test]
+fn a_failed_reset_lookup_still_names_the_limit_and_exits_1() {
+    let (_tmp, dir) = rate_limit_shim("echo 'HTTP 502' >&2; exit 1", GRAPHQL_REFUSAL);
+    let out = run_shim_args(&dir, &["api", "graphql", "-f", "query=x"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("primary GraphQL rate limit"), "{stderr}");
+    assert!(stderr.contains("reset time is unknown"), "{stderr}");
+}
+
+/// 🔴 #10550: a call that is not a primary GraphQL refusal keeps its stdout,
+/// stderr and exit status byte for byte — including a REST rate limit (any
+/// `HTTP <status>`: 403 or 429), which is a different quota.
+#[cfg(unix)]
+#[test]
+fn a_call_with_no_rate_limit_passes_output_and_status_through_unchanged() {
+    let cases: [(&str, &[u8], &[u8], i32); 4] = [
+        (
+            "printf 'a\\tb\\n\\001no-newline'; printf 'warn: x\\n' >&2; exit 3",
+            b"a\tb\n\x01no-newline",
+            b"warn: x\n",
+            3,
+        ),
+        (
+            "printf 'body\\n'; echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1",
+            b"body\n",
+            b"GraphQL: Could not resolve to a Repository\n",
+            1,
+        ),
+        (
+            "echo 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2; exit 1",
+            b"",
+            b"gh: API rate limit exceeded for user ID 1. (HTTP 403)\n",
+            1,
+        ),
+        (
+            "printf 'partial\\n'; echo 'gh: API rate limit exceeded for user ID 1. (HTTP 429)' >&2; exit 1",
+            b"partial\n",
+            b"gh: API rate limit exceeded for user ID 1. (HTTP 429)\n",
+            1,
+        ),
+    ];
+    for (call, stdout, stderr, code) in cases {
+        let (_tmp, dir) = rate_limit_shim("echo 1767225600; exit 0", call);
+        let out = run_shim_args(&dir, &["api", "user"]);
+        assert_eq!(out.status.code(), Some(code), "{call}: {out:?}");
+        assert_eq!(out.stdout, stdout, "{call}: {out:?}");
+        assert_eq!(out.stderr, stderr, "{call}: {out:?}");
+    }
+}
+
+/// 🔴 #10550: a GraphQL error that is not a rate limit — the auto-merge
+/// refusal GitHub returned at 13:28Z — keeps stderr byte for byte, an empty
+/// stdout and exit 1.
+#[cfg(unix)]
+#[test]
+fn a_non_rate_limit_graphql_error_passes_through_unchanged() {
+    // #10550: the shim's exit-1 arm must not rewrite a GraphQL error that lacks the rate-limit text.
+    const REFUSAL: &str = "GraphQL: Failed to add PR #10842: expected head oid does not match \
+                           the current head oid (enablePullRequestAutoMerge)";
+    let call = format!("echo '{REFUSAL}' >&2; exit 1");
+    let (_tmp, dir) = rate_limit_shim("echo 1767225600; exit 0", &call);
+    let out = run_shim_args(&dir, &["pr", "merge", "10842", "--auto", "--squash"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert_eq!(out.stderr, format!("{REFUSAL}\n").as_bytes(), "{out:?}");
+}
+
+/// #10550 item 4: a large buffered output (`--paginate` on a big set) comes
+/// through whole — the buffer is a temp file, so no size bound drops bytes.
+#[cfg(unix)]
+#[test]
+fn a_large_buffered_output_passes_through_whole() {
+    let call = "awk 'BEGIN { for (i = 0; i < 300000; i++) printf \"%09d\\n\", i }'; exit 0";
+    let (_tmp, dir) = rate_limit_shim("exit 1", call);
+    let out = run_shim_args(&dir, &["api", "--paginate", "repos/o/r/issues"]);
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(out.stdout.len(), 3_000_000);
+    assert!(out.stdout.ends_with(b"000299999\n"));
+}
+
+/// 🔴 #10550 item 4: a watch command keeps the plain `exec` path, so its
+/// streamed stdout is never held back — not even on a rate-limit exit.
+#[cfg(unix)]
+#[test]
+fn a_watch_command_keeps_the_exec_path() {
+    let (_tmp, dir) = rate_limit_shim("echo 1767225600; exit 0", GRAPHQL_REFUSAL);
+    for args in [
+        &["run", "watch", "7"][..],
+        &["pr", "checks", "--watch"][..],
+        &["pr", "checks", "9", "--watch=true"][..],
+    ] {
+        let out = run_shim_args(&dir, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        assert_eq!(out.stdout, b"{\"data\":null}\n", "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.starts_with("GraphQL: API rate limit"), "{stderr}");
+    }
+}
+
+/// 🔴 #10550 item 3: a tty stdout keeps the plain `exec` path — gh itself sees
+/// the terminal.
+#[cfg(unix)]
+#[test]
+fn a_tty_stdout_keeps_the_exec_path() {
+    let call = "[ -t 1 ] && echo stdout-is-tty >&2; exit 0";
+    let (_tmp, dir) = rate_limit_shim("exit 1", call);
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty writes two fds into the out-params.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty");
+    // SAFETY: both fds were just opened and are owned here.
+    let (master, slave) = unsafe {
+        use std::os::fd::FromRawFd;
+        (
+            std::fs::File::from_raw_fd(master),
+            std::fs::File::from_raw_fd(slave),
+        )
+    };
+    let mut cmd = std::process::Command::new(dir.join("gh"));
+    cmd.args(["pr", "list"])
+        .stdin(std::process::Stdio::null())
+        .stdout(slave);
+    let out = output_past_etxtbsy(&mut cmd);
+    drop(master);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("stdout-is-tty"), "{stderr}");
+}

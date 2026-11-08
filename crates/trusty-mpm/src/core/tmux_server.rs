@@ -87,10 +87,184 @@ pub fn server_args(name: &str) -> [String; 2] {
     ["-L".to_owned(), name.to_owned()]
 }
 
+/// The whole tmux argv for `command` on `server` (#10101).
+///
+/// Why: a call that builds its own argv can forget the `-L` prefix and reach
+/// the default server, where the Architect's pane lives. One builder for every
+/// `TmuxDriver` call and every core spawn helper leaves no such path.
+/// What: [`server_args`] then `command` when `server` is `Some`; `command`
+/// unchanged when `None`, so a default-server call is byte-identical to the
+/// argv it had before this function existed.
+/// Test: `server_argv_prefixes_only_a_named_server`, and the per-method
+/// `*_reaches_the_named_server` tests in `daemon/tmux_tests.rs`.
+pub fn server_argv(server: Option<&str>, command: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut argv: Vec<String> = server.into_iter().flat_map(server_args).collect();
+    argv.extend(command);
+    argv
+}
+
+/// How long one tmux server probe (a socket connect, or one listing) may take
+/// before the server reads as unknown (#10101).
+pub const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The tmux servers with a probe in flight, by socket path (#10101).
+static PROBES_IN_FLIGHT: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Holds `key` in [`PROBES_IN_FLIGHT`]; dropping it, on return or unwind,
+/// frees the server for its next probe.
+struct InFlight(PathBuf);
+
+impl InFlight {
+    /// Claim `key`; `None` when a probe of that server is already in flight.
+    fn claim(key: &Path) -> Option<Self> {
+        let mut held = PROBES_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.insert(key.to_path_buf())
+            .then(|| Self(key.to_path_buf()))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        PROBES_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+/// Whether a probe of the server at socket `key` is in flight (#10101).
+/// Test: `a_server_with_a_probe_in_flight_is_not_probed_again`.
+pub fn probe_in_flight(key: &Path) -> bool {
+    PROBES_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(key)
+}
+
+/// Run `probe` of the tmux server at socket `key` within `budget`, at most
+/// one at a time per server process-wide (#10101).
+///
+/// Why: a probe that outlives its budget is abandoned with its thread and its
+/// tmux client still blocked. Against a hung server, one new probe per reap
+/// tick, dedup check or by-name call would pile up threads and clients
+/// without bound.
+/// What: `None` at once, with nothing spawned, while an earlier probe of
+/// `key` is still running; otherwise `probe` runs on its own thread and this
+/// waits at most `budget`, `None` on expiry or a thread that cannot start.
+/// The server is freed when `probe` returns, before its answer is sent.
+/// Test: `a_server_with_a_probe_in_flight_is_not_probed_again`,
+/// `a_hung_workspace_server_holds_one_probe_and_refuses_the_call`.
+pub fn bounded_probe<T: Send + 'static>(
+    key: &Path,
+    budget: std::time::Duration,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let held = InFlight::claim(key)?;
+    bounded_call(budget, move || {
+        let _held = held;
+        probe()
+    })
+}
+
+/// `call` on its own thread, waited on for at most `budget`; `None` on expiry
+/// or a thread that cannot start. Not limited per server: a caller that names
+/// a server uses [`bounded_probe`].
+/// Test: `a_server_with_a_probe_in_flight_is_not_probed_again`.
+pub fn bounded_call<T: Send + 'static>(
+    budget: std::time::Duration,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("tmux-probe".to_owned())
+        .spawn(move || {
+            let _ = tx.send(call());
+        })
+        .ok()?;
+    rx.recv_timeout(budget).ok()
+}
+
+/// Whether the Unix socket at `path` accepts a connection within `budget`:
+/// `Some(true)` it did, `Some(false)` no server listens there,
+/// `None` it did not answer in time or the connect failed some other way
+/// (#10101).
+///
+/// Why: a stuck server can hold a blocking `connect` without bound, and every
+/// caller of this probe runs on a path that must not hang on tmux.
+/// What: the connect runs through [`bounded_probe`] keyed on `path`, so a
+/// server with a probe in flight reads `None` without another connect.
+/// Test: `a_socket_probe_answers_and_refuses`.
+pub fn socket_answers(path: &Path, budget: std::time::Duration) -> Option<bool> {
+    let target = path.to_path_buf();
+    bounded_probe(path, budget, move || {
+        match std::os::unix::net::UnixStream::connect(&target) {
+            Ok(_) => Some(true),
+            // No server: refused, gone, or a socket of another type (EPROTOTYPE).
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) || e.raw_os_error() == Some(nix::libc::EPROTOTYPE) =>
+            {
+                Some(false)
+            }
+            Err(_) => None,
+        }
+    })
+    .flatten()
+}
+
+/// When this host last booted, in Unix seconds; `None` when it cannot be read
+/// (#10101).
+///
+/// Why: a reboot that wipes `/tmp` takes every workspace server's socket with
+/// it, which reads like a deliberate kill; a session started before the boot
+/// was lost to the reboot instead.
+/// What: read once per process (the boot time does not change while it
+/// runs): `btime` in `/proc/stat` on Linux, `sysctl -n kern.boottime` on
+/// macOS.
+/// Test: `boot_time_is_parsed_from_proc_stat_and_sysctl`.
+pub fn last_host_boot() -> Option<u64> {
+    static BOOT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *BOOT.get_or_init(|| {
+        if cfg!(target_os = "linux") {
+            parse_proc_stat_btime(&std::fs::read_to_string("/proc/stat").ok()?)
+        } else {
+            let out = std::process::Command::new("sysctl")
+                .args(["-n", "kern.boottime"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())?;
+            parse_kern_boottime(&String::from_utf8_lossy(&out.stdout))
+        }
+    })
+}
+
+/// The `btime <secs>` line of `/proc/stat`.
+fn parse_proc_stat_btime(text: &str) -> Option<u64> {
+    text.lines()
+        .find_map(|l| l.strip_prefix("btime "))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// The `sec = N` field of `{ sec = N, usec = M } <date>`.
+fn parse_kern_boottime(text: &str) -> Option<u64> {
+    let digits: String = text
+        .split_once("sec = ")?
+        .1
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
 /// The workspace servers in `socket_dir` that accept a connection, by name.
 ///
 /// What: entries named [`WORKSPACE_SERVER_PREFIX`]`*` that are sockets and
-/// answer a connect, sorted. A missing directory has none; a socket that
+/// answer a connect, or do not answer within [`PROBE_BUDGET`], sorted. A missing directory has none; a socket that
 /// refuses (a server that exited) is skipped.
 ///
 /// # Errors
@@ -114,7 +288,9 @@ pub fn live_workspace_servers(socket_dir: &Path) -> std::io::Result<Vec<String>>
             continue;
         }
         let is_socket = entry.file_type().is_ok_and(|t| t.is_socket());
-        if is_socket && std::os::unix::net::UnixStream::connect(entry.path()).is_ok() {
+        // #10101: a socket that does not answer in time is a live, stuck
+        // server — listed, so its sessions read as unknown, never gone.
+        if is_socket && socket_answers(&entry.path(), PROBE_BUDGET) != Some(false) {
             names.push(name);
         }
     }

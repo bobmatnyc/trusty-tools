@@ -7,10 +7,10 @@
 //! and its core is network-free.
 //!
 //! What: the module tree of SPEC-OKF-01 §4.1. Slice S2 of epic #10746 fills
-//! [`format`] and [`profile`] (moved from trusty-kb) and the [`OkfError`]
+//! [`format`](mod@format) and [`profile`] (moved from trusty-kb) and the [`OkfError`]
 //! type; every other module is still empty and its doc states what it will
 //! hold.
-//!   - [`format`], [`profile`], [`bundle`], [`build`], [`state`], [`import`],
+//!   - [`format`](mod@format), [`profile`], [`bundle`], [`build`], [`state`], [`import`],
 //!     [`extract`] — the network-free core.
 //!   - `feed` and `retrieve` — behind the cargo feature `search-feed`.
 //!   - `extract::worker` — behind the cargo feature `extract-worker`.

@@ -1,11 +1,13 @@
 //! Key dispatch for the `tm projects` TUI (#2118).
 //!
-//! **Tree (#10476)**: the Owner -> Project -> Sessions tree replaced the
-//! Projects and Sessions panes (Architect Q9). Every key those panes bound
-//! keeps its meaning and now acts on the selected tree node; the tree's own
-//! keys (arrows, Enter, `f`, `g`) and its read-only details overlay live in
-//! [`tree`]. The pane-scoped wording below predates the tree: read "Projects
-//! pane" as a project node and "Sessions pane" as a session node.
+//! **Two columns (#10754, Bob 11-06)**: the Owner -> Project tree is the left
+//! column and the selected node's sessions are the right one. Every key the
+//! old Projects and Sessions panes bound keeps its meaning: the project verbs
+//! (`l`/`c`/`v`) and the tree's own keys live in [`tree`], the session verbs
+//! in [`session_keys`]. #10754: De1 key map (Bob 11-06) — on a session row,
+//! Enter opens, Right expands in place, `r` renames (a fourth modal, checked
+//! after the config form), `R` resumes and `n` starts a new session. The pane-scoped wording below predates the columns: read
+//! "Projects pane" as the left column and "Sessions pane" as the right one.
 //!
 //! Why: separating "a key arrives → mutate state, maybe request an async
 //! action" from the terminal pump keeps the dispatch pure and unit-testable,
@@ -89,41 +91,55 @@ use super::state::{ConfirmKind, Pane, ProjectCtlState, SessionRow};
 
 mod modal;
 mod mouse;
+mod mouse_cols;
+mod session_keys;
 mod tree;
-use modal::{handle_config_form_key, handle_confirm_key, handle_deliverable_view_key};
+use modal::{
+    handle_config_form_key, handle_confirm_key, handle_deliverable_view_key, handle_rename_key,
+};
 pub use mouse::handle_mouse;
 
 /// An action a key press requested that needs an async daemon round trip.
 ///
 /// Why: [`handle_key`] must stay a pure, terminal-free, IO-free function to
-/// remain unit-testable; the actual HTTP calls live in [`super::actions::dispatch`],
+/// remain unit-testable; the actual HTTP calls live in [`super::actions::dispatch_on`],
 /// which the run loop awaits after `handle_key` returns.
 /// What: one variant per lettered verb (DOC-35 §5 keybinding table) plus
 /// [`PendingAction::SubmitConfig`] for the #2120 config form's submit
 /// (opening the form is a pure state mutation — see the module doc — so
-/// there is no `Config` variant here anymore). `Launch` and `SubmitConfig`
+/// there is no `Config` variant here anymore). `NewSession` and `SubmitConfig`
 /// carry the target project name (`SubmitConfig` also carries the built
-/// [`PatchProjectArgs`]); the rest carry the target session id.
+/// [`PatchProjectArgs`]); the rest carry the target session id. #10754: no
+/// `Launch` variant — `l` produces `NewSession` until a launch form exists.
 /// Test: `handle_key_*` in `super::tests`.
 #[derive(Debug, Clone)]
 pub enum PendingAction {
-    /// `l` in the Sessions pane — launch a new session for the given project.
-    Launch(String),
     /// `k` in the Sessions pane — runtime-stop the given session.
     Kill(String),
-    /// `r` in the Sessions pane — resume the given session.
+    /// `R` in the session column — resume the given session.
     Resume(String),
     /// `d` in the Sessions pane — decommission the given session.
     Decommission(String),
     /// `a` in the Sessions pane — fetch and display the attach command.
     Attach(String),
     /// The config form's submit key (DOC-35 §6, #2120) — PATCHes the built
-    /// args for the named project; see [`super::actions::dispatch`] for the
+    /// args for the named project; see [`super::actions::dispatch_on`] for the
     /// success/error handling (close-on-success, inline-error-on-failure).
     SubmitConfig(String, PatchProjectArgs),
     /// #10476: `f` on a session — move to its existing tmux window or iTerm2
     /// tab (by tmux session name); never opens a new one.
     Focus(String),
+    // #10754: De1 key map (Bob 11-06) — Enter, the rename modal and `n`
+    // produce the first three; `super::session_ops` dispatches them through
+    // the hooks. No key produces `DeleteSession`: `d` stays decommission.
+    /// Enter on a session — open it (resume if needed, then attach), as `tm ls`.
+    OpenSession(String),
+    /// The rename modal's Enter — rename the session `(id, new_name)`.
+    RenameSession(String, String),
+    /// `n` or `l` — start a new session in the named project, as `tm ls` `n`.
+    NewSession(String),
+    /// Delete the session by its state's route, as `tm ls` `d` (code only).
+    DeleteSession(String),
 }
 
 /// Manual `PartialEq` (not derived): [`PatchProjectArgs`] — a contract type
@@ -136,12 +152,15 @@ pub enum PendingAction {
 impl PartialEq for PendingAction {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Launch(a), Self::Launch(b)) => a == b,
             (Self::Kill(a), Self::Kill(b)) => a == b,
             (Self::Resume(a), Self::Resume(b)) => a == b,
             (Self::Decommission(a), Self::Decommission(b)) => a == b,
             (Self::Attach(a), Self::Attach(b)) => a == b,
             (Self::Focus(a), Self::Focus(b)) => a == b,
+            (Self::OpenSession(a), Self::OpenSession(b)) => a == b,
+            (Self::RenameSession(a, x), Self::RenameSession(b, y)) => a == b && x == y,
+            (Self::NewSession(a), Self::NewSession(b)) => a == b,
+            (Self::DeleteSession(a), Self::DeleteSession(b)) => a == b,
             (Self::SubmitConfig(name_a, args_a), Self::SubmitConfig(name_b, args_b)) => {
                 name_a == name_b
                     && serde_json::to_value(args_a).ok() == serde_json::to_value(args_b).ok()
@@ -176,20 +195,21 @@ pub fn is_quit(key: &KeyEvent) -> bool {
 /// [`ProjectCtlState::config_form`] is `Some`, through
 /// [`handle_config_form_key`] (#2120 — checked THIRD, see the module doc for
 /// why this ordering makes the three modals mutually exclusive by
-/// construction); else, #10476, when the session details overlay is open,
-/// through `tree::handle_details_key`. Otherwise: Ctrl-C / `q` set
+/// construction); else when [`ProjectCtlState::rename`] is `Some` (#10754),
+/// through [`handle_rename_key`]. Otherwise: Ctrl-C / `q` set
 /// `should_exit`. Tab/Shift+Tab cycle pane focus. Esc clears any shown
-/// notice. With the tree focused, every other key goes to
-/// `tree::handle_tree_key` (arrows, Enter, `f`, `g` and the lettered verbs —
-/// see its module doc). `l`/`r`/`a` return the matching [`PendingAction`]
+/// notice and, in the session column, collapses an expanded session
+/// (#10754). With the tree focused, every other key goes to
+/// `tree::handle_tree_key`; with the session column focused (#10754), to
+/// `session_keys::handle_session_key` (see their module docs). `l`/`r`/`a` return the matching [`PendingAction`]
 /// immediately when a target is selected, else set an explanatory notice and
 /// return `None`. `c` calls [`ProjectCtlState::open_config_form`] directly (a
 /// pure state mutation, NOT a [`PendingAction`] — see the module doc) when a
 /// project is selected, else sets the same explanatory notice. `k`/`d` (see
 /// [`request_kill`] / [`request_decommission`]) open the confirm gate instead
 /// of returning an action directly, except a `k` on a non-Active session,
-/// which is not destructive-pending and fires immediately. The Activity pane
-/// binds nothing.
+/// which is not destructive-pending and fires immediately. With the activity pane
+/// focused, `handle_activity_key` (#10754).
 /// Test: `super::tests`.
 pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingAction> {
     if state.pending_confirm.is_some() {
@@ -204,9 +224,9 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
         return handle_config_form_key(state, key);
     }
 
-    // #10476: the read-only session details overlay is the fourth modal.
-    if state.tree.details.is_some() {
-        return tree::handle_details_key(state, key);
+    // #10754: De1 key map (Bob 11-06)
+    if state.rename.is_some() {
+        return handle_rename_key(state, key);
     }
 
     if is_quit(&key) {
@@ -225,10 +245,46 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
         }
         KeyCode::Esc => {
             state.clear_notice();
+            // #10754: inline session details (Bob 11-06)
+            if state.focus == Pane::Sessions {
+                state.collapse_selected_session();
+            }
             None
         }
         _ if state.focus == Pane::Tree => tree::handle_tree_key(state, key),
-        _ => None,
+        // #10754: two-column MPM pane (Bob 11-06)
+        _ if state.focus == Pane::Sessions => session_keys::handle_session_key(state, key),
+        _ => handle_activity_key(state, key),
+    }
+}
+
+/// Notice for an unbound key while the activity pane has focus.
+const ACTIVITY_NOTICE: &str =
+    "the activity pane has no actions — Tab to the projects or sessions pane";
+
+/// Route one key while the activity pane has focus and no modal is open.
+///
+/// #10754: the old `_ => None` dropped every key here silently, so `n` after
+/// two Tabs looked like a hang. `n`/`l` take the same path as the columns;
+/// navigation keys stay silent no-ops; any other key says how to leave.
+/// Test: `activity_focus_n_and_l_start_a_new_session_and_other_keys_notice`.
+fn handle_activity_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingAction> {
+    match key.code {
+        KeyCode::Char('n' | 'l') => tree::request_new_session(state),
+        KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::Modifier(_)
+        | KeyCode::Null => None,
+        _ => {
+            state.set_notice(ACTIVITY_NOTICE);
+            None
+        }
     }
 }
 
@@ -266,7 +322,7 @@ fn request_kill(state: &mut ProjectCtlState) -> Option<PendingAction> {
     }
 }
 
-/// `r` in the Sessions pane: resume the selected session.
+/// `R` in the session column: resume the selected session (`r` before De1).
 ///
 /// Why (#2595): a session flagged `unresumable` — `stopped`/`errored` with no
 /// `last_cwd`/`workspace_path`/`cwd` candidate left on disk — can never

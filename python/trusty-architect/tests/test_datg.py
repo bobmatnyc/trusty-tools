@@ -696,7 +696,7 @@ class StopHookCase(Base):
     def test_large_digest_stays_under_the_hook_limit(self):
         # #10109: Claude Code caps additionalContext at 10,000 chars; a cut digest points at the full one.
         datg.write_ops(self.p, [{"op": "session", "task": "big", "next": "keep going"}])
-        for kind, n in (("D", 40), ("T", 30)):  # well under the 64 KB state bar
+        for kind, n in (("D", 50), ("T", 40)):  # well under the 64 KB state bar; ~2.4 KB over the limit at a 0-char path
             datg.write_ops(self.p, [{"op": "add", "kind": kind, "title": f"{kind} {i:02d} " + "w" * 105,
                                      "goal": "th-G01"} for i in range(n)])
         self.assertGreater(len(datg.RULES) + len(datg.build_digest(self.p)), 10000)  # uncut, over the limit

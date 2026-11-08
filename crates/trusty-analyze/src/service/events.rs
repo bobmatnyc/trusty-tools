@@ -21,6 +21,7 @@ use std::sync::Arc;
 use crate::core::{AnalyzerRegistry, FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::embedder::{BowEmbedder, Embedder};
 use crate::lsp::{LspConfig, LspManager};
+use crate::service::analysis_cache::AnalysisCache;
 use crate::service::lsp_events::LspEventPublisher;
 use crate::types::SmellThresholds;
 use trusty_common::uds::server::{RpcError, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS};
@@ -102,6 +103,13 @@ pub struct AnalyzerAppState {
     /// `ANALYZE_LSP` is on (`lsp_events::attach`).
     /// Test: `flag_off_emits_no_events`, `an_unresolvable_bus_still_serves`.
     pub lsp_events: Option<Arc<LspEventPublisher>>,
+    /// Per-index cache of corpus-wide analysis (#10781).
+    ///
+    /// Why: an unscoped `analyze.quality`/`smells`/`complexity_hotspots` must
+    /// not walk a 315K-chunk corpus inside its own request.
+    /// What: empty at construction; filled by background refreshes.
+    /// Test: `analysis_cache_tests.rs`.
+    pub analysis_cache: AnalysisCache,
 }
 
 impl AnalyzerAppState {
@@ -131,6 +139,7 @@ impl AnalyzerAppState {
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
             lsp: Arc::new(LspManager::new(LspConfig::from_env())),
             lsp_events: None,
+            analysis_cache: AnalysisCache::default(),
         }
     }
 
@@ -154,6 +163,7 @@ impl AnalyzerAppState {
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
             lsp: Arc::new(LspManager::new(LspConfig::from_env())),
             lsp_events: None,
+            analysis_cache: AnalysisCache::default(),
         }
     }
 
@@ -211,6 +221,14 @@ impl AnalyzerAppState {
         self
     }
 
+    /// Replace the analysis cache, e.g. with test timing bounds (#10781).
+    ///
+    /// Test: `a_cold_walk_past_warm_wait_answers_warming`.
+    pub fn with_analysis_cache(mut self, cache: AnalysisCache) -> Self {
+        self.analysis_cache = cache;
+        self
+    }
+
     /// Replace the embedder on an existing state. Useful when the binary
     /// builds state first and then tries to load fastembed, falling back
     /// silently when the model isn't available.
@@ -264,6 +282,18 @@ pub const CODE_DEADLINE_EXCEEDED: i64 = -32005;
 /// `disabled_flag_is_lsp_disabled_for_every_method`.
 pub const CODE_LSP_ERROR: i64 = -32006;
 
+/// JSON-RPC code for "the corpus-wide result is still being computed" (#10781).
+///
+/// Why: an unscoped `analyze.complexity_hotspots`, `analyze.smells` or
+/// `analyze.quality` that passes `allow_warming: true` does not wait out a
+/// cold corpus walk, and must tell "retry shortly" from an outage without
+/// parsing prose. A call without the field waits for the walk instead.
+/// What: `-32007`, the next code in the implementation-defined band; `data`
+/// carries `{"kind": "analysis_warming", "retryable": true}`.
+/// Test: `a_cold_walk_past_warm_wait_answers_warming`,
+/// `an_opted_in_cold_call_answers_warming`.
+pub const CODE_ANALYSIS_WARMING: i64 = -32007;
+
 /// What kind of failure a handler is reporting.
 ///
 /// Why (#6287): this was an `axum::http::StatusCode`, which described how the
@@ -287,6 +317,8 @@ pub(crate) enum ApiErrorKind {
     BadGateway,
     /// The handler's own work exceeded its deadline (#6018).
     GatewayTimeout,
+    /// A background computation the answer needs has not finished (#10781).
+    Warming,
 }
 
 /// Uniform handler error: a kind plus a message.
@@ -345,6 +377,14 @@ impl ApiError {
             message: msg.into(),
         }
     }
+
+    /// The analysis cache is warming; the caller should retry (#10781).
+    pub fn warming(msg: impl Into<String>) -> Self {
+        Self {
+            kind: ApiErrorKind::Warming,
+            message: msg.into(),
+        }
+    }
 }
 
 /// Map a handler failure onto the JSON-RPC error frame the client reads.
@@ -370,6 +410,12 @@ impl From<ApiError> for RpcError {
             ApiErrorKind::NotFound => CODE_NOT_FOUND,
             ApiErrorKind::GatewayTimeout => CODE_DEADLINE_EXCEEDED,
             ApiErrorKind::Internal | ApiErrorKind::BadGateway => CODE_INTERNAL_ERROR,
+            // #10781: retryable, and says so in `data`.
+            ApiErrorKind::Warming => {
+                return RpcError::new(CODE_ANALYSIS_WARMING, e.message).with_data(
+                    serde_json::json!({ "kind": "analysis_warming", "retryable": true }),
+                );
+            }
         };
         RpcError::new(code, e.message)
     }

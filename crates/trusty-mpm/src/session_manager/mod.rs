@@ -70,12 +70,15 @@ pub mod retention;
 mod runtime_exit_guard;
 /// #8935: whether a live tmux session is a record's own, by its `%N` pane.
 pub mod runtime_identity;
+// #10101: route a record's tmux calls to the server it lives on.
+pub(crate) mod launch_server;
 pub mod search_gc;
 pub mod session_guard;
 pub mod session_kind;
 pub mod setters;
 pub mod slots;
 pub mod snapshot;
+pub(crate) mod tmux_route;
 // #8942: the lifecycle paths' refusals for the Architect's sessions.
 pub mod architect;
 pub mod architect_floor;
@@ -263,6 +266,9 @@ mod rename_race_tests;
 
 #[cfg(test)]
 mod rename_follow_tests;
+
+#[cfg(test)]
+mod doctor_server_probe_tests;
 
 #[cfg(test)]
 mod liveness_tests;

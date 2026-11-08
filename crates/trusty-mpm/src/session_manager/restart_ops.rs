@@ -95,10 +95,27 @@ impl SessionManager {
             Ok(owned) => owned,
             Err(teardown) => return Ok(teardown),
         };
+        // See #10101: signal and kill on the server ownership was proved on.
+        let tmux = match super::tmux_route::route(self.tmux.as_ref(), record) {
+            Ok(tmux) => tmux,
+            Err(e) => {
+                return Ok(RuntimeTeardown::Unproven {
+                    why: e.to_string(),
+                    liveness_known: false,
+                    signalled: false,
+                });
+            }
+        };
         // #8935: the record's own pane's claude, not the session's active pane;
-        // with no pid the Ctrl-C fallback targets that pane too.
-        let pid = crate::core::process::find_claude_pid_in_pane(tmux_name, &pane_id);
-        self.tmux.signal_terminate_pane(tmux_name, &pane_id, pid);
+        // with no pid the Ctrl-C fallback targets that pane too. #10101: a
+        // named-server pane's pid is read through its own server's driver.
+        let pid = if tmux.is_named() {
+            tmux.pane_pid(&pane_id)
+                .and_then(crate::core::process::claude_child_of)
+        } else {
+            crate::core::process::find_claude_pid_in_pane(tmux_name, &pane_id)
+        };
+        tmux.signal_terminate_pane(tmux_name, &pane_id, pid);
         tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
         // #8935: the grace window is long enough for the name to change hands.
         // #8935 delta critic: an unproven verdict here says the pane was signalled.
@@ -115,7 +132,7 @@ impl SessionManager {
         // #9004: kill the `$N` session the re-check just proved holds the
         // record's pane. A by-name kill here would reach a session that took
         // the name after the re-check; a new session never gets this `$N`.
-        match self.tmux.kill_session_id(tmux_name, &session_id) {
+        match tmux.kill_session_id(tmux_name, &session_id) {
             Err(refused @ ManagedError::KillRefused(_)) => return Err(refused),
             Err(e) => warn!(
                 name = %tmux_name, session_id = %session_id,

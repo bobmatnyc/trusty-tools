@@ -14,7 +14,8 @@
 //!   * [`CommentableLines`] indexes which `(file, line)` pairs are valid inline
 //!     anchors by parsing the unified diff's `@@` hunks (added + context lines on
 //!     the new/right side, which is what the GitHub `line`/`side: RIGHT` anchor
-//!     addresses).
+//!     addresses), plus the old-side numbers of removed lines (`side: LEFT`)
+//!     and the files the diff names (file-level anchors, #10762).
 //!   * [`InlineComment`] is one would-be inline review comment (path/line/body).
 //!   * [`InlinePlan`] is the full structured decision for a review: the inline
 //!     comments to post plus the findings that fell back to the summary — surfaced
@@ -30,7 +31,10 @@
 
 use std::collections::HashSet;
 
-use crate::models::{Effort, Finding, FindingCategory, VerifyOutcome};
+use crate::models::{
+    AnchorSide, Effort, Finding, FindingCategory, SubjectType, UnanchoredFinding, UnanchoredReason,
+    VerifyOutcome,
+};
 
 // ─── Tuning constants ─────────────────────────────────────────────────────────
 
@@ -102,11 +106,18 @@ pub const MAX_INLINE_NITS: usize = 5;
 /// post.  The valid anchors are the added (`+`) and context (` `) lines on the new
 /// side of each hunk — these are the lines GitHub's `side: RIGHT` anchor addresses.
 /// What: a set of `(path, line)` pairs parsed from the unified diff's `@@` headers.
+/// #10762: also the old-side `(path, line)` of every removed line, and the
+/// set of paths the diff names.
 /// Test: `commentable_lines_indexes_added_and_context`,
-/// `commentable_lines_excludes_removed_lines`.
+/// `commentable_lines_excludes_removed_lines`,
+/// `removed_line_with_no_new_side_match_is_not_off_diff`.
 #[derive(Debug, Default, Clone)]
 pub struct CommentableLines {
     anchors: HashSet<(String, u32)>,
+    /// #10762: old-side numbers of removed lines, for a `LEFT` anchor.
+    removed: HashSet<(String, u32)>,
+    /// #10762: every path the diff names, for a file-level anchor.
+    files: HashSet<String>,
 }
 
 impl CommentableLines {
@@ -120,28 +131,51 @@ impl CommentableLines {
     /// header's `+c`).  Added (`+`) and context (` `) lines advance the new-side
     /// counter and are recorded as anchors; removed (`-`) lines do not (they have
     /// no new-side line number).  Malformed `@@` headers are skipped defensively.
+    /// #10762: an old-side counter, seeded from `-a`, numbers each removed line
+    /// into `removed`, keyed by the new path (the old path for a deleted file);
+    /// every `+++ b/` path, and a deleted file's `--- a/` path, goes to `files`.
     /// Test: `commentable_lines_indexes_added_and_context`,
     /// `commentable_lines_excludes_removed_lines`,
-    /// `commentable_lines_handles_multiple_hunks`.
+    /// `commentable_lines_handles_multiple_hunks`,
+    /// `removed_line_with_no_new_side_match_is_not_off_diff`.
     pub fn from_unified_diff(diff: &str) -> Self {
-        let mut anchors: HashSet<(String, u32)> = HashSet::new();
+        let mut index = Self::default();
         let mut current_file: Option<String> = None;
+        // #10762: `old_file` is the `--- a/` path; `removed_file` keys removed lines.
+        let mut old_file: Option<String> = None;
+        let mut removed_file: Option<String> = None;
         let mut new_line: u32 = 0;
+        let mut old_line: Option<u32> = None;
         let mut in_hunk = false;
 
         for line in diff.lines() {
+            if line.starts_with("diff ") {
+                // #10762: a file header ends the hunk, so a following
+                // `deleted file mode` line is never read as a context line.
+                in_hunk = false;
+                continue;
+            }
             if let Some(path) = line.strip_prefix("+++ b/") {
-                current_file = Some(path.trim().to_string());
+                let path = path.trim().to_string();
+                index.files.insert(path.clone());
+                removed_file = Some(path.clone());
+                current_file = Some(path);
                 in_hunk = false;
                 continue;
             }
             if line.starts_with("+++ ") {
                 // e.g. `+++ /dev/null` — not a usable new-side path.
                 current_file = None;
+                // #10762: a deleted file's removed lines keep its old path.
+                removed_file = old_file.clone();
+                if let Some(path) = &old_file {
+                    index.files.insert(path.clone());
+                }
                 in_hunk = false;
                 continue;
             }
             if line.starts_with("--- ") {
+                old_file = line.strip_prefix("--- a/").map(|p| p.trim().to_string());
                 in_hunk = false;
                 continue;
             }
@@ -149,6 +183,7 @@ impl CommentableLines {
                 match parse_hunk_new_start(rest) {
                     Some(start) => {
                         new_line = start;
+                        old_line = parse_hunk_old_start(rest);
                         in_hunk = true;
                     }
                     None => in_hunk = false,
@@ -159,32 +194,50 @@ impl CommentableLines {
                 continue;
             }
             // Diff-file metadata lines that can appear between hunks.
-            if line.starts_with("diff ")
-                || line.starts_with("index ")
-                || line.starts_with("\\ No newline")
-            {
+            if line.starts_with("index ") || line.starts_with("\\ No newline") {
+                continue;
+            }
+            if line.starts_with('-') {
+                // Removed line: no new-side number, do not advance it.
+                // #10762: record its old-side number for a LEFT anchor.
+                if let Some(n) = old_line.as_mut() {
+                    if let Some(file) = removed_file.as_ref() {
+                        index.removed.insert((file.clone(), *n));
+                    }
+                    *n += 1;
+                }
                 continue;
             }
             let Some(file) = current_file.as_ref() else {
                 continue;
             };
-            match line.chars().next() {
-                Some('+') => {
-                    anchors.insert((file.clone(), new_line));
-                    new_line += 1;
-                }
-                Some('-') => {
-                    // Removed line: no new-side number, do not advance.
-                }
-                _ => {
-                    // Context line (leading space or empty): anchorable, advances.
-                    anchors.insert((file.clone(), new_line));
-                    new_line += 1;
-                }
+            index.anchors.insert((file.clone(), new_line));
+            new_line += 1;
+            // Added (`+`) or context line; only a context line has an old side.
+            if !line.starts_with('+')
+                && let Some(n) = old_line.as_mut()
+            {
+                *n += 1;
             }
         }
 
-        Self { anchors }
+        index
+    }
+
+    /// Whether `(file, line)` is a removed line, by its old-side number (#10762).
+    ///
+    /// What: set-membership test against the removed-line index.
+    /// Test: `removed_line_with_no_new_side_match_is_not_off_diff`.
+    pub fn contains_removed(&self, file: &str, line: u32) -> bool {
+        self.removed.contains(&(file.to_string(), line))
+    }
+
+    /// Whether the diff names `file` (#10762).
+    ///
+    /// What: set-membership test against the diff's paths.
+    /// Test: `file_level_anchor_for_in_diff_file_without_line`.
+    pub fn contains_file(&self, file: &str) -> bool {
+        self.files.contains(file)
     }
 
     /// Return whether `(file, line)` is a valid inline-comment anchor.
@@ -230,6 +283,20 @@ fn parse_hunk_new_start(rest: &str) -> Option<u32> {
     token.parse::<u32>().ok()
 }
 
+/// Parse the old-side start line from the remainder of an `@@` hunk header (#10762).
+///
+/// Why: a `LEFT` anchor addresses a removed line by its old-side number, which
+/// counts from `-a` in `@@ -a,b +c,d @@`.
+/// What: strips leading spaces and the `-`, then parses the integer before an
+/// optional `,count`. Returns `None` for a malformed header; removed lines in
+/// that hunk are then not indexed.
+/// Test: `deleted_line_finding_anchors_left`.
+fn parse_hunk_old_start(rest: &str) -> Option<u32> {
+    let after = rest.trim_start().strip_prefix('-')?;
+    let token: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    token.parse::<u32>().ok()
+}
+
 // ─── Inline comment + plan types ──────────────────────────────────────────────
 
 /// One would-be inline review comment anchored to a diff line.
@@ -238,14 +305,21 @@ fn parse_hunk_new_start(rest: &str) -> Option<u32> {
 /// modelling it explicitly lets the dry-run path surface the exact set that would
 /// be posted (so the MCP response is faithful) and keeps the live POST a trivial
 /// serialisation.
-/// What: `path` + `line` are the new-side anchor; `body` is the rendered markdown.
-/// Test: `build_inline_plan_maps_on_diff_finding`.
+/// What: `path` + `line` + `side` are the anchor; `body` is the rendered markdown.
+/// #10762: `side` is `LEFT` for a removed line; `subject_type` is `File`, with
+/// `line` 0, for a file-level anchor.
+/// Test: `build_inline_plan_maps_on_diff_finding`, `deleted_line_finding_anchors_left`,
+/// `file_level_anchor_for_in_diff_file_without_line`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineComment {
     /// Changed file path (new side), e.g. `src/db.rs`.
     pub path: String,
-    /// New-side line number the comment anchors to.
+    /// Line number the comment anchors to, on `side`; 0 for a file-level anchor.
     pub line: u32,
+    /// #10762: the diff side `line` counts on.
+    pub side: AnchorSide,
+    /// #10762: `Some(File)` for a file-level anchor, else `None`.
+    pub subject_type: Option<SubjectType>,
     /// Rendered comment markdown body.
     pub body: String,
 }
@@ -262,8 +336,11 @@ pub struct InlineComment {
 /// became an inline comment, so downstream code can partition by finding identity
 /// rather than by `(file, line)` coordinate (two distinct findings can share the
 /// same anchor — coordinate matching silently drops one); `suppressed_nits`
-/// is the count of low-severity findings rolled up past the inline cap (#1420).
-/// Test: `build_inline_plan_*` tests in `inline_tests.rs`.
+/// is the count of low-severity findings rolled up past the inline cap (#1420);
+/// `unanchored` names every finding not placed inline, with its reason
+/// (#10762), so `inline_indices` and `unanchored` partition the input.
+/// Test: `build_inline_plan_*` tests in `inline_tests.rs`,
+/// `unanchored_reason_enum_covers_no_line_off_diff_nit_cap_withheld`.
 #[derive(Debug, Clone, Default)]
 pub struct InlinePlan {
     /// Inline comments to post (each anchored to a diff line).
@@ -280,6 +357,8 @@ pub struct InlinePlan {
     pub inline_indices: Vec<usize>,
     /// Count of low-severity nits suppressed past the inline cap (#1420).
     pub suppressed_nits: usize,
+    /// #10762: every finding not placed inline, indexed into the input slice.
+    pub unanchored: Vec<UnanchoredFinding>,
 }
 
 impl InlinePlan {
@@ -319,31 +398,43 @@ impl InlinePlan {
 /// inline placements are not emitted inline — they increment `suppressed_nits`
 /// instead.  Higher-severity findings are never suppressed.  Input order is
 /// preserved. A `citation_partial` finding always goes to the summary (#8949).
+/// #10762: each finding not placed inline is recorded in `unanchored` as
+/// `no_line`, `off_diff` (a `citation_partial` finding included), `deleted_line`
+/// or `nit_cap`. Placement is decided by `place_finding`.
 /// Test: `build_inline_plan_maps_on_diff_finding`,
 /// `build_inline_plan_off_diff_falls_back`, `build_inline_plan_no_line_falls_back`,
 /// `nit_cap_rolls_up_overflow`, `nit_cap_does_not_suppress_high_severity`,
-/// `build_inline_plan_posts_a_partial_citation_in_the_body`.
+/// `build_inline_plan_posts_a_partial_citation_in_the_body`,
+/// `unanchored_reason_enum_covers_no_line_off_diff_nit_cap_withheld`,
+/// `deleted_line_finding_anchors_left`,
+/// `file_level_anchor_for_in_diff_file_without_line`.
 pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -> InlinePlan {
     let mut plan = InlinePlan::default();
     let mut inline_nits = 0usize;
 
     for (idx, finding) in findings.iter().enumerate() {
-        // #8949: a partly verified citation is posted in the body, never inline.
-        let anchor = finding
-            .line
-            .filter(|_| !finding.citation_partial)
-            .filter(|l| commentable.contains(&finding.file, *l));
-
-        let Some(line) = anchor else {
-            // No usable diff anchor → summary body (never fails the post).
-            plan.summary_findings.push(finding.clone());
-            continue;
+        let anchor = match place_finding(finding, commentable) {
+            Ok(anchor) => anchor,
+            Err(reason) => {
+                // No usable diff anchor → summary body (never fails the post).
+                plan.summary_findings.push(finding.clone());
+                plan.unanchored.push(UnanchoredFinding {
+                    finding_index: idx,
+                    reason,
+                });
+                continue;
+            }
         };
 
         // Nit-volume cap (#1420): only Effort::Low findings are subject to it.
         if finding.effort == Effort::Low {
             if inline_nits >= MAX_INLINE_NITS {
                 plan.suppressed_nits += 1;
+                // #10762: the overflow nit is named, not only counted.
+                plan.unanchored.push(UnanchoredFinding {
+                    finding_index: idx,
+                    reason: UnanchoredReason::NitCap,
+                });
                 continue;
             }
             inline_nits += 1;
@@ -351,7 +442,9 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
 
         plan.comments.push(InlineComment {
             path: finding.file.clone(),
-            line,
+            line: anchor.line,
+            side: anchor.side,
+            subject_type: anchor.subject_type,
             body: render_finding_comment(finding),
         });
         // Record identity (not coordinate) of the inline-placed finding so the
@@ -360,6 +453,67 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
     }
 
     plan
+}
+
+/// Where a finding anchors in the diff (#10762).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Anchor {
+    /// Line on `side`; 0 for a file-level anchor.
+    line: u32,
+    /// The diff side `line` counts on.
+    side: AnchorSide,
+    /// `Some(File)` for a file-level anchor.
+    subject_type: Option<SubjectType>,
+}
+
+/// Decide one finding's anchor, or why it has none (#10762).
+///
+/// Why: a finding at a deleted line read as `off_diff`, and a finding with a
+/// file but no line read as `no_line`, though GitHub can anchor both.
+/// What: with a line, the new side is tried first (`RIGHT`); a removed line
+/// with no new-side match anchors `LEFT` at its old-side number. With no line,
+/// a file the diff names gets a file-level anchor. A `citation_partial`
+/// finding is never placed (#8949): it reads `deleted_line` when its line is
+/// only a removed line, else `off_diff` or `no_line`.
+/// Test: `deleted_line_finding_anchors_left`,
+/// `removed_line_with_no_new_side_match_is_not_off_diff`,
+/// `file_level_anchor_for_in_diff_file_without_line`,
+/// `no_line_and_file_not_in_diff_is_unanchored_no_line`.
+fn place_finding(
+    finding: &Finding,
+    commentable: &CommentableLines,
+) -> Result<Anchor, UnanchoredReason> {
+    let file = finding.file.as_str();
+    let Some(line) = finding.line else {
+        if finding.citation_partial || !commentable.contains_file(file) {
+            return Err(UnanchoredReason::NoLine);
+        }
+        return Ok(Anchor {
+            line: 0,
+            side: AnchorSide::Right,
+            subject_type: Some(SubjectType::File),
+        });
+    };
+    let new_side = commentable.contains(file, line);
+    let removed_only = !new_side && commentable.contains_removed(file, line);
+    if finding.citation_partial {
+        // #8949: a partly verified citation is posted in the body, never inline.
+        return Err(if removed_only {
+            UnanchoredReason::DeletedLine
+        } else {
+            UnanchoredReason::OffDiff
+        });
+    }
+    let side = match (new_side, removed_only) {
+        (true, _) => AnchorSide::Right,
+        (false, true) => AnchorSide::Left,
+        (false, false) => return Err(UnanchoredReason::OffDiff),
+    };
+    Ok(Anchor {
+        line,
+        side,
+        subject_type: None,
+    })
 }
 
 // ─── Per-finding comment rendering ────────────────────────────────────────────

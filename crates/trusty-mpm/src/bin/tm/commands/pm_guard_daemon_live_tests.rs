@@ -10,6 +10,7 @@ use super::daemon_live_at;
 
 /// A stale socket file: bound by a daemon that is gone, so a dial is refused
 /// with `ECONNREFUSED` — the errno a saturated live listener also gives.
+/// `stale` returns only once a dial is refused (#10026).
 struct Stale {
     _dir: tempfile::TempDir,
     socket: PathBuf,
@@ -19,7 +20,8 @@ struct Stale {
 fn stale() -> Stale {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("s").join("trusty-mpm.sock");
-    drop(trusty_common::uds::bind_hardened(&socket).expect("bind"));
+    // #10026: wait out a listener fd a concurrent test's fork inherited.
+    crate::test_support::stale_socket::bind_stale(&socket);
     let lock = dir.path().join("daemon.lock");
     Stale {
         _dir: dir,

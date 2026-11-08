@@ -38,6 +38,39 @@ cost ride along in the footer.
 UNKNOWN exists deliberately. A reviewer that cannot see enough to form an
 opinion should say so, not approve.
 
+## Every finding is anchored or explained
+
+A review result splits every finding, withheld findings included, into two
+lists. `inline_comments[]` holds the findings that have an anchor in the diff.
+`unanchored[]` holds the rest, each with the reason it has none. No finding
+appears in both, and none is missing from both.
+
+An `inline_comments[]` entry carries `path`, `line`, `side` (`LEFT` or
+`RIGHT`), `severity`, `category` and `finding_index`. It may also carry
+`start_line` for a multi-line anchor and `subject_type: file` for a file-level
+anchor. `finding_index` counts the findings first, then the withheld findings.
+
+An `unanchored[]` entry is `{finding_index, reason}`. The reason is one of:
+
+- `off_diff`: the finding cites a line outside the diff.
+- `no_line`: the finding cites no line, and its file is not in the diff.
+- `deleted_line`: the finding cites a removed line that cannot anchor.
+- `nit_cap`: a low-severity nit past the inline cap. It still appears in the
+  summary.
+- `withheld:<class>`: a gate withheld the finding. `<class>` names the gate.
+
+The anchor rule is short. A finding anchors on the new side first. A finding
+at a removed line with no new-side match anchors on `LEFT`. A finding with a
+file but no line, where the diff names that file, gets a file-level anchor.
+
+GitHub rejects a file-level comment in a review and fails the whole review.
+When posting, trusty-review therefore lists file-level entries in the review
+summary instead of as inline comments. The result JSON still reports them in
+`inline_comments[]`.
+
+The new fields are additive. A consumer written for the older JSON keeps
+working.
+
 ## Standards that live in the repo
 
 Drop a `.trusty-review.toml` at your repository root and every contributor and
