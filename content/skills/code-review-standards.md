@@ -44,12 +44,22 @@ preferences are **LOW at most**, never MEDIUM, HIGH, or CRITICAL, regardless
 of how strongly the reviewer feels about them. Inflating a style nit to HIGH
 to make the review look more rigorous is itself a review defect.
 
+**Criterion-fail tag (#10803).** Keep the native severity and append `criterion-fail: "<verbatim quote>" (source: <issue #N body | brief | owner ruling <ref>>)` to
+any finding that directly fails a stated acceptance criterion. A stated acceptance criterion is written in the issue body (whoever wrote it), the dispatch brief, or a recorded owner ruling; a criterion the reviewer infers, a design preference, or a paraphrase with no owner source is not stated, and an Architect restatement with no owner source counts only as a brief criterion. "Directly fails" means the finding shows the criterion is unmet, or undemonstrated where the criterion asks for proof; a chain of reasoning does not qualify. The tag
+does not raise severity; dashboards and counts show the native grade. A finding
+with no quote and source is an ordinary finding at its native severity. The
+criteria come from the brief; a brief with no criteria yields no criterion-fail
+findings.
+
 ## The 80% Confidence Filter
 
 For every candidate finding, ask: *can I assert this is a real issue with
 more than 80% confidence?* If not:
 - Downgrade the severity, or
 - Drop the finding entirely.
+
+The filter runs first: a candidate criterion-fail finding you are not more than
+80% sure of is dropped like any other.
 
 A review full of speculative "this might be a problem" findings is worse than
 a shorter review of confirmed issues — it forces the reader to re-triage the
@@ -69,6 +79,7 @@ finding that doesn't obviously fit the first two.
    causes, or leaves unguarded, wrong behaviour against the acceptance
    criteria, a security or credential exposure, data loss or corruption, a
    crash, hang or leaked process, a resource pileup, or a broken gate or CI.
+   A finding of any severity that directly fails a stated acceptance criterion of the brief or issue blocks; its fix uses the one fix round (no extra round). A criterion-fail fix and a fix-bar fix share the one fix round.
 2. **`Parent`** — kept with the work already in flight, in ONE PR comment or a
    checklist item on the parent issue. The default for every other finding,
    missing tests on non-safety paths included. It starts no fix round.
@@ -256,7 +267,8 @@ correct, and complete outcome — do not manufacture findings to look thorough.
 - **WARN** — zero CRITICAL, one or more HIGH findings. Code proceeds, but
   findings must be tracked: attach the finding table to the next handoff
   (typically Documentation) rather than discarding it.
-- **BLOCK** — any CRITICAL finding. Halt immediately. Surface the verdict and
+- **BLOCK** — any CRITICAL finding, or any criterion-fail finding (a valid
+  `criterion-fail:` tag, after the 80% filter) regardless of its severity. Halt immediately. Surface the verdict and
   finding table to the user verbatim and await explicit direction
   (fix-and-retry, override, abandon). Never auto-re-delegate back to the
   implementer without that direction.
