@@ -301,10 +301,76 @@ fn inline_comment_out_serde_roundtrip() {
         path: "src/db.rs".to_string(),
         line: 42,
         body: "**security** — SQL injection".to_string(),
+        ..InlineCommentOut::default() // #10762
     };
     let json = serde_json::to_string(&c).expect("serialise");
     let back: InlineCommentOut = serde_json::from_str(&json).expect("deserialise");
     assert_eq!(back, c);
+}
+
+/// REGRESSION (#10762): a 0.39 `ReviewResult` still deserializes.
+///
+/// Why: the #10762 fields (`unanchored`, and `side`, `severity`, `category`,
+/// `finding_index` on each inline entry) are additive; a stored 0.39 record
+/// carries none of them.
+/// What: parses a 0.39 result whose inline entry is `{path, line, body}` and
+/// asserts the new fields take their defaults.
+/// Test: this test itself.
+#[test]
+fn result_without_unanchored_field_still_deserializes() {
+    let json = r#"{
+  "cost_estimate_usd": 0.000042,
+  "dry_run": true,
+  "findings": [
+    {
+      "category": "correctness",
+      "code_provable": false,
+      "confidence": 0.9,
+      "consequence": "",
+      "description": "overflow",
+      "effort": "medium",
+      "file": "src/billing.rs",
+      "issue_eligible": false,
+      "kind": "overflow",
+      "line": 10,
+      "severity": "medium",
+      "suggestion": "",
+      "verified": "confirmed"
+    }
+  ],
+  "findings_count": 1,
+  "grade": "D+",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "inline_comments": [
+    { "body": "**overflow** — overflow\n", "line": 10, "path": "src/billing.rs" }
+  ],
+  "inline_finding_indices": [0],
+  "input_tokens": 100,
+  "latency_ms": 42,
+  "model": "stub/golden-reviewer",
+  "output_tokens": 400,
+  "owner": "acme",
+  "posted": false,
+  "pr_number": 7,
+  "pr_title": "Add an invoice total",
+  "pr_url": "https://github.com/acme/billing/pull/7",
+  "repo": "billing",
+  "review_body": "body",
+  "review_version": "tr-0.39",
+  "status": "completed",
+  "timestamp": "2026-11-01T00:00:00Z",
+  "unverified_count": 0,
+  "verdict": "REQUEST_CHANGES",
+  "verdict_status": "parsed",
+  "withheld_unverified_count": 0
+}"#;
+    let back: ReviewResult = serde_json::from_str(json).expect("a 0.39 result parses");
+    assert!(back.unanchored.is_empty());
+    let c = &back.inline_comments[0];
+    assert_eq!((c.path.as_str(), c.line), ("src/billing.rs", 10));
+    assert_eq!(c.side, AnchorSide::Right);
+    assert_eq!((c.severity, c.finding_index), (None, 0));
+    assert_eq!(c.category, FindingCategory::Correctness);
 }
 
 /// A pre-#1414 `ReviewResult` JSON (no `inline_comments`) still deserialises.

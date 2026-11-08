@@ -22,6 +22,14 @@
 #     stop-owned  `--stop DIR` ends the recorded pid and removes sandbox.pid
 #     stop-decoy  `--stop DIR` refuses a recorded pid whose argv lacks the
 #                 project token and leaves that process alive
+#     bin-fresh-*  (#10755) against a temp git source root (SANDBOX_SRC_ROOT)
+#                 and a stubbed dependency tree (BIN_FRESH_SOURCES_CMD): a
+#                 stale build artifact refuses and starts nothing, also via a
+#                 symlink, a custom profile dir, or a newer dependency crate;
+#                 a missing source refuses; a fresh one and --allow-stale
+#                 pass; an installed-style stub passes with a notice
+#                 the override is announced, and ignored with a warning
+#                 unless BIN_FRESH_TEST=1
 #
 # Usage: ./scripts/sandbox_code_daemon_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -128,6 +136,77 @@ printf '%s\n' "$D4/project" > "$D4/sandbox.project"
 rc=0; "$LAUNCHER" --stop "$D4" >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 1 ] || fail "stop-decoy (exit $rc, want 1)"
 kill -0 "$DECOY" 2>/dev/null || fail "stop-decoy (decoy was signalled)"
+
+# bin-fresh (#10755): a temp source root and a stubbed dependency tree
+# (BIN_FRESH_SOURCES_CMD), so neither the real tree nor cargo changes the
+# answer. Sources: trusty-code lib.rs 2020-06, trusty-newdep lib.rs 2020-08 (a
+# dependency no fixed list names, as a newly added crate would be). Stubs: debug/tcode, profiling/tcode, tcode-mark 2020-01
+# (stale), debug/tcode-mid 2020-07, release/tcode now (fresh).
+SRC="$WORK/src"
+TGT="$WORK/tgt"
+mkdir -p "$SRC/crates/trusty-code/src" "$SRC/crates/trusty-newdep/src" \
+  "$TGT/debug" "$TGT/release" "$TGT/profiling"
+echo "pub fn f() {}" > "$SRC/crates/trusty-code/src/lib.rs"
+echo "pub fn g() {}" > "$SRC/crates/trusty-newdep/src/lib.rs"
+touch -d 2020-06-01T00:00:00 "$SRC/crates/trusty-code/src/lib.rs"
+touch -d 2020-08-01T00:00:00 "$SRC/crates/trusty-newdep/src/lib.rs"
+git -C "$SRC" init -q
+git -C "$SRC" add crates
+: > "$TGT/.rustc_info.json"
+for b in debug/tcode profiling/tcode debug/tcode-mid release/tcode; do cp "$STUB" "$TGT/$b"; done
+# Exits at once, so a launcher that wrongly starts it fails instead of hanging.
+printf "#!/bin/sh\n: > \"\$HOME/../stub-ran\"\n" > "$TGT/debug/tcode-mark"
+chmod +x "$TGT/debug/tcode-mark"
+touch -d 2020-01-01T00:00:00 "$TGT/debug/tcode" "$TGT/profiling/tcode" "$TGT/debug/tcode-mark"
+touch -d 2020-07-01T00:00:00 "$TGT/debug/tcode-mid"
+ln -s "$TGT/debug/tcode" "$WORK/link-tcode"
+# The stubbed `cargo tree` output; it runs in the source root.
+TREE="$WORK/tree-tc"
+# shellcheck disable=SC2016  # $(pwd -P) expands in the stub, not here
+printf '%s\n' '#!/bin/sh' 'echo "trusty-code v0.0.0 ($(pwd -P)/crates/trusty-code)"' > "$TREE"
+# shellcheck disable=SC2016  # $(pwd -P) expands in the stub, not here
+printf '%s\n' '#!/bin/sh' 'echo "trusty-code v0.0.0 ($(pwd -P)/crates/trusty-code)"' \
+  'echo "trusty-newdep v0.0.0 ($(pwd -P)/crates/trusty-newdep)"' > "$TREE-deps"
+chmod +x "$TREE" "$TREE-deps"
+D5="$WORK/d5"; mkdir -p "$D5"
+# fresh_case NAME WANT_RC NEEDLE TREE_CMD SRC_ROOT LAUNCHER_ARGS...
+fresh_case() {
+  local name="$1" want="$2" needle="$3" tree="$4" root="$5" rc=0 out
+  shift 5
+  out="$(SANDBOX_SRC_ROOT="$root" BIN_FRESH_TEST=1 BIN_FRESH_SOURCES_CMD="$tree" "$LAUNCHER" "$@" 2>&1)" || rc=$?
+  [ "$rc" -eq "$want" ] || fail "$name (exit $rc, want $want)"
+  case "$out" in *"$needle"*) ;; *) fail "$name (output lacks '$needle'): $out" ;; esac
+}
+fresh_case bin-fresh-stale-dry-run 1 "is older than its newest source $SRC/crates/trusty-code/src/lib.rs" \
+  "$TREE" "$SRC" --bin "$TGT/debug/tcode" --dir "$D5" --dry-run
+fresh_case bin-fresh-stale 1 "refused: stale build artifact $TGT/debug/tcode-mark" \
+  "$TREE" "$SRC" --bin "$TGT/debug/tcode-mark" --dir "$D5"
+[ ! -e "$D5/home" ] && [ ! -e "$D5/stub-ran" ] || fail "bin-fresh-stale (the launcher started or created something)"
+fresh_case bin-fresh-symlink 1 "refused: stale build artifact $TGT/debug/tcode" \
+  "$TREE" "$SRC" --bin "$WORK/link-tcode" --dir "$D5" --dry-run
+fresh_case bin-fresh-profile 1 "refused: stale build artifact $TGT/profiling/tcode" \
+  "$TREE" "$SRC" --bin "$TGT/profiling/tcode" --dir "$D5" --dry-run
+fresh_case bin-fresh-dependency 1 "is older than its newest source $SRC/crates/trusty-newdep/src/lib.rs" \
+  "$TREE-deps" "$SRC" --bin "$TGT/debug/tcode-mid" --dir "$D5" --dry-run
+fresh_case bin-fresh-fresh 0 "fresh: build artifact" \
+  "$TREE-deps" "$SRC" --bin "$TGT/release/tcode" --dir "$D5" --dry-run
+fresh_case bin-fresh-allow-stale 0 "warning: --allow-stale" \
+  "$TREE" "$SRC" --bin "$TGT/debug/tcode" --dir "$D5" --dry-run --allow-stale
+fresh_case bin-fresh-installed 0 "notice: installed binary (not under a cargo target dir)" \
+  "$TREE" "$SRC" --bin "$STUB" --dir "$D5" --dry-run
+fresh_case bin-fresh-override-notice 0 "sources from BIN_FRESH_SOURCES_CMD override: $TREE" \
+  "$TREE" "$SRC" --bin "$TGT/debug/tcode-mid" --dir "$D5" --dry-run
+# Without BIN_FRESH_TEST the stub (which marks tcode-mid fresh) is ignored
+# with a warning, and the real derivation refuses (cargo cannot read $SRC).
+rc=0; out="$(SANDBOX_SRC_ROOT="$SRC" BIN_FRESH_SOURCES_CMD="$TREE" "$LAUNCHER" --bin "$TGT/debug/tcode-mid" --dir "$D5" --dry-run 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || fail "bin-fresh-override-ignored (exit $rc, want 1)"
+case "$out" in *"warning: BIN_FRESH_SOURCES_CMD is set but ignored"*) ;; *) fail "bin-fresh-override-ignored (no warning): $out" ;; esac
+rc=0; out="$(SANDBOX_SRC_ROOT="$SRC" BIN_FRESH_SOURCES_CMD="$TREE" "$LAUNCHER" --bin "$TGT/debug/tcode" --dir "$D5" --dry-run 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || fail "bin-fresh-override-ignored-stale (exit $rc, want 1)"
+case "$out" in *"refused: cannot judge the freshness of $TGT/debug/tcode"*) ;; *) fail "bin-fresh-override-ignored-stale (no refusal): $out" ;; esac
+mkdir -p "$WORK/not-a-repo"
+fresh_case bin-fresh-no-source 1 "no source file of trusty-code found by git" \
+  "$TREE" "$WORK/not-a-repo" --bin "$TGT/release/tcode" --dir "$D5" --dry-run
 
 if [ -n "$FAILED" ]; then
   echo "sandbox_code_daemon_selftest: FAILED:$FAILED" >&2

@@ -230,6 +230,8 @@ async fn main() -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     // #10476: lend the tui the guarded, quiet tmux switch for its Focus key.
     commands::tmux_attach::install_tui_focus_hook();
+    // #10754: S3 tm ls actions plumbing (keys wait on De1).
+    commands::tui_session_hooks::install_tui_session_hooks();
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion (issue #216) before exiting on a clap error.
     let argv: Vec<String> = std::env::args().collect();

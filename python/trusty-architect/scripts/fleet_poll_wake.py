@@ -139,7 +139,7 @@ def wake(n, panes, dry_run, defer_turn=False):
     test_a_suggestion_wakes_only_when_the_whole_box_is_dim,
     test_a_rule_that_vanishes_after_typing_strands_the_pointer_without_enter
     """
-    sup = sorted((p for p in panes if p["session"] == P.ARCHITECT),
+    sup = sorted((p for p in panes if P.is_architect_pane(p)),
                  key=lambda p: p["active"] != "11")
     if not sup:
         return f"skipped: no {P.ARCHITECT} pane"

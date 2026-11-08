@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use super::services::ServiceId;
 use super::state::{COLUMNS, HomeState, MetricsState, TileHealth, View};
+use crate::tui::VERSION_LABEL;
 
 /// Footer on the tile grid.
 pub const HOME_HINT: &str = "[←→↑↓] select  [Enter] open  [q] quit";
@@ -32,9 +33,21 @@ pub fn render(frame: &mut Frame, state: &HomeState) {
         View::Home => ("trusty console — services".to_string(), HOME_HINT),
         View::Service(id) => (format!("trusty console › {}", id.id()), SERVICE_HINT),
     };
+    // #10476: version in tui header (Bob 11-05)
+    let [title_area, version_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(VERSION_LABEL.chars().count() as u16),
+        ])
+        .areas(header);
     frame.render_widget(
         Paragraph::new(Line::from(title)).style(Style::default().add_modifier(Modifier::BOLD)),
-        header,
+        title_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(VERSION_LABEL)).style(Style::default().fg(Color::DarkGray)),
+        version_area,
     );
     match state.view {
         View::Home => render_grid(frame, body, state),
