@@ -576,6 +576,21 @@ pub trait ManagedTmuxDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The tmux socket directory a named server's `-L` name resolves in
+    /// (#10101); `None` for a driver with none, which checks no record's
+    /// socket path. `RealTmuxDriver` answers its own.
+    /// Test: `a_socket_outside_the_socket_dir_is_refused_and_reads_unknown`.
+    fn socket_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// The pid of pane `pane_id`'s process, read on this driver's server
+    /// (#10101); `None` when it cannot be read. `RealTmuxDriver` asks tmux.
+    /// Test: `a_named_server_teardown_signals_the_claude_read_through_its_server`.
+    fn pane_pid(&self, _pane_id: &str) -> Option<u32> {
+        None
+    }
+
     /// Whether a tmux session with this name currently exists, keeping
     /// "confirmed absent" and "could not tell" apart (#5859).
     ///

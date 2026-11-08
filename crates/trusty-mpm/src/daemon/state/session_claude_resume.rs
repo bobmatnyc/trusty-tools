@@ -20,6 +20,8 @@ use super::DaemonState;
 use super::session_claudes::ResumeGrant;
 use crate::core::session::SessionId;
 use crate::core::twin_identity::ClaudeProcess;
+use crate::session_manager::ManagedTmuxDriver;
+use crate::session_manager::tmux_route::route_to;
 
 impl DaemonState {
     /// Grant `record`'s resumed `claude` its session id (#8983).
@@ -38,6 +40,8 @@ impl DaemonState {
             record.claude_session_id.as_deref(),
             &record.tmux_name,
             record.pane_id.as_deref(),
+            // See #10101: the rebind reads the pane on the record's own server.
+            record.tmux_socket.as_deref(),
         )
     }
 
@@ -50,7 +54,7 @@ impl DaemonState {
     }
 
     /// Record that the daemon is about to relaunch `claude_session_id` in
-    /// `tmux_name`'s pane (#8983).
+    /// `tmux_name`'s pane, on the server at `tmux_socket` (#8983, #10101).
     ///
     /// What: a [`ResumeGrant`] stamped now. No grant for a missing or
     /// malformed id: such a launch starts a fresh session, whose own
@@ -61,6 +65,7 @@ impl DaemonState {
         claude_session_id: Option<&str>,
         tmux_name: &str,
         pane_id: Option<&str>,
+        tmux_socket: Option<&std::path::Path>,
     ) -> Option<(SessionId, ResumeGrant)> {
         let session = claude_session_id
             .and_then(|id| uuid::Uuid::parse_str(id).ok())
@@ -71,6 +76,7 @@ impl DaemonState {
         let grant = ResumeGrant {
             tmux_name: tmux_name.to_string(),
             pane_id: pane_id.map(str::to_string),
+            tmux_socket: tmux_socket.map(std::path::Path::to_path_buf),
             issued_at,
         };
         self.session_claudes.grant_resume(session, grant.clone());
@@ -146,14 +152,47 @@ impl DaemonState {
 /// The `claude` running in `grant`'s own pane, with its start time (#8983).
 ///
 /// What: `Err` for a grant with no pane id. It never falls back to the tmux
-/// session's active pane, which can be a sibling's (#8935).
+/// session's active pane, which can be a sibling's (#8935). #10101: a grant on
+/// a workspace server reads the pane there ([`pane_claude_on`]).
 /// Test: `a_resume_rebind_fails_closed_8983`.
 pub(crate) fn pane_claude(grant: &ResumeGrant) -> Result<ClaudeProcess, String> {
+    pane_claude_on(grant, || {
+        crate::session_manager::RealTmuxDriver::discover()
+            .map(|d| Box::new(d) as Box<dyn ManagedTmuxDriver>)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// [`pane_claude`] with the driver for a named-server grant from `tmux`
+/// (#10101).
+///
+/// Why: `--resume` on a workspace server runs the new `claude` in a pane the
+/// default server does not have, so a default-server read refused every
+/// rebind there.
+/// What: a grant with no socket reads the default server, unchanged; one with
+/// a socket is routed to its server ([`route_to`]), where the pane's pid is
+/// read and its `claude` child found. A server that cannot be routed to is
+/// `Err`; the default server is never asked in its place.
+/// Test: `a_resume_rebind_reads_the_claude_on_the_grants_own_server`.
+pub(crate) fn pane_claude_on(
+    grant: &ResumeGrant,
+    tmux: impl FnOnce() -> Result<Box<dyn ManagedTmuxDriver>, String>,
+) -> Result<ClaudeProcess, String> {
     let pane = grant.pane_id.as_deref().ok_or(
         "the managed record has no pane id, so its claude cannot be told from a sibling's",
     )?;
-    let pid = crate::core::process::find_claude_pid_in_pane(&grant.tmux_name, pane)
-        .ok_or("no claude runs in the pane")?;
+    let pid = match grant.tmux_socket.as_deref() {
+        None => crate::core::process::find_claude_pid_in_pane(&grant.tmux_name, pane),
+        Some(socket) => {
+            let tmux = tmux()?;
+            let routed = route_to(tmux.as_ref(), &grant.tmux_name, Some(socket))
+                .map_err(|e| e.to_string())?;
+            routed
+                .pane_pid(pane)
+                .and_then(crate::core::process::claude_child_of)
+        }
+    }
+    .ok_or("no claude runs in the pane")?;
     let facts = crate::core::twin_arming::process_facts(pid)?;
     Ok(ClaudeProcess {
         pid,

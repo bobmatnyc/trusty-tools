@@ -15,6 +15,10 @@ use crate::core::framework_content::tests::skill_with_references;
 mod rule_markers;
 use rule_markers::{has_rule, plain, rule_section, rule_sentence};
 
+// #10803: the fix bar's acceptance-criterion class reaches every surface.
+#[path = "bundle_fix_bar_criterion_tests.rs"]
+mod fix_bar_criterion;
+
 // #10401: data-design skill and data-designer agent registration and import safety.
 #[path = "bundle_data_design_tests.rs"]
 mod data_design;

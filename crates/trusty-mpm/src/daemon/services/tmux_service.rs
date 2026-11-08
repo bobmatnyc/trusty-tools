@@ -101,6 +101,7 @@ impl TmuxService {
     pub fn capture(session: &Session, lines: u32) -> String {
         match TmuxDriver::discover() {
             Ok(driver) => {
+                // See #10101: a legacy `Session` lives on the default server only.
                 let target = TmuxTarget::session(&session.tmux_name);
                 match driver.capture(&target, Some(lines)) {
                     Ok(text) => text,
@@ -129,7 +130,8 @@ impl TmuxService {
     /// [`INPUT_BOX_PROBE_LINES`] lines of the session's pane, classified by
     /// [`classify_input_box`](crate::core::input_box::classify_input_box) via
     /// [`input_box_from`]. `-u` keeps the `❯` glyph intact under a non-UTF-8
-    /// locale such as launchd's. The host-state gate applies.
+    /// locale such as launchd's. The host-state gate applies. #10101: on the
+    /// default server, the only one a legacy `Session` lives on.
     /// Test: `input_box_from_*` in this module's tests.
     pub fn input_box(session: &Session) -> Option<crate::core::input_box::InputBox> {
         let target = TmuxTarget::session(&session.tmux_name).as_target();
@@ -158,6 +160,7 @@ impl TmuxService {
     pub fn send_command(session: &Session, command: &str) {
         match TmuxDriver::discover() {
             Ok(driver) => {
+                // See #10101: a legacy `Session` lives on the default server only.
                 let target = TmuxTarget::session(&session.tmux_name);
                 if let Err(e) = driver.send_line(&target, command) {
                     tracing::warn!("tmux send_line failed for {}: {e}", session.tmux_name);
@@ -338,9 +341,12 @@ impl TmuxService {
 /// name held by two servers is refused, so a same-named session on another
 /// server never stands in for the one the caller meant. No holder returns
 /// the default server's error. A socket directory that cannot be read is
-/// logged and adds no servers.
+/// logged and adds no servers. Each workspace server is asked through
+/// [`crate::core::tmux_server::bounded_probe`]; one that does not answer in
+/// time refuses the snapshot.
 /// Test: `a_snapshot_finds_a_session_on_a_workspace_server`,
-/// `a_name_on_two_servers_is_refused`.
+/// `a_name_on_two_servers_is_refused`,
+/// `a_hung_workspace_server_bounds_the_snapshot`.
 pub(crate) fn snapshot_on_any_server(
     driver: &TmuxDriver,
     socket_dir: &Path,
@@ -359,10 +365,26 @@ pub(crate) fn snapshot_on_any_server(
         Ok(snapshot) => (vec![("the default server".to_owned(), snapshot)], None),
         Err(e) => (Vec::new(), Some(e)),
     };
-    holders.extend(servers.iter().filter_map(|server| {
-        let snapshot = driver.on_server(server).monitor_session(name, lines).ok()?;
-        Some((format!("server {server}"), snapshot))
-    }));
+    for server in &servers {
+        // See #10101: bounded, one in flight per server; a server that does
+        // not answer in time leaves the holder unknown, so nothing is picked.
+        let named = driver.on_server(server);
+        let wanted = name.to_owned();
+        let key = crate::core::tmux_server::server_socket_path(socket_dir, server);
+        match crate::core::tmux_server::bounded_probe(
+            &key,
+            crate::core::tmux_server::PROBE_BUDGET,
+            move || named.monitor_session(&wanted, lines).ok(),
+        ) {
+            Some(Some(snapshot)) => holders.push((format!("server {server}"), snapshot)),
+            Some(None) => {}
+            None => {
+                return Err(crate::core::Error::Protocol(format!(
+                    "tmux server {server} did not answer in time; the holder of {name} is unknown"
+                )));
+            }
+        }
+    }
     match holders.len() {
         0 => Err(default_err.unwrap_or_else(|| {
             crate::core::Error::Protocol(format!("no tmux server holds session {name}"))
@@ -376,6 +398,66 @@ pub(crate) fn snapshot_on_any_server(
                 on.join(", ")
             )))
         }
+    }
+}
+
+/// The driver on the one tmux server holding session `name`: the default
+/// server or a live workspace server (#10101).
+///
+/// Why: `tm attach` names a session, not a record, so it cannot read a stored
+/// socket; it must still never reach a same-named session on the wrong server.
+/// What: the default server when it alone holds `name`, or when no server
+/// does (its own "no session" error then reaches the caller); the one
+/// workspace server that holds it otherwise. Each workspace server is listed
+/// through [`crate::core::tmux_server::bounded_probe`]: within the probe
+/// budget, and not at all while an earlier listing of it is still blocked.
+///
+/// # Errors
+///
+/// Two or more servers hold `name`, or a server cannot be listed in time:
+/// the holder is unknown and no server is picked.
+///
+/// Test: `a_by_name_call_reaches_the_server_that_holds_the_session`,
+/// `a_by_name_call_refuses_a_name_on_two_servers`,
+/// `a_hung_workspace_server_holds_one_probe_and_refuses_the_call`.
+pub fn holder_of(driver: &TmuxDriver, socket_dir: &Path, name: &str) -> Result<TmuxDriver, String> {
+    use crate::core::tmux_server::{PROBE_BUDGET, bounded_probe, server_socket_path};
+    let servers = crate::core::tmux_server::live_workspace_servers(socket_dir)
+        .map_err(|e| format!("cannot list workspace tmux servers: {e}"))?;
+    let holds = |d: &TmuxDriver| -> Result<bool, String> {
+        let wanted = name.to_owned();
+        let listing = d.clone();
+        let list = move || {
+            listing
+                .list_sessions()
+                .map(|all| all.iter().any(|s| s.name == wanted))
+                .map_err(|e| e.to_string())
+        };
+        match d.server() {
+            None => list(),
+            // See #10101: a hung workspace server refuses, never blocks.
+            Some(server) => {
+                bounded_probe(&server_socket_path(socket_dir, server), PROBE_BUDGET, list)
+                    .unwrap_or_else(|| Err(format!("tmux server {server} did not answer in time")))
+            }
+        }
+    };
+    let mut holders = Vec::new();
+    if holds(driver)? {
+        holders.push(driver.clone());
+    }
+    for server in servers {
+        let named = driver.on_server(&server);
+        if holds(&named)? {
+            holders.push(named);
+        }
+    }
+    match holders.len() {
+        0 => Ok(driver.clone()),
+        1 => Ok(holders.remove(0)),
+        n => Err(format!(
+            "tmux session {name} is on {n} servers; refusing to pick one"
+        )),
     }
 }
 
@@ -786,3 +868,8 @@ mod tests {
 #[cfg(test)]
 #[path = "tmux_service_8928_tests.rs"]
 mod workspace_server_tests;
+
+// #10101: by-name calls reach the server that holds the session (fake tmux).
+#[cfg(test)]
+#[path = "tmux_service_holder_tests.rs"]
+mod holder_tests;

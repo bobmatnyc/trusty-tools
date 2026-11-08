@@ -140,11 +140,15 @@ impl SessionManager {
         Err(ManagedError::PaneGone(sid, stale))
     }
 
-    /// The process in the foreground of pane `pane_id`, from the manager's own
-    /// tmux driver (#9566).
+    /// The process in the foreground of `record`'s pane `pane_id`, read on
+    /// the record's own tmux server (#9566, #10101).
     /// Test: `a_stopped_record_whose_pane_runs_a_live_agent_is_never_reactivated_in_place`.
-    pub(crate) fn pane_foreground_command(&self, pane_id: &str) -> Result<String, ManagedError> {
-        self.tmux.pane_foreground_command(pane_id)
+    pub(crate) fn pane_foreground_command(
+        &self,
+        record: &SessionRecord,
+        pane_id: &str,
+    ) -> Result<String, ManagedError> {
+        super::tmux_route::route(self.tmux.as_ref(), record)?.pane_foreground_command(pane_id)
     }
 }
 

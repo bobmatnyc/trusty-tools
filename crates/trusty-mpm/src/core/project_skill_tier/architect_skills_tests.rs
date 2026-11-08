@@ -292,7 +292,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-completion-standard",
-            "5e8aac79b0d9b187a46418d0e9443188e439474b40fed535b71379ceeeb34374",
+            "b00cc7544daacb4a48d6b8335666f737cd20aab4211286160974b547fdf71403",
         ),
         (
             "architect-owner-model",
@@ -329,11 +329,10 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 9] = [
+    const FIRST_RELEASE: [&str; 8] = [
         "architect-tmux-ops",
         "architect-search-memory",
         "architect-github",
-        "architect-completion-standard",
         "architect-owner-model",
         "architect-drift-check",
         "architect-review",
