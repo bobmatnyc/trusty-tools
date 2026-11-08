@@ -15,6 +15,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A malformed `expires_at` on either tool is now an error even when the content would also trip a content gate; it no longer returns a "skipped" success envelope (#10643).
 - An HNSW operation abandoned at its budget is now counted before the store's breaker trips, so any reader that sees the breaker tripped also sees `abandoned_ops` at least 1. Before, a health read or test could catch the tripped breaker with a count of 0 (#10707).
 
+### Documentation
+
+- The ignored test `engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured` was not run in the 1.12.0 release gate. It exceeds 16 GB RSS and exhausts the gate host's memory ([#10802](https://github.com/bobmatnyc/trusty-tools/issues/10802)).
+  - The owner chose to ship without it (decision Dec, 2026-11-07).
+  - All other trusty-memory tests, including ignored ones, passed in the gate.
+
 ## [0.36.4] — 2026-10-31
 
 ### Changed
