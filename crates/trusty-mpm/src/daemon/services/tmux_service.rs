@@ -307,9 +307,13 @@ impl TmuxService {
         // #8286: a GUI session is a PM session, so it starts with the PM prompt
         // file. Written before the tmux host exists, so a refusal leaves no
         // session behind and the caller registers nothing.
-        let line = crate::daemon::spawn_command::gui_spawn_line(workdir, &std::env::temp_dir())
-            .map_err(|e| DaemonError::Internal(format!("{e:#}")))?;
+        let (line, profile) =
+            crate::daemon::spawn_command::gui_spawn_line(workdir, &std::env::temp_dir())
+                .map_err(|e| DaemonError::Internal(format!("{e:#}")))?;
 
+        // #8878: `-A` below attaches to a session already of this name; only a
+        // `claude` this spawn started in a session it created is bound.
+        let already_running = driver.pane_id(tmux_name).is_some();
         let workdir_str = workdir.to_string_lossy().into_owned();
         driver
             .create_session(tmux_name, Some(&workdir_str))
@@ -334,8 +338,45 @@ impl TmuxService {
                 "failed to launch claude in {tmux_name}: {e}"
             )));
         }
-
+        Self::bind_gui_spawn(&driver, tmux_name, workdir, profile, already_running);
         Ok(())
+    }
+
+    /// Bind an Architect `claude` the GUI spawn started (#8878).
+    ///
+    /// Why: a GUI-spawned Architect (#10459) wrote no launch record, so the
+    /// floor refused its anchor writes.
+    /// What: for a session this spawn created,
+    /// [`crate::runtime::architect_bind::bind_profile`] under the process home,
+    /// finding the `claude` under the session's pane shell on `driver`'s
+    /// server; a session that was already running is not re-bound. Not bound
+    /// is a warning in the daemon log.
+    /// Test: `every_architect_spawn_site_binds_8878`.
+    fn bind_gui_spawn(
+        driver: &TmuxDriver,
+        tmux_name: &str,
+        workdir: &Path,
+        profile: crate::core::session_profile::SessionProfile,
+        already_running: bool,
+    ) {
+        use crate::runtime::architect_bind::{
+            bind_profile, bind_reused, find_claude_with, home_root,
+        };
+        let architect = profile.is_architect();
+        let binding = if already_running {
+            bind_reused(architect)
+        } else {
+            bind_profile(
+                home_root().as_deref(),
+                architect,
+                workdir,
+                tmux_name,
+                || find_claude_with(|| driver.pane_pid(&driver.pane_id(tmux_name)?).ok()),
+            )
+        };
+        if let Some(warning) = binding.warning(tmux_name) {
+            tracing::warn!("{warning}");
+        }
     }
 
     /// Snapshot a session's pane output.

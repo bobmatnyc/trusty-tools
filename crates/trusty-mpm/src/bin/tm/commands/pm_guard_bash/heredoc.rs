@@ -263,6 +263,7 @@ impl HeredocBodies {
         let mut expanding = Vec::new();
         let mut bodies = Vec::new();
         let mut later: Option<LineIndex> = None;
+        let mut bodiless = false;
         let mut line = 0;
         while line < lines.len() {
             let (start, mut end) = lines[line];
@@ -288,13 +289,22 @@ impl HeredocBodies {
                     // #8878: only a line that opens a body; a line starting a
                     // multi-line `"…"` opens none, and abandoning there left a
                     // quoted body's `(` live (Architect `cat >> … <<'EOF'`).
-                    if !own.balanced && read.as_ref().is_some_and(|d| !d.is_empty()) {
+                    // #8878 critic: it passes only when every operator so far
+                    // opened a body and none sits at or after it, where its
+                    // own quotes could mask a real `<<`.
+                    let masks = bodiless || ops.last().is_some_and(|(at, _)| *at >= start);
+                    let opens = read.as_ref().is_some_and(|d| masks || !d.is_empty());
+                    if !own.balanced && opens {
                         return Err(Abandon::NoConfidence(Partial { expanding, bodies }));
                     }
                     read
                 }
             };
             let delimiters = delimiters.ok_or(Abandon::Delimiter)?;
+            // #8878 critic: an operator line that opened no body, or a `<<`
+            // whose body the guard cannot place.
+            bodiless |= delimiters.iter().any(|d| d.ambiguous)
+                || delimiters.is_empty() && ops.iter().any(|(at, _)| (start..end).contains(at));
             // #9180: a `#` can end the line's code before the continuation the
             // walk followed, and then the body starts a line earlier.
             if joined && !delimiters.is_empty() && has_comment_mark(command, (start, end), quotes) {

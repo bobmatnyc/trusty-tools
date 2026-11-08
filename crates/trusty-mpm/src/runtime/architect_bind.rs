@@ -1,24 +1,29 @@
-//! Bind every Architect `claude` a CLI launch starts (#8878, owner ruling
-//! 2026-11-08: the Architect is the operator's twin however tm launched it).
+//! Bind every Architect `claude` a tm launch starts in tmux (#8878, owner
+//! ruling 2026-11-08: the Architect is the operator's twin however tm
+//! launched it).
 //!
 //! Why: the trust-anchor floor admits only a `claude` with a launch record.
-//! `tm fleet init|relaunch` wrote one; `tm connect`, `tm launch`, `tm session
-//! start` and the daemon client's launch and connect start the same
-//! supervisor-profile `claude` from the same kind of spec and wrote none, so
-//! that Architect was refused its own anchor writes.
-//! What: [`crate::runtime::cli_launch::send_spec_launch`] — the one function
-//! that types a launch line into a pane — calls [`bind_live`] after the line is
-//! typed. A spec whose effective `TRUSTY_MPM_SESSION_PROFILE` is not the
-//! Architect's is [`Binding::NotArchitect`] and costs nothing. For an Architect
-//! spec the `claude` is found under the session's pane shell, never named by a
-//! caller, and recorded through
-//! [`crate::core::architect_session::bind_architect`], the one record writer
-//! the fleet path calls too. Every failure is a [`Binding`] the caller reports;
-//! none grants anything, since no record means the floor denies.
+//! `tm fleet init|relaunch` wrote one; the other paths that start the same
+//! supervisor-profile `claude` wrote none, so that Architect was refused its
+//! own anchor writes.
+//! What: every launch that stamps a profile binds an Architect it started:
+//! [`crate::runtime::cli_launch::send_spec_launch`] (`tm connect`, `tm
+//! launch`, `tm session start`, the daemon client) calls [`bind_live`]; the
+//! daemon's managed spawn and resume bind in `managed_launch::deliver_in`;
+//! the GUI spawn binds in `TmuxService::spawn_claude`; `tm fleet` binds
+//! through [`crate::core::architect_session::bind_architect`], the one record
+//! writer every path reaches. A non-Architect launch is
+//! [`Binding::NotArchitect`] and costs nothing. The `claude` is found under
+//! the session's pane shell, never named by a caller. A session that was
+//! already running is not re-bound ([`Binding::NotStarted`]); re-binding a
+//! running Architect is #8878 PR2. The bare-`tm` in-place relaunch refuses a
+//! supervisor session before it execs (#9092). [`DEFERRED`] names the one
+//! path that does not bind yet. Every failure is a [`Binding`] the caller
+//! reports; none grants anything, since no record means the floor denies.
 //! Test: `architect_bind_tests.rs`.
 
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::core::architect_compat::is_architect_stamp;
@@ -34,6 +39,16 @@ const FIND_ATTEMPTS: u8 = 20;
 /// The pause between two looks for the `claude`.
 const FIND_DELAY: Duration = Duration::from_millis(500);
 
+/// The launch paths that can start an Architect `claude` and do not bind it
+/// yet, with why; the module doc, the changelog and
+/// `every_architect_spawn_site_binds_8878` name the same list.
+pub const DEFERRED: &[(&str, &str)] = &[(
+    "tm run (core/standalone/run.rs)",
+    "it runs `claude` as a direct child in no tmux session, and a launch record \
+     carries the session-name sidecar the #8902 pane guard and `tm fleet status` \
+     read; a session-less record is #8878 PR2",
+)];
+
 /// What binding a launched `claude` as the Architect came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -46,6 +61,8 @@ pub enum Binding {
     NoClaude(String),
     /// A `claude` was found but its record did not land or read back.
     NotRecorded(String),
+    /// The session was already running, so its `claude` is not re-bound.
+    NotStarted,
 }
 
 impl Binding {
@@ -55,7 +72,8 @@ impl Binding {
     pub fn warning(&self, session: &str) -> Option<String> {
         let why = match self {
             Self::NotArchitect | Self::Bound(_) => return None,
-            Self::NoClaude(why) | Self::NotRecorded(why) => why,
+            Self::NoClaude(why) | Self::NotRecorded(why) => why.as_str(),
+            Self::NotStarted => "the session was already running",
         };
         Some(format!(
             "warning: the Architect `claude` in tmux session {session} is NOT bound ({why}); \
@@ -78,22 +96,50 @@ pub fn spec_is_architect(spec: &LaunchSpec) -> bool {
     is_architect_stamp(stamp)
 }
 
-/// Bind the `claude` `find` locates for an Architect `spec` started in
-/// `session`, under `root` (`~/.trusty-mpm`).
+/// [`bind_profile`] for a launch `spec`: its last stamp and its `cwd`.
 ///
-/// Why/What: see the module doc. `root` `None` (no home) is
-/// [`Binding::NotRecorded`]; `find` runs only for an Architect spec. The
-/// record's project is the spec's `cwd`, the directory the hook later reads
-/// as `CLAUDE_PROJECT_DIR`.
-/// Test: `only_an_architect_stamped_spec_is_bound`,
-/// `an_architect_spec_with_no_claude_or_no_home_is_unbound`.
+/// Test: `only_an_architect_stamped_spec_is_bound`.
 pub fn bind_launch(
     root: Option<&Path>,
     spec: &LaunchSpec,
     session: &str,
     find: impl FnOnce() -> Option<u32>,
 ) -> Binding {
-    if !spec_is_architect(spec) {
+    bind_profile(root, spec_is_architect(spec), &spec.cwd, session, find)
+}
+
+/// What a launch into a session that was already running binds: nothing.
+///
+/// Why: only a `claude` this command started may be recorded; the pane's
+/// `claude` may be one it found there (#8878 critic). Re-binding a running
+/// Architect is #8878 PR2.
+/// Test: `a_reused_session_binds_nothing_8878`.
+pub fn bind_reused(architect: bool) -> Binding {
+    if architect {
+        Binding::NotStarted
+    } else {
+        Binding::NotArchitect
+    }
+}
+
+/// Bind the `claude` `find` locates for a launch started in `session` in
+/// `project`, under `root` (`~/.trusty-mpm`), when `architect` says the launch
+/// carries the Architect stamp.
+///
+/// Why/What: see the module doc. `root` `None` (no home) is
+/// [`Binding::NotRecorded`]; `find` runs only for an Architect launch. The
+/// record's project is the directory the hook later reads as
+/// `CLAUDE_PROJECT_DIR`.
+/// Test: `only_an_architect_stamped_spec_is_bound`,
+/// `an_architect_spec_with_no_claude_or_no_home_is_unbound`.
+pub fn bind_profile(
+    root: Option<&Path>,
+    architect: bool,
+    project: &Path,
+    session: &str,
+    find: impl FnOnce() -> Option<u32>,
+) -> Binding {
+    if !architect {
         return Binding::NotArchitect;
     }
     let Some(root) = root else {
@@ -104,7 +150,7 @@ pub fn bind_launch(
             "no `claude` process appeared in {session} within 10 s"
         ));
     };
-    match bind_architect(root, pid, &spec.cwd, session) {
+    match bind_architect(root, pid, project, session) {
         Ok(record) => Binding::Bound(record),
         Err(why) => Binding::NotRecorded(why),
     }
@@ -114,12 +160,33 @@ pub fn bind_launch(
 /// the pm-guard hook reads) and the `claude` under `session`'s pane shell on
 /// tmux `server`.
 pub fn bind_live(server: Option<&str>, session: &str, spec: &LaunchSpec) -> Binding {
-    let root = dirs::home_dir()
-        .filter(|home| home.is_absolute())
-        .map(|home| home.join(".trusty-mpm"));
-    bind_launch(root.as_deref(), spec, session, || {
+    bind_launch(home_root().as_deref(), spec, session, || {
         crate::core::process::find_claude_pid_in_tmux_on(server, session, FIND_ATTEMPTS, FIND_DELAY)
     })
+}
+
+/// The process home's `~/.trusty-mpm`, the root the pm-guard hook reads.
+pub fn home_root() -> Option<PathBuf> {
+    dirs::home_dir()
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".trusty-mpm"))
+}
+
+/// The `claude` under the pane shell `shell_pid` reads, retried as
+/// [`bind_live`] retries; `None` at once when no shell PID reads (no pane).
+///
+/// Why: the daemon paths read the pane through their own tmux driver.
+/// Test: `the_daemon_delivery_binds_an_architect_spec_8878`.
+pub fn find_claude_with(mut shell_pid: impl FnMut() -> Option<u32>) -> Option<u32> {
+    for attempt in 0..FIND_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(FIND_DELAY);
+        }
+        if let Some(pid) = crate::core::process::claude_child_of(shell_pid()?) {
+            return Some(pid);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

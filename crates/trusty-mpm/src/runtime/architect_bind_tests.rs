@@ -143,7 +143,7 @@ fn bind_architect_writes_a_record_the_identity_check_accepts() {
 }
 
 /// Production source of this crate: `(path relative to src, text)`, with test
-/// files skipped and an inline `mod tests` cut off.
+/// files skipped and every top-level inline `#[cfg(test)] mod … { … }` cut.
 fn production_sources() -> Vec<(String, String)> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read src dir") {
@@ -166,13 +166,42 @@ fn production_sources() -> Vec<(String, String)> {
             if name == "tests.rs" || name.ends_with("_tests.rs") || rel.contains("/tests/") {
                 return None;
             }
-            let text = std::fs::read_to_string(&path).ok()?;
-            let cut = text
-                .find("\n#[cfg(test)]\nmod tests {")
-                .unwrap_or(text.len());
-            Some((rel, text[..cut].to_owned()))
+            Some((
+                rel,
+                without_test_mods(&std::fs::read_to_string(&path).ok()?),
+            ))
         })
         .collect()
+}
+
+/// `text` with each top-level `#[cfg(test)] mod <name> {` block removed.
+fn without_test_mods(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("\n#[cfg(test)]\nmod ") {
+        let head = &rest[at + 1..];
+        let opens = head.lines().nth(1).is_some_and(|l| l.ends_with(" {"));
+        let Some(close) = head.find("\n}\n").filter(|_| opens) else {
+            out.push_str(&rest[..at + 1]);
+            rest = head;
+            continue;
+        };
+        out.push_str(&rest[..at + 1]);
+        rest = &head[close + 3..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether `line` calls `needle` as a whole name (`launch_env(` is not a call
+/// in `pinned_relaunch_env(`).
+fn calls(line: &str, needle: &str) -> bool {
+    line.match_indices(needle).any(|(at, _)| {
+        !line[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
 }
 
 /// The production files whose code (comments skipped) calls `needle`.
@@ -182,24 +211,133 @@ fn callers(sources: &[(String, String)], needle: &str) -> Vec<String> {
         .filter(|(_, text)| {
             text.lines().any(|line| {
                 let line = line.trim_start();
-                !line.starts_with("//") && line.contains(needle) && !line.contains("fn ")
+                !line.starts_with("//") && calls(line, needle) && !line.contains("fn ")
             })
         })
         .map(|(rel, _)| rel.clone())
         .collect()
 }
 
-/// #8878: no tm path starts an Architect `claude` without binding it. Every
-/// pane launch is typed by `send_spec_launch` (the only caller of the line
-/// typer), which binds an Architect spec; only the fleet path skips that, and
-/// it binds through `bind_architect`, the one place a launch record is written.
+/// Whether `text`'s code (comment lines skipped) contains `needle`.
+fn code_has(text: &str, needle: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with("//") && line.contains(needle)
+    })
+}
+
+/// How a production file that stamps or builds a launch profile treats an
+/// Architect `claude` it could start.
+enum Site {
+    /// Binds it: its code calls this bind (or a function that binds).
+    Binds(&'static str),
+    /// Builds the stamp for the callers of this function, each listed too.
+    Builds(&'static str),
+    /// Refuses a supervisor session before it starts one (#9092).
+    Refuses(&'static str),
+    /// Does not bind yet; named in [`DEFERRED`].
+    Deferred,
+    /// Starts no `claude`: defines the stamp, or a doctor probe line.
+    NoLaunch,
+}
+
+/// The calls that put a profile stamp on a launch, or carry one to a launch.
+const STAMP_NEEDLES: &[&str] = &[
+    "launch_env(",
+    "\"TRUSTY_MPM_SESSION_PROFILE\"",
+    "cli_launch(",
+    "gui_spawn_line(",
+    "spawn_spec(",
+    "relaunch_spec(",
+];
+
+/// Every production file a [`STAMP_NEEDLES`] call sits in, and its [`Site`].
+const SITES: &[(&str, Site)] = &[
+    ("core/session_profile.rs", Site::NoLaunch),
+    ("daemon/doctor_transcript_saving.rs", Site::NoLaunch),
+    (
+        "core/session_launch/system_prompt.rs",
+        Site::Builds("cli_launch("),
+    ),
+    ("daemon/spawn_command.rs", Site::Builds("gui_spawn_line(")),
+    ("runtime/managed_launch.rs", Site::Binds("bind_delivered(")),
+    (
+        "runtime/claude_code.rs",
+        Site::Binds("managed_launch::deliver_in("),
+    ),
+    (
+        "daemon/services/tmux_service.rs",
+        Site::Binds("bind_profile("),
+    ),
+    (
+        "bin/tm/commands/launch.rs",
+        Site::Binds("send_spec_launch("),
+    ),
+    (
+        "bin/tm/commands/session/start.rs",
+        Site::Binds("send_spec_launch("),
+    ),
+    (
+        "bin/tm/commands/fleet/launch.rs",
+        Site::Binds("bind_architect("),
+    ),
+    (
+        "bin/tm/commands/guided_inplace.rs",
+        Site::Refuses("guided_supervisor_guard::refusal("),
+    ),
+    ("core/standalone/run.rs", Site::Deferred),
+];
+
+/// #8878: no tm path starts an Architect `claude` without binding it, unless
+/// it refuses a supervisor session or is named in [`DEFERRED`]. Every file
+/// that stamps a profile (or builds or carries a stamped launch) is listed in
+/// [`SITES`], so a new stamp site fails here until it is bound or deferred.
+/// The pane line typer is reached only through `send_spec_launch`, which
+/// binds, and the unbound form only from the fleet path (which binds through
+/// `bind_architect`) and a start into a session that was already running.
 #[test]
 fn every_architect_spawn_site_binds_8878() {
     let sources = production_sources();
-    let only = |needle: &str, allowed: &[&str]| {
-        let found = callers(&sources, needle);
-        let stray: Vec<_> = found
+    let text = |rel: &str| {
+        sources
             .iter()
+            .find(|(r, _)| r == rel)
+            .map(|(_, t)| t.clone())
+            .unwrap_or_else(|| panic!("{rel} missing"))
+    };
+    let mut found: Vec<String> = STAMP_NEEDLES
+        .iter()
+        .flat_map(|needle| callers(&sources, needle))
+        .collect();
+    found.sort();
+    found.dedup();
+    let mut listed: Vec<String> = SITES.iter().map(|(rel, _)| (*rel).to_owned()).collect();
+    listed.sort();
+    assert_eq!(found, listed, "a profile stamp site is unlisted or gone");
+    let mut deferred = Vec::new();
+    for (rel, site) in SITES {
+        let code = text(rel);
+        match site {
+            Site::Binds(call) | Site::Refuses(call) => {
+                assert!(code_has(&code, call), "{rel} does not call {call}");
+            }
+            Site::Builds(call) => assert!(STAMP_NEEDLES.contains(call), "{call} unscanned"),
+            Site::Deferred => deferred.push(*rel),
+            Site::NoLaunch => {}
+        }
+    }
+    for rel in &deferred {
+        assert!(DEFERRED.iter().any(|(path, _)| path.contains(rel)), "{rel}");
+    }
+    assert_eq!(
+        deferred.len(),
+        DEFERRED.len(),
+        "DEFERRED names a bound path"
+    );
+
+    let only = |needle: &str, allowed: &[&str]| {
+        let stray: Vec<_> = callers(&sources, needle)
+            .into_iter()
             .filter(|f| !allowed.contains(&f.as_str()))
             .collect();
         assert!(
@@ -211,33 +349,67 @@ fn every_architect_spawn_site_binds_8878() {
     only("send_spec_launch_with(", &["runtime/cli_launch.rs"]);
     only(
         "send_spec_launch_unbound(",
-        &["runtime/cli_launch.rs", "bin/tm/commands/fleet/launch.rs"],
+        &[
+            "runtime/cli_launch.rs",
+            "bin/tm/commands/fleet/launch.rs",
+            "bin/tm/commands/session/start.rs",
+        ],
     );
+    only("deliver_in(", &["runtime/claude_code.rs"]);
     only("record_launch(", &["core/architect_session.rs"]);
     only("record_architect(", &[]);
     only(
         "ARCHITECT_RECORDS.record_claude(",
         &["core/architect_session.rs", "core/architect_launch.rs"],
     );
-    let text = |rel: &str| {
-        sources
-            .iter()
-            .find(|(r, _)| r == rel)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_else(|| panic!("{rel} missing"))
+    let body = |rel: &str, head: &str| {
+        text(rel)
+            .split(head)
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next().map(str::to_owned))
+            .unwrap_or_else(|| panic!("{head} in {rel}"))
     };
-    let cli = text("runtime/cli_launch.rs");
-    let body = cli
-        .split("pub fn send_spec_launch(")
-        .nth(1)
-        .and_then(|rest| rest.split("\n}\n").next())
-        .expect("send_spec_launch body");
+    let typer = body("runtime/cli_launch.rs", "pub fn send_spec_launch(");
     assert!(
-        body.contains("bind_live("),
+        typer.contains("bind_live("),
         "send_spec_launch does not bind"
     );
+    let deliver = body("runtime/managed_launch.rs", "fn deliver_in(");
     assert!(
-        text("bin/tm/commands/fleet/launch.rs").contains("bind_architect("),
-        "the fleet launch path does not bind through bind_architect"
+        deliver.contains("bind_delivered("),
+        "deliver_in does not bind"
     );
+}
+
+/// #8878 critic: a start into a session that was already running sends the
+/// launch unbound and records nothing, as `tm connect` starts nothing there;
+/// the GUI spawn does the same for a session it attached to.
+#[test]
+fn a_reused_session_binds_nothing_8878() {
+    assert_eq!(bind_reused(false), Binding::NotArchitect);
+    let reused = bind_reused(true);
+    assert_eq!(reused, Binding::NotStarted);
+    let warn = reused.warning("tm-a").expect("warns");
+    assert!(warn.contains("already running"), "{warn}");
+    let sources = production_sources();
+    let start = &sources
+        .iter()
+        .find(|(rel, _)| rel == "bin/tm/commands/session/start.rs")
+        .expect("start.rs")
+        .1;
+    let reused_arm = start
+        .split("let sent = if already_running {")
+        .nth(1)
+        .and_then(|rest| rest.split("} else {").next())
+        .expect("start binds by already_running");
+    assert!(
+        reused_arm.contains("send_spec_launch_unbound(") && reused_arm.contains("bind_reused("),
+        "{reused_arm}"
+    );
+    let gui = &sources
+        .iter()
+        .find(|(rel, _)| rel == "daemon/services/tmux_service.rs")
+        .expect("tmux_service.rs")
+        .1;
+    assert!(gui.contains("if already_running {\n            bind_reused(architect)"));
 }

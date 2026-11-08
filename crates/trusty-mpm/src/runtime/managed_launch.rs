@@ -393,8 +393,10 @@ fn abort_notice(session_id: &str) -> String {
 /// the half of the handshake that proves the SHELL, not just tmux, took the
 /// line. On any failure it types [`abort_notice`] (best-effort — a pane that
 /// cannot be typed into cannot be told either), removes the spec it wrote so no
-/// credential is left on disk, and returns the error.
+/// credential is left on disk, and returns the error. #8878: a delivered
+/// Architect spec is then bound (`bind_delivered`).
 /// Test: `deliver_types_a_short_line_and_leaves_a_readable_spec`,
+/// `the_daemon_delivery_binds_an_architect_spec_8878`,
 /// `deliver_announces_a_refused_line_in_the_pane`,
 /// `deliver_errors_and_cleans_up_when_the_spec_dir_is_unwritable`,
 /// `deliver_resets_the_pane_before_typing` — the wedged-pane handshake, and
@@ -414,7 +416,10 @@ pub(super) fn deliver_in(
     spec_dir: &Path,
 ) -> Result<(), super::RuntimeError> {
     match deliver_inner(tmux, tmux_name, pane_id, spec, spec_dir) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            bind_delivered(tmux, tmux_name, pane_id, spec);
+            Ok(())
+        }
         Err(err) => {
             // Best-effort: this notice is short by construction, so the only way
             // it fails is a pane that is gone — in which case the error below is
@@ -422,6 +427,37 @@ pub(super) fn deliver_in(
             let _ = tmux.send_command_line(tmux_name, pane_id, &abort_notice(&spec.session_id));
             Err(err)
         }
+    }
+}
+
+/// Bind an Architect `claude` the daemon's spawn or resume just typed (#8878).
+///
+/// Why: the daemon's managed spawn and resume start an Architect from a
+/// stamped spec as the CLI paths do, and wrote no launch record.
+/// What: [`super::architect_bind::bind_launch`] under the process home,
+/// finding the `claude` under the launched pane's shell through `tmux` (the
+/// driver that typed the line, so the same server). Deliver already
+/// confirmed that pane was at a shell prompt, so the `claude` is the one it
+/// started. Not bound is a warning in the daemon log; the launch stands and
+/// the floor denies.
+/// Test: `the_daemon_delivery_binds_an_architect_spec_8878`.
+fn bind_delivered(
+    tmux: &dyn crate::session_manager::ManagedTmuxDriver,
+    tmux_name: &str,
+    pane_id: Option<&str>,
+    spec: &LaunchSpec,
+) {
+    use super::architect_bind::{bind_launch, find_claude_with, home_root};
+    let binding = bind_launch(home_root().as_deref(), spec, tmux_name, || {
+        find_claude_with(|| {
+            let pane = pane_id
+                .map(str::to_owned)
+                .or_else(|| tmux.get_pane_id(tmux_name))?;
+            tmux.pane_pid(&pane)
+        })
+    });
+    if let Some(warning) = binding.warning(tmux_name) {
+        tracing::warn!("{warning}");
     }
 }
 

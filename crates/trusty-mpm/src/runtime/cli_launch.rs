@@ -280,9 +280,10 @@ pub fn send_spec_launch(
     Ok(super::architect_bind::bind_live(server, session, spec))
 }
 
-/// [`send_spec_launch`] without the bind, for `tm fleet init|relaunch` only:
-/// that path binds through `architect_session::bind_architect` under its own
-/// home and stops an Architect it cannot bind (#8878, #10448).
+/// [`send_spec_launch`] without the bind, for `tm fleet init|relaunch` — which
+/// binds through `architect_session::bind_architect` under its own home and
+/// stops an Architect it cannot bind (#8878, #10448) — and for `tm session
+/// start` into a session that was already running, which binds nothing.
 /// Test: `every_architect_spawn_site_binds_8878`.
 pub fn send_spec_launch_unbound(
     server: Option<&str>,

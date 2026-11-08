@@ -402,12 +402,27 @@ async fn start_session_in_place(
     // `transcript_saving` doctor check.
     // #8286: `spec` carries the prompt `inplace_prompt_file` wrote above.
     let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
-    let sent = trusty_mpm::runtime::cli_launch::send_spec_launch(
-        host.server(),
-        &body.name,
-        &spec,
-        &spec_dir,
-    );
+    // #8878: only a session this start created is bound; the `claude` in one
+    // that was already running may not be the one it started (as `connect`).
+    let sent = if already_running {
+        trusty_mpm::runtime::cli_launch::send_spec_launch_unbound(
+            host.server(),
+            &body.name,
+            &spec,
+            &spec_dir,
+        )
+        .map(|()| {
+            let architect = trusty_mpm::runtime::architect_bind::spec_is_architect(&spec);
+            trusty_mpm::runtime::architect_bind::bind_reused(architect)
+        })
+    } else {
+        trusty_mpm::runtime::cli_launch::send_spec_launch(
+            host.server(),
+            &body.name,
+            &spec,
+            &spec_dir,
+        )
+    };
     // #8878: an Architect `claude` the start could not bind is reported.
     if let Ok(binding) = &sent
         && let Some(warning) = binding.warning(&body.name)
