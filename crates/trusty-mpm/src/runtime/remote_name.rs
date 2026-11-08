@@ -103,10 +103,26 @@ pub fn remote_name_drifts(
     claude_pid: impl Fn(&str) -> Option<u32>,
     registry: impl FnOnce() -> Result<String, String>,
 ) -> Result<Vec<RemoteNameDrift>, String> {
-    let running: Vec<(&String, u32)> = sessions
+    let running: Vec<(String, u32)> = sessions
         .iter()
-        .filter_map(|s| claude_pid(s).map(|pid| (s, pid)))
+        .filter_map(|s| claude_pid(s).map(|pid| (s.clone(), pid)))
         .collect();
+    remote_name_drifts_of(running, registry)
+}
+
+/// [`remote_name_drifts`] over already-resolved `(session, claude pid)`
+/// pairs (#10101: a caller whose sessions share a name across tmux servers
+/// resolves each pid itself, so no name maps back to the wrong server).
+///
+/// # Errors
+///
+/// As [`remote_name_drifts`].
+/// Test: `same_named_records_are_probed_on_their_own_servers`,
+/// `a_renamed_tmux_session_is_a_remote_name_drift`.
+pub fn remote_name_drifts_of(
+    running: Vec<(String, u32)>,
+    registry: impl FnOnce() -> Result<String, String>,
+) -> Result<Vec<RemoteNameDrift>, String> {
     if running.is_empty() {
         return Ok(Vec::new());
     }
@@ -120,8 +136,8 @@ pub fn remote_name_drifts(
         .into_iter()
         .filter_map(|(session, pid)| {
             let remote = by_pid.get(&pid)?;
-            (remote != session).then(|| RemoteNameDrift {
-                session: session.clone(),
+            (*remote != session).then(|| RemoteNameDrift {
+                session,
                 pid,
                 remote: remote.clone(),
             })

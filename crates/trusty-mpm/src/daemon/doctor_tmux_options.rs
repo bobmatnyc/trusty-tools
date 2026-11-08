@@ -259,8 +259,8 @@ pub(super) fn tmux_options_row(
                 CHECK_NAME,
                 CheckStatus::Unknown,
                 format!(
-                    "tmux server '{server}' did not answer within {}s; its options were not \
-                     checked",
+                    "tmux server '{server}' did not answer within {}s or is already being \
+                     probed; its options were not checked",
                     budget.as_secs_f32()
                 ),
             ),

@@ -46,36 +46,29 @@ pub(crate) const NAME: &str = "session_names";
 /// Test: `the_doctor_row_flags_a_live_pane_under_another_name`,
 /// `a_pane_the_probe_could_not_read_is_reported_unchecked`,
 /// `the_doctor_probes_each_record_on_its_own_server`,
+/// `same_named_records_are_probed_on_their_own_servers`,
 /// `a_hung_workspace_server_bounds_the_doctor_row_and_reads_unknown`.
 pub(crate) async fn check_session_names(mgr: &SessionManager) -> DoctorCheck {
     let drifts = mgr.name_drifts().await;
     let sessions = managed_sessions(mgr, drifts.as_deref().unwrap_or_default()).await;
-    let names: Vec<String> = sessions.iter().map(|(name, _)| name.clone()).collect();
     let tmux = mgr.tmux.clone();
     // #9025: the name each managed `claude` shows peers. A pane whose
     // `pane_claude` answer is neither Present nor Absent is collected, not
     // skipped, so the row can say it was not checked.
     let (remote, unchecked) = tokio::task::spawn_blocking(move || {
-        let unchecked = std::cell::RefCell::new(Vec::new());
-        let remote = remote_name::remote_name_drifts(
-            &names,
-            |s| {
-                // #10101: the record's own server, never the default one.
-                let socket = sessions
-                    .iter()
-                    .find(|(name, _)| name == s)
-                    .and_then(|(_, socket)| socket.as_deref());
-                match claude_pid_on_own_server(tmux.as_ref(), s, socket, PROBE_BUDGET) {
-                    Ok(pid) => pid,
-                    Err(entry) => {
-                        unchecked.borrow_mut().push(entry);
-                        None
-                    }
-                }
-            },
-            remote_name::read_registry,
-        );
-        (remote, unchecked.into_inner())
+        let mut unchecked = Vec::new();
+        // #10101: each record on its own socket, so two records sharing a
+        // name on different servers are each probed on their own server.
+        let mut running = Vec::new();
+        for (name, socket) in &sessions {
+            match claude_pid_on_own_server(tmux.as_ref(), name, socket.as_deref(), PROBE_BUDGET) {
+                Ok(Some(pid)) => running.push((name.clone(), pid)),
+                Ok(None) => {}
+                Err(entry) => unchecked.push(entry),
+            }
+        }
+        let remote = remote_name::remote_name_drifts_of(running, remote_name::read_registry);
+        (remote, unchecked)
     })
     .await
     .unwrap_or_else(|e| {
@@ -165,7 +158,7 @@ pub(crate) fn claude_pid_on_own_server(
         Some(Ok(pid)) => Ok(pid),
         Some(Err(())) => Err(format!("{name} (on tmux server '{server}')")),
         None => Err(format!(
-            "{name} (tmux server '{server}' did not answer within {}s)",
+            "{name} (tmux server '{server}' did not answer within {}s or is already being probed)",
             budget.as_secs_f32()
         )),
     }

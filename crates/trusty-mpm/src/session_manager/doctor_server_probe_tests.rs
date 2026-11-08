@@ -154,3 +154,34 @@ async fn a_hung_workspace_server_bounds_the_doctor_row_and_reads_unknown() {
         .count();
     assert_eq!(on_server, 1, "the hung server was probed again");
 }
+
+/// #10101 fix round: two live records share a tmux name on different
+/// workspace servers. Each is probed on its own server. Red on d5795b2690,
+/// which mapped the name back to the first record's socket and probed that
+/// server twice.
+#[tokio::test]
+async fn same_named_records_are_probed_on_their_own_servers() {
+    let (tmux, calls) = ServerTmux::new(None);
+    let (_dir, mgr) = manager(
+        tmux,
+        &[
+            ("tm-twin", Some(PathBuf::from("/s/tm-ws-10101d-twin-a"))),
+            ("tm-twin", Some(PathBuf::from("/s/tm-ws-10101d-twin-b"))),
+        ],
+    )
+    .await;
+
+    let row = check_session_names(&mgr).await;
+
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    let mut seen = calls.lock().expect("calls").clone();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            (Some("tm-ws-10101d-twin-a".to_owned()), "tm-twin".to_owned()),
+            (Some("tm-ws-10101d-twin-b".to_owned()), "tm-twin".to_owned()),
+        ],
+        "each same-named record must be probed on its own server"
+    );
+}
