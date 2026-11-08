@@ -555,6 +555,27 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Return all live tmux session names on the host.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError>;
 
+    /// This driver aimed at the named (`-L`) tmux server `server` (#10101).
+    ///
+    /// Why: a record on a workspace server is reachable only through it, and
+    /// the default server may hold a same-named session that is not its own.
+    /// What: the default is `None` — a driver that cannot reach a named
+    /// server says so, and `tmux_route::route` refuses rather than fall back
+    /// to this driver. `RealTmuxDriver` answers a driver on that server.
+    /// Test: `a_driver_that_cannot_reach_a_named_server_refuses`.
+    fn on_server(&self, _server: &str) -> Option<std::sync::Arc<dyn ManagedTmuxDriver>> {
+        None
+    }
+
+    /// The workspace servers that answer on this host, by name (#10101).
+    ///
+    /// What: the default is none, for drivers that see only one server;
+    /// `RealTmuxDriver` lists the live `tm-ws-*` sockets.
+    /// Test: `live_sessions_list_every_workspace_server`.
+    fn workspace_servers(&self) -> Result<Vec<String>, ManagedError> {
+        Ok(Vec::new())
+    }
+
     /// Whether a tmux session with this name currently exists, keeping
     /// "confirmed absent" and "could not tell" apart (#5859).
     ///

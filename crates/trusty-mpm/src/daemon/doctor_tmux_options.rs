@@ -142,11 +142,13 @@ pub(super) fn build_tmux_options_check(
 /// What: `show-options -g -v mouse`, mapping `on`/`off`. Anything else is
 /// `None`: a value tmux does not document must not be guessed at, because a
 /// wrong guess here reports agreement that was never observed.
+/// #10101: on `server` (`None` for the default one).
 /// Test: covered through `check_tmux_options`; the parse branches are the same
 /// two `core::tmux::probe_alternate_screen` pins.
-fn probe_mouse(bin: &str) -> Option<bool> {
-    let output = crate::core::tmux::run_tmux_with_bin(
+fn probe_mouse(bin: &str, server: Option<&str>) -> Option<bool> {
+    let output = crate::core::tmux::run_tmux_on(
         bin,
+        server,
         &crate::core::tmux::TmuxCommand::ShowGlobalOption {
             name: crate::core::tmux::MOUSE_OPTION.to_string(),
         },
@@ -162,31 +164,95 @@ fn probe_mouse(bin: &str) -> Option<bool> {
     }
 }
 
-/// Probe the live tmux server and compare it against the configured spec.
+/// The three option probes against one server (#10101: `None` is the
+/// default server).
+fn observe_server(bin: &str, server: Option<&str>) -> ObservedTmuxOptions {
+    ObservedTmuxOptions {
+        history_limit: crate::core::tmux::probe_history_limit(bin, server).ok(),
+        mouse: probe_mouse(bin, server),
+        alternate_screen: crate::core::tmux::probe_alternate_screen(bin, server).ok(),
+    }
+}
+
+/// Fold one check per tmux server into the one row the doctor shows (#10101).
+///
+/// Why: a PM on a workspace server gets that server's globals, not the
+/// default server's, so the default server's row says nothing about it.
+/// What: the default server's check alone is returned unchanged, so a host
+/// with no workspace server reports exactly as before. Otherwise the worst
+/// status, and one `<server>: <message>` clause per server.
+/// Test: `one_server_reports_unchanged`, `a_workspace_server_is_reported_by_name`.
+pub(super) fn fold_server_checks(mut checks: Vec<(String, DoctorCheck)>) -> DoctorCheck {
+    if checks.len() == 1 {
+        return checks.remove(0).1;
+    }
+    let status = checks
+        .iter()
+        .fold(CheckStatus::Ok, |worst, (_, c)| worst.worst(c.status));
+    let message = checks
+        .iter()
+        .map(|(server, c)| format!("{server}: {}", c.message))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    DoctorCheck::new(CHECK_NAME, status, message)
+}
+
+/// Probe each live tmux server and compare it against the configured spec.
 ///
 /// Why: the one entry point `run_doctor` calls.
 /// What: resolves the tmux binary, runs the three read-only `show-options`
-/// probes, and hands them to [`build_tmux_options_check`] alongside the
-/// `tmux:` section of `TrustyToolsConfig`. Read-only — it never sets an
-/// option and never starts a server, so a quiet host stays quiet and reports
-/// `Unknown`.
-/// Test: the decision is covered by `build_tmux_options_check`'s tests; this
-/// wrapper is process execution.
+/// probes on the default server and (#10101) on every live workspace server,
+/// decides each with [`build_tmux_options_check`] against the `tmux:` section
+/// of `TrustyToolsConfig`, and folds them with [`fold_server_checks`].
+/// Read-only — it never sets an option and never starts a server, so a quiet
+/// host stays quiet and reports `Unknown`.
+/// Test: the decision is covered by `build_tmux_options_check`'s and
+/// `fold_server_checks`'s tests; this wrapper is process execution.
 pub(super) fn check_tmux_options() -> DoctorCheck {
     let bin = crate::core::tmux::resolve_tmux_binary_or_bare();
-    let observed = ObservedTmuxOptions {
-        history_limit: crate::core::tmux::probe_history_limit(&bin, None).ok(),
-        mouse: probe_mouse(&bin),
-        alternate_screen: crate::core::tmux::probe_alternate_screen(&bin, None).ok(),
-    };
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let expected = crate::core::trusty_tools_config::resolve_tmux_options(&config);
-    build_tmux_options_check(observed, &expected)
+    let socket_dir = crate::core::tmux_server::ambient_socket_dir();
+    // An unreadable socket directory adds no servers; the default row stands.
+    let servers = crate::core::tmux_server::live_workspace_servers(&socket_dir).unwrap_or_default();
+    let mut checks = vec![(
+        "default server".to_owned(),
+        build_tmux_options_check(observe_server(&bin, None), &expected),
+    )];
+    checks.extend(servers.into_iter().map(|server| {
+        let check = build_tmux_options_check(observe_server(&bin, Some(&server)), &expected);
+        (server, check)
+    }));
+    fold_server_checks(checks)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_server_reports_unchanged() {
+        let only = DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, "fine");
+        let folded = fold_server_checks(vec![("default server".into(), only.clone())]);
+        assert_eq!(folded.message, only.message);
+        assert_eq!(folded.status, only.status);
+    }
+
+    #[test]
+    fn a_workspace_server_is_reported_by_name() {
+        let folded = fold_server_checks(vec![
+            (
+                "default server".into(),
+                DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, "fine"),
+            ),
+            (
+                "tm-ws-x".into(),
+                DoctorCheck::new(CHECK_NAME, CheckStatus::Warn, "drifted"),
+            ),
+        ]);
+        assert_eq!(folded.status, CheckStatus::Warn);
+        assert_eq!(folded.message, "default server: fine | tm-ws-x: drifted");
+    }
 
     /// The spec these tests compare against — tm's shipped defaults.
     fn spec() -> ResolvedTmuxOptions {

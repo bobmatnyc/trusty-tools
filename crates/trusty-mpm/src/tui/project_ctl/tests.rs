@@ -123,7 +123,7 @@ fn seeded_state_renders_live_project_and_its_session() {
         .iter()
         .find(|r| r.id.project_name() == Some("trusty-tools"))
         .expect("the project row");
-    let text: String = tree::row_line(&state, row)
+    let text: String = tree::row_line(row)
         .spans
         .iter()
         .map(|s| s.content.as_ref())
@@ -154,14 +154,15 @@ fn seeded_state_renders_live_project_and_its_session() {
 #[test]
 fn expanding_then_killing_an_active_session_requires_confirmation() {
     // The seeded session is "active", so DOC-35 §5.2's confirm gate applies:
-    // `k` alone must not fire — it takes expand, select, `k`, THEN `y` to
-    // reach the real PendingAction (#10476: Enter expands the project node).
+    // `k` alone must not fire — it takes Enter, select, `k`, THEN `y` to
+    // reach the real PendingAction (#10754: Enter on the project node enters
+    // the session column).
     let mut state = seeded_state();
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     assert!(handle_key(&mut state, enter).is_none());
     let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
     assert!(handle_key(&mut state, down).is_none());
-    assert_eq!(state.focus, Pane::Tree);
+    assert_eq!(state.focus, Pane::Sessions);
     assert_eq!(
         state.selected_session().map(|s| s.id.as_str()),
         Some("a1b2c3d4e5f6")
@@ -540,16 +541,15 @@ impl super::drive::EventSource for ScriptedRawEvents {
 async fn click_reaches_the_tree_through_the_loop_10476() {
     use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
 
-    let project = NodeId::Project {
-        owner: "acme".to_string(),
-        name: "trusty-tools".to_string(),
-    };
+    // #10754: a project is a leaf now; the owner bar is what a click opens
+    // and shuts.
+    let owner = NodeId::Owner("acme".to_string());
     let row = seeded_state()
         .tree
         .rows
         .iter()
-        .position(|r| r.id == project)
-        .expect("the project row") as u16;
+        .position(|r| r.id == owner)
+        .expect("the owner row") as u16;
     let click = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 5,
@@ -563,7 +563,7 @@ async fn click_reaches_the_tree_through_the_loop_10476() {
     let mut opened = Vec::new();
     let mut draw = |state: &mut ProjectCtlState| -> anyhow::Result<()> {
         terminal.draw(|f| super::layout::render(f, state))?;
-        opened.push(state.tree.is_expanded(&project));
+        opened.push(state.tree.is_expanded(&owner));
         Ok(())
     };
     let mut client = DaemonClient::new("http://127.0.0.1:1".to_string());
@@ -578,12 +578,8 @@ async fn click_reaches_the_tree_through_the_loop_10476() {
     )
     .await
     .expect("drive returns Ok on q");
-    assert_eq!(opened.first(), Some(&false), "the project starts shut");
-    assert_eq!(
-        opened.last(),
-        Some(&true),
-        "the click opened it: {opened:?}"
-    );
+    assert_eq!(opened.first(), Some(&true), "the owner starts open");
+    assert_eq!(opened.last(), Some(&false), "the click shut it: {opened:?}");
 }
 
 /// #10476: a key pressed while a poll is in flight is drawn before that poll
