@@ -282,6 +282,14 @@ fn group_alive(pgid: u32) -> bool {
 /// is left. Every process the fake left running is killed before return,
 /// so a failing run leaks nothing.
 pub fn interrupt_cli(fake: &FakeAdapter, op: &str, extra: &[&str]) -> Interrupted {
+    let mut args = vec!["--now", "2026-11-04T12:00:00Z"];
+    args.extend_from_slice(extra);
+    interrupt_verb(fake, "run", op, &args)
+}
+
+/// [`interrupt_cli`] for any import verb. #10818: `import plan` must take
+/// the same run-level cancel as `import run`.
+pub fn interrupt_verb(fake: &FakeAdapter, verb: &str, op: &str, extra: &[&str]) -> Interrupted {
     use std::time::{Duration, Instant};
     for f in ["pid", "grandchild", "requests.log"] {
         let _ = std::fs::remove_file(fake.dir.join(f));
@@ -289,7 +297,7 @@ pub fn interrupt_cli(fake: &FakeAdapter, op: &str, extra: &[&str]) -> Interrupte
     fake.flag(&format!("hang_{op}"), "");
     fake.flag("spawn_grandchild", "");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_trusty-okf"))
-        .args(["import", "run"])
+        .args(["import", verb])
         .arg(&fake.root)
         .args(["--from", "adapter:gmail", "--adapter", "/bin/sh"])
         .arg("--adapter-arg")
@@ -303,7 +311,7 @@ pub fn interrupt_cli(fake: &FakeAdapter, op: &str, extra: &[&str]) -> Interrupte
             "LC_ALL=C",
         ])
         .args(["--select", "account=work", "--select", "query=in:sent"])
-        .args(["--json", "--now", "2026-11-04T12:00:00Z"])
+        .arg("--json")
         .args(extra)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

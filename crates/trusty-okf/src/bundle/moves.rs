@@ -16,7 +16,8 @@
 //! rewrite is a content change through `put` (actor
 //! `process:trusty-okf-move`), so it clears that concept's verification.
 //! URLs are never touched. A link that climbs above the root, or sits in a
-//! foreign, unparseable or unpatchable file, stays unchanged and is reported.
+//! foreign, unparseable, unpatchable or non-UTF-8 (`unreadable`) file,
+//! stays unchanged and is reported.
 //! `log.md` gains exactly one entry for the move.
 //! #10746 S5: the whole move is one journaled `Move` operation (§4.11), so
 //! a crash at any step boundary recovers to the moved tree on the next open,
@@ -25,6 +26,8 @@
 //! `c55_move_leaves_a_climbing_link_and_reports_it`,
 //! `c115_bundle_open_reads_foreign_files_and_writes_never_touch_them`,
 //! `c140_fold_collision_on_put_and_move`,
+//! `move_reports_a_link_in_a_non_utf8_file_as_unreadable`,
+//! `move_refuses_an_unparseable_source_with_no_file_changed`,
 //! `c106_crash_at_every_boundary_rolls_forward_byte_identical`.
 
 use std::ops::Range;
@@ -37,7 +40,7 @@ use crate::bundle::Bundle;
 use crate::bundle::commit::PutPlan;
 use crate::bundle::log_md::prepare_entry;
 use crate::bundle::ops::{self, OpKind, OpPlan};
-use crate::bundle::paths::{confined_file, fold_conflict, read_rel};
+use crate::bundle::paths::{confined_file, fold_conflict, io_err, read_rel};
 use crate::bundle::put::{PutOutcome, WriteKind, conflict};
 use crate::bundle::record::{instant_string, record_rel};
 use crate::bundle::walk::scan;
@@ -56,7 +59,8 @@ pub struct UnmovedLink {
     pub path: String,
     /// The link target as written.
     pub target: String,
-    /// `climbs_above_root`, `foreign_file`, `unparseable` or `unpatchable`.
+    /// `climbs_above_root`, `foreign_file`, `unparseable`, `unpatchable`
+    /// or `unreadable` (#10746: a file that is not UTF-8).
     pub reason: String,
 }
 
@@ -314,8 +318,29 @@ impl Bundle {
             reason: reason.to_string(),
         };
         for entry in scan(&self.root)?.files {
-            let Ok(text) = std::fs::read_to_string(self.root.join(&entry.rel)) else {
-                continue;
+            // #10746: a read failure is never a silent skip. A non-UTF-8
+            // file is scanned lossily (a link to the old ID is ASCII-framed
+            // UTF-8, so the scan finds every one) and each such link is
+            // reported `unreadable`; any other read error stops the move.
+            let path = self.root.join(&entry.rel);
+            let bytes = std::fs::read(&path).map_err(|e| io_err(&path, e))?;
+            let text = match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(e) => {
+                    let lossy = String::from_utf8_lossy(e.as_bytes()).into_owned();
+                    if matches!(&entry.r, ConceptRef::Id(id) if id == from) {
+                        return Err(OkfError::Parse {
+                            path: entry.rel.clone().into(),
+                            line: None,
+                            message: "not UTF-8; the move is refused".to_string(),
+                        });
+                    }
+                    let base = entry.rel.rsplit_once('/').map_or("", |(d, _)| d);
+                    for t in plan_body(&lossy, base, from, to, None).to_old {
+                        report.unmoved.push(unmoved(&entry.rel, &t, "unreadable"));
+                    }
+                    continue;
+                }
             };
             let id = match &entry.r {
                 ConceptRef::Id(id) => id.clone(),
@@ -328,11 +353,18 @@ impl Bundle {
                 }
             };
             let is_moved = &id == from;
-            let Ok((mut c, _)) = parse_concept(id.clone(), &text) else {
-                for t in plan_body(&text, dir_of(&id), from, to, None).to_old {
-                    report.unmoved.push(unmoved(&entry.rel, &t, "unparseable"));
+            let (mut c, _) = match parse_concept(id.clone(), &text) {
+                Ok(parsed) => parsed,
+                // #10746: an unparseable source would leave `moved_text`
+                // empty and the op would write an empty concept at the new
+                // ID; refuse before `ops::run`, as the non-UTF-8 arm does.
+                Err(e) if is_moved => return Err(e),
+                Err(_) => {
+                    for t in plan_body(&text, dir_of(&id), from, to, None).to_old {
+                        report.unmoved.push(unmoved(&entry.rel, &t, "unparseable"));
+                    }
+                    continue;
                 }
-                continue;
             };
             if is_moved {
                 moved_text = text.clone();
