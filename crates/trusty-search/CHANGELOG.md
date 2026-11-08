@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.63.1] — 2026-11-08
+
+### Changed
+
+- Requires trusty-embedderd-py 0.2.3: sidecar torch 2.10 (CVE-2026-24747, #10840)
+
 ## [0.63.0] — 2026-11-07
 
 ### Added

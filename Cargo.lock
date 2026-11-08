@@ -11453,7 +11453,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd-py"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "flate2",
@@ -11775,7 +11775,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.63.0"
+version = "0.63.1"
 dependencies = [
  "anyhow",
  "arc-swap",

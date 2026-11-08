@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.3] — 2026-11-08
+
+### Security
+
+- Bump the sidecar `torch` pin to `>=2.10.0,<2.11` (resolves 2.10.0) to fix GHSA-63cw-57p8-fm3p / CVE-2026-24747, remote code execution via untrusted checkpoint files (Dependabot #413, #414)
+
 ## [0.2.2] — 2026-11-07
 
 ### Added
