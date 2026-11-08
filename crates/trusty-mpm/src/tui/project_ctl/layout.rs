@@ -20,7 +20,8 @@ use ratatui::{
 };
 
 use super::panes::{
-    actions_bar, activity, config_form, deliverables_view, rename_view, session_list, tree,
+    actions_bar, activity, config_form, deliverables_view, launch_view, rename_view, session_list,
+    tree,
 };
 use super::state::{Pane, ProjectCtlState};
 
@@ -119,6 +120,10 @@ pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
     // #10754: De1 key map (Bob 11-06)
     if let Some(modal) = &state.rename {
         rename_view::render(frame, modal);
+    }
+    // See #10754: the `l` launch form.
+    if let Some(modal) = &state.launch {
+        launch_view::render(frame, modal);
     }
 }
 

@@ -87,6 +87,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::client::http_client::projects::PatchProjectArgs;
 
+use super::state::launch::LaunchRequest;
 use super::state::{ConfirmKind, Pane, ProjectCtlState, SessionRow};
 
 mod modal;
@@ -95,7 +96,8 @@ mod mouse_cols;
 mod session_keys;
 mod tree;
 use modal::{
-    handle_config_form_key, handle_confirm_key, handle_deliverable_view_key, handle_rename_key,
+    handle_config_form_key, handle_confirm_key, handle_deliverable_view_key, handle_launch_key,
+    handle_rename_key,
 };
 pub use mouse::handle_mouse;
 
@@ -109,8 +111,8 @@ pub use mouse::handle_mouse;
 /// (opening the form is a pure state mutation — see the module doc — so
 /// there is no `Config` variant here anymore). `NewSession` and `SubmitConfig`
 /// carry the target project name (`SubmitConfig` also carries the built
-/// [`PatchProjectArgs`]); the rest carry the target session id. #10754: no
-/// `Launch` variant — `l` produces `NewSession` until a launch form exists.
+/// [`PatchProjectArgs`]); the rest carry the target session id. See #10754: `Launch` carries the
+/// submitted launch form's [`LaunchRequest`].
 /// Test: `handle_key_*` in `super::tests`.
 #[derive(Debug, Clone)]
 pub enum PendingAction {
@@ -136,8 +138,11 @@ pub enum PendingAction {
     OpenSession(String),
     /// The rename modal's Enter — rename the session `(id, new_name)`.
     RenameSession(String, String),
-    /// `n` or `l` — start a new session in the named project, as `tm ls` `n`.
+    /// `n` — start a new session in the named project, as `tm ls` `n`.
     NewSession(String),
+    /// See #10754: the launch form's Enter — launch a session in the
+    /// request's project with its task and ref, as `tm sessions new`.
+    Launch(LaunchRequest),
     /// Delete the session by its state's route, as `tm ls` `d` (code only).
     DeleteSession(String),
 }
@@ -160,6 +165,7 @@ impl PartialEq for PendingAction {
             (Self::OpenSession(a), Self::OpenSession(b)) => a == b,
             (Self::RenameSession(a, x), Self::RenameSession(b, y)) => a == b && x == y,
             (Self::NewSession(a), Self::NewSession(b)) => a == b,
+            (Self::Launch(a), Self::Launch(b)) => a == b,
             (Self::DeleteSession(a), Self::DeleteSession(b)) => a == b,
             (Self::SubmitConfig(name_a, args_a), Self::SubmitConfig(name_b, args_b)) => {
                 name_a == name_b
@@ -196,12 +202,14 @@ pub fn is_quit(key: &KeyEvent) -> bool {
 /// [`handle_config_form_key`] (#2120 — checked THIRD, see the module doc for
 /// why this ordering makes the three modals mutually exclusive by
 /// construction); else when [`ProjectCtlState::rename`] is `Some` (#10754),
-/// through [`handle_rename_key`]. Otherwise: Ctrl-C / `q` set
+/// through [`handle_rename_key`]; else when [`ProjectCtlState::launch`] is
+/// `Some` (#10754), through [`handle_launch_key`]. Otherwise: Ctrl-C / `q` set
 /// `should_exit`. Tab/Shift+Tab cycle pane focus. Esc clears any shown
 /// notice and, in the session column, collapses an expanded session
 /// (#10754). With the tree focused, every other key goes to
 /// `tree::handle_tree_key`; with the session column focused (#10754), to
-/// `session_keys::handle_session_key` (see their module docs). `l`/`r`/`a` return the matching [`PendingAction`]
+/// `session_keys::handle_session_key` (see their module docs). `l` opens the
+/// launch form for the selected project (#10754). `r`/`a` return the matching [`PendingAction`]
 /// immediately when a target is selected, else set an explanatory notice and
 /// return `None`. `c` calls [`ProjectCtlState::open_config_form`] directly (a
 /// pure state mutation, NOT a [`PendingAction`] — see the module doc) when a
@@ -227,6 +235,11 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
     // #10754: De1 key map (Bob 11-06)
     if state.rename.is_some() {
         return handle_rename_key(state, key);
+    }
+
+    // See #10754: the `l` launch form.
+    if state.launch.is_some() {
+        return handle_launch_key(state, key);
     }
 
     if is_quit(&key) {
@@ -265,12 +278,17 @@ const ACTIVITY_NOTICE: &str =
 /// Route one key while the activity pane has focus and no modal is open.
 ///
 /// #10754: the old `_ => None` dropped every key here silently, so `n` after
-/// two Tabs looked like a hang. `n`/`l` take the same path as the columns;
-/// navigation keys stay silent no-ops; any other key says how to leave.
-/// Test: `activity_focus_n_and_l_start_a_new_session_and_other_keys_notice`.
+/// two Tabs looked like a hang. `n` and `l` take the same paths as in the
+/// columns; navigation keys stay silent no-ops; any other key says how to leave.
+/// Test: `activity_focus_n_starts_a_new_session_l_launches_and_other_keys_notice`.
 fn handle_activity_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingAction> {
     match key.code {
-        KeyCode::Char('n' | 'l') => tree::request_new_session(state),
+        KeyCode::Char('n') => tree::request_new_session(state),
+        // See #10754: `l` opens the launch form, as in the columns.
+        KeyCode::Char('l') => {
+            tree::open_launch(state);
+            None
+        }
         KeyCode::Up
         | KeyCode::Down
         | KeyCode::Left

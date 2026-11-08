@@ -8,10 +8,10 @@
 //! or Enter on a project moves focus into the session column. `g` toggles
 //! worker indentation. `c`/`v` act on a project node, `n` and `l` on its
 //! project (#10754: De1 key map (Bob 11-06) — `n` starts a new session, as in
-//! `tm ls`; `l` does the same until a launch form exists). The session verbs
+//! `tm ls`; `l` opens the launch form, see #10754). The session verbs
 //! `f`/`k`/`r`/`R`/`d`/`a` belong to the session column; here they set a
-//! notice and act on nothing. `request_new_session` and `request_focus` are
-//! shared with the session column.
+//! notice and act on nothing. `request_new_session`, `open_launch` and
+//! `request_focus` are shared with the session column.
 //! Test: `events::tests` (`enter_on_owner_toggles_and_on_project_enters_sessions`,
 //! `kill_resume_decommission_attach_on_bar_or_project_act_on_nothing`),
 //! `two_column_tests` (`n_starts_a_new_session_in_the_project_from_either_column`).
@@ -19,6 +19,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::PendingAction;
+use crate::tui::project_ctl::state::launch::LaunchModal;
 use crate::tui::project_ctl::state::{NodeId, ProjectCtlState};
 
 /// Route one key while the tree pane has focus and no modal is open.
@@ -30,9 +31,10 @@ pub(super) fn handle_tree_key(state: &mut ProjectCtlState, key: KeyEvent) -> Opt
         KeyCode::Right => state.tree_right(),
         KeyCode::Enter => enter(state),
         KeyCode::Char('g') => state.toggle_worker_indent(),
-        // #10754: De1 key map (Bob 11-06); `l` is `n` until a launch form
-        // exists — the old stub only set a notice.
-        KeyCode::Char('n' | 'l') => return request_new_session(state),
+        // #10754: De1 key map (Bob 11-06)
+        KeyCode::Char('n') => return request_new_session(state),
+        // See #10754: `l` opens the launch form for the project.
+        KeyCode::Char('l') => open_launch(state),
         // #10754: two-column MPM pane (Bob 11-06) — the session verbs act on
         // the right column only, so a key here never hits a session unseen.
         KeyCode::Char('f' | 'k' | 'r' | 'R' | 'd' | 'a') => {
@@ -78,15 +80,43 @@ fn enter(state: &mut ProjectCtlState) {
     }
 }
 
-/// `n`/`l`: start a new session in the selected project and attach, as `tm ls`.
+/// `n`: start a new session in the selected project and attach, as `tm ls`.
 ///
-/// What: the target is the left column's project, else the selected
-/// session's project (an owner selected on the left); with neither, a notice.
-/// #10754: an empty session column falls back to the tree's project too.
+/// What: the target is [`target_project`]'s; with none, a notice.
 /// Test: `n_starts_a_new_session_in_the_project_from_either_column`,
-/// `n_and_l_in_an_empty_session_column_start_a_new_session`.
+/// `n_in_an_empty_session_column_starts_a_new_session_and_l_opens_the_form`.
 pub(super) fn request_new_session(state: &mut ProjectCtlState) -> Option<PendingAction> {
-    let project = state
+    match target_project(state) {
+        Some(name) => Some(PendingAction::NewSession(name)),
+        None => {
+            state.set_notice("no project selected");
+            None
+        }
+    }
+}
+
+/// `l`: open the launch form on the selected project.
+///
+/// Why: DOC-35 §5.2 binds `l` to `launch` on a project or session node; the
+/// form collects the task and ref the launch call needs. See #10754.
+/// What: opens [`LaunchModal`] on [`target_project`]'s project; with none
+/// (an owner bar with no session selected), a notice and no form.
+/// Test: `l_opens_the_launch_form_for_the_selected_nodes_project`,
+/// `l_opens_the_launch_form_and_enter_submits_the_request`.
+pub(super) fn open_launch(state: &mut ProjectCtlState) {
+    match target_project(state) {
+        Some(name) => state.launch = Some(LaunchModal::open(name)),
+        None => state.set_notice("no project selected"),
+    }
+}
+
+/// The project `n` and `l` act on.
+///
+/// What: the left column's project, else the selected session's project (an
+/// owner selected on the left). #10754: an empty session column falls back
+/// to the tree's project too.
+fn target_project(state: &ProjectCtlState) -> Option<String> {
+    state
         .selected_project_name()
         .map(str::to_string)
         .or_else(|| {
@@ -96,14 +126,7 @@ pub(super) fn request_new_session(state: &mut ProjectCtlState) -> Option<Pending
                 .iter()
                 .find(|(_, rows)| rows.iter().any(|s| s.id == id))
                 .map(|(name, _)| name.clone())
-        });
-    match project {
-        Some(name) => Some(PendingAction::NewSession(name)),
-        None => {
-            state.set_notice("no project selected");
-            None
-        }
-    }
+        })
 }
 
 /// `f`: focus the selected session's existing tmux window or iTerm2 tab.

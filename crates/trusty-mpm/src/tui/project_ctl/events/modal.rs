@@ -193,3 +193,30 @@ pub(super) fn handle_rename_key(
         }
     }
 }
+
+/// Route one key while the launch form is open.
+///
+/// See #10754: the form takes every key, `q` included, like the rename modal.
+/// [`RenameStep::Cancel`] closes it with its notice; [`RenameStep::Submit`]
+/// closes it and returns the [`PendingAction::Launch`]; any other step
+/// (including an empty-task refusal) keeps it open.
+/// Test: `l_opens_the_launch_form_and_enter_submits_the_request`,
+/// `launch_form_refuses_an_empty_task_and_esc_cancels`.
+pub(super) fn handle_launch_key(
+    state: &mut ProjectCtlState,
+    key: KeyEvent,
+) -> Option<PendingAction> {
+    let modal = state.launch.as_mut()?;
+    match modal.apply(key) {
+        RenameStep::Ignore | RenameStep::Redraw => None,
+        RenameStep::Cancel(notice) => {
+            state.launch = None;
+            state.set_notice(notice);
+            None
+        }
+        RenameStep::Submit(action) => {
+            state.launch = None;
+            Some(action)
+        }
+    }
+}
