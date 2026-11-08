@@ -308,3 +308,23 @@ async fn drive_walk_refuses_a_root_that_is_not_a_live_folder() {
         assert!(walk.next_page(&c, Some("a"), 10).await.is_err(), "{id}");
     }
 }
+
+/// Why: #10746 review — a folder ID goes into the Drive query inside a
+/// string literal; a quote in it must not end the literal and add a
+/// clause that lists another folder's files.
+/// What: an ID with a quote and an `or` clause, and an ID ending in a
+/// backslash, stay inside one literal (Drive query syntax escapes `\` and
+/// `'` with a backslash); a plain ID is unchanged.
+/// Test: self-contained.
+#[test]
+fn parents_query_cannot_be_widened() {
+    assert_eq!(parents_query("F1"), "'F1' in parents and trashed = false");
+    assert_eq!(
+        parents_query("x' in parents or 'y"),
+        r"'x\' in parents or \'y' in parents and trashed = false"
+    );
+    assert_eq!(
+        parents_query(r"a\"),
+        r"'a\\' in parents and trashed = false"
+    );
+}

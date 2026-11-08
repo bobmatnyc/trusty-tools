@@ -415,7 +415,7 @@ impl DriveWalk {
                 self.token = None;
             }
         };
-        let q = format!("'{folder}' in parents and trashed = false");
+        let q = parents_query(&folder);
         let mut url = format!(
             "{DRIVE_API_BASE}/files?q={}&pageSize={}&fields={}\
              &supportsAllDrives=true&includeItemsFromAllDrives=true",
@@ -453,6 +453,18 @@ impl DriveWalk {
         }
         Ok(Some(files))
     }
+}
+
+/// The `files.list` query for the untrashed children of `folder`, with
+/// the ID escaped as a Drive query string literal.
+///
+/// Test: `parents_query_cannot_be_widened`.
+pub fn parents_query(folder: &str) -> String {
+    // #10746: Drive query syntax escapes `\` and `'` in a literal with a
+    // backslash; unescaped, a crafted ID could close the literal and add a
+    // clause that lists another folder's files.
+    let id = folder.replace('\\', "\\\\").replace('\'', "\\'");
+    format!("'{id}' in parents and trashed = false")
 }
 
 /// #10746: fail unless `folder` is a readable, untrashed Drive folder.
