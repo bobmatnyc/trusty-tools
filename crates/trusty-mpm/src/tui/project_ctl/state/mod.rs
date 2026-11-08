@@ -36,6 +36,8 @@ pub use modals::{
 };
 // #10476: the tree model and its navigation, kept out of this file (SLOC cap).
 // #10754: S3 tm ls actions; De1 key map (Bob 11-06).
+// See #10754: the `l` launch form.
+pub mod launch;
 pub mod rename;
 pub mod session_col;
 pub mod tree;
@@ -431,6 +433,9 @@ pub struct ProjectCtlState {
     /// #10754: De1 key map (Bob 11-06) — the rename modal `r` opens on a
     /// session row. While `Some`, it takes every key (see `events::modal`).
     pub rename: Option<rename::RenameModal>,
+    /// See #10754: the launch form `l` opens on a project. While `Some`, it
+    /// takes every key (see `events::modal`).
+    pub launch: Option<launch::LaunchModal>,
     /// Set when a mutating action just succeeded and the operator should see
     /// the fleet refreshed without waiting for the next timer tick.
     ///

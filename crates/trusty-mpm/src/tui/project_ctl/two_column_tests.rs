@@ -778,10 +778,11 @@ fn n_starts_a_new_session_in_the_project_from_either_column() {
     );
 }
 
-/// #10754: `n` and `l` in an EMPTY session column start a new session in the
-/// project selected in the tree, and the empty column advertises `[n]`.
+/// #10754: `n` in an EMPTY session column starts a new session in the
+/// project selected in the tree, `l` opens the launch form on it, and the
+/// empty column advertises `[n]`.
 #[test]
-fn n_and_l_in_an_empty_session_column_start_a_new_session() {
+fn n_in_an_empty_session_column_starts_a_new_session_and_l_opens_the_form() {
     let mut fetch = fleet(alpha_sessions());
     if let Some((projects, _, _)) = fetch.fleet.as_mut() {
         projects.push(project("qaempty"));
@@ -796,37 +797,98 @@ fn n_and_l_in_an_empty_session_column_start_a_new_session() {
         super::panes::session_list::empty_hint(&state),
         "no sessions in qaempty — [n] new session"
     );
-    for code in [KeyCode::Char('n'), KeyCode::Char('l')] {
-        state.set_notice("stale notice");
-        assert_eq!(
-            press(&mut state, code),
-            Some(PendingAction::NewSession("qaempty".to_string())),
-            "{code:?} in the empty column"
-        );
-    }
+    state.set_notice("stale notice");
+    assert_eq!(
+        press(&mut state, KeyCode::Char('n')),
+        Some(PendingAction::NewSession("qaempty".to_string())),
+        "n in the empty column"
+    );
+    assert_eq!(press(&mut state, KeyCode::Char('l')), None);
+    let form = state.launch.take().expect("l opens the launch form");
+    assert_eq!(form.project, "qaempty");
     // The tree's own `l` takes the same path.
     press(&mut state, KeyCode::BackTab);
+    assert_eq!(press(&mut state, KeyCode::Char('l')), None);
     assert_eq!(
-        press(&mut state, KeyCode::Char('l')),
-        Some(PendingAction::NewSession("qaempty".to_string()))
+        state.launch.take().map(|f| f.project).as_deref(),
+        Some("qaempty")
     );
 }
 
-/// #10754: with focus in the activity pane, `n` and `l` start a new session
-/// in the tree's project, and any other unbound key says where to go.
+/// See #10754: `l` on a session row opens the launch form for its project;
+/// the form takes every key, and Enter submits project, task and ref.
 #[test]
-fn activity_focus_n_and_l_start_a_new_session_and_other_keys_notice() {
+fn l_opens_the_launch_form_and_enter_submits_the_request() {
+    use super::state::launch::LaunchRequest;
+
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(press(&mut state, KeyCode::Char('l')), None, "no call yet");
+    let buffer = draw(&mut state, 100, 30);
+    assert!(
+        find(&buffer, "Launch — alpha").is_some(),
+        "the form is drawn"
+    );
+    assert!(find(&buffer, "> task: _").is_some(), "Task has the cursor");
+    // The form takes every key: `q`, `k` and `n` type, they do not act.
+    for c in "qkn fix".chars() {
+        assert_eq!(press(&mut state, KeyCode::Char(c)), None);
+    }
+    assert!(!state.should_exit && state.pending_confirm.is_none());
+    press(&mut state, KeyCode::Tab);
+    for c in "dev".chars() {
+        press(&mut state, KeyCode::Char(c));
+    }
+    assert!(find(&draw(&mut state, 100, 30), "> ref:  dev_").is_some());
+    assert_eq!(
+        press(&mut state, KeyCode::Enter),
+        Some(PendingAction::Launch(LaunchRequest {
+            project: "alpha".to_string(),
+            task: "qkn fix".to_string(),
+            git_ref: Some("dev".to_string()),
+        }))
+    );
+    let buffer = draw(&mut state, 100, 30);
+    assert!(find(&buffer, "Launch — alpha").is_none(), "the form closed");
+}
+
+/// See #10754: Enter on an empty task keeps the form open with the refusal
+/// and sends nothing; Esc closes it with "launch cancelled".
+#[test]
+fn launch_form_refuses_an_empty_task_and_esc_cancels() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Char('l'));
+    assert_eq!(press(&mut state, KeyCode::Enter), None, "no request sent");
+    assert!(state.launch.is_some(), "the form stays open");
+    let buffer = draw(&mut state, 100, 30);
+    assert!(
+        find(&buffer, "a task is required").is_some(),
+        "inline refusal"
+    );
+    assert_eq!(press(&mut state, KeyCode::Esc), None);
+    assert!(state.launch.is_none(), "closed");
+    assert_eq!(state.notice.as_deref(), Some("launch cancelled"));
+}
+
+/// #10754: with focus in the activity pane, `n` starts a new session in the
+/// tree's project, `l` opens the launch form on it, and any other unbound key
+/// says where to go.
+#[test]
+fn activity_focus_n_starts_a_new_session_l_launches_and_other_keys_notice() {
     let mut state = polled();
     press(&mut state, KeyCode::Tab);
     press(&mut state, KeyCode::Tab);
     assert_eq!(state.focus, Pane::Activity);
-    for code in [KeyCode::Char('n'), KeyCode::Char('l')] {
-        assert_eq!(
-            press(&mut state, code),
-            Some(PendingAction::NewSession("alpha".to_string())),
-            "{code:?} with activity focus"
-        );
-    }
+    assert_eq!(
+        press(&mut state, KeyCode::Char('n')),
+        Some(PendingAction::NewSession("alpha".to_string())),
+        "n with activity focus"
+    );
+    assert_eq!(press(&mut state, KeyCode::Char('l')), None);
+    assert_eq!(
+        state.launch.take().map(|f| f.project).as_deref(),
+        Some("alpha")
+    );
     for code in [KeyCode::Char('x'), KeyCode::Char('k'), KeyCode::Enter] {
         state.clear_notice();
         assert_eq!(press(&mut state, code), None, "{code:?}");

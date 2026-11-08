@@ -58,6 +58,8 @@ pub fn handle_mouse(state: &mut ProjectCtlState, mouse: MouseEvent) -> Option<Pe
         || state.config_form.is_some()
         // #10754: De1 key map (Bob 11-06) — the rename modal is a modal too.
         || state.rename.is_some()
+        // See #10754: the launch form too.
+        || state.launch.is_some()
     {
         return None;
     }
@@ -281,12 +283,18 @@ mod tests {
 
     #[test]
     fn click_under_modal_ignored() {
-        let open_modals: [fn(&mut ProjectCtlState); 4] = [
+        let open_modals: [fn(&mut ProjectCtlState); 5] = [
             |s| s.request_confirm(ConfirmKind::Kill, "s0", "name-0"),
             |s| s.open_deliverable_view("alpha"),
             |s| s.open_config_form("alpha"),
             // #10754: De1 key map (Bob 11-06)
             |s| s.rename = Some(RenameModal::prefilled("s0", "name-0")),
+            // See #10754: the launch form.
+            |s| {
+                s.launch = Some(crate::tui::project_ctl::state::launch::LaunchModal::open(
+                    "alpha",
+                ))
+            },
         ];
         for open in open_modals {
             let mut state = state_with(2);
@@ -317,7 +325,8 @@ mod tests {
                 state.pending_confirm.is_some()
                     || state.deliverable_view.is_some()
                     || state.config_form.is_some()
-                    || state.rename.is_some(),
+                    || state.rename.is_some()
+                    || state.launch.is_some(),
                 "the modal must really be open"
             );
 

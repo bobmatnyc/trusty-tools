@@ -31,14 +31,14 @@ use crate::tui::project_ctl::state::{NodeId, Pane, PendingConfirm, ProjectCtlSta
 pub const OWNER_HINT: &str =
     "[Enter/←→] expand  [↑↓] select  [g] workers  [Tab] switch pane  [q] quit";
 /// Key-hint text while a project is selected in the left column.
-// #10754: De1 key map (Bob 11-06); `l` is `n` until a launch form exists.
-pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [n/l] new  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
+// #10754: De1 key map (Bob 11-06); see #10754 for `[l] launch`.
+pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [n] new  [l] launch  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
 /// Key-hint text while the session column has focus.
 // #10754: De1 key map (Bob 11-06)
-pub const SESSIONS_HINT: &str = "[Enter] open  [→] details  [←] collapse/projects  [f] focus  [r] rename  [R] resume  [n/l] new  [k] kill  [d] decommission  [a] attach-cmd  [q] quit";
+pub const SESSIONS_HINT: &str = "[Enter] open  [→] details  [←] collapse/projects  [f] focus  [r] rename  [R] resume  [n] new  [l] launch  [k] kill  [d] decommission  [a] attach-cmd  [q] quit";
 /// Key-hint text shown while the Activity pane has focus. It is a read-only
-/// status strip; #10754: `n`/`l` start a new session from it, as elsewhere.
-pub const ACTIVITY_HINT: &str = "[n/l] new  [Tab] switch pane  [q] quit";
+/// status strip; #10754: `n` and `l` work from it, as elsewhere.
+pub const ACTIVITY_HINT: &str = "[n] new  [l] launch  [Tab] switch pane  [q] quit";
 
 /// The indicator shown when the daemon answered its last health probe.
 pub const DAEMON_REACHABLE: &str = "daemon ●";
@@ -244,12 +244,14 @@ mod tests {
             "[←] collapse/projects",
             "[r] rename",
             "[R] resume",
-            "[n/l] new",
+            "[n] new",
+            "[l] launch",
         ] {
             assert!(sessions.contains(keys), "{keys}");
         }
-        assert!(projects.contains("[n/l] new"));
-        assert!(activity.contains("[n/l] new"));
+        for hint in [projects, activity] {
+            assert!(hint.contains("[n] new  [l] launch"), "{hint}");
+        }
         assert!(sessions.contains("[a] attach-cmd"));
         let mut expanded = state_at(Some(session_node()));
         assert!(expanded.toggle_session_details());

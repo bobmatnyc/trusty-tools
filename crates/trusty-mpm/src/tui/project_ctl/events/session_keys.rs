@@ -12,21 +12,22 @@
 //! collapses an expanded session, else returns focus to the left column (Esc
 //! also collapses, in `handle_key`). `f`/`k`/`d`/`a` focus, kill,
 //! decommission and attach-cmd the selected session, through the same gates
-//! as before; `l` is `n` until a launch form exists; `g` toggles worker
-//! indentation.
+//! as before; `l` opens the launch form for the session's project (see
+//! #10754); `g` toggles worker indentation.
 //! Test: `two_column_tests.rs` (`tab_and_arrows_move_focus_between_columns`,
 //! `session_verbs_act_on_the_right_column_session`,
 //! `right_expands_a_session_and_details_render_under_it`,
 //! `right_toggles_details_and_enter_does_not`,
 //! `r_opens_the_rename_modal_prefilled_and_enter_submits`,
 //! `n_starts_a_new_session_in_the_project_from_either_column`,
-//! `n_and_l_in_an_empty_session_column_start_a_new_session`,
+//! `n_in_an_empty_session_column_starts_a_new_session_and_l_opens_the_form`,
+//! `l_opens_the_launch_form_and_enter_submits_the_request`,
 //! `up_and_down_skip_detail_lines`); `session_ops_tests.rs`
 //! (`enter_on_a_session_opens_it_between_suspend_and_resume`).
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::tree::{request_focus, request_new_session};
+use super::tree::{open_launch, request_focus, request_new_session};
 use super::{
     PendingAction, request_decommission, request_kill, request_resume, selected_session_action,
 };
@@ -55,9 +56,10 @@ pub(super) fn handle_session_key(
             }
         }
         KeyCode::Char('g') => state.toggle_worker_indent(),
-        // #10754: `l` is `n` until a launch form exists; both reach the
-        // tree's project when the column is empty.
-        KeyCode::Char('n' | 'l') => return request_new_session(state),
+        // #10754: both reach the tree's project when the column is empty;
+        // `l` opens the launch form (see #10754).
+        KeyCode::Char('n') => return request_new_session(state),
+        KeyCode::Char('l') => open_launch(state),
         KeyCode::Char('f') => return request_focus(state),
         KeyCode::Char('k') => return request_kill(state),
         KeyCode::Char('r') => open_rename(state),

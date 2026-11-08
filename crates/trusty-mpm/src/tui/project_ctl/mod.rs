@@ -25,6 +25,8 @@ pub mod events;
 pub mod layout;
 pub mod panes;
 pub mod poll;
+// See #10754: the `l` launch form's dispatch.
+mod launch_ops;
 // #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 mod session_ops;
 #[cfg(test)]

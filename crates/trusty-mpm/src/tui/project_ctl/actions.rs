@@ -6,9 +6,9 @@
 //! result into a notice, mirroring `tui::coordinator`'s
 //! `dispatch_submitted_line` split between pure routing and async dispatch.
 //!
-//! **No launch stub** (#10754): `l` used to set a notice pointing at
-//! `tm sessions new`; it now produces the same `NewSession` as `n`, which
-//! the `tm ls` new-session hook runs. Config (`c`) is NO LONGER a stub — #2120 replaced it with a
+//! **Launch** (#10754): `l` opens a launch form; its submit,
+//! [`PendingAction::Launch`], runs through [`super::launch_ops::run`], the
+//! same `ManagedNew` intent `tm sessions new` executes. Config (`c`) is NO LONGER a stub — #2120 replaced it with a
 //! real fixed-field form; see [`PendingAction::SubmitConfig`]'s handling
 //! below.
 //!
@@ -55,6 +55,7 @@ use crate::tui::session_hooks::ScreenHandoff;
 /// explicit #2120 requirement that a rejected submit never discards the
 /// operator's other unsaved edits. `Focus` (#10476) runs
 /// [`crate::tui::focus::focus_session`] and shows its one-line result.
+/// `Launch` (#10754) runs [`super::launch_ops::run`].
 /// #10754: the four `tm ls` verbs (`OpenSession`, `RenameSession`,
 /// `NewSession`, `DeleteSession`) go to [`super::session_ops::run`] with
 /// `screen`, which hands the terminal over around an attach. Only a failed
@@ -130,6 +131,8 @@ async fn dispatch_daemon(
         PendingAction::Focus(name) => {
             state.set_notice(crate::tui::focus::focus_session(&name).await);
         }
+        // See #10754: the launch form's submit.
+        PendingAction::Launch(request) => super::launch_ops::run(state, client, request).await,
         PendingAction::SubmitConfig(name, args) => {
             match client.registry_patch_project(&name, &args).await {
                 Ok(project) => {

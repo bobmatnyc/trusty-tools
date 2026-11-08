@@ -13,8 +13,8 @@
 //! (a centred overlay, the read-only Deliverable/Milestone view reachable
 //! from the Projects pane, DOC-35 §10.8 `show`, #2383), [`config_form`]
 //! (a centred overlay, the editable deterministic config form reachable from
-//! the Projects pane, DOC-35 §6, #2120), and [`rename_view`] (the session
-//! rename overlay, #10754).
+//! the Projects pane, DOC-35 §6, #2120), [`rename_view`] (the session
+//! rename overlay, #10754), and [`launch_view`] (the `l` launch form, #10754).
 //! Test: each submodule's pure builders are unit-tested in its own `tests`
 //! block; the `render` functions are terminal glue exercised by launching the
 //! TUI.
@@ -23,6 +23,7 @@ pub mod actions_bar;
 pub mod activity;
 pub mod config_form;
 pub mod deliverables_view;
+pub mod launch_view;
 pub mod rename_view;
 pub mod session_details;
 pub mod session_list;
