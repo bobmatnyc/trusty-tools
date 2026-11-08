@@ -353,8 +353,10 @@ pub fn message_attachments(payload: &Value) -> Vec<AttachmentInfo> {
 /// `visited` the folders already started, `current` and `token` the folder
 /// and page token in progress. [`DriveWalk::next_page`] lists one page and
 /// returns its non-folder files; with `recursive` a subfolder joins the
-/// queue. Trashed files are never listed.
-/// Test: `drive_walk_resumes_from_its_serialised_state`.
+/// queue. Trashed files are never listed. Before the first page the root
+/// must be a readable, untrashed folder, else the walk fails.
+/// Test: `drive_walk_resumes_from_its_serialised_state`,
+/// `drive_walk_refuses_a_root_that_is_not_a_live_folder`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriveWalk {
     /// Folders still to list.
@@ -392,6 +394,15 @@ impl DriveWalk {
         account: Option<&str>,
         page_size: usize,
     ) -> Result<Option<Vec<Value>>> {
+        // #10746: Drive answers `files.list` for an unknown or unshared
+        // folder with 200 and no files, which reads as a whole, empty
+        // listing. Before the first page the root must be a live folder.
+        if self.visited.is_empty()
+            && self.current.is_none()
+            && let Some(root) = self.queue.last()
+        {
+            check_root(client, account, root).await?;
+        }
         let folder = loop {
             if let Some(f) = &self.current {
                 break f.clone();
@@ -442,6 +453,20 @@ impl DriveWalk {
         }
         Ok(Some(files))
     }
+}
+
+/// #10746: fail unless `folder` is a readable, untrashed Drive folder.
+/// Errors: the `files.get` failure (403, 404, transport), a file that is
+/// not a folder, or a trashed folder.
+async fn check_root(client: &BaseClient, account: Option<&str>, folder: &str) -> Result<()> {
+    let meta = drive_file(client, account, folder).await?;
+    if meta.get("mimeType").and_then(Value::as_str) != Some(DRIVE_FOLDER_MIME) {
+        anyhow::bail!("drive root {folder} is not a folder");
+    }
+    if meta.get("trashed").and_then(Value::as_bool) == Some(true) {
+        anyhow::bail!("drive root folder {folder} is trashed");
+    }
+    Ok(())
 }
 
 /// List Drive files under a folder, following `nextPageToken`, up to

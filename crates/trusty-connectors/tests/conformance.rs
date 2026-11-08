@@ -736,3 +736,58 @@ fn cancel_while_waiting_on_google_kills_the_adapter() {
     assert!(gone(&fake.url), "{:?}", processes_with(&fake.url));
     fake.with(|st| st.hold = None);
 }
+
+/// Why: #10746 review (PR 10821) — Drive answers `files.list` for an
+/// unknown or unshared folder with 200 and an empty page, so a walk that
+/// never checks its root reads as a whole, empty listing and tombstones
+/// every item of the store.
+/// What: two Docs under `F` imported; then `F` unknown (no root, no
+/// files), trashed, not a folder, and refused with 403. Each run fails
+/// before any write, with `not_found` and `permission_denied` for the HTTP
+/// cases; the Docs stay live.
+/// Test: self-contained.
+#[test]
+fn an_unknown_or_unusable_root_fails_the_run_and_tombstones_nothing() {
+    let (fake, h) = (FakeGoogle::start(), Home::new(Some("work")));
+    fake.with(|st| {
+        for d in ["d1", "d2"] {
+            st.files.push(doc(d, "F", 1));
+            st.exports
+                .insert((d.into(), "text/markdown".into()), b"Doc.\n".to_vec());
+        }
+    });
+    let cmd = h.cmd(GDOCS, &fake, &[]);
+    assert_eq!(run(&cmd, &h.root, &docs(true, &[])).unwrap().created, 2);
+    type Set = fn(&mut support::State);
+    let cases: [(&str, Set); 4] = [
+        ("not_found", |st| {
+            st.roots.clear();
+            st.files.clear();
+        }),
+        ("trashed", |st| {
+            st.roots = vec![folder("F", "root")];
+            st.roots[0]["trashed"] = json!(true);
+        }),
+        ("not a folder", |st| st.roots = vec![doc("F", "root", 1)]),
+        ("permission_denied", |st| {
+            st.roots = vec![folder("F", "root")];
+            st.fail.push(("drive/v3/files/F?".into(), 403));
+        }),
+    ];
+    for (want, set) in cases {
+        fake.with(set);
+        let before = tree(&h.root);
+        let got = run(&cmd, &h.root, &docs(true, &[]));
+        let e = got.map(|r| (r.tombstoned, r.deletion_safe)).unwrap_err();
+        assert!(e.to_string().contains(want), "{want}: {e}");
+        assert_eq!(tree(&h.root), before, "{want}: the run wrote");
+    }
+    for d in ["d1", "d2"] {
+        let fm = frontmatter(&h.root, &format!("docs/docs-src/{d}.md"));
+        assert_ne!(
+            fm_str(&fm, "source_status").as_deref(),
+            Some("deleted"),
+            "{d}"
+        );
+    }
+}

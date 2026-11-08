@@ -7,7 +7,8 @@
 //! What: the selection is `account`, then either `folder_id` (with
 //! `recursive`) or `document_ids`, never both, and `max_items` (the
 //! adapter's ceiling, default 5,000). A folder `list` walks one Drive page
-//! (`trashed = false`, so a trashed Doc is absent) and hands the
+//! (`trashed = false`, so a trashed Doc is absent; #10746: the first page
+//! fails unless the root is a readable, untrashed folder) and hands the
 //! `DriveWalk` back as the cursor `w1:<json>`; a native Doc is an entry
 //! with its `version`, else `modifiedTime`, as the revision; any other file
 //! is an entry skipped `unsupported_format`. A `document_ids` list reads
