@@ -23,11 +23,11 @@ yields the same kind with the goal id. "Refresh briefing" (item or goal that alr
 and is reported until the Architect regenerates the brief and sets brief_request to null.
 Each `steer_requests` entry {text, at, by} on a task without `relayed_at` (the Steer button) yields
 {id, kind: "steer", at: entry.at, text: entry.text}, whatever the item's status. The Architect relays it to the
-owning PM as `User instruction (the owner): <text>`, then sets that entry's relayed_at (ISO time) with
+owning PM as `User instruction (the owner): "<text>" (owner turn: dashboard <id>)`, then sets that entry's relayed_at (ISO time) with
 `dashboard-db.py update items <id> --json '{"steer_requests": [...all entries, this one with relayed_at...]}' --if-version <v>`.
 A doc in <root>/il_steers with status "new" (the Steer button on an Intent Ledger task row in the Architect IL pane) yields
 {id: doc id, kind: "steer", at, text, task: the IL task id, session}. The Architect relays it to that session's PM as
-`User instruction (the owner): <text>` and sets status "relayed" (and relayed_at) with `dashboard-db.py update il_steers <id> --json '{...}'`.
+`User instruction (the owner): "<text>" (owner turn: dashboard <id>)` and sets status "relayed" (and relayed_at) with `dashboard-db.py update il_steers <id> --json '{...}'`.
 A session doc (<root>/sessions) whose command.status is "new" (the Activate, Prioritize, Park and Restart
 buttons) yields {id, kind: "owner_command", at: command.at, text, type, goal}; text is the activate text
 or the note (prioritize, park, restart). The Architect sets command.status "applied" once it has relayed and recorded it.

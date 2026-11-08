@@ -1,7 +1,7 @@
 """fleet_poll_io.py — fleet-poll.py's tmux, log, event and host reads (#10571 Phase 2 split).
 
 Why: fleet-poll.py sat at the 500-SLOC cap; its I/O half moves here unchanged.
-What: TmuxError, log, tmux, socket_dir, workspace_servers, list_panes, capture, capture_pane,
+What: TmuxError, log, tmux, socket_dir, workspace_servers, list_panes, is_architect_pane, capture, capture_pane,
 send_to_architect, read_events, swap_used_mb, host_alerts and acquire_poll_lock. Every name these
 functions use from the poller (settings, sibling functions) is read through `P`, the late-bound view fleet-poll.py passes to
 bind(), so rebinding `fleet-poll.tmux` or `fleet-poll.LOG` still steers them, as before the split.
@@ -114,6 +114,12 @@ def list_panes():
         except P.TmuxError as e:
             P.log(f"{server} list-panes ERROR {e}")
     return panes
+
+
+def is_architect_pane(p):
+    """#10101: the Architect's pane is on its own (default) server; a same-named
+    session on a workspace server is never it."""
+    return p["session"] == P.ARCHITECT and not p.get("server")
 
 
 def _rows(out, server):

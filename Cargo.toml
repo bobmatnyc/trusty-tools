@@ -24,7 +24,11 @@ resolver = "2"
 # Exclude paths inside copied projects that contain stray manifests we don't
 # want Cargo to treat as workspace members. trusty-agents bundles a `weather_alerter`
 # scratch dir.
-exclude = []
+#
+# `workers/okf-extract` (#10745) holds the trusty-okf extraction worker. It
+# needs Rust 1.98 (xberg) and builds on its own rust-toolchain.toml, outside the
+# 1.94 workspace MSRV (ADR-0029). Guard: scripts/check_worker_dir_excluded.sh.
+exclude = ["workers/okf-extract"]
 # `default-members` — the crates a BARE `cargo build`/`test`/`check` (no
 # `--workspace`, no `-p`, run from this root) actually targets. Everything
 # except `trusty-code-gui` (#2983 — a Tauri desktop GUI needing the pnpm/Svelte
@@ -76,6 +80,7 @@ default-members = [
     "crates/trusty-mcp",
     "crates/trusty-memory",
     "crates/trusty-mpm",
+    "crates/trusty-okf",
     "crates/trusty-progress",
     "crates/trusty-publish-guard",
     "crates/trusty-review",

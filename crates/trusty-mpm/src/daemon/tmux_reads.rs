@@ -30,6 +30,28 @@ impl TmuxDriver {
         crate::core::tmux_server::server_argv(self.server.as_deref(), command)
     }
 
+    /// The named server this driver reaches; `None` for the default one.
+    pub fn server(&self) -> Option<&str> {
+        self.server.as_deref()
+    }
+
+    /// `rename-session -t <old> <new>` on this driver's server (#10101).
+    ///
+    /// What: [`crate::core::tmux::run_tmux_on`] with this driver's binary and
+    /// server; the raw output, for the caller to read the exit status.
+    /// Test: `a_named_real_driver_sends_every_call_to_its_server`.
+    pub fn rename_session_output(
+        &self,
+        old: &str,
+        new: &str,
+    ) -> std::io::Result<std::process::Output> {
+        let cmd = TmuxCommand::RenameSession {
+            old: old.to_owned(),
+            new: new.to_owned(),
+        };
+        crate::core::tmux::run_tmux_on(&self.tmux_path, self.server.as_deref(), &cmd)
+    }
+
     /// A `Command` for `command` on this driver's server (#10101).
     fn tmux_command<S: Into<String>>(&self, command: impl IntoIterator<Item = S>) -> Command {
         let mut cmd = Command::new(&self.tmux_path);

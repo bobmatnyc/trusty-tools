@@ -1,14 +1,16 @@
-//! The Owner -> Project -> Sessions tree model for `tm tui` (#10476).
+//! The Owner -> Project tree model for `tm tui` (#10476).
 //!
-//! Why: the tree pane replaces the Projects and Sessions panes (Architect Q9).
-//! The poll rebuilds the project and session lists on every tick, so the tree
-//! is a pure projection of them plus the operator's collapsed set. Keeping it
-//! pure makes the counters, the collapse rules and the worker indentation
-//! testable without a terminal or a daemon.
+//! Why: the tree pane replaces the Projects pane (Architect Q9). The poll
+//! rebuilds the project and session lists on every tick, so the tree is a
+//! pure projection of them plus the operator's collapsed set. Keeping it pure
+//! makes the counters, the collapse rules and the worker indentation testable
+//! without a terminal or a daemon.
 //! What: [`NodeId`] names a node by value, so a repoll keeps the same id.
 //! [`build_tree`] flattens the visible nodes into [`TreeRow`]s in draw order.
-//! [`owner_of_repo_url`] derives the owner from `repo_url`, because the
-//! registry stores no owner field.
+//! #10754: two-column MPM pane (Bob 11-06) — the sessions moved to the right
+//! column (`super::session_col`), which orders them with
+//! [`session_placements`]. [`owner_of_repo_url`] derives the owner from
+//! `repo_url`, because the registry stores no owner field.
 //! Test: `tree_tests.rs` (`counts_total_and_live_per_project_and_owner`,
 //! `worker_indents_under_parent_by_link`, `owner_of_https_with_and_without_dot_git`).
 
@@ -33,8 +35,8 @@ const MANAGER_TOKENS: &[&str] = &["manager", "lead", "orchestrator"];
 /// collapsed set must name nodes by what they are, not by row index. Each
 /// variant carries its ancestors, so a vanished node can still name the node
 /// the selection falls back to.
-/// What: owners, projects, sessions, and the dimmed anchor drawn for a parent
-/// that is not in the project's list.
+/// What: owners and projects. #10754: two-column MPM pane (Bob 11-06) — the
+/// session and anchor nodes left with the session rows.
 /// Test: `parent_chain_walks_to_the_owner`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NodeId {
@@ -42,18 +44,6 @@ pub enum NodeId {
     Owner(String),
     /// A project under `owner`.
     Project { owner: String, name: String },
-    /// A session `id` under `project`.
-    Session {
-        owner: String,
-        project: String,
-        id: String,
-    },
-    /// The placeholder for `parent`, a parent session the project does not list.
-    Anchor {
-        owner: String,
-        project: String,
-        parent: String,
-    },
 }
 
 impl NodeId {
@@ -62,12 +52,6 @@ impl NodeId {
         match self {
             NodeId::Owner(_) => None,
             NodeId::Project { owner, .. } => Some(NodeId::Owner(owner.clone())),
-            NodeId::Session { owner, project, .. } | NodeId::Anchor { owner, project, .. } => {
-                Some(NodeId::Project {
-                    owner: owner.clone(),
-                    name: project.clone(),
-                })
-            }
         }
     }
 
@@ -76,13 +60,13 @@ impl NodeId {
         match self {
             NodeId::Owner(_) => None,
             NodeId::Project { name, .. } => Some(name),
-            NodeId::Session { project, .. } | NodeId::Anchor { project, .. } => Some(project),
         }
     }
 
-    /// True for the two node kinds Enter, Left and Right expand or collapse.
+    /// True for an owner, the one node kind Enter, Left and Right expand or
+    /// collapse. #10754: a project is a leaf; its sessions draw on the right.
     pub fn is_expandable(&self) -> bool {
-        matches!(self, NodeId::Owner(_) | NodeId::Project { .. })
+        matches!(self, NodeId::Owner(_))
     }
 }
 
@@ -97,22 +81,12 @@ pub enum TreeRowKind {
         live: usize,
         expanded: bool,
     },
-    /// A project with its session counters.
+    /// A project (a leaf) with its session counters.
     Project {
         name: String,
         total: usize,
         live: usize,
-        expanded: bool,
     },
-    /// A session: `index` into `sessions_by_project[project]`, `depth` its
-    /// worker indentation (0 for a session with no parent shown).
-    Session {
-        project: String,
-        index: usize,
-        depth: usize,
-    },
-    /// The dimmed line standing in for a parent the project does not list.
-    Anchor { parent: String, depth: usize },
 }
 
 /// One visible row of the tree, in draw order.
@@ -165,20 +139,19 @@ fn is_live(state: &str) -> bool {
 /// What: projects group by [`owner_key`]; an owner row shows the first-seen
 /// spelling and its [`NodeId`] carries the key. Owners are sorted by key with
 /// [`LOCAL_OWNER`] last; projects keep registry order inside their owner. An
-/// owner or project is expanded unless its [`NodeId`] is in `collapsed`, so a
-/// node first seen on any poll starts open. Counters count the polled (non-
+/// owner is expanded unless its [`NodeId`] is in `collapsed`, so an owner
+/// first seen on any poll starts open. Counters count the polled (non-
 /// terminal) session rows: `total` is all of them, `live` those `active` or
-/// `provisioning`; an owner sums its projects. With `indent_workers`, sessions
-/// follow [`session_placements`]; without it, they list flat in poll order.
+/// `provisioning`; an owner sums its projects. #10754: two-column MPM pane
+/// (Bob 11-06) — no session rows; a project is a leaf.
 /// Test: `counts_total_and_live_per_project_and_owner`,
-/// `collapsed_owner_hides_projects`, `collapsed_project_hides_sessions`,
+/// `collapsed_owner_hides_projects`, `left_column_draws_no_session_rows`,
 /// `owner_expand_state_survives_first_seen_spelling_change`,
-/// `fresh_state_shows_every_node_expanded_with_sessions`.
+/// `fresh_state_shows_every_node_expanded_without_sessions`.
 pub(crate) fn build_tree(
     projects: &[ProjectRow],
     sessions_by_project: &BTreeMap<String, Vec<SessionRow>>,
     collapsed: &BTreeSet<NodeId>,
-    indent_workers: bool,
     aliases: &SshHostAliases,
 ) -> Vec<TreeRow> {
     // #10476: D1c — case-only owner variants group as one owner
@@ -219,75 +192,26 @@ pub(crate) fn build_tree(
             continue;
         }
         for (project, (total, live)) in owner_projects.into_iter().zip(counts) {
-            let project_id = NodeId::Project {
-                owner: owner.clone(),
-                name: project.name.clone(),
-            };
-            let project_open = !collapsed.contains(&project_id);
             rows.push(TreeRow {
-                id: project_id,
+                id: NodeId::Project {
+                    owner: owner.clone(),
+                    name: project.name.clone(),
+                },
                 kind: TreeRowKind::Project {
                     name: project.name.clone(),
                     total,
                     live,
-                    expanded: project_open,
                 },
             });
-            if project_open {
-                let sessions = sessions_by_project.get(&project.name).unwrap_or(&empty);
-                push_sessions(&mut rows, &owner, &project.name, sessions, indent_workers);
-            }
         }
     }
     rows
 }
 
 /// `(total, live)` for one project's session rows.
-fn counters(sessions: &[SessionRow]) -> (usize, usize) {
+pub(crate) fn counters(sessions: &[SessionRow]) -> (usize, usize) {
     let live = sessions.iter().filter(|s| is_live(&s.state)).count();
     (sessions.len(), live)
-}
-
-/// Append one expanded project's session rows (and anchors) to `rows`.
-fn push_sessions(
-    rows: &mut Vec<TreeRow>,
-    owner: &str,
-    project: &str,
-    sessions: &[SessionRow],
-    indent_workers: bool,
-) {
-    let placements = if indent_workers {
-        session_placements(sessions)
-    } else {
-        (0..sessions.len())
-            .map(|i| Placement::Session(i, 0))
-            .collect()
-    };
-    for placement in placements {
-        let (id, kind) = match placement {
-            Placement::Session(index, depth) => (
-                NodeId::Session {
-                    owner: owner.to_string(),
-                    project: project.to_string(),
-                    id: sessions[index].id.clone(),
-                },
-                TreeRowKind::Session {
-                    project: project.to_string(),
-                    index,
-                    depth,
-                },
-            ),
-            Placement::Anchor(parent) => (
-                NodeId::Anchor {
-                    owner: owner.to_string(),
-                    project: project.to_string(),
-                    parent: parent.clone(),
-                },
-                TreeRowKind::Anchor { parent, depth: 0 },
-            ),
-        };
-        rows.push(TreeRow { id, kind });
-    }
 }
 
 /// Where one entry of a project's session list draws.

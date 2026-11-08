@@ -1357,3 +1357,84 @@ fn reserved_name(tag: &str) -> String {
         trusty_common::session_naming::RESERVED_TEST_PREFIX
     )
 }
+
+/// A driver whose default server lists nothing and whose one workspace
+/// server (`server`, socket in `dir`) holds `tm-adoptee` with cwd `cwd`.
+struct WorkspaceHost {
+    dir: PathBuf,
+    server: Option<String>,
+    cwd: PathBuf,
+}
+
+impl ManagedTmuxDriver for WorkspaceHost {
+    fn create_session(&self, _n: &str, _w: &str) -> Result<(), super::manager::ManagedError> {
+        Ok(())
+    }
+    fn kill_session(&self, _n: &str) -> Result<(), super::manager::ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _n: &str, _t: &str) -> Result<(), super::manager::ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _n: &str, _l: usize) -> Result<String, super::manager::ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, super::manager::ManagedError> {
+        Ok(match self.server {
+            Some(_) => vec!["tm-adoptee".to_owned()],
+            None => Vec::new(),
+        })
+    }
+    fn get_pane_cwd(&self, _n: &str) -> Option<PathBuf> {
+        self.server.as_ref().map(|_| self.cwd.clone())
+    }
+    fn on_server(&self, server: &str) -> Option<std::sync::Arc<dyn ManagedTmuxDriver>> {
+        Some(std::sync::Arc::new(Self {
+            dir: self.dir.clone(),
+            server: Some(server.to_owned()),
+            cwd: self.cwd.clone(),
+        }))
+    }
+    fn workspace_servers(&self) -> Result<Vec<String>, super::manager::ManagedError> {
+        Ok(vec!["tm-ws-10101-adopt".to_owned()])
+    }
+    fn socket_dir(&self) -> Option<PathBuf> {
+        Some(self.dir.clone())
+    }
+}
+
+/// Error arm (Fail-Open Check): boot adoption reads every workspace server; a
+/// session found only on one is adopted with that server's socket, so later
+/// calls reach it there. Red on 420b3717bf, which adopted from the default
+/// server only.
+#[serial_test::serial]
+#[tokio::test]
+async fn boot_reconcile_adopts_a_workspace_servers_session_with_its_socket() {
+    let dir = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(dir.path());
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let host = WorkspaceHost {
+        dir: dir.path().join("sockets"),
+        server: None,
+        cwd: workspace,
+    };
+    let mgr = SessionManager::new(&dir.path().join("data"), std::sync::Arc::new(host))
+        .await
+        .expect("manager");
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(report.external_adopted, vec!["tm-adoptee".to_owned()]);
+    let adopted = mgr
+        .list()
+        .await
+        .into_iter()
+        .find(|r| r.tmux_name == "tm-adoptee")
+        .expect("adopted record");
+    assert_eq!(
+        adopted.tmux_socket,
+        Some(dir.path().join("sockets").join("tm-ws-10101-adopt"))
+    );
+}

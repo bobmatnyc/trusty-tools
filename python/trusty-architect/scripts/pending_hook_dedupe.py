@@ -10,12 +10,16 @@ when user_state is given, then the pending line), or None when the pending set a
 items are open asks, not answers to relay, and are dropped. main() reads the hook JSON on stdin and
 prints the hookSpecificOutput JSON when decide() returns a line. Never raises; a state-file error
 means "emit".
+#10780: an owner prompt (owner_prompt, minus the machine-sent NOT_OWNER_TURN shapes) is also appended, verbatim, to the owner-turn record ({at, session, text} per line in
+inbox/owner-turns.jsonl, or $ARCHITECT_OWNER_TURNS), which relay_provenance.py checks a `User ruling` quote
+against; the record keeps its newest half once it passes OWNER_TURNS_MAX bytes.
 main() also appends pm_cursor.inject_block() (unread PM wake messages, repeated every call, D39) to the same
 additionalContext and echoes the hook's own hook_event_name (PostToolUse or UserPromptSubmit).
 Test: scripts/test_pending_answers_hook.py, scripts/test_user_state.py, scripts/test_pm_cursor.py
 """
 import json
 import os
+import re
 import sys
 import time
 
@@ -86,6 +90,57 @@ def owner_prompt(d):
     return bool(p) and not p.startswith(("[poll ", "<", "/"))
 
 
+OWNER_TURNS_MAX = 1024 * 1024
+OWNER_TURN_TEXT_MAX = 8000
+
+
+# #10780 critic: prompts that reach UserPromptSubmit but are not the owner typing. A PM's SendMessage
+# ("Another Claude session sent a message: <cross-session-message ...>"), the self-clear resume prompt,
+# hook feedback, a skill body, an interrupt or image note, a spawned session's brief, and a scheduled
+# heartbeat ("<id> heartbeat: ..."). Recording any of them would make another party's words citable as
+# the owner's. The architect MCP's architect_send never arrives as a prompt: it queues to
+# inbox/pm-messages.jsonl and reaches the Architect through a "[poll ...]" wake and pm_cursor context.
+NOT_OWNER_TURN = re.compile(
+    r"^(?:Another Claude session sent a message|<cross-session-message|Resume from the Architect IL|"
+    r"Stop hook feedback:|Base directory for this skill:|\[Request interrupted|\[Image:|You are tm-|"
+    r"\S{1,12} heartbeat:)")
+
+
+def owner_turn_text(d):
+    """The prompt text when `d` is a turn the owner typed and none of NOT_OWNER_TURN, else None."""
+    if not owner_prompt(d):
+        return None
+    p = str(d.get("prompt") or "").lstrip()
+    return None if NOT_OWNER_TURN.match(p) else p
+
+
+def record_owner_turn(d, now=None):
+    """#10780: append the owner's prompt to the owner-turn record; never raises (a write error goes to stderr).
+
+    Test: tests/test_pending_answers_hook.py
+    """
+    text = owner_turn_text(d)
+    if text is None:
+        return
+    path = os.environ.get("ARCHITECT_OWNER_TURNS") or os.path.join(ROOT, "inbox", "owner-turns.jsonl")
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() if now is None else now))
+    rec = {"at": at, "session": os.environ.get("ARCHITECT_SESSION") or "tm-architect",
+           "text": text[:OWNER_TURN_TEXT_MAX]}
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if os.path.getsize(path) > OWNER_TURNS_MAX:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(lines[len(lines) // 2:])
+            os.replace(tmp, path)
+    except (OSError, ValueError) as e:   # #10780 critic M: also a lone surrogate or a non-UTF-8 byte
+        sys.stderr.write(f"owner turn not recorded: {e!r}\n")
+
+
 def build_output(d, now=None):
     """The hook's JSON-able output for hook input `d`, or None. Subagent calls (agent_id) are skipped."""
     if not isinstance(d, dict) or d.get("agent_id"):
@@ -98,6 +153,7 @@ def build_output(d, now=None):
         user_state = None
     try:
         qroot = os.path.join(ROOT, "local", "owner-queue")
+        record_owner_turn(d, now)   # #10780: whether or not user_state is installed; owner turns only
         try:  # a signal write must never block a tool call or hide the state line
             if user_state is None:
                 raise LookupError("user_state not installed")

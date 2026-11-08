@@ -98,6 +98,7 @@ use tracing::{info, warn};
 
 use super::manager::{ManagedError, ReconcileReport, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
+use super::tmux_route::LiveSet;
 
 impl SessionManager {
     /// Reconcile daemon state against live tmux sessions after a restart.
@@ -166,7 +167,7 @@ impl SessionManager {
         // #5856: an unobservable tmux is not an empty tmux. `None` means tmux
         // was never successfully asked — it is NOT a set of zero live
         // sessions, and no record's state may be derived from it.
-        let live_names: Option<std::collections::HashSet<String>> =
+        let live_names: Option<super::tmux_route::LiveSessions> =
             match self.observed_live_managed_names() {
                 Ok(names) => Some(names),
                 Err(e) => {
@@ -214,9 +215,7 @@ impl SessionManager {
                 // is the EXPECTED state — the record is dropped while the
                 // orphan-GC still has two sweeps of work to do on the pane —
                 // and the advice to reactivate it is exactly wrong.
-                if live_names
-                    .as_ref()
-                    .is_some_and(|live| live.contains(&record.tmux_name))
+                if live_names.as_ref().is_some_and(|live| live.holds(&record))
                     && !record.is_leaked_test_adoption()
                 {
                     warn!(
@@ -300,7 +299,7 @@ impl SessionManager {
                 continue;
             };
 
-            if live_names.contains(&record.tmux_name) {
+            if live_names.holds(&record) {
                 // #9850: a live name is not a launch approval — a held Stopped
                 // or Errored record keeps its state (the rebind pass skips it
                 // too).
@@ -368,8 +367,13 @@ impl SessionManager {
         if let Err(why) = &sidecars {
             warn!("reconcile: external adoption skipped this pass (#8942) — {why}");
         }
-        for name in live_names.iter().flatten() {
+        // See #10101: every listed server; a workspace server's adoptee
+        // records that server's socket.
+        for (server, name) in live_names.iter().flat_map(adoptable_names) {
             let Ok(sidecars) = &sidecars else { break };
+            let Some((host, tmux_socket)) = self.adoption_host(server, live_names.as_ref()) else {
+                continue;
+            };
             let role = super::ArchitectFloor::sidecar_role(sidecars, name);
             if known_names.contains(name) {
                 continue;
@@ -401,8 +405,7 @@ impl SessionManager {
             // (a pane running an agent is kept and warned about instead). The
             // probe therefore decides a pane's life, which is why
             // `resolve_adoptable_cwd` retries an UNANSWERED one — see its doc.
-            let Some(resolved_cwd) = super::adopt::resolve_adoptable_cwd(&*self.tmux, name).await
-            else {
+            let Some(resolved_cwd) = super::adopt::resolve_adoptable_cwd(&*host, name).await else {
                 // #6414: "on any attempt" over-claimed — a pane whose recorded
                 // path is simply gone is now decided on the first probe.
                 warn!(
@@ -447,7 +450,7 @@ impl SessionManager {
             };
             // #9004: the pane id with the server it was read on.
             let (pane_id, tmux_server, tmux_session_id) =
-                super::pane_identity::capture(self.tmux.as_ref(), name);
+                super::pane_identity::capture(host.as_ref(), name);
             let external = SessionRecord {
                 context_usage: None,
                 parent_session_id: None,
@@ -492,7 +495,7 @@ impl SessionManager {
                 // immediately, mirroring `adopt.rs`'s explicit adoption path.
                 pane_id,
                 tmux_server,
-                tmux_socket: None,
+                tmux_socket,
                 injection_status: Default::default(),
                 worktree_owner: None,
                 terminal_at: None,
@@ -571,5 +574,43 @@ impl SessionManager {
         }
 
         Ok(report)
+    }
+}
+
+/// Every live name `live` lists with its server: `None` for the default
+/// server, then each workspace server's (#10101).
+fn adoptable_names(
+    live: &super::tmux_route::LiveSessions,
+) -> impl Iterator<Item = (Option<&str>, &String)> {
+    let named = live
+        .named
+        .iter()
+        .flat_map(|(server, names)| names.iter().map(move |n| (Some(server.as_str()), n)));
+    live.default.iter().map(|n| (None, n)).chain(named)
+}
+
+impl SessionManager {
+    /// The driver an adoption on `server` reads through, and the socket its
+    /// record stores (#10101): this manager's driver and `None` for the
+    /// default server. `None` (skip the adoption) for a workspace server with
+    /// no socket directory or no driver that reaches it.
+    /// Test: `boot_reconcile_adopts_a_workspace_servers_session_with_its_socket`.
+    fn adoption_host(
+        &self,
+        server: Option<&str>,
+        live: Option<&super::tmux_route::LiveSessions>,
+    ) -> Option<(
+        std::sync::Arc<dyn super::ManagedTmuxDriver>,
+        Option<PathBuf>,
+    )> {
+        let Some(server) = server else {
+            return Some((std::sync::Arc::clone(&self.tmux), None));
+        };
+        let dir = live?.socket_dir.as_deref()?;
+        let host = self.tmux.on_server(server)?;
+        Some((
+            host,
+            Some(crate::core::tmux_server::server_socket_path(dir, server)),
+        ))
     }
 }

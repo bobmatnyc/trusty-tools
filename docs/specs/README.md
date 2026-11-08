@@ -103,6 +103,8 @@ normative grammar — this note does not restate it.
 | DOC-84 | `SPEC-SUPERVISOR-01~draft` … `-08~draft` | [Fleet supervisor: design and decisions](./DOC-84-fleet-supervisor-design-and-decisions.md) | `trusty-mpm` — Architect question collector and event log (prototype; native build in #8436). Moved from the Architect project under [#9291](https://github.com/bobmatnyc/trusty-tools/issues/9291). **Superseded in part by [DOC-83](./DOC-83-architect-identity-voice-duties.md)**; remains the design of record for question collection, the append-only question event log, asking the user, and monitoring; decisions D1-D11 (2026-09-24). `SPEC-SUPERVISOR-01` is the id used before the move and stays valid as the alias |
 | DOC-85 | `SPEC-CHMODE-01~draft` … `-07~draft` | [Channel modes: bot / service account and personal](./DOC-85-channel-modes-bot-and-personal.md) | `trusty-channels` — route policy, host ceiling, audit; `trusty-common` — credential registry. Two modes for every channel (Notion, Slack, Google Chat, Google Docs, Telegram): allow/deny table, per-use routes, `bot_ref` / `personal_ref` binding, per-channel credential table, Notion worked example. Amends the #8454 2026-09-23 ruling (Dd7) |
 | DOC-86 | none yet (design draft; no `SPEC-` IDs declared) | [#10459 — one main-thread ticket for Architect set/copy and 1-step direct commands](./DOC-86-main-thread-ticket-design.md) | `trusty-mpm` (Architect session only) — main-thread ticket, turn grants, `/tm-run`; `trusty-secrets` — provenance; `trusty-common` — credential path. Design draft, no code |
+| DOC-87 | `SPEC-OWNERCON-01~draft` … `-08~draft` | [Typed owner constraints](./DOC-87-typed-owner-constraints.md) | `trusty-architect` ledger, Architect relay, PM dispatch, `trusty-mpm` pm-guard — shared owner-provenance guardrails: typed owner constraints, enforcement points, lifecycle. Follow-up to [#10780](https://github.com/bobmatnyc/trusty-tools/issues/10780) |
+| DOC-88 | `SPEC-FIXBAR-01~draft` … `-08~draft` | [Fix bar: acceptance-criterion class](./DOC-88-fix-bar-acceptance-criterion-class.md) | Completion Standard (framework core, Architect core, `tm-workflow`, `architect-completion-standard`), `code-review-standards` rubric, prompt goldens. A finding of any severity that fails a stated acceptance criterion blocks; [#10803](https://github.com/bobmatnyc/trusty-tools/issues/10803) |
 
 > **Related catalog — Trusty Code implementation status.** [Trusty Code
 > specification and ADR reconciliation](../trusty-code/spec-adr-reconciliation.md)
@@ -114,8 +116,11 @@ normative grammar — this note does not restate it.
 > **Catalog note — `DOC-73` claim.** `DOC-72` is claimed by open pull request
 > [#6607](https://github.com/bobmatnyc/trusty-tools/pull/6607) on branch
 > `docs/6606-analyze-lsp-spec`, which the note below could not have seen when it
-> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-87`** (updated
-> 2026-10-29 — `DOC-86` claimed by
+> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-89`** (updated
+> 2026-11-08 — `DOC-87` and `DOC-88` claimed by
+> [Typed owner constraints](./DOC-87-typed-owner-constraints.md) and
+> [Fix bar: acceptance-criterion class](./DOC-88-fix-bar-acceptance-criterion-class.md).
+> Prior note: 2026-10-29 — `DOC-86` claimed by
 > [#10459 main-thread ticket design](./DOC-86-main-thread-ticket-design.md).
 > Prior note: 2026-10-27 — `DOC-85` claimed by
 > [Channel modes](./DOC-85-channel-modes-bot-and-personal.md).
