@@ -791,3 +791,35 @@ fn verify_refuses_a_fold_twin_and_writes_no_record() {
     assert_eq!(snapshot(tmp.path()), before, "no file changed");
     assert!(!tmp.path().join("_sources/verification").exists());
 }
+
+/// #10746 (§2.3, §4.5): an actor holding a control character cannot forge
+/// a `log.md` entry or heading. `put`, `put_confirmed`, `verify` and
+/// `verify_confirmed` each refuse it with `actor_control_character` and no
+/// file changes; the forged text never reaches `log.md`.
+#[cfg(unix)]
+#[test]
+fn put_and_verify_refuse_an_actor_with_a_control_character() {
+    let forged = "x`\n\n## 2026-01-01\n\n- **Verified** `/a.md` by `human:jo";
+    for by in [
+        Actor::Process(forged.into()),
+        Actor::Human("jo\r".into()),
+        Actor::Other("tab\there".into()),
+    ] {
+        let (tmp, mut b) = setup("---\ntype: Note\n---\nBody\n");
+        let before = snapshot(tmp.path());
+        let mut c = b.get(&id("a")).unwrap();
+        c.body = "Changed\n".into();
+        let got = b.put(c.clone(), by.clone(), WriteMode::default(), now());
+        assert_eq!(conflict_reason(got), "actor_control_character", "{by:?}");
+        let got = b.put_confirmed(c, by.clone(), confirm(), WriteMode::default(), now());
+        assert_eq!(conflict_reason(got), "actor_control_character", "{by:?}");
+        let seen = content_hash(&b.get(&id("a")).unwrap());
+        let v = verification(by.clone(), "2026-11-01T09:00:00Z");
+        let got = b.verify(&id("a"), v.clone(), &seen);
+        assert_eq!(conflict_reason(got), "actor_control_character", "{by:?}");
+        let got = b.verify_confirmed(&id("a"), v, &seen, confirm());
+        assert_eq!(conflict_reason(got), "actor_control_character", "{by:?}");
+        assert_eq!(snapshot(tmp.path()), before, "{by:?}: no file changed");
+        assert!(!tmp.path().join("log.md").exists(), "{by:?}");
+    }
+}

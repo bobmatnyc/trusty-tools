@@ -21,7 +21,8 @@
 //! [`Bundle::verify`] binds a new event to the hash the verifier saw, and
 //! writes a `human:` event only with a [`HumanConfirmation`] (§2.4).
 //! #10746: an `Actor::Human` value alone is never a confirmation; only the
-//! `_confirmed` entry points accept one.
+//! `_confirmed` entry points accept one. An actor whose text holds a
+//! control character is refused (`actor_control_character`) by both.
 //! Order (#10746, §4.4, §4.11): every refusal, the render, and the
 //! confinement of the record and `log.md` paths run first, with no file
 //! changed. #10746 S5: then one journaled operation (`bundle::commit`)
@@ -40,7 +41,8 @@
 //! `unwritable_record_keeps_the_legacy_event_and_the_concept`,
 //! `put_and_verify_refuse_a_symlinked_log_with_no_file_changed`,
 //! `human_actor_without_confirmation_cannot_extend_a_review`,
-//! `human_verify_without_confirmation_is_refused`.
+//! `human_verify_without_confirmation_is_refused`,
+//! `put_and_verify_refuse_an_actor_with_a_control_character`.
 
 use chrono::{DateTime, FixedOffset};
 use serde_yaml::{Mapping, Value};
@@ -228,6 +230,24 @@ fn generated_value(by: &Actor, now: &DateTime<FixedOffset>) -> Value {
     Value::Mapping(m)
 }
 
+/// Refuse an actor whose text holds a control character (§2.3, §4.5).
+///
+/// Why: #10746 — the actor text lands verbatim in `generated.by`, the
+/// verification record, the operation journal and one `log.md` entry. A
+/// newline in it would forge `log.md` entries or `## date` headings, and
+/// folding it in `log.md` alone would make the log name a different actor
+/// than the record.
+/// What: `Conflict { reason: "actor_control_character" }` when any char of
+/// `by.to_string()` is a control character (newline included), before any
+/// other check, so no file changes.
+/// Test: `put_and_verify_refuse_an_actor_with_a_control_character`.
+fn check_actor(id: &ConceptId, by: &Actor) -> Result<(), OkfError> {
+    if by.to_string().chars().any(char::is_control) {
+        return Err(conflict(id, "actor_control_character"));
+    }
+    Ok(())
+}
+
 /// The concept on disk at `bytes`, parsed under `id`.
 fn parse_disk(id: &ConceptId, bytes: &[u8]) -> Result<Concept, OkfError> {
     let text = std::str::from_utf8(bytes).map_err(|e| OkfError::Parse {
@@ -337,6 +357,8 @@ impl Bundle {
             ConceptRef::Id(id) => id.clone(),
             ConceptRef::Foreign(p) => return Err(foreign_refusal(p)),
         };
+        // #10746: an actor that could forge a `log.md` line is refused.
+        check_actor(&id, by)?;
         let target = confined_file(&self.root, &id.file_name())?;
         let (existing, record_of) = match at {
             Some((bytes, of)) => (bytes, of),
@@ -504,6 +526,8 @@ impl Bundle {
         seen: &ContentHash,
         confirmed: bool,
     ) -> Result<(PutPlan, Vec<Finding>), OkfError> {
+        // #10746: an actor that could forge a `log.md` line is refused.
+        check_actor(id, &v.by)?;
         // #10746: a `human:` actor alone is not explicit confirmation (§2.4).
         if is_human(&v.by) && !confirmed {
             return Err(conflict(id, "human_not_confirmed"));
