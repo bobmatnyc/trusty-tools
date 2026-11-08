@@ -40,9 +40,11 @@ The class is an addition to the fix bar. No existing class changes, and non-matc
 
 **Stated acceptance criterion.** A requirement written in one of:
 
-1. the issue body (a checklist item, a "Closure" or "Acceptance" line, or a "must" statement);
+1. the issue body, whoever wrote it, owner or agent (a checklist item, a "Closure" or "Acceptance" line, or a "must" statement);
 2. the dispatch brief to the agent;
 3. a recorded owner ruling attached to the work (an issue comment or a ledger/palace record whose source is the owner, per [DOC-87](./DOC-87-typed-owner-constraints.md)).
+
+An Architect restatement with no owner source counts as a brief criterion (item 2) and never as an owner ruling (item 3).
 
 Not stated: a criterion the reviewer infers, a design preference, an Architect or PM paraphrase with no owner source, a general quality bar ("should be well tested").
 
@@ -135,10 +137,10 @@ Doc gates: `scripts/check_sld.sh`, `scripts/check_test_pointers.sh`.
 
 **ID:** SPEC-FIXBAR-08~draft
 
-For Bob (owner policy):
+Answered by Bob (dashboard Dfa, 2026-11-08 03:44Z):
 
-1. Does an issue-body checklist item count as a "stated acceptance criterion" when the issue is a ticket filed by an agent, not by the owner? Default in this spec: yes, an issue body counts regardless of author, because the PM dispatches against it.
-2. May the Architect, in a relay with no owner source, restate a criterion for a brief? Default: it counts only as part of the brief, so a criterion the Architect adds is a brief criterion, not an owner ruling. DOC-87 provenance rules decide whether it carries owner weight.
+1. Does an issue-body checklist item count as a "stated acceptance criterion" when an agent wrote the issue? Answer: yes. An issue body counts regardless of author.
+2. May the Architect, in a relay with no owner source, restate a criterion for a brief? Answer: it counts only as a brief criterion, not as an owner ruling.
 
 Engineering (stated defaults):
 
