@@ -1,5 +1,5 @@
 //! Tests for `launch_host` (#10101): a CLI launch's tmux calls reach the PM's
-//! workspace server, and a held name is refused.
+//! workspace server.
 
 use std::path::{Path, PathBuf};
 
@@ -123,45 +123,4 @@ async fn a_dropped_guard_kills_on_its_own_server() {
         "{lines:?}"
     );
     assert!(lines[0].contains("tm-proj"), "{lines:?}");
-}
-
-/// One managed summary as the daemon sends it.
-fn summary(name: &str, state: &str, persisted: Option<&str>) -> ManagedSessionSummary {
-    serde_json::from_value(serde_json::json!({
-        "id": format!("{name}-{state}-id"),
-        "name": name,
-        "state": state,
-        "persisted_state": persisted,
-    }))
-    .expect("summary")
-}
-
-/// #10101: a non-terminal record holds its name; a decommissioned or deleted
-/// one does not; the persisted state decides; an unknown state holds.
-#[test]
-fn a_live_managed_record_holds_its_name() {
-    let held = [summary("tm-proj", "active", None)];
-    assert_eq!(
-        name_holder(&held, "tm-proj").map(|s| s.id.as_str()),
-        Some("tm-proj-active-id")
-    );
-    assert!(name_holder(&held, "tm-other").is_none());
-    for state in ["decommissioned", "deleted"] {
-        assert!(name_holder(&[summary("tm-proj", state, None)], "tm-proj").is_none());
-    }
-    let tombstone = [summary("tm-proj", "stopped", Some("decommissioned"))];
-    assert!(
-        name_holder(&tombstone, "tm-proj").is_none(),
-        "persisted wins"
-    );
-    let stopped = [summary("tm-proj", "active", Some("stopped"))];
-    assert!(
-        name_holder(&stopped, "tm-proj").is_some(),
-        "stopped still holds"
-    );
-    let unknown = [summary("tm-proj", "some-future-state", None)];
-    assert!(
-        name_holder(&unknown, "tm-proj").is_some(),
-        "unknown fails closed"
-    );
 }

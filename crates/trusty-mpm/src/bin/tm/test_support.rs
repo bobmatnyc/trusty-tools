@@ -214,6 +214,11 @@ pub(crate) fn renderer_operand(alternate_screen: bool) -> &'static str {
     }
 }
 
+// #10101 D3c: the stub daemon CLI launch tests run against. Declared here,
+// not in `main.rs`, which sits at the SLOC cap.
+#[path = "launch_stub_tests.rs"]
+pub(crate) mod launch_stub;
+
 #[cfg(test)]
 mod tests {
     use super::*;

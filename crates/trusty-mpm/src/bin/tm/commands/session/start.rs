@@ -8,13 +8,13 @@
 //! pre-#1916 in-place deploy-and-start behavior, preserved for directories that
 //! are not a recognized git repo.
 //! Test: `session_start_dispatches_managed_new_for_github_repo`,
-//! `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
+//! `session_start_in_place_refuses_an_unreachable_daemon_before_any_write_10101`
 //! in `start_tests.rs`.
 
 use serde::Deserialize;
 
 use crate::cli::SessionAction;
-use crate::commands::launch_host::{LaunchHost, refuse_held_name};
+use crate::commands::launch_host::{LaunchHost, settle_claim};
 use crate::commands::project::resolve_dir;
 use crate::formatters::session::{delegation_roster_line, deploy_summary_line};
 
@@ -50,7 +50,7 @@ use crate::formatters::session::{delegation_roster_line, deploy_summary_line};
 /// supported, so the original in-place `prepare_session` + detached-tmux-start
 /// behavior ([`start_session_in_place`]) is preserved unchanged.
 /// Test: `session_start_dispatches_managed_new_for_github_repo`,
-/// `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
+/// `session_start_in_place_refuses_an_unreachable_daemon_before_any_write_10101`
 /// in `start_tests.rs`.
 pub(crate) async fn start_session(
     daemon: &trusty_mpm::client::DaemonClient,
@@ -209,15 +209,22 @@ pub(crate) fn refuse_outside_a_git_project(path: &std::path::Path) -> anyhow::Re
 /// that, a name a managed record holds is refused; the session is created on
 /// the workspace server ([`LaunchHost::for_workspace`]) whose socket the
 /// registration carries; a create or `claude` start that fails removes the
-/// registration and is an `Err`.
-/// Test: `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`,
+/// registration and is an `Err`. #10101 D3c: the shared name rule
+/// ([`trusty_mpm::client::DaemonClient::claim_launch_name`]) runs first, so
+/// an unreachable daemon or a live legacy holder refuses before any write; a
+/// `Stopped`/`Errored` managed holder is resumed instead ([`settle_claim`]);
+/// a session of the name already on the server is never typed into.
+/// Test: `session_start_in_place_refuses_an_unreachable_daemon_before_any_write_10101`,
+/// `a_stopped_holder_is_resumed_by_session_start_10101`,
+/// `a_failed_resume_reports_and_creates_nothing_10101`,
+/// `a_live_legacy_record_refuses_session_start_10101`,
+/// `an_in_place_start_never_types_into_a_session_that_already_existed_10101`,
 /// `session_start_in_place_writes_the_user_tier_under_the_config_dir_9999`
 /// in `start_tests.rs` covers the routing decision hermetically;
 /// `session_start_in_place_launches_on_the_workspace_server_10101`,
 /// `a_held_name_refuses_the_launch_before_tmux_or_registration` and
-/// `a_failed_create_removes_the_registration`,
-/// `a_failed_start_never_kills_a_session_it_did_not_create_10101` the tmux
-/// server and failure arms.
+/// `a_failed_create_removes_the_registration` the tmux server and failure
+/// arms.
 async fn start_session_in_place(
     daemon: &trusty_mpm::client::DaemonClient,
     path: &std::path::Path,
@@ -230,11 +237,16 @@ async fn start_session_in_place(
     // #9999: relocates the user tier off `home`, as `CLAUDE_CONFIG_DIR` does.
     claude_config_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    // #10101: the session's name, and its workspace server; a name a managed
+    // #10101: the session's name, and its workspace server; a name a live
     // record holds is refused before anything is written or registered.
+    // D3c: an unreachable daemon refuses here too; a Stopped/Errored holder
+    // is resumed; this directory's running legacy session is left in place.
     let name = trusty_mpm::core::names::name_from_dir(path);
     let host = LaunchHost::for_workspace(path);
-    refuse_held_name(daemon, &name).await?;
+    let claim = daemon.claim_launch_name(&name, path).await?;
+    if settle_claim(daemon, claim, &path.to_string_lossy(), None).await? {
+        return Ok(());
+    }
     // Prepare the custom instructions Claude Code reads at startup:
     // deploy composed agents to `~/.claude/agents/` and merge the
     // project CLAUDE.md. This shared prep is what makes a plain
@@ -372,6 +384,16 @@ async fn start_session_in_place(
         let hint = manual_launch_hint(&body.name, &workdir, &prompt.file);
         return Err(registered.fail(e.context(hint)).await);
     }
+    // #10101: D3c — a session this start did not create is never typed into,
+    // as in `tm connect` (`if !already_running`).
+    if already_running {
+        println!(
+            "tmux session {} already existed on {}; left in place, claude was not started in it",
+            body.name,
+            host.describe()
+        );
+        return Ok(());
+    }
     // #2997: disclaim the pane's `claude` off the shared tmux server
     // (same wrapper the daemon + `tm launch`/`connect` paths use).
     // No-op off macOS / under TM_DISABLE_SPAWN_DISCLAIM.
@@ -387,14 +409,10 @@ async fn start_session_in_place(
         &spec_dir,
     );
     if let Err(e) = sent {
-        let left = if already_running {
-            "it was already running, so it was left as it was"
-        } else {
-            host.kill(&body.name);
-            "the session was killed"
-        };
+        // Only a session this start created reaches here (D3c guard above).
+        host.kill(&body.name);
         let e = anyhow::anyhow!(
-            "claude could not be started in tmux session {} on {}: {e}; {left}",
+            "claude could not be started in tmux session {} on {}: {e}; the session was killed",
             body.name,
             host.describe()
         );
