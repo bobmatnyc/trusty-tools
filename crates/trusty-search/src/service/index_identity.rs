@@ -319,46 +319,89 @@ fn bump_and_stamp(index_id: &str, corpus: Option<&crate::core::corpus::CorpusSto
     }
 }
 
-/// Mark `staging` to bump at promotion when a path write finished after the
-/// incremental carryover copy began.
+/// Mark the corpora a staged run is about to swap, so every way the run can
+/// lose a write bumps the generation (#10738).
 ///
-/// Why: an incremental run copies the live corpus into staging, then swaps
-/// staging in (#839). A path write that commits to the live corpus in between
-/// is missing from staging, and the promotion drops it (SPEC-OKF-01 §5.6 D1).
-/// The loss lands at promotion, so the bump does too: the promotion's attach
-/// sees the pending marker. A bump at the swap would let a caller re-probe,
-/// still find the write in memory, and journal it under the new value.
+/// Why: puts during a staged run land in staging only. A rollback, a deferral
+/// or a restart re-attaches the live corpus, whose stamp still matches, so
+/// nothing bumped (SPEC-OKF-01 §5.6 D1). And an incremental run copies the
+/// live corpus into staging, then swaps it in (#839): a path write that
+/// commits to the live corpus in between is missing from staging, and the
+/// promotion drops it.
 /// What: called under the indexer's write guard, so no path write is in
-/// flight. A force run, or no write finished since `before`, is a no-op.
-/// Otherwise writes the pending marker into `staging`. A failed marker write
+/// flight. Writes the pending marker into `staging` when a path write finished
+/// since `before` on an incremental run (the promotion's attach bumps), then
+/// into the outgoing live corpus (any later attach of it bumps; a promotion
+/// renames over it, so the marker leaves with the old file). A failed write
 /// removes the staging file and is returned, so the caller abandons the run
 /// with the live corpus still attached.
-/// Test: `a_write_in_the_carryover_window_raises_the_generation`.
-pub(crate) fn mark_carryover_misses(
+/// Test: `a_write_in_the_carryover_window_raises_the_generation`,
+/// `a_restart_mid_staged_reindex_raises_the_generation`.
+pub(crate) fn mark_before_swap(
     indexer: &crate::core::CodeIndexer,
     staging: &crate::core::corpus::CorpusStore,
     staging_path: &Path,
     before: u64,
     force: bool,
 ) -> Result<()> {
-    if force || indexer.path_writes_finished() == before {
-        return Ok(());
-    }
     let index_id = indexer.index_id.as_str();
-    tracing::warn!(
-        index_id,
-        "a path write finished during the carryover copy; the promotion bumps (#10738)"
-    );
-    // #10738: fail closed; a promotion that dropped the write must not run unmarked.
-    if let Err(e) = staging.mark_identity_bump_pending_sync("carryover_window_write") {
+    let window_write = !force && indexer.path_writes_finished() != before;
+    if window_write {
+        tracing::warn!(
+            index_id,
+            "a path write finished during the carryover copy; the promotion bumps (#10738)"
+        );
+    }
+    // #10738: fail closed; a run that can drop a write must not start unmarked.
+    let marked = if window_write {
+        staging
+            .mark_identity_bump_pending_sync("carryover_window_write")
+            .context("mark the carryover-window write for a bump")
+    } else {
+        Ok(())
+    }
+    .and_then(|()| mark_live_before_swap(indexer));
+    if let Err(e) = marked {
         if let Err(rm) = std::fs::remove_file(staging_path) {
             tracing::warn!(index_id, error = %rm, "staging corpus not removed (#10738)");
         }
-        return Err(e.context(format!(
-            "reindex[{index_id}]: could not mark the carryover-window write for a bump"
-        )));
+        return Err(e.context(format!("reindex[{index_id}]: staged swap not marked")));
     }
     Ok(())
+}
+
+/// Write the pending marker into the live corpus a staged run is about to
+/// swap out; no corpus attached is a no-op.
+///
+/// Why: see [`mark_before_swap`]; an adopted resume swaps the live corpus out
+/// too, and puts made after the restart are in it alone (#10738).
+/// Test: `a_restart_mid_staged_reindex_raises_the_generation`.
+pub(crate) fn mark_live_before_swap(indexer: &crate::core::CodeIndexer) -> Result<()> {
+    let Some(live) = indexer.corpus_store() else {
+        return Ok(());
+    };
+    live.mark_identity_bump_pending_sync("staged_reindex_in_flight")
+        .context("mark the outgoing live corpus for a bump")
+}
+
+/// Write the pending marker into the staging corpus a prune is about to
+/// shrink; no corpus attached is a no-op.
+///
+/// Why: the incremental prune removes paths no caller asked to remove,
+/// pushed ones not on disk included, and the promoted staging corpus would
+/// carry a matching stamp (SPEC-OKF-01 §5.6 D1, #10738). The promotion's
+/// attach sees the marker and bumps.
+/// Test: `a_prune_that_removes_a_pushed_path_raises_the_generation`.
+pub(crate) async fn mark_staging_before_prune(
+    corpus: Option<std::sync::Arc<crate::core::corpus::CorpusStore>>,
+) -> Result<()> {
+    let Some(corpus) = corpus else {
+        return Ok(());
+    };
+    tokio::task::spawn_blocking(move || corpus.mark_identity_bump_pending_sync("reindex_prune"))
+        .await
+        .context("prune identity marker task did not complete")?
+        .context("mark the staging corpus for a prune bump")
 }
 
 /// Drop this process's poison for `index_id`, as a daemon restart does.

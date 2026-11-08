@@ -310,3 +310,172 @@ async fn a_write_in_the_carryover_window_raises_the_generation() {
         "a write the promotion dropped must raise the generation: {before:?} -> {after:?}"
     );
 }
+
+const LATE: &str = "src/late_10738.rs";
+const LATE_BODY: &str = "pub fn late_10738(x: u32) -> u32 {\n    x + 2\n}\n";
+
+/// A colocated, walkable index under `root` with `a.rs` on disk.
+///
+/// Why: the restart and prune cases run real reindexes, which walk the root;
+/// the corpus directory must not be walked as source.
+/// Test: used by the restart and prune cases below.
+fn walkable_index(id: &str, root: &std::path::Path) -> Arc<IndexHandle> {
+    let embedder: Arc<dyn crate::core::embed::Embedder> =
+        Arc::new(crate::core::embed::MockEmbedder::new(8));
+    let store: Arc<dyn crate::core::store::VectorStore> =
+        Arc::new(crate::core::store::UsearchStore::new(8).expect("usearch"));
+    let colocated = root.join(crate::service::colocated_storage::COLOCATED_DIR_NAME);
+    std::fs::create_dir_all(&colocated).expect("colocated dir");
+    let mut indexer = CodeIndexer::new(id, root.to_path_buf())
+        .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated)
+        .with_components(embedder, store);
+    indexer.set_corpus_store(Arc::new(
+        crate::core::corpus::CorpusStore::open(
+            &colocated.join(crate::service::storage_layout::REDB_FILE),
+        )
+        .expect("open live corpus"),
+    ));
+    let mut handle = IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.to_path_buf(),
+    );
+    handle.defer_embed = false;
+    handle
+        .extra_skip_dirs
+        .push(crate::service::colocated_storage::COLOCATED_DIR_NAME.into());
+    Arc::new(handle)
+}
+
+/// Write `path` through the shared write core, as a put does.
+async fn push(handle: &Arc<IndexHandle>, path: &str, body: &str) {
+    let outcome = handle
+        .indexer
+        .read()
+        .await
+        .index_file_outcome(path, body)
+        .await
+        .expect("push");
+    assert!(
+        matches!(outcome, crate::core::indexer::IndexFileOutcome::Indexed { chunks } if chunks > 0),
+        "{outcome:?}"
+    );
+}
+
+/// Why: HIGH 1, crash arm — puts made during a staged run live only in
+/// staging. After a restart the live corpus attached with a matching stamp
+/// and no marker, so nothing bumped; the next run then discarded staging, or
+/// adopted it without the puts made after the restart.
+/// What: for a discard and a resume, begin a staged run, push a path, drop the
+/// handle and the process state as a crash does, re-attach the live corpus
+/// and assert the generation rose; then push again, run the next reindex
+/// (which adopts staging when `resume`), and assert it rose again.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_restart_mid_staged_reindex_raises_the_generation() {
+    for resume in [false, true] {
+        let id = format!("identity-restart-mid-run-{resume}-10738");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        std::fs::write(
+            root.join("a.rs"),
+            "pub fn alpha_10738() -> u8 {\n    1\n}\n",
+        )
+        .expect("a.rs");
+        let _ = index_identity::retire(&id);
+        let handle = walkable_index(&id, &root);
+        reindex(&handle, false).await;
+        let checkpoint = resume.then(|| {
+            super::checkpoint::ReindexCheckpoint::for_run(
+                &handle,
+                &handle.id,
+                &super::validate::canonical_walk_root(&root),
+            )
+        });
+        super::corpus_swap::begin_staged_corpus_swap(
+            &handle,
+            &handle.id,
+            false,
+            None,
+            checkpoint.as_ref(),
+            crate::service::storage_layout::REDB_TMP_FILE,
+        )
+        .await
+        .expect("staging")
+        .expect("staging must engage");
+        push(&handle, PUSHED, PUSHED_BODY).await;
+        let acknowledged = identity(&id).generation;
+
+        // A crash: every handle and the process-local state go.
+        drop(handle);
+        index_identity::forget_process_state(&id);
+        super::hash::file_hashes().remove(&IndexId::new(&id));
+        let handle = walkable_index(&id, &root);
+        let restarted = identity(&id).generation;
+        assert!(
+            restarted > acknowledged,
+            "resume={resume}: a restart mid-run must raise the generation: \
+             {acknowledged} -> {restarted}"
+        );
+
+        push(&handle, LATE, LATE_BODY).await;
+        let late = identity(&id).generation;
+        let progress = Arc::new(ReindexProgress::new());
+        spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+            .await
+            .expect("reindex task must not panic");
+        let events = progress.events.lock().await.clone();
+        let start = events
+            .iter()
+            .map(|e| serde_json::from_str::<serde_json::Value>(e).expect("event json"))
+            .find(|e| e["event"] == "start")
+            .expect("a start event");
+        assert_eq!(start["resumed"], resume, "{start}");
+        let after = identity(&id).generation;
+        assert!(
+            after > late,
+            "resume={resume}: the next run drops the push made after the restart: {late} -> {after}"
+        );
+    }
+}
+
+/// Why: HIGH 1, prune arm — an incremental reindex removes every path that
+/// is in the corpus but not on disk, pushed paths included, and promoted with
+/// a matching stamp, so the push was gone under the same identity.
+/// What: reindex, push a path that is not on disk, reindex again, and assert
+/// the path is gone and the generation rose.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_prune_that_removes_a_pushed_path_raises_the_generation() {
+    let id = "identity-prune-pushed-10738";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::write(
+        root.join("a.rs"),
+        "pub fn alpha_10738() -> u8 {\n    1\n}\n",
+    )
+    .expect("a.rs");
+    let _ = index_identity::retire(id);
+    let handle = walkable_index(id, &root);
+    reindex(&handle, false).await;
+    push(&handle, PUSHED, PUSHED_BODY).await;
+    let acknowledged = identity(id).generation;
+
+    reindex(&handle, false).await;
+    let corpus = handle.indexer.read().await.corpus_store().expect("corpus");
+    assert!(
+        !corpus
+            .list_indexed_files()
+            .expect("list")
+            .iter()
+            .any(|f| f == PUSHED),
+        "the prune removes the pushed path"
+    );
+    let after = identity(id).generation;
+    assert!(
+        after > acknowledged,
+        "a prune that removes a pushed path must raise the generation: {acknowledged} -> {after}"
+    );
+}
