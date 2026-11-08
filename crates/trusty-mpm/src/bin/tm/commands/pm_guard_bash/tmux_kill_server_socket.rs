@@ -1,18 +1,21 @@
 //! The socket a tmux kill reaches when its argv does not spell it (#10665 r3).
 //!
 //! Why: Architect ruling df-D77. `env -u TMUX TMUX_TMPDIR=<dir> tmux
-//! kill-server` reaches `<dir>/tmux-<uid>/default`, and the sandbox scripts
-//! stop their server with `env -i … tmux -S "$SOCK" kill-server`. Neither
-//! spells a literal `-S`, so the floor would refuse both.
+//! kill-server` reaches `<dir>/tmux-<uid>/default`, and `-S "$SOCK"` names
+//! the socket through a variable. Neither spells a literal `-S`, so the floor
+//! would refuse both.
 //! What: [`explicit_argv`] writes the socket into the tmux argv as a literal
 //! `-S`, which `scratch_server` then judges: the default socket of a scratch
 //! `TMUX_TMPDIR` that `env` sets while it removes `TMUX` (`-u TMUX` or `-i`),
 //! when `env` runs tmux directly and nothing else in the command sets `TMUX`;
 //! and for `-S "$VAR"`, the one literal absolute path the command assigns to
-//! `VAR`, or [`FRESH_SCRATCH`] for a `mktemp` value or, under `env -i`, any
-//! value. Anything else is left as written, and refuses.
+//! `VAR`, or [`FRESH_SCRATCH`] for a `mktemp` value. Anything else is left as
+//! written, and refuses. #10706 C2: `env -i` no longer vouches for any
+//! `$VAR` — the outer shell expands it first; the sandbox scripts are
+//! trusted by repo and content instead (`pm_guard_secret_script::tmux_kill`).
 //! Test: `env_cleared_scratch_tmpdir_kills_are_allowed`,
-//! `a_socket_variable_is_read_from_its_one_assignment`.
+//! `a_socket_variable_is_read_from_its_one_assignment`,
+//! `deny_env_i_with_preexpanded_socket`.
 
 use std::path::Path;
 
@@ -23,7 +26,7 @@ use crate::commands::hook_rewrite::is_env_assignment;
 use trusty_mpm::core::tmux_server::socket_dir;
 
 /// A path no tmux server listens on, outside every socket directory: the
-/// socket of a server the command creates fresh (`mktemp`, `env -i`).
+/// socket of a server the command creates fresh (`mktemp`).
 const FRESH_SCRATCH: &str = "/nonexistent/tm-guard-fresh-scratch.sock";
 
 /// `argv` with the socket its tmux (at `pos`) reaches written as a literal
@@ -37,7 +40,6 @@ pub(super) fn explicit_argv(
 ) -> Vec<String> {
     let mut argv = argv.to_vec();
     let prefix = env_prefix(&argv, pos);
-    let reset = prefix.as_ref().is_some_and(|p| p.reset);
     let mut has_server = false;
     let mut i = pos + 1;
     while let Some(word) = argv.get(i) {
@@ -51,11 +53,12 @@ pub(super) fn explicit_argv(
             .map(|(k, c)| (c, word[k + c.len_utf8()..].is_empty()));
         if let Some((c, separate)) = option {
             has_server |= c == 'L' || c == 'S';
+            // #10706 C2: no `env -i` fallback — the outer shell expands the
+            // variable before `env` runs, so `env -i` says nothing about it.
             if c == 'S'
                 && separate
                 && let Some(name) = argv.get(i + 1).and_then(|v| variable(v))
-                && let Some(path) =
-                    assigned_path(name, script).or_else(|| reset.then(|| FRESH_SCRATCH.into()))
+                && let Some(path) = assigned_path(name, script)
             {
                 argv[i + 1] = path;
             }

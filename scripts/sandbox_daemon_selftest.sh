@@ -50,6 +50,17 @@
 #     teardown      after the daemon exits, the launcher runs
 #                   `tmux -S <dir>/data/tmux/tmux-<uid>/default kill-server`
 #                   and no other tmux call (#9557); skips without python3
+#     bin-fresh-*   (#10755) against a temp git source root (SANDBOX_SRC_ROOT)
+#                   and a stubbed dependency tree (BIN_FRESH_SOURCES_CMD): a
+#                   stale build artifact refuses, in a dry run and in a real
+#                   run that starts nothing, also via a symlink, a custom
+#                   profile, a cargo-target-pool path, a newer dependency
+#                   crate or an untracked module; the newest of several
+#                   sources is named; a failed derivation or no source
+#                   refuses; a fresh one and --allow-stale pass; an
+#                   installed-style stub passes with a notice; the override
+#                   is announced, and ignored with a warning unless
+#                   BIN_FRESH_TEST=1
 #   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
@@ -92,8 +103,10 @@ chmod +x "$STUB"
 
 # The launcher, run from a cleared environment carrying fake secrets, two
 # forwardable names, and an `LC_`-prefixed name that is no locale category.
+# SRC_ROOT_ENV: extra env words, set by the bin-fresh cases only.
+SRC_ROOT_ENV=()
 run_launcher() {
-  env -i PATH="$PATH" LANG=C RUST_LOG=warn LC_API_KEY="$FAKE_LC" \
+  env -i PATH="$PATH" ${SRC_ROOT_ENV[@]+"${SRC_ROOT_ENV[@]}"} LANG=C RUST_LOG=warn LC_API_KEY="$FAKE_LC" \
     TELEGRAM_BOT_TOKEN="$FAKE_TOKEN" OPENAI_API_KEY="$FAKE_KEY" \
     SELFTEST_SECRET_TOKEN="$FAKE_TOKEN" bash "$LAUNCHER" "$@"
 }
@@ -390,6 +403,96 @@ if command -v python3 >/dev/null 2>&1; then
 else
   echo "skip teardown: no python3 to bind a fake socket"
 fi
+
+# 11. bin-fresh (#10755): a temp source root and a stubbed dependency tree
+# (BIN_FRESH_SOURCES_CMD), so neither the real tree nor cargo changes the
+# answer. Source mtimes: a.rs 2020-03, z.rs 2020-04, main.rs 2020-06 (the
+# newest of several), trusty-secrets lib.rs 2020-08 (a dependency crate).
+# Stubs: debug/tm and profiling/tm 2020-01 (stale), debug/tm-mid 2020-07
+# (fresh against trusty-mpm alone, stale against its dependency), release/tm
+# now (fresh).
+SRC11="$TMP_ROOT/src11"
+TGT11="$TMP_ROOT/tgt11"
+mkdir -p "$SRC11/crates/trusty-mpm/src" "$SRC11/crates/trusty-secrets/src" \
+  "$TGT11/debug" "$TGT11/release" "$TGT11/profiling"
+for f in a z main; do echo "// $f" > "$SRC11/crates/trusty-mpm/src/$f.rs"; done
+echo "// dep" > "$SRC11/crates/trusty-secrets/src/lib.rs"
+touch -d 2020-03-01T00:00:00 "$SRC11/crates/trusty-mpm/src/a.rs"
+touch -d 2020-04-01T00:00:00 "$SRC11/crates/trusty-mpm/src/z.rs"
+touch -d 2020-06-01T00:00:00 "$SRC11/crates/trusty-mpm/src/main.rs"
+touch -d 2020-08-01T00:00:00 "$SRC11/crates/trusty-secrets/src/lib.rs"
+git -C "$SRC11" init -q
+git -C "$SRC11" add crates
+: > "$TGT11/CACHEDIR.TAG"
+for b in debug/tm profiling/tm debug/tm-mid release/tm; do cp "$STUB" "$TGT11/$b"; done
+touch -d 2020-01-01T00:00:00 "$TGT11/debug/tm" "$TGT11/profiling/tm"
+touch -d 2020-07-01T00:00:00 "$TGT11/debug/tm-mid"
+POOL11="$TMP_ROOT/cargo-target-pool/org/repo/slot-0/debug"
+mkdir -p "$POOL11"
+cp "$STUB" "$POOL11/tm"
+touch -d 2020-01-01T00:00:00 "$POOL11/tm"
+ln -s "$TGT11/debug/tm" "$TMP_ROOT/link-tm"
+# The stubbed `cargo tree` output: trusty-mpm alone, or with its dependency.
+TREE11="$TMP_ROOT/tree-tm"
+# It runs in the source root, so it names crates under whichever root is set.
+# shellcheck disable=SC2016  # $(pwd -P) expands in the stub, not here
+printf '%s\n' '#!/bin/sh' 'echo "trusty-mpm v0.0.0 ($(pwd -P)/crates/trusty-mpm)"' \
+  'echo "anyhow v1.0.0"' > "$TREE11"
+# shellcheck disable=SC2016  # $(pwd -P) expands in the stub, not here
+printf '%s\n' '#!/bin/sh' 'echo "trusty-mpm v0.0.0 ($(pwd -P)/crates/trusty-mpm)"' \
+  'echo "trusty-secrets v0.0.0 ($(pwd -P)/crates/trusty-secrets) (*)"' > "$TREE11-deps"
+chmod +x "$TREE11" "$TREE11-deps"
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=$TREE11")
+expect_refusal bin-fresh-newest-of-several 1 \
+  "is older than its newest source $SRC11/crates/trusty-mpm/src/main.rs" \
+  --bin "$TGT11/debug/tm" --dir "$DIR2" --dry-run
+DIR11="$TMP_ROOT/case11"
+mkdir -p "$DIR11"
+expect_refusal bin-fresh-stale 1 "refused: stale build artifact $TGT11/debug/tm" \
+  --bin "$TGT11/debug/tm" --dir "$DIR11"
+[ ! -e "$DIR11/home" ] || fail bin-fresh-stale "the launcher created <dir>/home"
+expect_refusal bin-fresh-symlink 1 "refused: stale build artifact $TGT11/debug/tm" \
+  --bin "$TMP_ROOT/link-tm" --dir "$DIR2" --dry-run
+expect_refusal bin-fresh-profile 1 "refused: stale build artifact $TGT11/profiling/tm" \
+  --bin "$TGT11/profiling/tm" --dir "$DIR2" --dry-run
+expect_refusal bin-fresh-pool 1 "refused: stale build artifact $POOL11/tm" \
+  --bin "$POOL11/tm" --dir "$DIR2" --dry-run
+expect_refusal bin-fresh-fresh 0 "fresh: build artifact" \
+  --bin "$TGT11/release/tm" --dir "$DIR2" --dry-run
+expect_refusal bin-fresh-allow-stale 0 "warning: --allow-stale" \
+  --bin "$TGT11/debug/tm" --dir "$DIR2" --dry-run --allow-stale
+expect_refusal bin-fresh-installed 0 "notice: installed binary (not under a cargo target dir)" \
+  --bin "$STUB" --dir "$DIR2" --dry-run
+# An untracked new module counts (2020-07-15 > tm-mid's 2020-07-01).
+echo "// new" > "$SRC11/crates/trusty-mpm/src/new_mod.rs"
+touch -d 2020-07-15T00:00:00 "$SRC11/crates/trusty-mpm/src/new_mod.rs"
+expect_refusal bin-fresh-untracked 1 \
+  "is older than its newest source $SRC11/crates/trusty-mpm/src/new_mod.rs" \
+  --bin "$TGT11/debug/tm-mid" --dir "$DIR2" --dry-run
+rm "$SRC11/crates/trusty-mpm/src/new_mod.rs"
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=$TREE11-deps")
+expect_refusal bin-fresh-dependency 1 \
+  "is older than its newest source $SRC11/crates/trusty-secrets/src/lib.rs" \
+  --bin "$TGT11/debug/tm-mid" --dir "$DIR2" --dry-run
+# The override is announced; without BIN_FRESH_TEST it is ignored with a
+# warning, so a stub that would mark tm-mid fresh does not, and a stale binary
+# is still refused by the real derivation (cargo cannot read this root).
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=$TREE11")
+expect_refusal bin-fresh-override-notice 0 "sources from BIN_FRESH_SOURCES_CMD override: $TREE11" \
+  --bin "$TGT11/debug/tm-mid" --dir "$DIR2" --dry-run
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_SOURCES_CMD=$TREE11")
+expect_refusal bin-fresh-override-ignored 1 "warning: BIN_FRESH_SOURCES_CMD is set but ignored" \
+  --bin "$TGT11/debug/tm-mid" --dir "$DIR2" --dry-run
+expect_refusal bin-fresh-override-ignored-stale 1 "refused: cannot judge the freshness of $TGT11/debug/tm" \
+  --bin "$TGT11/debug/tm" --dir "$DIR2" --dry-run
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$SRC11" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=false")
+expect_refusal bin-fresh-derive-fails 1 "cannot judge the freshness" \
+  --bin "$TGT11/release/tm" --dir "$DIR2" --dry-run
+mkdir -p "$TMP_ROOT/not-a-repo"
+SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$TMP_ROOT/not-a-repo" "BIN_FRESH_TEST=1" "BIN_FRESH_SOURCES_CMD=$TREE11")
+expect_refusal bin-fresh-no-source 1 "no source file of trusty-mpm found by git" \
+  --bin "$TGT11/release/tm" --dir "$DIR2" --dry-run
+SRC_ROOT_ENV=()
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

@@ -46,7 +46,10 @@ impl SessionManager {
                 ),
             ));
         };
-        match self.tmux.pane_exists_checked(name, pane_id) {
+        // See #10101: the record's own server, or a refusal.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), record)
+            .map_err(|e| refusal(id, record, e.to_string()))?;
+        match tmux.pane_exists_checked(name, pane_id) {
             Some(true) => {}
             Some(false) => {
                 warn!(
@@ -66,7 +69,7 @@ impl SessionManager {
                 ));
             }
         }
-        match same_server(record, name, pane_id, self.tmux.as_ref()) {
+        match same_server(record, name, pane_id, &*tmux) {
             RuntimeOwnership::Owned { pane_id, .. } => Ok(pane_id),
             RuntimeOwnership::Foreign(why) => Err(refusal(
                 id,

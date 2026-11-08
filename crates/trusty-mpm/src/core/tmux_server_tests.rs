@@ -83,6 +83,18 @@ fn server_args_select_the_named_server() {
     );
 }
 
+/// #10101: `-L <name>` only for a named server; the default-server argv is
+/// exactly the command.
+#[test]
+fn server_argv_prefixes_only_a_named_server() {
+    let command = || ["list-sessions".to_owned(), "-F".to_owned(), "x".to_owned()];
+    assert_eq!(server_argv(None, command()), command().to_vec());
+    assert_eq!(
+        server_argv(Some("tm-ws-a-1"), command()),
+        ["-L", "tm-ws-a-1", "list-sessions", "-F", "x"].map(String::from)
+    );
+}
+
 #[test]
 fn live_servers_are_listed_and_dead_ones_skipped() {
     let (_dir, root) = scratch();
