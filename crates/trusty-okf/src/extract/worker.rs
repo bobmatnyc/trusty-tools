@@ -411,6 +411,9 @@ impl WorkerExtractor {
     /// killed. An unreadable spend recycles it (fails closed).
     fn budget_left(&self, proc: &WorkerProcess) -> bool {
         let budget = self.cfg.limits.cpu_seconds as f64;
+        // #10746: the group ID is the spawned PID, the root of the process
+        // tree `spent` reads; under `bwrap --new-session` the worker itself
+        // sits two levels below it in a group of its own.
         cpu::spent(proc.pgid()).is_some_and(|used| used + budget / 2.0 <= budget)
     }
 

@@ -25,8 +25,9 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub struct Fake {
     /// Whole-process behaviour: `ok`, `no_read`, `no_hello`, `bad_first`,
-    /// `ignore_shutdown`, `env` (text is the environment and directory) or
-    /// `probe` (text says whether a socket and a file outside opened).
+    /// `ignore_shutdown`, `env` (text is the environment and directory),
+    /// `probe` (text says whether a socket and a file outside opened) or
+    /// `tty` (text says whether `/dev/tty` opened, and the `tty_nr`).
     pub mode: &'static str,
     pub protocol: u32,
     pub version: String,
@@ -138,6 +139,14 @@ while (1) {
     my $s = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $o{port}, Proto => 'tcp', Timeout => 2);
     my $file = open(my $fh, '<', $o{secret}) ? 'ok' : 'fail';
     $text = 'socket=' . ($s ? 'ok' : 'fail') . ";file=$file";
+  }
+  # #10746: whether /dev/tty opens, and tty_nr from /proc/self/stat (0: no
+  # controlling terminal).
+  if ($o{mode} eq 'tty') {
+    my $tty = open(my $t, '<', '/dev/tty') ? 'open' : 'fail';
+    open(my $sf, '<', '/proc/self/stat') or die; my $st = <$sf>; close $sf;
+    my ($rest) = $st =~ /.*\)\s+(.*)/s; my @f = split ' ', $rest;
+    $text = "tty=$tty;ctty=$f[4]";
   }
   my $sha = $body =~ /^LIE/ ? ('0' x 64) : $m->{sha256};
   wframe({type => 'ok', request_id => $m->{request_id}, input_sha256 => $sha, text => $text,

@@ -908,6 +908,74 @@ fn sandboxed_worker_cannot_fork_a_setsid_grandchild() {
     );
 }
 
+/// Run `cmd` under util-linux `script` on a fresh pty, which becomes the
+/// controlling terminal of `cmd`'s session (#10746). Stdout and the status.
+fn on_pty(cmd: &str) -> (std::process::ExitStatus, String) {
+    let out = std::process::Command::new("/usr/bin/script")
+        .args(["-qec", cmd, "/dev/null"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    (
+        out.status,
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// Why: #10746 review finding 1 (CVE-2017-5226) — a sandboxed worker left
+/// in the operator's session can open `/dev/tty` and push keystrokes into
+/// the operator's shell with TIOCSTI. `bwrap --new-session` leaves it no
+/// controlling terminal.
+/// What: Linux only, where `bwrap` and `script` exist. `script` runs the CLI
+/// with a fresh pty as its controlling terminal (checked first on a plain
+/// process, so the test cannot pass for want of a tty); the CLI imports one
+/// PDF through a double that reports whether `/dev/tty` opens and its
+/// `tty_nr`. The imported text says it did not open and `tty_nr` is 0.
+/// Test: self-contained.
+#[test]
+fn sandboxed_worker_has_no_controlling_tty() {
+    let tools = ["/usr/bin/bwrap", "/usr/bin/script"];
+    if !cfg!(target_os = "linux") || !tools.iter().all(|t| Path::new(t).is_file()) {
+        eprintln!("tty: needs Linux with {tools:?}; nothing is checked on this host");
+        return;
+    }
+    let (_, stat) = on_pty("cat /proc/self/stat");
+    let tty_nr = stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().nth(4))
+        .unwrap_or("0");
+    assert_ne!(tty_nr, "0", "the harness gave no controlling tty: {stat}");
+    let fx = Fx::new(&[("t.pdf", "TTY")]);
+    let w = Fake {
+        mode: "tty",
+        sandbox: "platform".into(),
+        ..Fake::default()
+    }
+    .write(fx.tmp.path(), "worker");
+    let q = |p: &Path| format!("'{}'", p.display());
+    let cmd = format!(
+        "{} import run {} --from dir:{} --worker {}",
+        q(Path::new(env!("CARGO_BIN_EXE_trusty-okf"))),
+        q(&fx.root),
+        q(&fx.src),
+        q(&w)
+    );
+    let (status, out) = within(S(10 + 30 + 5 + 5), move || on_pty(&cmd));
+    let text: Vec<String> = walkdir::WalkDir::new(&fx.root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter(|t| t.contains("tty="))
+        .collect();
+    assert_eq!(text.len(), 1, "{status:?} {out}");
+    assert!(
+        text[0].contains("tty=fail;ctty=0"),
+        "the sandboxed worker had a controlling tty: {}",
+        text[0]
+    );
+}
+
 /// Why: #10746 S10 fix round, finding 3 — Ctrl-C on the CLI cancels the
 /// import; the worker's process group is killed and reaped, the report is
 /// printed, and the CLI exits 3 instead of dying with the worker orphaned.
@@ -1030,9 +1098,39 @@ fn sigint_cancels_an_adapter_import_with_a_worker() {
 /// Test: self-contained.
 #[test]
 fn cpu_budget_recycles_before_a_valid_item_is_killed() {
+    cpu_budget_recycles(SandboxPolicy::Off, "none");
+}
+
+/// Why: #10746 review finding 1 — `bwrap --new-session` moves the worker
+/// out of the host's process group, so the CPU read must still find it, or
+/// the budget runs out and a valid item is killed.
+/// What: `cpu_budget_recycles_before_a_valid_item_is_killed` under the
+/// platform sandbox, where its launcher exists.
+/// Test: self-contained.
+#[test]
+fn cpu_budget_recycles_a_sandboxed_worker() {
+    let launcher = if cfg!(target_os = "macos") {
+        "/usr/bin/sandbox-exec"
+    } else {
+        "/usr/bin/bwrap"
+    };
+    if !Path::new(launcher).is_file() {
+        eprintln!("cpu: no {launcher}; nothing is sandboxed on this host");
+        return;
+    }
+    cpu_budget_recycles(SandboxPolicy::Platform, "platform");
+}
+
+/// A 2 s CPU budget, six 0.5 s items: all succeed on more than one worker.
+fn cpu_budget_recycles(policy: SandboxPolicy, claim: &str) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
-    let mut cfg = config(&dir, &Fake::default(), "worker");
+    let fake = Fake {
+        sandbox: claim.into(),
+        ..Fake::default()
+    };
+    let mut cfg = config(&dir, &fake, "worker");
+    cfg.sandbox = policy;
     cfg.limits.item = S(10);
     cfg.limits.cpu_seconds = 2;
     let (codes, groups) = within(S(6 * 10 + 2 + 5), move || {
