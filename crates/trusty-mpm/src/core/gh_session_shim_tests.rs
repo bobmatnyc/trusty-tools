@@ -6,8 +6,8 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::{
-    GH_SHIM_ENV, LaunchSeams, PinnedCredential, find_real_gh, launch_pinned_login, prefixed_path,
-    shim_dir, shim_root, shim_script, write_gh_shim,
+    GH_SHIM_ENV, LaunchSeams, PinnedCredential, REAP_FN, find_real_gh, launch_pinned_login,
+    prefixed_path, shim_dir, shim_root, shim_script, write_gh_shim,
 };
 use crate::core::gh_account::PinnedGhIdentity;
 use crate::core::gh_account_dir::AccountDirSources;
@@ -1090,13 +1090,7 @@ fn a_signal_to_the_shim_reaps_gh_and_removes_the_buffer_dir() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         let mut shim = spawn_past_etxtbsy(&mut cmd);
-        let mut gh: libc::pid_t = 0;
-        let started = holds_within(Duration::from_secs(10), || {
-            let text = std::fs::read_to_string(pid_file.path()).unwrap_or_default();
-            gh = text.trim().parse().unwrap_or(0);
-            gh > 0
-        });
-        assert!(started, "signal {signal}: the fake gh never started");
+        let gh = pid_written_to(pid_file.path());
         let shim_pid = libc::pid_t::try_from(shim.id()).expect("pid fits");
         // SAFETY: plain kill(2) on the shim pid this test spawned.
         unsafe { libc::kill(shim_pid, signal) };
@@ -1107,12 +1101,7 @@ fn a_signal_to_the_shim_reaps_gh_and_removes_the_buffer_dir() {
             shim.kill().expect("KILL the shim after its grace");
         }
         let status = shim.wait().expect("the shim is reaped");
-        // SAFETY: kill(2) with signal 0 only probes whether `gh` exists.
-        let gh_gone = holds_within(Duration::from_secs(5), || unsafe { libc::kill(gh, 0) != 0 });
-        if !gh_gone {
-            // SAFETY: KILL the orphaned fake gh this test started.
-            unsafe { libc::kill(gh, libc::SIGKILL) };
-        }
+        let gh_gone = gone_within(gh, Duration::from_secs(5));
         assert!(gh_gone, "signal {signal}: gh pid {gh} outlived the shim");
         assert_eq!(status.code(), Some(code), "signal {signal}: {status:?}");
         let left: Vec<_> = std::fs::read_dir(&buffers).expect("buffer root").collect();
@@ -1144,4 +1133,101 @@ fn a_buffered_call_still_reads_the_callers_stdin() {
     let out = shim.wait_with_output().expect("the shim runs");
     assert!(out.status.success(), "{out:?}");
     assert_eq!(out.stdout, b"{\"query\":\"x\"}\n", "{out:?}");
+}
+
+/// Read the pid a fake gh wrote to `path`, waiting up to 10 s for it.
+#[cfg(unix)]
+fn pid_written_to(path: &Path) -> libc::pid_t {
+    let mut pid: libc::pid_t = 0;
+    let written = holds_within(std::time::Duration::from_secs(10), || {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        pid = text.trim().parse().unwrap_or(0);
+        pid > 0
+    });
+    assert!(written, "no pid was written to {}", path.display());
+    pid
+}
+
+/// `true` once `pid` is gone, within `bound`; otherwise KILL it (a pid this
+/// test recorded) and answer `false`.
+#[cfg(unix)]
+fn gone_within(pid: libc::pid_t, bound: std::time::Duration) -> bool {
+    // SAFETY: kill(2) with signal 0 only probes whether `pid` exists.
+    let gone = holds_within(bound, || unsafe { libc::kill(pid, 0) != 0 });
+    if !gone {
+        // SAFETY: KILL a process this test started and recorded.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    gone
+}
+
+/// 🔴 #10550: a gh that ignores TERM is KILLed once the shim's 5 s grace
+/// passes, so TERM to the shim pid alone still leaves no gh, exit 143 and no
+/// buffer dir.
+#[cfg(unix)]
+#[test]
+fn a_gh_that_ignores_term_is_killed_within_the_grace() {
+    use std::time::Duration;
+    let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+    let call = format!(
+        "trap '' TERM; echo $$ > '{}'; exec sleep 30",
+        pid_file.path().display()
+    );
+    let (tmp, dir) = rate_limit_shim("exit 1", &call);
+    let buffers = tmp.path().join("buffers");
+    std::fs::create_dir(&buffers).expect("buffer root");
+    let mut cmd = std::process::Command::new(dir.join("gh"));
+    cmd.args(["api", "user"])
+        .env("TMPDIR", &buffers)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut shim = spawn_past_etxtbsy(&mut cmd);
+    let gh = pid_written_to(pid_file.path());
+    let shim_pid = libc::pid_t::try_from(shim.id()).expect("pid fits");
+    // SAFETY: plain kill(2) on the shim pid this test spawned.
+    unsafe { libc::kill(shim_pid, libc::SIGTERM) };
+    // The grace is 5 s; 2 s of slack.
+    let gh_gone = gone_within(gh, Duration::from_secs(7));
+    if !holds_within(Duration::from_secs(1), || {
+        shim.try_wait().expect("try_wait").is_some()
+    }) {
+        shim.kill().expect("KILL the shim");
+    }
+    let status = shim.wait().expect("the shim is reaped");
+    assert!(gh_gone, "a TERM-ignoring gh pid {gh} outlived the grace");
+    assert_eq!(status.code(), Some(143), "{status:?}");
+    let left: Vec<_> = std::fs::read_dir(&buffers).expect("buffer root").collect();
+    assert!(left.is_empty(), "buffer dir leaked: {left:?}");
+}
+
+/// 🔴 #10550: a trap that fires after gh is forked but before `child=$!` runs
+/// still reaps gh, through `$!`. The window cannot be hit on demand from
+/// outside, so this runs [`REAP_FN`] itself with `child` empty and `$!` set.
+#[cfg(unix)]
+#[test]
+fn reap_falls_back_to_the_forked_pid_when_child_is_unset() {
+    use std::time::Duration;
+    let scratch = tempfile::tempdir().expect("scratch");
+    let pid_file = scratch.path().join("pid");
+    let script = format!(
+        "{REAP_FN}child=\nsleep 30 &\necho $! > '{}'\nreap 143 TERM\n",
+        pid_file.display()
+    );
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", &script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut sh = spawn_past_etxtbsy(&mut cmd);
+    let forked = pid_written_to(&pid_file);
+    if !holds_within(Duration::from_secs(10), || {
+        sh.try_wait().expect("try_wait").is_some()
+    }) {
+        sh.kill().expect("KILL the sh");
+    }
+    let status = sh.wait().expect("the sh is reaped");
+    let forked_gone = gone_within(forked, Duration::from_secs(2));
+    assert!(forked_gone, "the forked pid {forked} outlived reap");
+    assert_eq!(status.code(), Some(143), "{status:?}");
 }
