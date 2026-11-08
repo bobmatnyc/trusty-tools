@@ -80,6 +80,7 @@ default-members = [
     "crates/trusty-mcp",
     "crates/trusty-memory",
     "crates/trusty-mpm",
+    "crates/trusty-okf",
     "crates/trusty-progress",
     "crates/trusty-publish-guard",
     "crates/trusty-review",
