@@ -262,23 +262,39 @@ pub(crate) fn shim_script(
 /// "unknown", and exits 1 with no stdout. The call is never retried: the limit
 /// holds until the reset. Otherwise it replays stdout, then stderr, and the
 /// exit status.
-/// Test: `a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout`,
+/// The buffered gh runs as a background child so a HUP, INT or TERM to the
+/// shim is acted on at once — sh defers a trap until a foreground child exits.
+/// The trap sends the child HUP (for HUP) or TERM (for INT and TERM: POSIX sh
+/// starts a background child with INT ignored), waits for it, removes the
+/// buffer dir and exits 129, 130 or 143. gh is reaped before the shim exits,
+/// so a supervisor's KILL after its grace finds no gh left to orphan (#10550).
+/// The child's stdin is the caller's, passed on fd 9: POSIX sh gives a
+/// background child `/dev/null` otherwise.
+/// Test: `a_signal_to_the_shim_reaps_gh_and_removes_the_buffer_dir`,
+/// `a_buffered_call_still_reads_the_callers_stdin`,
+/// `a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout`,
 /// `a_failed_reset_lookup_still_names_the_limit_and_exits_1`,
 /// `a_call_with_no_rate_limit_passes_output_and_status_through_unchanged`,
 /// `a_non_rate_limit_graphql_error_passes_through_unchanged`,
 /// `a_large_buffered_output_passes_through_whole`,
 /// `a_watch_command_keeps_the_exec_path`, `a_tty_stdout_keeps_the_exec_path`.
 fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
+    // #10550: gh runs in the background and the traps forward and reap, so a
+    // TERM-then-KILL supervisor never orphans gh or leaks the buffer dir.
     format!(
         "[ -t 1 ] && exec \"$real\" \"$@\"\n\
          case \" $* \" in *' --watch '*|*' --watch='*) exec \"$real\" \"$@\" ;; esac\n\
          [ \"$1 $2\" = 'run watch' ] && exec \"$real\" \"$@\"\n\
          out=$(mktemp -d 2>/dev/null) || exec \"$real\" \"$@\"\n\
          trap 'rm -rf \"$out\"' EXIT\n\
-         trap 'exit 129' HUP\n\
-         trap 'exit 130' INT\n\
-         trap 'exit 143' TERM\n\
-         \"$real\" \"$@\" >\"$out/1\" 2>\"$out/2\"\n\
+         child=\n\
+         reap() {{ [ -z \"$child\" ] || {{ kill -\"$2\" \"$child\" 2>/dev/null; wait \"$child\"; }}; exit \"$1\"; }}\n\
+         trap 'reap 129 HUP' HUP\n\
+         trap 'reap 130 TERM' INT\n\
+         trap 'reap 143 TERM' TERM\n\
+         {{ \"$real\" \"$@\" <&9 9<&- >\"$out/1\" 2>\"$out/2\" & child=$!; }} 2>/dev/null 9<&0\n\
+         [ -n \"$child\" ] || {{ rm -rf \"$out\"; exec \"$real\" \"$@\"; }}\n\
+         wait \"$child\"\n\
          status=$?\n\
          if [ \"$status\" -eq 1 ] && grep -Eq 'API rate limit (already )?exceeded' \"$out/2\" && ! grep -Eq 'HTTP [0-9][0-9][0-9]' \"$out/2\"; then\n\
          \x20 reset=$(\n\
