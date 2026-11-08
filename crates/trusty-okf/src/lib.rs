@@ -8,7 +8,7 @@
 //!
 //! What: the module tree of SPEC-OKF-01 §4.1. This is the S1 scaffold of epic
 //! #10746: each module is empty and its doc states what it will hold.
-//!   - [`format`], [`profile`], [`bundle`], [`build`], [`state`], [`import`],
+//!   - [`format`](mod@format), [`profile`], [`bundle`], [`build`], [`state`], [`import`],
 //!     [`extract`] — the network-free core.
 //!   - `feed` and `retrieve` — behind the cargo feature `search-feed`.
 //!   - `extract::worker` — behind the cargo feature `extract-worker`.
