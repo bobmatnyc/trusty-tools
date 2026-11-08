@@ -143,7 +143,10 @@ fn refusal_reason(handle: &IndexHandle, path: &str) -> &'static str {
         &handle.additional_roots,
         path,
     );
-    if !under_any_root(&index_admission::configured_roots(handle), &abs) {
+    // #10739: an unresolvable include root names no refusing rule of its own.
+    let outside =
+        index_admission::configured_roots(handle).is_ok_and(|roots| !under_any_root(&roots, &abs));
+    if outside {
         "outside_include_paths"
     } else if index_admission::globs_exclude(
         &handle.root_path,

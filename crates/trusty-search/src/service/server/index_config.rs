@@ -456,9 +456,20 @@ pub(crate) async fn patch_index_config_report(
     // Whenever the request names the list, not only when it changed: the new
     // globs are already stored, so a retry after a failed purge sees no change.
     // #10739: a named include_paths list purges the files outside it the same way.
+    let mut include_skip: Option<String> = None;
     let purge = if reconcile {
         let roots = (new_include_paths.is_some() && !registered.include_paths.is_empty())
-            .then(|| crate::service::index_admission::configured_roots(&registered));
+            .then(|| crate::service::index_admission::configured_roots(&registered))
+            .transpose();
+        // #10739: an unresolvable include root skips include-list pruning
+        // entirely; the reply reports the skip and nothing is deleted for it.
+        let roots = match roots {
+            Ok(roots) => roots,
+            Err(err) => {
+                include_skip = Some(err.to_string());
+                None
+            }
+        };
         Some(
             super::profile_apply::purge_newly_excluded(
                 &registered,
@@ -540,7 +551,13 @@ pub(crate) async fn patch_index_config_report(
                 "catch_up_started": catch_up_started,
             },
         });
-        with_profile(&mut body, stamp.as_ref(), include_named, purge.as_ref());
+        with_profile(
+            &mut body,
+            stamp.as_ref(),
+            include_named,
+            purge.as_ref(),
+            include_skip.as_deref(),
+        );
         with_catch_up_reindex(&mut body, catch_up_reindex);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, body));
     }
@@ -560,7 +577,13 @@ pub(crate) async fn patch_index_config_report(
             "catch_up_started": catch_up_started,
         },
     });
-    with_profile(&mut body, stamp.as_ref(), include_named, purge.as_ref());
+    with_profile(
+        &mut body,
+        stamp.as_ref(),
+        include_named,
+        purge.as_ref(),
+        include_skip.as_deref(),
+    );
     with_catch_up_reindex(&mut body, catch_up_reindex);
     Ok(body)
 }
@@ -568,12 +591,15 @@ pub(crate) async fn patch_index_config_report(
 /// Add `profile` and `profile_purge` to a PATCH body when it changed the excludes (#10532).
 ///
 /// What: a PATCH that touched neither leaves the body as it was. #10739: a
-/// PATCH naming `include_paths` reports the same purge as `include_paths_purge`.
+/// PATCH naming `include_paths` reports the same purge as `include_paths_purge`,
+/// or `{skipped: true, reason}` when `include_skip` says the include-list
+/// pruning did not run.
 fn with_profile(
     body: &mut serde_json::Value,
     stamp: Option<&crate::core::profile::ResolvedProfile>,
     include_named: bool,
     purge: Option<&Result<(usize, usize), String>>,
+    include_skip: Option<&str>,
 ) {
     let Some(map) = body.as_object_mut() else {
         return;
@@ -589,10 +615,14 @@ fn with_profile(
         );
     }
     if include_named {
-        map.insert(
-            "include_paths_purge".into(),
-            super::profile_apply::purge_body(purge),
-        );
+        // #10739: a skipped include-list pruning is reported, not shown as 0 removed.
+        let body = match include_skip {
+            Some(reason) => serde_json::json!({
+                "skipped": true, "reason": reason, "rebuilt": false,
+            }),
+            None => super::profile_apply::purge_body(purge),
+        };
+        map.insert("include_paths_purge".into(), body);
     }
 }
 

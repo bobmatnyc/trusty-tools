@@ -11,14 +11,26 @@ use std::path::{Path, PathBuf};
 /// always walked whole. One list, so the reindex walk, live admission, the
 /// rescan and pushed-write admission cannot disagree about which roots count.
 ///
-/// #10739: an include path whose real path leaves the primary root, or that
-/// cannot be resolved, is dropped, so none of those consumers admits it.
-pub(crate) fn configured_roots(handle: &IndexHandle) -> Vec<PathBuf> {
-    checked_roots(handle)
-        .into_iter()
-        .filter(|r| !r.include || matches!(r.resolution, RootResolution::Inside(_)))
-        .map(|r| r.raw)
-        .collect()
+/// #10739: an include path whose real path leaves the primary root is
+/// dropped. One that cannot be resolved is `Err`: the caller cannot tell
+/// which files it holds, so it must neither admit nor purge on this answer.
+/// Test: `an_unresolvable_include_root_purges_nothing_and_pushes_are_undetermined`.
+pub(crate) fn configured_roots(handle: &IndexHandle) -> std::io::Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    for root in checked_roots(handle) {
+        match root.resolution {
+            RootResolution::Outside => {}
+            // #10739: an I/O error is not evidence the subtree's files left the index.
+            RootResolution::Unresolved(err) if root.include => {
+                return Err(std::io::Error::new(
+                    err.kind(),
+                    format!("include path {}: {err}", root.raw.display()),
+                ));
+            }
+            _ => roots.push(root.raw),
+        }
+    }
+    Ok(roots)
 }
 
 /// One configured root after the #10739 containment check.

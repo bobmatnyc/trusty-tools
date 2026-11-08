@@ -404,3 +404,53 @@ async fn a_watcher_event_under_an_out_of_root_symlink_include_path_is_not_indexe
         .count();
     assert_eq!(leaked, 0, "out-of-root content indexed");
 }
+
+/// #10739: an include root that cannot be resolved (here `dang/inner`, under
+/// a dangling symlink, so `canonicalize` fails while the PATCH admits it)
+/// skips include-list pruning: no in-root chunk is deleted, the reply reports
+/// the skip, and a pushed write the policy cannot place is undetermined.
+/// Test: this test. When `configured_roots` drops the unresolvable root, the
+/// purge removes `index.md` and `drive/a/b.md` and the push is excluded.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn an_unresolvable_include_root_purges_nothing_and_pushes_are_undetermined() {
+    let _data = IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = bundle();
+    let id = "inc-unresolved";
+    create(&state, id, &root, None, okf_excludes()).await;
+    reindex(&state, id).await;
+    for kept in [INDEX, DRIVE, NOTE] {
+        assert!(chunks_of(&state, id, kept).await > 0, "{kept}");
+    }
+    std::os::unix::fs::symlink(root.join("gone"), root.join("dang")).expect("symlink");
+    assert!(
+        root.join("dang").canonicalize().is_err(),
+        "fixture must break resolution"
+    );
+
+    let reply = patch(
+        &state,
+        id,
+        serde_json::json!({ "include_paths": ["notes", "dang/inner"] }),
+    )
+    .await;
+    // The corpus first, so a purge that ran on a partial root list fails on behaviour.
+    for kept in [INDEX, DRIVE, NOTE] {
+        assert!(
+            chunks_of(&state, id, kept).await > 0,
+            "{kept} purged: {reply}"
+        );
+    }
+    let purge = &reply["include_paths_purge"];
+    assert_eq!(purge["skipped"], true, "{reply}");
+    assert!(
+        purge["reason"].as_str().is_some_and(|r| r.contains("dang")),
+        "{reply}"
+    );
+    assert_eq!(
+        admission(&state, id, "dang/inner/new.md"),
+        Admission::Undetermined
+    );
+}
