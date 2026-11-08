@@ -54,6 +54,11 @@ use tempfile::TempDir;
 #[path = "test_tmux_session.rs"]
 pub(crate) mod tmux_session;
 
+/// A stale socket whose dial is known to be refused (#10026). The same file
+/// backs the `tm` binary's copy; filter on `stale_socket`, the module path.
+#[path = "test_stale_socket.rs"]
+pub(crate) mod stale_socket;
+
 /// The spawn primitive [`tmux_session`] runs every tmux invocation through
 /// (#7060).
 ///
