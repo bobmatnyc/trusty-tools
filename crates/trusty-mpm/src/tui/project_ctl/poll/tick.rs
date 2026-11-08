@@ -265,7 +265,7 @@ pub(crate) fn apply_core(state: &mut ProjectCtlState, core: CoreFetch) {
             state.activity_attempt = None;
         }
     }
-    // #10476: the tree keeps its selection and expanded set across the swap.
+    // #10476: the tree keeps its selection and collapsed set across the swap.
     state.rebuild_tree();
 }
 

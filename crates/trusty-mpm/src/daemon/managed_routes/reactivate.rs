@@ -189,7 +189,7 @@ async fn caller_pane_refusal(
         Err(e) => return Some(e.to_string()),
     };
     // #9566: a live agent in the foreground means this caller is its child.
-    match mgr.pane_foreground_command(&pane) {
+    match mgr.pane_foreground_command(&record, &pane) {
         Ok(command) if caller_pane_is_idle(&command) => None,
         Ok(command) => Some(format!(
             "refusing to reactivate session {id} in place: pane {pane} runs `{command}` \
@@ -459,6 +459,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,

@@ -74,7 +74,7 @@ use super::state::ProjectCtlState;
 /// `state.sessions_by_project`; on a transport error or an unreachable daemon
 /// it clears both and sets `daemon_reachable = false`. Always rebuilds the
 /// tree (#10476, [`ProjectCtlState::rebuild_tree`]), which keeps the
-/// selection and expanded set across a refresh and clamps a vanished
+/// selection and collapsed set across a refresh and clamps a vanished
 /// selection to its nearest surviving ancestor. Finally refreshes
 /// [`ProjectCtlState::activity`] for whichever session is selected AFTER the
 /// project/session refresh above (see [`refresh_activity`]).
@@ -308,7 +308,8 @@ fn apply_activity_outcome(
 /// Why: one place owns the two-call fetch + merge so [`project_ctl_poll_daemon`]
 /// stays a thin health/rediscover wrapper.
 /// What: GETs `registry_list_projects` and `fleet_managed_sessions_slim`, then
-/// builds the `Vec<ProjectRow>` (registry order, counts from the matching
+/// builds the `Vec<ProjectRow>` (registry order, one row per repo via
+/// [`crate::project::one_project_per_repo`], counts from the matching
 /// fleet group), the `sessions_by_project` map (every fleet group, even a
 /// project the registry list omitted — defensive against a transient
 /// registry/fleet mismatch) via [`live_session_rows`] (which drops
@@ -336,8 +337,9 @@ async fn fetch_projects_and_sessions(
         sessions_by_project.insert(group.project_name.clone(), rows);
     }
 
-    let rows = projects
-        .iter()
+    // #10476: one row per repo, matching the fleet's one group per repo.
+    let rows = crate::project::one_project_per_repo(&projects)
+        .into_iter()
         .map(|p| {
             let group = groups.iter().find(|g| g.project_name == p.name);
             project_to_row(p, group)

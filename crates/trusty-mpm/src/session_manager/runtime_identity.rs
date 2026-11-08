@@ -82,12 +82,16 @@ impl RuntimeOwnership {
 /// server differs; `Unverifiable` when the record has no server, the
 /// identity cannot be read, or the session name differs. `Err` only when the
 /// session probe itself fails, so each caller picks its own direction for
-/// "cannot tell" (#5859).
-/// Test: `runtime_identity_tests.rs`.
+/// "cannot tell" (#5859). #10101: every probe goes to the record's own tmux
+/// server, and a server that cannot be reached is that `Err`.
+/// Test: `runtime_identity_tests.rs`, `server_route_tests.rs`.
 pub fn runtime_ownership(
     record: &SessionRecord,
     tmux: &dyn ManagedTmuxDriver,
 ) -> Result<RuntimeOwnership, ManagedError> {
+    // See #10101: never the default server for a named-server record.
+    let routed = super::tmux_route::route(tmux, record)?;
+    let tmux: &dyn ManagedTmuxDriver = &*routed;
     let name = record.tmux_name.as_str();
     if !tmux.session_exists_checked(name)? {
         return Ok(RuntimeOwnership::Absent);

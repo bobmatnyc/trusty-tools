@@ -692,7 +692,7 @@ fn find_reusable_inproject_session(
         .find(|r| {
             r.source_id.as_deref() == Some(source_id)
                 && r.state == ManagedSessionState::Active
-                && tmux.session_exists(&r.tmux_name)
+                && crate::session_manager::tmux_route::session_exists_on_own_server(tmux, r)
         })
         .cloned()
 }
@@ -883,7 +883,7 @@ pub(super) async fn spawn_managed_inproject(
     );
 
     emit(ProvisioningStage::LaunchingRuntime);
-    let tmux_arc = mgr.tmux_driver();
+    let tmux_arc = mgr.tmux_driver_for(&record).map_err(|e| e.to_string())?; // See #10101
     // #8233: the post-send launch check below needs the driver after the adapter
     // has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
@@ -1144,7 +1144,12 @@ pub async fn resume_managed(
     }
 
     // #6766: the post-send launch check below takes its own driver handle.
-    let adapter = build_adapter(record.runtime, mgr.tmux_driver(), fw_root);
+    let adapter = build_adapter(
+        record.runtime,
+        mgr.tmux_driver_for(&record)
+            .map_err(|e| ResumeManagedError::Other(e.to_string()))?,
+        fw_root,
+    );
     // #1744: prefer --resume <id> when a claude_session_id was captured at
     // SessionStart; launch fresh when the id is absent or stale (#6765 — no
     // --continue fallback). ClaudeCodeAdapter overrides spawn_resume
@@ -1182,7 +1187,9 @@ pub async fn resume_managed(
         // not that `claude` started. A launch-time refusal leaves the pane at a
         // bare shell, and this arm used to log a resume that never happened.
         &mgr,
-        &*mgr.tmux_driver(),
+        &*mgr
+            .tmux_driver_for(&record)
+            .map_err(|e| ResumeManagedError::Other(e.to_string()))?,
         &record,
         &workspace,
     )

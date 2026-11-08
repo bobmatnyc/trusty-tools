@@ -40,7 +40,7 @@ def run_architect_relaunch(lister=None, runner=None, tmux_fn=None):
     script = P.RELAUNCH_SCRIPT
 
     def live():
-        mine = [p for p in lister() if p["session"] == P.ARCHITECT]
+        mine = [p for p in lister() if P.is_architect_pane(p)]
         return mine, [p for p in mine if _alive(p)]
 
     if not os.path.isfile(script):
@@ -82,7 +82,7 @@ def architect_busy(panes, capturer=None):
     """
     capturer = capturer or P.capture
     for p in panes:
-        if p["session"] == P.ARCHITECT and _alive(p):
+        if P.is_architect_pane(p) and _alive(p):
             try:
                 info = P.parse_pane(capturer(p["pane"]))
             except P.TmuxError as e:

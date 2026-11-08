@@ -621,9 +621,10 @@ fn stamp_and_send(
         bail!("failed to record the launch stamp on {session}");
     }
     // #8308: one call types the short line naming the spec.
-    trusty_mpm::runtime::cli_launch::send_spec_launch(session, claude_spec, spec_dir).map_err(|e| {
-        anyhow::anyhow!("{session} was created but `claude` could not be started in it: {e}")
-    })
+    // #10101: the Architect is not a fresh PM; it stays on the default server.
+    trusty_mpm::runtime::cli_launch::send_spec_launch(None, session, claude_spec, spec_dir).map_err(
+        |e| anyhow::anyhow!("{session} was created but `claude` could not be started in it: {e}"),
+    )
 }
 
 /// Fail unless a launch in `dir` resolves to the supervisor profile.

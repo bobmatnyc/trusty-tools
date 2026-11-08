@@ -302,6 +302,7 @@ fn architect_record(
         deliverable_id: None,
         pane_id,
         tmux_server,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

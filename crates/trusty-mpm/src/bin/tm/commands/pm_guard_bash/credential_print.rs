@@ -298,14 +298,16 @@ const HOW_TO: &str = "Stop and report this refusal to the Architect, who decides
      (`security find-generic-password -s <service> >/dev/null 2>&1`, no `-w`/`-g`).";
 
 /// Whether `text`, quotes removed and lowercased, names a [`TRIGGERS`] entry,
-/// an interactive `security`, or a sibling credential call (#8677).
+/// an interactive `security`, or a sibling credential call (#8677); or, quotes
+/// kept, names one as an argv list (#10734).
 fn has_trigger(text: &str) -> bool {
     let flat: String = text
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '\\'))
         .collect::<String>()
         .to_ascii_lowercase();
-    TRIGGERS.iter().any(|t| flat.contains(t)) || names_cli_trigger(&flat)
+    // #10734: `text`, quotes kept, for an argv list (`["op", "read", ref]`).
+    TRIGGERS.iter().any(|t| flat.contains(t)) || names_cli_trigger(&flat, text)
 }
 
 /// Whether `text` handed to an evaluator could run a credential call: it names
