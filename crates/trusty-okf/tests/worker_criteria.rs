@@ -789,6 +789,60 @@ fn c102_flooded_frames_are_bounded_and_unsolicited_is_protocol_error() {
     assert!(pids_gone(&pidfile));
 }
 
+/// Why: #10746 review finding 2 — JSON escaping grows text up to six-fold
+/// (`\u0001`), so the frame cap must allow that and leave the decoded text
+/// length as the real limit: escape-dense text within the limit extracts,
+/// and escape-dense text past it is `output_too_large`, not
+/// `protocol_error`.
+/// What: a 256 KiB output limit (its escaped forms exceed the old cap);
+/// newline-, quote-newline- and U+0001-dense text at the limit and one byte
+/// past it, as the real worker cuts it.
+/// Test: self-contained.
+#[test]
+fn c102_escape_dense_output_is_judged_by_its_decoded_length() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let mut cfg = config(&dir, &Fake::default(), "worker");
+    cfg.limits.output_bytes = 256 << 10;
+    cfg.limits.item = S(10);
+    let items = ["NLFIT", "QNFIT", "CTLFIT", "NLOVER", "QNOVER", "CTLOVER"];
+    // Six items at the item deadline, three kill sequences (2 s each).
+    let got = within(S(2 + 6 * 10 + 3 * 2 + 5), move || {
+        let ex = WorkerExtractor::new(cfg).unwrap();
+        ex.begin_run(&local());
+        let hint = TypeHint::for_path("x.pdf");
+        let got: Vec<String> = items
+            .iter()
+            .map(|i| match ex.extract(i.as_bytes(), &hint) {
+                Ok(e) => format!("ok {}", e.text.len()),
+                Err(e) => format!("{} {}", e.code, e.message),
+            })
+            .collect();
+        assert!(ex.end_run().errors.is_empty());
+        got
+    });
+    let fit = format!("ok {}", 256 << 10);
+    let codes: Vec<&str> = got.iter().map(|g| g.split(' ').next().unwrap()).collect();
+    assert_eq!(&got[..3], [fit.as_str(); 3], "{got:?}");
+    assert_eq!(&codes[3..], ["output_too_large"; 3], "{got:?}");
+}
+
+/// Why: #10746 review finding 2 — the frame cap is six bytes per text byte
+/// up to one past the output limit, plus the fields limit and 64 KiB, and
+/// a limit near `u64::MAX` must not overflow it.
+/// What: the default cap's value, and a saturated cap.
+/// Test: self-contained.
+#[test]
+fn frame_cap_allows_six_fold_escape_growth() {
+    let d = Limits::default();
+    assert_eq!(d.frame_cap(), 6 * ((5 << 20) + 1) + (64 << 10) + (64 << 10));
+    let huge = Limits {
+        output_bytes: u64::MAX,
+        ..d
+    };
+    assert_eq!(huge.frame_cap(), u64::MAX);
+}
+
 /// Why: #10746 S10 fix round, finding 2 — §2.16 requires `RLIMIT_CPU` and
 /// `RLIMIT_AS` where the OS honours them; a runaway item fails alone.
 /// What: a 1 s CPU limit and (not on macOS, which does not honour it) a

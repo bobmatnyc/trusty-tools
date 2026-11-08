@@ -128,10 +128,21 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// The largest worker frame: the output and fields limits plus 64 KiB
-    /// (§2.16 "Frame size"; the JSON header carries both).
+    /// The largest worker frame: six bytes for each text byte up to one past
+    /// the output limit, plus the fields limit and 64 KiB (§2.16 "Frame
+    /// size"; the JSON header carries both). Saturates instead of
+    /// overflowing.
     pub fn frame_cap(&self) -> u64 {
-        self.output_bytes + self.fields_bytes + 64 * KIB
+        // #10746: JSON escapes one text byte as up to six (`\u0001`), and a
+        // worker cuts oversize text one byte past the limit. A cap on the
+        // escaped size refused in-limit text and turned oversize text into
+        // `protocol_error`; the decoded length check in `parse_reply` is the
+        // real output limit.
+        self.output_bytes
+            .saturating_add(1)
+            .saturating_mul(6)
+            .saturating_add(self.fields_bytes)
+            .saturating_add(64 * KIB)
     }
 
     /// Refuse a limit over its compiled-in ceiling, or a zero count.

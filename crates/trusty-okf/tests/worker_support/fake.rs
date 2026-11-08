@@ -6,6 +6,9 @@
 //!
 //! Per-item behaviour is keyed on the item's first bytes: `HANG` sleeps,
 //! `CRASH` exits 3, `FLOOD` answers text one byte over the output limit,
+//! `NLFIT`, `QNFIT` and `CTLFIT` answer newline-, quote- or U+0001-dense
+//! text at the output limit and `NLOVER`, `QNOVER` and `CTLOVER` one byte
+//! past it,
 //! `BIG` declares a 2 GiB frame, `LIE` echoes a wrong input hash, `ERR`
 //! answers `extract_error`, `NOTEXT` answers `no_text_layer`, `STDERR`
 //! writes 1 MiB to stderr first, `SPAM` answers then streams 2000 more
@@ -130,6 +133,14 @@ while (1) {
   if ($body =~ /^NOTEXT/) { wframe({type => 'error', request_id => $m->{request_id}, code => 'no_text_layer', message => ''}); next; }
   my $text = length($o{text}) ? $o{text} : $body;
   $text = 'x' x ($m->{limits}{output_bytes} + 1) if $body =~ /^FLOOD/;
+  # #10746: escape-dense text. `NL` newlines, `QN` quote-newline pairs, `CTL`
+  # U+0001 (six bytes once escaped); `FIT` fills the output limit, `OVER` is
+  # one byte past it, as the real worker cuts oversize text.
+  if ($body =~ /^(NL|QN|CTL)(FIT|OVER)/) {
+    my %unit = (NL => "\n", QN => "\"\n", CTL => "\x01");
+    my $n = $m->{limits}{output_bytes} + ($2 eq 'OVER' ? 1 : 0);
+    $text = substr($unit{$1} x $n, 0, $n);
+  }
   if ($o{mode} eq 'env') {
     $text = join('', map { "$_=$ENV{$_}\n" } sort keys %ENV) . 'CWD=' . Cwd::getcwd() . "\n";
     opendir(my $d, '.') or die; my @e = grep { !/^\.\.?$/ } readdir($d);
