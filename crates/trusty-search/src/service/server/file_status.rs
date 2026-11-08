@@ -4,8 +4,8 @@
 //! Why: a caller that pushes a file needs to know which bytes the index holds
 //! for it, under which index identity. Chunk coverage alone cannot tell an old
 //! revision from the current one.
-//! What: [`record_put_hash`], which the put core calls after a write, and
-//! [`file_status_report`], the core behind `search.index.file.status`.
+//! What: [`file_status_report`], the core behind `search.index.file.status`.
+//! The shared write core keeps the hash it reads (#10738).
 //! Test: `service::rpc::identity_10738_tests`.
 
 use std::sync::Arc;
@@ -13,9 +13,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use serde::Deserialize;
 
-use crate::core::indexer::IndexFileOutcome;
 use crate::core::registry::IndexId;
-use crate::core::CodeIndexer;
 
 use super::state::SearchAppState;
 
@@ -24,29 +22,6 @@ use super::state::SearchAppState;
 pub struct FileStatusRequest {
     /// Index-relative path, or an absolute path inside one of the index's roots.
     pub path: String,
-}
-
-/// Record the content hash of a finished put, and return it for the reply.
-///
-/// Why: `content_sha256` in the put reply is the hash of the exact bytes the
-/// daemon indexed; the same value must back `search.index.file.status` later.
-/// What: hashes `content` (SHA-256 of its UTF-8 bytes, lowercase hex). Only an
-/// outcome that left chunks behind records it; every other outcome leaves the
-/// hash forgotten, because no chunks came from that content. The caller
-/// forgot the old hash before the write.
-/// Test: `put_reply_carries_the_sha256_of_the_content_and_the_identity`.
-pub(super) async fn record_put_hash(
-    index_id: &IndexId,
-    indexer: &CodeIndexer,
-    key: &str,
-    content: &str,
-    outcome: &IndexFileOutcome,
-) -> anyhow::Result<String> {
-    let hash = crate::service::reindex::hash::hash_content(content);
-    if matches!(outcome, IndexFileOutcome::Indexed { chunks } if *chunks > 0) {
-        crate::service::reindex::hash::record_file_hash(index_id, indexer, key, &hash).await?;
-    }
-    Ok(hash)
 }
 
 /// The body `search.index.file.status` serves.
