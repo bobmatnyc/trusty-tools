@@ -1053,13 +1053,14 @@ pub fn refuse_oversized_pane_command(text: &str) -> Option<String> {
 /// Test: `send_command_line_refuses_an_oversized_line`.
 pub fn send_command_line(
     tmux_bin: Option<&str>,
+    server: Option<&str>, // See #10101
     target: &TmuxTarget,
     text: &str,
 ) -> std::io::Result<std::process::Output> {
     if let Some(msg) = refuse_oversized_pane_command(text) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
     }
-    send_line(tmux_bin, target, text)
+    send_line(tmux_bin, server, target, text)
 }
 
 /// Type a composed `claude` launch line at a fresh session's shell (#8308).
@@ -1071,14 +1072,21 @@ pub fn send_command_line(
 /// — the #8233 class, which that fix closed only for the managed path. The six
 /// now start `claude` through `runtime::cli_launch::send_spec_launch`, whose
 /// short line this types, so a line that grew is refused, never truncated.
-/// What: [`send_command_line`] against `TmuxTarget::session(session)`. `Err`
+/// What: [`send_command_line`] against `TmuxTarget::session(session)` on the
+/// named (`-L`) `server`, or the default server for `None` (#10101). `Err`
 /// carries the refusal (`InvalidInput`, nothing typed), a spawn failure, or a
 /// non-zero `send-keys` exit with tmux's stderr.
 /// Test: `launch_line_over_the_limit_is_refused_before_tmux_runs`,
 /// `launch_line_within_the_limit_reaches_tmux`,
-/// `cli_launch_paths_type_through_the_guard`.
-pub fn send_launch_line(tmux_bin: Option<&str>, session: &str, line: &str) -> std::io::Result<()> {
-    let output = send_command_line(tmux_bin, &TmuxTarget::session(session), line)?;
+/// `cli_launch_paths_type_through_the_guard`,
+/// `a_launch_line_for_a_named_server_is_typed_there`.
+pub fn send_launch_line(
+    tmux_bin: Option<&str>,
+    server: Option<&str>,
+    session: &str,
+    line: &str,
+) -> std::io::Result<()> {
+    let output = send_command_line(tmux_bin, server, &TmuxTarget::session(session), line)?;
     if output.status.success() {
         return Ok(());
     }
@@ -1100,8 +1108,8 @@ pub fn send_launch_line(tmux_bin: Option<&str>, session: &str, line: &str) -> st
 /// (functionally equivalent for a non-key-name string, but a second,
 /// independently-typed-out version of the same idiom is exactly the kind of
 /// drift #2398 closes).
-/// What: runs the literal `send-keys -l <text>` via [`run_tmux_with_bin`]
-/// (`tmux_bin` if given, else resolved via [`resolve_tmux_binary_or_bare`]);
+/// What: runs the literal `send-keys -l <text>` via [`run_tmux_on`] on
+/// `server` (`tmux_bin` if given, else resolved via [`resolve_tmux_binary_or_bare`]);
 /// if that invocation itself fails to spawn, the error is returned
 /// immediately WITHOUT sending `Enter`. Otherwise sends `Enter` and returns
 /// ITS `Output` — callers check `output.status.success()` exactly as they
@@ -1112,19 +1120,14 @@ pub fn send_launch_line(tmux_bin: Option<&str>, session: &str, line: &str) -> st
 /// site.
 pub fn send_line(
     tmux_bin: Option<&str>,
+    server: Option<&str>, // See #10101
     target: &TmuxTarget,
     text: &str,
 ) -> std::io::Result<std::process::Output> {
-    let owned_bin;
-    let bin = match tmux_bin {
-        Some(b) => b,
-        None => {
-            owned_bin = resolve_tmux_binary_or_bare();
-            &owned_bin
-        }
-    };
-    let literal_output = run_tmux_with_bin(
+    let bin = &tmux_bin.map_or_else(resolve_tmux_binary_or_bare, str::to_owned);
+    let literal_output = run_tmux_on(
         bin,
+        server,
         &TmuxCommand::SendKeys {
             target: target.clone(),
             keys: text.to_string(),
@@ -1135,8 +1138,9 @@ pub fn send_line(
         // Don't send Enter after a failed literal send — nothing to submit.
         return Ok(literal_output);
     }
-    run_tmux_with_bin(
+    run_tmux_on(
         bin,
+        server,
         &TmuxCommand::SendKeys {
             target: target.clone(),
             keys: "Enter".to_string(),

@@ -145,6 +145,8 @@ pub(crate) mod issue;
 pub(crate) mod launch;
 // #8406: `tm launch --detach` reports the session instead of attaching.
 pub(crate) mod launch_handoff;
+// #10101: the workspace tmux server a CLI launch starts its PM on.
+pub(crate) mod launch_host;
 mod launch_notices;
 // #8545: launch/connect user-home writes, under a caller-named home.
 pub(crate) mod launch_home;

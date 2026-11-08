@@ -184,3 +184,28 @@ fn two_worktrees_of_one_project_share_one_server() {
     assert_eq!(socket(&second), expected, "the second PM shares the server");
     assert_ne!(socket(&elsewhere), expected, "another project has its own");
 }
+
+/// #10101: a CLI launch from a worktree names the server the daemon's create
+/// path picks for it, and the socket in the given socket directory.
+#[serial_test::serial]
+#[test]
+fn a_cli_launch_names_the_daemons_workspace_server() {
+    let (dir, _log, tmux) = real_driver();
+    let fixture = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let worktree = fixture.add_worktree("pm-cli-10101");
+    let (_, daemon) = launch_target_with(&tmux, &worktree, None).expect("daemon server");
+    let (name, socket) = cli_launch_server_with(&worktree, None, dir.path()).expect("cli server");
+    assert_eq!(socket, daemon, "one rule for both launch paths");
+    assert_eq!(
+        name,
+        crate::core::tmux_server::workspace_server_name(&fixture.repo)
+    );
+}
+
+/// #10101: `TM_WORKSPACE_TMUX=0` keeps a CLI launch on the default server.
+#[test]
+fn the_cli_opt_out_keeps_the_default_server() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert!(cli_launch_server_with(dir.path(), Some("0"), dir.path()).is_none());
+    assert!(cli_launch_server_with(dir.path(), Some("1"), dir.path()).is_some());
+}

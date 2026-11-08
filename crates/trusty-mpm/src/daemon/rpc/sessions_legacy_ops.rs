@@ -170,13 +170,26 @@ pub fn list_sessions(state: &Arc<DaemonState>, query: SessionQuery) -> SessionsR
 /// [`DaemonError`] when `workdir` was supplied and the tmux spawn failed —
 /// `claude` or tmux missing (HTTP 422 / `CODE_UNPROCESSABLE`), or the tmux
 /// command itself failing (HTTP 500 / `CODE_INTERNAL_ERROR`).
+/// [`DaemonError::InvalidRequest`] when `tmux_socket` is combined with
+/// `workdir` (#10101).
 ///
 /// Test: `parity_sessions_register_agrees_across_transports`,
-/// `register_and_remove_session`.
+/// `register_and_remove_session`,
+/// `a_registration_records_the_workspace_server_socket_10101`,
+/// `a_socket_with_spawn_mode_is_refused_10101`.
 pub fn register_session(
     state: &Arc<DaemonState>,
     body: RegisterSession,
 ) -> Result<RegisterSessionResponse, DaemonError> {
+    // #10101: spawn mode creates on the default server, so a socket naming
+    // another server would record the wrong one.
+    if body.workdir.is_some() && body.tmux_socket.is_some() {
+        return Err(DaemonError::InvalidRequest(
+            "`tmux_socket` names a session the caller created; it cannot be combined with \
+             `workdir`, which spawns on the default tmux server"
+                .into(),
+        ));
+    }
     // Derive the tmux name from the project directory (`tm-<folder>`) so the
     // registry name matches the folder-based session the CLI creates. A
     // caller-supplied `name` always wins; otherwise fall back to the UUID name.
@@ -208,6 +221,8 @@ pub fn register_session(
         session.status = SessionStatus::Active;
     }
 
+    // #10101: a CLI launch names the workspace server it creates the PM on.
+    session.tmux_socket = body.tmux_socket.clone();
     let id = session.id;
     let tmux_name = session.tmux_name.clone();
     state.register_session(session);
@@ -220,6 +235,7 @@ pub fn register_session(
         Arc::clone(state),
         id,
         tmux_name.clone(),
+        body.tmux_socket, // #10101: on the session's own server
     );
 
     Ok(RegisterSessionResponse {
@@ -280,7 +296,8 @@ pub async fn remove_session(
         })?;
 
     let tmux_name = removed.tmux_name.clone();
-    TmuxService::kill_best_effort(&tmux_name);
+    // #10101: on the session's own server, never a same-named default one.
+    TmuxService::kill_best_effort_on(&tmux_name, removed.tmux_socket.as_deref());
     reconcile_managed_store_on_delete(state, &tmux_name).await;
 
     Ok(RemoveSessionResponse {

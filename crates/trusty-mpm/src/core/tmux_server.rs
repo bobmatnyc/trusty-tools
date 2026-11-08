@@ -81,6 +81,35 @@ pub fn server_socket_path(socket_dir: &Path, name: &str) -> PathBuf {
     socket_dir.join(name)
 }
 
+/// The `-L` name of the server listening on `socket`, for a caller holding a
+/// session's stored socket (#10101).
+///
+/// What: `Ok(None)` for no socket (the default server); the socket's file name
+/// when the socket sits in `socket_dir`. `Err` names the socket when it has no
+/// UTF-8 file name or lies in another directory: `-L` resolves a name in this
+/// process's socket directory only, so that server cannot be reached by name
+/// and the default server is never used in its place.
+/// Test: `a_socket_in_the_socket_dir_names_its_server`,
+/// `a_socket_elsewhere_or_unnamed_is_refused`.
+pub fn server_of_socket(
+    socket: Option<&Path>,
+    socket_dir: &Path,
+) -> Result<Option<String>, String> {
+    let Some(socket) = socket else {
+        return Ok(None);
+    };
+    match socket.file_name().and_then(|n| n.to_str()) {
+        Some(name) if !name.is_empty() && socket.parent() == Some(socket_dir) => {
+            Ok(Some(name.to_owned()))
+        }
+        _ => Err(format!(
+            "tmux socket {} is not a named server in {}; its server cannot be reached",
+            socket.display(),
+            socket_dir.display()
+        )),
+    }
+}
+
 /// The `-L <name>` words that select a named server, ahead of the command.
 /// Test: `server_args_select_the_named_server`.
 pub fn server_args(name: &str) -> [String; 2] {
