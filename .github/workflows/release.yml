@@ -591,7 +591,7 @@ jobs:
       # job needs so it never needs to repeat crate-specific logic.
       #
       # Standard variant (macOS — native `cargo build`, no linker tricks needed):
-      #   { runner: macos-14,      target: aarch64-apple-darwin,      variant: standard }
+      #   { runner: macos-15,      target: aarch64-apple-darwin,      variant: standard }
       #
       # linux-zigbuild variants (issue #2037 — portable glibc 2.17 baseline,
       # built via `cargo zigbuild --target <triple>.2.17`; see the file-header
@@ -800,7 +800,9 @@ jobs:
 
           includes = [
               {**common,
-               "runner": "macos-14",
+               # macos-14 images retired 2026-11-02 (actions/runner-images#13518);
+               # macos-15 is arm64, so the target is unchanged.
+               "runner": "macos-15",
                "host_multiarch": "",
                "target": "aarch64-apple-darwin",
                "variant": "standard",
