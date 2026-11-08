@@ -31,6 +31,7 @@ use serde_yaml::{Mapping, Value};
 use crate::OkfError;
 use crate::format::fields::Frontmatter;
 use crate::format::frontmatter;
+use crate::format::hash::bytes_hash;
 use crate::format::id::{ConceptId, ConceptRef};
 use crate::format::raw::{self, RawFrontmatter};
 use crate::format::validate::Finding;
@@ -98,21 +99,44 @@ impl Entity {
 
 /// A concept read from a file, or built for a new one (SPEC-OKF-01 §2.2.1,
 /// §4.2). The raw block is the source of truth; the typed view is derived.
+///
+/// #10746 S3 (Architect A2): `raw` and `frontmatter` are private with read
+/// accessors, so the stored block and the typed view can only change in step
+/// with the values a write renders. Assigning either does not compile:
+///
+/// ```compile_fail
+/// use trusty_okf::format::{Concept, ConceptId};
+/// let mut c = Concept::new(ConceptId::parse("a").unwrap(), Default::default(), String::new());
+/// c.frontmatter = c.frontmatter().clone();
+/// ```
+///
+/// ```compile_fail
+/// use trusty_okf::format::{Concept, ConceptId};
+/// let mut c = Concept::new(ConceptId::parse("a").unwrap(), Default::default(), String::new());
+/// c.raw = c.raw().clone();
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Concept {
     /// The concept ID, or the path of a read-only foreign file.
     pub id: ConceptRef,
     /// The stored frontmatter block, byte for byte. Empty for a new concept
     /// and for a file without frontmatter.
-    pub raw: RawFrontmatter,
+    raw: RawFrontmatter,
     /// Read-only typed view of the current values.
-    pub frontmatter: Frontmatter,
+    frontmatter: Frontmatter,
     /// Every byte after the closing fence, unchanged.
     pub body: String,
     /// The current top-level values. Equal to the stored entries after a
     /// read; changed only through [`Concept::set`] and [`Concept::remove`],
     /// which keep `frontmatter` in step.
     values: Mapping,
+    /// `sha256:<hex>` of the whole text this concept was parsed from; `None`
+    /// for [`Concept::new`]. A write refuses when the file no longer holds
+    /// these bytes, or when a new concept would replace a file (A1).
+    read_hash: Option<String>,
+    /// Stored keys a write renames in place, keeping the entry's raw bytes
+    /// (§2.2.1 "Malformed owned values").
+    renames: Vec<(String, String)>,
 }
 
 impl Concept {
@@ -125,6 +149,34 @@ impl Concept {
             frontmatter,
             body,
             values,
+            read_hash: None,
+            renames: Vec::new(),
+        }
+    }
+
+    /// The stored frontmatter block, read-only.
+    pub fn raw(&self) -> &RawFrontmatter {
+        &self.raw
+    }
+
+    /// The typed view of the current values, read-only.
+    pub fn frontmatter(&self) -> &Frontmatter {
+        &self.frontmatter
+    }
+
+    /// The hash of the text this concept was read from; `None` when new.
+    pub fn read_hash(&self) -> Option<&str> {
+        self.read_hash.as_deref()
+    }
+
+    /// Move the value of `from` to `to`; the render keeps the stored entry's
+    /// raw bytes under the new key name (§2.2.1). The caller checks that
+    /// `to` is free.
+    pub(crate) fn rename_key(&mut self, from: &str, to: &str) {
+        if let Some(v) = self.values.shift_remove(from) {
+            self.values.insert(Value::String(to.to_string()), v);
+            self.renames.push((from.to_string(), to.to_string()));
+            self.refresh();
         }
     }
 
@@ -216,6 +268,8 @@ pub fn parse_concept_at(id: ConceptRef, text: &str) -> Result<(Concept, Vec<Find
         frontmatter,
         body: body.to_string(),
         values,
+        read_hash: Some(bytes_hash(text.as_bytes())),
+        renames: Vec::new(),
     };
     Ok((concept, findings))
 }
@@ -226,7 +280,7 @@ pub fn parse_concept_at(id: ConceptRef, text: &str) -> Result<(Concept, Vec<Find
 /// entries and the body keep their bytes. A concept with no stored block
 /// renders key-sorted, `---` on line 1, the body verbatim after the closing
 /// fence; with no values it renders as the body alone. A stored block that
-/// is not patchable renders unchanged; `write_concept` refuses to write it.
+/// is not patchable renders unchanged; `prepare_write` refuses to write it.
 /// Test: `concept_parse_render_is_byte_identical`,
 /// `new_concept_renders_key_sorted`.
 pub fn render_concept(c: &Concept) -> String {
@@ -238,7 +292,7 @@ pub fn render_concept(c: &Concept) -> String {
         let yaml = serde_yaml::to_string(&sorted).unwrap_or_default();
         return format!("---\n{yaml}---\n{}", c.body);
     }
-    match raw::patch(&c.raw, &c.values) {
+    match raw::patch(&c.raw, &c.values, &c.renames) {
         Some(block) => format!("{block}{}", c.body),
         None => format!("{}{}", c.raw.text, c.body),
     }
