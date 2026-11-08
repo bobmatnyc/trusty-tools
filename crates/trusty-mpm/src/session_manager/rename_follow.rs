@@ -92,6 +92,9 @@ impl SessionManager {
         let records = self.list().await;
         Ok(records
             .into_iter()
+            // See #10101: `live` is the default server's; a named-server
+            // record's pane is never looked up there.
+            .filter(|r| r.tmux_socket.is_none())
             .filter_map(|r| {
                 let current = live_name_by_pane(&r, &live, self.tmux.as_ref())?;
                 Some(NameDrift {

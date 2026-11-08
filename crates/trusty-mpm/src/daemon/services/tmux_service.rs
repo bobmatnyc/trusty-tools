@@ -331,23 +331,22 @@ impl TmuxService {
     }
 }
 
-/// Snapshot `name` on the default server, else on the first live workspace
-/// server (`core::tmux_server`) that holds it (#8928 step 4).
+/// Snapshot `name` on the one tmux server that holds it: the default server
+/// or a live workspace server (`core::tmux_server`, #8928 step 4).
 ///
-/// What: the default server's error is returned when no workspace server
-/// holds the session; a socket directory that cannot be read is logged and
-/// adds no servers.
-/// Test: `a_snapshot_finds_a_session_on_a_workspace_server`.
+/// What: every server is asked. One holder answers its snapshot. #10101: a
+/// name held by two servers is refused, so a same-named session on another
+/// server never stands in for the one the caller meant. No holder returns
+/// the default server's error. A socket directory that cannot be read is
+/// logged and adds no servers.
+/// Test: `a_snapshot_finds_a_session_on_a_workspace_server`,
+/// `a_name_on_two_servers_is_refused`.
 pub(crate) fn snapshot_on_any_server(
     driver: &TmuxDriver,
     socket_dir: &Path,
     name: &str,
     lines: u32,
 ) -> crate::core::Result<SessionSnapshot> {
-    let first = match driver.monitor_session(name, lines) {
-        Ok(snapshot) => return Ok(snapshot),
-        Err(e) => e,
-    };
     let servers =
         crate::core::tmux_server::live_workspace_servers(socket_dir).unwrap_or_else(|e| {
             tracing::warn!(
@@ -356,10 +355,28 @@ pub(crate) fn snapshot_on_any_server(
             );
             Vec::new()
         });
-    servers
-        .iter()
-        .find_map(|server| driver.on_server(server).monitor_session(name, lines).ok())
-        .ok_or(first)
+    let (mut holders, default_err) = match driver.monitor_session(name, lines) {
+        Ok(snapshot) => (vec![("the default server".to_owned(), snapshot)], None),
+        Err(e) => (Vec::new(), Some(e)),
+    };
+    holders.extend(servers.iter().filter_map(|server| {
+        let snapshot = driver.on_server(server).monitor_session(name, lines).ok()?;
+        Some((format!("server {server}"), snapshot))
+    }));
+    match holders.len() {
+        0 => Err(default_err.unwrap_or_else(|| {
+            crate::core::Error::Protocol(format!("no tmux server holds session {name}"))
+        })),
+        1 => Ok(holders.remove(0).1),
+        _ => {
+            // See #10101: two servers, two sessions; never pick one.
+            let on: Vec<String> = holders.into_iter().map(|(server, _)| server).collect();
+            Err(crate::core::Error::Protocol(format!(
+                "tmux session {name} is on more than one server ({}); refusing to pick one",
+                on.join(", ")
+            )))
+        }
+    }
 }
 
 /// Resolve the `claude` binary on `PATH`.
