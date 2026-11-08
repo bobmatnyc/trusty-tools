@@ -99,21 +99,31 @@ pub const CONTEXT_REFRESH: ShippedSkill = ShippedSkill {
         "eebce72992c84b3e7cc25356cf9b94bc0001b1e67947a668cd94e14fddd04c12",
         // #10599: the text before the datg-ready self-clear gate.
         "ea25ebe3f0fee74963bcf4ccb1452535c233c47eb844754392d05e17382242e7",
+        // #10780: the text before the owner-rulings/inferences keep-list split.
+        "6b0fdc7b311e3272b706a410ab9b6f0f5608623eda9778d8577e1e37452ff014",
     ],
 };
 
 /// `architect-operating-rules`, edited since its first release.
 const OPERATING_RULES: ShippedSkill = ShippedSkill {
     stem: "architect-operating-rules",
-    // #10161: the U1b text, before the Asks-to-Actions rename.
-    previous: &["fa119b43da0dd7275659d652eea2448472743920f33e5d5da68a4e953d06b4c3"],
+    previous: &[
+        // #10161: the U1b text, before the Asks-to-Actions rename.
+        "fa119b43da0dd7275659d652eea2448472743920f33e5d5da68a4e953d06b4c3",
+        // #10780: the text before owner labels needed a cited quote.
+        "821edcc7c292dc6263ddaa2538bee3e235155679d5f3282c9823b9de1ceb0109",
+    ],
 };
 
 /// `architect-workflow`, edited since its first release.
 const WORKFLOW: ShippedSkill = ShippedSkill {
     stem: "architect-workflow",
-    // #10161: the U1b text, before the Intent Ledger handoff.
-    previous: &["bcc47e5103279f23c1af085d2d36e90fbf90d06fc1ec1f9e7d6fb65bb7c0f755"],
+    previous: &[
+        // #10161: the U1b text, before the Intent Ledger handoff.
+        "bcc47e5103279f23c1af085d2d36e90fbf90d06fc1ec1f9e7d6fb65bb7c0f755",
+        // #10780: the text before the owner-rulings/inferences resume split.
+        "15e6c3d5bff69fccb7066adbe228ea7376f435ea91a6fe826dad3a24f5e2c2e4",
+    ],
 };
 
 /// `architect-strategy`, edited since its first release.
