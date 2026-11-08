@@ -134,94 +134,19 @@ impl CommentableLines {
     /// #10762: an old-side counter, seeded from `-a`, numbers each removed line
     /// into `removed`, keyed by the new path (the old path for a deleted file);
     /// every `+++ b/` path, and a deleted file's `--- a/` path, goes to `files`.
+    /// The walk itself is `HunkWalk`, which reads a hunk's body by its `@@`
+    /// counts so a `--- `/`+++ ` body line is never taken for a file header.
     /// Test: `commentable_lines_indexes_added_and_context`,
     /// `commentable_lines_excludes_removed_lines`,
     /// `commentable_lines_handles_multiple_hunks`,
-    /// `removed_line_with_no_new_side_match_is_not_off_diff`.
+    /// `removed_line_with_no_new_side_match_is_not_off_diff`,
+    /// `sql_comment_removed_line_does_not_end_the_hunk`.
     pub fn from_unified_diff(diff: &str) -> Self {
-        let mut index = Self::default();
-        let mut current_file: Option<String> = None;
-        // #10762: `old_file` is the `--- a/` path; `removed_file` keys removed lines.
-        let mut old_file: Option<String> = None;
-        let mut removed_file: Option<String> = None;
-        let mut new_line: u32 = 0;
-        let mut old_line: Option<u32> = None;
-        let mut in_hunk = false;
-
+        let mut walk = HunkWalk::default();
         for line in diff.lines() {
-            if line.starts_with("diff ") {
-                // #10762: a file header ends the hunk, so a following
-                // `deleted file mode` line is never read as a context line.
-                in_hunk = false;
-                continue;
-            }
-            if let Some(path) = line.strip_prefix("+++ b/") {
-                let path = path.trim().to_string();
-                index.files.insert(path.clone());
-                removed_file = Some(path.clone());
-                current_file = Some(path);
-                in_hunk = false;
-                continue;
-            }
-            if line.starts_with("+++ ") {
-                // e.g. `+++ /dev/null` — not a usable new-side path.
-                current_file = None;
-                // #10762: a deleted file's removed lines keep its old path.
-                removed_file = old_file.clone();
-                if let Some(path) = &old_file {
-                    index.files.insert(path.clone());
-                }
-                in_hunk = false;
-                continue;
-            }
-            if line.starts_with("--- ") {
-                old_file = line.strip_prefix("--- a/").map(|p| p.trim().to_string());
-                in_hunk = false;
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("@@") {
-                match parse_hunk_new_start(rest) {
-                    Some(start) => {
-                        new_line = start;
-                        old_line = parse_hunk_old_start(rest);
-                        in_hunk = true;
-                    }
-                    None => in_hunk = false,
-                }
-                continue;
-            }
-            if !in_hunk {
-                continue;
-            }
-            // Diff-file metadata lines that can appear between hunks.
-            if line.starts_with("index ") || line.starts_with("\\ No newline") {
-                continue;
-            }
-            if line.starts_with('-') {
-                // Removed line: no new-side number, do not advance it.
-                // #10762: record its old-side number for a LEFT anchor.
-                if let Some(n) = old_line.as_mut() {
-                    if let Some(file) = removed_file.as_ref() {
-                        index.removed.insert((file.clone(), *n));
-                    }
-                    *n += 1;
-                }
-                continue;
-            }
-            let Some(file) = current_file.as_ref() else {
-                continue;
-            };
-            index.anchors.insert((file.clone(), new_line));
-            new_line += 1;
-            // Added (`+`) or context line; only a context line has an old side.
-            if !line.starts_with('+')
-                && let Some(n) = old_line.as_mut()
-            {
-                *n += 1;
-            }
+            walk.step(line);
         }
-
-        index
+        walk.index
     }
 
     /// Whether `(file, line)` is a removed line, by its old-side number (#10762).
@@ -266,6 +191,236 @@ impl CommentableLines {
     /// Test: covered transitively by `commentable_lines_indexes_added_and_context`.
     pub fn is_empty(&self) -> bool {
         self.anchors.is_empty()
+    }
+}
+
+// ─── Unified-diff hunk walker ─────────────────────────────────────────────────
+
+/// Where [`HunkWalk`] stands relative to the current hunk (#10762).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum HunkState {
+    /// Before the first hunk, or after a file header: only headers count.
+    #[default]
+    Outside,
+    /// In a hunk body, with `old`/`new` lines still owed by its `@@` header.
+    Body { old: u32, new: u32 },
+    /// Past a hunk's counts, or in a hunk whose counts did not parse. A header
+    /// line is read as a header first; any other line is indexed as a body line,
+    /// as the pre-#10762 walk did, so a fixture with wrong counts keeps its anchors.
+    Tail,
+}
+
+impl HunkState {
+    /// `Body` while either side still owes lines, else `Tail`.
+    fn owing(old: u32, new: u32) -> Self {
+        if old == 0 && new == 0 {
+            Self::Tail
+        } else {
+            Self::Body { old, new }
+        }
+    }
+}
+
+/// One hunk body line, by its first character (#10762).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyLine {
+    /// `-`: old side only.
+    Removed,
+    /// `+`: new side only.
+    Added,
+    /// ` `, or an empty line whose leading space was stripped: both sides.
+    Context,
+    /// `\ No newline at end of file`: neither side.
+    NoNewline,
+}
+
+impl BodyLine {
+    /// Classify `line` by its first character; `None` when no body line can
+    /// start with it (the `@@` counts overstated the hunk).
+    fn classify(line: &str) -> Option<Self> {
+        match line.as_bytes().first() {
+            Some(b'-') => Some(Self::Removed),
+            Some(b'+') => Some(Self::Added),
+            Some(b' ') | None => Some(Self::Context),
+            Some(b'\\') => Some(Self::NoNewline),
+            Some(_) => None,
+        }
+    }
+
+    /// The `(old, new)` counts still owed after this line.
+    fn consume(self, old: u32, new: u32) -> (u32, u32) {
+        match self {
+            Self::Removed => (old.saturating_sub(1), new),
+            Self::Added => (old, new.saturating_sub(1)),
+            Self::Context => (old.saturating_sub(1), new.saturating_sub(1)),
+            Self::NoNewline => (old, new),
+        }
+    }
+}
+
+/// Line-by-line state of [`CommentableLines::from_unified_diff`] (#10762).
+///
+/// Why: a removed line whose content starts `-- ` (a SQL or Lua comment)
+/// renders as `--- …`, and an added `++ …` line as `+++ …`. A walk that tests
+/// for those headers before the hunk body took such a line for a file header,
+/// dropped out of the hunk, and left every later line of it `off_diff`.
+/// What: an `@@ -a,b +c,d @@` header opens [`HunkState::Body`] with the `b`
+/// and `d` counts (a missing count is 1). In the body every line is classified
+/// by its first character and spends its side's count; only once both counts
+/// are spent are `diff `, `--- `, `+++ ` and `@@` lines read as headers. A
+/// line no body line can start with ends an overstated hunk early and is then
+/// read as a header.
+/// Test: `sql_comment_removed_line_does_not_end_the_hunk`,
+/// `plus_plus_added_line_does_not_end_the_hunk`,
+/// `sql_comment_at_hunk_end_then_next_file_headers`,
+/// `missing_hunk_count_means_one_line`.
+#[derive(Debug, Default)]
+struct HunkWalk {
+    index: CommentableLines,
+    /// The `+++ b/` path; anchors are keyed by it.
+    current_file: Option<String>,
+    /// The `--- a/` path.
+    old_file: Option<String>,
+    /// Keys removed lines: the new path, or the old path for a deleted file.
+    removed_file: Option<String>,
+    new_line: u32,
+    old_line: Option<u32>,
+    state: HunkState,
+}
+
+impl HunkWalk {
+    /// Consume one diff line.
+    ///
+    /// Why: the hunk body must be read before any header test (#10762).
+    /// What: in `Body`, a classifiable line is indexed and spends its count; an
+    /// unclassifiable one drops to `Tail` and falls through. Then header lines
+    /// are applied; outside a hunk anything else is ignored; in `Tail` a
+    /// non-header line is indexed as before (`index ` and `\ No newline` skipped).
+    /// Test: `sql_comment_removed_line_does_not_end_the_hunk`,
+    /// `sql_comment_at_hunk_end_then_next_file_headers`.
+    fn step(&mut self, line: &str) {
+        // #10762: drive hunks from @@ counts
+        if let HunkState::Body { old, new } = self.state {
+            if let Some(kind) = BodyLine::classify(line) {
+                self.record(kind);
+                let (old, new) = kind.consume(old, new);
+                self.state = HunkState::owing(old, new);
+                return;
+            }
+            self.state = HunkState::Tail;
+        }
+        if self.header(line) || self.state == HunkState::Outside {
+            return;
+        }
+        if line.starts_with("index ") || line.starts_with("\\ No newline") {
+            return;
+        }
+        let kind = match line.as_bytes().first() {
+            Some(b'-') => BodyLine::Removed,
+            Some(b'+') => BodyLine::Added,
+            _ => BodyLine::Context,
+        };
+        self.record(kind);
+    }
+
+    /// Apply `line` if it is a file or hunk header; `true` when it was one.
+    fn header(&mut self, line: &str) -> bool {
+        if line.starts_with("diff ") {
+            // #10762: a file header ends the hunk, so a following
+            // `deleted file mode` line is never read as a context line.
+            self.state = HunkState::Outside;
+            return true;
+        }
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            let path = path.trim().to_string();
+            self.index.files.insert(path.clone());
+            self.removed_file = Some(path.clone());
+            self.current_file = Some(path);
+            self.state = HunkState::Outside;
+            return true;
+        }
+        if line.starts_with("+++ ") {
+            // e.g. `+++ /dev/null` — not a usable new-side path.
+            self.current_file = None;
+            // #10762: a deleted file's removed lines keep its old path.
+            self.removed_file = self.old_file.clone();
+            if let Some(path) = &self.old_file {
+                self.index.files.insert(path.clone());
+            }
+            self.state = HunkState::Outside;
+            return true;
+        }
+        if line.starts_with("--- ") {
+            self.old_file = line.strip_prefix("--- a/").map(|p| p.trim().to_string());
+            self.state = HunkState::Outside;
+            return true;
+        }
+        let Some(rest) = line.strip_prefix("@@") else {
+            return false;
+        };
+        self.state = match parse_hunk_new_start(rest) {
+            Some(start) => {
+                self.new_line = start;
+                self.old_line = parse_hunk_old_start(rest);
+                match parse_hunk_counts(rest) {
+                    Some((old, new)) => HunkState::owing(old, new),
+                    None => HunkState::Tail,
+                }
+            }
+            None => HunkState::Outside,
+        };
+        true
+    }
+
+    /// Index one body line and advance the side counters it occupies.
+    fn record(&mut self, kind: BodyLine) {
+        match kind {
+            BodyLine::NoNewline => {}
+            BodyLine::Removed => {
+                // No new-side number; #10762: its old-side number is a LEFT anchor.
+                if let Some(n) = self.old_line.as_mut() {
+                    if let Some(file) = self.removed_file.as_ref() {
+                        self.index.removed.insert((file.clone(), *n));
+                    }
+                    *n += 1;
+                }
+            }
+            BodyLine::Added | BodyLine::Context => {
+                let Some(file) = self.current_file.as_ref() else {
+                    return;
+                };
+                self.index.anchors.insert((file.clone(), self.new_line));
+                self.new_line += 1;
+                // Only a context line has an old side.
+                if kind == BodyLine::Context
+                    && let Some(n) = self.old_line.as_mut()
+                {
+                    *n += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Parse the `(old, new)` line counts from the remainder of an `@@` header (#10762).
+///
+/// Why: the counts say where a hunk body ends, which is the only way to tell
+/// a `--- `/`+++ ` body line from a file header.
+/// What: reads the `-a[,b]` and `+c[,d]` ranges; a missing count means 1, as
+/// in standard unified diff. Returns `None` when either range does not parse.
+/// Test: `missing_hunk_count_means_one_line`.
+fn parse_hunk_counts(rest: &str) -> Option<(u32, u32)> {
+    let mut ranges = rest.split_whitespace();
+    let old = range_count(ranges.next()?.strip_prefix('-')?)?;
+    let new = range_count(ranges.next()?.strip_prefix('+')?)?;
+    Some((old, new))
+}
+
+/// `start,count` → `count`; a bare `start` → 1.
+fn range_count(spec: &str) -> Option<u32> {
+    match spec.split_once(',') {
+        Some((_, count)) => count.parse().ok(),
+        None => Some(1),
     }
 }
 

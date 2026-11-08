@@ -760,3 +760,189 @@ fn no_line_and_file_not_in_diff_is_unanchored_no_line() {
     assert_eq!(plan.summary_findings.len(), 1);
     assert_eq!(plan.summary_findings[0].file, "src/other.rs");
 }
+
+// ─── #10762: hunk bodies are read by their @@ counts ──────────────────────────
+
+/// Each comment's `(path, line, side)`, in plan order.
+fn placed(plan: &InlinePlan) -> Vec<(&str, u32, AnchorSide)> {
+    plan.comments
+        .iter()
+        .map(|c| (c.path.as_str(), c.line, c.side))
+        .collect()
+}
+
+/// REGRESSION (#10762): a removed `-- ` SQL comment does not end its hunk.
+///
+/// Why: the removed line `-- old comment` renders as `--- old comment`, which
+/// the walk took for a file header, so every later line of the hunk read
+/// `off_diff`.
+/// What: indexes a hunk that removes that line (old 2), then adds new line 2,
+/// keeps context new 3 and 4, and removes old line 5; asserts each index entry
+/// and that findings at lines 2 to 5 anchor `RIGHT` 2, 3, 4 and `LEFT` 5.
+/// Test: this test itself.
+#[test]
+fn sql_comment_removed_line_does_not_end_the_hunk() {
+    let diff = "\
+diff --git a/db/schema.sql b/db/schema.sql
+--- a/db/schema.sql
++++ b/db/schema.sql
+@@ -1,5 +1,4 @@
+ CREATE TABLE a (id INT);
+--- old comment
++CREATE INDEX a_id ON a (id);
+ CREATE TABLE b (id INT);
+ CREATE TABLE d (id INT);
+-DROP TABLE c;
+";
+    let c = CommentableLines::from_unified_diff(diff);
+    let f = "db/schema.sql";
+    assert!(c.contains_removed(f, 2), "the `-- ` line itself is removed");
+    assert!(c.contains(f, 2) && c.contains(f, 3) && c.contains(f, 4));
+    assert!(
+        c.contains_removed(f, 5),
+        "a later removed line keeps its entry"
+    );
+    assert!(!c.contains(f, 5), "no new-side line 5");
+
+    let findings: Vec<Finding> = (2..=5).map(|n| finding_at(f, Some(n))).collect();
+    let plan = build_inline_plan(&findings, &c);
+    assert!(plan.unanchored.is_empty(), "{:?}", plan.unanchored);
+    assert_eq!(
+        placed(&plan),
+        vec![
+            (f, 2, AnchorSide::Right),
+            (f, 3, AnchorSide::Right),
+            (f, 4, AnchorSide::Right),
+            (f, 5, AnchorSide::Left),
+        ]
+    );
+}
+
+/// REGRESSION (#10762): an added `++ ` line does not end its hunk.
+///
+/// Why: the added line `++ middle` renders as `+++ middle`, which the walk
+/// took for a `+++ /dev/null`-style header: it cleared the new-side path and
+/// skipped the rest of the hunk.
+/// What: indexes a hunk (old 20.., new 18..) holding that line at new 19, a
+/// later added line 20, context 21 and removed old lines 22 and 23; asserts
+/// findings at 19 to 23 anchor `RIGHT` 19, 20, 21 and `LEFT` 22, 23.
+/// Test: this test itself.
+#[test]
+fn plus_plus_added_line_does_not_end_the_hunk() {
+    let diff = "\
+diff --git a/src/Join.hs b/src/Join.hs
+--- a/src/Join.hs
++++ b/src/Join.hs
+@@ -20,4 +18,4 @@ joined =
+ joined = prefix
++++ middle
++  ++ suffix
+ where
+-old = 1
+-dead = 2
+";
+    let c = CommentableLines::from_unified_diff(diff);
+    let f = "src/Join.hs";
+    assert!(c.contains(f, 19), "the `++ ` line itself is added");
+    assert!(c.contains(f, 20) && c.contains(f, 21));
+    assert!(c.contains_removed(f, 22) && c.contains_removed(f, 23));
+
+    let findings: Vec<Finding> = (19..=23).map(|n| finding_at(f, Some(n))).collect();
+    let plan = build_inline_plan(&findings, &c);
+    assert!(plan.unanchored.is_empty(), "{:?}", plan.unanchored);
+    assert_eq!(
+        placed(&plan),
+        vec![
+            (f, 19, AnchorSide::Right),
+            (f, 20, AnchorSide::Right),
+            (f, 21, AnchorSide::Right),
+            (f, 22, AnchorSide::Left),
+            (f, 23, AnchorSide::Left),
+        ]
+    );
+}
+
+/// REGRESSION (#10762): a `-- ` line that ends a hunk leaves the next file intact.
+///
+/// Why: once the counts are spent the walker must read headers again, or the
+/// next file's `--- a/`/`+++ b/` pair would be taken for body lines.
+/// What: `db/a.sql`'s hunk ends on the removed line `-- trailing note` (old
+/// 3); `src/lib.rs` follows with its own headers. Asserts both files' index
+/// entries, and that findings anchor `LEFT` 2 and 3 in the first file and
+/// `RIGHT` 6 and 7 in the second.
+/// Test: this test itself.
+#[test]
+fn sql_comment_at_hunk_end_then_next_file_headers() {
+    let diff = "\
+diff --git a/db/a.sql b/db/a.sql
+--- a/db/a.sql
++++ b/db/a.sql
+@@ -1,3 +1,1 @@
+ SELECT 1;
+-SELECT 2;
+--- trailing note
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,3 +5,3 @@
+ fn a() {}
+-fn old() {}
++fn b() {}
+ fn c() {}
+";
+    let c = CommentableLines::from_unified_diff(diff);
+    let (sql, rs) = ("db/a.sql", "src/lib.rs");
+    assert!(c.contains(sql, 1) && !c.contains(sql, 2));
+    assert!(c.contains_removed(sql, 2) && c.contains_removed(sql, 3));
+    assert!(c.contains_file(sql) && c.contains_file(rs));
+    assert!(c.contains(rs, 5) && c.contains(rs, 6) && c.contains(rs, 7));
+    assert!(c.contains_removed(rs, 6));
+    assert!(!c.contains_removed(sql, 4) && !c.contains(sql, 5));
+
+    let findings = vec![
+        finding_at(sql, Some(2)),
+        finding_at(sql, Some(3)),
+        finding_at(rs, Some(6)),
+        finding_at(rs, Some(7)),
+    ];
+    let plan = build_inline_plan(&findings, &c);
+    assert!(plan.unanchored.is_empty(), "{:?}", plan.unanchored);
+    assert_eq!(
+        placed(&plan),
+        vec![
+            (sql, 2, AnchorSide::Left),
+            (sql, 3, AnchorSide::Left),
+            (rs, 6, AnchorSide::Right),
+            (rs, 7, AnchorSide::Right),
+        ]
+    );
+}
+
+/// REGRESSION (#10762): a missing `@@` count means one line.
+///
+/// Why: `@@ -3 +3 @@` owes one line per side; reading more would swallow
+/// the next file's headers, and reading none would drop the body.
+/// What: `a.sql`'s one-line hunk removes `-- note` and adds `++ note`, then
+/// `b.sql` follows with a bare `---`/`+++` header pair; asserts the two body
+/// lines index at line 3 and that `b.sql` parses as its own file.
+/// Test: this test itself.
+#[test]
+fn missing_hunk_count_means_one_line() {
+    let diff = "\
+--- a/a.sql
++++ b/a.sql
+@@ -3 +3 @@
+--- note
++++ note
+--- a/b.sql
++++ b/b.sql
+@@ -1 +1,2 @@
+ x
++y
+";
+    let c = CommentableLines::from_unified_diff(diff);
+    assert!(c.contains_removed("a.sql", 3) && c.contains("a.sql", 3));
+    assert!(!c.contains("a.sql", 4) && !c.contains_removed("a.sql", 4));
+    assert!(c.contains("b.sql", 1) && c.contains("b.sql", 2));
+    assert_eq!(c.len(), 3);
+}
