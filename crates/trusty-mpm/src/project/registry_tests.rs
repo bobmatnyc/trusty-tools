@@ -757,3 +757,63 @@ async fn implicit_registration_registers_a_different_origin() {
     assert_eq!(gadget.repo_url, "https://github.com/acme/gadget.git");
     assert_eq!(registry.list().await.expect("list").len(), 3);
 }
+
+// #10696: the `list()` error arm of both implicit-registration entry points.
+/// Why: when `projects.json` cannot be read, implicit registration must warn and
+/// register nothing rather than proceed against an empty view of the registry.
+/// What: corrupts `projects.json` after load so `list()` fails, runs both entry
+/// points, and asserts each warned, neither attempted a write, and the file is
+/// byte-for-byte unchanged.
+/// Test: this test.
+#[tokio::test]
+async fn implicit_registration_warns_and_registers_nothing_when_list_fails() {
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    crate::test_support::enable_event_capture();
+    let dir = TempDir::new().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let path = dir.path().join("projects.json");
+    const CORRUPT: &str = "{ not json";
+    std::fs::write(&path, CORRUPT).expect("corrupt projects.json");
+    assert!(
+        registry.list().await.is_err(),
+        "list() must fail on a corrupt file"
+    );
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let session = make_session_with_repo("https://github.com/acme/widget.git", None);
+    async {
+        registry.register_from_session(&session).await;
+        registry
+            .auto_register_from_sessions(std::slice::from_ref(&session))
+            .await;
+    }
+    .with_subscriber(subscriber)
+    .await;
+
+    let lines = buffer.tail(64);
+    for prefix in ["register_from_session", "auto_register"] {
+        let warned = format!("{prefix}: failed to list existing projects");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("WARN") && l.contains(&warned)),
+            "{prefix} did not warn: {lines:?}"
+        );
+    }
+    assert!(
+        lines
+            .iter()
+            .all(|l| !l.contains("failed to register") && !l.contains("registered project")),
+        "a failed list() must not reach the register step: {lines:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read projects.json"),
+        CORRUPT,
+        "projects.json must be left unchanged"
+    );
+}
