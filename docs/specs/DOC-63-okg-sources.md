@@ -661,6 +661,14 @@ one bug away from being written.
 >   adapter as `operator_initiated: true` in the `acquire` request. An absent
 >   `operator_initiated` field means the run is not operator-initiated, and
 >   SENT-only applies.
+> - Only a human operator sets `operator_initiated: true`, and only through a
+>   path the operator invokes directly: the trusty-okf CLI `--operator` flag
+>   (SPEC-OKF-01 Appendix B, `import run`) or an equivalent operator UI command.
+>   No agent or assistant tool call, MCP tool, scheduled refresh or other
+>   automated path sets it. An agent-originated request that carries
+>   `operator_initiated: true` is refused, or the field is treated as false, so
+>   SENT-only applies. This is fail-closed. (New constraint, 2026-11-07: SPEC-OKF-01
+>   says "the CLI or caller marks the run" and does not name who may set it.)
 > - A sub-agent cannot start an inbound import (SPEC-OKF-01 §2.15
 >   "Sub-agent imports").
 > - Until the capability-grant review (§13) passes, the adapter refuses an
