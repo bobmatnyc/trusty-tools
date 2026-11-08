@@ -205,6 +205,34 @@ pub(crate) struct LiveSessions {
     pub(crate) boot: Option<u64>,
 }
 
+impl LiveSessions {
+    /// Whether session `tmux_name`, whose stored socket is `socket`, is live
+    /// on that server: [`LiveSet::holds`] for a caller holding a socket but no
+    /// managed record (the daemon's legacy registry, #10101).
+    /// Test: `live_sessions_hold_a_record_only_on_its_own_server`,
+    /// `the_legacy_reaper_judges_a_socket_session_on_its_own_server_10101`.
+    pub(crate) fn holds_session(&self, tmux_name: &str, socket: Option<&Path>) -> bool {
+        let server = match socket_server(tmux_name, socket) {
+            Ok(None) => return self.default.contains(tmux_name),
+            Ok(Some(server)) => server,
+            Err(_) => return true,
+        };
+        if self.named_unlisted || self.unknown.contains(&server) {
+            return true;
+        }
+        if socket_in_dir(socket, self.socket_dir.as_deref())
+            && let Some(names) = self.named.get(&server)
+        {
+            return names.contains(tmux_name);
+        }
+        // Not listed here: alive (or stuck) only if its own socket says so.
+        socket.is_some_and(|socket| {
+            crate::core::tmux_server::socket_answers(socket, crate::core::tmux_server::PROBE_BUDGET)
+                != Some(false)
+        })
+    }
+}
+
 /// A set that answers whether a record's session is live (#10101).
 ///
 /// Why: the dedup planners take a name set from older callers and tests, and
@@ -229,24 +257,7 @@ impl LiveSet for LiveSessions {
     /// `one_unlistable_server_degrades_only_its_own_records`,
     /// `a_socket_outside_the_socket_dir_is_refused_and_reads_unknown`.
     fn holds(&self, record: &SessionRecord) -> bool {
-        let server = match record_server(record) {
-            Ok(None) => return self.default.contains(&record.tmux_name),
-            Ok(Some(server)) => server,
-            Err(_) => return true,
-        };
-        if self.named_unlisted || self.unknown.contains(&server) {
-            return true;
-        }
-        if in_socket_dir(record, self.socket_dir.as_deref())
-            && let Some(names) = self.named.get(&server)
-        {
-            return names.contains(&record.tmux_name);
-        }
-        // Not listed here: alive (or stuck) only if its own socket says so.
-        record.tmux_socket.as_deref().is_some_and(|socket| {
-            crate::core::tmux_server::socket_answers(socket, crate::core::tmux_server::PROBE_BUDGET)
-                != Some(false)
-        })
+        self.holds_session(&record.tmux_name, record.tmux_socket.as_deref())
     }
 
     /// What: the default server is lost when it lists nothing. A named

@@ -58,12 +58,51 @@ fn launch_target_with(
         return None;
     }
     let dir = tmux.socket_dir()?;
-    let name = crate::core::tmux_server::workspace_server_name(&server_workspace(workspace));
+    let name = server_name_for(workspace);
     let driver = tmux.on_server(&name)?;
     Some((
         driver,
         crate::core::tmux_server::server_socket_path(&dir, &name),
     ))
+}
+
+/// The `-L` server a CLI launch (`tm launch`, `tm connect`, the in-place
+/// `tm session start`) from `workspace` creates its PM on, and that server's
+/// socket; `None` for the default server (#10101).
+///
+/// Why: a PM the CLI starts must land on the same server the daemon would
+/// pick for that workspace, so the two launch paths share one rule.
+/// What: [`cli_launch_server_with`] with [`WORKSPACE_TMUX_ENV`] read from the
+/// process environment and tmux's socket directory for this process
+/// ([`crate::core::tmux_server::ambient_socket_dir`]).
+/// Test: `a_cli_launch_names_the_daemons_workspace_server`,
+/// `the_cli_opt_out_keeps_the_default_server`.
+pub fn cli_launch_server(workspace: &Path) -> Option<(String, PathBuf)> {
+    let opt_out = std::env::var(WORKSPACE_TMUX_ENV).ok();
+    let dir = crate::core::tmux_server::ambient_socket_dir();
+    cli_launch_server_with(workspace, opt_out.as_deref(), &dir)
+}
+
+/// [`cli_launch_server`] with the opt-out value and socket directory passed
+/// in: `None` when opted out, else [`server_name_for`] `workspace` and its
+/// socket in `socket_dir`.
+fn cli_launch_server_with(
+    workspace: &Path,
+    opt_out: Option<&str>,
+    socket_dir: &Path,
+) -> Option<(String, PathBuf)> {
+    if opted_out(opt_out) {
+        return None;
+    }
+    let name = server_name_for(workspace);
+    let socket = crate::core::tmux_server::server_socket_path(socket_dir, &name);
+    Some((name, socket))
+}
+
+/// The server name a fresh PM at `workspace` launches on, for both the
+/// daemon's [`launch_target`] and the CLI's [`cli_launch_server`].
+fn server_name_for(workspace: &Path) -> String {
+    crate::core::tmux_server::workspace_server_name(&server_workspace(workspace))
 }
 
 /// The workspace whose server a session at `cwd` launches on: the project

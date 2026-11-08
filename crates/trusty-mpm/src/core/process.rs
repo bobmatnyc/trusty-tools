@@ -34,11 +34,24 @@ pub fn find_claude_pid_in_tmux(
     max_attempts: u8,
     delay: Duration,
 ) -> Option<u32> {
+    find_claude_pid_in_tmux_on(None, session_name, max_attempts, delay)
+}
+
+/// [`find_claude_pid_in_tmux`] on the named (`-L`) `server`; `None` is the
+/// default server (#10101: a PM on its workspace server).
+/// Test: `find_claude_pid_on_a_named_server_asks_only_that_server`.
+pub fn find_claude_pid_in_tmux_on(
+    server: Option<&str>,
+    session_name: &str,
+    max_attempts: u8,
+    delay: Duration,
+) -> Option<u32> {
     for attempt in 0..max_attempts.max(1) {
         if attempt > 0 {
             sleep(delay);
         }
-        let Some(pane_pid) = tmux_pane_pid(session_name) else {
+        let target = crate::core::tmux::TmuxTarget::session(session_name);
+        let Some(pane_pid) = tmux_target_pid_on(server, &target) else {
             // No pane / tmux unavailable — retrying will not help.
             return None;
         };
@@ -80,10 +93,16 @@ fn tmux_pane_pid(session_name: &str) -> Option<u32> {
 /// [`tmux_pane_pid`] for any target — a session's active pane or a `%N` pane
 /// id (#8935).
 fn tmux_target_pid(target: &crate::core::tmux::TmuxTarget) -> Option<u32> {
+    tmux_target_pid_on(None, target)
+}
+
+/// [`tmux_target_pid`] on the named (`-L`) `server` (#10101).
+fn tmux_target_pid_on(server: Option<&str>, target: &crate::core::tmux::TmuxTarget) -> Option<u32> {
     // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
     // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
     let tmux_bin = crate::core::tmux::resolve_tmux_binary_or_bare();
     let argv = crate::core::tmux::display_message_argv(Some(target), "#{pane_pid}");
+    let argv = crate::core::tmux_server::server_argv(server, argv);
     let output = crate::core::tmux::run_tmux_argv_with_bin(&tmux_bin, &argv).ok()?;
     if !output.status.success() {
         return None;
@@ -397,6 +416,31 @@ mod tests {
             Duration::from_millis(1),
         );
         assert_eq!(pid, None);
+    }
+
+    /// #10101: the pane lookup for a PM on a workspace server goes to that
+    /// server only; the default server is never asked in its place.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn find_claude_pid_on_a_named_server_asks_only_that_server() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("argv.log");
+        let bin = dir.path().join("fake-tmux");
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display());
+        trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+        let pid = crate::core::tmux::with_tmux_binary(bin, async {
+            find_claude_pid_in_tmux_on(Some("tm-ws-proj-abc"), "tm-proj", 2, Duration::ZERO)
+        })
+        .await;
+        assert_eq!(pid, None, "the fake prints no pane pid");
+        let lines = std::fs::read_to_string(&log).expect("tmux was asked");
+        assert!(!lines.is_empty());
+        for line in lines.lines() {
+            assert!(
+                line.starts_with("-L tm-ws-proj-abc display-message"),
+                "{line}"
+            );
+        }
     }
 
     /// #8935: a pane id no server has handed out yields `None`, read-only.

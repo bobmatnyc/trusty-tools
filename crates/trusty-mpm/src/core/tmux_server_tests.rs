@@ -184,3 +184,29 @@ fn boot_time_is_parsed_from_proc_stat_and_sysctl() {
     );
     assert_eq!(parse_kern_boottime("garbage"), None);
 }
+
+/// #10101: a stored socket in this process's socket directory names its
+/// server; no socket is the default server.
+#[test]
+fn a_socket_in_the_socket_dir_names_its_server() {
+    let dir = Path::new("/private/tmp/tmux-501");
+    assert_eq!(server_of_socket(None, dir), Ok(None));
+    assert_eq!(
+        server_of_socket(Some(&dir.join("tm-ws-proj-abc")), dir),
+        Ok(Some("tm-ws-proj-abc".to_owned()))
+    );
+}
+
+/// #10101: a socket in another directory, or with no file name, is refused
+/// rather than re-aimed at a same-named server here or the default server.
+#[test]
+fn a_socket_elsewhere_or_unnamed_is_refused() {
+    let dir = Path::new("/private/tmp/tmux-501");
+    let elsewhere = Path::new("/var/folders/x/tmux-501/tm-ws-proj-abc");
+    let err = server_of_socket(Some(elsewhere), dir).expect_err("another dir is refused");
+    assert!(
+        err.contains("/var/folders/x/tmux-501/tm-ws-proj-abc"),
+        "{err}"
+    );
+    assert!(server_of_socket(Some(Path::new("/")), dir).is_err());
+}

@@ -47,6 +47,7 @@ fn send_command_line_refuses_an_oversized_line() {
     let line = "x".repeat(MAX_PANE_COMMAND_BYTES + 1);
     let err = send_command_line(
         Some("/nonexistent/definitely-not-tmux"),
+        None,
         &TmuxTarget::session("tm-sess"),
         &line,
     )
@@ -73,7 +74,7 @@ fn launch_line_over_the_limit_is_refused_before_tmux_runs() {
     let dir = tempfile::tempdir().unwrap();
     let (bin, log) = argv_logging_tmux(dir.path(), 0);
     let line = "x".repeat(MAX_PANE_COMMAND_BYTES + 1);
-    let err = send_launch_line(Some(&bin), "tm-sess", &line)
+    let err = send_launch_line(Some(&bin), None, "tm-sess", &line)
         .expect_err("an over-length launch line must be refused");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
     assert!(!log.exists(), "tmux must not run for a refused line");
@@ -84,7 +85,8 @@ fn launch_line_over_the_limit_is_refused_before_tmux_runs() {
 fn launch_line_within_the_limit_reaches_tmux() {
     let dir = tempfile::tempdir().unwrap();
     let (bin, log) = argv_logging_tmux(dir.path(), 0);
-    send_launch_line(Some(&bin), "tm-sess", "echo short-line").expect("a short line is typed");
+    send_launch_line(Some(&bin), None, "tm-sess", "echo short-line")
+        .expect("a short line is typed");
     let argv = std::fs::read_to_string(&log).unwrap();
     assert!(argv.contains("-l echo short-line"), "{argv}");
     assert!(argv.contains("Enter"), "{argv}");
@@ -92,8 +94,27 @@ fn launch_line_within_the_limit_reaches_tmux() {
     // A non-zero `send-keys` exit is an error that carries tmux's stderr.
     let failing = tempfile::tempdir().unwrap();
     let (bin, _) = argv_logging_tmux(failing.path(), 1);
-    let err = send_launch_line(Some(&bin), "tm-sess", "echo").expect_err("exit 1 is a failure");
+    let err =
+        send_launch_line(Some(&bin), None, "tm-sess", "echo").expect_err("exit 1 is a failure");
     assert!(err.to_string().contains("fake failure"), "{err}");
+}
+
+/// #10101: a launch line for a PM on its workspace server is typed on that
+/// server, every `send-keys` behind its `-L`.
+#[serial_test::serial]
+#[test]
+fn a_launch_line_for_a_named_server_is_typed_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bin, log) = argv_logging_tmux(dir.path(), 0);
+    send_launch_line(Some(&bin), Some("tm-ws-proj-abc"), "tm-sess", "echo hi")
+        .expect("a short line is typed");
+    let argv = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(argv.lines().count(), 2, "{argv}");
+    assert!(
+        argv.lines()
+            .all(|l| l.starts_with("-L tm-ws-proj-abc send-keys")),
+        "{argv}"
+    );
 }
 
 /// #8308: no launch site types its `claude` line through the unguarded free

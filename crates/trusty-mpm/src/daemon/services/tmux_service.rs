@@ -192,8 +192,31 @@ impl TmuxService {
     /// `full_user_cycle` integration test asserts the session is gone after a
     /// DELETE when tmux is available.
     pub fn kill_best_effort(tmux_name: &str) {
+        Self::kill_best_effort_on(tmux_name, None);
+    }
+
+    /// [`Self::kill_best_effort`] on the server listening on `socket`; `None`
+    /// is the default server (#10101).
+    ///
+    /// What: a socket that names no server in this process's socket directory
+    /// is logged and nothing is killed, so a same-named session on the
+    /// default server is never torn down in its place.
+    /// Test: `a_kill_for_an_unreachable_socket_touches_no_server_10101`.
+    pub fn kill_best_effort_on(tmux_name: &str, socket: Option<&Path>) {
+        let dir = crate::core::tmux_server::ambient_socket_dir();
+        let server = match crate::core::tmux_server::server_of_socket(socket, &dir) {
+            Ok(server) => server,
+            Err(e) => {
+                tracing::warn!("#10101: kill for {tmux_name} skipped — {e}");
+                return;
+            }
+        };
         match TmuxDriver::discover() {
             Ok(driver) => {
+                let driver = match server.as_deref() {
+                    Some(server) => driver.on_server(server),
+                    None => driver,
+                };
                 if let Err(e) = driver.kill_session(tmux_name) {
                     tracing::warn!(
                         "tmux kill_session failed for {tmux_name} (may already be gone): {e}"
@@ -622,6 +645,36 @@ mod tests {
         // be a silent no-op, never a panic — the DELETE handler relies on this
         // to never fail the HTTP response on a best-effort tmux kill (#1454).
         TmuxService::kill_best_effort("tmpm-definitely-no-such-session-xyz");
+    }
+
+    /// #10101: a stored socket outside this process's socket directory kills
+    /// nothing; one inside it kills only on that server.
+    /// Test: itself.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn a_kill_for_an_unreachable_socket_touches_no_server_10101() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("argv.log");
+        let bin = dir.path().join("fake-tmux");
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display());
+        trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+        let elsewhere = dir.path().join("tm-ws-proj-abc");
+        let own = crate::core::tmux_server::ambient_socket_dir().join("tm-ws-proj-abc");
+        crate::core::tmux::with_tmux_binary(bin, async {
+            TmuxService::kill_best_effort_on("tm-proj", Some(&elsewhere));
+            assert!(
+                !log.exists(),
+                "a socket elsewhere must reach no tmux server"
+            );
+            TmuxService::kill_best_effort_on("tm-proj", Some(&own));
+        })
+        .await;
+        let lines = std::fs::read_to_string(&log).expect("the own-server kill ran");
+        assert!(
+            lines.lines().all(|l| l.starts_with("-L tm-ws-proj-abc "))
+                && lines.contains("kill-session"),
+            "{lines}"
+        );
     }
 
     #[test]
