@@ -15,7 +15,7 @@
 //! Test: this file is the test.
 
 use super::*;
-use crate::tui::project_ctl::state::{NodeId, ProjectRow};
+use crate::tui::project_ctl::state::{NodeId, ProjectRow, SessionColRow};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -105,7 +105,8 @@ fn project_node(name: &str) -> NodeId {
     }
 }
 
-/// Select alpha's lone session — what focusing the Sessions pane used to mean.
+/// Select alpha's lone session in the right column, focusing that column
+/// (#10754: two-column MPM pane).
 fn on_session(state: &mut ProjectCtlState) {
     assert!(state.focus_session("sess-1"));
 }
@@ -125,12 +126,17 @@ fn quit_on_bare_q_and_ctrl_c() {
 fn tab_cycles_focus_forward_and_back() {
     let mut state = seeded_state();
     assert_eq!(state.focus, Pane::Tree);
+    // #10754: two-column MPM pane (Bob 11-06)
+    handle_key(&mut state, key(KeyCode::Tab));
+    assert_eq!(state.focus, Pane::Sessions);
     handle_key(&mut state, key(KeyCode::Tab));
     assert_eq!(state.focus, Pane::Activity);
     handle_key(&mut state, key(KeyCode::Tab));
     assert_eq!(state.focus, Pane::Tree);
     handle_key(&mut state, key(KeyCode::BackTab));
     assert_eq!(state.focus, Pane::Activity);
+    handle_key(&mut state, key(KeyCode::BackTab));
+    assert_eq!(state.focus, Pane::Sessions);
 }
 
 #[test]
@@ -152,16 +158,23 @@ fn arrow_keys_do_nothing_in_the_activity_pane() {
     assert_eq!(state.selected_project().unwrap().name, "alpha");
 }
 
+/// #10754: a project is a leaf of the left column; Enter on it moves focus
+/// into the session column, which then selects the project's first session.
 #[test]
-fn enter_on_owner_and_project_toggles() {
+fn enter_on_owner_toggles_and_on_project_enters_sessions() {
     let mut state = seeded_state();
-    let alpha = project_node("alpha");
     assert!(handle_key(&mut state, key(KeyCode::Enter)).is_none());
-    assert!(state.tree.is_expanded(&alpha), "Enter opens a project");
-    assert!(state.tree.rows.iter().any(|r| matches!(&r.id,
-        NodeId::Session { id, .. } if id == "sess-1")));
-    handle_key(&mut state, key(KeyCode::Enter));
-    assert!(!state.tree.is_expanded(&alpha), "Enter closes it again");
+    assert_eq!(state.focus, Pane::Sessions, "Enter enters the sessions");
+    assert_eq!(
+        state.selected_session().map(|s| s.id.as_str()),
+        Some("sess-1")
+    );
+    assert_eq!(state.selected_node(), Some(&project_node("alpha")));
+    assert!(
+        state.session_col.expanded.is_empty(),
+        "entering opens no details"
+    );
+    state.focus = Pane::Tree;
 
     let acme = NodeId::Owner("acme".to_string());
     state.select_node(acme.clone());
@@ -174,45 +187,57 @@ fn enter_on_owner_and_project_toggles() {
     );
     handle_key(&mut state, key(KeyCode::Enter));
     assert!(state.tree.is_expanded(&acme));
-    assert!(state.tree.details.is_none(), "toggling never opens details");
+    assert!(
+        state.session_col.expanded.is_empty(),
+        "toggling never opens details"
+    );
 }
 
 /// REGRESSION (#10476): before the tree, Enter on a session did nothing
-/// (`events/mod.rs` bound Enter on the Projects pane only).
+/// (`events/mod.rs` bound Enter on the Projects pane only). #10754: De1 key
+/// map (Bob 11-06) — Right expands the session in place; Enter opens it.
 #[test]
-fn enter_on_session_opens_details_and_returns_no_pending_action() {
+fn right_on_session_expands_details_and_returns_no_pending_action() {
     let mut state = seeded_state();
     on_session(&mut state);
-    let action = handle_key(&mut state, key(KeyCode::Enter));
+    let action = handle_key(&mut state, key(KeyCode::Right));
     assert!(action.is_none(), "details are read-only: {action:?}");
-    assert_eq!(state.tree.details.as_deref(), Some("sess-1"));
-    let (project, shown) = state.details_session().expect("details show the session");
-    assert_eq!((project, shown.id.as_str()), ("alpha", "sess-1"));
+    assert!(state.session_col.expanded.contains("sess-1"));
+    assert!(
+        state
+            .session_col
+            .rows
+            .iter()
+            .any(|r| matches!(r, SessionColRow::Detail { id, text, .. }
+                if id == "sess-1" && text == "project:     alpha")),
+        "the details follow the row"
+    );
     assert!(state.pending_confirm.is_none());
 }
 
 #[test]
-fn esc_closes_details() {
+fn esc_collapses_details() {
     let mut state = seeded_state();
     on_session(&mut state);
-    handle_key(&mut state, key(KeyCode::Enter));
+    handle_key(&mut state, key(KeyCode::Right));
     assert!(handle_key(&mut state, key(KeyCode::Esc)).is_none());
-    assert!(state.tree.details.is_none());
+    assert!(state.session_col.expanded.is_empty());
     assert_eq!(state.selected_session().unwrap().id, "sess-1");
+    assert_eq!(state.focus, Pane::Sessions, "Esc keeps the column");
 }
 
 #[test]
-fn f_in_details_returns_focus() {
+fn f_on_an_expanded_session_returns_focus() {
     let mut state = seeded_state();
     on_session(&mut state);
-    handle_key(&mut state, key(KeyCode::Enter));
+    handle_key(&mut state, key(KeyCode::Right));
     assert_eq!(
         handle_key(&mut state, key(KeyCode::Char('f'))),
         Some(PendingAction::Focus("alpha-session".to_string()))
     );
     assert!(
-        state.tree.details.is_some(),
-        "focus leaves the overlay open"
+        state.session_col.expanded.contains("sess-1"),
+        "focus leaves the details open"
     );
 }
 
@@ -228,34 +253,34 @@ fn f_on_a_session_node_returns_focus_and_on_a_project_does_nothing() {
     );
 }
 
+/// #10754: an expanded session that leaves the poll leaves the expanded set,
+/// and returns closed.
 #[test]
-fn details_swallow_quit_and_close_when_session_leaves() {
+fn expanded_session_drops_out_when_it_leaves() {
     let mut state = seeded_state();
     on_session(&mut state);
-    handle_key(&mut state, key(KeyCode::Enter));
-    handle_key(&mut state, key(KeyCode::Char('q')));
-    handle_key(&mut state, ctrl_c());
-    assert!(
-        !state.should_exit,
-        "quit is swallowed while details are open"
-    );
-    assert!(state.tree.details.is_some());
-
-    state.sessions_by_project.get_mut("alpha").unwrap().clear();
+    handle_key(&mut state, key(KeyCode::Right));
+    let rows = state.sessions_by_project["alpha"].clone();
+    let other = SessionRow {
+        id: "sess-2".to_string(),
+        name: "other".to_string(),
+        ..Default::default()
+    };
+    state
+        .sessions_by_project
+        .insert("alpha".to_string(), vec![other]);
     state.rebuild_tree();
-    handle_key(&mut state, key(KeyCode::Char('x')));
-    assert!(state.tree.details.is_none());
-    assert_eq!(
-        state.notice.as_deref(),
-        Some("that session is no longer listed")
-    );
+    assert!(state.session_col.expanded.is_empty());
+    state.sessions_by_project.insert("alpha".to_string(), rows);
+    state.rebuild_tree();
+    assert!(state.session_col.expanded.is_empty(), "returns closed");
 }
 
 #[test]
-fn details_forward_the_session_verbs() {
+fn expanded_session_keeps_the_session_verbs() {
     let mut state = seeded_state();
     on_session(&mut state);
-    handle_key(&mut state, key(KeyCode::Enter));
+    handle_key(&mut state, key(KeyCode::Right));
     assert_eq!(
         handle_key(&mut state, key(KeyCode::Char('a'))),
         Some(PendingAction::Attach("sess-1".to_string()))
@@ -276,19 +301,24 @@ fn g_toggles_worker_indentation() {
     assert!(!state.tree.flat_workers, "default is indented");
 }
 
+/// See #10754: `l` opens the launch form on the node's project, never a
+/// new session; on an owner bar it is a notice and opens nothing.
 #[test]
-fn launch_targets_the_selected_nodes_project() {
+fn l_opens_the_launch_form_for_the_selected_nodes_project() {
     let mut state = seeded_state();
     on_session(&mut state);
-    let action = handle_key(&mut state, key(KeyCode::Char('l')));
-    assert_eq!(action, Some(PendingAction::Launch("alpha".to_string())));
+    assert_eq!(handle_key(&mut state, key(KeyCode::Char('l'))), None);
+    let form = state.launch.take().expect("l opens the launch form");
+    assert_eq!(form.project, "alpha");
 
     state.select_node(project_node("beta"));
-    let action = handle_key(&mut state, key(KeyCode::Char('l')));
-    assert_eq!(action, Some(PendingAction::Launch("beta".to_string())));
+    assert_eq!(handle_key(&mut state, key(KeyCode::Char('l'))), None);
+    let form = state.launch.take().expect("l opens the launch form");
+    assert_eq!(form.project, "beta");
 
     state.select_node(NodeId::Owner("acme".to_string()));
     assert!(handle_key(&mut state, key(KeyCode::Char('l'))).is_none());
+    assert!(state.launch.is_none(), "no project, no form");
     assert_eq!(state.notice.as_deref(), Some("no project selected"));
 }
 
@@ -321,7 +351,7 @@ fn existing_bindings_unchanged() {
 
     on_session(&mut state);
     assert_eq!(
-        handle_key(&mut state, key(KeyCode::Char('r'))),
+        handle_key(&mut state, key(KeyCode::Char('R'))),
         Some(PendingAction::Resume("sess-1".to_string()))
     );
     assert_eq!(
@@ -362,7 +392,7 @@ fn resume_and_attach_target_selected_session_immediately() {
     let mut state = seeded_state();
     on_session(&mut state);
     assert_eq!(
-        handle_key(&mut state, key(KeyCode::Char('r'))),
+        handle_key(&mut state, key(KeyCode::Char('R'))),
         Some(PendingAction::Resume("sess-1".to_string()))
     );
     assert!(state.pending_confirm.is_none());
@@ -373,7 +403,7 @@ fn resume_and_attach_target_selected_session_immediately() {
     assert!(state.pending_confirm.is_none());
 }
 
-/// #2595: `r` on a session flagged `unresumable` must NOT fire
+/// #2595: `R` (#10754: De1 key map (Bob 11-06), `r` before) on a session flagged `unresumable` must NOT fire
 /// `PendingAction::Resume` — its workspace is gone for good, so the daemon
 /// round trip can only 422 (#2594). Mirrors the CLI picker's
 /// `PickerDecision::Unresumable` guard, adapted to the TUI's notice idiom: no
@@ -384,7 +414,7 @@ fn resume_on_unresumable_session_is_blocked() {
     on_session(&mut state);
     state.sessions_by_project.get_mut("alpha").unwrap()[0].unresumable = true;
 
-    let action = handle_key(&mut state, key(KeyCode::Char('r')));
+    let action = handle_key(&mut state, key(KeyCode::Char('R')));
     assert!(
         action.is_none(),
         "a dead session must never produce PendingAction::Resume"
@@ -408,8 +438,10 @@ fn resume_on_unresumable_session_is_blocked() {
 fn resume_on_healthy_session_fires_immediately() {
     let mut state = seeded_state();
     on_session(&mut state);
+    // A terminal reports `R` with SHIFT held.
+    let shifted = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
     assert_eq!(
-        handle_key(&mut state, key(KeyCode::Char('r'))),
+        handle_key(&mut state, shifted),
         Some(PendingAction::Resume("sess-1".to_string()))
     );
     assert!(state.notice.is_none());
@@ -549,12 +581,18 @@ fn config_form_swallows_quit_and_pane_keys() {
 fn lettered_actions_are_ignored_outside_their_pane() {
     let mut state = seeded_state();
     on_session(&mut state);
-    // #10476: the Activity pane binds no verb (no action, no notice).
+    // #10754: the Activity pane binds only `n`/`l`; every other verb acts on
+    // nothing and says how to leave, instead of dropping silently.
     state.focus = Pane::Activity;
-    for verb in ['l', 'k', 'r', 'd', 'a', 'c', 'v', 'f', 'g'] {
+    for verb in ['k', 'r', 'd', 'a', 'c', 'v', 'f', 'g'] {
+        state.clear_notice();
         assert!(handle_key(&mut state, key(KeyCode::Char(verb))).is_none());
+        let notice = state.notice.as_deref().unwrap_or_default();
+        assert!(
+            notice.contains("Tab to the projects or sessions pane"),
+            "{verb}"
+        );
     }
-    assert!(state.notice.is_none());
     assert!(state.pending_confirm.is_none());
     assert!(!state.tree.flat_workers);
 }

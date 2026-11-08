@@ -135,7 +135,7 @@ async fn feeds_the_backlog_then_settles() {
     std::fs::write(fx.corpus.join("one.md"), "alpha note").unwrap();
     std::fs::write(fx.corpus.join("two.md"), "beta note").unwrap();
     let spec = fx.register();
-    fx.ingest("t0");
+    fx.ingest("2026-07-24T00:00:00Z");
 
     let feed = FakeFeed::default();
     let report = feed_source(&fx.store, &spec, "scratch-index", &feed, "t0")
@@ -178,7 +178,7 @@ async fn failed_push_stays_pending_and_heals_on_a_later_run() {
     let fx = Fixture::new();
     std::fs::write(fx.corpus.join("one.md"), "alpha note").unwrap();
     let spec = fx.register();
-    fx.ingest("t0");
+    fx.ingest("2026-07-24T00:00:00Z");
 
     let feed = FakeFeed::default();
     feed.arm_failure(true);
@@ -199,7 +199,7 @@ async fn failed_push_stays_pending_and_heals_on_a_later_run() {
 
     // A second ingest skips the unchanged file entirely — only the index
     // backlog can rescue it.
-    fx.ingest("t1");
+    fx.ingest("2026-07-24T01:00:00Z");
     feed.arm_failure(false);
     let healed = feed_source(&fx.store, &spec, "scratch-index", &feed, "t1")
         .await
@@ -231,14 +231,14 @@ async fn edited_entity_is_withdrawn_before_it_is_repushed() {
     let fx = Fixture::new();
     std::fs::write(fx.corpus.join("one.md"), "alpha note").unwrap();
     let spec = fx.register();
-    fx.ingest("t0");
+    fx.ingest("2026-07-24T00:00:00Z");
     let feed = FakeFeed::default();
     feed_source(&fx.store, &spec, "idx", &feed, "t0")
         .await
         .unwrap();
 
     std::fs::write(fx.corpus.join("one.md"), "alpha note, revised").unwrap();
-    fx.ingest("t1");
+    fx.ingest("2026-07-24T01:00:00Z");
     let report = feed_source(&fx.store, &spec, "idx", &feed, "t1")
         .await
         .unwrap();
@@ -266,14 +266,14 @@ async fn tombstoned_entity_is_withdrawn_from_the_index() {
     let fx = Fixture::new();
     std::fs::write(fx.corpus.join("one.md"), "alpha note").unwrap();
     let spec = fx.register();
-    fx.ingest("t0");
+    fx.ingest("2026-07-24T00:00:00Z");
     let feed = FakeFeed::default();
     feed_source(&fx.store, &spec, "idx", &feed, "t0")
         .await
         .unwrap();
 
     std::fs::remove_file(fx.corpus.join("one.md")).unwrap();
-    fx.ingest("t1");
+    fx.ingest("2026-07-24T01:00:00Z");
     let report = feed_source(&fx.store, &spec, "idx", &feed, "t1")
         .await
         .unwrap();
@@ -299,7 +299,7 @@ async fn a_bad_entity_does_not_abort_the_pass() {
         std::fs::write(fx.corpus.join(format!("{name}.md")), format!("{name} note")).unwrap();
     }
     let spec = fx.register();
-    fx.ingest("t0");
+    fx.ingest("2026-07-24T00:00:00Z");
     // Delete one entity from the TREE (not the corpus) behind the ledger's back.
     std::fs::remove_file(fx.store.entity_path("notes", "two").unwrap()).unwrap();
 
@@ -335,7 +335,7 @@ async fn refuses_an_index_rooted_away_from_the_tree() {
     let fx = Fixture::new();
     std::fs::write(fx.corpus.join("one.md"), "alpha note").unwrap();
     let spec = fx.register();
-    fx.ingest("t0");
+    fx.ingest("2026-07-24T00:00:00Z");
 
     let feed = FakeFeed::default();
     let elsewhere = tempfile::tempdir().unwrap();

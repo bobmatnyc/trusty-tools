@@ -231,6 +231,8 @@ pub fn message_to_item(msg: &Value) -> Option<SourceItem> {
         timestamp,
         body,
         fields,
+        // #10746: the connector supplies no structured frontmatter.
+        frontmatter: Default::default(),
         // A Gmail message is immutable, so its id is a perfect change signal —
         // never volatile, which is what makes "pull exactly once, ever" hold.
         volatile: false,
@@ -425,6 +427,8 @@ pub fn drive_item(file: &Value, content: String) -> Option<SourceItem> {
         timestamp: modified,
         body: content,
         fields,
+        // #10746: the connector supplies no structured frontmatter.
+        frontmatter: Default::default(),
         volatile,
     })
 }

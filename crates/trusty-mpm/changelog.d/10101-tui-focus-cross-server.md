@@ -1,0 +1,4 @@
+Fixed
+- The `tm tui` Focus key on a session that runs on another tmux server opens a window in the caller's tmux session that attaches to it, as `tm attach` does, instead of a `switch-client` that cannot reach that server. A session on the caller's own server is switched to as before. When the target's server, the caller's server or the caller's pane cannot be found, or tmux refuses the window, Focus reports a failure and moves nothing (#10101).
+- `tm attach` from inside tmux to a session on another tmux server opens its attach window: the window is placed after the caller's window by window id, which tmux accepts, instead of by pane id, which tmux refused with "can't specify pane here" (#10101).
+- Focus and `tm attach` from inside tmux report "session '<name>' not found on any tmux server" and open no window when no tmux server holds the session, instead of opening an attach window that closes at once and reporting success (#10101).

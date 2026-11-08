@@ -18,7 +18,6 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_yaml::Value;
 
 use crate::entity::{Entity, slugify};
 use crate::roots::{assert_within, confine};
@@ -308,22 +307,9 @@ impl KbStore {
     }
 }
 
-/// A one-line summary for an entity: its `description`, else its first non-blank
-/// body line, trimmed.
-pub fn summarise(entity: &Entity) -> Option<String> {
-    if let Some(Value::String(desc)) = entity.frontmatter.get("description") {
-        let d = desc.trim();
-        if !d.is_empty() {
-            return Some(d.to_string());
-        }
-    }
-    entity
-        .body
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with("##"))
-        .map(str::to_string)
-}
+// #10746: `summarise` moved to trusty-okf with the graph reader
+// (SPEC-OKF-01 §2.7.2); re-exported under its old path until S11.
+pub use trusty_okf::bundle::graph::summarise;
 
 #[cfg(test)]
 mod tests {

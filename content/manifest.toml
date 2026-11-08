@@ -16,7 +16,7 @@ schema_major = 1
 
 [[member]]
 path = "agents/BASE-AGENT.md"
-version = "0.1.2"
+version = "0.2.0"
 
 [[member]]
 path = "agents/BASE-ENGINEER.md"

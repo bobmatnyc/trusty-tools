@@ -13,15 +13,20 @@
 //! What: a library (the schema, store, and converter engine) plus a `serve
 //! --stdio` MCP server binary. The library is split so each file stays under
 //! the 500-SLOC cap:
-//!   - [`schema`]      — pluggable collection/field/relationship profile.
-//!   - [`frontmatter`] — hand-rolled `---` split + deterministic YAML render.
-//!   - [`entity`]      — Entity model, slugify, deep-merge, wiki-link scan.
+//!   - [`schema`]      — pluggable collection/field/relationship profile
+//!     (re-exported from trusty-okf, #10746).
+//!   - [`frontmatter`] — hand-rolled `---` split + deterministic YAML render
+//!     (re-exported from trusty-okf).
+//!   - [`entity`]      — Entity model, slugify, deep-merge, wiki-link scan
+//!     (re-exported from trusty-okf).
 //!   - [`roots`]       — per-call root resolution + path confinement.
 //!   - [`store`]       — [`store::KbStore`]: status / list / get.
 //!   - [`put`]         — create-or-merge entity writes.
-//!   - [`reconcile`]   — inverse-edge materialisation (relationship mirror).
+//!   - [`reconcile`]   — inverse-edge materialisation (relationship mirror);
+//!     the pure half is in trusty-okf, the file walk in `store_reconcile`.
 //!   - [`structure`]   — idempotent dir + generated-README maintenance.
-//!   - [`validate`]    — full-tree lint.
+//!   - [`validate`]    — full-tree lint; findings and lint rules are in
+//!     trusty-okf, the file walk in `store_validate`.
 //!   - [`convert`]     — arbitrary-tree → collection-model converter.
 //!   - [`okg`]         — OKG builder: source registry, per-item ledger, and the
 //!     idempotent additive ingest engine that grows a tree from doc stores
@@ -41,18 +46,39 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod convert;
-pub mod entity;
-pub mod frontmatter;
 pub mod mcp;
 pub mod okg;
 pub mod put;
-pub mod reconcile;
 pub mod roots;
-pub mod schema;
 pub mod store;
+mod store_reconcile;
+mod store_validate;
 pub mod structure;
 pub mod tooldefs;
-pub mod validate;
+
+// #10746 (S2): these five modules moved to trusty-okf (SPEC-OKF-01 §2.7.2).
+// trusty-kb re-exports them under their old paths, so trusty-kb and
+// trusty-agents keep one implementation until slice S11 deletes this crate.
+// The edge runs trusty-kb -> trusty-okf only; boundary rule B1 bars the
+// reverse.
+pub use trusty_okf::format::concept as entity;
+pub use trusty_okf::format::frontmatter;
+pub use trusty_okf::format::validate;
+pub use trusty_okf::profile::reconcile;
+// #10746 (S3): the graph reader moved from trusty-agents to trusty-okf
+// (SPEC-OKF-01 §2.7.2). trusty-agents reaches it through this re-export,
+// because its only OKF edge is trusty-kb until S11.
+pub use trusty_okf::bundle::graph;
+
+/// The pluggable schema profile and the OKF container rules, now split
+/// between `trusty_okf::profile` and `trusty_okf::format::container`
+/// (#10746). Re-exported under trusty-kb's old `schema` path until S11.
+pub mod schema {
+    pub use trusty_okf::format::container::{
+        FieldSpec, FieldType, RESERVED_FILES, base_envelope, is_reserved_file,
+    };
+    pub use trusty_okf::profile::{CollectionSpec, EDGE_PAIRS, Profile, inverse_edge};
+}
 
 /// The MCP protocol server name reported in `initialize`'s `serverInfo`.
 pub const SERVER_NAME: &str = "trusty-kb";

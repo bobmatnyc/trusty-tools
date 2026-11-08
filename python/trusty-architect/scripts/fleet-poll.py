@@ -118,6 +118,7 @@ for _mod in (_io, _alerts, _wake, _watchdog, _selfrefresh):
     _mod.bind(_Poller())
 TmuxError, log, tmux, socket_dir = _io.TmuxError, _io.log, _io.tmux, _io.socket_dir
 workspace_servers, list_panes, _rows = _io.workspace_servers, _io.list_panes, _io._rows
+is_architect_pane = _io.is_architect_pane
 capture, capture_pane, send_to_architect = _io.capture, _io.capture_pane, _io.send_to_architect
 read_events, swap_used_mb, host_alerts = _io.read_events, _io.swap_used_mb, _io.host_alerts
 acquire_poll_lock = _io.acquire_poll_lock

@@ -10,71 +10,9 @@
 use serde::Deserialize;
 use trusty_mpm::client::DaemonClient;
 
+use crate::commands::launch_host::{LaunchHost, LaunchSessionGuard, refuse_held_name};
 use crate::commands::{launch_handoff::Handoff, launch_home::launch_files, project::resolve_dir};
-use crate::formatters::banner::{fallback_session_name, normalize_workdir, tmux_has_session};
-
-/// RAII guard that kills a tmux session on drop unless explicitly disarmed.
-///
-/// Why: `launch()` and `connect()` create real tmux sessions; if any step after
-/// creation fails (e.g. `send-keys` error, or `attach-session` failing because
-/// there is no TTY available — which is always the case in integration tests),
-/// the session would otherwise be permanently orphaned, filling the host tmux
-/// with leaked managed (`tm-*`/`tmpm-*`) sessions (#1815).
-/// What: on `drop` while armed, runs `tmux kill-session -t <name>` best-effort
-/// (ignores errors, since the session may already be gone). `disarm` turns
-/// `drop` into a no-op; call it before returning `Ok(())` so a session that
-/// the user successfully attached to persists for future re-attachment.
-/// Test: verified by `cargo test -p trusty-mpm --bin tm`; the before/after
-/// managed (`tm-*`/`tmpm-*`) session count must be equal after the test run (issue #1815).
-struct LaunchSessionGuard {
-    name: String,
-    armed: bool,
-}
-
-impl LaunchSessionGuard {
-    /// Construct an armed guard owning `name`.
-    ///
-    /// Why: callers create the guard immediately after `tmux new-session` so the
-    /// cleanup window opens with no gap.
-    /// What: stores `name` with `armed = true`.
-    /// Test: see module-level doc.
-    fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            armed: true,
-        }
-    }
-
-    /// Transfer ownership away: `drop` becomes a no-op after this call.
-    ///
-    /// Why: a session the user successfully attached to must NOT be killed when
-    /// they detach; disarming transfers lifetime responsibility to the live tmux
-    /// server.
-    /// What: clears `armed`. Idempotent.
-    /// Test: see module-level doc.
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for LaunchSessionGuard {
-    /// Why: the whole point — any error path between session creation and a
-    /// successful `attach-session` must reap the session so it cannot leak.
-    /// What: when `armed`, issues `tmux kill-session -t <name>` best-effort.
-    /// Never panics — `Drop` must not unwind.
-    /// Test: see module-level doc.
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        // #2398 architecture consolidation: route through the crate's single
-        // tmux entry point instead of shelling out independently.
-        let _ =
-            trusty_mpm::core::tmux::run_tmux(&trusty_mpm::core::tmux::TmuxCommand::KillSession {
-                name: self.name.clone(),
-            });
-    }
-}
+use crate::formatters::banner::{fallback_session_name, normalize_workdir};
 
 /// `launch` subcommand — provision a managed clone and launch a configured session.
 ///
@@ -106,6 +44,11 @@ impl Drop for LaunchSessionGuard {
 ///
 /// #8406: `handoff` decides the end of every path, the reattach included:
 /// [`Handoff::Detach`] prints the session name and pane id and returns.
+///
+/// #10101: a fresh launch whose name a managed record holds is refused before
+/// provisioning; the PM is created on its workspace server
+/// ([`LaunchHost::for_workspace`]), whose socket the registration carries, and
+/// a failure after the registration removes it.
 /// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
 /// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`,
 /// `cli_parses_launch_with_twin`, `cli_parses_launch_with_detach`,
@@ -188,15 +131,19 @@ pub(crate) async fn launch(
     //    session for this project. Liveness is checked inside `find_existing_session`
     //    so ALL candidates are evaluated (not just the first one returned by the
     //    daemon), which correctly handles projects with stale historical sessions.
-    if let Some(existing) =
+    if let Some((existing, host)) =
         find_existing_session(client, url, &live_workdir, Some(&project_dir_str)).await
-        && !existing.is_empty()
     {
         super::launch_twin::refuse_reattach(twin, &existing)?; // #8878
         // #8406: a detached launch reports the running session, never attaches.
         handoff.announce_reconnect(&live_workdir, &existing);
-        return handoff.hand_over(&existing);
+        return handoff.hand_over(&host, &existing);
     }
+    // #10101: a fresh launch under a name a managed record holds is refused
+    // before anything is provisioned.
+    let folder_name = fallback_session_name(&live_path);
+    let daemon = DaemonClient::with_client(client.clone(), url);
+    refuse_held_name(&daemon, &folder_name).await?;
 
     // #9091: a broken `[accounts]` table refuses before provisioning.
     super::run_target::accounts_preflight(None, &origin_url)?;
@@ -362,6 +309,9 @@ pub(crate) async fn launch(
         &files,
     )?;
 
+    // #10101: before `POST /sessions`, so a missing spec dir registers nothing.
+    let spec_dir = launch_spec_dir(home)?;
+
     // 10. Register the session with the daemon. The tmux name is derived from
     //    the LIVE project folder so the human-readable name reflects the repo.
     //    `project`/`project_path` are the MANAGED clone path; `source_id` links
@@ -375,14 +325,16 @@ pub(crate) async fn launch(
         /// The registered session's id; `None` when the daemon is unreachable.
         id: Option<trusty_mpm::core::session::SessionId>,
     }
-    let folder_name = fallback_session_name(&live_path);
-    let (tmux_name, session_id) = match DaemonClient::with_client(client.clone(), url)
+    // #10101: the PM lands on its workspace server; the record names it.
+    let host = LaunchHost::for_workspace(&managed_path);
+    let (tmux_name, session_id) = match daemon
         .post("/sessions")
         .json(&serde_json::json!({
             "project": managed_workdir,
             "project_path": managed_workdir,
             "name": folder_name,
             "source_id": source_id,
+            "tmux_socket": host.socket(),
         }))
         .send()
         .await
@@ -404,8 +356,6 @@ pub(crate) async fn launch(
         }
     };
 
-    let spec_dir = launch_spec_dir(home)?;
-
     // 11. Print the full-screen robot splash then the rich info panel.
     //     Pass the real managed worktree path so the banner shows the session
     //     directory (not just the base project dir). #8406: not when detached.
@@ -416,60 +366,45 @@ pub(crate) async fn launch(
         Some(&managed_path),
     );
 
-    // 12. Create a detached tmux session rooted at the MANAGED clone directory.
-    //     #2398: routes through `core::tmux::create_managed_session`, the
-    //     crate's single session-creation choke point — this is what applies
-    //     the configured scrollback/mouse ergonomics BEFORE the pane exists
-    //     (a bare `tmux new-session` here would silently bypass them, the
-    //     exact QA-caught regression this consolidation closes).
-    let new_session =
-        trusty_mpm::core::tmux::create_managed_session(None, &tmux_name, Some(&managed_workdir));
-    let outcome = match new_session {
-        Ok(o) if o.output.status.success() => o,
-        _ => anyhow::bail!("failed to create tmux session {tmux_name} in {managed_workdir}"),
-    };
-    if !outcome.options_verified {
-        // #3386 review: a caller-visible one-line notice — never silently
-        // proceed as if the pane's scrollback limit landed.
-        eprintln!(
-            "warning: tmux scrollback limit could not be verified for session {tmux_name} — \
-             the pane may be capped at tmux's factory 2000-line history-limit instead of the \
-             configured value; see issue #3386"
-        );
+    // 12. Create a detached tmux session rooted at the MANAGED clone directory,
+    //     on the host server (#10101), through the #2398 choke point.
+    //     #10101: a failure from here on removes the registration it leaves.
+    let registered = super::launch_host::Registered::new(&daemon, session_id);
+    if let Err(e) = host.create(&tmux_name, &managed_workdir) {
+        return Err(registered.fail(e).await);
     }
     // RAII guard — disarmed only after successful attach so the session persists
     // when the user detaches normally. On any error path (including attach
     // failing because there is no TTY, which is always the case in tests) the
     // guard's Drop impl reaps the session, preventing leaks (#1815).
-    let mut session_guard = LaunchSessionGuard::new(&tmux_name);
+    let mut session_guard = LaunchSessionGuard::new(&host, &tmux_name);
 
     // 13. Start `claude` inside the tmux session.
-    let sent =
-        trusty_mpm::runtime::cli_launch::send_spec_launch(&tmux_name, &claude_spec, &spec_dir);
+    let sent = trusty_mpm::runtime::cli_launch::send_spec_launch(
+        host.server(),
+        &tmux_name,
+        &claude_spec,
+        &spec_dir,
+    );
     if let Err(e) = sent {
-        anyhow::bail!(
+        let e = anyhow::anyhow!(
             "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
         );
+        return Err(registered.fail(e).await);
     }
 
     // 13b. Find the claude process PID inside the tmux pane and report it to
     //      the daemon so it can monitor process liveness.
     // #8878: twin arming needs the PID even when registration failed.
     let claude_pid = (session_id.is_some() || twin_root.is_some())
-        .then(|| {
-            trusty_mpm::core::process::find_claude_pid_in_tmux(
-                &tmux_name,
-                10,
-                std::time::Duration::from_millis(500),
-            )
-        })
+        .then(|| host.claude_pid(&tmux_name))
         .flatten();
     if let Some(root) = &twin_root {
         super::launch_twin::arm(root, claude_pid, &managed_path);
     }
     if let Some(session_id) = session_id {
         if let Some(pid) = claude_pid {
-            let _ = DaemonClient::with_client(client.clone(), url)
+            let _ = daemon
                 .patch(format!("/sessions/{}/pid", session_id.0))
                 .json(&serde_json::json!({ "pid": pid }))
                 .send()
@@ -479,13 +414,21 @@ pub(crate) async fn launch(
                 session_id.0
             );
         } else {
-            tracing::warn!("could not find claude PID for session {tmux_name} after retries");
+            // #10101: printed — `tm launch` has no tracing subscriber.
+            eprintln!(
+                "warning: no claude process found in session {tmux_name} on {} after retries; \
+                 the daemon tracks the session without its pid",
+                host.describe()
+            );
         }
     }
 
     // 14. Attach to the session — blocks until the user detaches or exits claude.
     // #8406: a detached launch prints the session name and pane id instead.
-    handoff.hand_over(&tmux_name)?;
+    if let Err(e) = handoff.hand_over(&host, &tmux_name) {
+        drop(session_guard); // #1815: reaped before the record goes
+        return Err(registered.fail(e).await);
+    }
     // Handed over: disarm the guard so the session persists and can be
     // resumed with `tmux attach -t <name>`.
     session_guard.disarm();
@@ -520,8 +463,11 @@ pub(crate) async fn launch(
 /// plus the shared `--setting-sources project,local` /
 /// `--dangerously-skip-permissions` isolation flags), then `attach`es to it —
 /// or, under [`Handoff::Detach`] (`tm launch --detach` on a checkout with no
-/// origin, #8406), prints the session name and pane id and returns.
-/// Test: `cli_parses_connect`, `cli_parses_connect_with_dir`.
+/// origin, #8406), prints the session name and pane id and returns. #10101:
+/// the same name refusal, workspace server and failure cleanup as [`launch`].
+/// Test: `cli_parses_connect`, `cli_parses_connect_with_dir`;
+/// `a_cli_create_reaches_the_workspace_server_only` for the server;
+/// `a_connect_failing_after_registration_rolls_it_back_10101` for the rollback.
 pub(crate) async fn connect(
     client: &reqwest::Client,
     url: &str,
@@ -543,13 +489,15 @@ pub(crate) async fn connect(
     //     exists — `connect` is idempotent by design. No project_dir prefix-match
     //     since `connect` always works on the live checkout. Liveness is checked
     //     inside `find_existing_session` so stale historical sessions don't block.
-    if let Some(existing) = find_existing_session(client, url, &workdir, None).await
-        && !existing.is_empty()
-    {
+    if let Some((existing, host)) = find_existing_session(client, url, &workdir, None).await {
         // Full-screen robot splash + rich info panel (reconnect mode).
         handoff.announce_reconnect(&workdir, &existing); // #8406
-        return handoff.hand_over(&existing);
+        return handoff.hand_over(&host, &existing);
     }
+    // #10101: a name a managed record holds is refused before any prep write.
+    let folder_name = fallback_session_name(&path);
+    let daemon = DaemonClient::with_client(client.clone(), url);
+    refuse_held_name(&daemon, &folder_name).await?;
 
     // 1c. Deploy the framework directly into the live checkout — agents,
     //     skills, the project-tier output-style, and the
@@ -611,31 +559,35 @@ pub(crate) async fn connect(
     struct Body {
         #[serde(default)]
         name: String,
+        id: Option<trusty_mpm::core::session::SessionId>,
     }
-    let folder_name = fallback_session_name(&path);
-    let tmux_name = match DaemonClient::with_client(client.clone(), url)
+    // #10101: the PM lands on its workspace server; the record names it.
+    let host = LaunchHost::for_workspace(&path);
+    let (tmux_name, session_id) = match daemon
         .post("/api/v1/sessions/connect")
         .json(&serde_json::json!({
             "project": path,
             "project_path": path,
             "name": folder_name,
+            "tmux_socket": host.socket(),
         }))
         .send()
         .await
     {
         Ok(resp) => match resp.error_for_status() {
             Ok(resp) => match resp.json::<Body>().await {
-                Ok(body) if !body.name.is_empty() => body.name,
-                _ => folder_name.clone(),
+                Ok(body) if !body.name.is_empty() => (body.name, body.id),
+                Ok(body) => (folder_name.clone(), body.id),
+                _ => (folder_name.clone(), None),
             },
             Err(err) => {
                 eprintln!("warning: daemon rejected session registration: {err}");
-                folder_name.clone()
+                (folder_name.clone(), None)
             }
         },
         Err(err) => {
             eprintln!("warning: daemon unreachable ({err}); connecting without registration");
-            folder_name.clone()
+            (folder_name.clone(), None)
         }
     };
 
@@ -645,33 +597,19 @@ pub(crate) async fn connect(
     // 4. Create the tmux host idempotently. `new-session -A` attaches to an
     //    existing session and creates a detached one (`-d`) otherwise; the
     //    `has-session` probe tells us which happened so `claude` is started
-    //    only for a freshly-created session. #2398: routes through
-    //    `core::tmux::create_managed_session`, the crate's single session-
-    //    creation choke point, so the configured scrollback/mouse ergonomics
-    //    are applied before the pane exists.
-    let already_running = tmux_has_session(&tmux_name);
-    let new_session =
-        trusty_mpm::core::tmux::create_managed_session(None, &tmux_name, Some(&workdir));
-    let outcome = match new_session {
-        Ok(o) if o.output.status.success() => o,
-        _ => anyhow::bail!("failed to create tmux session {tmux_name} in {workdir}"),
-    };
-    if !outcome.options_verified {
-        // #3386 review: a caller-visible one-line notice — never silently
-        // proceed as if the pane's scrollback limit landed.
-        eprintln!(
-            "warning: tmux scrollback limit could not be verified for session {tmux_name} — \
-             the pane may be capped at tmux's factory 2000-line history-limit instead of the \
-             configured value; see issue #3386"
-        );
+    //    only for a freshly-created session. #2398/#10101: the host's
+    //    create goes through the crate's choke point, on the host server.
+    let already_running = host.has_session(&tmux_name);
+    // #10101: a failure removes the registration, unless the session was
+    // already running: a `DELETE` would kill it.
+    let registered =
+        super::launch_host::Registered::new(&daemon, session_id.filter(|_| !already_running));
+    if let Err(e) = host.create(&tmux_name, &workdir) {
+        return Err(registered.fail(e).await);
     }
     // Guard only needed for freshly-created sessions; if the session was already
     // running we must NOT kill it on attach failure — another user may be attached.
-    let mut session_guard = if already_running {
-        None
-    } else {
-        Some(LaunchSessionGuard::new(&tmux_name))
-    };
+    let mut session_guard = (!already_running).then(|| LaunchSessionGuard::new(&host, &tmux_name));
 
     // 5. Start `claude` inside a freshly-created session, carrying the PM
     //    system-prompt injection plus the shared isolation flags (#2230).
@@ -680,31 +618,44 @@ pub(crate) async fn connect(
         // wrapper the daemon + `tm launch` paths use). No-op off macOS / under
         // TM_DISABLE_SPAWN_DISCLAIM.
         // #7422: same fail-closed composition as `tm launch`.
-        let files = launch_files(&path, config_dir.as_deref(), home, cli.profile)?;
-        // #8308: same spec carrier as `tm launch`.
-        let claude_spec = connect_claude_spec(
-            &path,
-            Some(prompt_path.as_path()),
-            config_dir.as_deref(),
-            // #4181: the per-project MCP pins; #8453: plus the profile stamp.
-            &cli.env,
-            &files,
-            // #8405: the operator's config decides the renderer.
-            trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
-        )?;
-        let spec_dir = launch_spec_dir(home)?;
-        let sent =
-            trusty_mpm::runtime::cli_launch::send_spec_launch(&tmux_name, &claude_spec, &spec_dir);
-        if let Err(e) = sent {
-            anyhow::bail!(
-                "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
-            );
+        // #10101: these run after the registration, so a failure rolls it back.
+        let started = (|| -> anyhow::Result<()> {
+            let files = launch_files(&path, config_dir.as_deref(), home, cli.profile)?;
+            // #8308: same spec carrier as `tm launch`.
+            let claude_spec = connect_claude_spec(
+                &path,
+                Some(prompt_path.as_path()),
+                config_dir.as_deref(),
+                // #4181: the per-project MCP pins; #8453: plus the profile stamp.
+                &cli.env,
+                &files,
+                // #8405: the operator's config decides the renderer.
+                trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+            )?;
+            let spec_dir = launch_spec_dir(home)?;
+            trusty_mpm::runtime::cli_launch::send_spec_launch(
+                host.server(),
+                &tmux_name,
+                &claude_spec,
+                &spec_dir,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
+                )
+            })
+        })();
+        if let Err(e) = started {
+            return Err(registered.fail(e).await);
         }
     }
 
     // 6. Attach — takes over the current terminal until the user detaches.
     // #8406: a detached launch prints the session name and pane id instead.
-    handoff.hand_over(&tmux_name)?;
+    if let Err(e) = handoff.hand_over(&host, &tmux_name) {
+        drop(session_guard); // #1815: reaped before the record goes
+        return Err(registered.fail(e).await);
+    }
     // Handed over: disarm the guard so the session persists for re-attachment.
     if let Some(ref mut g) = session_guard {
         g.disarm();
@@ -882,8 +833,9 @@ pub(crate) fn launch_spec_dir(
 /// candidates are evaluated — not just the first workdir-matching one. This prevents
 /// a project with stale historical sessions from blocking reconnect to a later live one.
 /// What: fetches `GET /sessions`, iterates all rows, skips empty tmux names and
-/// sessions where `tmux has-session` fails, and returns the first matching live
-/// session's `tmux_name`. `workdir`/`project_dir` matching is delegated to
+/// sessions where `tmux has-session` fails on the row's own server (#10101),
+/// and returns the first matching live session's `tmux_name` and server.
+/// A row whose stored socket names no reachable server is skipped. `workdir`/`project_dir` matching is delegated to
 /// [`session_matches_workdir`]. Returns `None` when the daemon is unreachable or no
 /// live matching session exists.
 /// Test: `session_matches_workdir_*` unit tests cover the matching logic;
@@ -894,21 +846,25 @@ async fn find_existing_session(
     url: &str,
     workdir: &str,
     project_dir: Option<&str>,
-) -> Option<String> {
+) -> Option<(String, LaunchHost)> {
     let daemon = DaemonClient::with_client(client.clone(), url);
     let resp = daemon.get("/sessions").send().await.ok()?;
     let body = resp.error_for_status().ok()?.text().await.ok()?;
-    first_live_session(body.as_bytes(), workdir, project_dir, tmux_has_session)
+    first_live_session(body.as_bytes(), workdir, project_dir, |name, host| {
+        host.has_session(name)
+    })
 }
 
-/// The tmux name of the first session in a `GET /sessions` body that matches
-/// `workdir`/`project_dir` and that `is_live` accepts; `None` on an unreadable body.
+/// The tmux name and server of the first session in a `GET /sessions` body
+/// that matches `workdir`/`project_dir` and that `is_live` accepts on its own
+/// server; `None` on an unreadable body. #10101: a row whose socket names no
+/// reachable server is skipped, never asked on the default server.
 fn first_live_session(
     body: &[u8],
     workdir: &str,
     project_dir: Option<&str>,
-    is_live: impl Fn(&str) -> bool,
-) -> Option<String> {
+    is_live: impl Fn(&str, &LaunchHost) -> bool,
+) -> Option<(String, LaunchHost)> {
     /// One session row including its tmux name, as returned by `GET /sessions`.
     #[derive(Deserialize)]
     struct Row {
@@ -916,6 +872,8 @@ fn first_live_session(
         workdir: String,
         #[serde(default)]
         tmux_name: String,
+        #[serde(default)]
+        tmux_socket: Option<std::path::PathBuf>,
     }
     // #8406: the daemon answers `{"sessions": [...]}` (`SessionsResponse`); a
     // bare-array read failed on every body, so no launch ever reconnected.
@@ -924,13 +882,13 @@ fn first_live_session(
         sessions: Vec<Row>,
     }
     let rows = serde_json::from_slice::<Body>(body).ok()?.sessions;
-    rows.into_iter()
-        .find(|r| {
-            !r.tmux_name.is_empty()
-                && session_matches_workdir(&r.workdir, workdir, project_dir)
-                && is_live(&r.tmux_name)
-        })
-        .map(|r| r.tmux_name)
+    rows.into_iter().find_map(|r| {
+        let host = LaunchHost::of_socket(r.tmux_socket.as_deref()).ok()?;
+        (!r.tmux_name.is_empty()
+            && session_matches_workdir(&r.workdir, workdir, project_dir)
+            && is_live(&r.tmux_name, &host))
+        .then_some((r.tmux_name, host))
+    })
 }
 
 /// Return true when `session_workdir` matches `target` exactly OR lies under `project_dir`.
@@ -988,14 +946,14 @@ mod tests {
             sessions: vec![session],
         })
         .expect("serialize the daemon body");
-        let live = first_live_session(&body, "/work/proj", None, |_| true);
-        assert_eq!(live.as_deref(), Some("tm-proj"));
+        let live = first_live_session(&body, "/work/proj", None, |_, _| true);
+        assert_eq!(live.map(|(name, _)| name).as_deref(), Some("tm-proj"));
         assert_eq!(
-            first_live_session(&body, "/work/proj", None, |_| false),
+            first_live_session(&body, "/work/proj", None, |_, _| false),
             None
         );
         assert_eq!(
-            first_live_session(&body, "/work/other", None, |_| true),
+            first_live_session(&body, "/work/other", None, |_, _| true),
             None
         );
     }

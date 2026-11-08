@@ -76,6 +76,7 @@ async fn seed_live(
         pane_id: pane_id.map(str::to_owned),
         // #9004: captured on the fake's one server.
         tmux_server: pane_id.map(|_| super::super::tests::FAKE_TMUX_SERVER.to_owned()),
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

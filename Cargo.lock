@@ -1257,9 +1257,9 @@ dependencies = [
 
 [[package]]
 name = "calamine"
-version = "0.37.0"
+version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9ca341b94bc4b29e08970b1a03914fad2dfe177e2ecb67fcd6de9046004aafb"
+checksum = "f431b67cba6122a1f7d26b7adafc71bbdf07026095fe811f5efc025d8748e1d8"
 dependencies = [
  "atoi_simd",
  "byteorder",
@@ -11453,7 +11453,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd-py"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "flate2",
@@ -11562,6 +11562,7 @@ dependencies = [
  "tracing-subscriber",
  "trusty-common",
  "trusty-mcp",
+ "trusty-okf",
  "walkdir",
 ]
 
@@ -11634,7 +11635,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11701,6 +11702,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-okf"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "globset",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.23",
+ "trusty-common",
+ "unicode-normalization",
+ "walkdir",
+]
+
+[[package]]
 name = "trusty-progress"
 version = "0.3.2"
 dependencies = [
@@ -11724,7 +11746,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.40.0"
+version = "0.40.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11760,7 +11782,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.63.0"
+version = "0.63.1"
 dependencies = [
  "anyhow",
  "arc-swap",

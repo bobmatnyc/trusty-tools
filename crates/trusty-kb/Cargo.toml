@@ -54,6 +54,11 @@ trusty-common = { workspace = true, features = ["knowledge-document"] }
 # `trusty-common` itself is no longer a dependency: that feature was the only
 # thing this crate took from it.
 trusty-mcp = { workspace = true }
+# #10746 (S2): frontmatter, entity, schema, validate and reconcile moved to
+# trusty-okf; `src/lib.rs` re-exports them under their old paths until S11
+# deletes this crate. The edge is trusty-kb -> trusty-okf only (SPEC-OKF-01
+# B1 bars trusty-okf from depending on trusty-kb).
+trusty-okf = { path = "../trusty-okf" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }

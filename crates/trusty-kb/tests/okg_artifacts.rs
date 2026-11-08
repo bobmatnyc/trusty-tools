@@ -151,7 +151,7 @@ fn crashed_run_converges_on_rerun() {
     }
     register(&store, &corpus);
     store
-        .okg_ingest_docstore("field-notes", &policy(&_tmp), "t0")
+        .okg_ingest_docstore("field-notes", &policy(&_tmp), "2026-07-24T00:00:00Z")
         .expect("ingest");
 
     // Simulate a kill -9 mid-append: drop the last full line and leave a torn
@@ -164,7 +164,7 @@ fn crashed_run_converges_on_rerun() {
     std::fs::write(&path, torn).unwrap();
 
     let recovery = store
-        .okg_ingest_docstore("field-notes", &policy(&_tmp), "t1")
+        .okg_ingest_docstore("field-notes", &policy(&_tmp), "2026-07-24T01:00:00Z")
         .expect("recovery run");
     println!("recovery: {recovery:?}");
     assert_eq!(
@@ -179,7 +179,7 @@ fn crashed_run_converges_on_rerun() {
     assert!(recovery.errors.is_empty(), "errors: {:?}", recovery.errors);
 
     let settled = store
-        .okg_ingest_docstore("field-notes", &policy(&_tmp), "t2")
+        .okg_ingest_docstore("field-notes", &policy(&_tmp), "2026-07-24T02:00:00Z")
         .expect("settled run");
     assert_eq!(
         (settled.ingested, settled.updated, settled.skipped),

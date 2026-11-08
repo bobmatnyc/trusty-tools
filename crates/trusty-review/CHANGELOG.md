@@ -6,7 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.40.2] — 2026-11-08
+
+### Fixed
+
+- Inline review comments no longer drop a hunk when a removed line starts with `-- ` (a SQL or Lua comment, shown as `--- …`) or an added line starts with `++ ` (shown as `+++ …`). The diff walker now reads each hunk by its `@@` line counts before it looks for file headers, so findings on the later lines of such a hunk anchor on the correct side instead of reading `off_diff` (#10762).
+
+## [0.40.1] — 2026-11-07
+
+### Security
+
+- Release 0.40.1 supersedes 0.40.0, which was tagged but never published: its pre-publish gate failed on RUSTSEC-2026-0436 (`calamine`, bumped 0.37 to 0.38) and RUSTSEC-2026-0429 (`zip`, ignore row expires 2026-12-07). `trusty-review` does not depend on `calamine`; no `trusty-review` source changed since 0.40.0 (#10788).
+
 ## [0.40.0] — 2026-11-07
+
+Not published: pre-publish gate failed on RUSTSEC-2026-0436/0429; superseded by 0.40.1.
 
 ### Breaking
 
