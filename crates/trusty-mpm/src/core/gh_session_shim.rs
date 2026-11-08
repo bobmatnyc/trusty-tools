@@ -245,6 +245,35 @@ pub(crate) fn shim_script(
     ))
 }
 
+/// The shim's `reap <code> <signal>` function, run by its HUP, INT and TERM
+/// traps (#10550).
+///
+/// Why: gh must be gone before the shim exits, or a supervisor's KILL after
+/// its grace orphans gh. A trap can fire after gh is forked but before
+/// `child=$!` runs, and a gh can ignore TERM.
+/// What: silences the shim's own stderr (the shell's job notice for a killed
+/// child would reach the caller; nothing is replayed on this path). The pid is
+/// `$child`, or `$!` when the trap fired before `child=$!`; with neither it
+/// just exits. It sends `<signal>` — HUP for HUP, TERM for INT and TERM, since
+/// POSIX sh starts a background child with INT ignored — and starts a
+/// watchdog that sends KILL after 25 sleeps of 0.2 s (5 s; 1 s each where
+/// `sleep` takes no fraction). It waits for gh, stops the watchdog and exits
+/// `<code>`. The watchdog, not a `kill -0` poll, ends the grace: an exited gh
+/// stays a zombie until `wait`, so `kill -0` would see it alive for 5 s.
+/// Test: `reap_falls_back_to_the_forked_pid_when_child_is_unset`,
+/// `a_gh_that_ignores_term_is_killed_within_the_grace`.
+pub(crate) const REAP_FN: &str = "reap() {\n\
+     \x20 exec 2>/dev/null\n\
+     \x20 c=${child:-$!}\n\
+     \x20 [ -n \"$c\" ] || exit \"$1\"\n\
+     \x20 kill -\"$2\" \"$c\"\n\
+     \x20 (n=0; while [ \"$n\" -lt 25 ]; do sleep 0.2 || sleep 1; n=$((n + 1)); done; kill -KILL \"$c\") >/dev/null 2>&1 &\n\
+     \x20 dog=$!\n\
+     \x20 wait \"$c\"\n\
+     \x20 kill \"$dog\"\n\
+     \x20 exit \"$1\"\n\
+     }\n";
+
 /// The shim's tail: run the real gh, refusing a primary GraphQL rate-limit
 /// refusal cleanly (#10550, ruling D8f, option A).
 ///
@@ -262,23 +291,37 @@ pub(crate) fn shim_script(
 /// "unknown", and exits 1 with no stdout. The call is never retried: the limit
 /// holds until the reset. Otherwise it replays stdout, then stderr, and the
 /// exit status.
-/// Test: `a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout`,
+/// The buffered gh runs as a background child so a HUP, INT or TERM to the
+/// shim is acted on at once — sh defers a trap until a foreground child exits.
+/// The trap runs [`REAP_FN`], removes the buffer dir and exits 129, 130 or
+/// 143. The child's stdin is the caller's, passed on fd 9: POSIX sh gives a
+/// background child `/dev/null` otherwise.
+/// Test: `a_signal_to_the_shim_reaps_gh_and_removes_the_buffer_dir`,
+/// `a_gh_that_ignores_term_is_killed_within_the_grace`,
+/// `a_buffered_call_still_reads_the_callers_stdin`,
+/// `a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout`,
 /// `a_failed_reset_lookup_still_names_the_limit_and_exits_1`,
 /// `a_call_with_no_rate_limit_passes_output_and_status_through_unchanged`,
 /// `a_non_rate_limit_graphql_error_passes_through_unchanged`,
 /// `a_large_buffered_output_passes_through_whole`,
 /// `a_watch_command_keeps_the_exec_path`, `a_tty_stdout_keeps_the_exec_path`.
 fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
+    // #10550: gh runs in the background and the traps forward, bound and reap,
+    // so a TERM-then-KILL supervisor never orphans gh or leaks the buffer dir.
     format!(
         "[ -t 1 ] && exec \"$real\" \"$@\"\n\
          case \" $* \" in *' --watch '*|*' --watch='*) exec \"$real\" \"$@\" ;; esac\n\
          [ \"$1 $2\" = 'run watch' ] && exec \"$real\" \"$@\"\n\
          out=$(mktemp -d 2>/dev/null) || exec \"$real\" \"$@\"\n\
          trap 'rm -rf \"$out\"' EXIT\n\
-         trap 'exit 129' HUP\n\
-         trap 'exit 130' INT\n\
-         trap 'exit 143' TERM\n\
-         \"$real\" \"$@\" >\"$out/1\" 2>\"$out/2\"\n\
+         child=\n\
+         {REAP_FN}\
+         trap 'reap 129 HUP' HUP\n\
+         trap 'reap 130 TERM' INT\n\
+         trap 'reap 143 TERM' TERM\n\
+         {{ \"$real\" \"$@\" <&9 9<&- >\"$out/1\" 2>\"$out/2\" & child=$!; }} 2>/dev/null 9<&0\n\
+         [ -n \"$child\" ] || {{ rm -rf \"$out\"; exec \"$real\" \"$@\"; }}\n\
+         wait \"$child\"\n\
          status=$?\n\
          if [ \"$status\" -eq 1 ] && grep -Eq 'API rate limit (already )?exceeded' \"$out/2\" && ! grep -Eq 'HTTP [0-9][0-9][0-9]' \"$out/2\"; then\n\
          \x20 reset=$(\n\

@@ -6,8 +6,8 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::{
-    GH_SHIM_ENV, LaunchSeams, PinnedCredential, find_real_gh, launch_pinned_login, prefixed_path,
-    shim_dir, shim_root, shim_script, write_gh_shim,
+    GH_SHIM_ENV, LaunchSeams, PinnedCredential, REAP_FN, find_real_gh, launch_pinned_login,
+    prefixed_path, shim_dir, shim_root, shim_script, write_gh_shim,
 };
 use crate::core::gh_account::PinnedGhIdentity;
 use crate::core::gh_account_dir::AccountDirSources;
@@ -1018,4 +1018,216 @@ fn a_tty_stdout_keeps_the_exec_path() {
     assert!(out.status.success(), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("stdout-is-tty"), "{stderr}");
+}
+
+/// `cmd.spawn()` with HUP, INT and TERM at their default disposition, retried
+/// while the exec fails with ETXTBSY (see `output_past_etxtbsy`).
+///
+/// Why: a shell cannot trap a signal ignored on entry, so a test runner under
+/// `nohup` would hide the trap under test; a real supervisor starts the shim
+/// with default dispositions.
+#[cfg(unix)]
+fn spawn_past_etxtbsy(cmd: &mut std::process::Command) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `signal` is async-signal-safe, and nothing else runs post-fork.
+    unsafe {
+        cmd.pre_exec(|| {
+            for sig in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+            Ok(())
+        });
+    }
+    for _ in 0..100 {
+        match cmd.spawn() {
+            // #10176: see `output_past_etxtbsy`.
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other.expect("the shim spawns"),
+        }
+    }
+    panic!("the shim stayed busy (ETXTBSY) for 2 s");
+}
+
+/// Poll `done` every 20 ms; `true` once it holds, `false` after `bound`.
+#[cfg(unix)]
+fn holds_within(bound: std::time::Duration, mut done: impl FnMut() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if done() {
+            return true;
+        }
+        if started.elapsed() >= bound {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// 🔴 #10550: HUP, INT or TERM sent to the shim pid alone reaches the buffered
+/// gh at once. The shim reaps gh, removes its buffer dir and exits 129, 130 or
+/// 143 — so a supervisor's KILL after a 2 s grace finds no gh left to orphan.
+#[cfg(unix)]
+#[test]
+fn a_signal_to_the_shim_reaps_gh_and_removes_the_buffer_dir() {
+    use std::time::Duration;
+    let cases = [
+        (libc::SIGTERM, 143),
+        (libc::SIGINT, 130),
+        (libc::SIGHUP, 129),
+    ];
+    for (signal, code) in cases {
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let call = format!("echo $$ > '{}'; exec sleep 30", pid_file.path().display());
+        let (tmp, dir) = rate_limit_shim("exit 1", &call);
+        let buffers = tmp.path().join("buffers");
+        std::fs::create_dir(&buffers).expect("buffer root");
+        let mut cmd = std::process::Command::new(dir.join("gh"));
+        cmd.args(["api", "user"])
+            .env("TMPDIR", &buffers)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut shim = spawn_past_etxtbsy(&mut cmd);
+        let gh = pid_written_to(pid_file.path());
+        let shim_pid = libc::pid_t::try_from(shim.id()).expect("pid fits");
+        // SAFETY: plain kill(2) on the shim pid this test spawned.
+        unsafe { libc::kill(shim_pid, signal) };
+        let exited = holds_within(Duration::from_secs(2), || {
+            shim.try_wait().expect("try_wait").is_some()
+        });
+        if !exited {
+            shim.kill().expect("KILL the shim after its grace");
+        }
+        let status = shim.wait().expect("the shim is reaped");
+        let gh_gone = gone_within(gh, Duration::from_secs(5));
+        assert!(gh_gone, "signal {signal}: gh pid {gh} outlived the shim");
+        assert_eq!(status.code(), Some(code), "signal {signal}: {status:?}");
+        let left: Vec<_> = std::fs::read_dir(&buffers).expect("buffer root").collect();
+        assert!(
+            left.is_empty(),
+            "signal {signal}: buffer dir leaked: {left:?}"
+        );
+    }
+}
+
+/// #10550: the buffered gh, now a background child, still reads the caller's
+/// stdin (`--body-file -`, `--input -`) rather than `/dev/null`.
+#[cfg(unix)]
+#[test]
+fn a_buffered_call_still_reads_the_callers_stdin() {
+    use std::io::Write as _;
+    let (_tmp, dir) = rate_limit_shim("exit 1", "cat; exit 0");
+    let mut cmd = std::process::Command::new(dir.join("gh"));
+    cmd.args(["api", "graphql", "--input", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut shim = spawn_past_etxtbsy(&mut cmd);
+    shim.stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"{\"query\":\"x\"}\n")
+        .expect("write stdin");
+    let out = shim.wait_with_output().expect("the shim runs");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(out.stdout, b"{\"query\":\"x\"}\n", "{out:?}");
+}
+
+/// Read the pid a fake gh wrote to `path`, waiting up to 10 s for it.
+#[cfg(unix)]
+fn pid_written_to(path: &Path) -> libc::pid_t {
+    let mut pid: libc::pid_t = 0;
+    let written = holds_within(std::time::Duration::from_secs(10), || {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        pid = text.trim().parse().unwrap_or(0);
+        pid > 0
+    });
+    assert!(written, "no pid was written to {}", path.display());
+    pid
+}
+
+/// `true` once `pid` is gone, within `bound`; otherwise KILL it (a pid this
+/// test recorded) and answer `false`.
+#[cfg(unix)]
+fn gone_within(pid: libc::pid_t, bound: std::time::Duration) -> bool {
+    // SAFETY: kill(2) with signal 0 only probes whether `pid` exists.
+    let gone = holds_within(bound, || unsafe { libc::kill(pid, 0) != 0 });
+    if !gone {
+        // SAFETY: KILL a process this test started and recorded.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    gone
+}
+
+/// 🔴 #10550: a gh that ignores TERM is KILLed once the shim's 5 s grace
+/// passes, so TERM to the shim pid alone still leaves no gh, exit 143 and no
+/// buffer dir.
+#[cfg(unix)]
+#[test]
+fn a_gh_that_ignores_term_is_killed_within_the_grace() {
+    use std::time::Duration;
+    let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+    let call = format!(
+        "trap '' TERM; echo $$ > '{}'; exec sleep 30",
+        pid_file.path().display()
+    );
+    let (tmp, dir) = rate_limit_shim("exit 1", &call);
+    let buffers = tmp.path().join("buffers");
+    std::fs::create_dir(&buffers).expect("buffer root");
+    let mut cmd = std::process::Command::new(dir.join("gh"));
+    cmd.args(["api", "user"])
+        .env("TMPDIR", &buffers)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut shim = spawn_past_etxtbsy(&mut cmd);
+    let gh = pid_written_to(pid_file.path());
+    let shim_pid = libc::pid_t::try_from(shim.id()).expect("pid fits");
+    // SAFETY: plain kill(2) on the shim pid this test spawned.
+    unsafe { libc::kill(shim_pid, libc::SIGTERM) };
+    // The grace is 5 s; 2 s of slack.
+    let gh_gone = gone_within(gh, Duration::from_secs(7));
+    if !holds_within(Duration::from_secs(1), || {
+        shim.try_wait().expect("try_wait").is_some()
+    }) {
+        shim.kill().expect("KILL the shim");
+    }
+    let status = shim.wait().expect("the shim is reaped");
+    assert!(gh_gone, "a TERM-ignoring gh pid {gh} outlived the grace");
+    assert_eq!(status.code(), Some(143), "{status:?}");
+    let left: Vec<_> = std::fs::read_dir(&buffers).expect("buffer root").collect();
+    assert!(left.is_empty(), "buffer dir leaked: {left:?}");
+}
+
+/// 🔴 #10550: a trap that fires after gh is forked but before `child=$!` runs
+/// still reaps gh, through `$!`. The window cannot be hit on demand from
+/// outside, so this runs [`REAP_FN`] itself with `child` empty and `$!` set.
+#[cfg(unix)]
+#[test]
+fn reap_falls_back_to_the_forked_pid_when_child_is_unset() {
+    use std::time::Duration;
+    let scratch = tempfile::tempdir().expect("scratch");
+    let pid_file = scratch.path().join("pid");
+    let script = format!(
+        "{REAP_FN}child=\nsleep 30 &\necho $! > '{}'\nreap 143 TERM\n",
+        pid_file.display()
+    );
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", &script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut sh = spawn_past_etxtbsy(&mut cmd);
+    let forked = pid_written_to(&pid_file);
+    if !holds_within(Duration::from_secs(10), || {
+        sh.try_wait().expect("try_wait").is_some()
+    }) {
+        sh.kill().expect("KILL the sh");
+    }
+    let status = sh.wait().expect("the sh is reaped");
+    let forked_gone = gone_within(forked, Duration::from_secs(2));
+    assert!(forked_gone, "the forked pid {forked} outlived reap");
+    assert_eq!(status.code(), Some(143), "{status:?}");
 }
