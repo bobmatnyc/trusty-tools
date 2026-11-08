@@ -65,7 +65,8 @@ pub enum OkfError {
     /// `verification_record_exists`, `human_not_confirmed` (§2.4).
     /// #10746 S6: `tombstone_without_source_id` (§4.8), `superseded`,
     /// `supersede_self`, `stale_plan` (§2.9).
-    /// #10746: `actor_control_character` (an actor that could forge a
+    /// #10746: `actor_control_character` and `reason_control_character`
+    /// (an actor, or a `deprecate`/`supersede` reason, that could forge a
     /// `log.md` entry).
     #[error("conflict on {id}: {reason}")]
     Conflict {

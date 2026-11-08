@@ -236,7 +236,8 @@ fn generated_value(by: &Actor, now: &DateTime<FixedOffset>) -> Value {
 /// verification record, the operation journal and one `log.md` entry. A
 /// newline in it would forge `log.md` entries or `## date` headings, and
 /// folding it in `log.md` alone would make the log name a different actor
-/// than the record.
+/// than the record. This closes the actor channel only; the
+/// `deprecate`/`supersede` reason has its own check (`correct.rs`).
 /// What: `Conflict { reason: "actor_control_character" }` when any char of
 /// `by.to_string()` is a control character (newline included), before any
 /// other check, so no file changes.

@@ -795,7 +795,8 @@ fn verify_refuses_a_fold_twin_and_writes_no_record() {
 /// #10746 (§2.3, §4.5): an actor holding a control character cannot forge
 /// a `log.md` entry or heading. `put`, `put_confirmed`, `verify` and
 /// `verify_confirmed` each refuse it with `actor_control_character` and no
-/// file changes; the forged text never reaches `log.md`.
+/// file changes. A `deprecate` or `supersede` reason holding one is refused
+/// with `reason_control_character`, so neither text reaches `log.md`.
 #[cfg(unix)]
 #[test]
 fn put_and_verify_refuse_an_actor_with_a_control_character() {
@@ -821,5 +822,23 @@ fn put_and_verify_refuse_an_actor_with_a_control_character() {
         assert_eq!(conflict_reason(got), "actor_control_character", "{by:?}");
         assert_eq!(snapshot(tmp.path()), before, "{by:?}: no file changed");
         assert!(!tmp.path().join("log.md").exists(), "{by:?}");
+    }
+    for reason in [forged, "cr\r", "tab\t"] {
+        let (tmp, mut b) = setup("---\ntype: Note\n---\nBody\n");
+        let before = snapshot(tmp.path());
+        let got = b.deprecate(&id("a"), reason, process(), now());
+        assert_eq!(
+            conflict_reason(got),
+            "reason_control_character",
+            "{reason:?}"
+        );
+        let got = b.supersede(&id("a"), new_concept("b", "Note"), reason, process(), now());
+        assert_eq!(
+            conflict_reason(got),
+            "reason_control_character",
+            "{reason:?}"
+        );
+        assert_eq!(snapshot(tmp.path()), before, "{reason:?}: no file changed");
+        assert!(!tmp.path().join("log.md").exists(), "{reason:?}");
     }
 }
