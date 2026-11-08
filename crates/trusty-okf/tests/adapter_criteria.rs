@@ -649,6 +649,26 @@ fn c97_sigint_cancels_an_adapter_import_and_reaps_its_group() {
     );
 }
 
+/// Why: #10818 critic (HIGH) — `import plan` used a cancel flag nothing
+/// set, so SIGINT killed the CLI by default and left the adapter and its
+/// grandchild running.
+/// What: the fake starts a grandchild and hangs in `list`; one SIGINT to
+/// `import plan` exits 3 (cancelled before its plan) and leaves no adapter,
+/// grandchild or process group.
+/// Test: self-contained.
+#[test]
+fn sigint_cancels_an_adapter_plan_and_reaps_its_group() {
+    let fake = FakeAdapter::new("gmail");
+    fake.page(None, json!([msg_entry("c1", "t1")]), None, true);
+    fake.item(msg("c1", "t1", 1_767_225_600_000, "c1", "Body."));
+    let got = s9_support::interrupt_verb(&fake, "plan", "list", &[]);
+    assert_eq!(got.code, Some(3), "{got:?}");
+    assert!(
+        !got.adapter_left && !got.grandchild_left && !got.group_left,
+        "{got:?}"
+    );
+}
+
 /// Why: criterion 98, host half (Appendix B "Acquire role") — every
 /// `acquire` request carries the store selection and the run's
 /// `operator_initiated`, false unless the caller set it. The adapter half
