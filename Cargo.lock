@@ -11724,7 +11724,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.40.0"
+version = "0.40.1"
 dependencies = [
  "anyhow",
  "async-trait",
