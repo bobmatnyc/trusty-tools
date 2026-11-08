@@ -64,7 +64,8 @@ pub const DEFAULT_MAX_ITEMS: usize = 100_000;
 /// Why: one SIGINT must cancel every child process of a run, and an
 /// adapter-only run has no worker whose flag `import` could read.
 /// What: one shared flag. The CLI's SIGINT waiter sets it; the worker
-/// client ([`crate::extract::worker::WorkerExtractor::with_cancel`]) and
+/// client (`extract::worker::WorkerExtractor::with_cancel`, feature
+/// `extract-worker`) and
 /// [`super::adapter::AdapterSource`] watch the same `Arc`; `plan_import`
 /// stops listing (the listing is then incomplete) and `import` writes
 /// nothing more once it is set. It is not part of a spec's identity, so
