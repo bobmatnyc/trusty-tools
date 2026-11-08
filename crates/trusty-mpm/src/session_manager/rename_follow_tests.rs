@@ -753,3 +753,68 @@ async fn an_unreachable_or_failing_workspace_server_is_skipped_never_defaulted()
     }
     assert!(tmux.mutations.lock().unwrap().is_empty());
 }
+
+/// #10101 (critic HIGH): another prober holds the workspace server's probe
+/// slot while the reaper's follow runs, so the follow skips it; the reaper's
+/// own listing of that server succeeded and lists only the current name.
+/// The renamed PM must stay Active this pass, and is followed on the next.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn the_reaper_holds_a_pm_whose_server_the_follow_could_not_probe() {
+    let ws = PaneTmux::new(&["tm-arch"], &[("%5", WS_SERVER, "tm-arch")]);
+    let tmux = host(&["tm-unrelated"], &[], vec![("tm-ws-a", Arc::clone(&ws))]);
+    let (dir, mgr) = manager(tmux).await;
+    let sock = socket(&dir, "tm-ws-a");
+    let id = seed_on(&mgr, "tm-sup", "%5", &sock).await;
+    let state = DaemonState::with_session_manager(Arc::clone(&mgr));
+    let live = crate::session_manager::tmux_route::LiveSessions {
+        default: HashSet::from(["tm-unrelated".to_owned()]),
+        named: HashMap::from([("tm-ws-a".to_owned(), HashSet::from(["tm-arch".to_owned()]))]),
+        ..Default::default()
+    };
+
+    // Another prober (a `tm ls`, the doctor) holds the server's slot.
+    let (release, rx) = mpsc::channel::<()>();
+    let key = sock.clone();
+    let holder = std::thread::spawn(move || {
+        crate::core::tmux_server::bounded_probe(&key, Duration::from_secs(60), move || {
+            let _ = rx.recv();
+        })
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !crate::core::tmux_server::probe_in_flight(&sock) {
+        assert!(
+            Instant::now() < deadline,
+            "the holder never claimed the slot"
+        );
+        std::thread::yield_now();
+    }
+    state.reap_managed_against(&live).await;
+    let record = mgr.get(&id).await.expect("record kept");
+    assert_eq!(
+        record.state,
+        ManagedSessionState::Active,
+        "reaped while unfollowed"
+    );
+    assert_eq!(record.tmux_name, "tm-sup");
+    assert_eq!(
+        ws.lists.load(Ordering::SeqCst),
+        0,
+        "the busy server was not probed"
+    );
+
+    drop(release);
+    holder.join().expect("holder");
+    state.reap_managed_against(&live).await;
+    let record = mgr.get(&id).await.expect("record");
+    assert_eq!(record.state, ManagedSessionState::Active);
+    assert_eq!(
+        record.tmux_name, "tm-arch",
+        "followed once the slot is free"
+    );
+    assert!(
+        ws.mutations.lock().unwrap().is_empty(),
+        "nothing was killed"
+    );
+}

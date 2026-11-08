@@ -7,8 +7,65 @@ use std::sync::Arc;
 use super::DaemonState;
 use crate::session_manager::tmux_route::LiveSessions;
 use crate::session_manager::{
-    FakeNoopTmuxDriver, ManagedSessionId, ManagedSessionState, SessionManager, StopCause,
+    FakeNoopTmuxDriver, ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver,
+    SessionManager, StopCause,
 };
+
+/// [`FakeNoopTmuxDriver`] that also reaches every named server, each an empty
+/// [`FakeNoopTmuxDriver`] (a vanished `-L` server lists no session).
+///
+/// Why: #10101 — the reaper holds a record whose server the rename follow
+/// could not read, so a driver that reaches no named server would hold every
+/// workspace-server record and the stop arms below would never run.
+struct RoutingNoop;
+
+impl ManagedTmuxDriver for RoutingNoop {
+    fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
+        FakeNoopTmuxDriver.create_session(name, workdir)
+    }
+    fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        FakeNoopTmuxDriver.kill_session(name)
+    }
+    fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        FakeNoopTmuxDriver.send_line(name, text)
+    }
+    fn send_keys_literal(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        FakeNoopTmuxDriver.send_keys_literal(name, text)
+    }
+    fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
+        FakeNoopTmuxDriver.send_interrupt(name)
+    }
+    fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError> {
+        FakeNoopTmuxDriver.capture(name, lines)
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        FakeNoopTmuxDriver.list_sessions()
+    }
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        FakeNoopTmuxDriver.get_pane_id(name)
+    }
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<crate::session_manager::pane_identity::PaneIdentity, ManagedError> {
+        FakeNoopTmuxDriver.pane_identity(pane_id)
+    }
+    fn send_keys_literal_to_pane(&self, n: &str, p: &str, t: &str) -> Result<(), ManagedError> {
+        FakeNoopTmuxDriver.send_keys_literal_to_pane(n, p, t)
+    }
+    fn send_interrupt_to_pane(&self, name: &str, pane_id: &str) -> Result<(), ManagedError> {
+        FakeNoopTmuxDriver.send_interrupt_to_pane(name, pane_id)
+    }
+    fn capture_pane(&self, n: &str, p: &str, lines: usize) -> Result<String, ManagedError> {
+        FakeNoopTmuxDriver.capture_pane(n, p, lines)
+    }
+    fn pane_harness(&self, n: &str, p: &str, h: &str) -> crate::core::process::PaneClaude {
+        FakeNoopTmuxDriver.pane_harness(n, p, h)
+    }
+    fn on_server(&self, _server: &str) -> Option<Arc<dyn ManagedTmuxDriver>> {
+        Some(Arc::new(FakeNoopTmuxDriver))
+    }
+}
 
 /// One Active record per `(task, socket)`, wired into a state.
 async fn seeded(
@@ -21,7 +78,7 @@ async fn seeded(
 ) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mgr = Arc::new(
-        SessionManager::new(tmp.path(), Arc::new(FakeNoopTmuxDriver))
+        SessionManager::new(tmp.path(), Arc::new(RoutingNoop))
             .await
             .expect("session manager"),
     );
