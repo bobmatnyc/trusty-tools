@@ -215,7 +215,9 @@ pub(crate) fn refuse_outside_a_git_project(path: &std::path::Path) -> anyhow::Re
 /// in `start_tests.rs` covers the routing decision hermetically;
 /// `session_start_in_place_launches_on_the_workspace_server_10101`,
 /// `a_held_name_refuses_the_launch_before_tmux_or_registration` and
-/// `a_failed_create_removes_the_registration` the tmux server and failure arms.
+/// `a_failed_create_removes_the_registration`,
+/// `a_failed_start_never_kills_a_session_it_did_not_create_10101` the tmux
+/// server and failure arms.
 async fn start_session_in_place(
     daemon: &trusty_mpm::client::DaemonClient,
     path: &std::path::Path,
@@ -358,7 +360,12 @@ async fn start_session_in_place(
     // ergonomics are applied before the pane exists.
     // #10101: every failure from here on removes the registration and
     // reports; nothing is left that names a session which never ran.
-    let registered = crate::commands::launch_host::Registered::new(daemon, body.id);
+    // #10101: `create` attaches (`-A`) to a session of this name already on
+    // the server; one this start did not create is never killed or rolled
+    // back, as in `tm connect`.
+    let already_running = host.has_session(&body.name);
+    let registered =
+        crate::commands::launch_host::Registered::new(daemon, body.id.filter(|_| !already_running));
     let workdir = path.to_string_lossy().to_string();
     if let Err(e) = host.create(&body.name, &workdir) {
         // #8286: the manual fallback names the prompt file too.
@@ -380,10 +387,14 @@ async fn start_session_in_place(
         &spec_dir,
     );
     if let Err(e) = sent {
-        host.kill(&body.name);
+        let left = if already_running {
+            "it was already running, so it was left as it was"
+        } else {
+            host.kill(&body.name);
+            "the session was killed"
+        };
         let e = anyhow::anyhow!(
-            "tmux session {} was created on {} but claude could not be started in it: {e}; \
-             the session was killed",
+            "claude could not be started in tmux session {} on {}: {e}; {left}",
             body.name,
             host.describe()
         );

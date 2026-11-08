@@ -919,6 +919,21 @@ async fn spawn_inplace_daemon(
     let on_post = std::sync::Arc::clone(&seen);
     let on_delete = std::sync::Arc::clone(&seen);
     let list = serde_json::json!({ "sessions": managed });
+    let register = move |Json(body): Json<serde_json::Value>| {
+        let seen = std::sync::Arc::clone(&on_post);
+        async move {
+            // A pre-#10101 start posts no name; answer one anyway.
+            let name = body["name"]
+                .as_str()
+                .unwrap_or("tm-inplace-stub")
+                .to_owned();
+            seen.lock().expect("seen").posts.push(body);
+            Json(serde_json::json!({
+                "id": "22222222-2222-2222-2222-222222222222",
+                "name": name,
+            }))
+        }
+    };
     let router = Router::new()
         .route(
             "/api/v1/sessions/managed",
@@ -927,24 +942,9 @@ async fn spawn_inplace_daemon(
                 async move { Json(list) }
             }),
         )
-        .route(
-            "/sessions",
-            post(move |Json(body): Json<serde_json::Value>| {
-                let seen = std::sync::Arc::clone(&on_post);
-                async move {
-                    // A pre-#10101 start posts no name; answer one anyway.
-                    let name = body["name"]
-                        .as_str()
-                        .unwrap_or("tm-inplace-stub")
-                        .to_owned();
-                    seen.lock().expect("seen").posts.push(body);
-                    Json(serde_json::json!({
-                        "id": "22222222-2222-2222-2222-222222222222",
-                        "name": name,
-                    }))
-                }
-            }),
-        )
+        .route("/sessions", post(register.clone()))
+        // `tm connect` registers through its own route over the same body.
+        .route("/api/v1/sessions/connect", post(register))
         .route(
             "/sessions/{id}",
             delete(move |Path(id): Path<String>| {
@@ -1087,4 +1087,86 @@ async fn a_failed_create_removes_the_registration() {
     let seen = seen.lock().expect("seen");
     assert_eq!(seen.posts.len(), 1);
     assert_eq!(seen.deletes, ["22222222-2222-2222-2222-222222222222"]);
+}
+
+/// A fake `tmux` under `dir` that logs each argv to `<dir>/argv.log`, exits 1
+/// for a call whose argv contains `fail_on`, and 0 for every other call.
+fn scripted_fake_tmux(
+    dir: &std::path::Path,
+    fail_on: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let log = dir.join("argv.log");
+    let bin = dir.join("fake-tmux");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *{fail_on}*) exit 1;; esac\nexit 0\n",
+        log.display()
+    );
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+    (bin, log)
+}
+
+/// #10101: an in-place start whose session name is already live on the
+/// server attaches to it (`-A`); when `claude` then fails to start there, the
+/// session it did not create is neither killed nor rolled back. Red at
+/// c3ac72a3aa: the failure arm ran `kill-session` and a `DELETE`.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_failed_start_never_kills_a_session_it_did_not_create_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    // has-session answers yes; the launch line's send-keys fails.
+    let (bin, log) = scripted_fake_tmux(target.path(), "send-keys");
+    let (seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let err = run_inplace(&url, target.path(), home.path(), bin)
+        .await
+        .expect_err("a claude that cannot start fails the start");
+    let argv = std::fs::read_to_string(&log).expect("tmux was called");
+    assert!(argv.contains("send-keys"), "{argv}");
+    assert!(
+        !argv.contains("kill-session"),
+        "killed a session it did not create: {argv}"
+    );
+    assert!(
+        seen.lock().expect("seen").deletes.is_empty(),
+        "rolled back a registration for a session it did not create"
+    );
+    assert!(format!("{err:#}").contains("already running"), "{err:#}");
+}
+
+/// #10101: a `tm connect` that fails after its registration, here while
+/// composing the session MCP config, removes the registration. Red at
+/// c3ac72a3aa: `?` returned past the rollback and the record stayed.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_connect_failing_after_registration_rolls_it_back_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    // The session MCP config is composed under this root; a file there
+    // makes that composition fail.
+    let root = trusty_mpm::core::paths::FrameworkPaths::under(home.path()).crate_config_root();
+    std::fs::create_dir_all(root.parent().expect("a parent")).expect("parent");
+    std::fs::write(&root, "not a directory").expect("block the config root");
+    // No session of the name exists yet; every other tmux call succeeds.
+    let (bin, _log) = scripted_fake_tmux(target.path(), "has-session");
+    let (seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let client = reqwest::Client::new();
+    let result = trusty_mpm::core::tmux::with_tmux_binary(
+        bin,
+        crate::commands::launch::connect(
+            &client,
+            &url,
+            Some(target.path().display().to_string()),
+            Some(home.path()),
+            crate::commands::launch_handoff::Handoff::Detach,
+        ),
+    )
+    .await;
+    let err = result.expect_err("a blocked config root fails the connect");
+    let seen = seen.lock().expect("seen");
+    assert_eq!(seen.posts.len(), 1, "the connect registered first: {err:#}");
+    assert_eq!(
+        seen.deletes,
+        ["22222222-2222-2222-2222-222222222222"],
+        "the registration must be removed: {err:#}"
+    );
 }

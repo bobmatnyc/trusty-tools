@@ -309,6 +309,9 @@ pub(crate) async fn launch(
         &files,
     )?;
 
+    // #10101: before `POST /sessions`, so a missing spec dir registers nothing.
+    let spec_dir = launch_spec_dir(home)?;
+
     // 10. Register the session with the daemon. The tmux name is derived from
     //    the LIVE project folder so the human-readable name reflects the repo.
     //    `project`/`project_path` are the MANAGED clone path; `source_id` links
@@ -352,8 +355,6 @@ pub(crate) async fn launch(
             (folder_name.clone(), None)
         }
     };
-
-    let spec_dir = launch_spec_dir(home)?;
 
     // 11. Print the full-screen robot splash then the rich info panel.
     //     Pass the real managed worktree path so the banner shows the session
@@ -465,7 +466,8 @@ pub(crate) async fn launch(
 /// origin, #8406), prints the session name and pane id and returns. #10101:
 /// the same name refusal, workspace server and failure cleanup as [`launch`].
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir`;
-/// `a_cli_create_reaches_the_workspace_server_only` for the server.
+/// `a_cli_create_reaches_the_workspace_server_only` for the server;
+/// `a_connect_failing_after_registration_rolls_it_back_10101` for the rollback.
 pub(crate) async fn connect(
     client: &reqwest::Client,
     url: &str,
@@ -616,29 +618,34 @@ pub(crate) async fn connect(
         // wrapper the daemon + `tm launch` paths use). No-op off macOS / under
         // TM_DISABLE_SPAWN_DISCLAIM.
         // #7422: same fail-closed composition as `tm launch`.
-        let files = launch_files(&path, config_dir.as_deref(), home, cli.profile)?;
-        // #8308: same spec carrier as `tm launch`.
-        let claude_spec = connect_claude_spec(
-            &path,
-            Some(prompt_path.as_path()),
-            config_dir.as_deref(),
-            // #4181: the per-project MCP pins; #8453: plus the profile stamp.
-            &cli.env,
-            &files,
-            // #8405: the operator's config decides the renderer.
-            trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
-        )?;
-        let spec_dir = launch_spec_dir(home)?;
-        let sent = trusty_mpm::runtime::cli_launch::send_spec_launch(
-            host.server(),
-            &tmux_name,
-            &claude_spec,
-            &spec_dir,
-        );
-        if let Err(e) = sent {
-            let e = anyhow::anyhow!(
-                "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
-            );
+        // #10101: these run after the registration, so a failure rolls it back.
+        let started = (|| -> anyhow::Result<()> {
+            let files = launch_files(&path, config_dir.as_deref(), home, cli.profile)?;
+            // #8308: same spec carrier as `tm launch`.
+            let claude_spec = connect_claude_spec(
+                &path,
+                Some(prompt_path.as_path()),
+                config_dir.as_deref(),
+                // #4181: the per-project MCP pins; #8453: plus the profile stamp.
+                &cli.env,
+                &files,
+                // #8405: the operator's config decides the renderer.
+                trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+            )?;
+            let spec_dir = launch_spec_dir(home)?;
+            trusty_mpm::runtime::cli_launch::send_spec_launch(
+                host.server(),
+                &tmux_name,
+                &claude_spec,
+                &spec_dir,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
+                )
+            })
+        })();
+        if let Err(e) = started {
             return Err(registered.fail(e).await);
         }
     }
