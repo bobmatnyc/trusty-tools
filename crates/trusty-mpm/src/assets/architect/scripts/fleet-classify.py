@@ -24,7 +24,8 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 IDLE_AFTER = 600          # seconds an idle pane waits before it alerts
-REEMIT = {"idle": 1800, "ctx": 1800, "load": 1800, "disk": 1800, "swap": 1800,
+# ar-T8a: load, disk and swap are keyed kind|severity|bucket (fleet_alert_dedupe.py) and only remind daily.
+REEMIT = {"idle": 1800, "ctx": 1800, "load": 86400, "disk": 86400, "swap": 86400,
           "self_ctx": 1800, "architect_dead": 1800, "architect_silent": 1800,
           "architect_frozen": 1800,  # #10571: the watchdog's alerts re-emit as the prototype's do
           "owner_answer": 1800}  # #10670: until owner_answers.pending stops listing it
@@ -46,6 +47,7 @@ def _load_by_path(name, filename):
 
 
 input_state = _load_by_path("input_state", "input-state.py")
+alert_dedupe = _load_by_path("fleet_alert_dedupe", "fleet_alert_dedupe.py")  # ar-T8a
 
 # --- pane parsing (pure) ----------------------------------------------------
 
@@ -419,25 +421,12 @@ def fleet_plan_alerts(infos, now):
     return out
 
 
-def dedup(state, candidates, now):
+def dedup(state, candidates, now, held=False):
     """Split candidates into (new, suppressed_count) and update state['alerts'].
 
     Key = session|pane|kind|fingerprint. A key absent this cycle is cleared, so
     its next appearance is new. A kind in REEMIT re-emits after its interval.
+    load, disk and swap follow fleet_alert_dedupe.dedup (ar-T8a): key kind|severity|bucket,
+    a two-cycle clear, and no reminder while `held`.
     """
-    seen = state.get("alerts", {})
-    active, new, suppressed = {}, [], 0
-    for a in candidates:
-        k = "|".join((a["session"], a["pane"], a["kind"], a["fingerprint"]))
-        if k in active:
-            continue
-        prev = seen.get(k)
-        every = REEMIT.get(a["kind"])
-        if prev is None or (every and now - prev["last"] >= every):
-            new.append(a)
-            active[k] = {"first": prev["first"] if prev else now, "last": now}
-        else:
-            suppressed += 1
-            active[k] = prev
-    state["alerts"] = active
-    return new, suppressed
+    return alert_dedupe.dedup(state, candidates, now, REEMIT, held)

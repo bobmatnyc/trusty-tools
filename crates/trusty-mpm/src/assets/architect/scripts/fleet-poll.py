@@ -17,7 +17,10 @@ context in tokens, which has no `ctx N%` line to read, against the same
 context bar), owner_answer_alerts (dashboard answers not yet relayed), and
 appends each NEW alert as a JSON line to inbox/alerts.jsonl. Dedup state is inbox/poll-state.json: an
 alert with the same (session, pane, kind, fingerprint) is not re-emitted
-until it clears for one cycle, or its kind's re-emit interval passes.
+until it clears for one cycle, or its kind's re-emit interval passes. load, disk and swap are keyed
+kind|severity|bucket instead (fleet_alert_dedupe.py, ar-T8a): leftover swap with no swap-in/out only
+logs, and a held Architect (inbox/hold.json: the ledger HOLD or the owner away/sleeping) gets only
+urgent alerts, then one held_digest on release.
 `dispatch_wake` types the one-line pointer into the Architect's pane and
 sends keys to no other pane. quiet_sessions.py drops "idle" for a parked
 session and "exited" for a disposable test-fixture one. The pure parsing and
@@ -83,7 +86,7 @@ class _Poller:
 _cfg = _load_by_path("fleet_poll_cfg", "fleet_poll_cfg.py")
 ROOT, INBOX, EVENTS, ALERTS = _cfg.ROOT, _cfg.INBOX, _cfg.EVENTS, _cfg.ALERTS
 STATE, LOG, SOCKET, WORKSPACE_PREFIX = _cfg.STATE, _cfg.LOG, _cfg.SOCKET, _cfg.WORKSPACE_PREFIX
-LOCK = _cfg.LOCK
+LOCK, HOLD = _cfg.LOCK, _cfg.HOLD
 ARCHITECT, POLL_SESSION, SKIP_SESSIONS = _cfg.ARCHITECT, _cfg.POLL_SESSION, _cfg.SKIP_SESSIONS
 SHELLS, EVENT_TYPES = _cfg.SHELLS, _cfg.EVENT_TYPES
 DISK_HIGH, LOAD_FACTOR_DEFAULT = _cfg.DISK_HIGH, _cfg.LOAD_FACTOR_DEFAULT
@@ -99,6 +102,8 @@ find_box, _screen_lines = fleet_classify.find_box, fleet_classify._screen_lines
 parse_pane, evaluate = fleet_classify.parse_pane, fleet_classify.evaluate
 fleet_plan_alerts, dedup = fleet_classify.fleet_plan_alerts, fleet_classify.dedup
 clean = fleet_classify.clean
+alert_dedupe = fleet_classify.alert_dedupe          # ar-T8a: host severity/bucket, hold gating
+alert_triage = alert_dedupe.alert_triage            # ar-T8a: is_urgent, the hold file
 
 self_ctx = _load_by_path("self_ctx", "self-ctx.py")
 quiet_sessions = _load_by_path("quiet_sessions", "quiet-sessions.py")
@@ -121,10 +126,12 @@ workspace_servers, list_panes, _rows = _io.workspace_servers, _io.list_panes, _i
 is_architect_pane = _io.is_architect_pane
 capture, capture_pane, send_to_architect = _io.capture, _io.capture_pane, _io.send_to_architect
 read_events, swap_used_mb, host_alerts = _io.read_events, _io.swap_used_mb, _io.host_alerts
+swap_probe, _swap_counters, _memory_pressure = _io.swap_probe, _io._swap_counters, _io._memory_pressure
 acquire_poll_lock = _io.acquire_poll_lock
 resolve_context_bar, self_ctx_alerts = _alerts.resolve_context_bar, _alerts.self_ctx_alerts
 il_cron_alerts, ctx_watch_alerts = _alerts.il_cron_alerts, _alerts.ctx_watch_alerts
 owner_answer_alerts, ANSWER_KINDS = _alerts.owner_answer_alerts, _alerts.ANSWER_KINDS
+user_state_hold = _alerts.user_state_hold
 ANSWER_KEY = _alerts.ANSWER_KEY
 run_architect_relaunch, architect_busy = _watchdog.run_architect_relaunch, _watchdog.architect_busy
 architect_transcript_mtime, watchdog_alerts = _watchdog.architect_transcript_mtime, _watchdog.watchdog_alerts
@@ -196,26 +203,35 @@ def cycle(state, dry_run=False, now=None):
                                 f"cannot read owner answers ({failure}); see poll.log", now=now))
     # #10670: dedup clears a key absent from a cycle. A failed read says nothing about an
     # answer, so hold its keys: it stays unconsumed and keeps its re-emit clock.
-    held = {} if answers is not None else {
+    kept = {} if answers is not None else {
         k: v for k, v in state.get("alerts", {}).items() if k.startswith(ANSWER_KEY)}
     quiet = quiet_sessions.read_quiet_sessions(QUIET_SESSIONS_FILE)
     candidates = [a for a in candidates if not (a["kind"] == "idle" and a["session"] in quiet)]
-    new, suppressed = dedup(state, candidates, now)
-    state["alerts"].update(held)
+    # ar-T8a: the hold (user_state and ledger writers) gates non-urgent alerts; a bad hold file is not held.
+    user_state_hold(dry_run)
+    hold = alert_triage.read_hold(HOLD, now)
+    if hold["error"]:
+        log(f"hold ERROR {hold['error']}; not held", dry_run)
+    new, suppressed = dedup(state, candidates, now, held=hold["held"])
+    state["alerts"].update(kept)
+    new, on_hold = alert_dedupe.gate(state, new, hold, now, alert)
+    info = [a["detail"] for a in candidates if a.get("severity") == "info"]
     if dry_run:
-        for a in new:
-            print(f"  would alert: {a['display']}")
-    elif new:
+        for a in new + on_hold:
+            print(f"  would alert: {a['display']}" + (" (held)" if a.get("held") else ""))
+    elif new or on_hold:
         with open(ALERTS, "a") as f:
-            for a in new:
+            for a in new + on_hold:
                 f.write(json.dumps(a, ensure_ascii=False) + "\n")
     result = dispatch_wake(state, panes, len(new), dry_run,
                            sum(1 for a in new if a["kind"] == "owner_answer"))
     # #10599 PR-1's slot (prototype :2000): never type into the box twice in a cycle.
     if not result.startswith("sent"):
         watch_phrase = f"{watch_phrase} {self_refresh_step(state, panes, now, dry_run)}".rstrip()
-    log(f"panes={len(watched)} new={len(new)} suppressed={suppressed} wake={result} {watch_phrase}".rstrip(),
-        dry_run)
+    held_phrase = f" held={len(on_hold)} ({hold['reason']})" if hold["held"] else ""
+    info_phrase = f" info=[{'; '.join(info)}]" if info else ""
+    log(f"panes={len(watched)} new={len(new)} suppressed={suppressed}{held_phrase}{info_phrase} "
+        f"wake={result} {watch_phrase}".rstrip(), dry_run)
 
 
 def load_state():

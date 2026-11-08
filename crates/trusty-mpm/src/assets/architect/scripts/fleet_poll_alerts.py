@@ -3,7 +3,8 @@
 Why: fleet-poll.py sat at the 500-SLOC cap; its alert steps move here unchanged, and later steps land here.
 What: resolve_context_bar (the context bar, each warning logged once per process), self_ctx_alerts (the
 Architect's own context against that bar), il_cron_alerts (il-cron.py's due cadence jobs),
-ctx_watch_alerts (ctx-watch.py's clear candidates) and owner_answer_alerts (dashboard answers not yet relayed, #10670).
+ctx_watch_alerts (ctx-watch.py's clear candidates), owner_answer_alerts (dashboard answers not yet relayed, #10670)
+and user_state_hold (the owner's away/sleeping state as a hold-file source, ar-T8a).
 Names from the poller are read through `P`, the late-bound view
 fleet-poll.py passes to bind(), so rebinding a fleet-poll name still steers these, as before the split.
 Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports), tests/test_fleet_poll_watchdog_wiring.py,
@@ -117,3 +118,39 @@ def owner_answer_alerts(now, dry_run=False, root=None, ever_read=True):
         a["display"] = f"[owner] {a['detail']}" + (f": {text}" if text else "")
         out.append(a)
     return out, None
+
+
+USER_STATE_HOLD = ("away", "sleeping")   # ar-T8a: the owner states that hold the Architect's non-urgent alerts
+
+
+def user_state_hold(dry_run=False, root=None):
+    """Write or clear the "user_state" source of the hold file (P.HOLD) from meta/settings.user_state.
+
+    Why: ar-T8a, the owner's Away or Sleeping state is a hold; the dashboard, dashboard-db.py and the
+    instance's user_state.py all write meta/settings, so the poller syncs from the store each cycle.
+    What: away/sleeping sets the source; any other state, or no settings document, clears it. A read or
+    write error is logged and leaves the file as it was; a dry run writes nothing. Returns the state read.
+    Root: `root`, else DASHBOARD_ROOT, else the default (as owner_answer_alerts).
+    Test: test_user_state_sleeping_holds_and_active_releases
+    """
+    ds = P.owner_answers.ds
+    root = root or os.environ.get("DASHBOARD_ROOT") or ds.DEFAULT_ROOT
+    try:
+        try:
+            data = ds.Store(root).get("meta", "settings")["data"]
+        except ds.NotFound:
+            data = {}
+        state = data.get("user_state") if isinstance(data, dict) else None
+        if dry_run:
+            return state
+        if state in USER_STATE_HOLD:
+            changed = P.alert_triage.set_hold(P.HOLD, "user_state", f"owner {state}",
+                                              until_event="user_state active")
+        else:
+            changed = P.alert_triage.clear_hold(P.HOLD, "user_state")
+        if changed:
+            P.log(f"hold user_state={state or 'unset'}: {'held' if state in USER_STATE_HOLD else 'released'}")
+        return state
+    except Exception as e:  # never stop the cycle; the hold file stays as it was
+        P.log(f"user_state hold ERROR {type(e).__name__}: {e}; hold file unchanged", dry_run)
+        return None
