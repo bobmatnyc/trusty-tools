@@ -92,14 +92,28 @@ impl DaemonState {
     /// `reap_marks_a_targeted_kill_deliberate`,
     /// `reap_leaves_a_whole_server_loss_auto_resumable`,
     /// `reap_managed_against_skips_a_session_whose_resume_is_in_flight` in
-    /// `super::tests`; `the_reaper_never_stops_a_live_pm_on_a_workspace_server`.
+    /// `super::tests`; `the_reaper_never_stops_a_live_pm_on_a_workspace_server`,
+    /// `the_reaper_holds_a_pm_whose_server_the_follow_could_not_probe`.
     pub(crate) async fn reap_managed_against<L: LiveSet + Sync>(&self, live: &L) {
         let mgr = self.session_manager().await;
         // #9238: a session renamed in tmux keeps its pane; follow it first,
         // so the name check below never stops it.
-        mgr.follow_tmux_renames().await;
+        // #10101: a workspace server the follow could not read may hold a
+        // renamed PM under its old record name; its records wait a pass.
+        let (_, unfollowed) = mgr.follow_tmux_renames_skipping().await;
         let records = mgr.list().await;
         for r in records {
+            if r.tmux_socket
+                .as_ref()
+                .is_some_and(|s| unfollowed.contains(s))
+            {
+                tracing::info!(
+                    id = %r.id,
+                    name = %r.tmux_name,
+                    "reaper: rename follow could not read this session's tmux server; leaving it alone this pass (#10101)"
+                );
+                continue;
+            }
             // #10101: live and lost are judged on the record's own server.
             if matches!(r.state, crate::session_manager::ManagedSessionState::Active)
                 && !live.holds(&r)
