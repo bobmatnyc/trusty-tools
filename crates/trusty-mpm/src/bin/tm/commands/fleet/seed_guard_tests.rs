@@ -133,6 +133,51 @@ fn credential_reads_are_still_refused_from_the_fleet_dir() {
     }
 }
 
+/// 🔴 CONTROL (#10734): a seeded script body that does read a credential still
+/// refuses. Each row is a passing seeded body plus one real read, run as
+/// `python3 scripts/<copy>`; `dashboard_jsonl.py` names `op` in prose and
+/// `dashboard_media.py` as a dict key, and each passes on its own.
+#[test]
+fn a_seeded_body_with_a_real_credential_read_refuses_10734() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = std::fs::canonicalize(fx.dir()).unwrap();
+    let files = seeded_files();
+    let mut wrong = Vec::new();
+    for seed in [
+        "scripts/dashboard-db.py",
+        "scripts/datg.py",
+        "scripts/dashboard_jsonl.py",
+        "scripts/dashboard_media.py",
+    ] {
+        let body = &files
+            .iter()
+            .find(|f| f.dest == seed)
+            .expect("seeded")
+            .contents;
+        let copy = dir.join("scripts/probe-10734.py");
+        std::fs::write(&copy, body.as_bytes()).unwrap();
+        if let Some(why) = verdict("python3 scripts/probe-10734.py", &dir) {
+            wrong.push(format!("{seed} alone refused: {why}"));
+        }
+        for read in [
+            "subprocess.run([\"op\", \"read\", \"op://v/i/f\"])",
+            "subprocess.run(('op', 'read', 'op://v/i/f'))",
+            "subprocess.run([\n    \"op\",\n    \"read\",\n    \"op://v/i/f\",\n])",
+            "subprocess.run([\"op\", \"--account\", \"work\", \"read\", \"op://v/i/f\"])",
+            "subprocess.run([\"security\", \"find-generic-password\", \"-s\", \"x\", \"-w\"])",
+            "print(open(\".env\").read())",
+            "print(open(\"token.json\").read())",
+        ] {
+            std::fs::write(&copy, format!("{body}\n{read}\n")).unwrap();
+            if verdict("python3 scripts/probe-10734.py", &dir).is_none() {
+                wrong.push(format!("{seed} + {read} allowed"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "wrong verdicts:\n{}", wrong.join("\n"));
+}
+
 /// #10579: the seeded instructions end every owner reply with the dashboard
 /// footer, resolved from the instance config, never a typed address.
 #[test]
