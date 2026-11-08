@@ -268,6 +268,9 @@ mod rename_race_tests;
 mod rename_follow_tests;
 
 #[cfg(test)]
+mod doctor_server_probe_tests;
+
+#[cfg(test)]
 mod liveness_tests;
 
 #[cfg(test)]
