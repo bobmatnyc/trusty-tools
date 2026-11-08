@@ -355,3 +355,69 @@ async fn concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks() {
         "the stored hash must name the committed chunks' content: {status}"
     );
 }
+
+/// Bytes on disk for `FILE`, with a symbol of their own so their chunk ids
+/// differ from the put's.
+const ON_DISK: &str = "fn authenticate_on_disk_10738(token: &str) -> bool { check(token) }\n";
+
+/// Why: HIGH 2 — only the put path kept a path's content hash, so a watcher
+/// rewrite of a pushed path from disk left the put's hash beside chunks from
+/// other bytes, and `file.status` reported it as the indexed revision.
+/// What: put `FILE`, write other bytes to it on disk, re-index it through the
+/// watcher's `handle_modified` (the same write core reconcile calls), and
+/// assert `file.status` reports the hash of the bytes the watcher indexed,
+/// never the put's.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_watcher_rewrite_after_a_put_never_reports_the_put_hash() {
+    let id = "identity-watcher-rewrite-10738";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // The watcher keys a path by stripping the canonical root (`/private/var`).
+    let root = tmp.path().canonicalize().expect("canonical root");
+    let store = tempfile::tempdir().expect("store");
+    let (state, rpc) = served(registry_with(id, &root, Some(store.path()))).await;
+    put(&rpc, id, FILE, CONTENT).await;
+    assert_eq!(
+        file_status(&rpc, id, FILE).await["content_sha256"],
+        sha256_hex(CONTENT)
+    );
+
+    let abs = root.join(FILE);
+    std::fs::create_dir_all(abs.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&abs, ON_DISK).expect("write the on-disk revision");
+    let handle = state.registry.get(&IndexId::new(id)).expect("registered");
+    crate::service::watch_loop::handle_modified(
+        &abs,
+        &handle.id,
+        &root,
+        &root,
+        &handle.indexer,
+        &crate::service::IndexedFiles::new(),
+    )
+    .await;
+
+    let ids = handle
+        .indexer
+        .read()
+        .await
+        .file_chunk_ids(FILE)
+        .await
+        .expect("chunk ids");
+    assert!(
+        ids.iter().any(|c| c.contains("authenticate_on_disk_10738")),
+        "the watcher must have replaced the put's chunks: {ids:?}"
+    );
+    let status = file_status(&rpc, id, FILE).await;
+    assert_eq!(status["present"], true, "{status}");
+    assert_ne!(
+        status["content_sha256"],
+        sha256_hex(CONTENT),
+        "the put's hash must not describe the watcher's chunks: {status}"
+    );
+    assert_eq!(
+        status["content_sha256"],
+        sha256_hex(ON_DISK),
+        "the hash names the bytes the watcher indexed: {status}"
+    );
+}

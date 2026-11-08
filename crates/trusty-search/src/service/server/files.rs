@@ -107,16 +107,10 @@ pub(crate) async fn index_file_report(
     super::remove_path::purge_verbatim_key(&indexer, &index_id, &req.path, &key)
         .await
         .map_err(failed)?;
-    // #10738: forget, write and record under the path's write lock, so two
-    // puts to one path cannot leave the hash of one beside the other's chunks.
-    let path_lock = indexer.lock_path_for_write(&key).await;
-    // #10738: forget the old hash first, so a write that fails part-way never
-    // leaves a hash naming content its chunks no longer hold.
-    crate::service::reindex::hash::forget_file_hash(&index_id, &indexer, &key)
-        .await
-        .map_err(failed)?;
+    // #10738: the write core forgets and records the path's content hash under
+    // the path's write lock, for this put and for the watcher and reconcile.
     let outcome = indexer
-        .index_file_outcome_path_locked(&key, &req.content, &path_lock)
+        .index_file_outcome(&key, &req.content)
         .await
         .map_err(failed)?;
     // #8922: sops content is refused like an excluded path, not a quiet 200.
@@ -124,12 +118,8 @@ pub(crate) async fn index_file_report(
         use crate::service::write_admission::{refusal, Refusal};
         return Err(refusal(&index_id.0, &req.path, Refusal::SopsEncrypted, 0));
     }
-    // #10738: record the indexed bytes' hash; the reply carries it and the identity.
-    let content_sha256 =
-        super::file_status::record_put_hash(&index_id, &indexer, &key, &req.content, &outcome)
-            .await
-            .map_err(failed)?;
-    drop(path_lock);
+    // #10738: the reply carries the indexed bytes' hash and the identity.
+    let content_sha256 = crate::service::reindex::hash::hash_content(&req.content);
     // #8976: `indexed` follows the outcome; `chunks`/`reason` are additive.
     let mut body = serde_json::Map::new();
     body.insert("index_id".into(), index_id.0.clone().into());

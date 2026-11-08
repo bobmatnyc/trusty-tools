@@ -23,6 +23,7 @@
 
 use crate::core::corpus::CorpusOpenFailure;
 use crate::core::registry::{IndexHandle, IndexId};
+use crate::service::index_identity;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
@@ -160,7 +161,7 @@ async fn begin_staged_corpus_swap_with_schema_reader(
     }
     // Quick read-lock probe: nothing to stage if no durable corpus.
     // Also capture the live corpus Arc for the incremental copy path (#839).
-    let live_corpus = {
+    let (live_corpus, writes_before) = {
         let indexer = handle.indexer.read().await;
         if !indexer.has_corpus_store() {
             return Ok(None);
@@ -169,7 +170,8 @@ async fn begin_staged_corpus_swap_with_schema_reader(
         // corpus (#839), and a force reindex — which deliberately starts with
         // no chunks — still has to carry the contributed overlay across the
         // swap (ADR-0009), because nothing in the pipeline can regenerate it.
-        indexer.corpus_store()
+        // #10738: the finished-write count, taken before the copy begins.
+        (indexer.corpus_store(), indexer.path_writes_finished())
     };
     // Whether this is an incremental (carryover) reindex — tracked so the
     // error path can distinguish a copy failure from a staging-open failure.
@@ -305,6 +307,9 @@ async fn begin_staged_corpus_swap_with_schema_reader(
     // dropped here; reads during the reindex are served from the in-memory
     // `chunks` HashMap, so dropping the durable handle does not affect search.
     let mut indexer = handle.indexer.write().await;
+    // #10738: a path write that finished after the copy began may be missing
+    // from staging (#839); mark the promotion to bump, or abandon the run.
+    index_identity::mark_carryover_misses(&indexer, &staged, &tmp_path, writes_before, force)?;
     let _prev = indexer.swap_corpus_store(std::sync::Arc::new(staged));
     drop(indexer);
     tracing::info!(
