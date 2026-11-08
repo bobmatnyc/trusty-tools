@@ -432,7 +432,8 @@ impl Bundle {
     /// it, and only a record event bound to the current hash counts.
     /// What: a `human:` `v.by` is refused with
     /// `Conflict { reason: "human_not_confirmed" }` and nothing is written;
-    /// it needs [`Bundle::verify_confirmed`] (§2.4, #10746). `seen` must
+    /// it needs [`Bundle::verify_confirmed`] (§2.4, #10746). An `id` that
+    /// folds to another file's key is `fold_collision` (§2.11). `seen` must
     /// equal the current content hash, else
     /// `Conflict { reason: "stale_verify_hash" }` and nothing is written. A
     /// malformed `verified` first moves to `legacy_verified` (criterion 125;
@@ -446,7 +447,8 @@ impl Bundle {
     /// Test: `c35_verify_with_stale_hash_is_conflict_and_writes_nothing`,
     /// `c125_malformed_owned_values_move_to_legacy_keys`,
     /// `c146_stale_after_extension_needs_a_human_or_a_verify`,
-    /// `human_verify_without_confirmation_is_refused`.
+    /// `human_verify_without_confirmation_is_refused`,
+    /// `verify_refuses_a_fold_twin_and_writes_no_record`.
     pub fn verify(
         &mut self,
         id: &ConceptId,
@@ -505,6 +507,12 @@ impl Bundle {
         // #10746: a `human:` actor alone is not explicit confirmation (§2.4).
         if is_human(&v.by) && !confirmed {
             return Err(conflict(id, "human_not_confirmed"));
+        }
+        // #10746: the `put` fold check (§2.11). On a case-insensitive file
+        // system `get` would read the twin and the record would gain a
+        // second ID; on any file system the answer is the same refusal.
+        if fold_conflict(&self.root, &id.file_name())?.is_some() {
+            return Err(conflict(id, "fold_collision"));
         }
         let c = self.get(id)?;
         if &content_hash(&c) != seen {

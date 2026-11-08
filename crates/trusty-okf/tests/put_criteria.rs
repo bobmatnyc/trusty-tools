@@ -772,3 +772,22 @@ fn human_verify_refuses_a_producer_named_human() {
         version: "1".into(),
     });
 }
+
+/// #10746 (§2.11 fold rule): `verify` applies the `put` fold check. A
+/// verify of `A` beside an existing `a.md` is `fold_collision` on every file
+/// system, and no second verification record (`_sources/verification/A…`)
+/// is written.
+#[cfg(unix)]
+#[test]
+fn verify_refuses_a_fold_twin_and_writes_no_record() {
+    let (tmp, mut b) = setup("---\ntype: Note\n---\nBody\n");
+    let before = snapshot(tmp.path());
+    let seen = content_hash(&b.get(&id("a")).unwrap());
+    let v = verification(process(), "2026-11-01T09:00:00Z");
+    assert_eq!(
+        conflict_reason(b.verify(&id("A"), v, &seen)),
+        "fold_collision"
+    );
+    assert_eq!(snapshot(tmp.path()), before, "no file changed");
+    assert!(!tmp.path().join("_sources/verification").exists());
+}
