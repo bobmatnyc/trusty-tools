@@ -120,6 +120,7 @@ pub mod mcp_session_bulk;
 pub mod openapi;
 pub mod optimizer;
 pub mod orphan_gc;
+pub(crate) mod orphan_gc_servers; // #10101
 pub mod overseer_compose;
 /// The `/pair/*` route registrations, extracted from `api.rs` (#4480).
 pub mod pairing_routes;
@@ -714,6 +715,7 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
     // #6118: the untracked-active skip log repeats once every N sweeps per
     // session rather than every sweep; N is overridable for live debugging.
     let mut gc = orphan_gc::OrphanGc::from_env();
+    let mut ws_gc = orphan_gc_servers::WorkspaceServerGc::default(); // #10101: per server
     // Cross-restart debounce for the PID-file sweep (#1918): owned here (not
     // reconstructed per-tick) so its two-pass candidate history persists across
     // sweeps, exactly like `gc` above.
@@ -811,8 +813,8 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // #6118: `run_sweep_fs` supplies the filesystem cwd probe, which
                 // is what lets the sweep reap a pane whose worktree was deleted
                 // underneath it — see `orphan_gc::CwdProbe`.
-                let reaped =
-                    orphan_gc::run_sweep_fs(&mut gc, &panes, &tracked, &probe, mtmux.as_ref());
+                let reaped = orphan_gc::run_sweep_fs(&mut gc, &panes, &tracked, &probe, &*mtmux)
+                    + ws_gc.sweep(&tracked, &probe, &driver, &*mtmux);
                 if reaped > 0 {
                     info!("orphan-GC reaped {reaped} orphaned managed session(s)");
                 }

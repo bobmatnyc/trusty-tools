@@ -888,7 +888,10 @@ impl SessionManager {
         // session holds the name now, so it never pairs the pane with a
         // server: the record stays unverifiable and every pane gate refuses.
         if record.pane_id.is_none() {
-            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
+            // See #10101: read on the record's own server, or not at all.
+            record.pane_id = super::tmux_route::route(self.tmux.as_ref(), &record)
+                .ok()
+                .and_then(|tmux| tmux.get_pane_id(&record.tmux_name));
         }
         // #9034: re-check under a fresh guard; a failed re-check writes nothing.
         let mut guard = self.store.write().await;
@@ -930,12 +933,11 @@ impl SessionManager {
         // `tmux show-environment` even though the process-env export never
         // landed. Best-effort — never fails the reap. #9101: never into a
         // session whose pane is not proven this record's.
+        // See #10101: the record's own server; an unreachable one is skipped.
         if owned.is_some()
-            && let Err(e) = self.tmux.set_environment(
-                &record.tmux_name,
-                "TM_MANAGED_SESSION_ID",
-                &id.to_string(),
-            )
+            && let Ok(tmux) = super::tmux_route::route(self.tmux.as_ref(), &record)
+            && let Err(e) =
+                tmux.set_environment(&record.tmux_name, "TM_MANAGED_SESSION_ID", &id.to_string())
         {
             warn!(
                 id = %id,
@@ -1081,6 +1083,12 @@ impl SessionManager {
         // the resume instead — the operator can retry once tmux answers.
         // See #10101: probe, and recreate, on the record's own server.
         let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
+        // #10101: a crashed workspace server leaves a socket that refuses
+        // (ECONNREFUSED); `start-server` replaces it with an empty server, so
+        // the probe below reads "no session" and the pane is recreated.
+        if tmux.is_named() {
+            tmux.ensure_server_up()?;
+        }
         if tmux.session_exists_checked(&record.tmux_name)? {
             // Sibling-window hijack fix (follow-up to #2456): `session_exists`
             // only proves SOME pane in this tmux session is alive — it says
@@ -1228,6 +1236,22 @@ impl SessionManager {
     /// Test: used in handler_spawn_wires_provision_and_spawn.
     pub fn tmux_driver(&self) -> Arc<dyn ManagedTmuxDriver> {
         self.tmux.clone()
+    }
+
+    /// The driver on `record`'s own tmux server (#10101): the default
+    /// driver for a default-server record.
+    ///
+    /// # Errors
+    ///
+    /// [`ManagedError::TmuxUnavailable`] when the record's server cannot be
+    /// reached; never the default server in its place.
+    ///
+    /// Test: `a_fresh_launch_creates_its_session_on_the_workspace_server`.
+    pub fn tmux_driver_for(
+        &self,
+        record: &SessionRecord,
+    ) -> Result<Arc<dyn ManagedTmuxDriver>, ManagedError> {
+        super::tmux_route::route_arc(&self.tmux, record)
     }
 
     /// Capture the last `lines` of the session's RECORDED harness pane.

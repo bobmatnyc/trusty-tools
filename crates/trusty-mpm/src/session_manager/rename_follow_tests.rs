@@ -300,7 +300,8 @@ async fn the_reaper_follows_a_rename_instead_of_stopping_the_session() {
     .await;
     let state = DaemonState::with_session_manager(Arc::clone(&mgr));
 
-    let live = ["tm-architect".to_string()].into_iter().collect();
+    let live: std::collections::HashSet<String> =
+        ["tm-architect".to_string()].into_iter().collect();
     state.reap_managed_against(&live).await;
 
     let record = mgr.get(&id).await.expect("record");

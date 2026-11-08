@@ -69,13 +69,19 @@ impl RealTmuxDriver {
         }
     }
 
-    /// Wrap an already-built driver — tests only, for a scripted fake tmux.
-    #[cfg(test)]
-    pub(crate) fn from_driver_for_test(driver: TmuxDriver) -> Self {
+    /// Wrap a driver the caller already discovered (#10101: the reap loop
+    /// lists workspace servers through the driver it holds).
+    pub(crate) fn from_driver(driver: TmuxDriver) -> Self {
         Self {
             driver,
             socket_dir: None,
         }
+    }
+
+    /// Wrap an already-built driver — tests only, for a scripted fake tmux.
+    #[cfg(test)]
+    pub(crate) fn from_driver_for_test(driver: TmuxDriver) -> Self {
+        Self::from_driver(driver)
     }
 
     /// List workspace servers in `dir`, never the process's socket directory
@@ -430,6 +436,20 @@ impl ManagedTmuxDriver for RealTmuxDriver {
                 dir.display()
             ))
         })
+    }
+
+    /// #10101: the pane's pid on this driver's server.
+    fn pane_pid(&self, pane_id: &str) -> Option<u32> {
+        self.driver.pane_pid(pane_id).ok()
+    }
+
+    /// #10101: this driver's socket directory, the one `-L` resolves in.
+    fn socket_dir(&self) -> Option<std::path::PathBuf> {
+        Some(
+            self.socket_dir
+                .clone()
+                .unwrap_or_else(crate::core::tmux_server::ambient_socket_dir),
+        )
     }
 
     /// #10127: the owned pane's pid through this driver's tmux, then the

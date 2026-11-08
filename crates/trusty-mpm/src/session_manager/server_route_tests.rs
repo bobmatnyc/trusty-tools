@@ -133,3 +133,38 @@ async fn stopping_a_named_server_record_reclaims_it_on_its_own_server() {
         "the default server was signalled: {calls}"
     );
 }
+
+/// Error arm (Fail-Open Check): a named-server teardown reads the pane's pid
+/// on the record's own server, so SIGTERM reaches its `claude`; the default
+/// server's pid read is never used. Red on 420b3717bf, which skipped the pid
+/// read for a named server and sent only the Ctrl-C fallback.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_named_server_teardown_signals_the_claude_read_through_its_server() {
+    let f = Fixture::new(FakeTmux {
+        only_server: Some(NAMED),
+        ..FakeTmux::default()
+    })
+    .await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
+    put_on_named_server(&f, &id).await;
+
+    f.scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
+        .await
+        .expect("stop");
+
+    let calls = f.calls();
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with(&format!("-L {NAMED} display-message"))
+                && l.contains("#{pane_pid}")),
+        "the pane pid was not read on the record's server: {calls}"
+    );
+    assert!(
+        default_server_calls(&calls)
+            .iter()
+            .all(|l| !l.contains("#{pane_pid}")),
+        "the pid was read on the default server: {calls}"
+    );
+}

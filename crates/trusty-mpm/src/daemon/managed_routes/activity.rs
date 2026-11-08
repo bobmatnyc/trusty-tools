@@ -228,7 +228,10 @@ pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> Rou
         .unwrap_or_else(|_| String::new());
 
     // Determine runtime_active from tmux presence (independent of LLM classifier).
-    let runtime_active = mgr.tmux_driver().session_exists(&record.tmux_name);
+    // See #10101: on the record's own server.
+    let runtime_active = mgr
+        .tmux_driver_for(&record)
+        .is_ok_and(|t| t.session_exists(&record.tmux_name));
 
     // #1840: when the runtime is stopped and the live capture is empty, serve
     // the stop-time scrollback snapshot so callers get SOME content rather than

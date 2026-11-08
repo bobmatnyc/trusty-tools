@@ -107,11 +107,11 @@ impl SessionManager {
             }
         };
         // #8935: the record's own pane's claude, not the session's active pane;
-        // with no pid the Ctrl-C fallback targets that pane too. #10101: the
-        // pid probe reads the default server, so a named-server pane gets the
-        // pane-scoped Ctrl-C instead.
+        // with no pid the Ctrl-C fallback targets that pane too. #10101: a
+        // named-server pane's pid is read through its own server's driver.
         let pid = if tmux.is_named() {
-            None
+            tmux.pane_pid(&pane_id)
+                .and_then(crate::core::process::claude_child_of)
         } else {
             crate::core::process::find_claude_pid_in_pane(tmux_name, &pane_id)
         };
