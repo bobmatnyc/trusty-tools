@@ -693,8 +693,10 @@ fn new_window_attach(name: &str, socket: &std::path::Path) -> anyhow::Result<Att
 /// every terminal write (the tui's Focus key, #10476).
 /// What: the window opens after the caller pane's window, named by its `@N`
 /// id; tmux refuses a `%N` pane id as a `new-window -a` target. A pane, or a
-/// window id, that cannot be read moves nothing.
+/// window id, that cannot be read moves nothing. A session the target server
+/// does not hold is an error, before any window opens.
 /// Test: `a_cross_server_focus_opens_the_attach_window`,
+/// `focus_on_a_session_no_server_holds_moves_nothing`,
 /// `a_cross_server_focus_without_a_pane_moves_nothing`,
 /// `a_caller_pane_with_no_window_moves_nothing`,
 /// `a_failed_attach_window_is_a_focus_failure`.
@@ -717,6 +719,10 @@ fn new_window_attach_in(
         }
         return Ok(AttachOutcome::TargetUnresolved);
     };
+    // #10101: Dc3 — no server holds `name`: an attach window would only close.
+    if !server::server_holds(&tmux_bin, socket, name)? {
+        anyhow::bail!("session '{name}' not found on any tmux server");
+    }
     let argv = server::new_window_attach_argv(&window, &tmux_bin, socket, name);
     if !quiet {
         eprintln!("tm: opening a window attached to '{name}' on its own tmux server");

@@ -110,6 +110,31 @@ pub(crate) fn window_of_pane(tmux_bin: &str, pane: &str) -> anyhow::Result<Optio
     Ok(id.starts_with('@').then_some(id))
 }
 
+/// Whether the tmux server at `socket` holds session `name` (`has-session`).
+///
+/// Why: [`target_socket`] answers the default server when no server holds
+/// `name`; a window opened there runs an attach that fails and closes, and the
+/// caller would report a move that never happened (#10101, Dc3).
+/// What: `false` on any non-zero exit, including a server that is not running.
+///
+/// # Errors
+///
+/// tmux cannot be run.
+///
+/// Test: `focus_on_a_session_no_server_holds_moves_nothing`.
+pub(crate) fn server_holds(tmux_bin: &str, socket: &Path, name: &str) -> anyhow::Result<bool> {
+    let target = trusty_common::tmux::exact_session_target(name);
+    let status = std::process::Command::new(tmux_bin)
+        .arg("-S")
+        .arg(socket)
+        .args(["has-session", "-t", &target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("failed to invoke tmux")?;
+    Ok(status.success())
+}
+
 /// `new-window -a -t <caller_window> -n <session> <command>` on the caller's
 /// server, where the command attaches to `session` on the server at `socket`
 /// with `$TMUX`/`$TMUX_PANE` unset (tmux refuses a nested attach otherwise).

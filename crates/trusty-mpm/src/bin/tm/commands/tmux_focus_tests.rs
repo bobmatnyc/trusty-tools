@@ -11,17 +11,29 @@ use super::*;
 
 const NAME: &str = "tm-a";
 
+/// [`fake_tmux_holding`] where the target server holds the session.
+fn fake_tmux(window: &str, code: i32, stderr: &str) -> (tempfile::TempDir, PathBuf) {
+    fake_tmux_holding(window, code, stderr, true)
+}
+
 /// A scratch dir holding a fake tmux that logs each argv to `calls.log`.
 /// `display-message` prints `window`; `new-window` prints `stderr` to stderr
-/// and exits with `code`; every other call exits 0 and prints nothing.
-fn fake_tmux(window: &str, code: i32, stderr: &str) -> (tempfile::TempDir, PathBuf) {
+/// and exits with `code`; a `-S <socket>` call (`has-session`) exits 0 only
+/// when `holds`; every other call exits 0 and prints nothing.
+fn fake_tmux_holding(
+    window: &str,
+    code: i32,
+    stderr: &str,
+    holds: bool,
+) -> (tempfile::TempDir, PathBuf) {
+    let held = if holds { 0 } else { 1 };
     let dir = tempfile::tempdir().expect("scratch dir");
     let log = dir.path().join("calls.log");
     let bin = dir.path().join("fake-tmux");
     let script = format!(
         "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1\" in\n\
          display-message) printf '%s\\n' '{window}' ;;\n\
-         new-window) echo '{stderr}' >&2; exit {code} ;;\nesac\nexit 0\n",
+         new-window) echo '{stderr}' >&2; exit {code} ;;\n-S) exit {held} ;;\nesac\nexit 0\n",
         log.display()
     );
     trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
@@ -60,11 +72,16 @@ async fn a_cross_server_focus_opens_the_attach_window() {
     assert_eq!(result, FocusResult::Switched);
     let log = calls(dir.path());
     let lines: Vec<&str> = log.lines().collect();
-    assert_eq!(lines.len(), 2, "two tmux calls: {log}");
-    // The caller pane's window id, then the window after it (#10101: Dc3).
+    assert_eq!(lines.len(), 3, "three tmux calls: {log}");
+    // The caller pane's window id, the target server holds the session, then
+    // the window after the caller's (#10101: Dc3).
     assert_eq!(lines[0], "display-message -p -t %7 #{window_id}");
+    assert_eq!(
+        lines[1],
+        format!("-S {} has-session -t =tm-a", target.display())
+    );
     assert!(
-        lines[1].starts_with("new-window -a -t @3 -n tm-a env -u TMUX -u TMUX_PANE "),
+        lines[2].starts_with("new-window -a -t @3 -n tm-a env -u TMUX -u TMUX_PANE "),
         "{log}"
     );
     assert!(
@@ -147,5 +164,20 @@ async fn a_caller_pane_with_no_window_moves_nothing() {
     let target = dir.path().join("tm-ws-a");
     let result = focus(&bin, Some(&caller), Some("%7"), Ok(target)).await;
     assert_eq!(result, FocusResult::Unresolved);
+    assert!(!calls(dir.path()).contains("new-window"));
+}
+
+#[tokio::test]
+async fn focus_on_a_session_no_server_holds_moves_nothing() {
+    // #10101: `target_socket` answers the default server for a session no
+    // server holds; the caller is on a workspace server.
+    let (dir, bin) = fake_tmux_holding("@3", 0, "", false);
+    let caller = tmux_env(dir.path(), "tm-ws-a");
+    let target = dir.path().join("default");
+    let result = focus(&bin, Some(&caller), Some("%7"), Ok(target)).await;
+    assert!(
+        matches!(&result, FocusResult::Failed(e) if e.contains("not found on any tmux server")),
+        "{result:?}"
+    );
     assert!(!calls(dir.path()).contains("new-window"));
 }
