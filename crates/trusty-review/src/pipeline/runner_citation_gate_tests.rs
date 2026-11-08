@@ -93,7 +93,9 @@ async fn run_review_posts_the_reanchored_line() {
 /// catches it.
 #[tokio::test]
 async fn run_review_drops_a_finding_whose_quoted_code_is_absent() {
-    let result = review_one("`flush_all()` is never awaited.", SUM_LINE).await;
+    // #10782: a quoted snippet, not a bare identifier, so the gate (not the
+    // pre-gate quote admission) is what withholds it.
+    let result = review_one("`flush()?;` is never awaited.", SUM_LINE).await;
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     // #8905 row 4: a review the gate emptied is withheld, never APPROVE.
     // #9310: the reviewer asked for changes, so it is a suppressed rejection.
@@ -130,10 +132,11 @@ async fn run_review_drops_a_finding_with_no_anchor() {
         result.verdict_status,
         Some(crate::models::VerdictStatus::SuppressedReject)
     );
+    // #10782: a finding that quotes nothing is withheld before the gate.
     assert!(
         result
             .review_body
-            .starts_with("1 findings withheld:\n- 1 citation unverifiable"),
+            .starts_with("1 findings withheld:\n- 1 quotes no code"),
         "{}",
         result.review_body
     );
@@ -349,7 +352,8 @@ fn run_json(result: &ReviewResult) -> (Verdict, bool, serde_json::Value) {
 /// gate withholds it, not the pre-grade hygiene pass.
 #[tokio::test]
 async fn run_review_all_withheld_approve_stays_approve_and_exits_zero() {
-    let nit = billing_finding("style", "`flush_all()` is slow.", "low", SUM_LINE);
+    // #10782: a quoted snippet, so the line gate withholds it, not quote admission.
+    let nit = billing_finding("style", "`flush()?;` is slow.", "low", SUM_LINE);
     let result = review_payload(
         "Minor style nit only.",
         "APPROVE",
@@ -374,7 +378,7 @@ async fn run_review_all_withheld_approve_stays_approve_and_exits_zero() {
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert_eq!(json["findings"], serde_json::json!([]));
     assert!(
-        !result.review_body.contains("flush_all"),
+        !result.review_body.contains("flush()"),
         "{}",
         result.review_body
     );
@@ -453,12 +457,15 @@ async fn run_review_all_withheld_request_changes_is_suppressed_reject() {
 /// An APPROVE graded `grade` whose one high-severity finding the #8905 gate
 /// withholds (#9310).
 async fn approve_graded_with_its_finding_withheld(grade: &str) -> ReviewResult {
-    let bug = billing_finding(
+    let mut bug = billing_finding(
         "data-loss",
         "`flush_all()` loses the total.",
         "high",
         SUM_LINE,
     );
+    // #10782: a usable quote absent from the file, so the gate withholds it,
+    // not the pregate (a pregate-only APPROVE is `parsed`, not `all_withheld`).
+    bug["quoted_snippet"] = serde_json::json!("ledger.flush_all().await?;");
     review_payload(
         "The flush loses data.",
         "APPROVE",
@@ -504,6 +511,7 @@ async fn run_review_all_withheld_approve_graded_a_stays_approve() {
     assert!(!fails, "{:?}", result.error);
     assert_eq!(json["verdict_status"], "all_withheld", "{json}");
     assert_eq!(json["withheld_count"], 1, "{json}");
+    assert_eq!(json["withheld_by_reason"]["line_citation"], 1, "{json}");
 }
 
 /// #9188 (Architect ruling, option A), single-pass path: a REQUEST_CHANGES

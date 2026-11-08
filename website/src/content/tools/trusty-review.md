@@ -71,6 +71,26 @@ summary instead of as inline comments. The result JSON still reports them in
 The new fields are additive. A consumer written for the older JSON keeps
 working.
 
+## Every finding quotes its code
+
+Each finding carries `quoted_snippet`: the code it is about, copied from its
+cited `file` at `line`. The cited line must hold that code. If it does not, the
+finding moves to the one line that does, or it is withheld.
+
+A note the reviewer cannot quote code for, such as "confirm X is imported", is
+not a finding. It goes in the result's `questions` list. No grade or verdict
+reads that list. A finding with no quote is withheld before grading, and
+`withheld_by_reason` counts it as `no_quote_pregate`.
+
+A pregate drop is not a gate withhold. An APPROVE with no surviving finding
+whose only withholds are `no_quote_pregate` reads `verdict_status: parsed`
+and carries `pregate_only_approve: true`. `all_withheld` still means a gate
+withheld at least one finding, alone or beside pregate drops. A review that
+asks for changes stays `suppressed_reject` whatever the reason. The gate
+count is `withheld_count` minus `withheld_by_reason.no_quote_pregate`.
+
+These fields are additive and absent when empty or false.
+
 ## Standards that live in the repo
 
 Drop a `.trusty-review.toml` at your repository root and every contributor and
