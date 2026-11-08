@@ -405,3 +405,41 @@ pub fn zip_bomb_docx(mib: usize) -> Vec<u8> {
         .unwrap();
     z.finish().unwrap().into_inner()
 }
+
+/// #10746: a DOCX with one paragraph per string, so xberg's Markdown is each
+/// string and a blank line: newline-dense, and quote-dense when the strings
+/// are (see [`quote_paras`]).
+pub fn dense_docx(paras: &[String]) -> Vec<u8> {
+    let body: String = paras.iter().map(|t| para(None, false, t)).collect();
+    let doc = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"{W}\"><w:body>{body}</w:body></w:document>"
+    );
+    docx_package(doc.as_bytes())
+}
+
+/// #10746: paragraphs of 1 to 31 characters, about half of them `"` and the
+/// rest lowercase letters, until their Markdown (each paragraph and a blank
+/// line) reaches `bytes`. A fixed-seed generator: deterministic, and varied
+/// enough that the package stays under xberg's compression-ratio guard.
+pub fn quote_paras(bytes: usize) -> Vec<String> {
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        x = x
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        x >> 33
+    };
+    let (mut out, mut total) = (Vec::new(), 0);
+    while total < bytes {
+        let len = 1 + (next() % 31) as usize;
+        let p: String = (0..len)
+            .map(|_| match next() {
+                r if r & 1 == 0 => '"',
+                r => (b'a' + ((r >> 1) % 26) as u8) as char,
+            })
+            .collect();
+        total += p.len() + 2;
+        out.push(p);
+    }
+    out
+}

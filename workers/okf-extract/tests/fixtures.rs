@@ -429,3 +429,72 @@ fn unknown_type_is_unsupported_and_the_worker_stays_up() {
     assert!(out.1.unwrap().contains("Opening slide"));
     assert_eq!(out.2, 1, "one worker process served both items");
 }
+
+/// The frame cap before #10746's fix: the output and fields limits plus
+/// 64 KiB, with no room for JSON escape growth.
+fn unescaped_cap(l: &Limits) -> u64 {
+    l.output_bytes + l.fields_bytes + (64 << 10)
+}
+
+/// Extract one DOCX with `limits` on a local store; the run's worker errors
+/// come back beside the result, so a protocol fault reads as a code.
+fn extract_with(limits: Limits, bytes: Vec<u8>) -> (Result<Extracted, ExtractError>, usize) {
+    within(budget(1) + limits.item, move || {
+        let (_tmp, dir) = scratch();
+        let mut cfg = WorkerConfig::new(WORKER, &dir);
+        cfg.sandbox = SandboxPolicy::Platform;
+        cfg.limits = limits;
+        let ex = WorkerExtractor::new(cfg).unwrap();
+        ex.begin_run(&local());
+        let r = ex.extract(&bytes, &TypeHint::for_path("dense.docx"));
+        (r, ex.end_run().errors.len())
+    })
+}
+
+/// Why: #10746 review — JSON escapes a newline or a quote as two bytes, so
+/// the real worker's reply for oversize, newline-dense text (cut one byte
+/// past the output limit) is near twice the limit. The host must still
+/// judge it by its decoded length and fail it `output_too_large`, not
+/// `protocol_error` (Appendix B "Error codes").
+/// What: a 1 MiB output limit and a DOCX of short paragraphs, half quotes,
+/// whose Markdown is 1.2 MiB (each paragraph and a blank line); the item
+/// fails `output_too_large` with no worker error.
+/// Test: self-contained.
+#[test]
+fn oversize_newline_dense_output_is_output_too_large() {
+    let limits = Limits {
+        output_bytes: 1 << 20,
+        ..Limits::default()
+    };
+    let (r, errors) = extract_with(limits, docs::dense_docx(&docs::quote_paras(1_200 << 10)));
+    let got = r.map(|e| e.text.len()).map_err(|e| (e.code, e.message));
+    assert_eq!(
+        got.as_ref().map_err(|e| e.0.as_str()),
+        Err("output_too_large"),
+        "{got:?}"
+    );
+    assert_eq!(errors, 0);
+}
+
+/// Why: #10746 review — text inside the output limit must extract however
+/// many bytes JSON escaping adds to its frame.
+/// What: the default limits and a DOCX of short paragraphs, half quotes,
+/// whose Markdown is 4 MiB; its escaped form is over the pre-fix cap, and
+/// the item extracts `ok` with every quote kept.
+/// Test: self-contained.
+#[test]
+fn in_limit_quote_and_newline_dense_output_is_ok() {
+    let limits = Limits::default();
+    let paras = docs::quote_paras(4 << 20);
+    let quotes: usize = paras.iter().map(|p| p.matches('"').count()).sum();
+    let (r, errors) = extract_with(limits, docs::dense_docx(&paras));
+    let t = match r {
+        Ok(e) => e.text,
+        Err(e) => panic!("expected ok, got {} {}", e.code, e.message),
+    };
+    let escaped = serde_json::to_string(&t).unwrap().len() as u64;
+    assert!(t.len() as u64 <= limits.output_bytes, "{} bytes", t.len());
+    assert!(escaped > unescaped_cap(&limits), "{escaped} escaped bytes");
+    assert_eq!(t.matches('"').count(), quotes);
+    assert_eq!(errors, 0);
+}
