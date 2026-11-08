@@ -1,6 +1,6 @@
 //! Doc-store read confinement — which directories may be ingested at all.
 //!
-//! Why: `okg_ingest_docstore` takes a filesystem path from a MODEL. Without a
+//! Why: a doc-store ingest can take a filesystem path from a MODEL. Without a
 //! boundary that is an arbitrary local-file-read capability on the default base
 //! assistant (inherited by every persona that extends it): `/etc`, `~/.ssh`,
 //! `~/.aws`, or `/` could be walked verbatim into a KB tree that is then
@@ -19,7 +19,7 @@
 //! roots, and then rejects any HIDDEN segment below the matched root. "Hidden"
 //! means three things, because one platform's convention is not another's: a
 //! dot-prefix (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
-//! `~/.trusty-agents`), the `UF_HIDDEN` file flag (macOS marks `~/Library` this
+//! agent homes), the `UF_HIDDEN` file flag (macOS marks `~/Library` this
 //! way — it is NOT dot-prefixed, yet holds `Application Support/<App>` tokens,
 //! `Keychains`, and `Preferences`), and a small name backstop for when the flag
 //! is absent. Together they fail closed for the credential dirs nobody has
@@ -35,16 +35,18 @@
 //!   - Loose non-hidden files sitting directly in `$HOME` (`~/private_key.pem`)
 //!     are still reachable under the DEFAULT policy. That is inherent to
 //!     defaulting to `$HOME` at all; an operator wanting a tighter boundary
-//!     narrows `docstore_roots` to the specific corpus directories.
+//!     narrows the doc-store roots to the specific corpus directories.
 //!   - This gate authorises a ROOT. Per-file symlink safety during the walk is
 //!     `WalkDir`'s `follow_links(false)`, pinned explicitly in
-//!     [`crate::okg::docstore::scan`] so a refactor cannot silently flip it.
+//!     [`crate::build::docstore::scan`] so a refactor cannot silently flip it.
 //!
 //! Test: `home_default_permits_ordinary_dir`, `ssh_style_dotdir_is_rejected`,
 //! `outside_allow_list_is_rejected`, `symlink_escape_is_rejected`,
 //! `configured_root_is_permitted`, `empty_allow_list_denies_everything`.
 
 use std::path::{Component, Path, PathBuf};
+
+use crate::OkfError;
 
 /// Directories a doc-store ingest is permitted to read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +69,8 @@ impl DocStorePolicy {
     /// of the box, while the credential and config directories that make an
     /// unconfined read dangerous are excluded by the dot-segment rule rather
     /// than by an enumeration that would inevitably fall behind.
+    /// #10746: the caller passes the user's home; trusty-okf never derives a
+    /// home or an agent home itself (SPEC-OKF-01 §2.7.2, B3).
     pub fn home_default(home: &Path) -> Self {
         Self::new(vec![home.to_path_buf()])
     }
@@ -77,21 +81,33 @@ impl DocStorePolicy {
     /// `..` chain or a symlink pointing at `/etc` is judged by where it
     /// actually lands, not by how it was spelled.
     /// Test: the tests in this module.
-    pub fn permit(&self, candidate: &Path) -> anyhow::Result<PathBuf> {
+    pub fn permit(&self, candidate: &Path) -> Result<PathBuf, OkfError> {
+        let refuse = |path: &Path, reason: String| OkfError::PolicyRefused {
+            path: path.to_path_buf(),
+            reason,
+        };
         if self.allowed_roots.is_empty() {
-            anyhow::bail!(
-                "no doc-store roots are configured, so {} cannot be ingested — \
-                 add one under [okg] docstore_roots in ~/.trusty-agents/config.toml",
-                candidate.display()
-            );
+            return Err(refuse(
+                candidate,
+                format!(
+                    "no doc-store roots are configured, so {} cannot be ingested — \
+                     the caller must name at least one permitted root",
+                    candidate.display()
+                ),
+            ));
         }
         let resolved = candidate.canonicalize().map_err(|e| {
-            anyhow::anyhow!("doc store {} cannot be resolved: {e}", candidate.display())
+            refuse(
+                candidate,
+                format!("doc store {} cannot be resolved: {e}", candidate.display()),
+            )
         })?;
         if !resolved.is_dir() {
-            anyhow::bail!("doc store {} is not a directory", resolved.display());
+            return Err(refuse(
+                &resolved,
+                format!("doc store {} is not a directory", resolved.display()),
+            ));
         }
-
         // Find the allowed root this path actually sits under. An unresolvable
         // root simply never matches — a stale config entry must not widen the
         // boundary or crash the ingest.
@@ -104,18 +120,20 @@ impl DocStorePolicy {
             // not re-judged against a broader parent root.
             .max_by_key(|root| root.components().count())
         else {
-            anyhow::bail!(
-                "doc store {} is outside every configured doc-store root ({}) — \
-                 add it under [okg] docstore_roots in ~/.trusty-agents/config.toml to ingest it",
-                resolved.display(),
-                self.allowed_roots
-                    .iter()
-                    .map(|r| r.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            return Err(refuse(
+                &resolved,
+                format!(
+                    "doc store {} is outside every configured doc-store root ({}) — \
+                     add it to the caller's doc-store roots to ingest it",
+                    resolved.display(),
+                    self.allowed_roots
+                        .iter()
+                        .map(|r| r.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
         };
-
         // Hidden directories hold credentials and tool state, never corpora.
         //
         // The check runs only on the portion BELOW the matched root, for two
@@ -125,12 +143,16 @@ impl DocStorePolicy {
         // it runs on the RESOLVED path, so a symlink from `~/Documents/keys`
         // into `~/.ssh` is still caught.
         if let Some(hidden) = hidden_segment_below(&matched, &resolved) {
-            anyhow::bail!(
-                "doc store {} is not ingestible: it lies inside the hidden directory {hidden:?}, \
-                 which is excluded because such paths hold credentials and tool state — \
-                 name it directly in [okg] docstore_roots if you really intend to ingest it",
-                resolved.display()
-            );
+            return Err(refuse(
+                &resolved,
+                format!(
+                    "doc store {} is not ingestible: it lies inside the hidden directory \
+                     {hidden:?}, which is excluded because such paths hold credentials and \
+                     tool state — name it directly as a doc-store root if you really intend \
+                     to ingest it",
+                    resolved.display()
+                ),
+            ));
         }
         Ok(resolved)
     }
@@ -159,7 +181,8 @@ const EXCLUDED_SEGMENT_NAMES: &[&str] = &["Library"];
 /// refused.
 /// Test: `ssh_style_dotdir_is_rejected`, `macos_library_is_rejected`,
 /// `platform_hidden_flag_is_rejected`.
-fn hidden_segment_below(root: &Path, resolved: &Path) -> Option<String> {
+/// #10746 S8: also the import walk's `hidden` rule (§2.14 rule 9).
+pub(crate) fn hidden_segment_below(root: &Path, resolved: &Path) -> Option<String> {
     let relative = resolved.strip_prefix(root).ok()?;
     let mut probe = root.to_path_buf();
     for component in relative.components() {
@@ -296,7 +319,7 @@ mod tests {
     }
 
     /// Why: explicit configuration must still beat the heuristic — an operator
-    /// who names a directory inside `~/Library` in `docstore_roots` has opted
+    /// who names a directory inside `~/Library` as a doc-store root has opted
     /// in deliberately, consistent with how a configured `~/.local/...` root
     /// already behaves.
     /// What: configures a root INSIDE Library and asserts it is permitted while

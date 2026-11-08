@@ -239,7 +239,7 @@ fn entities(key: &str, input: &SourceItem, output: &Extraction, model: &str) -> 
             let link=format!("[[{}]]",ids[&relation.object]);
             fields.entry(relation.predicate.clone()).and_modify(|v|{v.push(' ');v.push_str(&link)}).or_insert(link);
         }
-        SourceItem{item_id:id.clone(),name:id,title:entity.name.clone(),fingerprint:catalog::digest(&body),timestamp:input.timestamp.clone(),body,fields,volatile:false}
+        SourceItem{item_id:id.clone(),name:id,title:entity.name.clone(),fingerprint:catalog::digest(&body),timestamp:input.timestamp.clone(),body,fields,frontmatter:Default::default(),volatile:false}
     }).collect()
 }
 async fn withdraw(context: &Context, state: &KnowledgeState, key: &str) -> anyhow::Result<()> {

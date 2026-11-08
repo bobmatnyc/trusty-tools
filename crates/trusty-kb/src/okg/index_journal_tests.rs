@@ -66,7 +66,7 @@ fn backlog_lists_freshly_ingested_entities() {
     std::fs::write(corpus.join("two.md"), "second note").unwrap();
     let spec = register(&store, &corpus);
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
         .unwrap();
 
     let backlog = store.okg_index_backlog(&spec).unwrap();
@@ -101,7 +101,7 @@ fn recorded_entity_leaves_the_backlog() {
     std::fs::write(corpus.join("one.md"), "first note").unwrap();
     let spec = register(&store, &corpus);
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
         .unwrap();
     assert_eq!(drain(&store, &spec, "t0"), 1);
 
@@ -111,7 +111,7 @@ fn recorded_entity_leaves_the_backlog() {
 
     // A full re-ingest skips the item entirely; the index must stay settled.
     let report = store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t1")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T01:00:00Z")
         .unwrap();
     assert_eq!(report.skipped, 1);
     assert!(store.okg_index_backlog(&spec).unwrap().tasks.is_empty());
@@ -129,14 +129,14 @@ fn unrecorded_push_stays_pending_across_runs() {
     std::fs::write(corpus.join("one.md"), "first note").unwrap();
     let spec = register(&store, &corpus);
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
         .unwrap();
 
     // Simulate a run whose push failed: the ledger has the item, the journal
     // does not.
     assert_eq!(store.okg_index_backlog(&spec).unwrap().tasks.len(), 1);
     let second = store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t1")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T01:00:00Z")
         .unwrap();
     assert_eq!(second.skipped, 1, "the ingest engine skips it — by design");
 
@@ -162,7 +162,7 @@ fn changed_entity_reenters_the_backlog() {
     std::fs::write(corpus.join("one.md"), "first note").unwrap();
     let spec = register(&store, &corpus);
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
         .unwrap();
     drain(&store, &spec, "t0");
     let before = store.okg_index_backlog(&spec).unwrap();
@@ -170,7 +170,7 @@ fn changed_entity_reenters_the_backlog() {
 
     std::fs::write(corpus.join("one.md"), "first note, revised").unwrap();
     let report = store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t1")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T01:00:00Z")
         .unwrap();
     assert_eq!(report.updated, 1);
 
@@ -196,13 +196,13 @@ fn tombstoned_entity_becomes_a_remove_task() {
     std::fs::write(corpus.join("one.md"), "first note").unwrap();
     let spec = register(&store, &corpus);
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
         .unwrap();
     drain(&store, &spec, "t0");
 
     std::fs::remove_file(corpus.join("one.md")).unwrap();
     let report = store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t1")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T01:00:00Z")
         .unwrap();
     assert_eq!(report.tombstoned, 1);
 
@@ -227,11 +227,11 @@ fn never_indexed_tombstone_needs_no_removal() {
     std::fs::write(corpus.join("one.md"), "first note").unwrap();
     let spec = register(&store, &corpus);
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
         .unwrap();
     std::fs::remove_file(corpus.join("one.md")).unwrap();
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t1")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T01:00:00Z")
         .unwrap();
 
     let backlog = store.okg_index_backlog(&spec).unwrap();
@@ -255,7 +255,7 @@ fn torn_index_journal_line_is_skipped_not_fatal() {
     std::fs::write(corpus.join("two.md"), "second note").unwrap();
     let spec = register(&store, &corpus);
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
         .unwrap();
     drain(&store, &spec, "t0");
 
@@ -276,7 +276,7 @@ fn torn_index_journal_line_is_skipped_not_fatal() {
     // And the journal keeps working: a new entity records cleanly.
     std::fs::write(corpus.join("three.md"), "third note").unwrap();
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t1")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T01:00:00Z")
         .unwrap();
     assert_eq!(drain(&store, &spec, "t1"), 1);
     assert!(store.okg_index_backlog(&spec).unwrap().tasks.is_empty());
@@ -296,13 +296,13 @@ fn same_length_edit_is_still_detected() {
     std::fs::write(corpus.join("one.md"), "aaaa").unwrap();
     let spec = register(&store, &corpus);
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
         .unwrap();
     drain(&store, &spec, "t0");
 
     std::fs::write(corpus.join("one.md"), "bbbb").unwrap();
     store
-        .okg_ingest_docstore("corpus", &policy(&tmp), "t1")
+        .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T01:00:00Z")
         .unwrap();
     let backlog = store.okg_index_backlog(&spec).unwrap();
     assert_eq!(

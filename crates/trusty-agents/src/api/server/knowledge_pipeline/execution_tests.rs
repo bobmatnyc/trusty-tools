@@ -172,6 +172,7 @@ fn host_identity_scopes_equal_names_to_the_source_item() {
         timestamp: None,
         body: "Maya leads Atlas.".into(),
         fields: BTreeMap::new(),
+        frontmatter: Default::default(),
         volatile: false,
     };
     let one = entities("source-one", &input, &output(), "fixture");

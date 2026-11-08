@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 
+use crate::bundle::audit::LossItem;
 use crate::format::id::ConceptId;
 use crate::format::validate::Finding;
 
@@ -62,11 +63,100 @@ pub enum OkfError {
     /// `verified_is_owned_by_verify`, `legacy_verified_exists`,
     /// `legacy_generated_exists`, `target_exists`,
     /// `verification_record_exists`, `human_not_confirmed` (§2.4).
+    /// #10746 S6: `tombstone_without_source_id` (§4.8), `superseded`,
+    /// `supersede_self`, `stale_plan` (§2.9).
     #[error("conflict on {id}: {reason}")]
     Conflict {
         /// The concept the write targets.
         id: ConceptId,
         /// Why the write was refused.
+        reason: String,
+    },
+    /// #10746 S5: an operation of the journal is incomplete and conflicted;
+    /// a write touching one of its paths needs `Bundle::recover` first
+    /// (SPEC-OKF-01 §4.11 rule 2).
+    #[error("operation {op_id} needs an explicit recover; paths {paths:?}")]
+    RecoveryPending {
+        /// The incomplete operation.
+        op_id: String,
+        /// Its file-step paths, bundle-relative.
+        paths: Vec<PathBuf>,
+    },
+    /// #10746 S6: the §2.9 migration audit failed; every changed file was
+    /// restored from its backup, or is listed as `restore_failed`.
+    #[error("migration audit failed: {0:?}")]
+    MigrationLoss(Vec<LossItem>),
+    /// #10746 S6: `adopt` refused the whole call (§4.5 "Adopt"): reason
+    /// `not_human` or `not_confirmed`; no file or record changed.
+    #[error("adopt refused: {reason}")]
+    AdoptRefused {
+        /// `not_human` or `not_confirmed`.
+        reason: String,
+    },
+    /// #10746 S8: the bundle root and an import's source root contain one
+    /// another; the import refused before any write (§2.14 rule 1).
+    #[error("source root {source_root:?} and bundle root {bundle_root:?} overlap")]
+    SourceOverlap {
+        /// The canonical source root.
+        source_root: PathBuf,
+        /// The canonical bundle root.
+        bundle_root: PathBuf,
+    },
+    /// #10746 S9: an import over an authenticated source names no account
+    /// or no source selection; refused before any spawn or write (§2.15
+    /// item 1, criterion 86). The string names what is missing.
+    #[error("selection required: {0}")]
+    SelectionRequired(String),
+    /// #10746 S5: an `IndexStateDir` inside the bundle root (§4.9.1).
+    #[error("index state directory lies inside the bundle root: {0:?}")]
+    StateDirInBundle(PathBuf),
+    /// #10746 S7: the search index root is missing, not absolute, or does not
+    /// contain the bundle root; the feed pass refused before any push
+    /// (SPEC-OKF-01 §5.4 F5).
+    #[error(
+        "index {index_id} root {index_root:?} does not contain the bundle root {bundle_root:?}"
+    )]
+    RootMismatch {
+        /// The caller's index ID.
+        index_id: String,
+        /// The root the daemon reported, when it reported an absolute one.
+        index_root: Option<PathBuf>,
+        /// The canonical bundle root.
+        bundle_root: PathBuf,
+    },
+    /// #10746 S7: the daemon confirmed a write but the index journal append
+    /// failed; the task counts as not indexed and the pass stopped (§5.4 F3).
+    #[error("index journal append failed at {path:?}: {source}")]
+    JournalWrite {
+        /// The journal file.
+        path: PathBuf,
+        /// The underlying error.
+        source: std::io::Error,
+    },
+    /// #10746 S7: the index holds a path under the bundle's `_sources/` or
+    /// `_state/`; the pass removed the prefix, pushed nothing and advanced no
+    /// state (§5.3.1 rule 3, F16).
+    #[error("index {index_id} holds bookkeeping paths: {leaked:?}")]
+    IndexScope {
+        /// The caller's index ID.
+        index_id: String,
+        /// The leaked paths, index-relative.
+        leaked: Vec<PathBuf>,
+    },
+    /// #10746 S7: a trusty-search call failed (feed preflight and `retrieve`
+    /// only). Feature `search-feed`.
+    #[cfg(feature = "search-feed")]
+    #[error("{0}")]
+    Search(crate::feed::SearchError),
+    /// #10746 S4: the doc-store read policy refused a directory; nothing was
+    /// read. The display is the reason alone, so a caller that matched
+    /// trusty-kb's message text still matches (SPEC-OKF-01 §2.13 reuses
+    /// `DocStorePolicy`; §2.14 names the item skip `policy_refused`).
+    #[error("{reason}")]
+    PolicyRefused {
+        /// The directory as given, or as resolved when resolution succeeded.
+        path: PathBuf,
+        /// Why it is not permitted.
         reason: String,
     },
 }

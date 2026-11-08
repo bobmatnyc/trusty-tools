@@ -1,7 +1,7 @@
 //! Per-source append-only ledger — the "pull exactly once, ever" guarantee.
 //!
 //! Why: every ingest must converge, not accumulate. A re-run over the same
-//! corpus has to produce ZERO new entities, a widened Gmail window has to fetch
+//! corpus has to produce ZERO new entities, a widened gmail window has to fetch
 //! only the messages it has never seen, and a crash halfway through a 5,000-item
 //! pull must not force a full re-pull or duplicate the half that landed. All
 //! three fall out of one durable structure: an append-only JSONL journal keyed
@@ -28,10 +28,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::entity::slugify;
-use crate::okg::jsonl::{Appender, read_journal};
-use crate::okg::registry::SOURCES_DIR;
-use crate::roots::{assert_within, confine};
+use crate::OkfError;
+use crate::build::jsonl::{Appender, read_journal};
+use crate::build::registry::sources_file;
+use crate::format::concept::slugify;
 
 /// What a ledger line asserts about its item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,11 +47,11 @@ pub enum ItemStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerRecord {
     /// The source's own stable identity for this item — a relative path, a
-    /// Gmail message id, a Drive file id. Never re-derived from content.
+    /// gmail message id, a drive file id. Never re-derived from content.
     pub item_id: String,
     /// Change token. Equal fingerprint = unchanged = skip. A content hash for
-    /// doc stores, a revision/modifiedTime for Drive, the message id for Gmail
-    /// (immutable, so a Gmail item is pulled exactly once, ever).
+    /// doc stores, a revision/modifiedTime for drive, the message id for gmail
+    /// (immutable, so a gmail item is pulled exactly once, ever).
     pub fingerprint: String,
     /// `<collection>/<slug>` of the entity this item produced.
     pub entity: String,
@@ -92,22 +92,20 @@ pub struct Ledger {
     /// Count of unparseable lines encountered on load.
     malformed: usize,
     /// Durable append handle, which also heals a crash-torn final line — see
-    /// [`crate::okg::jsonl`].
+    /// [`crate::build::jsonl`].
     appender: Appender,
 }
 
 impl Ledger {
     /// The confined journal path for a source id under a KB root.
     ///
-    /// Why: the id comes from a tool argument; slugging plus [`confine`] means a
+    /// Why: the id comes from a tool argument; slugging plus
+    /// [`confine`](crate::bundle::paths::confine) means a
     /// hostile id can never name a file outside `_sources/`.
     /// What: `<root>/_sources/<slug(id)>.jsonl`.
     /// Test: exercised by every test here via [`Ledger::load`].
-    pub fn path_for(root: &Path, source_id: &str) -> anyhow::Result<PathBuf> {
-        let file = format!("{}.jsonl", slugify(source_id));
-        let path = confine(root, &[SOURCES_DIR, &file])?;
-        assert_within(root, &path)?;
-        Ok(path)
+    pub fn path_for(root: &Path, source_id: &str) -> Result<PathBuf, OkfError> {
+        sources_file(root, &format!("{}.jsonl", slugify(source_id)))
     }
 
     /// Read a source's journal into a last-record-wins index.
@@ -115,12 +113,12 @@ impl Ledger {
     /// Why: an absent journal is a first run, not an error; and a damaged line
     /// must be SKIPPED rather than abort the load, or one torn write from a
     /// crash would permanently brick the source. Both properties live in
-    /// [`crate::okg::jsonl::read_journal`], shared with the index journal.
+    /// [`crate::build::jsonl::read_journal`], shared with the index journal.
     /// What: reads every parseable line, keeps the last record per item id, and
     /// counts every line it could not use.
     /// Test: `torn_line_is_skipped_not_fatal`,
     /// `torn_mid_utf8_codepoint_is_skipped_not_fatal`.
-    pub fn load(root: &Path, source_id: &str) -> anyhow::Result<Self> {
+    pub fn load(root: &Path, source_id: &str) -> Result<Self, OkfError> {
         let path = Self::path_for(root, source_id)?;
         let load = read_journal::<LedgerRecord>(&path)?;
         let mut ledger = Self {
@@ -158,7 +156,7 @@ impl Ledger {
 
     /// Whether this item has EVER been recorded, at any version.
     ///
-    /// Why: callers that pay per fetch (Gmail message bodies, Drive downloads)
+    /// Why: callers that pay per fetch (gmail message bodies, drive downloads)
     /// use this to skip the expensive fetch entirely for ids already pulled —
     /// the "pull exactly once, ever" optimisation. Content-addressed sources use
     /// [`Ledger::is_current`] instead, since they must re-read to know.
@@ -191,7 +189,7 @@ impl Ledger {
     /// killed immediately after has lost nothing already reported as ingested.
     /// What: opens (once per run) in append mode, writes one JSON line, syncs.
     /// Test: `append_then_reload_is_current`.
-    pub fn append(&mut self, record: LedgerRecord) -> anyhow::Result<()> {
+    pub fn append(&mut self, record: LedgerRecord) -> Result<(), OkfError> {
         self.appender.append(&record)?;
         self.last_ingest_at = Some(record.ingested_at.clone());
         self.latest.insert(record.item_id.clone(), record);
@@ -224,6 +222,31 @@ impl Ledger {
         }
         wm
     }
+}
+
+/// The concept IDs (`entity`) that any ledger under `_sources/` names, at
+/// any status (#10746 S6: "ledger-owned", SPEC-OKF-01 §4.5).
+///
+/// What: reads every top-level `_sources/*.jsonl` as a ledger; a line that is
+/// not a ledger record (the revision journal) is skipped, as a torn line is.
+/// Test: `c142_legacy_hashless_events_never_gain_a_hash`.
+pub(crate) fn owned_entities(root: &Path) -> Result<std::collections::BTreeSet<String>, OkfError> {
+    let dir = crate::bundle::paths::confined_file(root, "_sources")?;
+    let mut out = std::collections::BTreeSet::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(crate::bundle::paths::io_err(&dir, e)),
+    };
+    for e in entries {
+        let path = e.map_err(|e| crate::bundle::paths::io_err(&dir, e))?.path();
+        if path.is_file() && path.extension().is_some_and(|x| x == "jsonl") {
+            for r in read_journal::<LedgerRecord>(&path)?.records {
+                out.insert(r.entity);
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -329,7 +352,7 @@ mod tests {
 
     /// Why: regression guard (code-critic CRITICAL 1). A crash lands mid-write
     /// at an arbitrary BYTE, and this crate's records routinely carry non-ASCII
-    /// text — a Gmail subject with an em-dash, a Drive filename in kana. Tearing
+    /// text — a gmail subject with an em-dash, a drive filename in kana. Tearing
     /// such a record mid-codepoint left the file invalid UTF-8, and the old
     /// `read_to_string` load then failed outright, bricking the source on every
     /// subsequent run instead of losing one item.

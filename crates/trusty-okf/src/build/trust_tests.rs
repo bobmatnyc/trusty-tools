@@ -5,17 +5,61 @@
 //! matching the crate-local convention (`ingest.rs`/`ingest_tests.rs`).
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use super::*;
-use crate::okg::ingest::SourceItem;
-use crate::okg::registry::Locator;
-use crate::schema::Profile;
-use crate::store::KbStore;
+use crate::OkfError;
+use crate::build::ingest::{IngestReport, SourceItem, concept_id_for, ingest_items};
+use crate::build::registry::{ConnectorParams, Locator};
+use crate::format::fields::parse_instant;
+use crate::profile::Profile;
 
-fn store() -> (tempfile::TempDir, KbStore) {
+/// #10746: the engine bound to a temp root, with trusty-kb's method names.
+struct Kb {
+    root: PathBuf,
+}
+
+impl Kb {
+    fn ingest_items(
+        &self,
+        spec: &SourceSpec,
+        items: &[SourceItem],
+        detect: bool,
+        now: &str,
+    ) -> Result<IngestReport, OkfError> {
+        let now = parse_instant(now).unwrap();
+        ingest_items(
+            &self.root,
+            &Profile::default_profile(),
+            spec,
+            items,
+            detect,
+            now,
+        )
+    }
+
+    fn entity_path(&self, collection: &str, name: &str) -> Result<PathBuf, OkfError> {
+        Ok(self
+            .root
+            .join(concept_id_for(collection, name)?.file_name()))
+    }
+}
+
+fn store() -> (tempfile::TempDir, Kb) {
     let tmp = tempfile::tempdir().unwrap();
-    let store = KbStore::new(tmp.path().to_path_buf(), Profile::default_profile());
-    (tmp, store)
+    let root = tmp.path().canonicalize().unwrap();
+    (tmp, Kb { root })
+}
+
+fn connector(kind: &str, pairs: &[(&str, &str)]) -> Locator {
+    let mut params = ConnectorParams::new();
+    for (k, v) in pairs {
+        params.insert(k, toml::Value::String(v.to_string()));
+    }
+    Locator::Connector {
+        kind: kind.into(),
+        params,
+    }
 }
 
 fn docstore_spec() -> SourceSpec {
@@ -35,11 +79,7 @@ fn gmail_spec() -> SourceSpec {
     SourceSpec::new(
         "mail",
         Some("sources"),
-        Locator::Gmail {
-            query: "in:sent".into(),
-            after: None,
-            before: None,
-        },
+        connector("gmail", &[("query", "in:sent")]),
         "2026-08-01T00:00:00Z",
     )
 }
@@ -48,10 +88,7 @@ fn drive_spec() -> SourceSpec {
     SourceSpec::new(
         "shared",
         Some("sources"),
-        Locator::Drive {
-            folder_id: "root".into(),
-            recursive: false,
-        },
+        connector("drive", &[("folder_id", "root")]),
         "2026-08-01T00:00:00Z",
     )
 }
@@ -65,6 +102,7 @@ fn item(id: &str, body: &str, fields: BTreeMap<String, String>) -> SourceItem {
         timestamp: Some("2026-08-01".into()),
         body: body.into(),
         fields,
+        frontmatter: Default::default(),
         volatile: false,
     }
 }
@@ -100,7 +138,7 @@ fn undesignated_directory_is_untrusted() {
 /// Why: DOC-63 §6.4 `S-4.8`/`S-4.9` — no remote corpus has an enforceable
 /// author constraint, so a `user_authored = true` row on a remote locator must
 /// be IGNORED, not honoured. This is the property that stops a mis-set (or
-/// maliciously-set) registry row laundering Gmail or Drive content into the
+/// maliciously-set) registry row laundering gmail or drive content into the
 /// trusted set.
 /// What: sets the designation on every remote locator and asserts it changes
 /// nothing.
@@ -301,9 +339,10 @@ fn ingest_stamps_user_authored_for_a_designated_directory() {
 /// connector cannot mark its own output trusted". A fetcher is the component
 /// closest to attacker-influenced bytes; if it could set its own label, the
 /// label would be worth nothing.
-/// What: a `SourceItem` from an UNTRUSTED gmail source carries
+/// What: a `SourceItem` from an UNTRUSTED `gmail` source carries
 /// `trust: user-authored` in its connector-supplied `fields`. The written
-/// entity must still be `untrusted-external`.
+/// concept's top-level label must still be `untrusted-external`; #10746: the
+/// forged value sits unchanged under `source_fields` (SPEC-OKF-01 §2.13.1).
 #[test]
 fn connector_cannot_override_the_trust_label() {
     let (_t, store) = store();
@@ -311,8 +350,7 @@ fn connector_cannot_override_the_trust_label() {
     fields.insert(TRUST_KEY.to_string(), "user-authored".to_string());
     // Belt-and-braces: the other envelope fields are equally unforgeable.
     fields.insert("source_kind".to_string(), "docstore".to_string());
-
-    store
+    let report = store
         .ingest_items(
             &gmail_spec(),
             &[item("evil", "payload", fields)],
@@ -320,18 +358,46 @@ fn connector_cannot_override_the_trust_label() {
             "2026-08-01T00:00:00Z",
         )
         .unwrap();
-
+    assert_eq!(report.findings.len(), 2, "{:?}", report.findings);
     let path = store.entity_path("sources", "evil").unwrap();
     let written = std::fs::read_to_string(&path).unwrap();
-    assert!(
-        !written.contains("user-authored"),
-        "connector-supplied trust must be shadowed out entirely: {written}"
-    );
+    let fm = crate::format::concept::Entity::from_content(&written)
+        .unwrap()
+        .frontmatter;
+    assert_eq!(fm["trust"], "untrusted-external", "{written}");
+    assert_eq!(fm["source_kind"], "gmail", "{written}");
+    assert_eq!(fm["source_fields"]["trust"], "user-authored", "{written}");
     assert_eq!(
         TrustLabel::of_entity_file(&path),
         TrustLabel::UntrustedExternal,
         "connector-supplied trust must not survive to the point of use"
     );
+}
+
+/// Why: B6 moves the connector kinds out of trusty-okf, so every row the
+/// engine cannot interpret must land on the untrusted side, whatever its
+/// kind and whatever its `user_authored` flag says — including a SENT-only
+/// `gmail` row and an operator-initiated inbound import (DOC-63 S-3.3 as
+/// amended 2026-11-03; SPEC-OKF-01 §3 (l) C).
+/// What: connector rows of several kinds, flagged and unflagged.
+#[test]
+fn connector_rows_are_untrusted_even_when_marked_user_authored() {
+    for kind in ["gmail", "drive", "slack", "notion", "granola", "docstore"] {
+        for flag in [false, true] {
+            let spec = SourceSpec::new(
+                "x",
+                None,
+                connector(kind, &[("query", "in:sent")]),
+                "2026-08-01T00:00:00Z",
+            )
+            .with_user_authored(flag);
+            assert_eq!(
+                TrustLabel::for_source(&spec),
+                TrustLabel::UntrustedExternal,
+                "connector `{kind}` (user_authored={flag}) must stay untrusted"
+            );
+        }
+    }
 }
 
 /// Why: a tombstone is a flag, never a deletion (see `tombstone_item`), so the

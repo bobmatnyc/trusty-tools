@@ -87,6 +87,21 @@ pub enum FindingKind {
     LinkNotRewritten,
     /// #10746 S3: a file in the bundle that could not be read as text.
     UnreadableFile,
+    /// #10746 S5: a legacy `_sources/<id>.index.jsonl`; left unchanged and
+    /// never read as index state (§4.9.1 rule 4).
+    LegacyIndexJournal,
+    /// #10746 S5: an incomplete operation whose files changed outside
+    /// trusty-okf; nothing was overwritten (§4.11 rule 2).
+    RecoveryConflict,
+    /// #10746 S5: an incomplete operation, reported by `Bundle::open`
+    /// without the §4.4 lock; `Bundle::recover_interrupted` finishes it.
+    InterruptedOperation,
+    /// #10746 S5: an operation completed but its staging directory under
+    /// `_sources/ops/` was not removed; the next recovery removes it.
+    StagingLeft,
+    /// #10746 S5: another writer holds the bundle lock, so `Bundle::open`
+    /// did not recover (§4.11 "Lock held elsewhere").
+    RecoveryDeferred,
 }
 
 /// One structured validation finding.

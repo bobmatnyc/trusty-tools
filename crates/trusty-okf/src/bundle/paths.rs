@@ -130,22 +130,6 @@ fn restrict_file(file: &File) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Set the bundle file at `path` to [`BUNDLE_FILE_MODE`] on Unix; used by
-/// `move_concept` for a file it renames into a new path. A no-op elsewhere.
-///
-/// The caller has refused a link at `path` through [`confined_file`].
-pub(crate) fn restrict_path(path: &Path) -> Result<(), OkfError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(BUNDLE_FILE_MODE))
-            .map_err(|e| io_err(path, e))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
 /// Write `bytes` to `target` through a `create_new` temporary file in the
 /// same directory and a rename (§2.11 rule 3, §4.4).
 ///
@@ -236,8 +220,12 @@ pub(crate) fn append_line(root: &Path, rel: &str, line: &str) -> Result<(), OkfE
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
     }
-    let needs_newline = match std::fs::read(&path) {
-        Ok(b) => !b.is_empty() && !b.ends_with(b"\n"),
+    // #10746 S5: read the last byte only, so an append costs O(1) in the
+    // file's size; the revision and operation journals grow with every write.
+    let needs_newline = match File::open(&path) {
+        Ok(mut f) => {
+            matches!(last_byte(&mut f).map_err(|e| io_err(&path, e))?, Some(b) if b != b'\n')
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => return Err(io_err(&path, e)),
     };
@@ -257,6 +245,28 @@ pub(crate) fn append_line(root: &Path, rel: &str, line: &str) -> Result<(), OkfE
     f.write_all(out.as_bytes())
         .and_then(|()| f.sync_all())
         .map_err(|e| io_err(&path, e))
+}
+
+/// The last byte of `f`, or `None` for an empty file.
+fn last_byte(f: &mut File) -> std::io::Result<Option<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    if f.metadata()?.len() == 0 {
+        return Ok(None);
+    }
+    f.seek(SeekFrom::End(-1))?;
+    let mut b = [0u8; 1];
+    f.read_exact(&mut b)?;
+    Ok(Some(b[0]))
+}
+
+/// The bytes at bundle-relative `rel`, or `None` when absent. Confined.
+pub(crate) fn read_rel(root: &Path, rel: &str) -> Result<Option<Vec<u8>>, OkfError> {
+    let path = confined_file(root, rel)?;
+    match std::fs::read(&path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_err(&path, e)),
+    }
 }
 
 /// The §2.11 fold key: Unicode case folding, then NFC.

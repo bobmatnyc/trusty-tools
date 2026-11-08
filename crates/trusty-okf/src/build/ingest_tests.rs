@@ -1,27 +1,83 @@
-//! Unit tests for the OKG ingest engine.
+//! Unit tests for the ingest engine.
 //!
 //! Split out of `ingest.rs` to keep that file under the repo's 500-SLOC cap;
 //! wired back in via `#[path]` so `use super::*` still resolves to the engine
-//! module, matching the crate-local convention (`delegate.rs`/`delegate_tests.rs`).
+//! module. #10746: moved from trusty-kb; `Kb` keeps the old call shape over
+//! the free functions, and `tN` stands for a fixed instant N hours apart.
+
+use std::path::PathBuf;
 
 use super::*;
-use crate::okg::registry::Locator;
-use crate::schema::Profile;
+use crate::build::registry::{ConnectorParams, Locator};
+use crate::format::fields::parse_instant;
+use crate::profile::Profile;
 
-fn store() -> (tempfile::TempDir, KbStore) {
+/// The engine bound to a temp root, with trusty-kb's method names.
+struct Kb {
+    root: PathBuf,
+    profile: Profile,
+}
+
+/// `t0`..`t9` as instants an hour apart, else an RFC 3339 instant.
+fn t(now: &str) -> DateTime<FixedOffset> {
+    match now.strip_prefix('t').and_then(|n| n.parse::<u32>().ok()) {
+        Some(n) => parse_instant(&format!("2026-07-24T{n:02}:00:00Z")).unwrap(),
+        None => parse_instant(now).unwrap(),
+    }
+}
+
+impl Kb {
+    fn ingest_items(
+        &self,
+        spec: &SourceSpec,
+        items: &[SourceItem],
+        detect_deletions: bool,
+        now: &str,
+    ) -> Result<IngestReport, OkfError> {
+        ingest_items(
+            &self.root,
+            &self.profile,
+            spec,
+            items,
+            detect_deletions,
+            t(now),
+        )
+    }
+
+    fn sweep_deleted(
+        &self,
+        spec: &SourceSpec,
+        present: &BTreeSet<String>,
+        now: &str,
+    ) -> Result<IngestReport, OkfError> {
+        sweep_deleted(&self.root, spec, present, t(now))
+    }
+
+    fn entity_path(&self, collection: &str, name: &str) -> Result<PathBuf, OkfError> {
+        Ok(self
+            .root
+            .join(concept_id_for(collection, name)?.file_name()))
+    }
+}
+
+fn store() -> (tempfile::TempDir, Kb) {
     let tmp = tempfile::tempdir().unwrap();
-    let store = KbStore::new(tmp.path().to_path_buf(), Profile::default_profile());
+    let store = Kb {
+        root: tmp.path().canonicalize().unwrap(),
+        profile: Profile::default_profile(),
+    };
     (tmp, store)
 }
 
 fn spec(tombstone: bool) -> SourceSpec {
+    let mut params = ConnectorParams::new();
+    params.insert("query", toml::Value::String("in:sent".into()));
     let mut s = SourceSpec::new(
         "mail",
         Some("sources"),
-        Locator::Gmail {
-            query: "in:sent".into(),
-            after: None,
-            before: None,
+        Locator::Connector {
+            kind: "gmail".into(),
+            params,
         },
         "2026-07-24T00:00:00Z",
     );
@@ -38,6 +94,7 @@ fn item(id: &str, fingerprint: &str, ts: &str, body: &str) -> SourceItem {
         timestamp: Some(ts.into()),
         body: body.into(),
         fields: BTreeMap::new(),
+        frontmatter: Mapping::new(),
         volatile: false,
     }
 }
@@ -128,7 +185,7 @@ fn changed_item_replaces_entity() {
 }
 
 /// Why: Bob's additive requirement — "I can go further back in time".
-/// Widening a Gmail window must fetch only the OLDER messages the ledger has
+/// Widening a gmail window must fetch only the OLDER messages the ledger has
 /// never seen, and must not re-pull or duplicate the window already covered.
 /// What: ingests a recent window, then a wider superset window, asserting
 /// only the two older messages are new and the coverage watermark extends
@@ -148,7 +205,7 @@ fn wider_window_only_adds_older_items() {
     assert_eq!(first.watermark.oldest.as_deref(), Some("2026-07-01"));
 
     // The widened window returns the older messages AND everything already
-    // covered — exactly what Gmail does when `after:` moves backwards.
+    // covered — exactly what gmail does when `after:` moves backwards.
     let widened = vec![
         item("m08", "m08", "2026-05-01", "may"),
         item("m09", "m09", "2026-06-01", "june"),
@@ -297,7 +354,7 @@ fn sweep_tombstones_only_after_the_full_set_is_known() {
 
     // Now sweep with the complete observed set — only `a` was seen.
     let present: BTreeSet<String> = ["a".to_string()].into_iter().collect();
-    let sweep = store.okg_sweep_deleted(&spec, &present, "t1").unwrap();
+    let sweep = store.sweep_deleted(&spec, &present, "t1").unwrap();
     assert_eq!(sweep.tombstoned, 1);
     assert_eq!(sweep.watermark.items, 1);
     assert_eq!(sweep.watermark.tombstoned, 1);
@@ -367,4 +424,140 @@ fn per_item_errors_do_not_abort_the_run() {
         report.errors
     );
     assert_eq!(report.scanned, 2, "the run completes rather than aborting");
+}
+
+/// Why: SPEC-OKF-01 §2.9 — a re-ingest of a changed item used to drop
+/// `verified`, `status`, `supersedes` and every editorial key. The engine
+/// must keep them, still replace the source-derived keys, and still apply
+/// §2.10 to `verified` when the content changed.
+/// What: ingests an item, adds editorial keys and a `verified` event by hand
+/// (as an out-of-band reviewer would), re-ingests with a new fingerprint and
+/// the SAME content (verified stays), then with new content (verified moves
+/// to history; editorial keys stay).
+/// Test: self-contained.
+#[test]
+fn reingest_keeps_editorial_and_verification_keys() {
+    let (_t, store) = store();
+    let spec = spec(false);
+    let mut first = item("a", "h1", "2026-07-01", "body one");
+    first.fields.insert("from".into(), "me@example.com".into());
+    store.ingest_items(&spec, &[first], false, "t0").unwrap();
+    let path = store.entity_path("sources", "a").unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let edited = text.replacen(
+        "---\n",
+        "---\nstatus: draft\nsupersedes: /sources/old.md\nstale_after: 2027-01-01T00:00:00Z\n\
+         verified:\n- by: human:jo\n  at: 2026-07-24T05:00:00Z\n",
+        1,
+    );
+    std::fs::write(&path, &edited).unwrap();
+
+    // Same content, new fingerprint: every kept key survives, `verified`
+    // included, because the content hash did not change.
+    let mut same = item("a", "h2", "2026-07-03", "body one");
+    same.fields.insert("from".into(), "me@example.com".into());
+    let r = store.ingest_items(&spec, &[same], false, "t6").unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let text = std::fs::read_to_string(&path).unwrap();
+    for kept in [
+        "status: draft",
+        "supersedes: /sources/old.md",
+        "stale_after: 2027-01-01T00:00:00Z",
+        "by: human:jo",
+    ] {
+        assert!(text.contains(kept), "{kept} must survive: {text}");
+    }
+    assert!(text.contains("source_timestamp: 2026-07-03"), "{text}");
+
+    // New content and provenance: editorial keys stay, the old `from` is
+    // replaced, and `verified` moves to the record (§2.10).
+    let mut changed = item("a", "h3", "2026-07-04", "body two");
+    changed
+        .fields
+        .insert("from".into(), "you@example.com".into());
+    store.ingest_items(&spec, &[changed], false, "t7").unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("status: draft"), "{text}");
+    assert!(text.contains("supersedes: /sources/old.md"), "{text}");
+    assert!(!text.contains("verified:"), "content change clears: {text}");
+    assert!(text.contains("from: you@example.com"), "{text}");
+    assert!(!text.contains("me@example.com"), "stale provenance: {text}");
+    assert!(text.contains("by: process:trusty-okf-ingest"), "{text}");
+    let record =
+        std::fs::read_to_string(store.root.join("_sources/verification/sources/a.jsonl")).unwrap();
+    assert!(record.contains("human:jo"), "kept as history: {record}");
+}
+
+/// Why: SPEC-OKF-01 §3 (c2) decided (i) — a source re-ingest over a
+/// deprecated concept writes the new content and keeps `status: deprecated`;
+/// (ii), refuse with `Conflict` on every run, was rejected. #10746: S4 first
+/// shipped (ii) by accident, and a caller that requires an error-free report
+/// retried forever.
+/// What: hand-sets `status: deprecated`, `superseded_by` and a `verified`
+/// event, re-ingests changed content (written, status and editorial keys
+/// kept, event moved to history, one more `log.md` entry), then shows a
+/// plain `put` content change on the same concept is still `deprecated`.
+/// Test: self-contained.
+#[test]
+fn reingest_over_a_deprecated_concept_writes_content_and_keeps_status() {
+    let (_t, store) = store();
+    let spec = spec(false);
+    store
+        .ingest_items(
+            &spec,
+            &[item("d", "h1", "2026-07-01", "old body")],
+            false,
+            "t0",
+        )
+        .unwrap();
+    let path = store.entity_path("sources", "d").unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let edited = text.replacen(
+        "---\n",
+        "---\nstatus: deprecated\nsuperseded_by: /sources/e.md\n\
+         verified:\n- by: human:jo\n  at: 2026-07-24T05:00:00Z\n",
+        1,
+    );
+    std::fs::write(&path, &edited).unwrap();
+    let log_before = std::fs::read_to_string(store.root.join("log.md")).unwrap();
+
+    let r = store
+        .ingest_items(
+            &spec,
+            &[item("d", "h2", "2026-07-02", "new body")],
+            false,
+            "t1",
+        )
+        .unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(r.updated, 1);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("new body") && !text.contains("old body"),
+        "{text}"
+    );
+    assert!(text.contains("status: deprecated"), "{text}");
+    assert!(text.contains("superseded_by: /sources/e.md"), "{text}");
+    assert!(!text.contains("verified:"), "§2.10 clears it: {text}");
+    let record =
+        std::fs::read_to_string(store.root.join("_sources/verification/sources/d.jsonl")).unwrap();
+    assert!(record.contains("human:jo"), "kept as history: {record}");
+    let log_after = std::fs::read_to_string(store.root.join("log.md")).unwrap();
+    assert!(
+        log_after.len() > log_before.len() && log_after.contains("`/sources/d.md`"),
+        "the §2.10 log entry is written: {log_after}"
+    );
+
+    // A caller content change to the deprecated concept is still refused.
+    let mut bundle = Bundle::at(&store.root).unwrap();
+    let id = concept_id_for("sources", "d").unwrap();
+    let mut c = bundle.get(&id).unwrap();
+    c.body = "\ncaller edit\n".to_string();
+    let err = bundle
+        .put(c, Actor::parse("human:jo"), WriteMode::Lenient, t("t2"))
+        .expect_err("a caller edit to a deprecated concept is refused");
+    assert!(
+        matches!(&err, OkfError::Conflict { reason, .. } if reason == "deprecated"),
+        "{err}"
+    );
 }

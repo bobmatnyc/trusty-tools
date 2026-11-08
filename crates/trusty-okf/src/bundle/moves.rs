@@ -18,31 +18,36 @@
 //! URLs are never touched. A link that climbs above the root, or sits in a
 //! foreign, unparseable or unpatchable file, stays unchanged and is reported.
 //! `log.md` gains exactly one entry for the move.
-//! Residual risk until slice S5's operation journal (§4.11): a crash after
-//! the rename leaves links to the old ID.
+//! #10746 S5: the whole move is one journaled `Move` operation (§4.11), so
+//! a crash at any step boundary recovers to the moved tree on the next open,
+//! and an out-of-band edit during the move stops it with `RecoveryPending`.
 //! Test: `c09_move_rewrites_every_link_and_logs_one_entry`,
 //! `c55_move_leaves_a_climbing_link_and_reports_it`,
 //! `c115_bundle_open_reads_foreign_files_and_writes_never_touch_them`,
-//! `c140_fold_collision_on_put_and_move`.
+//! `c140_fold_collision_on_put_and_move`,
+//! `c106_crash_at_every_boundary_rolls_forward_byte_identical`.
 
 use std::ops::Range;
-use std::path::Path;
 
 use chrono::{DateTime, FixedOffset};
 use serde_yaml::Value;
 
 use crate::OkfError;
 use crate::bundle::Bundle;
-use crate::bundle::log_md::append_entry;
-use crate::bundle::paths::{confined_file, fold_conflict, io_err, restrict_path};
-use crate::bundle::put::{PutOutcome, conflict};
-use crate::bundle::record::record_rel;
+use crate::bundle::commit::PutPlan;
+use crate::bundle::log_md::prepare_entry;
+use crate::bundle::ops::{self, OpKind, OpPlan};
+use crate::bundle::paths::{confined_file, fold_conflict, read_rel};
+use crate::bundle::put::{PutOutcome, WriteKind, conflict};
+use crate::bundle::record::{instant_string, record_rel};
 use crate::bundle::walk::scan;
 use crate::format::concept::{Concept, parse_concept};
 use crate::format::fields::Actor;
+use crate::format::hash::{bytes_hash, content_hash};
 use crate::format::id::{ConceptId, ConceptRef};
 use crate::format::validate::Finding;
 use crate::format::write::WriteMode;
+use crate::state::revisions::{REVISIONS_REL, RevisionLine};
 
 /// A link `move_concept` left unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +264,29 @@ impl Bundle {
         to: &ConceptId,
         now: DateTime<FixedOffset>,
     ) -> Result<MoveReport, OkfError> {
+        // #10746 S5: one writer at a time (§4.4). The refusals run first
+        // without the lock, so a refused move creates no lock file; the plan
+        // is then made again under the lock.
+        let _lock = if self.held.is_none() {
+            self.plan_move(from, to, &now)?;
+            self.write_lock()?
+        } else {
+            None
+        };
+        let (op, mut report) = self.plan_move(from, to, &now)?;
+        self.check_recovery(&op.file_paths())?;
+        report.findings.extend(ops::run(self, op)?);
+        Ok(report)
+    }
+
+    /// Every refusal and the journaled operation of a move, writing nothing.
+    fn plan_move(
+        &self,
+        from: &ConceptId,
+        to: &ConceptId,
+        now: &DateTime<FixedOffset>,
+    ) -> Result<(OpPlan, MoveReport), OkfError> {
+        let now = *now;
         let from_path = confined_file(&self.root, &from.file_name())?;
         let to_path = confined_file(&self.root, &to.file_name())?;
         if !from_path.is_file() {
@@ -277,7 +305,6 @@ impl Bundle {
         if to_record.exists() {
             return Err(conflict(to, "verification_record_exists"));
         }
-        let from_record = confined_file(&self.root, &record_rel(from))?;
         let mut report = MoveReport::default();
         let mut rewrites: Vec<Concept> = Vec::new();
         let mut moved_text = String::new();
@@ -340,15 +367,17 @@ impl Bundle {
             }
             rewrites.push(c);
         }
-        // Execute: the file and its record move first, then the rewrites.
-        let mut pairs = vec![(from_path.as_path(), to_path.as_path())];
-        if from_record.exists() {
-            pairs.push((from_record.as_path(), to_record.as_path()));
-        }
-        relocate(&pairs)?;
+        // #10746 S5: plan every rewrite, then run one journaled `Move`
+        // operation (§4.11): the new file and its record, each linking
+        // concept (record lines, revision line, file), `log.md`, and the old
+        // paths removed last.
+        let from_bytes = moved_text.clone().into_bytes();
         let actor = Actor::Process("trusty-okf-move".to_string());
+        let mut moved_plan: Option<PutPlan> = None;
+        let mut plans: Vec<PutPlan> = Vec::new();
         for c in rewrites {
-            let c = if matches!(&c.id, ConceptRef::Id(id) if id == from) {
+            // #10746: a link rewrite carries no human confirmation (§2.4).
+            let (c, at) = if matches!(&c.id, ConceptRef::Id(id) if id == from) {
                 // Re-read under the new ID: same bytes, so the stale check holds.
                 let (mut moved, _) = parse_concept(to.clone(), &moved_text)?;
                 for key in ["supersedes", "superseded_by"] {
@@ -357,25 +386,40 @@ impl Bundle {
                     }
                 }
                 moved.body = c.body.clone();
-                moved
+                (moved, Some((Some(from_bytes.clone()), from.clone())))
             } else {
-                c
+                (c, None)
             };
-            // #10746: a link rewrite carries no human confirmation (§2.4).
-            let (outcome, findings, id) =
-                self.put_inner(c, &actor, false, WriteMode::Lenient, &now, true)?;
-            report.findings.extend(findings);
+            let is_moved = at.is_some();
+            let plan = self.plan_put(
+                c,
+                &actor,
+                false,
+                WriteMode::Lenient,
+                &now,
+                WriteKind::LinkRewrite,
+                at,
+            )?;
+            if plan.outcome == PutOutcome::Unchanged {
+                continue;
+            }
+            report.findings.extend(plan.findings.iter().cloned());
             if let PutOutcome::Updated {
                 verifications_cleared,
                 ..
-            } = outcome
+            } = plan.outcome
             {
                 report.verifications_cleared += verifications_cleared;
             }
-            report.rewritten.push(id);
+            report.rewritten.push(plan.id.clone());
+            if is_moved {
+                moved_plan = Some(plan);
+            } else {
+                plans.push(plan);
+            }
         }
         report.rewritten.sort();
-        append_entry(
+        let entry = prepare_entry(
             &self.root,
             &now,
             &format!(
@@ -387,60 +431,71 @@ impl Bundle {
                 report.verifications_cleared
             ),
         )?;
-        Ok(report)
+        let stamp = instant_string(&now);
+        let mut op = OpPlan::new(OpKind::Move, &stamp, &actor.to_string());
+        let (new_bytes, new_content, new_lines) = match moved_plan {
+            Some(p) => (p.post, p.content, p.lines),
+            None => {
+                let (c, _) = parse_concept(to.clone(), &moved_text)?;
+                (from_bytes.clone(), content_hash(&c), Vec::new())
+            }
+        };
+        let mut rev = RevisionLine {
+            id: to.as_str().to_string(),
+            content: new_content.as_str().to_string(),
+            bytes: bytes_hash(&new_bytes),
+            op_kind: "move".to_string(),
+            now: stamp.clone(),
+            run: String::new(),
+            op: None,
+            step: None,
+            proven: None,
+            origin: None,
+        };
+        // #10746 S6: §4.5 ownership; a move is a caller write at a new ID.
+        rev.stamp(&self.root, None, false)?;
+        op.append(REVISIONS_REL, revision_value(&rev)?);
+        op.file(&to.file_name(), None, Some(new_bytes));
+        let from_record_bytes = read_rel(&self.root, &record_rel(from))?;
+        if from_record_bytes.is_some() || !new_lines.is_empty() {
+            op.file(
+                &record_rel(to),
+                None,
+                from_record_bytes.clone().or(Some(Vec::new())),
+            );
+            for l in &new_lines {
+                op.append(&record_rel(to), l.value()?);
+            }
+        }
+        for p in &plans {
+            for l in &p.lines {
+                op.append(&record_rel(&p.id), l.value()?);
+            }
+            let mut rev = p.revision("move", &now, "");
+            rev.stamp(&self.root, p.pre.as_deref(), false)?;
+            op.append(REVISIONS_REL, revision_value(&rev)?);
+            op.file(&p.id.file_name(), p.pre.clone(), Some(p.post.clone()));
+        }
+        op.file("log.md", entry.old, Some(entry.text.into_bytes()));
+        op.file(&from.file_name(), Some(from_bytes), None);
+        if let Some(bytes) = from_record_bytes {
+            op.file(&record_rel(from), Some(bytes), None);
+        }
+        Ok((op, report))
     }
 }
 
-/// Rename each `(from, to)` pair, every source restricted to 0600 first.
-///
-/// #10746: a chmod that fails (EPERM on another user's file in a shared
-/// bundle) must fail before any rename, so the move leaves no partial state.
-/// What: restricts every source, then creates each target's directory and
-/// renames. The caller has confined and link-checked every path.
-/// Test: `relocate_restricts_every_source_before_any_rename`.
-fn relocate(pairs: &[(&Path, &Path)]) -> Result<(), OkfError> {
-    for (from, _) in pairs {
-        restrict_path(from)?;
-    }
-    for (from, to) in pairs {
-        if let Some(dir) = to.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
-        }
-        std::fs::rename(from, to).map_err(|e| io_err(from, e))?;
-    }
-    Ok(())
+fn revision_value(r: &RevisionLine) -> Result<serde_json::Value, OkfError> {
+    serde_json::to_value(r).map_err(|e| OkfError::Parse {
+        path: REVISIONS_REL.into(),
+        line: None,
+        message: e.to_string(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Why: a failed restrict must leave the bundle unmoved (#10746).
-    /// What: the second source is missing, so its restrict fails; the first
-    /// pair is not renamed. With both present, both land 0600.
-    /// Test: self-contained.
-    #[cfg(unix)]
-    #[test]
-    fn relocate_restricts_every_source_before_any_rename() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let r = tmp.path();
-        let (a, a2) = (r.join("a.md"), r.join("d/a.md"));
-        let (rec, rec2) = (r.join("a.jsonl"), r.join("d/a.jsonl"));
-        std::fs::write(&a, "x").unwrap();
-        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let got = relocate(&[(a.as_path(), a2.as_path()), (rec.as_path(), rec2.as_path())]);
-        assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
-        assert!(a.is_file() && !a2.exists(), "no rename ran");
-
-        std::fs::write(&rec, "y").unwrap();
-        relocate(&[(a.as_path(), a2.as_path()), (rec.as_path(), rec2.as_path())]).unwrap();
-        for p in [&a2, &rec2] {
-            let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
-            assert_eq!(mode, 0o600, "{p:?}");
-        }
-        assert!(!a.exists() && !rec.exists());
-    }
 
     fn id(s: &str) -> ConceptId {
         ConceptId::parse(s).unwrap()

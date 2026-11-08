@@ -11,9 +11,13 @@
 //! reads one concept. The writes live in submodules: [`put`] (`put`,
 //! `verify`, §2.10), [`moves`] (`move_concept`), [`index_md`]
 //! (`regenerate_indexes`), [`log_md`], [`record`] (the verification record
-//! and axis), [`paths`] (§2.11), [`graph`] (graph read). Slice S3 of #10746;
-//! `create`, `supersede`, `deprecate`, `adopt`, `migrate`, recovery and the
-//! operation journal come with S5 and S6.
+//! and axis), [`paths`] (§2.11), [`graph`] (graph read). Slice S3 of #10746.
+//! S5: [`ops`] (the §4.11 operation journal) and [`recover`]
+//! (`recover_interrupted`, `Bundle::recover`); `open` and the build layer
+//! report and refuse interrupted operations without recovering them.
+//! S6: [`correct`] (`deprecate`, `supersede`, the tombstone rule),
+//! [`migrate`] and [`audit`] (§2.9), [`adopt`] (3q C). `create` is not
+//! built yet.
 //! Test: `c01_bundle_open_is_ok_on_the_google_bundles`,
 //! `c54_open_on_a_missing_root_is_an_error`,
 //! `c115_bundle_open_reads_foreign_files_and_writes_never_touch_them`,
@@ -28,25 +32,44 @@ use crate::format::hash::content_hash;
 use crate::format::id::{ConceptId, ConceptRef};
 use crate::format::validate::{Finding, FindingKind, Severity};
 
+pub mod adopt;
+pub mod audit;
+pub(crate) mod commit;
+pub mod correct;
 pub mod graph;
 pub mod index_md;
+pub(crate) mod lock;
 pub mod log_md;
+pub mod migrate;
 pub mod moves;
+pub mod ops;
 pub mod paths;
 pub mod put;
 pub mod record;
+pub mod recover;
 pub(crate) mod walk;
 
+pub use adopt::AdoptReport;
+pub use audit::LossItem;
 pub use index_md::IndexReport;
+pub use migrate::{FileChange, MigrationPlan, MigrationReport};
 pub use moves::{MoveReport, UnmovedLink};
+pub use ops::{OpKind, RecoveryDirection};
 pub use put::{HumanConfirmation, PutOutcome};
 pub use record::{VerificationEvent, VerificationState};
+pub use recover::RecoveryReport;
 
 /// One OKF bundle, opened from its root directory.
 #[derive(Debug, Clone)]
 pub struct Bundle {
     /// The canonical root directory.
     root: PathBuf,
+    /// #10746 S5: operations found or left conflicted, with their file-step
+    /// paths; a write to one of them returns `RecoveryPending` (§4.11).
+    conflicts: Vec<(String, Vec<String>)>,
+    /// #10746 S5: the bundle lock this handle holds for its whole life (an
+    /// ingest run); `None` takes the lock per write (§4.4).
+    held: Option<std::sync::Arc<lock::BundleLock>>,
 }
 
 impl Bundle {
@@ -66,11 +89,17 @@ impl Bundle {
     /// `c115_bundle_open_reads_foreign_files_and_writes_never_touch_them`,
     /// `c36_out_of_band_edit_reads_unverified_with_a_warning`.
     pub fn open(root: &Path) -> Result<(Bundle, Vec<Finding>), OkfError> {
-        let bundle = Bundle {
+        let mut bundle = Bundle {
             root: paths::canonical_root(root)?,
+            conflicts: Vec::new(),
+            held: None,
         };
+        // #10746 S5: recovery runs before the read, under the lock; with the
+        // lock held elsewhere it is deferred (§4.11 "Lock held elsewhere").
+        let mut findings = bundle.recover_unless_locked()?;
+        findings.extend(legacy_index_journals(&bundle.root)?);
         let scan = walk::scan(&bundle.root)?;
-        let mut findings = scan.findings;
+        findings.extend(scan.findings);
         let mut folds: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for entry in &scan.files {
             if matches!(entry.r, ConceptRef::Id(_)) {
@@ -116,6 +145,64 @@ impl Bundle {
             ));
         }
         Ok((bundle, findings))
+    }
+
+    /// A bundle at an existing root, without the full-tree read `open` does.
+    ///
+    /// #10746 S4: the build layer writes one concept at a time through `put`
+    /// and needs no findings, so it skips the scan. The root rule is the same
+    /// (§2.11 rule 1).
+    pub(crate) fn at(root: &Path) -> Result<Bundle, OkfError> {
+        let root = paths::canonical_root(root)?;
+        // #10746 S5: the build layer holds the lock for the whole run (§4.4),
+        // and recovers under it first.
+        let held = Some(std::sync::Arc::new(lock::BundleLock::acquire(&root)?));
+        let mut bundle = Bundle {
+            root,
+            conflicts: Vec::new(),
+            held,
+        };
+        recover::recover_on_open(&mut bundle)?;
+        Ok(bundle)
+    }
+
+    /// The lock for one write: `None` when this handle already holds it.
+    ///
+    /// #10746 S5 (§4.4): a lock is per open file, so a handle that holds it
+    /// never takes it twice. Test: `lock_prevents_lost_log_and_registry_updates`.
+    pub(crate) fn write_lock(&self) -> Result<Option<lock::BundleLock>, OkfError> {
+        match self.held {
+            Some(_) => Ok(None),
+            None => lock::BundleLock::acquire(&self.root).map(Some),
+        }
+    }
+
+    /// Recover under the lock, or report `recovery_deferred` when another
+    /// writer holds it (§4.11). Takes no lock when nothing is journaled, so
+    /// opening a read-only bundle writes nothing.
+    /// Test: `open_defers_recovery_while_another_writer_holds_the_lock`.
+    fn recover_unless_locked(&mut self) -> Result<Vec<Finding>, OkfError> {
+        if !paths::confined_file(&self.root, ops::OPS_DIR)?.is_dir() {
+            return Ok(Vec::new());
+        }
+        match lock::BundleLock::try_acquire(&self.root)? {
+            Some(_lock) => recover::recover_on_open(self),
+            // #10746 S5 r2: a live writer holds the lock: report and refuse
+            // its paths (read-only scan), never recover under it.
+            None => Ok([
+                recover::scan_interrupted(self)?,
+                vec![Finding::new(
+                    Severity::Info,
+                    FindingKind::RecoveryDeferred,
+                    ops::OPS_DIR.to_string(),
+                    "another writer holds the bundle lock; recovery deferred, and reads may \
+                 see an operation in progress"
+                        .to_string(),
+                    "SPEC-OKF-01 §4.11",
+                )],
+            ]
+            .concat()),
+        }
     }
 
     /// The canonical root directory.
@@ -173,4 +260,39 @@ impl Bundle {
         f.concept = Some(id.clone());
         Ok(Some(f))
     }
+}
+
+/// An info finding per legacy `_sources/<id>.index.jsonl` (§4.9.1 rule 4).
+///
+/// #10746 S5: the file stays byte-identical and is never read as index
+/// state; index state lives only in the caller's `IndexStateDir`.
+/// Test: `c119_index_state_never_lives_in_the_bundle`.
+fn legacy_index_journals(root: &Path) -> Result<Vec<Finding>, OkfError> {
+    let dir = paths::confined_file(root, "_sources")?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(paths::io_err(&dir, e)),
+    };
+    let mut out = Vec::new();
+    for e in entries {
+        let name = e
+            .map_err(|e| paths::io_err(&dir, e))?
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        if name.ends_with(".index.jsonl") {
+            out.push(Finding::new(
+                Severity::Info,
+                FindingKind::LegacyIndexJournal,
+                format!("_sources/{name}"),
+                "legacy index journal left unchanged; index state is machine-local and \
+                 is never read from the bundle"
+                    .to_string(),
+                "SPEC-OKF-01 §4.9.1",
+            ));
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
 }

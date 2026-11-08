@@ -24,14 +24,10 @@
 //! `_confirmed` entry points accept one.
 //! Order (#10746, §4.4, §4.11): every refusal, the render, and the
 //! confinement of the record and `log.md` paths run first, with no file
-//! changed. Then the record lines are appended, then the concept is renamed
-//! into place, then `log.md` is written. A failure after the record append
-//! leaves the events as history while the frontmatter still holds them, so
-//! no event is lost. A failure writing `log.md` after the rename fails
-//! closed: the call returns the error, never `Ok`. Residual risk until
-//! slice S5's operation journal: a crash after the rename leaves `log.md`
-//! without the entry, and a rename failure after the record append can
-//! leave the concept reading Unverified until the put is retried.
+//! changed. #10746 S5: then one journaled operation (`bundle::commit`)
+//! appends the record lines and the revision line, renames the concept into
+//! place and writes `log.md`; a crash at any step is finished by the next
+//! open, and an in-process step failure rolls the set back (§4.11).
 //! Test: `a1_put_never_replaces_an_existing_file_with_a_new_concept`,
 //! `a1_put_refuses_a_stale_write`, `a2_strict_check_runs_on_rendered_values`,
 //! `a3_put_writes_the_concept_0600_whatever_its_prior_mode`,
@@ -51,7 +47,8 @@ use serde_yaml::{Mapping, Value};
 
 use crate::OkfError;
 use crate::bundle::Bundle;
-use crate::bundle::log_md::prepare_entry;
+use crate::bundle::commit::{LogMode, PutPlan};
+use crate::bundle::ops::OpKind;
 use crate::bundle::paths::{confined_file, fold_conflict};
 use crate::bundle::record::{self, Line, instant_string};
 use crate::format::concept::{Concept, parse_concept};
@@ -60,8 +57,7 @@ use crate::format::hash::{ContentHash, content_hash};
 use crate::format::id::{ConceptId, ConceptRef};
 use crate::format::validate::{Finding, FindingKind, Severity};
 use crate::format::write::{
-    PreparedWrite, WriteMode, WriteOutcome, check_not_stale, foreign_refusal, prepare_write,
-    read_existing,
+    WriteMode, WriteOutcome, check_not_stale, foreign_refusal, prepare_write_with, read_existing,
 };
 
 /// An explicit confirmation from the person a `human:` actor names
@@ -89,6 +85,24 @@ impl HumanConfirmation {
     pub fn explicit() -> Self {
         Self { _private: () }
     }
+}
+
+/// Who a crate-private `put_inner` call writes for (#10746).
+///
+/// What: `Caller` is a public `put`; `LinkRewrite` is a `move_concept` link
+/// rewrite (no `log.md` entry; takes a deprecated concept); `SourceReingest`
+/// is the build engine writing a source's new content, which a deprecated
+/// concept also takes (SPEC-OKF-01 §3 (c2) (i)) while §2.10 and the
+/// `log.md` entry still apply.
+/// Test: `reingest_over_a_deprecated_concept_writes_content_and_keeps_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteKind {
+    /// A public `put` or `put_confirmed`.
+    Caller,
+    /// A `move_concept` link rewrite.
+    LinkRewrite,
+    /// The build engine writing a source item.
+    SourceReingest,
 }
 
 /// What a `put` or `verify` did (SPEC-OKF-01 §4.2).
@@ -240,7 +254,8 @@ impl Bundle {
         mode: WriteMode,
         now: DateTime<FixedOffset>,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
-        let (outcome, findings, _) = self.put_inner(c, &by, false, mode, &now, false)?;
+        let (outcome, findings, _) =
+            self.put_inner(c, &by, false, mode, &now, WriteKind::Caller, LogMode::Entry)?;
         Ok((outcome, findings))
     }
 
@@ -259,16 +274,17 @@ impl Bundle {
         now: DateTime<FixedOffset>,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
         let HumanConfirmation { _private: () } = confirmation;
-        let (outcome, findings, _) = self.put_inner(c, &by, true, mode, &now, false)?;
+        let (outcome, findings, _) =
+            self.put_inner(c, &by, true, mode, &now, WriteKind::Caller, LogMode::Entry)?;
         Ok((outcome, findings))
     }
 
-    /// `put`; a `link_rewrite` call writes no `log.md` entry, because
-    /// `move_concept` logs once for the whole move. `link_rewrite` marks a
-    /// `move_concept` link rewrite, which is not a caller edit, so a
-    /// deprecated concept still takes it (§4.8 refuses caller edits only).
+    /// `put`; `kind` says who writes (see [`WriteKind`]) and `log` where the
+    /// `log.md` entry goes (see [`LogMode`]). Only a `Caller` content change
+    /// to a deprecated concept is refused (§4.8 refuses caller edits only).
     /// `confirmed` is true only under a [`HumanConfirmation`].
     /// Returns the outcome, the findings and the target ID.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn put_inner(
         &mut self,
         c: Concept,
@@ -276,17 +292,61 @@ impl Bundle {
         confirmed: bool,
         mode: WriteMode,
         now: &DateTime<FixedOffset>,
-        link_rewrite: bool,
+        kind: WriteKind,
+        log: LogMode<'_>,
     ) -> Result<(PutOutcome, Vec<Finding>, ConceptId), OkfError> {
+        // #10746 S5: one writer at a time (§4.4). The refusals run first
+        // without the lock, so a refused or unchanged write creates no lock
+        // file; the plan is then made again under the lock.
+        let _lock = if self.held.is_none() {
+            let probe = self.plan_put(c.clone(), by, confirmed, mode, now, kind, None)?;
+            if probe.outcome == PutOutcome::Unchanged {
+                return Ok((probe.outcome, probe.findings, probe.id));
+            }
+            self.write_lock()?
+        } else {
+            None
+        };
+        let plan = self.plan_put(c, by, confirmed, mode, now, kind, None)?;
+        let mut out = (plan.outcome, plan.findings.clone(), plan.id.clone());
+        if plan.outcome != PutOutcome::Unchanged {
+            out.1
+                .extend(self.commit_op(plan, by, now, log, OpKind::Correct)?);
+        }
+        Ok(out)
+    }
+
+    /// Every check and the render of a `put`, writing nothing.
+    ///
+    /// #10746 S5: split from `put_inner` so a journaled operation can stage
+    /// the post-image. `at` overrides the target's bytes and names the
+    /// concept whose verification record holds its events: a move plans the
+    /// moved concept's rewrite at its new path before any file moves.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn plan_put(
+        &self,
+        c: Concept,
+        by: &Actor,
+        confirmed: bool,
+        mode: WriteMode,
+        now: &DateTime<FixedOffset>,
+        kind: WriteKind,
+        at: Option<(Option<Vec<u8>>, ConceptId)>,
+    ) -> Result<PutPlan, OkfError> {
         let id = match &c.id {
             ConceptRef::Id(id) => id.clone(),
             ConceptRef::Foreign(p) => return Err(foreign_refusal(p)),
         };
         let target = confined_file(&self.root, &id.file_name())?;
-        if fold_conflict(&self.root, &id.file_name())?.is_some() {
-            return Err(conflict(&id, "fold_collision"));
-        }
-        let existing = read_existing(&target)?;
+        let (existing, record_of) = match at {
+            Some((bytes, of)) => (bytes, of),
+            None => {
+                if fold_conflict(&self.root, &id.file_name())?.is_some() {
+                    return Err(conflict(&id, "fold_collision"));
+                }
+                (read_existing(&target)?, id.clone())
+            }
+        };
         check_not_stale(&id, &c, existing.as_deref())?;
         let old = existing
             .as_deref()
@@ -305,14 +365,16 @@ impl Bundle {
         let mut cleared = 0;
         if let Some(o) = &old {
             let deprecated = matches!(o.frontmatter().status, Field::Valid(Status::Deprecated));
-            if content_changed && deprecated && !link_rewrite {
+            // #10746: §3 (c2) (i) — a source re-ingest writes the new content
+            // and keeps `status: deprecated`; only a caller edit is refused.
+            if content_changed && deprecated && kind == WriteKind::Caller {
                 return Err(conflict(&id, "deprecated"));
             }
             // #10746: §2.4 needs a `human:` actor AND explicit confirmation.
             if extends_stale_after(o, &next)
                 && !(confirmed && is_human(by))
                 && matches!(
-                    record::state_for(self, &id, o)?,
+                    record::state_for(self, &record_of, o)?,
                     record::VerificationState::Verified { human: true, .. }
                 )
             {
@@ -329,7 +391,7 @@ impl Bundle {
                 if malformed_owned(o, "generated") {
                     move_to_legacy(&id, &mut next, "generated", &mut findings)?;
                 }
-                let folded = record::fold(record::read_lines(self, &id)?);
+                let folded = record::fold(record::read_lines(self, &record_of)?);
                 let new_hash = content_hash(&next);
                 lines =
                     record::invalidation_lines(&folded, &events, &instant_string(now), &new_hash);
@@ -339,44 +401,29 @@ impl Bundle {
         if content_changed {
             next.set("generated", generated_value(by, now));
         }
-        // #10746: refusals and path checks first, record before the rename.
-        let (prepared, write_findings) = prepare_write(&self.root, &next, mode)?;
+        // #10746 S6: a tombstone must stay detectable (§4.8, criterion 38).
+        crate::bundle::correct::check_tombstone(&id, &next)?;
+        let (prepared, write_findings) =
+            prepare_write_with(&self.root, &next, mode, existing.as_deref())?;
         findings.extend(write_findings);
         let outcome = match prepared.outcome {
-            WriteOutcome::Unchanged => return Ok((PutOutcome::Unchanged, findings, id)),
+            WriteOutcome::Unchanged => PutOutcome::Unchanged,
             WriteOutcome::Created => PutOutcome::Created,
             WriteOutcome::Updated => PutOutcome::Updated {
                 content_changed,
                 verifications_cleared: cleared,
             },
         };
-        let entry = (!link_rewrite)
-            .then(|| prepare_entry(&self.root, now, &log_line(&id, by, &outcome)))
-            .transpose()?;
-        self.commit_with_record(&id, &lines, &prepared)?;
-        if let Some(entry) = entry {
-            entry.commit()?;
-        }
-        Ok((outcome, findings, id))
-    }
-
-    /// Append `lines` to `id`'s record, then rename the concept into place.
-    ///
-    /// #10746: the record path is confined and its directory created before
-    /// the append, and the append runs before the rename, so a failure at
-    /// any step leaves the concept file unchanged and every event either in
-    /// the frontmatter, in the record, or in both (§2.10, §4.4).
-    fn commit_with_record(
-        &self,
-        id: &ConceptId,
-        lines: &[Line],
-        prepared: &PreparedWrite,
-    ) -> Result<(), OkfError> {
-        if !lines.is_empty() {
-            record::prepare_append(self, id)?;
-            record::append(self, id, lines)?;
-        }
-        prepared.commit()
+        Ok(PutPlan {
+            log: log_line(&id, by, &outcome),
+            id,
+            outcome,
+            findings,
+            pre: existing,
+            post: prepared.bytes().to_vec(),
+            content: content_hash(&next),
+            lines,
+        })
     }
 
     /// Record a verification of the revision the verifier saw (§2.10).
@@ -431,6 +478,30 @@ impl Bundle {
         seen: &ContentHash,
         confirmed: bool,
     ) -> Result<(PutOutcome, Vec<Finding>), OkfError> {
+        // #10746 S5: one writer at a time (§4.4). Refusals run first without
+        // the lock, so a refused verify creates no lock file; the plan is then
+        // made again under the lock.
+        let _lock = if self.held.is_none() {
+            self.plan_verify(id, &v, seen, confirmed)?;
+            self.write_lock()?
+        } else {
+            None
+        };
+        let (plan, mut findings) = self.plan_verify(id, &v, seen, confirmed)?;
+        let outcome = plan.outcome;
+        findings.extend(self.commit_op(plan, &v.by, &v.at, LogMode::Entry, OpKind::Verify)?);
+        Ok((outcome, findings))
+    }
+
+    /// Every refusal, the render and the record line of a `verify`, writing
+    /// nothing (#10746 S5).
+    fn plan_verify(
+        &self,
+        id: &ConceptId,
+        v: &Verification,
+        seen: &ContentHash,
+        confirmed: bool,
+    ) -> Result<(PutPlan, Vec<Finding>), OkfError> {
         // #10746: a `human:` actor alone is not explicit confirmation (§2.4).
         if is_human(&v.by) && !confirmed {
             return Err(conflict(id, "human_not_confirmed"));
@@ -463,14 +534,14 @@ impl Bundle {
             seen,
             "verify changes lifecycle keys only"
         );
-        // #10746: refusals and path checks first, record before the rename.
-        let (prepared, write_findings) = prepare_write(&self.root, &next, WriteMode::Lenient)?;
+        crate::bundle::correct::check_tombstone(id, &next)?;
+        // #10746: refusals and path checks first; S5: the record line, the
+        // concept and `log.md` change as one journaled `Verify` operation.
+        let target = confined_file(&self.root, &id.file_name())?;
+        let pre = read_existing(&target)?;
+        let (prepared, write_findings) =
+            prepare_write_with(&self.root, &next, WriteMode::Lenient, pre.as_deref())?;
         findings.extend(write_findings);
-        let entry = prepare_entry(
-            &self.root,
-            &v.at,
-            &format!("**Verified** `/{}` by `{}`", id.file_name(), v.by),
-        )?;
         let line = Line {
             by: v.by.to_string(),
             at,
@@ -478,9 +549,9 @@ impl Bundle {
             invalidated_at: None,
             invalidated_by_hash: None,
             reason: None,
+            op: None,
+            step: None,
         };
-        self.commit_with_record(id, &[line], &prepared)?;
-        entry.commit()?;
         let outcome = match prepared.outcome {
             WriteOutcome::Unchanged => PutOutcome::Unchanged,
             WriteOutcome::Created => PutOutcome::Created,
@@ -489,7 +560,17 @@ impl Bundle {
                 verifications_cleared: 0,
             },
         };
-        Ok((outcome, findings))
+        let plan = PutPlan {
+            id: id.clone(),
+            outcome,
+            findings: Vec::new(),
+            pre,
+            post: prepared.bytes().to_vec(),
+            content: seen.clone(),
+            lines: vec![line],
+            log: format!("**Verified** `/{}` by `{}`", id.file_name(), v.by),
+        };
+        Ok((plan, findings))
     }
 }
 
