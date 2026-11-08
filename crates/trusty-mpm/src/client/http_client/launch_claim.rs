@@ -101,6 +101,74 @@ fn resumable(s: &ManagedSessionSummary) -> bool {
     )
 }
 
+/// The normalized `owner/repo` of a remote URL or an `owner/repo` string,
+/// through the shared parser (`trusty_common::github_path`); `None` when no
+/// owner can be read, so an unknown identity never matches.
+fn identity_of(raw: &str) -> Option<String> {
+    let path = trusty_common::github_path::parse_github_path(raw)?;
+    (path.owner != trusty_common::github_path::UNKNOWN_OWNER)
+        .then(|| format!("{}/{}", path.owner, path.repo))
+}
+
+/// Whether `raw` names a remote (`scheme://` or scp-style `git@`), never a
+/// local path whose last two segments would read as an owner/repo.
+fn is_remote(raw: &str) -> bool {
+    raw.contains("://") || raw.starts_with("git@")
+}
+
+/// The project a managed record belongs to: its `source_id` (`owner/repo`,
+/// #1730), else its remote `repo_url`. A local-path `repo_url` or no field at
+/// all is `None`.
+fn holder_identity(s: &ManagedSessionSummary) -> Option<String> {
+    let source = s
+        .source_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && !id.starts_with('/'));
+    match source {
+        // A bare `owner/repo` has no host, which the parser would read as
+        // its first segment; give it one so both segments survive.
+        Some(id) if !is_remote(id) => identity_of(&format!("https://github.com/{id}")),
+        Some(id) => identity_of(id),
+        None => s
+            .repo_url
+            .as_deref()
+            .filter(|url| is_remote(url))
+            .and_then(identity_of),
+    }
+}
+
+/// The project a launch in `workdir` belongs to: its `origin` remote's
+/// `owner/repo` ([`crate::core::git_origin::get_origin_url`]); `None` when
+/// there is no origin or git cannot read it.
+fn launch_identity(workdir: &Path) -> Option<String> {
+    crate::core::git_origin::get_origin_url(workdir)
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(identity_of)
+}
+
+/// Whether `holder` belongs to the same project as a launch in `workdir`
+/// (owner ruling D58, 2026-11-08 21:49Z): both `owner/repo` identities are
+/// known and equal. Either one unknown answers `false` (fail closed).
+/// Test: `a_stopped_holder_of_another_project_is_refused_10101`,
+/// `a_stopped_holder_of_unknown_project_is_refused_10101`.
+fn same_project(holder: &ManagedSessionSummary, workdir: &Path) -> bool {
+    match (holder_identity(holder), launch_identity(workdir)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The directory a managed record runs in, as an operator reads it.
+fn holder_dir(s: &ManagedSessionSummary) -> &str {
+    s.workspace_path
+        .as_deref()
+        .or(s.cwd.as_deref())
+        .unwrap_or("an unknown directory")
+}
+
 /// Whether two directory strings name the same directory, trailing `/` aside.
 fn same_dir(a: &str, b: &Path) -> bool {
     let b = b.to_string_lossy();
@@ -194,7 +262,8 @@ impl DaemonClient {
     /// (fail closed).
     /// What: reads `GET /api/v1/sessions/managed` and `GET /sessions`. A
     /// non-terminal managed holder in any other state, or in a state this
-    /// build does not know, refuses. A legacy holder ([`legacy_name_holder`])
+    /// build does not know, refuses; so does a `Stopped`/`Errored` holder of
+    /// another or an unknown `owner/repo` (D58). A legacy holder ([`legacy_name_holder`])
     /// refuses, unless it is this same directory's session and runs on its
     /// server, which answers [`LaunchClaim::Running`]. A resumable managed
     /// holder answers [`LaunchClaim::Resume`] when no live legacy record
@@ -205,6 +274,7 @@ impl DaemonClient {
     /// The daemon cannot be reached or read, or a live record holds `name`.
     ///
     /// Test: `a_held_name_refuses_the_launch_before_tmux_or_registration`,
+    /// `a_stopped_holder_of_another_project_is_refused_10101`,
     /// `a_live_legacy_record_refuses_the_launch_10101`,
     /// `a_stopped_holder_is_resumed_not_launched_10101`.
     pub async fn claim_launch_name(
@@ -221,13 +291,17 @@ impl DaemonClient {
             .await
             .map_err(|e| read_refusal(self, name, &e))?;
         let resume = match name_holder(&managed, name) {
-            Some(holder) if resumable(holder) => Some(Box::new(holder.clone())),
+            // #10101: D58 — resumed only for the launch's own owner/repo.
+            Some(holder) if resumable(holder) && same_project(holder, workdir) => {
+                Some(Box::new(holder.clone()))
+            }
             Some(holder) => anyhow::bail!(
-                "tmux session name {name} is already held by managed session {} (state {}); \
-                 refusing to launch a second session under it. Stop or rename that session \
-                 (`tm session rename`), or launch from another directory.",
+                "tmux session name {name} is already held by managed session {} (state {}, \
+                 in {}); refusing to launch a second session under it. Stop or rename that \
+                 session (`tm session rename`), or launch from another directory.",
                 holder.id,
-                raw_state(holder)
+                raw_state(holder),
+                holder_dir(holder)
             ),
             None => None,
         };

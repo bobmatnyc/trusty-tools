@@ -1106,10 +1106,30 @@ async fn a_connect_failing_after_registration_rolls_it_back_10101() {
 
 // ── #10101 D3c: unreachable daemon, legacy holders, resume ──
 
-/// A managed record of the start's name in `state`.
-fn held(target: &std::path::Path, state: &str) -> serde_json::Value {
+/// A managed record of the start's name in `state`, belonging to
+/// `source_id`; `target` becomes a checkout whose origin is `acme/proj`
+/// (#10101 D58: only the same owner/repo resumes).
+fn held_for(target: &std::path::Path, state: &str, source_id: &str) -> serde_json::Value {
+    git(target, &["init", "-q"]);
+    git(
+        target,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/proj.git",
+        ],
+    );
     let name = trusty_mpm::core::names::name_from_dir(target);
-    serde_json::json!({ "id": "held-id-10101", "name": name, "state": state })
+    serde_json::json!({
+        "id": "held-id-10101", "name": name, "state": state,
+        "source_id": source_id, "workspace_path": "/b/proj",
+    })
+}
+
+/// [`held_for`] the start's own project.
+fn held(target: &std::path::Path, state: &str) -> serde_json::Value {
+    held_for(target, state, "acme/proj")
 }
 
 /// #10101 D3c: an in-place start under a name a `Stopped` or `Errored`
@@ -1145,6 +1165,37 @@ async fn a_stopped_holder_is_resumed_by_session_start_10101() {
             "{state}: prep ran"
         );
     }
+}
+
+/// #10101 D58: an in-place start under a name a `Stopped` managed record of
+/// ANOTHER owner/repo holds is refused with the held-name error naming the
+/// holder and its directory; nothing is resumed, written, registered or
+/// created. Red at ffc59676b4: that record was resumed on the name alone.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_stopped_holder_of_another_project_refuses_session_start_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let holder = held_for(target.path(), "stopped", "other-owner/proj");
+    let reply = serde_json::json!({
+        "id": "held-id-10101", "name": holder["name"], "state": "active"
+    });
+    let (bin, log) = inplace_fake_tmux(target.path(), 0);
+    let (seen, url) =
+        crate::test_support::launch_stub::spawn(vec![holder], vec![], (200, reply)).await;
+    let err = run_inplace(&url, target.path(), home.path(), bin)
+        .await
+        .expect_err("another project's PM is never resumed");
+    let text = err.to_string();
+    assert!(
+        text.contains("held-id-10101") && text.contains("/b/proj"),
+        "{text}"
+    );
+    let seen = seen.lock().expect("seen");
+    assert!(seen.resumes.is_empty(), "resumed {:?}", seen.resumes);
+    assert!(seen.posts.is_empty(), "registered {:?}", seen.posts);
+    assert!(!log.exists(), "tmux ran");
+    assert!(!target.path().join(".trusty-mpm").exists(), "prep ran");
 }
 
 /// #10101 D3c: a resume the daemon refuses is reported as a failure and

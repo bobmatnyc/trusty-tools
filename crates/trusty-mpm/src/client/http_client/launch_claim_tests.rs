@@ -202,11 +202,38 @@ fn resumed(name: &str, state: &str) -> (u16, serde_json::Value) {
     )
 }
 
-/// #10101 D3c: `Stopped` and `Errored` holders are resumed; an `Active` or
-/// unknown-state holder refuses, naming the holder.
+/// A git checkout in `dir` whose `origin` is `url` (#10101 D58).
+fn git_repo_with_origin(dir: &Path, url: &str) {
+    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", url]] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(&args)
+            .status()
+            .expect("run git")
+            .success();
+        assert!(ok, "git {args:?} failed in {}", dir.display());
+    }
+}
+
+/// A managed holder of `tm-proj` in `state`, with `extra` fields merged in.
+fn holder_with(state: &str, extra: serde_json::Value) -> serde_json::Value {
+    let mut holder =
+        serde_json::json!({ "id": "held-id-10101", "name": "tm-proj", "state": state });
+    if let (Some(h), Some(e)) = (holder.as_object_mut(), extra.as_object()) {
+        h.extend(e.clone());
+    }
+    holder
+}
+
+/// #10101 D3c: `Stopped` and `Errored` holders of the launch's own
+/// owner/repo are resumed; an `Active` or unknown-state holder refuses,
+/// naming the holder.
 #[tokio::test]
 async fn a_stopped_holder_is_resumed_not_launched_10101() {
-    let dir = Path::new("/w/proj");
+    let checkout = crate::test_support::hermetic_temp_dir();
+    git_repo_with_origin(checkout.path(), "https://github.com/acme/proj.git");
+    let dir = checkout.path();
     for (state, resumes) in [
         ("stopped", true),
         ("errored", true),
@@ -214,8 +241,7 @@ async fn a_stopped_holder_is_resumed_not_launched_10101() {
         ("provisioning", false),
         ("some-future-state", false),
     ] {
-        let holder =
-            serde_json::json!({ "id": "held-id-10101", "name": "tm-proj", "state": state });
+        let holder = holder_with(state, serde_json::json!({ "source_id": "acme/proj" }));
         let (_seen, url) = spawn_stub(vec![holder], vec![], resumed("tm-proj", "active")).await;
         let claim = DaemonClient::new(url)
             .claim_launch_name("tm-proj", dir)
@@ -225,6 +251,62 @@ async fn a_stopped_holder_is_resumed_not_launched_10101() {
             (false, Err(e)) => assert!(e.to_string().contains("held-id-10101"), "{e}"),
             (_, other) => panic!("{state}: {other:?}"),
         }
+    }
+}
+
+/// #10101 D58: a `Stopped` holder of the same folder name but another
+/// owner/repo is refused with the held-name error naming it and its
+/// directory. Red at ffc59676b4: it was resumed on the name alone.
+#[tokio::test]
+async fn a_stopped_holder_of_another_project_is_refused_10101() {
+    let checkout = crate::test_support::hermetic_temp_dir();
+    git_repo_with_origin(checkout.path(), "git@github.com:acme/proj.git");
+    for other in [
+        serde_json::json!({ "source_id": "other-owner/proj", "workspace_path": "/b/proj" }),
+        serde_json::json!({ "repo_url": "https://github.com/other-owner/proj.git", "workspace_path": "/b/proj" }),
+    ] {
+        let holder = holder_with("stopped", other);
+        let (seen, url) = spawn_stub(vec![holder], vec![], resumed("tm-proj", "active")).await;
+        let err = DaemonClient::new(url)
+            .claim_launch_name("tm-proj", checkout.path())
+            .await
+            .expect_err("another project's PM is never resumed");
+        let text = err.to_string();
+        assert!(
+            text.contains("held-id-10101") && text.contains("/b/proj"),
+            "{text}"
+        );
+        assert!(seen.lock().expect("seen").resumes.is_empty());
+    }
+}
+
+/// #10101 D58: an identity either side cannot read fails closed — a holder
+/// with no `source_id` and no remote `repo_url` (a local path is no
+/// identity), or a launch directory with no `origin` remote.
+#[tokio::test]
+async fn a_stopped_holder_of_unknown_project_is_refused_10101() {
+    let with_origin = crate::test_support::hermetic_temp_dir();
+    git_repo_with_origin(with_origin.path(), "https://github.com/acme/proj.git");
+    let no_origin = crate::test_support::hermetic_temp_dir();
+    let cases = [
+        (with_origin.path(), serde_json::json!({})),
+        (
+            with_origin.path(),
+            serde_json::json!({ "repo_url": "/Users/x/acme/proj" }),
+        ),
+        (
+            no_origin.path(),
+            serde_json::json!({ "source_id": "acme/proj" }),
+        ),
+    ];
+    for (dir, extra) in cases {
+        let holder = holder_with("stopped", extra.clone());
+        let (seen, url) = spawn_stub(vec![holder], vec![], resumed("tm-proj", "active")).await;
+        let claim = DaemonClient::new(url)
+            .claim_launch_name("tm-proj", dir)
+            .await;
+        assert!(claim.is_err(), "{extra}: {claim:?}");
+        assert!(seen.lock().expect("seen").resumes.is_empty(), "{extra}");
     }
 }
 
@@ -375,8 +457,12 @@ async fn the_tui_resumes_a_stopped_holder_10101() {
     let home = crate::test_support::hermetic_temp_dir();
     let project = crate::test_support::hermetic_temp_dir();
     let name = crate::core::names::name_from_dir(project.path());
+    // #10101 D58: the holder is this checkout's own owner/repo.
+    git_repo_with_origin(project.path(), "https://github.com/acme/proj.git");
     let (bin, log) = fake_tmux(project.path(), "has-session");
-    let holder = serde_json::json!({ "id": "held-id-10101", "name": name, "state": "stopped" });
+    let holder = serde_json::json!({
+        "id": "held-id-10101", "name": name, "state": "stopped", "source_id": "acme/proj"
+    });
     let (seen, url) = spawn_stub(vec![holder], vec![], resumed(&name, "active")).await;
     let got = tui(&url, project.path(), home.path(), bin, false)
         .await
@@ -386,4 +472,26 @@ async fn the_tui_resumes_a_stopped_holder_10101() {
     assert_eq!(seen.resumes, ["held-id-10101"]);
     assert!(seen.posts.is_empty(), "registered: {:?}", seen.posts);
     assert!(logged(&log).is_empty(), "tmux ran: {:?}", logged(&log));
+}
+
+/// #10101 D58: a record's identity is its `source_id` or its remote
+/// `repo_url`, normalized like a launch's origin; a local path is none.
+#[test]
+fn a_holder_identity_reads_source_id_and_remote_repo_url_10101() {
+    let of = |extra| {
+        let h: ManagedSessionSummary =
+            serde_json::from_value(holder_with("stopped", extra)).expect("summary");
+        holder_identity(&h)
+    };
+    let want = Some("acme/proj".to_owned());
+    assert_eq!(of(serde_json::json!({ "source_id": "Acme/Proj" })), want);
+    assert_eq!(
+        of(serde_json::json!({ "repo_url": "git@github.com:acme/proj.git" })),
+        want
+    );
+    assert_eq!(
+        of(serde_json::json!({ "repo_url": "/Users/x/acme/proj" })),
+        None
+    );
+    assert_eq!(of(serde_json::json!({})), None);
 }
