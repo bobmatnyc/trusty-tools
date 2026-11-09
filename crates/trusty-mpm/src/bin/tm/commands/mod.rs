@@ -194,6 +194,8 @@ pub(crate) mod pm_guard_architect_envfile;
 pub(crate) mod pm_guard_architect_reason;
 // #8878 PR2a: the presence gate on Architect anchor writes, and its verbs.
 pub(crate) mod pm_guard_presence;
+// #8878 PR2a: no hooked caller writes the presence key's Keychain item.
+pub(crate) mod pm_guard_presence_key;
 // #8878 PR2a: `tm presence local`.
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;

@@ -3,20 +3,36 @@
 //! Why: a `<pid>.presence` grant is a file in `~/.trusty-mpm/architect-launch/`.
 //! The pm-guard keeps PMs and agents from writing there, but a same-uid shell
 //! outside any hook can write any file the user owns. Bob ruled (D5b Q3) that
-//! a grant is HMAC-sealed with a Keychain-held key only tm can read, so such a
-//! write cannot forge one.
+//! a grant is HMAC-sealed with a Keychain-held key, so a hand-written grant
+//! carries no valid seal.
 //! What: [`GrantKey`] seals and verifies a message with HMAC-SHA256.
 //! [`KeySource::Keychain`] keeps the 256-bit key in the login Keychain
 //! (service [`KEYCHAIN_SERVICE`]); macOS trusts only the binary that created
 //! the item, so another program reading it raises an access prompt.
-//! [`KeySource::File`] is the test sandbox's key (`TRUSTY_SANDBOX=1`, the
-//! sandbox daemons' flag): a 0600 file in the scratch home's anchor directory.
-//! Residual: a rebuilt `tm` is a new binary to the Keychain, so its first read
-//! raises the access prompt once; a hook that hits it waits up to
-//! [`KEYCHAIN_TIMEOUT`] and then denies.
+//! [`KeySource::File`] is the test sandbox's key: a 0600 file in the scratch
+//! home's anchor directory, chosen only under the full sandbox marker
+//! ([`sandbox_isolated`]).
+//! Residuals (owner ruling Q9b: only Bob types outside a hook):
+//! - [`KeySource::load`] does not authenticate the item: it takes whatever
+//!   item answers [`KEYCHAIN_SERVICE`]. A same-uid process outside any hook
+//!   can pre-plant that item before the first `tm presence local`, or delete
+//!   and replace it, and then seal its own grants. It can also replace the
+//!   `tm` binary itself. Hooked callers — PMs, agents, subagents and the
+//!   Architect — are blocked by the pm-guard floor
+//!   `pm_guard_presence_key`, which denies every `security` add, delete or
+//!   partition-list write of the item and every Keychain API write naming it.
+//! - A rebuilt `tm` is a new binary to the Keychain, so its first read raises
+//!   the access prompt once. A hook that meets it does not wait out
+//!   [`KEYCHAIN_TIMEOUT`]: the guard's 8 s deadline (release builds,
+//!   GP-049 `guard-timeout`) or Claude Code's 10 s hook timeout with
+//!   `onFailure: "block"` (debug builds) ends the run first, and the call is
+//!   refused with the timeout text, not the presence remedy.
+//!
 //! Test: `presence_tests.rs` (`a_forged_grant_without_the_key_is_refused`,
-//! `a_sandbox_key_file_round_trips_and_refuses_a_symlink`).
+//! `a_sandbox_key_file_round_trips_and_refuses_a_symlink`);
+//! `tests/presence_key_sandbox_8878.rs` for [`KeySource::ambient`].
 
+use std::ffi::OsStr;
 use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
@@ -115,7 +131,7 @@ pub enum KeySource {
 
 impl KeySource {
     /// The key source for `root` (`~/.trusty-mpm`): the sandbox file when
-    /// `sandbox` (`TRUSTY_SANDBOX=1`), else the Keychain.
+    /// `sandbox` ([`sandbox_isolated`]), else the Keychain.
     pub fn for_root(root: &Path, sandbox: bool) -> Self {
         if sandbox {
             Self::File(root.join(ARCHITECT_DIR).join(SANDBOX_KEY_FILE))
@@ -124,9 +140,19 @@ impl KeySource {
         }
     }
 
-    /// The process's key source: [`Self::for_root`] with `TRUSTY_SANDBOX`.
+    /// The process's key source: [`Self::for_root`] under
+    /// [`sandbox_isolated`] over this process's environment.
+    ///
+    /// Test: `the_sandbox_flag_alone_keeps_the_keychain_8878`,
+    /// `the_full_sandbox_marker_selects_the_key_file_8878`.
     pub fn ambient(root: &Path) -> Self {
-        let sandbox = std::env::var_os("TRUSTY_SANDBOX").is_some_and(|v| v == "1");
+        // #8878: `TRUSTY_SANDBOX=1` alone does not move the key to a file.
+        let sandbox = sandbox_isolated(
+            std::env::var_os("TRUSTY_SANDBOX").as_deref(),
+            std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).as_deref(),
+            root,
+            crate::core::host_state_gate::passwd_home_dir().as_deref(),
+        );
         Self::for_root(root, sandbox)
     }
 
@@ -170,6 +196,33 @@ impl KeySource {
             Self::File(path) => KeyError::File(path.clone(), why),
         }
     }
+}
+
+/// Whether the key may be the sandbox file: the marker
+/// `scripts/sandbox_daemon.sh` sets in full.
+///
+/// Why: #8878 critic MEDIUM — `TRUSTY_SANDBOX=1` alone in an Architect's
+/// environment would move its hook to a 0600 file any same-uid process can
+/// write. The sandbox also sets `TRUSTY_DATA_DIR_OVERRIDE` and a scratch
+/// `$HOME`.
+/// What: `flag` is exactly `1`, `data_override` is non-empty, and `root`'s
+/// parent (the home it sits in) is not `account_home`, the password
+/// database's home, compared canonical when both resolve. No account home,
+/// or a root with no parent, is not a sandbox.
+/// Test: `the_sandbox_flag_alone_keeps_the_keychain_8878`,
+/// `the_full_sandbox_marker_selects_the_key_file_8878`.
+pub fn sandbox_isolated(
+    flag: Option<&OsStr>,
+    data_override: Option<&OsStr>,
+    root: &Path,
+    account_home: Option<&Path>,
+) -> bool {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let away = match (root.parent(), account_home) {
+        (Some(home), Some(account)) => canonical(home) != canonical(account),
+        _ => false,
+    };
+    flag.is_some_and(|v| v == "1") && data_override.is_some_and(|v| !v.is_empty()) && away
 }
 
 /// The sandbox key file's bytes: opened without following a symlink, a

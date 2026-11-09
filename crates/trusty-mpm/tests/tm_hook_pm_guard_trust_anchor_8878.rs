@@ -37,6 +37,14 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
+    /// A data directory beside the scratch home: the `TRUSTY_DATA_DIR_OVERRIDE`
+    /// half of the sandbox marker the presence key source requires (#8878).
+    pub(crate) fn sandbox_data(&self) -> String {
+        let data = self.home.parent().expect("scratch root").join("data");
+        std::fs::create_dir_all(&data).expect("mkdir data");
+        data.display().to_string()
+    }
+
     pub(crate) fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
@@ -181,7 +189,7 @@ pub(crate) fn run_script_under_claude(
         let record =
             record_architect(&root, child.id(), &fx.project).expect("record the fake claude");
         // #8878 PR2a: a sandboxed run is a present Bob — a grant sealed with
-        // the sandbox key file the hook reads under `TRUSTY_SANDBOX=1`.
+        // the sandbox key file the hook reads under the full sandbox marker.
         if env.contains(&("TRUSTY_SANDBOX", "1")) {
             mint_grant(&root, record.pid, record.start_time);
         }
@@ -247,7 +255,9 @@ fn the_architect_main_thread_writes_and_its_subagent_does_not() {
     let fx = Fixture::new();
     let main = write_payload(&fx, &fx.anchor());
     // #8878 PR2a: the bound Architect needs Bob's presence for an anchor write.
-    let present = [("TRUSTY_SANDBOX", "1")];
+    // #8878: the sandbox's full marker, so the hook reads the key file.
+    let data = fx.sandbox_data();
+    let present = [("TRUSTY_SANDBOX", "1"), ("TRUSTY_DATA_DIR_OVERRIDE", &data)];
     let out = run_under_claude_with(&fx, &main.to_string(), true, &present);
     assert_eq!(out.trim(), "", "the present Architect writes the anchor");
     let out = run_under_claude(&fx, &main.to_string(), true);
@@ -423,6 +433,30 @@ fn the_architects_send_keys_path_still_passes() {
     assert_eq!(run(&fx, &stdin, &unrestricted, Some("pm")).trim(), "");
 }
 
+/// #8878 PR2a critic HIGH, end to end: the bound, present Architect cannot
+/// plant the presence key's Keychain item, guarded or under either bypass.
+#[test]
+fn the_architect_cannot_plant_the_presence_key_8878() {
+    let fx = Fixture::new();
+    let data = fx.sandbox_data();
+    let stdin = bash_payload(
+        &fx,
+        "security add-generic-password -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    );
+    for bypass in BYPASSES {
+        let mut env: Vec<(&str, &str)> = bypass.into_iter().collect();
+        env.extend([
+            ("TRUSTY_SANDBOX", "1"),
+            ("TRUSTY_DATA_DIR_OVERRIDE", data.as_str()),
+        ]);
+        let out = run_under_claude_with(&fx, &stdin, true, &env);
+        assert!(
+            out.contains("\"deny\"") && out.contains("trusty-mpm.presence"),
+            "{bypass:?}: {out}"
+        );
+    }
+}
+
 /// #8878 PR2a spoof, end to end: a PM's `tm presence local` is denied by the
 /// hook, and the verb run outside the bound Architect shows no prompt and
 /// writes no `.presence`.
@@ -443,7 +477,9 @@ fn a_pm_cannot_mint_a_presence_grant_8878() {
         );
     }
     let mut cmd = common::tm_command_in(&fx.home);
-    cmd.args(["presence", "local"]).env("TRUSTY_SANDBOX", "1");
+    cmd.args(["presence", "local"])
+        .env("TRUSTY_SANDBOX", "1")
+        .env("TRUSTY_DATA_DIR_OVERRIDE", fx.sandbox_data());
     guard_env(&fx, &mut cmd, &[], Some("supervisor"));
     let out = cmd.output().expect("run tm presence local");
     assert!(!out.status.success(), "{out:?}");

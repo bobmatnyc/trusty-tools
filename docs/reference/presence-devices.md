@@ -74,13 +74,38 @@ on first use. macOS trusts only the binary that created the item, so another
 program reading it shows an access prompt.
 
 - A newly built `tm` is a new binary to the Keychain. Its first read shows the
-  access prompt once; allow it for `tm`. A hook that meets the prompt waits up
-  to 20 seconds and then denies.
-- With `TRUSTY_SANDBOX=1` (the sandbox daemons and tests) the key is the file
-  `architect-launch/presence-hmac.key` in the scratch home instead.
-- Not verified: whether a same-user process can delete the Keychain item and
-  create a replacement that lists `tm` as trusted. If it can, it could seal its
-  own grants.
+  access prompt once; allow it for `tm` by running `tm presence local` at the
+  Studio. A hook that meets the prompt does not wait for it: the guard's
+  8-second deadline (release builds, GP-049 `guard-timeout`) or Claude Code's
+  10-second hook timeout with `onFailure: "block"` (debug builds) ends the
+  run, and the call is refused with the timeout text, not the
+  `tm presence local` remedy.
+- The key moves to the file `architect-launch/presence-hmac.key` in the
+  scratch home only under the sandbox's full marker: `TRUSTY_SANDBOX=1`, a
+  non-empty `TRUSTY_DATA_DIR_OVERRIDE`, and a `$HOME` that is not the
+  account's own (`scripts/sandbox_daemon.sh` sets all three).
+  `TRUSTY_SANDBOX=1` alone keeps the key in the Keychain.
+
+### Who can replace the key
+
+tm reads whatever item answers to service `trusty-mpm.presence`; it does not
+check who created the item or its access list.
+
+- Hooked callers — PMs, agents, subagents and the Architect — cannot. The
+  pm-guard denies, on every path and under both bypasses, a `security
+  add-generic-password`, `delete-generic-password` or
+  `set-generic-password-partition-list` that names the item, chooses its
+  words at run time, or names no literal service or account; and any
+  Keychain API write (`keyring.set_password`, `SecItemAdd`, …) naming the
+  item. The same check reads the body of every script the command runs.
+- A process outside any hook, running as the same user, can. It can create
+  the item before the first `tm presence local`, or delete it and create a
+  replacement, and then seal its own grants. It can also replace the `tm`
+  binary. Owner ruling Q9b accepts this: only Bob types commands outside a
+  hook.
+- Also not covered: a name an interpreter's code assembles at run time, a
+  script the guard cannot locate, and a Keychain search list that puts
+  another keychain first (`security list-keychains -s`).
 
 ## Not covered
 
