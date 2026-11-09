@@ -128,6 +128,19 @@ pub enum IndexRecord {
         /// Identity observed after the reindex.
         identity: Option<IndexIdentity>,
     },
+    /// #10876: a feed pass read this identity from `search.index.status`
+    /// and it differed from the newest `Observed` record. An offline read
+    /// checks every acknowledgement against the newest one, so a re-create
+    /// or generation bump stays visible after the pass that saw it. An
+    /// older binary skips this kind as an unparseable line (F11).
+    Observed {
+        /// The identity the status reply carried. `None`: the reply carried
+        /// none after an earlier pass saw one (D1 rolled back), so an
+        /// offline read stops checking acks against the stale identity.
+        // #10876: `Option` so a D1 rollback is journaled; a bare identity
+        // object, as the first #10876 commit wrote, still parses as `Some`.
+        identity: Option<IndexIdentity>,
+    },
 }
 
 /// One machine's index journal for one bundle root and one index ID.
@@ -243,9 +256,27 @@ pub(crate) fn journaled_paths(records: &[IndexRecord]) -> std::collections::BTre
             | IndexRecord::Probe { path, .. }
             | IndexRecord::RemoveAck { path, .. }
             | IndexRecord::WithdrawProbe { path, .. } => Some(path.clone()),
-            IndexRecord::Reindex { .. } => None,
+            // #10876: an identity observation names no path.
+            IndexRecord::Reindex { .. } | IndexRecord::Observed { .. } => None,
         })
         .collect()
+}
+
+/// The identity of the newest [`IndexRecord::Observed`] (#10876).
+///
+/// `None` when there is no observation or the newest one records D1 absent.
+/// Test: `observed_record_written_once_per_identity_change`,
+/// `d1_rollback_journals_one_absent_observation`.
+pub(crate) fn last_observed_identity(records: &[IndexRecord]) -> Option<&IndexIdentity> {
+    records
+        .iter()
+        .rev()
+        .find_map(|r| match r {
+            // #10876: a newest `None` (D1 rolled back) hides older identities.
+            IndexRecord::Observed { identity } => Some(identity.as_ref()),
+            _ => None,
+        })
+        .flatten()
 }
 
 /// Fold `records` for `path` in journal order.

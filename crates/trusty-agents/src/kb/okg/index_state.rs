@@ -12,9 +12,10 @@
 //! `<data dir>/trusty-agents/okf-index-state`. [`KbStore::index_view`] reads
 //! the trusty-okf backlog for the tree, and [`KbStore::okg_index_coverage_of`]
 //! folds it per source into [`IndexCoverage`]. Read-only, no network: the
-//! live identity is unknown offline, so recorded bytes decide which work is
-//! owed, and settled paths count as `unconfirmed`, never `synced` (§4.9.2
-//! rules 4-5). Only a feed pass that ended Searchable confirms them.
+//! live identity is unknown offline, so recorded bytes and the newest
+//! identity a feed pass observed decide which work is owed (#10876), and
+//! settled paths count as `unconfirmed`, never `synced` (§4.9.2 rules 4-5).
+//! Only a feed pass that ended Searchable confirms them.
 //! Test: `coverage_is_pending_until_this_machines_daemon_confirms`,
 //! `two_state_dirs_over_one_tree_keep_separate_state`,
 //! `confirmed_put_and_probe_never_read_synced_without_an_identity`.
@@ -27,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use trusty_okf::build::ledger::{ItemStatus, Ledger};
 use trusty_okf::bundle::Bundle;
-use trusty_okf::state::{IndexBacklog, IndexStateDir, LiveIdentity, TaskOp};
+use trusty_okf::state::{IndexBacklog, IndexStateDir, TaskOp};
 
 use crate::kb::okg::IndexCoverage;
 use crate::kb::okg::registry::SourceSpec;
@@ -76,19 +77,16 @@ impl IndexStateRef {
     }
 }
 
-/// The live identity an offline read reports: unreadable, so a record's
-/// bytes decide and no read is Searchable (§4.9.2 rule 4).
-fn offline() -> LiveIdentity {
-    LiveIdentity::Unreadable("offline read: no daemon was asked".to_string())
-}
-
 impl KbStore {
     /// This machine's index backlog for the tree, or `None` with no state.
     ///
     /// Why: one backlog read serves every source of a status view.
     /// What: opens the tree as a trusty-okf bundle and diffs it against the
-    /// journal in `state`. A state directory inside the tree is an error
-    /// (`StateDirInBundle`). Writes nothing.
+    /// journal in `state`, checking each record against the newest identity
+    /// a feed pass observed (`Bundle::index_backlog_offline`). A state
+    /// directory inside the tree is an error (`StateDirInBundle`). Writes
+    /// nothing.
+    /// Test: `identity_change_makes_offline_read_pending`.
     pub fn index_view(
         &self,
         state: Option<&IndexStateRef>,
@@ -97,11 +95,10 @@ impl KbStore {
             return Ok(None);
         };
         let (bundle, _) = Bundle::open(&self.root)?;
-        Ok(Some(bundle.index_backlog(
-            &state.dir,
-            &state.index_id,
-            &offline(),
-        )?))
+        // #10876: an identity change a pass journaled makes older acks owed.
+        Ok(Some(
+            bundle.index_backlog_offline(&state.dir, &state.index_id)?,
+        ))
     }
 
     /// One source's index coverage on this machine, read offline (#3892,
@@ -199,8 +196,9 @@ pub(crate) struct SourceIndexState {
     /// publication gate matches the pass's errors against it.
     pub(crate) paths: std::collections::BTreeSet<String>,
     /// Paths still owed a push or a remove by the OFFLINE read, or
-    /// unreadable. An offline read cannot see an identity change, so this
-    /// alone is not the gate (see `stores::okg_feed`).
+    /// unreadable. The offline read sees only identity changes a pass
+    /// journaled (#10876), so the pass's own errors also gate (see
+    /// `stores::okg_feed`).
     pub(crate) blocking: Vec<String>,
 }
 

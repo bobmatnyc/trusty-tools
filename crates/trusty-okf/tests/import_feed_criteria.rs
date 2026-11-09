@@ -278,8 +278,13 @@ fn c135_identity_and_no_d1_paths_never_read_searchable() {
     assert_ne!(r.status, FeedStatus::Searchable);
     assert_eq!(r.acknowledged, 0, "{r:?}");
     let journal = trusty_okf::state::IndexJournal::open(&st3, &fx3.root, INDEX).unwrap();
+    // #10876: the pass journals the identity it read; nothing else.
     assert!(
-        journal.read().unwrap().is_empty(),
+        journal
+            .read()
+            .unwrap()
+            .iter()
+            .all(|r| matches!(r, trusty_okf::state::IndexRecord::Observed { .. })),
         "a mismatched put was journaled"
     );
 }
