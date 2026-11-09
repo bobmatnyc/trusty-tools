@@ -92,12 +92,17 @@ fn device_grants_are_refused_while_inert_8878() {
     assert!(local.is_ok());
 }
 
-/// D67: `check` is `check_with_policy` under `DEVICE_GRANTS`.
+/// D67: `check` is `check_with_policy` under `DEVICE_GRANTS`, which ships
+/// `Honour` (#8878: owner ruling "Honour device grants now").
 #[test]
 fn check_applies_the_d67_switch_8878() {
     let (_d, root) = root();
     FakeDevice::new("cred-A", 1).enrol(&root, 0);
     crate::core::presence::mint(&root, &ARCHITECT, "device:cred-A", &key(), NOW).expect("mint");
+    assert_eq!(
+        crate::core::presence::DEVICE_GRANTS,
+        DeviceGrantPolicy::Honour
+    );
     let via_switch = check_with_policy(
         &root,
         &ARCHITECT,
@@ -105,7 +110,9 @@ fn check_applies_the_d67_switch_8878() {
         NOW,
         crate::core::presence::DEVICE_GRANTS,
     );
-    assert_eq!(check(&root, &ARCHITECT, || Some(key()), NOW), via_switch);
+    let shipped = check(&root, &ARCHITECT, || Some(key()), NOW);
+    assert_eq!(shipped, via_switch);
+    assert_eq!(shipped.map(|g| g.method), Ok("device:cred-A".to_owned()));
 }
 
 /// R: revoking device X kills X's live grant at once.

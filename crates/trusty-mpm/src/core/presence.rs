@@ -38,9 +38,9 @@ pub const METHOD_LOCAL: &str = "local";
 
 /// Whether a `device:<credential id>` grant lets a call through.
 ///
-/// Why: #8878 D67 Q1 is pending the owner: device grants either lift the
-/// deny exactly like `local`, or ship inert until #10865 verifies the key's
-/// access list. Both settings are built and tested; [`DEVICE_GRANTS`] picks.
+/// Why: #8878 D67 Q1: device grants either lift the deny exactly like
+/// `local`, or stay inert. Both settings are built and tested;
+/// [`DEVICE_GRANTS`] picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceGrantPolicy {
     /// A device grant counts like `local`, while its device record is
@@ -50,9 +50,12 @@ pub enum DeviceGrantPolicy {
     Inert,
 }
 
-/// #8878 D67: THE switch for device grants. Inert (fail-closed) until the
-/// owner rules; flip to [`DeviceGrantPolicy::Honour`] to let them through.
-pub const DEVICE_GRANTS: DeviceGrantPolicy = DeviceGrantPolicy::Inert;
+/// #8878 D67: THE switch for device grants. The owner ruled "Honour device
+/// grants now; accept labelled caller text": a device grant lets a call
+/// through while its device record is present and sealed, and the action
+/// text stays labelled "unverified origin". [`DeviceGrantPolicy::Inert`]
+/// refuses every device grant.
+pub const DEVICE_GRANTS: DeviceGrantPolicy = DeviceGrantPolicy::Honour;
 
 /// [`refresh`] rewrites a grant at most this often, in seconds.
 const REFRESH_EVERY: u64 = 60;
@@ -213,7 +216,7 @@ pub fn check(
 
 /// [`check`] under an explicit [`DeviceGrantPolicy`].
 ///
-/// Why: #8878 D67 — both answers to Q1 stay tested while the owner decides.
+/// Why: #8878 D67 — both answers to Q1 stay built and tested.
 /// What: as [`check`]; a `device:<id>` method is refused under
 /// [`DeviceGrantPolicy::Inert`], and under [`DeviceGrantPolicy::Honour`]
 /// passes only while that device's record is present and its seal verifies
