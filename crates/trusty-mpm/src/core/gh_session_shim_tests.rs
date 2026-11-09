@@ -6,8 +6,9 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::{
-    GH_SHIM_ENV, LaunchSeams, PinnedCredential, REAP_FN, find_real_gh, launch_pinned_login,
-    prefixed_path, shim_dir, shim_root, shim_script, write_gh_shim,
+    GH_SHIM_ENV, LaunchSeams, PinnedCredential, RATE_LIMIT_REFUSAL_MARKER,
+    RATE_LIMIT_RESET_EPOCH_OPEN, REAP_FN, find_real_gh, launch_pinned_login, prefixed_path,
+    shim_dir, shim_root, shim_script, write_gh_shim,
 };
 use crate::core::gh_account::PinnedGhIdentity;
 use crate::core::gh_account_dir::AccountDirSources;
@@ -872,6 +873,10 @@ fn a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout() {
     ] {
         assert!(stderr.contains(part), "{part} missing: {stderr}");
     }
+    // #10550: `tm wait` reads the line through these two constants.
+    assert!(stderr.starts_with(RATE_LIMIT_REFUSAL_MARKER), "{stderr}");
+    let epoch = format!("{RATE_LIMIT_RESET_EPOCH_OPEN}1767225600)");
+    assert!(stderr.contains(&epoch), "{epoch} missing: {stderr}");
     // #10550 item 5: zero retries — the refused call ran once.
     let ran = std::fs::read_to_string(calls.path()).expect("call log");
     assert_eq!(ran, "call\n", "the refused call was retried");

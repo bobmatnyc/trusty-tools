@@ -24,10 +24,14 @@ use serde::{Deserialize, Serialize};
 /// only reason an agent can tell a wait that is progressing from one that is
 /// about to expire.
 /// What: when the wait began, when it was last polled, how many polls have
-/// happened, and the hard timeout in force.
+/// happened, the hard timeout in force, and the current run of consecutive
+/// rate-limit refusals.
 /// Test: `budget_resumes_across_invocations` proves `remaining` survives a
 /// re-run; `loop_returns_timeout_when_budget_exhausted` proves `expired` ends
-/// the wait once the budget reaches zero.
+/// the wait once the budget reaches zero;
+/// `rate_limit_streak_spans_slices_and_errors_on_the_fifth_refusal` and
+/// `budget_resumes_a_state_file_written_before_the_rate_limit_streak` cover
+/// the streak.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Budget {
     /// The canonical condition spec this budget belongs to.
@@ -40,6 +44,12 @@ pub(crate) struct Budget {
     pub(crate) polls: u64,
     /// The hard timeout in force, in seconds.
     pub(crate) timeout_s: u64,
+    /// Consecutive gh shim rate-limit refusals, across every invocation.
+    ///
+    /// #10550: persisted so a refusal streak spread over several slices still
+    /// ends the wait on the fifth refusal; `default` reads an older state file.
+    #[serde(default)]
+    pub(crate) rate_limited_streak: u32,
 }
 
 impl Budget {
@@ -124,6 +134,7 @@ pub(crate) fn load_or_start(
         updated_at: now,
         polls: 0,
         timeout_s,
+        rate_limited_streak: 0,
     };
 
     let Ok(raw) = std::fs::read_to_string(path) else {
