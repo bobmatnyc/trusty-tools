@@ -28,6 +28,8 @@ mod il_init;
 mod inside_claude;
 // #8902: the pm-guard's Architect pane floor names the launch session.
 pub(crate) mod launch;
+// #10885: the Architect's Notification hook step and status row.
+mod notify_hook;
 mod poller;
 mod preflight;
 // #8942: daemon registration and the ruling-2 sidecar prune.
@@ -421,6 +423,8 @@ pub(crate) fn init_with_seed(
         let label = format!("`[supervisor] session = \"{}\"` in", names.architect());
         report.steps.push(write_edit(&config_path, edit, &label)?);
     }
+    // #10885: after the config edits; fails `init` only on its config write.
+    report.steps.push(notify_hook::step(dir, home, None));
 
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
@@ -638,3 +642,7 @@ fn launch_step(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "notify_hook_tests.rs"]
+mod notify_hook_tests;
