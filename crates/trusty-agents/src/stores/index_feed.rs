@@ -10,11 +10,9 @@
 //! was missing: after an entity is durably written to the tree, its content is
 //! pushed into the bound index, making the binding's semantics true.
 //!
-//! It lives in `trusty-agents`, not `trusty-kb`, for the same reason the
-//! Gmail/Drive fetchers do: the push is a NETWORK call, and `trusty-kb` stays
-//! deterministic and network-free. The reconcile that decides WHAT to push is
-//! pure and therefore stays in the KB crate
-//! ([`KbStore::okg_index_backlog`](trusty_kb::store::KbStore::okg_index_backlog));
+//! The push is a NETWORK call; the reconcile that decides WHAT to push is
+//! pure and deterministic and lives in the KB glue
+//! ([`KbStore::okg_index_backlog`](crate::kb::store::KbStore::okg_index_backlog));
 //! this module owns only the seam ([`IndexFeed`]) and the drive loop, so every
 //! ordering property is testable against a fake with no daemon running.
 //!
@@ -58,11 +56,11 @@
 
 use std::time::Duration;
 
+use crate::kb::okg::index_journal::{IndexJournal, IndexOp, IndexTask};
+use crate::kb::okg::registry::SourceSpec;
+use crate::kb::store::KbStore;
 use async_trait::async_trait;
 use serde::Serialize;
-use trusty_kb::okg::index_journal::{IndexJournal, IndexOp, IndexTask};
-use trusty_kb::okg::registry::SourceSpec;
-use trusty_kb::store::KbStore;
 
 /// Per-push timeout.
 ///

@@ -249,8 +249,8 @@ impl StoreStatus {
 
 /// The knowledge directory holding one KB tree per assistant.
 ///
-/// Mirrors `trusty-kb`'s own default (and `tools::okg::knowledge_dir`) so every
-/// surface addresses the same trees: `$KB_KNOWLEDGE_DIR`, else
+/// Mirrors `tools::okg::knowledge_dir` so every surface addresses the same
+/// trees: `$KB_KNOWLEDGE_DIR`, else
 /// `<home>/.trusty-agents/knowledge`.
 fn knowledge_dir() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("KB_KNOWLEDGE_DIR") {
@@ -283,7 +283,7 @@ fn attach_tree_coverage(status: &mut StoreStatus) {
         return;
     }
     let store =
-        trusty_kb::store::KbStore::new(tree_path, trusty_kb::schema::Profile::default_profile());
+        crate::kb::store::KbStore::new(tree_path, trusty_okf::profile::Profile::default_profile());
     if let Ok(coverage) = store.okg_index_coverage() {
         status.pending_index = Some(coverage.pending);
         status.synced_index = Some(coverage.synced);

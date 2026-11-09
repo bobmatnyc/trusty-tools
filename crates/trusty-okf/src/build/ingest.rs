@@ -147,7 +147,7 @@ pub const PROVENANCE_KEYS: [&str; 6] = [
 /// #10746 S8: who writes an item: the `generated.by` actor (ingest or
 /// import, §2.14 rule 11) and the provenance the writer itself derives,
 /// never a source value. Kept apart from [`SourceItem`] so callers that
-/// build items (trusty-agents through trusty-kb) are unchanged.
+/// build items (the agent crate) are unchanged.
 pub(crate) struct Writer<'a> {
     pub actor: &'a str,
     pub provenance: &'a Mapping,

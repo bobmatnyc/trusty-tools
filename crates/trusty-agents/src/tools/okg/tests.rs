@@ -1,7 +1,7 @@
 //! Unit tests for the OKG builder tool surface.
 //!
 //! Why: the ledger/idempotency invariants themselves are proved in
-//! `trusty-kb::okg`; what needs covering HERE is the agent-facing layer — the
+//! `trusty_okf::build` and `crate::kb::okg`; what needs covering HERE is the agent-facing layer — the
 //! tool schemas, the path-confinement gate on a model-supplied `root`, the
 //! register-then-ingest wiring, and the pure Gmail/Drive adapters (which cannot
 //! be exercised end-to-end because `trusty-gworkspace` exposes no injectable
@@ -159,8 +159,8 @@ fn every_tool_schema_is_well_formed() {
 }
 
 /// Why: `root` is model-supplied. Without the confinement gate an ingest could
-/// be aimed at any directory on disk — the same hole trusty-kb closed for
-/// `kb_convert_tree`.
+/// be aimed at any directory on disk — the same hole the retired trusty-kb
+/// closed for `kb_convert_tree`.
 /// What: asserts a root outside the knowledge dir is rejected, and one inside
 /// resolves.
 /// Test: self-contained.
@@ -280,10 +280,10 @@ async fn sources_tool_reports_registered_sources() {
 
     let store = resolve_store(&json!({ "root": &root })).unwrap();
     store
-        .okg_register_source(trusty_kb::okg::registry::SourceSpec::new(
+        .okg_register_source(crate::kb::okg::registry::SourceSpec::new(
             "sent-mail",
             Some("mail"),
-            trusty_kb::okg::registry::Locator::Gmail {
+            crate::kb::okg::registry::Locator::Gmail {
                 query: "in:sent".into(),
                 after: Some("2026/01/01".into()),
                 before: None,
@@ -515,7 +515,7 @@ fn config_defaults_to_home() {
     let default = config::OkgConfig::default();
     assert_eq!(
         default.policy(home),
-        trusty_kb::okg::policy::DocStorePolicy::home_default(home),
+        trusty_okf::build::policy::DocStorePolicy::home_default(home),
         "an absent [okg] section means home, never everything"
     );
 
@@ -524,7 +524,7 @@ fn config_defaults_to_home() {
     };
     assert_eq!(
         configured.policy(home),
-        trusty_kb::okg::policy::DocStorePolicy::new(vec![
+        trusty_okf::build::policy::DocStorePolicy::new(vec![
             home.join("Corpora/research"),
             std::path::PathBuf::from("/srv/corpora"),
         ]),
@@ -590,10 +590,10 @@ async fn docstore_tool_reports_actionable_errors() {
     OkgIngestGmailTool::new();
     let store = resolve_store(&json!({ "root": &root })).unwrap();
     store
-        .okg_register_source(trusty_kb::okg::registry::SourceSpec::new(
+        .okg_register_source(crate::kb::okg::registry::SourceSpec::new(
             "mail",
             None,
-            trusty_kb::okg::registry::Locator::Gmail {
+            crate::kb::okg::registry::Locator::Gmail {
                 query: "in:sent".into(),
                 after: None,
                 before: None,

@@ -14,9 +14,9 @@
 use std::sync::Mutex;
 
 use super::*;
-use trusty_kb::okg::policy::DocStorePolicy;
-use trusty_kb::okg::registry::Locator;
-use trusty_kb::schema::Profile;
+use crate::kb::okg::registry::Locator;
+use trusty_okf::build::policy::DocStorePolicy;
+use trusty_okf::profile::Profile;
 
 /// One recorded call against the fake feed.
 #[derive(Debug, Clone, PartialEq)]

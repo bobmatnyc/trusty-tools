@@ -18,12 +18,12 @@
 
 use std::collections::BTreeSet;
 
+use crate::kb::okg::registry::{Locator, SourceSpec};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_gworkspace::api::client::BaseClient;
-use trusty_kb::okg::ingest::{IngestReport, SourceItem};
-use trusty_kb::okg::ledger::Ledger;
-use trusty_kb::okg::registry::{Locator, SourceSpec};
+use trusty_okf::build::ingest::{IngestReport, SourceItem};
+use trusty_okf::build::ledger::Ledger;
 
 use crate::tools::okg::gapi;
 use crate::tools::okg::{arg_str, now_iso, ok_json, require_str, resolve_store, with_root};

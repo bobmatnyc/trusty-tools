@@ -1,15 +1,16 @@
 //! `KbStore` entry points over trusty-okf's ingest engine.
 //!
 //! Why: #10746 S4 moved the engine to `trusty_okf::build::ingest`. The
-//! trusty-agents connector tools still call `KbStore::ingest_items` and
-//! `KbStore::okg_sweep_deleted` until slice S11, so trusty-kb keeps the two
-//! methods and delegates; there is one engine.
+//! connector tools in `crate::tools::okg` and the knowledge pipeline call
+//! `KbStore::ingest_items` and `KbStore::okg_sweep_deleted`; these two
+//! methods delegate to that engine, so there is one engine (#10746 S11 moved
+//! them here from the deleted trusty-kb).
 //! What: converts the typed registry row to trusty-okf's, parses `now` (the
 //! engine takes every time from the caller as an instant, SPEC-OKF-01 §4.3),
 //! creates the store root when absent (the engine requires an existing root,
-//! §2.11 rule 1), and calls the engine. Then it runs trusty-kb's inverse-edge
-//! reconcile over each item's entity, as `put_entity` did after every write
-//! before the move; the reconcile is idempotent, and its failures join the
+//! §2.11 rule 1), and calls the engine. Then it runs the inverse-edge
+//! reconcile over each item's entity, as trusty-kb's `put_entity` did after
+//! every write; the reconcile is idempotent, and its failures join the
 //! report's errors.
 //! Test: `docstore_ingest_is_idempotent_end_to_end`,
 //! `ingest_rejects_a_now_that_is_not_an_instant`, and the trusty-okf engine
@@ -18,11 +19,11 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, FixedOffset};
-pub use trusty_okf::build::ingest::{INGEST_ACTOR, IngestFinding, IngestReport, SourceItem};
+use trusty_okf::build::ingest::{IngestReport, SourceItem};
 use trusty_okf::format::fields::parse_instant;
 
-use crate::okg::registry::SourceSpec;
-use crate::store::KbStore;
+use crate::kb::okg::registry::SourceSpec;
+use crate::kb::store::KbStore;
 
 /// `now` as an instant with an offset, or an error naming the value.
 ///

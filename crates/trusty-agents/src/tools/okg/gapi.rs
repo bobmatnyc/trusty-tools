@@ -25,7 +25,7 @@ use base64::Engine;
 use serde_json::Value;
 use trusty_gworkspace::api::client::BaseClient;
 use trusty_gworkspace::api::constants::{DRIVE_API_BASE, GMAIL_API_BASE};
-use trusty_kb::okg::ingest::SourceItem;
+use trusty_okf::build::ingest::SourceItem;
 
 /// Page size for list calls. Both APIs cap well above this.
 const PAGE_SIZE: usize = 100;

@@ -5,27 +5,20 @@
 //! properties at once: idempotent (re-running an ingest changes nothing),
 //! additive (registering a new doc store, or reaching further back in time,
 //! appends and never rebuilds), and crash-convergent (a killed run re-runs to
-//! the same state). This module is the machinery for all three. #10746 S4:
-//! the engine and its parts live in `trusty_okf::build`, and concept writes
-//! go through `trusty_okf::bundle::Bundle::put`.
+//! the same state). The engine and its parts live in `trusty_okf::build`
+//! (#10746 S4); this module composes them for the agent's OKG tools.
 //!
 //! What:
-//!   - [`registry`] — `_sources/registry.toml`, the human-readable source list.
-//!   - [`ledger`]   — `_sources/<id>.jsonl`, the per-item append-only journal.
-//!   - [`ingest`]   — the fetcher-agnostic engine ([`ingest::SourceItem`] in,
-//!     entities + ledger lines out).
-//!   - [`docstore`] — the in-crate filesystem fetcher.
+//!   - [`registry`] — the typed view of `_sources/registry.toml`, which adds
+//!     the `gmail` and `drive` kinds this crate implements (#10746 S11).
+//!   - [`ingest`]   — the `KbStore` entry points over the trusty-okf engine.
 //!   - [`index_journal`] — `_sources/<id>.index.jsonl`, the record of what
 //!     reached the bound SEARCH index, and the reconcile that diffs it against
-//!     the ledger (#3892).
-//!   - [`trust`]    — the per-entity trust label the engine stamps at ingest
-//!     and the retrieval fence reads back (#4532, DOC-63 §6.3).
+//!     the ledger (#3892). `crate::stores::index_feed` pushes and records.
 //!
-//! Gmail and Drive fetchers deliberately live in `trusty-agents`, where the
-//! authenticated `trusty-gworkspace` client already is — this crate stays pure,
-//! deterministic, and network-free. For the same reason the index PUSH lives
-//! there too (`trusty_agents::stores::index_feed`); this crate only decides
-//! what is owed.
+//! The ledger, docstore walk, read policy and trust labels are used straight
+//! from `trusty_okf::build`. Gmail and Drive fetchers live in
+//! `crate::tools::okg`, next to the authenticated `trusty-gworkspace` client.
 //!
 //! This file adds the store-level entry points that compose those pieces:
 //! [`KbStore::okg_register_source`], [`KbStore::okg_sources`], and
@@ -35,11 +28,6 @@
 //! `docstore_ingest_is_idempotent_end_to_end`,
 //! `ingest_rejects_a_now_that_is_not_an_instant`.
 
-// #10746 S4: registry, ledger, jsonl, ingest, docstore, policy and trust
-// moved to `trusty_okf::build` (SPEC-OKF-01 §2.7.2). trusty-kb re-exports the
-// five that need no agent view and keeps thin `ingest` and `registry` layers
-// for trusty-agents until S11; the index journal stays here until S5.
-pub use trusty_okf::build::{docstore, jsonl, ledger, policy, trust};
 pub mod index_journal;
 pub mod ingest;
 pub mod registry;
@@ -47,10 +35,12 @@ pub mod registry;
 use serde::Serialize;
 use serde_json::Value as Json;
 
-use crate::okg::ingest::IngestReport;
-use crate::okg::ledger::{Ledger, Watermark};
-use crate::okg::registry::{Locator, RegisterOutcome, SourceRegistry, SourceSpec};
-use crate::store::KbStore;
+use trusty_okf::build::ingest::IngestReport;
+use trusty_okf::build::ledger::{Ledger, Watermark};
+use trusty_okf::build::{docstore, policy};
+
+use crate::kb::okg::registry::{Locator, RegisterOutcome, SourceRegistry, SourceSpec};
+use crate::kb::store::KbStore;
 
 /// One row of the `okg_sources` status view.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -196,7 +186,7 @@ impl KbStore {
     /// Scan a registered doc store and ingest whatever changed.
     ///
     /// Why: the whole doc-store path is local and deterministic, so it runs
-    /// end-to-end inside this crate — the agent tool is a thin wrapper.
+    /// end-to-end without a connector — the agent tool is a thin wrapper.
     /// What: resolves the source, walks its directory (subject to `policy`, the
     /// read-side confinement gate), and hands the items to the ingest engine
     /// with deletion detection enabled (a full walk DOES enumerate the corpus,
@@ -247,8 +237,8 @@ impl KbStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::okg::policy::DocStorePolicy;
-    use crate::schema::Profile;
+    use trusty_okf::build::policy::DocStorePolicy;
+    use trusty_okf::profile::Profile;
 
     /// A policy permitting the whole fixture tempdir.
     fn policy(tmp: &tempfile::TempDir) -> DocStorePolicy {
@@ -362,13 +352,13 @@ mod tests {
             },
             "t0",
         );
-        let mut item = ingest::SourceItem {
+        let mut item = trusty_okf::build::ingest::SourceItem {
             item_id: "m1".into(),
             fingerprint: "m1".into(),
             name: "m1".into(),
             title: "m1".into(),
             body: "hello".into(),
-            ..ingest::SourceItem::default()
+            ..trusty_okf::build::ingest::SourceItem::default()
         };
         item.fields.insert("source_status".into(), "deleted".into());
         item.fields
@@ -582,7 +572,7 @@ mod tests {
         let spec = store.okg_source("corpus").unwrap();
         let backlog = store.okg_index_backlog(&spec).unwrap();
         let mut journal =
-            crate::okg::index_journal::IndexJournal::load(&store.root, "corpus").unwrap();
+            crate::kb::okg::index_journal::IndexJournal::load(&store.root, "corpus").unwrap();
         for task in &backlog.tasks {
             store.okg_record_index(&mut journal, task, "t0").unwrap();
         }

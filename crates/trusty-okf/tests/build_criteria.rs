@@ -181,8 +181,8 @@ fn key_order(line: &str, keys: &[&str]) -> Vec<usize> {
 }
 
 /// Why: §2.7.2 "unchanged on-disk format" — an existing ledger must read,
-/// and a new line must have trusty-kb's shape so trusty-kb (until S11) and
-/// any reader of the old format still parse it.
+/// and a new line must have trusty-kb's shape so any reader of the old
+/// format still parses it.
 /// What: loads the golden ledgers (last record wins, tombstone kept),
 /// re-serialises every golden line to the same bytes, then ingests one item
 /// over the golden tree and checks the file only grew by a line of the same
@@ -377,7 +377,8 @@ fn plain(id: &str) -> SourceItem {
 
 /// trusty-common's `is_tombstone` rule: leading frontmatter with a
 /// non-empty `source_id` and `source_status: deleted`. trusty-okf cannot
-/// link trusty-common (B8), so trusty-kb's suite also calls the real one.
+/// link trusty-common (B8), so trusty-agents' `okf_tombstone` test calls the
+/// real one.
 fn is_tombstone(fm: &Mapping) -> bool {
     fm.get("source_status").and_then(Value::as_str) == Some("deleted")
         && fm

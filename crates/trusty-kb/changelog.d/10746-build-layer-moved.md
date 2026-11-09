@@ -1,4 +1,0 @@
-Changed
-- The OKG registry, ledger, JSONL journal, ingest engine, doc-store scanner, read policy and trust labels now live in `trusty_okf::build` (#10746). `trusty_kb::okg::{docstore, jsonl, ledger, policy, trust}` re-export them; `okg::registry` keeps the typed `Gmail` and `Drive` locators over trusty-okf's registry, and `KbStore::ingest_items` and `okg_sweep_deleted` call the trusty-okf engine.
-- `KbStore::ingest_items`, `okg_sweep_deleted` and `okg_ingest_docstore` refuse a `now` that is not an ISO 8601 instant with an offset.
-- Ingested entities are written in the OKF v0.2 form: `generated` replaces `updated` on a content change, the store root gains a `log.md`, and files are created 0600. A re-ingest keeps editorial and verification keys, and a protected key a connector supplies moves under `source_fields`.

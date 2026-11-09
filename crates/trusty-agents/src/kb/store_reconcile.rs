@@ -1,26 +1,26 @@
 //! Inverse-edge reconciliation — the [`KbStore`] file walk over trusty-okf's
 //! pure reconciler.
 //!
-//! Why: #10746 moved the edge logic to `trusty_okf::profile::reconcile`
-//! (re-exported here as [`crate::reconcile`]); inverse edges now come from the
-//! profile. Resolving a link to a file and writing it stays with [`KbStore`]
-//! until slice S3 gives trusty-okf its own `Bundle`. This post-pass runs after
-//! every [`crate::put`] and across the whole tree after [`crate::convert`].
+//! Why: the edge logic lives in `trusty_okf::profile::reconcile`; inverse
+//! edges come from the profile. Resolving a link to an entity file and
+//! writing it is the [`KbStore`] half, which ingest runs after each item
+//! (`crate::kb::okg::ingest`), as trusty-kb's `put_entity` did after every
+//! write. #10746 S11 moved it here from the deleted trusty-kb.
 //!
 //! What: [`KbStore::reconcile_entity`] resolves each `(target, inverse)` pair
 //! of a source entity to an existing entity file and unions a `[[source]]`
-//! link into it; [`KbStore::reconcile_all`] applies it to every entity.
-//! Dangling links (no target file) are left untouched for validation to
-//! report; targets are never fabricated.
+//! link into it. Dangling links (no target file) are left untouched for
+//! validation to report; targets are never fabricated.
 //!
 //! Test: `reconcile_materialises_symmetric_edge`, `reconcile_materialises_pair`,
 //! `reconcile_is_idempotent`, `reconcile_skips_dangling`.
 
 use std::path::PathBuf;
 
-use crate::entity::{Entity, slugify};
-use crate::reconcile::{add_inverse_link, inverse_links, source_link};
-use crate::store::KbStore;
+use trusty_okf::format::concept::{Entity, slugify};
+use trusty_okf::profile::reconcile::{add_inverse_link, inverse_links, source_link};
+
+use crate::kb::store::KbStore;
 
 impl KbStore {
     /// Materialise inverse edges for one source entity onto its link targets.
@@ -48,33 +48,11 @@ impl KbStore {
         Ok(changed)
     }
 
-    /// Reconcile every entity in the tree (used after conversion).
-    ///
-    /// Why: a bulk conversion writes many entities before any reconciliation;
-    /// this second pass closes every edge deterministically.
-    /// What: iterates collections then entities (both sorted), reconciling each.
-    /// Test: exercised via the convert idempotency test.
-    pub fn reconcile_all(&self, now: &str) -> anyhow::Result<usize> {
-        let mut touched = 0;
-        for coll in self.collection_dirs_on_disk()? {
-            for (slug, path) in self.entity_files(&coll)? {
-                // Fail-open: a malformed file (unparseable frontmatter) is
-                // skipped, never aborting a bulk reconcile — it has no edges to
-                // mirror and kb_validate reports it separately.
-                if let Ok(Some(entity)) = self.read_entity_at(&path) {
-                    let n = self.reconcile_entity(&coll, &slug, &entity, now)?;
-                    touched += n.len();
-                }
-            }
-        }
-        Ok(touched)
-    }
-
     /// Resolve a `[[target]]` link to an existing entity file path, by slug,
     /// searching every collection in deterministic order.
     ///
     /// Test: exercised via `reconcile_materialises_pair`.
-    pub(crate) fn resolve_link(&self, target: &str) -> anyhow::Result<Option<PathBuf>> {
+    fn resolve_link(&self, target: &str) -> anyhow::Result<Option<PathBuf>> {
         let want = slugify(target);
         for coll in self.collection_dirs_on_disk()? {
             for (slug, path) in self.entity_files(&coll)? {
@@ -107,12 +85,12 @@ impl KbStore {
 
 #[cfg(test)]
 mod tests {
-    use serde_yaml::Value;
+    use trusty_okf::format::concept::link_values;
+    use trusty_okf::profile::Profile;
 
-    use crate::entity::link_values;
-    use crate::put::empty_map;
-    use crate::schema::Profile;
-    use crate::store::KbStore;
+    use crate::kb::store::KbStore;
+
+    const NOW: &str = "2026-01-01T00:00:00Z";
 
     fn store() -> (tempfile::TempDir, KbStore) {
         let tmp = tempfile::tempdir().unwrap();
@@ -120,8 +98,20 @@ mod tests {
         (tmp, s)
     }
 
-    fn fm(y: &str) -> Value {
-        serde_yaml::from_str(y).unwrap()
+    /// Write one entity and reconcile it, as an ingest does per item.
+    ///
+    /// #10746 S11: trusty-kb's `put_entity` (the `kb_put_entity` MCP write,
+    /// deleted with that crate) did both; the edge outcome is the same.
+    fn put(s: &KbStore, collection: &str, name: &str, frontmatter: &str) {
+        let path = s.entity_path(collection, name).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!("---\ntype: Person\ntitle: {name}\n{frontmatter}---\n\n"),
+        )
+        .unwrap();
+        let entity = s.read_entity_at(&path).unwrap().unwrap();
+        s.reconcile_entity(collection, name, &entity, NOW).unwrap();
     }
 
     /// Why: symmetric verbs mirror the same field on the target.
@@ -130,24 +120,8 @@ mod tests {
     #[test]
     fn reconcile_materialises_symmetric_edge() {
         let (_t, s) = store();
-        s.put_entity(
-            "people",
-            "Grace",
-            empty_map(),
-            None,
-            false,
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
-        s.put_entity(
-            "people",
-            "Ada",
-            fm("knows: \"[[Grace]]\"\n"),
-            None,
-            false,
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
+        put(&s, "people", "Grace", "");
+        put(&s, "people", "Ada", "knows: \"[[Grace]]\"\n");
         let grace = s.get_entity("people", "Grace").unwrap().unwrap();
         let links = link_values(grace.frontmatter.get("knows").unwrap());
         assert_eq!(links, vec!["Ada".to_string()]);
@@ -159,57 +133,27 @@ mod tests {
     #[test]
     fn reconcile_materialises_pair() {
         let (_t, s) = store();
-        s.put_entity(
-            "people",
-            "Leon",
-            empty_map(),
-            None,
-            false,
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
-        s.put_entity(
-            "people",
-            "Ada",
-            fm("parent_of: \"[[Leon]]\"\n"),
-            None,
-            false,
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
+        put(&s, "people", "Leon", "");
+        put(&s, "people", "Ada", "parent_of: \"[[Leon]]\"\n");
         let leon = s.get_entity("people", "Leon").unwrap().unwrap();
         let links = link_values(leon.frontmatter.get("child_of").unwrap());
         assert_eq!(links, vec!["Ada".to_string()]);
     }
 
     /// Why: re-running the reconciler must not churn the target.
-    /// What: reconciles twice; asserts the target file is byte-identical after
-    /// the second pass.
+    /// What: reconciles Ada a second time at a later instant; asserts the
+    /// target file is byte-identical after the second pass.
     /// Test: self-contained.
     #[test]
     fn reconcile_is_idempotent() {
         let (_t, s) = store();
-        s.put_entity(
-            "people",
-            "Grace",
-            empty_map(),
-            None,
-            false,
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
-        s.put_entity(
-            "people",
-            "Ada",
-            fm("knows: \"[[Grace]]\"\n"),
-            None,
-            false,
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
+        put(&s, "people", "Grace", "");
+        put(&s, "people", "Ada", "knows: \"[[Grace]]\"\n");
         let path = s.entity_path("people", "Grace").unwrap();
         let after_first = std::fs::read_to_string(&path).unwrap();
-        s.reconcile_all("2026-02-02T00:00:00Z").unwrap();
+        let ada = s.get_entity("people", "Ada").unwrap().unwrap();
+        s.reconcile_entity("people", "Ada", &ada, "2026-02-02T00:00:00Z")
+            .unwrap();
         let after_second = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after_first, after_second, "reconcile must be idempotent");
     }
@@ -220,15 +164,7 @@ mod tests {
     #[test]
     fn reconcile_skips_dangling() {
         let (_t, s) = store();
-        s.put_entity(
-            "people",
-            "Ada",
-            fm("knows: \"[[Nobody]]\"\n"),
-            None,
-            false,
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
+        put(&s, "people", "Ada", "knows: \"[[Nobody]]\"\n");
         assert!(s.get_entity("people", "Nobody").unwrap().is_none());
     }
 }

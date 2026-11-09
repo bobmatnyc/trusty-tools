@@ -1,15 +1,12 @@
 //! Automatic, bounded source extraction; no user chat or manual ingest is required (#4283).
 use super::*;
-use crate::knowledge::{execution::Checkpoint, extraction::Extraction};
-use std::collections::BTreeSet;
-use trusty_kb::{
-    okg::{
-        ingest::SourceItem,
-        registry::{Locator, SourceSpec},
-    },
-    schema::Profile,
+use crate::kb::{
+    okg::registry::{Locator, SourceSpec},
     store::KbStore,
 };
+use crate::knowledge::{execution::Checkpoint, extraction::Extraction};
+use std::collections::BTreeSet;
+use trusty_okf::{build::ingest::SourceItem, profile::Profile};
 
 #[path = "execution_sources.rs"]
 mod sources;
@@ -203,7 +200,7 @@ async fn publish(
 ) -> anyhow::Result<()> {
     let store = KbStore::new(state.store.root.clone(), Profile::default_profile());
     let spec = spec(key, &state.store.root);
-    let mut registry = trusty_kb::okg::registry::SourceRegistry::load(&store.root)?;
+    let mut registry = crate::kb::okg::registry::SourceRegistry::load(&store.root)?;
     registry.upsert(spec.clone());
     registry.save(&store.root)?;
     let items = entities(key, input, output, model);

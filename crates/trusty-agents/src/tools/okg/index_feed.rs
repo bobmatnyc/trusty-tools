@@ -19,9 +19,9 @@
 //! `super::tests::bound_store_reports_pending_when_the_daemon_is_down`,
 //! `super::tests::sources_tool_reports_the_unsearchable_backlog`.
 
+use crate::kb::okg::registry::SourceSpec;
+use crate::kb::store::KbStore;
 use serde_json::{Value, json};
-use trusty_kb::okg::registry::SourceSpec;
-use trusty_kb::store::KbStore;
 
 use crate::stores::index_feed::{IndexFeed, IndexFeedReport, feed_source};
 

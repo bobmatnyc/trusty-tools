@@ -103,12 +103,14 @@ trusty-search = { path = "../trusty-search", version = "0.63" }
 # connector library, no cargo-cycle concern.
 trusty-channels = { path = "../trusty-channels", version = "0.2.0" }
 trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.0" }
-# trusty-kb: the deterministic KB store + OKG ingest engine (source registry,
-# per-item ledger, entity writes). The `okg_ingest_*` tools are thin agent-facing
-# wrappers over it — all idempotency logic lives in that crate, which stays pure
-# and network-free while the Google fetchers live here, next to the authenticated
-# gworkspace client.
-trusty-kb = { path = "../trusty-kb", version = "0.1.0" }
+# trusty-okf: the OKF format, profile, bundle and build layer (source registry,
+# per-item ledger, ingest engine). #10746 S11: it replaces trusty-kb, which is
+# deleted. The agent glue trusty-kb also held (`Roots`, the typed `gmail` and
+# `drive` registry kinds, the `KbStore` entry points and the in-tree index
+# journal) now lives in `src/kb/`. The edge runs trusty-agents -> trusty-okf
+# only (SPEC-OKF-01 B1, B2). No features: the agent's own index feed is used,
+# not `search-feed`, and no extraction worker is spawned from here.
+trusty-okf = { path = "../trusty-okf", version = "0.1.0" }
 tokio = { version = "1", features = ["full"] }
 async-openai = "0.30"
 serde = { version = "1", features = ["derive"] }
@@ -250,7 +252,10 @@ tar = { workspace = true }
 secrecy = "0.10"
 # #9123: the shared credential test sandbox. Dev-only because it mutates the
 # process environment; it must never reach a normal build.
-trusty-common = { path = "../trusty-common", version = "0.67.5", features = ["credential-test-sandbox"] }
+# #10746 S11: `knowledge-document` for `tests/okf_tombstone.rs` (SPEC-OKF-01
+# criterion 37), moved here from the deleted trusty-kb. trusty-search already
+# enables it in this graph, so no new code compiles.
+trusty-common = { path = "../trusty-common", version = "0.67.5", features = ["credential-test-sandbox", "knowledge-document"] }
 
 [lints.clippy]
 doc_lazy_continuation = "allow"
