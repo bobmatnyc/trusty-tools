@@ -1,6 +1,6 @@
 [package]
 name = "trusty-cto-db"
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 license.workspace = true
 description = "Read-only SQLite query tools over the CTO ops database (~/Duetto/cto/data/cto.db)"
