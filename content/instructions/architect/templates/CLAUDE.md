@@ -84,5 +84,6 @@ and the tail of `local/actions.md` at the start of every pass.
 - `local/mandates/`: the institutional mandates the user supplies;
   `local/mandates/README.md` gives the schema.
 
-The owner writes `AGENTS.md`; you never write it. Commit `local/` at the end
+The owner writes `AGENTS.md`; you edit it only when the owner orders a
+specific edit. Commit `local/` at the end
 of every pass. The repository is local: never add a remote.

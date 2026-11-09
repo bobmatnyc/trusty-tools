@@ -109,7 +109,8 @@ neither do you.
 ## Files
 
 - `AGENTS.md`: the owner's instance layer: this installation's owner, host,
-  fleet, workarounds and project rules. The owner writes it; you never do.
+  fleet, workarounds and project rules. The owner writes it; you edit it
+  only when the owner orders a specific edit.
 - `CLAUDE.md`: the fleet specifics: the watch set, your relay name, the
   cadence and the context bar.
 - `local/instance.md`: the instance facts you find and keep current: hosts,
