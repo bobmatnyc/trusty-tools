@@ -349,21 +349,65 @@ pub fn resolve_project(
 /// #2379) need to bind a repo URL to its registry-B project name; extracting
 /// the shared match rule keeps the normalisation logic in exactly one place
 /// rather than duplicating it at the new call site.
-/// What: normalises both sides and returns the first exact match. Per #1532
-/// item 5, when the same `repo_url` is registered under multiple project
-/// names the first match in `projects` order wins.
-/// Test: `resolver_by_repo_url_matches`, `resolver_by_repo_url_no_match`
-/// (`resolve_session_project`'s own tests exercise this transitively).
+/// What: normalises both sides with [`repo_key`] and returns the matching
+/// project. When the same repo is registered under several names (#1532 item
+/// 5) the winner is the smallest by [`name_order`], never `projects` order.
+/// Test: `resolver_by_repo_url_matches`, `resolver_by_repo_url_no_match`,
+/// `resolver_session_url_tie_break_is_name_order_not_insertion_order`.
 pub fn resolve_project_by_repo_url<'a>(
     repo_url: &str,
     projects: &'a [Project],
 ) -> Option<&'a Project> {
-    let repo_lower = repo_url.to_lowercase();
-    let repo_norm = normalise_url(&repo_lower);
-    projects.iter().find(|p| {
-        let proj_lower = p.repo_url.to_lowercase();
-        normalise_url(&proj_lower) == repo_norm
-    })
+    let key = repo_key(repo_url);
+    // #10476: a stable winner; the registry is a HashMap, so slice order is not.
+    projects
+        .iter()
+        .filter(|p| repo_key(&p.repo_url) == key)
+        .min_by(|a, b| name_order(a).cmp(&name_order(b)))
+}
+
+/// One project per repo: the registrations of `projects`, duplicates folded.
+///
+/// Why: owner ruling D64 (#10476) — "a project is a repo by definition". The
+/// registry can hold several registrations of one repo (differing by case,
+/// trailing `/` or `.git`), and every view that listed one node per
+/// registration showed the repo's sessions under each of them. Folding at the
+/// view layer leaves `projects.json` untouched.
+/// What: groups by [`repo_key`] and keeps each group's [`name_order`] winner,
+/// in the order the group's first registration appears in `projects`. A
+/// registration with an empty `repo_url` names no repo and is never folded.
+/// Test: `resolver_fleet_shared_repo_url_one_group_all_sessions`,
+/// `poll_collapses_duplicate_repo_registrations_to_one_row`.
+pub fn one_project_per_repo(projects: &[Project]) -> Vec<&Project> {
+    let mut out: Vec<&Project> = Vec::with_capacity(projects.len());
+    let mut slot_of: std::collections::HashMap<String, usize> = Default::default();
+    for p in projects {
+        let key = repo_key(&p.repo_url);
+        if key.is_empty() {
+            out.push(p);
+            continue;
+        }
+        match slot_of.get(&key) {
+            Some(&i) if name_order(p) < name_order(out[i]) => out[i] = p,
+            Some(_) => {}
+            None => {
+                slot_of.insert(key, out.len());
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// The comparison key that matches a `repo_url` to a project: lowercased,
+/// then [`normalise_url`].
+fn repo_key(url: &str) -> String {
+    normalise_url(&url.to_lowercase()).to_string()
+}
+
+/// The order that picks the winner among one repo's registrations (#10476).
+fn name_order(p: &Project) -> (String, &str) {
+    (p.name.to_lowercase(), p.name.as_str())
 }
 
 /// Bind a live session to its registered project by `repo_url`.
@@ -388,16 +432,18 @@ pub fn resolve_session_project<'a>(
 /// Why: the Telegram `/fleet` command and the SM TUI both need a
 /// project-grouped view of active sessions; computing it once here keeps
 /// the rendering layer thin.
-/// What: for each registered project collects sessions whose `repo_url`
-/// matches; projects with no sessions are included with an empty `sessions`
-/// vec so callers can still display the full registry. Session records with
-/// no `repo_url` (or whose URL matches no project) are silently omitted from
-/// the fleet view.
+/// What: one entry per repo ([`one_project_per_repo`], #10476), holding every
+/// session whose `repo_url` matches it, each once; projects with no sessions
+/// are included with an empty `sessions` vec so callers can still display the
+/// full registry. Session records with no `repo_url` (or whose URL matches no
+/// project) are silently omitted from the fleet view.
 /// Test: `resolver_fleet_by_project_basic`, `resolver_fleet_empty_sessions`,
-/// `resolver_fleet_no_repo_sessions_omitted`.
+/// `resolver_fleet_no_repo_sessions_omitted`,
+/// `resolver_fleet_shared_repo_url_one_group_all_sessions`.
 pub fn fleet_by_project(sessions: &[SessionRecord], projects: &[Project]) -> Vec<ProjectFleet> {
-    projects
-        .iter()
+    // #10476: one group per repo, not one per registration.
+    one_project_per_repo(projects)
+        .into_iter()
         .map(|project| {
             let bound: Vec<SessionRecord> = sessions
                 .iter()

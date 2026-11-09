@@ -528,6 +528,23 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux_session_id: Option<String>,
 
+    /// The socket path of the tmux server this record's session runs on
+    /// (#10101).
+    ///
+    /// Why: a PM launched on its workspace's `-L` server is reachable only
+    /// through that server; the record must say which one, and the stored path
+    /// lets a later caller check that a `-L <name>` still resolves to it.
+    /// Unlike [`Self::tmux_server`], which is the server PROCESS identity
+    /// (`<pid>:<start_time>`, read with `pane_id`), this is the server's
+    /// ADDRESS.
+    /// What: `None` means the default server, and is every record written
+    /// before this field; skipped when `None`, so such a record re-saves
+    /// byte-identical. Nothing writes it yet (the launch change is #10101's
+    /// PR C).
+    /// Test: `tmux_socket_round_trips_and_old_records_load`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_socket: Option<std::path::PathBuf>,
+
     /// Delivery status of the turnkey `--task` pane injection (#2364).
     ///
     /// Why: `inject_task_when_ready` was fire-and-forget before this field

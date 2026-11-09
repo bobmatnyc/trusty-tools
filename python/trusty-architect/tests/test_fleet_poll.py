@@ -727,8 +727,9 @@ def test_load_factor_is_env_overridable(monkeypatch):
     assert [a for a in fp.host_alerts(0.0) if a["kind"] == "load"] == []
 
 
-def test_load_reemit_interval_is_unchanged_at_1800s():
-    assert fp.REEMIT["load"] == 1800
+def test_load_reminder_is_24h_under_its_severity_bucket_key():
+    """ar-T8a (Architect Q5): load is keyed kind|severity|bucket like swap; it reminds once a day."""
+    assert fp.REEMIT["load"] == fp.REEMIT["disk"] == fp.REEMIT["swap"] == 86400
 
 
 def test_send_refuses_any_pane_outside_the_architect(monkeypatch):

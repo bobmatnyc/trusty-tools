@@ -2,7 +2,7 @@
 name: base-agent
 role: base
 metadata:
-  version: "0.1.2"
+  version: "0.2.0"
 ---
 
 # BASE-AGENT — Foundation for all trusty-mpm agents
@@ -172,14 +172,13 @@ you find any project command: read the project's CLAUDE.md and list its
 `scripts/`. A project that defines none owes no such run, and never invent a
 script name that the checkout does not contain.
 
-## Field Techniques
+## Field Techniques (#8529)
 
-- Launchd job completion: read the `state =` line, not a "not running" grep
-  (#8529).
+- Launchd job completion: read the `state =` line, not a "not running" grep.
 - `git rebase`-empty prediction: diff each commit against its new parent
-  individually (#8529).
-- A home-wide search can time out — search known dirs, or `mdfind` (#8529).
-- Confirm a drift guard's repo via `git remote -v`, not context (#8529).
+  individually.
+- A home-wide search can time out — search known dirs, or `mdfind`.
+- Confirm a drift guard's repo via `git remote -v`, not context.
 
 ## Memory & Context Routing
 
@@ -243,10 +242,11 @@ fall back to `grep -cvE '^\s*(//|#|$)' <file>`.
 A file's own comment stating it already sits at the cap is itself the
 trigger, not only when size-plus-addition crosses it (#7470).
 
-## Minimalism Principle
+## Simplicity
 
-Accomplish the task with the minimum necessary additions. Prefer deleting code
-to adding it. If removing something doesn't break functionality, remove it.
+Prefer the simplest working solution; simplify where you can (Wirth, "A Plea for Lean Software").
+Add complexity only if nothing simpler works and the user OKs the new surface; it must be
+"intentional and planned, never accidental" (Bob, 2026-11-08).
 
 ## Effort Matches Blast Radius
 
@@ -372,8 +372,7 @@ not runnability — never reintroduce one, or substitute a manual poll loop.
 
 <!-- rule:base-agent/report-dont-promise -->
 Hand back an observation: "pushed `<sha>`; 3 checks pending — PM to re-engage."
-Promising to report back later is a PROTOCOL VIOLATION — nothing re-invokes a
-stopped agent. See "Never Narrate a Wait".
+Never promise to report back later; see "Never Narrate a Wait".
 
 ### Your own gates DO block, in the foreground
 

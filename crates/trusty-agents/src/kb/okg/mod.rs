@@ -12,9 +12,12 @@
 //!   - [`registry`] — the typed view of `_sources/registry.toml`, which adds
 //!     the `gmail` and `drive` kinds this crate implements (#10746 S11).
 //!   - [`ingest`]   — the `KbStore` entry points over the trusty-okf engine.
-//!   - [`index_journal`] — `_sources/<id>.index.jsonl`, the record of what
-//!     reached the bound SEARCH index, and the reconcile that diffs it against
-//!     the ledger (#3892). `crate::stores::index_feed` pushes and records.
+//!   - [`index_state`] — this machine's index state for a bound SEARCH index,
+//!     read through `trusty_okf::state::index` from a directory in the
+//!     trusty-agents data area, never the synced tree (#3892; #10746 S12).
+//!     `crate::stores::okg_feed` runs the `trusty_okf::feed` pass.
+//!   - [`legacy_journal`] — the one-time migration of the pre-S12 in-tree
+//!     `_sources/<id>.index.jsonl` journals into that state, as Pending.
 //!
 //! The ledger, docstore walk, read policy and trust labels are used straight
 //! from `trusty_okf::build`. Gmail and Drive fetchers live in
@@ -28,8 +31,9 @@
 //! `docstore_ingest_is_idempotent_end_to_end`,
 //! `ingest_rejects_a_now_that_is_not_an_instant`.
 
-pub mod index_journal;
+pub mod index_state;
 pub mod ingest;
+pub mod legacy_journal;
 pub mod registry;
 
 use serde::Serialize;
@@ -39,6 +43,7 @@ use trusty_okf::build::ingest::IngestReport;
 use trusty_okf::build::ledger::{Ledger, Watermark};
 use trusty_okf::build::{docstore, policy};
 
+use crate::kb::okg::index_state::IndexStateRef;
 use crate::kb::okg::registry::{Locator, RegisterOutcome, SourceRegistry, SourceSpec};
 use crate::kb::store::KbStore;
 
@@ -74,15 +79,23 @@ pub struct SourceStatus {
 /// binding at all). This field makes the lag VISIBLE — an "ingested but not yet
 /// searchable" backlog is the exact failure mode #3892 reports, and it must
 /// never again be invisible on both sides.
-/// What: `synced` entities the index journal says are current, and `pending`
-/// still owed — pushes, withdrawals, AND rows that could not be resolved to a
+/// What: from this machine's index state (#10746 S12: never the synced
+/// tree), `synced` entities confirmed searchable under a known index
+/// identity, `unconfirmed` entities pushed and probed whose identity is not
+/// known (every settled entity before SPEC-OKF-01 dependency D1), and
+/// `pending` still owed — pushes, withdrawals, AND rows that could not be resolved to a
 /// readable entity file (unsearchable too, and additionally listed in `notes`).
 /// Derived, like the watermark, so it cannot claim more than was recorded.
 /// Test: `sources_report_index_coverage`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct IndexCoverage {
-    /// Entities recorded as current in the bound index.
+    /// Entities Searchable (or Withdrawn) under a known, matching index
+    /// identity. #10746 S12: always 0 before search indexes report an
+    /// identity (SPEC-OKF-01 §4.9.2 rule 5).
     pub synced: usize,
+    /// Entities pushed at their current bytes and probed on this machine,
+    /// whose index identity is not confirmed (§4.9.2 rules 4-5).
+    pub unconfirmed: usize,
     /// Entities still owed to the index (not yet searchable, or not yet
     /// withdrawn after a tombstone).
     pub pending: usize,
@@ -132,24 +145,24 @@ impl KbStore {
     /// additionally reports SEARCH coverage (#3892) — see [`IndexCoverage`] —
     /// because "ingested" and "findable" are two different claims and conflating
     /// them is what made the ingest→search gap silent.
-    /// What: one row per registered source. The index reconcile is local
-    /// filesystem work (one `stat` per settled entity, a re-hash only when the
-    /// cheap check moves), never a daemon call, so this stays a read-only,
-    /// offline-safe status view.
+    /// What: one row per registered source. `state` is this machine's index
+    /// state for the bound index (#10746 S12); `None` (no bound index) reads
+    /// every entity as pending. The coverage read is local filesystem work,
+    /// never a daemon call, so this stays a read-only, offline-safe view.
     /// Test: `register_is_additive_across_sources`,
     /// `sources_report_index_coverage`.
-    pub fn okg_sources(&self) -> anyhow::Result<Vec<SourceStatus>> {
+    pub fn okg_sources(&self, state: Option<&IndexStateRef>) -> anyhow::Result<Vec<SourceStatus>> {
         let sources = SourceRegistry::load(&self.root)?.sources();
         let mut out = Vec::with_capacity(sources.len());
+        let view = if sources.is_empty() {
+            None
+        } else {
+            self.index_view(state)?
+        };
         for spec in &sources {
             let watermark = Ledger::load(&self.root, &spec.id)?.watermark();
-            let backlog = self.okg_index_backlog(spec)?;
             out.push(SourceStatus {
-                index: IndexCoverage {
-                    synced: backlog.synced,
-                    pending: backlog.tasks.len() + backlog.notes.len(),
-                    notes: backlog.notes,
-                },
+                index: self.okg_index_coverage_of(spec, view.as_ref())?,
                 id: spec.id.clone(),
                 kind: spec.kind().to_string(),
                 collection: spec.collection.clone(),
@@ -169,16 +182,26 @@ impl KbStore {
     /// "is this store connected?" per INDEX; this answers the other half — how
     /// much of the tree has actually reached that index. A store can be
     /// perfectly connected and still hold nothing the assistant ingested.
-    /// What: sums [`IndexCoverage`] over the registry. Returns zeroes for a tree
-    /// with no registry at all, which is the normal state for a hand-built tree.
+    /// What: sums [`IndexCoverage`] over the registry, against this machine's
+    /// `state` (#10746 S12). Returns zeroes for a tree with no registry at
+    /// all, which is the normal state for a hand-built tree.
     /// Test: `sources_report_index_coverage`.
-    pub fn okg_index_coverage(&self) -> anyhow::Result<IndexCoverage> {
+    pub fn okg_index_coverage(
+        &self,
+        state: Option<&IndexStateRef>,
+    ) -> anyhow::Result<IndexCoverage> {
         let mut total = IndexCoverage::default();
-        for spec in &SourceRegistry::load(&self.root)?.sources() {
-            let backlog = self.okg_index_backlog(spec)?;
-            total.synced += backlog.synced;
-            total.pending += backlog.tasks.len() + backlog.notes.len();
-            total.notes.extend(backlog.notes);
+        let sources = SourceRegistry::load(&self.root)?.sources();
+        if sources.is_empty() {
+            return Ok(total);
+        }
+        let view = self.index_view(state)?;
+        for spec in &sources {
+            let c = self.okg_index_coverage_of(spec, view.as_ref())?;
+            total.synced += c.synced;
+            total.unconfirmed += c.unconfirmed;
+            total.pending += c.pending;
+            total.notes.extend(c.notes);
         }
         Ok(total)
     }
@@ -404,7 +427,7 @@ mod tests {
             .okg_ingest_docstore("docs", &policy(&tmp), "2026-07-24T00:00:00Z")
             .unwrap();
 
-        let before = store.okg_sources().unwrap();
+        let before = store.okg_sources(None).unwrap();
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].watermark.items, 1);
 
@@ -423,7 +446,7 @@ mod tests {
             .unwrap();
         assert!(second.created);
 
-        let after = store.okg_sources().unwrap();
+        let after = store.okg_sources(None).unwrap();
         assert_eq!(after.len(), 2, "append, not replace");
         assert_eq!(after[0], before[0], "the existing source row is untouched");
         assert_eq!(after[1].kind, "gmail");
@@ -446,7 +469,7 @@ mod tests {
             !again.created && !again.changed,
             "identical re-register is inert"
         );
-        assert_eq!(store.okg_sources().unwrap()[0], before[0]);
+        assert_eq!(store.okg_sources(None).unwrap()[0], before[0]);
     }
 
     /// Why: the end-to-end doc-store path must satisfy every property at once —
@@ -524,7 +547,7 @@ mod tests {
         assert!(two.contains("source_status: deleted"), "flagged: {two}");
         assert!(two.contains("second note"), "never silently dropped: {two}");
 
-        let status = store.okg_sources().unwrap();
+        let status = store.okg_sources(None).unwrap();
         assert_eq!(status[0].watermark.items, 1);
         assert_eq!(status[0].watermark.tombstoned, 1);
     }
@@ -559,26 +582,47 @@ mod tests {
             .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
             .unwrap();
 
-        let status = store.okg_sources().unwrap();
+        // #10746 S12: index state is this machine's, in a directory outside
+        // the tree, for one bound index.
+        let state = IndexStateRef::new(tmp.path().join("state"), "corpus-index");
+        let status = store.okg_sources(Some(&state)).unwrap();
         assert_eq!(status[0].watermark.items, 2, "both are in the TREE");
         assert_eq!(
             (status[0].index.synced, status[0].index.pending),
             (0, 2),
             "and neither is searchable yet — the #3892 state, now visible"
         );
-        assert_eq!(store.okg_index_coverage().unwrap().pending, 2);
+        assert_eq!(store.okg_index_coverage(Some(&state)).unwrap().pending, 2);
 
-        // Record the pushes the feed layer would have made.
-        let spec = store.okg_source("corpus").unwrap();
-        let backlog = store.okg_index_backlog(&spec).unwrap();
-        let mut journal =
-            crate::kb::okg::index_journal::IndexJournal::load(&store.root, "corpus").unwrap();
-        for task in &backlog.tasks {
-            store.okg_record_index(&mut journal, task, "t0").unwrap();
+        // Record the pushes and probes the feed layer would have made.
+        let journal =
+            trusty_okf::state::IndexJournal::open(&state.dir, &store.root, "corpus-index").unwrap();
+        for (_, path) in store.entity_files("notes").unwrap() {
+            let rel = store.rel(&path);
+            let bytes = trusty_okf::state::ByteHash::of(&std::fs::read(&path).unwrap());
+            journal
+                .append(&[
+                    trusty_okf::state::IndexRecord::PutAck {
+                        path: rel.clone(),
+                        bytes: bytes.as_str().to_string(),
+                        identity: None,
+                    },
+                    trusty_okf::state::IndexRecord::Probe {
+                        path: rel,
+                        bytes: bytes.as_str().to_string(),
+                        identity: None,
+                        passed: true,
+                    },
+                ])
+                .unwrap();
         }
 
-        let settled = store.okg_sources().unwrap();
-        assert_eq!((settled[0].index.synced, settled[0].index.pending), (2, 0));
-        assert_eq!(store.okg_index_coverage().unwrap().synced, 2);
+        // #10746 S12 fix round: settled, but no index identity (D1), so
+        // `unconfirmed`, never `synced` (SPEC-OKF-01 §4.9.2 rules 4-5).
+        let settled = store.okg_sources(Some(&state)).unwrap();
+        assert_eq!((settled[0].index.synced, settled[0].index.pending), (0, 0));
+        assert_eq!(settled[0].index.unconfirmed, 2);
+        let total = store.okg_index_coverage(Some(&state)).unwrap();
+        assert_eq!((total.synced, total.unconfirmed), (0, 2));
     }
 }

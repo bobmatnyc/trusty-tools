@@ -215,13 +215,9 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     report.scanned = ids.len();
 
     // Make the pulled messages findable — fail-open, never silent (#3892).
-    let index = crate::tools::okg::index_feed::feed_bound_index(
-        &store,
-        &spec,
-        arg_str(args, "agent"),
-        &now,
-    )
-    .await;
+    let index =
+        crate::tools::okg::index_feed::feed_bound_index(&store, &spec, arg_str(args, "agent"))
+            .await;
 
     Ok(ok_json(&json!({
         "source": registered,

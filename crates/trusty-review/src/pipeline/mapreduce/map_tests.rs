@@ -411,7 +411,12 @@ async fn run_map_stage_graded_reports_each_chunk_floor() {
         ];
         let graded = run_map_stage_graded(&units, &llm, &c, 4, &super::no_sections).await;
         assert_eq!(graded.len(), 3, "grade {grade}");
-        for (outcome, chunk_floor) in &graded {
+        for super::GradedChunk {
+            outcome,
+            floor: chunk_floor,
+            ..
+        } in &graded
+        {
             let want = if outcome.file() == "src/reviewed.rs" {
                 assert!(matches!(outcome, MapOutcome::Reviewed { .. }));
                 floor.clone()

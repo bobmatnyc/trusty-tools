@@ -228,13 +228,9 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     report.scanned = files.len();
 
     // Make the downloaded files findable — fail-open, never silent (#3892).
-    let index = crate::tools::okg::index_feed::feed_bound_index(
-        &store,
-        &spec,
-        arg_str(args, "agent"),
-        &now,
-    )
-    .await;
+    let index =
+        crate::tools::okg::index_feed::feed_bound_index(&store, &spec, arg_str(args, "agent"))
+            .await;
 
     Ok(ok_json(&json!({
         "source": registered,

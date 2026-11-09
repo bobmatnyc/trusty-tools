@@ -17,12 +17,16 @@
 //! `a_pane_the_probe_could_not_read_is_reported_unchecked`.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::process::PaneClaude;
+use crate::core::tmux_server::{PROBE_BUDGET, bounded_probe};
 use crate::runtime::remote_name::{self, RemoteNameDrift};
 use crate::session_manager::rename_follow::NameDrift;
-use crate::session_manager::{ManagedError, SessionManager};
+use crate::session_manager::tmux_route::{self, RoutedTmux};
+use crate::session_manager::{ManagedError, ManagedTmuxDriver, SessionManager};
 
 /// The row's name.
 pub(crate) const NAME: &str = "session_names";
@@ -34,10 +38,16 @@ pub(crate) const NAME: &str = "session_names";
 /// What: [`session_names_row`] over [`SessionManager::name_drifts`] and the
 /// #9025 remote-name drifts of the live, non-terminal records. A session is
 /// probed for a `claude` pid only when the tmux driver reports one present,
-/// so a driver that cannot inspect panes runs no process probe. The probe
-/// and the bounded registry read run off the async executor.
+/// so a driver that cannot inspect panes runs no process probe. A record on
+/// a workspace server is probed on that server, within
+/// [`crate::core::tmux_server::PROBE_BUDGET`] and one probe at a time per
+/// server (#10101). The probe and the bounded registry read run off the
+/// async executor.
 /// Test: `the_doctor_row_flags_a_live_pane_under_another_name`,
-/// `a_pane_the_probe_could_not_read_is_reported_unchecked`.
+/// `a_pane_the_probe_could_not_read_is_reported_unchecked`,
+/// `the_doctor_probes_each_record_on_its_own_server`,
+/// `same_named_records_are_probed_on_their_own_servers`,
+/// `a_hung_workspace_server_bounds_the_doctor_row_and_reads_unknown`.
 pub(crate) async fn check_session_names(mgr: &SessionManager) -> DoctorCheck {
     let drifts = mgr.name_drifts().await;
     let sessions = managed_sessions(mgr, drifts.as_deref().unwrap_or_default()).await;
@@ -46,30 +56,19 @@ pub(crate) async fn check_session_names(mgr: &SessionManager) -> DoctorCheck {
     // `pane_claude` answer is neither Present nor Absent is collected, not
     // skipped, so the row can say it was not checked.
     let (remote, unchecked) = tokio::task::spawn_blocking(move || {
-        let unchecked = std::cell::RefCell::new(Vec::new());
-        let remote = remote_name::remote_name_drifts(
-            &sessions,
-            |s| match tmux.pane_claude(s) {
-                PaneClaude::Absent => None,
-                PaneClaude::Present => {
-                    let pid = crate::core::process::find_claude_pid_in_tmux(
-                        s,
-                        1,
-                        std::time::Duration::ZERO,
-                    );
-                    if pid.is_none() {
-                        unchecked.borrow_mut().push(s.to_owned());
-                    }
-                    pid
-                }
-                PaneClaude::Unknown => {
-                    unchecked.borrow_mut().push(s.to_owned());
-                    None
-                }
-            },
-            remote_name::read_registry,
-        );
-        (remote, unchecked.into_inner())
+        let mut unchecked = Vec::new();
+        // #10101: each record on its own socket, so two records sharing a
+        // name on different servers are each probed on their own server.
+        let mut running = Vec::new();
+        for (name, socket) in &sessions {
+            match claude_pid_on_own_server(tmux.as_ref(), name, socket.as_deref(), PROBE_BUDGET) {
+                Ok(Some(pid)) => running.push((name.clone(), pid)),
+                Ok(None) => {}
+                Err(entry) => unchecked.push(entry),
+            }
+        }
+        let remote = remote_name::remote_name_drifts_of(running, remote_name::read_registry);
+        (remote, unchecked)
     })
     .await
     .unwrap_or_else(|e| {
@@ -81,20 +80,88 @@ pub(crate) async fn check_session_names(mgr: &SessionManager) -> DoctorCheck {
     session_names_row(drifts, remote, &unchecked)
 }
 
-/// The live tmux name of every non-terminal record: the drifted name when
-/// its pane moved, else the recorded one.
-async fn managed_sessions(mgr: &SessionManager, drifts: &[NameDrift]) -> Vec<String> {
-    let names: BTreeSet<String> = mgr
+/// The live tmux name of every non-terminal record — the drifted name when
+/// its pane moved, else the recorded one — with the record's stored tmux
+/// socket (#10101: `None` is the default server).
+async fn managed_sessions(
+    mgr: &SessionManager,
+    drifts: &[NameDrift],
+) -> Vec<(String, Option<PathBuf>)> {
+    let sessions: BTreeSet<(String, Option<PathBuf>)> = mgr
         .list()
         .await
         .into_iter()
         .filter(|r| !r.state.is_terminal())
         .map(|r| match drifts.iter().find(|d| d.id == r.id) {
-            Some(d) => d.current.clone(),
-            None => r.tmux_name,
+            Some(d) => (d.current.clone(), r.tmux_socket),
+            None => (r.tmux_name, r.tmux_socket),
         })
         .collect();
-    names.into_iter().collect()
+    sessions.into_iter().collect()
+}
+
+/// The `claude` pid in session `name`'s pane, read on the server its record
+/// names (#10101).
+///
+/// Why: a PM on a workspace server is invisible to the default server, which
+/// may hold an unrelated same-named session; and a hung workspace server
+/// must not hang `tm doctor`.
+/// What: no `socket` keeps the pre-#10101 default-server probe:
+/// [`ManagedTmuxDriver::pane_claude`], then
+/// [`crate::core::process::find_claude_pid_in_tmux`]. A socket routes through
+/// [`tmux_route::route_to`]; the pane probe and the pid read then run on that
+/// server's driver through [`crate::core::tmux_server::bounded_probe`] keyed
+/// on the socket, so they finish within `budget` and never run twice at once
+/// against one server. `Ok(None)` is no `claude`; `Err` is the unchecked
+/// entry the row lists, naming the server when it was the server that failed.
+/// Test: `the_doctor_probes_each_record_on_its_own_server`,
+/// `a_hung_workspace_server_bounds_the_doctor_row_and_reads_unknown`.
+pub(crate) fn claude_pid_on_own_server(
+    tmux: &dyn ManagedTmuxDriver,
+    name: &str,
+    socket: Option<&Path>,
+    budget: Duration,
+) -> Result<Option<u32>, String> {
+    let Some(socket) = socket else {
+        return match tmux.pane_claude(name) {
+            PaneClaude::Absent => Ok(None),
+            PaneClaude::Present => {
+                crate::core::process::find_claude_pid_in_tmux(name, 1, Duration::ZERO)
+                    .map(Some)
+                    .ok_or_else(|| name.to_owned())
+            }
+            PaneClaude::Unknown => Err(name.to_owned()),
+        };
+    };
+    let routed = match tmux_route::route_to(tmux, name, Some(socket)) {
+        Ok(RoutedTmux::Named(driver)) => driver,
+        Ok(RoutedTmux::Default(_)) => return Err(name.to_owned()),
+        Err(e) => return Err(format!("{name} ({e})")),
+    };
+    let server = socket
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let session = name.to_owned();
+    // #10101: bounded, one in flight per server — a hung server reads unknown.
+    // The probe answers `Err(())` for a pane it could not read.
+    let probe = bounded_probe(socket, budget, move || match routed.pane_claude(&session) {
+        PaneClaude::Absent => Ok(None),
+        PaneClaude::Present => routed
+            .get_pane_id(&session)
+            .and_then(|pane| routed.pane_pid(&pane))
+            .and_then(crate::core::process::claude_child_of)
+            .map(Some)
+            .ok_or(()),
+        PaneClaude::Unknown => Err(()),
+    });
+    match probe {
+        Some(Ok(pid)) => Ok(pid),
+        Some(Err(())) => Err(format!("{name} (on tmux server '{server}')")),
+        None => Err(format!(
+            "{name} (tmux server '{server}' did not answer within {}s or is already being probed)",
+            budget.as_secs_f32()
+        )),
+    }
 }
 
 /// The row for a [`SessionManager::name_drifts`] and a remote-name answer.
