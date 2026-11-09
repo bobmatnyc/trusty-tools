@@ -82,7 +82,7 @@ trusty-mcp = { workspace = true, features = ["config"] }  # JSON-RPC / MCP primi
 # #10662: `memory::embed` imports `embedder::retry_transient_init`, first in
 # trusty-common 0.67.5. The workspace entry admits `^0.67`, so this crate states
 # its own floor, as trusty-memory does. The dev-dependency below matches it.
-trusty-common = { path = "../trusty-common", version = "0.67.5", features = ["symgraph-parser", "credentials", "chat-attachments", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli", "redb-open", "log-drain"] }  # `redb-open` (#5063): named explicitly, because `memory::redb_recovery` uses it directly. `log-drain` (#6537): `trusty_common::log_drain::{run_once, DrainConfig, ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the drain CORE `crate::log_drain`'s scheduler calls.
+trusty-common = { path = "../trusty-common", version = "0.68", features = ["symgraph-parser", "credentials", "chat-attachments", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli", "redb-open", "log-drain"] }  # `redb-open` (#5063): named explicitly, because `memory::redb_recovery` uses it directly. `log-drain` (#6537): `trusty_common::log_drain::{run_once, DrainConfig, ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the drain CORE `crate::log_drain`'s scheduler calls.
 # Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
 #      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
 #      surface (it owns its own axum stack for the orchestrator's UI). Setting
@@ -257,7 +257,7 @@ secrecy = "0.10"
 # #10746 S11: `knowledge-document` for `tests/okf_tombstone.rs` (SPEC-OKF-01
 # criterion 37), moved here from the deleted trusty-kb. trusty-search already
 # enables it in this graph, so no new code compiles.
-trusty-common = { path = "../trusty-common", version = "0.67.5", features = ["credential-test-sandbox", "knowledge-document"] }
+trusty-common = { path = "../trusty-common", version = "0.68", features = ["credential-test-sandbox", "knowledge-document"] }
 
 [lints.clippy]
 doc_lazy_continuation = "allow"
