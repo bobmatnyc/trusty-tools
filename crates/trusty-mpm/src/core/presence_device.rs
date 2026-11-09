@@ -153,6 +153,13 @@ pub enum DeviceError {
     /// verify saved a higher one first).
     #[error("the signature counter did not increase past the stored one")]
     CounterRegressed,
+    /// #8878: revoke removed the record and swept grants without the store
+    /// lock, so a verify already holding it may still mint a grant.
+    #[error(
+        "the device is removed, but the device store lock could not be taken ({0}); \
+         a verify in flight may still mint a grant: run revoke again"
+    )]
+    Unlocked(String),
 }
 
 /// `root/architect-launch/devices`.
@@ -254,24 +261,32 @@ pub struct StoreLock {
 /// Test: `revoke_during_verify_does_not_resurrect_the_device_8878`,
 /// `concurrent_verifies_never_move_the_sign_count_backwards_8878`.
 pub fn lock_store(root: &Path) -> Result<StoreLock, DeviceError> {
-    use std::os::unix::fs::OpenOptionsExt as _;
     let path = devices_dir(root).join(LOCK_FILE);
-    let file = match std::fs::OpenOptions::new()
+    try_lock(&path).map_err(|e| lock_error(&path, &e))
+}
+
+/// Open `path` (0600, no symlink) and take its exclusive `flock`.
+fn try_lock(path: &Path) -> std::io::Result<StoreLock> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(DeviceError::Unknown),
-        Err(e) => return Err(DeviceError::Write(format!("{}: {e}", path.display()))),
-    };
-    file.lock()
-        .map_err(|e| DeviceError::Write(format!("{}: {e}", path.display())))?;
+        .open(path)?;
+    file.lock()?;
     Ok(StoreLock { _file: file })
+}
+
+/// Map a [`try_lock`] failure: a missing directory is [`DeviceError::Unknown`].
+fn lock_error(path: &Path, e: &std::io::Error) -> DeviceError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        DeviceError::Unknown
+    } else {
+        DeviceError::Write(format!("{}: {e}", path.display()))
+    }
 }
 
 /// Persist a verified assertion's counter and backup state on the device
@@ -352,17 +367,21 @@ pub struct Revoked {
 ///
 /// Why: plan-pr2-devices.md §4 — a stolen device's grant dies at once, not at
 /// the 120-minute idle edge.
-/// What: checks the ticket, takes [`lock_store`] (#8878: so an in-flight
-/// verify either finishes before and its grant is swept, or runs after and
-/// finds no record), deletes the record (the kill switch: a device grant is
-/// refused without it), then deletes every `*.presence` whose method names
-/// the credential. A lock that cannot be taken does not stop the revoke: a
-/// verify needs the same lock to save its counter, so it is refused too. A grant that cannot be read or removed makes the
-/// call an error after the sweep; the record is already gone, so the grant is
-/// refused anyway. An unknown credential is [`DeviceError::Unknown`] after
-/// the sweep.
+/// What: checks the ticket, takes the store lock (#8878: a verify holding it
+/// finishes first and its grant is swept; a later verify finds no record),
+/// deletes the record (the kill switch: a device grant is refused without
+/// it), then deletes every `*.presence` whose method names the credential.
+/// An interrupted lock is retried once. A lock that still cannot be taken
+/// does not stop the delete and sweep, but the call is then
+/// [`DeviceError::Unlocked`]: a verify already holding the lock can still
+/// mint after the sweep, so the operator runs revoke again. A grant that
+/// cannot be read or removed is [`DeviceError::Write`] after the sweep; the
+/// record is already gone, so the grant is refused anyway. An unknown
+/// credential is [`DeviceError::Unknown`] after the sweep.
 /// Test: `revoke_kills_a_live_grant_8878`, `revoke_with_no_ticket_is_refused_8878`,
-/// `revoke_partial_failure_is_an_error_and_check_still_refuses_8878`.
+/// `revoke_partial_failure_is_an_error_and_check_still_refuses_8878`,
+/// `revoke_without_the_store_lock_is_an_error_8878`,
+/// `revoke_waits_for_the_store_lock_and_sweeps_a_later_grant_8878`.
 pub fn revoke(
     root: &Path,
     key: &GrantKey,
@@ -373,13 +392,19 @@ pub fn revoke(
     check_ticket(key, ticket, TicketPurpose::Revoke, credential_id, now)
         .map_err(DeviceError::Ticket)?;
     let path = device_path(root, credential_id)?;
-    // #8878: held until the sweep ends, so no verify mints in between.
-    let _lock = match lock_store(root) {
-        Ok(lock) => Some(lock),
-        Err(DeviceError::Unknown) => None,
+    // #8878: held until the sweep ends, so no verify mints in between. A
+    // missing store has no record to race; any other failure is reported.
+    let lock_path = devices_dir(root).join(LOCK_FILE);
+    let locked = match try_lock(&lock_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => try_lock(&lock_path),
+        other => other,
+    };
+    let (_lock, unlocked) = match locked {
+        Ok(lock) => (Some(lock), None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
         Err(e) => {
             tracing::warn!("#8878: revoking without the device store lock: {e}");
-            None
+            (None, Some(format!("{}: {e}", lock_path.display())))
         }
     };
     let known = match std::fs::remove_file(&path) {
@@ -394,6 +419,9 @@ pub fn revoke(
             "the device record is removed, but these grants were not: {}",
             failures.join("; ")
         )));
+    }
+    if let Some(cause) = unlocked {
+        return Err(DeviceError::Unlocked(cause));
     }
     if !known {
         return Err(DeviceError::Unknown);

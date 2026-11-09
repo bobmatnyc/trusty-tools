@@ -1,8 +1,9 @@
 //! Tests for the sealed device store (#8878 PR2b-1a).
 
 use super::*;
+use crate::core::presence_enrol::Ticket;
 use crate::core::presence_enrol::{TicketPurpose, mint_ticket};
-use crate::core::presence_test_support::{FakeDevice, NOW, root, snapshot};
+use crate::core::presence_test_support::{ARCHITECT, FakeDevice, NOW, grant_files, root, snapshot};
 
 fn key() -> GrantKey {
     crate::core::presence_test_support::key()
@@ -153,4 +154,64 @@ fn enrol_refuses_a_duplicate_or_a_bad_name_8878() {
         NOW,
     );
     assert_eq!(refused, Err(DeviceError::InvalidName));
+}
+
+/// Enrol `cred-A`, mint it a live grant, and return a revoke ticket for it.
+fn enrolled_with_grant(root: &Path) -> Ticket {
+    FakeDevice::new("cred-A", 1).enrol(root, 0);
+    crate::core::presence::mint(root, &ARCHITECT, "device:cred-A", &key(), NOW).expect("mint");
+    assert_eq!(grant_files(root).len(), 1);
+    mint_ticket(&key(), TicketPurpose::Revoke, "cred-A", NOW).expect("ticket")
+}
+
+/// #8878: a revoke that cannot take the store lock still deletes the record
+/// and sweeps, but is an error so the operator runs it again.
+#[test]
+fn revoke_without_the_store_lock_is_an_error_8878() {
+    let (_d, root) = root();
+    let ticket = enrolled_with_grant(&root);
+    let lock = devices_dir(&root).join(LOCK_FILE);
+    let _ = std::fs::remove_file(&lock);
+    std::os::unix::fs::symlink(root.join("elsewhere"), &lock).expect("symlink the lock");
+    let revoked = revoke(&root, &key(), &ticket, "cred-A", NOW);
+    assert!(
+        matches!(revoked, Err(DeviceError::Unlocked(_))),
+        "{revoked:?}"
+    );
+    assert_eq!(
+        load(&root, &key(), "cred-A"),
+        Err(DeviceError::Unknown),
+        "the record is still deleted"
+    );
+    assert!(grant_files(&root).is_empty(), "the grant is still swept");
+}
+
+/// #8878: revoke waits for a verify holding the store lock, so a grant the
+/// verify mints before releasing it is swept.
+#[test]
+fn revoke_waits_for_the_store_lock_and_sweeps_a_later_grant_8878() {
+    let (_d, root) = root();
+    let ticket = enrolled_with_grant(&root);
+    std::fs::remove_file(grant_files(&root)[0].clone()).expect("start with no grant");
+    let held = lock_store(&root).expect("lock");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let revoker = {
+        let root = root.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(revoke(&root, &key(), &ticket, "cred-A", NOW));
+        })
+    };
+    let early = rx.recv_timeout(std::time::Duration::from_millis(300));
+    assert!(early.is_err(), "revoke ran without the lock: {early:?}");
+    assert!(load(&root, &key(), "cred-A").is_ok(), "revoke is blocked");
+    // A verify between record_use and mint, still holding the lock.
+    crate::core::presence::mint(&root, &ARCHITECT, "device:cred-A", &key(), NOW).expect("mint");
+    drop(held);
+    let revoked = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("revoke finishes once the lock is released");
+    revoker.join().expect("revoke thread");
+    assert!(revoked.is_ok(), "{revoked:?}");
+    assert_eq!(load(&root, &key(), "cred-A"), Err(DeviceError::Unknown));
+    assert!(grant_files(&root).is_empty(), "the later grant is swept");
 }
