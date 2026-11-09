@@ -22,7 +22,8 @@
 //! [`FINAL_FLUSH_BUDGET`]. #10412: what the bus does not take is written to
 //! the [`spool`], and the next start buffers it again.
 //! #10906: [`registry_resolver`] names each session's registry `project_key`,
-//! once per session, and every event of that session carries it.
+//! once per session, on a blocking thread off the hook path; every event the
+//! session projects after the answer lands carries it.
 //! Test: `tests.rs` (socket level), `projection_tests.rs` (pure),
 //! `spool_tests.rs` (stop and restart).
 //!
@@ -30,7 +31,7 @@
 //! - [`SPEC-UNIDASH-04~draft`](docs/specs/DOC-73-unified-mpm-code-agents-dashboard.md#SPEC-UNIDASH-04~draft)
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -65,6 +66,11 @@ pub const FINAL_FLUSH_BUDGET: Duration = Duration::from_secs(1);
 /// (#6849 fix round). Kept small because that wait delays the exit that
 /// races the serve drain's pane shutdown (#6288); see [`before_signal_exit`].
 pub const SIGNAL_FLUSH_BUDGET: Duration = Duration::from_millis(200);
+
+/// Project lookups running at once (#10906). A stale mount can hold each
+/// one for minutes; past this, a session's lookup waits for its next hook
+/// instead of taking another thread from the blocking pool.
+pub const MAX_LOOKUPS_IN_FLIGHT: usize = 16;
 
 /// At most one "events dropped" warning per this window.
 const DROP_WARN_EVERY: Duration = Duration::from_secs(60);
@@ -192,8 +198,11 @@ const BUFFER_BYTES: u64 = 8 * 1024 * 1024;
 /// Test: `hook_events_reach_the_bus_with_a_parent_chain_6849`.
 pub struct ActionPublisher {
     client: PushClient,
-    threader: parking_lot::Mutex<projection::Threader>,
+    // #10906: shared with the project lookups, which settle off the hook path.
+    threader: Arc<parking_lot::Mutex<projection::Threader>>,
     seq: AtomicU64,
+    /// #10906: project lookups still running, at most [`MAX_LOOKUPS_IN_FLIGHT`].
+    lookups: Arc<AtomicUsize>,
     flush_interval: Duration,
     /// Transcript read positions for received messages (#9167).
     received: parking_lot::Mutex<received::Tails>,
@@ -221,8 +230,11 @@ impl ActionPublisher {
     pub fn with_buffer(socket: impl Into<PathBuf>, events: usize, bytes: u64) -> Self {
         Self {
             client: PushClient::with_limits(socket, events, bytes),
-            threader: parking_lot::Mutex::new(projection::Threader::new(dirs::home_dir())),
+            threader: Arc::new(parking_lot::Mutex::new(projection::Threader::new(
+                dirs::home_dir(),
+            ))),
             seq: AtomicU64::new(0),
+            lookups: Arc::default(),
             flush_interval: DEFAULT_FLUSH_INTERVAL,
             received: parking_lot::Mutex::default(),
             scanning: parking_lot::Mutex::new(()),
@@ -279,17 +291,71 @@ impl ActionPublisher {
     /// Why: this runs on the hook path, which must not wait on the bus.
     /// What: projection and `PushClient::send` under one lock, so `seq`
     /// follows emission order and a parent is buffered before its child.
+    /// #10906: a session's project lookup is queued here and run by
+    /// [`Self::spawn_lookup`] after the lock drops, so neither this call nor
+    /// any other holder of the lock waits on the resolver's disk reads.
     /// Test: `ten_thousand_hooks_with_no_bus_are_fast_and_bounded_6849`,
-    /// `a_stalled_bus_never_slows_hook_ingest_6849`.
+    /// `a_stalled_bus_never_slows_hook_ingest_6849`,
+    /// `a_slow_project_lookup_never_holds_the_hook_path_10906`.
     pub fn publish(&self, record: &HookEventRecord) {
         let mut threader = self.threader.lock();
         for mut event in threader.project(record) {
             event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
             self.buffer(event);
         }
+        let lookups = threader.take_lookups();
         drop(threader);
+        for lookup in lookups {
+            self.spawn_lookup(lookup);
+        }
         // #9167: no I/O here; the flush task reads the transcript.
         self.received.lock().note(record);
+    }
+
+    /// Run `lookup` on a blocking thread and settle its answer (#10906).
+    ///
+    /// Why: the resolver reads the disk, and the hook path must not wait on
+    /// it, nor hold the lock `delivered`, `publish_event` and the transcript
+    /// scan share.
+    /// What: on tokio's blocking pool when a runtime is current, else on a
+    /// named std thread. The thread takes the lock only to store the answer.
+    /// At [`MAX_LOOKUPS_IN_FLIGHT`] the lookup is requeued for the session's
+    /// next hook, so stuck lookups cannot drain the blocking pool.
+    /// Test: `a_slow_project_lookup_never_holds_the_hook_path_10906`.
+    fn spawn_lookup(&self, lookup: projection::Lookup) {
+        if self.lookups.fetch_add(1, Ordering::SeqCst) >= MAX_LOOKUPS_IN_FLIGHT {
+            self.lookups.fetch_sub(1, Ordering::SeqCst);
+            tracing::debug!("action events: project lookups saturated; retrying on the next hook");
+            self.threader.lock().requeue(&lookup);
+            return;
+        }
+        let threader = Arc::clone(&self.threader);
+        let in_flight = Arc::clone(&self.lookups);
+        let run = move || {
+            let project = lookup.resolve();
+            threader.lock().settle(&lookup, project);
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+        };
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            drop(rt.spawn_blocking(run));
+        } else if let Err(e) = std::thread::Builder::new()
+            .name("tm-project-lookup".into())
+            .spawn(run)
+        {
+            // The closure, and its lookup, are gone; the session stays unattributed.
+            self.lookups.fetch_sub(1, Ordering::SeqCst);
+            tracing::warn!(error = %e, "action events: project lookup thread did not start");
+        }
+    }
+
+    /// Wait until no project lookup is running, at most 10 s (#10906 tests).
+    #[cfg(test)]
+    pub(crate) async fn lookups_settled(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.lookups.load(Ordering::SeqCst) > 0 {
+            assert!(Instant::now() < deadline, "project lookups still running");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// Buffer one already-built `event`; never does I/O (#10362).
@@ -573,9 +639,9 @@ impl StartAt {
 /// What: [`trusty_common::resolve_project_root`] on `cwd`, mapped through
 /// [`main_checkout_root`] when that root is a linked worktree, then
 /// [`crate::project::registered_project_for_root_in`] against
-/// `registry_dir`. All three read the disk, so the threader calls this once
-/// per session. `None` for an unregistered cwd, an absent or unreadable
-/// registry, or a worktree whose main checkout cannot be read.
+/// `registry_dir`. All three read the disk, so it runs once per session. `None` for an unregistered cwd, an absent or unreadable
+/// registry, or a worktree whose main checkout cannot be read. #10906: the
+/// publisher runs it on a blocking thread, never on the hook path.
 /// Test: `an_event_from_a_registered_project_carries_its_project_key_10906`,
 /// `an_unresolvable_session_still_sends_its_events_unattributed_10906`,
 /// `a_linked_worktree_session_carries_its_main_checkouts_project_key_10906`.

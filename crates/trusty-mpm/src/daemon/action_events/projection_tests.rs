@@ -359,9 +359,10 @@ fn build_and_vcs_noise_is_not_projected_6849() {
     assert!(fresh.is_empty());
 }
 
-/// #10906: a session's project is resolved once, from the first record that
-/// names a cwd, and every event of the session carries it from then on.
-/// Records before that carry `None`; none is dropped or held.
+/// #10906: a session queues one project lookup, from the first record that
+/// names a cwd, and never runs it itself. Events before the answer is
+/// settled carry `None` (the queuing record included); every event after it
+/// carries the key. A stale answer for an ended session lands nowhere.
 #[test]
 fn a_session_is_resolved_once_from_its_first_cwd_10906() {
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -376,19 +377,33 @@ fn a_session_is_resolved_once_from_its_first_cwd_10906() {
     let before = threader.project(&rec(HookEvent::Notification, json!({})));
     assert_eq!(before.len(), 2, "inferred root and the hook still go out");
     assert!(before.iter().all(|e| e.project.is_none()), "{before:?}");
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(threader.take_lookups().is_empty(), "no cwd, nothing queued");
     let first = threader.project(&rec(
         HookEvent::PreToolUse,
         json!({"cwd": "/w/acme", "tool": "Bash", "tool_use_id": "t1"}),
     ));
+    assert!(first.iter().all(|e| e.project.is_none()), "{first:?}");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "queued, not run"
+    );
+    let lookups = threader.take_lookups();
+    assert_eq!(lookups.len(), 1);
+    let answer = lookups[0].resolve();
+    threader.settle(&lookups[0], answer);
     let later = threader.project(&rec(
         HookEvent::PostToolUse,
         json!({"cwd": "/elsewhere", "tool": "Bash", "tool_use_id": "t1"}),
     ));
+    assert!(threader.take_lookups().is_empty(), "once per session");
     assert_eq!(threader.project_of(&s).as_deref(), Some("acme/web"));
     let end = threader.project(&rec(HookEvent::SessionEnd, json!({})));
-    for e in first.iter().chain(&later).chain(&end) {
+    for e in later.iter().chain(&end) {
         assert_eq!(e.project.as_deref(), Some("acme/web"), "{e:?}");
     }
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "once");
+    // The session ended; a late answer for it is dropped.
+    threader.settle(&lookups[0], Some("acme/web".to_string()));
+    assert_eq!(threader.project_of(&s), None);
 }

@@ -448,14 +448,14 @@ async fn register_10906(reg: &Path, name: &str, root: &Path) -> String {
         .expect("key")
 }
 
-/// One `SessionStart` with `cwd`, through the daemon's ingest point.
+/// One `SessionStart` with `cwd`, through the daemon's ingest point; it
+/// queues the session's project lookup (#10906).
 fn start_in(state: &DaemonState, session: SessionId, cwd: &Path) {
     state.push_hook_event(HookEventRecord::now(
         session,
         HookEvent::SessionStart,
         json!({"cwd": cwd.display().to_string()}),
     ));
-    state.push_hook_event(pre_tool_use_in(session, cwd));
 }
 
 fn pre_tool_use_in(session: SessionId, cwd: &Path) -> HookEventRecord {
@@ -471,6 +471,8 @@ fn pre_tool_use_in(session: SessionId, cwd: &Path) -> HookEventRecord {
 /// without — which is the field trusty-events keys `by_project` on (its
 /// `events_console_metrics_answers_on_the_real_socket`). A session in an
 /// unregistered directory goes out as `None`, so it counts as unattributed.
+/// The `SessionStart` that queues the lookup goes out before it lands, as
+/// `None`; the tool call after it carries the key.
 #[tokio::test]
 async fn an_event_from_a_registered_project_carries_its_project_key_10906() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -488,9 +490,14 @@ async fn an_event_from_a_registered_project_carries_its_project_key_10906() {
     assert!(state.action_events().attach(Arc::clone(&publisher)));
     let (a, b, c) = (SessionId::new(), SessionId::new(), SessionId::new());
     // A subdirectory of the checkout resolves to the checkout's project.
-    start_in(&state, a, &web.join("sub"));
-    start_in(&state, b, &solo);
-    start_in(&state, c, &stray);
+    let cwds = [(a, web.join("sub")), (b, solo.clone()), (c, stray.clone())];
+    for (s, cwd) in &cwds {
+        start_in(&state, *s, cwd);
+    }
+    publisher.lookups_settled().await;
+    for (s, cwd) in &cwds {
+        state.push_hook_event(pre_tool_use_in(*s, cwd));
+    }
     let read = read_one(&sock);
     let outcome = publisher.flush().await;
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
@@ -509,13 +516,11 @@ async fn an_event_from_a_registered_project_carries_its_project_key_10906() {
             .filter(|e| e.session.as_deref() == Some(&id))
             .collect();
         assert_eq!(mine.len(), 2, "{id}: {got:?}");
-        assert!(
-            mine.iter().all(|e| e.project.as_deref() == project),
-            "{mine:?}"
-        );
+        assert_eq!(mine[0].project, None, "queued, not yet resolved: {mine:?}");
+        assert_eq!(mine[1].project.as_deref(), project, "{mine:?}");
     }
     let raw = String::from_utf8_lossy(&bytes);
-    assert_eq!(raw.matches(r#""project":"acme/web""#).count(), 2, "{raw}");
+    assert_eq!(raw.matches(r#""project":"acme/web""#).count(), 1, "{raw}");
 }
 
 /// #10906 error arm: a registry that cannot be read names no project, and
@@ -534,6 +539,8 @@ async fn an_unresolvable_session_still_sends_its_events_unattributed_10906() {
     assert!(state.action_events().attach(Arc::clone(&publisher)));
     let s = SessionId::new();
     start_in(&state, s, &root);
+    publisher.lookups_settled().await;
+    state.push_hook_event(pre_tool_use_in(s, &root));
     assert_eq!(publisher.buffered_len(), 2, "buffered on the hook path");
     let read = read_one(&sock);
     let outcome = publisher.flush().await;
@@ -574,7 +581,8 @@ fn linked_worktree_10906(checkout: &Path, at: &Path, branch: &str) -> PathBuf {
 }
 
 /// The events every session in `cwds` sends, keyed by session id, through
-/// [`registry_resolver`] on `reg`.
+/// [`registry_resolver`] on `reg`: a `SessionStart`, then, once the lookups
+/// have landed, a tool call.
 async fn projects_for_10906(
     dir: &tempfile::TempDir,
     reg: &Path,
@@ -589,6 +597,10 @@ async fn projects_for_10906(
     let sessions: Vec<SessionId> = cwds.iter().map(|_| SessionId::new()).collect();
     for (s, cwd) in sessions.iter().zip(cwds) {
         start_in(&state, *s, cwd);
+    }
+    publisher.lookups_settled().await;
+    for (s, cwd) in sessions.iter().zip(cwds) {
+        state.push_hook_event(pre_tool_use_in(*s, cwd));
     }
     let read = read_one(&sock);
     let outcome = publisher.flush().await;
@@ -623,7 +635,7 @@ async fn a_linked_worktree_session_carries_its_main_checkouts_project_key_10906(
     let cwds = [nested.join("sub"), nested.clone(), sibling.join("sub")];
     let cwds: Vec<&Path> = cwds.iter().map(PathBuf::as_path).collect();
     for (id, projects) in projects_for_10906(&dir, &reg, &cwds).await {
-        assert_eq!(projects, vec![Some("acme/web".to_string()); 2], "{id}");
+        assert_eq!(projects, [None, Some("acme/web".to_string())], "{id}");
     }
 }
 
@@ -648,4 +660,54 @@ async fn a_worktree_with_a_broken_gitdir_sends_its_events_unattributed_10906() {
     for (id, projects) in projects_for_10906(&dir, &reg, &cwds).await {
         assert_eq!(projects, vec![None; 2], "{id}");
     }
+}
+
+/// #10906 regression: a project lookup stuck on the disk — a stale network
+/// mount under the cwd — never holds the hook path. The hook that queues it
+/// returns within the 6849 ingest bound, and a second session's hook does
+/// not wait on it; the answer still lands once the lookup finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_project_lookup_never_holds_the_hook_path_10906() {
+    const STALL: Duration = Duration::from_secs(2);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let slow: projection::ProjectResolver = Arc::new(|cwd: &Path| {
+        if cwd == Path::new("/stale") {
+            std::thread::sleep(STALL);
+            return Some("acme/stale".to_string());
+        }
+        Some("acme/live".to_string())
+    });
+    let state = Arc::new(DaemonState::new());
+    let publisher = Arc::new(ActionPublisher::new(sock_in(&dir)).with_project_resolver(slow));
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    let (a, b) = (SessionId::new(), SessionId::new());
+
+    let hook_a = std::thread::spawn({
+        let state = Arc::clone(&state);
+        move || {
+            let started = Instant::now();
+            state.push_hook_event(pre_tool_use_in(a, Path::new("/stale")));
+            started.elapsed()
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = Instant::now();
+    state.push_hook_event(pre_tool_use_in(b, Path::new("/live")));
+    let second = started.elapsed();
+    let first = hook_a.join().expect("join");
+    let waits = format!("first session {first:?}, second session {second:?}");
+    assert!(first < STALL, "the hook waited on the lookup: {waits}");
+    assert!(
+        second < Duration::from_secs(1),
+        "the second session's hook waited on the first one's lookup: {waits}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while publisher.threader.lock().project_of(&a).is_none() {
+        assert!(Instant::now() < deadline, "the slow lookup never landed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let threader = publisher.threader.lock();
+    assert_eq!(threader.project_of(&a).as_deref(), Some("acme/stale"));
+    assert_eq!(threader.project_of(&b).as_deref(), Some("acme/live"));
 }

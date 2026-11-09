@@ -14,7 +14,9 @@
 //! path or a message never leaves this module. #9167: a relay's text leaves
 //! only as `super::message` digests it, never as text unless bodies are on.
 //! #10906: each session's registry `project_key` is resolved once, from its
-//! first `cwd`, and stamped on every event the session projects to.
+//! first `cwd`, and stamped on every event the session projects after the
+//! lookup lands. The lookup reads the disk, so this module only queues it
+//! ([`Lookup`]); the publisher runs it off the hook path and off the lock.
 //! Test: `projection_tests.rs`.
 //!
 //! # Spec References
@@ -76,10 +78,36 @@ struct Thread {
     calls: Open,
     worktrees: Open,
     touched: u64,
-    // #10906: the session's registry `project_key`, resolved once.
+    // #10906: the session's registry `project_key`, once its lookup lands.
     project: Option<String>,
-    /// Whether `project` was resolved; it is, from the first known `cwd`.
+    /// Whether the lookup was queued; it is, from the first known `cwd`.
     resolved: bool,
+}
+
+/// One session's queued project lookup (#10906).
+///
+/// Why: the resolver walks the filesystem and reads the registry, and a
+/// stale network mount can block that for minutes. The threader runs under
+/// the publisher's one lock on the synchronous hook path, so it must never
+/// call the resolver itself.
+/// What: the session, the root that identifies its thread, the first `cwd`
+/// and the resolver. [`Self::resolve`] does the I/O; [`Threader::settle`]
+/// stores the answer only if the same thread is still tracked.
+/// Test: `a_session_is_resolved_once_from_its_first_cwd_10906`,
+/// `a_slow_project_lookup_never_holds_the_hook_path_10906`.
+pub struct Lookup {
+    session: SessionId,
+    root: EventId,
+    cwd: PathBuf,
+    resolver: ProjectResolver,
+}
+
+impl Lookup {
+    /// The registry `project_key` for this session's first `cwd`. Reads the
+    /// disk: call it on a blocking thread, never under the threader lock.
+    pub fn resolve(&self) -> Option<String> {
+        (self.resolver)(&self.cwd)
+    }
 }
 
 /// What one record becomes, before the envelope is stamped.
@@ -111,6 +139,8 @@ pub struct Threader {
     bodies: bool,
     /// #10906: names a session's project; none in a pure threader.
     resolver: Option<ProjectResolver>,
+    /// #10906: lookups queued for the publisher, at most [`MAX_SESSIONS`].
+    lookups: VecDeque<Lookup>,
 }
 
 impl Threader {
@@ -132,7 +162,49 @@ impl Threader {
             home: prefixes,
             bodies: false,
             resolver: None,
+            lookups: VecDeque::new(),
         }
+    }
+
+    /// Hand over the project lookups queued since the last call (#10906).
+    pub fn take_lookups(&mut self) -> Vec<Lookup> {
+        self.lookups.drain(..).collect()
+    }
+
+    /// Store `lookup`'s answer, unless its session ended or was evicted
+    /// meanwhile (#10906: a stale answer never lands on a newer thread).
+    pub fn settle(&mut self, lookup: &Lookup, project: Option<String>) {
+        if let Some(thread) = self.sessions.get_mut(&lookup.session)
+            && thread.root == lookup.root
+        {
+            thread.project = project;
+        }
+    }
+
+    /// Queue `lookup` again on its session's next record with a cwd: the
+    /// publisher had no room to run it (#10906).
+    pub fn requeue(&mut self, lookup: &Lookup) {
+        if let Some(thread) = self.sessions.get_mut(&lookup.session)
+            && thread.root == lookup.root
+        {
+            thread.resolved = false;
+        }
+    }
+
+    /// #10906: queue the one lookup for `session`'s first cwd. No I/O.
+    fn request(&mut self, session: SessionId, root: EventId, cwd: &Path) {
+        let Some(resolver) = self.resolver.clone() else {
+            return;
+        };
+        if self.lookups.len() >= MAX_SESSIONS {
+            self.lookups.pop_front();
+        }
+        self.lookups.push_back(Lookup {
+            session,
+            root,
+            cwd: cwd.to_path_buf(),
+            resolver,
+        });
     }
 
     /// Name each session's project with `resolver` (#10906).
@@ -189,9 +261,13 @@ impl Threader {
     /// A record for a session with no root first mints a `Session::Started`
     /// with `attrs.inferred = true`, so a daemon that started mid-session
     /// still emits a forest. `seq` is `0`; the publisher stamps it.
-    /// #10906: every event carries the session's `project_key`, resolved
-    /// once from the first record with a `cwd`; `None` until then, and when
-    /// the cwd is unregistered. Resolution never drops or holds an event.
+    /// #10906: the first record with a `cwd` queues the session's one
+    /// [`Lookup`]; this call never runs it. Every event carries the
+    /// session's `project_key` once [`Self::settle`] has stored it, and
+    /// `None` before that — the record that queued the lookup included — and
+    /// when the cwd is unregistered. Events are never held for the lookup:
+    /// hook ingest neither waits nor drops, at the cost of the session's
+    /// first events going out unattributed.
     /// Test: `every_hook_event_variant_projects_to_its_kind_6849`,
     /// `terminals_parent_their_opening_event_6849`,
     /// `a_session_is_resolved_once_from_its_first_cwd_10906`.
@@ -226,13 +302,14 @@ impl Threader {
         if let Some(cwd) = str_field(&record.payload, "cwd") {
             thread.cwd = Some(PathBuf::from(cwd));
         }
-        // #10906: a session whose first records named no cwd resolves now.
-        if !thread.resolved
-            && let Some(cwd) = thread.cwd.as_deref()
-        {
-            thread.project = resolve(self.resolver.as_ref(), cwd);
-            thread.resolved = true;
-        }
+        // #10906: a session whose first records named no cwd queues now.
+        let lookup = match thread.cwd.clone() {
+            Some(cwd) if !thread.resolved => {
+                thread.resolved = true;
+                Some((thread.root, cwd))
+            }
+            _ => None,
+        };
         let project = thread.project.clone();
         let id = EventId::new();
         let (body, parent) = step(thread, record, id, &self.home);
@@ -245,6 +322,8 @@ impl Threader {
         );
         if record.event == HookEvent::SessionEnd {
             self.sessions.remove(&record.session);
+        } else if let Some((root, cwd)) = lookup {
+            self.request(record.session, root, &cwd);
         }
         stamped(out, project)
     }
@@ -264,10 +343,10 @@ impl Threader {
         self.tick += 1;
         let root = EventId::new();
         let cwd = str_field(&record.payload, "cwd").map(PathBuf::from);
-        // #10906: the one resolution, when this first record names a cwd.
-        let project = cwd
-            .as_deref()
-            .and_then(|c| resolve(self.resolver.as_ref(), c));
+        // #10906: queue the one lookup when this first record names a cwd.
+        if let Some(c) = cwd.as_deref() {
+            self.request(record.session, root, c);
+        }
         self.sessions.insert(
             record.session,
             Thread {
@@ -277,16 +356,11 @@ impl Threader {
                 calls: Open::default(),
                 worktrees: Open::default(),
                 touched: self.tick,
-                project,
+                project: None,
             },
         );
         root
     }
-}
-
-/// `resolver`'s `project_key` for `cwd`; `None` with no resolver.
-fn resolve(resolver: Option<&ProjectResolver>, cwd: &Path) -> Option<String> {
-    resolver.and_then(|r| r(cwd))
 }
 
 /// `events`, each carrying `project` (#10906).
