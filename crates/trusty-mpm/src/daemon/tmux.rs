@@ -17,13 +17,10 @@
 // only by its own tests, so its public surface is intentionally unused.
 #![allow(dead_code)]
 
-use std::process::Command;
-
 use tracing::warn;
 
 use crate::core::external_session::ExternalSession;
 use crate::core::tmux::{TmuxCommand, TmuxTarget, tmux_argv};
-use crate::core::tmux_server::server_args;
 use crate::core::{Error, Result};
 use crate::session_manager::ArchitectFloor;
 
@@ -287,34 +284,28 @@ impl TmuxDriver {
     /// `ensure_server_up_fails_loudly_when_the_server_never_comes_up`
     /// (`tmux_tests.rs`, both drive a scripted fake `tmux` binary).
     pub fn ensure_server_up(&self) -> Result<()> {
-        crate::core::tmux::ensure_server_up(&self.tmux_path).map_err(Error::Protocol)
+        // See #10101: `start-server` on this driver's server.
+        crate::core::tmux::ensure_server_up(&self.tmux_path, self.server.as_deref())
+            .map_err(Error::Protocol)
     }
 
     /// Run a typed tmux command, returning captured stdout on success.
     ///
     /// Why: every other method routes through here so exit-status handling
     /// lives in one place. The actual process spawn is delegated to
-    /// [`crate::core::tmux::run_tmux_with_bin`] (#2398 architecture
+    /// [`crate::core::tmux::run_tmux_on`] (#2398 architecture
     /// consolidation) — `TmuxDriver` WRAPS that single crate-wide entry point
     /// rather than spawning independently, using its own already-resolved
     /// `self.tmux_path` (cached at [`Self::discover`] time for the
     /// fail-fast-if-absent contract) instead of re-resolving on every call.
     /// What: renders argv via `core::tmux::tmux_argv` (for the error message
-    /// only — the actual spawn happens inside `run_tmux_with_bin`), runs
+    /// only — the actual spawn happens inside `run_tmux_on`, on this driver's
+    /// server, #10101), runs
     /// `tmux`, and maps a non-zero exit to `Error::Protocol` carrying stderr.
     /// Test: exercised indirectly by the `#[ignore]` integration tests.
     fn run(&self, cmd: &TmuxCommand) -> Result<String> {
-        let output = match &self.server {
-            None => crate::core::tmux::run_tmux_with_bin(&self.tmux_path, cmd)?,
-            // #8928 step 4: the same spawn, with the `-L` prefix first.
-            Some(name) => {
-                cmd.validate_targets()
-                    .map_err(|e| Error::Protocol(e.to_string()))?;
-                let mut argv = server_args(name).to_vec();
-                argv.extend(tmux_argv(cmd));
-                crate::core::tmux::run_tmux_argv_with_bin(&self.tmux_path, &argv)?
-            }
-        };
+        // See #10101: the `-L` prefix comes from the one server-aware builder.
+        let output = crate::core::tmux::run_tmux_on(&self.tmux_path, self.server.as_deref(), cmd)?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -352,9 +343,14 @@ impl TmuxDriver {
     /// requires (a `warn!`-only log is the exact silent-degrade #3386 was
     /// filed against).
     pub fn create_session(&self, name: &str, workdir: Option<&str>) -> Result<()> {
-        let outcome =
-            crate::core::tmux::create_managed_session(Some(&self.tmux_path), name, workdir)
-                .inspect(|o| crate::core::tmux::warn_if_options_unverified(o, name))?;
+        let outcome = crate::core::tmux::create_managed_session_on(
+            Some(&self.tmux_path),
+            self.server.as_deref(), // See #10101
+            name,
+            workdir,
+            true,
+        )
+        .inspect(|o| crate::core::tmux::warn_if_options_unverified(o, name))?;
         if outcome.output.status.success() {
             Ok(())
         } else {
@@ -387,10 +383,12 @@ impl TmuxDriver {
         name: &str,
         workdir: Option<&str>,
     ) -> Result<ExclusiveCreate> {
-        let outcome = crate::core::tmux::create_managed_session_exclusive(
+        let outcome = crate::core::tmux::create_managed_session_on(
             Some(&self.tmux_path),
+            self.server.as_deref(), // See #10101
             name,
             workdir,
+            false,
         )
         .inspect(|o| crate::core::tmux::warn_if_options_unverified(o, name))?;
         if outcome.output.status.success() {
@@ -414,9 +412,9 @@ impl TmuxDriver {
     /// `set-option` issued after a pane already exists does not retroactively
     /// grow it (a tmux limitation — existing panes are unaffected by this
     /// call; only NEW panes/sessions created after it benefit). Because
-    /// trusty-mpm runs every managed session on the ONE default tmux server
-    /// (no dedicated `-S` socket — confirmed: no call site in this crate
-    /// passes `-S`/`-L`), setting these as GLOBAL (`-g`) options once, right
+    /// the options are server-global and this driver talks to one server
+    /// (the default one, or its `-L` server since #10101), setting these as
+    /// GLOBAL (`-g`) options once, right
     /// before [`Self::create_session`]'s `new-session`, benefits every
     /// session subsequently created without per-session bookkeeping. `mouse
     /// on` additionally maps the wheel to pane-scroll/copy-mode entry, the
@@ -473,32 +471,6 @@ impl TmuxDriver {
             name: name.to_string(),
         })?;
         Ok(())
-    }
-
-    /// List all tmux sessions on this host.
-    ///
-    /// Why: the multi-session dashboard enumerates every running session.
-    /// What: runs `list-sessions`; tmux exits non-zero with "no server running"
-    /// when there are zero sessions — that is mapped to an empty `Vec`.
-    /// Test: row parsing covered by `parses_session_row`.
-    pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
-        // #8928 step 4: a named server's listing carries its `-L` prefix.
-        let mut argv: Vec<String> = self.server.iter().flat_map(|s| server_args(s)).collect();
-        argv.extend(tmux_argv(&TmuxCommand::ListSessions));
-        let output = Command::new(&self.tmux_path).args(&argv).output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr_means_empty_server(&stderr) {
-                return Ok(Vec::new());
-            }
-            return Err(Error::Protocol(format!("tmux list-sessions: {stderr}")));
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut sessions = Vec::new();
-        for line in stdout.lines().filter(|l| !l.is_empty()) {
-            sessions.push(SessionInfo::parse(line)?);
-        }
-        Ok(sessions)
     }
 
     /// Send literal text to a session/pane, then press Enter to execute it.
@@ -605,85 +577,6 @@ impl TmuxDriver {
             value: value.to_string(),
         })?;
         Ok(())
-    }
-
-    /// List every pane on the host as `session_name pane_current_command`.
-    ///
-    /// Why: session auto-discovery scans all panes to find ones running Claude
-    /// Code; `list-panes -a` reports every pane across every session in one
-    /// call, so the daemon need not iterate sessions itself.
-    /// What: runs `tmux list-panes -a -F "#{session_name} #{pane_current_command}"`
-    /// directly (this cross-session form has no `core::tmux::TmuxCommand`
-    /// variant) and returns its raw stdout. An empty tmux server (`no server
-    /// running`) yields an empty string rather than an error.
-    /// Test: parsing of the output is covered by `discovery::parse_pane_line`;
-    /// this listing path is exercised by the `discovery` tmux-absent test.
-    pub fn list_claude_panes(&self) -> Result<String> {
-        let output = Command::new(&self.tmux_path)
-            .args([
-                "list-panes",
-                "-a",
-                "-F",
-                "#{session_name} #{pane_current_command}",
-            ])
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr_means_empty_server(&stderr) {
-                return Ok(String::new());
-            }
-            return Err(Error::Protocol(format!("tmux list-panes -a: {stderr}")));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    }
-
-    /// Enumerate every pane as a structured [`orphan_gc::PaneInfo`](crate::daemon::orphan_gc::PaneInfo) row.
-    ///
-    /// Why: the orphan-GC must reconcile live tmux against the registries, and
-    /// to decide whether a session is idle it needs each pane's
-    /// `pane_current_command` (and, for the belt-and-braces liveness check, the
-    /// pane's shell PID). The reactivate-reconcile path (#2789) additionally
-    /// needs each pane's stable `pane_id` to identify the caller's OWN pane and
-    /// treat it as idle. `list-panes -a` reports all of that across every
-    /// session in a single tmux call.
-    /// What: runs
-    /// `tmux list-panes -a -F "#{session_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}"`
-    /// and parses each row into a [`orphan_gc::PaneInfo`](crate::daemon::orphan_gc::PaneInfo). A tab delimiter avoids
-    /// colliding with the colons in session names. An empty tmux server (`no
-    /// server running`) yields an empty `Vec` rather than an error, so a quiet
-    /// host reaps nothing rather than failing the sweep.
-    ///
-    /// The spawn goes through [`crate::core::tmux::force_utf8_client_env`]
-    /// because tmux deletes this format's delimiters from its own output when
-    /// the client does not declare a UTF-8 locale — see that function and
-    /// #6529. A row that still arrives malformed is DROPPED, never coerced, and
-    /// the drop is reported once per listing rather than once per row.
-    /// Test: row parsing covered by `parses_managed_pane_row`,
-    /// `sanitized_pane_row_is_dropped_not_coerced`; the live listing path is
-    /// exercised by the `#[ignore]` integration test.
-    pub fn list_managed_panes(&self) -> Result<Vec<crate::daemon::orphan_gc::PaneInfo>> {
-        let mut cmd = Command::new(&self.tmux_path);
-        cmd.args([
-            "list-panes",
-            "-a",
-            "-F",
-            // #6118: `pane_current_path` is the evidence the cwd-gone reap path
-            // needs. Asking for it in the SAME listing keeps the sweep at one
-            // tmux call rather than one per untracked pane.
-            "#{session_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}\t#{pane_current_path}",
-        ]);
-        // #6529: without a UTF-8 client locale tmux rewrites every tab to `_`.
-        crate::core::tmux::force_utf8_client_env(&mut cmd);
-        let output = cmd.output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr_means_empty_server(&stderr) {
-                return Ok(Vec::new());
-            }
-            return Err(Error::Protocol(format!("tmux list-panes -a: {stderr}")));
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(Self::parse_managed_pane_rows(&stdout))
     }
 
     /// Parse a whole `list-panes -a -F` listing, reporting dropped rows once.
@@ -812,85 +705,6 @@ impl TmuxDriver {
             output,
             captured_at: chrono::Utc::now().timestamp(),
         })
-    }
-
-    /// Return the pane's current working directory via `display-message`.
-    ///
-    /// Why: the snapshot-before-stop path (#1816) needs the pane's cwd to
-    /// restore it on resume; `tmux display-message -p '#{pane_current_path}'`
-    /// is the standard mechanism. The call is best-effort — callers must handle
-    /// `None` gracefully (resume falls back to workspace_path/cwd).
-    /// What: runs `tmux display-message -t =<name>: -p '#{pane_current_path}'`,
-    /// trims the output, and returns `Some(path)` on success or `None` if the
-    /// session does not exist, tmux is unavailable, or the path is empty.
-    /// Test: exercised indirectly via `snapshot::capture_into` with a live tmux;
-    /// `RealTmuxDriver::get_pane_cwd` wraps this method.
-    pub fn pane_current_path(&self, session_name: &str) -> Option<std::path::PathBuf> {
-        // #8443: an empty name would render a target matching no pane; say so.
-        crate::core::tmux::check_session_name(session_name).ok()?;
-        let output = Command::new(&self.tmux_path)
-            .args([
-                "display-message",
-                "-t",
-                // #8443: pane-typed target — `=name:`, never a bare name.
-                &crate::core::tmux::exact_window_target(session_name),
-                "-p",
-                "#{pane_current_path}",
-            ])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let raw = String::from_utf8_lossy(&output.stdout);
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(std::path::PathBuf::from(trimmed))
-        }
-    }
-
-    /// Return the pane's stable tmux `pane_id` (e.g. `"%5"`) via `display-message`.
-    ///
-    /// Why: `#2453` review finding 1 (round 2) — pane-identity confirmation for
-    /// the bare-`tm` in-pane relaunch's nested-session guard needs a signal
-    /// that is NEVER inherited across panes, unlike a tmux session-scoped env
-    /// var (`set-environment` is applied to every new pane/window created in
-    /// that session afterward, defeating an env-var-only gate — see
-    /// [`crate::session_manager::record::SessionRecord::pane_id`]'s doc for
-    /// the full empirical proof). tmux's own `pane_id` (distinct from
-    /// `pane_pid`, which the OS can reuse across a pane's lifetime) is that
-    /// signal.
-    /// What: runs `tmux display-message -t =<name>: -p '#{pane_id}'`, trims the
-    /// output, and returns `Some(id)` on success or `None` if the session does
-    /// not exist, tmux is unavailable, or the id is empty. Mirrors
-    /// [`Self::pane_current_path`]'s exact shape.
-    /// Test: exercised indirectly via `SessionManager::create`/
-    /// `mark_runtime_exited_stopped` with a live tmux;
-    /// `RealTmuxDriver::get_pane_id` wraps this method.
-    pub fn pane_id(&self, session_name: &str) -> Option<String> {
-        crate::core::tmux::check_session_name(session_name).ok()?; // #8443
-        let output = Command::new(&self.tmux_path)
-            .args([
-                "display-message",
-                "-t",
-                &crate::core::tmux::exact_window_target(session_name),
-                "-p",
-                "#{pane_id}",
-            ])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let raw = String::from_utf8_lossy(&output.stdout);
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
     }
 
     /// Register an external session for oversight without modifying it.
@@ -1062,6 +876,10 @@ pub struct SessionSnapshot {
     /// Unix epoch seconds the snapshot was taken.
     pub captured_at: i64,
 }
+
+// #10101: the server-aware argv builder and the direct-argv reads.
+#[path = "tmux_reads.rs"]
+mod reads;
 
 // #9004: pane identity and kill-by-id, split out for the SLOC cap.
 #[path = "tmux_pane_identity.rs"]

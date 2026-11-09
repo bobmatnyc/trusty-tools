@@ -145,6 +145,8 @@ pub(crate) mod issue;
 pub(crate) mod launch;
 // #8406: `tm launch --detach` reports the session instead of attaching.
 pub(crate) mod launch_handoff;
+// #10101: the workspace tmux server a CLI launch starts its PM on.
+pub(crate) mod launch_host;
 mod launch_notices;
 // #8545: launch/connect user-home writes, under a caller-named home.
 pub(crate) mod launch_home;
@@ -190,8 +192,14 @@ pub(crate) mod pm_guard;
 // #8939: the Architect's `tm env set|keys` exemption from the #7266 rule.
 pub(crate) mod pm_guard_architect_envfile;
 pub(crate) mod pm_guard_architect_reason;
+// #8878 PR2a: the presence gate on Architect anchor writes, and its verbs.
+pub(crate) mod pm_guard_presence;
+// #8878 PR2a: no hooked caller writes the presence key's Keychain item.
+pub(crate) mod pm_guard_presence_key;
+// #8878 PR2a: `tm presence local`.
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
+pub(crate) mod presence;
 // #6892: the machine-wide concurrent-builder denial. Fails CLOSED, unlike its
 // #4480 sibling — see its module doc.
 pub(crate) mod pm_guard_build_lease;
@@ -325,6 +333,9 @@ pub(crate) mod sync_assets;
 pub(crate) mod telegram;
 pub(crate) mod ticket;
 pub(crate) mod tmux_attach;
+pub(crate) mod tmux_attach_server; // #10101: Dc3
+// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
+pub(crate) mod tui_session_hooks;
 // #5843: the condition-poll wait primitive that replaces backgrounding.
 pub(crate) mod wait;
 // #8994: `tm worktrees` — the worktree ledger report.

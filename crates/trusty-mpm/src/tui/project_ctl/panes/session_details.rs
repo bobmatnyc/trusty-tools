@@ -1,35 +1,17 @@
-//! Read-only session details overlay (#10476).
+//! The field lines of an expanded session row (#10476, #10754).
 //!
-//! Why: the owner asked that Enter on a session open its details (#10476
-//! comment 2). The overlay shows what the poll already holds and makes no
-//! daemon call of its own.
-//! What: [`detail_lines`] is the pure field projection; [`render`] floats it
-//! over the frame, as `deliverables_view` does.
+//! Why: the owner asked that Enter on a session show its details (#10476
+//! comment 2). #10754: inline session details (Bob 11-06) — they now draw
+//! under the session's row in the session column, replacing the modal
+//! overlay (Architect Q2). They show what the poll already holds and make no
+//! daemon call of their own. #10754: De1 key map (Bob 11-06) — Right now
+//! toggles them; Enter opens the session.
+//! What: [`detail_lines`] is the pure field projection; the session column
+//! (`state::session_col`) inserts its lines as rows and
+//! `panes::session_list` draws them.
 //! Test: `detail_lines_show_fields_and_parent`.
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
-};
-
-use super::deliverables_view::centered_rect;
 use crate::tui::project_ctl::state::{ProjectCtlState, SessionRow};
-
-const OVERLAY_WIDTH: u16 = 76;
-const OVERLAY_HEIGHT: u16 = 18;
-
-/// The key line at the foot of the overlay.
-pub const DETAILS_KEYS: &str =
-    "[f] focus window  [k] kill  [r] resume  [d] decommission  [a] attach-cmd  [Esc] close";
-
-/// The head of [`DETAILS_KEYS`], which a click treats as the Focus button.
-const FOCUS_LABEL: &str = "[f] focus window";
-
-/// Rows reserved for [`DETAILS_KEYS`], which wraps inside the overlay.
-const KEYS_ROWS: u16 = 2;
 
 /// One `label: value` line per field, `-` for an absent value.
 ///
@@ -66,52 +48,6 @@ pub fn detail_lines(state: &ProjectCtlState, project: &str, s: &SessionRow) -> V
     ]
 }
 
-/// Draw the overlay for the session [`ProjectCtlState::details_session`] names.
-///
-/// What: the fields fill the overlay; the key line sits in its bottom
-/// `KEYS_ROWS` rows. #10476: a long field wrapping can no longer move the key
-/// line, so the click target recorded in [`ProjectCtlState::tree`] is exact.
-/// Test: `overlay_records_the_focus_button_on_its_label`.
-pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
-    let Some((project, session)) = state.details_session() else {
-        return;
-    };
-    let area = centered_rect(OVERLAY_WIDTH, OVERLAY_HEIGHT, frame.area());
-    frame.render_widget(Clear, area);
-    let title = Line::from(Span::styled(
-        format!("Session — {}", session.name),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ));
-    let lines: Vec<Line> = detail_lines(state, project, session)
-        .into_iter()
-        .map(Line::from)
-        .collect();
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [body, keys] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(KEYS_ROWS)]).areas(inner);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            DETAILS_KEYS,
-            Style::default().fg(Color::DarkGray),
-        )))
-        .wrap(Wrap { trim: false }),
-        keys,
-    );
-    let label = Rect {
-        height: 1,
-        width: FOCUS_LABEL.len() as u16,
-        ..keys
-    }
-    .intersection(keys);
-    state.tree.hit.details = Some(area);
-    state.tree.hit.details_focus = (!label.is_empty()).then_some(label);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,35 +62,6 @@ mod tests {
             parent_session_id: parent.map(str::to_string),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn overlay_records_the_focus_button_on_its_label() {
-        let mut state = ProjectCtlState::default();
-        let mut long = row("s1", "boss", None);
-        // A field that wraps must not move the key line.
-        long.workspace_path = Some("x".repeat(300));
-        state
-            .sessions_by_project
-            .insert("alpha".to_string(), vec![long]);
-        state.tree.details = Some("s1".to_string());
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("backend");
-        terminal
-            .draw(|f| render(f, &mut state))
-            .expect("draw the overlay");
-
-        let button = state.tree.hit.details_focus.expect("the button");
-        let label: String = (button.left()..button.right())
-            .map(|x| {
-                terminal.backend().buffer()[(x, button.y)]
-                    .symbol()
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(label, FOCUS_LABEL);
-        let overlay = state.tree.hit.details.expect("the overlay");
-        assert!(overlay.y < button.y && button.y < overlay.bottom());
     }
 
     #[test]

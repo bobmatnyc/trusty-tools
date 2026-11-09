@@ -470,6 +470,10 @@ pub mod architect_session;
 pub mod architect_conversation;
 // #8942 ruling 2: `tm fleet init` prunes a sidecar only for a proven-dead launch.
 pub mod architect_sidecar_prune;
+// #8878 PR2a: presence grants, their Keychain key, and the Touch ID prompt.
+pub mod presence;
+pub mod presence_key;
+pub mod presence_local;
 pub mod twin_identity;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
 pub mod uncommitted_changes;

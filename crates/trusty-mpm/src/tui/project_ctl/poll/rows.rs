@@ -126,7 +126,7 @@ pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
         proposed_default: s.proposed_default,
         deliverable_id: s.deliverable_id,
         unresumable: s.unresumable,
-        // #10476: the tree indents workers by this link; the details overlay
+        // #10476: the tree indents workers by this link; the inline details
         // shows the other two.
         parent_session_id: s.parent_session_id,
         workspace_path: s.workspace_path,

@@ -1893,9 +1893,11 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume. #6542: the session it launches
     // lands on `run_fallback`'s private tmux server.
+    // #10101 D3c: a launch refuses an unreachable daemon, so a stub answers.
+    let (_seen, url) = crate::test_support::launch_stub::spawn_empty().await;
     let _run = run_fallback(
         &client,
-        "http://127.0.0.1:1",
+        &url,
         live_dir.path(),
         &empty_disk(),
         Some(fw_home.path()),
@@ -1984,9 +1986,11 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume. #6542: the session it launches
     // lands on `run_fallback`'s private tmux server.
+    // #10101 D3c: a launch refuses an unreachable daemon, so a stub answers.
+    let (_seen, url) = crate::test_support::launch_stub::spawn_empty().await;
     let _run = run_fallback(
         &client,
-        "http://127.0.0.1:1",
+        &url,
         live_dir.path(),
         &empty_disk(),
         Some(fw_home.path()),
@@ -2044,6 +2048,23 @@ fn fallback_tmux_bin() -> String {
     trusty_mpm::core::tmux::resolve_tmux_binary_or_bare()
 }
 
+/// Kills tmux server `server` on drop, so a failed assertion leaves no
+/// workspace server behind (#10101).
+struct KillServerOnDrop {
+    tmux: String,
+    server: Option<String>,
+}
+
+impl Drop for KillServerOnDrop {
+    fn drop(&mut self) {
+        if let Some(server) = &self.server {
+            let _ = std::process::Command::new(&self.tmux)
+                .args(["-L", server, "kill-server"])
+                .output();
+        }
+    }
+}
+
 /// The guided fallback launches onto its private tmux server, never the
 /// default one, and that server dies with the run (#6542).
 ///
@@ -2055,7 +2076,12 @@ fn fallback_tmux_bin() -> String {
 /// What: watches the default server for sessions whose pane sits under the
 /// fixture root, runs the fallback through [`run_fallback`], then asserts the
 /// launch reached tmux on the private server, created nothing under the root on
-/// the default server, and left no private session alive. `NestedTmuxPaneEnv`
+/// the default server, and left no private session alive. #10101: the launch
+/// names its workspace server (`-L tm-ws-…`) after the shim's `-L`, so its
+/// session lands there, in this process's relocated tmux directory; the test
+/// counts that server's sessions with the private ones, kills it (also on drop)
+/// and asserts none outlived it. D3c: a stub daemon answers the launch.
+/// `NestedTmuxPaneEnv`
 /// keeps the launched session alive past `launch()` so the first assertion has
 /// something to see; the default-server watch still reaps on drop if the second
 /// assertion fails.
@@ -2097,14 +2123,46 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume.
+    // #10101 D3c: a launch refuses an unreachable daemon, so a stub answers.
+    let (_seen, url) = crate::test_support::launch_stub::spawn_empty().await;
+    // #10101: the PM's workspace server, named for the base clone that owns
+    // the session worktree; empty under `TM_WORKSPACE_TMUX=0`. Killed on
+    // every exit path, panic included.
+    let workspace = trusty_mpm::session_manager::launch_server::cli_launch_server(&base)
+        .map(|(server, _)| server);
+    let _kill_workspace = KillServerOnDrop {
+        tmux: tmux.clone(),
+        server: workspace.clone(),
+    };
     let run = run_fallback(
         &client,
-        "http://127.0.0.1:1",
+        &url,
         live_dir.path(),
         &empty_disk(),
         Some(fw_home.path()),
     )
     .await;
+
+    let list = |server: &str| -> Vec<String> {
+        let out = std::process::Command::new(&tmux)
+            .args(["-L", server, "list-sessions", "-F", "#{session_name}"])
+            .output()
+            .expect("list the workspace server");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    let workspace_sessions: Vec<String> = workspace.iter().flat_map(|s| list(s)).collect();
+    if let Some(server) = &workspace {
+        let _ = std::process::Command::new(&tmux)
+            .args(["-L", server, "kill-server"])
+            .output();
+        assert!(
+            list(server).is_empty(),
+            "a session outlived workspace server {server}"
+        );
+    }
 
     let leaked = default_server.spawned();
     assert!(
@@ -2114,7 +2172,7 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
         repos_root_path.display()
     );
     assert!(
-        !run.private_sessions.is_empty(),
+        !run.private_sessions.is_empty() || !workspace_sessions.is_empty(),
         "fixture precondition: the fallback must have launched a tmux session on \
          the private server, or the assertions around it prove nothing. \
          `NestedTmuxPaneEnv::pin` sets $TMUX_PANE so `tmux_attach` takes its \

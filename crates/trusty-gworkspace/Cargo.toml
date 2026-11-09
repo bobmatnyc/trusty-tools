@@ -1,6 +1,6 @@
 [package]
 name = "trusty-gworkspace"
-version = "0.3.0"  # bump for the #8539 RemoveOutcome non_exhaustive + field API change
+version = "0.3.1"  # #10746 S13: additive api::bulk and BaseClient::with_loopback_root
 edition = "2024" # edition 2024 required: let-chains used in api/client.rs, api/services/gmail/, api/services/docs/ (issue #258)
 description = "Google Workspace MCP server for the Trusty suite"
 license.workspace = true
@@ -13,6 +13,13 @@ crate-type = ["rlib"]
 [[bin]]
 name = "trusty-gworkspace-mcp"
 path = "src/bin/trusty-gworkspace-mcp.rs"
+
+[features]
+# #10746 S13 fix round: `BaseClient::with_loopback_root`, the test seam that
+# sends every Google API call to a loopback HTTP server. Off by default, so no
+# default or release build can send a bearer token over cleartext HTTP; the
+# trusty-connectors conformance suite turns it on.
+loopback-seam = []
 
 [dependencies]
 trusty-common = { path = "../trusty-common", version = "0.67" }
@@ -49,3 +56,6 @@ tracing-test = "0.2"
 # endpoint without hitting Google, matching the trusty-channels /
 # trusty-git-analytics precedent.
 wiremock = { workspace = true }
+# #10873: `credential-test-sandbox` is the shared credential test sandbox
+# (#9123); it mutates the process environment, so it is dev-only.
+trusty-common = { path = "../trusty-common", version = "0.67", features = ["credential-test-sandbox"] }

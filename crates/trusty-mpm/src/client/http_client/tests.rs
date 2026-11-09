@@ -111,11 +111,17 @@ async fn launch_session_prepares_under_the_pinned_home_before_tmux() {
 
     let router = axum::Router::new()
         .route("/health", axum::routing::get(|| async { "ok" }))
+        // #10101 D3c: the name rule reads both registries first.
+        .route(
+            "/api/v1/sessions/managed",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"sessions": []})) }),
+        )
         .route(
             "/sessions",
             axum::routing::post(|| async {
                 axum::Json(serde_json::json!({"name": "tm-8719-fake"}))
-            }),
+            })
+            .get(|| async { axum::Json(serde_json::json!({"sessions": []})) }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -159,11 +165,17 @@ async fn launch_session_writes_the_user_tier_under_the_config_dir_9999() {
 
     let router = axum::Router::new()
         .route("/health", axum::routing::get(|| async { "ok" }))
+        // #10101 D3c: the name rule reads both registries first.
+        .route(
+            "/api/v1/sessions/managed",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"sessions": []})) }),
+        )
         .route(
             "/sessions",
             axum::routing::post(|| async {
                 axum::Json(serde_json::json!({"name": "tm-9999-fake"}))
-            }),
+            })
+            .get(|| async { axum::Json(serde_json::json!({"sessions": []})) }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -279,6 +291,7 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
@@ -1293,4 +1306,16 @@ fn managed_list_response_carries_store_health_when_degraded() {
         older.store_health.is_none(),
         "a daemon that omits the field must still deserialize"
     );
+}
+
+/// Why (#10101): `sent: false` from the command route is a failure for every
+/// caller; a body from an older daemon with no `sent` field is not.
+/// Test: itself.
+#[test]
+fn command_delivery_refuses_an_undelivered_command_10101() {
+    let not_sent = serde_json::json!({"sent": false, "send_error": "socket gone"});
+    let err = command_delivery(&not_sent).expect_err("not sent");
+    assert!(err.to_string().contains("socket gone"), "{err}");
+    assert!(command_delivery(&serde_json::json!({"sent": true})).is_ok());
+    assert!(command_delivery(&serde_json::json!({"output": ""})).is_ok());
 }

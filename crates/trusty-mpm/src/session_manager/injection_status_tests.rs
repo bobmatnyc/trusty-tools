@@ -76,6 +76,7 @@ fn record_round_trips_injection_status() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: InjectionStatus::Pending,
         worktree_owner: None,
         terminal_at: None,

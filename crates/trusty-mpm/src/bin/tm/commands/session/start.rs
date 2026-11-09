@@ -8,12 +8,13 @@
 //! pre-#1916 in-place deploy-and-start behavior, preserved for directories that
 //! are not a recognized git repo.
 //! Test: `session_start_dispatches_managed_new_for_github_repo`,
-//! `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
+//! `session_start_in_place_refuses_an_unreachable_daemon_before_any_write_10101`
 //! in `start_tests.rs`.
 
 use serde::Deserialize;
 
 use crate::cli::SessionAction;
+use crate::commands::launch_host::{LaunchHost, settle_claim};
 use crate::commands::project::resolve_dir;
 use crate::formatters::session::{delegation_roster_line, deploy_summary_line};
 
@@ -49,7 +50,7 @@ use crate::formatters::session::{delegation_roster_line, deploy_summary_line};
 /// supported, so the original in-place `prepare_session` + detached-tmux-start
 /// behavior ([`start_session_in_place`]) is preserved unchanged.
 /// Test: `session_start_dispatches_managed_new_for_github_repo`,
-/// `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
+/// `session_start_in_place_refuses_an_unreachable_daemon_before_any_write_10101`
 /// in `start_tests.rs`.
 pub(crate) async fn start_session(
     daemon: &trusty_mpm::client::DaemonClient,
@@ -204,12 +205,26 @@ pub(crate) fn refuse_outside_a_git_project(path: &std::path::Path) -> anyhow::Re
 /// #8286 — a write failure refuses the launch before anything is registered),
 /// registers via `POST /sessions`, then creates a detached tmux session rooted
 /// at `path` and starts `claude` in it from [`inplace_session_spec`], which
-/// carries that file as `--append-system-prompt-file`.
-/// Test: `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`,
+/// carries that file as `--append-system-prompt-file`. #10101: before any of
+/// that, a name a managed record holds is refused; the session is created on
+/// the workspace server ([`LaunchHost::for_workspace`]) whose socket the
+/// registration carries; a create or `claude` start that fails removes the
+/// registration and is an `Err`. #10101 D3c: the shared name rule
+/// ([`trusty_mpm::client::DaemonClient::claim_launch_name`]) runs first, so
+/// an unreachable daemon or a live legacy holder refuses before any write; a
+/// `Stopped`/`Errored` managed holder is resumed instead ([`settle_claim`]);
+/// a session of the name already on the server is never typed into.
+/// Test: `session_start_in_place_refuses_an_unreachable_daemon_before_any_write_10101`,
+/// `a_stopped_holder_is_resumed_by_session_start_10101`,
+/// `a_failed_resume_reports_and_creates_nothing_10101`,
+/// `a_live_legacy_record_refuses_session_start_10101`,
+/// `an_in_place_start_never_types_into_a_session_that_already_existed_10101`,
 /// `session_start_in_place_writes_the_user_tier_under_the_config_dir_9999`
-/// in `start_tests.rs` covers the routing decision hermetically; the tmux/daemon
-/// I/O is exercised by the pre-existing `tests/session_manager_mvp.rs` coverage
-/// this function inherited unchanged.
+/// in `start_tests.rs` covers the routing decision hermetically;
+/// `session_start_in_place_launches_on_the_workspace_server_10101`,
+/// `a_held_name_refuses_the_launch_before_tmux_or_registration` and
+/// `a_failed_create_removes_the_registration` the tmux server and failure
+/// arms.
 async fn start_session_in_place(
     daemon: &trusty_mpm::client::DaemonClient,
     path: &std::path::Path,
@@ -222,6 +237,16 @@ async fn start_session_in_place(
     // #9999: relocates the user tier off `home`, as `CLAUDE_CONFIG_DIR` does.
     claude_config_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    // #10101: the session's name, and its workspace server; a name a live
+    // record holds is refused before anything is written or registered.
+    // D3c: an unreachable daemon refuses here too; a Stopped/Errored holder
+    // is resumed; this directory's running legacy session is left in place.
+    let name = trusty_mpm::core::names::name_from_dir(path);
+    let host = LaunchHost::for_workspace(path);
+    let claim = daemon.claim_launch_name(&name, path).await?;
+    if settle_claim(daemon, claim, &path.to_string_lossy(), None).await? {
+        return Ok(());
+    }
     // Prepare the custom instructions Claude Code reads at startup:
     // deploy composed agents to `~/.claude/agents/` and merge the
     // project CLAUDE.md. This shared prep is what makes a plain
@@ -322,12 +347,15 @@ async fn start_session_in_place(
     struct Body {
         #[serde(default)]
         name: String,
+        id: Option<trusty_mpm::core::session::SessionId>,
     }
     let body: Body = daemon
         .post("/sessions")
         .json(&serde_json::json!({
             "project": path,
             "project_path": path,
+            "name": name,
+            "tmux_socket": host.socket(),
         }))
         .send()
         .await?
@@ -338,55 +366,80 @@ async fn start_session_in_place(
     // The daemon only registers session state now — it no longer
     // spawns the tmux host (that caused session proliferation). The
     // CLI owns the actual launch: create a detached tmux session in
-    // the project directory and start `claude` in it. #2398: routes through
-    // `core::tmux::create_managed_session`, the crate's single session-
-    // creation choke point, so the configured scrollback/mouse ergonomics
-    // are applied before the pane exists.
+    // the project directory and start `claude` in it, on its workspace server
+    // (#10101). #2398: the host's create goes through the crate's single
+    // session-creation choke point, so the configured scrollback/mouse
+    // ergonomics are applied before the pane exists.
+    // #10101: every failure from here on removes the registration and
+    // reports; nothing is left that names a session which never ran.
+    // #10101: `create` attaches (`-A`) to a session of this name already on
+    // the server; one this start did not create is never killed or rolled
+    // back, as in `tm connect`.
+    let already_running = host.has_session(&body.name);
+    let registered =
+        crate::commands::launch_host::Registered::new(daemon, body.id.filter(|_| !already_running));
     let workdir = path.to_string_lossy().to_string();
-    let new_session =
-        trusty_mpm::core::tmux::create_managed_session(None, &body.name, Some(&workdir));
-    match new_session {
-        Ok(outcome) if outcome.output.status.success() => {
-            if !outcome.options_verified {
-                // #3386 review: a caller-visible one-line notice — never
-                // silently proceed as if the pane's scrollback limit landed.
-                eprintln!(
-                    "warning: tmux scrollback limit could not be verified for session {} — the \
-                     pane may be capped at tmux's factory 2000-line history-limit instead of \
-                     the configured value; see issue #3386",
-                    body.name
-                );
-            }
-            // #2997: disclaim the pane's `claude` off the shared tmux server
-            // (same wrapper the daemon + `tm launch`/`connect` paths use).
-            // No-op off macOS / under TM_DISABLE_SPAWN_DISCLAIM.
-            // #4467: the launch line itself is built in the LIBRARY
-            // (`model_inject::build_inplace_session_command`) so it carries the
-            // shared inherited-marker scrub and is readable by the
-            // `transcript_saving` doctor check. It used to be hand-built here as
-            // `format!("claude {PERMISSION_MODE_FLAG}")` — a sixth interactive
-            // launch line that silently saved no transcript.
-            // #8286: `spec` carries the prompt `inplace_prompt_file` wrote above.
-            let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
-            match trusty_mpm::runtime::cli_launch::send_spec_launch(&body.name, &spec, &spec_dir) {
-                Ok(()) => {
-                    println!("started session {} (tmux + claude)", body.name);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "warning: tmux session {} created but failed to start claude: {e}",
-                        body.name
-                    );
-                    println!("started session {}", body.name);
-                }
-            }
-        }
-        Ok(_) | Err(_) => {
-            // #8286: the manual fallback names the prompt file too.
-            eprintln!("{}", manual_launch_hint(&body.name, &workdir, &prompt.file));
-            println!("started session {}", body.name);
-        }
+    if let Err(e) = host.create(&body.name, &workdir) {
+        // #8286: the manual fallback names the prompt file too.
+        let hint = manual_launch_hint(&body.name, &workdir, &prompt.file);
+        return Err(registered.fail(e.context(hint)).await);
     }
+    // #10101: D3c — a session this start did not create is never typed into,
+    // as in `tm connect` (`if !already_running`).
+    if already_running {
+        println!(
+            "tmux session {} already existed on {}; left in place, claude was not started in it",
+            body.name,
+            host.describe()
+        );
+        return Ok(());
+    }
+    // #2997: disclaim the pane's `claude` off the shared tmux server
+    // (same wrapper the daemon + `tm launch`/`connect` paths use).
+    // No-op off macOS / under TM_DISABLE_SPAWN_DISCLAIM.
+    // #4467: the launch line itself is built in the LIBRARY so it carries the
+    // shared inherited-marker scrub and is readable by the
+    // `transcript_saving` doctor check.
+    // #8286: `spec` carries the prompt `inplace_prompt_file` wrote above.
+    let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
+    // #8878: only a session this start created is bound; the `claude` in one
+    // that was already running may not be the one it started (as `connect`).
+    let sent = if already_running {
+        trusty_mpm::runtime::cli_launch::send_spec_launch_unbound(
+            host.server(),
+            &body.name,
+            &spec,
+            &spec_dir,
+        )
+        .map(|()| {
+            let architect = trusty_mpm::runtime::architect_bind::spec_is_architect(&spec);
+            trusty_mpm::runtime::architect_bind::bind_reused(architect)
+        })
+    } else {
+        trusty_mpm::runtime::cli_launch::send_spec_launch(
+            host.server(),
+            &body.name,
+            &spec,
+            &spec_dir,
+        )
+    };
+    // #8878: an Architect `claude` the start could not bind is reported.
+    if let Ok(binding) = &sent
+        && let Some(warning) = binding.warning(&body.name)
+    {
+        eprintln!("{warning}");
+    }
+    if let Err(e) = sent {
+        // Only a session this start created reaches here (D3c guard above).
+        host.kill(&body.name);
+        let e = anyhow::anyhow!(
+            "claude could not be started in tmux session {} on {}: {e}; the session was killed",
+            body.name,
+            host.describe()
+        );
+        return Err(registered.fail(e).await);
+    }
+    println!("started session {} (tmux + claude)", body.name);
     Ok(())
 }
 

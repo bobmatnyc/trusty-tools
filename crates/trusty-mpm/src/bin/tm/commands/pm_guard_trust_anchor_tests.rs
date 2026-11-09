@@ -49,13 +49,47 @@ pub(crate) fn pm_env(fx: &Fixture) -> HookEnv {
 }
 
 /// The fully granted Architect: stamp, launch directory and allowlist agree,
-/// and the hook's parent is the `claude` tm launched and recorded.
+/// the hook's parent is the `claude` tm launched and recorded, and Bob's
+/// presence is proven (#8878 PR2a: a live grant sealed with [`test_key`]).
 pub(crate) fn architect_env(fx: &Fixture) -> HookEnv {
+    let env = HookEnv {
+        presence_key: key_lookup(),
+        ..bound_env(fx)
+    };
+    grant_idle(fx, 0);
+    env
+}
+
+/// The bound Architect with no presence grant and no key (#8878 PR2a).
+pub(crate) fn bound_env(fx: &Fixture) -> HookEnv {
     launch_record(fx, ARCHITECT, &fx.project);
     HookEnv {
         claude: table(architect_table()),
         ..spoof_env(fx)
     }
+}
+
+/// The grant key the unit tests seal with (#8878 PR2a).
+pub(crate) fn test_key() -> trusty_mpm::core::presence_key::GrantKey {
+    trusty_mpm::core::presence_key::GrantKey::from_bytes([3; 32])
+}
+
+/// A [`KeyLookup`] answering [`test_key`].
+pub(crate) fn key_lookup() -> KeyLookup {
+    KeyLookup::new(|| Ok(Some(test_key())))
+}
+
+/// Mint a grant for [`ARCHITECT`] last used `idle_secs` ago.
+pub(crate) fn grant_idle(fx: &Fixture, idle_secs: u64) -> PathBuf {
+    let now = trusty_mpm::core::presence::unix_secs(std::time::SystemTime::now());
+    trusty_mpm::core::presence::mint(
+        &fx.home.join(ANCHOR_ROOT),
+        &ARCHITECT,
+        trusty_mpm::core::presence::METHOD_LOCAL,
+        &test_key(),
+        now - idle_secs,
+    )
+    .expect("mint grant")
 }
 
 /// The environment half of the Architect, with no process behind it.
@@ -597,8 +631,11 @@ fn a_launch_record_binds_one_process() {
     let under_architect = |record: ClaudeProcess, project: Option<&Path>| {
         let fx = fixture();
         launch_record(&fx, record, project.unwrap_or(&fx.project));
+        // #8878 PR2a: Bob's presence is proven, so only the record decides.
+        grant_idle(&fx, 0);
         let env = HookEnv {
             claude: table(architect_table()),
+            presence_key: key_lookup(),
             ..spoof_env(&fx)
         };
         write_by(&fx, &env)

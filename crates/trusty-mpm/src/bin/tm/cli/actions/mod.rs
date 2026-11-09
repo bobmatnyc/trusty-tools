@@ -44,6 +44,8 @@ mod optimizer;
 mod overseer;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.
 mod pr;
+// #8878 PR2a: `tm presence local`.
+mod presence;
 mod project;
 mod projects;
 mod repair;
@@ -83,6 +85,7 @@ pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;
 pub(crate) use pr::{PrCleanupArgs, PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs};
+pub(crate) use presence::PresenceAction;
 pub(crate) use project::ProjectAction;
 pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,

@@ -147,13 +147,14 @@ impl SessionManager {
         // Live-tmux snapshot BEFORE the guard (#3698 round-2 HIGH-A):
         // `list_sessions` is a blocking tmux subprocess and must never run
         // under the store write lock that gates every other mutation.
-        let live_names = self
-            .tmux
-            .list_sessions()
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         // #9101: ownership is proved from a snapshot before the guard too, for
         // the same reason; Guard 1 refuses if the record moved since.
         let snapshot = self.get(id).await?;
+        // See #10101: list, rename and roll back on the record's own server.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &snapshot)?;
+        let live_names = tmux
+            .list_sessions()
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         let name_live = live_names.iter().any(|n| n == &snapshot.tmux_name);
         let owned_session =
             if name_live && snapshot.tmux_name != new_name && !snapshot.state.is_terminal() {
@@ -253,9 +254,9 @@ impl SessionManager {
         // Live path: rename tmux OUTSIDE any lock (#3698 round-2 HIGH-A) —
         // a slow/hung tmux must never stall the daemon-wide store guard.
         // #9101: by the `$N` id ownership was proved for, never by name.
-        self.tmux
-            .rename_session_id(&old_name, &session_id, &new_name)?;
+        tmux.rename_session_id(&old_name, &session_id, &new_name)?;
         let undo = Rollback {
+            tmux: &*tmux,
             session_id: &session_id,
             new_name: &new_name,
             old_name: &old_name,
@@ -339,12 +340,13 @@ impl SessionManager {
     /// `super::rename_tests`.
     fn rollback_rename(&self, undo: &Rollback<'_>, cause: &str) -> ManagedError {
         let Rollback {
+            tmux,
             session_id,
             new_name,
             old_name,
             id,
         } = *undo;
-        match self.tmux.rename_session_id(new_name, session_id, old_name) {
+        match tmux.rename_session_id(new_name, session_id, old_name) {
             Ok(()) => ManagedError::InvalidState(
                 id.to_string(),
                 format!("rename aborted and rolled back ({cause}) — retry the rename"),
@@ -412,6 +414,8 @@ impl Drop for RenameTurn {
 /// The tmux rename [`SessionManager::rollback_rename`] undoes (#9101).
 #[derive(Clone, Copy)]
 struct Rollback<'a> {
+    /// #10101: the driver on the server the rename ran on.
+    tmux: &'a dyn super::ManagedTmuxDriver,
     /// The `$N` id of the renamed session.
     session_id: &'a str,
     new_name: &'a str,

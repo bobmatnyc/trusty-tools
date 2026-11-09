@@ -88,6 +88,34 @@ fn input_box_from(
     }
 }
 
+/// The driver on `session`'s own tmux server (#10101).
+///
+/// Why: since #10850 a legacy `Session` may live on a `tm-ws-*` workspace
+/// server, recorded in `Session::tmux_socket`; a driver on the default server
+/// reads an empty pane or types into a same-named one.
+/// What: [`server_of_socket`](crate::core::tmux_server::server_of_socket)
+/// over the stored socket and this process's socket directory, then
+/// `discover` and `on_server`. No socket is the default server. `Err` names
+/// why — an unroutable socket (logged at warn) or tmux absent (info) — and
+/// never falls back to the default server. `op` names the call in the log.
+/// Test: `capture_and_send_reach_the_session_server_10101`,
+/// `an_unroutable_socket_neither_captures_nor_sends_10101`.
+fn session_driver(session: &Session, op: &str) -> Result<TmuxDriver, String> {
+    use crate::core::tmux_server::{ambient_socket_dir, server_of_socket};
+    let socket = session.tmux_socket.as_deref();
+    let server = server_of_socket(socket, &ambient_socket_dir()).inspect_err(|e| {
+        tracing::warn!("#10101: {op} for {} refused — {e}", session.tmux_name);
+    })?;
+    let driver = TmuxDriver::discover().map_err(|_| {
+        tracing::info!("tmux unavailable; {op} for {} skipped", session.tmux_name);
+        "tmux unavailable".to_owned()
+    })?;
+    Ok(match server.as_deref() {
+        Some(server) => driver.on_server(server),
+        None => driver,
+    })
+}
+
 impl TmuxService {
     /// Capture a session's pane output, degrading to empty when tmux is absent.
     ///
@@ -95,29 +123,22 @@ impl TmuxService {
     /// absent (CI) or the session may not be tmux-hosted. None of that is fatal
     /// — the endpoints still succeed, just without captured text. This replaces
     /// the free `capture_pane` function from `api.rs`.
-    /// What: discovers tmux and captures the last `lines` pane lines; any
-    /// failure is logged and yields an empty string.
-    /// Test: `capture_without_tmux_is_empty`.
+    /// What: captures the last `lines` pane lines on the session's own server
+    /// ([`session_driver`]); any failure, an unroutable socket included, is
+    /// logged and yields an empty string.
+    /// Test: `capture_without_tmux_is_empty`,
+    /// `capture_and_send_reach_the_session_server_10101`,
+    /// `an_unroutable_socket_neither_captures_nor_sends_10101`.
     pub fn capture(session: &Session, lines: u32) -> String {
-        match TmuxDriver::discover() {
-            Ok(driver) => {
-                let target = TmuxTarget::session(&session.tmux_name);
-                match driver.capture(&target, Some(lines)) {
-                    Ok(text) => text,
-                    Err(e) => {
-                        tracing::warn!("tmux capture failed for {}: {e}", session.tmux_name);
-                        String::new()
-                    }
-                }
-            }
-            Err(_) => {
-                tracing::info!(
-                    "tmux unavailable; capture for {} skipped",
-                    session.tmux_name
-                );
-                String::new()
-            }
-        }
+        // #10101: the session's own server; an unroutable socket captures nothing.
+        let Ok(driver) = session_driver(session, "capture") else {
+            return String::new();
+        };
+        let target = TmuxTarget::session(&session.tmux_name);
+        driver.capture(&target, Some(lines)).unwrap_or_else(|e| {
+            tracing::warn!("tmux capture failed for {}: {e}", session.tmux_name);
+            String::new()
+        })
     }
 
     /// What a session's input box holds, or `None` when that cannot be read (#8407).
@@ -129,12 +150,22 @@ impl TmuxService {
     /// [`INPUT_BOX_PROBE_LINES`] lines of the session's pane, classified by
     /// [`classify_input_box`](crate::core::input_box::classify_input_box) via
     /// [`input_box_from`]. `-u` keeps the `❯` glyph intact under a non-UTF-8
-    /// locale such as launchd's. The host-state gate applies.
-    /// Test: `input_box_from_*` in this module's tests.
+    /// locale such as launchd's. The host-state gate applies. #10101: on the
+    /// session's own server (`-L <name>` from its stored socket); an
+    /// unroutable socket is `None` and runs no tmux.
+    /// Test: `input_box_from_*` in this module's tests,
+    /// `capture_and_send_reach_the_session_server_10101`.
     pub fn input_box(session: &Session) -> Option<crate::core::input_box::InputBox> {
+        use crate::core::tmux_server::{ambient_socket_dir, server_argv, server_of_socket};
+        // #10101: the stored socket picks the server; never the default in its place.
+        let server = server_of_socket(session.tmux_socket.as_deref(), &ambient_socket_dir())
+            .inspect_err(|e| {
+                tracing::warn!("#10101: input-box for {} refused — {e}", session.tmux_name);
+            })
+            .ok()?;
         let target = TmuxTarget::session(&session.tmux_name).as_target();
         let start = format!("-{INPUT_BOX_PROBE_LINES}");
-        let argv: Vec<String> = [
+        let command = [
             "-u",
             "capture-pane",
             "-t",
@@ -144,32 +175,29 @@ impl TmuxService {
             "-S",
             &start,
         ]
-        .map(str::to_string)
-        .to_vec();
+        .map(str::to_string);
+        let argv = server_argv(server.as_deref(), command);
         input_box_from(&session.tmux_name, crate::core::tmux::run_tmux_argv(&argv))
     }
 
-    /// Send a command line into a session's pane, best-effort.
+    /// Send a command line into a session's pane.
     ///
-    /// Why: remote control of a running session; a tmux failure must not fail
-    /// the request (the caller still gets whatever output was captured).
-    /// What: discovers tmux and sends `command`, logging any failure.
-    /// Test: covered indirectly by `send_command_returns_output_shape`.
-    pub fn send_command(session: &Session, command: &str) {
-        match TmuxDriver::discover() {
-            Ok(driver) => {
-                let target = TmuxTarget::session(&session.tmux_name);
-                if let Err(e) = driver.send_line(&target, command) {
-                    tracing::warn!("tmux send_line failed for {}: {e}", session.tmux_name);
-                }
-            }
-            Err(_) => {
-                tracing::info!(
-                    "tmux unavailable; command for {} not sent",
-                    session.tmux_name
-                );
-            }
-        }
+    /// Why: remote control of a running session. The caller must learn when
+    /// the line did not reach the pane: answering "sent" for a line typed into
+    /// nothing hid #10101 behind a warning in the daemon log.
+    /// What: sends `command` and Enter on the session's own server
+    /// ([`session_driver`]). `Err` names why nothing reached the pane: an
+    /// unroutable socket, tmux absent, or a failed `send-keys`.
+    /// Test: `capture_and_send_reach_the_session_server_10101`,
+    /// `an_unroutable_socket_neither_captures_nor_sends_10101`.
+    pub fn send_command(session: &Session, command: &str) -> Result<(), String> {
+        // #10101: the session's own server; an unroutable socket sends nothing.
+        let driver = session_driver(session, "command")?;
+        let target = TmuxTarget::session(&session.tmux_name);
+        driver.send_line(&target, command).map_err(|e| {
+            tracing::warn!("tmux send_line failed for {}: {e}", session.tmux_name);
+            format!("tmux send to {} failed: {e}", session.tmux_name)
+        })
     }
 
     /// Kill the tmux session named `tmux_name`, best-effort.
@@ -189,8 +217,31 @@ impl TmuxService {
     /// `full_user_cycle` integration test asserts the session is gone after a
     /// DELETE when tmux is available.
     pub fn kill_best_effort(tmux_name: &str) {
+        Self::kill_best_effort_on(tmux_name, None);
+    }
+
+    /// [`Self::kill_best_effort`] on the server listening on `socket`; `None`
+    /// is the default server (#10101).
+    ///
+    /// What: a socket that names no server in this process's socket directory
+    /// is logged and nothing is killed, so a same-named session on the
+    /// default server is never torn down in its place.
+    /// Test: `a_kill_for_an_unreachable_socket_touches_no_server_10101`.
+    pub fn kill_best_effort_on(tmux_name: &str, socket: Option<&Path>) {
+        let dir = crate::core::tmux_server::ambient_socket_dir();
+        let server = match crate::core::tmux_server::server_of_socket(socket, &dir) {
+            Ok(server) => server,
+            Err(e) => {
+                tracing::warn!("#10101: kill for {tmux_name} skipped — {e}");
+                return;
+            }
+        };
         match TmuxDriver::discover() {
             Ok(driver) => {
+                let driver = match server.as_deref() {
+                    Some(server) => driver.on_server(server),
+                    None => driver,
+                };
                 if let Err(e) = driver.kill_session(tmux_name) {
                     tracing::warn!(
                         "tmux kill_session failed for {tmux_name} (may already be gone): {e}"
@@ -281,9 +332,13 @@ impl TmuxService {
         // #8286: a GUI session is a PM session, so it starts with the PM prompt
         // file. Written before the tmux host exists, so a refusal leaves no
         // session behind and the caller registers nothing.
-        let line = crate::daemon::spawn_command::gui_spawn_line(workdir, &std::env::temp_dir())
-            .map_err(|e| DaemonError::Internal(format!("{e:#}")))?;
+        let (line, profile) =
+            crate::daemon::spawn_command::gui_spawn_line(workdir, &std::env::temp_dir())
+                .map_err(|e| DaemonError::Internal(format!("{e:#}")))?;
 
+        // #8878: `-A` below attaches to a session already of this name; only a
+        // `claude` this spawn started in a session it created is bound.
+        let already_running = driver.pane_id(tmux_name).is_some();
         let workdir_str = workdir.to_string_lossy().into_owned();
         driver
             .create_session(tmux_name, Some(&workdir_str))
@@ -308,8 +363,45 @@ impl TmuxService {
                 "failed to launch claude in {tmux_name}: {e}"
             )));
         }
-
+        Self::bind_gui_spawn(&driver, tmux_name, workdir, profile, already_running);
         Ok(())
+    }
+
+    /// Bind an Architect `claude` the GUI spawn started (#8878).
+    ///
+    /// Why: a GUI-spawned Architect (#10459) wrote no launch record, so the
+    /// floor refused its anchor writes.
+    /// What: for a session this spawn created,
+    /// [`crate::runtime::architect_bind::bind_profile`] under the process home,
+    /// finding the `claude` under the session's pane shell on `driver`'s
+    /// server; a session that was already running is not re-bound. Not bound
+    /// is a warning in the daemon log.
+    /// Test: `every_architect_spawn_site_binds_8878`.
+    fn bind_gui_spawn(
+        driver: &TmuxDriver,
+        tmux_name: &str,
+        workdir: &Path,
+        profile: crate::core::session_profile::SessionProfile,
+        already_running: bool,
+    ) {
+        use crate::runtime::architect_bind::{
+            bind_profile, bind_reused, find_claude_with, home_root,
+        };
+        let architect = profile.is_architect();
+        let binding = if already_running {
+            bind_reused(architect)
+        } else {
+            bind_profile(
+                home_root().as_deref(),
+                architect,
+                workdir,
+                tmux_name,
+                || find_claude_with(|| driver.pane_pid(&driver.pane_id(tmux_name)?).ok()),
+            )
+        };
+        if let Some(warning) = binding.warning(tmux_name) {
+            tracing::warn!("{warning}");
+        }
     }
 
     /// Snapshot a session's pane output.
@@ -331,23 +423,25 @@ impl TmuxService {
     }
 }
 
-/// Snapshot `name` on the default server, else on the first live workspace
-/// server (`core::tmux_server`) that holds it (#8928 step 4).
+/// Snapshot `name` on the one tmux server that holds it: the default server
+/// or a live workspace server (`core::tmux_server`, #8928 step 4).
 ///
-/// What: the default server's error is returned when no workspace server
-/// holds the session; a socket directory that cannot be read is logged and
-/// adds no servers.
-/// Test: `a_snapshot_finds_a_session_on_a_workspace_server`.
+/// What: every server is asked. One holder answers its snapshot. #10101: a
+/// name held by two servers is refused, so a same-named session on another
+/// server never stands in for the one the caller meant. No holder returns
+/// the default server's error. A socket directory that cannot be read is
+/// logged and adds no servers. Each workspace server is asked through
+/// [`crate::core::tmux_server::bounded_probe`]; one that does not answer in
+/// time refuses the snapshot.
+/// Test: `a_snapshot_finds_a_session_on_a_workspace_server`,
+/// `a_name_on_two_servers_is_refused`,
+/// `a_hung_workspace_server_bounds_the_snapshot`.
 pub(crate) fn snapshot_on_any_server(
     driver: &TmuxDriver,
     socket_dir: &Path,
     name: &str,
     lines: u32,
 ) -> crate::core::Result<SessionSnapshot> {
-    let first = match driver.monitor_session(name, lines) {
-        Ok(snapshot) => return Ok(snapshot),
-        Err(e) => e,
-    };
     let servers =
         crate::core::tmux_server::live_workspace_servers(socket_dir).unwrap_or_else(|e| {
             tracing::warn!(
@@ -356,10 +450,104 @@ pub(crate) fn snapshot_on_any_server(
             );
             Vec::new()
         });
-    servers
-        .iter()
-        .find_map(|server| driver.on_server(server).monitor_session(name, lines).ok())
-        .ok_or(first)
+    let (mut holders, default_err) = match driver.monitor_session(name, lines) {
+        Ok(snapshot) => (vec![("the default server".to_owned(), snapshot)], None),
+        Err(e) => (Vec::new(), Some(e)),
+    };
+    for server in &servers {
+        // See #10101: bounded, one in flight per server; a server that does
+        // not answer in time leaves the holder unknown, so nothing is picked.
+        let named = driver.on_server(server);
+        let wanted = name.to_owned();
+        let key = crate::core::tmux_server::server_socket_path(socket_dir, server);
+        match crate::core::tmux_server::bounded_probe(
+            &key,
+            crate::core::tmux_server::PROBE_BUDGET,
+            move || named.monitor_session(&wanted, lines).ok(),
+        ) {
+            Some(Some(snapshot)) => holders.push((format!("server {server}"), snapshot)),
+            Some(None) => {}
+            None => {
+                return Err(crate::core::Error::Protocol(format!(
+                    "tmux server {server} did not answer in time; the holder of {name} is unknown"
+                )));
+            }
+        }
+    }
+    match holders.len() {
+        0 => Err(default_err.unwrap_or_else(|| {
+            crate::core::Error::Protocol(format!("no tmux server holds session {name}"))
+        })),
+        1 => Ok(holders.remove(0).1),
+        _ => {
+            // See #10101: two servers, two sessions; never pick one.
+            let on: Vec<String> = holders.into_iter().map(|(server, _)| server).collect();
+            Err(crate::core::Error::Protocol(format!(
+                "tmux session {name} is on more than one server ({}); refusing to pick one",
+                on.join(", ")
+            )))
+        }
+    }
+}
+
+/// The driver on the one tmux server holding session `name`: the default
+/// server or a live workspace server (#10101).
+///
+/// Why: `tm attach` names a session, not a record, so it cannot read a stored
+/// socket; it must still never reach a same-named session on the wrong server.
+/// What: the default server when it alone holds `name`, or when no server
+/// does (its own "no session" error then reaches the caller); the one
+/// workspace server that holds it otherwise. Each workspace server is listed
+/// through [`crate::core::tmux_server::bounded_probe`]: within the probe
+/// budget, and not at all while an earlier listing of it is still blocked.
+///
+/// # Errors
+///
+/// Two or more servers hold `name`, or a server cannot be listed in time:
+/// the holder is unknown and no server is picked.
+///
+/// Test: `a_by_name_call_reaches_the_server_that_holds_the_session`,
+/// `a_by_name_call_refuses_a_name_on_two_servers`,
+/// `a_hung_workspace_server_holds_one_probe_and_refuses_the_call`.
+pub fn holder_of(driver: &TmuxDriver, socket_dir: &Path, name: &str) -> Result<TmuxDriver, String> {
+    use crate::core::tmux_server::{PROBE_BUDGET, bounded_probe, server_socket_path};
+    let servers = crate::core::tmux_server::live_workspace_servers(socket_dir)
+        .map_err(|e| format!("cannot list workspace tmux servers: {e}"))?;
+    let holds = |d: &TmuxDriver| -> Result<bool, String> {
+        let wanted = name.to_owned();
+        let listing = d.clone();
+        let list = move || {
+            listing
+                .list_sessions()
+                .map(|all| all.iter().any(|s| s.name == wanted))
+                .map_err(|e| e.to_string())
+        };
+        match d.server() {
+            None => list(),
+            // See #10101: a hung workspace server refuses, never blocks.
+            Some(server) => {
+                bounded_probe(&server_socket_path(socket_dir, server), PROBE_BUDGET, list)
+                    .unwrap_or_else(|| Err(format!("tmux server {server} did not answer in time")))
+            }
+        }
+    };
+    let mut holders = Vec::new();
+    if holds(driver)? {
+        holders.push(driver.clone());
+    }
+    for server in servers {
+        let named = driver.on_server(&server);
+        if holds(&named)? {
+            holders.push(named);
+        }
+    }
+    match holders.len() {
+        0 => Ok(driver.clone()),
+        1 => Ok(holders.remove(0)),
+        n => Err(format!(
+            "tmux session {name} is on {n} servers; refusing to pick one"
+        )),
+    }
 }
 
 /// Resolve the `claude` binary on `PATH`.
@@ -523,6 +711,36 @@ mod tests {
         // be a silent no-op, never a panic — the DELETE handler relies on this
         // to never fail the HTTP response on a best-effort tmux kill (#1454).
         TmuxService::kill_best_effort("tmpm-definitely-no-such-session-xyz");
+    }
+
+    /// #10101: a stored socket outside this process's socket directory kills
+    /// nothing; one inside it kills only on that server.
+    /// Test: itself.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn a_kill_for_an_unreachable_socket_touches_no_server_10101() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("argv.log");
+        let bin = dir.path().join("fake-tmux");
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display());
+        trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+        let elsewhere = dir.path().join("tm-ws-proj-abc");
+        let own = crate::core::tmux_server::ambient_socket_dir().join("tm-ws-proj-abc");
+        crate::core::tmux::with_tmux_binary(bin, async {
+            TmuxService::kill_best_effort_on("tm-proj", Some(&elsewhere));
+            assert!(
+                !log.exists(),
+                "a socket elsewhere must reach no tmux server"
+            );
+            TmuxService::kill_best_effort_on("tm-proj", Some(&own));
+        })
+        .await;
+        let lines = std::fs::read_to_string(&log).expect("the own-server kill ran");
+        assert!(
+            lines.lines().all(|l| l.starts_with("-L tm-ws-proj-abc "))
+                && lines.contains("kill-session"),
+            "{lines}"
+        );
     }
 
     #[test]
@@ -769,3 +987,13 @@ mod tests {
 #[cfg(test)]
 #[path = "tmux_service_8928_tests.rs"]
 mod workspace_server_tests;
+
+// #10101: by-name calls reach the server that holds the session (fake tmux).
+#[cfg(test)]
+#[path = "tmux_service_holder_tests.rs"]
+mod holder_tests;
+
+// #10101: capture, input box and sends route by the stored socket (fake tmux).
+#[cfg(test)]
+#[path = "tmux_service_routing_tests.rs"]
+mod routing_tests;

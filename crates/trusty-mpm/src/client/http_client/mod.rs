@@ -27,6 +27,8 @@ mod error;
 mod managed;
 pub mod manager;
 pub mod projects;
+// #10101 D3c: the one name rule every launch path reads.
+pub mod launch_claim;
 mod session_connect;
 pub(crate) mod socket_routes;
 // #8942: `tm fleet init`'s Architect registration.
@@ -64,6 +66,25 @@ pub use types::{
 };
 
 use serde::Deserialize;
+
+/// `Ok` unless a `POST /sessions/{id}/command` body says the command did not
+/// reach the pane (#10101).
+///
+/// Why: a 1.12.0 daemon answered `sent: true` for a line typed into no pane;
+/// every caller of the route must now surface `sent: false` as a failure.
+/// What: `Err` naming `send_error` when `sent` is `false`; a body with no
+/// `sent` field (an older daemon) is `Ok`.
+/// Test: `command_delivery_refuses_an_undelivered_command_10101`.
+pub fn command_delivery(body: &serde_json::Value) -> anyhow::Result<()> {
+    if body.get("sent").and_then(serde_json::Value::as_bool) != Some(false) {
+        return Ok(());
+    }
+    let reason = body
+        .get("send_error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("no reason given");
+    anyhow::bail!("command not delivered: {reason}")
+}
 
 /// Build the shared bounded-timeout `reqwest::Client` [`DaemonClient::new`] uses.
 ///
@@ -486,8 +507,10 @@ impl DaemonClient {
     /// Claude Code session remotely — type a prompt, read back the pane.
     /// What: POSTs `{ command }`; returns `Ok(Some(output))` with the captured
     /// pane text on success, `Ok(None)` when the session is unknown (`404`), and
-    /// `Err` on transport failure.
-    /// Test: covered by the daemon's session-command tests.
+    /// `Err` on transport failure or when the daemon reports the command did
+    /// not reach the pane ([`command_delivery`], #10101).
+    /// Test: covered by the daemon's session-command tests and
+    /// `command_delivery_refuses_an_undelivered_command_10101`.
     pub async fn send_session_command(
         &self,
         id: &str,
@@ -503,6 +526,7 @@ impl DaemonClient {
             return Ok(None);
         }
         let body: serde_json::Value = resp.error_for_status()?.json().await?;
+        command_delivery(&body)?;
         Ok(Some(
             body.get("output")
                 .and_then(|v| v.as_str())

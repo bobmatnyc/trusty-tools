@@ -24,7 +24,11 @@ resolver = "2"
 # Exclude paths inside copied projects that contain stray manifests we don't
 # want Cargo to treat as workspace members. trusty-agents bundles a `weather_alerter`
 # scratch dir.
-exclude = []
+#
+# `workers/okf-extract` (#10745) holds the trusty-okf extraction worker. It
+# needs Rust 1.98 (xberg) and builds on its own rust-toolchain.toml, outside the
+# 1.94 workspace MSRV (ADR-0029). Guard: scripts/check_worker_dir_excluded.sh.
+exclude = ["workers/okf-extract"]
 # `default-members` — the crates a BARE `cargo build`/`test`/`check` (no
 # `--workspace`, no `-p`, run from this root) actually targets. Everything
 # except `trusty-code-gui` (#2983 — a Tauri desktop GUI needing the pnpm/Svelte
@@ -65,6 +69,7 @@ default-members = [
     "crates/trusty-code",
     "crates/trusty-code-tui",
     "crates/trusty-common",
+    "crates/trusty-connectors",
     "crates/trusty-console",
     "crates/trusty-cto-db",
     "crates/trusty-embedderd",
@@ -72,10 +77,10 @@ default-members = [
     "crates/trusty-events",
     "crates/trusty-gworkspace",
     "crates/trusty-installer",
-    "crates/trusty-kb",
     "crates/trusty-mcp",
     "crates/trusty-memory",
     "crates/trusty-mpm",
+    "crates/trusty-okf",
     "crates/trusty-progress",
     "crates/trusty-publish-guard",
     "crates/trusty-review",
@@ -108,7 +113,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
 # trusty-code: per-project Claude-Code-compatible MPM orchestration harness (#587).
 # First published to crates.io at version 0.1.0.
-trusty-code = { path = "crates/trusty-code", version = "0.7" }
+trusty-code = { path = "crates/trusty-code", version = "0.8" }
 # trusty-code-tui: engine-agnostic terminal-UI seam (`TuiEngine` trait + `ReplEvent`)
 # shared by trusty-code's `tcode tui` and trusty-agents' tagent REPL (DOC-50,
 # epic #3411). Published as of #4713 so `trusty-code` can publish again; 0.1.0
@@ -142,7 +147,7 @@ trusty-channels = { path = "crates/trusty-channels", version = "0.2.0" }
 # `--http`'s removal took `AppState`, `embed_handler`, `health_handler` and
 # `Args.http_addr` with it, and `http-server` left the default feature set.
 # Under Cargo's 0.x rule a break needs the MINOR position.
-trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.4", default-features = false }
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.5", default-features = false }
 # Why (#5329): the `trusty-bm25-daemon` member and dependency were REMOVED. Its
 # per-palace subprocess never ran in any shipped configuration, and its index is
 # now `trusty_memory::bm25_lane::Bm25Lane`, in-process.
@@ -159,7 +164,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 #      this line existed. Both consumers name what they need: trusty-analyze's
 #      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
 #      only touches `integrations`, which is unconditional.
-trusty-review = { path = "crates/trusty-review", version = "0.39", default-features = false }
+trusty-review = { path = "crates/trusty-review", version = "0.40", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
@@ -300,6 +305,9 @@ toml = "0.8"
 # not reflow the operator's comments and unrelated tables.
 toml_edit = "0.22"
 libc = "0.2"
+# #10746 S9: trusty-okf's safe `openat` directory walk and adapter process-group
+# kill (the crate forbids unsafe). Already in the lockfile through other crates.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
 # #7520 S2: trusty-secrets zeroes a cached secret value when it is dropped
 # (ruling Dd8). Already in the lockfile through other crates.
 zeroize = "1"
@@ -503,7 +511,9 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 candle-core = { version = "0.8", default-features = false }
 candle-nn = { version = "0.8", default-features = false }
 candle-transformers = { version = "0.8", default-features = false }
-hf-hub = { version = "0.3", default-features = false, features = ["online", "tokio"] }
+# #6067: no `tokio` feature; both callers use only `api::sync`, and `tokio`
+# pulls reqwest 0.11 -> h2 0.3.27 (RUSTSEC-2026-0258).
+hf-hub = { version = "0.3", default-features = false, features = ["online"] }
 http-body-util = "0.1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
@@ -535,10 +545,8 @@ pdf-extract = "0.12"
 # Pinned to >=0.36 (issue #3367): 0.26 pulled quick-xml 0.31.0, vulnerable to
 # RUSTSEC-2026-0194/0195 (DoS, CVSS 7.5 each); 0.36 pulls patched
 # quick-xml >=0.41.
-# Pinned to >=0.37 (GHSA-m665-v7pm-7grj): 0.36 pulled zip 8.6.0, inside the
-# advisory's `zip <= 9.0.4` range; 0.37 requires zip ^9.0, which resolves to
-# the same patched 9.0.5 as the direct `zip` entry below.
-calamine = "0.37"
+# 0.38 requires zip ^9.0 (patched 9.0.5), clearing GHSA-m665-v7pm-7grj.
+calamine = "0.38"
 # zip + quick-xml: OOXML (.docx) is a zip container around XML parts. Parsing
 # `word/document.xml` ourselves (rather than pulling in docx-rs) matches this
 # repo's own-the-parsing style and avoids a much larger dependency surface for

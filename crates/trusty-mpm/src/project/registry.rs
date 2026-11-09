@@ -198,9 +198,10 @@ impl ProjectRegistry {
     /// Test: `registry_auto_register_from_sessions`,
     /// `registry_derive_name_skips_missing_url`.
     pub async fn auto_register_from_sessions(&self, records: &[SessionRecord]) {
-        // Collect existing names to avoid overwriting manually-registered entries.
-        let existing: std::collections::HashSet<String> = match self.list().await {
-            Ok(projects) => projects.into_iter().map(|p| p.name).collect(),
+        // Collect existing names and origins to avoid overwriting or duplicating
+        // registered entries.
+        let existing = match self.list().await {
+            Ok(projects) => ExistingProjects::from_projects(&projects),
             Err(e) => {
                 warn!("auto_register: failed to list existing projects: {e}");
                 return;
@@ -241,8 +242,8 @@ impl ProjectRegistry {
     /// `registry_register_from_session_skips_when_repo_url_missing`,
     /// `registry_register_from_session_does_not_overwrite_existing`.
     pub async fn register_from_session(&self, record: &SessionRecord) {
-        let existing: std::collections::HashSet<String> = match self.list().await {
-            Ok(projects) => projects.into_iter().map(|p| p.name).collect(),
+        let existing = match self.list().await {
+            Ok(projects) => ExistingProjects::from_projects(&projects),
             Err(e) => {
                 warn!("register_from_session: failed to list existing projects: {e}");
                 return;
@@ -254,18 +255,22 @@ impl ProjectRegistry {
 
     /// Shared tail of [`Self::auto_register_from_sessions`] (looped) and
     /// [`Self::register_from_session`] (single-record): derive an implicit
-    /// `Project` from `record`'s `repo_url` and upsert it unless a project
-    /// with that name is already in `existing` (#3822 — extracted so the two
-    /// entry points can never drift on what "implicit registration" means).
+    /// `Project` from `record`'s `repo_url` and upsert it unless `existing`
+    /// already holds that name or that origin (#3822 — extracted so the two
+    /// entry points can never drift on what "implicit registration" means;
+    /// #10696 added the origin match).
     ///
     /// `log_prefix` names the caller in the `warn!`/`info!`/`debug!` lines so
     /// a daemon log line still identifies which pass produced it. No line
     /// carries a URL's credentials (#9124).
-    /// Test: `implicit_registration_never_logs_a_credentialed_url`.
+    /// Test: `implicit_registration_never_logs_a_credentialed_url`,
+    /// `implicit_registration_skips_a_keyed_record_with_the_same_origin`,
+    /// `implicit_registration_skips_a_legacy_ssh_record_for_the_same_repo`,
+    /// `implicit_registration_registers_a_different_origin`.
     async fn register_implicit_from_record(
         &self,
         record: &SessionRecord,
-        existing: &std::collections::HashSet<String>,
+        existing: &ExistingProjects,
         log_prefix: &str,
     ) {
         let Some(repo_url) = &record.repo_url else {
@@ -280,8 +285,14 @@ impl ProjectRegistry {
             );
             return;
         };
-        if existing.contains(&name) {
+        if existing.names.contains(&name) {
             debug!(name = %name, "{log_prefix}: project already registered; skipping");
+            return;
+        }
+        // #10696: a record under another name (e.g. a directory-named
+        // `tm project init` record) may already own this origin.
+        if existing.holds_origin(repo_url) {
+            debug!(name = %name, repo_url = %shown, "{log_prefix}: origin already registered; skipping");
             return;
         }
         let default_branch = record.branch.clone().unwrap_or_else(|| "main".to_string());
@@ -310,6 +321,64 @@ impl ProjectRegistry {
             info!(name = %name, repo_url = %shown, "{log_prefix}: registered project from session history");
         }
     }
+}
+
+/// Names and origins of the registered projects, for the implicit-registration skip.
+///
+/// Why: #10696 — matching on name alone let a session add a second record for
+/// an origin a differently-named record already owns. A legacy record has no
+/// stored `project_key`, so its origin must be derived from its `repo_url`.
+/// What: `names` holds every record name. `origin_urls` holds every trimmed
+/// `repo_url` verbatim. `origin_keys` holds each stored `project_key`, or for a
+/// legacy record the key [`origin_key`] derives — the same `owner/repo` the
+/// store mints, so an ssh and an https URL for one repo match.
+/// Test: `implicit_registration_skips_a_keyed_record_with_the_same_origin`,
+/// `implicit_registration_skips_a_legacy_ssh_record_for_the_same_repo`,
+/// `implicit_registration_registers_a_different_origin`.
+struct ExistingProjects {
+    names: std::collections::HashSet<String>,
+    origin_urls: std::collections::HashSet<String>,
+    origin_keys: std::collections::HashSet<String>,
+}
+
+impl ExistingProjects {
+    /// Index `projects` by name, verbatim origin URL and origin key.
+    fn from_projects(projects: &[Project]) -> Self {
+        let mut existing = Self {
+            names: std::collections::HashSet::new(),
+            origin_urls: std::collections::HashSet::new(),
+            origin_keys: std::collections::HashSet::new(),
+        };
+        for p in projects {
+            existing.names.insert(p.name.clone());
+            existing.origin_urls.insert(p.repo_url.trim().to_string());
+            // #10696: a legacy record carries no key; derive one from its URL.
+            if let Some(key) = p.project_key.clone().or_else(|| origin_key(&p.repo_url)) {
+                existing.origin_keys.insert(key);
+            }
+        }
+        existing
+    }
+
+    /// Whether a registered record already owns `repo_url`'s origin.
+    fn holds_origin(&self, repo_url: &str) -> bool {
+        self.origin_urls.contains(repo_url.trim())
+            || origin_key(repo_url).is_some_and(|key| self.origin_keys.contains(&key))
+    }
+}
+
+/// The `owner/repo` key of a remote URL, or `None` for a checkout path.
+///
+/// Why: #10696 — this pass runs on every session spawn; a path-form `repo_url`
+/// would make [`super::project_key_from_repo_url`] spawn `git` per record.
+/// A path still matches verbatim through `origin_urls`.
+/// What: `None` for an absolute path, else [`super::project_key_from_repo_url`].
+/// Test: `implicit_registration_registers_a_different_origin`.
+fn origin_key(repo_url: &str) -> Option<String> {
+    if repo_url.trim().starts_with('/') {
+        return None;
+    }
+    super::project_key_from_repo_url(repo_url)
 }
 
 #[cfg(test)]

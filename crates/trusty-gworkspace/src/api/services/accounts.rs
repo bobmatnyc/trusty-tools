@@ -23,7 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
-use crate::api::auth::oauth::{self, DefaultMode, flow};
+use crate::api::auth::oauth::{self, DefaultMode, ScopePreset, flow};
 use crate::api::client::BaseClient;
 use crate::api::services::{opt_str, require_str};
 
@@ -147,7 +147,11 @@ const ADD_ACCOUNT_TIMEOUT_MAX_SECS: u64 = 90;
 /// `~/.gworkspace-mcp/clients/<profile>.json` BEFORE the consent flow runs
 /// (fast-failing on a missing/malformed file with no network call), so the
 /// authorization that follows uses that client, and every later refresh for
-/// this profile reuses it automatically. Returns
+/// this profile reuses it automatically. `scopes` (optional, #10746 ok-T20)
+/// names a scope preset; the only one is `"readonly"`, and any other value,
+/// or a non-string, is refused before any side effect. `"readonly"` also
+/// needs an explicit `profile` other than the default (#10873). Omitted, the consent
+/// requests the full default set. Returns
 /// `{"status": "authorized", "auth_url", ...}` on success, or
 /// `{"status": "timed_out", "auth_url", "message"}` if the browser step
 /// didn't complete in time — the caller can retry `add_account` for a fresh
@@ -155,9 +159,16 @@ const ADD_ACCOUNT_TIMEOUT_MAX_SECS: u64 = 90;
 /// invalid `oauth_client_path`) propagates as a tool error.
 /// Test: `add_account_rejects_conflicting_default_flags`,
 /// `add_account_clamps_timeout_bounds`,
-/// `add_account_rejects_invalid_oauth_client_path_before_consent`.
+/// `add_account_rejects_invalid_oauth_client_path_before_consent`,
+/// `add_account_rejects_unknown_scope_preset_before_any_side_effect`,
+/// `add_account_readonly_without_profile_keeps_default_token`.
 pub async fn add_account(client: &BaseClient, args: Value) -> Result<Value> {
-    let profile = flow::effective_profile(opt_str(&args, "profile"));
+    // #10746: ok-T20 read-only scope preset. Parsed before the client file is
+    // persisted, so a refused preset leaves no state behind.
+    let preset = scope_preset_of(&args)?;
+    // #10873: a read-only consent without `profile` is refused here, before
+    // any side effect, so it cannot replace the default profile's token.
+    let profile = flow::consent_profile(opt_str(&args, "profile"), preset)?;
     let no_default = args
         .get("no_default")
         .and_then(Value::as_bool)
@@ -189,9 +200,17 @@ pub async fn add_account(client: &BaseClient, args: Value) -> Result<Value> {
     // across an `.await` inside a `Send` future (`run_stdio_loop` requires
     // it) — `&Mutex<String>` is `Send`, `&RefCell<String>` is not.
     let captured_url = std::sync::Mutex::new(String::new());
-    let outcome = flow::run_consent_with(client.storage(), &profile, mode, false, timeout, |url| {
-        *captured_url.lock().unwrap_or_else(|p| p.into_inner()) = url.to_string();
-    })
+    let outcome = flow::run_consent_with(
+        client.storage(),
+        &profile,
+        mode,
+        false,
+        preset,
+        timeout,
+        |url| {
+            *captured_url.lock().unwrap_or_else(|p| p.into_inner()) = url.to_string();
+        },
+    )
     .await;
     let auth_url = captured_url.into_inner().unwrap_or_else(|p| p.into_inner());
 
@@ -212,6 +231,24 @@ pub async fn add_account(client: &BaseClient, args: Value) -> Result<Value> {
             ),
         })),
         Err(e) => Err(e),
+    }
+}
+
+// #10746: ok-T20 read-only scope preset
+/// Read `add_account`'s optional `scopes` argument through the preset
+/// allow-list.
+///
+/// Why: A free-form scope string must never reach the consent request.
+/// What: Absent or `null` gives `ScopePreset::Full`; a string goes through
+/// `ScopePreset::parse`; any other JSON type is an error.
+/// Test: `add_account_rejects_unknown_scope_preset_before_any_side_effect`.
+fn scope_preset_of(args: &Value) -> Result<ScopePreset> {
+    match args.get("scopes") {
+        None | Some(Value::Null) => Ok(ScopePreset::Full),
+        Some(Value::String(name)) => ScopePreset::parse(Some(name)),
+        Some(other) => Err(anyhow!(
+            "scopes must be a preset name string such as \"readonly\", got {other}"
+        )),
     }
 }
 
@@ -240,6 +277,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use serial_test::serial;
     use std::collections::HashMap;
+    use trusty_common::credentials::test_sandbox::CredentialSandbox;
 
     fn test_client() -> BaseClient {
         let dir = std::env::temp_dir().join(format!("gw-accounts-svc-{}", uuid::Uuid::new_v4()));
@@ -402,5 +440,83 @@ mod tests {
             "{a}"
         );
         assert_eq!(b["client"], "global");
+    }
+
+    // #10746: ok-T20 read-only scope preset
+    #[tokio::test]
+    #[serial]
+    async fn add_account_rejects_unknown_scope_preset_before_any_side_effect() {
+        let _guard = EnvGuard::capture(&["HOME"]);
+        let home = fresh_temp_home("add-account-bad-preset");
+        // SAFETY: serialised via #[serial]; EnvGuard restores on drop.
+        unsafe { std::env::set_var("HOME", &home) };
+        let source = home.join("client.json");
+        std::fs::write(&source, r#"{"client_id":"id","client_secret":"secret"}"#).unwrap();
+
+        let client = test_client();
+        for bad in [
+            json!("write"),
+            json!("https://www.googleapis.com/auth/drive"),
+            json!(["readonly"]),
+        ] {
+            let err = add_account(
+                &client,
+                json!({
+                    "profile": "ro",
+                    "scopes": bad,
+                    "oauth_client_path": source.to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("unknown scope preset") || err.contains("scopes must be"),
+                "{err}"
+            );
+        }
+        assert!(
+            !oauth::profile_client_path("ro").unwrap().exists(),
+            "a refused preset must not persist the per-profile client"
+        );
+        assert_eq!(scope_preset_of(&json!({})).unwrap(), ScopePreset::Full);
+        assert_eq!(
+            scope_preset_of(&json!({ "scopes": "readonly" })).unwrap(),
+            ScopePreset::ReadOnly
+        );
+    }
+
+    // #10873: read-only consent without a profile must not touch the default.
+    /// Why: the default profile's full-scope token is shared with Python
+    /// tools; a read-only consent without `profile` must not replace it.
+    /// What: `add_account {scopes:"readonly"}` with no profile is refused
+    /// with a message naming `--profile`, and the token file is byte-identical.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial]
+    async fn add_account_readonly_without_profile_keeps_default_token() {
+        // #10873: the credential sandbox (#9123) gives a temp HOME and clears
+        // the client env, so a regression fails fast on missing credentials
+        // instead of waiting on a real consent.
+        let mut sandbox = CredentialSandbox::enter();
+        sandbox.remove("GOOGLE_OAUTH_CLIENT_ID");
+        sandbox.remove("GOOGLE_OAUTH_CLIENT_SECRET");
+        let path = sandbox.root().join("tokens.json");
+        let client = BaseClient::for_test(TokenStorage::with_path(path.clone()));
+        let mut map = HashMap::new();
+        map.insert(
+            crate::api::constants::DEFAULT_PROFILE.to_string(),
+            entry(crate::api::constants::DEFAULT_PROFILE, true),
+        );
+        client.storage().save(&map).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let err = add_account(&client, json!({ "scopes": "readonly" }))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("--profile"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }

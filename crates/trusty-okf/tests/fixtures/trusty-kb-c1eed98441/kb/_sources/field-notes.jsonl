@@ -1,0 +1,4 @@
+{"item_id":"alpha.md","fingerprint":"sha256:aaaa","entity":"notes/alpha","ingested_at":"2026-07-24T12:00:00Z","timestamp":"2026-07-01T08:00:00Z","status":"ingested"}
+{"item_id":"beta.md","fingerprint":"sha256:bbbb","entity":"notes/beta","ingested_at":"2026-07-24T12:00:00Z","timestamp":"2026-07-02T08:00:00Z","status":"ingested"}
+{"item_id":"alpha.md","fingerprint":"sha256:aaab","entity":"notes/alpha","ingested_at":"2026-07-25T12:00:00Z","timestamp":"2026-07-03T08:00:00Z","status":"ingested"}
+{"item_id":"beta.md","fingerprint":"sha256:bbbb","entity":"notes/beta","ingested_at":"2026-07-26T12:00:00Z","timestamp":"2026-07-02T08:00:00Z","status":"tombstoned"}
