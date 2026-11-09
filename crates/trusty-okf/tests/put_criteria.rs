@@ -64,7 +64,8 @@ fn conflict_reason<T: std::fmt::Debug>(got: Result<T, OkfError>) -> String {
 }
 
 /// A concept with one legacy (hashless) frontmatter event, then verified by
-/// `human:jo` through `verify`, so the record binds one event.
+/// `human:jo` through `verify`, so the record binds one event. Under owner
+/// ruling D64 the frontmatter-only hashless event counts as history.
 const VERIFIED: &str = "---\ntype: Note\ndescription: d\nverified:\n  - { by: human:old, at: 2026-01-01T00:00:00Z }\n---\nBody\n";
 
 fn verified_bundle() -> (tempfile::TempDir, Bundle) {
@@ -77,7 +78,7 @@ fn verified_bundle() -> (tempfile::TempDir, Bundle) {
         VerificationState::Verified {
             human: true,
             events: 1,
-            history: 0
+            history: 1
         }
     );
     (tmp, b)

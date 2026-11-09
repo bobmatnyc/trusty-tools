@@ -170,7 +170,7 @@ fn enrich(
     hit.staleness = staleness(fm, now);
     hit.trust = TrustLabel::of_entity_text(&text);
     hit.stale_revision = hit.content.trim().is_empty() || !text.contains(&hit.content);
-    let events = record::fold(record::read_lines(bundle, &id)?);
+    let events = record::counted_events(bundle, &id, &c)?;
     hit.verification = if hit.stale_revision {
         VerificationState::Unverified {
             history: events.len(),
