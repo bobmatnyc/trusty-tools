@@ -826,6 +826,8 @@ const MODULE_SOURCES: &[(&str, &str)] = &[
     ("control_bus/envelope.rs", include_str!("envelope.rs")),
     ("control_bus/event_id.rs", include_str!("event_id.rs")),
     ("control_bus/filter.rs", include_str!("filter.rs")),
+    // See #10901.
+    ("control_bus/health.rs", include_str!("health.rs")),
     ("control_bus/message.rs", include_str!("message.rs")),
     // #6847: `push_client.rs` is the one file in this list that DOES dial a
     // socket — see `control_bus_declares_no_transport`'s doc comment for why

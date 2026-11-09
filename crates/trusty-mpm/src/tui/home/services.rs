@@ -26,7 +26,7 @@ pub enum ServiceId {
     Mpm,
     /// trusty-agents; no UDS socket yet, so the TUI does not probe it (#10899).
     Agents,
-    /// trusty-events, the bus daemon; one socket connect proves it serves.
+    /// trusty-events, the bus daemon, `events.health` on its socket.
     Events,
     /// trusty-console; no UDS listener yet, so the TUI does not probe it (#10899).
     Console,
@@ -113,7 +113,10 @@ impl ServiceId {
             ServiceId::Memory => ProbeKind::UdsHealth("memory.health"),
             ServiceId::Analyze => ProbeKind::UdsHealth("analyze.health"),
             ServiceId::Mpm => ProbeKind::UdsHealth("mpm.health"),
-            ServiceId::Events => ProbeKind::SocketConnect,
+            // See #10901: the bus answers health, not just a connect.
+            ServiceId::Events => {
+                ProbeKind::UdsHealth(trusty_common::control_bus::METHOD_EVENTS_HEALTH)
+            }
             // See #10899: the TUI sends no HTTP probe; these have no UDS yet.
             ServiceId::Agents => {
                 ProbeKind::NoUdsEndpoint("trusty-agents has no UDS socket yet (#6433)")

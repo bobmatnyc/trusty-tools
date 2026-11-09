@@ -10,11 +10,12 @@ use common::{
     subscribe,
 };
 use trusty_common::control_bus::{
-    HarnessEvent, HarnessPayload, HarnessSource, MessageChannel, MessageDirection, MessageEvent,
-    SubscribeFilter, SubscribeItem, SubscribeParams,
+    EventsHealth, HarnessEvent, HarnessPayload, HarnessSource, METHOD_EVENTS_HEALTH,
+    MessageChannel, MessageDirection, MessageEvent, SubscribeFilter, SubscribeItem,
+    SubscribeParams,
 };
-use trusty_common::uds::UdsRpcError;
-use trusty_common::uds::server::CODE_INVALID_PARAMS;
+use trusty_common::uds::server::{CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND, RpcResponse};
+use trusty_common::uds::{UdsRpcError, send_framed_request};
 
 fn session(s: &str) -> SubscribeFilter {
     SubscribeFilter {
@@ -305,4 +306,52 @@ async fn a_message_event_round_trips_through_the_daemon_9167() {
     assert_eq!(got.seq, 2, "the ping at seq 1 is filtered out");
     assert_eq!(got.payload, sent.payload);
     assert_eq!((got.id, got.parent_id), (sent.id, sent.parent_id));
+}
+
+// ─── #10901: events.health over the real socket ──────────────────────────────
+
+/// One unary JSON-RPC request through the trusty-common UDS client.
+async fn call(socket: &std::path::Path, method: &str) -> RpcResponse {
+    let request = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}});
+    send_framed_request(socket, &request, common::BOUND)
+        .await
+        .expect("the daemon answers one frame")
+}
+
+/// The daemon answers `events.health` on its one socket with its counters.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_health_answers_on_the_real_socket() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let daemon = start(tmp.path(), &[]).await;
+    let dup = event("s1");
+    push(&daemon.socket, vec![dup.clone(), dup, event("s2")]).await;
+    // Reading the second event back proves both pushes were ingested.
+    let mut stream = subscribe(&daemon.socket, Some(0), SubscribeFilter::default()).await;
+    let _ = next_event(&mut stream).await;
+    let (seq, ..) = next_event(&mut stream).await;
+    assert_eq!(seq, 2);
+
+    let response = call(&daemon.socket, METHOD_EVENTS_HEALTH).await;
+    assert!(response.error.is_none(), "{:?}", response.error);
+    let health: EventsHealth =
+        serde_json::from_value(response.result.expect("a result")).expect("an EventsHealth");
+    assert_eq!(health.status, "ok");
+    assert_eq!(health.service, "trusty-events");
+    assert!(!health.version.is_empty());
+    assert_eq!(
+        (health.ingested, health.deduped, health.head_seq),
+        (2, 1, 2)
+    );
+    assert_eq!(health.subscribers, 1, "the open subscription");
+}
+
+/// An unknown method on the bus socket is still an RPC error, not a hang-up.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_method_on_the_bus_socket_is_an_rpc_error() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let daemon = start(tmp.path(), &[]).await;
+    let response = call(&daemon.socket, "events.unknown").await;
+    let error = response.error.expect("an error frame");
+    assert_eq!(error.code, CODE_METHOD_NOT_FOUND, "{error}");
+    assert!(response.result.is_none());
 }
