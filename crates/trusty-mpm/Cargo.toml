@@ -500,6 +500,8 @@ sha2.workspace = true
 hmac.workspace = true
 # #8878 PR2b-1b (D72): passkey (WebAuthn) verifier for presence devices.
 webauthn-rs.workspace = true
+# #8878 PR2b-1b: base64url credential ids (already in the tree at 0.22).
+base64.workspace = true
 hex.workspace = true
 regex.workspace = true
 # Glob compilation for the `tm ls` picker's `d <glob>` bulk delete (#5539).
