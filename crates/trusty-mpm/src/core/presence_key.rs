@@ -68,6 +68,18 @@ pub const SANDBOX_KEY_FILE: &str = "presence-hmac.key";
 /// How long one Keychain call may wait (an access prompt holds it open).
 pub const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// The notice every device-approval surface prints while [`acl_verified`]
+/// is false (#8878 PR2b-1b, plan-pr2b1.md §3).
+pub const UNTRUSTED_NOTICE: &str = "key ACL unverified (#10865): device approvals are untrusted";
+
+/// Whether the key's Keychain ACL is verified to admit only tm.
+///
+/// Why: #10865 fills this seam; until then device approvals are labelled
+/// untrusted. It only selects [`UNTRUSTED_NOTICE`]; it gates nothing.
+pub fn acl_verified() -> bool {
+    false
+}
+
 /// Why the grant key could not be read or made.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyError {
