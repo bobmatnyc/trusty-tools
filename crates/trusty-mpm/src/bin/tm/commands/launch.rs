@@ -401,10 +401,7 @@ pub(crate) async fn launch(
             return Err(registered.fail(e).await);
         }
         // #8878: an Architect `claude` the launch could not bind is reported.
-        Ok(binding) => binding
-            .warning(&tmux_name)
-            .into_iter()
-            .for_each(|w| eprintln!("{w}")),
+        Ok(binding) => binding.report(&tmux_name),
     }
 
     // 13b. Find the claude process PID inside the tmux pane and report it to
@@ -671,12 +668,7 @@ pub(crate) async fn connect(
                 )
             })
             // #8878: an Architect `claude` the connect could not bind is reported.
-            .map(|binding| {
-                binding
-                    .warning(&tmux_name)
-                    .into_iter()
-                    .for_each(|w| eprintln!("{w}"))
-            })
+            .map(|binding| binding.report(&tmux_name))
         })();
         if let Err(e) = started {
             return Err(registered.fail(e).await);

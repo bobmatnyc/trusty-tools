@@ -80,6 +80,15 @@ impl Binding {
              pm-guard denies its trust-anchor writes until `tm fleet relaunch` binds it"
         ))
     }
+
+    /// Print [`Self::warning`] to stderr when the Architect is unbound.
+    ///
+    /// Test: `an_unbound_architect_names_the_relaunch` (the text it prints).
+    pub fn report(&self, session: &str) {
+        if let Some(warning) = self.warning(session) {
+            eprintln!("{warning}");
+        }
+    }
 }
 
 /// Whether `spec` starts an Architect: the last `TRUSTY_MPM_SESSION_PROFILE`
