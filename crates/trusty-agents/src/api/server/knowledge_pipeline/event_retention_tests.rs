@@ -86,6 +86,8 @@ async fn published_event_survives_unrelated_event_batch_rollover() {
                     Ok(json!({"indexes":[{"id":index,"root_path":root}]}))
                 }
                 "search.index.config.get" => Ok(json!({"extensions":["md"]})),
+                // #10740: every bind checks for indexed bookkeeping files.
+                "search.chunks.list" => Ok(json!({"chunks":[]})),
                 trusty_common::search_rpc::METHOD_INDEX_STATUS => Ok(json!({"root_path":root})),
                 "search.index.file.put" => {
                     published.lock().unwrap().insert(
