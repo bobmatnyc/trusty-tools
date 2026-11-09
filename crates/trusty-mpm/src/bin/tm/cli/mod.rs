@@ -723,6 +723,7 @@ pub(crate) enum Command {
     /// under `~/.trusty-mpm/build-slots/`, sets `CARGO_TARGET_DIR` to the
     /// slot's pool directory unless one is pinned, runs the command and exits
     /// with its status; exits 75 naming the holders when no slot frees.
+    /// `tm build-lease where <bin>` prints the freshest built binary (#10835).
     /// Test: `tests/tm_build_lease.rs`.
     BuildLease(crate::commands::build_lease::BuildLeaseArgs),
     /// List the worktrees the machine-wide ledger records (#8994).

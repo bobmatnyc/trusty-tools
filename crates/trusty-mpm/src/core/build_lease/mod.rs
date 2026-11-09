@@ -100,6 +100,8 @@ pub mod deps_rotate;
 pub mod deps_repair;
 // #8451: the daemon's percent-of-volume sweep over the slot pool.
 pub mod evict;
+// See #10835: `tm build-lease where`, the freshest built binary.
+pub mod locate;
 pub mod orphan;
 pub mod slots;
 pub mod stale_guard;

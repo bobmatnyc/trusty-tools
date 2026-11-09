@@ -1374,3 +1374,92 @@ fn build_lease_status_lists_a_seed_in_progress_9239() {
     );
     assert!(staging.is_dir(), "status deletes nothing: {text}");
 }
+
+/// Write `<dir>/debug/<bin>` with an mtime `age_secs` in the past (#10835).
+fn built(dir: &Path, bin: &str, age_secs: u64) -> PathBuf {
+    let path = dir.join("debug").join(bin);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("debug dir");
+    std::fs::write(&path, b"bin").expect("artifact");
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("open")
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(age_secs))
+        .expect("mtime");
+    path
+}
+
+/// A seeded `slot-<index>` in the widget repo's pool.
+fn seeded_widget_slot(pool: &Path, index: u32) -> PathBuf {
+    let slot = pool.join(format!("acme/widget/slot-{index}"));
+    std::fs::create_dir_all(&slot).expect("slot");
+    std::fs::write(
+        slot.join(".trusty-slot-seeded"),
+        "#8261 builder slot pool\nstatus: seeded\nseed: ClonedFromShared\n",
+    )
+    .expect("marker");
+    slot
+}
+
+/// #10835: `where` prints the newest artifact across the pool slots and the
+/// checkout's own target dir, takes no lease, and has a JSON form.
+#[test]
+fn build_lease_where_prints_the_newest_slot_binary_10835() {
+    let home = home_with_ceiling(2, "");
+    let (repo, pool, _shared) = widget_repo(home.path());
+    built(&repo.join("target"), "widget", 3_000);
+    built(&seeded_widget_slot(&pool, 0), "widget", 1_200);
+    let newest = built(&seeded_widget_slot(&pool, 1), "widget", 30);
+
+    let out = build_lease(home.path())
+        .current_dir(&repo)
+        .args(["where", "widget"])
+        .output()
+        .expect("where");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}{}", stderr(&out));
+    let printed = PathBuf::from(text.trim())
+        .canonicalize()
+        .expect("a real path");
+    assert_eq!(printed, newest.canonicalize().expect("newest"));
+
+    let out = build_lease(home.path())
+        .current_dir(&repo)
+        .args(["where", "widget", "--json"])
+        .output()
+        .expect("where --json");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(json["source"], "slot-1", "{json}");
+    assert!(json["mtime_unix"].is_u64(), "{json}");
+    assert!(
+        !home.path().join(".trusty-mpm/build-slots").exists()
+            && !home.path().join("fallback-store").exists(),
+        "where opens no lease store"
+    );
+}
+
+/// #10835: no artifact is exit 1 with stdout empty and every path searched
+/// on stderr — never a guessed path.
+#[test]
+fn build_lease_where_names_every_dir_when_the_binary_is_absent_10835() {
+    let home = home_with_ceiling(2, "");
+    let (repo, pool, _shared) = widget_repo(home.path());
+    seeded_widget_slot(&pool, 0);
+
+    let out = build_lease(home.path())
+        .current_dir(&repo)
+        .args(["where", "widget", "--profile", "release"])
+        .output()
+        .expect("where");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(err.contains("searched:"), "{err}");
+    assert!(err.contains("acme/widget/slot-0/release/widget"), "{err}");
+    assert!(err.contains("repo/target/release/widget"), "{err}");
+}
