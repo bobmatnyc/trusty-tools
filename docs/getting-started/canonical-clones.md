@@ -16,7 +16,7 @@ For example, `bobmatnyc/trusty-tools` lives at `~/trusty-mpm-projects/bobmatnyc/
 ## Why `tm` owns the clone
 
 - **One path per repository.** The `<owner>/<repo>` key gives the same path on every machine. `tm` can derive the location from the repository name instead of from a path you chose.
-- **Right account.** `tm` clones as the `gh` account that session will run as. A hand clone uses whatever credential `git` finds first.
+- **Right account.** `tm` clones as the `gh` account pinned for the project, else the account its `[accounts]` org map names for the owner, else your ambient `git` credential. The session then runs as that same account. A hand clone always uses the ambient credential.
 - **Safe sessions.** The base clone stays clean. Each session works in its own worktree under it, and `tm` installs the cross-branch push guard when it clones.
 - **Wrong remotes fail loud.** If a checkout at the canonical path has a different `origin`, `tm` stops. It never re-points a remote.
 
@@ -34,7 +34,7 @@ A dirty checkout does not block the run. `tm` skips the fast-forward, prints a w
 
 ## Existing flat or legacy checkout
 
-Leave the old checkout where it is. `tm` does not move or adopt it. Do not run `tm project init` on it: that command is deprecated, and `tm projects register` replaces it (see [tm-project-control-plane.md](../specs/tm-project-control-plane.md)).
+Leave the old checkout where it is. `tm` does not move or adopt it. Do not run `tm project init` on it: the [project control-plane spec](../specs/tm-project-control-plane.md) marks that command deprecated in favour of `tm projects register`.
 
 1. Push or stash anything you want to keep in the old checkout.
 2. Run `tm run <owner>/<repo>`. This creates the canonical clone next to your other managed projects.
@@ -44,11 +44,11 @@ Leave the old checkout where it is. `tm` does not move or adopt it. Do not run `
 Two cases look similar but are different:
 
 - **A no-origin local repository.** `tm launch` runs the session in that checkout itself. It is not refused. Use this for a scratch repository that has no remote.
-- **An old per-session layout.** Earlier versions kept full clones in per-session subdirectories under `~/trusty-mpm-projects/<owner>/<repo>/`. `tm` moves such a directory aside before it clones, so a stale layout does not block the new one.
+- **An old per-session layout.** Earlier versions kept full clones in per-session subdirectories under `~/trusty-mpm-projects/<owner>/<repo>/`. If that directory has no `.git`, `.base`, or `.worktrees` entry, `tm` renames it to `<repo>.old-layout-backup-<timestamp>` before it clones, and keeps your data there. If it has one of those entries, `tm` stops with an error and moves nothing. Remove or relocate the directory yourself.
 
 ## Change the root
 
-The default root is `~/trusty-mpm-projects`. To move it, set `workspace_root_template` in `~/.trusty-tools/trusty-mpm/config.yaml`, or export `TRUSTY_MPM_WORKSPACE_ROOT`. See [config-convention.md](../reference/config-convention.md) for the precedence rules.
+The default root is `~/trusty-mpm-projects`. To move it, set `workspace_root_template` in `~/.trusty-tools/trusty-mpm/config.yaml`, or export `TRUSTY_MPM_WORKSPACE_ROOT`. The order is `TRUSTY_MPM_REPOS_ROOT`, then `TRUSTY_MPM_WORKSPACE_ROOT`, then `workspace_root_template`, then the default. `TRUSTY_MPM_REPOS_ROOT`, if set, wins over both of the others. See [config-convention.md](../reference/config-convention.md) for the precedence rules.
 
 ## Next steps
 
