@@ -1,2 +1,0 @@
-Fixed
-- `tm wait --for check` now backs off when the pinned gh shim reports a primary GraphQL rate-limit refusal: it sleeps until the reset the shim named (or 20, 40, 80 s… up to 5 minutes when the reset is unknown), still inside the slice and the `--timeout` deadline. Refusals no longer count toward the three-error probe budget; five in a row end the wait with `status=error` (exit 2), and a slice that ends mid-backoff reports `pending` with the rate limit in `detail` (#10550).

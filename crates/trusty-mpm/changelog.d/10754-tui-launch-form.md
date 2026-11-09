@@ -1,2 +1,0 @@
-Added
-- `tm tui`: `l` on a project, or on a session under a project, opens a launch form with a required Task field and an optional Ref field. Enter launches a session for that project through the same `ManagedNew` request `tm sessions new` sends, using the project's checkout and, when Ref is blank, its default branch; the notice reads `launched <name>` or the error. An empty task is refused inside the form, and Esc cancels. `n` still starts a new session, and the hint bar shows `[n] new  [l] launch` (#10754).
