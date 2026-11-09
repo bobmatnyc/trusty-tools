@@ -92,6 +92,22 @@ Refuses with a one-line reason, exits non-zero, and calls no merge when:
   - the review decision is CHANGES_REQUESTED
   - the PR has merge conflicts — `mergeable` CONFLICTING or `mergeStateStatus`
     DIRTY (resolve them with `gh pr update-branch <n>`)
+  - a code-critic BLOCK is pinned to the head commit and no later APPROVE or \
+WARN is pinned to it, a BLOCK names no commit, or a BLOCK on an earlier commit \
+has no later APPROVE or WARN (#10724)
+  - the comments and reviews holding those verdicts cannot be read
+  - the head commit changed between the PR read and the verdict read
+
+A code-critic verdict is the line `## Verdict: <APPROVE|WARN|BLOCK>` in a PR \
+comment or review by an OWNER, MEMBER or COLLABORATOR. A BLOCK is read in any \
+case and decoration; APPROVE and WARN only in the plain form. A review is \
+pinned to the commit it was submitted on; `, pinned to <sha>` on the verdict \
+line overrides that and is the only pin a comment can carry. A push does not \
+resolve a BLOCK. An APPROVE or WARN on an older head prints a warning that no \
+verdict covers the current head.
+
+Known limit: a raw `gh pr merge` bypasses every refusal above, the critic \
+verdict included. Only `tm pr merge` enforces them.
 
 A mergeStateStatus of BEHIND is NOT a refusal — a behind branch merges fine here. \
 Every other mergeStateStatus — BLOCKED, UNSTABLE, HAS_HOOKS, UNKNOWN — and every \

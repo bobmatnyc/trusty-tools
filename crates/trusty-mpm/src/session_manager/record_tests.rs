@@ -62,6 +62,7 @@ fn record_serde_round_trip() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -109,6 +110,7 @@ fn stopped_state_survives_serde() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -154,6 +156,7 @@ fn decommissioned_state_survives_serde() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -224,6 +227,7 @@ fn record_round_trips_tcode_runtime() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -298,6 +302,7 @@ fn record_round_trips_ephemeral_true() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -402,6 +407,7 @@ fn record_round_trips_scrollback_fields() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -451,6 +457,7 @@ fn record_round_trips_workspace_owned_true() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -528,6 +535,7 @@ fn record_round_trips_deliverable_id() {
         deliverable_id: Some(did),
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -602,6 +610,7 @@ fn record_round_trips_worktree_owner() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: Some(owner),
         terminal_at: None,
@@ -750,6 +759,7 @@ fn terminal_fixture() -> SessionRecord {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -800,4 +810,34 @@ fn set_lifecycle_state_clears_stamp_on_revival() {
     let again = died + chrono::Duration::days(2);
     r.set_lifecycle_state(ManagedSessionState::Deleted, again);
     assert_eq!(r.terminal_at, Some(again), "a fresh death restamps");
+}
+
+/// #10101: a record written before `tmux_socket` existed loads as the default
+/// server, keeps its `tmux_server` process identity apart from it, and
+/// re-saves without the key; a stored socket path round-trips.
+/// Test: this function IS the test.
+#[test]
+fn tmux_socket_round_trips_and_old_records_load() {
+    let old = r#"{
+        "id": "0708af71-2b5e-5dab-8c92-739ebdb04941",
+        "task": "PM",
+        "tmux_name": "tm-proj",
+        "cwd": "/",
+        "state": "stopped",
+        "created_at": "2026-09-30T00:00:00Z",
+        "pane_id": "%3",
+        "tmux_server": "41:1700000000"
+    }"#;
+    let mut record: SessionRecord = serde_json::from_str(old).expect("old record loads");
+    assert_eq!(record.tmux_socket, None);
+    assert_eq!(record.tmux_server.as_deref(), Some("41:1700000000"));
+    let resaved = serde_json::to_string(&record).expect("serializes");
+    assert!(!resaved.contains("tmux_socket"), "{resaved}");
+
+    let socket = std::path::PathBuf::from("/private/tmp/tmux-501/tm-ws-proj-0123456789ab");
+    record.tmux_socket = Some(socket.clone());
+    let json = serde_json::to_string(&record).expect("serializes");
+    let back: SessionRecord = serde_json::from_str(&json).expect("reloads");
+    assert_eq!(back.tmux_socket, Some(socket));
+    assert_eq!(back.tmux_server, record.tmux_server);
 }

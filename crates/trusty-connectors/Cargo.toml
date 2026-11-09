@@ -1,0 +1,57 @@
+[package]
+name = "trusty-connectors"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Connector adapter programs for trusty-okf import: Gmail and Google Docs over the SPEC-OKF-01 Appendix B acquire protocol."
+# #10746 S13: not published, like trusty-okf (SPEC-OKF-01 §3 (h) A); the
+# adapter protocol is still at version 1 of a proposal.
+publish = false
+
+# #10746 S13: one adapter program per source kind (SPEC-OKF-01 §3 (m) A).
+# The trusty-okf CLI starts them with `--adapter PATH`. They hold the Google
+# credential through trusty-gworkspace's token store, found from the
+# environment list the caller supplies (B10); trusty-okf links none of this.
+[[bin]]
+name = "okf-adapter-gmail"
+path = "src/bin/okf-adapter-gmail.rs"
+
+[[bin]]
+name = "okf-adapter-gdocs"
+path = "src/bin/okf-adapter-gdocs.rs"
+
+[features]
+# #10746 S13 fix round: the `--api-base` test seam (loopback-only Google root).
+# Off by default, so a default or release adapter refuses `--api-base` and can
+# never send its bearer token over cleartext HTTP. The conformance suite turns
+# it on through the dev self-dependency below.
+loopback-seam = ["trusty-gworkspace/loopback-seam"]
+
+[dependencies]
+# The shared Google layer: `BaseClient` (token store, refresh) and the bulk
+# listing and fetch plumbing moved out of trusty-agents (`api::bulk`).
+trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.1" }
+# The protocol constants and the `SourceRecord` wire shape, so the adapter
+# and the host cannot drift. The edge runs trusty-connectors -> trusty-okf
+# only; scripts/check_okf_boundary.sh bars the reverse (B1).
+trusty-okf = { path = "../trusty-okf", version = "0.1.0", default-features = false }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The adapter's own grant configuration (`config.toml`).
+toml = { workspace = true }
+# One current-thread runtime per adapter process for the BaseClient calls.
+tokio = { workspace = true }
+
+[dev-dependencies]
+# #10746 S13 fix round: enables `loopback-seam` for this crate's own tests, so
+# the conformance suite drives the binaries against the stubbed Google.
+trusty-connectors = { path = ".", features = ["loopback-seam"] }
+base64 = { workspace = true }
+chrono = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }

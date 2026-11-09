@@ -35,6 +35,8 @@ mod owner_config_8988;
 mod owner_launch_config_8988;
 mod pane_launch_line_8233;
 mod prompt_refusal_before_post_8286;
+// #8878 PR2a: `TRUSTY_SANDBOX=1` alone keeps the presence key in the Keychain.
+mod presence_key_sandbox_8878;
 mod scratch_home_tmux_gate;
 mod scratch_root_tmux_gate;
 mod session_manager_mvp;

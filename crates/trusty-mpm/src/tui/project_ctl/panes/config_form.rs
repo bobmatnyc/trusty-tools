@@ -29,7 +29,7 @@ use crate::tui::project_ctl::state::ConfigFormView;
 /// helper in `deliverables_view.rs` — each overlay module keeps its own
 /// three-line copy rather than sharing across modules (see that module's doc
 /// for the rationale, which applies unchanged here).
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let w = width.min(area.width);
     let h = height.min(area.height);
     Rect {

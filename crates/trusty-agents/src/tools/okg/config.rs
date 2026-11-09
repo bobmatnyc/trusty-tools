@@ -8,7 +8,7 @@
 //!
 //! What: [`OkgConfig`] is the `[okg]` section of `~/.trusty-agents/config.toml`.
 //! `docstore_roots` defaults to the user's home directory, and
-//! [`trusty_kb::okg::policy::DocStorePolicy`] additionally excludes every
+//! [`trusty_okf::build::policy::DocStorePolicy`] additionally excludes every
 //! hidden path below a root — so `~/Documents` works out of the box while
 //! `~/.ssh`, `~/.aws`, and `~/.gnupg` are refused without needing to be named.
 //!
@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use trusty_kb::okg::policy::DocStorePolicy;
+use trusty_okf::build::policy::DocStorePolicy;
 
 /// `[okg]` section of the global config.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-70 top-level commands.
+71 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -71,6 +71,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `events` — Show the recent hook-event feed
 - `f` — Find a session by NAME, filtering as you type — `tm f [pattern]`
 - `fleet` — Set up and inspect the Architect, the one fleet supervisor per user
+  - `bind` — Bind the running Architect `claude` this command runs under (#8878)
   - `init` — Set up the Architect project and start its session
   - `relaunch` — Restart the Architect's `claude` in its running session and bind it
   - `status` — Report whether the Architect is set up and running (read-only)
@@ -140,6 +141,8 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `merge` — Squash-merge a PR with its validated body as the commit message
   - `open` — Validate a PR body against the nine-field contract, then open the PR
   - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
+- `presence` — Prove you are at the Studio, so the Architect may write trust anchors
+  - `local` — Approve the Architect's trust-anchor writes with Touch ID or the login password at this Mac
 - `project` — Define and manage projects (registered working directories)
   - `info` — Show the current project's registered info and config
   - `init` — Register a working directory as a trusty-mpm project

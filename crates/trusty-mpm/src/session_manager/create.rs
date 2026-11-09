@@ -233,6 +233,18 @@ impl SessionManager {
         // live session under an already-taken name.
         let resolved_name = tmux_name;
         let workdir = cwd.to_string_lossy().to_string();
+        // #10101: a fresh PM gets its workspace's own tmux server, started
+        // first; its socket is what the record stores. `None` is the default
+        // server (`TM_WORKSPACE_TMUX=0`, or a driver with no named servers).
+        let launch = super::launch_server::launch_target(self.tmux.as_ref(), &cwd);
+        let host: std::sync::Arc<dyn super::ManagedTmuxDriver> = match &launch {
+            Some((driver, _)) => {
+                driver.ensure_server_up()?;
+                std::sync::Arc::clone(driver)
+            }
+            None => std::sync::Arc::clone(&self.tmux),
+        };
+        let tmux_socket = launch.map(|(_, socket)| socket);
         // #3707: names tmux refused on an earlier attempt, remembered across
         // the loop so a stale snapshot cannot keep proposing one of them.
         let mut refused: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -250,7 +262,7 @@ impl SessionManager {
             }
             // #3707: no `-A`, so a lost race refuses instead of attaching this
             // record to somebody else's pane.
-            match self.tmux.create_session_exclusive(&candidate, &workdir) {
+            match host.create_session_exclusive(&candidate, &workdir) {
                 Ok(()) => break candidate,
                 Err(ManagedError::NameCollision(why))
                     if refused.len() + 1 < MAX_CREATE_ATTEMPTS =>
@@ -282,7 +294,7 @@ impl SessionManager {
         // therefore insufficient (see `SessionRecord::pane_id`'s doc).
         // #9004: with the server it was read on, or the record never owns it.
         let (pane_id, tmux_server, tmux_session_id) =
-            super::pane_identity::capture(self.tmux.as_ref(), &tmux_name);
+            super::pane_identity::capture(host.as_ref(), &tmux_name);
 
         // OWN the freshly-created tmux session immediately (#1453). From here
         // until the record is durably persisted, this guard is the session's
@@ -291,7 +303,7 @@ impl SessionManager {
         // transferred to the persistent store via `disarm` only AFTER upsert
         // succeeds — closing the window that let 159 orphans accumulate (#1452).
         let mut tmux_guard =
-            super::session_guard::TmuxSessionGuard::new(tmux_name.clone(), self.tmux.clone());
+            super::session_guard::TmuxSessionGuard::new(tmux_name.clone(), host.clone());
 
         // Seed the session↔artifact correlation from what we know at creation
         // time (worktree path + branch). PR / issue ids accrue later as the
@@ -341,6 +353,7 @@ impl SessionManager {
             deliverable_id: None,
             pane_id,
             tmux_server,
+            tmux_socket,
             injection_status: Default::default(),
             // #3649: owner-unknown by default. The two real provisioning call
             // sites (`spawn_managed_inproject`, `spawn_managed_on_main` in

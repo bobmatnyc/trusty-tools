@@ -112,6 +112,9 @@ pub mod inspection;
 pub mod intent;
 pub mod interaction_log;
 pub mod ipc;
+// #10746 S11: the agent-side KB glue over trusty-okf, moved from the deleted
+// trusty-kb crate (SPEC-OKF-01 §2.7.2).
+pub mod kb;
 pub mod listeners;
 pub mod llm;
 pub mod local_inference;

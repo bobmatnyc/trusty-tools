@@ -740,6 +740,7 @@ mod restart_pane_selection_tests {
             deliverable_id: None,
             pane_id: pane_id.map(str::to_owned),
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,

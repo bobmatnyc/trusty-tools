@@ -34,9 +34,18 @@ pub struct AppState {
 /// tools added to `tools.rs` need a matching arm here.
 /// What: Returns the JSON value to wrap inside an MCP `content` envelope.
 /// On error, returns `{"error": "<message>"}` so the model gets actionable
-/// feedback rather than a JSON-RPC framing-level failure.
-/// Test: covered indirectly by `tools/call` tests.
+/// feedback rather than a JSON-RPC framing-level failure. A tool the acting
+/// profile's read-only grant cannot run is refused first, naming the missing
+/// scope (`scope_guard`, #10746 ok-T20).
+/// Test: covered indirectly by `tools/call` tests; the read-only refusal by
+/// `scope_tests`.
 pub async fn handle_tool_call(state: &AppState, name: &str, args: Value) -> Value {
+    // #10746: ok-T20 read-only scope preset
+    if let Some((profile, granted)) = state.client.recorded_scopes(services::account_of(&args))
+        && let Some(refusal) = crate::scope_guard::readonly_refusal(name, &profile, &granted)
+    {
+        return json!({ "error": refusal });
+    }
     let result: anyhow::Result<Value> = match name {
         // Accounts
         "list_accounts" => services::accounts::list_accounts(&state.client, args).await,
@@ -273,6 +282,11 @@ pub async fn run_stdio(state: AppState) -> anyhow::Result<()> {
     })
     .await
 }
+
+// #10746: ok-T20 read-only scope preset
+#[cfg(test)]
+#[path = "server_scope_tests.rs"]
+mod scope_tests;
 
 #[cfg(test)]
 mod tests {

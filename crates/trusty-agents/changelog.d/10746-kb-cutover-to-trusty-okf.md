@@ -1,0 +1,2 @@
+Changed
+- trusty-agents depends on trusty-okf directly; the trusty-kb crate is deleted (#10746 S11). The agent glue trusty-kb held moved to `trusty_agents::kb`: `Roots` (agent name to tree), the typed `gmail` and `drive` registry kinds, the `KbStore` OKG entry points and the in-tree index journal. The OKG tools, `[[stores]]` status, the index feed and the knowledge pipeline read and write the same files as before.

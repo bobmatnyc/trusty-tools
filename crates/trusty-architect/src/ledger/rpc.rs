@@ -155,7 +155,15 @@ message!(/// `update`.
         #[serde(default)] title: Option<String>, #[serde(default)] rank: Option<u32>,
         #[serde(default)] esc: Option<String>, #[serde(default)] answer: Option<String>,
         #[serde(default)] to: Option<String>, #[serde(default)] outcome: Option<String>,
-        #[serde(default)] status: Option<String>, #[serde(default)] note: Option<String> });
+        #[serde(default)] status: Option<String>, #[serde(default)] note: Option<String>,
+        // #10780: the answer's provenance; needs `answer` in the same op.
+        #[serde(default, skip_serializing_if = "Option::is_none")] source: Option<SourceInput> });
+message!(/// `update.source` (#10780): `by` is owner or architect.
+    SourceInput { by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")] cite: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] quote: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] until: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] basis: Option<String> });
 message!(/// `close`.
     CloseOp { id: String, outcome: String });
 message!(/// `session`: a list field replaces the stored list.

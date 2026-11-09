@@ -206,7 +206,7 @@ package to its manifest, source, and documentation, use the
 | Crate | Description |
 |---|---|
 | `trusty-installer` | Install/upgrade orchestrator (bins: `trusty-installer`, `tctl` alias; ADR-0013) |
-| `trusty-kb` | Deterministic personal knowledge-base store + MCP server |
+| `trusty-okf` | OKF knowledge-bundle builder: format, profiles, build, import (bin: `trusty-okf`) |
 | `trusty-publish-guard` | Internal release parity checker |
 | `trusty-sld-lint` | Spec-linked documentation linter |
 | `trusty-embedderd-py` | Optional Python/MPS embedding sidecar launcher |

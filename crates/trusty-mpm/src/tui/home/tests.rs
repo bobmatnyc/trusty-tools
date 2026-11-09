@@ -8,7 +8,10 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use trusty_common::console_metrics::{ConsoleMetricsReport, ServiceHealth};
 
-use super::probe::{Observation, classify, fetch_metrics, spawn_health_poller, with_deadline};
+use super::probe::{
+    Observation, classify, fetch_metrics, on_demand_when_idle, spawn_health_poller,
+    transport_failure, with_deadline,
+};
 use super::render::{metric_lines, render, service_lines};
 use super::services::ServiceId;
 use super::state::{
@@ -57,17 +60,26 @@ fn tm_tui_opens_on_the_console_home_screen() {
     assert_eq!(tui_entry(true), TuiEntry::SinglePane);
 }
 
+/// The test that fails without #10476: Search used to be first and selected.
 #[test]
-fn roster_matches_the_console_order() {
+fn home_opens_with_mpm_first_and_selected() {
+    assert_eq!(ServiceId::ALL[0], ServiceId::Mpm);
+    let state = HomeState::default();
+    assert_eq!(state.selected_id(), ServiceId::Mpm);
+    assert_eq!(state.tiles[0].0, ServiceId::Mpm, "MPM tile renders first");
+}
+
+#[test]
+fn roster_lists_mpm_first_then_the_console_order() {
     let ids: Vec<&str> = ServiceId::ALL.iter().map(|s| s.id()).collect();
     assert_eq!(
         ids,
         [
+            "trusty-mpm",
             "trusty-search",
             "trusty-memory",
             "trusty-analyze",
             "trusty-review",
-            "trusty-mpm",
             "trusty-agents",
             "trusty-events",
             "trusty-console",
@@ -104,6 +116,7 @@ fn enter_on_mpm_opens_projects() {
 #[test]
 fn enter_on_search_opens_its_view_and_esc_returns() {
     let mut state = HomeState::default();
+    select(&mut state, ServiceId::Search);
     up(&mut state, ServiceId::Search);
     let action = handle_key(&mut state, key(KeyCode::Enter), Instant::now());
     assert_eq!(action, Some(HomeAction::FetchMetrics(ServiceId::Search)));
@@ -191,6 +204,18 @@ fn classify_maps_each_observation_to_a_tile_state() {
             false,
             TileHealth::Absent,
         ),
+        (
+            Observation::NotListening("idle".into()),
+            true,
+            TileHealth::Down {
+                reason: "idle".into(),
+            },
+        ),
+        (
+            Observation::NotListening("idle".into()),
+            false,
+            TileHealth::Absent,
+        ),
         (Observation::OnDemand, true, TileHealth::OnDemand),
         (Observation::OnDemand, false, TileHealth::Absent),
         (
@@ -202,6 +227,147 @@ fn classify_maps_each_observation_to_a_tile_state() {
     for (observation, installed, want) in cases {
         assert_eq!(classify(observation, installed), want);
     }
+}
+
+/// #10476: trusty-analyze is on demand, so an installed analyze with nothing
+/// listening is idle, not down. Every other service keeps not-listening as
+/// Down, and a `Silent` failure (an unresolvable socket path included) is
+/// Down for analyze too.
+#[test]
+fn an_idle_analyze_reads_as_on_demand_not_down() {
+    let idle = || Observation::NotListening("no socket".into());
+    let seen = |id| classify(on_demand_when_idle(id, idle()), true);
+    assert_eq!(seen(ServiceId::Analyze), TileHealth::OnDemand);
+    for id in [ServiceId::Search, ServiceId::Memory, ServiceId::Mpm] {
+        assert_eq!(
+            seen(id),
+            TileHealth::Down {
+                reason: "no socket".into()
+            },
+            "{id:?}"
+        );
+    }
+    assert_eq!(
+        classify(on_demand_when_idle(ServiceId::Analyze, idle()), false),
+        TileHealth::Absent,
+        "an analyze that is not installed is still absent"
+    );
+    let unresolved = Observation::Silent("analyze socket unresolved".into());
+    assert_eq!(
+        classify(on_demand_when_idle(ServiceId::Analyze, unresolved), true),
+        TileHealth::Down {
+            reason: "analyze socket unresolved".into()
+        },
+        "an unresolvable analyze socket path is down"
+    );
+}
+
+/// #10476: only a dial that found no listener is `NotListening`; every other
+/// transport failure is `Silent`, so an on-demand analyze still reads Down.
+#[test]
+fn transport_failures_split_not_listening_from_broken() {
+    use std::io::{Error, ErrorKind};
+    use std::path::PathBuf;
+    use trusty_common::uds::{UdsRpcError, UdsSecurityError};
+
+    let path = || PathBuf::from("/run/analyze.sock");
+    let dial = |source| UdsRpcError::Dial {
+        path: path(),
+        source,
+    };
+    let connect = |kind| {
+        dial(UdsSecurityError::Connect {
+            path: path(),
+            source: Error::from(kind),
+        })
+    };
+    let stat = |kind| {
+        dial(UdsSecurityError::StatForConnect {
+            path: path(),
+            source: Error::from(kind),
+        })
+    };
+    let retried = |last| UdsRpcError::ConnectRetriesExhausted {
+        path: path(),
+        attempts: 3,
+        source: Box::new(last),
+    };
+    let not_listening = [
+        stat(ErrorKind::NotFound),
+        connect(ErrorKind::NotFound),
+        connect(ErrorKind::ConnectionRefused),
+        retried(connect(ErrorKind::ConnectionRefused)),
+    ];
+    for err in not_listening {
+        assert!(
+            matches!(transport_failure(&err), Observation::NotListening(_)),
+            "{err}"
+        );
+    }
+    let decode_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+    let broken = [
+        stat(ErrorKind::PermissionDenied),
+        connect(ErrorKind::PermissionDenied),
+        dial(UdsSecurityError::UntrustedSocket {
+            path: path(),
+            reason: "socket is mode 0644, not 0600".into(),
+        }),
+        retried(connect(ErrorKind::PermissionDenied)),
+        UdsRpcError::Write {
+            path: path(),
+            source: Error::from(ErrorKind::BrokenPipe),
+        },
+        UdsRpcError::Read {
+            path: path(),
+            source: Error::from(ErrorKind::Other),
+        },
+        UdsRpcError::HalfClose {
+            path: path(),
+            source: Error::from(ErrorKind::Other),
+        },
+        UdsRpcError::NoResponse { path: path() },
+        UdsRpcError::FrameTooLarge {
+            path: path(),
+            limit: 16,
+        },
+        UdsRpcError::Decode {
+            path: path(),
+            source: decode_error,
+        },
+        UdsRpcError::Timeout {
+            path: path(),
+            timeout: Duration::from_millis(5),
+        },
+    ];
+    for err in broken {
+        let observed = transport_failure(&err);
+        assert!(matches!(observed, Observation::Silent(_)), "{err}");
+        assert!(
+            matches!(
+                classify(on_demand_when_idle(ServiceId::Analyze, observed), true),
+                TileHealth::Down { .. }
+            ),
+            "{err}"
+        );
+    }
+}
+
+/// #10476: an analyze that answers health is still Up, and one that answers
+/// badly is still Degraded.
+#[test]
+fn an_answering_analyze_still_reads_as_up() {
+    let healthy = Observation::Healthy(Some("0.9.0".into()));
+    assert_eq!(
+        classify(on_demand_when_idle(ServiceId::Analyze, healthy), true),
+        TileHealth::Up {
+            version: Some("0.9.0".into())
+        }
+    );
+    let unhealthy = Observation::Unhealthy("x".into());
+    assert_eq!(
+        classify(on_demand_when_idle(ServiceId::Analyze, unhealthy), true),
+        TileHealth::Degraded { reason: "x".into() }
+    );
 }
 
 #[tokio::test]
@@ -288,4 +454,36 @@ fn service_view_shows_unavailable_metrics() {
     let metrics = metric_lines(&report().metrics);
     assert!(metrics.contains(&"  index_count: 3".to_string()));
     assert!(metrics.contains(&"  indexes: [2 items]".to_string()));
+}
+
+/// Row `y` of a drawn `TestBackend` buffer as text.
+fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol())
+        .collect()
+}
+
+// #10476: version in tui header (Bob 11-05)
+#[test]
+fn home_header_shows_tm_version_at_80_columns() {
+    let version = format!("tm {}", env!("CARGO_PKG_VERSION"));
+    let mut state = HomeState::default();
+    for view in [View::Home, View::Service(ServiceId::Search)] {
+        state.view = view;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test backend");
+        terminal
+            .draw(|f| render(f, &state))
+            .expect("draw the home screen");
+        let top = buffer_row(&terminal, 0);
+        assert!(
+            top.contains(&version),
+            "{view:?} header lacks {version}: {top:?}"
+        );
+        let title = match view {
+            View::Home => "trusty console — services".to_string(),
+            View::Service(id) => format!("trusty console › {}", id.id()),
+        };
+        assert!(top.starts_with(&title), "{view:?} title displaced: {top:?}");
+    }
 }

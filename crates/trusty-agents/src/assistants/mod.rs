@@ -65,7 +65,7 @@
 //! in scope.
 //!
 //! Naming caveat (#4406): two unrelated stores are both called "OKG" — the
-//! trusty-kb markdown entity tree and the trusty-memory knowledge graph. #4325
+//! markdown entity tree (`crate::kb`) and the trusty-memory knowledge graph. #4325
 //! specifies an `okg/` DIRECTORY inside the home, which only the filesystem
 //! tree can be, so [`home::OKG_DIR`] is that tree. The owner CONFIRMED that
 //! shape on 2026-08-01 — `trusty-agents/<agent>/okg/`, a store indexed by
