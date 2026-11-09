@@ -1,0 +1,2 @@
+Added
+- The passkey enrol page for trusty-mpm presence devices at `/tools/presence/enrol/`, with `POST /api/console/presence/enrol/start` and `/finish` relaying to the tm daemon's `mpm.presence.register.*` socket methods. Every request first asks the daemon for the enrol origin: `404` while `[presence] browser_enrol` is off, `503` when the daemon cannot answer. `Host` must name that origin and a POST must carry it as `Origin`, else `403`; a request without a ticket never reaches the daemon (#8878).

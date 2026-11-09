@@ -2,9 +2,10 @@
 
 The pm-guard lets the bound Architect write a trust anchor only when Bob has
 proven, recently, that he is at the Studio. This page covers the local path
-(#8878 PR2a) and approval from enrolled passkey devices (#8878 PR2b-1). The
-browser page that lets a phone approve, and Slack delivery of its link, are
-#8878 PR2b-2 and are not built yet.
+(#8878 PR2a), approval from enrolled passkey devices (#8878 PR2b-1) and
+enrolment through a one-time browser link (#8878 PR2b-2). The browser page
+that lets a phone approve a request, and Slack delivery of its link, are
+#8878 PR2b-3 and are not built yet.
 
 **key ACL unverified (#10865): device approvals are untrusted.** Every device
 surface prints this until #10865 verifies the grant key's Keychain access
@@ -185,12 +186,67 @@ device methods answer exit 3 and nothing is enrolled or approved.
 |---|---|---|
 | `tm presence request [--action <text>]` | Asks for a device approval for this session's `claude`; grants nothing | 0 asked, 1 refused |
 | `tm presence wait [--timeout 5m] [--request <id>]` | Polls for a valid grant | 0 granted, 75 still pending (re-issue), 1 the request is gone with no grant |
-| `tm presence devices add <name>` | Touch ID, then an enrol ticket and the registration options. **Incomplete until PR2b-2:** no browser path finishes it yet; tests finish it with a software passkey | 0, 1 |
+| `tm presence devices add <name>` | With `browser_enrol` on: Touch ID, then a one-time enrol link (see "Enrolment"). With it off: refuses before the prompt | 0, 1 |
 | `tm presence devices list` | Each device: id, name, created, last used, counter, backup flags | 0 |
 | `tm presence devices revoke <id>` | Touch ID, then deletes the record and every grant it approved | 0, 1 |
 
 PMs, agents and subagents cannot run any `tm presence` verb, and cannot write
 `devices/`, `pending/` or a `.presence` file: all are trust-anchor writes.
+
+### Enrolment (#8878 PR2b-2)
+
+Browser enrolment is off until owner decision D24. Turn it on with one key
+in `~/.trusty-mpm/config.toml`, beside `rp_id` and `rp_origin`, then restart
+the daemon (it reads `[presence]` at start):
+
+```toml
+[presence]
+browser_enrol = true
+```
+
+With it off, `tm presence devices add` says "enrolment via browser is not
+enabled" before any prompt, and the console answers `404` for the page and
+its calls.
+
+With it on:
+
+1. `tm presence devices add <name>` runs Touch ID, mints an enrol ticket,
+   checks that the daemon opens a registration for it, and prints
+   `<rp_origin>/tools/presence/enrol/#<ticket>`. The link is valid once, for
+   10 minutes (the ticket's own TTL).
+2. Open the link on the device. The ticket rides in the URL fragment, which
+   the browser never sends to a server; the page removes it from the address
+   bar and history at once.
+3. The page posts the ticket to the console, which asks the daemon for
+   `mpm.presence.register.start` and shows the passkey prompt. The passkey
+   is bound to the page's origin, so it must be `rp_origin` (the console's
+   https tailnet name); on `127.0.0.1` the browser cannot create it.
+4. The page posts the credential; the console relays it to
+   `mpm.presence.register.finish`. The daemon checks the open registration,
+   the passkey (origin, RP id, user verification, ES256), then the ticket,
+   marks it spent and writes the sealed record. The page says "Enrolled"
+   only when the daemon confirms the credential id.
+
+The console asks the daemon's `mpm.presence.status` for the enrol origin on
+every request, and serves the page or relays a call only when `Host` names
+that origin and a POST carries it as `Origin` (`403` otherwise). This holds
+on every listener; it does not rest on the tailnet peer gate. A request
+without a ticket never reaches the daemon.
+
+Refusals, each writing no device record:
+
+- a used link: `register.start` refuses a spent ticket, and a second finish
+  finds no open registration;
+- an expired link, or a ticket dated more than a minute ahead or valid longer
+  than 10 minutes;
+- a finish after a daemon restart (registrations are held in memory only);
+- a finish that fails any check: it consumes the open registration, the
+  ticket stays unspent, and reloading the link starts again;
+- a ticket for another device name;
+- a credential that is not ES256.
+
+The ticket is spent before the record is written, so a failed write leaves
+a spent ticket and no device; run `devices add` again.
 
 ### Tickets
 
@@ -205,7 +261,7 @@ daemon socket directly, skipping the CLI, has no ticket.
 Revoke deletes the device record first, then every `.presence` whose method
 names it, under the device store lock, so an approval being verified cannot
 mint after the sweep. A grant whose removal failed is still refused: the hook
-re-reads the device record. Revoke by another enrolled device is PR2b-2.
+re-reads the device record. Revoke by another enrolled device is PR2b-3.
 
 ### Recovery
 
@@ -215,6 +271,13 @@ grant key makes every sealed record, request and grant unreadable; enrol
 again.
 
 ## Not covered
+
+- Approving a request from the phone's browser, Slack delivery of links,
+  device-authorised revoke and the `approve` ceremony-replacement fix are
+  #8878 PR2b-3.
+- A real-device enrolment (Touch ID in Safari on the Studio, Face ID on an
+  iPhone) is a manual owner check; the automated smoke uses a software
+  passkey (`crates/trusty-mpm/tests/presence_enrol_smoke_8878.rs`).
 
 - `tm run` launches are still not bound; a launch record without a tmux
   session changes the record format, and is deferred to #8878 PR2b-1.
