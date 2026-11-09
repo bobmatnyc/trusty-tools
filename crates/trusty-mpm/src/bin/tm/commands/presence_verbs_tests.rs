@@ -117,7 +117,7 @@ fn devices_add_and_revoke_refuse_without_presence_8878() {
         PresenceOutcome::Unavailable("no GUI session".to_owned()),
     ] {
         let fake = Fake::new(outcome);
-        assert!(add(&fake, &key, "iphone", &call).is_err());
+        assert!(add(&fake, &key, "iphone", Some(ORIGIN), &call).is_err());
         assert!(revoke(&fake, &key, &root, "cred-A").is_err());
     }
     assert_eq!(*called.borrow(), 0, "no daemon call without presence");
@@ -131,19 +131,56 @@ fn devices_add_and_revoke_refuse_without_presence_8878() {
     );
 }
 
+/// The console origin the enrol link points at in these tests.
+const ORIGIN: &str = "https://studio.example.ts.net";
+
+/// #8878 PR2b-2: the link carries the ticket the daemon accepted.
 #[test]
-fn devices_add_opens_a_registration_after_presence_8878() {
+fn devices_add_prints_the_enrol_link_after_presence_8878() {
+    use base64::Engine as _;
     let key = || Ok(test_key());
+    let sent = RefCell::new(Value::Null);
     let call = |method: &str, params: Value| {
         assert_eq!(method, "mpm.presence.register.start");
         assert_eq!(params["ticket"]["subject"], "iphone");
         assert_eq!(params["ticket"]["purpose"], "enrol");
+        *sent.borrow_mut() = params["ticket"].clone();
         Ok(json!({ "options": { "publicKey": {} } }))
     };
     let fake = Fake::new(PresenceOutcome::Granted);
-    let printed = add(&fake, &key, "iphone", &call).expect("add");
-    assert!(printed.contains("publicKey"));
+    let url = add(&fake, &key, "iphone", Some(ORIGIN), &call).expect("add");
     assert_eq!(fake.prompts.get(), 1);
+    let (page, fragment) = url.split_once('#').expect("fragment");
+    assert_eq!(page, format!("{ORIGIN}/tools/presence/enrol/"));
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(fragment)
+        .expect("base64url");
+    let ticket: Value = serde_json::from_slice(&raw).expect("json");
+    assert_eq!(ticket, sent.into_inner());
+    let refused = |_: &str, _: Value| Err("the ticket was refused".to_owned());
+    assert!(add(&fake, &key, "iphone", Some(ORIGIN), &refused).is_err());
+}
+
+/// #8878 PR2b-2 (Architect Q4): with the switch off, no prompt, no ticket,
+/// no daemon call, and a message naming the switch.
+#[test]
+fn devices_add_fails_closed_while_browser_enrol_is_off_8878() {
+    let minted = RefCell::new(0);
+    let key = || {
+        *minted.borrow_mut() += 1;
+        Ok(test_key())
+    };
+    let call = |_: &str, _: Value| -> Result<Value, String> {
+        panic!("no daemon call while browser enrol is off")
+    };
+    let fake = Fake::new(PresenceOutcome::Granted);
+    let err = add(&fake, &key, "iphone", None, &call).expect_err("refused");
+    assert!(
+        err.to_string().contains("enrolment via browser is not enabled"),
+        "{err}"
+    );
+    assert_eq!(fake.prompts.get(), 0);
+    assert_eq!(*minted.borrow(), 0);
 }
 
 #[test]

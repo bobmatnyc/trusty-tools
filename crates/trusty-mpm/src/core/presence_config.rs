@@ -4,10 +4,14 @@
 //! key. The 120-minute idle window is fixed in `presence::IDLE_LIMIT`, not a
 //! key. #8878 PR2b-1b adds the WebAuthn RP id and origin, with no default:
 //! missing either leaves the device verifier unavailable (fail-closed).
+//! #8878 PR2b-2 adds `browser_enrol`, default off until owner decision D24.
 //! What: [`PresenceConfig::request_ttl`] is the configured TTL, clamped to
 //! 1 minute .. `presence_request::MAX_TTL`; a clamp is logged. `rp_id` and
 //! `rp_origin` feed `presence_webauthn::WebauthnVerifier::from_config`.
-//! Test: `the_request_ttl_defaults_to_five_minutes_and_is_clamped_8878`.
+//! [`PresenceConfig::enrol_origin`] is where the browser enrol page lives,
+//! or `None` while `browser_enrol` is off.
+//! Test: `the_request_ttl_defaults_to_five_minutes_and_is_clamped_8878`,
+//! `browser_enrol_is_off_by_default_and_needs_an_origin_8878`.
 
 use std::time::Duration;
 
@@ -28,6 +32,9 @@ pub struct PresenceConfig {
     pub rp_id: Option<String>,
     /// The one origin approvals may come from, `https://<rp_id>`; no default.
     pub rp_origin: Option<String>,
+    /// #8878 PR2b-2: serve the browser enrol page and let `tm presence
+    /// devices add` print its link. Off until owner decision D24.
+    pub browser_enrol: bool,
 }
 
 impl Default for PresenceConfig {
@@ -36,11 +43,20 @@ impl Default for PresenceConfig {
             request_ttl_minutes: DEFAULT_REQUEST_TTL_MINUTES,
             rp_id: None,
             rp_origin: None,
+            browser_enrol: false,
         }
     }
 }
 
 impl PresenceConfig {
+    /// The origin the browser enrol page is served on: `rp_origin` without a
+    /// trailing `/`, or `None` while `browser_enrol` is off or `rp_origin`
+    /// is unset (fail-closed).
+    pub fn enrol_origin(&self) -> Option<&str> {
+        let origin = self.rp_origin.as_deref()?.trim_end_matches('/');
+        (self.browser_enrol && !origin.is_empty()).then_some(origin)
+    }
+
     /// The request TTL, clamped to 1 minute .. [`MAX_TTL`].
     pub fn request_ttl(&self) -> Duration {
         let max = MAX_TTL.as_secs() / 60;
@@ -78,5 +94,22 @@ mod tests {
             ..PresenceConfig::default()
         };
         assert_eq!(huge.request_ttl(), MAX_TTL);
+    }
+
+    #[test]
+    fn browser_enrol_is_off_by_default_and_needs_an_origin_8878() {
+        let parsed: crate::core::config::MpmConfig =
+            toml::from_str("[presence]\nrp_origin = \"https://s.ts.net/\"\n").expect("parse");
+        assert_eq!(parsed.presence.enrol_origin(), None, "off by default");
+        let on = PresenceConfig {
+            browser_enrol: true,
+            ..parsed.presence
+        };
+        assert_eq!(on.enrol_origin(), Some("https://s.ts.net"));
+        let no_origin = PresenceConfig {
+            browser_enrol: true,
+            ..PresenceConfig::default()
+        };
+        assert_eq!(no_origin.enrol_origin(), None);
     }
 }

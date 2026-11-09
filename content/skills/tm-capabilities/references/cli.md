@@ -143,7 +143,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
 - `presence` — Prove you are at the Studio, so the Architect may write trust anchors
   - `devices` — Enrolled presence devices (passkeys)
-    - `add` — Start enrolling a passkey device (INCOMPLETE until #8878 PR2b-2: no browser path finishes the ceremony yet)
+    - `add` — Enrol a passkey device through a one-time browser link
     - `list` — List enrolled devices
     - `revoke` — Revoke a device: removes its record and every grant it approved. Needs Touch ID or the login password at the Studio first
   - `local` — Approve the Architect's trust-anchor writes with Touch ID or the login password at this Mac

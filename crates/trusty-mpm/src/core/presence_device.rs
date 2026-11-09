@@ -290,6 +290,26 @@ fn spend_ticket(root: &Path, ticket: &Ticket, now: u64) -> Result<(), DeviceErro
     .map_err(DeviceError::Write)
 }
 
+/// Whether `ticket` already enrolled a device under `root`.
+///
+/// Why: #8878 PR2b-2, Architect Q3 — the enrol link is single-use, so a
+/// second `register.start` on a spent ticket must refuse, not only the
+/// second finish.
+/// What: true when the spent marker exists, when its nonce is not a safe
+/// token, or when its state cannot be read (fail-closed); false only for a
+/// marker that is definitely absent.
+/// Test: `a_spent_ticket_is_refused_at_start_and_finish_8878`.
+pub fn ticket_spent(root: &Path, ticket: &Ticket) -> bool {
+    if !valid_token(&ticket.nonce, 64) {
+        return true;
+    }
+    let marker = devices_dir(root).join(format!("{SPENT_PREFIX}{}", ticket.nonce));
+    match std::fs::symlink_metadata(marker) {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// An exclusive hold on the device store; dropping it releases the lock.
 #[derive(Debug)]
 pub struct StoreLock {

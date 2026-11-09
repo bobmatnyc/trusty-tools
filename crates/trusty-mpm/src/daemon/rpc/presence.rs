@@ -13,8 +13,11 @@
 //! grant through `verify_and_grant`), `register.start` / `register.finish`
 //! (enrol behind a ticket), `devices.list`, `devices.revoke` (behind a
 //! ticket). Refusals carry `data.exit` 1; a missing key, home or verifier
-//! is exit 3; bad params exit 2.
-//! Test: `presence_tests.rs` beside this file.
+//! is exit 3; bad params exit 2. #8878 PR2b-2: `register.start` refuses a
+//! spent ticket, and `status` names the browser enrol origin (`null` while
+//! `[presence] browser_enrol` is off), which trusty-console reads before it
+//! serves the enrol page.
+//! Test: `presence_tests.rs` and `presence_enrol_tests.rs` beside this file.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +29,7 @@ use serde_json::{Value, json};
 use trusty_common::uds::server::{RpcError, RpcRouter};
 
 use crate::core::presence_device::{self, Device};
-use crate::core::presence_enrol::Ticket;
+use crate::core::presence_enrol::{Ticket, TicketRefusal};
 use crate::core::presence_key::{GrantKey, KeySource, UNTRUSTED_NOTICE, acl_verified};
 use crate::core::presence_request::{self, NewRequest};
 use crate::core::presence_verify::{Assertion, Ceremonies, VerifyEnv, verify_and_grant};
@@ -36,6 +39,10 @@ use crate::daemon::error::{CODE_UNAVAILABLE, CODE_UNPROCESSABLE};
 #[cfg(test)]
 #[path = "presence_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "presence_enrol_tests.rs"]
+mod enrol_tests;
 
 /// Every method this family serves.
 pub const METHODS: [&str; 8] = [
@@ -70,6 +77,7 @@ pub struct PresenceService {
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     ceremonies: Ceremonies,
     verifier: Result<WebauthnVerifier, WebauthnRefusal>,
+    enrol_origin: Option<String>,
 }
 
 impl PresenceService {
@@ -90,7 +98,15 @@ impl PresenceService {
             now,
             ceremonies: Ceremonies::new(),
             verifier,
+            enrol_origin: None,
         }
+    }
+
+    /// The browser enrol origin `status` reports (#8878 PR2b-2); `None`
+    /// keeps the console's enrol page unserved.
+    pub fn with_enrol_origin(mut self, origin: Option<String>) -> Self {
+        self.enrol_origin = origin;
+        self
     }
 
     /// This daemon's service: `~/.trusty-mpm`, the ambient key source (read
@@ -101,6 +117,7 @@ impl PresenceService {
             .map(|h| h.join(".trusty-mpm"));
         let source = root.as_deref().map(KeySource::ambient);
         let config = crate::core::config::MpmConfig::load_default().presence;
+        let enrol_origin = config.enrol_origin().map(str::to_owned);
         Self::new(
             root,
             Box::new(move || source.as_ref()?.load().ok().flatten()),
@@ -113,6 +130,7 @@ impl PresenceService {
             Box::new(|| crate::core::presence::unix_secs(std::time::SystemTime::now())),
             WebauthnVerifier::from_config(&config),
         )
+        .with_enrol_origin(enrol_origin)
     }
 
     fn root(&self) -> Result<&std::path::Path, Failure> {
@@ -144,18 +162,21 @@ impl PresenceService {
                 "verifier": self.verifier.as_ref().err().map_or("ready".to_owned(), ToString::to_string),
                 "acl_verified": acl_verified(),
                 "notice": UNTRUSTED_NOTICE,
+                "enrol_origin": self.enrol_origin,
             })),
             "approve" => self.approve(&parse::<ById>(params)?.request_id),
             "verify" => self.verify(parse(params)?),
             "register.start" => {
                 let p: WithTicket = parse(params)?;
-                let options = self
-                    .verifier()?
+                let verifier = self.verifier()?;
+                // #8878 PR2b-2: the enrol link is single-use (Architect Q3).
+                if presence_device::ticket_spent(self.root()?, &p.ticket) {
+                    return Err(refused(TicketRefusal::Spent));
+                }
+                let options = verifier
                     .start_registration(&self.key()?, &p.ticket, (self.now)())
                     .map_err(refused)?;
-                Ok(
-                    json!({ "options": options, "incomplete": "the browser leg arrives with PR2b-2" }),
-                )
+                Ok(json!({ "options": options }))
             }
             "register.finish" => {
                 let p: Finish = parse(params)?;

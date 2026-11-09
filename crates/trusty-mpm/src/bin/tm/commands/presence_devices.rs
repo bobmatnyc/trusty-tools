@@ -4,9 +4,10 @@
 //! lost one from the Studio. Enrol and revoke need fresh local presence:
 //! the CLI asks Touch ID first and only then mints the sealed ticket the
 //! store and the daemon demand, so a caller that skips the CLI has no ticket.
-//! What: [`add`] prompts, mints an enrol ticket and asks the daemon to open
-//! the registration; the options it prints need a browser, which arrives
-//! with PR2b-2 (Architect Q4: shipped labelled incomplete). [`list`] reads
+//! What: [`add`] refuses before any prompt while `[presence] browser_enrol`
+//! is off (#8878 PR2b-2, Architect Q4); otherwise it prompts, mints an enrol
+//! ticket, checks with the daemon that the registration opens, and prints
+//! the one-time enrol link (single use, 10 minutes, Architect Q3). [`list`] reads
 //! the sealed records. [`revoke`] prompts, mints a revoke ticket and revokes
 //! locally (record first, then every grant the device approved).
 //! Test: `presence_verbs_tests.rs`.
@@ -17,40 +18,53 @@ use anyhow::Context as _;
 use serde_json::json;
 use trusty_mpm::core::presence;
 use trusty_mpm::core::presence_device;
-use trusty_mpm::core::presence_enrol::{TicketPurpose, mint_ticket};
+use trusty_mpm::core::presence_enrol::{TICKET_TTL, TicketPurpose, enrol_url, mint_ticket};
 use trusty_mpm::core::presence_key::{GrantKey, UNTRUSTED_NOTICE};
 use trusty_mpm::core::presence_local::Authenticator;
 
 use crate::commands::presence::prompt;
 use crate::commands::presence_client::Call;
 
-/// The label `add` prints until PR2b-2 ships the browser leg.
-pub(crate) const ADD_INCOMPLETE: &str = "INCOMPLETE (#8878 PR2b-2): no browser path finishes \
-     this enrolment yet; the options below are what the console page will answer";
+/// What `add` says while the browser enrol page is switched off.
+pub(crate) const ENROL_DISABLED: &str = "enrolment via browser is not enabled: \
+     `[presence] browser_enrol` is off (owner decision D24) or `rp_origin` is unset; \
+     no prompt was shown and no ticket was minted";
 
 fn now() -> u64 {
     presence::unix_secs(std::time::SystemTime::now())
 }
 
-/// Prompt, mint an enrol ticket for `name`, open the registration.
+/// Prompt, mint an enrol ticket for `name`, print the one-time enrol link.
 ///
+/// Why: #8878 PR2b-2 — the passkey is created in a browser on the device,
+/// at `enrol_origin` (the console's tailnet origin, which WebAuthn binds).
+/// What: `enrol_origin` `None` (switch off) fails before any prompt. Then
+/// Touch ID, the ticket, a `register.start` that proves the daemon will open
+/// the registration, and the link from `enrol_url`, which is returned.
 /// Test: `devices_add_and_revoke_refuse_without_presence_8878`,
-/// `devices_add_opens_a_registration_after_presence_8878`.
+/// `devices_add_prints_the_enrol_link_after_presence_8878`,
+/// `devices_add_fails_closed_while_browser_enrol_is_off_8878`.
 pub(crate) fn add(
     auth: &dyn Authenticator,
     key: &dyn Fn() -> anyhow::Result<GrantKey>,
     name: &str,
+    enrol_origin: Option<&str>,
     call: Call<'_>,
 ) -> anyhow::Result<String> {
+    let origin = enrol_origin.context(ENROL_DISABLED)?;
     prompt(auth, &format!("enrol the presence device \"{name}\""))?;
     let ticket =
         mint_ticket(&key()?, TicketPurpose::Enrol, name, now()).map_err(anyhow::Error::msg)?;
-    let reply = call("mpm.presence.register.start", json!({ "ticket": ticket }))
+    call("mpm.presence.register.start", json!({ "ticket": ticket }))
         .map_err(anyhow::Error::msg)
         .context("the daemon refused to open the registration")?;
-    let options = serde_json::to_string_pretty(&reply["options"])?;
-    println!("{ADD_INCOMPLETE}\n{options}\n{UNTRUSTED_NOTICE}");
-    Ok(options)
+    let url = enrol_url(origin, &ticket).map_err(anyhow::Error::msg)?;
+    println!(
+        "Open this link on the device to enrol \"{name}\". It works once and expires in {} \
+         minutes:\n{url}\n{UNTRUSTED_NOTICE}",
+        TICKET_TTL.as_secs() / 60
+    );
+    Ok(url)
 }
 
 /// Print every enrolled device.
