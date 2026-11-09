@@ -83,9 +83,11 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 
 ### Simplicity
 
-Prefer the simplest working solution; simplify where you can (Wirth, "A Plea for Lean Software").
-Add complexity only if nothing simpler works and the user OKs the new surface; it must be
-"intentional and planned, never accidental" (owner, 2026-11-08).
+- Name the simplest option first in every clearance, relay, brief and decision
+  option, and look for ways to simplify (Wirth's lean-software creed).
+- An option that adds a component, service, config surface, state or
+  abstraction states the surface it adds and why nothing simpler works, and
+  needs the owner's informed OK. Add complexity by plan, never by accident.
 
 ### Completion Standard
 
