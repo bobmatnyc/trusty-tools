@@ -56,3 +56,6 @@ tracing-test = "0.2"
 # endpoint without hitting Google, matching the trusty-channels /
 # trusty-git-analytics precedent.
 wiremock = { workspace = true }
+# #10873: `credential-test-sandbox` is the shared credential test sandbox
+# (#9123); it mutates the process environment, so it is dev-only.
+trusty-common = { path = "../trusty-common", version = "0.67", features = ["credential-test-sandbox"] }

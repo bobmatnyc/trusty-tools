@@ -277,6 +277,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use serial_test::serial;
     use std::collections::HashMap;
+    use trusty_common::credentials::test_sandbox::CredentialSandbox;
 
     fn test_client() -> BaseClient {
         let dir = std::env::temp_dir().join(format!("gw-accounts-svc-{}", uuid::Uuid::new_v4()));
@@ -494,23 +495,13 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn add_account_readonly_without_profile_keeps_default_token() {
-        // A temp HOME and no client env: a regression fails fast on missing
-        // credentials instead of waiting on a real consent.
-        let _guard = EnvGuard::capture(&[
-            "HOME",
-            "GOOGLE_OAUTH_CLIENT_ID",
-            "GOOGLE_OAUTH_CLIENT_SECRET",
-        ]);
-        let home = fresh_temp_home("add-account-ro-default");
-        // SAFETY: serialised via #[serial]; EnvGuard restores on drop.
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::remove_var("GOOGLE_OAUTH_CLIENT_ID");
-            std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET");
-        }
-        let dir = std::env::temp_dir().join(format!("gw-ro-default-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tokens.json");
+        // #10873: the credential sandbox (#9123) gives a temp HOME and clears
+        // the client env, so a regression fails fast on missing credentials
+        // instead of waiting on a real consent.
+        let mut sandbox = CredentialSandbox::enter();
+        sandbox.remove("GOOGLE_OAUTH_CLIENT_ID");
+        sandbox.remove("GOOGLE_OAUTH_CLIENT_SECRET");
+        let path = sandbox.root().join("tokens.json");
         let client = BaseClient::for_test(TokenStorage::with_path(path.clone()));
         let mut map = HashMap::new();
         map.insert(
