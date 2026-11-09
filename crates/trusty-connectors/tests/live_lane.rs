@@ -26,7 +26,12 @@
 //!
 //! 1. Mint the read-only profile once (ok-T20):
 //!    `trusty-gworkspace-mcp setup --profile r-1mc-readonly --scopes readonly --no-default`.
-//! 2. Run, with the fixture folder's Drive ID:
+//! 2. Record the gdocs capability-grant review once (#10824): add a
+//!    `[[gdocs_grant]]` row with `store = "lane-docs"`, `account` set to the
+//!    profile and a non-blank `review` to
+//!    `$HOME/.config/trusty-connectors/config.toml`. Without it every Docs
+//!    import is `policy_refused` and the lane fails.
+//! 3. Run, with the fixture folder's Drive ID:
 //!    `OKF_LIVE_PROFILE=r-1mc-readonly OKF_LIVE_DRIVE_FOLDER=<folder id>
 //!    cargo test -p trusty-connectors --test live_lane -- --nocapture --test-threads=1`
 //!
@@ -640,6 +645,8 @@ fn lane_steps_pass_against_the_fixture_fake() {
     let (fake, h) = (FakeGoogle::start(), Home::new(Some("ro")));
     fixtures(&fake);
     fake.with(|st| st.tokeninfo_scope = Some(READONLY_SCOPES.join(" ")));
+    // #10824: gdocs refuses any Drive request without a passed grant review.
+    h.docs_grant(DOCS_STORE, "ro");
     let lane = Lane::new(&h.home, "ro", "F", Some(&fake.url));
     run_lane(&lane).unwrap();
     for seen in fake.seen() {
