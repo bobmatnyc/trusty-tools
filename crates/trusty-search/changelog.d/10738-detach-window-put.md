@@ -1,0 +1,2 @@
+Fixed
+- A put (`search.index.file.put`, or a watcher or reconcile write) made while a staged reindex had the corpus detached is now refused with an error instead of answering `indexed: true` (#10738). The abort and the promotion take the corpus out and then delete, rename and reopen files with no lock held; a write in that span landed in memory only and was lost from the corpus. The refusal lasts until the swap re-attaches a corpus or quarantines the index; retry the put after it.

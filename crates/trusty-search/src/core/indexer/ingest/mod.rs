@@ -441,6 +441,9 @@ impl CodeIndexer {
                 self.index_id
             );
         }
+        // #10738: a staged swap's detach window holds no corpus; the write
+        // would land in memory only and still answer success.
+        self.refuse_if_corpus_detached()?;
         // #10159: active from here, embed included, so the ticker's quiet
         // rebuild cannot fire mid-write.
         let _active_write = self.begin_active_write();
