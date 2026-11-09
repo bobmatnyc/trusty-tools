@@ -1,8 +1,9 @@
 """fleet_poll_io.py — fleet-poll.py's tmux, log, event and host reads (#10571 Phase 2 split).
 
 Why: fleet-poll.py sat at the 500-SLOC cap; its I/O half moves here unchanged.
-What: TmuxError, log, tmux, socket_dir, workspace_servers, list_panes, capture, capture_pane,
-send_to_architect, read_events, swap_used_mb, host_alerts and acquire_poll_lock. Every name these
+What: TmuxError, log, tmux, socket_dir, workspace_servers, list_panes, is_architect_pane, capture, capture_pane,
+send_to_architect, read_events, swap_used_mb, swap_probe (used, swap-in/out, OS memory pressure; ar-T8a), host_alerts
+and acquire_poll_lock. Every name these
 functions use from the poller (settings, sibling functions) is read through `P`, the late-bound view fleet-poll.py passes to
 bind(), so rebinding `fleet-poll.tmux` or `fleet-poll.LOG` still steers them, as before the split.
 Test: tests/test_fleet_poll.py, tests/test_fleet_poll_workspace_servers.py (through fleet-poll.py)
@@ -116,6 +117,12 @@ def list_panes():
     return panes
 
 
+def is_architect_pane(p):
+    """#10101: the Architect's pane is on its own (default) server; a same-named
+    session on a workspace server is never it."""
+    return p["session"] == P.ARCHITECT and not p.get("server")
+
+
 def _rows(out, server):
     panes = []
     for line in out.splitlines():
@@ -188,21 +195,66 @@ def swap_used_mb():
     return (mi.get("SwapTotal", 0) - mi.get("SwapFree", 0)) / 1024
 
 
+PSI_FULL_CRITICAL = 10.0   # Linux: /proc/pressure/memory "full avg10" at or above this is critical
+# #10857: the previous cycle's (ins, outs). Swap activity needs a previous sample, so the first cycle after a
+# start, and every --once run, reads activity as unknown (logged as info, never an alert).
+_SWAP_PREV = []
+
+
+def _swap_counters():
+    """(swap-ins, swap-outs) since boot: vm_stat on macOS, /proc/vmstat elsewhere. Raises on no reading."""
+    if sys.platform == "darwin":
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+        ins, outs = re.search(r"Swapins:\s+(\d+)", out), re.search(r"Swapouts:\s+(\d+)", out)
+        if not (ins and outs):
+            raise ValueError("vm_stat has no Swapins/Swapouts line")
+        return int(ins.group(1)), int(outs.group(1))
+    with open("/proc/vmstat") as f:
+        vm = dict(l.split()[:2] for l in f if len(l.split()) >= 2)
+    return int(vm["pswpin"]), int(vm["pswpout"])
+
+
+def _memory_pressure():
+    """"critical" | "warn" | "normal" from the OS. Raises when the OS gives no reading."""
+    if sys.platform == "darwin":
+        out = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        return {"1": "normal", "2": "warn", "4": "critical"}[out]
+    with open("/proc/pressure/memory") as f:
+        full = next(l for l in f if l.startswith("full"))
+    avg10 = float(re.search(r"avg10=([\d.]+)", full).group(1))
+    return "critical" if avg10 >= PSI_FULL_CRITICAL else "normal"
+
+
+def swap_probe():
+    """{"used_mb", "counters", "pressure", "errors"} for this host (ar-T8a). A part that fails is None and its
+    error is listed: a failed probe is an unknown reading, never a critical one.
+    Test: test_a_pressure_probe_error_neither_invents_critical_nor_drops_warn"""
+    r = {"used_mb": None, "counters": None, "pressure": None, "errors": []}
+    for key, fn, name in (("used_mb", P.swap_used_mb, "swap used"), ("counters", P._swap_counters, "swap-in/out"),
+                          ("pressure", P._memory_pressure, "memory pressure")):
+        try:
+            r[key] = fn()
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, AttributeError,
+                StopIteration, IndexError) as e:
+            r["errors"].append(f"{name} unknown: {type(e).__name__}")
+    return r
+
+
 def host_alerts(now):
-    out = []
-    load1, load5, load15 = os.getloadavg()
+    """load, disk and swap alerts with a severity and a bucket (fleet_alert_dedupe.py, ar-T8a). Leftover or
+    unknown-activity swap comes back at severity "info", which the cycle logs and never alerts on.
+    Test: test_load_and_disk_carry_severity_and_bucket"""
+    out, ad = [], P.fleet_classify.alert_dedupe
     cores, factor = os.cpu_count() or 1, float(os.environ.get("LOAD_FACTOR", P.LOAD_FACTOR_DEFAULT))
-    if load5 > factor * cores:
-        out.append(P.alert("load", "load", f"load {load1:.1f}/{load5:.1f}/{load15:.1f} "
-                           f"(5m > {factor}x{cores} cores)", now=now))
     du = shutil.disk_usage("/")
-    pct = 100 * du.used / du.total
-    if pct > P.DISK_HIGH:
-        out.append(P.alert("disk", "disk", f"root disk {pct:.0f}% used", now=now))
-    try:
-        swap = P.swap_used_mb()
-    except (OSError, subprocess.SubprocessError, ValueError):
-        swap = None
-    if swap:
-        out.append(P.alert("swap", "swap", f"swap in use: {swap:.0f} MB", now=now))
+    reading = P.swap_probe()
+    prev = _SWAP_PREV[-1] if _SWAP_PREV else None
+    if reading.get("counters"):
+        _SWAP_PREV[:] = [reading["counters"]]
+    for a in (ad.load_alert(P.alert, os.getloadavg(), cores, factor, now),
+              ad.disk_alert(P.alert, 100 * du.used / du.total, P.DISK_HIGH, now),
+              ad.swap_alert(P.alert, reading, prev, now)):
+        if a:
+            out.append(a)
     return out

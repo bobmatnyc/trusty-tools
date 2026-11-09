@@ -5,7 +5,8 @@
 //! `bob-kb/_state/ingest.md`). That is neither idempotent nor resumable — a
 //! second pass re-reads everything and duplicates whatever it re-summarises.
 //! These four tools make ingestion mechanical and convergent: the engine in
-//! `trusty-kb::okg` owns the ledger and the entity writes, and the assistant
+//! `trusty_okf::build` (reached through `crate::kb::okg`) owns the ledger and
+//! the entity writes, and the assistant
 //! stays free to do the part that actually needs a model — distilling those
 //! ingested items into people/organizations/events entities.
 //!
@@ -34,10 +35,10 @@ pub mod sources;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::kb::roots::{Roots, assert_within};
+use crate::kb::store::KbStore;
 use serde_json::{Value, json};
-use trusty_kb::roots::{Roots, assert_within};
-use trusty_kb::schema::Profile;
-use trusty_kb::store::KbStore;
+use trusty_okf::profile::Profile;
 
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
@@ -90,8 +91,8 @@ pub(super) fn with_root(mut props: Value) -> Value {
 
 /// The knowledge directory holding one KB tree per assistant.
 ///
-/// Mirrors `trusty-kb`'s own default so both binaries address the same trees:
-/// `$KB_KNOWLEDGE_DIR`, else `<home>/.trusty-agents/knowledge`.
+/// The same default `stores::status` uses, so every surface addresses the
+/// same trees: `$KB_KNOWLEDGE_DIR`, else `<home>/.trusty-agents/knowledge`.
 pub(crate) fn knowledge_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("KB_KNOWLEDGE_DIR") {
         return PathBuf::from(dir);
@@ -108,9 +109,9 @@ pub(crate) fn knowledge_dir() -> PathBuf {
 ///
 /// Why: `root` is model-supplied input. Without the confinement check an
 /// ingest could be pointed at any directory on disk and rewrite it — the same
-/// hole `kb_convert_tree` was fixed for in trusty-kb. Resolution precedence
-/// matches trusty-kb exactly so a tree addressed here is the same tree the KB
-/// MCP server sees.
+/// hole `kb_convert_tree` was fixed for in the retired trusty-kb. Resolution
+/// precedence is [`Roots::resolve`]'s, so every OKG tool addresses the same
+/// tree for the same arguments.
 /// What: explicit `root` → `agent`-mapped tree → service default, then asserts
 /// the result stays under the knowledge directory.
 /// Test: `resolve_store_rejects_out_of_tree_root`.
@@ -163,7 +164,7 @@ pub(super) fn require_str<'a>(args: &'a Value, key: &str) -> anyhow::Result<&'a 
 /// argument. Resolved per call so an operator can widen the list without
 /// restarting the agent.
 /// Test: `config_defaults_to_home`, `docstore_tool_rejects_credential_dir`.
-pub(crate) fn docstore_policy() -> trusty_kb::okg::policy::DocStorePolicy {
+pub(crate) fn docstore_policy() -> trusty_okf::build::policy::DocStorePolicy {
     let home = config::home_dir().unwrap_or_else(|| PathBuf::from("."));
     config::load().policy(&home)
 }

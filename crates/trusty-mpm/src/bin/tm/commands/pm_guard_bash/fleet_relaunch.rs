@@ -43,7 +43,24 @@ use super::{Decoded, command_substitutions, decode_ansi_c, unclassifiable_comman
 #[path = "fleet_relaunch_argv.rs"]
 mod argv;
 
+pub(crate) use argv::Verbs;
 use argv::{Reading, cargo_run_argvs, read_tm_args, shell_words};
+
+/// The `tm fleet relaunch` subcommand path.
+const RELAUNCH: Verbs = &[&["fleet", "relaunch"]];
+
+/// How a command reaches a `tm` verb a floor names (#8878 PR2a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VerbHit {
+    /// The command runs it.
+    Runs,
+    /// A word the shell expands sits where the subcommand is chosen.
+    Unresolved(String),
+    /// The command names `tm` and feeds a program text the guard cannot read.
+    Opaque(&'static str),
+    /// The command names `tm` and cannot be lexed (the text, trimmed).
+    Unreadable(String),
+}
 
 /// The rule name recorded with a `tm fleet relaunch` deny.
 pub(crate) const FLEET_RELAUNCH_RULE: &str = "fleet-relaunch";
@@ -75,19 +92,34 @@ struct Program {
 /// `an_opaque_route_in_a_command_naming_tm_denies`,
 /// `other_tm_commands_and_mentions_pass`.
 pub(crate) fn evaluate_fleet_relaunch(command: &str) -> Option<String> {
-    // #10033 critic r1: read once on the root, so `T=tm; echo $($T …)` counts.
-    let named = names_tm(&without_data_bodies(command));
-    shell(command, 0, named)
+    find_tm_verb(command, RELAUNCH).map(|hit| match hit {
+        VerbHit::Runs => denied(),
+        VerbHit::Unresolved(word) => unresolved(&word),
+        VerbHit::Opaque(why) => opaque(why),
+        VerbHit::Unreadable(text) => unreadable(&text),
+    })
 }
 
-/// Read `command` as shell text; the first deny wins. `named` says whether
+/// How `command` reaches one of `verbs`, read as the module doc describes.
+///
+/// Why: #8878 PR2a — the presence verbs need the walk `tm fleet relaunch`
+/// has, so one walk catches every spelling for both.
+/// Test: `every_spelling_of_tm_fleet_relaunch_is_denied`,
+/// `every_spelling_of_a_presence_verb_is_found_8878`.
+pub(crate) fn find_tm_verb(command: &str, verbs: Verbs) -> Option<VerbHit> {
+    // #10033 critic r1: read once on the root, so `T=tm; echo $($T …)` counts.
+    let named = names_tm(&without_data_bodies(command));
+    shell(command, 0, named, verbs)
+}
+
+/// Read `command` as shell text; the first hit wins. `named` says whether
 /// the root command names `tm`.
-fn shell(command: &str, depth: usize, named: bool) -> Option<String> {
+fn shell(command: &str, depth: usize, named: bool, verbs: Verbs) -> Option<VerbHit> {
     let command = without_data_bodies(command);
     let named = named || names_tm(&command);
     // #10033 fail-closed: past the depth bound, a command naming `tm` denies.
     if depth > MAX_DEPTH {
-        return named.then(|| unreadable(command.trim()));
+        return named.then(|| VerbHit::Unreadable(command.trim().to_owned()));
     }
     // #10033: a command the guard cannot read could run `tm fleet relaunch`;
     // judge what a `$'…'` quote spells (#9001). The universal #6660 floor
@@ -95,22 +127,22 @@ fn shell(command: &str, depth: usize, named: bool) -> Option<String> {
     if unclassifiable_command(&command).is_some() {
         return match decode_ansi_c(&command) {
             Decoded::Text(text) if unclassifiable_command(&text).is_none() => {
-                shell(&text, depth, named)
+                shell(&text, depth, named, verbs)
             }
-            _ => named.then(|| unreadable(command.trim())),
+            _ => named.then(|| VerbHit::Unreadable(command.trim().to_owned())),
         };
     }
     for seg in segments(&command) {
         let Some(argv) = shlex::split(seg.text.trim()) else {
             if names_tm(&seg.text) {
-                return Some(unreadable(seg.text.trim()));
+                return Some(VerbHit::Unreadable(seg.text.trim().to_owned()));
             }
             continue;
         };
         let read = shell_words(&seg.text, with_dynamics(&seg.text, argv));
         let texts: Vec<String> = read.words.iter().map(|w| w.text.clone()).collect();
         for program in positions(&texts) {
-            if let Some(reason) = judge_program(&read.words, &texts, &program, named) {
+            if let Some(reason) = judge_program(&read.words, &texts, &program, named, verbs) {
                 return Some(reason);
             }
             // #10033 critic r1: `| sh`, `bash <<<`, `xargs -I{}`, `parallel`.
@@ -118,10 +150,10 @@ fn shell(command: &str, depth: usize, named: bool) -> Option<String> {
             let names =
                 |route| named && (route != FedRoute::XargsReplace || replaces_tm(&texts, &program));
             if let Some(why) = fed_route(&texts, program.pos, fed, &names) {
-                return Some(opaque(why));
+                return Some(VerbHit::Opaque(why));
             }
             for text in runner_texts(&texts, program.pos) {
-                if let Some(reason) = shell(&text, depth + 1, named) {
+                if let Some(reason) = shell(&text, depth + 1, named, verbs) {
                     return Some(reason);
                 }
             }
@@ -129,7 +161,7 @@ fn shell(command: &str, depth: usize, named: bool) -> Option<String> {
     }
     command_substitutions(&command)
         .iter()
-        .find_map(|body| shell(body.text(), depth + 1, named))
+        .find_map(|body| shell(body.text(), depth + 1, named, verbs))
 }
 
 /// The program words of `texts` ([`program_positions`]), plus the utility
@@ -191,7 +223,7 @@ fn replaces_tm(texts: &[String], program: &Program) -> bool {
     code || replaced
 }
 
-/// The deny for `program`, if it runs `tm fleet relaunch`.
+/// How `program` reaches one of `verbs`, if it does.
 ///
 /// What: a `tm`/`trusty-mpm` word (any case: APFS runs `TM` as `tm`) or a
 /// `cargo run` naming one is read by [`read_tm_args`]. A program word the
@@ -202,7 +234,8 @@ fn judge_program(
     texts: &[String],
     program: &Program,
     named: bool,
-) -> Option<String> {
+    verbs: Verbs,
+) -> Option<VerbHit> {
     let dynamic = expanded_program(&words[program.pos]);
     let argvs = if dynamic || is_tm(&program.base) {
         vec![tm_operands(words, texts, program)]
@@ -211,11 +244,13 @@ fn judge_program(
     } else {
         return None;
     };
-    argvs.iter().find_map(|args| match read_tm_args(args) {
-        Reading::Relaunch => Some(denied()),
-        Reading::Unresolved(word) if !dynamic || named => Some(unresolved(&word)),
-        _ => None,
-    })
+    argvs
+        .iter()
+        .find_map(|args| match read_tm_args(args, verbs) {
+            Reading::Matched => Some(VerbHit::Runs),
+            Reading::Unresolved(word) if !dynamic || named => Some(VerbHit::Unresolved(word)),
+            _ => None,
+        })
 }
 
 /// Whether a program word's name is expanded: [`dynamic_name`], or a brace

@@ -4,15 +4,17 @@
 //! and independently testable (the pure row/line builders vs. the terminal-
 //! touching `render` calls). [`super::layout::render`] composes the frame's
 //! `Rect`s and calls into each of these.
-//! What: [`tree`] (#10476: the Owner -> Project -> Sessions tree that
-//! replaced the Projects and Sessions panes), [`sessions`] (the session row
-//! builders the tree reuses), [`session_details`] (the read-only session
-//! overlay Enter opens), [`activity`] (bottom strip, live `/activity`-endpoint wiring per #2119),
+//! What: [`tree`] (#10476: the Owner -> Project tree, the left column of the
+//! MPM pane), [`session_list`] (#10754: two-column MPM pane (Bob 11-06) — the
+//! right column, the selected node's sessions), [`sessions`] (the session row
+//! builders the session column reuses), [`session_details`] (the field lines
+//! an expanded session row shows, #10754), [`activity`] (bottom strip, live `/activity`-endpoint wiring per #2119),
 //! [`actions_bar`] (the 1-row key-hint / notice line), [`deliverables_view`]
 //! (a centred overlay, the read-only Deliverable/Milestone view reachable
-//! from the Projects pane, DOC-35 §10.8 `show`, #2383), and [`config_form`]
+//! from the Projects pane, DOC-35 §10.8 `show`, #2383), [`config_form`]
 //! (a centred overlay, the editable deterministic config form reachable from
-//! the Projects pane, DOC-35 §6, #2120).
+//! the Projects pane, DOC-35 §6, #2120), [`rename_view`] (the session
+//! rename overlay, #10754), and [`launch_view`] (the `l` launch form, #10754).
 //! Test: each submodule's pure builders are unit-tested in its own `tests`
 //! block; the `render` functions are terminal glue exercised by launching the
 //! TUI.
@@ -21,6 +23,9 @@ pub mod actions_bar;
 pub mod activity;
 pub mod config_form;
 pub mod deliverables_view;
+pub mod launch_view;
+pub mod rename_view;
 pub mod session_details;
+pub mod session_list;
 pub mod sessions;
 pub mod tree;

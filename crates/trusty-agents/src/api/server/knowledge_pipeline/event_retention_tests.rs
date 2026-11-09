@@ -92,7 +92,8 @@ async fn published_event_survives_unrelated_event_batch_rollover() {
                         params["body"]["path"].as_str().unwrap().into(),
                         params["body"]["content"].as_str().unwrap().into(),
                     );
-                    Ok(json!({}))
+                    // #10746 S12: the daemon's real put reply (§5.4 F4).
+                    Ok(json!({"indexed": true}))
                 }
                 "search.index.file.remove" => {
                     published

@@ -174,8 +174,10 @@ pub struct StoreStatus {
     /// (a hand-built tree), which is not the same as zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_index: Option<usize>,
-    /// Entities recorded as current in the index. Same nullability as
-    /// `pending_index`.
+    /// Entities confirmed searchable under a known index identity. Same
+    /// nullability as `pending_index`. #10746 S12: 0 until search indexes
+    /// report an identity (SPEC-OKF-01 §4.9.2 rule 5); a store card never
+    /// shows a synced count the index state cannot confirm.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub synced_index: Option<usize>,
     /// Names of the `/indexes/{id}/status` `stages` (`lexical`/`semantic`/
@@ -249,8 +251,8 @@ impl StoreStatus {
 
 /// The knowledge directory holding one KB tree per assistant.
 ///
-/// Mirrors `trusty-kb`'s own default (and `tools::okg::knowledge_dir`) so every
-/// surface addresses the same trees: `$KB_KNOWLEDGE_DIR`, else
+/// Mirrors `tools::okg::knowledge_dir` so every surface addresses the same
+/// trees: `$KB_KNOWLEDGE_DIR`, else
 /// `<home>/.trusty-agents/knowledge`.
 fn knowledge_dir() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("KB_KNOWLEDGE_DIR") {
@@ -270,9 +272,9 @@ fn knowledge_dir() -> std::path::PathBuf {
 /// it hold what the tree holds?". Both halves are needed before a card can
 /// honestly say a store is working.
 /// What: resolves the `okg://` tree to a directory and, when that directory has
-/// an OKG source registry, folds its index coverage. Local filesystem work only
-/// — one `stat` per settled entity — and every failure leaves the fields `None`
-/// rather than degrading the connection verdict.
+/// an OKG source registry, folds its index coverage from this machine's index
+/// state (#10746 S12). Local filesystem work only, and every failure leaves the
+/// fields `None` rather than degrading the connection verdict.
 /// Test: `reports_the_unsearchable_backlog_for_a_bound_tree`.
 fn attach_tree_coverage(status: &mut StoreStatus) {
     let Some(tree_path) = super::binding::okg_tree_path(&knowledge_dir(), &status.tree) else {
@@ -283,8 +285,11 @@ fn attach_tree_coverage(status: &mut StoreStatus) {
         return;
     }
     let store =
-        trusty_kb::store::KbStore::new(tree_path, trusty_kb::schema::Profile::default_profile());
-    if let Ok(coverage) = store.okg_index_coverage() {
+        crate::kb::store::KbStore::new(tree_path, trusty_okf::profile::Profile::default_profile());
+    // #10746 S12: this machine's index state for the bound index, never the
+    // synced tree.
+    let state = crate::kb::okg::index_state::IndexStateRef::machine_local(&status.index).ok();
+    if let Ok(coverage) = store.okg_index_coverage(state.as_ref()) {
         status.pending_index = Some(coverage.pending);
         status.synced_index = Some(coverage.synced);
     }

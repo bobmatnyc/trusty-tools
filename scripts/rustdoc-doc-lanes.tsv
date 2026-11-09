@@ -86,6 +86,8 @@ LANE	features	trusty-memory/daemon,trusty-memory/mcp-schema,trusty-memory/server
 # `engine::store` format fixtures), formerly trusty-common's.
 LANE	features	trusty-memory/embedder-test-support,trusty-memory/memory-core-test-support
 LANE	features	trusty-mpm/bedrock,trusty-mpm/channels,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/memory-test-support,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
+LANE	features	trusty-okf/extract-worker,trusty-okf/search-feed
+LANE	features	trusty-connectors/loopback-seam,trusty-gworkspace/loopback-seam
 LANE	features	trusty-review/http-server,trusty-review/mcp,trusty-review/report
 LANE	features	trusty-search/candle,trusty-search/clustering,trusty-search/ner,trusty-search/test-support
 LANE	features	trusty-secrets/ancestry,trusty-secrets/api,trusty-secrets/cli-backends,trusty-secrets/server,trusty-secrets/store,trusty-secrets/test-support

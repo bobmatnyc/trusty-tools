@@ -636,6 +636,19 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy -p trusty-channels --all-targets --features unrouted-slack-mcp -- -D warnings
 
+      # #10746: no crate enables trusty-okf's `search-feed`, so the
+      # `--workspace` run above never compiles `feed` or `retrieve`. This step
+      # lints them; `affected-test` runs their tests.
+      - name: cargo clippy -p trusty-okf --features search-feed -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy -p trusty-okf --all-targets --features search-feed -- -D warnings
+
+      # #10746 S10: no crate enables `extract-worker` either; this lints the
+      # worker client and its criteria.
+      - name: cargo clippy -p trusty-okf --features extract-worker -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy -p trusty-okf --all-targets --features extract-worker -- -D warnings
+
       # #10013: trusty-agents builds trusty-memory with only `mcp-schema`, but
       # feature unification turns `server` back on in the `--workspace` run
       # above, so dead code under `mcp-schema` alone reached main unseen. This
@@ -1772,6 +1785,48 @@ jobs:
       - name: cargo test -p trusty-channels --features unrouted-slack-mcp
         if: contains(format(' {0} ', matrix.crates), ' trusty-channels ')
         run: cargo test -p trusty-channels --all-targets --no-fail-fast --features unrouted-slack-mcp
+
+      # #10746: a default `cargo test -p trusty-okf` leaves `search-feed` off,
+      # so the feed and retrieve tests (`feed_criteria`) run only in this step.
+      # The `clippy` job lints the same feature set.
+      - name: cargo test -p trusty-okf --features search-feed
+        if: contains(format(' {0} ', matrix.crates), ' trusty-okf ')
+        run: cargo test -p trusty-okf --features search-feed --no-fail-fast
+
+      # #10746: the sandboxed worker tests need `/usr/bin/bwrap`. On
+      # ubuntu-24.04 `kernel.apparmor_restrict_unprivileged_userns=1` and
+      # bwrap is not setuid, so it cannot map its uid: a bwrap-only AppArmor
+      # profile grants it user namespaces, with the sysctl as the fallback.
+      # An image without the restriction needs neither. The probe uses the
+      # worker launch's namespace flags (`extract/worker/sandbox.rs`
+      # `wrapped`) and fails the step if bwrap cannot start.
+      - name: Install bubblewrap (trusty-okf sandbox tests)
+        if: contains(format(' {0} ', matrix.crates), ' trusty-okf ')
+        run: |
+          bash scripts/ci-apt-install.sh bubblewrap
+          restrict=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -r "$restrict" ] && [ "$(cat "$restrict")" = 1 ]; then
+            if command -v apparmor_parser >/dev/null && [ -f /etc/apparmor.d/abi/4.0 ]; then
+              printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+                'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
+                | sudo tee /etc/apparmor.d/bwrap >/dev/null
+              sudo apparmor_parser -r /etc/apparmor.d/bwrap \
+                || sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            else
+              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            fi
+          fi
+          /usr/bin/bwrap --unshare-all --die-with-parent --new-session \
+            --ro-bind / / --proc /proc --dev /dev /bin/true
+
+      # #10746 S10: the worker criteria (`worker_criteria`) and the worker
+      # unit tests run only with `extract-worker`. TRUSTY_OKF_REQUIRE_SANDBOX
+      # turns a missing launcher into a failure instead of a skip.
+      - name: cargo test -p trusty-okf --features extract-worker
+        if: contains(format(' {0} ', matrix.crates), ' trusty-okf ')
+        env:
+          TRUSTY_OKF_REQUIRE_SANDBOX: "1"
+        run: cargo test -p trusty-okf --features extract-worker --no-fail-fast
 
   # The single context for this suite. "Must equal success" polarity, as in
   # `test` above, so a failed or skipped plan fails closed.

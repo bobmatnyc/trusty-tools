@@ -58,7 +58,9 @@ root. `.trusty-mpm/sessions/` is inside the WATCHED project's root.
    Verify that the conversation reset before you go on.
 5. **Send `/tm-session-resume`** in the same pane. Verify that it resolves the
    snapshot from step 3 and no older one, restores the task state, and
-   continues the authorized work.
+   continues the authorized work. The snapshot's keep-list splits "Owner
+   rulings (with source)" from "Architect inferences"; an Architect inference
+   never goes into the keep-list as the owner's limit (#10780).
 6. **Record** in `local/actions.md` and `local/state.md`: the context
    before and after, the snapshot path, the exact commands sent, the
    acknowledgements seen, and any restoration problem. When the restore is

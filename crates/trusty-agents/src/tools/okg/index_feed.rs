@@ -8,8 +8,8 @@
 //! the behaviour with no per-connector work (DOC-55 SPEC-OKGIMPORT-06 §7.2.3).
 //!
 //! What: [`feed_bound_index`] resolves the agent's `[[stores]]` binding for the
-//! tree that was just written, drains that source's index backlog through the
-//! live trusty-search feed, and returns the JSON block the tool embeds as
+//! tree that was just written, runs one `trusty_okf::feed` pass over the tree
+//! with this machine's index state (#10746 S12), and returns the JSON block the tool embeds as
 //! `"index"`. It NEVER fails the ingest: a missing binding, an undiscoverable
 //! daemon, and a failed push all degrade to a report carrying `pending` plus a
 //! `reason`, because the tree write is the durable record and a later run
@@ -19,67 +19,62 @@
 //! `super::tests::bound_store_reports_pending_when_the_daemon_is_down`,
 //! `super::tests::sources_tool_reports_the_unsearchable_backlog`.
 
+use crate::kb::okg::index_state::IndexStateRef;
+use crate::kb::okg::registry::SourceSpec;
+use crate::kb::store::KbStore;
 use serde_json::{Value, json};
-use trusty_kb::okg::registry::SourceSpec;
-use trusty_kb::store::KbStore;
 
-use crate::stores::index_feed::{IndexFeed, IndexFeedReport, feed_source};
+use crate::stores::okg_feed::{feed_source, unfed};
 
-/// Feed everything this source owes the agent's bound search index.
+/// Feed everything this tree owes the agent's bound search index.
 ///
 /// Why/What/Test: see the module doc. `agent` is the tool's own `agent`
 /// argument — the hint that avoids searching the roster; when it is absent the
 /// binding is resolved by finding the single agent that claims this tree.
+/// #10746 S12: the pass runs in `trusty_okf::feed` with this machine's index
+/// state; the report keeps its shape and adds the pass `status`.
 pub(super) async fn feed_bound_index(
     store: &KbStore,
     spec: &SourceSpec,
     agent: Option<&str>,
-    now: &str,
 ) -> Value {
     let report = match resolve_feed(store, agent) {
-        Ok((index, feed)) => match feed_source(store, spec, &index, feed.as_ref(), now).await {
-            Ok(report) => report,
-            // A reconcile that cannot even read its own journal is worth
-            // reporting, but it is still not an ingest failure.
-            Err(e) => IndexFeedReport::not_fed(format!("index reconcile failed: {e}"), 0, 0),
-        },
-        Err(reason) => {
-            let (pending, synced) = backlog_counts(store, spec);
-            IndexFeedReport::not_fed(reason, pending, synced)
-        }
+        Ok((state, feed)) => feed_source(store, spec, &state, &feed).await,
+        Err((reason, state)) => unfed(store, spec, state.as_ref(), reason),
     };
     serde_json::to_value(&report).unwrap_or_else(|e| json!({ "error": e.to_string() }))
 }
 
-/// Resolve the bound index id and a live feed for it.
+/// Resolve the bound index's machine-local state and a live feed for it.
 ///
 /// Every failure is a REASON string, never an error the caller propagates —
 /// "this tree has no bound index" and "the search daemon is down" are normal,
-/// reportable states.
+/// reportable states. The state, when it resolved, still sizes the backlog.
 fn resolve_feed(
     store: &KbStore,
     agent: Option<&str>,
-) -> Result<(String, Box<dyn IndexFeed>), String> {
+) -> Result<(IndexStateRef, trusty_okf::feed::RpcIndexFeed), (String, Option<IndexStateRef>)> {
     let bound = crate::stores::bound_index_for_tree(
         &crate::agents::agents_dir_candidates(),
         &super::knowledge_dir(),
         &store.root,
         agent,
-    )?;
-    let socket = trusty_common::search_rpc::search_socket()
-        .map_err(|e| format!("trusty-search socket unavailable: {e}"))?;
-    let feed = crate::stores::index_feed_rpc::RpcIndexFeed::new(socket);
-    Ok((bound.index, Box::new(feed)))
-}
-
-/// `(pending, synced)` for a source whose feed could not run.
-///
-/// Why: reporting "not fed" without the size of the backlog tells the caller
-/// nothing actionable. A reconcile failure here degrades to zeroes rather than
-/// masking the real reason with a second one.
-fn backlog_counts(store: &KbStore, spec: &SourceSpec) -> (usize, usize) {
-    match store.okg_index_backlog(spec) {
-        Ok(b) => (b.tasks.len() + b.notes.len(), b.synced),
-        Err(_) => (0, 0),
-    }
+    )
+    .map_err(|reason| (reason, None))?;
+    let state = IndexStateRef::machine_local(&bound.index).map_err(|e| {
+        (
+            format!("machine-local index state directory unavailable: {e:#}"),
+            None,
+        )
+    })?;
+    let socket = match trusty_common::search_rpc::search_socket() {
+        Ok(s) => s,
+        Err(e) => {
+            return Err((
+                format!("trusty-search socket unavailable: {e}"),
+                Some(state),
+            ));
+        }
+    };
+    Ok((state, trusty_okf::feed::RpcIndexFeed::new(socket)))
 }

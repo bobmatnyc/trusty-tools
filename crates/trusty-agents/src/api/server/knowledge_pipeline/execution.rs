@@ -1,15 +1,12 @@
 //! Automatic, bounded source extraction; no user chat or manual ingest is required (#4283).
 use super::*;
-use crate::knowledge::{execution::Checkpoint, extraction::Extraction};
-use std::collections::BTreeSet;
-use trusty_kb::{
-    okg::{
-        ingest::SourceItem,
-        registry::{Locator, SourceSpec},
-    },
-    schema::Profile,
+use crate::kb::{
+    okg::registry::{Locator, SourceSpec},
     store::KbStore,
 };
+use crate::knowledge::{execution::Checkpoint, extraction::Extraction};
+use std::collections::BTreeSet;
+use trusty_okf::{build::ingest::SourceItem, profile::Profile};
 
 #[path = "execution_sources.rs"]
 mod sources;
@@ -203,7 +200,7 @@ async fn publish(
 ) -> anyhow::Result<()> {
     let store = KbStore::new(state.store.root.clone(), Profile::default_profile());
     let spec = spec(key, &state.store.root);
-    let mut registry = trusty_kb::okg::registry::SourceRegistry::load(&store.root)?;
+    let mut registry = crate::kb::okg::registry::SourceRegistry::load(&store.root)?;
     registry.upsert(spec.clone());
     registry.save(&store.root)?;
     let items = entities(key, input, output, model);
@@ -239,7 +236,7 @@ fn entities(key: &str, input: &SourceItem, output: &Extraction, model: &str) -> 
             let link=format!("[[{}]]",ids[&relation.object]);
             fields.entry(relation.predicate.clone()).and_modify(|v|{v.push(' ');v.push_str(&link)}).or_insert(link);
         }
-        SourceItem{item_id:id.clone(),name:id,title:entity.name.clone(),fingerprint:catalog::digest(&body),timestamp:input.timestamp.clone(),body,fields,volatile:false}
+        SourceItem{item_id:id.clone(),name:id,title:entity.name.clone(),fingerprint:catalog::digest(&body),timestamp:input.timestamp.clone(),body,fields,frontmatter:Default::default(),volatile:false}
     }).collect()
 }
 async fn withdraw(context: &Context, state: &KnowledgeState, key: &str) -> anyhow::Result<()> {
@@ -260,19 +257,21 @@ async fn feed(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("trusty-search unavailable"))?;
     indexing::at(&socket, &state.store, true).await?;
-    let report = crate::stores::index_feed::feed_source(
+    // #10746 S12: the pass runs in `trusty_okf::feed` with this machine's
+    // index state. Publication is gated on this record's own source only: a
+    // failure on another path stays in the report and does not block it
+    // (SPEC-OKF-01 §5.4 F2; S12 fix round).
+    let index_state =
+        crate::kb::okg::index_state::IndexStateRef::machine_local(&state.store.index_id)?;
+    let report = crate::stores::okg_feed::feed_source(
         store,
         spec,
-        &state.store.index_id,
-        &crate::stores::index_feed_rpc::RpcIndexFeed::new(socket),
-        &Utc::now().to_rfc3339(),
+        &index_state,
+        &trusty_okf::feed::RpcIndexFeed::new(socket),
     )
-    .await?;
+    .await;
     anyhow::ensure!(
-        report.pending == 0
-            && report.errors.is_empty()
-            && report.reason.is_none()
-            && report.index.as_deref() == Some(state.store.index_id.as_str()),
+        report.acknowledged(&state.store.index_id),
         "Index publication not acknowledged: {:?}",
         report
     );
