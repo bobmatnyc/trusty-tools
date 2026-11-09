@@ -200,6 +200,11 @@ pub(crate) mod pm_guard_presence_key;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
 pub(crate) mod presence;
+// #8878 PR2b-1b: the daemon client and the device verbs.
+pub(crate) mod presence_client;
+pub(crate) mod presence_devices;
+pub(crate) mod presence_request;
+pub(crate) mod presence_wait;
 // #6892: the machine-wide concurrent-builder denial. Fails CLOSED, unlike its
 // #4480 sibling — see its module doc.
 pub(crate) mod pm_guard_build_lease;

@@ -80,6 +80,24 @@ pub fn acl_verified() -> bool {
     false
 }
 
+/// Whether `root` (`~/.trusty-mpm`) sits in this account's password-database
+/// home, the one the daemon serves.
+///
+/// Why: #8878 PR2b-1b — the hook asks the daemon for a device approval only
+/// for the real home; a scratch `$HOME` (tests, sandboxes) must never reach
+/// the operator's daemon.
+/// Test: `a_scratch_home_is_not_the_account_root_8878`.
+pub fn is_account_root(root: &Path) -> bool {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    match (
+        root.parent(),
+        crate::core::host_state_gate::passwd_home_dir(),
+    ) {
+        (Some(home), Some(account)) => canonical(home) == canonical(&account),
+        _ => false,
+    }
+}
+
 /// Why the grant key could not be read or made.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyError {
