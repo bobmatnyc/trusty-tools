@@ -48,7 +48,10 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   file named by session ref `handoff`. `provenance FILE..` prints the same flags for any handoff file
   (exit 1 when one is found).
 Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
-intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD); a failure is logged, never fatal.
+intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD). Exit 3 means the ledger was saved
+but at least one notification was not confirmed; stderr lists each queue outcome. Do not
+replay the write/batch: reconcile delivery and retry only the needed notification. Exit 0
+confirms the sender succeeded, not that the Architect read or acted on the message.
 Hold file (#10857, ar-T8a): a `hold` set or cleared on an Architect's own ledger (<arch>/local/il) is mirrored to its
 inbox/hold.json (source "ledger"), the hold fleet-poll.py reads before it wakes the Architect.
 A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
@@ -354,7 +357,7 @@ def main(argv=None):
                 raise DatgError("--cite, --quote, --until and --basis need --source")
             evs, st = write_ops_ev(a.project, [entry])
             print(", ".join(e["id"] for e in evs))
-            notify_escalations(a.project, evs, st)
+            return notify_escalations(a.project, evs, st)
         elif a.verb == "close":
             print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome}]))
         elif a.verb == "batch":
@@ -366,8 +369,8 @@ def main(argv=None):
                 raise DatgError("batch input must be a JSON list")
             evs, st = write_ops_ev(a.project, ops)
             print(", ".join(e["id"] for e in evs))
-            notify_escalations(a.project, evs, st)
-            sync_ledger_hold(a.project, ops)
+            sync_ledger_hold(a.project, ops)   # #10719: before the exit-3 return, so a failed sender never skips the hold
+            return notify_escalations(a.project, evs, st)
         elif a.verb == "session":
             op = session_op(a)
             print(write_ops(a.project, [op]))
