@@ -91,21 +91,31 @@ program reading it shows an access prompt.
 tm reads whatever item answers to service `trusty-mpm.presence`; it does not
 check who created the item or its access list.
 
-- Hooked callers — PMs, agents, subagents and the Architect — cannot. The
-  pm-guard denies, on every path and under both bypasses, a `security
-  add-generic-password`, `delete-generic-password` or
-  `set-generic-password-partition-list` that names the item, chooses its
-  words at run time, or names no literal service or account; and any
-  Keychain API write (`keyring.set_password`, `SecItemAdd`, …) naming the
+- Hooked callers — PMs, agents, subagents and the Architect — cannot, except
+  through the residuals below. The pm-guard denies, on every path and under
+  both bypasses, a `security add-generic-password`, `delete-generic-password`
+  or `set-generic-password-partition-list` that names the item, chooses its
+  words at run time, or names no literal service or account; any `security`
+  verb the shell builds at run time, expands as a glob, or abbreviates; and
+  any Keychain API write (`keyring.set_password`, `SecItemAdd`, …) naming the
   item. The same check reads the body of every script the command runs.
 - A process outside any hook, running as the same user, can. It can create
   the item before the first `tm presence local`, or delete it and create a
   replacement, and then seal its own grants. It can also replace the `tm`
   binary. Owner ruling Q9b accepts this: only Bob types commands outside a
   hook.
-- Also not covered: a name an interpreter's code assembles at run time, a
-  script the guard cannot locate, and a Keychain search list that puts
-  another keychain first (`security list-keychains -s`).
+- Residuals for hooked callers, accepted for PR2a:
+  - an interpreter that assembles the service name, or the command name, at
+    run time (`python3 -c` with `keyring`, `osascript`), or a script the
+    guard cannot locate;
+  - a Keychain search list that puts another keychain first
+    (`security list-keychains -s`), which shadows the item.
+
+  Follow-up #10865 makes tm check the item's access list
+  (`SecKeychainItemCopyAccess`), which closes both. Until it ships, the key is
+  not trusted for any approval decision: a grant only adds a requirement to
+  the Architect's anchor writes, which needed no grant before PR2a, and no
+  call that is denied without a grant is approved because of one.
 
 ## Not covered
 

@@ -18,9 +18,16 @@
 //!   can pre-plant that item before the first `tm presence local`, or delete
 //!   and replace it, and then seal its own grants. It can also replace the
 //!   `tm` binary itself. Hooked callers — PMs, agents, subagents and the
-//!   Architect — are blocked by the pm-guard floor
-//!   `pm_guard_presence_key`, which denies every `security` add, delete or
-//!   partition-list write of the item and every Keychain API write naming it.
+//!   Architect — cannot, except the residuals below: the pm-guard floor
+//!   `pm_guard_presence_key` denies every `security` add, delete or
+//!   partition-list write of the item, every `security` verb built at run
+//!   time, globbed or abbreviated, and every Keychain API write naming it.
+//! - Hooked-caller residuals, accepted for PR2a: an interpreter that
+//!   assembles the service name at run time (`python3` `keyring`,
+//!   `osascript`), and `security list-keychains -s` shadowing the item.
+//!   #10865 adds the access-list check (`SecKeychainItemCopyAccess`). Until
+//!   it ships the key is not trusted for any approval decision: a grant only
+//!   adds a requirement to the Architect's anchor writes.
 //! - A rebuilt `tm` is a new binary to the Keychain, so its first read raises
 //!   the access prompt once. A hook that meets it does not wait out
 //!   [`KEYCHAIN_TIMEOUT`]: the guard's 8 s deadline (release builds,

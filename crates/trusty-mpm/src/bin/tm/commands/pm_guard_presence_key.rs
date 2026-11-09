@@ -16,7 +16,9 @@
 //! 2. runs a `security` item-write verb whose words the shell chooses at run
 //!    time (`$`, a backtick), other than the password value; or
 //! 3. runs one with no literal `-s` service or `-a` account, which selects or
-//!    creates an item the guard cannot tell from the key.
+//!    creates an item the guard cannot tell from the key; or
+//! 4. runs any `security` verb built at run time, globbed or abbreviated
+//!    ([`judge_security_verbs`]), whatever item it names.
 //!
 //! `pm_guard_floor` runs it on every path for every caller, and
 //! `pm_guard_secret_script::presence_key` runs it over the body of every
@@ -24,7 +26,8 @@
 //! Residual: a process outside any hook (Q9b: only Bob types there), a name
 //! an interpreter's code assembles at run time (`base64`, `chr`), a script
 //! the script walk cannot locate, and a Keychain search list that puts
-//! another keychain first (`security list-keychains -s`).
+//! another keychain first (`security list-keychains -s`); #10865 tracks the
+//! access-list check that closes the hooked ones.
 //! Test: `pm_guard_presence_key_tests.rs`; on every path in
 //! `pm_guard_floor_tests::presence_key_writes_bind_every_caller_8878`.
 
@@ -102,6 +105,10 @@ fn finding(text: &str) -> Option<&'static str> {
     if !folded.contains("security") {
         return None;
     }
+    // #8878: the verb itself, judged before the literal-verb rules below.
+    if let Some(what) = judge_security_verbs(&folded) {
+        return Some(what);
+    }
     // `to_ascii_lowercase` keeps byte offsets, so `raw` keeps option case.
     verbs.into_iter().find_map(|end| {
         let rest = &raw[end..];
@@ -109,6 +116,106 @@ fn finding(text: &str) -> Option<&'static str> {
         judge_security_args(segment)
     })
 }
+
+/// The subcommand word of every `security` word in `folded`: denied when the
+/// shell builds it at run time or expands it as a glob, or when it abbreviates
+/// a verb (`security` runs a unique prefix: `add-generic-pass`).
+///
+/// Why: the write rules read only a literal [`WRITE_VERBS`] entry, so
+/// `security add-generic-pass$(echo word) -s …` passed them (#8878 delta HIGH).
+/// What: skips `security`'s own `-` options, then reads one word. A word that
+/// is neither a known verb nor a prefix of one passes: `security` rejects it,
+/// so prose such as `git commit -m "harden security for X"` is not denied.
+/// Test: `a_run_time_word_in_a_security_write_is_denied_8878`,
+/// `other_keychain_items_and_reads_pass_8878`.
+fn judge_security_verbs(folded: &str) -> Option<&'static str> {
+    folded.match_indices("security").find_map(|(at, word)| {
+        let before = folded[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+            return None;
+        }
+        let rest = &folded[at + word.len()..];
+        // #8878: an argv list reads `[security, verb, …]`.
+        if !rest.starts_with(|c: char| c.is_whitespace() || c == ',') {
+            return None;
+        }
+        let verb = rest
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .find(|w| !w.is_empty() && !w.starts_with('-'))?
+            .trim_end_matches([']', ')']);
+        if verb.contains(['$', '`', '*', '?', '[', '{']) {
+            return Some(
+                "runs a `security` verb the shell builds at run time or expands as a glob",
+            );
+        }
+        let abbreviates = |known: &&str| known.starts_with(verb) && **known != *verb;
+        (!verb.is_empty()
+            && !SECURITY_VERBS.contains(&verb)
+            && SECURITY_VERBS.iter().any(abbreviates))
+        .then_some("runs an abbreviated `security` verb, which the guard does not resolve")
+    })
+}
+
+/// Every `security` subcommand (`security help`, macOS 26).
+const SECURITY_VERBS: &[&str] = &[
+    "help",
+    "list-keychains",
+    "list-smartcards",
+    "default-keychain",
+    "login-keychain",
+    "create-keychain",
+    "delete-keychain",
+    "lock-keychain",
+    "unlock-keychain",
+    "set-keychain-settings",
+    "set-keychain-password",
+    "show-keychain-info",
+    "dump-keychain",
+    "create-keypair",
+    "add-generic-password",
+    "add-internet-password",
+    "add-certificates",
+    "find-generic-password",
+    "delete-generic-password",
+    "set-generic-password-partition-list",
+    "find-internet-password",
+    "delete-internet-password",
+    "set-internet-password-partition-list",
+    "find-key",
+    "set-key-partition-list",
+    "find-certificate",
+    "find-identity",
+    "delete-certificate",
+    "delete-identity",
+    "set-identity-preference",
+    "get-identity-preference",
+    "create-db",
+    "export",
+    "import",
+    "export-smartcard",
+    "cms",
+    "install-mds",
+    "add-trusted-cert",
+    "remove-trusted-cert",
+    "dump-trust-settings",
+    "user-trust-settings-enable",
+    "trust-settings-export",
+    "trust-settings-import",
+    "verify-cert",
+    "authorize",
+    "authorizationdb",
+    "execute-with-privileges",
+    "leaks",
+    "error",
+    "create-filevaultmaster-keychain",
+    "smartcards",
+    "translocate-policy-check",
+    "translocate-status-check",
+    "translocate-original-path",
+    "requirement-evaluate",
+    "filevault",
+    "platformsso",
+];
 
 /// The words after a `security` write verb: denied when one is chosen at
 /// run time or none selects an item the guard can tell from the key.

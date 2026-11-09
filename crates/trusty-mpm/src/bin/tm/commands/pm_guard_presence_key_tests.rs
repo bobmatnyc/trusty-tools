@@ -25,7 +25,7 @@ pub(crate) const NAMED: &[&str] = &[
     "swift -e 'SecItemDelete([kSecAttrService: \"trusty-mpm.presence\"] as CFDictionary)'",
 ];
 
-/// `security` writes whose selector words are chosen at run time.
+/// `security` writes whose verb or selector words are chosen at run time.
 pub(crate) const RUN_TIME: &[&str] = &[
     "security add-generic-password -s \"$SVC\" -a x -w y",
     "security delete-generic-password -s trusty-mpm.$(echo presence)",
@@ -33,6 +33,11 @@ pub(crate) const RUN_TIME: &[&str] = &[
     "security add-generic-password $ARGS",
     "security delete-generic-password -a me ${REST}",
     "bash -c \"security delete-generic-password -s $S\"",
+    // #8878 delta HIGH: the verb itself built at run time, globbed or abbreviated.
+    "security add-generic-pass$(echo word) -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    "V=add-generic-pass; security ${V}word -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    "security add-generic-passwor? -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    "security -q add-generic-pass -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
 ];
 
 /// `security` writes with no literal `-s` or `-a`.
@@ -54,6 +59,11 @@ pub(crate) const OTHERS: &[&str] = &[
     "grep -rn delete-generic-password crates",
     "cargo test -p trusty-mpm --no-fail-fast presence",
     "tm presence local",
+    // #8878: literal read verbs and prose naming `security` still pass.
+    "security find-generic-password -s gh:github.com -a masa >/dev/null",
+    "security find-identity -v -p codesigning",
+    "/usr/bin/security list-keychains",
+    "git commit -m \"harden security for the guard\"",
 ];
 
 /// Assert every command is denied; a failure lists every row that passed.
