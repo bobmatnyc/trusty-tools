@@ -130,6 +130,10 @@ impl CodeIndexer {
         if ids.is_empty() {
             return Ok(false);
         }
+        // #10738: a removal in a staged swap's detach window misses redb, and
+        // the re-attached corpus brings the file back; refuse before memory
+        // changes so the watcher keeps the ids for a retry.
+        self.refuse_if_corpus_detached()?;
         self.remove_chunks_from_stores(ids, RedbChunkDelete::FailClosed)
             .await?;
         Ok(true)

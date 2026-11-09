@@ -59,7 +59,8 @@ impl CodeIndexer {
     /// `a_put_during_the_promotion_detach_window_is_refused_or_raises_the_generation`,
     /// `an_abort_whose_live_reopen_fails_quarantines_and_raises_the_generation`,
     /// `a_panicked_staged_run_is_covered_by_the_next_attach`, and for the
-    /// delete paths `a_delete_during_the_abort_detach_window_is_refused_or_stays_deleted`.
+    /// delete paths `a_delete_during_the_abort_detach_window_is_refused_or_stays_deleted`
+    /// and `a_watcher_delete_during_the_abort_detach_window_does_not_resurrect`.
     pub(crate) fn refuse_if_corpus_detached(&self) -> anyhow::Result<()> {
         // #10738: the #7920 snapshot-writer predicate, applied to puts.
         if self.corpus_ever_wired && self.corpus.is_none() && !self.corpus_open_failed {
