@@ -285,3 +285,49 @@ fn an_unreadable_spent_marker_keeps_the_ticket_spent_8878() {
         );
     }
 }
+
+fn new_device(credential_id: &str) -> NewDevice {
+    NewDevice {
+        credential_id: credential_id.to_owned(),
+        name: "iphone".to_owned(),
+        public_key: "{}".to_owned(),
+        sign_count: 0,
+        backup_eligible: false,
+        backup_state: false,
+    }
+}
+
+/// #8878 PR2b-2 review: an id whose `<id>.json` cannot be a file name is
+/// refused before the ticket is spent, so the authenticator is told at once
+/// and the ticket stays usable. Red against the old 1400-byte cap.
+#[test]
+fn an_overlong_credential_id_is_refused_before_the_ticket_is_spent_8878() {
+    let (_d, root) = root();
+    let ticket = mint_ticket(&key(), TicketPurpose::Enrol, "iphone", NOW).expect("ticket");
+    let before = snapshot(&root);
+    let long = "A".repeat(MAX_CREDENTIAL_ID + 1);
+    let out = enrol(&root, &key(), &ticket, new_device(&long), NOW);
+    assert_eq!(out, Err(DeviceError::InvalidId));
+    assert!(!ticket_spent(&root, &ticket), "the ticket is not spent");
+    assert_eq!(snapshot(&root), before, "nothing is written");
+    let longest = "B".repeat(MAX_CREDENTIAL_ID);
+    let device = enrol(&root, &key(), &ticket, new_device(&longest), NOW).expect("fits");
+    assert_eq!(load(&root, &key(), &longest), Ok(device));
+}
+
+/// The ticket is spent before the record is written, so a failed write
+/// leaves a spent ticket and no device, never a device with a live ticket.
+/// Red against: writing the record before the spend.
+#[test]
+fn a_record_write_failure_leaves_the_ticket_spent_and_no_device_8878() {
+    let (_d, root) = root();
+    let ticket = mint_ticket(&key(), TicketPurpose::Enrol, "iphone", NOW).expect("ticket");
+    let failing: fn(&Path, &Device) -> Result<(), DeviceError> =
+        |_, _| Err(DeviceError::Write("disk full".to_owned()));
+    let out = enrol_with(&root, &key(), &ticket, new_device("cred-A"), NOW, failing);
+    assert_eq!(out, Err(DeviceError::Write("disk full".to_owned())));
+    assert!(list(&root, &key()).expect("list").is_empty());
+    assert!(ticket_spent(&root, &ticket));
+    let again = enrol(&root, &key(), &ticket, new_device("cred-A"), NOW);
+    assert_eq!(again, Err(DeviceError::Ticket(TicketRefusal::Spent)));
+}

@@ -12,7 +12,6 @@ use webauthn_authenticator_rs::prelude::{CreationChallengeResponse, Url, Webauth
 use webauthn_authenticator_rs::softtoken::SoftToken;
 
 use super::*;
-use crate::core::presence_device::{DeviceError, NewDevice};
 use crate::core::presence_enrol::{TICKET_TTL, TicketPurpose, mint_ticket};
 use crate::core::presence_test_support::{NOW, architect_alive, key, root};
 use crate::core::presence_webauthn::ES256_ALG;
@@ -144,33 +143,6 @@ fn a_failed_finish_consumes_the_ceremony_and_spends_nothing_8878() {
     assert_eq!(devices(&root), 1);
 }
 
-/// The ticket is spent before the record is written, so a failed write
-/// leaves a spent ticket and no device, never a device with a live ticket.
-/// The record path is too long for the file system, which fails the write
-/// after the spend. Red against: writing the record before the spend.
-#[test]
-fn a_record_write_failure_leaves_the_ticket_spent_and_no_device_8878() {
-    let (_d, root) = root();
-    let ticket = ticket_at("iphone", NOW);
-    let new = NewDevice {
-        credential_id: "A".repeat(300),
-        name: "iphone".to_owned(),
-        public_key: "{}".to_owned(),
-        sign_count: 0,
-        backup_eligible: false,
-        backup_state: false,
-    };
-    let out = presence_device::enrol(&root, &key(), &ticket, new.clone(), NOW);
-    assert!(matches!(out, Err(DeviceError::Write(_))), "{out:?}");
-    assert_eq!(devices(&root), 0);
-    assert!(presence_device::ticket_spent(&root, &ticket));
-    let again = presence_device::enrol(&root, &key(), &ticket, new, NOW);
-    assert!(
-        matches!(again, Err(DeviceError::Ticket(TicketRefusal::Spent))),
-        "{again:?}"
-    );
-}
-
 /// A ticket for another name cannot finish the ceremony opened for this
 /// one: not one with its own nonce, and not one resealed onto this nonce.
 /// Red against: dropping the `name == subject` check in
@@ -253,7 +225,7 @@ fn register_start_offers_es256_only_8878() {
 
 /// Q4: `status` names the enrol origin only when the switch put one there.
 #[test]
-fn status_names_the_enrol_origin_only_when_switched_on_8878() {
+fn status_names_the_enrol_origin_only_when_configured_8878() {
     let (_d, root) = root();
     let off = service_at(&root, &clock(NOW));
     assert_eq!(

@@ -34,8 +34,10 @@ pub const DEVICES_DIR: &str = "devices";
 /// The grant method prefix of a device approval: `device:<credential id>`.
 pub const METHOD_DEVICE_PREFIX: &str = "device:";
 
-/// The longest credential id accepted (base64url of a 1023-byte id fits).
-pub const MAX_CREDENTIAL_ID: usize = 1400;
+/// The longest credential id accepted: `<id>.json` must fit a 255-byte file
+/// name, so an over-long id is refused before an enrol spends its ticket
+/// (#8878 PR2b-2 review).
+pub const MAX_CREDENTIAL_ID: usize = 255 - ".json".len();
 
 /// The longest device name accepted, in bytes.
 pub const MAX_NAME: usize = 64;
@@ -212,13 +214,29 @@ pub fn load(root: &Path, key: &GrantKey, credential_id: &str) -> Result<Device, 
 /// spends the ticket under the store lock (#8878: single-use), then writes
 /// the sealed record 0600 through a temp file and a rename.
 /// Test: `an_enrolled_device_loads_back_sealed_8878`,
-/// `register_start_with_no_ticket_is_refused_8878`, `an_enrol_ticket_enrols_once_8878`.
+/// `register_start_with_no_ticket_is_refused_8878`, `an_enrol_ticket_enrols_once_8878`,
+/// `an_overlong_credential_id_is_refused_before_the_ticket_is_spent_8878`.
 pub fn enrol(
     root: &Path,
     key: &GrantKey,
     ticket: &Ticket,
     new: NewDevice,
     now: u64,
+) -> Result<Device, DeviceError> {
+    enrol_with(root, key, ticket, new, now, write)
+}
+
+/// [`enrol`] with the record writer as a parameter, so a test can fail the
+/// write after the spend.
+///
+/// Test: `a_record_write_failure_leaves_the_ticket_spent_and_no_device_8878`.
+fn enrol_with(
+    root: &Path,
+    key: &GrantKey,
+    ticket: &Ticket,
+    new: NewDevice,
+    now: u64,
+    write: fn(&Path, &Device) -> Result<(), DeviceError>,
 ) -> Result<Device, DeviceError> {
     check_ticket(key, ticket, TicketPurpose::Enrol, &new.name, now).map_err(DeviceError::Ticket)?;
     let path = device_path(root, &new.credential_id)?;
