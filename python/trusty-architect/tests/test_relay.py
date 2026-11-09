@@ -128,7 +128,9 @@ def test_relay_sends_enter_only_after_both_checks(tmp_path, before):
     assert len(captures) == 2 and all("-t =tm-api:" in c for c in captures)
 
 
-@pytest.mark.parametrize("fail_from,expect", [(1, "SKIP input=error"), (2, "NOT-OURS input=error")])
+# #10780: python3 call 1 is relay_provenance.py, 2 and 3 are the two box classifications.
+@pytest.mark.parametrize("fail_from,expect", [(1, "PROVENANCE input=error"), (2, "SKIP input=error"),
+                                              (3, "NOT-OURS input=error")])
 def test_relay_fails_closed_when_the_classifier_exits_nonzero(tmp_path, fail_from, expect):
     stub = Stub(tmp_path, [box(), box(TEXT)])
     stub.fail_python_from(fail_from)
@@ -190,6 +192,244 @@ def test_relay_usage_errors_send_nothing(tmp_path, args):
     out = stub.run(RELAY, *args)
     assert out.returncode == 2, out
     assert stub.calls() == []
+
+
+# --- relay.sh: owner-label provenance (#10780) ---------------------------------
+
+import json  # noqa: E402
+
+# The 2026-11-06T23:39Z relay that cut the owner's helper count from four to two. Only "reset was done
+# just now" came from the owner; the pacing and the helper count were the Architect's inference.
+FOUR_TO_TWO = ("[Ada Architect 23:39Z] User instruction (Ada): manual usage reset applied 23:38Z. New pacing until "
+               "the regular reset 2026-11-09T09:00Z: about 1.75% of the week per hour, which is two helpers (one per "
+               "track). Let the four running helpers finish; do not start a replacement until you are at two. Then "
+               "keep two busy from the ready queue. Ack with your current helper count.")
+RESET_TURN = {"at": "2026-11-06T23:38:20Z", "session": "tm-architect", "text": "reset was done just now"}
+REVERSAL_TURN = {"at": "2026-11-07T05:34:02Z", "session": "tm-architect",
+                 "text": "Go back to four helpers and pace to use the whole allocation by Monday morning at 4am. "
+                         "After that return to two helpers. Don't make unilateral decisions to change my instructions."}
+
+
+def owner_turns(*turns):
+    with open(os.environ["ARCHITECT_OWNER_TURNS"], "a", encoding="utf-8") as f:
+        for t in turns:
+            f.write(json.dumps(t) + "\n")
+
+
+def relay_log():
+    path = os.environ["ARCHITECT_RELAY_LOG"]
+    return [json.loads(x) for x in open(path, encoding="utf-8")] if os.path.exists(path) else []
+
+
+@pytest.mark.parametrize("text", [
+    FOUR_TO_TWO,
+    # Codex's read-only audit of the installed relay.sh (results.json `uncited_owner`: exit 0, submitted).
+    "[Ada Architect 23:39Z] User instruction (Ada): use two helpers.",
+    # The owner label over the Architect's paraphrase, with a citation but no quote.
+    "[Ada Architect 23:39Z] User instruction (Ada): pace to two helpers (owner turn: chat 2026-11-06T23:38Z)",
+    # The real owner words, then the inference after the citation without an Architect label.
+    '[Ada Architect 23:39Z] User instruction (Ada): "reset was done just now" (owner turn: chat 2026-11-06T23:38Z)'
+    " which is two helpers, one per track.",
+    # A quote the cited turn does not hold (audit `irrelevant_citation`: the turn said only "reset done").
+    '[Ada Architect 23:39Z] User instruction (Ada): "two helpers until Monday" (owner turn: chat 2026-11-06T23:38Z)',
+])
+def test_relay_refuses_an_owner_label_without_the_owners_cited_words_10780(tmp_path, text):
+    owner_turns(RESET_TURN)
+    stub = Stub(tmp_path, [box(), box(text)])
+    out = stub.run(RELAY, "tm-api", text)
+    assert out.returncode == 3, out
+    assert out.stdout.startswith("tm-api NO-OWNER-CITE: User instruction (Ada):"), out
+    assert "Architect answer: ... (basis: ...)" in out.stdout, out
+    assert stub.calls() == []   # refused before the box was read or typed into
+    assert [r["outcome"] for r in relay_log()] == ["refused"]
+
+
+def test_relay_refuses_a_citation_to_an_unrecorded_turn_10780(tmp_path):
+    text = '[Ada Architect 23:39Z] User ruling (Ada): "use two helpers" (owner turn: chat 2026-11-06T22:00Z)'
+    owner_turns(RESET_TURN)
+    stub = Stub(tmp_path, [box(), box(text)])
+    out = stub.run(RELAY, "tm-api", text)
+    assert out.returncode == 3 and "no owner turn recorded" in out.stdout, out
+    assert stub.calls() == []
+
+
+def _sent_and_logged(tmp_path, text, cite, outcome="verified"):
+    stub = Stub(tmp_path, [box(), box(text)])
+    out = stub.run(RELAY, "tm-api", text)
+    assert out.returncode == 0 and out.stdout.startswith("tm-api sent "), out
+    assert stub.sends()[-1] == "send-keys -t =tm-api: Enter"
+    logged = relay_log()
+    assert [(r["outcome"], r["cite"], r["session"]) for r in logged] == [(outcome, cite, "tm-api")], logged
+    return logged[0]
+
+
+def test_relay_sends_an_owner_reversal_quoted_and_cited_10780(tmp_path):
+    """False-refusal guard: the owner's 05:34Z reversal of the two-helper relay, with the inference labelled."""
+    owner_turns(RESET_TURN, REVERSAL_TURN)
+    text = ('[Ada Architect 05:34Z] User ruling (Ada): "Go back to four helpers and pace to use the whole allocation '
+            'by Monday morning at 4am." "After that return to two helpers." (owner turn: chat 2026-11-07T05:34Z) '
+            "Architect note: this reverses my 23:39Z relay, which was my inference, not a ruling.")
+    rec = _sent_and_logged(tmp_path, text, "chat 2026-11-07T05:34Z")
+    assert rec["label"] == "User ruling (Ada)" and len(rec["quotes"]) == 2
+
+
+def test_relay_sends_an_expired_ruling_relayed_as_history_10780(tmp_path):
+    """False-refusal guard: a superseded dashboard ruling, cited, relayed as history (expired: superseded by a
+    later owner turn). The label says it is history; the in-force ruling is named after an Architect label."""
+    import dashboard_store as ds
+    ds.Store(os.environ["DASHBOARD_ROOT"]).set("items", "D70", {
+        "kind": "question", "status": "answered", "title": "helpers this weekend",
+        "answer": "Keep one helper on the rules and one on the restructure.",
+        "answer_note": "Relayed 2026-11-05T23:15Z tm-api"})
+    text = ('[Ada Architect 06:10Z] User ruling (Ada, 2026-11-05, superseded 2026-11-06T20:48Z): "Keep one helper on '
+            'the rules and one on the restructure." (owner turn: dashboard D70) Architect note: history only; the '
+            "20:48Z four-helper ruling is in force.")
+    _sent_and_logged(tmp_path, text, "dashboard D70")
+
+
+@pytest.mark.parametrize("note", ["Relayed 2026-11-06T23:39Z: two helpers",
+                                  # #10780: an Architect outcome note with no "Relayed" prefix
+                                  "Outcome: pace set to two helpers, one per track"])
+def test_relay_never_takes_the_architects_answer_note_as_owner_words_10780(tmp_path, note):
+    import dashboard_store as ds
+    ds.Store(os.environ["DASHBOARD_ROOT"]).set("items", "D71", {
+        "kind": "question", "status": "answered", "title": "pace", "answer": "yes", "answer_note": note})
+    text = '[Ada Architect 06:10Z] User ruling (Ada): "two helpers" (owner turn: dashboard D71)'
+    stub = Stub(tmp_path, [box(), box(text)])
+    out = stub.run(RELAY, "tm-api", text)
+    assert out.returncode == 3 and "is not in the owner turn" in out.stdout, out
+
+
+def test_relay_sends_a_quote_from_the_items_answer_10780(tmp_path):
+    """The passing case beside it: the quote is in the owner's `answer`, not the note."""
+    import dashboard_store as ds
+    ds.Store(os.environ["DASHBOARD_ROOT"]).set("items", "D72", {
+        "kind": "question", "status": "answered", "title": "pace", "answer": "Four helpers until Monday",
+        "answer_note": "Outcome: relayed"})
+    text = '[Ada Architect 06:10Z] User ruling (Ada): "Four helpers until Monday" (owner turn: dashboard D72)'
+    _sent_and_logged(tmp_path, text, "dashboard D72")
+
+
+class FakeMemory:
+    """A trusty-memory stand-in on a Unix socket: answers `memory.drawers_list` with `drawers`."""
+
+    def __init__(self, monkeypatch, drawers):
+        import socket
+        import tempfile
+        import threading
+        self.dir = tempfile.mkdtemp(dir="/tmp")   # a short path: AF_UNIX caps it near 104 bytes
+        self.path = os.path.join(self.dir, "m.sock")
+        self.calls = []
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.srv.bind(self.path)
+        self.srv.listen(4)
+        self.drawers = drawers
+        threading.Thread(target=self._serve, daemon=True).start()
+        monkeypatch.setenv("ARCHITECT_MEMORY_SOCKET", self.path)
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.srv.accept()
+            except OSError:
+                return
+            with conn:
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                req = json.loads(buf)
+                self.calls.append((req["method"], req["params"]["palace_id"]))
+                conn.sendall((json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": self.drawers}) + "\n").encode())
+
+    def close(self):
+        self.srv.close()
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+HOLD_DRAWER = {"id": "a5f3053b-1c2d-4e5f-8a9b-0c1d2e3f4a5b", "content": "Ruling (owner, 2026-11-07): hold all merges until I am back."}
+
+
+@pytest.mark.parametrize("text,cite,outcome", [
+    # A resource HOLD on the Architect's own authority: no owner label, so no citation is owed.
+    ("[Ada Architect 08:55Z] Architect answer: HOLD new dispatches until the 09:00Z reset; usage is 97% "
+     "(basis: usage read 08:54Z; standing rule on the reset window)", None, None),
+    # The owner's own HOLD, cited to the owner's chat turn.
+    ('[Ada Architect 08:55Z] User ruling (Ada): "hold all merges until I am back" (owner turn: chat 2026-11-07T08:54Z)',
+     "chat 2026-11-07T08:54Z", "verified"),
+])
+def test_relay_sends_a_resource_hold_10780(tmp_path, text, cite, outcome):
+    """False-refusal guard: a HOLD sent as an Architect answer, or as a cited owner HOLD."""
+    owner_turns({"at": "2026-11-07T08:54:10Z", "session": "tm-architect", "text": "hold all merges until I am back"})
+    if cite is not None:
+        _sent_and_logged(tmp_path, text, cite, outcome)
+        return
+    if cite is None:
+        stub = Stub(tmp_path, [box(), box(text)])
+        out = stub.run(RELAY, "tm-api", text)
+        assert out.returncode == 0 and out.stdout.startswith("tm-api sent "), out
+        assert relay_log() == []   # nothing owner-labelled to record
+        assert "NO-OWNER-CITE" not in out.stdout
+        # The pre-#10780 script also sent this one; the line below is what it could not do: tell it apart.
+        assert "Architect answer:" in stub.sends()[0]
+    else:
+        _sent_and_logged(tmp_path, text, cite, outcome)
+
+
+@pytest.mark.parametrize("cite", ["palace architect:a5f3053b", "palace a5f3053b"])
+def test_relay_refuses_a_palace_cite_even_with_the_quoted_words_10780(tmp_path, monkeypatch, cite):
+    """#10780 round 2: the Architect writes every palace drawer, so a drawer holding the quoted words is still
+    not the owner's turn. The memory stand-in holds an Architect-written drawer with exactly those words."""
+    monkeypatch.setenv("ARCHITECT_MEMORY_PALACE", "architect")
+    mem = FakeMemory(monkeypatch, [dict(HOLD_DRAWER, content="Architect inference: two helpers, one per track.")])
+    text = f'[Ada Architect 23:39Z] User instruction (Ada): "two helpers, one per track." (owner turn: {cite})'
+    stub = Stub(tmp_path, [box(), box(text)])
+    out = stub.run(RELAY, "tm-api", text)
+    mem.close()
+    assert out.returncode == 3 and "written by the Architect, not the owner" in out.stdout, out
+    assert "dashboard <id>" in out.stdout and "palace <drawer" not in out.stdout.split(". Quote")[-1], out
+    assert stub.calls() == [] and mem.calls == []   # refused before any lookup
+
+
+def test_relay_sends_a_palace_basis_as_an_architect_note_10780(tmp_path):
+    """The form a palace-only ruling takes: an Architect label with the drawer as its basis."""
+    text = "[Ada Architect 23:39Z] Architect note: four helpers stay until Mon 09:00Z (basis: palace a5f3053b)"
+    stub = Stub(tmp_path, [box(), box(text)])
+    out = stub.run(RELAY, "tm-api", text)
+    assert out.returncode == 0 and out.stdout.startswith("tm-api sent "), out
+    assert relay_log() == []
+
+
+@pytest.mark.parametrize("label", [
+    "User instruction: two helpers",
+    "user instruction (Ada): two helpers",
+    "User Instruction (Ada): two helpers",
+    "User instruction(Ada): two helpers",
+    "User instruction (Ada) : two helpers",
+    "User\u00a0instruction (Ada): two helpers",
+    "User instruction (Ada)\uff1a two helpers",
+    "Owner ruling (Ada): two helpers",
+    "User decision (Ada): two helpers",
+    'Pacing to two helpers per User instruction (Ada): "reset was done just now" (owner turn: chat 2026-11-06T23:38Z)',
+])
+def test_relay_refuses_an_owner_claim_in_any_other_spelling_10780(tmp_path, label):
+    """#10780 critic H1: only the exact labels make an owner claim, and no lead text precedes one unlabelled."""
+    owner_turns(RESET_TURN)
+    text = f"[Ada Architect 23:39Z] {label}"
+    stub = Stub(tmp_path, [box(), box(text)])
+    out = stub.run(RELAY, "tm-api", text)
+    assert out.returncode == 3 and "NO-OWNER-CITE" in out.stdout, out
+    assert stub.calls() == []
+
+
+def test_relay_allows_an_architect_label_before_the_owner_label_10780(tmp_path):
+    owner_turns(RESET_TURN)
+    text = ('[Ada Architect 23:39Z] Architect note: for the record. User instruction (Ada): "reset was done just now" '
+            "(owner turn: chat 2026-11-06T23:38Z)")
+    _sent_and_logged(tmp_path, text, "chat 2026-11-06T23:38Z")
 
 
 # --- posted.sh ---------------------------------------------------------------

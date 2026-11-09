@@ -2,6 +2,8 @@
 //! and worker indentation.
 
 use super::*;
+use crate::tui::project_ctl::state::ProjectCtlState;
+use crate::tui::project_ctl::state::session_col::{SessionColRow, build_session_rows};
 
 fn aliases() -> SshHostAliases {
     SshHostAliases::empty()
@@ -60,7 +62,8 @@ fn fixture() -> (Vec<ProjectRow>, BTreeMap<String, Vec<SessionRow>>) {
     (projects, sessions)
 }
 
-fn all_expanded() -> BTreeSet<NodeId> {
+/// Every owner and project of [`fixture`], for a fully collapsed tree.
+fn all_nodes() -> BTreeSet<NodeId> {
     [
         owner("acme"),
         owner("zeta"),
@@ -142,14 +145,20 @@ fn owner_of_non_default_host() {
     );
 }
 
+/// The session column rows for project `alpha` of `by_project`.
+fn alpha_session_rows(
+    by_project: &BTreeMap<String, Vec<SessionRow>>,
+    indent: bool,
+) -> Vec<SessionColRow> {
+    let projects = vec![project("alpha", "https://github.com/acme/alpha")];
+    let source = proj("acme", "alpha");
+    build_session_rows(Some(&source), &projects, by_project, indent, |_| {
+        Some("acme".to_string())
+    })
+}
+
 #[test]
 fn parent_chain_walks_to_the_owner() {
-    let s = NodeId::Session {
-        owner: "acme".to_string(),
-        project: "alpha".to_string(),
-        id: "a1".to_string(),
-    };
-    assert_eq!(s.parent(), Some(proj("acme", "alpha")));
     assert_eq!(proj("acme", "alpha").parent(), Some(owner("acme")));
     assert_eq!(owner("acme").parent(), None);
 }
@@ -157,7 +166,7 @@ fn parent_chain_walks_to_the_owner() {
 #[test]
 fn counts_total_and_live_per_project_and_owner() {
     let (projects, sessions) = fixture();
-    let rows = build_tree(&projects, &sessions, &all_expanded(), true, &aliases());
+    let rows = build_tree(&projects, &sessions, &BTreeSet::new(), &aliases());
     let acme = rows
         .iter()
         .find(|r| r.id == owner("acme"))
@@ -179,7 +188,6 @@ fn counts_total_and_live_per_project_and_owner() {
             name: "alpha".to_string(),
             total: 3,
             live: 2,
-            expanded: true,
         }
     );
     let gamma = rows.iter().find(|r| r.id == proj("zeta", "gamma")).unwrap();
@@ -196,7 +204,7 @@ fn counts_total_and_live_per_project_and_owner() {
 #[test]
 fn owners_sort_by_name_with_local_last() {
     let (projects, sessions) = fixture();
-    let rows = build_tree(&projects, &sessions, &BTreeSet::new(), true, &aliases());
+    let rows = build_tree(&projects, &sessions, &all_nodes(), &aliases());
     assert_eq!(
         ids(&rows),
         vec![owner("acme"), owner("zeta"), owner(LOCAL_OWNER)]
@@ -206,29 +214,24 @@ fn owners_sort_by_name_with_local_last() {
 #[test]
 fn collapsed_owner_hides_projects() {
     let (projects, sessions) = fixture();
-    let mut expanded = all_expanded();
-    expanded.remove(&owner("acme"));
-    let rows = build_tree(&projects, &sessions, &expanded, true, &aliases());
+    let collapsed = [owner("acme")].into_iter().collect();
+    let rows = build_tree(&projects, &sessions, &collapsed, &aliases());
     assert!(!rows.iter().any(|r| r.id.project_name() == Some("alpha")));
     assert!(!rows.iter().any(|r| r.id.project_name() == Some("beta")));
     assert!(rows.iter().any(|r| r.id == proj("zeta", "gamma")));
 }
 
+/// #10754: two-column MPM pane (Bob 11-06) — the left column is owner >
+/// project only; the sessions draw in the right column.
 #[test]
-fn collapsed_project_hides_sessions() {
+fn left_column_draws_no_session_rows() {
     let (projects, sessions) = fixture();
-    let mut expanded = all_expanded();
-    expanded.remove(&proj("acme", "alpha"));
-    let rows = build_tree(&projects, &sessions, &expanded, true, &aliases());
-    assert!(rows.iter().any(|r| r.id == proj("acme", "alpha")));
+    let rows = build_tree(&projects, &sessions, &BTreeSet::new(), &aliases());
+    assert_eq!(ids(&rows).into_iter().collect::<BTreeSet<_>>(), all_nodes());
+    assert_eq!(rows.len(), all_nodes().len(), "{rows:?}");
     assert!(
-        !rows
-            .iter()
-            .any(|r| matches!(&r.id, NodeId::Session { project, .. } if project == "alpha"))
-    );
-    assert!(
-        rows.iter()
-            .any(|r| matches!(&r.id, NodeId::Session { id, .. } if id == "b1"))
+        !proj("acme", "alpha").is_expandable(),
+        "a project is a leaf"
     );
 }
 
@@ -297,16 +300,12 @@ fn missing_parent_shows_dimmed_anchor() {
         vec!["0:root", "anchor:gone", "1:child-a", "1:child-b"]
     );
 
-    let projects = vec![project("alpha", "https://github.com/acme/alpha")];
     let by_project: BTreeMap<_, _> = [("alpha".to_string(), sessions)].into_iter().collect();
-    let expanded = [owner("acme"), proj("acme", "alpha")].into_iter().collect();
-    let rows = build_tree(&projects, &by_project, &expanded, true, &aliases());
-    assert!(rows.iter().any(|r| r.id
-        == NodeId::Anchor {
-            owner: "acme".to_string(),
-            project: "alpha".to_string(),
-            parent: "gone".to_string(),
-        }));
+    let rows = alpha_session_rows(&by_project, true);
+    assert!(rows.contains(&SessionColRow::Anchor {
+        parent: "gone".to_string(),
+        depth: 0,
+    }));
 }
 
 #[test]
@@ -328,17 +327,226 @@ fn indentation_off_lists_flat_in_poll_order() {
         session("m1", "boss", "active", None),
         session("c", "orphan", "active", Some("gone")),
     ];
-    let projects = vec![project("alpha", "https://github.com/acme/alpha")];
     let by_project: BTreeMap<_, _> = [("alpha".to_string(), sessions)].into_iter().collect();
-    let expanded = [owner("acme"), proj("acme", "alpha")].into_iter().collect();
-    let rows = build_tree(&projects, &by_project, &expanded, false, &aliases());
+    let rows = alpha_session_rows(&by_project, false);
     let depths: Vec<_> = rows
         .iter()
-        .filter_map(|r| match &r.kind {
-            TreeRowKind::Session { index, depth, .. } => Some((*index, *depth)),
-            TreeRowKind::Anchor { .. } => panic!("no anchor without indentation"),
-            _ => None,
+        .filter_map(|r| match r {
+            SessionColRow::Session { index, depth, .. } => Some((*index, *depth)),
+            SessionColRow::Anchor { .. } => panic!("no anchor without indentation"),
+            SessionColRow::Header { .. } | SessionColRow::Detail { .. } => None,
         })
         .collect();
     assert_eq!(depths, vec![(0, 0), (1, 0), (2, 0)]);
+}
+
+/// The owner bars of `rows`: `(id, shown name, project count, expanded)`.
+fn owner_bars(rows: &[TreeRow]) -> Vec<(NodeId, String, usize, bool)> {
+    rows.iter()
+        .filter_map(|r| match &r.kind {
+            TreeRowKind::Owner {
+                name,
+                projects,
+                expanded,
+                ..
+            } => Some((r.id.clone(), name.clone(), *projects, *expanded)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn case_only_owner_variants_group_as_one_owner() {
+    let projects = vec![
+        project("a", "https://github.com/BTA-agent-AI/a"),
+        project("b", "https://github.com/bta-agent-ai/b"),
+        project("c", "https://github.com/bta-agent/c"),
+    ];
+    let rows = build_tree(&projects, &BTreeMap::new(), &BTreeSet::new(), &aliases());
+    assert_eq!(
+        owner_bars(&rows),
+        vec![
+            (owner("bta-agent"), "bta-agent".to_string(), 1, true),
+            (owner("bta-agent-ai"), "BTA-agent-AI".to_string(), 2, true),
+        ],
+        "case-only variants share one bar showing the first-seen spelling; \
+         an owner differing by more than case stays separate"
+    );
+}
+
+#[test]
+fn owner_expand_state_survives_first_seen_spelling_change() {
+    let upper = project("a", "https://github.com/BTA-agent-AI/a");
+    let lower = project("b", "https://github.com/bta-agent-ai/b");
+    let empty = BTreeMap::new();
+    // A collapse keyed by the owner key holds under either first-seen spelling.
+    let collapsed: BTreeSet<NodeId> = [owner("bta-agent-ai")].into_iter().collect();
+    let first = build_tree(
+        &[upper.clone(), lower.clone()],
+        &empty,
+        &collapsed,
+        &aliases(),
+    );
+    let second = build_tree(
+        &[lower.clone(), upper.clone()],
+        &empty,
+        &collapsed,
+        &aliases(),
+    );
+    assert_eq!(
+        owner_bars(&first),
+        vec![(owner("bta-agent-ai"), "BTA-agent-AI".to_string(), 2, false)]
+    );
+    assert_eq!(
+        owner_bars(&second),
+        vec![(owner("bta-agent-ai"), "bta-agent-ai".to_string(), 2, false)]
+    );
+    assert_eq!(ids(&first), [owner("bta-agent-ai")]);
+    assert_eq!(ids(&second), [owner("bta-agent-ai")]);
+
+    // Open, the projects sit under the one key in registry order.
+    let open = BTreeSet::new();
+    let first = build_tree(&[upper.clone(), lower.clone()], &empty, &open, &aliases());
+    let second = build_tree(&[lower, upper], &empty, &open, &aliases());
+    assert_eq!(
+        ids(&first)[1..],
+        [proj("bta-agent-ai", "a"), proj("bta-agent-ai", "b")]
+    );
+    assert_eq!(
+        ids(&second)[1..],
+        [proj("bta-agent-ai", "b"), proj("bta-agent-ai", "a")]
+    );
+}
+
+/// The polled state of `projects` (owner from the URL) and `sessions`.
+fn poll_into(
+    state: &mut ProjectCtlState,
+    projects: Vec<ProjectRow>,
+    sessions: BTreeMap<String, Vec<SessionRow>>,
+) {
+    use crate::tui::project_ctl::poll::tick::{CoreFetch, apply_core};
+    apply_core(
+        state,
+        CoreFetch {
+            reachable: true,
+            fleet: Some((projects, sessions, BTreeMap::new())),
+        },
+    );
+}
+
+/// True when every owner row of `rows` draws open.
+fn all_rows_open(rows: &[TreeRow]) -> bool {
+    rows.iter().all(|r| match r.kind {
+        TreeRowKind::Owner { expanded, .. } => expanded,
+        TreeRowKind::Project { .. } => true,
+    })
+}
+
+/// The session ids the right column lists, in draw order.
+fn column_ids(state: &ProjectCtlState) -> Vec<&str> {
+    state
+        .session_col
+        .rows
+        .iter()
+        .filter_map(SessionColRow::session_id)
+        .collect()
+}
+
+/// REGRESSION (#10476, Bob 11-05 17:30Z): the first poll drew only owner bars,
+/// so no session showed until the operator opened each node. #10754: the
+/// left column now holds owners and projects only, and the first selection's
+/// sessions show in the right column.
+#[test]
+fn fresh_state_shows_every_node_expanded_without_sessions() {
+    let (projects, sessions) = fixture();
+    let mut state = ProjectCtlState::default();
+    poll_into(&mut state, projects, sessions);
+    let rows = &state.tree.rows;
+    for node in all_nodes() {
+        assert!(rows.iter().any(|r| r.id == node), "{node:?} is drawn");
+        assert!(state.tree.is_expanded(&node), "{node:?} starts open");
+    }
+    assert!(all_rows_open(rows), "{rows:?}");
+    assert_eq!(rows.len(), all_nodes().len(), "no session rows on the left");
+    assert_eq!(state.selected_node(), Some(&owner("acme")));
+    assert_eq!(
+        column_ids(&state),
+        ["a1", "a2", "a3", "b1"],
+        "the first owner's session rows on first render"
+    );
+}
+
+/// REGRESSION (#10476): a node the operator closes stays closed across
+/// repolls, and opening it again works. #10754: owners are the nodes that
+/// close; a project is a leaf.
+#[test]
+fn collapse_survives_a_rebuild() {
+    let (projects, sessions) = fixture();
+    let mut state = ProjectCtlState::default();
+    poll_into(&mut state, projects.clone(), sessions.clone());
+    let acme = owner("acme");
+    assert!(state.tree.is_expanded(&acme), "acme starts open");
+
+    state.select_node(acme.clone());
+    state.toggle_selected();
+    poll_into(&mut state, projects.clone(), sessions.clone());
+    poll_into(&mut state, projects, sessions);
+    assert!(!state.tree.is_expanded(&acme), "the collapse survives");
+    assert!(
+        !state
+            .tree
+            .rows
+            .iter()
+            .any(|r| r.id == proj("acme", "alpha"))
+    );
+    assert_eq!(state.selected_node(), Some(&acme));
+
+    state.toggle_selected();
+    assert!(state.tree.is_expanded(&acme), "it opens again");
+    assert!(
+        state
+            .tree
+            .rows
+            .iter()
+            .any(|r| r.id == proj("acme", "alpha"))
+    );
+}
+
+/// REGRESSION (#10476): an owner and project first seen on a later poll start
+/// open; one the operator closed before stays closed when it comes back.
+#[test]
+fn node_added_on_a_later_poll_starts_expanded() {
+    let (mut projects, mut sessions) = fixture();
+    let mut state = ProjectCtlState::default();
+    poll_into(&mut state, projects.clone(), sessions.clone());
+    state.select_node(owner("zeta"));
+    state.toggle_selected();
+    let gamma = projects.remove(1);
+    poll_into(&mut state, projects.clone(), sessions.clone());
+
+    projects.push(gamma);
+    projects.push(project("delta", "https://github.com/omega/delta"));
+    sessions.insert(
+        "delta".to_string(),
+        vec![session("d1", "delta-1", "active", None)],
+    );
+    poll_into(&mut state, projects, sessions);
+    assert!(state.tree.is_expanded(&owner("omega")));
+    assert!(
+        state
+            .tree
+            .rows
+            .iter()
+            .any(|r| r.id == proj("omega", "delta"))
+    );
+    state.select_node(proj("omega", "delta"));
+    assert_eq!(
+        column_ids(&state),
+        ["d1"],
+        "the new project's session shows"
+    );
+    assert!(
+        !state.tree.is_expanded(&owner("zeta")),
+        "a closed id stays closed when it returns"
+    );
 }

@@ -5,13 +5,16 @@
 //! host, enforces that (Appendix B "Acquire role"). The record of a passed
 //! review therefore lives in the adapter's configuration, which trusty-okf
 //! never reads.
-//! What: `config.toml` holds `[[inbound_grant]]` rows of `store`, `account`
-//! and `review` (the review's reference). [`Config::load`] reads `--config`
+//! What: `config.toml` holds `[[inbound_grant]]` rows, and (#10746) the
+//! native-Doc export grants `[[gdocs_grant]]` (§2.15 "Native-Doc export",
+//! item 10 B), each of `store`, `account` and `review` (the review's
+//! reference). [`Config::load`] reads `--config`
 //! when given (it must exist), else `$HOME/.config/trusty-connectors/
 //! config.toml` when present; no file means no grant. A file that does not
-//! parse is an error the Gmail adapter reports on every inbound request, so
-//! a broken grant file never grants. [`Config::inbound_granted`] needs a row
-//! with a non-blank review reference for exactly that store and account.
+//! parse is an error the Gmail adapter reports on every inbound request,
+//! and the gdocs adapter on every request, so a broken grant file never
+//! grants. [`Config::inbound_granted`] and [`Config::gdocs_granted`] need a
+//! row with a non-blank review reference for exactly that store and account.
 //! Test: `config::tests`, `c98_inbound_needs_an_operator_run_and_a_grant`
 //! (`tests/conformance.rs`).
 
@@ -38,6 +41,11 @@ pub struct Config {
     /// Passed inbound reviews.
     #[serde(default)]
     pub inbound_grant: Vec<InboundGrant>,
+    /// #10746: passed native-Doc export reviews (§2.15 "Native-Doc
+    /// export", item 10 B), one row per store and account like
+    /// `inbound_grant`.
+    #[serde(default)]
+    pub gdocs_grant: Vec<InboundGrant>,
 }
 
 /// The default grant file under `home`.
@@ -69,10 +77,22 @@ impl Config {
 
     /// Whether a passed review covers inbound mail for `store` and `account`.
     pub fn inbound_granted(&self, store: &str, account: &str) -> bool {
-        self.inbound_grant
-            .iter()
-            .any(|g| g.store == store && g.account == account && !g.review.trim().is_empty())
+        covers(&self.inbound_grant, store, account)
     }
+
+    /// #10746: whether a passed review covers native-Doc export for `store`
+    /// and `account`, with the semantics of [`Config::inbound_granted`].
+    pub fn gdocs_granted(&self, store: &str, account: &str) -> bool {
+        covers(&self.gdocs_grant, store, account)
+    }
+}
+
+/// Whether a row with a non-blank review covers exactly `store` and
+/// `account`.
+fn covers(grants: &[InboundGrant], store: &str, account: &str) -> bool {
+    grants
+        .iter()
+        .any(|g| g.store == store && g.account == account && !g.review.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -94,6 +114,14 @@ mod tests {
         );
         assert!(toml::from_str::<Config>("[[inbound_grant]]\nstore = \"s\"\n").is_err());
         assert!(toml::from_str::<Config>("grant_all = true\n").is_err());
+        // #10746: the gdocs grant is its own table; an inbound grant is not one.
+        assert!(!c.gdocs_granted("s", "a"));
+        let d: Config = toml::from_str(
+            "[[gdocs_grant]]\nstore = \"s\"\naccount = \"a\"\nreview = \"DOC-63 r1\"\n",
+        )
+        .unwrap();
+        assert!(d.gdocs_granted("s", "a") && !d.gdocs_granted("s", "b"));
+        assert!(!d.inbound_granted("s", "a"));
     }
 
     #[test]

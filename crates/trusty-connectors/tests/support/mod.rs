@@ -6,7 +6,8 @@
 //! `--api-base` (`BaseClient::with_loopback_root`). It serves a mailbox
 //! (`messages.list` honouring `in:sent`, `after:`/`before:`, `maxResults`
 //! and its own page tokens; `messages.get`) and a Drive (`files.list` by
-//! parent with `trashed = false`, `pageSize` and page tokens; `files.get`;
+//! parent with `trashed = false`, `pageSize` and page tokens; `files.get`,
+//! of a listed file or a root folder;
 //! `files.export` by MIME type). It answers 401 to any request without the
 //! seeded bearer token, records every request, can hold a request whose
 //! URL contains a marker until released, and can fail one with a status.
@@ -54,6 +55,9 @@ pub struct State {
     pub messages: Vec<Value>,
     /// Drive file metadata, each with `parents`.
     pub files: Vec<Value>,
+    /// #10746: folders `files.get` answers but no listing returns: the
+    /// roots a selection names. `start` seeds folder `F`.
+    pub roots: Vec<Value>,
     /// `(file id, MIME)` to export bytes.
     pub exports: HashMap<(String, String), Vec<u8>>,
     /// A request whose path and query contain this waits until it is
@@ -227,6 +231,7 @@ fn respond(st: &State, path: &str, q: &BTreeMap<String, String>) -> (u16, &'stat
         return st
             .files
             .iter()
+            .chain(&st.roots)
             .find(|f| f["id"] == rest)
             .map_or_else(missing, |f| js(f.clone()));
     }
@@ -318,7 +323,10 @@ impl FakeGoogle {
     pub fn start() -> FakeGoogle {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let state = Arc::new(Mutex::new(State::default()));
+        let state = Arc::new(Mutex::new(State {
+            roots: vec![folder("F", "root")],
+            ..State::default()
+        }));
         let st = Arc::clone(&state);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
@@ -445,11 +453,20 @@ impl Home {
 
     /// Write the adapter's default grant file.
     pub fn grant(&self, store: &str, account: &str) {
+        self.grant_table("inbound_grant", store, account);
+    }
+
+    /// #10746: write a default grant file with one native-Doc export grant.
+    pub fn docs_grant(&self, store: &str, account: &str) {
+        self.grant_table("gdocs_grant", store, account);
+    }
+
+    fn grant_table(&self, table: &str, store: &str, account: &str) {
         let p = self.home.join(".config/trusty-connectors/config.toml");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(
             p,
-            format!("[[inbound_grant]]\nstore = \"{store}\"\naccount = \"{account}\"\nreview = \"DOC-63 S-4.4 test review\"\n"),
+            format!("[[{table}]]\nstore = \"{store}\"\naccount = \"{account}\"\nreview = \"DOC-63 S-4.4 test review\"\n"),
         )
         .unwrap();
     }

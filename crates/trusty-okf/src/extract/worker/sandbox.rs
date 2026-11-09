@@ -24,7 +24,8 @@
 //!    writes to the working directory only; Linux `/usr/bin/bwrap` with every
 //!    namespace unshared (no network; only `/usr`, the system library links,
 //!    the worker file and the working directory mounted; a `setsid`
-//!    grandchild dies with the PID namespace). The launcher execs the worker
+//!    grandchild dies with the PID namespace) and, by `--new-session`, a
+//!    session of its own with no controlling terminal (#10746). The launcher execs the worker
 //!    only after the sandbox is in place, so a worker that answers `hello`
 //!    under it is sandboxed. The evidence names the launcher, or `None` when
 //!    the policy is `Off` or the launcher is absent. `PATH` is never
@@ -33,7 +34,8 @@
 //! Test: `c145_sandbox_evidence_gates_connector_items_and_blocks_io`,
 //! `rlimits_kill_a_runaway_item_and_spare_the_rest`,
 //! `worker_env_is_exact_even_where_sh_is_bash`,
-//! `sandboxed_worker_cannot_fork_a_setsid_grandchild`.
+//! `sandboxed_worker_cannot_fork_a_setsid_grandchild`,
+//! `sandboxed_worker_has_no_controlling_tty`.
 //!
 //! # Spec References
 //! - SPEC-OKF-01 §2.16 "OS sandbox", "Limits", "Local-only configuration".
@@ -127,6 +129,10 @@ fn wrapped(worker: &Path, cwd: &Path) -> Vec<OsString> {
     push(&[
         "--unshare-all",
         "--die-with-parent",
+        // #10746: a session of its own, so the worker has no controlling
+        // terminal: `/dev/tty` cannot be opened and no TIOCSTI can reach the
+        // operator's shell (CVE-2017-5226).
+        "--new-session",
         "--ro-bind",
         "/usr",
         "/usr",

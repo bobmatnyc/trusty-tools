@@ -109,6 +109,13 @@ pub fn review_response_schema() -> ResponseSchema {
                 "type": "string",
                 "description": "One-line summary of the review"
             },
+            // #10782: "confirm / check / verify X" notes with nothing to quote.
+            // Not findings: no gate, grade or verdict reads them.
+            "questions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Things to confirm, check or verify that you cannot quote code for. Never put these in `findings`. Empty array if none."
+            },
             "findings": {
                 "type": "array",
                 "items": {
@@ -123,6 +130,13 @@ pub fn review_response_schema() -> ResponseSchema {
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                         "file": {"type": "string"},
                         "line": {"type": ["integer", "null"]},
+                        // #10782: the quote is structured data, not a `body`
+                        // convention. A finding without one is withheld before
+                        // the line-citation gate (`quote_admission`).
+                        "quoted_snippet": {
+                            "type": "string",
+                            "description": "Code copied verbatim from `file` at `line`: the code this finding is about. Never empty. A note with no code to quote is not a finding; put it in `questions`."
+                        },
                         // `category` (#1359) is intentionally listed here so
                         // `enforce_strict_mode` adds it to `findings.items.required`.
                         // OpenAI strict mode REQUIRES every declared property to be

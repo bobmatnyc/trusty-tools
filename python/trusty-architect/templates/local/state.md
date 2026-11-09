@@ -28,6 +28,21 @@ None.
 | Project | tmux session / pane | Context | Current observation / next action |
 | --- | --- | --- | --- |
 
+## Owner rulings (with source)
+
+Each line quotes the owner and cites the turn: `"<words>" (owner turn: chat
+<ISO> | dashboard <id>)`. A palace drawer is not an owner turn. A ruling past
+its end or superseded goes to history, never kept here.
+
+None.
+
+## Architect inferences
+
+Your own readings, pacing and arithmetic, each with its basis. Never an owner
+ruling; never relayed under an owner label.
+
+None.
+
 ## Pending questions
 
 None.

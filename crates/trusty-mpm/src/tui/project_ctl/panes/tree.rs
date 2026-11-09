@@ -1,9 +1,9 @@
-//! The Owner -> Project -> Sessions tree pane (#10476).
+//! The Owner -> Project tree: the left column of the MPM pane (#10476).
 //!
-//! Why: the owner asked for one tree in place of the Projects and Sessions
-//! panes (#10476 comment 2; Architect Q9): an owner bar per repository owner,
-//! projects with session counters under it, and sessions under each project,
-//! workers indented under the session that launched them.
+//! Why: the owner asked for one tree in place of the Projects pane (#10476
+//! comment 2; Architect Q9): an owner bar per repository owner and projects
+//! with session counters under it. #10754: two-column MPM pane (Bob 11-06) —
+//! the sessions moved to the right column (`super::session_list`).
 //! What: [`row_line`] builds one row's text from a [`TreeRow`] (pure, tested
 //! without a terminal); [`render`] draws the rows as a stateful `List` whose
 //! highlight follows [`crate::tui::project_ctl::state::TreeView::nav`].
@@ -18,17 +18,16 @@ use ratatui::{
     widgets::{Block, Borders, HighlightSpacing, List, ListItem},
 };
 
-use super::sessions::session_spans;
-use crate::tui::project_ctl::state::{
-    DeliverableLinkState, Pane, ProjectCtlState, TreeRow, TreeRowKind,
-};
+use crate::tui::project_ctl::state::{Pane, ProjectCtlState, TreeRow, TreeRowKind};
 
-/// Marker for an open owner or project.
+/// Marker for an open owner.
 pub const OPEN_GLYPH: &str = "▾";
-/// Marker for a closed owner or project.
+/// Marker for a closed owner.
 pub const CLOSED_GLYPH: &str = "▸";
+/// Marker for a project, a leaf of the tree (#10754).
+pub const PROJECT_GLYPH: &str = "·";
 
-/// The open/closed marker for an expandable row.
+/// The open/closed marker for an owner row.
 fn marker(expanded: bool) -> &'static str {
     if expanded { OPEN_GLYPH } else { CLOSED_GLYPH }
 }
@@ -48,20 +47,33 @@ fn counter_style(live: usize) -> Style {
     }
 }
 
-/// Build the line for one tree row.
+/// `"<total> · <live> live"`, the counter a narrow column falls back to.
+pub fn short_counter_text(total: usize, live: usize) -> String {
+    format!("{total} · {live} live")
+}
+
+/// Build the full line for one tree row.
 ///
-/// Why: kept pure so the counters and indentation are testable without a
-/// terminal.
+/// Why: kept pure so the counters are testable without a terminal.
 /// What: an owner bar reads `▾ acme  2 projects · 4 sessions, 2 live`; a
-/// project, indented two columns, reads `▸ alpha  3 sessions, 2 live`; a
-/// session, indented four columns plus two per worker level with a `↳`
-/// before a worker, reuses [`session_spans`]; an anchor is a dimmed
-/// `↳ parent <8-char id> (not listed)` line.
-/// Test: `owner_and_project_lines_show_counters`,
-/// `worker_rows_indent_and_anchor_is_dim`.
-pub fn row_line(state: &ProjectCtlState, row: &TreeRow) -> Line<'static> {
+/// project, indented two columns, reads `· alpha  3 sessions, 2 live`.
+/// Test: `owner_and_project_lines_show_counters`.
+pub fn row_line(row: &TreeRow) -> Line<'static> {
+    row_line_fit(row, usize::MAX)
+}
+
+/// Build the line for one tree row, fitted to `width` columns.
+///
+/// Why: #10754: two-column MPM pane (Bob 11-06) — the left column is 30% of
+/// the terminal, too narrow for the full counters, and they must stay
+/// visible.
+/// What: the [`row_line`] text when it fits. Otherwise the owner drops its
+/// project count and both kinds show [`short_counter_text`]; a name still too
+/// long is cut with `…` so the counter is never the part cut off.
+/// Test: `narrow_left_column_keeps_the_counters`.
+pub fn row_line_fit(row: &TreeRow, width: usize) -> Line<'static> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    match &row.kind {
+    let (lead, lead_style, name, extra, total, live) = match &row.kind {
         TreeRowKind::Owner {
             name,
             projects,
@@ -74,62 +86,65 @@ pub fn row_line(state: &ProjectCtlState, row: &TreeRow) -> Line<'static> {
             } else {
                 "projects"
             };
-            Line::from(vec![
-                Span::styled(format!("{} {name}  ", marker(*expanded)), bold),
-                Span::raw(format!("{projects} {noun} · ")),
-                Span::styled(counter_text(*total, *live), counter_style(*live)),
-            ])
+            let lead = format!("{} ", marker(*expanded));
+            (
+                lead,
+                bold,
+                name,
+                format!("{projects} {noun} · "),
+                *total,
+                *live,
+            )
         }
-        TreeRowKind::Project {
-            name,
-            total,
-            live,
-            expanded,
-        } => Line::from(vec![
-            Span::raw(format!("  {} ", marker(*expanded))),
-            Span::styled(format!("{name}  "), bold),
-            Span::styled(counter_text(*total, *live), counter_style(*live)),
-        ]),
-        TreeRowKind::Session {
-            project,
-            index,
-            depth,
-        } => {
-            let Some(session) = state
-                .sessions_by_project
-                .get(project)
-                .and_then(|rows| rows.get(*index))
-            else {
-                return Line::from("");
-            };
-            let link = session
-                .deliverable_id
-                .as_deref()
-                .map_or(DeliverableLinkState::Unknown, |id| {
-                    state.deliverable_link_state(id)
-                });
-            let lead = if *depth > 0 { "↳ " } else { "" };
-            let mut spans = vec![Span::raw(format!("    {}{lead}", "  ".repeat(*depth)))];
-            spans.extend(session_spans(session, link));
-            Line::from(spans)
+        TreeRowKind::Project { name, total, live } => {
+            let lead = format!("  {PROJECT_GLYPH} ");
+            (lead, Style::default(), name, String::new(), *total, *live)
         }
-        TreeRowKind::Anchor { parent, depth } => {
-            let short: String = parent.chars().take(8).collect();
-            Line::from(Span::styled(
-                format!("    {}↳ parent {short} (not listed)", "  ".repeat(*depth)),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            ))
-        }
+    };
+    let len = |s: &str| s.chars().count();
+    let full = counter_text(total, live);
+    let fits = len(&lead) + len(name) + 2 + len(&extra) + len(&full) <= width;
+    let (extra, counters) = if fits {
+        (extra, full)
+    } else {
+        (String::new(), short_counter_text(total, live))
+    };
+    let room = width.saturating_sub(len(&lead) + 2 + len(&counters)).max(1);
+    let name = if len(name) > room {
+        let cut: String = name.chars().take(room.saturating_sub(1)).collect();
+        format!("{cut}…")
+    } else {
+        name.clone()
+    };
+    let mut spans = vec![
+        Span::styled(lead, lead_style),
+        Span::styled(format!("{name}  "), bold),
+    ];
+    if !extra.is_empty() {
+        spans.push(Span::raw(extra));
+    }
+    spans.push(Span::styled(counters, counter_style(live)));
+    Line::from(spans)
+}
+
+/// The style of a column title: cyan and bold while the column is focused.
+pub fn title_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
     }
 }
 
-/// Draw the tree pane into `area`.
+/// Draw the tree (left) column into `area`.
 ///
-/// What: a bordered list titled `OWNERS / PROJECTS / SESSIONS (<n> owners)`,
-/// cyan while focused, with the selected row highlighted.
-pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState) {
+/// What: a bordered list titled `OWNERS / PROJECTS (<n>)`, cyan while
+/// focused, with the selected row highlighted. #10754: the
+/// [`crate::tui::VERSION_LABEL`] sits right-aligned on the top border only
+/// when `version` is set — the rightmost drawn column carries it.
+pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState, version: bool) {
     let focused = state.focus == Pane::Tree;
     let owners = state
         .tree
@@ -137,22 +152,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState) {
         .iter()
         .filter(|r| matches!(r.kind, TreeRowKind::Owner { .. }))
         .count();
+    let width = usize::from(area.width.saturating_sub(2));
     let items: Vec<ListItem> = state
         .tree
         .rows
         .iter()
-        .map(|row| ListItem::new(row_line(state, row)))
+        .map(|row| ListItem::new(row_line_fit(row, width)))
         .collect();
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
-    };
-    let title =
-        Line::from(format!("OWNERS / PROJECTS / SESSIONS ({owners} owners)")).style(title_style);
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let title = Line::from(format!("OWNERS / PROJECTS ({owners})")).style(title_style(focused));
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    // #10476: version in tui header (Bob 11-05)
+    if version {
+        block = block.title(Line::from(crate::tui::VERSION_LABEL).right_aligned());
+    }
     // #10476: record the rows' rectangle for the mouse hit test.
     state.tree.hit.tree_rows = block.inner(area);
     let list = List::new(items)
@@ -212,10 +224,9 @@ mod tests {
                 session("o1", "orphan", "active", Some("deadbeefcafe")),
             ],
         );
-        state.select_node(NodeId::Session {
+        state.select_node(NodeId::Project {
             owner: "acme".to_string(),
-            project: "alpha".to_string(),
-            id: "w1".to_string(),
+            name: "alpha".to_string(),
         });
         state
     }
@@ -225,8 +236,23 @@ mod tests {
             .tree
             .rows
             .iter()
-            .map(|r| line_text(&row_line(state, r)))
+            .map(|r| line_text(&row_line(r)))
             .collect()
+    }
+
+    #[test]
+    fn narrow_left_column_keeps_the_counters() {
+        let state = state();
+        let fit = |i: usize, width: usize| line_text(&row_line_fit(&state.tree.rows[i], width));
+        assert_eq!(fit(0, 60), "▾ acme  2 projects · 3 sessions, 2 live");
+        assert_eq!(fit(0, 22), "▾ acme  3 · 2 live");
+        assert_eq!(fit(1, 22), "  · alpha  3 · 2 live");
+        assert_eq!(
+            fit(1, 18),
+            "  · a…  3 · 2 live",
+            "the name is cut, not the counter"
+        );
+        assert_eq!(fit(1, 18).chars().count(), 18);
     }
 
     #[test]
@@ -234,20 +260,10 @@ mod tests {
         let state = state();
         let lines = texts(&state);
         assert_eq!(lines[0], "▾ acme  2 projects · 3 sessions, 2 live");
-        assert_eq!(lines[1], "  ▾ alpha  3 sessions, 2 live");
-        assert_eq!(lines.last().unwrap(), "  ▸ beta  0 sessions, 0 live");
-    }
-
-    #[test]
-    fn worker_rows_indent_and_anchor_is_dim() {
-        let state = state();
-        let lines = texts(&state);
-        assert!(lines[2].starts_with("    ● boss"), "{:?}", lines[2]);
-        assert!(lines[3].starts_with("      ↳ ○ helper"), "{:?}", lines[3]);
-        assert_eq!(lines[4], "    ↳ parent deadbeef (not listed)");
-        assert!(lines[5].starts_with("      ↳ ● orphan"), "{:?}", lines[5]);
-        let anchor = row_line(&state, &state.tree.rows[4]);
-        assert!(anchor.spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(lines[1], "  · alpha  3 sessions, 2 live");
+        // #10754: the left column holds owner and projects only.
+        assert_eq!(lines[2], "  · beta  0 sessions, 0 live");
+        assert_eq!(lines.len(), 3, "{lines:?}");
     }
 
     #[test]
@@ -264,12 +280,30 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(
-            text.contains("acme  2 projects · 3 sessions, 2 live"),
-            "{text}"
-        );
-        assert!(text.contains("alpha  3 sessions, 2 live"));
+        // #10754: the 24-column left column shows the short counters.
+        assert!(text.contains("▾ acme  3 · 2 live"), "{text}");
+        assert!(text.contains("· alpha  3 · 2 live"), "{text}");
         assert!(text.contains("parent deadbeef (not listed)"));
-        assert!(text.contains("OWNERS / PROJECTS / SESSIONS (1 owners)"));
+        assert!(text.contains("OWNERS / PROJECTS (1)"));
+    }
+
+    // #10476: version in tui header (Bob 11-05)
+    #[test]
+    fn projects_view_top_line_shows_tm_version_at_80_columns() {
+        let version = format!("tm {}", env!("CARGO_PKG_VERSION"));
+        let mut state = state();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test backend");
+        terminal
+            .draw(|f| crate::tui::project_ctl::layout::render(f, &mut state))
+            .expect("draw the projects view");
+        let buffer = terminal.backend().buffer();
+        let top: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect();
+        assert!(top.contains(&version), "top line lacks {version}: {top:?}");
+        assert!(
+            top.contains("OWNERS / PROJECTS (1)"),
+            "title displaced: {top:?}"
+        );
     }
 }

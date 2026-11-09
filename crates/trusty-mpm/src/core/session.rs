@@ -177,6 +177,17 @@ pub struct Session {
     /// What: `Some(pid)` for [`SessionHost::Native`] sessions, `None` otherwise.
     #[serde(default)]
     pub pid: Option<u32>,
+    /// The socket of the tmux server the session runs on; `None` is the
+    /// default server.
+    ///
+    /// Why (#10101): a CLI launch starts a fresh PM on its workspace's own
+    /// server, which the default server cannot see; every tmux call for this
+    /// session must go to that server.
+    /// What: set from the registration body; absent from older records, so
+    /// those stay on the default server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub tmux_socket: Option<PathBuf>,
 }
 
 impl Session {
@@ -216,6 +227,7 @@ impl Session {
             pause_summary: None,
             origin: SessionHost::Tmux,
             pid: None,
+            tmux_socket: None,
         }
     }
 

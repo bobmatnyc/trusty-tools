@@ -800,3 +800,116 @@ fn log_excerpt_caps_a_long_fragment() {
     assert_eq!(verdict::log_excerpt(&long).chars().count(), 121);
     assert_eq!(verdict::log_excerpt("short"), "short");
 }
+
+// ─── #10782: the structured quote places the finding ─────────────────────────
+
+/// A finding carrying `quoted_snippet`, with `body` as its prose.
+fn quoted(line: Option<u32>, quote: &str, body: &str) -> Finding {
+    let mut f = finding("src/billing.rs", line, body);
+    f.quoted_snippet = Some(quote.to_string());
+    f
+}
+
+/// #10782: a quote that holds its cited line keeps the finding, though the
+/// body quotes nothing.
+#[test]
+fn a_quote_on_its_cited_line_keeps_the_finding() {
+    let mut findings = vec![quoted(
+        Some(SUM_LINE),
+        "let total = amounts.iter().sum::<u64>();",
+        "This total can overflow on large invoices.",
+    )];
+    assert_eq!(gate(&mut findings, &billing_index()), (0, 0));
+    assert_eq!(findings[0].line, Some(SUM_LINE));
+}
+
+/// #10782 error arm: a quote absent from the file withholds the finding,
+/// naming the quote, even when the body quotes the cited line's code.
+#[test]
+fn a_quote_absent_from_the_file_is_withheld_naming_it() {
+    let mut findings = vec![quoted(
+        Some(SUM_LINE),
+        "ledger.flush_all().await?;",
+        SUM_QUOTE,
+    )];
+    let report = enforce_line_citations(&mut findings, &billing_index());
+    assert!(findings.is_empty(), "{findings:?}");
+    assert_eq!(report.withheld_findings.len(), 1);
+    let withheld = &report.withheld_findings[0];
+    assert_eq!(
+        withheld.missing_fragment.as_deref(),
+        Some("ledger.flush_all().await?;")
+    );
+    assert_eq!(
+        crate::pipeline::withheld_contract::reason_class(&withheld.reason),
+        "line_citation"
+    );
+}
+
+/// #10782 error arm: the cited line holds a body snippet but not the quote,
+/// which occurs on several lines; the quote alone places the finding, so it
+/// is withheld rather than held by the other snippet.
+#[test]
+fn a_quote_off_its_cited_line_is_not_held_by_another_snippet() {
+    let mut findings = vec![quoted(Some(SUM_LINE), "let value_", SUM_QUOTE)];
+    assert_eq!(gate(&mut findings, &billing_index()), (1, 0));
+}
+
+/// #10782: a quote that occurs once elsewhere moves the finding there.
+#[test]
+fn a_quote_cited_off_by_n_moves_to_its_line() {
+    let mut findings = vec![quoted(
+        Some(SUM_LINE - 7),
+        "amounts.iter().sum::<u64>()",
+        "This total can overflow.",
+    )];
+    assert_eq!(gate(&mut findings, &billing_index()), (0, 1));
+    assert_eq!(findings[0].line, Some(SUM_LINE));
+}
+
+/// #10782 error arm: a quote too short to be specific places nothing, so the
+/// finding is withheld as quoting no code, whatever the cited line holds.
+#[test]
+fn an_unspecific_quote_does_not_place_a_finding() {
+    let mut findings = vec![quoted(Some(SUM_LINE), "();", SUM_QUOTE)];
+    assert_eq!(gate(&mut findings, &billing_index()), (1, 0));
+}
+
+/// #10782 keeps #9188 B: beside a quote that holds, a body snippet absent
+/// from the file still withholds the finding.
+#[test]
+fn a_body_snippet_absent_beside_a_holding_quote_is_withheld() {
+    let mut findings = vec![quoted(
+        Some(SUM_LINE),
+        "amounts.iter().sum::<u64>()",
+        "`ledger.flush_all()` drops the total.",
+    )];
+    let report = enforce_line_citations(&mut findings, &billing_index());
+    assert!(findings.is_empty());
+    assert_eq!(
+        report.withheld_findings[0].missing_fragment.as_deref(),
+        Some("ledger.flush_all()")
+    );
+}
+
+/// #10782 keeps #9188 E: a bare-identifier quote places nothing, even on a
+/// line that holds the identifier, so the gate withholds the finding.
+#[test]
+fn a_bare_identifier_quote_on_its_cited_line_places_nothing() {
+    for (line, quote) in [(4, "step_4"), (4, "step_4()"), (SUM_LINE, "amounts")] {
+        let mut findings = vec![quoted(Some(line), quote, "Confirm it is pure.")];
+        assert_eq!(gate(&mut findings, &billing_index()), (1, 0), "{quote:?}");
+    }
+}
+
+/// #10782: a real code quote on that same cited line still holds.
+#[test]
+fn a_code_quote_on_a_bare_identifier_line_still_holds() {
+    let mut findings = vec![quoted(
+        Some(4),
+        "let value_4 = step_4(input);",
+        "Confirm it is pure.",
+    )];
+    assert_eq!(gate(&mut findings, &billing_index()), (0, 0));
+    assert_eq!(findings[0].line, Some(4));
+}

@@ -232,6 +232,7 @@ async fn seed_sessions(
             // #9101: bound to the fake's pane for this name, on its server.
             pane_id: Some(fake_pane(&tmux_name)),
             tmux_server: Some(FAKE_SERVER.into()),
+            tmux_socket: None,
             tmux_name,
             cwd: ws.path().to_path_buf(),
             task: format!("fleet task {i}"),
@@ -489,6 +490,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

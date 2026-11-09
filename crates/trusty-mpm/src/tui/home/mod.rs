@@ -17,6 +17,9 @@ pub mod state;
 
 #[cfg(test)]
 mod tests;
+// #10476: the analyze probe driven over real sockets.
+#[cfg(test)]
+mod analyze_probe_tests;
 
 use std::time::{Duration, Instant};
 

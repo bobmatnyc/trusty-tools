@@ -350,13 +350,15 @@ impl SessionManager {
     /// reuses this capture but NOT [`Self::pane_readiness`] wholesale.
     /// What: `capture_pane(name, pane_id, MODAL_PROBE_LINES)`. #9101: callers
     /// pass only a pane [`Self::owned_pane`] proved, so the session-scoped
-    /// `capture` fallback is gone.
+    /// `capture` fallback is gone. #10101: on the record's own server.
     /// Test: `inject_when_ready_checks_pane_scoped_capture_when_pane_id_known`;
     /// `send_input`'s reuse is covered by
     /// `manager_send_input_rejected_when_pane_shows_blocking_modal`.
-    pub(super) fn capture_readiness_pane(&self, name: &str, pane_id: &str) -> String {
-        self.tmux
-            .capture_pane(name, pane_id, MODAL_PROBE_LINES)
+    pub(super) fn capture_readiness_pane(&self, record: &SessionRecord, pane_id: &str) -> String {
+        let Ok(tmux) = super::tmux_route::route(self.tmux.as_ref(), record) else {
+            return String::new();
+        };
+        tmux.capture_pane(&record.tmux_name, pane_id, MODAL_PROBE_LINES)
             .unwrap_or_default()
     }
 
@@ -385,10 +387,12 @@ impl SessionManager {
     ) -> Result<PaneReadiness, ManagedError> {
         let pane_id = self.owned_pane(id, record)?;
         let name = record.tmux_name.as_str();
-        if !self.tmux.runtime_ready(name) {
+        // See #10101: probe the record's own server.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), record)?;
+        if !tmux.runtime_ready(name) {
             return Ok(PaneReadiness::RuntimeNotReady);
         }
-        if pane_shows_blocking_modal(&self.capture_readiness_pane(name, &pane_id)) {
+        if pane_shows_blocking_modal(&self.capture_readiness_pane(record, &pane_id)) {
             return Ok(PaneReadiness::BlockingModal);
         }
         Ok(PaneReadiness::Ready)
@@ -466,7 +470,7 @@ impl SessionManager {
         // #9101: the modal probe reads the pane, so it runs only on a pane
         // proven to be this record's. #10442: a gone pane is re-resolved first.
         let (record, pane) = self.live_owned_pane(id, record).await?;
-        if pane_shows_blocking_modal(&self.capture_readiness_pane(&record.tmux_name, &pane)) {
+        if pane_shows_blocking_modal(&self.capture_readiness_pane(&record, &pane)) {
             return Err(ManagedError::TmuxUnavailable(format!(
                 "session {} is showing a blocking onboarding/trust modal; \
                  cannot inject input until it is dismissed",

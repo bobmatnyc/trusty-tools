@@ -126,7 +126,13 @@ fn pm_guard_refuses_an_agent_printing_a_credential() {
             parsed["hookSpecificOutput"]["permissionDecision"], "deny",
             "{command}: {stdout}"
         );
-        assert!(stdout.contains("#8596"), "{command}: {stdout}");
+        // #8878: the presence-key floor runs first and denies `security -i`.
+        let rule = if command.contains("security -i") {
+            "#8878"
+        } else {
+            "#8596"
+        };
+        assert!(stdout.contains(rule), "{command}: {stdout}");
     }
 }
 

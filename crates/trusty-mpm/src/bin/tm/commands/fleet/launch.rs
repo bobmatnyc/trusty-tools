@@ -31,7 +31,6 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use trusty_mpm::core::architect_conversation::{self, ConversationStart};
-use trusty_mpm::core::architect_launch::ARCHITECT_RECORDS;
 use trusty_mpm::core::architect_session;
 use trusty_mpm::core::process::PaneClaude;
 use trusty_mpm::core::session_profile::{self, SESSION_PROFILE_ENV};
@@ -587,21 +586,9 @@ fn record_process(dir: &Path, home: &Path, session: &str) -> Result<ArmingRecord
 }
 
 /// Record the `claude` at `pid` found in `session` and read its name back.
+// #8878: through the one record writer every Architect launch path calls.
 fn record_found(dir: &Path, home: &Path, session: &str, pid: u32) -> Result<ArmingRecord, String> {
-    let root = home.join(".trusty-mpm");
-    let record = architect_session::record_launch(&root, pid, dir, session).map_err(|why| {
-        format!(
-            "cannot write the Architect launch record {} for claude pid {pid}: {why}",
-            ARCHITECT_RECORDS.path(&root, pid).display()
-        )
-    })?;
-    match architect_session::architect_session_name(&root, pid) {
-        Ok(name) if name == session => Ok(record),
-        Ok(name) => Err(format!(
-            "the launch record reads back session {name}, not {session}"
-        )),
-        Err(why) => Err(why.to_string()),
-    }
+    architect_session::bind_architect(&home.join(".trusty-mpm"), pid, dir, session)
 }
 
 /// Record the stamp on the session, then start `claude` in it from its spec.
@@ -621,9 +608,12 @@ fn stamp_and_send(
         bail!("failed to record the launch stamp on {session}");
     }
     // #8308: one call types the short line naming the spec.
-    trusty_mpm::runtime::cli_launch::send_spec_launch(session, claude_spec, spec_dir).map_err(|e| {
-        anyhow::anyhow!("{session} was created but `claude` could not be started in it: {e}")
-    })
+    // #10101: the Architect is not a fresh PM; it stays on the default server.
+    // #8878: unbound here; `record_process` binds through `bind_architect`.
+    trusty_mpm::runtime::cli_launch::send_spec_launch_unbound(None, session, claude_spec, spec_dir)
+        .map_err(|e| {
+            anyhow::anyhow!("{session} was created but `claude` could not be started in it: {e}")
+        })
 }
 
 /// Fail unless a launch in `dir` resolves to the supervisor profile.

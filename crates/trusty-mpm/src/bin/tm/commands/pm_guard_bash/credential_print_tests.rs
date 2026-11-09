@@ -1728,3 +1728,95 @@ fn denies_a_body_behind_a_refused_delimiter() {
         &["cat > notes.md <<'EOF'\r\nNever run gcloud auth print-access-token bare.\r\nEOF\r\n"],
     );
 }
+
+/// The inline spelling of a Python script body (`inline_equivalent`).
+fn python_body(code: &str) -> String {
+    format!("python3 <<'TM_PM_GUARD_SCRIPT_BODY'\n{code}\nTM_PM_GUARD_SCRIPT_BODY\n")
+}
+
+/// #10734: a credential call written as an argv list, the way a script
+/// body runs it, refuses like the typed command.
+#[test]
+fn denies_a_credential_call_written_as_an_argv_list_10734() {
+    let rows: Vec<String> = [
+        "subprocess.run([\"op\", \"read\", \"op://v/i/f\"])",
+        "subprocess.run(['op','read','op://v/i/f'])",
+        "subprocess.run(('op', 'read', ref))",
+        "subprocess.run([\n    \"op\",\n    \"read\",\n    ref,\n])",
+        "subprocess.run([\"op\", \"--account\", \"work\", \"read\", ref])",
+        "subprocess.run([\"op\", \"--account\", acct, \"read\", ref])",
+        "subprocess.run([\"/opt/homebrew/bin/op\", \"read\", ref])",
+        "subprocess.run([\"op\", sub, ref])",
+        "subprocess.check_output([\"gh\", \"auth\", \"token\"])",
+        "subprocess.run([\"gcloud\", \"secrets\", \"versions\", \"access\", \"latest\"])",
+        "subprocess.run([\"aws\", \"configure\", \"get\", \"aws_secret_access_key\"])",
+        "subprocess.run([\"security\", \"-i\"], input=cmds)",
+        "execFileSync(\"op\", [\"read\", ref])",
+        "system \"op\", \"read\", ref",
+        // Fail closed: a list the body never closes is still read.
+        "subprocess.run([\"op\", \"read\", ref",
+    ]
+    .iter()
+    .map(|c| python_body(c))
+    .chain([
+        "python3 -c 'import subprocess; subprocess.run([\"op\", \"read\", \"op://v/i/f\"])'"
+            .to_string(),
+    ])
+    .collect();
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    check(true, &rows);
+}
+
+/// #10734: a quoted `op` that is no argv list, and prose naming `op` before
+/// a `read`, stay allowed.
+#[test]
+fn allows_the_10734_neighbours() {
+    let rows: Vec<String> = [
+        "\"\"\"An audit log (seq, ts, actor, op, coll, id), read back on start.\"\"\"",
+        "if e.get(\"op\") == \"delete\":\n    data = fh.read()",
+        "ops.append({\"op\": \"read\", \"collection\": \"media\"})",
+        "print(row[\"op\"], \"read\")",
+        "kind = op.get(\"op\")\nbody = sys.stdin.read()",
+        "subprocess.run([\"git\", \"log\", \"--format=op read\"])",
+    ]
+    .iter()
+    .map(|c| python_body(c))
+    .collect();
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    check(false, &rows);
+}
+
+/// #10734: bracket nesting past the argv reader's bound counts as naming a
+/// call, so a body built to outrun it refuses rather than passing unread.
+#[test]
+fn deep_bracket_nesting_fails_closed_10734() {
+    let deep = format!("x = {}1{}", "[".repeat(80), "]".repeat(80));
+    check(true, &[python_body(&deep).as_str()]);
+    let shallow = format!("x = {}1{}", "[".repeat(8), "]".repeat(8));
+    check(false, &[python_body(&shallow).as_str()]);
+}
+
+/// #10734: the #10570 critic shapes (a mid-literal subcommand) and the typed
+/// reads still refuse beside the argv-list reading.
+#[test]
+fn keeps_the_10570_critic_shapes_refused_10734() {
+    let mut rows: Vec<String> = [
+        "OP_BIN = \"op\"\nos.system(OP_BIN + \" read op://v/i/f\")",
+        "os.system(\"op --account work read op://v/i/f\")",
+        "B = \"op\"\nos.system(\"%(b)s read %(r)s\" % {\"b\": B, \"r\": R})",
+        "B = \"op\"\nos.system(string.Template(\"$b read $r\").substitute(b=B, r=R))",
+    ]
+    .iter()
+    .map(|c| python_body(c))
+    .collect();
+    rows.extend(
+        [
+            "op read op://fake-vault/fake-item/password",
+            "op --account work read op://fake-vault/fake-item/password",
+            "security find-generic-password -s fake-svc -w",
+        ]
+        .map(String::from),
+    );
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    check(true, &rows);
+}

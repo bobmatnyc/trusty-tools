@@ -19,6 +19,8 @@
 //! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
 //! `commands::fleet::relaunch::tests`, `tests/tm_fleet.rs`.
 
+// #8878 PR2a: `tm fleet bind`.
+mod bind;
 mod config;
 mod dashboard_agent;
 // #10033: relaunch refuses inside a Claude Code session.
@@ -136,6 +138,22 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             if report.failed() {
                 bail!("tm fleet relaunch failed; see the FAILED step above");
             }
+            Ok(())
+        }
+        // #8878 PR2a: re-bind a running Architect after presence.
+        FleetAction::Bind => {
+            let root = home.join(crate::commands::pm_guard_trust_anchor::ANCHOR_ROOT);
+            let env = crate::commands::pm_guard_trust_anchor::HookEnv {
+                home: Some(home.clone()),
+                ..status::this_session_env()
+            };
+            let source = trusty_mpm::core::presence_key::KeySource::ambient(&root);
+            let auth = trusty_mpm::core::presence_local::LocalAuthenticator;
+            let config = trusty_mpm::core::config::MpmConfig::load_default;
+            println!(
+                "{}",
+                bind::bind(&env, config, &auth, &source, &root, bind::live_pane)?
+            );
             Ok(())
         }
     }

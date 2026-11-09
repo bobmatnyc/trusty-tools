@@ -709,6 +709,14 @@ impl Recorder {
 }
 
 impl ManagedTmuxDriver for Recorder {
+    /// #8878: a bind asks for the launched pane's shell; none reads here.
+    fn pane_pid(&self, pane_id: &str) -> Option<u32> {
+        self.events
+            .lock()
+            .expect("recorder mutex")
+            .push(format!("pid:{pane_id}"));
+        None
+    }
     fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
         Ok(())
     }
@@ -855,6 +863,27 @@ fn deliver_resets_the_pane_before_typing() {
         "the reset must precede the keystrokes, or the open construct swallows them: {events:?}"
     );
     assert_eq!(tmux.lines().len(), 1, "and then the launch line is typed");
+}
+
+/// #8878: the daemon's spawn and resume bind an Architect `claude` they typed:
+/// delivery reads the launched pane's shell through the same driver (nothing
+/// is recorded when no `claude` reads). A PM spec never looks.
+#[test]
+fn the_daemon_delivery_binds_an_architect_spec_8878() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let w = Worst::new();
+    let architect = ManagedLaunch {
+        profile: crate::core::session_profile::SessionProfile::Architect,
+        ..w.launch()
+    };
+    for (launch, looks) in [(architect, true), (w.launch(), false)] {
+        let spec = spawn_spec(&launch).expect("spec");
+        let tmux = Recorder::new(0);
+        deliver_in(&tmux, "tm-sess", Some("%9"), &spec, dir.path()).expect("deliver");
+        let events = tmux.events();
+        let asked = events.iter().any(|e| e == "pid:%9");
+        assert_eq!(asked, looks, "{:?}: {events:?}", launch.profile);
+    }
 }
 
 /// #2456: the reset must land on the RECORD's pane, not on whichever pane tmux
