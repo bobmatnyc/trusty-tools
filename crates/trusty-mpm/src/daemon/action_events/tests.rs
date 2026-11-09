@@ -544,3 +544,108 @@ async fn an_unresolvable_session_still_sends_its_events_unattributed_10906() {
     assert!(got.iter().all(|e| e.project.is_none()), "{got:?}");
     assert!(!String::from_utf8_lossy(&bytes).contains("\"project\""));
 }
+
+/// Commit in `checkout` and add a linked worktree of it at `at`,
+/// returning the worktree's canonical path.
+fn linked_worktree_10906(checkout: &Path, at: &Path, branch: &str) -> PathBuf {
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c"])
+            .arg("commit.gpgsign=false")
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    // `worktree add` needs a commit to check out; a repeat is harmless.
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        branch,
+        &at.display().to_string(),
+    ]);
+    std::fs::create_dir_all(at.join("sub")).expect("mkdir");
+    at.canonicalize().expect("canonical")
+}
+
+/// The events every session in `cwds` sends, keyed by session id, through
+/// [`registry_resolver`] on `reg`.
+async fn projects_for_10906(
+    dir: &tempfile::TempDir,
+    reg: &Path,
+    cwds: &[&Path],
+) -> Vec<(String, Vec<Option<String>>)> {
+    let sock = sock_in(dir);
+    let state = DaemonState::new();
+    let publisher = Arc::new(
+        ActionPublisher::new(&sock).with_project_resolver(registry_resolver(reg.to_path_buf())),
+    );
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    let sessions: Vec<SessionId> = cwds.iter().map(|_| SessionId::new()).collect();
+    for (s, cwd) in sessions.iter().zip(cwds) {
+        start_in(&state, *s, cwd);
+    }
+    let read = read_one(&sock);
+    let outcome = publisher.flush().await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let got = frames(&received(read).await);
+    assert_eq!(got.len(), 2 * cwds.len(), "{got:?}");
+    sessions
+        .iter()
+        .map(|s| {
+            let id = s.0.to_string();
+            let projects = got
+                .iter()
+                .filter(|e| e.session.as_deref() == Some(&id))
+                .map(|e| e.project.clone())
+                .collect();
+            (id, projects)
+        })
+        .collect()
+}
+
+/// #10906 regression: a session working in a linked worktree of a registered
+/// checkout — nested under it or beside it, at its root or in a subdirectory
+/// — carries the main checkout's registry `project_key`.
+#[tokio::test]
+async fn a_linked_worktree_session_carries_its_main_checkouts_project_key_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = dir.path().join("registry");
+    let web = checkout_10906(dir.path(), "web", Some("https://github.com/Acme/Web.git"));
+    assert_eq!(register_10906(&reg, "web", &web).await, "acme/web");
+    let nested = linked_worktree_10906(&web, &web.join(".claude/worktrees/wt"), "wt");
+    let sibling = linked_worktree_10906(&web, &dir.path().join("web-wt"), "wt2");
+    let cwds = [nested.join("sub"), nested.clone(), sibling.join("sub")];
+    let cwds: Vec<&Path> = cwds.iter().map(PathBuf::as_path).collect();
+    for (id, projects) in projects_for_10906(&dir, &reg, &cwds).await {
+        assert_eq!(projects, vec![Some("acme/web".to_string()); 2], "{id}");
+    }
+}
+
+/// #10906 error arm: a worktree whose `gitdir:` names a missing admin dir
+/// maps to no main checkout, so its events go out at once with no project,
+/// never claimed by the registered checkout that encloses it.
+#[tokio::test]
+async fn a_worktree_with_a_broken_gitdir_sends_its_events_unattributed_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = dir.path().join("registry");
+    let web = checkout_10906(dir.path(), "web", Some("https://github.com/acme/web"));
+    assert_eq!(register_10906(&reg, "web", &web).await, "acme/web");
+    let broken = web.join(".claude/worktrees/gone");
+    std::fs::create_dir_all(broken.join("sub")).expect("mkdir");
+    std::fs::write(
+        broken.join(".git"),
+        "gitdir: /nonexistent/.git/worktrees/gone\n",
+    )
+    .expect("write");
+    let cwds = [broken.join("sub")];
+    let cwds: Vec<&Path> = cwds.iter().map(PathBuf::as_path).collect();
+    for (id, projects) in projects_for_10906(&dir, &reg, &cwds).await {
+        assert_eq!(projects, vec![None; 2], "{id}");
+    }
+}

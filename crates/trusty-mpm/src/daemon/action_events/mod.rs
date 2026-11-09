@@ -570,18 +570,38 @@ impl StartAt {
 /// Why: the bus's `by_project` breakdown groups events by the registry
 /// `project_key` (`owner/repo`, or `local:<uuid>`), the same key the mpm
 /// pane groups by. Only the registry knows it.
-/// What: [`trusty_common::resolve_project_root`] on `cwd`, then
+/// What: [`trusty_common::resolve_project_root`] on `cwd`, mapped through
+/// [`main_checkout_root`] when that root is a linked worktree, then
 /// [`crate::project::registered_project_for_root_in`] against
-/// `registry_dir`. Both read the disk, so the threader calls this once per
-/// session. `None` for an unregistered cwd, an absent or unreadable
-/// registry, or a linked worktree (the registry matches checkouts only).
+/// `registry_dir`. All three read the disk, so the threader calls this once
+/// per session. `None` for an unregistered cwd, an absent or unreadable
+/// registry, or a worktree whose main checkout cannot be read.
 /// Test: `an_event_from_a_registered_project_carries_its_project_key_10906`,
-/// `an_unresolvable_session_still_sends_its_events_unattributed_10906`.
+/// `an_unresolvable_session_still_sends_its_events_unattributed_10906`,
+/// `a_linked_worktree_session_carries_its_main_checkouts_project_key_10906`.
 pub fn registry_resolver(registry_dir: PathBuf) -> projection::ProjectResolver {
     Arc::new(move |cwd| {
-        let root = trusty_common::resolve_project_root(cwd);
+        let root = main_checkout_root(trusty_common::resolve_project_root(cwd));
         crate::project::registered_project_for_root_in(&registry_dir, &root).map(|p| p.project_key)
     })
+}
+
+/// The main checkout a linked worktree's `root` belongs to; `root` otherwise.
+///
+/// Why (#10906): the registry matches main-checkout paths only (#10530), so a
+/// session working in a linked worktree would count as unattributed.
+/// What: when `root/.git` is a FILE, defers to
+/// [`trusty_common::palace_resolve::find_project_root`], which follows
+/// `gitdir:` and the admin dir's `commondir` with file reads only — no git
+/// process. A submodule, a `--separate-git-dir` checkout, or a broken pointer
+/// keeps the worktree's own directory, which no registry entry matches.
+/// Test: `a_linked_worktree_session_carries_its_main_checkouts_project_key_10906`,
+/// `a_worktree_with_a_broken_gitdir_sends_its_events_unattributed_10906`.
+fn main_checkout_root(root: PathBuf) -> PathBuf {
+    if !root.join(".git").is_file() {
+        return root;
+    }
+    trusty_common::palace_resolve::find_project_root(&root).unwrap_or(root)
 }
 
 /// [`start_at`] on [`StartAt::from_env`].
