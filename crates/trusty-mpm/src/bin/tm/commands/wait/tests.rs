@@ -34,16 +34,23 @@ fn args_for(condition: WaitFor) -> WaitArgs {
     }
 }
 
-/// A clock that never really sleeps — it just advances.
+/// A clock that never really sleeps — it just advances, and records each nap
+/// (#10550) so a test can pin the backoff the loop chose.
 struct FakeClock {
     now: Cell<u64>,
+    sleeps: std::cell::RefCell<Vec<u64>>,
 }
 
 impl FakeClock {
     fn at(now: u64) -> Self {
         Self {
             now: Cell::new(now),
+            sleeps: std::cell::RefCell::new(Vec::new()),
         }
+    }
+    /// Every nap, in seconds, in call order.
+    fn sleeps(&self) -> Vec<u64> {
+        self.sleeps.borrow().clone()
     }
 }
 
@@ -52,6 +59,7 @@ impl Clock for FakeClock {
         self.now.get()
     }
     fn sleep(&self, secs: u64) {
+        self.sleeps.borrow_mut().push(secs);
         self.now.set(self.now.get() + secs);
     }
 }
@@ -700,6 +708,127 @@ fn loop_recovers_from_a_transient_probe_error() {
     let out = poll_until(&cond, &plan(10, 100, 1800), &mut b, &clock).unwrap();
     assert_eq!(out.status, Status::Met);
     assert_eq!(b.polls, 3);
+}
+
+// ── the rate-limit backoff (#10550) ──────────────────────────────────────────
+
+/// The probe error `GhChecksProbe` returns when the pinned gh shim refuses a
+/// call on the primary GraphQL rate limit. A LITERAL copy of the shim's line,
+/// so a change to the shim's wording fails these tests.
+fn shim_refusal(reset_epoch: Option<u64>) -> String {
+    let when = match reset_epoch {
+        Some(epoch) => format!("it resets at 2026-11-09 02:00:00 UTC (epoch {epoch})"),
+        None => "the reset time is unknown (gh api rate_limit did not answer)".to_string(),
+    };
+    format!(
+        "`gh pr view 7` failed (exit status: 1): tm: GitHub refused this gh call on its \
+         primary GraphQL rate limit (gh account 'bot' on github.com); {when}. tm did not retry it."
+    )
+}
+
+/// Why: only the shim's own sentence earns a backoff, and its epoch is read.
+#[test]
+fn classify_reads_the_shim_refusal_and_its_reset_epoch() {
+    let hit = |text: String| rate_limit::classify(&anyhow::anyhow!(text));
+    assert_eq!(
+        hit(shim_refusal(Some(1_767_225_600))),
+        Some(rate_limit::RateLimited {
+            reset_epoch: Some(1_767_225_600)
+        })
+    );
+    assert_eq!(
+        hit(shim_refusal(None)),
+        Some(rate_limit::RateLimited { reset_epoch: None })
+    );
+    // A REST quota and gh's own unmarked text are generic probe errors.
+    for other in [
+        "gh: API rate limit exceeded for user ID 1. (HTTP 403)",
+        "GraphQL: API rate limit already exceeded for user ID 1.",
+        "connection reset",
+    ] {
+        assert_eq!(hit(other.to_string()), None, "{other}");
+    }
+}
+
+/// Why: a refused poll must wait for the reset the shim named, not re-poll on
+/// the 20-second interval and burn the probe-error budget.
+#[test]
+fn loop_backs_off_to_the_reset_on_a_rate_limited_probe() {
+    let clock = FakeClock::at(1_000);
+    let cond = FakeCondition::new(vec![
+        Err(shim_refusal(Some(1_137))),
+        Ok(Poll::Met("done".into())),
+    ]);
+    let mut b = budget_at(1_000, 1800);
+    let out = poll_until(&cond, &plan(20, 500, 1800), &mut b, &clock).unwrap();
+    assert_eq!(out.status, Status::Met);
+    assert_eq!(clock.sleeps(), vec![137], "the nap must be reset minus now");
+    assert_eq!(b.polls, 2);
+}
+
+/// Why: with no reset to wait for, back off 20, 40, 80 s, never past 5 min,
+/// and never count those polls against the 3-error budget.
+#[test]
+fn loop_backs_off_exponentially_when_the_reset_is_unknown() {
+    let clock = FakeClock::at(0);
+    let cond = FakeCondition::new(vec![
+        Err(shim_refusal(None)),
+        Err(shim_refusal(None)),
+        Err(shim_refusal(None)),
+        Err(shim_refusal(None)),
+        Ok(Poll::Met("done".into())),
+    ]);
+    let mut b = budget_at(0, 1800);
+    let out = poll_until(&cond, &plan(20, 500, 1800), &mut b, &clock).unwrap();
+    assert_eq!(out.status, Status::Met);
+    assert_eq!(clock.sleeps(), vec![20, 40, 80, 160]);
+    let unknown = rate_limit::RateLimited { reset_epoch: None };
+    assert_eq!(
+        rate_limit::backoff_secs(unknown, 0, 20, 5),
+        300,
+        "5-min cap"
+    );
+}
+
+/// Why: fail closed. A refusal that keeps coming ends the wait as an error
+/// naming the rate limit — never as met, never as a generic probe failure.
+#[test]
+fn rate_limit_exhaustion_errors_not_met() {
+    let clock = FakeClock::at(0);
+    let cond = FakeCondition::new(vec![Err(shim_refusal(None))]);
+    let mut b = budget_at(0, 1800);
+    let err = poll_until(&cond, &plan(20, 500, 1800), &mut b, &clock).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("rate limit"), "{text}");
+    assert!(text.contains("5 polls in a row"), "{text}");
+    assert_eq!(b.polls, 5);
+    assert_eq!(Status::Error.exit_code(), EXIT_ERROR);
+}
+
+/// Why: a reset past the hard deadline must not stretch the wait past it.
+#[test]
+fn loop_rate_limit_sleep_never_extends_the_hard_deadline() {
+    // 60s of budget left, a reset 300s away, a 500s slice.
+    let clock = FakeClock::at(11_740);
+    let cond = FakeCondition::new(vec![Err(shim_refusal(Some(12_040)))]);
+    let mut b = budget_at(10_000, 1_800);
+    let out = poll_until(&cond, &plan(20, 500, 1_800), &mut b, &clock).unwrap();
+    assert_eq!(out.status, Status::Timeout);
+    assert_eq!(clock.sleeps(), vec![60]);
+    assert_eq!(clock.now_unix(), 11_800, "stopped at the deadline");
+}
+
+/// Why: a slice that ends mid-backoff is pending (75), and says why.
+#[test]
+fn loop_reports_pending_with_the_rate_limit_when_a_slice_ends_in_a_backoff() {
+    let clock = FakeClock::at(1_000);
+    let cond = FakeCondition::new(vec![Err(shim_refusal(Some(1_300)))]);
+    let mut b = budget_at(1_000, 1800);
+    let out = poll_until(&cond, &plan(20, 100, 1800), &mut b, &clock).unwrap();
+    assert_eq!(out.status, Status::Pending);
+    assert_eq!(out.status.exit_code(), EXIT_PENDING);
+    assert_eq!(clock.sleeps(), vec![100], "clamped to the slice");
+    assert!(out.detail.contains("rate limit"), "{}", out.detail);
 }
 
 // ── budget persistence ───────────────────────────────────────────────────────

@@ -274,6 +274,25 @@ pub(crate) const REAP_FN: &str = "reap() {\n\
      \x20 exit \"$1\"\n\
      }\n";
 
+/// The fixed opening of the shim's primary GraphQL rate-limit refusal line.
+///
+/// Why: `tm wait` backs off on this refusal instead of counting it as a probe
+/// error (#10550), so it must match the shim's own sentence and nothing else.
+/// What: [`rate_limit_tail`] builds its stderr line from this text, so the
+/// line and every reader of it share one source. Shell-safe: no quote, `$` or
+/// backslash.
+/// Test: `a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout`;
+/// `classify_reads_the_shim_refusal_and_its_reset_epoch` pins a literal copy.
+pub const RATE_LIMIT_REFUSAL_MARKER: &str =
+    "tm: GitHub refused this gh call on its primary GraphQL rate limit";
+
+/// The text before the reset epoch in the refusal line, closed by `)`.
+///
+/// Why/What: see [`RATE_LIMIT_REFUSAL_MARKER`]; `tm wait` reads the epoch
+/// after it to sleep until the reset (#10550).
+/// Test: `classify_reads_the_shim_refusal_and_its_reset_epoch`.
+pub const RATE_LIMIT_RESET_EPOCH_OPEN: &str = "(epoch ";
+
 /// The shim's tail: run the real gh, refusing a primary GraphQL rate-limit
 /// refusal cleanly (#10550, ruling D8f, option A).
 ///
@@ -337,9 +356,9 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
          \x20 case \"$reset\" in\n\
          \x20   ''|*[!0-9]*) when='the reset time is unknown (gh api rate_limit did not answer)' ;;\n\
          \x20   *) utc=$(date -u -r \"$reset\" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || date -u -d \"@$reset\" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)\n\
-         \x20      when=\"it resets at ${{utc:-an unknown UTC time}} (epoch $reset)\" ;;\n\
+         \x20      when=\"it resets at ${{utc:-an unknown UTC time}} {RATE_LIMIT_RESET_EPOCH_OPEN}$reset)\" ;;\n\
          \x20 esac\n\
-         \x20 echo \"tm: GitHub refused this gh call on its primary GraphQL rate limit (gh account '{login}' on {shown}); $when. tm did not retry it.\" >&2\n\
+         \x20 echo \"{RATE_LIMIT_REFUSAL_MARKER} (gh account '{login}' on {shown}); $when. tm did not retry it.\" >&2\n\
          \x20 exit 1\n\
          fi\n\
          cat \"$out/1\"\n\

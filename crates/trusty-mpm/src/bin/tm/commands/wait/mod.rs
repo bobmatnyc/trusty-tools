@@ -29,6 +29,7 @@
 
 pub(crate) mod budget;
 pub(crate) mod condition;
+pub(crate) mod rate_limit;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -51,11 +52,12 @@ pub(crate) const EXIT_PENDING: i32 = 75;
 
 /// How many CONSECUTIVE probe errors are tolerated before giving up.
 ///
-/// Why: a `gh` call can fail transiently (rate limit, a dropped connection) and
-/// killing an hour-long wait over one blip would be worse than the blip. But an
-/// error that repeats is real — a missing binary, a deleted PR — and retrying it
-/// forever would hide it.
-/// What: the fourth consecutive failure ends the wait with `status=error`.
+/// Why: a `gh` call can fail transiently (a dropped connection) and killing an
+/// hour-long wait over one blip would be worse than the blip. But an error that
+/// repeats is real — a missing binary, a deleted PR — and retrying it forever
+/// would hide it.
+/// What: the fourth consecutive failure ends the wait with `status=error`. A
+/// shim rate-limit refusal is not counted here; see [`rate_limit`] (#10550).
 /// Test: `loop_gives_up_after_repeated_probe_errors`.
 const MAX_CONSECUTIVE_PROBE_ERRORS: u32 = 3;
 
@@ -255,12 +257,23 @@ pub(crate) struct Outcome {
 /// one more poll the wait has no budget for. Without either, a stalled `gh`
 /// read carried the invocation past whatever ran it and the process was
 /// SIGKILLed — exit 137, which is none of the four documented statuses.
+///
+/// #10550: a probe error carrying the gh shim's rate-limit line is counted
+/// apart from the generic error budget. The next nap waits for the reset (or
+/// backs off exponentially) and is still clamped to the slice and the
+/// deadline; the fifth refusal in a row is an error. `Met` comes only from an
+/// `Ok` poll.
 /// Test: `loop_returns_met_on_first_poll`, `loop_returns_pending_at_slice_end`,
 /// `loop_returns_timeout_when_budget_exhausted`,
 /// `loop_gives_up_after_repeated_probe_errors`,
 /// `loop_recovers_from_a_transient_probe_error`,
 /// `loop_bounds_each_poll_to_the_time_left_in_the_slice`,
-/// `loop_never_starts_a_poll_it_has_no_slice_for`.
+/// `loop_never_starts_a_poll_it_has_no_slice_for`,
+/// `loop_backs_off_to_the_reset_on_a_rate_limited_probe`,
+/// `loop_backs_off_exponentially_when_the_reset_is_unknown`,
+/// `rate_limit_exhaustion_errors_not_met`,
+/// `loop_rate_limit_sleep_never_extends_the_hard_deadline`,
+/// `loop_reports_pending_with_the_rate_limit_when_a_slice_ends_in_a_backoff`.
 pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
     cond: &C,
     plan: &Plan,
@@ -269,6 +282,8 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
 ) -> anyhow::Result<Outcome> {
     let slice_end = clock.now_unix().saturating_add(plan.slice_s);
     let mut consecutive_errors = 0u32;
+    // #10550: refusals run on their own streak, outside the generic budget.
+    let mut consecutive_rate_limited = 0u32;
     // Deliberately uninitialised: every path that reaches a read assigns it
     // first, so the compiler — not a placeholder string — proves it is set.
     let mut detail: String;
@@ -287,6 +302,7 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
                 .min(budget.remaining(started))
                 .max(1),
         );
+        let mut rate_limited = None;
         match cond.poll(poll_budget) {
             Ok(Poll::Met(d)) => {
                 return Ok(Outcome {
@@ -296,17 +312,37 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
             }
             Ok(Poll::Pending(d)) => {
                 consecutive_errors = 0;
+                consecutive_rate_limited = 0;
                 detail = d;
             }
-            Err(e) => {
-                consecutive_errors += 1;
-                if consecutive_errors > MAX_CONSECUTIVE_PROBE_ERRORS {
-                    return Err(e.context(format!(
-                        "condition probe failed {consecutive_errors} times in a row"
-                    )));
+            Err(e) => match rate_limit::classify(&e) {
+                // #10550: a shim refusal backs off; it neither spends nor
+                // resets the generic error budget.
+                Some(hit) => {
+                    consecutive_rate_limited += 1;
+                    if consecutive_rate_limited >= rate_limit::MAX_CONSECUTIVE_RATE_LIMITED {
+                        return Err(e.context(format!(
+                            "GitHub's primary GraphQL rate limit refused the probe \
+                             {consecutive_rate_limited} polls in a row"
+                        )));
+                    }
+                    detail = format!(
+                        "GitHub primary GraphQL rate limit (refusal \
+                         {consecutive_rate_limited}), backing off: {e}"
+                    );
+                    rate_limited = Some(hit);
                 }
-                detail = format!("probe error {consecutive_errors}, retrying: {e}");
-            }
+                None => {
+                    consecutive_rate_limited = 0;
+                    consecutive_errors += 1;
+                    if consecutive_errors > MAX_CONSECUTIVE_PROBE_ERRORS {
+                        return Err(e.context(format!(
+                            "condition probe failed {consecutive_errors} times in a row"
+                        )));
+                    }
+                    detail = format!("probe error {consecutive_errors}, retrying: {e}");
+                }
+            },
         }
 
         let now = clock.now_unix();
@@ -322,8 +358,12 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
                 detail,
             });
         }
-        let nap = plan
-            .interval_s
+        // #10550: a backoff is clamped like any nap, so it never extends the
+        // slice or the hard deadline.
+        let wait = rate_limited.map_or(plan.interval_s, |hit| {
+            rate_limit::backoff_secs(hit, now, plan.interval_s, consecutive_rate_limited)
+        });
+        let nap = wait
             .min(budget.remaining(now))
             .min(slice_end.saturating_sub(now))
             .max(1);
