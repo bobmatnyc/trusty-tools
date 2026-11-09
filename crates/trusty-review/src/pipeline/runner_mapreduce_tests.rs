@@ -285,6 +285,29 @@ fn oversized_multi_file_diff() -> (String, &'static str) {
     (diff, tail_signature)
 }
 
+/// #10782: a chunk reviewer whose every reply holds one "confirm X" note with
+/// nothing to quote, and the same question.
+struct QuestioningReviewer;
+
+#[async_trait]
+impl LlmProvider for QuestioningReviewer {
+    fn name(&self) -> &str {
+        "questioning-reviewer"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let text = r#"{"verdict":"APPROVE","summary":"ok","questions":["Confirm compute_value is pure."],"findings":[{"title":"confirm","body":"Confirm compute_value is pure.","severity":"low","confidence":0.3,"file":"src/big.rs","line":1}]}"#;
+        Ok(LlmResponse {
+            text: text.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 /// THE headline test: an over-cap multi-file diff routes to MAP-REDUCE (not the
@@ -1787,5 +1810,41 @@ fn mapreduce_no_files_reviewed_abort_partitions_withheld() {
             finding_index: 0,
             reason: UnanchoredReason::Withheld("refuted".to_string()),
         }]
+    );
+}
+
+/// #10782 on the map-reduce path: each chunk's no-quote note is withheld
+/// before reduce under `no_quote_pregate`, and the chunks' questions reach the
+/// result once each.
+#[tokio::test]
+async fn mapreduce_withholds_no_quote_notes_and_keeps_questions() {
+    let (diff, _tail) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+    let llm: Arc<dyn LlmProvider> = Arc::new(QuestioningReviewer);
+    let result = run_review(
+        &ReviewConfig::load(None),
+        input(source),
+        confirmed_deps(llm),
+    )
+    .await;
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert!(
+        result
+            .withheld_by_reason
+            .get("no_quote_pregate")
+            .copied()
+            .unwrap_or(0)
+            >= 1,
+        "{:?}",
+        result.withheld_by_reason
+    );
+    assert!(
+        !result.withheld_by_reason.contains_key("line_citation"),
+        "{:?}",
+        result.withheld_by_reason
+    );
+    assert_eq!(
+        result.questions,
+        ["Confirm compute_value is pure.".to_string()]
     );
 }

@@ -13,6 +13,7 @@
       "issue_eligible": false,
       "kind": "overflow",
       "line": 10,
+      "quoted_snippet": "amounts.iter().sum::<u64>()",
       "severity": "medium",
       "suggestion": "",
       "verified": "confirmed"

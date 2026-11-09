@@ -67,6 +67,8 @@ pub mod post;
 // against, and each surface's degrade contract for an unreadable registry.
 pub mod pr_index;
 pub mod prompt;
+// #10782: a finding that quotes no code is withheld before the gate.
+pub mod quote_admission;
 // #9310: the bounded reply shape a parse failure records.
 pub(crate) mod reply_shape;
 pub mod runner;

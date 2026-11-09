@@ -28,7 +28,7 @@ use crate::{
     pipeline::{
         diff_analyzer::models::FilteredDiff,
         letter_grade::{Grade, default_grade_for_verdict, reconcile_grade_with_verdict},
-        mapreduce::{MapContext, ReducedReview, run_map_reduce_with_wiped},
+        mapreduce::{MapContext, MapReduceRunOutput, run_map_reduce_with_wiped},
         optional_context::assemble::{AppliedContext, refs_for_review}, // #9192, #9197
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
@@ -126,15 +126,19 @@ pub(super) async fn run_mapreduce_branch(
         "map-reduce branch: reviewing over-cap diff per-file (no truncation)"
     );
     // #9310 ruling 50: `grade_floor` is the synthesis or worst-chunk floor (Q2).
-    let (mut reduced, wiped_model_verdict, grade_floor): (ReducedReview, _, _) =
-        run_map_reduce_with_wiped(
-            &run.filtered,
-            &deps.llm,
-            &ctx,
-            mr_config,
-            &|file: &str, first: bool| run.applied.chunk_sections(file, first), // #9193, #9195
-        )
-        .await;
+    let MapReduceRunOutput {
+        review: mut reduced,
+        wiped_model_verdict,
+        grade_floor,
+        questions,
+    } = run_map_reduce_with_wiped(
+        &run.filtered,
+        &deps.llm,
+        &ctx,
+        mr_config,
+        &|file: &str, first: bool| run.applied.chunk_sections(file, first), // #9193, #9195
+    )
+    .await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
     result
         .withheld_findings
@@ -191,6 +195,7 @@ pub(super) async fn run_mapreduce_branch(
         grade_pre_floor: reduced.grade_pre_floor.clone(),
         summary: reduced.summary.clone(),
         findings: reduced.findings.clone(),
+        questions, // #10782
         is_fail_safe: false,
         fail_safe_reason: None,
     };
@@ -462,6 +467,7 @@ async fn fold_reduced_into_result(
     // Author rationale (#1618) lets the verifier REFUTE an addressed finding.
     result.verdict = final_verdict;
     result.findings = parsed.findings;
+    result.questions = parsed.questions; // #10782: never graded or gated
     let author_rationale = build_author_rationale(
         input.caller_context.pr_description.as_deref(),
         input.caller_context.pr_discussion.as_deref(),
