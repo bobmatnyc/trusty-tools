@@ -300,10 +300,13 @@ impl DaemonClient {
         let spec_dir = crate::runtime::cli_launch::spec_dir(home.as_deref()).ok_or_else(|| {
             anyhow::anyhow!("tmux session {session} created but no home holds its launch spec")
         })?;
-        let binding = crate::runtime::cli_launch::send_spec_launch(server, session, spec, &spec_dir)
-            .map_err(|e| {
-                anyhow::anyhow!("tmux session {session} created but failed to start claude: {e}")
-            })?;
+        let binding =
+            crate::runtime::cli_launch::send_spec_launch(server, session, spec, &spec_dir)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "tmux session {session} created but failed to start claude: {e}"
+                    )
+                })?;
         // #8878: an Architect `claude` this launch could not bind is reported.
         if let Some(warning) = binding.warning(session) {
             eprintln!("{warning}");
