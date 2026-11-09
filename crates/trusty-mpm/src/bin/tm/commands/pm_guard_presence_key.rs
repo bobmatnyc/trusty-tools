@@ -149,8 +149,9 @@ const SHELL_BUILT: &[char] = &['$', '`', '*', '?', '[', '{'];
 /// or behind a redirection or `-p prompt` (#8878 r2 HIGH).
 /// What: every `security` word, not only one in command position, because
 /// `echo 'security …' | sh` puts it after any word. Its stage ends at a
-/// newline or a word starting `;`, `|`, `&`, `)`, `]`, `` ` `` or `#`.
-/// Redirections and their targets are skipped; an option word runs nothing
+/// newline, a word starting `;`, `|`, `&`, `)`, `]` or `#`, or a lone
+/// backtick that closes a substitution. Redirections are skipped, with the
+/// target of a [`TARGET_OPS`] operator; an option word runs nothing
 /// unless it holds `i` or `p` (interactive mode reads verbs from stdin).
 /// The first other word must be an allowlisted verb. Two shapes pass because
 /// `security` runs nothing for them: no verb (it prints usage and exits 2),
@@ -171,27 +172,43 @@ fn judge_security_verbs(folded: &str) -> Option<&'static str> {
         if rest.starts_with(|c: char| !c.is_whitespace() && !NAME_END.contains(c)) {
             return None;
         }
-        judge_security_stage(rest.split('\n').next().unwrap_or_default())
+        // #8878: backticks earlier on the line; an odd count means a lone
+        // backtick after `security` closes a substitution it sits in.
+        let line = folded[..at].rsplit('\n').next().unwrap_or_default();
+        let ticks = line.matches('`').count();
+        judge_security_stage(rest.split('\n').next().unwrap_or_default(), ticks)
     })
 }
 
-/// The words after one `security` word, up to its stage end.
-fn judge_security_stage(stage: &str) -> Option<&'static str> {
+/// Redirection operators whose target is the next word.
+const TARGET_OPS: &[&str] = &[
+    ">", ">>", "<", "<<", "<<-", "<<<", "<>", ">|", "&>", "&>>", ">&", "<&",
+];
+
+/// The words after one `security` word, up to its stage end; `ticks` counts
+/// the backticks before that word on its line.
+fn judge_security_stage(stage: &str, mut ticks: usize) -> Option<&'static str> {
     let mut words = stage
         .split(|c: char| c.is_whitespace() || c == ',')
         .filter(|w| !w.is_empty());
     while let Some(word) = words.next() {
-        let ends = word.starts_with([';', '|', ')', ']', '`', '#'])
+        // #8878: only a lone closing backtick ends the stage (`` `security`
+        // calls ``); `` `true` `` or an opening `` ` `` expands to nothing or
+        // to a verb, so it goes to the run-time check below.
+        let closes = word == "`" && ticks % 2 == 1;
+        let ends = closes
+            || word.starts_with([';', '|', ')', ']', '#'])
             || (word.starts_with('&') && !word.starts_with("&>"));
         if ends {
             return None;
         }
-        // #8878: `2>/dev/null`, `2>&1`, `<<<x` skip themselves; `>`, `2>`,
-        // `<<<` and `&>` also skip their target.
+        // #8878: `2>/dev/null`, `2>&1`, `2>&-`, `<<<x` skip themselves; only
+        // an operator in [`TARGET_OPS`] also skips its target word.
         let op = word.trim_start_matches(|c: char| c.is_ascii_digit());
         if op.starts_with(['<', '>']) || op.starts_with("&>") {
-            if op.chars().all(|c| "<>&|-".contains(c)) {
-                words.next();
+            ticks += word.matches('`').count();
+            if TARGET_OPS.contains(&op) {
+                ticks += words.next().map_or(0, |t| t.matches('`').count());
             }
             continue;
         }
@@ -202,8 +219,12 @@ fn judge_security_stage(stage: &str) -> Option<&'static str> {
             .split([';', '|', '&', '<', '>', ')', ']', '`'])
             .next()?;
         // #8878: an option word is read whole; a substitution glued to `-q`
-        // can add `p`.
-        let judged = if word.starts_with('-') { word } else { verb };
+        // can add `p`; a backtick-led word is a run-time word.
+        let judged = if word.starts_with(['-', '`']) {
+            word
+        } else {
+            verb
+        };
         if judged.contains(SHELL_BUILT) {
             return Some("runs a `security` verb the shell builds at run time or expands");
         }

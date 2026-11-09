@@ -50,6 +50,15 @@ pub(crate) const RUN_TIME: &[&str] = &[
     "security \\\n add-generic-pass -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
     "echo 'add-generic-password -s trusty-mpm.presence -w k' | security -i",
     "echo 'add-generic-password -s trusty-mpm.presence -w k' | security -q`echo p` x",
+    // #8878 r3 HIGH: a backtick word that expands to nothing, and an fd
+    // close ahead of the verb.
+    "security `true` add-generic-pass -U -A -w zzz -s trusty-mpm.presence -a grant-hmac-v1",
+    "security `` delete-generic-pass -s trusty-mpm.presence -a grant-hmac-v1",
+    "security ` echo add-generic-pass` -s trusty-mpm.presence -a grant-hmac-v1 -w zzz",
+    "security 2>&- add-generic-pass -U -A -w zzz -s trusty-mpm.presence -a grant-hmac-v1",
+    "security >&- delete-generic-pass -s trusty-mpm.presence",
+    "security <&- delete-generic-pass -s trusty-mpm.presence -a grant-hmac-v1",
+    "security 2>&1 add-generic-pass -U -A -w zzz -s trusty-mpm.presence -a grant-hmac-v1",
 ];
 
 /// `security` verbs outside the read-only allowlist, whatever item they name.
@@ -90,6 +99,7 @@ pub(crate) const OTHERS: &[&str] = &[
     "git commit -m \"fix(security): guard verbs\"",
     "cargo add security-framework",
     "# script must not duplicate `codesign`/`security find-identity` calls.",
+    "git commit -m \"docs: `security` calls are read-only\"",
 ];
 
 /// Assert every command is denied; a failure lists every row that passed.
