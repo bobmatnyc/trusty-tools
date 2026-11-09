@@ -5,13 +5,15 @@ file here except this README and itself, by running the prototype's
 `datg.py` on the scrubbed stores in `../pm-*/`. Do not edit them by hand,
 and never regenerate them from the Rust.
 
-Baseline: the Architect prototype's `scripts/datg.py`, SHA-1 prefix
-`de5e81131979`.
+Baseline: `python/trusty-architect/scripts/datg.py` (#10780 regenerated it from the
+shipped copy; earlier corpora came from the prototype, SHA-1 prefix
+`de5e81131979`). The regen pins the 8 KB / 16 KB bars and the clock in every
+`datg_*` module.
 
 Each store runs one chain of verbs through `datg.main` with a clock pinned
 to 2026-10-21T10:MMZ (minute = step), prune and show two days later: add,
 a refused add, update (escalate, answer), close, a batch (add, update,
-session), a batch that crosses the 8 KB bar, prune `--dry-run`, prune and
+session), a batch that crosses the 8 KB bar, sourced answers (#10780), prune `--dry-run`, prune and
 show. `pm-over-refuse` prunes itself under the 16 KB bar on its first
 write; `pm-over-warn` refuses a write over it.
 
@@ -24,7 +26,7 @@ All strings are filler from the scrubbed stores or written by the script.
 
 ## Regenerate
 
-From the repository root, with `<prototype-dir>` the prototype's `scripts/`:
+From the repository root, with `<prototype-dir>` = `python/trusty-architect/scripts`:
 
 ```bash
 python3 -B -I crates/trusty-architect/tests/fixtures/ledger/writer/regen_writer.py <prototype-dir>

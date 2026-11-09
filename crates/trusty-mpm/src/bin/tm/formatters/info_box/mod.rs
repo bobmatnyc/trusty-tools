@@ -471,7 +471,8 @@ mod tests {
         let socket = dir.path().join("s").join("trusty-mpm.sock");
         assert!(!socket_probe(&socket), "absent");
         std::fs::create_dir_all(socket.parent().expect("parent")).expect("dir");
-        drop(trusty_common::uds::bind_hardened(&socket).expect("bind"));
+        // #10026: wait out a listener fd a concurrent test's fork inherited.
+        crate::test_support::stale_socket::bind_stale(&socket);
         assert!(socket.exists(), "the stale socket file stays behind");
         assert!(!socket_probe(&socket), "stale");
     }

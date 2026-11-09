@@ -43,7 +43,20 @@ fn scratch_home_and_project() -> (tempfile::TempDir, tempfile::TempDir) {
 /// Runs `tm sessions start` in `project` under `home`; returns success,
 /// stdout, stderr.
 fn sessions_start(home: &Path, project: &Path) -> (bool, String, String) {
-    let out = common::tm_command_in(home)
+    // #10101 D3c: an unreachable daemon refuses the start before provisioning,
+    // so a mock answers the launch name rule's two list reads.
+    let (url, _requests) = common::socket::spawn_mock(|frame| {
+        let method = frame["method"].as_str().unwrap_or_default();
+        let result = if method.ends_with(".list") {
+            r#"{"sessions":[]}"#
+        } else {
+            r#"{"status":"ok"}"#
+        };
+        common::socket::Reply::Frame(common::socket::result_frame(result))
+    });
+    let mut cmd = common::tm_command_in(home);
+    common::socket::aim(&mut cmd, &url);
+    let out = cmd
         .args(["sessions", "start", "--dir"])
         .arg(project)
         .current_dir(project)

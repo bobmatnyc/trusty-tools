@@ -151,7 +151,10 @@ name = "trusty-mpm"
 # requires the bump. Bug fix, no signature break.
 # 1.9.0 (Refs #9621): minor — 1.8.2 is published on crates.io and this PR adds
 # the `tm secrets exec` subcommand (a feature) under `src/**`.
-version = "1.12.0"
+# 1.12.1 (Refs #10754): patch — 1.12.0 is published on crates.io and main
+# carries `src/**` changes since (#10733, #10790), so the "PR version bump vs
+# crates.io" check (#4421) requires the bump. Version-only commit.
+version = "1.12.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -478,6 +481,9 @@ semver.workspace = true
 # Used by statusline/compaction.rs for atomic state-file writes (NamedTempFile::persist).
 tempfile.workspace = true
 sha2.workspace = true
+# #8878 PR2a (Bob D5b Q3): presence grants are HMAC-SHA256 sealed; the tag is hex.
+hmac.workspace = true
+hex.workspace = true
 regex.workspace = true
 # Glob compilation for the `tm ls` picker's `d <glob>` bulk delete (#5539).
 # Already a workspace dep (trusty-code) and already in the lockfile, so this
@@ -562,6 +568,15 @@ futures-util = { workspace = true, optional = true }
 # scratch `$HOME` from the operator's real one — see `core::host_state_gate`.
 # `fs` (#8528): `statvfs`, so the worktree disk gate reads the figure `df` does.
 nix = { version = "0.29", features = ["fs", "signal", "user"] }
+
+# #8878 PR2a: `tm presence local` asks LocalAuthentication (Touch ID or the
+# login password) through the Objective-C runtime, and the grant key lives in
+# the login Keychain. `keyring` is apple-native only, as trusty-secrets pins it:
+# the workspace entry's `sync-secret-service` pulls libdbus-sys.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
 
 # ── Dev dependencies ───────────────────────────────────────────────────────────
 [dev-dependencies]

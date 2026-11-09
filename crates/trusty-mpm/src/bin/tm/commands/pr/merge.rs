@@ -17,7 +17,8 @@
 //! re-validates the body with [`body::validate`] — reporting the nine-field
 //! gaps and refusing only on a missing attribution footer, which is the half
 //! that belongs to the commit message this command writes (#7868) — applies
-//! the #8614 checks gate ([`check_gate`]), and either
+//! the #10724 code-critic verdict gate ([`critic_verdict`]) and the #8614
+//! checks gate ([`check_gate`]), and either
 //! refuses with one line and no `gh pr merge` call, or merges
 //! with `--squash --delete-branch --subject "<title> (#<n>)" --body-file <tmp>`
 //! where the temp file holds that validated body. The refusal itself is
@@ -33,6 +34,7 @@ use serde::Deserialize;
 
 use super::body;
 use super::check_gate::{self, CheckGate};
+use super::critic_verdict;
 use super::rollup::RollupEntry;
 use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv, repo_slug};
 use crate::cli::PrMergeArgs;
@@ -51,8 +53,9 @@ pub(crate) struct Label {
 ///
 /// Why: every field here is either an input to the squash commit message
 /// (`title`, `body`) or one of the documented hold signals, so a single
-/// `gh pr view` answers the whole decision — no second round trip can observe
-/// a different PR state than the one that was judged.
+/// `gh pr view` answers the whole decision. The #10724 verdict read is a
+/// second round trip; `headRefOid` binds the two, and [`run`] refuses when
+/// they report different heads (#10796 review).
 /// What: the `gh pr view --json` payload, every field defaulted so a payload
 /// missing one (an unreviewed PR reports `reviewDecision: null`) still parses.
 /// Test: `merge_valid_body_merges`, `merge_refuses_draft`.
@@ -90,6 +93,9 @@ pub(crate) struct MergeView {
     /// The head branch, named in the merge output.
     #[serde(default, rename = "headRefName")]
     pub(crate) head_ref_name: String,
+    /// The head commit the checks and hold signals were read on (#10796 review).
+    #[serde(default, rename = "headRefOid")]
+    pub(crate) head_ref_oid: String,
     /// `OPEN`, `CLOSED` or `MERGED` at the START of this invocation (#7945).
     ///
     /// Why: the post-failure re-read cannot tell "this command's merge landed"
@@ -227,10 +233,16 @@ fn conflict_field(view: &MergeView) -> Option<&'static str> {
 /// command — without them GitHub concatenates the branch's raw commit messages
 /// into the squash commit.
 /// What: `pr merge <n> [--repo <slug>] --squash [--delete-branch] [--auto]
-/// --subject "<title> (#<n>)" --body-file <path>`.
+/// [--match-head-commit <oid>] --subject "<title> (#<n>)" --body-file <path>`.
 /// Test: `merge_argv_carries_squash_delete_and_body_file`,
-/// `merge_argv_honours_auto_and_no_delete_branch`.
-pub(crate) fn plan(args: &PrMergeArgs, view: &MergeView, body_file: &Path) -> Vec<String> {
+/// `merge_argv_honours_auto_and_no_delete_branch`,
+/// `pr_10724_the_merge_call_matches_the_assessed_head`.
+pub(crate) fn plan(
+    args: &PrMergeArgs,
+    view: &MergeView,
+    body_file: &Path,
+    head_oid: Option<&str>,
+) -> Vec<String> {
     let n = args.pr.to_string();
     let mut a = argv(&["pr", "merge", &n]);
     push_repo(&mut a, args);
@@ -240,6 +252,11 @@ pub(crate) fn plan(args: &PrMergeArgs, view: &MergeView, body_file: &Path) -> Ve
     }
     if args.auto {
         a.push("--auto".to_string());
+    }
+    // #10724: merge only the head the code-critic verdicts were assessed on.
+    if let Some(oid) = head_oid {
+        a.push("--match-head-commit".to_string());
+        a.push(oid.to_string());
     }
     a.push("--subject".to_string());
     a.push(format!("{} (#{})", view.title.trim(), args.pr));
@@ -270,9 +287,10 @@ fn pr_view<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<MergeView>
     // #7945: `state` joins the set so `decide` can refuse a PR that is not OPEN.
     // #8614: `statusCheckRollup` feeds the checks gate; `baseRefName` names
     // the branch whose protection lists the required checks.
+    // #10796 review: `headRefOid` binds this read to the verdict read.
     a.push(
         "number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName,\
-         state,statusCheckRollup,baseRefName"
+         headRefOid,state,statusCheckRollup,baseRefName"
             .to_string(),
     );
     let stdout = gh.run(&a)?.stdout_ok(&a)?;
@@ -408,7 +426,18 @@ fn merged_after_failure<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> Option<Merge
 /// [`check_gate::needs_required`] says the answer depends on them, and a
 /// waived check heads the commit body. A failed or unparseable read, or a
 /// view with no `baseRefName`, is an error and nothing merges.
-/// Test: `merge_refuses_without_calling_gh_merge`,
+///
+/// #10724: between [`decide`] and the checks gate, [`critic_verdict::assess`]
+/// refuses an unresolved code-critic BLOCK on the head; a failed verdict read
+/// refuses too. The read's `headRefOid` becomes `--match-head-commit`, so a
+/// push after the read is refused by GitHub. A head that differs between the
+/// decision read and the verdict read refuses (#10796 review). Known limit: a
+/// raw `gh pr merge` skips this gate entirely.
+/// Test: `pr_10724_a_block_pinned_to_the_head_refuses`,
+/// `pr_10724_a_head_that_moved_between_the_reads_refuses`,
+/// `pr_10724_the_merge_call_matches_the_assessed_head`,
+/// `pr_10724_a_verdict_read_failure_refuses`,
+/// `merge_refuses_without_calling_gh_merge`,
 /// `run_auto_refuses_while_a_non_required_check_runs`,
 /// `run_refuses_while_a_non_required_check_runs_without_auto`,
 /// `run_refuses_without_a_base_ref_name`,
@@ -443,6 +472,36 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
 
     if let Decision::Refuse(reason) = decide(&view, &report.merge_failures()) {
         return Ok(refuse(args.pr, &reason));
+    }
+
+    // #10724: an unresolved code-critic BLOCK on the head holds the merge; an
+    // unreadable verdict set fails closed.
+    let mut verdict_read = argv(&["pr", "view", &args.pr.to_string()]);
+    push_repo(&mut verdict_read, args);
+    let verdicts = match critic_verdict::read(gh, verdict_read) {
+        Ok(v) => v,
+        Err(e) => {
+            let reason = format!("cannot read the code-critic verdicts ({e:#})");
+            return Ok(refuse(args.pr, &reason));
+        }
+    };
+    // #10796 review: the checks were judged on `view`'s head; the merge is
+    // pinned to the verdict read's head. They must be one commit.
+    let (decided, assessed) = (view.head_ref_oid.trim(), verdicts.head.trim());
+    if !decided.eq_ignore_ascii_case(assessed) {
+        let reason = format!(
+            "the head moved between reads — the checks were read on `{decided}` and the \
+             code-critic verdicts on `{assessed}`; re-run `tm pr merge {}`",
+            args.pr
+        );
+        return Ok(refuse(args.pr, &reason));
+    }
+    let (critic, head_oid) = (critic_verdict::assess(&verdicts), verdicts.head_oid());
+    if let Some(reason) = critic.refusal {
+        return Ok(refuse(args.pr, &reason));
+    }
+    if let Some(warning) = critic.warning {
+        eprintln!("tm pr merge: #{}: warning — {warning}", args.pr);
     }
 
     // #8614: the checks gate, after every other hold signal passed.
@@ -484,7 +543,7 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
         .and_then(|()| tmp.flush())
         .context("cannot write the squash commit body to its temp file")?;
 
-    let a = plan(args, &view, tmp.path());
+    let a = plan(args, &view, tmp.path(), head_oid.as_deref());
     let out = gh.run(&a)?;
     if !out.success {
         // #7945: `gh pr merge --delete-branch` deletes the LOCAL branch AFTER

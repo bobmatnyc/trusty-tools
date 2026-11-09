@@ -8,6 +8,7 @@
 //! Test: this file IS the test module for `flow`.
 
 use super::*;
+use crate::api::constants::{OAUTH_SCOPES, READONLY_SCOPES};
 
 #[test]
 fn scope_string_matches_constant_set() {
@@ -39,6 +40,46 @@ fn build_auth_url_contains_all_params() {
     // redirect_uri and scope must be percent-encoded.
     assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A5000"));
     assert!(url.contains("scope=openid%20https"));
+}
+
+// #10746: ok-T20 read-only scope preset
+/// Why: the preset must reach the consent URL, or Google grants the default.
+/// What: the read-only scope string appears percent-encoded in the URL and
+/// no write scope does.
+/// Test: this test.
+#[test]
+fn readonly_preset_reaches_the_auth_url() {
+    let scope = ScopePreset::ReadOnly.scope_string();
+    let url = build_auth_url("cid", "http://127.0.0.1:5000", &scope, "C", "S");
+    assert!(url.contains(&format!("scope={}", pkce::percent_encode(&scope))));
+    assert!(url.contains("gmail.readonly"));
+    assert!(!url.contains("gmail.modify"), "{url}");
+    assert!(!url.contains("auth%2Fdrive%20"), "{url}");
+}
+
+/// Why: refresh and the read-only guard read the scopes recorded at consent.
+/// What: when Google's token response omits `scope`, the stored token records
+/// the requested preset; when it carries one, the granted set wins.
+/// Test: this test.
+#[test]
+fn readonly_preset_reaches_the_stored_token() {
+    let scope = ScopePreset::ReadOnly.scope_string();
+    let mut resp = TokenResponse {
+        access_token: "a".into(),
+        refresh_token: Some("r".into()),
+        expires_in: Some(3600),
+        token_type: None,
+        scope: None,
+        id_token: None,
+    };
+    let stored = build_stored_token("ro", None, &resp, &scope);
+    assert_eq!(stored.token.scopes, READONLY_SCOPES);
+    resp.scope = Some("openid https://www.googleapis.com/auth/gmail.readonly".into());
+    let stored = build_stored_token("ro", None, &resp, &scope);
+    assert_eq!(
+        stored.token.scopes,
+        ["openid", "https://www.googleapis.com/auth/gmail.readonly"]
+    );
 }
 
 #[test]

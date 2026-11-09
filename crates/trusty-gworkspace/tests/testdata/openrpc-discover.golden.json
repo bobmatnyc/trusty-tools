@@ -125,6 +125,18 @@
           }
         },
         {
+          "description": "Optional scope preset. \"readonly\" requests only openid, userinfo.email, gmail.readonly, drive.readonly and documents.readonly; write tools then fail on this profile with an error naming the missing scope. Omit for the full default scope set. Any other value is refused.",
+          "name": "scopes",
+          "required": false,
+          "schema": {
+            "description": "Optional scope preset. \"readonly\" requests only openid, userinfo.email, gmail.readonly, drive.readonly and documents.readonly; write tools then fail on this profile with an error naming the missing scope. Omit for the full default scope set. Any other value is refused.",
+            "enum": [
+              "readonly"
+            ],
+            "type": "string"
+          }
+        },
+        {
           "description": "How long to wait for the user to complete browser consent, in seconds (clamped to 10-90; default 60).",
           "name": "timeout_secs",
           "required": false,

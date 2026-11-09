@@ -3,6 +3,8 @@
 Why: datg.py passed the 500-SLOC cap; #10161 P3 split it by section, bodies moved verbatim.
 What: summary, dispatch_mode/check_dispatch, log_hook_warning, op_fresh, turn_tools,
 stamp_turn (the Stop hook's stale_il record) and build_digest. datg.py re-exports every name.
+#10780: the digest splits answered items by item.source and flags unsourced owner claims (unsourced_claim,
+provenance_flags).
 Test: tests/test_datg.py
 """
 import json
@@ -183,6 +185,79 @@ def stamp_turn(project, payload, now=None):
     return new
 
 
+# ---- provenance (#10780) ----------------------------------------------------------
+
+# An owner claim: an owner label, "ruling", or a "(<Name> HH:MMZ)" attribution. The name is data, never a list.
+OWNER_CLAIM = re.compile(r"\b(?:user|owner)\s+(?:ruling|instruction)s?\b|\bruling\b|\([A-Z][\w.-]* \d{2}:\d[\dx]Z\)",
+                         re.I)
+OWNER_CITE = re.compile(r"owner turn:\s*(?:chat|dashboard)\s+\S", re.I)   # round 2: a palace cite never clears
+
+
+CITED = re.compile(r'((?:"[^"\n]+"\s*(?:…|\.\.\.)?\s*)+)\(owner turn:\s*([^()\n]{1,80})\)')
+
+
+def _cite_verified(text):
+    """True when every `"<quote>" (owner turn: <cite>)` in `text` checks out (critic H3: a cite alone is not enough)."""
+    found = CITED.findall(text)
+    if not found:
+        return False
+    try:
+        import relay_provenance
+        for quotes, cite in found:
+            relay_provenance.verify(cite.strip(), re.findall(r'"([^"\n]+)"', quotes))
+    except Exception:  # noqa: BLE001 - a refusal, a missing module or an unreachable store keeps the flag
+        return False
+    return True
+
+
+def unsourced_claim(text):
+    """True when `text` claims an owner ruling without a verified `"<quote>" (owner turn: <cite>)`.
+
+    Test: tests/test_datg_provenance.py
+    """
+    t = str(text or "")
+    return bool(OWNER_CLAIM.search(t)) and not (OWNER_CITE.search(t) and _cite_verified(t))
+
+
+def provenance_flags(path):
+    """[(line number, line)] of a handoff file whose lines claim an owner ruling with no source; OSError unreadable."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return [(n, ln.rstrip("\n")) for n, ln in enumerate(f, 1) if unsourced_claim(ln)]
+
+
+def _handoff_path(project, value):
+    for p in (value, os.path.join(project, value), os.path.join(os.getcwd(), value)):
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _flag(where, text):
+    return f"  FLAG unsourced owner claim (not an owner ruling until cited; confirm first): {where}: {_short(text, 160)}"
+
+
+def _ruling_sections(items, now):
+    """Answered items split by item.source: owner rulings (current, then expired), Architect inferences, unsourced."""
+    cur, old, inf, uns = (["OWNER RULINGS (with source)"], ["OWNER RULINGS EXPIRED (history only, not current)"],
+                          ["ARCHITECT INFERENCES (not owner rulings)"],
+                          ["UNSOURCED ANSWERS (not owner rulings; confirm the source before acting)"])
+    for i in items:
+        if i.get("status") != "answered":
+            continue
+        src = i.get("source") if isinstance(i.get("source"), dict) else {}
+        line = f"  {i['id']} {i['title']} | answer: {i.get('answer', '')}"
+        if src.get("by") == "owner":   # #10780 H3: the owner's words are the ruling; the answer is our reading
+            until = parse_ts(src.get("until")) if src.get("until") else None
+            (old if until and until <= now else cur).append(
+                f'  {i["id"]} {i["title"]} | ruling: "{src.get("quote")}" (owner turn: {src.get("cite")})'
+                + (f" | until {src['until']}" if until else "") + f" | Architect reading: {i.get('answer', '')}")
+        elif src.get("by") == "architect":
+            inf.append(line + f" | basis: {src.get('basis')}")
+        else:
+            uns.append(line)
+    return [ln for sec in (cur, old, inf, uns) if len(sec) > 1 for ln in sec]
+
+
 def _short(v, n):
     v = " ".join(str(v or "").split())
     return v if len(v) <= n else v[:n - 1] + "…"
@@ -226,15 +301,27 @@ def _digest_sections(project, st):
     cu = ses.get("ctx_use")
     if cu:
         sess.append(f"  ctx_use: active {cu['active']}% stale {cu['stale']}% ctx {cu['ctx']} at {cu['at']} keep: {cu['keep']}")
+    # #10780: a session field or handoff line claiming an owner ruling with no cite is flagged, never restored as one.
+    texts = [(k, ses.get(k)) for k in ("hold", "merge_hold", "task", "next")]
+    texts += [("waiting_on", w.get("what")) for w in ses.get("waiting_on") or []]
+    texts += [(t["id"], t["title"]) for t in st["tasks"] if t["status"] != "done"]
+    sess += [_flag(k, v) for k, v in texts if v and unsourced_claim(v)]
+    for r in ses.get("refs") or []:
+        hp = _handoff_path(project, r["value"]) if r.get("key") == "handoff" else None
+        try:
+            sess += [_flag(f"{r['value']}:{n}", ln) for n, ln in (provenance_flags(hp) if hp else [])][:8]
+        except OSError as e:
+            sess.append(f"  FLAG handoff {r['value']} unreadable ({e})")
     goals = ["GOALS"] + [f"  {g['id']} r{g['rank']} {g['title']}" + (f" -> {g['finish']}" if g.get("finish") else "")
                          for g in sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])]
-    items = ["ITEMS (open/answered)"]
+    items = ["ITEMS (open)"]
     for i in st["items"]:
-        if i["status"] in ("open", "answered"):
+        if i["status"] == "open":
             rec = next((o["l"] for o in i.get("opts") or [] if o.get("rec")), "")
             items.append(f"  {i['id']} [{i['status']}]{' esc' if i.get('esc') else ''} {i['title']}"
                          + (f" | answer: {i['answer']}" if i.get("answer") else "")
-                         + (f" | rec: {rec}" if rec and i["status"] == "open" else ""))
+                         + (f" | rec: {rec}" if rec else ""))
+    items += _ruling_sections(st["items"], datetime.now(timezone.utc))   # #10780: owner vs Architect, by source
     tasks = [f"  {t['id']} [{t['status']}] {t['goal']} {t['title']}" for t in st["tasks"] if t["status"] != "done"]
     recent = [x for x in read_log(project, 262144) if x[1] in ("escalated", "answered", "done", "drift")][-10:]
     log = ["RECENT"] + [f"  {r.get('t') or r.get('ts')} {r.get('id', '')} {k} {_short(r.get('note') or r.get('text'), 80)}"

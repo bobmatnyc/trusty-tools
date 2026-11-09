@@ -262,16 +262,38 @@ pub fn pane_line(wrapper_bin: &str, spec_path: &Path) -> String {
 /// the read-back and the keystrokes cannot be split across callers.
 /// What: resolves this `tm` binary
 /// ([`crate::core::spawn_disclaim::launch_wrapper_bin`]), then
-/// [`send_spec_launch_with`] on the default tmux.
-/// Test: `send_spec_launch_types_a_short_line_naming_a_readable_spec`.
+/// [`send_spec_launch_with`] on the resolved tmux, on the named (`-L`)
+/// `server` the session lives on, or the default server for `None` (#10101).
+/// #8878: then binds an Architect `claude` it started
+/// ([`super::architect_bind::bind_live`]); the caller reports a
+/// [`Binding`](super::architect_bind::Binding) that is not bound.
+/// Test: `send_spec_launch_types_a_short_line_naming_a_readable_spec`,
+/// `a_launch_line_for_a_named_server_is_typed_there`,
+/// `every_architect_spawn_site_binds_8878`.
 pub fn send_spec_launch(
+    server: Option<&str>,
+    session: &str,
+    spec: &LaunchSpec,
+    spec_dir: &Path,
+) -> Result<super::architect_bind::Binding, CliLaunchError> {
+    send_spec_launch_unbound(server, session, spec, spec_dir)?;
+    Ok(super::architect_bind::bind_live(server, session, spec))
+}
+
+/// [`send_spec_launch`] without the bind, for `tm fleet init|relaunch` — which
+/// binds through `architect_session::bind_architect` under its own home and
+/// stops an Architect it cannot bind (#8878, #10448) — and for `tm session
+/// start` into a session that was already running, which binds nothing.
+/// Test: `every_architect_spawn_site_binds_8878`.
+pub fn send_spec_launch_unbound(
+    server: Option<&str>,
     session: &str,
     spec: &LaunchSpec,
     spec_dir: &Path,
 ) -> Result<(), CliLaunchError> {
     let wrapper =
         crate::core::spawn_disclaim::launch_wrapper_bin().ok_or(CliLaunchError::NoWrapper)?;
-    send_spec_launch_with(None, &wrapper, session, spec, spec_dir)
+    send_spec_launch_with(None, server, &wrapper, session, spec, spec_dir)
 }
 
 /// [`send_spec_launch`] with the tmux binary and the wrapper named (test seam).
@@ -288,6 +310,7 @@ pub fn send_spec_launch(
 /// `a_cli_launch_is_named_after_its_tmux_session`.
 pub(crate) fn send_spec_launch_with(
     tmux_bin: Option<&str>,
+    server: Option<&str>, // See #10101
     wrapper: &str,
     session: &str,
     spec: &LaunchSpec,
@@ -299,7 +322,8 @@ pub(crate) fn send_spec_launch_with(
     let result = LaunchSpec::verify(&path)
         .map_err(CliLaunchError::from)
         .and_then(|_| {
-            crate::core::tmux::send_launch_line(tmux_bin, session, &pane_line(wrapper, &path))
+            let line = pane_line(wrapper, &path);
+            crate::core::tmux::send_launch_line(tmux_bin, server, session, &line)
                 .map_err(CliLaunchError::Send)
         });
     if result.is_err() {

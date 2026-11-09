@@ -699,6 +699,42 @@ async fn parity_sessions_register_agrees_across_transports() {
     );
 }
 
+/// #10101: a CLI launch registers the workspace server it created the PM on,
+/// and the record carries that socket on both transports' list. Red before
+/// #10101: the body field was dropped and the record named no server.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_registration_records_the_workspace_server_socket_10101() {
+    let (state, _dir) = hermetic();
+    let socket = crate::core::tmux_server::ambient_socket_dir().join("tm-ws-reg-abc");
+    let payload = json!({"project": "/tmp/reg", "name": "tm-reg", "tmux_socket": socket});
+    let (status, body) = http(&state, "POST", "/sessions", Some(payload)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id: SessionId = serde_json::from_value(body["id"].clone()).expect("an id");
+    assert_eq!(session_json(&state, id, &[])["tmux_socket"], json!(socket));
+    let (_, listed) = http(&state, "GET", "/sessions", None).await;
+    assert_eq!(listed["sessions"][0]["tmux_socket"], json!(socket));
+}
+
+/// #10101: spawn mode creates on the default server, so a socket beside it is
+/// refused and nothing is registered.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_socket_with_spawn_mode_is_refused_10101() {
+    let (state, _dir) = hermetic();
+    let payload = json!({
+        "project": "/tmp/reg",
+        "workdir": "/tmp/reg",
+        "tmux_socket": "/private/tmp/tmux-501/tm-ws-reg-abc",
+    });
+    let (status, body) = http(&state, "POST", "/sessions", Some(payload)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        state.list_sessions().is_empty(),
+        "nothing may be registered"
+    );
+}
+
 /// Why `connect` gets its own case: it is a SECOND name over the same body, and
 /// the thing that could break is the wiring, not the body — a `connect` that
 /// registered nothing would still return a plausible id.

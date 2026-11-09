@@ -237,6 +237,15 @@ async fn drive_walk_resumes_from_its_serialised_state() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [{"id": "c"}]})))
         .mount(&server)
         .await;
+    // #10746: the walk checks its root before the first page.
+    Mock::given(method("GET"))
+        .and(path(format!("{at}/R")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id": "R", "mimeType": DRIVE_FOLDER_MIME})),
+        )
+        .mount(&server)
+        .await;
     let c = client(&server).await;
     let mut walk = DriveWalk::new("R", true);
     let mut ids = Vec::new();
@@ -259,4 +268,63 @@ async fn drive_walk_resumes_from_its_serialised_state() {
         .await
         .unwrap();
     assert_eq!(shallow.len(), 2);
+}
+
+/// Why: #10746 review — Drive lists an unknown or unshared folder as 200
+/// and no files, so a walk must refuse a root that is not a live folder
+/// before it lists anything.
+/// What: a 404 root, a trashed folder and a Doc each fail the first
+/// `next_page`, and no `files.list` call is made.
+/// Test: self-contained.
+#[tokio::test(flavor = "current_thread")]
+async fn drive_walk_refuses_a_root_that_is_not_a_live_folder() {
+    let server = MockServer::start().await;
+    let at = "/www.googleapis.com/drive/v3/files";
+    Mock::given(method("GET"))
+        .and(path(at))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": []})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    for (id, meta) in [
+        (
+            "T",
+            json!({"id": "T", "mimeType": DRIVE_FOLDER_MIME, "trashed": true}),
+        ),
+        (
+            "D",
+            json!({"id": "D", "mimeType": "application/vnd.google-apps.document"}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("{at}/{id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(meta))
+            .mount(&server)
+            .await;
+    }
+    let c = client(&server).await;
+    for id in ["gone", "T", "D"] {
+        let mut walk = DriveWalk::new(id, true);
+        assert!(walk.next_page(&c, Some("a"), 10).await.is_err(), "{id}");
+    }
+}
+
+/// Why: #10746 review — a folder ID goes into the Drive query inside a
+/// string literal; a quote in it must not end the literal and add a
+/// clause that lists another folder's files.
+/// What: an ID with a quote and an `or` clause, and an ID ending in a
+/// backslash, stay inside one literal (Drive query syntax escapes `\` and
+/// `'` with a backslash); a plain ID is unchanged.
+/// Test: self-contained.
+#[test]
+fn parents_query_cannot_be_widened() {
+    assert_eq!(parents_query("F1"), "'F1' in parents and trashed = false");
+    assert_eq!(
+        parents_query("x' in parents or 'y"),
+        r"'x\' in parents or \'y' in parents and trashed = false"
+    );
+    assert_eq!(
+        parents_query(r"a\"),
+        r"'a\\' in parents and trashed = false"
+    );
 }

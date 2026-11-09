@@ -19,7 +19,9 @@ use crate::integrations::github::{
 };
 use crate::{
     config::{ReviewConfig, constants::LOCAL_OWNER},
-    models::{InlineCommentOut, ReviewResult, ReviewStatus, Verdict},
+    models::{
+        InlineCommentOut, ReviewResult, ReviewStatus, UnanchoredFinding, UnanchoredReason, Verdict,
+    },
     pipeline::{
         diff::DiffSource,
         grade::derive_verdict_with_grade,
@@ -28,7 +30,9 @@ use crate::{
         post::{FinalizeAction, PostContext, decide_action, finalize_review},
         prompt::ReviewPrMeta,
         prompt_templates::ReviewerPrompts,
+        severity::effective_severity,
         voice_config::build_voice_config,
+        withheld_contract::reason_class,
     },
     store::{ClaimOutcome, DedupError, DedupStore},
     voice::VoiceConfig,
@@ -449,29 +453,58 @@ pub(super) async fn abort_dry(
 /// What: parses `raw_diff` into a `CommentableLines` index, builds the inline plan
 /// from `result.findings`, and stores the inline comments as `InlineCommentOut` on
 /// the result plus the suppressed-nit count (#1420).  Findings that fall back to the
-/// summary stay in `result.findings` (the body renders the non-inline ones).  A
-/// no-op when there are no findings.
-/// Test: `attach_inline_comments_maps_on_diff` (runner_tests.rs).
+/// summary stay in `result.findings` (the body renders the non-inline ones).
+/// #10762: each inline entry carries its finding's index, severity and category,
+/// and the plan's `side` and `subject_type`;
+/// every other finding, and every withheld finding (index `n + i`, reason
+/// `withheld:<class>`), goes to `result.unanchored`. A no-op only when both
+/// `findings` and `withheld_findings` are empty.
+/// Test: `attach_inline_comments_maps_on_diff` (runner_tests.rs),
+/// `attach_inline_comments_partitions_withheld_findings`,
+/// `partition_invariant_with_fixture`,
+/// `inline_entry_carries_severity_source_finding_index`.
 pub(super) fn attach_inline_comments(result: &mut ReviewResult, raw_diff: &str) {
-    if result.findings.is_empty() {
+    // #10762: withheld findings need an `unanchored` entry even with no survivor.
+    if result.findings.is_empty() && result.withheld_findings.is_empty() {
         return;
     }
     let commentable = CommentableLines::from_unified_diff(raw_diff);
     let plan = build_inline_plan(&result.findings, &commentable);
     result.suppressed_nits = plan.suppressed_nits;
+    // #10762: `effective_severity` is what `finalize_review` stamps later, and
+    // nothing changes a finding's effort between here and there.
+    let findings = &result.findings;
+    result.inline_comments = plan
+        .comments
+        .into_iter()
+        .zip(&plan.inline_indices)
+        .map(|(c, &idx)| InlineCommentOut {
+            path: c.path,
+            line: c.line,
+            // #10762: LEFT for a removed line; `file` for a file-level anchor.
+            side: c.side,
+            subject_type: c.subject_type,
+            severity: findings.get(idx).map(effective_severity),
+            category: findings.get(idx).map(|f| f.category).unwrap_or_default(),
+            finding_index: idx,
+            body: c.body,
+            ..InlineCommentOut::default()
+        })
+        .collect();
     // Carry the authoritative inline/summary partition by finding identity so the
     // summary body never drops a finding that shares a (file, line) with an inline
     // one (#1414 silent-omission fix).
     result.inline_finding_indices = plan.inline_indices;
-    result.inline_comments = plan
-        .comments
-        .into_iter()
-        .map(|c| InlineCommentOut {
-            path: c.path,
-            line: c.line,
-            body: c.body,
-        })
-        .collect();
+    let offset = result.findings.len();
+    let withheld = result
+        .withheld_findings
+        .iter()
+        .enumerate()
+        .map(|(i, w)| UnanchoredFinding {
+            finding_index: offset + i,
+            reason: UnanchoredReason::Withheld(reason_class(&w.reason).to_string()),
+        });
+    result.unanchored = plan.unanchored.into_iter().chain(withheld).collect();
 }
 
 /// Cap a Degraded run's APPROVE at APPROVE_WITH_RESERVATIONS.
@@ -550,13 +583,15 @@ pub(super) async fn finalize_run(
 ///      cited path or quoted content the diff does not contain (#2881, #4042).
 ///   3. `absence_claim::drop_refuted_absence_claims` — drop any finding whose
 ///      premise is that a file is missing from a diff that contains it (#1873).
-///   4. `finding_hygiene::relax_verdict_if_evidence_wiped` — when 1–3 removed
+///   4. `quote_admission::admit_quoted_findings` — withhold any finding that
+///      quotes no code, class `no_quote_pregate` (#10782).
+///   5. `finding_hygiene::relax_verdict_if_evidence_wiped` — when 1–4 removed
 ///      every finding, the model's own verdict rested on the same evidence and
 ///      is relaxed with it (#4042, #4044).
 ///
-/// Returns every finding passes 1–3 dropped, each with its reason, for the
+/// Returns every finding passes 1–4 dropped, each with its reason, for the
 /// caller to record in `ReviewResult::withheld_findings` (#4044; owner ruling
-/// on #8905, 2026-09-30), and the model's verdict when pass 4 relaxed it, for
+/// on #8905, 2026-09-30), and the model's verdict when pass 5 relaxed it, for
 /// `settle_no_survivors` (#9188, option A).
 /// Test: `run_review_outer_and_embedded_verdict_agree_after_severity_floor`,
 /// `unified_path_emits_no_finding_citing_a_path_outside_the_diff`,
@@ -583,6 +618,8 @@ pub(super) fn ground_parsed_findings(
         &cite_index,
         &mut withheld,
     );
+    // #10782: a finding that quotes no code never reaches grading or the gate.
+    crate::pipeline::quote_admission::admit_quoted_findings(&mut parsed.findings, &mut withheld);
 
     let wiped_model_verdict = crate::pipeline::finding_hygiene::relax_wiped_verdict(
         &mut parsed.verdict,

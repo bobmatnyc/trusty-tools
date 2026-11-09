@@ -10,6 +10,7 @@ use chrono::{DateTime, FixedOffset};
 use serde_yaml::Value;
 use trusty_okf::OkfError;
 use trusty_okf::bundle::Bundle;
+use trusty_okf::bundle::moves::UnmovedLink;
 use trusty_okf::bundle::put::link_target;
 use trusty_okf::format::{
     Actor, Concept, ConceptId, FindingKind, Severity, WriteMode, parse_concept,
@@ -460,4 +461,50 @@ fn c140_fold_collision_on_put_and_move() {
         assert!(fold(got.map(|_| ())), "move to {target}");
     }
     assert_eq!(tree(r), before, "no file changed");
+}
+
+/// #10746: a `.md` file that is not UTF-8 is never skipped silently by a
+/// move. Its link to the old ID stays unchanged and is listed in
+/// `MoveReport.unmoved` with reason `unreadable`; a non-UTF-8 source is
+/// refused with no file changed.
+#[test]
+fn move_reports_a_link_in_a_non_utf8_file_as_unreadable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let r = tmp.path();
+    write(r, "other.md", "---\ntype: Note\n---\n");
+    write(r, "bad-src.md", "---\ntype: Note\n---\n");
+    let mut b = open(r);
+    let bad = b"---\ntype: Note\n---\nCaf\xe9 [o](other.md)\n".to_vec();
+    std::fs::write(r.join("bad.md"), &bad).unwrap();
+    let report = b.move_concept(&id("other"), &id("moved"), now()).unwrap();
+    assert_eq!(
+        report.unmoved,
+        vec![UnmovedLink {
+            path: "bad.md".into(),
+            target: "other.md".into(),
+            reason: "unreadable".into(),
+        }]
+    );
+    assert_eq!(std::fs::read(r.join("bad.md")).unwrap(), bad);
+    std::fs::write(r.join("bad-src.md"), b"---\ntype: Note\n---\n\xff\n").unwrap();
+    let before = tree(r);
+    let got = b.move_concept(&id("bad-src"), &id("elsewhere"), now());
+    assert!(matches!(got, Err(OkfError::Parse { .. })), "{got:?}");
+    assert_eq!(tree(r), before, "no file changed");
+}
+
+/// #10746: a UTF-8 source whose YAML does not parse is refused with
+/// `Parse` before the journaled operation runs: no empty concept at the
+/// new ID, no `log.md` entry, no conflict mark; the tree is byte-identical.
+#[test]
+fn move_refuses_an_unparseable_source_with_no_file_changed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let r = tmp.path();
+    write(r, "linker.md", "---\ntype: Note\n---\n[s](src.md)\n");
+    let mut b = open(r);
+    write(r, "src.md", "---\ntype: [unclosed\n---\nBody\n");
+    let before = tree(r);
+    let got = b.move_concept(&id("src"), &id("dst"), now());
+    assert!(matches!(got, Err(OkfError::Parse { .. })), "{got:?}");
+    assert_eq!(tree(r), before, "no file changed, no conflict mark");
 }

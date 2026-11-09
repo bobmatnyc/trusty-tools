@@ -151,6 +151,7 @@ impl Default for HomeState {
                 .iter()
                 .map(|&id| (id, TileHealth::Pending))
                 .collect(),
+            // #10476: index 0 is the MPM tile, so MPM is selected on launch.
             selected: 0,
             view: View::Home,
             metrics: HashMap::new(),

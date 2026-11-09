@@ -65,7 +65,7 @@ impl RuntimeRelauncher for DaemonRelauncher {
             .workspace_path
             .clone()
             .unwrap_or_else(|| record.cwd.clone());
-        let tmux = mgr.tmux_driver();
+        let tmux = mgr.tmux_driver_for(record).map_err(|e| e.to_string())?; // See #10101
         let gh_env = super::lifecycle::resolve_gh_env(&state, &workspace).await;
         // #8233: the daemon's own framework root, never the process home.
         let adapter =

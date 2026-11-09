@@ -85,8 +85,9 @@ fn serve_http(stream: &std::net::TcpStream, calls: &Mutex<Vec<String>>) {
         .lock()
         .expect("calls")
         .push(request_line.trim().to_owned());
+    // #10101 D3c: the daemon's list bodies, read by the launch name rule.
     let payload = if request_line.starts_with("GET") {
-        "[]"
+        r#"{"sessions":[]}"#
     } else {
         r#"{"name":"tm-10459-probe","id":null}"#
     };
@@ -110,8 +111,9 @@ fn serve_rpc(stream: &std::os::unix::net::UnixStream, calls: &Mutex<Vec<String>>
         .and_then(|v| v["method"].as_str().map(str::to_owned))
         .unwrap_or_default();
     calls.lock().expect("calls").push(method.clone());
-    let result = if method == "mpm.sessions.list" {
-        serde_json::json!([])
+    // #10101 D3c: both list methods answer the daemon's `{"sessions": []}`.
+    let result = if method == "mpm.sessions.list" || method == "mpm.managed.list" {
+        serde_json::json!({ "sessions": [] })
     } else {
         serde_json::json!({ "name": "tm-10459-probe", "id": null })
     };
