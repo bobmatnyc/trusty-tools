@@ -168,10 +168,22 @@ pub fn device_path(root: &Path, credential_id: &str) -> Result<PathBuf, DeviceEr
 /// `unreadable_or_malformed_device_record_refuses_8878`,
 /// `device_record_swapped_for_symlink_refuses_8878`.
 pub fn load(root: &Path, key: &GrantKey, credential_id: &str) -> Result<Device, DeviceError> {
-    // RED STUB (#8878 commit 1): no mode, seal or id check.
-    let _ = key;
-    let raw = std::fs::read(device_path(root, credential_id)?).map_err(|_| DeviceError::Unknown)?;
-    serde_json::from_slice(&raw).map_err(|_| DeviceError::Malformed)
+    let path = device_path(root, credential_id)?;
+    let anchor = root.join(ARCHITECT_DIR);
+    let dir = devices_dir(root);
+    let raw = match read_owner_only(&[&anchor, &dir], &path, MAX_RECORD_BYTES) {
+        Ok(raw) => raw,
+        Err(FileFault::Missing) => return Err(DeviceError::Unknown),
+        Err(fault) => return Err(DeviceError::Unsafe(fault)),
+    };
+    let device: Device = serde_json::from_slice(&raw).map_err(|_| DeviceError::Malformed)?;
+    if !key.verify(&device.message(), &device.mac) {
+        return Err(DeviceError::Forged);
+    }
+    if device.credential_id != credential_id {
+        return Err(DeviceError::Malformed);
+    }
+    Ok(device)
 }
 
 /// Enrol `new` at `now`, authorised by an [`TicketPurpose::Enrol`] ticket
@@ -190,8 +202,14 @@ pub fn enrol(
     new: NewDevice,
     now: u64,
 ) -> Result<Device, DeviceError> {
-    // RED STUB (#8878 commit 1): no ticket, name or duplicate check.
-    let _ = ticket;
+    check_ticket(key, ticket, TicketPurpose::Enrol, &new.name, now).map_err(DeviceError::Ticket)?;
+    let path = device_path(root, &new.credential_id)?;
+    if new.name.is_empty() || new.name.len() > MAX_NAME || new.name.chars().any(char::is_control) {
+        return Err(DeviceError::InvalidName);
+    }
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(DeviceError::Exists);
+    }
     let device = Device {
         credential_id: new.credential_id,
         name: new.name,
@@ -221,9 +239,15 @@ pub fn record_use(
     backup_state: bool,
     now: u64,
 ) -> Result<Device, DeviceError> {
-    // RED STUB (#8878 commit 1): the counter is not persisted.
-    let _ = (root, key, sign_count, backup_state, now);
-    Ok(device.clone())
+    let next = Device {
+        sign_count,
+        backup_state,
+        last_used: now.max(device.last_used),
+        ..device.clone()
+    }
+    .sealed(key);
+    write(root, &next)?;
+    Ok(next)
 }
 
 /// One [`list`] row: a credential id and its record or why it is unusable.
@@ -280,18 +304,26 @@ pub fn revoke(
     credential_id: &str,
     now: u64,
 ) -> Result<Revoked, DeviceError> {
-    // RED STUB (#8878 commit 1): no ticket check, nothing removed.
-    let _ = (
-        root,
-        key,
-        ticket,
-        credential_id,
-        now,
-        sweep_grants(root, ""),
-    );
-    Ok(Revoked {
-        grants_removed: Vec::new(),
-    })
+    check_ticket(key, ticket, TicketPurpose::Revoke, credential_id, now)
+        .map_err(DeviceError::Ticket)?;
+    let path = device_path(root, credential_id)?;
+    let known = match std::fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(DeviceError::Write(format!("{}: {e}", path.display()))),
+    };
+    let method = format!("{METHOD_DEVICE_PREFIX}{credential_id}");
+    let (grants_removed, failures) = sweep_grants(root, &method);
+    if !failures.is_empty() {
+        return Err(DeviceError::Write(format!(
+            "the device record is removed, but these grants were not: {}",
+            failures.join("; ")
+        )));
+    }
+    if !known {
+        return Err(DeviceError::Unknown);
+    }
+    Ok(Revoked { grants_removed })
 }
 
 /// Remove every grant naming `method`; returns (removed, failures).
