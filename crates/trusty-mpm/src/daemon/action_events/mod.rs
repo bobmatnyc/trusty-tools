@@ -21,6 +21,8 @@
 //! reads every tracked transcript once more, and runs one final flush, all within
 //! [`FINAL_FLUSH_BUDGET`]. #10412: what the bus does not take is written to
 //! the [`spool`], and the next start buffers it again.
+//! #10906: [`registry_resolver`] names each session's registry `project_key`,
+//! once per session, and every event of that session carries it.
 //! Test: `tests.rs` (socket level), `projection_tests.rs` (pure),
 //! `spool_tests.rs` (stop and restart).
 //!
@@ -246,9 +248,17 @@ impl ActionPublisher {
     pub fn with_home(self, home: Option<PathBuf>) -> Self {
         let mut threader = self.threader.lock();
         let bodies = threader.message_bodies();
+        let resolver = threader.project_resolver();
         *threader = projection::Threader::new(home);
         threader.set_message_bodies(bodies);
+        threader.set_project_resolver(resolver);
         drop(threader);
+        self
+    }
+
+    /// Name each session's project with `resolver` (#10906).
+    pub fn with_project_resolver(self, resolver: projection::ProjectResolver) -> Self {
+        self.threader.lock().set_project_resolver(Some(resolver));
         self
     }
 
@@ -339,9 +349,14 @@ impl ActionPublisher {
                     continue;
                 }
             };
-            let (bodies, root) = {
+            let (bodies, root, project) = {
                 let threader = self.threader.lock();
-                (threader.message_bodies(), threader.root_of(&job.session))
+                (
+                    threader.message_bodies(),
+                    threader.root_of(&job.session),
+                    // #10906: the receiving session's project, from memory.
+                    threader.project_of(&job.session),
+                )
             };
             let events = received::events(
                 job.session,
@@ -355,6 +370,7 @@ impl ActionPublisher {
             }
             for mut event in events {
                 event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
+                event.project.clone_from(&project);
                 self.buffer(event);
                 found += 1;
             }
@@ -548,6 +564,26 @@ impl StartAt {
     }
 }
 
+/// The production [`projection::ProjectResolver`]: the registry project
+/// whose checkout holds a session's `cwd` (#10906).
+///
+/// Why: the bus's `by_project` breakdown groups events by the registry
+/// `project_key` (`owner/repo`, or `local:<uuid>`), the same key the mpm
+/// pane groups by. Only the registry knows it.
+/// What: [`trusty_common::resolve_project_root`] on `cwd`, then
+/// [`crate::project::registered_project_for_root_in`] against
+/// `registry_dir`. Both read the disk, so the threader calls this once per
+/// session. `None` for an unregistered cwd, an absent or unreadable
+/// registry, or a linked worktree (the registry matches checkouts only).
+/// Test: `an_event_from_a_registered_project_carries_its_project_key_10906`,
+/// `an_unresolvable_session_still_sends_its_events_unattributed_10906`.
+pub fn registry_resolver(registry_dir: PathBuf) -> projection::ProjectResolver {
+    Arc::new(move |cwd| {
+        let root = trusty_common::resolve_project_root(cwd);
+        crate::project::registered_project_for_root_in(&registry_dir, &root).map(|p| p.project_key)
+    })
+}
+
 /// [`start_at`] on [`StartAt::from_env`].
 pub fn start(state: &DaemonState) -> bool {
     start_at(state, StartAt::from_env(state))
@@ -631,7 +667,11 @@ pub fn start_with_spool(
                 ActionPublisher::new(socket)
                     .with_flush_interval(flush_every)
                     .with_message_bodies(message::bodies_from_env())
-                    .with_spool(spool),
+                    .with_spool(spool)
+                    // #10906: the daemon's own registry names each project.
+                    .with_project_resolver(registry_resolver(
+                        crate::project::registry_data_dir_under(state.framework_root()),
+                    )),
             );
             let events = state.action_events();
             // #10412: held across check, replay and attach, so a second

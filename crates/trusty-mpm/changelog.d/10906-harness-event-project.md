@@ -1,2 +1,2 @@
 Changed
-- Bus events set the new `HarnessEvent.project` field to `None`; no producer here names a project yet (#10906).
+- Bus events from the hook projection, its relayed and received messages, and delivered injects carry the session's registry `project_key` (`owner/repo`, or `local:<uuid>` with no remote) in `HarnessEvent.project`. It is resolved once per session from the session's cwd. A cwd in no registered checkout, or an unreadable registry, sends `None`, which trusty-events counts as unattributed; the event is never held or dropped (#10906).

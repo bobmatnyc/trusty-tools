@@ -13,6 +13,8 @@
 //! `agent_type`, a path); a prompt, a tool input or response, a transcript
 //! path or a message never leaves this module. #9167: a relay's text leaves
 //! only as `super::message` digests it, never as text unless bodies are on.
+//! #10906: each session's registry `project_key` is resolved once, from its
+//! first `cwd`, and stamped on every event the session projects to.
 //! Test: `projection_tests.rs`.
 //!
 //! # Spec References
@@ -21,6 +23,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use trusty_common::control_bus::{
@@ -40,6 +43,10 @@ pub const MAX_OPEN_PER_SESSION: usize = 256;
 
 /// Longest string copied from a payload, in characters.
 const MAX_FIELD_CHARS: usize = 1024;
+
+/// Names the registry `project_key` for a session's `cwd`; `None` when the
+/// cwd belongs to no registered project or the lookup fails (#10906).
+pub type ProjectResolver = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
 
 /// Payload fields a `Hook`-domain event keeps: identifiers, never content.
 pub const HOOK_DATA_FIELDS: &[&str] = &["agent_id", "agent_type"];
@@ -69,6 +76,10 @@ struct Thread {
     calls: Open,
     worktrees: Open,
     touched: u64,
+    // #10906: the session's registry `project_key`, resolved once.
+    project: Option<String>,
+    /// Whether `project` was resolved; it is, from the first known `cwd`.
+    resolved: bool,
 }
 
 /// What one record becomes, before the envelope is stamped.
@@ -98,6 +109,8 @@ pub struct Threader {
     home: Vec<PathBuf>,
     /// Whether `message` events carry their body (#9167); off by default.
     bodies: bool,
+    /// #10906: names a session's project; none in a pure threader.
+    resolver: Option<ProjectResolver>,
 }
 
 impl Threader {
@@ -118,7 +131,24 @@ impl Threader {
             tick: 0,
             home: prefixes,
             bodies: false,
+            resolver: None,
         }
+    }
+
+    /// Name each session's project with `resolver` (#10906).
+    pub fn set_project_resolver(&mut self, resolver: Option<ProjectResolver>) {
+        self.resolver = resolver;
+    }
+
+    /// The resolver [`Self::set_project_resolver`] installed, if any.
+    pub fn project_resolver(&self) -> Option<ProjectResolver> {
+        self.resolver.clone()
+    }
+
+    /// `session`'s registry `project_key`, while it is tracked (#10906: the
+    /// project of an inject or a received message). Reads memory only.
+    pub fn project_of(&self, session: &SessionId) -> Option<String> {
+        self.sessions.get(session).and_then(|t| t.project.clone())
     }
 
     /// Carry the credential-scanned body on `message` events (#9167).
@@ -159,8 +189,12 @@ impl Threader {
     /// A record for a session with no root first mints a `Session::Started`
     /// with `attrs.inferred = true`, so a daemon that started mid-session
     /// still emits a forest. `seq` is `0`; the publisher stamps it.
+    /// #10906: every event carries the session's `project_key`, resolved
+    /// once from the first record with a `cwd`; `None` until then, and when
+    /// the cwd is unregistered. Resolution never drops or holds an event.
     /// Test: `every_hook_event_variant_projects_to_its_kind_6849`,
-    /// `terminals_parent_their_opening_event_6849`.
+    /// `terminals_parent_their_opening_event_6849`,
+    /// `a_session_is_resolved_once_from_its_first_cwd_10906`.
     pub fn project(&mut self, record: &HookEventRecord) -> Vec<HarnessEvent> {
         // #6849: the watcher skips `hook_service`'s noise filter; build,
         // dependency and VCS writes would flood the bounded buffer.
@@ -180,7 +214,8 @@ impl Threader {
             let started = Body::Session(SessionPhase::Started, attrs);
             out.push(envelope(record, root, None, started));
             if fresh {
-                return out;
+                let project = self.project_of(&record.session);
+                return stamped(out, project);
             }
         }
         self.tick += 1;
@@ -191,6 +226,14 @@ impl Threader {
         if let Some(cwd) = str_field(&record.payload, "cwd") {
             thread.cwd = Some(PathBuf::from(cwd));
         }
+        // #10906: a session whose first records named no cwd resolves now.
+        if !thread.resolved
+            && let Some(cwd) = thread.cwd.as_deref()
+        {
+            thread.project = resolve(self.resolver.as_ref(), cwd);
+            thread.resolved = true;
+        }
+        let project = thread.project.clone();
         let id = EventId::new();
         let (body, parent) = step(thread, record, id, &self.home);
         out.push(envelope(record, id, Some(parent), body));
@@ -203,7 +246,7 @@ impl Threader {
         if record.event == HookEvent::SessionEnd {
             self.sessions.remove(&record.session);
         }
-        out
+        stamped(out, project)
     }
 
     /// Start a thread for `record`'s session, evicting the least recently
@@ -220,18 +263,38 @@ impl Threader {
         }
         self.tick += 1;
         let root = EventId::new();
+        let cwd = str_field(&record.payload, "cwd").map(PathBuf::from);
+        // #10906: the one resolution, when this first record names a cwd.
+        let project = cwd
+            .as_deref()
+            .and_then(|c| resolve(self.resolver.as_ref(), c));
         self.sessions.insert(
             record.session,
             Thread {
                 root,
-                cwd: str_field(&record.payload, "cwd").map(PathBuf::from),
+                resolved: cwd.is_some(),
+                cwd,
                 calls: Open::default(),
                 worktrees: Open::default(),
                 touched: self.tick,
+                project,
             },
         );
         root
     }
+}
+
+/// `resolver`'s `project_key` for `cwd`; `None` with no resolver.
+fn resolve(resolver: Option<&ProjectResolver>, cwd: &Path) -> Option<String> {
+    resolver.and_then(|r| r(cwd))
+}
+
+/// `events`, each carrying `project` (#10906).
+fn stamped(mut events: Vec<HarnessEvent>, project: Option<String>) -> Vec<HarnessEvent> {
+    for event in &mut events {
+        event.project.clone_from(&project);
+    }
+    events
 }
 
 /// The body and parent for a record on a session that has a root.

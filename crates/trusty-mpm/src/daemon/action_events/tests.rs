@@ -395,3 +395,152 @@ async fn the_signal_path_flushes_before_removing_the_lock_6849() {
     );
     assert_eq!(frames(&received(read).await).len(), 2);
 }
+
+/// A git checkout at `base/name`, with `origin` when given, canonicalized.
+fn checkout_10906(base: &Path, name: &str, origin: Option<&str>) -> PathBuf {
+    let dir = base.join(name);
+    std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+    if let Some(origin) = origin {
+        git(&["remote", "add", "origin", origin]);
+    }
+    dir.canonicalize().expect("canonical")
+}
+
+/// Register `root` in the registry at `reg` through the store, which mints
+/// the key, and return that key.
+async fn register_10906(reg: &Path, name: &str, root: &Path) -> String {
+    let mut store = crate::project::store::ProjectStore::load(reg)
+        .await
+        .expect("store");
+    store
+        .upsert(crate::project::Project {
+            name: name.into(),
+            repo_url: root.display().to_string(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: None,
+            project_key: None,
+        })
+        .await
+        .expect("upsert");
+    store
+        .get(name)
+        .await
+        .expect("get")
+        .project_key
+        .expect("key")
+}
+
+/// One `SessionStart` with `cwd`, through the daemon's ingest point.
+fn start_in(state: &DaemonState, session: SessionId, cwd: &Path) {
+    state.push_hook_event(HookEventRecord::now(
+        session,
+        HookEvent::SessionStart,
+        json!({"cwd": cwd.display().to_string()}),
+    ));
+    state.push_hook_event(pre_tool_use_in(session, cwd));
+}
+
+fn pre_tool_use_in(session: SessionId, cwd: &Path) -> HookEventRecord {
+    HookEventRecord::now(
+        session,
+        HookEvent::PreToolUse,
+        json!({"cwd": cwd.display().to_string(), "tool": "Bash", "tool_use_id": "t"}),
+    )
+}
+
+/// #10906 regression: events from a registered project carry its registry
+/// `project_key` on the wire — `owner/repo` with an origin, `local:<uuid>`
+/// without — which is the field trusty-events keys `by_project` on (its
+/// `events_console_metrics_answers_on_the_real_socket`). A session in an
+/// unregistered directory goes out as `None`, so it counts as unattributed.
+#[tokio::test]
+async fn an_event_from_a_registered_project_carries_its_project_key_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = dir.path().join("registry");
+    let web = checkout_10906(dir.path(), "web", Some("https://github.com/Acme/Web.git"));
+    let solo = checkout_10906(dir.path(), "solo", None);
+    let stray = checkout_10906(dir.path(), "stray", None);
+    assert_eq!(register_10906(&reg, "web", &web).await, "acme/web");
+    let solo_key = register_10906(&reg, "solo", &solo).await;
+    assert!(solo_key.starts_with("local:"), "{solo_key}");
+    let sock = sock_in(&dir);
+    let state = DaemonState::new();
+    let publisher =
+        Arc::new(ActionPublisher::new(&sock).with_project_resolver(registry_resolver(reg.clone())));
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    let (a, b, c) = (SessionId::new(), SessionId::new(), SessionId::new());
+    // A subdirectory of the checkout resolves to the checkout's project.
+    start_in(&state, a, &web.join("sub"));
+    start_in(&state, b, &solo);
+    start_in(&state, c, &stray);
+    let read = read_one(&sock);
+    let outcome = publisher.flush().await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let bytes = received(read).await;
+    let got = frames(&bytes);
+    assert_eq!(got.len(), 6, "started and tool per session: {got:?}");
+    let want = [
+        (a, Some("acme/web")),
+        (b, Some(solo_key.as_str())),
+        (c, None),
+    ];
+    for (session, project) in want {
+        let id = session.0.to_string();
+        let mine: Vec<_> = got
+            .iter()
+            .filter(|e| e.session.as_deref() == Some(&id))
+            .collect();
+        assert_eq!(mine.len(), 2, "{id}: {got:?}");
+        assert!(
+            mine.iter().all(|e| e.project.as_deref() == project),
+            "{mine:?}"
+        );
+    }
+    let raw = String::from_utf8_lossy(&bytes);
+    assert_eq!(raw.matches(r#""project":"acme/web""#).count(), 2, "{raw}");
+}
+
+/// #10906 error arm: a registry that cannot be read names no project, and
+/// the session's events still go out at once, with `project: None`.
+#[tokio::test]
+async fn an_unresolvable_session_still_sends_its_events_unattributed_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = dir.path().join("registry");
+    std::fs::create_dir_all(&reg).expect("mkdir");
+    std::fs::write(reg.join("projects.json"), "{not json").expect("write");
+    let root = checkout_10906(dir.path(), "web", Some("https://github.com/acme/web"));
+    let sock = sock_in(&dir);
+    let state = DaemonState::new();
+    let publisher =
+        Arc::new(ActionPublisher::new(&sock).with_project_resolver(registry_resolver(reg)));
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    let s = SessionId::new();
+    start_in(&state, s, &root);
+    assert_eq!(publisher.buffered_len(), 2, "buffered on the hook path");
+    let read = read_one(&sock);
+    let outcome = publisher.flush().await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let bytes = received(read).await;
+    let got = frames(&bytes);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got.iter().all(|e| e.project.is_none()), "{got:?}");
+    assert!(!String::from_utf8_lossy(&bytes).contains("\"project\""));
+}

@@ -358,3 +358,37 @@ fn build_and_vcs_noise_is_not_projected_6849() {
     ));
     assert!(fresh.is_empty());
 }
+
+/// #10906: a session's project is resolved once, from the first record that
+/// names a cwd, and every event of the session carries it from then on.
+/// Records before that carry `None`; none is dropped or held.
+#[test]
+fn a_session_is_resolved_once_from_its_first_cwd_10906() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = std::sync::Arc::clone(&calls);
+    let mut threader = Threader::new(None);
+    threader.set_project_resolver(Some(std::sync::Arc::new(move |cwd: &std::path::Path| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (cwd == std::path::Path::new("/w/acme")).then(|| "acme/web".to_string())
+    })));
+    let s = SessionId::new();
+    let rec = |event, payload| HookEventRecord::now(s, event, payload);
+    let before = threader.project(&rec(HookEvent::Notification, json!({})));
+    assert_eq!(before.len(), 2, "inferred root and the hook still go out");
+    assert!(before.iter().all(|e| e.project.is_none()), "{before:?}");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let first = threader.project(&rec(
+        HookEvent::PreToolUse,
+        json!({"cwd": "/w/acme", "tool": "Bash", "tool_use_id": "t1"}),
+    ));
+    let later = threader.project(&rec(
+        HookEvent::PostToolUse,
+        json!({"cwd": "/elsewhere", "tool": "Bash", "tool_use_id": "t1"}),
+    ));
+    assert_eq!(threader.project_of(&s).as_deref(), Some("acme/web"));
+    let end = threader.project(&rec(HookEvent::SessionEnd, json!({})));
+    for e in first.iter().chain(&later).chain(&end) {
+        assert_eq!(e.project.as_deref(), Some("acme/web"), "{e:?}");
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "once");
+}
