@@ -142,7 +142,13 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `open` — Validate a PR body against the nine-field contract, then open the PR
   - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
 - `presence` — Prove you are at the Studio, so the Architect may write trust anchors
+  - `devices` — Enrolled presence devices (passkeys)
+    - `add` — Start enrolling a passkey device (INCOMPLETE until #8878 PR2b-2: no browser path finishes the ceremony yet)
+    - `list` — List enrolled devices
+    - `revoke` — Revoke a device: removes its record and every grant it approved. Needs Touch ID or the login password at the Studio first
   - `local` — Approve the Architect's trust-anchor writes with Touch ID or the login password at this Mac
+  - `request` — Ask an enrolled device to approve this session's next trust-anchor write. Asks only; grants nothing. The action text is shown to the approver labelled "unverified origin". Approving needs the console page (#8878 PR2b-2)
+  - `wait` — Wait until this session holds a valid presence grant
 - `project` — Define and manage projects (registered working directories)
   - `info` — Show the current project's registered info and config
   - `init` — Register a working directory as a trusty-mpm project
