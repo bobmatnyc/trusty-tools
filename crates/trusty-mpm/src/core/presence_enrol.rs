@@ -137,8 +137,24 @@ pub fn check_ticket(
     subject: &str,
     now: u64,
 ) -> Result<(), TicketRefusal> {
-    // RED STUB (#8878 commit 1): accepts every ticket.
-    let _ = (key, ticket, purpose, subject, now, SKEW);
+    if !key.verify(&ticket.message(), &ticket.mac) {
+        return Err(TicketRefusal::Forged);
+    }
+    if ticket.purpose != purpose {
+        return Err(TicketRefusal::WrongPurpose);
+    }
+    if ticket.subject != subject {
+        return Err(TicketRefusal::WrongSubject);
+    }
+    if ticket.issued_at > now + SKEW
+        || ticket.expires_at < ticket.issued_at
+        || ticket.expires_at - ticket.issued_at > TICKET_TTL.as_secs()
+    {
+        return Err(TicketRefusal::BadDates);
+    }
+    if now > ticket.expires_at {
+        return Err(TicketRefusal::Expired);
+    }
     Ok(())
 }
 
