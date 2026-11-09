@@ -22,6 +22,7 @@ use crate::client::{CommandExecutor, CommandResult, DaemonClient, TrustyCommand}
 use crate::project::{Project, local_checkout_for};
 use crate::runtime::RuntimeKind;
 
+use super::drive::Screen;
 use super::state::ProjectCtlState;
 use super::state::launch::LaunchRequest;
 
@@ -66,28 +67,36 @@ pub(crate) fn launch_command(
 ///
 /// Why: the single seam [`super::actions::dispatch_on`] calls for
 /// [`super::events::PendingAction::Launch`].
-/// What: fetches the registry project, builds [`launch_command`], and runs it
-/// on a [`CommandExecutor`] over `client`. A spawned session sets
+/// What: first sets `launching <project>…` and draws one frame on `screen`,
+/// so the operator sees the launch start before any await. Then fetches the
+/// registry project, builds [`launch_command`], and runs it on a
+/// [`CommandExecutor`] over `client`. A spawned session sets
 /// `launched <name>` and requests a repoll; any failure (registry fetch,
-/// missing checkout, daemon refusal) sets its error text as the notice.
-/// Test: `launch_reports_the_error_when_the_daemon_is_unreachable`.
+/// missing checkout, daemon refusal) sets its error text as the notice. Only
+/// a failed draw is an `Err`.
+/// Test: `launch_reports_the_error_when_the_daemon_is_unreachable`,
+/// `launch_draws_the_launching_notice_before_the_spawn_is_sent`.
 pub(crate) async fn run(
     state: &mut ProjectCtlState,
     client: &DaemonClient,
     request: LaunchRequest,
-) {
+    screen: &mut dyn Screen,
+) -> anyhow::Result<()> {
+    // See #10754: the pending notice is on screen before the first await.
+    state.set_notice(format!("launching {}…", request.project));
+    screen.draw(state)?;
     let project = match client.registry_get_project(&request.project).await {
         Ok(project) => project,
         Err(e) => {
             state.set_notice(format!("launch failed: {e:#}"));
-            return;
+            return Ok(());
         }
     };
     let command = match launch_command(&request, &project) {
         Ok(command) => command,
         Err(msg) => {
             state.set_notice(msg);
-            return;
+            return Ok(());
         }
     };
     match CommandExecutor::from_daemon_client(client.clone())
@@ -101,6 +110,7 @@ pub(crate) async fn run(
         CommandResult::Error(msg) => state.set_notice(format!("launch failed: {msg}")),
         other => state.set_notice(format!("launch: unexpected result {other:?}")),
     }
+    Ok(())
 }
 
 #[cfg(test)]

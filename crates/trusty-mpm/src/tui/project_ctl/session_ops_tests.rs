@@ -42,6 +42,13 @@ impl ScreenHandoff for Recorder {
     }
 }
 
+// See #10754: `dispatch_on` takes a drawing screen; none of these verbs draws.
+impl super::drive::Screen for Recorder {
+    fn draw(&mut self, _: &mut ProjectCtlState) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 fn done(entry: String) -> SessionOpFuture {
     Box::pin(async move {
         log(entry.clone());
