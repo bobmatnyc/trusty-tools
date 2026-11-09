@@ -62,7 +62,7 @@ pub(crate) fn check_tombstone(id: &ConceptId, c: &Concept) -> Result<(), OkfErro
 /// `## date` headings, as an actor would (`put`'s `check_actor`).
 /// What: `Conflict { reason: "reason_control_character" }` before any other
 /// check, so no file changes.
-/// Test: `put_and_verify_refuse_an_actor_with_a_control_character`.
+/// Test: `put_verify_and_correct_refuse_a_control_character`.
 fn check_reason(id: &ConceptId, reason: &str) -> Result<(), OkfError> {
     if reason.chars().any(char::is_control) {
         return Err(conflict(id, "reason_control_character"));

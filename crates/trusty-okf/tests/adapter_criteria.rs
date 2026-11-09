@@ -653,8 +653,8 @@ fn c97_sigint_cancels_an_adapter_import_and_reaps_its_group() {
 /// set, so SIGINT killed the CLI by default and left the adapter and its
 /// grandchild running.
 /// What: the fake starts a grandchild and hangs in `list`; one SIGINT to
-/// `import plan` exits 3 (cancelled before its plan) and leaves no adapter,
-/// grandchild or process group.
+/// `import plan` exits 3 (cancelled before its plan), prints no plan, and
+/// leaves no adapter, grandchild or process group.
 /// Test: self-contained.
 #[test]
 fn sigint_cancels_an_adapter_plan_and_reaps_its_group() {
@@ -662,6 +662,8 @@ fn sigint_cancels_an_adapter_plan_and_reaps_its_group() {
     fake.page(None, json!([msg_entry("c1", "t1")]), None, true);
     fake.item(msg("c1", "t1", 1_767_225_600_000, "c1", "Body."));
     let got = s9_support::interrupt_verb(&fake, "plan", "list", &[]);
+    // #10879: a cancelled plan prints nothing a caller could read as whole.
+    assert!(got.report.is_none(), "{got:?}");
     assert_eq!(got.code, Some(3), "{got:?}");
     assert!(
         !got.adapter_left && !got.grandchild_left && !got.group_left,
@@ -1030,6 +1032,11 @@ fn final_page_without_a_flag_tombstones_nothing() {
 
 /// `import run --from adapter:gdocs` through the CLI with `select` pairs.
 fn cli_docs(fake: &FakeAdapter, select: &[&str]) -> std::process::Output {
+    cli_docs_with(fake, select, &[])
+}
+
+/// [`cli_docs`] with `extra` arguments after the selection.
+fn cli_docs_with(fake: &FakeAdapter, select: &[&str], extra: &[&str]) -> std::process::Output {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_trusty-okf"));
     cmd.args(["import", "run"])
         .arg(&fake.root)
@@ -1043,6 +1050,7 @@ fn cli_docs(fake: &FakeAdapter, select: &[&str]) -> std::process::Output {
     for s in select {
         cmd.args(["--select", s]);
     }
+    cmd.args(extra);
     cmd.output().unwrap()
 }
 
@@ -1052,8 +1060,10 @@ fn cli_docs(fake: &FakeAdapter, select: &[&str]) -> std::process::Output {
 /// folder A's store tombstoned every A item.
 /// What: a recursive import of folder A writes `d1` and `d2`; runs of folder
 /// B, and of folder A under another account, each list only `d3` as a
-/// complete listing. Each is refused (exit 2) before any write, `d1` and
-/// `d2` stay live, and a second run of folder A still uses the A store.
+/// complete listing. Each is refused (exit 2) before any write, with and
+/// without `--store` naming the A store (#10879: the refusal then asks for
+/// another store, not for `--store`), `d1` and `d2` stay live, and a second
+/// run of folder A still uses the A store.
 /// Test: self-contained.
 #[test]
 fn another_selection_never_reuses_an_adapter_store() {
@@ -1090,6 +1100,15 @@ fn another_selection_never_reuses_an_adapter_store() {
             "{out:?}"
         );
         assert_eq!(tree(&fake.root), before, "{other:?} wrote");
+        // #10879: with `--store` passed, the refusal never says "pass --store".
+        let out = cli_docs_with(&fake, &other, &["--store", "import-gdocs"]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{other:?}: {out:?}");
+        assert!(
+            err.contains("another selection") && !err.contains("pass --store to"),
+            "{err}"
+        );
+        assert_eq!(tree(&fake.root), before, "{other:?} --store wrote");
     }
     for d in ["d1", "d2"] {
         let fm = frontmatter(&fake.root, &format!("docs/import-gdocs/{d}.md"));

@@ -500,4 +500,48 @@ mod tests {
         );
         assert_eq!(r.parts[0].encoding.as_deref(), Some("base64"));
     }
+
+    /// Why: #10879 — `list` and `fetch` each check the grant, and the
+    /// conformance test is refused at `list`, so it never reaches `fetch`.
+    /// What: `fetch` straight on an adapter with no grant row, a grant for
+    /// another store, and an unusable grant file is `policy_refused`. The
+    /// token store is empty, so a Drive call would fail `auth_required`.
+    /// Test: self-contained.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_needs_a_capability_grant_before_any_drive_request() {
+        let home = tempfile::tempdir().unwrap();
+        let grant = |store: &str| -> Result<Config, String> {
+            Ok(toml::from_str(&format!(
+                "[[gdocs_grant]]\nstore = \"{store}\"\naccount = \"work\"\nreview = \"r\"\n"
+            ))
+            .unwrap())
+        };
+        let req = Request {
+            request_id: 1,
+            op: "fetch".into(),
+            kind: "gdocs".into(),
+            store: "docs-src".into(),
+            selection: json!({"account": "work", "document_ids": ["d1"]})
+                .as_object()
+                .unwrap()
+                .clone(),
+            operator_initiated: false,
+            cursor: None,
+            item_id: Some("d1".into()),
+        };
+        for (why, config) in [
+            ("no grant", Ok(Config::default())),
+            ("another store", grant("other-src")),
+            ("unusable grant file", Err("bad toml".to_string())),
+        ] {
+            let google = Google::with_home(home.path(), &Default::default()).unwrap();
+            let got = Docs::new(google, config).fetch(&req).await.unwrap_err();
+            assert_eq!(got.code, "policy_refused", "{why}: {got:?}");
+        }
+        // The control: with the grant, the fetch reaches Drive and fails
+        // on the empty token store instead.
+        let google = Google::with_home(home.path(), &Default::default()).unwrap();
+        let got = Docs::new(google, grant("docs-src")).fetch(&req).await;
+        assert_eq!(got.unwrap_err().code, "auth_required");
+    }
 }

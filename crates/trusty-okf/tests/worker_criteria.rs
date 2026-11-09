@@ -50,7 +50,7 @@ fn quick() -> Limits {
 
 /// This host's platform sandbox launcher, and whether it exists.
 ///
-/// #10746: with `TRUSTY_OKF_REQUIRE_SANDBOX=1` (set in CI) a missing
+/// #10746: with `TRUSTY_OKF_REQUIRE_SANDBOX` set (CI sets `1`) a missing
 /// launcher fails the test instead of letting it skip, so the sandboxed
 /// tests cannot pass silently on a runner without bubblewrap.
 fn sandbox_launcher() -> (&'static str, bool) {
@@ -60,12 +60,44 @@ fn sandbox_launcher() -> (&'static str, bool) {
         "/usr/bin/bwrap"
     };
     let present = Path::new(launcher).is_file();
-    let required = std::env::var_os("TRUSTY_OKF_REQUIRE_SANDBOX").is_some_and(|v| v == "1");
     assert!(
-        present || !required,
-        "TRUSTY_OKF_REQUIRE_SANDBOX=1 but {launcher} is missing"
+        present || !sandbox_required(),
+        "TRUSTY_OKF_REQUIRE_SANDBOX is set but {launcher} is missing"
     );
     (launcher, present)
+}
+
+/// Whether `TRUSTY_OKF_REQUIRE_SANDBOX` asks for the sandbox.
+fn sandbox_required() -> bool {
+    require_flag(std::env::var_os("TRUSTY_OKF_REQUIRE_SANDBOX").as_deref())
+}
+
+/// #10879: any set value other than empty, `0` or `false` turns a skip into
+/// a failure, so `true` or `yes` cannot skip the sandboxed tests silently.
+fn require_flag(v: Option<&std::ffi::OsStr>) -> bool {
+    v.is_some_and(|v| !matches!(v.to_str(), Some("" | "0" | "false")))
+}
+
+/// Why: #10879 — the flag counted only `"1"`, so `true` let the sandboxed
+/// tests skip on a runner without the launcher.
+/// What: unset, empty, `0` and `false` read as off; `1`, `true`, `yes` and
+/// a non-UTF-8 value read as on.
+/// Test: self-contained.
+#[test]
+fn require_sandbox_reads_any_set_value_but_off() {
+    use std::ffi::OsStr;
+    assert!(!require_flag(None));
+    for off in ["", "0", "false"] {
+        assert!(!require_flag(Some(OsStr::new(off))), "{off:?}");
+    }
+    for on in ["1", "true", "yes"] {
+        assert!(require_flag(Some(OsStr::new(on))), "{on:?}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(require_flag(Some(OsStr::from_bytes(b"\xff"))));
+    }
 }
 
 fn config(dir: &Path, fake: &Fake, name: &str) -> WorkerConfig {
@@ -1002,6 +1034,14 @@ fn on_pty(cmd: &str) -> (std::process::ExitStatus, String) {
 fn sandboxed_worker_has_no_controlling_tty() {
     let tools = ["/usr/bin/bwrap", "/usr/bin/script"];
     // #10746: `sandbox_launcher` fails here, not skips, under CI's flag.
+    // #10879: so does a missing `script` on Linux.
+    if cfg!(target_os = "linux") && sandbox_required() {
+        assert!(
+            Path::new(tools[1]).is_file(),
+            "TRUSTY_OKF_REQUIRE_SANDBOX is set but {} is missing",
+            tools[1]
+        );
+    }
     if !cfg!(target_os = "linux") || !sandbox_launcher().1 || !Path::new(tools[1]).is_file() {
         eprintln!("tty: needs Linux with {tools:?}; nothing is checked on this host");
         return;

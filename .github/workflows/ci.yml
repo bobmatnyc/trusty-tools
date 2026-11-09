@@ -1799,11 +1799,17 @@ jobs:
       # profile grants it user namespaces, with the sysctl as the fallback.
       # An image without the restriction needs neither. The probe uses the
       # worker launch's namespace flags (`extract/worker/sandbox.rs`
-      # `wrapped`) and fails the step if bwrap cannot start.
+      # `wrapped`) and fails the step if bwrap cannot start. #10879: the
+      # sysctl fallback runs whenever bwrap still cannot start after the
+      # profile, not only when `apparmor_parser -r` fails.
       - name: Install bubblewrap (trusty-okf sandbox tests)
         if: contains(format(' {0} ', matrix.crates), ' trusty-okf ')
         run: |
           bash scripts/ci-apt-install.sh bubblewrap
+          probe() {
+            /usr/bin/bwrap --unshare-all --die-with-parent --new-session \
+              --ro-bind / / --proc /proc --dev /dev /bin/true
+          }
           restrict=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
           if [ -r "$restrict" ] && [ "$(cat "$restrict")" = 1 ]; then
             if command -v apparmor_parser >/dev/null && [ -f /etc/apparmor.d/abi/4.0 ]; then
@@ -1811,13 +1817,12 @@ jobs:
                 'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
                 | sudo tee /etc/apparmor.d/bwrap >/dev/null
               sudo apparmor_parser -r /etc/apparmor.d/bwrap \
-                || sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-            else
-              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+                || echo "apparmor_parser -r failed; trying the sysctl"
             fi
+            probe 2>/dev/null \
+              || sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-          /usr/bin/bwrap --unshare-all --die-with-parent --new-session \
-            --ro-bind / / --proc /proc --dev /dev /bin/true
+          probe
 
       # #10746 S10: the worker criteria (`worker_criteria`) and the worker
       # unit tests run only with `extract-worker`. TRUSTY_OKF_REQUIRE_SANDBOX

@@ -309,6 +309,39 @@ async fn drive_walk_refuses_a_root_that_is_not_a_live_folder() {
     }
 }
 
+/// Why: #10879 — the root check runs for every `DriveWalk`, including
+/// trusty-agents' okg drive ingest, whose default folder is the `root`
+/// alias; Drive answers `files.get("root")` with My Drive's real ID.
+/// What: `files/root` answers a live folder under another ID; the walk
+/// passes the check and lists `'root' in parents`.
+/// Test: self-contained.
+#[tokio::test(flavor = "current_thread")]
+async fn drive_walk_accepts_the_root_alias() {
+    let server = MockServer::start().await;
+    let at = "/www.googleapis.com/drive/v3/files";
+    Mock::given(method("GET"))
+        .and(path(format!("{at}/root")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id": "0AMyDrive", "mimeType": DRIVE_FOLDER_MIME})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(at))
+        .and(query_param("q", "'root' in parents and trashed = false"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [{"id": "f"}]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = client(&server).await;
+    let mut walk = DriveWalk::new("root", false);
+    let files = walk.next_page(&c, Some("a"), 10).await.unwrap().unwrap();
+    assert_eq!(files, vec![json!({"id": "f"})]);
+    assert!(walk.is_done());
+}
+
 /// Why: #10746 review — a folder ID goes into the Drive query inside a
 /// string literal; a quote in it must not end the literal and add a
 /// clause that lists another folder's files.

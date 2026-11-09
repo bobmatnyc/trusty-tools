@@ -237,7 +237,10 @@ pub(crate) fn counted_events(
 /// The record lines that move frontmatter events to history on a content
 /// change (§2.10 step 2). A bound event keeps its hash and gains the
 /// invalidation; an event the record never bound is `legacy_unbound`; an
-/// event already in history adds no line.
+/// event already in history adds no line. #10879: a live record event bound
+/// to another hash with no frontmatter copy moves to history too, else
+/// `has_mismatch` would warn of an out-of-band edit forever.
+/// Test: `content_change_retires_a_record_only_event`.
 pub(crate) fn invalidation_lines(
     folded: &[Line],
     events: &[(String, String)],
@@ -262,6 +265,21 @@ pub(crate) fn invalidation_lines(
             op: None,
             step: None,
         });
+    }
+    // #10879: record-only events bound to a superseded hash.
+    for l in folded {
+        let in_frontmatter = events.iter().any(|(by, at)| &l.by == by && &l.at == at);
+        let stale =
+            l.invalidated_at.is_none() && l.hash.as_deref().is_some_and(|h| h != new_hash.as_str());
+        if stale && !in_frontmatter {
+            out.push(Line {
+                invalidated_at: Some(now.to_string()),
+                invalidated_by_hash: Some(new_hash.as_str().to_string()),
+                op: None,
+                step: None,
+                ..l.clone()
+            });
+        }
     }
     out
 }

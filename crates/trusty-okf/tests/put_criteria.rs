@@ -240,6 +240,38 @@ fn c36_out_of_band_edit_reads_unverified_with_a_warning() {
     assert_eq!(tier, TrustTier::HumanReviewed);
 }
 
+/// Why: #10879 — a content change moved only frontmatter events to
+/// history, so a record event whose frontmatter copy a hand edit removed
+/// stayed live and warned of an out-of-band edit after every later write.
+/// What: the record binds `human:jo`; a hand edit drops `verified` and
+/// changes the body (warned, as c36); the next `put` changes the body
+/// again, and the reopened bundle has no mismatch warning and the event is
+/// history.
+/// Test: self-contained.
+#[test]
+fn content_change_retires_a_record_only_event() {
+    let mismatch = |root: &Path| {
+        Bundle::open(root)
+            .unwrap()
+            .1
+            .iter()
+            .any(|f| f.kind == FindingKind::VerificationMismatch)
+    };
+    let (tmp, _) = verified_bundle();
+    let text = "---\ntype: Note\ndescription: d\n---\nBody, edited by hand\n";
+    std::fs::write(tmp.path().join("a.md"), text).unwrap();
+    assert!(mismatch(tmp.path()), "the hand edit warns");
+    let (mut b, _) = Bundle::open(tmp.path()).unwrap();
+    let mut c = b.get(&id("a")).unwrap();
+    c.body = "Body, written by trusty\n".into();
+    b.put(c, process(), WriteMode::Lenient, now()).unwrap();
+    assert!(!mismatch(tmp.path()), "the write retired the bound event");
+    assert!(matches!(
+        b.verification_state(&id("a")).unwrap(),
+        VerificationState::Unverified { history } if history >= 1
+    ));
+}
+
 /// Criterion 125: a `put` that changes only `description` moves
 /// `verified: "yes"` and `generated: bot` to `legacy_verified` and
 /// `legacy_generated` with their raw bytes, writes a new `generated` and no
@@ -429,7 +461,9 @@ fn a2_strict_check_runs_on_rendered_values() {
 }
 
 /// A2: a patch never emits a duplicate key, and a file that holds one never
-/// reads as a writable concept.
+/// reads as a writable concept. #10879: `Concept::set` replaces a key, so this
+/// cannot reach `render_checked`'s refusal; the unit test
+/// `render_checked_refuses_text_that_does_not_read_back` covers that arm.
 #[test]
 fn a2_render_never_emits_duplicate_keys() {
     let dup = "---\ntype: A\ntype: B\n---\n";
@@ -798,9 +832,10 @@ fn verify_refuses_a_fold_twin_and_writes_no_record() {
 /// `verify_confirmed` each refuse it with `actor_control_character` and no
 /// file changes. A `deprecate` or `supersede` reason holding one is refused
 /// with `reason_control_character`, so neither text reaches `log.md`.
+/// #10879: named for both checks, the actor and the `correct.rs` reason.
 #[cfg(unix)]
 #[test]
-fn put_and_verify_refuse_an_actor_with_a_control_character() {
+fn put_verify_and_correct_refuse_a_control_character() {
     let forged = "x`\n\n## 2026-01-01\n\n- **Verified** `/a.md` by `human:jo";
     for by in [
         Actor::Process(forged.into()),

@@ -469,7 +469,10 @@ pub fn parents_query(folder: &str) -> String {
 
 /// #10746: fail unless `folder` is a readable, untrashed Drive folder.
 /// Errors: the `files.get` failure (403, 404, transport), a file that is
-/// not a folder, or a trashed folder.
+/// not a folder, or a trashed folder. #10879: it runs for every walk,
+/// trusty-agents' okg drive ingest included; the `root` alias passes.
+/// Test: `drive_walk_refuses_a_root_that_is_not_a_live_folder`,
+/// `drive_walk_accepts_the_root_alias`.
 async fn check_root(client: &BaseClient, account: Option<&str>, folder: &str) -> Result<()> {
     let meta = drive_file(client, account, folder).await?;
     if meta.get("mimeType").and_then(Value::as_str) != Some(DRIVE_FOLDER_MIME) {
