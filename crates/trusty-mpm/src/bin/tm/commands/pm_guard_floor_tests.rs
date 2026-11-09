@@ -173,6 +173,54 @@ fn fleet_relaunch_binds_every_caller_on_every_path() {
     }
 }
 
+/// #8878 PR2a spoof: a PM or an agent calling `tm presence local` or `tm
+/// fleet bind` is denied on both paths; the Architect's main thread runs
+/// them, bound or not (an unbound one must reach `tm fleet bind`).
+#[test]
+fn presence_verbs_bind_pms_and_agents_not_the_architect_8878() {
+    // No launch record in this home: the unbound Architect.
+    let (fx, bound_fx) = (fixture(), fixture());
+    let unbound = HookEnv {
+        claude: table(architect_table()),
+        ..spoof_env(&fx)
+    };
+    for command in ["tm presence local", "tm fleet bind"] {
+        for bypassed in [false, true] {
+            let verdict = |fx: &Fixture, env: HookEnv, agent: bool| {
+                let mut call = bash(fx, command);
+                if agent {
+                    call["agent_id"] = json!("agent-7");
+                }
+                let gate = ArchitectGate::new(&call, env, || allowlist(fx));
+                evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed)
+                    .map(|d| (d.rule, d.reason))
+            };
+            let pm = verdict(&fx, pm_env(&fx), false).expect("a PM is denied");
+            assert_eq!(pm.0, TRUST_ANCHOR_RULE, "{command}");
+            assert!(pm.1.contains("`tm presence`"), "{}", pm.1);
+            assert_eq!(
+                verdict(&fx, unbound.clone(), false),
+                None,
+                "unbound: {command}"
+            );
+            assert!(
+                verdict(&fx, unbound.clone(), true).is_some(),
+                "agent: {command}"
+            );
+            let architect = architect_env(&bound_fx);
+            assert!(
+                verdict(&bound_fx, architect.clone(), true).is_some(),
+                "agent: {command}"
+            );
+            assert_eq!(
+                verdict(&bound_fx, architect, false),
+                None,
+                "architect: {command}"
+            );
+        }
+    }
+}
+
 /// #10665 r3: a scratch-socket whole-server kill passes every floor, inline
 /// and from a script, guarded and bypassed — `env -u TMUX` included (df-D77:
 /// the #10665 floor owns that form, so #9001 does not refuse it as opaque).

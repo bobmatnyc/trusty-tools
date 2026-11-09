@@ -121,6 +121,30 @@ fn cli_parses_fleet_relaunch() {
 }
 
 #[test]
+fn cli_parses_fleet_bind() {
+    // #8878 PR2a.
+    let cli = Cli::try_parse_from(["tm", "fleet", "bind"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Fleet {
+            action: FleetAction::Bind
+        }
+    ));
+}
+
+#[test]
+fn cli_parses_presence_local() {
+    // #8878 PR2a.
+    let cli = Cli::try_parse_from(["tm", "presence", "local"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Presence {
+            action: crate::cli::PresenceAction::Local
+        }
+    ));
+}
+
+#[test]
 fn a_first_run_writes_the_profile_the_grant_and_a_remote_less_repo() {
     let fx = Fixture::new();
     let report = fx.init().unwrap();

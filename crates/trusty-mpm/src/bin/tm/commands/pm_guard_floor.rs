@@ -61,6 +61,7 @@ use crate::commands::pm_guard_bash::{
     evaluate_tmux_exact_target, unclassifiable_reason,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, record_would_refuse};
+use crate::commands::pm_guard_presence::evaluate_presence_verbs;
 use crate::commands::pm_guard_refusal::refuse;
 use crate::commands::pm_guard_secret_script::tmux_kill::evaluate_script_body_tmux_kill;
 use crate::commands::pm_guard_trust_anchor::{self, HookEnv, TRUST_ANCHOR_RULE};
@@ -286,6 +287,17 @@ pub(crate) fn evaluate_floors(
         return Some(FloorDeny {
             rule: FLEET_RELAUNCH_RULE,
             reason,
+        });
+    }
+    // #8878 PR2a: `tm presence` and `tm fleet bind` are anchor writes for PMs
+    // and agents; the Architect's main thread runs them bound or unbound.
+    if let Some(reason) = command.and_then(evaluate_presence_verbs)
+        && let Err(why) = gate.identity()
+        && !matches!(why, NotArchitect::Launch(_))
+    {
+        return Some(FloorDeny {
+            rule: TRUST_ANCHOR_RULE,
+            reason: with_identity(reason, why),
         });
     }
     None

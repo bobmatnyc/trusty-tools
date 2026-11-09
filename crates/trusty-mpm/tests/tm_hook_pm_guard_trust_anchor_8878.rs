@@ -177,11 +177,28 @@ pub(crate) fn run_script_under_claude(
         .spawn()
         .expect("spawn the fake claude");
     if recorded {
-        record_architect(&fx.home.join(".trusty-mpm"), child.id(), &fx.project)
-            .expect("record the fake claude");
+        let root = fx.home.join(".trusty-mpm");
+        let record =
+            record_architect(&root, child.id(), &fx.project).expect("record the fake claude");
+        // #8878 PR2a: a sandboxed run is a present Bob — a grant sealed with
+        // the sandbox key file the hook reads under `TRUSTY_SANDBOX=1`.
+        if env.contains(&("TRUSTY_SANDBOX", "1")) {
+            mint_grant(&root, record.pid, record.start_time);
+        }
     }
     std::fs::write(&go, "").expect("release the fake claude");
     output(child, stdin)
+}
+
+/// Mint a presence grant for `pid` with the sandbox key file under `root`.
+fn mint_grant(root: &Path, pid: u32, start_time: u64) {
+    use trusty_mpm::core::presence;
+    let key = trusty_mpm::core::presence_key::KeySource::for_root(root, true)
+        .load_or_create()
+        .expect("sandbox key");
+    let claude = trusty_mpm::core::twin_identity::ClaudeProcess { pid, start_time };
+    let now = presence::unix_secs(std::time::SystemTime::now());
+    presence::mint(root, &claude, presence::METHOD_LOCAL, &key, now).expect("mint grant");
 }
 
 /// A main-thread `Write` payload targeting `path`.
@@ -229,10 +246,17 @@ fn an_unreadable_payload_denies_under_each_bypass() {
 fn the_architect_main_thread_writes_and_its_subagent_does_not() {
     let fx = Fixture::new();
     let main = write_payload(&fx, &fx.anchor());
-    assert_eq!(run_under_claude(&fx, &main.to_string(), true).trim(), "");
+    // #8878 PR2a: the bound Architect needs Bob's presence for an anchor write.
+    let present = [("TRUSTY_SANDBOX", "1")];
+    let out = run_under_claude_with(&fx, &main.to_string(), true, &present);
+    assert_eq!(out.trim(), "", "the present Architect writes the anchor");
+    let out = run_under_claude(&fx, &main.to_string(), true);
+    assert!(out.contains("Presence required (#8878)"), "no grant: {out}");
+    assert!(out.contains("`tm presence local`"), "{out}");
+    assert!(!out.contains("\"ask\""), "the hook never asks: {out}");
     let mut sub = main.clone();
     sub["agent_id"] = serde_json::json!("agent-7");
-    let out = run_under_claude(&fx, &sub.to_string(), true);
+    let out = run_under_claude_with(&fx, &sub.to_string(), true, &present);
     assert!(out.contains("#8878"), "{out}");
     // The stamp, project and allowlist with no record: the spoof.
     let out = run_under_claude(&fx, &main.to_string(), false);
@@ -397,4 +421,41 @@ fn the_architects_send_keys_path_still_passes() {
     let mut unrestricted = vec![("TRUSTY_MPM_PM_UNRESTRICTED", "1")];
     unrestricted.extend(server.env());
     assert_eq!(run(&fx, &stdin, &unrestricted, Some("pm")).trim(), "");
+}
+
+/// #8878 PR2a spoof, end to end: a PM's `tm presence local` is denied by the
+/// hook, and the verb run outside the bound Architect shows no prompt and
+/// writes no `.presence`.
+#[test]
+fn a_pm_cannot_mint_a_presence_grant_8878() {
+    let fx = Fixture::new();
+    for bypass in BYPASSES {
+        let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+        let out = run(
+            &fx,
+            &bash_payload(&fx, "tm presence local"),
+            &env,
+            Some("pm"),
+        );
+        assert!(
+            out.contains("\"deny\"") && out.contains("`tm presence`"),
+            "{bypass:?}: {out}"
+        );
+    }
+    let mut cmd = common::tm_command_in(&fx.home);
+    cmd.args(["presence", "local"]).env("TRUSTY_SANDBOX", "1");
+    guard_env(&fx, &mut cmd, &[], Some("supervisor"));
+    let out = cmd.output().expect("run tm presence local");
+    assert!(!out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("presence unavailable"), "{stderr}");
+    let anchor = fx.home.join(".trusty-mpm/architect-launch");
+    let grants = std::fs::read_dir(&anchor)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "presence"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(grants, 0, "no .presence was written");
 }

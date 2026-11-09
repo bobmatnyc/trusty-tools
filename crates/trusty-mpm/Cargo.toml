@@ -481,6 +481,9 @@ semver.workspace = true
 # Used by statusline/compaction.rs for atomic state-file writes (NamedTempFile::persist).
 tempfile.workspace = true
 sha2.workspace = true
+# #8878 PR2a (Bob D5b Q3): presence grants are HMAC-SHA256 sealed; the tag is hex.
+hmac.workspace = true
+hex.workspace = true
 regex.workspace = true
 # Glob compilation for the `tm ls` picker's `d <glob>` bulk delete (#5539).
 # Already a workspace dep (trusty-code) and already in the lockfile, so this
@@ -565,6 +568,15 @@ futures-util = { workspace = true, optional = true }
 # scratch `$HOME` from the operator's real one — see `core::host_state_gate`.
 # `fs` (#8528): `statvfs`, so the worktree disk gate reads the figure `df` does.
 nix = { version = "0.29", features = ["fs", "signal", "user"] }
+
+# #8878 PR2a: `tm presence local` asks LocalAuthentication (Touch ID or the
+# login password) through the Objective-C runtime, and the grant key lives in
+# the login Keychain. `keyring` is apple-native only, as trusty-secrets pins it:
+# the workspace entry's `sync-secret-service` pulls libdbus-sys.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
 
 # ── Dev dependencies ───────────────────────────────────────────────────────────
 [dev-dependencies]
