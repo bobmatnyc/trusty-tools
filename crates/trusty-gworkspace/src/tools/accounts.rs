@@ -75,11 +75,11 @@ pub(super) fn append(tools: &mut Vec<Value>) {
                 "type": "string",
                 "description": "Optional path to a JSON file holding THIS profile's own OAuth client (flat {client_id,client_secret}, or Google's downloaded installed/web shape). When given, this profile authorizes and refreshes with that client instead of the shared global one — never pass raw client_id/secret values here, only a file path.",
             },
-            // #10746: ok-T20 read-only scope preset
+            // #10746: ok-T20 read-only scope preset; #10873: requires profile.
             "scopes": {
                 "type": "string",
                 "enum": ["readonly"],
-                "description": "Optional scope preset. \"readonly\" requests only openid, userinfo.email, gmail.readonly, drive.readonly and documents.readonly; write tools then fail on this profile with an error naming the missing scope. Omit for the full default scope set. Any other value is refused.",
+                "description": "Optional scope preset. \"readonly\" requests only openid, userinfo.email, gmail.readonly, drive.readonly and documents.readonly; write tools then fail on this profile with an error naming the missing scope. Requires a \"profile\" other than the default \"gworkspace-mcp\", which keeps its full-scope token. Omit for the full default scope set. Any other value is refused.",
             },
         }),
         &[],

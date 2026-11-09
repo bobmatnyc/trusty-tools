@@ -418,11 +418,19 @@ pub async fn run_consent_with(
 
     info!("authorization code received; exchanging for tokens");
     let http = reqwest::Client::new();
-    let token = exchange_code(&http, &creds, &code, &pkce.verifier, &redirect_uri).await?;
+    let token = exchange_code(
+        &http,
+        OAUTH_TOKEN_URL,
+        &creds,
+        &code,
+        &pkce.verifier,
+        &redirect_uri,
+    )
+    .await?;
 
     let email = resolve_email(&http, &token).await;
-    let stored = build_stored_token(profile, email.clone(), &token, &scope);
-    persist(storage, profile, stored, set_default)?;
+    // #10873: refuse a read-only grant broader than the preset before persisting.
+    store_consent(storage, profile, preset, email.clone(), &token, set_default)?;
 
     Ok(ConsentOutcome {
         profile: profile.to_string(),
@@ -431,9 +439,98 @@ pub async fn run_consent_with(
     })
 }
 
+/// Check the granted scopes, then build and persist the consented token.
+///
+/// Why: Google's token response carries the scopes it actually granted. A
+/// read-only consent stored with a broader grant would be a "read-only"
+/// profile holding write authority (#10873).
+/// What: Runs [`check_granted_scopes`] first; on refusal nothing is written.
+/// Otherwise builds the `StoredToken` and calls [`persist`].
+/// Test: `broader_readonly_grant_is_refused_and_store_unchanged`,
+/// `exact_readonly_grant_is_stored`.
+fn store_consent(
+    storage: &TokenStorage,
+    profile: &str,
+    preset: ScopePreset,
+    email: Option<String>,
+    token: &TokenResponse,
+    set_default: bool,
+) -> Result<()> {
+    check_granted_scopes(preset, token.scope.as_deref())?;
+    let stored = build_stored_token(profile, email, token, &preset.scope_string());
+    persist(storage, profile, stored, set_default)
+}
+
+// #10873: the read-only preset's promise is checked against the real grant.
+/// Refuse a read-only consent whose granted scopes exceed the preset.
+///
+/// Why: Without this check a broader grant is stored and reported as a
+/// read-only profile (#10873).
+/// What: `Full` always passes, as before. For `ReadOnly`, every scope in the
+/// space-delimited `granted` value must be in the preset's set; otherwise
+/// the error names each extra scope. An absent or blank `scope` is refused:
+/// the real grant is then unknown, and an empty recorded set reads as a full
+/// profile to the read-only guard.
+/// Test: `broader_readonly_grant_is_refused_and_store_unchanged`,
+/// `exact_readonly_grant_is_stored`, `absent_scope_readonly_grant_is_refused`,
+/// `empty_scope_readonly_grant_is_refused`.
+fn check_granted_scopes(preset: ScopePreset, granted: Option<&str>) -> Result<()> {
+    if preset != ScopePreset::ReadOnly {
+        return Ok(());
+    }
+    // #10873: fail closed when Google names no granted scope.
+    let Some(granted) = granted.filter(|g| !g.trim().is_empty()) else {
+        return Err(anyhow!(
+            "read-only consent refused: Google returned no granted scopes, so the \
+             grant cannot be checked against the read-only preset. Nothing was stored."
+        ));
+    };
+    let allowed = preset.scopes();
+    let extra: Vec<&str> = granted
+        .split_whitespace()
+        .filter(|s| !allowed.contains(s))
+        .collect();
+    if extra.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "read-only consent refused: Google granted scopes outside the read-only preset: {}. \
+         Nothing was stored; revoke the app's access in your Google account and retry.",
+        extra.join(", ")
+    ))
+}
+
+// #10873: a read-only consent must not replace the shared default profile.
+/// Resolve the consent's target profile, refusing a read-only consent that
+/// names none or names the default profile.
+///
+/// Why: A read-only consent to [`DEFAULT_PROFILE`] would replace its
+/// full-scope token, which Python tools share (#10873).
+/// What: `Full` behaves as [`effective_profile`]. `ReadOnly` needs a
+/// non-blank `override_name` that, trimmed, is not [`DEFAULT_PROFILE`];
+/// otherwise it errors and asks for another profile.
+/// Test: `readonly_without_profile_is_refused`,
+/// `add_account_readonly_without_profile_keeps_default_token`.
+pub fn consent_profile(override_name: Option<&str>, preset: ScopePreset) -> Result<String> {
+    let explicit = override_name.is_some_and(|n| !n.trim().is_empty());
+    let profile = effective_profile(override_name);
+    // #10873: an explicit default profile is refused too, not only an absent one.
+    if preset == ScopePreset::ReadOnly && (!explicit || profile == DEFAULT_PROFILE) {
+        return Err(anyhow!(
+            "a read-only consent needs its own profile: pass --profile <name> other \
+             than '{DEFAULT_PROFILE}' (add_account: \"profile\"), so the default \
+             profile keeps its full-scope token"
+        ));
+    }
+    Ok(profile)
+}
+
 /// Exchange an authorization code for tokens (authorization_code grant).
+///
+/// `token_url` is [`OAUTH_TOKEN_URL`] in production and a mock server in tests.
 async fn exchange_code(
     http: &reqwest::Client,
+    token_url: &str,
     creds: &ClientCreds,
     code: &str,
     verifier: &str,
@@ -448,7 +545,7 @@ async fn exchange_code(
         ("redirect_uri", redirect_uri),
     ];
     let resp = http
-        .post(OAUTH_TOKEN_URL)
+        .post(token_url)
         .form(&params)
         .send()
         .await

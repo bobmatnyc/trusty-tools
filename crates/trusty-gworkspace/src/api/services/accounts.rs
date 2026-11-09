@@ -149,7 +149,8 @@ const ADD_ACCOUNT_TIMEOUT_MAX_SECS: u64 = 90;
 /// authorization that follows uses that client, and every later refresh for
 /// this profile reuses it automatically. `scopes` (optional, #10746 ok-T20)
 /// names a scope preset; the only one is `"readonly"`, and any other value,
-/// or a non-string, is refused before any side effect. Omitted, the consent
+/// or a non-string, is refused before any side effect. `"readonly"` also
+/// needs an explicit `profile` other than the default (#10873). Omitted, the consent
 /// requests the full default set. Returns
 /// `{"status": "authorized", "auth_url", ...}` on success, or
 /// `{"status": "timed_out", "auth_url", "message"}` if the browser step
@@ -159,9 +160,15 @@ const ADD_ACCOUNT_TIMEOUT_MAX_SECS: u64 = 90;
 /// Test: `add_account_rejects_conflicting_default_flags`,
 /// `add_account_clamps_timeout_bounds`,
 /// `add_account_rejects_invalid_oauth_client_path_before_consent`,
-/// `add_account_rejects_unknown_scope_preset_before_any_side_effect`.
+/// `add_account_rejects_unknown_scope_preset_before_any_side_effect`,
+/// `add_account_readonly_without_profile_keeps_default_token`.
 pub async fn add_account(client: &BaseClient, args: Value) -> Result<Value> {
-    let profile = flow::effective_profile(opt_str(&args, "profile"));
+    // #10746: ok-T20 read-only scope preset. Parsed before the client file is
+    // persisted, so a refused preset leaves no state behind.
+    let preset = scope_preset_of(&args)?;
+    // #10873: a read-only consent without `profile` is refused here, before
+    // any side effect, so it cannot replace the default profile's token.
+    let profile = flow::consent_profile(opt_str(&args, "profile"), preset)?;
     let no_default = args
         .get("no_default")
         .and_then(Value::as_bool)
@@ -183,9 +190,6 @@ pub async fn add_account(client: &BaseClient, args: Value) -> Result<Value> {
         DefaultMode::Auto
     };
     let timeout = clamp_timeout(args.get("timeout_secs").and_then(Value::as_u64));
-    // #10746: ok-T20 read-only scope preset. Parsed before the client file is
-    // persisted, so a refused preset leaves no state behind.
-    let preset = scope_preset_of(&args)?;
 
     if let Some(path) = opt_str(&args, "oauth_client_path") {
         oauth::persist_profile_client(&profile, Path::new(path))
@@ -273,6 +277,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use serial_test::serial;
     use std::collections::HashMap;
+    use trusty_common::credentials::test_sandbox::CredentialSandbox;
 
     fn test_client() -> BaseClient {
         let dir = std::env::temp_dir().join(format!("gw-accounts-svc-{}", uuid::Uuid::new_v4()));
@@ -479,5 +484,39 @@ mod tests {
             scope_preset_of(&json!({ "scopes": "readonly" })).unwrap(),
             ScopePreset::ReadOnly
         );
+    }
+
+    // #10873: read-only consent without a profile must not touch the default.
+    /// Why: the default profile's full-scope token is shared with Python
+    /// tools; a read-only consent without `profile` must not replace it.
+    /// What: `add_account {scopes:"readonly"}` with no profile is refused
+    /// with a message naming `--profile`, and the token file is byte-identical.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial]
+    async fn add_account_readonly_without_profile_keeps_default_token() {
+        // #10873: the credential sandbox (#9123) gives a temp HOME and clears
+        // the client env, so a regression fails fast on missing credentials
+        // instead of waiting on a real consent.
+        let mut sandbox = CredentialSandbox::enter();
+        sandbox.remove("GOOGLE_OAUTH_CLIENT_ID");
+        sandbox.remove("GOOGLE_OAUTH_CLIENT_SECRET");
+        let path = sandbox.root().join("tokens.json");
+        let client = BaseClient::for_test(TokenStorage::with_path(path.clone()));
+        let mut map = HashMap::new();
+        map.insert(
+            crate::api::constants::DEFAULT_PROFILE.to_string(),
+            entry(crate::api::constants::DEFAULT_PROFILE, true),
+        );
+        client.storage().save(&map).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let err = add_account(&client, json!({ "scopes": "readonly" }))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("--profile"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }
