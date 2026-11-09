@@ -124,6 +124,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/fleet_poll_selfrefresh.py",
         false
     ),
+    // #10857: fleet-classify.py loads this sibling by path (host-alert dedupe, hold gating).
+    embedded!(
+        "scripts/fleet_alert_dedupe.py",
+        "scripts/fleet_alert_dedupe.py",
+        false
+    ),
     embedded!("scripts/input-state.py", "scripts/input-state.py", true),
     embedded!(
         "scripts/quiet-sessions.py",

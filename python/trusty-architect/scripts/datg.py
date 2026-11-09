@@ -49,6 +49,8 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   (exit 1 when one is found).
 Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
 intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD); a failure is logged, never fatal.
+Hold file (#10857, ar-T8a): a `hold` set or cleared on an Architect's own ledger (<arch>/local/il) is mirrored to its
+inbox/hold.json (source "ledger"), the hold fleet-poll.py reads before it wakes the Architect.
 A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
 dispatch whose prompt lacks "Goal: <code>-G<hex2>" naming an active goal; config.mode
@@ -281,6 +283,29 @@ def session_op(a):
     return entry
 
 
+def sync_ledger_hold(project, ops):
+    """ar-T8a: mirror the Architect's own ledger HOLD into its inbox/hold.json, which the poller reads.
+
+    What: only after a write that set or cleared `hold`, and only for an Architect's ledger
+    (alert_triage.ledger_hold_path). A failure is reported on stderr; the ledger write stands.
+    Test: test_ledger_hold_writes_and_clears_the_hold_file
+    """
+    if not any(isinstance(o, dict) and o.get(VERB_KEY) == "session" and "hold" in o for o in ops):
+        return
+    try:
+        import alert_triage
+        path = alert_triage.ledger_hold_path(project)
+        if path is None:
+            return
+        text = (load_state(project).get("session") or {}).get("hold") or ""
+        if text:
+            alert_triage.set_hold(path, "ledger", text, until_event="datg.py session set --hold none")
+        else:
+            alert_triage.clear_hold(path, "ledger")
+    except Exception as e:  # noqa: BLE001 - the ledger write already committed
+        print(f"datg: hold file not updated ({type(e).__name__}: {e})", file=sys.stderr)
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     datg_store._SESSION = a.session  # #10161: _SESSION lives in datg_store, which reads it
@@ -342,8 +367,11 @@ def main(argv=None):
             evs, st = write_ops_ev(a.project, ops)
             print(", ".join(e["id"] for e in evs))
             notify_escalations(a.project, evs, st)
+            sync_ledger_hold(a.project, ops)
         elif a.verb == "session":
-            print(write_ops(a.project, [session_op(a)]))
+            op = session_op(a)
+            print(write_ops(a.project, [op]))
+            sync_ledger_hold(a.project, [op])
         elif a.verb == "prune":
             print(op_prune(a.project, a.dry_run, a.answered_hours, a.require_outcome))
         elif a.verb == "rotate":
