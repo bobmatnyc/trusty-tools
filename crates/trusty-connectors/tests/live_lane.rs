@@ -423,13 +423,18 @@ fn live_profile_skips_only_when_unset() {
 /// The lane's Drive fixture folder from `std::env::var(OKF_LIVE_DRIVE_FOLDER)`.
 ///
 /// Why: with the profile set, the lane cannot run without the folder.
-/// What: unset or not UTF-8 panics, naming both variables. Any other value
+/// What: unset or not UTF-8 panics, naming both variables; an empty or
+/// whitespace-only value panics naming the folder variable. Any other value
 /// is the trimmed folder ID.
 /// Test: `live_folder_must_be_set_and_non_empty`.
 fn live_folder(var: Result<String, VarError>) -> String {
     let folder = var.unwrap_or_else(|_| {
         panic!("{PROFILE_VAR} is set but {FOLDER_VAR} (the fixture folder ID) is not")
     });
+    // #10873: a blank folder failed late, after the pre-check and mail imports
+    if folder.trim().is_empty() {
+        panic!("{FOLDER_VAR} is set but empty");
+    }
     folder.trim().to_string()
 }
 
@@ -460,8 +465,8 @@ fn live_folder_must_be_set_and_non_empty() {
 /// Why: criterion 148 — the lane is off unless `OKF_LIVE_PROFILE` is set,
 /// and then runs against the owner's real account.
 /// What: unset, prints the skip and passes; set but empty or not UTF-8,
-/// panics (`live_profile`). Set, requires `OKF_LIVE_DRIVE_FOLDER` and
-/// `HOME`, and runs [`run_lane`]; a pre-check refusal or a failed outcome
+/// panics (`live_profile`). Set, requires a non-blank
+/// `OKF_LIVE_DRIVE_FOLDER` (`live_folder`) and `HOME`, and runs [`run_lane`]; a pre-check refusal or a failed outcome
 /// fails the test.
 /// Test: this test (live in the owner channel only; skipped elsewhere).
 #[test]
