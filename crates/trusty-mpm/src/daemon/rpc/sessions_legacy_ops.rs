@@ -27,9 +27,10 @@
 //! Three routes here do work that is deliberately allowed to fail without
 //! failing the call: the tmux kill and managed-store reconcile behind
 //! [`remove_session`], the pause-file write behind [`pause_session`], and the
-//! tmux `send-keys` behind [`send_command`]. Each is logged and swallowed
-//! exactly where it always was — inside this one body — so the socket inherits
-//! the HTTP contract rather than a second, laxer one. The failure branches that
+//! tmux `send-keys` behind [`send_command`] (which reports a failed send as
+//! `sent: false`, #10101). Each is handled exactly where it always was —
+//! inside this one body — so the socket inherits the HTTP contract rather
+//! than a second, laxer one. The failure branches that
 //! DO error (an unknown id, a stopped session, an overseer block) error on both
 //! transports for the same reason, because there is one `?` to hit.
 //!
@@ -503,10 +504,11 @@ pub fn resume_session(state: &Arc<DaemonState>, id: &str) -> Result<ResumeRespon
 /// Send a command into a session's tmux pane (`POST /sessions/{id}/command`,
 /// `mpm.sessions.command`).
 ///
-/// Why the tmux write is best-effort but the state check is not: a `Stopped`
-/// session is refused before anything is sent (`SessionNotActive`, HTTP 409 /
-/// `CODE_CONFLICT`), while a tmux failure after that point is logged and the
-/// caller still gets whatever the pane held. One body, so one policy.
+/// Why the tmux write does not fail the call but the state check does: a
+/// `Stopped` session is refused before anything is sent (`SessionNotActive`,
+/// HTTP 409 / `CODE_CONFLICT`), while a tmux failure after that point answers
+/// `sent: false` with `send_error` naming why (#10101), and the caller still
+/// gets whatever the pane held. One body, so one policy.
 ///
 /// # Errors
 ///
@@ -522,15 +524,19 @@ pub async fn send_command(
     compress: Option<CompressionLevel>,
 ) -> Result<CommandResponse, DaemonError> {
     let session = SessionService::new(state).command_target(id)?;
-    TmuxService::send_command(&session, command);
+    // #10101: a line that reached no pane answers `sent: false` and says why.
+    let delivery = TmuxService::send_command(&session, command);
 
-    // Give the pane a moment to render the command's output before capturing.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if delivery.is_ok() {
+        // Give the pane a moment to render the command's output before capturing.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
     let raw = TmuxService::capture(&session, 100);
     let compressed = apply_compression(compress, &raw);
 
     Ok(CommandResponse {
-        sent: true,
+        sent: delivery.is_ok(),
+        send_error: delivery.err(),
         output: compressed.text,
         original_bytes: compressed.stats.original_bytes,
         compressed_bytes: compressed.stats.compressed_bytes,
