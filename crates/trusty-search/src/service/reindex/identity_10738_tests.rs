@@ -865,3 +865,72 @@ async fn a_watcher_delete_during_the_abort_detach_window_does_not_resurrect() {
         "the retried watcher removal leaves live"
     );
 }
+
+/// Why: R1, watcher rescan arm — the overflow rescan commits through
+/// `index_files_batch_no_rebuild`. In the abort's detach window that batch
+/// landed in memory only and returned `Ok`, the rescan recorded the new
+/// fingerprint, and the re-attached live corpus kept the old content, so the
+/// next rescan skipped the file as unchanged and the index stayed stale.
+/// What: change `a.rs` on disk, park the abort after the take, run the
+/// rescan reconcile, release, and assert the pass failed without recording
+/// the new fingerprint, or the new content is in the re-attached live
+/// corpus. Fails before the fix: the pass succeeds and live holds the old
+/// content.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_rescan_batch_during_the_abort_detach_window_is_refused_or_lands_in_live() {
+    let id = "identity-abort-rescan-10738";
+    let (_dir, handle, _state, _live) = staged_index(id).await;
+    let root = handle.root_path.clone();
+    let new_body = "pub fn alpha_rescanned_10738() -> u8 {\n    2\n}\n";
+    std::fs::write(root.join("a.rs"), new_body).expect("a.rs on disk");
+    let fingerprint = super::hash::hash_content(new_body);
+    let tracked = crate::service::indexed_files::IndexedFiles::new();
+
+    let tmp = begin(&handle, false).await;
+    let Parked { reached, release } = detach_hook::park(id, Window::Abort);
+    let abort = resolve_spawned(&handle, tmp, false);
+    reach(reached).await;
+    let outcome = crate::service::watch_rescan::reconcile_after_rescan(
+        &handle.id,
+        &root,
+        &root,
+        &handle.indexer,
+        &tracked,
+    )
+    .await;
+    let recorded = super::hash::hashes_for(&handle.id)
+        .get(std::path::Path::new("a.rs"))
+        .map(|h| h.value().clone());
+    release.send(()).expect("the abort is still parked");
+    assert!(!abort.await.expect("abort task"), "a rollback never defers");
+
+    match outcome {
+        Err(e) => assert_ne!(
+            recorded.as_deref(),
+            Some(fingerprint.as_str()),
+            "a refused rescan batch must not record the new fingerprint: {e}"
+        ),
+        Ok(stats) => {
+            let corpus = handle
+                .indexer
+                .read()
+                .await
+                .corpus_store()
+                .expect("attached");
+            let live_a: Vec<String> = corpus
+                .load_all_chunks()
+                .expect("load")
+                .into_iter()
+                .filter(|c| c.file == "a.rs")
+                .map(|c| c.content)
+                .collect();
+            assert!(
+                live_a.iter().any(|c| c.contains("alpha_rescanned_10738")),
+                "a rescan that reported success must leave the new content in the \
+                 re-attached live corpus: {stats:?}, live a.rs = {live_a:?}"
+            );
+        }
+    }
+}
