@@ -355,20 +355,24 @@ fn consent_prompt_wording_differs_by_mode() {
 // #10873: read-only consent checks the granted scopes against the preset.
 /// Serve `scope` from a mock token endpoint and run the real code exchange
 /// against it, so the test sees the response the way the consent flow does.
-async fn granted_token(scope: &str) -> TokenResponse {
+/// `None` omits the `scope` field from the response.
+async fn granted_token(scope: Option<&str>) -> TokenResponse {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
+    let mut body = serde_json::json!({
+        "access_token": "at",
+        "refresh_token": "rt",
+        "expires_in": 3600,
+        "token_type": "Bearer",
+    });
+    if let Some(scope) = scope {
+        body["scope"] = scope.into();
+    }
     Mock::given(method("POST"))
         .and(path("/token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "access_token": "at",
-            "refresh_token": "rt",
-            "expires_in": 3600,
-            "token_type": "Bearer",
-            "scope": scope,
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(&server)
         .await;
     let creds = ClientCreds {
@@ -412,7 +416,7 @@ async fn broader_readonly_grant_is_refused_and_store_unchanged() {
     let modify = "https://www.googleapis.com/auth/gmail.modify";
     let drive = "https://www.googleapis.com/auth/drive";
     let grant = format!("{} {modify} {drive}", READONLY_SCOPES.join(" "));
-    let token = granted_token(&grant).await;
+    let token = granted_token(Some(&grant)).await;
     let (storage, path) = seeded_storage("ro-broad");
     let before = std::fs::read(&path).unwrap();
 
@@ -438,7 +442,7 @@ async fn broader_readonly_grant_is_refused_and_store_unchanged() {
 async fn exact_readonly_grant_is_stored() {
     let mut scopes = READONLY_SCOPES.to_vec();
     scopes.reverse();
-    let token = granted_token(&scopes.join(" ")).await;
+    let token = granted_token(Some(&scopes.join(" "))).await;
     let (storage, _path) = seeded_storage("ro-exact");
 
     store_consent(&storage, "ro", ScopePreset::ReadOnly, None, &token, false).unwrap();
@@ -455,7 +459,14 @@ async fn exact_readonly_grant_is_stored() {
 /// Test: this test.
 #[test]
 fn readonly_without_profile_is_refused() {
-    for missing in [None, Some(""), Some("  ")] {
+    // #10873: an explicit default profile is refused too, trimmed or not.
+    for missing in [
+        None,
+        Some(""),
+        Some("  "),
+        Some(DEFAULT_PROFILE),
+        Some(" gworkspace-mcp "),
+    ] {
         let err = consent_profile(missing, ScopePreset::ReadOnly)
             .unwrap_err()
             .to_string();
@@ -469,4 +480,43 @@ fn readonly_without_profile_is_refused() {
         consent_profile(None, ScopePreset::Full).unwrap(),
         DEFAULT_PROFILE
     );
+}
+
+// #10873: an absent or blank granted scope must not pass as read-only.
+/// Why: with no granted `scope`, the stored token would record the requested
+/// set, or `[]`, which the read-only guard treats as a full profile.
+/// What: the token response omits `scope`; the read-only consent is refused,
+/// the error says Google returned no granted scopes, and the token file is
+/// byte-identical. The full preset still accepts the response.
+/// Test: this test.
+#[tokio::test]
+async fn absent_scope_readonly_grant_is_refused() {
+    assert_no_scope_refused(granted_token(None).await, "ro-absent").await;
+}
+
+/// Why: `"scope": ""` is a blank grant, not a read-only one.
+/// What: as `absent_scope_readonly_grant_is_refused`, with an empty `scope`.
+/// Test: this test.
+#[tokio::test]
+async fn empty_scope_readonly_grant_is_refused() {
+    assert_no_scope_refused(granted_token(Some("")).await, "ro-empty").await;
+}
+
+/// Assert a read-only consent of `token` is refused for naming no granted
+/// scope and leaves the token file unchanged.
+async fn assert_no_scope_refused(token: TokenResponse, label: &str) {
+    let (storage, path) = seeded_storage(label);
+    let before = std::fs::read(&path).unwrap();
+
+    let err = store_consent(&storage, "ro", ScopePreset::ReadOnly, None, &token, false)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("Google returned no granted scopes"), "{err}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "store must be unchanged"
+    );
+    check_granted_scopes(ScopePreset::Full, token.scope.as_deref()).unwrap();
 }

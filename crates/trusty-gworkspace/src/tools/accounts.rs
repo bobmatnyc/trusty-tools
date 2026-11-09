@@ -79,7 +79,7 @@ pub(super) fn append(tools: &mut Vec<Value>) {
             "scopes": {
                 "type": "string",
                 "enum": ["readonly"],
-                "description": "Optional scope preset. \"readonly\" requests only openid, userinfo.email, gmail.readonly, drive.readonly and documents.readonly; write tools then fail on this profile with an error naming the missing scope. Requires \"profile\": the default profile keeps its full-scope token. Omit for the full default scope set. Any other value is refused.",
+                "description": "Optional scope preset. \"readonly\" requests only openid, userinfo.email, gmail.readonly, drive.readonly and documents.readonly; write tools then fail on this profile with an error naming the missing scope. Requires a \"profile\" other than the default \"gworkspace-mcp\", which keeps its full-scope token. Omit for the full default scope set. Any other value is refused.",
             },
         }),
         &[],

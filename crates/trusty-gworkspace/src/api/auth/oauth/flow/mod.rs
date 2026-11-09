@@ -468,17 +468,25 @@ fn store_consent(
 /// read-only profile (#10873).
 /// What: `Full` always passes, as before. For `ReadOnly`, every scope in the
 /// space-delimited `granted` value must be in the preset's set; otherwise
-/// the error names each extra scope. An absent `scope` passes, because the
-/// stored token then records the requested read-only set.
+/// the error names each extra scope. An absent or blank `scope` is refused:
+/// the real grant is then unknown, and an empty recorded set reads as a full
+/// profile to the read-only guard.
 /// Test: `broader_readonly_grant_is_refused_and_store_unchanged`,
-/// `exact_readonly_grant_is_stored`.
+/// `exact_readonly_grant_is_stored`, `absent_scope_readonly_grant_is_refused`,
+/// `empty_scope_readonly_grant_is_refused`.
 fn check_granted_scopes(preset: ScopePreset, granted: Option<&str>) -> Result<()> {
     if preset != ScopePreset::ReadOnly {
         return Ok(());
     }
+    // #10873: fail closed when Google names no granted scope.
+    let Some(granted) = granted.filter(|g| !g.trim().is_empty()) else {
+        return Err(anyhow!(
+            "read-only consent refused: Google returned no granted scopes, so the \
+             grant cannot be checked against the read-only preset. Nothing was stored."
+        ));
+    };
     let allowed = preset.scopes();
     let extra: Vec<&str> = granted
-        .unwrap_or_default()
         .split_whitespace()
         .filter(|s| !allowed.contains(s))
         .collect();
@@ -494,24 +502,27 @@ fn check_granted_scopes(preset: ScopePreset, granted: Option<&str>) -> Result<()
 
 // #10873: a read-only consent must not replace the shared default profile.
 /// Resolve the consent's target profile, refusing a read-only consent that
-/// names none.
+/// names none or names the default profile.
 ///
-/// Why: With no profile, a read-only consent would go to [`DEFAULT_PROFILE`]
-/// and replace its full-scope token, which Python tools share (#10873).
+/// Why: A read-only consent to [`DEFAULT_PROFILE`] would replace its
+/// full-scope token, which Python tools share (#10873).
 /// What: `Full` behaves as [`effective_profile`]. `ReadOnly` needs a
-/// non-blank `override_name`; without one it errors and asks for a profile.
+/// non-blank `override_name` that, trimmed, is not [`DEFAULT_PROFILE`];
+/// otherwise it errors and asks for another profile.
 /// Test: `readonly_without_profile_is_refused`,
 /// `add_account_readonly_without_profile_keeps_default_token`.
 pub fn consent_profile(override_name: Option<&str>, preset: ScopePreset) -> Result<String> {
     let explicit = override_name.is_some_and(|n| !n.trim().is_empty());
-    if preset == ScopePreset::ReadOnly && !explicit {
+    let profile = effective_profile(override_name);
+    // #10873: an explicit default profile is refused too, not only an absent one.
+    if preset == ScopePreset::ReadOnly && (!explicit || profile == DEFAULT_PROFILE) {
         return Err(anyhow!(
-            "a read-only consent needs its own profile: pass --profile <name> \
-             (add_account: \"profile\"), so the default profile '{DEFAULT_PROFILE}' \
-             keeps its full-scope token"
+            "a read-only consent needs its own profile: pass --profile <name> other \
+             than '{DEFAULT_PROFILE}' (add_account: \"profile\"), so the default \
+             profile keeps its full-scope token"
         ));
     }
-    Ok(effective_profile(override_name))
+    Ok(profile)
 }
 
 /// Exchange an authorization code for tokens (authorization_code grant).

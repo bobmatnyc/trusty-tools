@@ -150,7 +150,7 @@ const ADD_ACCOUNT_TIMEOUT_MAX_SECS: u64 = 90;
 /// this profile reuses it automatically. `scopes` (optional, #10746 ok-T20)
 /// names a scope preset; the only one is `"readonly"`, and any other value,
 /// or a non-string, is refused before any side effect. `"readonly"` also
-/// needs an explicit `profile` (#10873). Omitted, the consent
+/// needs an explicit `profile` other than the default (#10873). Omitted, the consent
 /// requests the full default set. Returns
 /// `{"status": "authorized", "auth_url", ...}` on success, or
 /// `{"status": "timed_out", "auth_url", "message"}` if the browser step

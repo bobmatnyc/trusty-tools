@@ -86,8 +86,9 @@ pub enum Command {
         /// Request a named scope preset instead of the full default set.
         /// The only preset is `readonly`: `openid`, `userinfo.email`,
         /// `gmail.readonly`, `drive.readonly` and `documents.readonly`. Any
-        /// other value is refused. `readonly` requires `--profile`, so the
-        /// default profile keeps its full-scope token.
+        /// other value is refused. `readonly` requires a `--profile` other
+        /// than `gworkspace-mcp`, so the default profile keeps its
+        /// full-scope token.
         // #10746: ok-T20 read-only scope preset; #10873: needs --profile.
         #[arg(long, value_name = "PRESET", value_parser = parse_scope_preset)]
         scopes: Option<ScopePreset>,
