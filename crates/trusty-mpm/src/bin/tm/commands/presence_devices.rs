@@ -4,8 +4,8 @@
 //! lost one from the Studio. Enrol and revoke need fresh local presence:
 //! the CLI asks Touch ID first and only then mints the sealed ticket the
 //! store and the daemon demand, so a caller that skips the CLI has no ticket.
-//! What: [`add`] refuses before any prompt while `[presence] browser_enrol`
-//! is off or `rp_origin` is unset (#8878 PR2b-2; on by default, D24); otherwise it prompts, mints an enrol
+//! What: [`add`] refuses before any prompt while `[presence] rp_origin` is
+//! unset (#8878 PR2b-2); otherwise it prompts, mints an enrol
 //! ticket, checks with the daemon that the registration opens, and prints
 //! the one-time enrol link (single use, 10 minutes, Architect Q3). [`list`] reads
 //! the sealed records. [`revoke`] prompts, mints a revoke ticket and revokes
@@ -27,7 +27,7 @@ use crate::commands::presence_client::Call;
 
 /// What `add` says while the browser enrol page is switched off.
 pub(crate) const ENROL_DISABLED: &str = "enrolment via browser is not enabled: \
-     `[presence] browser_enrol` is false or `rp_origin` is unset; \
+     `[presence] rp_origin` is unset; \
      no prompt was shown and no ticket was minted";
 
 fn now() -> u64 {
@@ -38,12 +38,12 @@ fn now() -> u64 {
 ///
 /// Why: #8878 PR2b-2 — the passkey is created in a browser on the device,
 /// at `enrol_origin` (the console's tailnet origin, which WebAuthn binds).
-/// What: `enrol_origin` `None` (switch off) fails before any prompt. Then
+/// What: `enrol_origin` `None` (no `rp_origin`) fails before any prompt. Then
 /// Touch ID, the ticket, a `register.start` that proves the daemon will open
 /// the registration, and the link from `enrol_url`, which is returned.
 /// Test: `devices_add_and_revoke_refuse_without_presence_8878`,
 /// `devices_add_prints_the_enrol_link_after_presence_8878`,
-/// `devices_add_fails_closed_while_browser_enrol_is_off_8878`.
+/// `devices_add_fails_closed_while_rp_origin_is_unset_8878`.
 pub(crate) fn add(
     auth: &dyn Authenticator,
     key: &dyn Fn() -> anyhow::Result<GrantKey>,

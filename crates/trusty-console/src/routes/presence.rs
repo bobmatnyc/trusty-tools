@@ -4,8 +4,8 @@
 //! Why: a passkey is created by the browser on the device, and WebAuthn binds
 //! it to the page's origin, so the page must be served on the console's
 //! tailnet origin (`[presence] rp_origin`). `tm presence devices add` prints a
-//! one-time link to it (Architect Q3). `[presence] browser_enrol` (on by
-//! default, owner ruling D24) can turn the page off (Architect Q4).
+//! one-time link to it (Architect Q3). With no `[presence] rp_origin` the
+//! page is not served (Architect ruling: no separate switch).
 //! What: [`router`] serves the page at [`ENROL_PAGE_PATH`] and two POST
 //! routes that relay to the tm daemon's `mpm.presence.register.start` and
 //! `.finish` over its Unix socket. Before anything else, every request asks
@@ -78,7 +78,7 @@ impl PresenceBridge {
 /// Why an enrol request was not relayed.
 #[derive(Debug, PartialEq, Eq)]
 enum Refusal {
-    /// `[presence] browser_enrol` is off: the page does not exist.
+    /// `[presence] rp_origin` is unset: the page does not exist.
     NotEnabled,
     /// The daemon could not be asked.
     Unavailable(String),
@@ -144,7 +144,7 @@ fn authority(origin: &Url) -> Option<String> {
 /// a refused or failed status → [`Refusal::Unavailable`]); `Host` must equal
 /// that origin's authority, and when `need_origin` the `Origin` header must
 /// equal the origin itself.
-/// Test: `the_enrol_routes_are_absent_while_the_switch_is_off_8878`,
+/// Test: `the_enrol_routes_are_absent_while_rp_origin_is_unset_8878`,
 /// `a_request_not_addressed_to_the_enrol_origin_is_refused_8878`.
 async fn gate(
     bridge: &PresenceBridge,

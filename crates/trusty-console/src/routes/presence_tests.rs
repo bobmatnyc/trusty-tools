@@ -96,11 +96,11 @@ fn ticket() -> Value {
         "expires_at": 2, "mac": "00" })
 }
 
-/// Q4: with `browser_enrol` off the daemon reports no origin, so the page
+/// With no `[presence] rp_origin` the daemon reports no origin, so the page
 /// and both calls are 404 and nothing is relayed; with no daemon they are
 /// 503, never served.
 #[tokio::test]
-async fn the_enrol_routes_are_absent_while_the_switch_is_off_8878() {
+async fn the_enrol_routes_are_absent_while_rp_origin_is_unset_8878() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (socket, seen) = daemon(dir.path(), None, json!({ "result": {} }));
     let app = router(PresenceBridge::with_socket(socket));

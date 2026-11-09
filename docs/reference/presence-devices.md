@@ -187,7 +187,7 @@ device methods answer exit 3 and nothing is enrolled or approved.
 |---|---|---|
 | `tm presence request [--action <text>]` | Asks for a device approval for this session's `claude`; grants nothing | 0 asked, 1 refused |
 | `tm presence wait [--timeout 5m] [--request <id>]` | Polls for a valid grant | 0 granted, 75 still pending (re-issue), 1 the request is gone with no grant |
-| `tm presence devices add <name>` | Touch ID, then a one-time enrol link (see "Enrolment"). With `browser_enrol = false` or no `rp_origin`: refuses before the prompt | 0, 1 |
+| `tm presence devices add <name>` | Touch ID, then a one-time enrol link (see "Enrolment"). With no `rp_origin`: refuses before the prompt | 0, 1 |
 | `tm presence devices list` | Each device: id, name, created, last used, counter, backup flags | 0 |
 | `tm presence devices revoke <id>` | Touch ID, then deletes the record and every grant it approved | 0, 1 |
 
@@ -196,18 +196,13 @@ PMs, agents and subagents cannot run any `tm presence` verb, and cannot write
 
 ### Enrolment (#8878 PR2b-2)
 
-Browser enrolment is on by default (owner ruling D24) once `rp_id` and
-`rp_origin` are set. One key in `~/.trusty-mpm/config.toml` turns it off;
-restart the daemon after changing it (it reads `[presence]` at start):
+Browser enrolment is available once `rp_id` and `rp_origin` are set in
+`[presence]` (owner ruling D24); there is no separate switch. The daemon
+reads `[presence]` at start, so restart it after changing either key.
 
-```toml
-[presence]
-browser_enrol = false
-```
-
-With it off, or with `rp_origin` unset, `tm presence devices add` says
-"enrolment via browser is not enabled" before any prompt, and the console
-answers `404` for the page and its calls.
+With `rp_origin` unset, `tm presence devices add` says "enrolment via
+browser is not enabled" before any prompt, and the console answers `404`
+for the page and its calls.
 
 An enrolled device approves nothing yet: until #10865 verifies the key's
 Keychain access list, the daemon's `mpm.presence.approve` and

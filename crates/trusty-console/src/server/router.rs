@@ -442,7 +442,7 @@ fn build_router_inner(
         // #9066 A6: merged after the write-origin guard, so it does not apply
         // to `/api/secrets/*`; the bridge has its own.
         .merge(secrets_routes(secrets))
-        // #8878 PR2b-2: its own Host/Origin gate; 404 while the switch is off.
+        // #8878 PR2b-2: its own Host/Origin gate; 404 while rp_origin is unset.
         .merge(crate::routes::presence::router(
             crate::routes::presence::PresenceBridge::live(),
         ))

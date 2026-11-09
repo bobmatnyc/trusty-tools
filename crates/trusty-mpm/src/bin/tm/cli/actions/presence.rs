@@ -53,8 +53,7 @@ pub(crate) enum PresenceAction {
 pub(crate) enum DevicesAction {
     /// Enrol a passkey device through a one-time browser link.
     ///
-    /// Needs `[presence] rp_origin` (with `browser_enrol`, on by default)
-    /// and Touch ID or the login password at the Studio first; prints a link
+    /// Needs `[presence] rp_origin` and Touch ID or the login password at the Studio first; prints a link
     /// that works once, for 10 minutes, on the console's tailnet origin.
     Add {
         /// A name for the device, e.g. `iphone`.

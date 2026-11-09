@@ -65,7 +65,7 @@ pub(crate) fn run(action: PresenceAction) -> anyhow::Result<()> {
         }
         PresenceAction::Devices { action } => match action {
             DevicesAction::Add { name } => {
-                // #8878 PR2b-2: the enrol link only while browser_enrol is on.
+                // #8878 PR2b-2: the enrol link needs `[presence] rp_origin`.
                 let presence = MpmConfig::load_default().presence;
                 let origin = presence.enrol_origin();
                 presence_devices::add(&LocalAuthenticator, &key, &name, origin, &call).map(drop)

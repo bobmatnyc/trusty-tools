@@ -164,7 +164,7 @@ fn devices_add_prints_the_enrol_link_after_presence_8878() {
 /// #8878 PR2b-2 (Architect Q4): with the switch off, no prompt, no ticket,
 /// no daemon call, and a message naming the switch.
 #[test]
-fn devices_add_fails_closed_while_browser_enrol_is_off_8878() {
+fn devices_add_fails_closed_while_rp_origin_is_unset_8878() {
     let minted = RefCell::new(0);
     let key = || {
         *minted.borrow_mut() += 1;

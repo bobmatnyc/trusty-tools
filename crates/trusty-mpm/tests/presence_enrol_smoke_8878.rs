@@ -12,7 +12,7 @@
 //! Run (ignored by default; needs a sandbox daemon):
 //! ```text
 //! D=$(mktemp -d /tmp/pr2b2.XXXX); mkdir -p "$D/home/.trusty-mpm"
-//! printf '[presence]\nrp_id = "studio.example.ts.net"\nrp_origin = "https://studio.example.ts.net"\nbrowser_enrol = true\n' \
+//! printf '[presence]\nrp_id = "studio.example.ts.net"\nrp_origin = "https://studio.example.ts.net"\n' \
 //!   > "$D/home/.trusty-mpm/config.toml"
 //! scripts/sandbox_daemon.sh --bin <tm> --dir "$D"        # another shell
 //! TRUSTY_SMOKE_SANDBOX_DIR="$D" cargo test -p trusty-mpm --test integration \
@@ -124,7 +124,7 @@ async fn enrol_spent_and_expired_through_the_sandbox_daemon_8878() {
     );
     let origin = status["enrol_origin"]
         .as_str()
-        .expect("browser_enrol = true")
+        .expect("[presence] rp_origin is set")
         .to_owned();
     let before = list(&socket).await;
     let now = unix_secs(SystemTime::now());

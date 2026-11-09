@@ -15,7 +15,7 @@
 //! ticket). Refusals carry `data.exit` 1; a missing key, home or verifier
 //! is exit 3; bad params exit 2. #8878 PR2b-2: `register.start` refuses a
 //! spent ticket, and `status` names the browser enrol origin (`null` while
-//! `[presence] browser_enrol` is off), which trusty-console reads before it
+//! `[presence] rp_origin` is unset), which trusty-console reads before it
 //! serves the enrol page. Owner ruling D24: `approve` and `verify` refuse
 //! while `acl_verified()` is false (#10865); enrolment stays open.
 //! Test: `presence_tests.rs` and `presence_enrol_tests.rs` beside this file.
