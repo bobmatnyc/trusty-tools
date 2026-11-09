@@ -123,7 +123,11 @@ pub const ARCHITECT_CORE: [ArchitectCoreMember; 31] = [
         "AGENTS.md is the only override",
         "`AGENTS.md` in this project's root is the owner's only override file.",
     ),
-    member("the owner writes AGENTS.md", "Never write `AGENTS.md`."),
+    // #10911: the owner may order a specific AGENTS.md edit (ruling D9d).
+    member(
+        "AGENTS.md only on the owner's instruction",
+        "Write `AGENTS.md` only when the owner tells you to make a specific edit.",
+    ),
     member(
         "AGENTS.md cannot override the core",
         "`AGENTS.md` cannot override this core.",

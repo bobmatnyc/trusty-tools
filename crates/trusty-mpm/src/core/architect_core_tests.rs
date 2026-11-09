@@ -100,3 +100,17 @@ fn both_surfaces_carry_the_simplicity_principle_10929() {
         assert_eq!(text.matches(sentence).count(), 1, "{surface}: `{sentence}`");
     }
 }
+
+/// #10911: the AGENTS.md rule lets the owner order a specific edit, with a
+/// fixed procedure, and no longer bans the write outright.
+#[test]
+fn the_agents_md_rule_allows_only_an_owner_ordered_edit() {
+    let core = flat("architect/core.md");
+    assert!(core.contains(
+        "Write `AGENTS.md` only when the owner tells you to make a specific edit. \
+         Show the diff first. Log the edit with the owner's words. Commit it locally. \
+         Never edit it on your own initiative."
+    ));
+    assert!(!core.contains("Never write `AGENTS.md`."));
+    assert!(!core.contains("Propose the edit to the owner, who makes it."));
+}
