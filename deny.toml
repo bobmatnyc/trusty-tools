@@ -104,12 +104,14 @@ allow = [
     # --- Weak copyleft, FILE-scoped. MPL-2.0 obliges you to publish
     #     modifications to the MPL-licensed FILES themselves; it creates no
     #     obligation on a work that merely links them. This workspace uses all
-    #     nine unmodified, straight from crates.io, so the obligation never
-    #     attaches. If anyone ever vendors and patches one of these, that fork
-    #     must ship its source — re-read this line before doing so.
+    #     of them unmodified, straight from crates.io, so the obligation
+    #     never attaches. If anyone ever vendors and patches one of these,
+    #     that fork must ship its source — re-read this line before doing so.
     #     Crates: colored (x2), cssparser (x2), cssparser-macros, dtoa-short,
-    #             option-ext, selectors (x2).
-    "MPL-2.0",                      # 9
+    #             option-ext, selectors (x2); #8878 PR2b-1b adds webauthn-rs,
+    #             webauthn-rs-core, webauthn-rs-proto,
+    #             webauthn-attestation-ca and crypto-glue.
+    "MPL-2.0",                      # 14
 ]
 
 # A crate whose licence expression cargo-deny cannot resolve to a confident
@@ -229,7 +231,15 @@ unsound = "none"
 # `extract()`; every zip read is in memory through `ZipArchive::new`. Architect
 # ruling df-D59 (2026-10-17). The same ids are ignored in `.cargo/audit.toml`;
 # remove all of them in one change once those parents take zip 9.
+#
+# RUSTSEC-2023-0071 (rsa Marvin Attack: timing side channel in RSA
+# decryption). rsa 0.10.0-rc arrives through webauthn-rs 0.6.2 ->
+# crypto-glue 0.2.2 (#8878 PR2b-1b); no fixed rsa release exists yet.
+# trusty-mpm registers and verifies ES256 passkeys only, so no RSA operation
+# runs. Owner ruling D72 (2026-11-09). Review by 2027-02-07. The same id is
+# ignored in `.cargo/audit.toml`.
 ignore = [
+  { id = "RUSTSEC-2023-0071", reason = "REVIEW BY 2027-02-07. rsa pulled by webauthn-rs crypto-glue; trusty-mpm accepts ES256 credentials only, so no RSA operation runs. Owner ruling D72, #8878. Nothing expires this row automatically." },
   { id = "RUSTSEC-2026-0367", reason = "REVIEW BY 2026-11-20. zip extract keeps SUID/SGID bits. Pinned upstream with no zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see #10019. Ruling df-D59. Nothing expires this row automatically." },
   { id = "RUSTSEC-2026-0368", reason = "REVIEW BY 2026-11-20. zip extract creates symlinks escaping the destination. Pinned upstream with no zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see #10019. Ruling df-D59. Nothing expires this row automatically." },
   { id = "RUSTSEC-2026-0369", reason = "REVIEW BY 2026-11-20. zip extract applies permissions through symlinks. Pinned upstream with no zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see #10019. Ruling df-D59. Nothing expires this row automatically." },

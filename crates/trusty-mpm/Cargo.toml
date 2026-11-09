@@ -483,6 +483,8 @@ tempfile.workspace = true
 sha2.workspace = true
 # #8878 PR2a (Bob D5b Q3): presence grants are HMAC-SHA256 sealed; the tag is hex.
 hmac.workspace = true
+# #8878 PR2b-1b (D72): passkey (WebAuthn) verifier for presence devices.
+webauthn-rs.workspace = true
 hex.workspace = true
 regex.workspace = true
 # Glob compilation for the `tm ls` picker's `d <glob>` bulk delete (#5539).
@@ -580,6 +582,8 @@ keyring = { version = "3", default-features = false, features = ["apple-native"]
 
 # ── Dev dependencies ───────────────────────────────────────────────────────────
 [dev-dependencies]
+# #8878 PR2b-1b: SoftToken, the software passkey the presence tests sign with.
+webauthn-authenticator-rs.workspace = true
 # Re-declare trusty-common with test-only features: Cargo merges
 # dev-dependency features ONLY for test/bench/example builds, so none of them
 # leaks into a production build. #9271: the engine's mock embedder and palace
