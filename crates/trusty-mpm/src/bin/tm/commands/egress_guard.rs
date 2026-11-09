@@ -24,7 +24,8 @@
 //! a deny records it through `pm_guard_deny_log`, prints the deny from
 //! `build_pm_guard_deny_response`, and exits 0. It fails closed: an unusable
 //! payload and a panic ([`deny_on_panic`]) both deny. Any other tool gets no
-//! output, which Claude Code reads as "no decision".
+//! output, which Claude Code reads as "no decision". `[egress_guard] mode =
+//! "log"` keeps every deny's record and POST but allows the call (#10690).
 //! Test: `egress_guard_tests.rs`; end to end in
 //! `tests/tm_hook_egress_guard_8454.rs`.
 
@@ -49,7 +50,7 @@ use crate::commands::pm_guard_deny_log::{DenyContext, post_deny_audit, record_de
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
 use crate::commands::pm_guard_trust_anchor::{HookEnv, TRUST_ANCHOR_RULE, evaluate};
 use trusty_mpm::core::channels_readiness::{NotReady, policy_ready};
-use trusty_mpm::core::config::MpmConfig;
+use trusty_mpm::core::config::{EgressGuardMode, MpmConfig};
 use trusty_mpm::core::guard_policy;
 use trusty_mpm::core::session_profile;
 
@@ -334,6 +335,53 @@ where
     }
 }
 
+/// The prefix on a `log`-mode deny's recorded and POSTed reason (#10690).
+pub(crate) const LOG_MODE_PREFIX: &str = "[egress_guard mode=log: recorded, not enforced] ";
+
+/// The guard's `[egress_guard] mode`, read once per hook run (#10690).
+///
+/// Why: the owner's switch must fail closed — only an exact `"log"` lifts
+/// enforcement, and a typo must be seen rather than silently enforced.
+/// What: `load()`'s [`EgressGuardConfig::mode`](trusty_mpm::core::config::EgressGuardConfig::mode);
+/// a value that is neither `"enforce"` nor `"log"` prints one warning on
+/// stderr. Every load fault already answers the default config, which is
+/// enforce; a panic in `load` is a [`deny_on_panic`] deny. [`guard_once`]
+/// passes `MpmConfig::load_default`, the user's `~/.trusty-mpm/config.toml`
+/// alone: no project `.trusty-mpm.toml` and no env var reaches this key.
+/// Test: `guard_mode_is_log_only_for_the_exact_value_10690`,
+/// `guard_mode_panicking_load_still_denies_10690`,
+/// `log_mode_in_a_project_config_still_enforces_10690`.
+pub(crate) fn guard_mode(load: impl FnOnce() -> MpmConfig) -> EgressGuardMode {
+    let config = load().egress_guard;
+    if let Some(value) = config.unknown_mode() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!(
+                "tm hook --egress-guard: warning: unknown `[egress_guard] mode = {value:?}` in \
+                 ~/.trusty-mpm/config.toml; enforcing (only \"log\" turns enforcement off, \
+                 #10690)"
+            );
+        });
+    }
+    config.mode()
+}
+
+/// Whether a deny for `check` is refused under `mode` (#10690).
+///
+/// Why (owner instruction, #10690): `log` lifts every guard deny for now, the
+/// #8878 trust-anchor floor included; the floor keeps its own arm so it can be
+/// re-enabled alone by answering `true` there.
+/// What: `Enforce` refuses every check; `Log` refuses none.
+/// Test: `enforced_refuses_everything_only_under_enforce_10690`.
+pub(crate) fn enforced(mode: EgressGuardMode, check: &str) -> bool {
+    match mode {
+        EgressGuardMode::Enforce => true,
+        // #10690: the trust-anchor floor follows the mode too (owner instruction).
+        EgressGuardMode::Log if check == TRUST_ANCHOR_RULE => false,
+        EgressGuardMode::Log => false,
+    }
+}
+
 /// Run one guard pass, answering a deny if it panics.
 ///
 /// Why (§4, Architect Q5): Claude Code treats a non-zero hook exit as
@@ -365,10 +413,19 @@ where
 /// deny is recorded and POSTed through `pm_guard_deny_log` first; neither can
 /// change the verdict — a failed record is reported on stderr, a failed POST
 /// is dropped, and a panic in either is caught by [`deny_on_panic`].
+/// #10690: under `[egress_guard] mode = "log"` ([`guard_mode`]) a deny is
+/// recorded and POSTed with [`LOG_MODE_PREFIX`] and `egress_guard_mode`, then
+/// allowed; [`enforced`] holds the trust-anchor floor's own arm. A log-mode
+/// deny whose record is not written (`record_deny` false) is enforced.
 /// Test: `egress_deny_is_audited_without_changing_verdict_when_log_unwritable`,
-/// `slack_read_allowlist_allows_tm_apex_reads_with_one_audit_line`.
+/// `slack_read_allowlist_allows_tm_apex_reads_with_one_audit_line`,
+/// `log_mode_records_and_posts_a_family_deny_and_allows_10690`,
+/// `log_mode_records_and_posts_a_trust_anchor_deny_and_allows_10690`,
+/// `log_mode_enforces_a_deny_it_cannot_record_10690`.
 async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let read = read_stdin_hook_payload_strict(PM_GUARD_STDIN_TIMEOUT).await;
+    // #10690: read where the guard runs, from the same user config the floor reads.
+    let mode = guard_mode(MpmConfig::load_default);
     // #8454 D1: the floor reads the ambient home and user config, as pm-guard's.
     let env = HookEnv::ambient();
     let anchor = |payload: &serde_json::Value| evaluate(payload, &env, MpmConfig::load_default);
@@ -400,8 +457,24 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     };
     // An unreadable payload names nothing: audit it with every field empty.
     let null = serde_json::Value::Null;
-    let ctx = DenyContext::from_payload(url, read.as_ref().unwrap_or(&null));
-    record_deny(&ctx, check, &reason);
+    let mut ctx = DenyContext::from_payload(url, read.as_ref().unwrap_or(&null));
+    if enforced(mode, check) {
+        record_deny(&ctx, check, &reason);
+    } else {
+        // #10690: log mode — the same record and POST, marked, then allow.
+        ctx.guard_mode = Some(mode.as_str());
+        let logged = format!("{LOG_MODE_PREFIX}{reason}");
+        if record_deny(&ctx, check, &logged) {
+            post_deny_audit(&ctx, &logged).await;
+            return None;
+        }
+        // #10690: a deny log mode cannot record is enforced, never a silent allow.
+        eprintln!(
+            "tm hook --egress-guard: `[egress_guard] mode = \"log\"` could not record deny \
+             `{check}`; enforcing it"
+        );
+        ctx.guard_mode = None;
+    }
     post_deny_audit(&ctx, &reason).await;
     // #10641: the check names the policy entry; a miss still refuses (GP-000).
     Some(build_pm_guard_deny_response(
