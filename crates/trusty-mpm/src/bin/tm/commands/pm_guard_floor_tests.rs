@@ -227,14 +227,9 @@ fn presence_verbs_bind_pms_and_agents_not_the_architect_8878() {
 #[test]
 fn presence_key_writes_bind_every_caller_8878() {
     let fx = fixture();
-    let writes = [
-        "security add-generic-password -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
-        "security delete-generic-password -s trusty-mpm.presence",
-        "security set-generic-password-partition-list -s trusty-mpm.presence -S x: -k pw",
-        "security add-generic-password -s \"$SVC\" -a x -w y",
-        "security delete-generic-password -l label",
-        "python3 -c 'import keyring; keyring.delete_password(\"trusty-mpm.presence\", \"x\")'",
-    ];
+    use crate::commands::pm_guard_presence_key::tests::{NAMED, NO_SELECTOR, OTHERS, RUN_TIME};
+    let writes: Vec<&str> = [NAMED, RUN_TIME, NO_SELECTOR].concat();
+    let mut wrong = Vec::new();
     for bypassed in [false, true] {
         for (env, agent) in [
             (architect_env(&fx), false),
@@ -251,18 +246,28 @@ fn presence_key_writes_bind_every_caller_8878() {
                 evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed)
                     .map(|d| (d.rule, d.reason))
             };
-            for command in writes {
+            for command in &writes {
                 let deny = verdict(command);
-                assert!(
-                    deny.as_ref()
-                        .is_some_and(|(r, why)| *r == TRUST_ANCHOR_RULE && why.contains("Keychain")),
-                    "agent={agent} bypassed={bypassed} {command}: {deny:?}"
-                );
+                let ok = deny
+                    .as_ref()
+                    .is_some_and(|(r, why)| *r == TRUST_ANCHOR_RULE && why.contains("Keychain"));
+                if !ok {
+                    wrong.push(format!(
+                        "agent={agent} bypassed={bypassed} not denied: {command}"
+                    ));
+                }
             }
-            let other = "security delete-generic-password -s other-service -a me";
-            assert_eq!(verdict(other), None, "agent={agent} bypassed={bypassed}");
+            // `tm presence` is the presence-verb floor's; it denies a PM.
+            for command in OTHERS.iter().filter(|c| !c.starts_with("tm ")) {
+                if let Some(deny) = verdict(command) {
+                    wrong.push(format!(
+                        "agent={agent} bypassed={bypassed} denied: {command}: {deny:?}"
+                    ));
+                }
+            }
         }
     }
+    assert!(wrong.is_empty(), "{} rows wrong: {wrong:#?}", wrong.len());
 }
 
 /// #8878 PR2a: the write moved into a script the command runs — shell or

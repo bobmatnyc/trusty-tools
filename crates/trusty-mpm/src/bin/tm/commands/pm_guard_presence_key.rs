@@ -146,4 +146,4 @@ fn judge_security_args(segment: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 #[path = "pm_guard_presence_key_tests.rs"]
-mod tests;
+pub(crate) mod tests;
