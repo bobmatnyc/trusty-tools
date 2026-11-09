@@ -4,14 +4,14 @@
 //! key. The 120-minute idle window is fixed in `presence::IDLE_LIMIT`, not a
 //! key. #8878 PR2b-1b adds the WebAuthn RP id and origin, with no default:
 //! missing either leaves the device verifier unavailable (fail-closed).
-//! #8878 PR2b-2 adds `browser_enrol`, default off until owner decision D24.
+//! #8878 PR2b-2 adds `browser_enrol`, default on (owner ruling D24).
 //! What: [`PresenceConfig::request_ttl`] is the configured TTL, clamped to
 //! 1 minute .. `presence_request::MAX_TTL`; a clamp is logged. `rp_id` and
 //! `rp_origin` feed `presence_webauthn::WebauthnVerifier::from_config`.
 //! [`PresenceConfig::enrol_origin`] is where the browser enrol page lives,
 //! or `None` while `browser_enrol` is off.
 //! Test: `the_request_ttl_defaults_to_five_minutes_and_is_clamped_8878`,
-//! `browser_enrol_is_off_by_default_and_needs_an_origin_8878`.
+//! `browser_enrol_is_on_by_default_and_needs_an_origin_8878`.
 
 use std::time::Duration;
 
@@ -33,7 +33,8 @@ pub struct PresenceConfig {
     /// The one origin approvals may come from, `https://<rp_id>`; no default.
     pub rp_origin: Option<String>,
     /// #8878 PR2b-2: serve the browser enrol page and let `tm presence
-    /// devices add` print its link. Off until owner decision D24.
+    /// devices add` print its link. On by default (owner ruling D24);
+    /// `false` turns browser enrolment off.
     pub browser_enrol: bool,
 }
 
@@ -43,7 +44,7 @@ impl Default for PresenceConfig {
             request_ttl_minutes: DEFAULT_REQUEST_TTL_MINUTES,
             rp_id: None,
             rp_origin: None,
-            browser_enrol: false,
+            browser_enrol: true,
         }
     }
 }
@@ -97,19 +98,19 @@ mod tests {
     }
 
     #[test]
-    fn browser_enrol_is_off_by_default_and_needs_an_origin_8878() {
+    fn browser_enrol_is_on_by_default_and_needs_an_origin_8878() {
         let parsed: crate::core::config::MpmConfig =
             toml::from_str("[presence]\nrp_origin = \"https://s.ts.net/\"\n").expect("parse");
-        assert_eq!(parsed.presence.enrol_origin(), None, "off by default");
-        let on = PresenceConfig {
-            browser_enrol: true,
+        assert_eq!(parsed.presence.enrol_origin(), Some("https://s.ts.net"));
+        let off = PresenceConfig {
+            browser_enrol: false,
             ..parsed.presence
         };
-        assert_eq!(on.enrol_origin(), Some("https://s.ts.net"));
-        let no_origin = PresenceConfig {
-            browser_enrol: true,
-            ..PresenceConfig::default()
-        };
-        assert_eq!(no_origin.enrol_origin(), None);
+        assert_eq!(off.enrol_origin(), None);
+        assert_eq!(
+            PresenceConfig::default().enrol_origin(),
+            None,
+            "no rp_origin"
+        );
     }
 }

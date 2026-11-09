@@ -4,8 +4,8 @@
 //! Why: a passkey is created by the browser on the device, and WebAuthn binds
 //! it to the page's origin, so the page must be served on the console's
 //! tailnet origin (`[presence] rp_origin`). `tm presence devices add` prints a
-//! one-time link to it (Architect Q3). The page is off until owner decision
-//! D24 flips `[presence] browser_enrol` (Architect Q4).
+//! one-time link to it (Architect Q3). `[presence] browser_enrol` (on by
+//! default, owner ruling D24) can turn the page off (Architect Q4).
 //! What: [`router`] serves the page at [`ENROL_PAGE_PATH`] and two POST
 //! routes that relay to the tm daemon's `mpm.presence.register.start` and
 //! `.finish` over its Unix socket. Before anything else, every request asks

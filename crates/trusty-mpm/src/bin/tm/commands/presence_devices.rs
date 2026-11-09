@@ -5,7 +5,7 @@
 //! the CLI asks Touch ID first and only then mints the sealed ticket the
 //! store and the daemon demand, so a caller that skips the CLI has no ticket.
 //! What: [`add`] refuses before any prompt while `[presence] browser_enrol`
-//! is off (#8878 PR2b-2, Architect Q4); otherwise it prompts, mints an enrol
+//! is off or `rp_origin` is unset (#8878 PR2b-2; on by default, D24); otherwise it prompts, mints an enrol
 //! ticket, checks with the daemon that the registration opens, and prints
 //! the one-time enrol link (single use, 10 minutes, Architect Q3). [`list`] reads
 //! the sealed records. [`revoke`] prompts, mints a revoke ticket and revokes
@@ -27,7 +27,7 @@ use crate::commands::presence_client::Call;
 
 /// What `add` says while the browser enrol page is switched off.
 pub(crate) const ENROL_DISABLED: &str = "enrolment via browser is not enabled: \
-     `[presence] browser_enrol` is off (owner decision D24) or `rp_origin` is unset; \
+     `[presence] browser_enrol` is false or `rp_origin` is unset; \
      no prompt was shown and no ticket was minted";
 
 fn now() -> u64 {

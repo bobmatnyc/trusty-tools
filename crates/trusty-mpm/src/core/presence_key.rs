@@ -75,7 +75,9 @@ pub const UNTRUSTED_NOTICE: &str = "key ACL unverified (#10865): device approval
 /// Whether the key's Keychain ACL is verified to admit only tm.
 ///
 /// Why: #10865 fills this seam; until then device approvals are labelled
-/// untrusted. It only selects [`UNTRUSTED_NOTICE`]; it gates nothing.
+/// untrusted, and (owner ruling D24, #8878 PR2b-2) the daemon's `approve`
+/// and `verify` refuse, so no device grant is minted.
+/// Test: `an_approval_is_refused_while_the_key_acl_is_unverified_8878`.
 pub fn acl_verified() -> bool {
     false
 }

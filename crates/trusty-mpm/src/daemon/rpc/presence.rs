@@ -16,7 +16,8 @@
 //! is exit 3; bad params exit 2. #8878 PR2b-2: `register.start` refuses a
 //! spent ticket, and `status` names the browser enrol origin (`null` while
 //! `[presence] browser_enrol` is off), which trusty-console reads before it
-//! serves the enrol page.
+//! serves the enrol page. Owner ruling D24: `approve` and `verify` refuse
+//! while `acl_verified()` is false (#10865); enrolment stays open.
 //! Test: `presence_tests.rs` and `presence_enrol_tests.rs` beside this file.
 
 use std::path::PathBuf;
@@ -61,6 +62,19 @@ type Failure = (i64, String);
 
 fn refused(e: impl std::fmt::Display) -> Failure {
     (1, e.to_string())
+}
+
+/// Why `approve` and `verify` refuse while the key ACL is unverified.
+pub const APPROVALS_BLOCKED: &str = "device approvals are refused until #10865 verifies the \
+     presence key's Keychain access list (owner ruling D24)";
+
+/// Refuse every device approval until #10865 (owner ruling D24).
+fn approvals_allowed() -> Result<(), Failure> {
+    if acl_verified() {
+        Ok(())
+    } else {
+        Err(refused(APPROVALS_BLOCKED))
+    }
 }
 
 /// The key lookup a service runs once per call.
@@ -151,7 +165,7 @@ impl PresenceService {
     ///
     /// Why/What: see the module doc; nothing here grants without
     /// `verify_and_grant`, and nothing enrols or revokes without a ticket.
-    /// Test: `a_device_approval_round_trips_through_the_service_8878`,
+    /// Test: `an_approval_is_refused_while_the_key_acl_is_unverified_8878`,
     /// `a_request_for_a_dead_or_reused_pid_is_refused_8878`,
     /// `register_start_without_a_ticket_writes_nothing_8878`,
     /// `the_service_refuses_when_the_verifier_is_unconfigured_8878`.
@@ -244,6 +258,8 @@ impl PresenceService {
             .filter_map(|(_, d)| d.ok())
             .collect();
         let verifier = self.verifier()?;
+        // #8878 D24: approvals stay blocked until #10865; enrolment does not.
+        approvals_allowed()?;
         let challenge = self
             .ceremonies
             .begin(root, &key, request_id, now)
@@ -262,6 +278,8 @@ impl PresenceService {
     fn verify(&self, p: VerifyParams) -> Result<Value, Failure> {
         let root = self.root()?;
         let verifier = self.verifier()?;
+        // #8878 D24: no grant is minted until #10865 verifies the key ACL.
+        approvals_allowed()?;
         let assertion = Assertion {
             request_id: p.request_id,
             credential_id: p.credential_id,
