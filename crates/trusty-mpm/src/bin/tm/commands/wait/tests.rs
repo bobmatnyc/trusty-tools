@@ -143,6 +143,7 @@ fn budget_at(now: u64, timeout_s: u64) -> Budget {
         updated_at: now,
         polls: 0,
         timeout_s,
+        rate_limited_streak: 0,
     }
 }
 
@@ -831,6 +832,84 @@ fn loop_reports_pending_with_the_rate_limit_when_a_slice_ends_in_a_backoff() {
     assert!(out.detail.contains("rate limit"), "{}", out.detail);
 }
 
+/// Why: with a reset beyond the slice, each invocation sees one refusal and
+/// returns pending. The streak must survive the state file, or a refusal that
+/// never clears would re-poll until the hard deadline instead of exiting 2.
+#[test]
+fn rate_limit_streak_spans_slices_and_errors_on_the_fifth_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = "check:pr=7";
+    let path = budget::path_for(dir.path(), spec);
+    let clock = FakeClock::at(1_000);
+    let cond = FakeCondition::new(vec![Err(shim_refusal(Some(100_000)))]);
+    let p = plan(20, 100, 3_600);
+    let resume = || budget::load_or_start(&path, spec, 3_600, clock.now_unix(), 600);
+    for slice in 1..=4 {
+        let mut b = resume();
+        let out = poll_until(&cond, &p, &mut b, &clock).unwrap();
+        assert_eq!(out.status, Status::Pending, "slice {slice}");
+        budget::save(&path, &b).unwrap();
+    }
+    let mut b = resume();
+    let err = poll_until(&cond, &p, &mut b, &clock).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("rate limit"), "{text}");
+    assert!(text.contains("5 polls in a row"), "{text}");
+    assert_eq!(b.polls, 5);
+}
+
+/// Why: the two error streaks interact one way only, and a reset that has
+/// already passed falls back to the normal interval (#10550).
+#[test]
+fn rate_limit_streak_and_generic_errors_interact_as_documented() {
+    let r = || Err(shim_refusal(None));
+    let e = || Err::<Poll, String>("connection reset".into());
+    let met = || Ok(Poll::Met("done".into()));
+    // (name, script, expected sleeps, expected error text; None = met)
+    type Case = (
+        &'static str,
+        Vec<Result<Poll, String>>,
+        Vec<u64>,
+        Option<&'static str>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            // A refusal never resets the generic count; an error resets the
+            // refusal streak, so eight refusals never reach five in a row.
+            "R,R,E alternation exits on the 4th generic error",
+            [r(), r(), e()].into_iter().cycle().take(12).collect(),
+            vec![20, 40, 20, 20, 40, 20, 20, 40, 20, 20, 40],
+            Some("failed 4 times in a row"),
+        ),
+        (
+            "a reset already passed naps the interval",
+            vec![Err(shim_refusal(Some(990))), met()],
+            vec![20],
+            None,
+        ),
+        (
+            "a reset equal to now naps the interval",
+            vec![Err(shim_refusal(Some(1_000))), met()],
+            vec![20],
+            None,
+        ),
+    ];
+    for (name, script, sleeps, error) in cases {
+        let clock = FakeClock::at(1_000);
+        let cond = FakeCondition::new(script);
+        let mut b = budget_at(1_000, 1800);
+        let out = poll_until(&cond, &plan(20, 500, 1800), &mut b, &clock);
+        match error {
+            Some(want) => {
+                let text = format!("{:#}", out.expect_err(name));
+                assert!(text.contains(want), "{name}: {text}");
+            }
+            None => assert_eq!(out.expect(name).status, Status::Met, "{name}"),
+        }
+        assert_eq!(clock.sleeps(), sleeps, "{name}");
+    }
+}
+
 // ── budget persistence ───────────────────────────────────────────────────────
 
 /// Why: two different waits must not share one deadline, and one wait must
@@ -873,6 +952,18 @@ fn budget_resumes_across_invocations() {
     assert_eq!(second.started_at, 1_000, "the deadline must not restart");
     assert_eq!(second.polls, 11);
     assert_eq!(second.remaining(1_150), 1_650);
+}
+
+/// Why: a state file written before #10550 has no rate-limit streak; a wait
+/// already in flight must resume it, not restart its deadline.
+#[test]
+fn budget_resumes_a_state_file_written_before_the_rate_limit_streak() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = budget::path_for(dir.path(), "file:/tmp/gate.txt");
+    let legacy = r#"{"spec":"file:/tmp/gate.txt","started_at":1000,"updated_at":1100,"polls":11,"timeout_s":1800}"#;
+    std::fs::write(&p, legacy).unwrap();
+    let resumed = budget::load_or_start(&p, "file:/tmp/gate.txt", 1800, 1_150, 600);
+    assert_eq!((resumed.started_at, resumed.polls), (1_000, 11));
 }
 
 /// Why: a changed `--timeout` means the agent changed the terms of the wait.

@@ -259,10 +259,11 @@ pub(crate) struct Outcome {
 /// SIGKILLed — exit 137, which is none of the four documented statuses.
 ///
 /// #10550: a probe error carrying the gh shim's rate-limit line is counted
-/// apart from the generic error budget. The next nap waits for the reset (or
-/// backs off exponentially) and is still clamped to the slice and the
-/// deadline; the fifth refusal in a row is an error. `Met` comes only from an
-/// `Ok` poll.
+/// apart from the generic error budget, in `budget.rate_limited_streak`, so the
+/// streak carries across slices. An `Ok` poll or a generic error resets it.
+/// The next nap waits for the reset (or backs off exponentially) and is still
+/// clamped to the slice and the deadline; the fifth refusal in a row is an
+/// error. `Met` comes only from an `Ok` poll.
 /// Test: `loop_returns_met_on_first_poll`, `loop_returns_pending_at_slice_end`,
 /// `loop_returns_timeout_when_budget_exhausted`,
 /// `loop_gives_up_after_repeated_probe_errors`,
@@ -273,7 +274,9 @@ pub(crate) struct Outcome {
 /// `loop_backs_off_exponentially_when_the_reset_is_unknown`,
 /// `rate_limit_exhaustion_errors_not_met`,
 /// `loop_rate_limit_sleep_never_extends_the_hard_deadline`,
-/// `loop_reports_pending_with_the_rate_limit_when_a_slice_ends_in_a_backoff`.
+/// `loop_reports_pending_with_the_rate_limit_when_a_slice_ends_in_a_backoff`,
+/// `rate_limit_streak_spans_slices_and_errors_on_the_fifth_refusal`,
+/// `rate_limit_streak_and_generic_errors_interact_as_documented`.
 pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
     cond: &C,
     plan: &Plan,
@@ -282,8 +285,6 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
 ) -> anyhow::Result<Outcome> {
     let slice_end = clock.now_unix().saturating_add(plan.slice_s);
     let mut consecutive_errors = 0u32;
-    // #10550: refusals run on their own streak, outside the generic budget.
-    let mut consecutive_rate_limited = 0u32;
     // Deliberately uninitialised: every path that reaches a read assigns it
     // first, so the compiler — not a placeholder string — proves it is set.
     let mut detail: String;
@@ -305,6 +306,7 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
         let mut rate_limited = None;
         match cond.poll(poll_budget) {
             Ok(Poll::Met(d)) => {
+                budget.rate_limited_streak = 0;
                 return Ok(Outcome {
                     status: Status::Met,
                     detail: d,
@@ -312,14 +314,16 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
             }
             Ok(Poll::Pending(d)) => {
                 consecutive_errors = 0;
-                consecutive_rate_limited = 0;
+                budget.rate_limited_streak = 0;
                 detail = d;
             }
             Err(e) => match rate_limit::classify(&e) {
                 // #10550: a shim refusal backs off; it neither spends nor
-                // resets the generic error budget.
+                // resets the generic error budget. Its streak lives in the
+                // budget, so it carries across slices.
                 Some(hit) => {
-                    consecutive_rate_limited += 1;
+                    budget.rate_limited_streak += 1;
+                    let consecutive_rate_limited = budget.rate_limited_streak;
                     if consecutive_rate_limited >= rate_limit::MAX_CONSECUTIVE_RATE_LIMITED {
                         return Err(e.context(format!(
                             "GitHub's primary GraphQL rate limit refused the probe \
@@ -333,7 +337,7 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
                     rate_limited = Some(hit);
                 }
                 None => {
-                    consecutive_rate_limited = 0;
+                    budget.rate_limited_streak = 0;
                     consecutive_errors += 1;
                     if consecutive_errors > MAX_CONSECUTIVE_PROBE_ERRORS {
                         return Err(e.context(format!(
@@ -361,7 +365,7 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
         // #10550: a backoff is clamped like any nap, so it never extends the
         // slice or the hard deadline.
         let wait = rate_limited.map_or(plan.interval_s, |hit| {
-            rate_limit::backoff_secs(hit, now, plan.interval_s, consecutive_rate_limited)
+            rate_limit::backoff_secs(hit, now, plan.interval_s, budget.rate_limited_streak)
         });
         let nap = wait
             .min(budget.remaining(now))
@@ -523,6 +527,7 @@ pub(crate) fn run(args: WaitArgs) -> ! {
                 updated_at: 0,
                 polls: 0,
                 timeout_s: 0,
+                rate_limited_streak: 0,
             };
             println!(
                 "{}",
