@@ -1,2 +1,0 @@
-Fixed
-- The seeded Architect's `pm-notify.sh` (`pm_intake.py notify`) no longer prints `queued` after a local append. It reads the appended line back and exits 0 with `queued-local <id>: ... delivery unconfirmed`; a failed append exits 2 with no queue claim. The new `pm_intake.py receipt <id>` exits 0 with `acked <id>: <outcome>` only once the Architect's ack is recorded, 3 until then, and 2 for an unknown id (Refs #10723)
