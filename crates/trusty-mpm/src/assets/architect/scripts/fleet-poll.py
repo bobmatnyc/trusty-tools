@@ -34,7 +34,7 @@ the Intent Ledger cadence jobs (il-cron.py) and the clear-signal check
 Config (env, all optional): ARCHITECT_SESSION (default tm-architect),
 ARCHITECT_POLL_SESSION (default <ARCHITECT_SESSION>-poll),
 ARCHITECT_INBOX_DIR (default <root>/inbox), ARCHITECT_QUIET_SESSIONS_FILE
-(default <root>/quiet-sessions.txt), TMUX_SOCKET, LOAD_FACTOR, SELF_CTX_DIR,
+(default <root>/local/quiet-sessions.txt), TMUX_SOCKET, LOAD_FACTOR, SELF_CTX_DIR,
 CONTEXT_BAR_TOKENS (default 250000), CONTEXT_WINDOW_TOKENS (default 1000000);
 see README.md.
 Test: tests/test_fleet_poll.py, tests/test_quiet_sessions.py,

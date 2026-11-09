@@ -31,8 +31,8 @@ session and the project path. Goals live in `local/goals.md`.
 - `tm-<project>`: `<absolute project path>`
 
 The poller watches every `tm-*` session. This list says which ones you act on.
-A session named in `quiet-sessions.txt`, one name per line, raises no idle
-alerts.
+A session named in `local/quiet-sessions.txt` under this directory, one name
+per line, raises no idle alerts. `tm architect quiet` prints that list.
 
 ## Cadence and thresholds
 
