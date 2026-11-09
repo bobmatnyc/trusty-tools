@@ -7,9 +7,12 @@
 //! and the payload types it must decode live here, beside the other per-service
 //! RPC vocabularies (`memory_rpc`, `mpm_rpc`).
 //! What: the socket's service name, the two method names, the
-//! [`ConsoleHealth`] and [`ConsoleFleetStatus`] response types, and the
-//! per-service row types ([`ServiceInfo`], [`ServiceStatus`],
-//! [`ServiceLifecycle`]) that moved here from `trusty_console::connector`,
+//! [`ConsoleHealth`](crate::console_rpc::ConsoleHealth) and
+//! [`ConsoleFleetStatus`](crate::console_rpc::ConsoleFleetStatus) response
+//! types, and the per-service row types
+//! ([`ServiceInfo`](crate::console_rpc::ServiceInfo),
+//! [`ServiceStatus`](crate::console_rpc::ServiceStatus),
+//! [`ServiceLifecycle`](crate::console_rpc::ServiceLifecycle)) that moved here from `trusty_console::connector`,
 //! which re-exports them. Ungated: the types need only `serde`, and a reader
 //! should not compile the socket machinery to decode a payload.
 //!
