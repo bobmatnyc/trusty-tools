@@ -215,3 +215,22 @@ fn revoke_waits_for_the_store_lock_and_sweeps_a_later_grant_8878() {
     assert_eq!(load(&root, &key(), "cred-A"), Err(DeviceError::Unknown));
     assert!(grant_files(&root).is_empty(), "the later grant is swept");
 }
+
+/// #8878 PR2b-1a review: a ticket that already enrolled a device cannot
+/// enrol another within its TTL; the refusal writes nothing.
+#[test]
+fn an_enrol_ticket_enrols_once_8878() {
+    let (_d, root) = root();
+    let ticket = mint_ticket(&key(), TicketPurpose::Enrol, "iphone", NOW).expect("ticket");
+    let first = FakeDevice::new("cred-A", 1).new_device("iphone", 0);
+    enrol(&root, &key(), &ticket, first, NOW).expect("first enrol");
+    let before = snapshot(&root);
+    let second = FakeDevice::new("cred-B", 2).new_device("iphone", 0);
+    let refused = enrol(&root, &key(), &ticket, second, NOW + 1);
+    assert!(
+        matches!(refused, Err(DeviceError::Ticket(_))),
+        "{refused:?}"
+    );
+    assert_eq!(snapshot(&root), before, "a spent ticket writes nothing");
+    assert_eq!(load(&root, &key(), "cred-B"), Err(DeviceError::Unknown));
+}
