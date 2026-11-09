@@ -105,6 +105,7 @@ normative grammar — this note does not restate it.
 | DOC-86 | none yet (design draft; no `SPEC-` IDs declared) | [#10459 — one main-thread ticket for Architect set/copy and 1-step direct commands](./DOC-86-main-thread-ticket-design.md) | `trusty-mpm` (Architect session only) — main-thread ticket, turn grants, `/tm-run`; `trusty-secrets` — provenance; `trusty-common` — credential path. Design draft, no code |
 | DOC-87 | `SPEC-OWNERCON-01~draft` … `-08~draft` | [Typed owner constraints](./DOC-87-typed-owner-constraints.md) | `trusty-architect` ledger, Architect relay, PM dispatch, `trusty-mpm` pm-guard — shared owner-provenance guardrails: typed owner constraints, enforcement points, lifecycle. Follow-up to [#10780](https://github.com/bobmatnyc/trusty-tools/issues/10780) |
 | DOC-88 | `SPEC-FIXBAR-01~draft` … `-08~draft` | [Fix bar: acceptance-criterion class](./DOC-88-fix-bar-acceptance-criterion-class.md) | Completion Standard (framework core, Architect core, `tm-workflow`, `architect-completion-standard`), `code-review-standards` rubric, prompt goldens. A finding of any severity that fails a stated acceptance criterion blocks; [#10803](https://github.com/bobmatnyc/trusty-tools/issues/10803) |
+| DOC-89 | `SPEC-OKF-01~draft` | [trusty-okf: building and maintaining OKF bundles](./SPEC-OKF-01.md) | `trusty-okf` (new) — OKF bundle build, validation, migration, import and the `search-feed` index-feed loop; `trusty-agents` — agent glue, binding, index creation; `trusty-search` — index identity and path admission (D1, D2). Accepted r7.1 2026-11-03 (owner); design only, no code. Filed under [#10743](https://github.com/bobmatnyc/trusty-tools/issues/10743) with [ADR-0075](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) |
 
 > **Related catalog — Trusty Code implementation status.** [Trusty Code
 > specification and ADR reconciliation](../trusty-code/spec-adr-reconciliation.md)
@@ -116,8 +117,10 @@ normative grammar — this note does not restate it.
 > **Catalog note — `DOC-73` claim.** `DOC-72` is claimed by open pull request
 > [#6607](https://github.com/bobmatnyc/trusty-tools/pull/6607) on branch
 > `docs/6606-analyze-lsp-spec`, which the note below could not have seen when it
-> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-89`** (updated
-> 2026-11-08 — `DOC-87` and `DOC-88` claimed by
+> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-90`** (updated
+> 2026-11-08 — `DOC-89` claimed by
+> [SPEC-OKF-01 trusty-okf](./SPEC-OKF-01.md) under #10743.
+> Prior note: 2026-11-08 — `DOC-87` and `DOC-88` claimed by
 > [Typed owner constraints](./DOC-87-typed-owner-constraints.md) and
 > [Fix bar: acceptance-criterion class](./DOC-88-fix-bar-acceptance-criterion-class.md).
 > Prior note: 2026-10-29 — `DOC-86` claimed by
