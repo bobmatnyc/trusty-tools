@@ -797,3 +797,71 @@ async fn a_delete_during_the_abort_detach_window_is_refused_or_stays_deleted() {
         );
     }
 }
+
+/// Why: R1, watcher delete arm — the watcher's removal
+/// (`remove_chunk_ids_committed`) in the abort's detach window dropped the
+/// file from memory only and reported success, and the live corpus
+/// re-attached with the file still in it, so the file came back.
+/// What: track `a.rs` as the watcher does, park the abort after the take,
+/// deliver the watcher's removal, release, and assert the removal changed
+/// nothing in memory and kept the ids tracked for a retry, or the file is
+/// gone from the re-attached live corpus; the retried removal after the
+/// re-attach lands. Fails before the fix: memory drops `a.rs` and live
+/// still holds it.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_watcher_delete_during_the_abort_detach_window_does_not_resurrect() {
+    let id = "identity-abort-watcher-delete-10738";
+    let (_dir, handle, _state, _live) = staged_index(id).await;
+    let root = handle.root_path.clone();
+    let ids = handle
+        .indexer
+        .read()
+        .await
+        .file_chunk_ids("a.rs")
+        .await
+        .expect("a.rs chunk ids");
+    assert!(!ids.is_empty(), "test setup: a.rs has chunks");
+    let tracked = crate::service::indexed_files::IndexedFiles::new();
+    tracked.record(std::path::PathBuf::from("a.rs"), ids).await;
+    let removed_path = root.join("a.rs");
+    let watcher_remove = || {
+        crate::service::watch_loop::handle_removed(
+            &removed_path,
+            &handle.id,
+            &root,
+            &root,
+            &handle.indexer,
+            &tracked,
+        )
+    };
+
+    let tmp = begin(&handle, false).await;
+    let Parked { reached, release } = detach_hook::park(id, Window::Abort);
+    let abort = resolve_spawned(&handle, tmp, false);
+    reach(reached).await;
+    let chunks_before = handle.indexer.read().await.chunk_count();
+    watcher_remove().await;
+    let chunks_after = handle.indexer.read().await.chunk_count();
+    release.send(()).expect("the abort is still parked");
+    assert!(!abort.await.expect("abort task"), "a rollback never defers");
+    if chunks_after == chunks_before {
+        assert!(
+            tracked.len().await == 1,
+            "a refused watcher removal keeps a.rs tracked for a retry"
+        );
+    } else {
+        assert!(
+            !corpus_holds(&handle, "a.rs").await,
+            "a watcher removal that dropped memory must not come back after the \
+             re-attach ({chunks_before} -> {chunks_after} chunks in memory)"
+        );
+    }
+
+    watcher_remove().await;
+    assert!(
+        !corpus_holds(&handle, "a.rs").await,
+        "the retried watcher removal leaves live"
+    );
+}
