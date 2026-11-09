@@ -604,6 +604,15 @@ Every connector and every extractor inherits this; none of them may weaken it.
    binary formats. Obligations: memory ceilings and decompression-ratio checks
    (E2); no shelling out to an external converter; prefer pure-Rust parsers with
    a maintained dependency; extraction failures are per-item, never fatal.
+
+   > **Amended 2026-11-03** (SPEC-OKF-01 r7.1, accepted 2026-11-03, §2.16;
+   > #10741). The "no shelling out" obligation does not forbid one case: an
+   > optional, separate extraction worker (Xberg) that the host calls over a
+   > versioned process protocol. The worker runs under these conditions. The host
+   > enforces hard limits on input, output and wall time. The host kills and
+   > reaps the worker on expiry or cancel. The worker has no network. The worker
+   > runs under an OS sandbox before it parses email or Drive content. §3.3 is
+   > unchanged.
 4. **Extracted content inherits the corpus's sensitivity.** A `.docx` from a
    restricted Drive folder becomes a plaintext KB entity that may be committed by
    #3837's git-backed store. Store confinement and `.gitignore` posture are the
@@ -679,3 +688,4 @@ ticket.
 |---|---|
 | 2026-07-25 | Initial draft — extraction layer, connector framework, assistant-driven crawl, #3892 position |
 | 2026-07-25 | §7 rewritten: #3892 settled as remediation (a); the open position becomes the shipped ingest→index contract |
+| 2026-11-03 | §8 item 3 amended: an optional sandboxed extraction worker over a versioned process protocol is allowed (SPEC-OKF-01 r7.1, accepted 2026-11-03, §2.16; #10741) |
