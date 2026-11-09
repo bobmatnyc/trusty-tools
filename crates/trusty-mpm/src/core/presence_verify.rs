@@ -231,32 +231,46 @@ pub fn verify_and_grant(
     verifier: &dyn AssertionVerifier,
     assertion: &Assertion,
 ) -> Result<Granted, VerifyError> {
-    // RED STUB (#8878 commit 1): only the verifier decides.
-    let key = (env.key)().unwrap_or_else(|| GrantKey::from_bytes([0; 32]));
+    let key = (env.key)().ok_or(VerifyError::NoKey)?;
     let challenge = ceremonies
         .current(&assertion.request_id)
-        .unwrap_or(Challenge {
-            request_id: assertion.request_id.clone(),
-            bytes: [0; 32],
-            issued_at: env.now,
-        });
+        .ok_or(VerifyError::NoCeremony)?;
+    if challenge.issued_at > env.now || env.now - challenge.issued_at > CHALLENGE_TTL.as_secs() {
+        return Err(VerifyError::ChallengeExpired);
+    }
     let pending: Pending = presence_request::load(env.root, &key, &assertion.request_id, env.now)
         .map_err(VerifyError::Request)?;
-    let device = match presence_device::load(env.root, &key, &assertion.credential_id) {
-        Ok(device) => device,
-        Err(e) => presence_device::list(env.root, &key)
-            .ok()
-            .and_then(|l| l.into_iter().find_map(|(_, d)| d.ok()))
-            .ok_or(VerifyError::Device(e))?,
-    };
-    verifier
+    if pending.action_hash != assertion.action_hash {
+        return Err(VerifyError::WrongRequest);
+    }
+    if (env.start_time_of)(pending.pid) != Some(pending.start_time) {
+        return Err(VerifyError::ProcessGone);
+    }
+    let device = presence_device::load(env.root, &key, &assertion.credential_id)
+        .map_err(VerifyError::Device)?;
+    let verified = verifier
         .verify(&challenge, &device, assertion)
         .map_err(VerifyError::Rejected)?;
-    let _ = (
-        Ceremonies::finish,
-        presence_request::claim,
-        presence_device::record_use,
-    );
+    if !verified.user_present || !verified.user_verified {
+        return Err(VerifyError::UserNotVerified);
+    }
+    let both_zero = verified.sign_count == 0 && device.sign_count == 0;
+    if verified.sign_count <= device.sign_count && !both_zero {
+        return Err(VerifyError::CounterRegressed);
+    }
+    presence_device::record_use(
+        env.root,
+        &key,
+        &device,
+        verified.sign_count,
+        verified.backup_state,
+        env.now,
+    )
+    .map_err(VerifyError::Persist)?;
+    if !ceremonies.finish(&challenge) {
+        return Err(VerifyError::NoCeremony);
+    }
+    presence_request::claim(env.root, &key, &pending).map_err(VerifyError::Request)?;
     let claude = ClaudeProcess {
         pid: pending.pid,
         start_time: pending.start_time,

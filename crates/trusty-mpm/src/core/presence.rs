@@ -238,15 +238,17 @@ pub fn check_with_policy(
     if grant.start_time != claude.start_time {
         return Err(PresenceRefusal::StaleStartTime);
     }
-    // RED STUB (#8878 commit 1): origin/main's rule, policy ignored.
-    let _ = (
-        policy,
-        &key,
-        presence_device::load,
-        DeviceError::Unknown,
-        METHOD_DEVICE_PREFIX,
-    );
-    if grant.method != METHOD_LOCAL {
+    // #8878 PR2b-1a: `device:<id>` is the second method, behind the D67 switch.
+    if let Some(credential) = grant.method.strip_prefix(METHOD_DEVICE_PREFIX) {
+        if policy == DeviceGrantPolicy::Inert {
+            return Err(PresenceRefusal::DeviceGrantsInert);
+        }
+        match presence_device::load(root, &key, credential) {
+            Ok(_) => {}
+            Err(DeviceError::Unknown) => return Err(PresenceRefusal::DeviceRevoked),
+            Err(_) => return Err(PresenceRefusal::DeviceUnusable),
+        }
+    } else if grant.method != METHOD_LOCAL {
         return Err(PresenceRefusal::UnknownMethod);
     }
     if grant.last_used > now + SKEW || grant.granted_at > grant.last_used {
