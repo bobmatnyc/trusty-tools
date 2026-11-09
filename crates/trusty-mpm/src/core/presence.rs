@@ -15,15 +15,15 @@
 //! tag that does not verify is a refusal; nothing here ever allows.
 //! Test: `presence_tests.rs`.
 
-use std::io::Read as _;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
 use crate::core::architect_launch::ARCHITECT_DIR;
+use crate::core::presence_device::{self, DeviceError, METHOD_DEVICE_PREFIX};
 use crate::core::presence_key::GrantKey;
+use crate::core::presence_store::{FileFault, read_owner_only};
 use crate::core::twin_identity::ClaudeProcess;
 
 /// A grant file's extension.
@@ -32,8 +32,26 @@ pub const PRESENCE_EXT: &str = "presence";
 /// How long a grant stays valid without use (Bob D5b Q2).
 pub const IDLE_LIMIT: Duration = Duration::from_secs(120 * 60);
 
-/// The one method PR2a mints: the Studio's LocalAuthentication.
+/// The Studio's LocalAuthentication (PR2a).
 pub const METHOD_LOCAL: &str = "local";
+
+/// Whether a `device:<credential id>` grant lets a call through.
+///
+/// Why: #8878 D67 Q1 is pending the owner: device grants either lift the
+/// deny exactly like `local`, or ship inert until #10865 verifies the key's
+/// access list. Both settings are built and tested; [`DEVICE_GRANTS`] picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceGrantPolicy {
+    /// A device grant counts like `local`, while its device record is
+    /// present and sealed.
+    Honour,
+    /// Every device grant is refused with [`PresenceRefusal::DeviceGrantsInert`].
+    Inert,
+}
+
+/// #8878 D67: THE switch for device grants. Inert (fail-closed) until the
+/// owner rules; flip to [`DeviceGrantPolicy::Honour`] to let them through.
+pub const DEVICE_GRANTS: DeviceGrantPolicy = DeviceGrantPolicy::Inert;
 
 /// [`refresh`] rewrites a grant at most this often, in seconds.
 const REFRESH_EVERY: u64 = 60;
@@ -52,7 +70,7 @@ pub struct Grant {
     pub pid: u32,
     /// That process's start time, Unix seconds.
     pub start_time: u64,
-    /// How presence was proven: [`METHOD_LOCAL`].
+    /// How presence was proven: [`METHOD_LOCAL`] or `device:<credential id>`.
     pub method: String,
     /// When presence was proven, Unix seconds.
     pub granted_at: u64,
@@ -117,6 +135,15 @@ pub enum PresenceRefusal {
     /// The grant has not been used for [`IDLE_LIMIT`].
     #[error("the presence grant expired after 120 idle minutes")]
     Idle,
+    /// A device grant, while [`DEVICE_GRANTS`] is [`DeviceGrantPolicy::Inert`].
+    #[error("device approvals are not honoured yet (#8878 D67); use `tm presence local`")]
+    DeviceGrantsInert,
+    /// The device that approved the grant is revoked or unknown.
+    #[error("the device that approved this grant is revoked")]
+    DeviceRevoked,
+    /// The approving device's record is unreadable, malformed or forged.
+    #[error("the record of the device that approved this grant is unusable")]
+    DeviceUnusable,
 }
 
 /// `root/architect-launch/<pid>.presence`, `root` being `~/.trusty-mpm`.
@@ -172,12 +199,32 @@ fn write(root: &Path, grant: &Grant) -> Result<PathBuf, String> {
 /// Test: `a_minted_grant_passes_the_check`, `a_grant_copied_to_another_pid_is_refused`,
 /// `a_grant_with_a_stale_start_time_is_refused`,
 /// `a_forged_grant_without_the_key_is_refused`, `a_symlinked_grant_is_refused`,
-/// `a_grant_idle_for_121_minutes_is_refused`, `a_malformed_or_open_grant_is_refused`.
+/// `a_grant_idle_for_121_minutes_is_refused`, `a_malformed_or_open_grant_is_refused`,
+/// `check_applies_the_d67_switch_8878`.
 pub fn check(
     root: &Path,
     claude: &ClaudeProcess,
     key: impl FnOnce() -> Option<GrantKey>,
     now: u64,
+) -> Result<Grant, PresenceRefusal> {
+    check_with_policy(root, claude, key, now, DEVICE_GRANTS)
+}
+
+/// [`check`] under an explicit [`DeviceGrantPolicy`].
+///
+/// Why: #8878 D67 — both answers to Q1 stay tested while the owner decides.
+/// What: as [`check`]; a `device:<id>` method is refused under
+/// [`DeviceGrantPolicy::Inert`], and under [`DeviceGrantPolicy::Honour`]
+/// passes only while that device's record is present and its seal verifies
+/// (a second kill switch beside revoke's grant sweep).
+/// Test: `a_device_grant_passes_presence_check_8878`,
+/// `device_grants_are_refused_while_inert_8878`, `revoke_kills_a_live_grant_8878`.
+pub fn check_with_policy(
+    root: &Path,
+    claude: &ClaudeProcess,
+    key: impl FnOnce() -> Option<GrantKey>,
+    now: u64,
+    policy: DeviceGrantPolicy,
 ) -> Result<Grant, PresenceRefusal> {
     let raw = read_grant(root, claude.pid)?;
     let grant: Grant = serde_json::from_slice(&raw).map_err(|_| PresenceRefusal::Malformed)?;
@@ -191,6 +238,14 @@ pub fn check(
     if grant.start_time != claude.start_time {
         return Err(PresenceRefusal::StaleStartTime);
     }
+    // RED STUB (#8878 commit 1): origin/main's rule, policy ignored.
+    let _ = (
+        policy,
+        &key,
+        presence_device::load,
+        DeviceError::Unknown,
+        METHOD_DEVICE_PREFIX,
+    );
     if grant.method != METHOD_LOCAL {
         return Err(PresenceRefusal::UnknownMethod);
     }
@@ -222,41 +277,14 @@ pub fn refresh(root: &Path, grant: &Grant, key: &GrantKey, now: u64) -> Result<(
 /// The grant file's bytes, read without following a symlink.
 fn read_grant(root: &Path, pid: u32) -> Result<Vec<u8>, PresenceRefusal> {
     let dir = root.join(ARCHITECT_DIR);
-    match std::fs::symlink_metadata(&dir) {
-        Ok(meta) if meta.is_dir() => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PresenceRefusal::NoGrant);
-        }
-        _ => return Err(PresenceRefusal::Unreadable),
-    }
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(grant_path(root, pid))
-    {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PresenceRefusal::NoGrant);
-        }
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-            return Err(PresenceRefusal::NotRegularFile);
-        }
-        Err(_) => return Err(PresenceRefusal::Unreadable),
-    };
-    let meta = file.metadata().map_err(|_| PresenceRefusal::Unreadable)?;
-    if !meta.is_file() {
-        return Err(PresenceRefusal::NotRegularFile);
-    }
-    // SAFETY: `geteuid` has no preconditions and cannot fail.
-    let euid = unsafe { libc::geteuid() };
-    if meta.mode() & 0o077 != 0 || meta.uid() != euid {
-        return Err(PresenceRefusal::UnsafeMode);
-    }
-    let mut raw = Vec::new();
-    file.take(MAX_GRANT_BYTES)
-        .read_to_end(&mut raw)
-        .map_err(|_| PresenceRefusal::Unreadable)?;
-    Ok(raw)
+    // #8878 PR2b-1a: the shared fail-closed read (presence_store).
+    read_owner_only(&[&dir], &grant_path(root, pid), MAX_GRANT_BYTES).map_err(|fault| match fault {
+        FileFault::Missing => PresenceRefusal::NoGrant,
+        FileFault::Unreadable => PresenceRefusal::Unreadable,
+        FileFault::NotRegularFile => PresenceRefusal::NotRegularFile,
+        FileFault::UnsafeMode => PresenceRefusal::UnsafeMode,
+        FileFault::Oversized => PresenceRefusal::Malformed,
+    })
 }
 
 #[cfg(test)]

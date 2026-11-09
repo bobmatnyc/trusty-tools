@@ -1,0 +1,338 @@
+//! Enrolled presence devices: `architect-launch/devices/<credential>.json`
+//! (#8878 PR2b-1a).
+//!
+//! Why: plan-pr2-devices.md §4 — an approval from an enrolled device (a
+//! passkey on Bob's iPhone or Mac) proves presence like the Studio's Touch ID.
+//! The store says which credentials count. A same-uid writer could drop its
+//! own credential file, so every record is HMAC-sealed with the presence
+//! [`GrantKey`] (plan-pr2b1.md §3), and enrol and revoke need a
+//! local-presence [`Ticket`].
+//! What: [`Device`] is one credential: its id, a name, the verifier's public
+//! key material (opaque here), dates, the signature counter and the backup
+//! flags. [`load`] reads one record fail-closed; [`enrol`] and [`revoke`]
+//! check a ticket first; [`record_use`] persists the counter after a
+//! verified assertion. A revoked device has no record: [`revoke`] deletes it
+//! first, then every grant that names it, so a grant whose sweep failed is
+//! still refused by `presence::check`, which re-reads the record.
+//! Test: `presence_device_tests.rs`.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::core::architect_launch::ARCHITECT_DIR;
+use crate::core::presence::{Grant, PRESENCE_EXT};
+use crate::core::presence_enrol::{Ticket, TicketPurpose, TicketRefusal, check_ticket};
+use crate::core::presence_key::GrantKey;
+use crate::core::presence_store::{FileFault, read_owner_only, sealed_message, valid_token};
+
+/// The device directory, inside the anchor directory.
+pub const DEVICES_DIR: &str = "devices";
+
+/// The grant method prefix of a device approval: `device:<credential id>`.
+pub const METHOD_DEVICE_PREFIX: &str = "device:";
+
+/// The longest credential id accepted (base64url of a 1023-byte id fits).
+pub const MAX_CREDENTIAL_ID: usize = 1400;
+
+/// The longest device name accepted, in bytes.
+pub const MAX_NAME: usize = 64;
+
+/// The largest device record read.
+const MAX_RECORD_BYTES: u64 = 16 << 10;
+
+/// The seal's record tag.
+const TAG: &str = "tm-presence-device-v1";
+
+/// One enrolled device, as stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Device {
+    /// The credential id, base64url; also the file stem.
+    pub credential_id: String,
+    /// The name Bob gave the device.
+    pub name: String,
+    /// The verifier's public key material, opaque to the store.
+    pub public_key: String,
+    /// When the device was enrolled, Unix seconds.
+    pub created: u64,
+    /// When an assertion from it last verified, Unix seconds.
+    pub last_used: u64,
+    /// The authenticator's signature counter at that assertion.
+    pub sign_count: u32,
+    /// The credential may be backed up (a synced passkey).
+    pub backup_eligible: bool,
+    /// The credential is backed up.
+    pub backup_state: bool,
+    /// HMAC-SHA256 over every other field, hex.
+    pub mac: String,
+}
+
+impl Device {
+    fn message(&self) -> Vec<u8> {
+        sealed_message(
+            TAG,
+            &[
+                &self.credential_id,
+                &self.name,
+                &self.public_key,
+                &self.created.to_string(),
+                &self.last_used.to_string(),
+                &self.sign_count.to_string(),
+                if self.backup_eligible { "1" } else { "0" },
+                if self.backup_state { "1" } else { "0" },
+            ],
+        )
+    }
+
+    fn sealed(mut self, key: &GrantKey) -> Self {
+        self.mac = key.seal(&self.message());
+        self
+    }
+
+    /// The grant method a verified assertion from this device mints.
+    pub fn method(&self) -> String {
+        format!("{METHOD_DEVICE_PREFIX}{}", self.credential_id)
+    }
+}
+
+/// What a verifier hands the store when a registration completes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDevice {
+    /// The credential id, base64url.
+    pub credential_id: String,
+    /// The name Bob gave the device.
+    pub name: String,
+    /// The verifier's public key material.
+    pub public_key: String,
+    /// The counter the registration reported.
+    pub sign_count: u32,
+    /// The backup-eligible flag.
+    pub backup_eligible: bool,
+    /// The backup-state flag.
+    pub backup_state: bool,
+}
+
+/// Why a device operation was refused or failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeviceError {
+    /// The credential id is not a safe base64url token.
+    #[error("the credential id is not a base64url token of at most {MAX_CREDENTIAL_ID} bytes")]
+    InvalidId,
+    /// The name is empty, too long or holds control characters.
+    #[error("the device name must be 1 to {MAX_NAME} bytes with no control characters")]
+    InvalidName,
+    /// No record exists for the credential: unknown or revoked.
+    #[error("no enrolled device has this credential (unknown or revoked)")]
+    Unknown,
+    /// A record already exists for the credential.
+    #[error("a device with this credential is already enrolled")]
+    Exists,
+    /// The record could not be read safely.
+    #[error("the device record is unusable: {0}")]
+    Unsafe(FileFault),
+    /// The record does not parse or names another credential.
+    #[error("the device record is malformed")]
+    Malformed,
+    /// The seal does not verify: the record was not written by tm.
+    #[error("the device record's seal does not verify (not written by tm)")]
+    Forged,
+    /// The local-presence ticket was refused.
+    #[error("the local-presence ticket was refused: {0}")]
+    Ticket(TicketRefusal),
+    /// A write or removal failed.
+    #[error("the device store could not be written: {0}")]
+    Write(String),
+}
+
+/// `root/architect-launch/devices`.
+pub fn devices_dir(root: &Path) -> PathBuf {
+    root.join(ARCHITECT_DIR).join(DEVICES_DIR)
+}
+
+/// The record path for `credential_id`, or [`DeviceError::InvalidId`].
+pub fn device_path(root: &Path, credential_id: &str) -> Result<PathBuf, DeviceError> {
+    if !valid_token(credential_id, MAX_CREDENTIAL_ID) {
+        return Err(DeviceError::InvalidId);
+    }
+    Ok(devices_dir(root).join(format!("{credential_id}.json")))
+}
+
+/// The enrolled device for `credential_id`, read fail-closed.
+///
+/// Why/What: a symlink, a non-0600 file, an oversized or unparseable record,
+/// one whose `credential_id` differs from its file name, or one whose seal
+/// does not verify under `key` is refused; a missing one is
+/// [`DeviceError::Unknown`].
+/// Test: `a_forged_device_record_with_a_bad_seal_is_refused_8878`,
+/// `unreadable_or_malformed_device_record_refuses_8878`,
+/// `device_record_swapped_for_symlink_refuses_8878`.
+pub fn load(root: &Path, key: &GrantKey, credential_id: &str) -> Result<Device, DeviceError> {
+    // RED STUB (#8878 commit 1): no mode, seal or id check.
+    let _ = key;
+    let raw = std::fs::read(device_path(root, credential_id)?).map_err(|_| DeviceError::Unknown)?;
+    serde_json::from_slice(&raw).map_err(|_| DeviceError::Malformed)
+}
+
+/// Enrol `new` at `now`, authorised by an [`TicketPurpose::Enrol`] ticket
+/// for its name.
+///
+/// Why: plan-pr2b1.md §1 — no device record without a fresh Studio
+/// presence; Q4 — before PR2b-2 only tests complete a registration.
+/// What: checks the ticket, the id and the name, refuses an existing record,
+/// then writes the sealed record 0600 through a temp file and a rename.
+/// Test: `an_enrolled_device_loads_back_sealed_8878`,
+/// `register_start_with_no_ticket_is_refused_8878`.
+pub fn enrol(
+    root: &Path,
+    key: &GrantKey,
+    ticket: &Ticket,
+    new: NewDevice,
+    now: u64,
+) -> Result<Device, DeviceError> {
+    // RED STUB (#8878 commit 1): no ticket, name or duplicate check.
+    let _ = ticket;
+    let device = Device {
+        credential_id: new.credential_id,
+        name: new.name,
+        public_key: new.public_key,
+        created: now,
+        last_used: now,
+        sign_count: new.sign_count,
+        backup_eligible: new.backup_eligible,
+        backup_state: new.backup_state,
+        mac: String::new(),
+    }
+    .sealed(key);
+    write(root, &device)?;
+    Ok(device)
+}
+
+/// Persist a verified assertion's counter and backup state on `device`.
+///
+/// Why: plan-pr2b1.md §5 Fail-Open 3 — a counter that is not persisted lets
+/// the same assertion verify again, so a failed write refuses the grant.
+/// Test: `sign_count_persist_failure_refuses_the_grant_8878`.
+pub fn record_use(
+    root: &Path,
+    key: &GrantKey,
+    device: &Device,
+    sign_count: u32,
+    backup_state: bool,
+    now: u64,
+) -> Result<Device, DeviceError> {
+    // RED STUB (#8878 commit 1): the counter is not persisted.
+    let _ = (root, key, sign_count, backup_state, now);
+    Ok(device.clone())
+}
+
+/// One [`list`] row: a credential id and its record or why it is unusable.
+pub type Listed = (String, Result<Device, DeviceError>);
+
+/// Every enrolled device's id and its record or the reason it is unusable.
+///
+/// Test: `an_enrolled_device_loads_back_sealed_8878`.
+pub fn list(root: &Path, key: &GrantKey) -> Result<Vec<Listed>, DeviceError> {
+    let entries = match std::fs::read_dir(devices_dir(root)) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(DeviceError::Write(e.to_string())),
+    };
+    let mut out: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.strip_suffix(".json").map(str::to_owned)
+        })
+        .map(|id| {
+            let device = load(root, key, &id);
+            (id, device)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// What a revoke removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revoked {
+    /// The grant files that named the device and were removed.
+    pub grants_removed: Vec<PathBuf>,
+}
+
+/// Revoke `credential_id`, authorised by a [`TicketPurpose::Revoke`] ticket
+/// for it.
+///
+/// Why: plan-pr2-devices.md §4 — a stolen device's grant dies at once, not at
+/// the 120-minute idle edge.
+/// What: checks the ticket, deletes the record (the kill switch: a device
+/// grant is refused without it), then deletes every `*.presence` whose method
+/// names the credential. A grant that cannot be read or removed makes the
+/// call an error after the sweep; the record is already gone, so the grant is
+/// refused anyway. An unknown credential is [`DeviceError::Unknown`] after
+/// the sweep.
+/// Test: `revoke_kills_a_live_grant_8878`, `revoke_with_no_ticket_is_refused_8878`,
+/// `revoke_partial_failure_is_an_error_and_check_still_refuses_8878`.
+pub fn revoke(
+    root: &Path,
+    key: &GrantKey,
+    ticket: &Ticket,
+    credential_id: &str,
+    now: u64,
+) -> Result<Revoked, DeviceError> {
+    // RED STUB (#8878 commit 1): no ticket check, nothing removed.
+    let _ = (
+        root,
+        key,
+        ticket,
+        credential_id,
+        now,
+        sweep_grants(root, ""),
+    );
+    Ok(Revoked {
+        grants_removed: Vec::new(),
+    })
+}
+
+/// Remove every grant naming `method`; returns (removed, failures).
+fn sweep_grants(root: &Path, method: &str) -> (Vec<PathBuf>, Vec<String>) {
+    let anchor = root.join(ARCHITECT_DIR);
+    let mut removed = Vec::new();
+    let mut failures = Vec::new();
+    let entries = match std::fs::read_dir(&anchor) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (removed, failures),
+        Err(e) => {
+            failures.push(format!("{}: {e}", anchor.display()));
+            return (removed, failures);
+        }
+    };
+    for path in entries.flatten().map(|e| e.path()) {
+        if path.extension().is_none_or(|e| e != PRESENCE_EXT) {
+            continue;
+        }
+        let names_it = match read_owner_only(&[&anchor], &path, 4 << 10) {
+            Ok(raw) => serde_json::from_slice::<Grant>(&raw).is_ok_and(|g| g.method == method),
+            // A file that is not a readable grant is refused by `check` anyway.
+            Err(_) => false,
+        };
+        if !names_it {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed.push(path),
+            Err(e) => failures.push(format!("{}: {e}", path.display())),
+        }
+    }
+    (removed, failures)
+}
+
+fn write(root: &Path, device: &Device) -> Result<(), DeviceError> {
+    let path = device_path(root, &device.credential_id)?;
+    let body = serde_json::to_vec(device).map_err(|e| DeviceError::Write(e.to_string()))?;
+    crate::core::architect_session::write_owner_only(&path, &body).map_err(DeviceError::Write)
+}
+
+#[cfg(test)]
+#[path = "presence_device_tests.rs"]
+mod tests;
