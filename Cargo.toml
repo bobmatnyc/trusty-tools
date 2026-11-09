@@ -510,7 +510,9 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 candle-core = { version = "0.8", default-features = false }
 candle-nn = { version = "0.8", default-features = false }
 candle-transformers = { version = "0.8", default-features = false }
-hf-hub = { version = "0.3", default-features = false, features = ["online", "tokio"] }
+# #6067: no `tokio` feature; both callers use only `api::sync`, and `tokio`
+# pulls reqwest 0.11 -> h2 0.3.27 (RUSTSEC-2026-0258).
+hf-hub = { version = "0.3", default-features = false, features = ["online"] }
 http-body-util = "0.1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"

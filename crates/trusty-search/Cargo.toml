@@ -416,7 +416,8 @@ tokenizers = { version = "0.21", optional = true, default-features = false, feat
 candle-core = { version = "0.8", optional = true }
 candle-nn = { version = "0.8", optional = true }
 candle-transformers = { version = "0.8", optional = true }
-hf-hub = { version = "0.3", optional = true, features = ["tokio"] }
+# #6067: `online` (sync, ureq) only; `tokio` pulls h2 0.3.27 (RUSTSEC-2026-0258).
+hf-hub = { version = "0.3", optional = true, default-features = false, features = ["online"] }
 
 [target.'cfg(unix)'.dependencies]
 # `fs` enables `nix::sys::statfs` (issue #3408): the network-mount detector
