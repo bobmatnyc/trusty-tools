@@ -19,15 +19,18 @@
 //!   and replace it, and then seal its own grants. It can also replace the
 //!   `tm` binary itself. Hooked callers — PMs, agents, subagents and the
 //!   Architect — cannot, except the residuals below: the pm-guard floor
-//!   `pm_guard_presence_key` denies every `security` add, delete or
-//!   partition-list write of the item, every `security` verb built at run
-//!   time, globbed or abbreviated, and every Keychain API write naming it.
-//! - Hooked-caller residuals, accepted for PR2a: an interpreter that
-//!   assembles the service name at run time (`python3` `keyring`,
-//!   `osascript`), and `security list-keychains -s` shadowing the item.
-//!   #10865 adds the access-list check (`SecKeychainItemCopyAccess`). Until
-//!   it ships the key is not trusted for any approval decision: a grant only
-//!   adds a requirement to the Architect's anchor writes.
+//!   `pm_guard_presence_key` denies every `security` call whose verb is not
+//!   a complete literal from its read-only allowlist (`find-generic-password`,
+//!   `find-internet-password`, `find-identity`, `find-certificate`, `help`),
+//!   and every Keychain API write naming the item.
+//! - Hooked-caller residuals, accepted for PR2a (#10865): an interpreter that
+//!   assembles a name at run time (`python3` `keyring`, `osascript`), a
+//!   command name the shell builds (`S=security; $S …`), and, through those,
+//!   `security list-keychains -s` shadowing the item. #10865 adds the
+//!   access-list check (`SecKeychainItemCopyAccess`). Until it ships the key
+//!   is not trusted for any approval decision: a forged grant only restores
+//!   pre-PR2a behaviour — the Architect's anchor writes needed no grant on
+//!   main — and no call denied without a grant is approved because of one.
 //! - A rebuilt `tm` is a new binary to the Keychain, so its first read raises
 //!   the access prompt once. A hook that meets it does not wait out
 //!   [`KEYCHAIN_TIMEOUT`]: the guard's 8 s deadline (release builds,

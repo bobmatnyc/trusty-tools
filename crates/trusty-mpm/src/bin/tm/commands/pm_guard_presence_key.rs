@@ -17,17 +17,19 @@
 //!    time (`$`, a backtick), other than the password value; or
 //! 3. runs one with no literal `-s` service or `-a` account, which selects or
 //!    creates an item the guard cannot tell from the key; or
-//! 4. runs any `security` verb built at run time, globbed or abbreviated
-//!    ([`judge_security_verbs`]), whatever item it names.
+//! 4. runs a `security` verb outside [`READ_ONLY_VERBS`]
+//!    ([`judge_security_verbs`]), whatever item it names: every `security`
+//!    word is read, not only one in command position.
 //!
 //! `pm_guard_floor` runs it on every path for every caller, and
 //! `pm_guard_secret_script::presence_key` runs it over the body of every
 //! script the command runs. Neither bypass lifts it.
 //! Residual: a process outside any hook (Q9b: only Bob types there), a name
-//! an interpreter's code assembles at run time (`base64`, `chr`), a script
-//! the script walk cannot locate, and a Keychain search list that puts
-//! another keychain first (`security list-keychains -s`); #10865 tracks the
-//! access-list check that closes the hooked ones.
+//! an interpreter's code assembles at run time (`base64`, `chr`), a command
+//! name the shell builds (`S=security; $S …`, `/usr/bin/s?curity`), a script
+//! the script walk cannot locate, and, through those, a Keychain search list
+//! that puts another keychain first (`security list-keychains -s`); #10865
+//! tracks the access-list check that closes the hooked ones.
 //! Test: `pm_guard_presence_key_tests.rs`; on every path in
 //! `pm_guard_floor_tests::presence_key_writes_bind_every_caller_8878`.
 
@@ -86,8 +88,10 @@ pub(crate) fn evaluate_presence_key_write(text: &str) -> Option<String> {
 /// What `text` does to the key item, as a clause, or `None`.
 fn finding(text: &str) -> Option<&'static str> {
     // #8878: the credential-print trigger's reading — quotes and backslashes
-    // gone, so `"trusty-mpm".presence` and `["security", …]` read whole.
+    // gone, so `"trusty-mpm".presence` and `["security", …]` read whole; a
+    // `\`-newline joins its lines, as the shell does.
     let raw: String = text
+        .replace("\\\n", "")
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '\\'))
         .collect();
@@ -117,16 +121,43 @@ fn finding(text: &str) -> Option<&'static str> {
     })
 }
 
-/// The subcommand word of every `security` word in `folded`: denied when the
-/// shell builds it at run time or expands it as a glob, or when it abbreviates
-/// a verb (`security` runs a unique prefix: `add-generic-pass`).
+/// The only `security` verbs a hooked caller runs; each reads and writes
+/// nothing (#8878 Architect ruling: an allowlist, not a denylist).
+const READ_ONLY_VERBS: &[&str] = &[
+    // Prints usage.
+    "help",
+    // Lists signing identities (`scripts/install-trusty-*-signed.sh`).
+    "find-identity",
+    // Prints public certificates.
+    "find-certificate",
+    // Read an item; printing its secret (`-w`, `-g`) is the credential-print rule's.
+    "find-generic-password",
+    "find-internet-password",
+];
+
+/// Bytes that end the word `security` as the shell reads it.
+const NAME_END: &str = ",$`;|&<>()]";
+
+/// Bytes that make a word one the shell builds at run time or expands.
+const SHELL_BUILT: &[char] = &['$', '`', '*', '?', '[', '{'];
+
+/// The verb of every `security` word in `folded`: denied unless it is a
+/// complete literal from [`READ_ONLY_VERBS`].
 ///
-/// Why: the write rules read only a literal [`WRITE_VERBS`] entry, so
-/// `security add-generic-pass$(echo word) -s …` passed them (#8878 delta HIGH).
-/// What: skips `security`'s own `-` options, then reads one word. A word that
-/// is neither a known verb nor a prefix of one passes: `security` rejects it,
-/// so prose such as `git commit -m "harden security for X"` is not denied.
+/// Why: a denylist of write verbs missed every spelling that hid the verb —
+/// built at run time, globbed, abbreviated (`security` runs a unique prefix),
+/// or behind a redirection or `-p prompt` (#8878 r2 HIGH).
+/// What: every `security` word, not only one in command position, because
+/// `echo 'security …' | sh` puts it after any word. Its stage ends at a
+/// newline or a word starting `;`, `|`, `&`, `)`, `]`, `` ` `` or `#`.
+/// Redirections and their targets are skipped; an option word runs nothing
+/// unless it holds `i` or `p` (interactive mode reads verbs from stdin).
+/// The first other word must be an allowlisted verb. Two shapes pass because
+/// `security` runs nothing for them: no verb (it prints usage and exits 2),
+/// and a plain lowercase word that is no verb nor a verb's prefix
+/// (`unknown command`) — so `git commit -m "harden security for X"` passes.
 /// Test: `a_run_time_word_in_a_security_write_is_denied_8878`,
+/// `a_verb_outside_the_read_only_allowlist_is_denied_8878`,
 /// `other_keychain_items_and_reads_pass_8878`.
 fn judge_security_verbs(folded: &str) -> Option<&'static str> {
     folded.match_indices("security").find_map(|(at, word)| {
@@ -135,25 +166,64 @@ fn judge_security_verbs(folded: &str) -> Option<&'static str> {
             return None;
         }
         let rest = &folded[at + word.len()..];
-        // #8878: an argv list reads `[security, verb, …]`.
-        if !rest.starts_with(|c: char| c.is_whitespace() || c == ',') {
+        // #8878: `security>/dev/null`, `security$IFS…` and `[security, …]`
+        // end the name; `security-framework` or `security.md` is another word.
+        if rest.starts_with(|c: char| !c.is_whitespace() && !NAME_END.contains(c)) {
             return None;
         }
-        let verb = rest
-            .split(|c: char| c.is_whitespace() || c == ',')
-            .find(|w| !w.is_empty() && !w.starts_with('-'))?
-            .trim_end_matches([']', ')']);
-        if verb.contains(['$', '`', '*', '?', '[', '{']) {
-            return Some(
-                "runs a `security` verb the shell builds at run time or expands as a glob",
-            );
-        }
-        let abbreviates = |known: &&str| known.starts_with(verb) && **known != *verb;
-        (!verb.is_empty()
-            && !SECURITY_VERBS.contains(&verb)
-            && SECURITY_VERBS.iter().any(abbreviates))
-        .then_some("runs an abbreviated `security` verb, which the guard does not resolve")
+        judge_security_stage(rest.split('\n').next().unwrap_or_default())
     })
+}
+
+/// The words after one `security` word, up to its stage end.
+fn judge_security_stage(stage: &str) -> Option<&'static str> {
+    let mut words = stage
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|w| !w.is_empty());
+    while let Some(word) = words.next() {
+        let ends = word.starts_with([';', '|', ')', ']', '`', '#'])
+            || (word.starts_with('&') && !word.starts_with("&>"));
+        if ends {
+            return None;
+        }
+        // #8878: `2>/dev/null`, `2>&1`, `<<<x` skip themselves; `>`, `2>`,
+        // `<<<` and `&>` also skip their target.
+        let op = word.trim_start_matches(|c: char| c.is_ascii_digit());
+        if op.starts_with(['<', '>']) || op.starts_with("&>") {
+            if op.chars().all(|c| "<>&|-".contains(c)) {
+                words.next();
+            }
+            continue;
+        }
+        // #8878: a word ends at a stage end or a backtick (`security
+        // find-identity` in a comment); no allowlisted verb prefixes another,
+        // so text glued after one only makes an unknown command.
+        let verb = word
+            .split([';', '|', '&', '<', '>', ')', ']', '`'])
+            .next()?;
+        // #8878: an option word is read whole; a substitution glued to `-q`
+        // can add `p`.
+        let judged = if word.starts_with('-') { word } else { verb };
+        if judged.contains(SHELL_BUILT) {
+            return Some("runs a `security` verb the shell builds at run time or expands");
+        }
+        if let Some(flags) = verb.strip_prefix('-') {
+            // #8878: `-i` and `-p prompt` read verbs from stdin.
+            if flags.contains(['i', 'p']) {
+                return Some("runs `security` in interactive mode, which reads verbs from stdin");
+            }
+            continue;
+        }
+        let plain = verb.trim_end_matches(['.', ':']);
+        let inert = !plain.is_empty()
+            && plain.bytes().all(|b| b.is_ascii_lowercase())
+            && !SECURITY_VERBS.iter().any(|known| known.starts_with(plain));
+        return (!READ_ONLY_VERBS.contains(&verb) && !inert).then_some(
+            "runs a `security` verb outside the read-only allowlist (find-generic-password, \
+             find-internet-password, find-identity, find-certificate, help)",
+        );
+    }
+    None
 }
 
 /// Every `security` subcommand (`security help`, macOS 26).

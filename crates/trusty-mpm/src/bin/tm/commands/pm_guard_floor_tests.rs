@@ -223,12 +223,14 @@ fn presence_verbs_bind_pms_and_agents_not_the_architect_8878() {
 
 /// #8878 PR2a critic HIGH: a write of the presence key's Keychain item is
 /// denied for the process-bound Architect, a subagent of it, a PM and a
-/// spoofed Architect, guarded and bypassed alike; another item's is not.
+/// spoofed Architect, guarded and bypassed alike; a read is not.
 #[test]
 fn presence_key_writes_bind_every_caller_8878() {
     let fx = fixture();
-    use crate::commands::pm_guard_presence_key::tests::{NAMED, NO_SELECTOR, OTHERS, RUN_TIME};
-    let writes: Vec<&str> = [NAMED, RUN_TIME, NO_SELECTOR].concat();
+    use crate::commands::pm_guard_presence_key::tests::{
+        NAMED, NO_SELECTOR, NOT_READ_ONLY, OTHERS, RUN_TIME,
+    };
+    let writes: Vec<&str> = [NAMED, RUN_TIME, NO_SELECTOR, NOT_READ_ONLY].concat();
     let mut wrong = Vec::new();
     for bypassed in [false, true] {
         for (env, agent) in [
@@ -248,12 +250,15 @@ fn presence_key_writes_bind_every_caller_8878() {
             };
             for command in &writes {
                 let deny = verdict(command);
-                let ok = deny
-                    .as_ref()
-                    .is_some_and(|(r, why)| *r == TRUST_ANCHOR_RULE && why.contains("Keychain"));
+                // #8878 r3: under a bypass the universal floor runs first, and
+                // its credential-print rule already denies `-i` / `-p` shapes.
+                let ok = deny.as_ref().is_some_and(|(r, why)| {
+                    (*r == TRUST_ANCHOR_RULE && why.contains("Keychain"))
+                        || (bypassed && *r != TRUST_ANCHOR_RULE)
+                });
                 if !ok {
                     wrong.push(format!(
-                        "agent={agent} bypassed={bypassed} not denied: {command}"
+                        "agent={agent} bypassed={bypassed} not denied: {command}: {deny:?}"
                     ));
                 }
             }
@@ -287,7 +292,8 @@ fn a_presence_key_write_in_a_script_body_is_denied_8878() {
     write("outer.sh", "#!/bin/sh\nbash ./plant.sh\n");
     write(
         "fine.sh",
-        "#!/bin/sh\nsecurity delete-generic-password -s other -a me\n",
+        // #8878 r3: a read; any write is outside the read-only allowlist.
+        "#!/bin/sh\nsecurity find-generic-password -s other -a me >/dev/null\n",
     );
     let verdict = |command: &str| {
         let call = bash(&fx, command);

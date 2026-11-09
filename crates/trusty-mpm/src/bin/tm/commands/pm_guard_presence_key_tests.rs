@@ -38,6 +38,29 @@ pub(crate) const RUN_TIME: &[&str] = &[
     "V=add-generic-pass; security ${V}word -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
     "security add-generic-passwor? -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
     "security -q add-generic-pass -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    // #8878 r2 HIGH: a redirection or `-p prompt` ahead of the verb.
+    "security 2>/dev/null add-generic-pass -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    "security 2>&1 add-generic-pass -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    "security >/dev/null delete-generic-pass -s trusty-mpm.presence",
+    "security > /dev/null delete-generic-pass -s trusty-mpm.presence",
+    "security </dev/null add-generic-pass -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    "security 2>/dev/null set-generic-password-partition -s trusty-mpm.presence -S x",
+    "security -p x add-generic-pass -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    "security>/dev/null add-generic-pass -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    "security \\\n add-generic-pass -s trusty-mpm.presence -a grant-hmac-v1 -w k -A",
+    "echo 'add-generic-password -s trusty-mpm.presence -w k' | security -i",
+    "echo 'add-generic-password -s trusty-mpm.presence -w k' | security -q`echo p` x",
+];
+
+/// `security` verbs outside the read-only allowlist, whatever item they name.
+pub(crate) const NOT_READ_ONLY: &[&str] = &[
+    "security add-generic-password -s gh:github.com -a masa -w \"$TOKEN\" -U",
+    "security add-generic-password -s other -a me -X \"$HEX\"",
+    "security delete-generic-password -s other-service -a me",
+    "/usr/bin/security list-keychains -d user -s /tmp/e.keychain",
+    "security unlock-keychain login.keychain",
+    "security in",
+    "echo 'security delete-generic-password -s other -a me' | sh",
 ];
 
 /// `security` writes with no literal `-s` or `-a`.
@@ -51,9 +74,6 @@ pub(crate) const NO_SELECTOR: &[&str] = &[
 
 /// Other items, reads and mentions: these pass.
 pub(crate) const OTHERS: &[&str] = &[
-    "security add-generic-password -s gh:github.com -a masa -w \"$TOKEN\" -U",
-    "security add-generic-password -s other -a me -X \"$HEX\"",
-    "security delete-generic-password -s other-service -a me",
     "security find-generic-password -s trusty-mpm.presence >/dev/null 2>&1",
     "grep -rn trusty-mpm.presence docs/",
     "grep -rn delete-generic-password crates",
@@ -62,8 +82,14 @@ pub(crate) const OTHERS: &[&str] = &[
     // #8878: literal read verbs and prose naming `security` still pass.
     "security find-generic-password -s gh:github.com -a masa >/dev/null",
     "security find-identity -v -p codesigning",
-    "/usr/bin/security list-keychains",
     "git commit -m \"harden security for the guard\"",
+    // #8878 r3: repo reads, usage and prose stay open.
+    "done < <(security find-identity -v -p codesigning 2>/dev/null || true)",
+    "security 2>/dev/null find-certificate -c Developer -p",
+    "security -h",
+    "git commit -m \"fix(security): guard verbs\"",
+    "cargo add security-framework",
+    "# script must not duplicate `codesign`/`security find-identity` calls.",
 ];
 
 /// Assert every command is denied; a failure lists every row that passed.
@@ -112,8 +138,15 @@ fn a_security_write_with_no_literal_selector_is_denied_8878() {
     assert_denied(NO_SELECTOR);
 }
 
-/// Other items, reads and mentions pass: a password value from a variable,
-/// a delete of another service, an existence check, a search.
+/// #8878 r3 ruling: a `security` verb outside the read-only allowlist is
+/// denied whatever item it names, in any position, piped to a shell or not.
+#[test]
+fn a_verb_outside_the_read_only_allowlist_is_denied_8878() {
+    assert_denied(NOT_READ_ONLY);
+}
+
+/// Reads, usage and mentions pass: an existence check, a signing-identity
+/// listing, a search, prose naming `security`.
 #[test]
 fn other_keychain_items_and_reads_pass_8878() {
     assert_passed(OTHERS);
