@@ -37,6 +37,8 @@ pub mod memory_rpc;
 // when the machine-status history routes pushed it over the 500-SLOC cap.
 pub mod metrics;
 pub mod origin_guard;
+// #8878 PR2b-2: the one-time passkey enrol page, behind `[presence] browser_enrol`.
+pub mod presence;
 pub mod sessions;
 pub mod verdict;
 
