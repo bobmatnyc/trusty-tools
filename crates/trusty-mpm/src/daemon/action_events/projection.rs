@@ -366,6 +366,7 @@ fn envelope(
         payload,
         id,
         parent_id,
+        project: None,
     }
 }
 

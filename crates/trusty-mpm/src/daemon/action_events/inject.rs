@@ -80,6 +80,7 @@ pub fn inject_event(delivery: &Delivery<'_>, bodies: bool, root: Option<EventId>
         payload: HarnessPayload::Message(message),
         id: EventId::new(),
         parent_id: root,
+        project: None,
     }
 }
 

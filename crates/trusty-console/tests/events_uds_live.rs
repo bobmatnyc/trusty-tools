@@ -185,6 +185,7 @@ fn event(session: &str) -> HarnessEvent {
         payload: HarnessPayload::Ping,
         id: EventId::new(),
         parent_id: None,
+        project: None,
     }
 }
 

@@ -133,6 +133,7 @@ pub(crate) fn pane_message_event(
         payload: HarnessPayload::Message(event),
         id: EventId::new(),
         parent_id: None,
+        project: None,
     }
 }
 

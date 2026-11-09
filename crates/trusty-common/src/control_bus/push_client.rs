@@ -483,6 +483,7 @@ mod tests {
                     source: HarnessSource::Mpm,
                     session: Some("s1".into()),
                     parent_id: None,
+                    project: None,
                     actor: Actor::System,
                     objects: Vec::new(),
                     attrs: Default::default(),

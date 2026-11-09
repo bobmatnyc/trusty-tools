@@ -294,6 +294,7 @@ async fn a_message_event_round_trips_through_the_daemon_9167() {
         payload: HarnessPayload::Message(message),
         id: Default::default(),
         parent_id: Some(Default::default()),
+        project: None,
     };
     push(&daemon.socket, vec![event("s1"), sent.clone()]).await;
 
@@ -343,6 +344,35 @@ async fn events_health_answers_on_the_real_socket() {
         (2, 1, 2)
     );
     assert_eq!(health.subscribers, 1, "the open subscription");
+}
+
+/// #10906: the daemon answers `events.console_metrics` on its one socket, and a
+/// pushed event's `project` reaches the `by_project` breakdown over the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_console_metrics_answers_on_the_real_socket() {
+    use trusty_common::console_metrics::{ConsoleMetricsReport, check_by_convention};
+    use trusty_common::control_bus::METHOD_EVENTS_CONSOLE_METRICS;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let daemon = start(tmp.path(), &[]).await;
+    let mut attributed = event("s1");
+    attributed.project = Some("acme/web".into());
+    push(&daemon.socket, vec![attributed, event("s2")]).await;
+    let mut stream = subscribe(&daemon.socket, Some(0), SubscribeFilter::default()).await;
+    let _ = next_event(&mut stream).await;
+    let (seq, ..) = next_event(&mut stream).await;
+    assert_eq!(seq, 2);
+
+    let response = call(&daemon.socket, METHOD_EVENTS_CONSOLE_METRICS).await;
+    assert!(response.error.is_none(), "{:?}", response.error);
+    let report: ConsoleMetricsReport =
+        serde_json::from_value(response.result.expect("a result")).expect("a ConsoleMetricsReport");
+    assert_eq!(report.service_id, "trusty-events");
+    let m = &report.metrics;
+    assert_eq!(m["events"], 2, "{m}");
+    assert_eq!(m["by_project"]["acme/web"]["events"], 1, "{m}");
+    assert_eq!(m["by_project"]["unattributed"]["events"], 1, "{m}");
+    assert_eq!(check_by_convention(m), Ok(()));
 }
 
 /// An unknown method on the bus socket is still an RPC error, not a hang-up.

@@ -197,6 +197,7 @@ impl LspEventPublisher {
             }),
             id,
             parent_id: step.parent,
+            project: None,
         });
         id
     }
