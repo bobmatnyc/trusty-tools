@@ -720,3 +720,80 @@ async fn a_panicked_staged_run_is_covered_by_the_next_attach() {
         .expect("a put after the attach is accepted");
     assert_eq!(late["indexed"], true, "{late}");
 }
+
+/// Why: R1, delete arm — a remove in the abort's detach window dropped the
+/// file from memory only and was acknowledged, and the live corpus
+/// re-attached with the file still in it, so the file came back.
+/// What: for `remove-file` and the batch `remove-files`, park the abort after
+/// the take, delete the seeded `a.rs`, release, and assert the delete was
+/// refused with the in-memory chunks untouched, or the file is gone from the
+/// re-attached live corpus; a delete after the re-attach lands. Fails before
+/// the fix: the delete is acknowledged and live still holds `a.rs`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_delete_during_the_abort_detach_window_is_refused_or_stays_deleted() {
+    async fn delete(
+        state: &Arc<crate::service::server::SearchAppState>,
+        id: &str,
+        batch: bool,
+    ) -> Result<serde_json::Value, serde_json::Value> {
+        let reply = if batch {
+            crate::service::server::remove_files_report(
+                state,
+                id,
+                crate::service::server::RemoveFilesRequest {
+                    path_prefix: None,
+                    paths: Some(vec!["a.rs".into()]),
+                    dry_run: false,
+                },
+            )
+            .await
+        } else {
+            crate::service::server::remove_file_report(
+                state,
+                id,
+                crate::service::server::RemoveFileRequest {
+                    path: "a.rs".into(),
+                },
+            )
+            .await
+        };
+        reply.map_err(|(_, body)| body)
+    }
+
+    for batch in [false, true] {
+        let id = format!("identity-abort-delete-{batch}-10738");
+        let (_dir, handle, state, _live) = staged_index(&id).await;
+        let tmp = begin(&handle, false).await;
+        let Parked { reached, release } = detach_hook::park(&id, Window::Abort);
+        let abort = resolve_spawned(&handle, tmp, false);
+        reach(reached).await;
+        let chunks_before = handle.indexer.read().await.chunk_count();
+        assert!(chunks_before > 0, "test setup: a.rs is in memory");
+
+        let reply = delete(&state, &id, batch).await;
+        let chunks_after = handle.indexer.read().await.chunk_count();
+        release.send(()).expect("the abort is still parked");
+        assert!(!abort.await.expect("abort task"), "a rollback never defers");
+        match reply {
+            Err(body) => assert_eq!(
+                chunks_after, chunks_before,
+                "batch={batch}: a refused delete changes nothing: {body}"
+            ),
+            Ok(body) => assert!(
+                !corpus_holds(&handle, "a.rs").await,
+                "batch={batch}: an acknowledged delete must not come back after the \
+                 re-attach: {body}"
+            ),
+        }
+
+        delete(&state, &id, batch)
+            .await
+            .unwrap_or_else(|body| panic!("batch={batch}: a delete after the re-attach: {body}"));
+        assert!(
+            !corpus_holds(&handle, "a.rs").await,
+            "batch={batch}: it leaves live"
+        );
+    }
+}
