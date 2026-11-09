@@ -108,9 +108,11 @@ trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.0" }
 # deleted. The agent glue trusty-kb also held (`Roots`, the typed `gmail` and
 # `drive` registry kinds, the `KbStore` entry points and the in-tree index
 # journal) now lives in `src/kb/`. The edge runs trusty-agents -> trusty-okf
-# only (SPEC-OKF-01 B1, B2). No features: the agent's own index feed is used,
-# not `search-feed`, and no extraction worker is spawned from here.
-trusty-okf = { path = "../trusty-okf", version = "0.1.0" }
+# only (SPEC-OKF-01 B1, B2). #10746 S12: `search-feed` is on; the agent's
+# index feed is `trusty_okf::feed` over machine-local `state::index`
+# (SPEC-OKF-01 §2.7.2, §4.9.1), and its in-tree journal is gone. No
+# extraction worker is spawned from here.
+trusty-okf = { path = "../trusty-okf", version = "0.1.0", features = ["search-feed"] }
 tokio = { version = "1", features = ["full"] }
 async-openai = "0.30"
 serde = { version = "1", features = ["derive"] }

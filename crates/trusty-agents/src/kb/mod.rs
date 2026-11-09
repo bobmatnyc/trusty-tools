@@ -5,8 +5,9 @@
 //! trusty-okf (format, profile, bundle, build). What is left is agent glue,
 //! which SPEC-OKF-01 §2.7.1 (B3, B4, B6) bars from trusty-okf: the
 //! `<knowledge_dir>/<slug(agent)>` root mapping, the typed `gmail` and
-//! `drive` registry kinds, and the in-tree index journal that this crate's
-//! own index feed (`crate::stores::index_feed`) reads and writes.
+//! `drive` registry kinds, and the choice of this machine's index state
+//! directory. #10746 S12: the in-tree index journal and the agent's own feed
+//! are gone; `crate::stores::okg_feed` runs `trusty_okf::feed`.
 //!
 //! What:
 //!   - [`roots`]  — [`roots::Roots`] (agent name to tree) and the
@@ -15,7 +16,7 @@
 //!     the confined entity paths and reads the OKG tools need.
 //!   - [`okg`]    — the store-level OKG entry points (register, sources,
 //!     ingest, index coverage) over `trusty_okf::build`, the typed registry
-//!     view and the index journal.
+//!     view, the machine-local index state and the legacy-journal migration.
 //!
 //! Every ingest, ledger and registry write goes through trusty-okf; this
 //! module adds no second engine. The dependency edge is trusty-agents ->
