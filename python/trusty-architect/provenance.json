@@ -59,7 +59,7 @@
     "scripts/fleet-poll.py": "db5052e8017eafe6215cf63a6fbcbf99982977ee9617411127cd6f51183031d2",
     "scripts/fleet_alert_dedupe.py": "ce6a9361fa46f993d8c27036ab6c68c4385fe963fdc025b6455899661467653b",
     "scripts/fleet_poll_alerts.py": "ab6f43afa913855d367d445f362088eda5ec9e4b90309a0fa0894ef236348914",
-    "scripts/fleet_poll_cfg.py": "94081eeddd3a372c88b64ff5cbac412ae9718bb17a08acad6ba7bebca80e923f",
+    "scripts/fleet_poll_cfg.py": "637151c7012eee009df6d39fb859c98ad5d07844dc2eef54853bd2ada5cded1d",
     "scripts/fleet_poll_io.py": "9a6931a2a321b0bea5903ea511129e448cbfc1cf53ae975d3fffa269ebb2a101",
     "scripts/fleet_poll_selfrefresh.py": "320163f2f0aa2b50eec2403d6697f88f3882afe686d34dbc0f13deee20d0bd48",
     "scripts/fleet_poll_wake.py": "ac1def97f4e12d3bf5876aea07507a631328343731378136175f6ca4a55d9476",
