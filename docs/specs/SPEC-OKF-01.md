@@ -12,6 +12,8 @@
 
 This spec proposes what the trusty-okf crate does. Bob decided §3 (a) on 2026-11-03. Bob also approved four inputs on 2026-11-03: state separation, document-tree import, email and Google Docs import, and the Xberg extraction worker (§1). On 2026-11-03 at 06:58Z Bob decided every remaining question in §3 and §7, and every other owner choice, as recommended (§1.5). No code exists yet.
 
+**Amendments of 2026-11-05 (owner rulings, Bob; #10746).** D14 drops `convert` from §2.7.2 and §4.1. D19 pins the extraction worker to `xberg =1.3.10` in §2.16. D4b amends §2.7.2 for the local constants slice S4 uses and records that the advisory lock (§4.4) is built in slice S5. Each change carries an inline `(Amended 2026-11-05, …)` note.
+
 **Revision r7.1 (2026-11-03).** Applies the four fixes and two MINORs of the delta review of r7 (`docs/specs/SPEC-OKF-01-review.md`, "Delta review of r7"). No owner decision changes.
 
 1. `adopt` takes `(ConceptId, ByteHash)` pairs and refuses a concept whose bytes changed since the review. It needs a `Human` actor with explicit confirmation, and its refusal reasons are named ([§4.5](#SPEC-OKF-01-4-5) "Adopt"; §4.2; §4.3; criterion 142).
@@ -378,7 +380,7 @@ Destinations name trusty-okf modules from §4.1. Each row cites the source at `@
 | `crates/trusty-kb/src/reconcile.rs` | `trusty_okf::profile::reconcile` | Inverse edges come from the profile. |
 | `crates/trusty-kb/src/structure.rs` | `trusty_okf::bundle::index_md` | Becomes the OKF §8 `index.md` regenerator, with the marker rule in §2.3. |
 | `crates/trusty-kb/src/validate.rs` | `trusty_okf::format::validate` | Gains the error/warning/info levels in §2.2. |
-| `crates/trusty-kb/src/convert.rs` | `trusty_okf::bundle::convert` | Writes v0.2 `sources[]`. Keeps `_state/conversion-log.md` (`:259-268`). Stays an in-place converter of a bundle. Import reuses its classification and its plan shape, not its in-place apply (§2.13). |
+| `crates/trusty-kb/src/convert.rs` | **Dropped; does not move to trusty-okf** | trusty-okf has no `bundle::convert`. The lossless trusty-kb-to-v0.2 path is `bundle::migrate` (§2.9). Import takes its plan-then-apply shape from §2.13, not from this module. (Amended 2026-11-05, #10746 D14, Bob: "Amend §2.7.2 and §4.1 to drop convert.") |
 | `crates/trusty-kb/src/roots.rs`, `confine`, `assert_within` | `trusty_okf::bundle::paths` | Generic. Strengthened per §2.11. |
 | `crates/trusty-kb/src/roots.rs`, `Roots`, `resolve`, `tree_path` | **Stays in trusty-agents** | Maps an agent name to `<knowledge_dir>/<slug>` (`:25-65`). Agent home layout, so B3 and B4 exclude it. |
 | `crates/trusty-kb/src/mcp.rs`, `tooldefs.rs`, `main.rs` | **Does not move to trusty-okf** | The `kb_*` MCP stdio server. B7 excludes it. ADR-0041 Decision 4 re-homes the agent-consumed tools in a trusty-mcp-services service, which is unbuilt. `kb_ensure_structure` and `kb_validate` become trusty-okf library calls. The binary is registered nowhere today (ADR-0040, ADR-0041 `:30`). |
@@ -392,7 +394,7 @@ Destinations name trusty-okf modules from §4.1. Each row cites the source at `@
 | `crates/trusty-kb/src/okg/policy.rs` | `trusty_okf::build::policy` | Read-side allow-list. `home_default` takes the user home as an argument (`:70`), not the agent home. |
 | `crates/trusty-kb/src/okg/trust.rs` | `trusty_okf::build::trust` | Label derivation and fail-closed read. |
 | `crates/trusty-kb/src/okg/index_journal.rs` | `trusty_okf::build::index_journal` | Pure diff of tree against journal. Widened to cover every concept per §5.4. r4: the journal moves to the machine-local index state directory (§4.9.1). |
-| `crates/trusty-common/src/knowledge_document.rs` | **Stays in trusty-common** | trusty-search depends on it (`crates/trusty-search/src/core/indexer/ingest/mod.rs:425@c1eed98441`). trusty-okf depends on it. |
+| `crates/trusty-common/src/knowledge_document.rs` | **Stays in trusty-common** | trusty-search depends on it (`crates/trusty-search/src/core/indexer/ingest/mod.rs:425@c1eed98441`). The trusty-okf core does not depend on it (B8). `build::ingest` keeps local constants for `source_status` and `deleted`, and `format::tombstone` keeps a local copy of the tombstone rule. Only the `search-feed` tests link trusty-common's `is_tombstone`, to pin the local rule to it. (Amended 2026-11-05, #10746 D4b, Bob: "Accept S4 local constants and amend §2.7.2.") |
 | `crates/trusty-agents/src/stores/index_feed.rs` (`IndexFeed`, `covers`, `feed_source`) | `trusty_okf::feed` (3e, decided A) | Generic: it imports only trusty-kb types (`:62-64`). Behind the cargo feature `search-feed`. Not chosen: 3e B (stays in trusty-agents) and 3e C (trusty-search absorbs it). |
 | `crates/trusty-agents/src/stores/index_feed_rpc.rs` (`RpcIndexFeed`) | `trusty_okf::feed` | Follows `index_feed.rs`. |
 | `crates/trusty-agents/src/stores/index_feed_tests.rs` | trusty-okf tests | Follows `index_feed.rs`. |
@@ -715,7 +717,7 @@ Scope is approved (§1.3). The rules below are proposals. Appendix C gives the p
 
 The design choice is approved (§1.4). Every rule below is a proposal. Appendix B gives the protocol messages and default limits.
 
-**Shape.** The worker is a separate binary, proposed name `trusty-okf-xberg-worker`. It depends on xberg at an exact version (`xberg = "=1.4.0"`, the assessed version, `xberg-assessment.md:579`) with a committed lockfile. trusty-okf implements one `Extractor`, `WorkerExtractor`, that forwards each item to the worker. trusty-okf never links xberg (B9). The worker is optional: trusty-okf builds and imports without it.
+**Shape.** The worker is a separate binary, proposed name `trusty-okf-xberg-worker`. It depends on xberg at an exact version (`xberg = "=1.3.10"`; Amended 2026-11-05, #10746 D19, Bob: "Amend §2.16 to =1.3.10." The assessment named 1.4.0 at `xberg-assessment.md:579`) with a committed lockfile. trusty-okf implements one `Extractor`, `WorkerExtractor`, that forwards each item to the worker. trusty-okf never links xberg (B9). The worker is optional: trusty-okf builds and imports without it.
 
 **Tiers. — Decided 2026-11-03 (owner): §3 (o) option A; revisitable at implementation.** The built-in tier handles UTF-8 text and Markdown, which is today's floor (DOC-55 §4.3). Every other format goes to the worker. Not chosen: 3o B (pure-Rust extractors also in process) and 3o C (3o B through a shared crate with trusty-search).
 
@@ -927,7 +929,7 @@ Questions (q) and (r) are new in r4. They come from the review-blocker fixes, no
 
 - `trusty_okf::format`: concept types, frontmatter, container rules, parse, render, validate, content hash. No I/O beyond files. No async.
 - `trusty_okf::profile`: pluggable collection profiles and inverse-edge reconciliation.
-- `trusty_okf::bundle`: open, create, put, move, verify, supersede, deprecate, `index.md` and `log.md` regeneration, paths, graph read, convert, migrate.
+- `trusty_okf::bundle`: open, create, put, move, verify, supersede, deprecate, `index.md` and `log.md` regeneration, paths, graph read, migrate. (Amended 2026-11-05, #10746 D14, Bob: `convert` dropped.)
 - `trusty_okf::build`: registry, ledger, ingest, docstore fetcher, read policy, trust labels, index journal, rebuild.
 - `trusty_okf::feed` (cargo feature `search-feed`): the push loop (3e, decided A).
 - `trusty_okf::retrieve` (cargo feature `search-feed`): `search.query` plus hit enrichment. Bob's requirement 3 puts retrieval in trusty-okf.
@@ -1081,7 +1083,7 @@ pub enum OkfError {
 - No public function panics on malformed input.
 - A read never fails on a finding of any severity. Only I/O failure or unparseable YAML in the target concept fails a read.
 - A refused write changes no file. Each file write is atomic: a `create_new` temporary file in the same directory, then a rename (§2.11). An operation that writes more than one file is atomic as a set through the operation journal (§4.11, r4).
-- One writer works on a bundle at a time. trusty-okf takes an advisory lock file under `_sources/` (proposal). ADR-0022 sync must not commit it (§2.12).
+- One writer works on a bundle at a time. trusty-okf takes an advisory lock file under `_sources/` (proposal). ADR-0022 sync must not commit it (§2.12). The lock is built in slice S5 of the #10746 plan. (Amended 2026-11-05, #10746 D4b, Bob: "lock goes in S5.")
 
 ### 4.5 Idempotency and rebuild guarantee {#SPEC-OKF-01-4-5}
 
