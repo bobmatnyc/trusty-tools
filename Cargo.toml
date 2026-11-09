@@ -395,8 +395,8 @@ usearch = "2.25"
 # in-memory Hnsw index is rebuilt on palace open, so direct serde of the
 # Hnsw struct is unnecessary.
 hnsw_rs = "0.3"
-# Align with trusty-memory upstream (rusqlite 0.39, bundled libsqlite3).
-rusqlite = { version = "0.39", features = ["bundled"] }
+# Align with trusty-memory upstream (rusqlite 0.41, bundled libsqlite3; #10882).
+rusqlite = { version = "0.41", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.33"
 tiktoken-rs = "0.5"
