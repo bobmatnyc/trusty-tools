@@ -10,6 +10,9 @@ shows a home page with a card per service.
   (binary on PATH, no daemon), **Absent** (binary not installed)
 - Embedded Svelte SPA served from the binary
 - `GET /api/console/services` JSON API
+- Unix socket `{data_dir}/trusty-console.sock` (`0600`, owner uid only):
+  JSON-RPC `console.health` and `console.fleet_status` (the same snapshot as
+  `GET /api/console/services`). Types: `trusty_common::console_rpc` (#10902)
 
 ## Usage
 

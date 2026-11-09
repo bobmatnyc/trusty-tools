@@ -49,6 +49,9 @@ pub mod bind;
 // #6285: the console's own SPA, split out of `server` at the 500-SLOC cap.
 pub mod connector;
 pub mod console_ui;
+// #10902: console's own socket (`console.health`, `console.fleet_status`).
+#[cfg(unix)]
+pub mod console_uds;
 pub mod detect;
 // #9075: the event-bus core that lived here (#6848) moved to the
 // `trusty-events` daemon (ADR-0065). #9076: console reads it as a UDS client.
@@ -554,6 +557,10 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         shutdown_signal,
     )
     .await?;
+    // See #10902: the console's own UDS listener, bound once HTTP is up. A
+    // failed bind warns and leaves HTTP serving (D8b (b): the TUI falls back).
+    #[cfg(unix)]
+    let console_socket = console_uds::start(state.clone()).await;
     // #9066 A11: secrets routes refuse every request until this is set.
     #[cfg(unix)]
     state.secrets().set_authorities(&listeners.bound);
@@ -577,7 +584,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         let _ = open::that(&console_url);
     }
 
-    listeners.wait_primary().await?;
+    let served = listeners.wait_primary().await;
+    #[cfg(unix)]
+    if let Some(socket) = console_socket {
+        socket.shutdown().await;
+    }
+    served?;
 
     // Best-effort removal of the discovery file on clean shutdown.
     // Only remove the file if it still points to our address; another

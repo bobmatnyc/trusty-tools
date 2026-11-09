@@ -450,6 +450,14 @@ pub mod server;
 #[cfg(feature = "memory-rpc")]
 pub mod memory_rpc;
 
+/// The wire vocabulary of trusty-console's own Unix socket (#10902).
+///
+/// Why: the TUI in trusty-mpm decodes the console's `console.health` and
+/// `console.fleet_status` answers and has no Cargo edge on trusty-console.
+/// What: method names and serde types only, so it is ungated.
+/// Test: `cargo test -p trusty-common --features uds console_rpc`.
+pub mod console_rpc;
+
 /// The active-project residency contract shared by every producer and
 /// consumer daemon (#7087 slice 1a).
 ///
