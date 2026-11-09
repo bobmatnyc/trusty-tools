@@ -172,8 +172,8 @@ The verifier is webauthn-rs 0.6.2. Registration offers ES256 (ECDSA P-256)
 only and refuses any other credential before a record is written; verify
 refuses a record whose key is not ES256 before any signature check (owner
 ruling D72). webauthn-rs pulls the `rsa` crate (RUSTSEC-2023-0071, ignored
-in `deny.toml` and `.cargo/audit.toml` until 2027-02-07): no RSA operation
-runs.
+in `deny.toml` and `.cargo/audit.toml` until 2027-02-07): no RSA decryption
+runs; no RSA credential is stored or used at approval.
 
 `[presence] rp_id` (the console's tailnet name) and `rp_origin`
 (`https://<rp_id>`) have no default. With either missing, the daemon's

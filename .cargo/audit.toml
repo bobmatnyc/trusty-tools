@@ -32,7 +32,8 @@
 #
 # RUSTSEC-2023-0071 — rsa Marvin Attack (timing side channel in RSA
 # decryption). rsa pulled by webauthn-rs crypto-glue; trusty-mpm accepts ES256
-# credentials only, so no RSA operation runs. Review by 2027-02-07 (owner
+# credentials only, so no RSA decryption runs; no RSA credential is stored or
+# used at approval. Review by 2027-02-07 (owner
 # ruling D72, #8878 PR2b-1b). Same reason as in `deny.toml`.
 ignore = [
   "RUSTSEC-2023-0071",
