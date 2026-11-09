@@ -260,3 +260,127 @@ async fn a_live_socket_refuses_a_second_bind() {
     assert!(response.result.is_some());
     first.shutdown().await;
 }
+
+/// A `tracing` writer that keeps every formatted line for the test to read.
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        let bytes = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// One plain `GET /health` over TCP; answers the raw response text.
+async fn http_get_health(addr: std::net::SocketAddr) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let request = format!("GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut response = String::new();
+    tokio::time::timeout(CALL_TIMEOUT, stream.read_to_string(&mut response))
+        .await
+        .expect("HTTP answer within the timeout")
+        .expect("read");
+    response
+}
+
+/// Why: the Architect's ruling on #10902 — a UDS bind failure warns and the
+/// HTTP console keeps serving; it must never take the console down.
+/// What: points the data dir at a tempdir whose `trusty-console.sock` is a
+/// regular file, so the real [`start`] resolves the canonical path and the
+/// hardened bind refuses it. Asserts `start` answered `None`, the warning
+/// names the path and the error, and an HTTP listener started first still
+/// answers `GET /health` afterwards.
+/// Test: this test itself.
+#[test]
+fn a_failed_bind_warns_and_http_keeps_serving() {
+    // DATA_DIR_OVERRIDE is process-global; the connector tests read it too.
+    let _env = crate::detect::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock_dir = tmp.path().join(CONSOLE_SERVICE);
+    std::fs::create_dir(&sock_dir).expect("mkdir");
+    std::fs::set_permissions(&sock_dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let blocker = sock_dir.join(format!("{CONSOLE_SERVICE}.sock"));
+    std::fs::write(&blocker, b"not a socket").expect("plant a regular file");
+
+    let logs = CapturedLogs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _log_guard = tracing::subscriber::set_default(subscriber);
+
+    // SAFETY: serialised by ENV_LOCK; removed before the lock is released.
+    unsafe {
+        std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let (socket, before, after) = runtime.block_on(async {
+        let (state, _) = state();
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind HTTP");
+        let addr = http.local_addr().expect("addr");
+        let app = crate::server::build_router(state.clone());
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(http, app).await;
+        });
+        let before = http_get_health(addr).await;
+        let socket = start(state).await;
+        let after = http_get_health(addr).await;
+        server.abort();
+        (socket, before, after)
+    });
+    unsafe {
+        std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+    }
+
+    assert!(
+        socket.is_none(),
+        "a refused bind answers None, not a socket"
+    );
+    assert!(
+        before.starts_with("HTTP/1.1 200"),
+        "HTTP up first: {before}"
+    );
+    assert!(
+        after.starts_with("HTTP/1.1 200"),
+        "HTTP still serves after the failed bind: {after}"
+    );
+    let text = logs.text();
+    assert!(
+        text.contains("WARN") && text.contains("UDS listener not bound; serving HTTP only"),
+        "the warning path ran: {text}"
+    );
+    assert!(
+        text.contains(&blocker.display().to_string()),
+        "the warning names the path: {text}"
+    );
+    assert!(
+        text.contains("error="),
+        "the warning carries the error: {text}"
+    );
+    assert!(blocker.is_file(), "the occupant is left untouched");
+}

@@ -210,7 +210,7 @@ async fn serve(
 /// What: resolves `daemon_socket_path("trusty-console")` and calls
 /// [`start_at`]; either failure is logged at `warn` with the path and cause.
 /// Test: `start_at` is covered by `listener_serves_both_methods_over_a_real_socket`;
-/// the warn path by `a_live_socket_refuses_a_second_bind`.
+/// the warn path by `a_failed_bind_warns_and_http_keeps_serving`.
 pub async fn start(state: AppState) -> Option<ConsoleSocket> {
     let path = match trusty_common::daemon_socket_path(CONSOLE_SERVICE) {
         Ok(path) => path,
