@@ -142,7 +142,7 @@ Vetted against `docs/adr/INDEX.md` on 2026-11-03:
 
 - **ADR-0041 (Native trusty-okg with search indexing): Amends.** Decision 1's name and rename path, and Decision 2's feed-loop ownership. Decisions 3–5 stand. ADR-0041's status becomes `Amended by 0075`.
 - **ADR-0040 (Split MCP framework and services): Consistent.** The consumer criterion keeps trusty-okf native. Boundary rule B7 restates it.
-- **ADR-0022 (Knowledge-tree synchronization): Consistent.** No change to sync. The `trusty-kb-<tree>` repo naming is stale prose.
+- **ADR-0022 (Knowledge-tree synchronization): Consistent.** This ADR changes no sync rule; the sync rule is amended separately by [#10744](https://github.com/bobmatnyc/trusty-tools/issues/10744) (#10743). The `trusty-kb-<tree>` repo naming is stale prose.
 - **ADR-0024 (Sub-agents are in-process leaves): Consistent.** A sub-agent gets the in-process import tier only, so ADR-0024 is not amended (SPEC-OKF-01 §2.12, owner-choices item 3 A).
 - **ADR-0026 (A credential grant does not survive delegation): Consistent.** trusty-okf holds no grant (B6, B10). An authenticated source adapter's caller holds its own.
 - **ADR-0029 (MSRV 1.94): Consistent.** The extraction worker builds outside the workspace (SPEC-OKF-01 §3 (n) B); recording that is a separate filing ([#10745](https://github.com/bobmatnyc/trusty-tools/issues/10745)).
