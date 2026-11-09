@@ -955,6 +955,42 @@ async fn parity_sessions_command_stopped_agrees_across_transports() {
     assert_eq!(error["message"], body["error"], "{error}");
 }
 
+/// Why (#10101): a command whose session's tmux server cannot be reached was
+/// answered `sent: true`. Both transports must now say `sent: false` and why.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn an_undelivered_command_answers_not_sent_on_both_transports_10101() {
+    let (state, dir) = hermetic();
+    let id = SessionId::new();
+    let mut session = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
+    session.status = SessionStatus::Active;
+    // A socket outside this process's socket directory: no server reachable.
+    session.tmux_socket = Some(dir.path().join("tm-ws-proj-abc"));
+    state.register_session(session);
+    let payload = json!({"command": "help"});
+
+    let (status, body) = http(
+        &state,
+        "POST",
+        &format!("/sessions/{}/command", id.0),
+        Some(payload),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let result = rpc_ok(
+        &rpc_router(&state),
+        "mpm.sessions.command",
+        json!({"id": id.0.to_string(), "command": "help"}),
+    )
+    .await;
+    for answer in [&body, &result] {
+        assert_eq!(answer["sent"], json!(false), "{answer}");
+        let reason = answer["send_error"].as_str().unwrap_or_default();
+        assert!(reason.contains("cannot be reached"), "{answer}");
+    }
+    assert_same("mpm.sessions.command", body, result, &[]);
+}
+
 /// Test: this function IS the test.
 #[tokio::test]
 async fn parity_sessions_set_pid_agrees_across_transports() {
