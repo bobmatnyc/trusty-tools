@@ -259,7 +259,9 @@ fn an_unreadable_spent_marker_keeps_the_ticket_spent_8878() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(m, std::fs::Permissions::from_mode(0o000)).expect("chmod");
     };
-    let mut cases: Vec<(&str, &dyn Fn(&Path))> = vec![("unparsable", &unparsable)];
+    // clippy::type_complexity: name the (label, damage fn) pair.
+    type DamageCase<'a> = (&'a str, &'a dyn Fn(&Path));
+    let mut cases: Vec<DamageCase<'_>> = vec![("unparsable", &unparsable)];
     #[cfg(unix)]
     cases.push(("unreadable", &unreadable));
     for (label, damage) in cases {
