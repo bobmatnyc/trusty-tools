@@ -148,6 +148,9 @@ impl CodeIndexer {
         sel: &PathSelection,
     ) -> Result<BatchRemoveCounts> {
         self.refuse_if_closed_for_shutdown()?;
+        // #10738: a detached corpus answers from memory alone; the real run
+        // is refused, so the dry run is too.
+        self.refuse_if_corpus_detached()?;
         Ok(self.plan_batch_remove(sel).await?.counts)
     }
 
@@ -202,6 +205,10 @@ impl CodeIndexer {
             source,
         };
         self.refuse_if_closed_for_shutdown()
+            .map_err(|e| fail(BatchRemoveCounts::default(), e))?;
+        // #10738: a delete in a staged swap's detach window misses redb, and
+        // the re-attached corpus brings the files back.
+        self.refuse_if_corpus_detached()
             .map_err(|e| fail(BatchRemoveCounts::default(), e))?;
         // #10110 Q4: the race check runs under the lock the batch then holds.
         let Ok(_scan_gate) = self.corpus_scan_gate.try_write() else {
