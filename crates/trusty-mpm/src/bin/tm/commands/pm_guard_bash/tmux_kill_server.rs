@@ -37,6 +37,9 @@ use trusty_mpm::core::tmux_server::socket_dir;
 mod socket;
 #[path = "tmux_kill_server_walk.rs"]
 mod walk;
+// #10706 H1: the reader options that write or run.
+#[path = "tmux_kill_server_readers.rs"]
+mod readers;
 
 /// The rule name recorded with a whole-server kill deny.
 pub(crate) const TMUX_KILL_SERVER_RULE: &str = "tmux-kill-server";
@@ -267,6 +270,13 @@ fn scratch_server(server: &[String], env: &ServerEnv) -> Result<(), Miss> {
         return fleet_label(label, env).map_err(Miss::fleet);
     };
     let path = Path::new(socket);
+    // #10706 M1: `..` resolves at run time (`/tmp/n/../tmux-501/default`);
+    // judge the text before `canonical` can follow it.
+    if has_parent_dir(path) {
+        return Err(Miss::fleet(
+            "gives an `-S` path with a `..` component, which may reach the default socket",
+        ));
+    }
     if !path.is_absolute() {
         // #10665 (ruling Dac): log-only, the guard cannot place it.
         return Err(Miss::soft(
@@ -326,6 +336,12 @@ fn fleet_label(label: &str, env: &ServerEnv) -> Result<(), &'static str> {
 fn same_ci(a: &Path, b: &Path) -> bool {
     a.to_string_lossy()
         .eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+/// Whether `path` has a `..` component, read as text (#10706 M1).
+fn has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
 /// `path` with its symlinks followed: its longest existing ancestor

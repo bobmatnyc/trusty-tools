@@ -98,12 +98,23 @@ pub async fn run_map_stage(
     run_map_stage_graded(units, llm, ctx, concurrency, &no_sections)
         .await
         .into_iter()
-        .map(|(outcome, _)| outcome)
+        .map(|chunk| chunk.outcome)
         .collect()
 }
 
+/// One chunk's map-stage result: its outcome, its grade floor (#9310 ruling
+/// 50) and the reviewer's non-postable `questions` (#10782).
+pub(crate) struct GradedChunk {
+    /// The chunk's outcome.
+    pub(crate) outcome: MapOutcome,
+    /// The chunk's grade floor; APPROVE when no reply graded it.
+    pub(crate) floor: Verdict,
+    /// #10782: the chunk reply's questions; empty when no reply parsed.
+    pub(crate) questions: Vec<String>,
+}
+
 /// [`run_map_stage`], pairing each outcome with its chunk's grade floor
-/// (#9310, owner ruling 50).
+/// (#9310, owner ruling 50) and questions (#10782).
 ///
 /// Why: the floor must be read from the reviewer's own grade before hygiene
 /// relaxes a chunk, and `MapOutcome` is public, so the floor travels beside it.
@@ -120,7 +131,7 @@ pub(crate) async fn run_map_stage_graded(
     ctx: &MapContext<'_>,
     concurrency: usize,
     sections: ChunkSections<'_>,
-) -> Vec<(MapOutcome, Verdict)> {
+) -> Vec<GradedChunk> {
     let conc = concurrency.max(1);
     debug!(
         units = units.len(),
@@ -155,7 +166,7 @@ pub(crate) async fn run_map_stage_graded(
             async move { run_task(task, &llm).await }
         })
         .buffer_unordered(conc)
-        .collect::<Vec<(MapOutcome, Verdict)>>()
+        .collect::<Vec<GradedChunk>>()
         .await
 }
 
@@ -260,9 +271,9 @@ fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>, extra_sections: &str) -> MapT
 /// Test: covered by all `map_*` tests; the grade fold by
 /// `map_chunk_approve_graded_f_reads_block`; the floor by
 /// `run_map_stage_graded_reports_each_chunk_floor`.
-async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> (MapOutcome, Verdict) {
+async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> GradedChunk {
     let (file, req) = match task {
-        MapTask::Resolved(outcome) => return (outcome, Verdict::Approve),
+        MapTask::Resolved(outcome) => return GradedChunk::ungraded(outcome),
         MapTask::Call { file, req } => (file, *req),
     };
 
@@ -311,7 +322,11 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> (MapOutcome, Ver
                     cost_usd: resp.cost_usd,
                 },
             };
-            (outcome, floor)
+            GradedChunk {
+                outcome,
+                floor,
+                questions: parsed.questions, // #10782
+            }
         }
         Err(e) => {
             // Fail-OPEN: one chunk's transport error drops that file's review and
@@ -327,7 +342,18 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> (MapOutcome, Ver
                 error: format!("LLM error: {e}"),
                 hunk_oversized: false,
             };
-            (outcome, Verdict::Approve)
+            GradedChunk::ungraded(outcome)
+        }
+    }
+}
+
+impl GradedChunk {
+    /// A chunk no reply graded: APPROVE floor, no questions.
+    fn ungraded(outcome: MapOutcome) -> Self {
+        Self {
+            outcome,
+            floor: Verdict::Approve,
+            questions: Vec::new(),
         }
     }
 }

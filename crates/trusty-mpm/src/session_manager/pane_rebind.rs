@@ -395,7 +395,9 @@ impl SessionManager {
                 .map_err(|why| ManagedError::InvalidState(id.to_string(), why))?,
             None => record.tmux_name.clone(),
         };
-        let identity = match single_pane(self.tmux.as_ref(), &target)? {
+        // See #10101: read and rebind on the record's own server.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
+        let identity = match single_pane(&*tmux, &target)? {
             PaneMatch::One(identity) => identity,
             PaneMatch::None(why) => return Ok(RebindOutcome::NoMatch(why)),
             PaneMatch::Many(why) => return Ok(RebindOutcome::Ambiguous(why)),
@@ -426,7 +428,7 @@ impl SessionManager {
         }
         // #9313: `--all` and (#10442) a send take the project gate.
         if mode != RebindMode::Manual {
-            let facts = match in_project(self.tmux.as_ref(), &record, &identity) {
+            let facts = match in_project(&*tmux, &record, &identity) {
                 Ok(facts) => facts,
                 Err(why) => return Ok(RebindOutcome::NoMatch(why)),
             };
@@ -480,7 +482,12 @@ impl SessionManager {
                 continue;
             };
             // #9850: `rebindable` skips a record its front gate holds.
-            if !rebindable(&record) || !live.contains(&record.tmux_name) {
+            // See #10101: `live` is the default server's; a named-server
+            // record is never matched against it.
+            if !rebindable(&record)
+                || record.tmux_socket.is_some()
+                || !live.contains(&record.tmux_name)
+            {
                 continue;
             }
             if live_server.as_deref() == Some(recorded) {

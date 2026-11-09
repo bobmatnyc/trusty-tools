@@ -82,6 +82,140 @@ def hold_covers(hold, kind):
     return kind in (kinds if isinstance(kinds, list) else ["idle"])
 
 
+# --- urgent classes and the Architect-wide hold file (#10857) --------------------
+
+# Alert kinds that wake the Architect even while it is held. The poller (fleet_alert_dedupe.py) reads this one set.
+URGENT_KINDS = {"permission_prompt", "agent_needs_input", "dialog", "question", "exited", "session_exited",
+                "self_ctx", "architect_dead", "architect_silent", "architect_frozen"}
+URGENT_SEVERITY_KINDS = {"swap", "disk"}   # urgent only at severity "critical"
+PM_WAKE_KINDS = {"decision", "blocker", "head", "done"}   # pm_intake.WAKE_MSG_KINDS
+HOLD_FILE = "hold.json"
+
+
+def is_urgent(alert):
+    """True when `alert` must wake the Architect while a hold is active.
+
+    What: a kind in URGENT_KINDS, any owner_* kind, a swap or disk alert at severity critical, or a
+    pm_message whose msg_kind is decision/blocker/head/done or missing (pm_intake wakes an unknown kind).
+    Test: test_urgent_classes_wake_while_held
+    """
+    kind = alert.get("kind", "")
+    if kind in URGENT_KINDS or kind.startswith("owner_"):
+        return True
+    if kind in URGENT_SEVERITY_KINDS:
+        return alert.get("severity") == "critical"
+    if kind == "pm_message":
+        return alert.get("msg_kind") in PM_WAKE_KINDS or not alert.get("msg_kind")
+    return False
+
+
+def _hold_entries(data):
+    """The hold entries of a parsed hold.json: {"holds": {source: entry}}, or one bare entry (the plan's shape)."""
+    if not isinstance(data, dict):
+        raise ValueError("hold file is not a JSON object")
+    if isinstance(data.get("holds"), dict):
+        return {k: v for k, v in data["holds"].items() if isinstance(v, dict)}
+    if any(k in data for k in ("until", "until_event", "reason")):
+        return {"file": data}
+    raise ValueError("hold file has no holds")
+
+
+def read_hold(path, now):
+    """{"held", "reason", "allow", "error"} for the Architect-wide hold file at `path`.
+
+    Why: ar-T8a, a paused Architect was woken 16 times by one unchanged alert; nothing told the poller it was held.
+    What: absent file: not held. An entry is active per hold_active (until in the future, or until_event with no
+    until). An unparseable file or timestamp is NOT held and `error` says why: a broken hold never silences.
+    `allow` is the union of the active entries' extra kinds that still wake.
+    Test: test_an_expired_or_unparseable_hold_is_not_held
+    """
+    out = {"held": False, "reason": "", "allow": set(), "error": None}
+    try:
+        with open(path, encoding="utf-8") as f:
+            entries = _hold_entries(json.load(f))
+    except FileNotFoundError:
+        return out
+    except (OSError, ValueError) as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+    active = {}
+    for src, h in entries.items():
+        try:
+            if hold_active(h, now):
+                active[src] = h
+        except (TypeError, AttributeError) as e:   # a non-string until: not held, said
+            out["error"] = f"{src}: {type(e).__name__}: {e}"
+    if active:
+        out["held"] = True
+        out["reason"] = "; ".join(f"{src}: {h.get('reason', '')}" for src, h in sorted(active.items()))
+        out["allow"] = {k for h in active.values() if isinstance(h.get("allow"), list)
+                        for k in h["allow"] if isinstance(k, str)}
+    return out
+
+
+def _edit_hold(path, source, entry):
+    """Set (entry is a dict) or remove (None) one source's hold; the file goes when no source is left.
+    An unparseable file is replaced: its hold was already not held. Serialised by flock on <path>.lock."""
+    import fcntl
+    if entry is None and not os.path.lexists(path):
+        return False   # nothing to clear: create neither the file nor its lock
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path + ".lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            with open(path, encoding="utf-8") as f:
+                holds = _hold_entries(json.load(f))
+        except FileNotFoundError:
+            holds = {}
+        except (OSError, ValueError):
+            holds = {}
+        if entry is None and source not in holds:
+            return False
+        if entry is not None and holds.get(source) == entry:
+            return False
+        if entry is None:
+            holds.pop(source)
+        else:
+            holds[source] = entry
+        if not holds:
+            os.remove(path)
+            return True
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"holds": holds}, f, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+        return True
+
+
+def set_hold(path, source, reason, until=None, until_event=None):
+    """Record `source`'s hold; True when the file changed. Without `until` it lasts until clear_hold(source).
+    Test: test_ledger_hold_writes_and_clears_the_hold_file, test_user_state_sleeping_holds_and_active_releases"""
+    return _edit_hold(path, source, {"reason": str(reason)[:300], "until": until,
+                                     "until_event": until_event or f"{source} cleared", "allow": []})
+
+
+def clear_hold(path, source):
+    """Remove `source`'s hold; True when the file changed. An absent file is left absent."""
+    return _edit_hold(path, source, None)
+
+
+def ledger_hold_path(project):
+    """<inbox>/hold.json when `project` is an Architect's own ledger (<arch>/local/il), else None.
+
+    Why: the Architect records a stop or pause as its ledger HOLD (`datg.py session set --hold`); a PM's ledger
+    hold is that PM's business, not the Architect's alerting.
+    What: <arch> holds scripts/fleet-poll.py; the inbox is ARCHITECT_INBOX_DIR, else <arch>/inbox, as the poller's.
+    Test: test_ledger_hold_writes_and_clears_the_hold_file
+    """
+    il = os.path.realpath(project)
+    arch = os.path.dirname(os.path.dirname(il))
+    if os.path.basename(il) != "il" or os.path.basename(os.path.dirname(il)) != "local":
+        return None
+    if not os.path.isfile(os.path.join(arch, "scripts", "fleet-poll.py")):
+        return None
+    return os.path.join(os.environ.get("ARCHITECT_INBOX_DIR") or os.path.join(arch, "inbox"), HOLD_FILE)
+
+
 def _res(decision, name, reason):
     return {"decision": decision, "path": f"rule:{name}", "reason": reason}
 

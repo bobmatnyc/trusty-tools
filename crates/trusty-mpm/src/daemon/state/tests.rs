@@ -203,6 +203,78 @@ fn reap_dead_sessions() {
     assert_eq!(state.reap_against(&live), ReapResult::default());
 }
 
+/// A session record that names workspace server `server`'s socket in `dir`,
+/// built from the JSON a CLI registration produces (#10101).
+fn socket_session(dir: &std::path::Path, server: &str) -> Session {
+    let mut value = serde_json::to_value(sample_session()).expect("serialize");
+    value["tmux_name"] = serde_json::json!("tm-proj");
+    value["tmux_socket"] = serde_json::json!(dir.join(server));
+    serde_json::from_value(value).expect("deserialize")
+}
+
+/// #10101: a CLI-launched PM on its workspace server is invisible to the
+/// default server's listing; a pass that observed no workspace server keeps
+/// its record instead of reaping it. Red before #10101: the default server's
+/// set did not hold the name, so the record was reaped.
+#[test]
+fn a_socket_session_is_kept_when_no_server_was_observed_10101() {
+    let state = DaemonState::new();
+    let session = socket_session(std::path::Path::new("/private/tmp/tmux-501"), "tm-ws-a");
+    let id = session.id;
+    state.register_session(session);
+    let result = state.reap_against(&std::collections::HashSet::new());
+    assert_eq!(result.reaped, 0);
+    assert!(
+        state.session(id).is_some(),
+        "an unobserved server's session is kept"
+    );
+}
+
+/// #10101: a socket session is judged on its own server only: a same-named
+/// session on the default server does not keep it alive, and its server's
+/// listing does.
+#[test]
+fn the_legacy_reaper_judges_a_socket_session_on_its_own_server_10101() {
+    use crate::session_manager::tmux_route::LiveSessions;
+    let dir = std::path::Path::new("/private/tmp/tmux-501");
+    let default: std::collections::HashSet<String> = ["tm-proj".to_owned()].into();
+    let observed = |names: &[&str]| LiveSessions {
+        default: default.clone(),
+        named: [(
+            "tm-ws-a".to_owned(),
+            names.iter().map(|n| (*n).to_owned()).collect(),
+        )]
+        .into(),
+        socket_dir: Some(dir.to_path_buf()),
+        ..LiveSessions::default()
+    };
+    let liveness = super::session_claude_liveness::claude_liveness;
+
+    let state = DaemonState::new();
+    let kept = socket_session(dir, "tm-ws-a");
+    state.register_session(kept.clone());
+    let live = observed(&["tm-proj"]);
+    assert_eq!(
+        state
+            .reap_against_servers(&default, Some(&live), liveness)
+            .reaped,
+        0
+    );
+    assert!(state.session(kept.id).is_some());
+
+    let gone = observed(&["tm-other"]);
+    assert_eq!(
+        state
+            .reap_against_servers(&default, Some(&gone), liveness)
+            .reaped,
+        1
+    );
+    assert!(
+        state.session(kept.id).is_none(),
+        "the default server's same-named session must not keep it"
+    );
+}
+
 #[test]
 fn reap_against_empty_live_removes_all_tmux_sessions() {
     // An empty live set (e.g. tmux server fully stopped) drops every

@@ -21,6 +21,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::PendingAction;
+use crate::tui::project_ctl::state::rename::RenameStep;
 use crate::tui::project_ctl::state::{ConfirmKind, PendingConfirm, ProjectCtlState};
 
 /// Resolve the currently open confirmation gate against one key event.
@@ -164,4 +165,58 @@ fn submit_config_form(state: &mut ProjectCtlState) -> Option<PendingAction> {
     let args = crate::project_config::merge_patch_args(&edits);
     let name = form.project_name.clone();
     Some(PendingAction::SubmitConfig(name, args))
+}
+
+/// Route one key while the rename modal is open.
+///
+/// #10754: De1 key map (Bob 11-06) — the modal takes every key, `q`
+/// included, like the other modals. [`RenameStep::Cancel`] closes it with its
+/// notice; [`RenameStep::Submit`] closes it and returns the
+/// [`PendingAction::RenameSession`]; any other step keeps it open.
+/// Test: `r_opens_the_rename_modal_prefilled_and_enter_submits`,
+/// `esc_closes_the_rename_modal_with_no_action` (`two_column_tests`).
+pub(super) fn handle_rename_key(
+    state: &mut ProjectCtlState,
+    key: KeyEvent,
+) -> Option<PendingAction> {
+    let modal = state.rename.as_mut()?;
+    match modal.apply(key) {
+        RenameStep::Ignore | RenameStep::Redraw => None,
+        RenameStep::Cancel(notice) => {
+            state.rename = None;
+            state.set_notice(notice);
+            None
+        }
+        RenameStep::Submit(action) => {
+            state.rename = None;
+            Some(action)
+        }
+    }
+}
+
+/// Route one key while the launch form is open.
+///
+/// See #10754: the form takes every key, `q` included, like the rename modal.
+/// [`RenameStep::Cancel`] closes it with its notice; [`RenameStep::Submit`]
+/// closes it and returns the [`PendingAction::Launch`]; any other step
+/// (including an empty-task refusal) keeps it open.
+/// Test: `l_opens_the_launch_form_and_enter_submits_the_request`,
+/// `launch_form_refuses_an_empty_task_and_esc_cancels`.
+pub(super) fn handle_launch_key(
+    state: &mut ProjectCtlState,
+    key: KeyEvent,
+) -> Option<PendingAction> {
+    let modal = state.launch.as_mut()?;
+    match modal.apply(key) {
+        RenameStep::Ignore | RenameStep::Redraw => None,
+        RenameStep::Cancel(notice) => {
+            state.launch = None;
+            state.set_notice(notice);
+            None
+        }
+        RenameStep::Submit(action) => {
+            state.launch = None;
+            Some(action)
+        }
+    }
 }

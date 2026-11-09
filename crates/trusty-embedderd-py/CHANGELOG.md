@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.3] — 2026-11-08
+
+### Security
+
+- Bump the sidecar `torch` pin to `>=2.10.0,<2.11` (resolves 2.10.0) to fix GHSA-63cw-57p8-fm3p / CVE-2026-24747, remote code execution via untrusted checkpoint files (Dependabot #413, #414)
+
+## [0.2.2] — 2026-11-07
+
+### Added
+
+- Success frames carry an optional `result.window`, the model's `max_seq_length`, omitted when unknown (#9284).
+
+### Fixed
+
+- `trusty-embedderd-py --version` and `-V` print the version and exit 0 without bootstrapping the venv; they no longer create a lock or project dir (#10582).
+
 ## [0.2.0] — 2026-10-21
 
 ### Breaking

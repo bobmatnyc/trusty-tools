@@ -250,11 +250,28 @@ pub fn run_tmux_with_bin(
     tmux_bin: &str,
     cmd: &TmuxCommand,
 ) -> std::io::Result<std::process::Output> {
+    run_tmux_on(tmux_bin, None, cmd)
+}
+
+/// [`run_tmux_with_bin`] on the named (`-L`) `server`, or the default server
+/// for `None` (#10101).
+///
+/// What: the host-state guard and target validation, then `cmd`'s argv
+/// through [`server_argv`](crate::core::tmux_server::server_argv), spawned as
+/// [`run_tmux_with_bin`] does. `None` spawns exactly the argv it always did.
+/// Test: `create_session_reaches_the_named_server`,
+/// `ensure_server_up_reaches_the_named_server`.
+pub fn run_tmux_on(
+    tmux_bin: &str,
+    server: Option<&str>,
+    cmd: &TmuxCommand,
+) -> std::io::Result<std::process::Output> {
     host_state_guard()?;
     // #8443: an empty session name addresses no session; never spawn for it.
     cmd.validate_targets()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    crate::core::spawn_disclaim::disclaimed_output(tmux_bin, &tmux_argv(cmd))
+    let argv = crate::core::tmux_server::server_argv(server, tmux_argv(cmd));
+    crate::core::spawn_disclaim::disclaimed_output(tmux_bin, &argv)
 }
 
 /// Refuse a tmux spawn when this process is not running in the operator's
@@ -576,9 +593,25 @@ pub fn create_managed_session_exclusive(
     name: &str,
     workdir: Option<&str>,
 ) -> std::io::Result<ManagedSessionOutcome> {
+    create_managed_session_on(tmux_bin, None, name, workdir, false)
+}
+
+/// [`create_managed_session`] (`idempotent`) or
+/// [`create_managed_session_exclusive`] on the named (`-L`) `server` (#10101).
+///
+/// What: loads the tmux options and runs the shared body with every spawn,
+/// probe and retry on `server`; `None` is the default server.
+/// Test: `create_session_reaches_the_named_server`.
+pub fn create_managed_session_on(
+    tmux_bin: Option<&str>,
+    server: Option<&str>,
+    name: &str,
+    workdir: Option<&str>,
+    idempotent: bool,
+) -> std::io::Result<ManagedSessionOutcome> {
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
-    create_managed_session_inner(tmux_bin, name, workdir, opts, false)
+    create_managed_session_inner(tmux_bin, server, name, workdir, opts, idempotent)
 }
 
 /// [`create_managed_session`] with the resolved tmux options supplied by the
@@ -603,7 +636,7 @@ pub fn create_managed_session_with_options(
     workdir: Option<&str>,
     opts: crate::core::trusty_tools_config::ResolvedTmuxOptions,
 ) -> std::io::Result<ManagedSessionOutcome> {
-    create_managed_session_inner(tmux_bin, name, workdir, opts, true)
+    create_managed_session_inner(tmux_bin, None, name, workdir, opts, true)
 }
 
 /// The body shared by [`create_managed_session_with_options`] (`-A`) and
@@ -617,6 +650,7 @@ pub fn create_managed_session_with_options(
 /// Test: `create_managed_session_confirms_server_before_applying_options`.
 fn create_managed_session_inner(
     tmux_bin: Option<&str>,
+    server: Option<&str>, // See #10101
     name: &str,
     workdir: Option<&str>,
     opts: crate::core::trusty_tools_config::ResolvedTmuxOptions,
@@ -664,7 +698,10 @@ fn create_managed_session_inner(
     // #9461: one invocation, so the `new-session` that starts a fresh server
     // also holds it while the options land. A separate `set-option -g` finds
     // no server: tmux stops an empty server as soon as `start-server` returns.
-    let chained = run_tmux_argv_with_bin(bin, &chained_argv(options, new_session))?;
+    // See #10101: the chained argv carries the `-L` prefix once, up front.
+    let chained_argv =
+        crate::core::tmux_server::server_argv(server, chained_argv(options, new_session));
+    let chained = run_tmux_argv_with_bin(bin, &chained_argv)?;
     let applied_before_pane = chained.status.success();
     let output = if applied_before_pane {
         chained
@@ -675,7 +712,7 @@ fn create_managed_session_inner(
             "#9461: tmux options + new-session for '{name}' failed: {}",
             String::from_utf8_lossy(&chained.stderr).trim()
         );
-        run_tmux_with_bin(bin, new_session)?
+        run_tmux_on(bin, server, new_session)?
     };
     if !output.status.success() {
         return Ok(ManagedSessionOutcome {
@@ -687,6 +724,7 @@ fn create_managed_session_inner(
     // also repairs the server globals for later panes after the fallback.
     let landed = apply_and_verify_scrollback_options(
         bin,
+        server,
         options,
         opts.history_limit,
         opts.alternate_screen,
@@ -756,10 +794,10 @@ const APPLY_VERIFY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_
 /// flow (`list-sessions`, issued by name-collision checks well before
 /// [`create_managed_session`] is ever reached) — not just before this
 /// module's own `set-option -g`/`new-session` sequence.
-pub(crate) fn ensure_server_up(bin: &str) -> Result<(), String> {
+pub(crate) fn ensure_server_up(bin: &str, server: Option<&str>) -> Result<(), String> {
     let mut last_err = String::new();
     for attempt in 1..=START_SERVER_MAX_ATTEMPTS {
-        match run_tmux_with_bin(bin, &TmuxCommand::StartServer) {
+        match run_tmux_on(bin, server, &TmuxCommand::StartServer) {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => last_err = String::from_utf8_lossy(&output.stderr).into_owned(),
             Err(e) => last_err = e.to_string(),
@@ -807,19 +845,20 @@ pub(crate) fn ensure_server_up(bin: &str) -> Result<(), String> {
 /// fake `tmux` binary — no live tmux server required).
 fn apply_and_verify_scrollback_options(
     bin: &str,
+    server: Option<&str>, // See #10101
     options: &[TmuxCommand],
     expected_history_limit: u32,
     expected_alternate_screen: bool,
 ) -> bool {
     for attempt in 1..=APPLY_VERIFY_MAX_ATTEMPTS {
-        if let Err(e) = ensure_server_up(bin) {
+        if let Err(e) = ensure_server_up(bin, server) {
             warn!(
                 "#3386: tmux start-server failed on apply-and-verify attempt \
                  {attempt}/{APPLY_VERIFY_MAX_ATTEMPTS}: {e}"
             );
         } else {
             for cmd in options {
-                match run_tmux_with_bin(bin, cmd) {
+                match run_tmux_on(bin, server, cmd) {
                     Ok(output) if !output.status.success() => {
                         warn!(
                             "#3386: tmux {cmd:?} exited non-zero on apply-and-verify attempt \
@@ -836,7 +875,7 @@ fn apply_and_verify_scrollback_options(
                     Ok(_) => {}
                 }
             }
-            let history_ok = match probe_history_limit(bin) {
+            let history_ok = match probe_history_limit(bin, server) {
                 Ok(observed) if observed == expected_history_limit => true,
                 Ok(observed) => {
                     warn!(
@@ -855,7 +894,7 @@ fn apply_and_verify_scrollback_options(
                 }
             };
             // #5151: read back the WINDOW scope the alternate-screen set wrote.
-            let alternate_screen_ok = match probe_alternate_screen(bin) {
+            let alternate_screen_ok = match probe_alternate_screen(bin, server) {
                 Ok(observed) if observed == expected_alternate_screen => true,
                 Ok(observed) => {
                     warn!(
@@ -897,9 +936,10 @@ fn apply_and_verify_scrollback_options(
 /// the value — callers decide how loudly to react.
 /// Test: `probe_history_limit_reads_back_configured_value`,
 /// `probe_history_limit_errors_on_unparsable_output`.
-pub(crate) fn probe_history_limit(bin: &str) -> Result<u32, String> {
-    match run_tmux_with_bin(
+pub(crate) fn probe_history_limit(bin: &str, server: Option<&str>) -> Result<u32, String> {
+    match run_tmux_on(
         bin,
+        server,
         &TmuxCommand::ShowGlobalOption {
             name: HISTORY_LIMIT_OPTION.to_string(),
         },
@@ -934,9 +974,10 @@ pub(crate) fn probe_history_limit(bin: &str) -> Result<u32, String> {
 /// `probe_alternate_screen_reads_back_off`,
 /// `probe_alternate_screen_errors_on_unrecognised_value`,
 /// `probe_alternate_screen_errors_on_nonzero_exit`.
-pub(crate) fn probe_alternate_screen(bin: &str) -> Result<bool, String> {
-    match run_tmux_with_bin(
+pub(crate) fn probe_alternate_screen(bin: &str, server: Option<&str>) -> Result<bool, String> {
+    match run_tmux_on(
         bin,
+        server,
         &TmuxCommand::ShowWindowGlobalOption {
             name: ALTERNATE_SCREEN_OPTION.to_string(),
         },
@@ -1012,13 +1053,14 @@ pub fn refuse_oversized_pane_command(text: &str) -> Option<String> {
 /// Test: `send_command_line_refuses_an_oversized_line`.
 pub fn send_command_line(
     tmux_bin: Option<&str>,
+    server: Option<&str>, // See #10101
     target: &TmuxTarget,
     text: &str,
 ) -> std::io::Result<std::process::Output> {
     if let Some(msg) = refuse_oversized_pane_command(text) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
     }
-    send_line(tmux_bin, target, text)
+    send_line(tmux_bin, server, target, text)
 }
 
 /// Type a composed `claude` launch line at a fresh session's shell (#8308).
@@ -1030,14 +1072,21 @@ pub fn send_command_line(
 /// — the #8233 class, which that fix closed only for the managed path. The six
 /// now start `claude` through `runtime::cli_launch::send_spec_launch`, whose
 /// short line this types, so a line that grew is refused, never truncated.
-/// What: [`send_command_line`] against `TmuxTarget::session(session)`. `Err`
+/// What: [`send_command_line`] against `TmuxTarget::session(session)` on the
+/// named (`-L`) `server`, or the default server for `None` (#10101). `Err`
 /// carries the refusal (`InvalidInput`, nothing typed), a spawn failure, or a
 /// non-zero `send-keys` exit with tmux's stderr.
 /// Test: `launch_line_over_the_limit_is_refused_before_tmux_runs`,
 /// `launch_line_within_the_limit_reaches_tmux`,
-/// `cli_launch_paths_type_through_the_guard`.
-pub fn send_launch_line(tmux_bin: Option<&str>, session: &str, line: &str) -> std::io::Result<()> {
-    let output = send_command_line(tmux_bin, &TmuxTarget::session(session), line)?;
+/// `cli_launch_paths_type_through_the_guard`,
+/// `a_launch_line_for_a_named_server_is_typed_there`.
+pub fn send_launch_line(
+    tmux_bin: Option<&str>,
+    server: Option<&str>,
+    session: &str,
+    line: &str,
+) -> std::io::Result<()> {
+    let output = send_command_line(tmux_bin, server, &TmuxTarget::session(session), line)?;
     if output.status.success() {
         return Ok(());
     }
@@ -1059,8 +1108,8 @@ pub fn send_launch_line(tmux_bin: Option<&str>, session: &str, line: &str) -> st
 /// (functionally equivalent for a non-key-name string, but a second,
 /// independently-typed-out version of the same idiom is exactly the kind of
 /// drift #2398 closes).
-/// What: runs the literal `send-keys -l <text>` via [`run_tmux_with_bin`]
-/// (`tmux_bin` if given, else resolved via [`resolve_tmux_binary_or_bare`]);
+/// What: runs the literal `send-keys -l <text>` via [`run_tmux_on`] on
+/// `server` (`tmux_bin` if given, else resolved via [`resolve_tmux_binary_or_bare`]);
 /// if that invocation itself fails to spawn, the error is returned
 /// immediately WITHOUT sending `Enter`. Otherwise sends `Enter` and returns
 /// ITS `Output` — callers check `output.status.success()` exactly as they
@@ -1071,19 +1120,14 @@ pub fn send_launch_line(tmux_bin: Option<&str>, session: &str, line: &str) -> st
 /// site.
 pub fn send_line(
     tmux_bin: Option<&str>,
+    server: Option<&str>, // See #10101
     target: &TmuxTarget,
     text: &str,
 ) -> std::io::Result<std::process::Output> {
-    let owned_bin;
-    let bin = match tmux_bin {
-        Some(b) => b,
-        None => {
-            owned_bin = resolve_tmux_binary_or_bare();
-            &owned_bin
-        }
-    };
-    let literal_output = run_tmux_with_bin(
+    let bin = &tmux_bin.map_or_else(resolve_tmux_binary_or_bare, str::to_owned);
+    let literal_output = run_tmux_on(
         bin,
+        server,
         &TmuxCommand::SendKeys {
             target: target.clone(),
             keys: text.to_string(),
@@ -1094,8 +1138,9 @@ pub fn send_line(
         // Don't send Enter after a failed literal send — nothing to submit.
         return Ok(literal_output);
     }
-    run_tmux_with_bin(
+    run_tmux_on(
         bin,
+        server,
         &TmuxCommand::SendKeys {
             target: target.clone(),
             keys: "Enter".to_string(),

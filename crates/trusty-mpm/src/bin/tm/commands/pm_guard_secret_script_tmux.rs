@@ -13,12 +13,13 @@
 //! whole-server kill refuses: the guard cannot read it as shell.
 //! Owner ruling Dac (2026-11-02): this rule is log-only. Its finding is a
 //! would-refuse the hook records; the call runs. Script-body bypasses are
-//! #10706's scope.
+//! #10706's scope. #10706 C2: a trusty-tools `scripts/sandbox_*.sh` whose
+//! bytes match `HEAD` is trusted unread (`trusted_sandbox_script`).
 //! Residual: a script the guard cannot locate or read is the #8879 rule's
 //! fail-closed refusal, not this one's.
 //! Test: `a_kill_server_in_a_script_body_is_refused`,
 //! `a_scratch_socket_kill_in_a_script_is_allowed`,
-//! `the_sandbox_daemon_script_is_allowed`.
+//! `sandbox_daemon_script_allowed_by_repo_and_content`.
 
 use std::path::{Path, PathBuf};
 
@@ -64,10 +65,13 @@ fn judge(
     if seen.contains(&key) {
         return None;
     }
-    seen.push(key);
+    seen.push(key.clone());
     let Ok(Body::Script(body)) = read_script(path) else {
         return None;
     };
+    if trusted_sandbox_script(&key, &body) {
+        return None;
+    }
     if depth >= MAX_SCRIPT_DEPTH {
         return None;
     }
@@ -89,6 +93,93 @@ fn judge(
     each_script(&nested, bases, |_, found, inner, inner_bases| {
         judge(&found.ok()?, inner, inner_bases, depth + 1, env, seen)
     })
+}
+
+/// Whether `path` is a trusty-tools sandbox launcher the guard trusts unread.
+///
+/// Why: #10706 C2 (Architect direction). The sandbox scripts stop their own
+/// server with `env -i PATH="$PATH" tmux -S "$SOCK" kill-server`, and with
+/// the `env -i` fallback gone the floor cannot resolve `$SOCK`. They are
+/// trusted by where they live and by their bytes instead.
+/// What: `true` when `path` (canonical) is `<root>/scripts/sandbox_*.sh`,
+/// `<root>` is the top of a git work tree whose `origin` is
+/// bobmatnyc/trusty-tools, and `body` hashes to the blob `HEAD` holds at that
+/// path — an uncommitted edit, or a copy in another repo, is judged as usual.
+/// Test: `sandbox_daemon_script_allowed_by_repo_and_content`.
+fn trusted_sandbox_script(path: &Path, body: &str) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let scripts = path
+        .parent()
+        .filter(|d| d.file_name() == Some("scripts".as_ref()));
+    let Some(root) = scripts.and_then(Path::parent) else {
+        return false;
+    };
+    if !(name.starts_with("sandbox_") && name.ends_with(".sh")) {
+        return false;
+    }
+    let head = format!("HEAD:scripts/{name}");
+    let Some(out) = git(root, &["rev-parse", "--show-toplevel", &head], None) else {
+        return false;
+    };
+    let mut lines = out.lines();
+    let (Some(top), Some(blob)) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    // Both sides canonical: a symlinked workspace path must still match.
+    let at_top = std::fs::canonicalize(top)
+        .ok()
+        .zip(std::fs::canonicalize(root).ok())
+        .is_some_and(|(t, r)| t == r);
+    let origin = git(root, &["config", "--get", "remote.origin.url"], None);
+    let ours = origin.is_some_and(|url| {
+        let url = url.trim().trim_end_matches('/').to_ascii_lowercase();
+        let url = url.strip_suffix(".git").unwrap_or(&url);
+        url.ends_with("github.com/bobmatnyc/trusty-tools")
+            || url.ends_with("github.com:bobmatnyc/trusty-tools")
+    });
+    let hashed = || {
+        git(
+            root,
+            &["hash-object", "--no-filters", "--stdin"],
+            Some(body),
+        )
+    };
+    at_top && ours && hashed().is_some_and(|h| h.trim() == blob.trim())
+}
+
+/// `git -C <dir> <args>` with `input` on stdin: its stdout, or `None` when it
+/// fails. The hook's `GIT_DIR`-family variables are dropped so `-C` decides.
+fn git(dir: &Path, args: &[&str], input: Option<&str>) -> Option<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // Reap the child before acting on a failed write, so it never lingers.
+    let wrote = match (input, child.stdin.take()) {
+        (Some(input), Some(mut stdin)) => stdin.write_all(input.as_bytes()).is_ok(),
+        (Some(_), None) => false,
+        (None, _) => true,
+    };
+    let out = child.wait_with_output().ok()?;
+    wrote.then_some(())?;
+    out.status
+        .success()
+        .then(|| String::from_utf8(out.stdout).ok())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -146,14 +237,5 @@ mod tests {
                 "{body}"
             );
         }
-    }
-
-    /// #10665 r3 (df-D77): the sandbox script stops its own server with
-    /// `env -i … tmux -S "$SOCK" kill-server`; running it is not refused.
-    #[test]
-    fn the_sandbox_daemon_script_is_allowed() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let command = "bash scripts/sandbox_daemon.sh --help";
-        assert_eq!(evaluate_script_body_tmux_kill(command, &repo, &env()), None);
     }
 }

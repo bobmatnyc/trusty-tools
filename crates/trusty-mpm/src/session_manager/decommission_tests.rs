@@ -312,6 +312,7 @@ fn owned_record(id: ManagedSessionId, state: ManagedSessionState) -> SessionReco
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: Some(id),
         terminal_at: None,

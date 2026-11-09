@@ -21,6 +21,7 @@ use trusty_common::console_metrics::{CONSOLE_METRICS_METHOD, ConsoleMetricsRepor
 use trusty_common::stdio_mcp_client::StdioMcpClient;
 use trusty_common::uds::probe::{SocketVerdict, probe_socket_verdict};
 use trusty_common::uds::server::RpcResponse;
+use trusty_common::uds::{UdsRpcError, UdsSecurityError};
 
 use super::services::{ProbeKind, ServiceId, binary_on_path};
 use super::state::{HealthUpdate, MetricsUpdate, TileHealth};
@@ -32,8 +33,12 @@ pub enum Observation {
     Healthy(Option<String>),
     /// The service answered, but not with health.
     Unhealthy(String),
-    /// Nothing answered (no socket, no listener, no discovery file).
+    /// Nothing answered, or the probe failed (no discovery file, a refused
+    /// socket, an I/O or decode failure, a hang-up, a timeout).
     Silent(String),
+    /// The kernel proved nothing is listening: the socket file is absent, or
+    /// the dial failed with not-found or connection-refused (#10476).
+    NotListening(String),
     /// The service has no resident daemon to observe.
     OnDemand,
 }
@@ -47,9 +52,30 @@ pub fn classify(observation: Observation, installed: bool) -> TileHealth {
     match observation {
         Observation::Healthy(version) => TileHealth::Up { version },
         Observation::Unhealthy(reason) => TileHealth::Degraded { reason },
-        Observation::Silent(_) | Observation::OnDemand if !installed => TileHealth::Absent,
-        Observation::Silent(reason) => TileHealth::Down { reason },
+        Observation::Silent(_) | Observation::NotListening(_) | Observation::OnDemand
+            if !installed =>
+        {
+            TileHealth::Absent
+        }
+        Observation::Silent(reason) | Observation::NotListening(reason) => {
+            TileHealth::Down { reason }
+        }
         Observation::OnDemand => TileHealth::OnDemand,
+    }
+}
+
+/// Fold the service's lifecycle into an [`Observation`]: for a service whose
+/// [`ServiceId::not_listening_is_on_demand`] holds, `NotListening` becomes
+/// `OnDemand`. Every other failure, `Silent` included, stays as observed.
+///
+/// Test: `an_idle_analyze_reads_as_on_demand_not_down`,
+/// `an_answering_analyze_still_reads_as_up`,
+/// `a_broken_analyze_socket_reads_as_down_not_on_demand`.
+pub fn on_demand_when_idle(id: ServiceId, observation: Observation) -> Observation {
+    match observation {
+        // #10476: only "nothing is listening" is idle; a broken analyze is down
+        Observation::NotListening(_) if id.not_listening_is_on_demand() => Observation::OnDemand,
+        other => other,
     }
 }
 
@@ -69,13 +95,15 @@ where
 /// Probe one service once, bounded by `deadline`.
 ///
 /// Why: the poller's one call per tick; it always yields a renderable state.
-/// What: the binary check, then the service's [`ProbeKind`] under
-/// [`with_deadline`].
-/// Test: the pieces are covered by `classify_*` and the deadline test; the
-/// live dials are the console's own probes, exercised by the smoke run.
+/// What: the binary check, then the service's [`ProbeKind`] folded through
+/// [`on_demand_when_idle`], under [`with_deadline`].
+/// Test: the pieces are covered by `classify_*`, the `*_analyze_*` tests and
+/// the deadline test; the live dials are the console's own probes, exercised
+/// by the smoke run.
 pub async fn probe_service(id: ServiceId, deadline: Duration) -> TileHealth {
     let installed = binary_on_path(id.binary());
-    with_deadline(observe(id, deadline), installed, deadline).await
+    let observed = async move { on_demand_when_idle(id, observe(id, deadline).await) };
+    with_deadline(observed, installed, deadline).await
 }
 
 /// Observe one service through its [`ProbeKind`].
@@ -99,13 +127,16 @@ async fn observe(id: ServiceId, deadline: Duration) -> Observation {
 
 /// One `<method>` frame with `"params": {}` over `socket` — the console's
 /// `detect/socket_health.rs::probe_health`, ported (#1318 forbids the edge).
-async fn uds_health(socket: &Path, method: &str, deadline: Duration) -> Observation {
+///
+/// Test: `an_absent_or_refused_analyze_socket_reads_as_on_demand`,
+/// `a_broken_analyze_socket_reads_as_down_not_on_demand`.
+pub(super) async fn uds_health(socket: &Path, method: &str, deadline: Duration) -> Observation {
     let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}});
     let sent =
         trusty_common::uds::send_framed_request::<_, RpcResponse>(socket, &request, deadline).await;
     let response = match sent {
         Ok(response) => response,
-        Err(e) => return Observation::Silent(e.to_string()),
+        Err(e) => return transport_failure(&e),
     };
     if let Some(error) = response.error {
         return Observation::Unhealthy(format!(
@@ -114,6 +145,39 @@ async fn uds_health(socket: &Path, method: &str, deadline: Duration) -> Observat
         ));
     }
     health_version(response.result.as_ref())
+}
+
+/// Map a failed health exchange: [`Observation::NotListening`] when the kernel
+/// proved nothing listens, [`Observation::Silent`] for every other failure.
+///
+/// Why (#10476): an on-demand service reads "not listening" as idle, so a
+/// verification, I/O, hang-up, decode or timeout failure must not reach that
+/// fold. The split keys off the error's variant and errno, never its message.
+/// Test: `transport_failures_split_not_listening_from_broken`.
+pub(super) fn transport_failure(err: &UdsRpcError) -> Observation {
+    if is_not_listening(err) {
+        Observation::NotListening(err.to_string())
+    } else {
+        Observation::Silent(err.to_string())
+    }
+}
+
+/// Whether `err` is a dial that found no listener: the socket (or its
+/// directory) absent, or `connect` refused / not-found, seen through the
+/// bounded connect retry's wrapper.
+fn is_not_listening(err: &UdsRpcError) -> bool {
+    use std::io::ErrorKind::{ConnectionRefused, NotFound};
+    match err {
+        UdsRpcError::Dial { source, .. } => match source {
+            UdsSecurityError::StatForConnect { source, .. } => source.kind() == NotFound,
+            UdsSecurityError::Connect { source, .. } => {
+                matches!(source.kind(), NotFound | ConnectionRefused)
+            }
+            _ => false,
+        },
+        UdsRpcError::ConnectRetriesExhausted { source, .. } => is_not_listening(source),
+        _ => false,
+    }
 }
 
 /// Read a health envelope; a body without `status` is not health.

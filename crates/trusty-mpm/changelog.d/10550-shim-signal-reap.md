@@ -1,0 +1,2 @@
+Fixed
+- A pinned session's gh shim now passes a TERM, INT or HUP it receives on to the buffered gh call at once (TERM for INT, since sh starts gh with INT ignored), waits for gh to exit, removes its temp buffer and exits 143, 130 or 129. A gh that is still running 5 s later is sent KILL, and a signal that lands just after gh starts still reaches it. Before, the shim acted on the signal only after gh finished, so a supervisor that sent TERM and then KILL left gh running and the buffer on disk (#10550).

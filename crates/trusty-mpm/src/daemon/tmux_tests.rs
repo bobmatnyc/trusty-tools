@@ -572,3 +572,163 @@ fn driver_send_command_line_refuses_an_oversized_line() {
         "a line at the limit must pass the guard: {err}"
     );
 }
+
+// ── #10101: every driver argv goes through the one server-aware builder ──
+
+/// The workspace server name the #10101 argv tests aim a driver at.
+const NAMED_SERVER: &str = "tm-ws-proj-0123456789ab";
+
+/// Run `call` against a fake tmux once on the default server and once on
+/// [`NAMED_SERVER`], returning each run's logged argv lines.
+///
+/// Why: a method that builds its own argv can drop the `-L` prefix; the
+/// argv tmux actually receives is the only proof it did not.
+/// What: the fake logs `$*` per invocation and prints `stdout`, exit 0.
+/// Asserts the named run's lines are exactly the default run's lines behind
+/// `-L <name>`, and that the default run carries no `-L` at all.
+fn assert_reaches_named_server(stdout: &str, call: impl Fn(&TmuxDriver)) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("argv.log");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\nprintf '%s' '{stdout}'\nexit 0\n",
+        log = log.display()
+    );
+    let bin = write_fake_tmux(dir.path(), "fake-tmux-argv", &script);
+    let read = || -> Vec<String> {
+        let lines = std::fs::read_to_string(&log).unwrap_or_default();
+        std::fs::remove_file(&log).ok();
+        lines.lines().map(str::to_owned).collect()
+    };
+    let default = TmuxDriver::with_tmux_path_for_test(&bin);
+    call(&default);
+    let default_lines = read();
+    call(&default.on_server(NAMED_SERVER));
+    let named_lines = read();
+
+    assert!(!default_lines.is_empty(), "the method spawned no tmux");
+    assert!(
+        default_lines.iter().all(|l| !l.starts_with("-L ")),
+        "a default-server call must carry no -L: {default_lines:?}"
+    );
+    let expected: Vec<String> = default_lines
+        .iter()
+        .map(|l| format!("-L {NAMED_SERVER} {l}"))
+        .collect();
+    assert_eq!(
+        named_lines, expected,
+        "every call must reach the named server"
+    );
+    default_lines
+}
+
+#[serial_test::serial]
+#[test]
+fn ensure_server_up_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("", |d| d.ensure_server_up().unwrap());
+    assert_eq!(lines, ["start-server"]);
+}
+
+#[serial_test::serial]
+#[test]
+fn run_reaches_the_named_server() {
+    let target = crate::core::tmux::TmuxTarget::session("tm-proj");
+    let lines = assert_reaches_named_server("", |d| {
+        d.capture(&target, Some(5)).unwrap();
+    });
+    assert_eq!(lines.len(), 1, "{lines:?}");
+}
+
+#[serial_test::serial]
+#[test]
+fn create_session_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("", |d| d.create_session("tm-proj", None).unwrap());
+    assert!(lines[0].contains("new-session"), "{lines:?}");
+}
+
+#[serial_test::serial]
+#[test]
+fn create_session_exclusive_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("", |d| {
+        assert!(matches!(
+            d.create_session_exclusive("tm-proj", None).unwrap(),
+            ExclusiveCreate::Created
+        ));
+    });
+    assert!(lines[0].contains("new-session"), "{lines:?}");
+}
+
+#[serial_test::serial]
+#[test]
+fn list_sessions_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("", |d| {
+        d.list_sessions().unwrap();
+    });
+    assert_eq!(
+        lines,
+        [tmux_argv(&TmuxCommand::ListSessions).join(" ")],
+        "the default-server argv is unchanged"
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn list_claude_panes_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("", |d| {
+        d.list_claude_panes().unwrap();
+    });
+    assert_eq!(
+        lines,
+        ["list-panes -a -F #{session_name} #{pane_current_command}"]
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn list_managed_panes_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("", |d| {
+        d.list_managed_panes().unwrap();
+    });
+    assert!(lines[0].starts_with("list-panes -a -F "), "{lines:?}");
+}
+
+#[serial_test::serial]
+#[test]
+fn pane_current_path_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("/w", |d| {
+        assert_eq!(d.pane_current_path("tm-proj"), Some("/w".into()));
+    });
+    assert_eq!(
+        lines,
+        ["display-message -t =tm-proj: -p #{pane_current_path}"]
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn pane_id_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("%3", |d| {
+        assert_eq!(d.pane_id("tm-proj").as_deref(), Some("%3"));
+    });
+    assert_eq!(lines, ["display-message -t =tm-proj: -p #{pane_id}"]);
+}
+
+#[serial_test::serial]
+#[test]
+fn session_panes_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("%3 41 claude", |d| {
+        assert_eq!(d.session_panes("tm-proj").unwrap().len(), 1);
+    });
+    assert!(
+        lines[0].starts_with("list-panes -s -t =tm-proj: -F "),
+        "{lines:?}"
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn pane_display_line_reaches_the_named_server() {
+    let lines = assert_reaches_named_server("claude", |d| {
+        assert_eq!(d.pane_current_command("%3").unwrap(), "claude");
+    });
+    assert_eq!(lines, ["display-message -t %3 -p #{pane_current_command}"]);
+}
