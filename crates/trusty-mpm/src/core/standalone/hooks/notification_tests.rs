@@ -228,3 +228,103 @@ fn the_doctor_step_refuses_a_malformed_file() {
     assert!(!steps[0].changed());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
 }
+
+/// #10885: the probe says what the repair would do, and goes in sync once it has.
+#[test]
+fn the_probe_tracks_the_repair_from_pending_to_in_sync() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("settings.json");
+    assert_eq!(
+        probe_notification_hook(&path, exe(), false),
+        HookSync::InSync
+    );
+    assert_eq!(
+        probe_notification_hook(&path, exe(), true),
+        HookSync::Pending
+    );
+    assert!(!path.exists(), "the probe wrote");
+    repair_notification_hook(&path, exe(), true, RepairMode::Apply);
+    assert_eq!(
+        probe_notification_hook(&path, exe(), true),
+        HookSync::InSync
+    );
+    assert_eq!(
+        probe_notification_hook(&path, exe(), false),
+        HookSync::Pending
+    );
+}
+
+/// #10885: a file the repair refuses is refused by the probe too, unchanged.
+#[test]
+fn the_probe_refuses_what_the_repair_refuses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("settings.json");
+    for bad in ["not json", "[1, 2]", "{\"hooks\": {\"Notification\": {}}}"] {
+        std::fs::write(&path, bad).unwrap();
+        assert!(
+            matches!(
+                probe_notification_hook(&path, exe(), true),
+                HookSync::Refused(_)
+            ),
+            "{bad}"
+        );
+        assert!(
+            matches!(
+                repair_notification_hook(&path, exe(), true, RepairMode::DryRun)[0].status,
+                StepStatus::Refused(_)
+            ),
+            "{bad}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
+    }
+}
+
+/// #10885: enabled but unapplied is a Warn naming the fix; `--fix` clears it.
+#[test]
+fn the_doctor_row_warns_until_the_repair_applies_the_hook() {
+    use crate::core::doctor::CheckStatus;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("settings.json");
+    let on = NotificationHookConfig {
+        enabled: true,
+        inbox: Some(PathBuf::from("/srv/architect/inbox")),
+    };
+    let row = notification_hook_check(&path, exe(), &on);
+    assert_eq!(row.name, NOTIFICATION_HOOK_CHECK);
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(
+        row.message.contains(NOTIFICATION_HOOK_FIX),
+        "{}",
+        row.message
+    );
+    repair_notification_hook(&path, exe(), true, RepairMode::Apply);
+    let row = notification_hook_check(&path, exe(), &on);
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    assert!(
+        row.message.contains("/srv/architect/inbox"),
+        "{}",
+        row.message
+    );
+    // Off with tm's entry still present is a Warn; off with no file is Ok.
+    let off = NotificationHookConfig::default();
+    let row = notification_hook_check(&path, exe(), &off);
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    let row = notification_hook_check(&tmp.path().join("absent.json"), exe(), &off);
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+}
+
+/// #10885: a file the repair refuses is never reported Ok.
+#[test]
+fn the_doctor_row_is_unknown_for_a_refused_file() {
+    use crate::core::doctor::CheckStatus;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("settings.json");
+    std::fs::write(&path, "[1, 2]").unwrap();
+    let on = NotificationHookConfig {
+        enabled: true,
+        inbox: None,
+    };
+    let row = notification_hook_check(&path, exe(), &on);
+    assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1, 2]");
+}

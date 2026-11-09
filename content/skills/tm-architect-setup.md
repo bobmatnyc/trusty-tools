@@ -31,7 +31,8 @@ alias `opus` as its model.
 2. **One Architect per user.** A second run in the same directory changes
    nothing and says so. `init` refuses when another allow-listed project
    already requests the `supervisor` profile, or when `tm-architect` runs in
-   another directory. Editing the watched set is `tm fleet add` (P3).
+   another directory. The watched set is edited separately; `init` does not
+   change it.
 3. **Local git repo, no remote.** It runs `git init` and adds no remote. The
    repo never inherits an `origin`. A private remote is added only when you
    ask for one. A public remote is never added.
@@ -65,18 +66,40 @@ alias `opus` as its model.
 8. **No twin mode.** `init` writes no `[supervisor.twin]` grant and never
    launches with `--twin`. Twin mode (#8878) stays a separate opt-in.
 
+## Notification hook
+
+tm's user-level `Notification` hook (#8392) appends
+each PM permission prompt or input request to the Architect's
+`inbox/events.jsonl`, so the Architect learns of a blocked session at once
+instead of on its next pane poll. It is one hook for every tm session, set by
+two keys in `~/.trusty-mpm/config.toml`:
+
+```toml
+[notification_hook]
+enabled = true
+inbox = "/absolute/path/to/architect/inbox"
+```
+
+`tm fleet init` writes both keys when the file has no `[notification_hook]`
+section and applies the hook to the tm-managed settings. It never edits a
+section that is already there: when its `inbox` names another directory,
+`init` reports the step skipped. To change the keys yourself, edit the file,
+then run `tm doctor --fix --only notification_hook --yes`. `tm doctor`
+reports a `notification_hook` row that warns when the hook is enabled but not
+applied. Removing an Architect does not remove the section; delete it by hand.
+
 ## Watched projects
 
-`tm fleet add <dir>` adds a project to the watched set and installs that
-project's notification hook (#8392). `tm fleet remove <dir>` removes that
-project's hook only and leaves every other watched project unchanged.
 `tm fleet status [--dir <path>] [--json]` reports four checks, read-only:
 the allowlist entry, the profile request, the running `tm-architect` session
 in that directory, and its Architect launch stamp. It exits 1 when any check
 fails, and when its `binding` row is `UNBOUND`: the session's `claude` has no
 Architect launch record, so every trust-anchor write is denied (#10448). Its `skills` row also warns when an Architect set up before `local/`
 still keeps its records in the old directory; move them into `local/`
-yourself, because `tm` moves nothing. The watched set joins the report in P3.
+yourself, because `tm` moves nothing. Its `notification_hook` row reads
+`on → <inbox>`, `off`, `enabled but not applied` or
+`points elsewhere: <path>`; like `skills`, it never changes the verdict. The
+watched set joins the report in P3.
 
 ## Without `tm fleet`
 

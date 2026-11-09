@@ -184,7 +184,9 @@ fn a_second_run_changes_nothing() {
         std::fs::read(fx.dir().join(".trusty-mpm.toml")).unwrap(),
         project_before
     );
-    assert_eq!(fx.config().matches(&canonical(&fx.dir())).count(), 1);
+    // #10885: quoted, so the `[notification_hook] inbox` below the dir is not counted.
+    let entry = format!("\"{}\"", canonical(&fx.dir()));
+    assert_eq!(fx.config().matches(&entry).count(), 1);
 }
 
 /// The fail-open guard: a config tm cannot parse is never rewritten or reset,

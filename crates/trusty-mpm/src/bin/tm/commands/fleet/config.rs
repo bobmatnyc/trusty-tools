@@ -1,15 +1,16 @@
-//! The two TOML edits `tm fleet init` makes, as pure text-to-text functions (#8436).
+//! The TOML edits `tm fleet init` makes, as pure text-to-text functions (#8436).
 //!
 //! Why: the user-level `~/.trusty-mpm/config.toml` holds the operator's other
 //! settings and comments, and a lenient load turns a bad file into defaults.
 //! A rewrite through `MpmConfig` would drop comments and unknown keys, and a
 //! write over a file tm could not parse would reset it. `toml_edit` changes
-//! one array and leaves every other byte alone.
-//! What: [`add_allowlist_entry`] and [`request_architect_profile`] each take
-//! a file's text and return [`Edit::Unchanged`] or the new text. Both refuse
-//! text that does not parse, both as TOML and as the typed config tm reads,
-//! so a caller never writes over a file it could not read.
-//! Test: `commands::fleet::tests`.
+//! one table and leaves every other byte alone.
+//! What: [`add_allowlist_entry`], [`request_architect_profile`] and
+//! [`enable_notification_hook`] (#10885) each take a file's text and return
+//! [`Edit::Unchanged`] or the new text. Each refuses text that does not parse,
+//! both as TOML and as the typed config tm reads, so a caller never writes
+//! over a file it could not read.
+//! Test: `commands::fleet::tests`, `commands::fleet::notify_hook_tests`.
 
 use std::path::{Path, PathBuf};
 
@@ -105,6 +106,46 @@ pub(crate) fn add_allowlist_entry(raw: &str, dir: &Path, path: &Path) -> anyhow:
             "internal error: the edited {} does not list {}",
             path.display(),
             dir.display()
+        );
+    }
+    Ok(Edit::Changed(text))
+}
+
+/// Add `[notification_hook] enabled = true` and `inbox = "<inbox>"` to the
+/// user config text `raw`, when it has no `[notification_hook]` yet (#10885).
+///
+/// Why: the Architect learns of a blocked PM session from the hook's inbox
+/// line; a section the operator already wrote is their choice and is kept.
+/// What: [`Edit::Unchanged`] when `raw` has a `notification_hook` key in any
+/// form. Otherwise appends the table with the two keys. `inbox` must be
+/// absolute and UTF-8. Refuses unparseable text.
+/// Postcondition on [`Edit::Changed`]: the new text parses as `MpmConfig`
+/// with the opt-in on and `inbox` as given; every other byte is untouched.
+/// Test: `a_missing_section_is_added_and_the_rest_survives`,
+/// `a_present_section_is_never_edited`.
+pub(crate) fn enable_notification_hook(
+    raw: &str,
+    inbox: &Path,
+    path: &Path,
+) -> anyhow::Result<Edit> {
+    let (mut doc, _) = parse_user_config(raw, path)?;
+    if doc.contains_key("notification_hook") {
+        return Ok(Edit::Unchanged);
+    }
+    let entry = absolute_utf8(inbox)?;
+    let mut table = toml_edit::Table::new();
+    table.insert("enabled", toml_edit::value(true));
+    table.insert("inbox", toml_edit::value(entry));
+    doc.insert("notification_hook", Item::Table(table));
+    let text = doc.to_string();
+    // Postcondition: the file tm hook reads back forwards to `inbox`.
+    let (_, check) = parse_user_config(&text, path)?;
+    let hook = &check.notification_hook;
+    if !hook.enabled || hook.inbox.as_deref() != Some(inbox) {
+        bail!(
+            "internal error: the edited {} does not enable the hook for {}",
+            path.display(),
+            inbox.display()
         );
     }
     Ok(Edit::Changed(text))
