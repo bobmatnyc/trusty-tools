@@ -26,9 +26,9 @@ edit it freely.
 ## Watch set
 
 The projects whose PM sessions you supervise. One line each: the tmux
-session, the project path, and what the user wants from it.
+session and the project path. Goals live in `local/goals.md`.
 
-- `tm-<project>`: `<absolute project path>`: <goal>
+- `tm-<project>`: `<absolute project path>`
 
 The poller watches every `tm-*` session. This list says which ones you act on.
 A session named in `quiet-sessions.txt`, one name per line, raises no idle
