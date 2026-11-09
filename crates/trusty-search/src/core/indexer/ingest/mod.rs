@@ -714,6 +714,11 @@ impl CodeIndexer {
         if files.is_empty() {
             return Ok(0);
         }
+        // #10738: the watcher rescan commits here; in a staged swap's detach
+        // window the batch would land in memory only and answer `Ok`, so the
+        // rescan recorded fingerprints for content live never got. The
+        // reindex's own batches call `commit_parsed_batch` on staging directly.
+        self.refuse_if_corpus_detached()?;
         let parsed = self.parse_and_embed_files(files.to_vec()).await?;
         let timings = self
             .commit_parsed_batch(parsed, defer_graph_rebuild)
