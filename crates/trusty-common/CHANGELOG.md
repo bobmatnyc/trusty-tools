@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.67.6] — 2026-11-09
+
+### Security
+
+- Bump `rusqlite` to 0.41 so the bundled `libsqlite3-sys` is 0.39 or later, which fixes RUSTSEC-2026-0459.
+
 ## [0.67.5] — 2026-11-07
 
 ### Added
