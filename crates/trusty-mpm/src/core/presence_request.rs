@@ -197,8 +197,36 @@ pub fn create(
     ttl: Duration,
     now: u64,
 ) -> Result<Pending, RequestError> {
-    // RED STUB (#8878 commit 1): no bounds, cap or rate limit.
-    let _ = scan;
+    if new.action.len() > MAX_ACTION
+        || new.project.len() > MAX_LABEL
+        || new.session.len() > MAX_LABEL
+    {
+        return Err(RequestError::OutOfBounds(
+            "a label or the action text is too long",
+        ));
+    }
+    if ttl.is_zero() || ttl > MAX_TTL {
+        return Err(RequestError::OutOfBounds(
+            "the TTL is zero or over 30 minutes",
+        ));
+    }
+    let mut live = 0usize;
+    for (id, found) in scan(root, key, now)? {
+        match found {
+            Err(RequestError::Expired) => {
+                if let Ok(path) = pending_path(root, &id) {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            Ok(p) if p.pid == new.pid && now.saturating_sub(p.created) < RATE_WINDOW.as_secs() => {
+                return Err(RequestError::RateLimited);
+            }
+            _ => live += 1,
+        }
+    }
+    if live >= PENDING_CAP {
+        return Err(RequestError::Full);
+    }
     let mut pending = Pending {
         id: random_hex::<16>().map_err(RequestError::Write)?,
         pid: new.pid,
@@ -248,16 +276,31 @@ fn scan(root: &Path, key: &GrantKey, now: u64) -> Result<Vec<Scanned>, RequestEr
 /// Test: `pending_symlink_oversized_or_malformed_refuses_and_is_not_consumed_into_a_grant_8878`,
 /// `clock_before_created_at_refuses_8878`, `an_expired_request_is_refused_8878`.
 pub fn load(root: &Path, key: &GrantKey, id: &str, now: u64) -> Result<Pending, RequestError> {
-    // RED STUB (#8878 commit 1): no mode, seal or date check.
-    let _ = (
-        key,
-        now,
-        MAX_PENDING_BYTES,
-        FileFault::Missing,
-        read_owner_only,
-    );
-    let raw = std::fs::read(pending_path(root, id)?).map_err(|_| RequestError::NotFound)?;
-    serde_json::from_slice(&raw).map_err(|_| RequestError::Malformed)
+    let path = pending_path(root, id)?;
+    let anchor = root.join(ARCHITECT_DIR);
+    let dir = pending_dir(root);
+    let raw = match read_owner_only(&[&anchor, &dir], &path, MAX_PENDING_BYTES) {
+        Ok(raw) => raw,
+        Err(FileFault::Missing) => return Err(RequestError::NotFound),
+        Err(fault) => return Err(RequestError::Unsafe(fault)),
+    };
+    let pending: Pending = serde_json::from_slice(&raw).map_err(|_| RequestError::Malformed)?;
+    if !key.verify(&pending.message(), &pending.mac) {
+        return Err(RequestError::Forged);
+    }
+    if pending.id != id || pending.action_hash != action_hash(&pending.action) {
+        return Err(RequestError::Malformed);
+    }
+    if now < pending.created
+        || pending.expires < pending.created
+        || pending.expires - pending.created > MAX_TTL.as_secs()
+    {
+        return Err(RequestError::BadDates);
+    }
+    if now >= pending.expires {
+        return Err(RequestError::Expired);
+    }
+    Ok(pending)
 }
 
 /// Consume `pending`: rename its file aside, confirm the bytes still hold
@@ -271,9 +314,27 @@ pub fn load(root: &Path, key: &GrantKey, id: &str, now: u64) -> Result<Pending, 
 /// never be submitted again.
 /// Test: `two_concurrent_verifies_for_one_request_mint_exactly_one_grant_8878`.
 pub fn claim(root: &Path, key: &GrantKey, pending: &Pending) -> Result<(), RequestError> {
-    // RED STUB (#8878 commit 1): nothing is consumed.
-    let _ = (root, key, pending);
-    Ok(())
+    let path = pending_path(root, &pending.id)?;
+    let claimed = path.with_extension("claimed");
+    match std::fs::rename(&path, &claimed) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(RequestError::Claimed),
+        Err(e) => return Err(RequestError::Write(format!("{}: {e}", path.display()))),
+    }
+    let anchor = root.join(ARCHITECT_DIR);
+    let dir = pending_dir(root);
+    let same = read_owner_only(&[&anchor, &dir], &claimed, MAX_PENDING_BYTES)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Pending>(&raw).ok())
+        .is_some_and(|found| found == *pending && key.verify(&found.message(), &found.mac));
+    if let Err(e) = std::fs::remove_file(&claimed) {
+        tracing::warn!("#8878: a claimed presence request was not removed: {e}");
+    }
+    if same {
+        Ok(())
+    } else {
+        Err(RequestError::Claimed)
+    }
 }
 
 #[cfg(test)]
