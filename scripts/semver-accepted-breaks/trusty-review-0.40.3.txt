@@ -1,0 +1,4 @@
+crate   trusty-review
+version 0.40.3
+reason  Architect ruling 2026-11-09 under Bob's standing ruling 2026-09-26 (a public-API break never forces a major version; record it in accepted-breaks): accept the new pub field ParsedReview.questions added by #10782 after 0.40.2 published. No in-workspace code constructs ParsedReview outside trusty-review. See docs/reference/semver-gate.md.
+accept  constructible_struct_adds_field ParsedReview.questions
