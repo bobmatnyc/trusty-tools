@@ -419,6 +419,44 @@ fn live_profile_skips_only_when_unset() {
     );
 }
 
+// #10873: the folder read moves out of the test so its error arms are testable
+/// The lane's Drive fixture folder from `std::env::var(OKF_LIVE_DRIVE_FOLDER)`.
+///
+/// Why: with the profile set, the lane cannot run without the folder.
+/// What: unset or not UTF-8 panics, naming both variables. Any other value
+/// is the trimmed folder ID.
+/// Test: `live_folder_must_be_set_and_non_empty`.
+fn live_folder(var: Result<String, VarError>) -> String {
+    let folder = var.unwrap_or_else(|_| {
+        panic!("{PROFILE_VAR} is set but {FOLDER_VAR} (the fixture folder ID) is not")
+    });
+    folder.trim().to_string()
+}
+
+/// Why: a set-but-empty folder must stop the lane before the pre-check and
+/// the mail imports run, not fail late in the Docs outcomes.
+/// What: unset and blank values panic naming `OKF_LIVE_DRIVE_FOLDER`; a
+/// folder ID is trimmed.
+/// Test: this test.
+#[test]
+fn live_folder_must_be_set_and_non_empty() {
+    let attempts: [Result<String, VarError>; 3] = [
+        Err(VarError::NotPresent),
+        Ok(String::new()),
+        Ok("   ".to_string()),
+    ];
+    for var in attempts {
+        let shown = format!("{var:?}");
+        let got = std::panic::catch_unwind(|| live_folder(var));
+        let msg = got
+            .err()
+            .and_then(|e| e.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| panic!("{shown} must panic, not run the lane"));
+        assert!(msg.contains(FOLDER_VAR), "{shown}: {msg}");
+    }
+    assert_eq!(live_folder(Ok(" F1 ".to_string())), "F1");
+}
+
 /// Why: criterion 148 — the lane is off unless `OKF_LIVE_PROFILE` is set,
 /// and then runs against the owner's real account.
 /// What: unset, prints the skip and passes; set but empty or not UTF-8,
@@ -434,11 +472,9 @@ fn live_lane_against_the_owner_account() {
         );
         return;
     };
-    let folder = std::env::var(FOLDER_VAR).unwrap_or_else(|_| {
-        panic!("{PROFILE_VAR} is set but {FOLDER_VAR} (the fixture folder ID) is not")
-    });
+    let folder = live_folder(std::env::var(FOLDER_VAR));
     let home = std::env::var_os("HOME").expect("HOME must hold ~/.gworkspace-mcp/tokens.json");
-    let mut lane = Lane::new(Path::new(&home), profile.trim(), folder.trim(), None);
+    let mut lane = Lane::new(Path::new(&home), profile.trim(), &folder, None);
     if let Ok(q) = std::env::var(QUERY_VAR) {
         lane.query = q;
     }
@@ -537,6 +573,47 @@ fn precheck_fails_closed_without_a_verdict() {
         0,
         "no fallback to the default profile"
     );
+}
+
+// #10873: the transport-error and 403/404 arms of `precheck` were untested.
+/// Why: a tokeninfo call that never answers gives no verdict, and no
+/// verdict is not a pass.
+/// What: the fake's root replaced by a loopback port nothing listens on;
+/// the pre-check is an `Err` from the tokeninfo call, not a scope verdict.
+/// Test: this test.
+#[test]
+fn precheck_fails_closed_on_a_transport_error() {
+    let h = Home::new(Some("ro"));
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let dead = Options {
+        api_base: Some(format!("http://127.0.0.1:{port}")),
+        config: None,
+    };
+    let e = precheck(&h.home, &dead, "ro").expect_err("no answer is not a pass");
+    assert!(e.starts_with("tokeninfo: "), "{e}");
+}
+
+/// Why: `BaseClient` returns a 403 or 404 as a JSON value with an `error`
+/// key, not as an `Err`; the pre-check must still refuse it, even when the
+/// scope field would pass.
+/// What: tokeninfo reports the preset but answers 403, then 404; each is an
+/// `Err` from the `error` arm, naming the status.
+/// Test: this test.
+#[test]
+fn precheck_fails_closed_on_tokeninfo_403_and_404() {
+    let (fake, h) = (FakeGoogle::start(), Home::new(Some("ro")));
+    fake.with(|st| st.tokeninfo_scope = Some(READONLY_SCOPES.join(" ")));
+    for code in [403u16, 404] {
+        fake.with(|st| st.fail = vec![("tokeninfo".into(), code)]);
+        let e = precheck(&h.home, &opts(&fake), "ro").expect_err("an error status is not a pass");
+        assert!(
+            e.contains("tokeninfo refused the token") && e.contains(&code.to_string()),
+            "{code}: {e}"
+        );
+    }
 }
 
 /// Why: the pre-check must stop the lane before any import, never warn and
