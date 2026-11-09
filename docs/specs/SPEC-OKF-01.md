@@ -510,13 +510,13 @@ A write that changes only lifecycle keys does none of this. `deprecate`, a tombs
 
 **Out-of-band edits.** A hand edit, a git sync merge (ADR-0022) or another tool can change content without trusty-okf. On the next read, trusty-okf compares the current hash with the hash stored for the frontmatter events. On a mismatch, it reports the verification state as Unverified, with a warning finding. The OKF trust tier stays derived from the raw frontmatter (§4.9). The next trusty-okf write applies the five steps above. Until then, a non-trusty consumer that reads the raw frontmatter still sees the old events. That is residual risk.
 
-**Where the record lives. — Decided 2026-11-03 (owner): §3 (d) option C.** The verification record is a ledger-side file under `_sources/`, and it is authoritative. Frontmatter holds a bounded copy: current `verified[]` events plus a bounded history projection. Only events in the record count toward Verified (§4.9 Axis 3). An event that appears only in frontmatter never counts as Verified, though the OKF trust tier still reads it (§4.9). A `rebuild` rewrites frontmatter and re-projects it from the record, so a human verification survives the rebuild. Not chosen: 3d B, the record only with no `verified` in frontmatter. Ruled out by r6: 3d A as written, the whole record in frontmatter.
+**Where the record lives. — Decided 2026-11-03 (owner): §3 (d) option C.** The verification record is a ledger-side file under `_sources/`, and it is authoritative. Frontmatter holds a bounded copy: current `verified[]` events plus a bounded history projection. Only events in the record count toward Verified (§4.9 Axis 3). An event that appears only in frontmatter never counts as Verified, though the OKF trust tier still reads it (§4.9). Ruling D64 (#10873): a frontmatter-only event with no `hash` key does count in `history`, as "Events with no hash" states. A `rebuild` rewrites frontmatter and re-projects it from the record, so a human verification survives the rebuild. Not chosen: 3d B, the record only with no `verified` in frontmatter. Ruled out by r6: 3d A as written, the whole record in frontmatter.
 
 **Bounded frontmatter (r6, reconciliation row 14).** The verification events in frontmatter are a bounded projection. The projection holds the current events and at most the 10 newest history events, and at most 16 KiB of rendered entries (proposal). Every event beyond the bound lives only in the verification record, and Axis 3 reads that record (§4.9). Under the decided 3d C the record holds the overflow. The rejected 3d A had no place for it. §4.8 states the 64 KiB tombstone bound that this rule serves.
 
 **Events with no hash (r6, reconciliation row 17).** Every verification event written before r3 carries no content hash. What must be true:
 
-1. An event with no hash is history. It never counts as Verified.
+1. An event with no hash is history. It never counts as Verified. Ruling D64 (#10873): this holds wherever the event lives. A frontmatter `verified[]` entry with no `hash` key whose `(by, at)` pair no folded record line shares is counted in `history`, once per distinct pair, even when the record does not hold it. It cannot make the state Verified and cannot raise a `VerificationMismatch` finding. An entry with a `hash` key, or without a string `by` or `at`, adds nothing. The code is `counted_events` in `crates/trusty-okf/src/bundle/record.rs`.
 2. No operation assigns a hash to such an event. That covers `Bundle::open`, `migrate`, `rebuild`, recovery and `adopt`. §3 (q) is decided C: the equality proof runs first, then `adopt`. Neither may bind a legacy event to the current hash. Each proves byte ownership only.
 3. The next content change moves every hashless event from frontmatter into the verification record, as step 2 above does, with the reason `legacy_unbound`.
 4. A lifecycle-only write, a migration and a tombstone leave hashless events where they are.
@@ -820,7 +820,7 @@ Each question lists its options. Bob decided (a) at 03:06Z and every other quest
 - A. OKF frontmatter only. Ruled out by r6 as written: the whole record in frontmatter breaks the bounded projection of §2.10 and the 64 KiB tombstone bound of §4.8, unless the overflow lives outside frontmatter, which makes it option C.
 - B. A sidecar ledger only. Not chosen.
 - C. Both. The record outside frontmatter is authoritative. The build projects a bounded copy into frontmatter. **Chosen.**
-- Reason: a rebuild regenerates frontmatter, so human `verified` events must survive outside it. Only events in the record count as Verified. Frontmatter keeps each bundle self-describing per OKF §5.2. §2.10 places the record.
+- Reason: a rebuild regenerates frontmatter, so human `verified` events must survive outside it. Only events in the record count as Verified; D64 (#10873) adds hashless frontmatter-only events to `history` only (§2.10 "Events with no hash"). Frontmatter keeps each bundle self-describing per OKF §5.2. §2.10 places the record.
 - Note (r6): under C, `verify` changes concept bytes, so it records `written_bytes` (§4.5).
 
 **(e) Owner of the feed loop to trusty-search. — Decided 2026-11-03 (owner): A.** Owner-choices item 14.
@@ -1258,10 +1258,10 @@ A stale-chunk hit fails the probe, so F6 is also caught here. The withdrawal pro
 **Axis 3: verification state.**
 
 - **Verified.** At least one non-invalidated event in the verification record carries the current content hash. The state reports whether any such event has a `human:` actor.
-- **Unverified.** No event carries the current content hash. The state reports how many history events exist.
+- **Unverified.** No event carries the current content hash. The state reports how many history events exist, including hashless frontmatter-only events (D64, #10873).
 - Events bound to other hashes are history. They never count toward the current revision (§1.1 item 12).
 - r6: an event with no hash is history too. No operation gives it a hash (§2.10 "Events with no hash").
-- The verification record lives outside frontmatter and is authoritative (§3 (d), decided C; §2.10). Axis 3 reads only the record.
+- The verification record lives outside frontmatter and is authoritative (§3 (d), decided C; §2.10). Axis 3 reads the record for Verified and for `VerificationMismatch`. Ruling D64 (#10873): for the `history` count it also reads frontmatter `verified[]` entries that have no `hash` key and whose `(by, at)` no folded record line shares. Such an event is history, never Verified, and never a mismatch (§2.10 "Events with no hash").
 
 **OKF trust tier, kept distinct.** The OKF trust tier stays as OKF §5.3 defines it: derived from frontmatter `verified[]`, advisory, and visible to every OKF consumer. trusty-okf reports it beside the verification state, never in place of it. The two agree while trusty-okf maintains the frontmatter. After an out-of-band edit they can differ: raw frontmatter may still show old events (§2.10 residual risk), while the verification state is Unverified. Any trusty surface that says "verified" uses the verification state.
 
