@@ -21,6 +21,9 @@ mod tests;
 #[cfg(test)]
 mod analyze_probe_tests;
 
+#[cfg(test)]
+mod no_uds_endpoint_tests;
+
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
