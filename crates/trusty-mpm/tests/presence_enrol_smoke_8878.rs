@@ -63,7 +63,11 @@ fn sandbox() -> (PathBuf, PathBuf) {
         dir.display()
     );
     let socket = dir.join("data/trusty-mpm/trusty-mpm.sock");
-    assert!(socket.exists(), "no sandbox daemon socket at {}", socket.display());
+    assert!(
+        socket.exists(),
+        "no sandbox daemon socket at {}",
+        socket.display()
+    );
     (socket, root)
 }
 
@@ -79,14 +83,22 @@ fn devices(listed: &Value) -> Vec<String> {
 }
 
 async fn list(socket: &Path) -> Vec<String> {
-    devices(&call(socket, "mpm.presence.devices.list", json!({})).await.expect("list"))
+    devices(
+        &call(socket, "mpm.presence.devices.list", json!({}))
+            .await
+            .expect("list"),
+    )
 }
 
 /// SoftToken's registration for `ticket`, through `register.start`.
 async fn register(socket: &Path, ticket: &Ticket, origin: &str) -> Value {
-    let started = call(socket, "mpm.presence.register.start", json!({ "ticket": ticket }))
-        .await
-        .expect("register.start");
+    let started = call(
+        socket,
+        "mpm.presence.register.start",
+        json!({ "ticket": ticket }),
+    )
+    .await
+    .expect("register.start");
     let options = serde_json::from_value(started["options"].clone()).expect("options");
     let mut token = SoftToken::new(true).expect("softtoken").0;
     let response = token
@@ -102,10 +114,18 @@ async fn enrol_spent_and_expired_through_the_sandbox_daemon_8878() {
     let key: GrantKey = KeySource::for_root(&root, true)
         .load_or_create()
         .expect("the sandbox file key");
-    let status = call(&socket, "mpm.presence.status", json!({})).await.expect("status");
+    let status = call(&socket, "mpm.presence.status", json!({}))
+        .await
+        .expect("status");
     eprintln!("status: {status}");
-    assert_eq!(status["verifier"], "ready", "set [presence] rp_id and rp_origin");
-    let origin = status["enrol_origin"].as_str().expect("browser_enrol = true").to_owned();
+    assert_eq!(
+        status["verifier"], "ready",
+        "set [presence] rp_id and rp_origin"
+    );
+    let origin = status["enrol_origin"]
+        .as_str()
+        .expect("browser_enrol = true")
+        .to_owned();
     let before = list(&socket).await;
     let now = unix_secs(SystemTime::now());
 
@@ -117,15 +137,26 @@ async fn enrol_spent_and_expired_through_the_sandbox_daemon_8878() {
         .await
         .expect("register.finish");
     eprintln!("(a) enrolled: {done}");
-    let id = done["credential_id"].as_str().expect("credential_id").to_owned();
+    let id = done["credential_id"]
+        .as_str()
+        .expect("credential_id")
+        .to_owned();
     let after = list(&socket).await;
     assert!(after.contains(&id), "devices.list shows {id}: {after:?}");
     assert_eq!(after.len(), before.len() + 1);
 
     // (b) The same ticket again: refused at start and at finish.
-    let again = call(&socket, "mpm.presence.register.start", json!({ "ticket": ticket })).await;
+    let again = call(
+        &socket,
+        "mpm.presence.register.start",
+        json!({ "ticket": ticket }),
+    )
+    .await;
     eprintln!("(b) start again: {again:?}");
-    assert!(again.as_ref().is_err_and(|m| m.contains("already used")), "{again:?}");
+    assert!(
+        again.as_ref().is_err_and(|m| m.contains("already used")),
+        "{again:?}"
+    );
     let refinish = call(&socket, "mpm.presence.register.finish", finish).await;
     eprintln!("(b) finish again: {refinish:?}");
     assert!(refinish.is_err());
@@ -134,12 +165,24 @@ async fn enrol_spent_and_expired_through_the_sandbox_daemon_8878() {
     // (c) A past-dated ticket: refused at start and at finish.
     let stale_at = now - TICKET_TTL.as_secs() - 1;
     let stale = mint_ticket(&key, TicketPurpose::Enrol, "smoke-8878-old", stale_at).expect("old");
-    let start = call(&socket, "mpm.presence.register.start", json!({ "ticket": stale })).await;
+    let start = call(
+        &socket,
+        "mpm.presence.register.start",
+        json!({ "ticket": stale }),
+    )
+    .await;
     eprintln!("(c) expired start: {start:?}");
-    assert!(start.as_ref().is_err_and(|m| m.contains("expired")), "{start:?}");
+    assert!(
+        start.as_ref().is_err_and(|m| m.contains("expired")),
+        "{start:?}"
+    );
     let late = json!({ "ticket": stale, "credential": credential });
     let late = call(&socket, "mpm.presence.register.finish", late).await;
     eprintln!("(c) expired finish: {late:?}");
     assert!(late.is_err());
-    assert_eq!(list(&socket).await, after, "no record for an expired ticket");
+    assert_eq!(
+        list(&socket).await,
+        after,
+        "no record for an expired ticket"
+    );
 }

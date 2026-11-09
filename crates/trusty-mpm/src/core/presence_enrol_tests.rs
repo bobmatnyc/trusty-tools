@@ -67,7 +67,10 @@ fn the_enrol_url_carries_the_ticket_in_its_fragment_8878() {
     let url = enrol_url("https://s.ts.net/", &ticket).expect("url");
     let (page, fragment) = url.split_once('#').expect("a fragment");
     assert_eq!(page, "https://s.ts.net/tools/presence/enrol/");
-    assert!(!page.contains(&ticket.nonce), "the ticket stays out of the path");
+    assert!(
+        !page.contains(&ticket.nonce),
+        "the ticket stays out of the path"
+    );
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(fragment)
         .expect("base64url");

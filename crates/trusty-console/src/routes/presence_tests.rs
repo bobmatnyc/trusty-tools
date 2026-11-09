@@ -54,7 +54,11 @@ fn daemon(dir: &Path, enrol_origin: Option<&str>, register: Value) -> (PathBuf, 
 }
 
 fn methods(seen: &Seen) -> Vec<String> {
-    seen.lock().expect("seen").iter().map(|(m, _)| m.clone()).collect()
+    seen.lock()
+        .expect("seen")
+        .iter()
+        .map(|(m, _)| m.clone())
+        .collect()
 }
 
 fn get_page(host: &str) -> HttpRequest<Body> {
@@ -78,7 +82,12 @@ async fn send(router: &Router, request: HttpRequest<Body>) -> (StatusCode, Heade
     let response = router.clone().oneshot(request).await.expect("response");
     let status = response.status();
     let headers = response.headers().clone();
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     (status, headers, String::from_utf8_lossy(&body).into_owned())
 }
 
@@ -100,7 +109,11 @@ async fn the_enrol_routes_are_absent_while_the_switch_is_off_8878() {
     assert!(body.contains("not enabled"), "{body}");
     for path in [ENROL_START_PATH, ENROL_FINISH_PATH] {
         let body = json!({ "ticket": ticket(), "credential": {} });
-        let body = if path == ENROL_START_PATH { json!({ "ticket": ticket() }) } else { body };
+        let body = if path == ENROL_START_PATH {
+            json!({ "ticket": ticket() })
+        } else {
+            body
+        };
         let (status, _, _) = send(&app, post_json(path, HOST, Some(ORIGIN), body)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
@@ -147,13 +160,21 @@ async fn a_request_not_addressed_to_the_enrol_origin_is_refused_8878() {
         let (status, _, _) = send(&app, post_json(ENROL_START_PATH, host, origin, start())).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{host} {origin:?}");
     }
-    for body in [json!({}), json!({ "ticket": null }), json!({ "credential": {} })] {
-        let (status, _, _) = send(&app, post_json(ENROL_START_PATH, HOST, Some(ORIGIN), body)).await;
+    for body in [
+        json!({}),
+        json!({ "ticket": null }),
+        json!({ "credential": {} }),
+    ] {
+        let (status, _, _) =
+            send(&app, post_json(ENROL_START_PATH, HOST, Some(ORIGIN), body)).await;
         assert!(status.is_client_error(), "{status}");
     }
     let no_credential = json!({ "ticket": ticket() });
-    let (status, _, _) =
-        send(&app, post_json(ENROL_FINISH_PATH, HOST, Some(ORIGIN), no_credential)).await;
+    let (status, _, _) = send(
+        &app,
+        post_json(ENROL_FINISH_PATH, HOST, Some(ORIGIN), no_credential),
+    )
+    .await;
     assert!(status.is_client_error(), "{status}");
     assert!(
         methods(&seen).iter().all(|m| m == "mpm.presence.status"),
@@ -173,24 +194,44 @@ async fn start_and_finish_relay_to_the_daemon_8878() {
     let app = router(PresenceBridge::with_socket(socket));
     let credential = json!({ "id": "x", "rawId": "eA", "type": "public-key" });
     let finish = json!({ "ticket": ticket(), "credential": credential });
-    let (status, _, body) =
-        send(&app, post_json(ENROL_FINISH_PATH, HOST, Some(ORIGIN), finish)).await;
+    let (status, _, body) = send(
+        &app,
+        post_json(ENROL_FINISH_PATH, HOST, Some(ORIGIN), finish),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(serde_json::from_str::<Value>(&body).expect("json")["credential_id"], "cred");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("json")["credential_id"],
+        "cred"
+    );
     let relayed = seen.lock().expect("seen").last().cloned().expect("a call");
     assert_eq!(relayed.0, "mpm.presence.register.finish");
-    assert_eq!(relayed.1, json!({ "ticket": ticket(), "credential": credential }));
+    assert_eq!(
+        relayed.1,
+        json!({ "ticket": ticket(), "credential": credential })
+    );
 
     let dir2 = tempfile::tempdir().expect("tempdir");
-    let spent = json!({ "error": { "code": -32022, "message": "the presence ticket was already used" } });
+    let spent =
+        json!({ "error": { "code": -32022, "message": "the presence ticket was already used" } });
     let (socket, seen) = daemon(dir2.path(), Some(ORIGIN), spent);
     let app = router(PresenceBridge::with_socket(socket));
-    let (status, _, body) =
-        send(&app, post_json(ENROL_START_PATH, HOST, Some(ORIGIN), json!({ "ticket": ticket() })))
-            .await;
+    let (status, _, body) = send(
+        &app,
+        post_json(
+            ENROL_START_PATH,
+            HOST,
+            Some(ORIGIN),
+            json!({ "ticket": ticket() }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body.contains("already used"), "{body}");
-    assert_eq!(methods(&seen).last().map(String::as_str), Some("mpm.presence.register.start"));
+    assert_eq!(
+        methods(&seen).last().map(String::as_str),
+        Some("mpm.presence.register.start")
+    );
 }
 
 /// The page shows "Enrolled" only after a confirmed finish, and keeps the
@@ -199,8 +240,13 @@ async fn start_and_finish_relay_to_the_daemon_8878() {
 fn the_enrol_page_reports_failure_unless_the_finish_confirms_8878() {
     assert!(ENROL_HTML.contains("history.replaceState(null, \"\", location.pathname)"));
     let success = ENROL_HTML.find("show(\"Enrolled").expect("success line");
-    let check = ENROL_HTML.find("typeof done.credential_id !== \"string\"").expect("check");
-    assert!(check < success, "the confirmation check precedes the success line");
+    let check = ENROL_HTML
+        .find("typeof done.credential_id !== \"string\"")
+        .expect("check");
+    assert!(
+        check < success,
+        "the confirmation check precedes the success line"
+    );
     assert!(ENROL_HTML.contains("if (!r.ok) throw"));
 }
 

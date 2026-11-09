@@ -160,7 +160,7 @@ async fn gate(
         .map_err(|e| Refusal::Unavailable(format!("the enrol origin is invalid: {e}")))?;
     let expected = authority(&parsed)
         .ok_or_else(|| Refusal::Unavailable("the enrol origin has no host".to_owned()))?;
-    let header_str = |name| headers.get(name).and_then(|v: &HeaderValue| v.to_str().ok());
+    let header_str = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
     if !header_str(header::HOST).is_some_and(|h| h.eq_ignore_ascii_case(&expected)) {
         return Err(Refusal::WrongTarget("Host is not the enrol origin"));
     }
@@ -203,7 +203,13 @@ async fn start(
     headers: HeaderMap,
     Json(body): Json<StartBody>,
 ) -> Response {
-    relay(&bridge, &headers, "mpm.presence.register.start", json!({ "ticket": body.ticket })).await
+    relay(
+        &bridge,
+        &headers,
+        "mpm.presence.register.start",
+        json!({ "ticket": body.ticket }),
+    )
+    .await
 }
 
 /// `POST /api/console/presence/enrol/finish` → `mpm.presence.register.finish`.
@@ -219,7 +225,12 @@ async fn finish(
 }
 
 /// Gate, then forward `params` to `method` and answer its result as JSON.
-async fn relay(bridge: &PresenceBridge, headers: &HeaderMap, method: &str, params: Value) -> Response {
+async fn relay(
+    bridge: &PresenceBridge,
+    headers: &HeaderMap,
+    method: &str,
+    params: Value,
+) -> Response {
     if let Err(refusal) = gate(bridge, headers, true).await {
         return refusal.into_response();
     }
@@ -239,7 +250,10 @@ async fn enrol_headers(request: Request, next: Next) -> Response {
         HeaderValue::from_static("frame-ancestors 'none'"),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     response
 }
 

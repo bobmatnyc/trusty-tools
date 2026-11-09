@@ -176,7 +176,8 @@ fn devices_add_fails_closed_while_browser_enrol_is_off_8878() {
     let fake = Fake::new(PresenceOutcome::Granted);
     let err = add(&fake, &key, "iphone", None, &call).expect_err("refused");
     assert!(
-        err.to_string().contains("enrolment via browser is not enabled"),
+        err.to_string()
+            .contains("enrolment via browser is not enabled"),
         "{err}"
     );
     assert_eq!(fake.prompts.get(), 0);

@@ -13,9 +13,9 @@ use webauthn_authenticator_rs::softtoken::SoftToken;
 
 use super::*;
 use crate::core::presence_device::{DeviceError, NewDevice};
-use crate::core::presence_webauthn::ES256_ALG;
 use crate::core::presence_enrol::{TICKET_TTL, TicketPurpose, mint_ticket};
 use crate::core::presence_test_support::{NOW, architect_alive, key, root};
+use crate::core::presence_webauthn::ES256_ALG;
 
 const RP: &str = "studio.example.ts.net";
 const ORIGIN: &str = "https://studio.example.ts.net";
@@ -92,7 +92,10 @@ fn a_spent_ticket_is_refused_at_start_and_finish_8878() {
     finish(&s, &ticket, &credential).expect("first finish enrols");
     assert_eq!(devices(&root), 1);
     assert!(presence_device::ticket_spent(&root, &ticket));
-    assert_refused(&s.call("register.start", json!({ "ticket": ticket })), "already used");
+    assert_refused(
+        &s.call("register.start", json!({ "ticket": ticket })),
+        "already used",
+    );
     assert!(finish(&s, &ticket, &credential).is_err());
     assert_eq!(devices(&root), 1, "no second record");
 }
@@ -106,7 +109,10 @@ fn an_expired_ticket_is_refused_at_start_and_finish_8878() {
     let now = clock(NOW);
     let s = service_at(&root, &now);
     let stale = ticket_at("iphone", NOW - ttl - 1);
-    assert_refused(&s.call("register.start", json!({ "ticket": stale })), "expired");
+    assert_refused(
+        &s.call("register.start", json!({ "ticket": stale })),
+        "expired",
+    );
     let ending = ticket_at("iphone", NOW - ttl + 10);
     let credential = answer(start(&s, &ending).expect("start"), ORIGIN);
     now.store(NOW + 11, Ordering::SeqCst);
@@ -193,12 +199,18 @@ fn a_ticket_dated_ahead_or_valid_too_long_is_refused_8878() {
     let (_d, root) = root();
     let s = service_at(&root, &clock(NOW));
     let ahead = ticket_at("iphone", NOW + 61);
-    assert_refused(&s.call("register.start", json!({ "ticket": ahead })), "out of range");
+    assert_refused(
+        &s.call("register.start", json!({ "ticket": ahead })),
+        "out of range",
+    );
     let long = resealed(Ticket {
         expires_at: NOW + TICKET_TTL.as_secs() + 1,
         ..ticket_at("iphone", NOW)
     });
-    assert_refused(&s.call("register.start", json!({ "ticket": long })), "out of range");
+    assert_refused(
+        &s.call("register.start", json!({ "ticket": long })),
+        "out of range",
+    );
     assert_eq!(devices(&root), 0);
 }
 
@@ -226,7 +238,10 @@ fn register_start_offers_es256_only_8878() {
     let (_d, root) = root();
     let s = service_at(&root, &clock(NOW));
     let reply = s
-        .call("register.start", json!({ "ticket": ticket_at("iphone", NOW) }))
+        .call(
+            "register.start",
+            json!({ "ticket": ticket_at("iphone", NOW) }),
+        )
         .expect("start");
     let params = reply["options"]["publicKey"]["pubKeyCredParams"]
         .as_array()
@@ -241,9 +256,15 @@ fn register_start_offers_es256_only_8878() {
 fn status_names_the_enrol_origin_only_when_switched_on_8878() {
     let (_d, root) = root();
     let off = service_at(&root, &clock(NOW));
-    assert_eq!(off.call("status", json!({})).expect("status")["enrol_origin"], Value::Null);
+    assert_eq!(
+        off.call("status", json!({})).expect("status")["enrol_origin"],
+        Value::Null
+    );
     let on = service_at(&root, &clock(NOW)).with_enrol_origin(Some(ORIGIN.to_owned()));
-    assert_eq!(on.call("status", json!({})).expect("status")["enrol_origin"], ORIGIN);
+    assert_eq!(
+        on.call("status", json!({})).expect("status")["enrol_origin"],
+        ORIGIN
+    );
 }
 
 /// No software authenticator or test clock reaches a production build:
@@ -256,7 +277,10 @@ fn softtoken_and_test_clocks_stay_out_of_production_8878() {
         toml::from_str(&std::fs::read_to_string(dir.join("Cargo.toml")).expect("manifest"))
             .expect("toml");
     let soft = "webauthn-authenticator-rs";
-    assert!(manifest["dependencies"].get(soft).is_none(), "{soft} in [dependencies]");
+    assert!(
+        manifest["dependencies"].get(soft).is_none(),
+        "{soft} in [dependencies]"
+    );
     assert!(manifest["dev-dependencies"].get(soft).is_some());
     let core = std::fs::read_to_string(dir.join("src/core/mod.rs")).expect("core/mod.rs");
     assert!(core.contains("#[cfg(test)]\npub(crate) mod presence_test_support;"));
