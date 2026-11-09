@@ -173,6 +173,27 @@ fn a_computed_script_in_a_body_substitution_refuses_10566() {
     }
 }
 
+/// 🔴 REGRESSION (#10748): a `/dev/fd/N` script refuses as computed even when
+/// the guard's own process has fd N open. The guard used to probe its own fd
+/// table, so the `d.sh` row of the test above failed whenever a parallel test
+/// held fd 63: the guard read that fd as the script, and the refusal came from
+/// another rule with another reason.
+#[test]
+fn an_fd_pipe_the_guard_has_open_still_refuses_10748() {
+    use std::os::unix::io::AsRawFd;
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "clean.sh", "echo fake-value\n");
+    let open = std::fs::File::open(dir.path().join("clean.sh")).expect("open");
+    let fd = open.as_raw_fd();
+    script(dir.path(), "f.sh", &format!("T=$(bash /dev/fd/{fd})\n"));
+    let reason = evaluate_script_body_secret_read("bash f.sh", dir.path()).unwrap_or_default();
+    assert!(
+        reason.contains("computed at run time"),
+        "`/dev/fd/{fd}` must deny as unresolvable: {reason}"
+    );
+    drop(open);
+}
+
 /// No over-deny (#10566 round 2): `$(git rev-parse --show-toplevel)`, bare
 /// or with a literal `-C`, resolves to the checkout root above the script,
 /// so a gate script's `$(bash "$REPO_ROOT/scripts/x.sh")` names a file.

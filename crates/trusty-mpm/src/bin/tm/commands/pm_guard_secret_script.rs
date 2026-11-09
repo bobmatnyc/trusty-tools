@@ -625,11 +625,17 @@ fn locate(candidates: &[Candidate], bases: &[PathBuf]) -> Vec<(String, PathBuf, 
 }
 
 /// Every existing file `word` names under `bases`; nothing for a word the
-/// shell computes at run time.
+/// shell computes at run time, or for a `/dev/fd/` or `/proc/self/fd/` pipe.
+/// Test: `an_fd_pipe_the_guard_has_open_still_refuses_10748`.
 fn existing_paths(word: &str, bases: &[PathBuf]) -> Vec<PathBuf> {
     let word = expand(word, bases);
     let word = word.as_str();
-    if word.is_empty() || is_computed(word) {
+    // #10748: an fd path names the script shell's fd, not the guard's; probing
+    // it read whatever the guard (or a sibling test) had open at that number.
+    let fd_pipe = ["/dev/fd/", "/proc/self/fd/"]
+        .iter()
+        .any(|p| word.starts_with(p));
+    if word.is_empty() || fd_pipe || is_computed(word) {
         return Vec::new();
     }
     let mut paths = Vec::new();
