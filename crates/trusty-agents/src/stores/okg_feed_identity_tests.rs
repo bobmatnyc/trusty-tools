@@ -223,3 +223,29 @@ async fn unchanged_identity_offline_read_is_unconfirmed_not_pending() {
         .count();
     assert_eq!(observed, 1, "{text}");
 }
+
+/// Why: #10876 — a daemon rolled back to a build without D1 acknowledges
+/// puts with no identity. If the offline read kept checking those acks
+/// against the last known identity, it would owe a re-push that no pass
+/// sends, and block publication until D1 returned.
+/// What: pass 1 under `i1` ends Searchable. `notes/one.md` is edited and
+/// pass 2 runs with no identity (Unsupported). The pass is acknowledged,
+/// and a fresh offline read blocks nothing and owes nothing.
+/// Test: self-contained.
+#[tokio::test]
+async fn d1_rollback_does_not_block_offline_read() {
+    let (tmp, store, spec) = fixture();
+    let st = IndexStateRef::new(tmp.path().join("state"), "idx");
+    let r1 = feed_source(&store, &spec, &st, &daemon(&store.root, "i1", 1)).await;
+    assert_eq!(r1.status, Some(FeedStatus::Searchable), "{r1:?}");
+
+    std::fs::write(tmp.path().join("corpus/one.md"), "first note, edited").unwrap();
+    let policy = DocStorePolicy::new(vec![tmp.path().canonicalize().unwrap()]);
+    store
+        .okg_ingest_docstore("corpus", &policy, "2026-07-25T00:00:00Z")
+        .unwrap();
+    let r2 = feed_source(&store, &spec, &st, &Fake::new(&store.root)).await;
+    assert_eq!(r2.indexed, 1, "{r2:?}");
+    assert!(r2.acknowledged("idx"), "{r2:?}");
+    assert_offline(&store.root, &spec, &st, 0, 2, &[], "D1 rolled back");
+}

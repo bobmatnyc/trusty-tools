@@ -132,6 +132,12 @@ impl Fake {
         self.hashes.lock().unwrap().clear();
     }
 
+    /// #10876: the daemon is rolled back to a build without D1; replies
+    /// carry no identity. The corpus is kept.
+    fn drop_d1(&self) {
+        *self.identity.lock().unwrap() = None;
+    }
+
     /// A generation bump with the same instance: the corpus lost content.
     fn bump_generation(&self) {
         if let Some(i) = self.identity.lock().unwrap().as_mut() {
@@ -438,7 +444,7 @@ fn only_observed(records: &[IndexRecord]) -> bool {
         .all(|r| matches!(r, IndexRecord::Observed { .. }))
 }
 
-fn observed(records: &[IndexRecord]) -> Vec<IndexIdentity> {
+fn observed(records: &[IndexRecord]) -> Vec<Option<IndexIdentity>> {
     records
         .iter()
         .filter_map(|r| match r {
@@ -1137,7 +1143,7 @@ async fn observed_record_written_once_per_identity_change() {
     let fake = Fake::new(&f.index_root, true);
     f.feed(&fake).await.unwrap();
     f.feed(&fake).await.unwrap();
-    assert_eq!(observed(&f.records()), vec![ident("inst-1", 1)]);
+    assert_eq!(observed(&f.records()), vec![Some(ident("inst-1", 1))]);
     fake.bump_generation();
     f.feed(&fake).await.unwrap();
     f.feed(&fake).await.unwrap();
@@ -1145,7 +1151,11 @@ async fn observed_record_written_once_per_identity_change() {
     f.feed(&fake).await.unwrap();
     assert_eq!(
         observed(&f.records()),
-        vec![ident("inst-1", 1), ident("inst-1", 2), ident("inst-2", 1)]
+        vec![
+            Some(ident("inst-1", 1)),
+            Some(ident("inst-1", 2)),
+            Some(ident("inst-2", 1))
+        ]
     );
 
     let g = fx();
@@ -1182,6 +1192,53 @@ async fn observed_write_failure_is_not_fed() {
     assert!(fake.calls("search.index.file.put").is_empty());
     assert!(fake.calls("search.index.file.remove").is_empty());
     assert_eq!(f.journal_bytes(), before);
+}
+
+/// Why: #10876 — a daemon rolled back to a build without D1 must not leave
+/// the offline read comparing new identity-less acks against the stale
+/// identity, which owes a re-push no pass sends.
+/// What: a D1 pass, then a pass with the daemon down (Unreadable: no
+/// record), then two passes with D1 gone and an edited concept. Exactly one
+/// `Observed { None }` is appended, the offline backlog owes nothing and
+/// equals the `Unreadable` backlog, and D1's return journals the identity
+/// again. Test: itself.
+#[tokio::test]
+async fn d1_rollback_journals_one_absent_observation() {
+    let f = fx();
+    create(&f.root, "a", &ALPHA);
+    let fake = Fake::new(&f.index_root, true);
+    assert_eq!(f.feed(&fake).await.unwrap().status, FeedStatus::Searchable);
+    assert_eq!(observed(&f.records()), vec![Some(ident("inst-1", 1))]);
+
+    fake.script(|s| s.down = true);
+    let before = f.journal_bytes();
+    f.feed(&fake).await.unwrap();
+    assert_eq!(f.journal_bytes(), before, "Unreadable writes nothing");
+    fake.script(|s| s.down = false);
+
+    fake.drop_d1();
+    edit(&f.root, "a", &["Alpha words edited after the rollback"]);
+    f.feed(&fake).await.unwrap();
+    f.feed(&fake).await.unwrap();
+    assert_eq!(
+        observed(&f.records()),
+        vec![Some(ident("inst-1", 1)), None],
+        "one absent observation, none on Unsupported -> Unsupported"
+    );
+    let offline = f.bundle().index_backlog_offline(&f.state, INDEX).unwrap();
+    assert_eq!(offline.owed(), 0, "{offline:?}");
+    let down = LiveIdentity::Unreadable("down".into());
+    assert_eq!(
+        offline,
+        f.bundle().index_backlog(&f.state, INDEX, &down).unwrap()
+    );
+
+    fake.recreate("inst-2");
+    f.feed(&fake).await.unwrap();
+    assert_eq!(
+        observed(&f.records()),
+        vec![Some(ident("inst-1", 1)), None, Some(ident("inst-2", 1))]
+    );
 }
 
 /// Why: #10876 criterion — a journal with no `Observed` record (D1 absent,
@@ -1237,14 +1294,23 @@ async fn index_backlog_offline_equals_index_backlog_when_no_identity() {
 #[test]
 fn observed_record_round_trips_and_older_readers_skip_it() {
     let r = IndexRecord::Observed {
-        identity: ident("inst-1", 3),
+        identity: Some(ident("inst-1", 3)),
     };
     let line = serde_json::to_string(&r).unwrap();
+    // #10876: the bare-object form the first #10876 commit wrote parses as
+    // `Some`, and a D1-absent observation round-trips as `null`.
     assert_eq!(
         line,
         r#"{"kind":"observed","identity":{"instance_id":"inst-1","generation":3}}"#
     );
     assert_eq!(serde_json::from_str::<IndexRecord>(&line).unwrap(), r);
+    let absent = IndexRecord::Observed { identity: None };
+    let null_line = serde_json::to_string(&absent).unwrap();
+    assert_eq!(null_line, r#"{"kind":"observed","identity":null}"#);
+    assert_eq!(
+        serde_json::from_str::<IndexRecord>(&null_line).unwrap(),
+        absent
+    );
 
     #[derive(serde::Deserialize, Debug)]
     #[serde(tag = "kind", rename_all = "snake_case")]

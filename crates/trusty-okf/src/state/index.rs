@@ -134,8 +134,12 @@ pub enum IndexRecord {
     /// or generation bump stays visible after the pass that saw it. An
     /// older binary skips this kind as an unparseable line (F11).
     Observed {
-        /// The identity the status reply carried.
-        identity: IndexIdentity,
+        /// The identity the status reply carried. `None`: the reply carried
+        /// none after an earlier pass saw one (D1 rolled back), so an
+        /// offline read stops checking acks against the stale identity.
+        // #10876: `Option` so a D1 rollback is journaled; a bare identity
+        // object, as the first #10876 commit wrote, still parses as `Some`.
+        identity: Option<IndexIdentity>,
     },
 }
 
@@ -258,14 +262,21 @@ pub(crate) fn journaled_paths(records: &[IndexRecord]) -> std::collections::BTre
         .collect()
 }
 
-/// The identity of the newest [`IndexRecord::Observed`], if any (#10876).
+/// The identity of the newest [`IndexRecord::Observed`] (#10876).
 ///
-/// Test: `observed_record_written_once_per_identity_change`.
+/// `None` when there is no observation or the newest one records D1 absent.
+/// Test: `observed_record_written_once_per_identity_change`,
+/// `d1_rollback_journals_one_absent_observation`.
 pub(crate) fn last_observed_identity(records: &[IndexRecord]) -> Option<&IndexIdentity> {
-    records.iter().rev().find_map(|r| match r {
-        IndexRecord::Observed { identity } => Some(identity),
-        _ => None,
-    })
+    records
+        .iter()
+        .rev()
+        .find_map(|r| match r {
+            // #10876: a newest `None` (D1 rolled back) hides older identities.
+            IndexRecord::Observed { identity } => Some(identity.as_ref()),
+            _ => None,
+        })
+        .flatten()
 }
 
 /// Fold `records` for `path` in journal order.

@@ -1,9 +1,10 @@
 //! One feed pass (SPEC-OKF-01 §5.4).
 //!
 //! Why/What: see the parent module. Every arm that is not a confirmation
-//! leaves the journal unchanged, except that a known identity that differs
-//! from the last one observed is recorded once (#10876); a journal append
-//! that fails stops the pass with `JournalWrite` (F3).
+//! leaves the journal unchanged, except that a status identity that differs
+//! from the last one observed, including D1 going absent, is recorded once
+//! (#10876); a journal append that fails stops the pass with `JournalWrite`
+//! (F3).
 //! Test: `crates/trusty-okf/tests/feed_criteria.rs`.
 
 use serde_json::json;
@@ -35,14 +36,16 @@ use crate::state::index::{
 /// pushed. No error and no report arm reads Searchable without a passed
 /// probe under a known, matching identity. A known status identity that
 /// differs from the journal's newest `Observed` record is journaled after
-/// the scope check and before any task (#10876).
+/// the scope check and before any task (#10876); so is a reply with no
+/// identity after a known one (D1 rolled back), as `None`.
 /// Test: `c43_daemon_down_is_not_fed_and_the_journal_is_unchanged`,
 /// `c44_one_failed_put_of_three_is_partial`,
 /// `c45_journal_append_failure_counts_nothing_and_the_next_pass_repushes`,
 /// `c128_scope_leak_is_index_scope_and_pushes_nothing`,
 /// `c134_identity_change_reads_pending_and_the_next_pass_repushes`,
 /// `observed_record_written_once_per_identity_change`,
-/// `observed_write_failure_is_not_fed`.
+/// `observed_write_failure_is_not_fed`,
+/// `d1_rollback_journals_one_absent_observation`.
 pub async fn feed(
     bundle: &Bundle,
     state: &IndexStateDir,
@@ -89,11 +92,19 @@ pub async fn feed(
     // sees it even when every re-push below is refused. After the scope
     // check: a leak appends no journal line (criterion 129). A failed write
     // stops the pass (F3).
-    if let LiveIdentity::Known(i) = &status.live
-        && last_observed_identity(&records) != Some(i)
+    // #10876: `Unsupported` after a known identity (D1 rolled back) is
+    // journaled as `None`, or the offline read keeps checking acks against
+    // the stale identity and blocks forever. `Unreadable` writes nothing.
+    let observed = match &status.live {
+        LiveIdentity::Known(i) => Some(Some(i)),
+        LiveIdentity::Unsupported => Some(None),
+        LiveIdentity::Unreadable(_) => None,
+    };
+    if let Some(now) = observed
+        && last_observed_identity(&records) != now
     {
         run.record(IndexRecord::Observed {
-            identity: i.clone(),
+            identity: now.cloned(),
         })?;
     }
     for u in &backlog.unreadable {
