@@ -69,6 +69,7 @@ default-members = [
     "crates/trusty-code",
     "crates/trusty-code-tui",
     "crates/trusty-common",
+    "crates/trusty-connectors",
     "crates/trusty-console",
     "crates/trusty-cto-db",
     "crates/trusty-embedderd",

@@ -42,6 +42,7 @@ new_fixture() {
   printf '%s\nserde v1.0.0\n' "$TREE_HEAD" > "$dir/all.txt"
   printf '%s\n' "$TREE_HEAD" > "$dir/core.txt"
   printf '%s\ntrusty-agents v0.39.4 (/x/crates/trusty-agents)\n' "$TREE_HEAD" > "$dir/inv.txt"
+  printf 'trusty-agents v0.39.4 (/x/crates/trusty-agents)\n%s\n' "$TREE_HEAD" > "$dir/agents.txt"
   git -C "$dir" init -q
   printf '%s\n' "$dir"
 }
@@ -52,7 +53,7 @@ run_case() {
   local name="$1" want="$2" needle="$3" dir="$4" out status
   set +e
   out="$(cd "$dir" && PATH="${CASE_PATH:-$PATH}" OKF_TREE_ALL=all.txt OKF_TREE_CORE=core.txt \
-    OKF_TREE_INV=inv.txt OKF_SKIP_BUILD=1 bash "$GATE" 2>&1)"
+    OKF_TREE_INV=inv.txt OKF_TREE_AGENTS=agents.txt OKF_SKIP_BUILD=1 bash "$GATE" 2>&1)"
   status=$?
   set -e
   if [ "$status" -ne "$want" ]; then
@@ -188,6 +189,32 @@ run_case "no trusty-agents dependent fails" 1 "FAIL b2_trusty_agents_depends_on_
 d="$(new_fixture agents-common-dependent)"
 printf '%s\ntrusty-agents-common v0.1.0 (/x/crates/trusty-agents-common)\n' "$TREE_HEAD" > "$d/inv.txt"
 run_case "a near-name dependent is not trusty-agents" 1 "FAIL b2_trusty_agents_depends_on_okf" "$d"
+
+# #10746 S13: the connector crate stays out of trusty-okf (B1) and out of
+# trusty-agents.
+d="$(new_fixture okf-connector-dep)"
+printf 'trusty-connectors v0.1.0 (/x/crates/trusty-connectors)\n' >> "$d/all.txt"
+run_case "connector crate in trusty-okf fails c11" 1 "banned dependency: trusty-connectors" "$d"
+d="$(new_fixture agents-connector-dep)"
+printf 'trusty-connectors v0.1.0 (/x/crates/trusty-connectors)\n' >> "$d/agents.txt"
+run_case "connector crate in trusty-agents fails" 1 "FAIL b11_agents_do_not_link_connectors" "$d"
+# #10746 S13 fix round: the edge is found whatever the tree's size. With the
+# edge near the top and over 64 KiB of tree after it, `awk | grep -q` under
+# pipefail exited 141 (SIGPIPE) and the check printed ok.
+d="$(new_fixture agents-connector-dep-large)"
+printf 'trusty-agents v0.39.4 (/x/crates/trusty-agents)\ntrusty-connectors v0.1.0 (/x/crates/trusty-connectors)\n' > "$d/agents.txt"
+awk 'BEGIN { for (i = 0; i < 20000; i++) printf "padding-crate-%06d v1.0.0\n", i }' >> "$d/agents.txt"
+run_case "connector crate in a large trusty-agents tree fails" 1 "FAIL b11_agents_do_not_link_connectors" "$d"
+d="$(new_fixture agents-dependent-large)"
+printf '%s\ntrusty-agents v0.39.4 (/x/crates/trusty-agents)\n' "$TREE_HEAD" > "$d/inv.txt"
+awk 'BEGIN { for (i = 0; i < 20000; i++) printf "padding-crate-%06d v1.0.0\n", i }' >> "$d/inv.txt"
+run_case "trusty-agents found in a large inverse tree" 0 "ok   b2_trusty_agents_depends_on_okf" "$d"
+d="$(new_fixture agents-tree-root)"
+printf 'serde v1.0.0\n' > "$d/agents.txt"
+run_case "agents tree not rooted at trusty-agents fails" 1 "does not start at trusty-agents" "$d"
+d="$(new_fixture agents-near-name)"
+printf 'trusty-connectors-extra v0.1.0\n' >> "$d/agents.txt"
+run_case "a near-name crate is not trusty-connectors" 0 "ok   b11_agents_do_not_link_connectors" "$d"
 
 # 15-16. Fail closed.
 d="$(new_fixture no-src)"
