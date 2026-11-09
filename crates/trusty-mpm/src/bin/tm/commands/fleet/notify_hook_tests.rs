@@ -118,6 +118,8 @@ fn a_first_run_enables_the_hook_and_applies_it() {
         cfg.notification_hook.inbox.as_deref(),
         Some(inbox.as_path())
     );
+    // `tm hook` creates no directory, so the step must.
+    assert!(inbox.is_dir(), "the inbox directory was not created");
     assert_eq!(notification_commands(&home), vec![format!("{EXE} hook")]);
 }
 

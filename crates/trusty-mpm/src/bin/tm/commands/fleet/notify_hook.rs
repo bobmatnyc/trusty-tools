@@ -46,8 +46,8 @@ fn fix_line() -> String {
 /// What: re-reads `home`'s config (the allowlist write ran first).
 /// (1) No `notification_hook` key: checks the managed settings with
 /// [`probe_notification_hook`] first, so a file the writer refuses (or no
-/// stable `tm` binary) is [`Step::Skipped`] with nothing written; then writes
-/// the two keys ([`config::enable_notification_hook`]) and applies the hook:
+/// stable `tm` binary) is [`Step::Skipped`] with nothing written; then creates
+/// `dir/inbox` (a failure is Skipped, nothing written), writes the two keys ([`config::enable_notification_hook`]) and applies the hook:
 /// [`Step::Changed`]. A config write error is [`Step::Failed`]; an apply
 /// error after it is [`Step::Skipped`] saying the config was written.
 /// (2) Present, `inbox` is `dir/inbox`: [`Step::Unchanged`], writing nothing,
@@ -81,6 +81,15 @@ pub(crate) fn step(dir: &Path, home: &Path, exe: Option<&Path>) -> Step {
             "`[notification_hook]` not enabled: {} cannot take the Notification hook ({why}); \
              nothing was written. Fix that file and re-run `tm fleet init`, or {}",
             settings.display(),
+            fix_line()
+        ));
+    }
+    // #10885: `tm hook` appends to `<inbox>/events.jsonl` and creates no directory.
+    if let Err(e) = std::fs::create_dir_all(&inbox) {
+        return Step::Skipped(format!(
+            "`[notification_hook]` not enabled: cannot create {}: {e}; nothing was written. \
+             Fix that and re-run `tm fleet init`, or {}",
+            inbox.display(),
             fix_line()
         ));
     }
