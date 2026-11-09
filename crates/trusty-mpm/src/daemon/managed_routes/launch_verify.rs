@@ -486,6 +486,7 @@ mod tests {
             last_cwd: None, deliverable_id: None,
             pane_id: None, injection_status: Default::default(),
             tmux_server: None,
+            tmux_socket: None,
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,

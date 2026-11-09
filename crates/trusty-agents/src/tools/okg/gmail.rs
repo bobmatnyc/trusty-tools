@@ -12,14 +12,15 @@
 //! authenticated `trusty-gworkspace` client, filters them against the ledger,
 //! fetches only the unseen ones, and hands them to the ingest engine with
 //! deletion detection OFF — a windowed pull can never prove a message is gone.
-//! Test: `super::tests::gmail_query_*`, `message_to_item_*`.
+//! Test: `super::tests::message_to_item_*`; the query composition moved to
+//! trusty-gworkspace with `gmail_query` (#10746 S13).
 
+use crate::kb::okg::registry::{Locator, SourceSpec};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_gworkspace::api::client::BaseClient;
-use trusty_kb::okg::ingest::{IngestReport, SourceItem};
-use trusty_kb::okg::ledger::Ledger;
-use trusty_kb::okg::registry::{Locator, SourceSpec};
+use trusty_okf::build::ingest::{IngestReport, SourceItem};
+use trusty_okf::build::ledger::Ledger;
 
 use crate::tools::okg::gapi;
 use crate::tools::okg::{arg_str, now_iso, ok_json, require_str, resolve_store, with_root};
@@ -214,13 +215,9 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     report.scanned = ids.len();
 
     // Make the pulled messages findable — fail-open, never silent (#3892).
-    let index = crate::tools::okg::index_feed::feed_bound_index(
-        &store,
-        &spec,
-        arg_str(args, "agent"),
-        &now,
-    )
-    .await;
+    let index =
+        crate::tools::okg::index_feed::feed_bound_index(&store, &spec, arg_str(args, "agent"))
+            .await;
 
     Ok(ok_json(&json!({
         "source": registered,

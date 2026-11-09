@@ -11,7 +11,9 @@
 //! doctor probes the daemon's unix socket only, and the scratch HOME's data
 //! directory holds none, so the dial is refused at once. It then asserts the
 //! local checks printed, that daemon reachability is ONE row saying "not
-//! running", and that no output names a port.
+//! running", and that no output names a port. #10565 AC4: the line after the
+//! header names the project the report checked, for a cwd run, `--dir`, and
+//! `--fix --dry-run`.
 //! Test: `cargo test -p trusty-mpm --test integration tm_doctor_standalone::`.
 
 use crate::common;
@@ -220,5 +222,106 @@ fn tm_doctor_rotate_deps_fail_row_exits_non_zero() {
     assert!(
         !output.status.success(),
         "exited 0 despite a FAIL row.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// #10565 AC4: the line after the header names the project the report checked.
+///
+/// Returns that line, or panics with the whole stdout when the report is too
+/// short to carry one.
+fn project_header_line(stdout: &str) -> &str {
+    let mut lines = stdout.lines();
+    assert_eq!(
+        lines.next(),
+        Some("trusty-mpm doctor"),
+        "no report header.\nstdout:\n{stdout}"
+    );
+    lines
+        .next()
+        .unwrap_or_else(|| panic!("report ends after its header.\nstdout:\n{stdout}"))
+}
+
+/// #10565 AC4: with no `--dir`, doctor names the cwd it scoped the report to.
+///
+/// The issue's case: run from a directory with no project settings, the
+/// `deployment` row fails and nothing said which directory was checked, so the
+/// failure read as a broken install. The scratch cwd here has no `.claude/`.
+#[test]
+fn tm_doctor_names_the_cwd_project_it_checked() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let canonical = cwd.path().canonicalize().expect("canonical cwd");
+    let output = common::tm_command_in(home.path())
+        .arg("doctor")
+        .current_dir(cwd.path())
+        .output()
+        .expect("failed to spawn `tm doctor`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+
+    let line = project_header_line(&stdout);
+    assert!(
+        line.starts_with("project: ") && line.contains(&canonical.display().to_string()),
+        "line after the header does not name the cwd {}: {line:?}",
+        canonical.display()
+    );
+}
+
+/// #10565 AC4: with `--dir`, the header names the target, never the cwd.
+#[test]
+fn tm_doctor_dir_names_the_target_project_not_the_cwd() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let target = tempfile::tempdir().expect("scratch target");
+    let canonical = target.path().canonicalize().expect("canonical target");
+    let cwd_canonical = cwd.path().canonicalize().expect("canonical cwd");
+    let output = common::tm_command_in(home.path())
+        .args(["doctor", "--dir"])
+        .arg(target.path())
+        .current_dir(cwd.path())
+        .output()
+        .expect("failed to spawn `tm doctor --dir`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+
+    let line = project_header_line(&stdout);
+    assert!(
+        line.starts_with("project: ") && line.contains(&canonical.display().to_string()),
+        "line after the header does not name --dir {}: {line:?}",
+        canonical.display()
+    );
+    assert!(
+        !line.contains(&cwd_canonical.display().to_string()),
+        "header names the cwd instead of --dir: {line:?}"
+    );
+}
+
+/// #10565 AC4: `--fix` names the project it is about to repair.
+///
+/// The Architect-directory incident was a `--fix` run; the operator could not
+/// tell from the output which project's settings the repair targeted.
+/// `--dry-run` writes nothing, and the scratch HOME keeps the walk off the
+/// operator's own files.
+#[test]
+fn tm_doctor_fix_dry_run_names_the_project_it_checked() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let canonical = cwd.path().canonicalize().expect("canonical cwd");
+    let output = common::tm_command_in(home.path())
+        .args(["doctor", "--fix", "--dry-run"])
+        .current_dir(cwd.path())
+        .output()
+        .expect("failed to spawn `tm doctor --fix --dry-run`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+
+    let line = project_header_line(&stdout);
+    assert!(
+        line.starts_with("project: ") && line.contains(&canonical.display().to_string()),
+        "line after the header does not name the cwd {}: {line:?}",
+        canonical.display()
     );
 }

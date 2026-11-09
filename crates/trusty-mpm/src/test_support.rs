@@ -54,6 +54,11 @@ use tempfile::TempDir;
 #[path = "test_tmux_session.rs"]
 pub(crate) mod tmux_session;
 
+/// A stale socket whose dial is known to be refused (#10026). The same file
+/// backs the `tm` binary's copy; filter on `stale_socket`, the module path.
+#[path = "test_stale_socket.rs"]
+pub(crate) mod stale_socket;
+
 /// The spawn primitive [`tmux_session`] runs every tmux invocation through
 /// (#7060).
 ///
@@ -581,6 +586,40 @@ pub(crate) fn self_describing_identity(
         session_id: "$0".into(),
         server: FAKE_PANE_SERVER.into(),
         session_name: pane_id.trim_start_matches('%').to_owned(),
+    }
+}
+
+/// A FIFO a fake tmux reads from to hang until the test ends (#10101).
+///
+/// What: dropping it opens the FIFO for writing (non-blocking, so with no
+/// reader it does nothing), which ends a blocked `read < fifo` with EOF; a
+/// failed assertion therefore leaves no fake tmux behind.
+#[cfg(unix)]
+pub(crate) struct HangFifo(std::path::PathBuf);
+
+#[cfg(unix)]
+impl HangFifo {
+    /// A FIFO named `hang` in `dir`.
+    pub(crate) fn new(dir: &Path) -> Self {
+        let path = dir.join("hang");
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+        Self(path)
+    }
+
+    /// The FIFO's path, for the fake tmux script.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HangFifo {
+    fn drop(&mut self) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(&self.0);
     }
 }
 

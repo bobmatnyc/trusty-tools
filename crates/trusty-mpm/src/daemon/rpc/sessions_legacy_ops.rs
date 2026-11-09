@@ -27,9 +27,10 @@
 //! Three routes here do work that is deliberately allowed to fail without
 //! failing the call: the tmux kill and managed-store reconcile behind
 //! [`remove_session`], the pause-file write behind [`pause_session`], and the
-//! tmux `send-keys` behind [`send_command`]. Each is logged and swallowed
-//! exactly where it always was — inside this one body — so the socket inherits
-//! the HTTP contract rather than a second, laxer one. The failure branches that
+//! tmux `send-keys` behind [`send_command`] (which reports a failed send as
+//! `sent: false`, #10101). Each is handled exactly where it always was —
+//! inside this one body — so the socket inherits the HTTP contract rather
+//! than a second, laxer one. The failure branches that
 //! DO error (an unknown id, a stopped session, an overseer block) error on both
 //! transports for the same reason, because there is one `?` to hit.
 //!
@@ -170,13 +171,26 @@ pub fn list_sessions(state: &Arc<DaemonState>, query: SessionQuery) -> SessionsR
 /// [`DaemonError`] when `workdir` was supplied and the tmux spawn failed —
 /// `claude` or tmux missing (HTTP 422 / `CODE_UNPROCESSABLE`), or the tmux
 /// command itself failing (HTTP 500 / `CODE_INTERNAL_ERROR`).
+/// [`DaemonError::InvalidRequest`] when `tmux_socket` is combined with
+/// `workdir` (#10101).
 ///
 /// Test: `parity_sessions_register_agrees_across_transports`,
-/// `register_and_remove_session`.
+/// `register_and_remove_session`,
+/// `a_registration_records_the_workspace_server_socket_10101`,
+/// `a_socket_with_spawn_mode_is_refused_10101`.
 pub fn register_session(
     state: &Arc<DaemonState>,
     body: RegisterSession,
 ) -> Result<RegisterSessionResponse, DaemonError> {
+    // #10101: spawn mode creates on the default server, so a socket naming
+    // another server would record the wrong one.
+    if body.workdir.is_some() && body.tmux_socket.is_some() {
+        return Err(DaemonError::InvalidRequest(
+            "`tmux_socket` names a session the caller created; it cannot be combined with \
+             `workdir`, which spawns on the default tmux server"
+                .into(),
+        ));
+    }
     // Derive the tmux name from the project directory (`tm-<folder>`) so the
     // registry name matches the folder-based session the CLI creates. A
     // caller-supplied `name` always wins; otherwise fall back to the UUID name.
@@ -208,6 +222,8 @@ pub fn register_session(
         session.status = SessionStatus::Active;
     }
 
+    // #10101: a CLI launch names the workspace server it creates the PM on.
+    session.tmux_socket = body.tmux_socket.clone();
     let id = session.id;
     let tmux_name = session.tmux_name.clone();
     state.register_session(session);
@@ -220,6 +236,7 @@ pub fn register_session(
         Arc::clone(state),
         id,
         tmux_name.clone(),
+        body.tmux_socket, // #10101: on the session's own server
     );
 
     Ok(RegisterSessionResponse {
@@ -280,7 +297,8 @@ pub async fn remove_session(
         })?;
 
     let tmux_name = removed.tmux_name.clone();
-    TmuxService::kill_best_effort(&tmux_name);
+    // #10101: on the session's own server, never a same-named default one.
+    TmuxService::kill_best_effort_on(&tmux_name, removed.tmux_socket.as_deref());
     reconcile_managed_store_on_delete(state, &tmux_name).await;
 
     Ok(RemoveSessionResponse {
@@ -486,10 +504,11 @@ pub fn resume_session(state: &Arc<DaemonState>, id: &str) -> Result<ResumeRespon
 /// Send a command into a session's tmux pane (`POST /sessions/{id}/command`,
 /// `mpm.sessions.command`).
 ///
-/// Why the tmux write is best-effort but the state check is not: a `Stopped`
-/// session is refused before anything is sent (`SessionNotActive`, HTTP 409 /
-/// `CODE_CONFLICT`), while a tmux failure after that point is logged and the
-/// caller still gets whatever the pane held. One body, so one policy.
+/// Why the tmux write does not fail the call but the state check does: a
+/// `Stopped` session is refused before anything is sent (`SessionNotActive`,
+/// HTTP 409 / `CODE_CONFLICT`), while a tmux failure after that point answers
+/// `sent: false` with `send_error` naming why (#10101), and the caller still
+/// gets whatever the pane held. One body, so one policy.
 ///
 /// # Errors
 ///
@@ -505,15 +524,19 @@ pub async fn send_command(
     compress: Option<CompressionLevel>,
 ) -> Result<CommandResponse, DaemonError> {
     let session = SessionService::new(state).command_target(id)?;
-    TmuxService::send_command(&session, command);
+    // #10101: a line that reached no pane answers `sent: false` and says why.
+    let delivery = TmuxService::send_command(&session, command);
 
-    // Give the pane a moment to render the command's output before capturing.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if delivery.is_ok() {
+        // Give the pane a moment to render the command's output before capturing.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
     let raw = TmuxService::capture(&session, 100);
     let compressed = apply_compression(compress, &raw);
 
     Ok(CommandResponse {
-        sent: true,
+        sent: delivery.is_ok(),
+        send_error: delivery.err(),
         output: compressed.text,
         original_bytes: compressed.stats.original_bytes,
         compressed_bytes: compressed.stats.compressed_bytes,

@@ -31,6 +31,7 @@ versions, publishability, and targets.
 | `trusty-code-gui` | [`crates/trusty-code-gui/`](../../crates/trusty-code-gui/) | library, `trusty-code-gui` | [crate README](../../crates/trusty-code-gui/README.md) |
 | `trusty-code-tui` | [`crates/trusty-code-tui/`](../../crates/trusty-code-tui/) | library | [crate README](../../crates/trusty-code-tui/README.md) |
 | `trusty-common` | [`crates/trusty-common/`](../../crates/trusty-common/) | library, supporting binaries | [crate README](../../crates/trusty-common/README.md), [extended docs](../trusty-common/README.md) |
+| `trusty-connectors` | [`crates/trusty-connectors/`](../../crates/trusty-connectors/) | library, `okf-adapter-gmail`, `okf-adapter-gdocs`; `publish = false`; the trusty-okf import adapter programs, which hold the Google credential (#10746) | [`CHANGELOG.md`](../../crates/trusty-connectors/CHANGELOG.md) |
 | `trusty-console` | [`crates/trusty-console/`](../../crates/trusty-console/) | library, `trusty-console` | [crate README](../../crates/trusty-console/README.md), [extended docs](../trusty-console/README.md) |
 | `trusty-crate-contracts` | [`crates/trusty-crate-contracts/`](../../crates/trusty-crate-contracts/) | test-only, never published — the home for tests spanning two production crates (#8341) | [crate README](../../crates/trusty-crate-contracts/README.md) |
 | `trusty-cto-db` | [`crates/trusty-cto-db/`](../../crates/trusty-cto-db/) | library | [crate README](../../crates/trusty-cto-db/README.md), [extended docs](../trusty-cto-db/README.md) |
@@ -39,10 +40,10 @@ versions, publishability, and targets.
 | `trusty-events` | [`crates/trusty-events/`](../../crates/trusty-events/) | library, `trusty-events` daemon binary — internal 0.x with no stability promise for its Rust API; no other crate links it; the wire contract lives in `trusty-common::control_bus`; launchd supervision follows in #10042 ([ADR-0065](../adr/0065-trusty-events-process-placement.md)) | [crate README](../../crates/trusty-events/README.md), [ADR-0065](../adr/0065-trusty-events-process-placement.md) |
 | `trusty-gworkspace` | [`crates/trusty-gworkspace/`](../../crates/trusty-gworkspace/) | library, `trusty-gworkspace-mcp` | [crate README](../../crates/trusty-gworkspace/README.md), [extended docs](../trusty-gworkspace/README.md) |
 | `trusty-installer` | [`crates/trusty-installer/`](../../crates/trusty-installer/) | library, `trusty-installer`, `tctl` | [crate README](../../crates/trusty-installer/README.md) |
-| `trusty-kb` | [`crates/trusty-kb/`](../../crates/trusty-kb/) | library, `trusty-kb` | [crate README](../../crates/trusty-kb/README.md) |
 | `trusty-mcp` | [`crates/trusty-mcp/`](../../crates/trusty-mcp/) | library | [crate README](../../crates/trusty-mcp/README.md) |
 | `trusty-memory` | [`crates/trusty-memory/`](../../crates/trusty-memory/) | library, `trusty-memory`, compatibility bridge | [crate README](../../crates/trusty-memory/README.md), [extended docs](../trusty-memory/README.md) |
 | `trusty-mpm` | [`crates/trusty-mpm/`](../../crates/trusty-mpm/) | library, `tm`, `trusty-mpm` | [crate README](../../crates/trusty-mpm/README.md), [extended docs](../trusty-mpm/README.md) |
+| `trusty-okf` | [`crates/trusty-okf/`](../../crates/trusty-okf/) | library, `trusty-okf`; `publish = false`; replaced `trusty-kb` (#10746) | [`CHANGELOG.md`](../../crates/trusty-okf/CHANGELOG.md) |
 | `trusty-progress` | [`crates/trusty-progress/`](../../crates/trusty-progress/) | library | [crate README](../../crates/trusty-progress/README.md) |
 | `trusty-publish-guard` | [`crates/trusty-publish-guard/`](../../crates/trusty-publish-guard/) | library, `publish-guard` | [crate README](../../crates/trusty-publish-guard/README.md) |
 | `trusty-review` | [`crates/trusty-review/`](../../crates/trusty-review/) | library, `trusty-review` | [crate README](../../crates/trusty-review/README.md) |

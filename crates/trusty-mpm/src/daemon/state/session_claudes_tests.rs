@@ -686,7 +686,7 @@ fn a_session_rebound_during_the_reap_is_kept_9010() {
     let resuming = bound_session(&state, CLAUDE);
     let id = resuming.0.to_string();
     let result = state.reap_against_with(&none, |_| {
-        state.grant_resumed_session(Some(&id), "tm-resumed", Some("%7"));
+        state.grant_resumed_session(Some(&id), "tm-resumed", Some("%7"), None);
         gone()
     });
     assert_eq!(result.reaped, 0, "a grant after the walk keeps it");
@@ -721,6 +721,7 @@ fn a_resume_grant_holds_a_reap_only_for_a_bounded_time_9010() {
     let grant = |issued_at| ResumeGrant {
         tmux_name: "tm-resumed".to_string(),
         pane_id: Some("%7".to_string()),
+        tmux_socket: None,
         issued_at,
     };
     let now = now_secs();
@@ -769,6 +770,7 @@ fn an_expired_resume_grant_does_not_rebind_9010() {
             ResumeGrant {
                 tmux_name: "tm-resumed".to_string(),
                 pane_id: Some("%7".to_string()),
+                tmux_socket: None,
                 issued_at,
             },
         );
@@ -845,7 +847,7 @@ fn resumed_session(state: &DaemonState) -> SessionId {
     let session = SessionId::new();
     state.bind_session_claude(session, CLAUDE).expect("vacant");
     state.upsert_delegation(Delegation::observed(session, "engineer", "task", None));
-    state.grant_resumed_session(Some(&session.0.to_string()), "tm-resumed", Some("%7"));
+    state.grant_resumed_session(Some(&session.0.to_string()), "tm-resumed", Some("%7"), None);
     session
 }
 
@@ -1065,7 +1067,7 @@ fn a_resume_rebind_fails_closed_8983() {
     // #8983: a record with no pane id never falls back to the active pane.
     let paneless = SessionId::new();
     state.bind_session_claude(paneless, CLAUDE).expect("vacant");
-    state.grant_resumed_session(Some(&paneless.0.to_string()), "tm-resumed", None);
+    state.grant_resumed_session(Some(&paneless.0.to_string()), "tm-resumed", None, None);
     let got = state.rebind_resumed_claude_with(
         paneless,
         resumed,
@@ -1084,7 +1086,7 @@ fn a_resume_rebind_fails_closed_8983() {
     std::fs::write(&file, b"{").expect("corrupt it");
     let sealed = daemon_at(sealed_root.path());
     let id = SessionId::new();
-    sealed.grant_resumed_session(Some(&id.0.to_string()), "tm-resumed", None);
+    sealed.grant_resumed_session(Some(&id.0.to_string()), "tm-resumed", None, None);
     let got = sealed.rebind_resumed_claude_with(id, resumed, |_| Ok(resumed));
     assert!(got.is_err_and(|e| e.contains("sealed")));
     assert_eq!(sealed.session_claudes().get(id), None);
@@ -1113,7 +1115,64 @@ fn an_unsaved_rebind_keeps_the_earlier_binding_8983() {
 #[test]
 fn a_malformed_resume_id_grants_nothing_8983() {
     let state = DaemonState::new();
-    state.grant_resumed_session(None, "tm-resumed", None);
-    state.grant_resumed_session(Some("not-a-uuid"), "tm-resumed", None);
+    state.grant_resumed_session(None, "tm-resumed", None, None);
+    state.grant_resumed_session(Some("not-a-uuid"), "tm-resumed", None, None);
     assert!(state.session_claudes().resumes.lock().is_empty());
+}
+
+/// Error arm (Fail-Open Check): a resume on a workspace tmux server reads the
+/// granted pane's `claude` on that server, and the default server is never
+/// asked. The pane's pid is this test process; its child `claude` (a `sleep`
+/// reached through a link named `claude`) is the one found. Red on
+/// 2df3760494, whose grant had no socket and read the default server.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_resume_rebind_reads_the_claude_on_the_grants_own_server() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let link = dir.path().join("claude");
+    std::os::unix::fs::symlink("/bin/sleep", &link).expect("link");
+    let mut claude = std::process::Command::new(&link)
+        .arg("30")
+        .spawn()
+        .expect("spawn claude");
+    let log = dir.path().join("calls.log");
+    let script = format!(
+        "#!/bin/sh\necho \"$*\" >> '{}'\n\
+         if [ \"$1\" = -L ] && [ \"$2\" = tm-ws-resume ] && [ \"$3\" = display-message ]; then \
+         echo {}; fi\nexit 0\n",
+        log.display(),
+        std::process::id()
+    );
+    let bin = dir.path().join("fake-tmux");
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+    let grant = ResumeGrant {
+        tmux_name: "tm-resumed".to_string(),
+        pane_id: Some("%7".to_string()),
+        tmux_socket: Some(dir.path().join("tm-ws-resume")),
+        issued_at: 0,
+    };
+    let socket_dir = dir.path().to_path_buf();
+    let fake = bin.clone();
+    let got = crate::core::tmux::with_tmux_binary(bin, async {
+        crate::daemon::state::session_claude_resume::pane_claude_on(&grant, move || {
+            let driver = crate::daemon::tmux::TmuxDriver::with_tmux_path_for_test(
+                fake.to_string_lossy().into_owned(),
+            );
+            Ok(Box::new(
+                crate::session_manager::RealTmuxDriver::from_driver_for_test(driver)
+                    .with_socket_dir_for_test(socket_dir),
+            ))
+        })
+    })
+    .await;
+    let pid = claude.id();
+    let _ = claude.kill();
+    let _ = claude.wait();
+
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(got.map(|c| c.pid), Ok(pid), "{calls}");
+    assert!(
+        calls.lines().all(|l| l.starts_with("-L tm-ws-resume ")),
+        "the default server was asked: {calls}"
+    );
 }

@@ -231,12 +231,12 @@ pub(super) async fn inputs(
             .ok_or_else(|| anyhow::anyhow!("Project no longer selected"))?;
         let root = PathBuf::from(path).canonicalize()?;
         let scan = tokio::task::spawn_blocking(move || {
-            trusty_kb::okg::docstore::scan(
+            trusty_okf::build::docstore::scan(
                 &root,
                 &[],
                 true,
                 12000,
-                &trusty_kb::okg::policy::DocStorePolicy::new(vec![root.clone()]),
+                &trusty_okf::build::policy::DocStorePolicy::new(vec![root.clone()]),
             )
         })
         .await??;
@@ -310,6 +310,8 @@ pub(super) fn event_inputs(
             timestamp: Some(event.ts),
             body,
             fields: BTreeMap::from([("content_scope".into(), "persisted event excerpt".into())]),
+            // #10746: no structured frontmatter for an event excerpt.
+            frontmatter: Default::default(),
             volatile: false,
         });
     }

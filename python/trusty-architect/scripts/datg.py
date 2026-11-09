@@ -41,8 +41,19 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   state-changing tool (Edit/Write/Agent/Task/SendMessage/Cron*, or Bash git/gh mutations) and no
   datg.py write followed, append {ts, session, kind: stale_il, n} to log.jsonl (n = consecutive
   stale turns) and record stamp.json changed_epoch for `fresh`.
+- Provenance (#10780): `update --answer A --source owner --cite C --quote Q [--until ISO]` or
+  `--source architect --basis B` stores item.source; an answer without --source drops any old one. The digest
+  prints OWNER RULINGS (with source), expired ones as history, ARCHITECT INFERENCES and UNSOURCED ANSWERS in
+  separate sections, and FLAGs an owner claim with no `owner turn:` cite in the session record or in the
+  file named by session ref `handoff`. `provenance FILE..` prints the same flags for any handoff file
+  (exit 1 when one is found).
 Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
-intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD); a failure is logged, never fatal.
+intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD). Exit 3 means the ledger was saved
+but at least one notification was not confirmed; stderr lists each queue outcome. Do not
+replay the write/batch: reconcile delivery and retry only the needed notification. Exit 0
+confirms the sender succeeded, not that the Architect read or acted on the message.
+Hold file (#10857, ar-T8a): a `hold` set or cleared on an Architect's own ledger (<arch>/local/il) is mirrored to its
+inbox/hold.json (source "ledger"), the hold fleet-poll.py reads before it wakes the Architect.
 A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
 dispatch whose prompt lacks "Goal: <code>-G<hex2>" naming an active goal; config.mode
@@ -80,7 +91,8 @@ from datg_log import (  # noqa: E402,F401  (#10161: re-exported for callers and 
 )
 from datg_read import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     MUTATING_BASH, MUTATING_TOOLS, _digest_sections, _read_json, _short, _stamp_path, _to_epoch, build_digest,
-    check_dispatch, dispatch_mode, log_hook_warning, op_fresh, stamp_turn, summary, turn_tools,
+    check_dispatch, dispatch_mode, log_hook_warning, op_fresh, provenance_flags, stamp_turn, summary, turn_tools,
+    unsourced_claim,
 )
 
 
@@ -182,6 +194,10 @@ def build_parser():
     for f in ("title", "status", "answer", "outcome", "esc", "to", "note"):
         s.add_argument(f"--{f}")
     s.add_argument("--rank", type=int)
+    # #10780: who the answer came from; owner needs --cite and --quote, architect needs --basis.
+    s.add_argument("--source", choices=("owner", "architect"))
+    for f in ("cite", "quote", "until", "basis"):
+        s.add_argument(f"--{f}")
     s = sub.add_parser("close")
     s.add_argument("id")
     s.add_argument("--outcome", required=True)
@@ -218,6 +234,8 @@ def build_parser():
     s.add_argument("--since", help="ISO YYYY-MM-DDTHH:MMZ or epoch seconds")
     s.add_argument("--max-age", type=float, help="minutes")
     sub.add_parser("stamp", help="Stop hook step; hook JSON on stdin")
+    s = sub.add_parser("provenance", help="flag handoff lines that claim an owner ruling with no cite (#10780)")
+    s.add_argument("files", nargs="+")
     s = sub.add_parser("ready", help="exit 0 ready to clear, 1 not ready (reasons printed), 2 missing or unreadable")
     s.add_argument("--json", action="store_true", help='print {"ready", "reasons", "written_at", "hold"}')
     s.add_argument("--since", help="ISO YYYY-MM-DDTHH:MMZ or epoch seconds (as for fresh)")
@@ -268,6 +286,29 @@ def session_op(a):
     return entry
 
 
+def sync_ledger_hold(project, ops):
+    """ar-T8a: mirror the Architect's own ledger HOLD into its inbox/hold.json, which the poller reads.
+
+    What: only after a write that set or cleared `hold`, and only for an Architect's ledger
+    (alert_triage.ledger_hold_path). A failure is reported on stderr; the ledger write stands.
+    Test: test_ledger_hold_writes_and_clears_the_hold_file
+    """
+    if not any(isinstance(o, dict) and o.get(VERB_KEY) == "session" and "hold" in o for o in ops):
+        return
+    try:
+        import alert_triage
+        path = alert_triage.ledger_hold_path(project)
+        if path is None:
+            return
+        text = (load_state(project).get("session") or {}).get("hold") or ""
+        if text:
+            alert_triage.set_hold(path, "ledger", text, until_event="datg.py session set --hold none")
+        else:
+            alert_triage.clear_hold(path, "ledger")
+    except Exception as e:  # noqa: BLE001 - the ledger write already committed
+        print(f"datg: hold file not updated ({type(e).__name__}: {e})", file=sys.stderr)
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     datg_store._SESSION = a.session  # #10161: _SESSION lives in datg_store, which reads it
@@ -284,6 +325,18 @@ def main(argv=None):
             else:
                 print("\n".join(reasons) if reasons else "ready: task, next, saved work, owed and crons recorded; fresh")
             return code
+        if a.verb == "provenance":   # #10780: exit 1 when a line is flagged, 2 when a file cannot be read
+            code = 0
+            for path in a.files:
+                try:
+                    flags = provenance_flags(path)
+                except OSError as e:
+                    print(f"{path}: unreadable ({e})", file=sys.stderr)
+                    return 2
+                for n, line in flags:
+                    print(f"{path}:{n}: FLAG unsourced owner claim: {line.strip()}")
+                code = code or (1 if flags else 0)
+            return code
         if a.verb == "fresh":
             code, msg = op_fresh(a.project, a.since, a.max_age)
             print(msg)
@@ -297,9 +350,14 @@ def main(argv=None):
         elif a.verb == "update":
             entry = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank")}
             entry.update({VERB_KEY: "update", "id": a.id})
+            if a.source:   # #10780: only the flags given, so the shape check names a stray one
+                entry["source"] = {"by": a.source, **{k: getattr(a, k) for k in ("cite", "quote", "until", "basis")
+                                                      if getattr(a, k) is not None}}
+            elif any(getattr(a, k) is not None for k in ("cite", "quote", "until", "basis")):
+                raise DatgError("--cite, --quote, --until and --basis need --source")
             evs, st = write_ops_ev(a.project, [entry])
             print(", ".join(e["id"] for e in evs))
-            notify_escalations(a.project, evs, st)
+            return notify_escalations(a.project, evs, st)
         elif a.verb == "close":
             print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome}]))
         elif a.verb == "batch":
@@ -311,9 +369,12 @@ def main(argv=None):
                 raise DatgError("batch input must be a JSON list")
             evs, st = write_ops_ev(a.project, ops)
             print(", ".join(e["id"] for e in evs))
-            notify_escalations(a.project, evs, st)
+            sync_ledger_hold(a.project, ops)   # #10719: before the exit-3 return, so a failed sender never skips the hold
+            return notify_escalations(a.project, evs, st)
         elif a.verb == "session":
-            print(write_ops(a.project, [session_op(a)]))
+            op = session_op(a)
+            print(write_ops(a.project, [op]))
+            sync_ledger_hold(a.project, [op])
         elif a.verb == "prune":
             print(op_prune(a.project, a.dry_run, a.answered_hours, a.require_outcome))
         elif a.verb == "rotate":

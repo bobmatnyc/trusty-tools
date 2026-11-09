@@ -109,6 +109,7 @@ fn base_record(id: ManagedSessionId, state: ManagedSessionState, cwd: PathBuf) -
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

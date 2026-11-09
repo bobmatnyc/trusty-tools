@@ -132,7 +132,6 @@ export const CRATE_GROUPS: CrateGroup[] = [
 		crates: [
 			{ name: 'trusty-agents', description: 'Agentic harness with multi-model routing (tagent)' },
 			{ name: 'trusty-channels', description: 'Chat-channel MCP servers, starting with Slack' },
-			{ name: 'trusty-kb', description: 'Personal knowledge base as an MCP server' },
 			{ name: 'trusty-sld-lint', description: 'Linter for spec-linked documentation' },
 			{ name: 'trusty-code-gui', description: 'Desktop shell for the tcode daemon' }
 		]

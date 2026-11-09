@@ -74,7 +74,19 @@ pub async fn run_map_reduce(
 ) -> ReducedReview {
     run_map_reduce_with_wiped(filtered, llm, ctx, config, &map::no_sections)
         .await
-        .0
+        .review
+}
+
+/// What [`run_map_reduce_with_wiped`] returns (#9310 ruling 50, #10782).
+pub(crate) struct MapReduceRunOutput {
+    /// The reduced (and, when enabled, synthesized) review.
+    pub(crate) review: ReducedReview,
+    /// The strictest verdict a chunk had before hygiene relaxed it (#9188 A).
+    pub(crate) wiped_model_verdict: Option<Verdict>,
+    /// The review's grade floor (#9310 ruling 50).
+    pub(crate) grade_floor: Verdict,
+    /// #10782: every chunk's questions, in chunk order, duplicates dropped.
+    pub(crate) questions: Vec<String>,
 }
 
 /// [`run_map_reduce`], also returning the strictest verdict a chunk reported
@@ -93,7 +105,7 @@ pub(crate) async fn run_map_reduce_with_wiped(
     ctx: &MapContext<'_>,
     config: &MapReduceConfig,
     sections: ChunkSections<'_>, // #9197, #9195: caller sections per chunk prompt
-) -> (ReducedReview, Option<Verdict>, Verdict) {
+) -> MapReduceRunOutput {
     let units = split_into_units(filtered, config);
     info!(
         files = filtered.files.len(),
@@ -103,10 +115,19 @@ pub(crate) async fn run_map_reduce_with_wiped(
     );
     let graded = run_map_stage_graded(&units, llm, ctx, config.concurrency, sections).await;
     // #9310 ruling 50: the strictest chunk floor, before hygiene relaxes a chunk.
-    let chunk_floor = graded.iter().fold(Verdict::Approve, |worst, (_, f)| {
-        stricter_of(worst, f.clone())
+    let chunk_floor = graded.iter().fold(Verdict::Approve, |worst, c| {
+        stricter_of(worst, c.floor.clone())
     });
-    let mut outcomes: Vec<MapOutcome> = graded.into_iter().map(|(o, _)| o).collect();
+    let mut questions: Vec<String> = Vec::new();
+    let mut outcomes: Vec<MapOutcome> = Vec::with_capacity(graded.len());
+    for chunk in graded {
+        for q in chunk.questions {
+            if !questions.contains(&q) {
+                questions.push(q); // #10782
+            }
+        }
+        outcomes.push(chunk.outcome);
+    }
 
     // Sanitize + verify citation integrity BEFORE reduce derives the aggregate
     // verdict (#2881, #4042, #4044): a per-unit reviewer can self-negate a
@@ -139,6 +160,8 @@ pub(crate) async fn run_map_reduce_with_wiped(
                 &cite_index,
                 &mut withheld,
             );
+            // #10782: a finding that quotes no code never reaches reduce or the gate.
+            crate::pipeline::quote_admission::admit_quoted_findings(findings, &mut withheld);
             // This chunk's own `verdict` field rested on the SAME findings we
             // may have just wiped out — relax it too so a wiped-out chunk
             // cannot poison `reduce`'s stricter-of-all-chunks seed (#4042,
@@ -167,5 +190,10 @@ pub(crate) async fn run_map_reduce_with_wiped(
     let (reviewed, synthesis_floor) = synthesize_review_graded(reduced, llm, ctx, config).await;
     // #9310 Q2: when synthesis answered, only its grade floors the review.
     let floor = synthesis_floor.unwrap_or(chunk_floor);
-    (reviewed, wiped_model_verdict, floor)
+    MapReduceRunOutput {
+        review: reviewed,
+        wiped_model_verdict,
+        grade_floor: floor,
+        questions,
+    }
 }

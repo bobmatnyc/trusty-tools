@@ -901,6 +901,15 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: ArchitectAction,
     },
+    /// Prove you are at the Studio, so the Architect may write trust anchors.
+    ///
+    /// `local` asks for Touch ID or the login password.
+    // #8878 PR2a. Test: `cli_parses_presence_local`.
+    Presence {
+        /// Presence action to perform.
+        #[command(subcommand)]
+        action: PresenceAction,
+    },
     /// The PM ledger: `init`, `add`, `update`, `close`, `batch`, `prune`, `show`.
     ///
     /// Writes go through the daemon; when it is down, this session's own
