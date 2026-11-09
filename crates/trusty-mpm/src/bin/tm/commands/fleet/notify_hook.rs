@@ -52,12 +52,15 @@ fn fix_line() -> String {
 /// error after it is [`Step::Skipped`] saying the config was written.
 /// (2) Present, `inbox` is `dir/inbox`: [`Step::Unchanged`], writing nothing,
 /// with a note when the hook is off or not applied.
-/// (3) Present, `inbox` elsewhere or unset: [`Step::Skipped`], writing nothing.
+/// (3) Present, `inbox` elsewhere, relative or unset: [`Step::Skipped`],
+/// writing nothing.
 /// `exe` overrides the hook binary (tests); production passes `None`.
 /// Test: `a_first_run_enables_the_hook_and_applies_it`,
 /// `a_second_run_is_unchanged_and_writes_nothing`,
 /// `an_inbox_set_elsewhere_is_skipped_and_the_config_keeps_it`,
+/// `a_relative_inbox_points_elsewhere`,
 /// `a_malformed_managed_settings_file_is_skipped_and_nothing_is_written`,
+/// `an_inbox_that_cannot_be_created_is_skipped_and_nothing_is_written`,
 /// `a_config_write_failure_fails_the_step`.
 pub(crate) fn step(dir: &Path, home: &Path, exe: Option<&Path>) -> Step {
     let config_path = user_config_path(home);
@@ -160,10 +163,11 @@ fn present(
 /// events or falls back to pane capture; like `skills` and `bundle`, the row
 /// never affects `complete`.
 /// What: from `home`'s `[notification_hook]` and [`probe_notification_hook`]:
-/// `off`; `points elsewhere: <path>` when `inbox` is not `dir/inbox`;
-/// `enabled but not applied` when the probe is not in sync; else
-/// `on → <inbox>`, the only ok state. Reads only.
-/// Test: `the_status_row_reports_each_of_the_four_states`.
+/// `off`; `points elsewhere: <path>` when `inbox` is not `dir/inbox` (a
+/// relative `inbox` never is); `enabled but not applied` when the probe is
+/// not in sync; else `on → <inbox>`, the only ok state. Reads only.
+/// Test: `the_status_row_reports_each_of_the_four_states`,
+/// `a_relative_inbox_points_elsewhere`.
 pub(crate) fn status_check(dir: &Path, home: &Path, exe: Option<&Path>) -> Check {
     let hook = MpmConfig::load(&home.join(".trusty-mpm")).notification_hook;
     let inbox = dir.join(INBOX_DIR);
@@ -189,14 +193,18 @@ pub(crate) fn status_check(dir: &Path, home: &Path, exe: Option<&Path>) -> Check
     }
 }
 
-/// Whether two directory paths name the same directory; the inbox itself
-/// may not exist yet, so a missing leaf is resolved through its parent.
-fn same_dir(a: &Path, b: &Path) -> bool {
+/// Whether the configured inbox `set` names the directory `inbox`; the inbox
+/// itself may not exist yet, so a missing leaf is resolved through its parent.
+fn same_dir(set: &Path, inbox: &Path) -> bool {
+    // #10885: `resolve_push_target` forwards nothing for a relative inbox.
+    if !set.is_absolute() {
+        return false;
+    }
     let canon = |p: &Path| {
         std::fs::canonicalize(p).ok().or_else(|| {
             let parent = std::fs::canonicalize(p.parent()?).ok()?;
             Some(parent.join(p.file_name()?))
         })
     };
-    a == b || matches!((canon(a), canon(b)), (Some(x), Some(y)) if x == y)
+    set == inbox || matches!((canon(set), canon(inbox)), (Some(x), Some(y)) if x == y)
 }

@@ -75,12 +75,19 @@ fn hook_steps(report: &InitReport) -> Vec<&Step> {
 /// Installed-looking binary the hook resolver accepts without a PATH lookup.
 const EXE: &str = "/usr/local/bin/tm";
 
-/// The step against `home` for its canonical Architect directory, with [`EXE`].
-fn run_step(home: &Home) -> Step {
+/// `home`'s Architect directory, created and canonical.
+fn arch_dir(home: &Home) -> PathBuf {
     let dir = home.dir();
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = std::fs::canonicalize(dir).unwrap();
-    step(&dir, home.path(), Some(Path::new(EXE)))
+    std::fs::canonicalize(dir).unwrap()
+}
+
+/// The step against `home` for its canonical Architect directory, with [`EXE`].
+///
+/// The injected exe keeps every row independent of an installed `tm`: under
+/// `cargo test` `current_exe()` is a refused build path (#10885).
+fn run_step(home: &Home) -> Step {
+    step(&arch_dir(home), home.path(), Some(Path::new(EXE)))
 }
 
 /// tm's `Notification` hook commands in the managed settings.
@@ -251,53 +258,96 @@ fn an_inbox_set_elsewhere_is_skipped_and_the_config_keeps_it() {
 }
 
 /// Row 4: a managed settings file the hook writer refuses skips the step, and
-/// neither file is written.
+/// nothing is written.
 #[test]
 fn a_malformed_managed_settings_file_is_skipped_and_nothing_is_written() {
     let home = Home::new();
+    home.write_config("# mine\n");
     let settings = home.settings_path();
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
     std::fs::write(&settings, "{not json").unwrap();
-    let report = home.init().unwrap();
-    let steps = hook_steps(&report);
+    let got = run_step(&home);
     assert!(
-        matches!(steps.as_slice(), [Step::Skipped(t)]
-            if t.contains(FIX) && t.contains(&settings.display().to_string())),
-        "{}",
-        report.render()
+        matches!(&got, Step::Skipped(t)
+            if t.contains(FIX) && t.contains("is not a settings object")),
+        "{got:?}"
     );
-    assert!(
-        !home.config().contains("[notification_hook]"),
-        "{}",
-        home.config()
-    );
+    assert_eq!(home.config(), "# mine\n");
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{not json");
-    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        !arch_dir(&home).join("inbox").exists(),
+        "the inbox was made"
+    );
 }
 
-/// Row 5: a `config.toml` that cannot be written fails the step and `init`.
+/// Row 5: a `config.toml` that cannot be written fails the step.
 #[test]
 fn a_config_write_failure_fails_the_step() {
     let home = Home::new();
-    let dir = home.dir();
-    std::fs::create_dir_all(&dir).unwrap();
-    let canonical = std::fs::canonicalize(&dir).unwrap();
-    home.write_config(&format!(
-        "[supervisor]\nprojects = [\"{}\"]\n",
-        canonical.display()
-    ));
-    let before = home.config();
+    home.write_config("# mine\n");
+    let dir = arch_dir(&home);
     let root = home.path().join(".trusty-mpm");
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let report = home.init();
+    let got = step(&dir, home.path(), Some(Path::new(EXE)));
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let report = report.unwrap();
     assert!(
-        matches!(hook_steps(&report).as_slice(), [Step::Failed(t)] if t.contains("cannot write")),
-        "{}",
-        report.render()
+        matches!(&got, Step::Failed(t) if t.contains("cannot write")),
+        "{got:?}"
     );
-    assert!(report.failed());
-    assert_eq!(home.config(), before);
+    assert_eq!(home.config(), "# mine\n");
+    assert!(!home.settings_path().exists(), "the settings were written");
+}
+
+/// #10885 Fail-Open: an inbox directory that cannot be created skips the step
+/// and writes nothing.
+#[test]
+fn an_inbox_that_cannot_be_created_is_skipped_and_nothing_is_written() {
+    let home = Home::new();
+    home.write_config("# mine\n");
+    let dir = arch_dir(&home);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let got = step(&dir, home.path(), Some(Path::new(EXE)));
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        matches!(&got, Step::Skipped(t) if t.contains("cannot create") && t.contains(FIX)),
+        "{got:?}"
+    );
+    assert_eq!(home.config(), "# mine\n");
+    assert!(!home.settings_path().exists(), "the settings were written");
+}
+
+/// `target` as a path relative to this process's cwd.
+fn relative_to_cwd(target: &Path) -> PathBuf {
+    let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    let up: PathBuf = cwd.components().skip(1).map(|_| "..").collect();
+    up.join(target.strip_prefix("/").unwrap())
+}
+
+/// #10885: a relative `inbox` is never this Architect's, even when it names
+/// the same directory from the cwd, because `tm hook` forwards nothing for it.
+#[test]
+fn a_relative_inbox_points_elsewhere() {
+    let home = Home::new();
+    let dir = arch_dir(&home);
+    let rel = relative_to_cwd(&dir.join("inbox"));
+    assert_eq!(std::fs::canonicalize(rel.parent().unwrap()).unwrap(), dir);
+    let text = format!(
+        "[notification_hook]\nenabled = true\ninbox = \"{}\"\n",
+        rel.display()
+    );
+    home.write_config(&text);
+    let exe = Some(Path::new(EXE));
+    let row = status_check(&dir, home.path(), exe);
+    assert_eq!(
+        (row.ok, row.detail),
+        (false, format!("points elsewhere: {}", rel.display()))
+    );
+    let got = step(&dir, home.path(), exe);
+    assert!(
+        matches!(&got, Step::Skipped(t)
+            if t.contains(FIX) && t.contains(&rel.display().to_string())),
+        "{got:?}"
+    );
+    assert_eq!(home.config(), text);
     assert!(!home.settings_path().exists(), "the settings were written");
 }

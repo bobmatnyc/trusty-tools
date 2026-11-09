@@ -328,3 +328,37 @@ fn the_doctor_row_is_unknown_for_a_refused_file() {
     assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1, 2]");
 }
+
+/// #10885: a `config.toml` that does not parse is Unknown and names no fix;
+/// its defaults (off) would have the fix remove a working hook.
+#[test]
+fn the_doctor_row_is_unknown_when_the_config_does_not_parse() {
+    use crate::core::doctor::CheckStatus;
+    let tmp = tempfile::tempdir().unwrap();
+    let settings = tmp.path().join("settings.json");
+    apply_notification_hook(&settings, exe(), true).unwrap();
+    let root = tmp.path().join(".trusty-mpm");
+    std::fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.toml");
+    std::fs::write(&config, "[notification_hook]\nenabled = true\ninbox =\n").unwrap();
+    let row = notification_hook_row(&settings, exe(), &root);
+    assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+    assert!(
+        !row.message.contains(NOTIFICATION_HOOK_FIX),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.message.contains(&config.display().to_string()),
+        "{}",
+        row.message
+    );
+    // A config that parses still reaches the probe.
+    std::fs::write(
+        &config,
+        "[notification_hook]\nenabled = true\ninbox = \"/a\"\n",
+    )
+    .unwrap();
+    let row = notification_hook_row(&settings, exe(), &root);
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+}

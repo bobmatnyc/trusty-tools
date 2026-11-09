@@ -12,7 +12,7 @@
 //! (opt-in on) or removes (off) tm's own `Notification` entry and nothing else;
 //! [`repair_notification_hook`] is the `tm doctor --fix` step over the same
 //! plan; [`probe_notification_hook`] reads that plan without writing, for the
-//! `tm doctor` row ([`notification_hook_check`]) and `tm fleet` (#10885);
+//! `tm doctor` row ([`notification_hook_row`]) and `tm fleet` (#10885);
 //! [`resolve_push_target`] names the inbox `tm hook` appends to.
 //! Test: `notification_tests.rs`.
 
@@ -399,6 +399,38 @@ pub fn notification_hook_check(
             ),
         };
     DoctorCheck::new(NOTIFICATION_HOOK_CHECK, status, message)
+}
+
+/// The `tm doctor` `notification_hook` row, reading the opt-in from
+/// `<config_root>/config.toml`.
+///
+/// Why (#10885): `MpmConfig::load` reads a `config.toml` that does not parse
+/// as the defaults (opt-in off), so with tm's entry present the row would
+/// recommend the fix that removes a working hook.
+/// What: parses the config strictly
+/// ([`crate::core::twin_arming::load_user_config_strict`]; an absent file is
+/// the defaults). A read or parse error is `Unknown` naming the file and no
+/// fix; otherwise [`notification_hook_check`].
+/// Test: `the_doctor_row_is_unknown_when_the_config_does_not_parse`.
+pub fn notification_hook_row(
+    settings_path: &Path,
+    exe_override: Option<&Path>,
+    config_root: &Path,
+) -> crate::core::doctor::DoctorCheck {
+    use crate::core::doctor::{CheckStatus, DoctorCheck};
+    match crate::core::twin_arming::load_user_config_strict(config_root) {
+        Ok(config) => {
+            notification_hook_check(settings_path, exe_override, &config.notification_hook)
+        }
+        Err(why) => DoctorCheck::new(
+            NOTIFICATION_HOOK_CHECK,
+            CheckStatus::Unknown,
+            format!(
+                "cannot tell whether the hook should be on: {why}; fix that file, then re-run \
+                 `tm doctor`"
+            ),
+        ),
+    }
 }
 
 #[cfg(test)]

@@ -97,12 +97,16 @@ pub(crate) async fn doctor(
         overall = overall.worst(check.status);
         print_check(&check);
     }
-    // #10885: the probe `--fix --only notification_hook` plans with, same inputs.
-    if let Some(dir) = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir() {
-        let check = trusty_mpm::core::standalone::hooks::notification::notification_hook_check(
+    // #10885: the probe `--fix --only notification_hook` plans with; a config
+    // that does not parse is Unknown, never the defaults.
+    if let (Some(dir), Some(home)) = (
+        trusty_mpm::core::trusty_tools_config::managed_claude_config_dir(),
+        dirs::home_dir(),
+    ) {
+        let check = trusty_mpm::core::standalone::hooks::notification::notification_hook_row(
             &dir.join("settings.json"),
             None,
-            &trusty_mpm::core::config::MpmConfig::load_default().notification_hook,
+            &home.join(".trusty-mpm"),
         );
         overall = overall.worst(check.status);
         print_check(&check);
