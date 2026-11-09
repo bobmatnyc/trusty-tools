@@ -86,10 +86,12 @@ pub(crate) fn bind(
 
 /// The live pane: `TMUX_PANE`'s session and the `claude` under its shell.
 pub(crate) fn live_pane() -> anyhow::Result<Pane> {
-    let pane = std::env::var("TMUX_PANE")
+    let raw = std::env::var("TMUX_PANE")
         .ok()
         .filter(|p| p.starts_with('%'))
         .context("not inside a tmux pane (`TMUX_PANE` is unset)")?;
+    // #8443: a `%N` id passes through unchanged; anything else renders exact.
+    let pane = trusty_common::tmux::exact_window_target(&raw);
     let argv = [
         "display-message",
         "-t",
