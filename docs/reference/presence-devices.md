@@ -2,8 +2,13 @@
 
 The pm-guard lets the bound Architect write a trust anchor only when Bob has
 proven, recently, that he is at the Studio. This page covers the local path
-(#8878 PR2a). Approval from other enrolled devices (passkeys through the
-console) is #8878 PR2b and is not built yet.
+(#8878 PR2a) and approval from enrolled passkey devices (#8878 PR2b-1). The
+browser page that lets a phone approve, and Slack delivery of its link, are
+#8878 PR2b-2 and are not built yet.
+
+**key ACL unverified (#10865): device approvals are untrusted.** Every device
+surface prints this until #10865 verifies the grant key's Keychain access
+list (see "Who can replace the key").
 
 Plans: `.claude/scratch-guard-twin/plan.md` §3–§5 and
 `plan-pr2-devices.md` (owner answers D5b, 2026-11-09).
@@ -126,6 +131,88 @@ check who created the item or its access list.
   not trusted for any approval decision. A forged grant only restores
   pre-PR2a behaviour: the Architect's anchor writes needed no grant on main,
   and no call that is denied without a grant is approved because of one.
+
+## Device approvals (#8878 PR2b-1)
+
+An enrolled passkey (Face ID or Touch ID on an iPhone, iPad or Mac) can
+approve one pending request for one `claude`. The approval becomes a grant
+with method `device:<credential id>`, which the hook accepts like `local`
+(owner ruling D67) while the device's sealed record exists. It lifts exactly
+what `local` lifts and never an absolute class.
+
+### Flow
+
+1. A guarded call by the Architect has no valid grant. The hook denies it and
+   asks the daemon, within one second, for a pending request (only from the
+   account's real home). If the request lands, the deny names its id and
+   `tm presence wait --request <id>`. If it fails (daemon down, timeout,
+   rate limit), the deny text is unchanged and nothing is granted.
+   `tm presence request` asks the same way from the command line.
+2. The daemon writes `architect-launch/pending/<id>.json` (0600, sealed),
+   but only for a live PID with the stated start time. A request expires
+   after `[presence] request_ttl_minutes` (default 5). At most 16 are live,
+   one per PID per 2 minutes.
+3. An approver loads the request (`mpm.presence.approve`). The daemon opens a
+   challenge for that request, held in memory only, and the passkey options.
+   The action text comes from the caller and is always shown labelled
+   "unverified origin".
+4. The device signs. `mpm.presence.verify` checks, in a fixed order: the key,
+   the open challenge, the request's seal and dates, the action hash, the
+   live `claude`, the sealed device record, the passkey signature (origin, RP
+   id, user verification), a counter that moves forward, then saves the
+   counter, consumes the request by an atomic rename and writes the grant.
+5. `tm presence wait` sees the grant through the hook's own check.
+
+Every refusal writes no grant and leaves the request in place. A daemon
+restart drops every open challenge, so a verify after it is refused.
+
+### Passkeys: ES256 only
+
+The verifier is webauthn-rs 0.6.2. Registration offers ES256 (ECDSA P-256)
+only and refuses any other credential before a record is written; verify
+refuses a record whose key is not ES256 before any signature check (owner
+ruling D72). webauthn-rs pulls the `rsa` crate (RUSTSEC-2023-0071, ignored
+in `deny.toml` and `.cargo/audit.toml` until 2027-02-07): no RSA operation
+runs.
+
+`[presence] rp_id` (the console's tailnet name) and `rp_origin`
+(`https://<rp_id>`) have no default. With either missing, the daemon's
+device methods answer exit 3 and nothing is enrolled or approved.
+
+### Commands
+
+| Command | Does | Exit |
+|---|---|---|
+| `tm presence request [--action <text>]` | Asks for a device approval for this session's `claude`; grants nothing | 0 asked, 1 refused |
+| `tm presence wait [--timeout 5m] [--request <id>]` | Polls for a valid grant | 0 granted, 75 still pending (re-issue), 1 the request is gone with no grant |
+| `tm presence devices add <name>` | Touch ID, then an enrol ticket and the registration options. **Incomplete until PR2b-2:** no browser path finishes it yet; tests finish it with a software passkey | 0, 1 |
+| `tm presence devices list` | Each device: id, name, created, last used, counter, backup flags | 0 |
+| `tm presence devices revoke <id>` | Touch ID, then deletes the record and every grant it approved | 0, 1 |
+
+PMs, agents and subagents cannot run any `tm presence` verb, and cannot write
+`devices/`, `pending/` or a `.presence` file: all are trust-anchor writes.
+
+### Tickets
+
+`devices add` and `devices revoke` need a sealed local-presence ticket, minted
+by the CLI only after the LocalAuthentication prompt answered. It is valid 10
+minutes, for one purpose and one device. An enrol ticket enrols one device
+only (`devices/.ticket-<nonce>` marks it spent). A caller that reaches the
+daemon socket directly, skipping the CLI, has no ticket.
+
+### Revoke
+
+Revoke deletes the device record first, then every `.presence` whose method
+names it, under the device store lock, so an approval being verified cannot
+mint after the sweep. A grant whose removal failed is still refused: the hook
+re-reads the device record. Revoke by another enrolled device is PR2b-2.
+
+### Recovery
+
+A lost phone: run `tm presence devices revoke <id>` at the Studio. No device
+works: `tm presence local` at the Studio always works. A replaced or missing
+grant key makes every sealed record, request and grant unreadable; enrol
+again.
 
 ## Not covered
 
