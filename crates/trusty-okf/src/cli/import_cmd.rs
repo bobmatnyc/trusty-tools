@@ -281,13 +281,24 @@ fn prepare(
 }
 
 /// `import plan`: print the plan; write nothing.
-pub(crate) fn plan(a: &Args, out: &mut dyn Write) -> Result<i32, Fail> {
+/// Test: `sigint_cancels_an_adapter_plan_and_reaps_its_group`.
+pub(crate) fn plan(a: &Args, out: &mut dyn Write, ctx: &Ctx<'_>) -> Result<i32, Fail> {
     a.only(IMPORT_OPTS).map_err(Fail::Usage)?;
     let root = bundle_root(a, 2)?;
-    // `import plan` writes nothing, so SIGINT keeps its default.
-    let cancel = RunCancel::default();
+    // #10818: the run's cancel, so Ctrl-C kills and reaps the adapter or
+    // worker it started instead of leaving them running.
+    let cancel = run_cancel(ctx)?;
     let ex = extractor(a, &cancel)?;
-    let (_, plan, _) = prepare(a, &root, "", ex.as_ref(), &cancel)?;
+    let prepared = prepare(a, &root, "", ex.as_ref(), &cancel);
+    // A cancelled listing is an incomplete plan: exit 3, never print it as
+    // a whole one.
+    if cancel.is_set() {
+        return Err(Fail::Code(
+            3,
+            "the plan was cancelled; nothing was written".into(),
+        ));
+    }
+    let (_, plan, _) = prepared?;
     output::plan(out, &plan, a.has("--json"));
     Ok(0)
 }

@@ -81,6 +81,12 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
   holds only how to run the Architect.
 - Call `mcp__trusty-search__search` before you read code or docs.
 
+### Simplicity
+
+Prefer the simplest working solution; simplify where you can (Wirth, "A Plea for Lean Software").
+Add complexity only if nothing simpler works and the user OKs the new surface; it must be
+"intentional and planned, never accidental" (owner, 2026-11-08).
+
 ### Completion Standard
 
 - **Done** (all four): (1) acceptance criteria met; (2) required gates pass,
@@ -88,6 +94,9 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
   its rung's live check; (4) shipped, and the issue closed with evidence.
 - **Fix bar:** a finding blocks only if it causes or leaves unguarded wrong
   behaviour, a security or credential exposure, data loss, a crash, hang or
-  leaked process, a resource pileup, or a broken gate or CI.
+  leaked process, a resource pileup, or a broken gate or CI. A finding of any
+  severity that directly fails a stated acceptance criterion of the brief or
+  issue blocks; its fix uses the one fix round (no extra round).
 - **Limits:** after the first review, a PR gets at most one fix round and one
-  delta review. A blocker left after that comes to you.
+  delta review (a criterion-fail fix uses that one round). A blocker left after
+  that comes to you.

@@ -27,6 +27,8 @@ mod error;
 mod managed;
 pub mod manager;
 pub mod projects;
+// #10101 D3c: the one name rule every launch path reads.
+pub mod launch_claim;
 mod session_connect;
 pub(crate) mod socket_routes;
 // #8942: `tm fleet init`'s Architect registration.

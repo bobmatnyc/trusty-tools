@@ -173,6 +173,139 @@ fn fleet_relaunch_binds_every_caller_on_every_path() {
     }
 }
 
+/// #8878 PR2a spoof: a PM or an agent calling `tm presence local` or `tm
+/// fleet bind` is denied on both paths; the Architect's main thread runs
+/// them, bound or not (an unbound one must reach `tm fleet bind`).
+#[test]
+fn presence_verbs_bind_pms_and_agents_not_the_architect_8878() {
+    // No launch record in this home: the unbound Architect.
+    let (fx, bound_fx) = (fixture(), fixture());
+    let unbound = HookEnv {
+        claude: table(architect_table()),
+        ..spoof_env(&fx)
+    };
+    for command in ["tm presence local", "tm fleet bind"] {
+        for bypassed in [false, true] {
+            let verdict = |fx: &Fixture, env: HookEnv, agent: bool| {
+                let mut call = bash(fx, command);
+                if agent {
+                    call["agent_id"] = json!("agent-7");
+                }
+                let gate = ArchitectGate::new(&call, env, || allowlist(fx));
+                evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed)
+                    .map(|d| (d.rule, d.reason))
+            };
+            let pm = verdict(&fx, pm_env(&fx), false).expect("a PM is denied");
+            assert_eq!(pm.0, TRUST_ANCHOR_RULE, "{command}");
+            assert!(pm.1.contains("`tm presence`"), "{}", pm.1);
+            assert_eq!(
+                verdict(&fx, unbound.clone(), false),
+                None,
+                "unbound: {command}"
+            );
+            assert!(
+                verdict(&fx, unbound.clone(), true).is_some(),
+                "agent: {command}"
+            );
+            let architect = architect_env(&bound_fx);
+            assert!(
+                verdict(&bound_fx, architect.clone(), true).is_some(),
+                "agent: {command}"
+            );
+            assert_eq!(
+                verdict(&bound_fx, architect, false),
+                None,
+                "architect: {command}"
+            );
+        }
+    }
+}
+
+/// #8878 PR2a critic HIGH: a write of the presence key's Keychain item is
+/// denied for the process-bound Architect, a subagent of it, a PM and a
+/// spoofed Architect, guarded and bypassed alike; a read is not.
+#[test]
+fn presence_key_writes_bind_every_caller_8878() {
+    let fx = fixture();
+    use crate::commands::pm_guard_presence_key::tests::{
+        NAMED, NO_SELECTOR, NOT_READ_ONLY, OTHERS, RUN_TIME,
+    };
+    let writes: Vec<&str> = [NAMED, RUN_TIME, NO_SELECTOR, NOT_READ_ONLY].concat();
+    let mut wrong = Vec::new();
+    for bypassed in [false, true] {
+        for (env, agent) in [
+            (architect_env(&fx), false),
+            (architect_env(&fx), true),
+            (pm_env(&fx), false),
+            (spoof_env(&fx), false),
+        ] {
+            let verdict = |command: &str| {
+                let mut call = bash(&fx, command);
+                if agent {
+                    call["agent_id"] = json!("agent-7");
+                }
+                let gate = ArchitectGate::new(&call, env.clone(), || allowlist(&fx));
+                evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed)
+                    .map(|d| (d.rule, d.reason))
+            };
+            for command in &writes {
+                let deny = verdict(command);
+                // #8878 r3: under a bypass the universal floor runs first, and
+                // its credential-print rule already denies `-i` / `-p` shapes.
+                let ok = deny.as_ref().is_some_and(|(r, why)| {
+                    (*r == TRUST_ANCHOR_RULE && why.contains("Keychain"))
+                        || (bypassed && *r != TRUST_ANCHOR_RULE)
+                });
+                if !ok {
+                    wrong.push(format!(
+                        "agent={agent} bypassed={bypassed} not denied: {command}: {deny:?}"
+                    ));
+                }
+            }
+            // `tm presence` is the presence-verb floor's; it denies a PM.
+            for command in OTHERS.iter().filter(|c| !c.starts_with("tm ")) {
+                if let Some(deny) = verdict(command) {
+                    wrong.push(format!(
+                        "agent={agent} bypassed={bypassed} denied: {command}: {deny:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{} rows wrong: {wrong:#?}", wrong.len());
+}
+
+/// #8878 PR2a: the write moved into a script the command runs — shell or
+/// Python, or a shell script that runs another — is denied for the Architect.
+#[test]
+fn a_presence_key_write_in_a_script_body_is_denied_8878() {
+    let fx = fixture();
+    let write = |name: &str, body: &str| std::fs::write(fx.cwd.join(name), body).expect("script");
+    write(
+        "plant.sh",
+        "#!/bin/sh\nsecurity add-generic-password -s trusty-mpm.presence -a grant-hmac-v1 -w k\n",
+    );
+    write(
+        "plant.py",
+        "import keyring\nkeyring.set_password('trusty-mpm.presence', 'grant-hmac-v1', 'k')\n",
+    );
+    write("outer.sh", "#!/bin/sh\nbash ./plant.sh\n");
+    write(
+        "fine.sh",
+        // #8878 r3: a read; any write is outside the read-only allowlist.
+        "#!/bin/sh\nsecurity find-generic-password -s other -a me >/dev/null\n",
+    );
+    let verdict = |command: &str| {
+        let call = bash(&fx, command);
+        let gate = ArchitectGate::new(&call, architect_env(&fx), || allowlist(&fx));
+        evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), false).map(|d| d.rule)
+    };
+    for command in ["bash plant.sh", "python3 plant.py", "sh outer.sh"] {
+        assert_eq!(verdict(command), Some(TRUST_ANCHOR_RULE), "{command}");
+    }
+    assert_eq!(verdict("bash fine.sh"), None);
+}
+
 /// #10665 r3: a scratch-socket whole-server kill passes every floor, inline
 /// and from a script, guarded and bypassed — `env -u TMUX` included (df-D77:
 /// the #10665 floor owns that form, so #9001 does not refuse it as opaque).

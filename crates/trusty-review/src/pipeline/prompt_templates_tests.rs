@@ -45,9 +45,10 @@ fn the_repository_prompts_load_byte_identical() {
     assert!(!p.stock().ends_with('\n'));
     assert!(!p.coverage_gating().ends_with('\n'));
 
-    // Frozen byte lengths (last changed by the quote-the-cited-line rule, #8905).
-    assert_eq!(p.stock().len(), 14239);
-    assert_eq!(p.coverage_gating().len(), 14555);
+    // Frozen byte lengths (last changed by the `quoted_snippet` and
+    // `questions` rules, #10782).
+    assert_eq!(p.stock().len(), 14689);
+    assert_eq!(p.coverage_gating().len(), 15005);
 
     // The coverage-gating variant is distinguished by its coverage-floor note.
     assert!(

@@ -3753,3 +3753,7 @@ fn pr_8934_an_explicit_repo_never_skips() {
 // #9571: `tm pr open`'s phase-title tests, split out for the test SLOC cap.
 #[path = "phase_title_open_tests.rs"]
 mod phase_title_open;
+
+// #10724: `tm pr merge` against code-critic verdicts.
+#[path = "merge_critic_tests.rs"]
+mod merge_critic;

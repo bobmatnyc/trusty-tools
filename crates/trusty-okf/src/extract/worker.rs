@@ -128,10 +128,21 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// The largest worker frame: the output and fields limits plus 64 KiB
-    /// (§2.16 "Frame size"; the JSON header carries both).
+    /// The largest worker frame: six bytes for each text byte up to one past
+    /// the output limit, plus the fields limit and 64 KiB (§2.16 "Frame
+    /// size"; the JSON header carries both). Saturates instead of
+    /// overflowing.
     pub fn frame_cap(&self) -> u64 {
-        self.output_bytes + self.fields_bytes + 64 * KIB
+        // #10746: JSON escapes one text byte as up to six (`\u0001`), and a
+        // worker cuts oversize text one byte past the limit. A cap on the
+        // escaped size refused in-limit text and turned oversize text into
+        // `protocol_error`; the decoded length check in `parse_reply` is the
+        // real output limit.
+        self.output_bytes
+            .saturating_add(1)
+            .saturating_mul(6)
+            .saturating_add(self.fields_bytes)
+            .saturating_add(64 * KIB)
     }
 
     /// Refuse a limit over its compiled-in ceiling, or a zero count.
@@ -411,6 +422,9 @@ impl WorkerExtractor {
     /// killed. An unreadable spend recycles it (fails closed).
     fn budget_left(&self, proc: &WorkerProcess) -> bool {
         let budget = self.cfg.limits.cpu_seconds as f64;
+        // #10746: the group ID is the spawned PID, the root of the process
+        // tree `spent` reads; under `bwrap --new-session` the worker itself
+        // sits two levels below it in a group of its own.
         cpu::spent(proc.pgid()).is_some_and(|used| used + budget / 2.0 <= budget)
     }
 

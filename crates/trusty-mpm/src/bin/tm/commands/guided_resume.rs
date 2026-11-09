@@ -797,7 +797,7 @@ async fn reconcile_zombie_stop(
 /// headless/`no_attach` mode, rather than assuming `state == "active"`); the
 /// interactive caller uses it to attach.
 /// Test: I/O path exercised by the e2e suite; branch selection is [`plan_resume`].
-async fn restart_via_daemon(
+pub(crate) async fn restart_via_daemon(
     daemon: &trusty_mpm::client::DaemonClient,
     session: &trusty_mpm::client::ManagedSessionSummary,
 ) -> anyhow::Result<trusty_mpm::client::ManagedSessionSummary> {

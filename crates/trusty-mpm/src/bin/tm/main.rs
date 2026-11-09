@@ -230,6 +230,8 @@ async fn main() -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     // #10476: lend the tui the guarded, quiet tmux switch for its Focus key.
     commands::tmux_attach::install_tui_focus_hook();
+    // #10754: S3 tm ls actions plumbing (keys wait on De1).
+    commands::tui_session_hooks::install_tui_session_hooks();
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion (issue #216) before exiting on a clap error.
     let argv: Vec<String> = std::env::args().collect();
@@ -275,20 +277,15 @@ async fn main() -> anyhow::Result<()> {
         commands::build_lease::run(args).await
     }
     // #8436: `tm fleet` is daemon-less — no gateway probe, no migration.
-    if let Some(Command::Fleet { action }) = cli.command {
-        return commands::fleet::run(action).await;
-    }
-    // #9822: `tm architect` is daemon-less, and its stdout is a script's.
-    if let Some(Command::Architect { action }) = cli.command {
-        std::process::exit(commands::architect::run(action));
-    }
-    // #8939: `tm env` is daemon-less too, and prints no value.
-    if let Some(Command::Env { action }) = cli.command {
-        return commands::env_file::run(action);
-    }
+    // #9822: `tm architect` too, and its stdout is a script's. #8939: `tm env`
+    // too, and prints no value. #8878 PR2a: `tm presence` too.
     // #7521: `tm secrets` talks to the trusty-secrets socket, not the daemon.
     // #8378 PR-C: `tm content` is daemon-less as well.
     match cli.command {
+        Some(Command::Fleet { action }) => return commands::fleet::run(action).await,
+        Some(Command::Architect { action }) => std::process::exit(commands::architect::run(action)),
+        Some(Command::Presence { action }) => return commands::presence::run(action),
+        Some(Command::Env { action }) => return commands::env_file::run(action),
         Some(Command::Secrets { action }) => return commands::secrets::run(action).await,
         Some(Command::Content { action }) => return commands::content::run(action).await,
         Some(Command::Dbatg(args)) => std::process::exit(commands::dbatg::run(args).await), // #9758
@@ -608,6 +605,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Fleet { action }) => commands::fleet::run(action).await,
         Some(Command::Architect { action }) => std::process::exit(commands::architect::run(action)),
         Some(Command::Env { action }) => commands::env_file::run(action),
+        Some(Command::Presence { action }) => commands::presence::run(action),
         Some(Command::Secrets { action }) => commands::secrets::run(action).await,
         Some(Command::Content { action }) => commands::content::run(action).await,
         Some(Command::Dbatg(args)) => std::process::exit(commands::dbatg::run(args).await),

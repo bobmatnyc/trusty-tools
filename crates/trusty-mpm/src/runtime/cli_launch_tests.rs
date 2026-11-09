@@ -347,7 +347,7 @@ fn send_spec_launch_types_a_short_line_naming_a_readable_spec() {
     let spec_dir = tmp.path().join("specs");
     let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
 
-    super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-sess", &spec, &spec_dir)
+    super::send_spec_launch_with(Some(&bin), None, "/w/tm", "tm-sess", &spec, &spec_dir)
         .expect("a short line is typed");
 
     let written = entries(&spec_dir);
@@ -372,7 +372,7 @@ fn a_cli_launch_is_named_after_its_tmux_session() {
     let spec_dir = tmp.path().join("specs");
     let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
 
-    super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-dogfood", &spec, &spec_dir)
+    super::send_spec_launch_with(Some(&bin), None, "/w/tm", "tm-dogfood", &spec, &spec_dir)
         .expect("a short line is typed");
 
     let written = LaunchSpec::verify(&entries(&spec_dir)[0]).expect("readable");
@@ -395,7 +395,7 @@ fn send_spec_launch_removes_the_spec_when_tmux_fails() {
     let spec_dir = tmp.path().join("specs");
     let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
 
-    let err = super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-sess", &spec, &spec_dir)
+    let err = super::send_spec_launch_with(Some(&bin), None, "/w/tm", "tm-sess", &spec, &spec_dir)
         .expect_err("a failing send-keys is an error");
 
     assert!(matches!(err, CliLaunchError::Send(_)), "{err:?}");

@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 /// `ReviewResult::error`); `NoReviewerOutput` — no reply at all: the call
 /// failed, the reply was empty or truncated, or the review stopped before the
 /// call (UNKNOWN); `AllWithheld` — the reviewer approved and every finding was
-/// withheld (APPROVE / APPROVE*); `SuppressedReject` — the reviewer asked for
+/// withheld, at least one by a gate (APPROVE / APPROVE*; an APPROVE whose only
+/// withholds are `no_quote_pregate` is `Parsed`, #10782); `SuppressedReject` — the reviewer asked for
 /// changes or blocked, and every finding supporting that was withheld
 /// (REQUEST_CHANGES). The retired `"no_verified_findings"` string still reads
 /// as `AllWithheld`, so a stored record from 0.38.0 or earlier deserializes.
@@ -35,7 +36,8 @@ pub enum VerdictStatus {
     ParseFailed,
     /// No reviewer reply: a call error, an empty or truncated reply, or no call.
     NoReviewerOutput,
-    /// The reviewer approved, and every finding was withheld.
+    /// The reviewer approved, and every finding was withheld, at least one by
+    /// a gate rather than the #10782 pregate.
     // #9310: read the #9188 string a stored record may still carry.
     #[serde(alias = "no_verified_findings")]
     AllWithheld,

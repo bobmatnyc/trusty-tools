@@ -121,6 +121,42 @@ pub fn record_launch(
     ARCHITECT_RECORDS.record_claude(root, pid, project_dir)
 }
 
+/// Bind the `claude` at `pid`, started by tm in tmux session `session` in
+/// `project_dir`, as the Architect: the one launch-record writer (#8878).
+///
+/// Why: owner ruling 2026-11-08 — the Architect is the operator's twin
+/// however tm started it. A tm launch path that wrote no record left a live
+/// Architect the trust-anchor floor denied (claude 58941, started through
+/// the fleet launch path with no `.architect` record). One function every
+/// launch path calls keeps the record and its read-back in one place.
+/// What: [`record_launch`] under `root` (`~/.trusty-mpm`), then reads the
+/// session name back ([`architect_session_name`]); a write failure, or a name
+/// that reads back as another session, is `Err` naming the record path. The
+/// caller must pass a PID it found under the pane shell of a session it just
+/// started, never one a caller names.
+/// Test: `bind_architect_writes_a_record_the_identity_check_accepts`,
+/// `every_architect_spawn_site_binds_8878`.
+pub fn bind_architect(
+    root: &Path,
+    pid: u32,
+    project_dir: &Path,
+    session: &str,
+) -> Result<ArmingRecord, String> {
+    let record = record_launch(root, pid, project_dir, session).map_err(|why| {
+        format!(
+            "cannot write the Architect launch record {} for claude pid {pid}: {why}",
+            ARCHITECT_RECORDS.path(root, pid).display()
+        )
+    })?;
+    match architect_session_name(root, pid) {
+        Ok(name) if name == session => Ok(record),
+        Ok(name) => Err(format!(
+            "the launch record reads back session {name}, not {session}"
+        )),
+        Err(why) => Err(why.to_string()),
+    }
+}
+
 /// Write `body` to `path` atomically, mode 0600, as `RecordStore::write` does.
 // #8981: shared with the conversation record.
 pub(crate) fn write_owner_only(path: &Path, body: &[u8]) -> Result<(), String> {

@@ -285,6 +285,29 @@ fn oversized_multi_file_diff() -> (String, &'static str) {
     (diff, tail_signature)
 }
 
+/// #10782: a chunk reviewer whose every reply holds one "confirm X" note with
+/// nothing to quote, and the same question.
+struct QuestioningReviewer;
+
+#[async_trait]
+impl LlmProvider for QuestioningReviewer {
+    fn name(&self) -> &str {
+        "questioning-reviewer"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let text = r#"{"verdict":"APPROVE","summary":"ok","questions":["Confirm compute_value is pure."],"findings":[{"title":"confirm","body":"Confirm compute_value is pure.","severity":"low","confidence":0.3,"file":"src/big.rs","line":1}]}"#;
+        Ok(LlmResponse {
+            text: text.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 /// THE headline test: an over-cap multi-file diff routes to MAP-REDUCE (not the
@@ -1751,3 +1774,77 @@ async fn mapreduce_mechanical_summary_never_contains_model_prose() {
 // #9310 ruling 50: a chunk or synthesis D/F grade is a hard verdict floor.
 #[path = "runner_mapreduce_grade_floor_tests.rs"]
 mod grade_floor;
+
+/// REGRESSION (#10762): the "assessed no files" abort partitions its findings.
+///
+/// Why: this exit returns through `abort_dry`, which never attached the
+/// inline plan, so a withheld finding on it sat in neither `inline_comments`
+/// nor `unanchored`.
+/// What: marks a result holding one withheld finding as assessing no files;
+/// asserts the fail-closed `Unknown` verdict, no inline entry, and one
+/// `withheld:refuted` entry at index 0.
+/// Test: this test itself.
+#[test]
+fn mapreduce_no_files_reviewed_abort_partitions_withheld() {
+    use crate::models::{
+        Effort, Finding, ReviewResult, UnanchoredFinding, UnanchoredReason, WithheldFinding,
+    };
+    use crate::pipeline::verify_posted::REFUTED_REASON;
+
+    let mut result = ReviewResult::new("o", "r", 1, "t", "u");
+    let mut finding = Finding::new("src/a.rs", "bug", "withheld", "fix", 0.9, Effort::High);
+    finding.line = Some(1);
+    result.withheld_findings.push(WithheldFinding {
+        finding,
+        reason: REFUTED_REASON.to_string(),
+        missing_fragment: None,
+    });
+    let raw_diff = "+++ b/src/a.rs\n@@ -0,0 +1,1 @@\n+fn a() {}\n";
+    super::mark_no_files_reviewed(&mut result, raw_diff);
+
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert!(result.inline_comments.is_empty());
+    assert_eq!(
+        result.unanchored,
+        vec![UnanchoredFinding {
+            finding_index: 0,
+            reason: UnanchoredReason::Withheld("refuted".to_string()),
+        }]
+    );
+}
+
+/// #10782 on the map-reduce path: each chunk's no-quote note is withheld
+/// before reduce under `no_quote_pregate`, and the chunks' questions reach the
+/// result once each.
+#[tokio::test]
+async fn mapreduce_withholds_no_quote_notes_and_keeps_questions() {
+    let (diff, _tail) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+    let llm: Arc<dyn LlmProvider> = Arc::new(QuestioningReviewer);
+    let result = run_review(
+        &ReviewConfig::load(None),
+        input(source),
+        confirmed_deps(llm),
+    )
+    .await;
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert!(
+        result
+            .withheld_by_reason
+            .get("no_quote_pregate")
+            .copied()
+            .unwrap_or(0)
+            >= 1,
+        "{:?}",
+        result.withheld_by_reason
+    );
+    assert!(
+        !result.withheld_by_reason.contains_key("line_citation"),
+        "{:?}",
+        result.withheld_by_reason
+    );
+    assert_eq!(
+        result.questions,
+        ["Confirm compute_value is pure.".to_string()]
+    );
+}

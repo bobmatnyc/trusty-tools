@@ -4,24 +4,36 @@
 //! items. Without a check, a run of valid items would spend the budget and
 //! the kernel would kill a valid item mid-request. The host reads what the
 //! worker has spent and recycles it while one item's allowance is left.
-//! What: [`spent`] returns the largest CPU time (user plus system) of any
-//! process in the worker's process group — `RLIMIT_CPU` binds each process
-//! on its own. Linux reads `/proc/<pid>/stat` (`USER_HZ` is 100 by ABI);
-//! other systems run `/bin/ps -o time= -p <pgid>` for the group leader (on
-//! macOS the sandbox denies `fork`, so the leader is the worker). `None`
-//! when it cannot be read; the caller then recycles (fails closed).
-//! Test: `cpu_budget_recycles_before_a_valid_item_is_killed`.
+//! What: [`spent`] returns the largest CPU time (user plus system) of the
+//! spawned process or any of its descendants — `RLIMIT_CPU` binds each
+//! process on its own. Linux reads `/proc/<pid>/stat` (`USER_HZ` is 100 by
+//! ABI) and walks the parent links down from the spawned PID, so it finds
+//! the worker under `bwrap --new-session`, which moves the worker out of the
+//! host's process group and session. Other systems run `/bin/ps -o time= -p
+//! <pid>` for the spawned process (on macOS the launcher and the limiter
+//! `exec` the worker, and the sandbox denies `fork`, so that process is the
+//! worker). `None` when it cannot be read; the caller then recycles (fails
+//! closed).
+//! Test: `cpu_budget_recycles_before_a_valid_item_is_killed`,
+//! `cpu_budget_recycles_a_sandboxed_worker`.
 
 /// `/proc` reports CPU in `USER_HZ` ticks, fixed at 100 by the Linux ABI.
 #[cfg(target_os = "linux")]
 const USER_HZ: f64 = 100.0;
 
-/// CPU seconds spent by the busiest process of group `pgid`.
+/// CPU seconds spent by the busiest process in the tree rooted at `root`,
+/// the PID the host spawned.
 #[cfg(target_os = "linux")]
-pub(crate) fn spent(pgid: i32) -> Option<f64> {
-    let mut best: Option<f64> = None;
+pub(crate) fn spent(root: i32) -> Option<f64> {
+    // #10746: keyed on the spawned PID's process tree, not its process
+    // group: `bwrap --new-session` puts the worker in a session (and group)
+    // of its own, two processes below the PID the host spawned.
+    let mut procs: Vec<(i32, i32, f64)> = Vec::new();
     for entry in std::fs::read_dir("/proc").ok()? {
         let Ok(entry) = entry else { continue };
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+            continue;
+        };
         let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
             continue;
         };
@@ -30,21 +42,35 @@ pub(crate) fn spent(pgid: i32) -> Option<f64> {
             continue;
         };
         let f: Vec<&str> = rest.split_whitespace().collect();
-        if f.get(2).and_then(|g| g.parse::<i32>().ok()) != Some(pgid) {
+        let field = |i: usize| f.get(i).and_then(|t| t.parse::<u64>().ok());
+        let (Some(ppid), Some(utime), Some(stime)) = (field(1), field(11), field(12)) else {
+            continue;
+        };
+        procs.push((pid, ppid as i32, (utime + stime) as f64 / USER_HZ));
+    }
+    let mut best: Option<f64> = None;
+    let mut frontier = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(parent) = frontier.pop() {
+        if !seen.insert(parent) {
             continue;
         }
-        let ticks = |i: usize| f.get(i).and_then(|t| t.parse::<u64>().ok());
-        let secs = (ticks(11)? + ticks(12)?) as f64 / USER_HZ;
-        best = Some(best.map_or(secs, |b: f64| b.max(secs)));
+        for (pid, ppid, secs) in &procs {
+            if *pid == parent {
+                best = Some(best.map_or(*secs, |b: f64| b.max(*secs)));
+            } else if *ppid == parent {
+                frontier.push(*pid);
+            }
+        }
     }
     best
 }
 
-/// CPU seconds spent by the group leader `pgid` (see the module doc).
+/// CPU seconds spent by the spawned process `root` (see the module doc).
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn spent(pgid: i32) -> Option<f64> {
+pub(crate) fn spent(root: i32) -> Option<f64> {
     let out = std::process::Command::new("/bin/ps")
-        .args(["-o", "time=", "-p", &pgid.to_string()])
+        .args(["-o", "time=", "-p", &root.to_string()])
         .output()
         .ok()?;
     if !out.status.success() {
