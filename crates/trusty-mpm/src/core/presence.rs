@@ -8,7 +8,8 @@
 //! 0600 through a temp file and a rename, sealed with the [`GrantKey`] HMAC.
 //! [`check`] accepts it only when the file is a 0600 regular file of this
 //! user's (no symlink), parses strictly, carries a valid tag, names the same
-//! PID and start time as the live `claude`, uses a known method, and was used
+//! PID and start time as the live `claude`, uses a known method (`local`, or
+//! `device:<id>` under the D67 switch [`DEVICE_GRANTS`]), and was used
 //! within [`IDLE_LIMIT`] (Bob D5b Q2: 120 min). [`refresh`] moves `last_used`
 //! forward on each guarded call. Every failure is a [`PresenceRefusal`].
 //! FAIL-CLOSED: no key, an unreadable directory or file, a future date, or a

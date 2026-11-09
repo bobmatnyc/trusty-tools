@@ -67,7 +67,7 @@ impl Ceremonies {
         presence_request::load(root, key, request_id, now).map_err(VerifyError::Request)?;
         let challenge = Challenge {
             request_id: request_id.to_owned(),
-            bytes: random_bytes::<32>().map_err(VerifyError::Grant)?,
+            bytes: random_bytes::<32>().map_err(VerifyError::NoRandom)?,
             issued_at: now,
         };
         self.lock().insert(request_id.to_owned(), challenge.clone());
@@ -211,6 +211,9 @@ pub enum VerifyError {
     /// The counter could not be persisted, so the grant is refused.
     #[error("the device's counter could not be saved: {0}")]
     Persist(DeviceError),
+    /// No random bytes for a challenge.
+    #[error("no random bytes for a challenge: {0}")]
+    NoRandom(String),
     /// The grant could not be written; the request is already consumed.
     #[error("the grant could not be written (the request is consumed): {0}")]
     Grant(String),
