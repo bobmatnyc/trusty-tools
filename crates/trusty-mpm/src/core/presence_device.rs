@@ -11,9 +11,11 @@
 //! key material (opaque here), dates, the signature counter and the backup
 //! flags. [`load`] reads one record fail-closed; [`enrol`] and [`revoke`]
 //! check a ticket first; [`record_use`] persists the counter after a
-//! verified assertion. A revoked device has no record: [`revoke`] deletes it
-//! first, then every grant that names it, so a grant whose sweep failed is
-//! still refused by `presence::check`, which re-reads the record.
+//! verified assertion, re-reading the record under [`lock_store`]. A revoked
+//! device has no record: [`revoke`] deletes it first, then every grant that
+//! names it, under the same lock, so a verify in flight cannot write the
+//! record back or mint after the sweep; a grant whose sweep failed is still
+//! refused by `presence::check`, which re-reads the record.
 //! Test: `presence_device_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -43,6 +45,10 @@ const MAX_RECORD_BYTES: u64 = 16 << 10;
 
 /// The seal's record tag.
 const TAG: &str = "tm-presence-device-v1";
+
+/// The store lock, inside the device directory (not a `.json`, so [`list`]
+/// skips it).
+const LOCK_FILE: &str = ".lock";
 
 /// One enrolled device, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +149,10 @@ pub enum DeviceError {
     /// A write or removal failed.
     #[error("the device store could not be written: {0}")]
     Write(String),
+    /// The counter did not move past the stored one (#8878: a concurrent
+    /// verify saved a higher one first).
+    #[error("the signature counter did not increase past the stored one")]
+    CounterRegressed,
 }
 
 /// `root/architect-launch/devices`.
@@ -226,24 +236,77 @@ pub fn enrol(
     Ok(device)
 }
 
-/// Persist a verified assertion's counter and backup state on `device`.
+/// An exclusive hold on the device store; dropping it releases the lock.
+#[derive(Debug)]
+pub struct StoreLock {
+    _file: std::fs::File,
+}
+
+/// Take the device store's exclusive lock, waiting for any other holder.
+///
+/// Why: #8878 — a revoke that runs while a verify is in flight must win: the
+/// verify must neither write the record back nor mint after the sweep, and
+/// two verifies on one device must not save their counters out of order.
+/// What: opens `devices/.lock` (0600, no symlink) and takes an exclusive
+/// `flock`, which also serialises threads in one process and is released if
+/// the holder dies. A missing device directory is [`DeviceError::Unknown`];
+/// any other failure is [`DeviceError::Write`].
+/// Test: `revoke_during_verify_does_not_resurrect_the_device_8878`,
+/// `concurrent_verifies_never_move_the_sign_count_backwards_8878`.
+pub fn lock_store(root: &Path) -> Result<StoreLock, DeviceError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = devices_dir(root).join(LOCK_FILE);
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(DeviceError::Unknown),
+        Err(e) => return Err(DeviceError::Write(format!("{}: {e}", path.display()))),
+    };
+    file.lock()
+        .map_err(|e| DeviceError::Write(format!("{}: {e}", path.display())))?;
+    Ok(StoreLock { _file: file })
+}
+
+/// Persist a verified assertion's counter and backup state on the device
+/// `credential_id`, under `_lock`.
 ///
 /// Why: plan-pr2b1.md §5 Fail-Open 3 — a counter that is not persisted lets
 /// the same assertion verify again, so a failed write refuses the grant.
-/// Test: `sign_count_persist_failure_refuses_the_grant_8878`.
+/// What: re-reads the record under the lock (#8878): a record revoked since
+/// the verifier ran is [`DeviceError::Unknown`] and is not written back; a
+/// `sign_count` not above the stored one (0 on 0 allowed) is
+/// [`DeviceError::CounterRegressed`], so the stored counter never moves
+/// backwards.
+/// Test: `sign_count_persist_failure_refuses_the_grant_8878`,
+/// `revoke_during_verify_does_not_resurrect_the_device_8878`,
+/// `concurrent_verifies_never_move_the_sign_count_backwards_8878`.
 pub fn record_use(
     root: &Path,
     key: &GrantKey,
-    device: &Device,
+    _lock: &StoreLock,
+    credential_id: &str,
     sign_count: u32,
     backup_state: bool,
     now: u64,
 ) -> Result<Device, DeviceError> {
+    // #8878: the copy the verifier saw may be stale; the disk under the lock wins.
+    let current = load(root, key, credential_id)?;
+    let both_zero = sign_count == 0 && current.sign_count == 0;
+    if sign_count <= current.sign_count && !both_zero {
+        return Err(DeviceError::CounterRegressed);
+    }
     let next = Device {
         sign_count,
         backup_state,
-        last_used: now.max(device.last_used),
-        ..device.clone()
+        last_used: now.max(current.last_used),
+        ..current
     }
     .sealed(key);
     write(root, &next)?;
@@ -289,9 +352,12 @@ pub struct Revoked {
 ///
 /// Why: plan-pr2-devices.md §4 — a stolen device's grant dies at once, not at
 /// the 120-minute idle edge.
-/// What: checks the ticket, deletes the record (the kill switch: a device
-/// grant is refused without it), then deletes every `*.presence` whose method
-/// names the credential. A grant that cannot be read or removed makes the
+/// What: checks the ticket, takes [`lock_store`] (#8878: so an in-flight
+/// verify either finishes before and its grant is swept, or runs after and
+/// finds no record), deletes the record (the kill switch: a device grant is
+/// refused without it), then deletes every `*.presence` whose method names
+/// the credential. A lock that cannot be taken does not stop the revoke: a
+/// verify needs the same lock to save its counter, so it is refused too. A grant that cannot be read or removed makes the
 /// call an error after the sweep; the record is already gone, so the grant is
 /// refused anyway. An unknown credential is [`DeviceError::Unknown`] after
 /// the sweep.
@@ -307,6 +373,15 @@ pub fn revoke(
     check_ticket(key, ticket, TicketPurpose::Revoke, credential_id, now)
         .map_err(DeviceError::Ticket)?;
     let path = device_path(root, credential_id)?;
+    // #8878: held until the sweep ends, so no verify mints in between.
+    let _lock = match lock_store(root) {
+        Ok(lock) => Some(lock),
+        Err(DeviceError::Unknown) => None,
+        Err(e) => {
+            tracing::warn!("#8878: revoking without the device store lock: {e}");
+            None
+        }
+    };
     let known = match std::fs::remove_file(&path) {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,

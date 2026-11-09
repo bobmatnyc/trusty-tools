@@ -185,11 +185,14 @@ pub fn pending_path(root: &Path, id: &str) -> Result<PathBuf, RequestError> {
 
 /// Make a request for `new` at `now`, valid for `ttl`.
 ///
-/// Why/What: see the module doc. Expired requests are removed first. Any
-/// other request file, readable or not, counts toward [`PENDING_CAP`]; a
-/// readable one for the same PID made within [`RATE_WINDOW`] refuses.
+/// Why/What: see the module doc. A readable request for the same PID made
+/// within [`RATE_WINDOW`] refuses, expired or not (#8878: a TTL shorter than
+/// the window must not reopen it). Expired requests do not count toward
+/// [`PENDING_CAP`] and are removed once older than the window; any other
+/// request file, readable or not, counts.
 /// Test: `a_request_round_trips_sealed_8878`, `the_pending_cap_is_16_8878`,
-/// `one_request_per_pid_per_two_minutes_8878`.
+/// `one_request_per_pid_per_two_minutes_8878`,
+/// `the_rate_window_holds_at_the_ttl_floor_8878`.
 pub fn create(
     root: &Path,
     key: &GrantKey,
@@ -211,15 +214,18 @@ pub fn create(
         ));
     }
     let mut live = 0usize;
-    for (id, found) in scan(root, key, now)? {
+    for (id, found) in scan(root, key)? {
         match found {
-            Err(RequestError::Expired) => {
-                if let Ok(path) = pending_path(root, &id) {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
             Ok(p) if p.pid == new.pid && now.saturating_sub(p.created) < RATE_WINDOW.as_secs() => {
                 return Err(RequestError::RateLimited);
+            }
+            Ok(p) if now >= p.expires => {
+                // #8878: kept until the window passes, so its PID stays limited.
+                if now.saturating_sub(p.created) >= RATE_WINDOW.as_secs()
+                    && let Ok(path) = pending_path(root, &id)
+                {
+                    let _ = std::fs::remove_file(path);
+                }
             }
             _ => live += 1,
         }
@@ -249,8 +255,9 @@ pub fn create(
 /// One [`scan`] row: a request id and its request or why it is unusable.
 type Scanned = (String, Result<Pending, RequestError>);
 
-/// Every request file's id and its request or the reason it is unusable.
-fn scan(root: &Path, key: &GrantKey, now: u64) -> Result<Vec<Scanned>, RequestError> {
+/// Every request file's id and its sealed request, expired or not, or the
+/// reason it is unusable.
+fn scan(root: &Path, key: &GrantKey) -> Result<Vec<Scanned>, RequestError> {
     let entries = match std::fs::read_dir(pending_dir(root)) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -261,7 +268,7 @@ fn scan(root: &Path, key: &GrantKey, now: u64) -> Result<Vec<Scanned>, RequestEr
         .filter_map(|e| e.file_name().into_string().ok())
         .filter_map(|name| name.strip_suffix(".json").map(str::to_owned))
         .map(|id| {
-            let found = load(root, key, &id, now);
+            let found = read_sealed(root, key, &id);
             (id, found)
         })
         .collect())
@@ -276,6 +283,19 @@ fn scan(root: &Path, key: &GrantKey, now: u64) -> Result<Vec<Scanned>, RequestEr
 /// Test: `pending_symlink_oversized_or_malformed_refuses_and_is_not_consumed_into_a_grant_8878`,
 /// `clock_before_created_at_refuses_8878`, `an_expired_request_is_refused_8878`.
 pub fn load(root: &Path, key: &GrantKey, id: &str, now: u64) -> Result<Pending, RequestError> {
+    let pending = read_sealed(root, key, id)?;
+    if now < pending.created {
+        return Err(RequestError::BadDates);
+    }
+    if now >= pending.expires {
+        return Err(RequestError::Expired);
+    }
+    Ok(pending)
+}
+
+/// Request `id` with its file, seal, id and TTL span checked, whatever the
+/// time: [`load`] adds the checks against now.
+fn read_sealed(root: &Path, key: &GrantKey, id: &str) -> Result<Pending, RequestError> {
     let path = pending_path(root, id)?;
     let anchor = root.join(ARCHITECT_DIR);
     let dir = pending_dir(root);
@@ -291,14 +311,8 @@ pub fn load(root: &Path, key: &GrantKey, id: &str, now: u64) -> Result<Pending, 
     if pending.id != id || pending.action_hash != action_hash(&pending.action) {
         return Err(RequestError::Malformed);
     }
-    if now < pending.created
-        || pending.expires < pending.created
-        || pending.expires - pending.created > MAX_TTL.as_secs()
-    {
+    if pending.expires < pending.created || pending.expires - pending.created > MAX_TTL.as_secs() {
         return Err(RequestError::BadDates);
-    }
-    if now >= pending.expires {
-        return Err(RequestError::Expired);
     }
     Ok(pending)
 }

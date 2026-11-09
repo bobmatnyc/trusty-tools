@@ -347,3 +347,55 @@ fn daemon_restart_drops_ceremony_state_8878() {
             .exists()
     );
 }
+
+/// #8878: a revoke while the verifier runs wins: the verify fails before the
+/// claim, so the record stays gone, no grant is written, and the request and
+/// challenge stay in place.
+#[test]
+fn revoke_during_verify_does_not_resurrect_the_device_8878() {
+    let (_d, root) = root();
+    let (phone, pending, ceremonies, challenge) = setup(&root);
+    let ticket = mint_ticket(&key(), TicketPurpose::Revoke, "cred-A", NOW).expect("ticket");
+    let revoke = || {
+        presence_device::revoke(&root, &key(), &ticket, "cred-A", NOW).expect("revoke");
+    };
+    let assertion = phone.sign(&challenge, &pending, 4, true);
+    let refused = verify_at(&root, &ceremonies, &Sabotage(&revoke), &assertion, NOW);
+    assert_eq!(refused, Err(VerifyError::Device(DeviceError::Unknown)));
+    assert_eq!(
+        presence_device::load(&root, &key(), "cred-A"),
+        Err(DeviceError::Unknown),
+        "the revoked device stays revoked"
+    );
+    assert!(grant_files(&root).is_empty(), "no grant names it");
+    assert!(
+        pending_path(&root, &pending.id).expect("path").exists(),
+        "not consumed"
+    );
+}
+
+/// #8878: a verify whose verifier saw an older counter cannot save it over
+/// the higher one another verify saved meanwhile.
+#[test]
+fn concurrent_verifies_never_move_the_sign_count_backwards_8878() {
+    let (_d, root) = root();
+    let (phone, first, ceremonies, challenge) = setup(&root);
+    let later = NOW + presence_request::RATE_WINDOW.as_secs();
+    let second = crate::core::presence_test_support::request_for(&root, ARCHITECT, "b", later);
+    let second_challenge = ceremonies
+        .begin(&root, &key(), &second.id, later)
+        .expect("begin");
+    let other = phone.sign(&second_challenge, &second, 7, true);
+    let race = || {
+        verify_at(&root, &ceremonies, &FakeVerifier, &other, later).expect("the other verify");
+    };
+    let stale = phone.sign(&challenge, &first, 5, true);
+    let refused = verify_at(&root, &ceremonies, &Sabotage(&race), &stale, NOW);
+    assert_eq!(refused, Err(VerifyError::CounterRegressed));
+    let stored = presence_device::load(&root, &key(), "cred-A").expect("device");
+    assert_eq!(stored.sign_count, 7, "the counter never moves backwards");
+    assert!(
+        pending_path(&root, &first.id).expect("path").exists(),
+        "not consumed"
+    );
+}

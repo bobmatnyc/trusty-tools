@@ -373,3 +373,24 @@ fn the_shipped_stub_verifier_grants_nothing_8878() {
     );
     assert_eq!(snapshot(&root), before);
 }
+
+/// #8878: challenges never finished do not pile up; a later `begin` drops
+/// every one past the TTL.
+#[test]
+fn begin_drops_challenges_older_than_the_ttl_8878() {
+    let (_d, root) = root();
+    let old = request(&root, "a");
+    let ceremonies = Ceremonies::new();
+    ceremonies
+        .begin(&root, &key(), &old.id, NOW)
+        .expect("begin");
+    let later = NOW + CHALLENGE_TTL.as_secs() + 1;
+    let fresh = request_for(&root, ARCHITECT, "b", later);
+    ceremonies
+        .begin(&root, &key(), &fresh.id, later)
+        .expect("begin");
+    let open = ceremonies.lock();
+    assert!(!open.contains_key(&old.id), "the stale challenge is gone");
+    assert!(open.contains_key(&fresh.id));
+    assert_eq!(open.len(), 1);
+}

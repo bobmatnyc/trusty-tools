@@ -123,3 +123,34 @@ fn new_for(claude: ClaudeProcess) -> NewRequest {
         action: "a".to_owned(),
     }
 }
+
+/// #8878: at the 1-minute TTL floor, an expired request still holds its PID's
+/// 2-minute window (Architect Q8).
+#[test]
+fn the_rate_window_holds_at_the_ttl_floor_8878() {
+    let (_d, root) = root();
+    let floor = crate::core::presence_config::PresenceConfig {
+        request_ttl_minutes: 0,
+    }
+    .request_ttl();
+    create(&root, &key(), new_for(ARCHITECT), floor, NOW).expect("first");
+    let expired_but_in_window = NOW + floor.as_secs() + 1;
+    assert_eq!(
+        create(
+            &root,
+            &key(),
+            new_for(ARCHITECT),
+            floor,
+            expired_but_in_window
+        ),
+        Err(RequestError::RateLimited)
+    );
+    create(
+        &root,
+        &key(),
+        new_for(ARCHITECT),
+        floor,
+        NOW + RATE_WINDOW.as_secs(),
+    )
+    .expect("after the window");
+}

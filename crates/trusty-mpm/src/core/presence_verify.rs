@@ -55,8 +55,11 @@ impl Ceremonies {
     /// Issue a challenge for the live request `request_id` at `now`.
     ///
     /// Why/What: only a request that [`presence_request::load`] accepts gets
-    /// one; a second call replaces the first.
-    /// Test: `a_valid_assertion_mints_a_device_grant_8878`.
+    /// one; a second call replaces the first. Every challenge past
+    /// [`CHALLENGE_TTL`] or dated after `now` is dropped first (#8878), so
+    /// ceremonies never finished do not pile up.
+    /// Test: `a_valid_assertion_mints_a_device_grant_8878`,
+    /// `begin_drops_challenges_older_than_the_ttl_8878`.
     pub fn begin(
         &self,
         root: &Path,
@@ -70,7 +73,10 @@ impl Ceremonies {
             bytes: random_bytes::<32>().map_err(VerifyError::NoRandom)?,
             issued_at: now,
         };
-        self.lock().insert(request_id.to_owned(), challenge.clone());
+        let mut open = self.lock();
+        // #8878: an unanswerable challenge is refused at verify; drop it here.
+        open.retain(|_, c| c.issued_at <= now && now - c.issued_at <= CHALLENGE_TTL.as_secs());
+        open.insert(request_id.to_owned(), challenge.clone());
         Ok(challenge)
     }
 
@@ -222,7 +228,9 @@ pub enum VerifyError {
 /// Turn `assertion` into a grant for the request it approves.
 ///
 /// Why/What: see the module doc. Every refusal before the claim leaves the
-/// request file and the challenge in place and writes no grant. After the
+/// request file and the challenge in place and writes no grant; that
+/// includes a device revoked, or a higher counter saved by another verify,
+/// while the verifier ran (#8878). After the
 /// claim the request is gone, so a mint failure is an error with nothing to
 /// resubmit.
 /// Test: `a_valid_assertion_mints_a_device_grant_8878` and the spoof and
@@ -261,15 +269,23 @@ pub fn verify_and_grant(
     if verified.sign_count <= device.sign_count && !both_zero {
         return Err(VerifyError::CounterRegressed);
     }
+    // #8878: held from the counter save to the mint, so a revoke either
+    // sweeps this grant or runs first and leaves no record to save.
+    let lock = presence_device::lock_store(env.root).map_err(VerifyError::Persist)?;
     presence_device::record_use(
         env.root,
         &key,
-        &device,
+        &lock,
+        &device.credential_id,
         verified.sign_count,
         verified.backup_state,
         env.now,
     )
-    .map_err(VerifyError::Persist)?;
+    .map_err(|e| match e {
+        DeviceError::Unknown => VerifyError::Device(DeviceError::Unknown),
+        DeviceError::CounterRegressed => VerifyError::CounterRegressed,
+        other => VerifyError::Persist(other),
+    })?;
     if !ceremonies.finish(&challenge) {
         return Err(VerifyError::NoCeremony);
     }
@@ -281,6 +297,7 @@ pub fn verify_and_grant(
     let method = device.method();
     let path =
         presence::mint(env.root, &claude, &method, &key, env.now).map_err(VerifyError::Grant)?;
+    drop(lock);
     Ok(Granted {
         path,
         claude,
