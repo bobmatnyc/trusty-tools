@@ -24,24 +24,55 @@ use trusty_mpm::core::presence_key::KeySource;
 use trusty_mpm::core::presence_local::{Authenticator, LocalAuthenticator, PresenceOutcome};
 use trusty_mpm::core::twin_identity::ClaudeProcess;
 
-use crate::cli::PresenceAction;
+use crate::cli::{DevicesAction, PresenceAction};
 use crate::commands::fleet::status::this_session_env;
 use crate::commands::pm_guard_architect_reason::session_binding;
 use crate::commands::pm_guard_trust_anchor::{ANCHOR_ROOT, HookEnv};
+use crate::commands::{presence_client, presence_devices, presence_request, presence_wait};
 
 /// Run a `tm presence` action.
 pub(crate) fn run(action: PresenceAction) -> anyhow::Result<()> {
+    let home = dirs::home_dir()
+        .filter(|h| h.is_absolute())
+        .context("the home directory is unknown")?;
+    let root = home.join(ANCHOR_ROOT);
+    let env = HookEnv {
+        home: Some(home),
+        ..this_session_env()
+    };
+    let source = KeySource::ambient(&root);
+    // #8878 PR2b-1b: the device verbs.
+    let key = || source.load_or_create().context("the presence key");
+    let call = presence_client::live(presence_client::CLI_TIMEOUT);
     match action {
-        PresenceAction::Local => {
-            let home = dirs::home_dir()
-                .filter(|h| h.is_absolute())
-                .context("the home directory is unknown")?;
-            let root = home.join(ANCHOR_ROOT);
-            let env = HookEnv {
-                home: Some(home),
-                ..this_session_env()
+        PresenceAction::Request { action } => {
+            presence_request::request(&env, &action, &call).map(drop)
+        }
+        PresenceAction::Wait { timeout, request } => {
+            let claude = this_claude(&env)?;
+            let timeout = presence_wait::parse_timeout(&timeout)?;
+            let wait_env = presence_wait::WaitEnv {
+                root: &root,
+                claude,
+                key: &|| source.load().ok().flatten(),
+                now: &|| presence::unix_secs(std::time::SystemTime::now()),
+                sleep: &std::thread::sleep,
             };
-            let source = KeySource::ambient(&root);
+            match presence_wait::wait(&wait_env, request.as_deref(), timeout) {
+                0 => Ok(()),
+                code => std::process::exit(code),
+            }
+        }
+        PresenceAction::Devices { action } => match action {
+            DevicesAction::Add { name } => {
+                presence_devices::add(&LocalAuthenticator, &key, &name, &call).map(drop)
+            }
+            DevicesAction::List => presence_devices::list(&root, &key()?).map(drop),
+            DevicesAction::Revoke { credential_id } => {
+                presence_devices::revoke(&LocalAuthenticator, &key, &root, &credential_id).map(drop)
+            }
+        },
+        PresenceAction::Local => {
             let path = local(
                 &env,
                 MpmConfig::load_default,

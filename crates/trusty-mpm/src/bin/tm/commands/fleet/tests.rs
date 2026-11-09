@@ -145,6 +145,34 @@ fn cli_parses_presence_local() {
 }
 
 #[test]
+fn cli_parses_presence_device_verbs_8878() {
+    use crate::cli::{DevicesAction, PresenceAction};
+    // #8878 PR2b-1b.
+    let parse = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command.unwrap() {
+        Command::Presence { action } => action,
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(
+        parse(&["tm", "presence", "request"]),
+        PresenceAction::Request { .. }
+    ));
+    assert!(matches!(
+        parse(&["tm", "presence", "wait", "--timeout", "2m", "--request", "ab"]),
+        PresenceAction::Wait { timeout, request: Some(r) } if timeout == "2m" && r == "ab"
+    ));
+    assert!(matches!(
+        parse(&["tm", "presence", "devices", "add", "iphone"]),
+        PresenceAction::Devices { action: DevicesAction::Add { name } } if name == "iphone"
+    ));
+    assert!(matches!(
+        parse(&["tm", "presence", "devices", "revoke", "c1"]),
+        PresenceAction::Devices {
+            action: DevicesAction::Revoke { .. }
+        }
+    ));
+}
+
+#[test]
 fn a_first_run_writes_the_profile_the_grant_and_a_remote_less_repo() {
     let fx = Fixture::new();
     let report = fx.init().unwrap();
