@@ -475,6 +475,7 @@ pub mod presence;
 pub mod presence_key;
 pub mod presence_local;
 // #8878 PR2b-1a: device store, tickets, pending requests, approval verify.
+pub mod presence_config;
 pub mod presence_device;
 pub mod presence_enrol;
 pub mod presence_request;

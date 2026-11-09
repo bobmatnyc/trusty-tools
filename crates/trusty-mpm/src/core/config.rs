@@ -441,6 +441,9 @@ pub struct MpmConfig {
     /// Absent section → `enabled = true`, the entry is written as before.
     pub pm_guard: PmGuardConfig,
 
+    /// `[presence]` — device-approval request TTL (#8878 PR2b-1a).
+    pub presence: crate::core::presence_config::PresenceConfig,
+
     /// `[session_manager]` — Session Manager agent config (DOC-14 §10).
     ///
     /// Defaults to `enabled = false`; absent or partial sections parse to spec
