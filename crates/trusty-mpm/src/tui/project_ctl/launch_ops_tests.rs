@@ -118,3 +118,64 @@ async fn launch_posts_the_spawn_and_notices_the_session_name() {
     assert_eq!(body["task"], "fix the flaky test");
     assert_eq!(body["force_new"], true);
 }
+
+/// See #10754: the submit draws `launching <project>…` before the spawn POST
+/// leaves, then replaces it with the outcome.
+#[tokio::test]
+async fn launch_draws_the_launching_notice_before_the_spawn_is_sent() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let record = serde_json::json!({
+        "name": "alpha",
+        "repo_url": tmp.path().to_string_lossy(),
+        "default_branch": "main",
+    });
+    let posted: Arc<Mutex<bool>> = Arc::default();
+    let sink = posted.clone();
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/projects/{name}",
+            axum::routing::get(move || std::future::ready(axum::Json(record.clone()))),
+        )
+        .route(
+            "/api/v1/sessions/managed",
+            axum::routing::post(move || {
+                if let Ok(mut flag) = sink.lock() {
+                    *flag = true;
+                }
+                std::future::ready(axum::Json(serde_json::json!({
+                    "id": "s-1",
+                    "name": "alpha-fix",
+                    "state": "provisioning",
+                })))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
+
+    // Each draw records the notice on screen and whether the spawn was posted.
+    let mut frames: Vec<(Option<String>, bool)> = Vec::new();
+    let seen = posted.clone();
+    let mut screen = |s: &mut ProjectCtlState| -> anyhow::Result<()> {
+        frames.push((s.notice.clone(), *seen.lock().unwrap()));
+        Ok(())
+    };
+    let client = DaemonClient::new(format!("http://{addr}"));
+    let mut state = ProjectCtlState::default();
+    crate::tui::project_ctl::actions::dispatch_on(
+        &mut state,
+        &client,
+        PendingAction::Launch(request(None)),
+        &mut screen,
+    )
+    .await
+    .expect("the draw never fails");
+
+    assert_eq!(
+        frames,
+        vec![(Some("launching alpha…".to_string()), false)],
+        "one frame shows the pending launch before the spawn is posted"
+    );
+    assert!(*posted.lock().unwrap(), "the spawn was posted");
+    assert_eq!(state.notice.as_deref(), Some("launched alpha-fix"));
+}

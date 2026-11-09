@@ -31,10 +31,10 @@
 
 use crate::client::{CommandExecutor, DaemonClient};
 
+use super::drive::Screen;
 use super::events::PendingAction;
 use super::session_ops::{self, SessionOp};
 use super::state::ProjectCtlState;
-use crate::tui::session_hooks::ScreenHandoff;
 
 /// Route one [`PendingAction`] to its handler and update `state`.
 ///
@@ -55,16 +55,17 @@ use crate::tui::session_hooks::ScreenHandoff;
 /// explicit #2120 requirement that a rejected submit never discards the
 /// operator's other unsaved edits. `Focus` (#10476) runs
 /// [`crate::tui::focus::focus_session`] and shows its one-line result.
-/// `Launch` (#10754) runs [`super::launch_ops::run`].
+/// `Launch` (#10754) runs [`super::launch_ops::run`] with `screen`, which
+/// draws the `launching…` notice before the spawn.
 /// #10754: the four `tm ls` verbs (`OpenSession`, `RenameSession`,
 /// `NewSession`, `DeleteSession`) go to [`super::session_ops::run`] with
 /// `screen`, which hands the terminal over around an attach. Only a failed
-/// terminal resume is an `Err`.
+/// terminal resume or draw is an `Err`.
 pub(crate) async fn dispatch_on(
     state: &mut ProjectCtlState,
     client: &DaemonClient,
     action: PendingAction,
-    screen: &mut dyn ScreenHandoff,
+    screen: &mut dyn Screen,
 ) -> anyhow::Result<()> {
     // #10754: S3 tm ls actions; De1 key map (Bob 11-06).
     let op = match action {
@@ -72,6 +73,10 @@ pub(crate) async fn dispatch_on(
         PendingAction::RenameSession(id, name) => SessionOp::Rename(id, name),
         PendingAction::NewSession(project) => SessionOp::New(project),
         PendingAction::DeleteSession(id) => SessionOp::Delete(id),
+        // See #10754: the launch form's submit draws before it awaits.
+        PendingAction::Launch(request) => {
+            return super::launch_ops::run(state, client, request, screen).await;
+        }
         other => {
             dispatch_daemon(state, client, other).await;
             return Ok(());
@@ -131,8 +136,6 @@ async fn dispatch_daemon(
         PendingAction::Focus(name) => {
             state.set_notice(crate::tui::focus::focus_session(&name).await);
         }
-        // See #10754: the launch form's submit.
-        PendingAction::Launch(request) => super::launch_ops::run(state, client, request).await,
         PendingAction::SubmitConfig(name, args) => {
             match client.registry_patch_project(&name, &args).await {
                 Ok(project) => {
@@ -143,11 +146,12 @@ async fn dispatch_daemon(
                 Err(e) => state.set_config_form_error(format!("{e}")),
             }
         }
-        // Routed to `session_ops` by `dispatch_on` before this match.
+        // Routed to `session_ops` / `launch_ops` by `dispatch_on` before this match.
         PendingAction::OpenSession(_)
         | PendingAction::RenameSession(..)
         | PendingAction::NewSession(_)
-        | PendingAction::DeleteSession(_) => {}
+        | PendingAction::DeleteSession(_)
+        | PendingAction::Launch(_) => {}
     }
 }
 

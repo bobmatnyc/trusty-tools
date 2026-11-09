@@ -126,3 +126,11 @@ impl ScreenHandoff for NoHandoff {
         Ok(())
     }
 }
+
+// See #10754: the launch dispatch draws, so a test screen must too.
+#[cfg(test)]
+impl super::drive::Screen for NoHandoff {
+    fn draw(&mut self, _: &mut super::state::ProjectCtlState) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
