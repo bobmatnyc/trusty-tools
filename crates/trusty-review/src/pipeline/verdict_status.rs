@@ -18,6 +18,7 @@ use crate::models::{Finding, ReviewResult, Verdict, VerdictStatus};
 use crate::pipeline::{
     grade::{derive_verdict, floors_verdict_to_block, stricter_of},
     letter_grade::{Grade, default_grade_for_verdict, grade_floor, verdict_for_grade},
+    quote_admission::pregate_withheld_count,
     verify_posted::REFUTED_REASON,
 };
 
@@ -173,8 +174,13 @@ fn verifier_withdrew_every_blocker(result: &ReviewResult) -> bool {
 /// Why: Architect ruling 2026-10-06 16:50Z. A withheld finding is
 /// unverified, so it can neither approve nor erase a rejection; the reviewer's
 /// own verdict decides which way the review falls.
-/// What, with `withheld > 0` and `model` the reviewer's verdict:
-///  - `model` APPROVE / APPROVE*, no survivor → `model`, `AllWithheld`;
+/// What, with `withheld > 0`, `pregate` of them `no_quote_pregate`, and
+/// `model` the reviewer's verdict:
+///  - `model` APPROVE / APPROVE*, no survivor, every withhold `pregate` →
+///    `model`, `Parsed`: a note that quotes no code never reached a gate, so
+///    it is not a withheld finding (#10782, Architect ruling 09:02Z);
+///  - `model` APPROVE / APPROVE*, no survivor, any other withhold (a gate
+///    withhold, alone or mixed with pregate drops) → `model`, `AllWithheld`;
 ///  - `model` APPROVE / APPROVE*, survivors, `current` UNKNOWN (a floor
 ///    raised the verdict on a finding later withheld) → what `model` and the
 ///    survivors derive, `Parsed`;
@@ -193,17 +199,26 @@ fn verifier_withdrew_every_blocker(result: &ReviewResult) -> bool {
 /// `None`.
 /// Test: `withheld_outcome_maps_every_reviewer_verdict`,
 /// `withheld_outcome_keeps_the_gates_verdict_with_supporting_survivors`,
-/// `withheld_outcome_is_none_when_nothing_was_withheld`.
+/// `withheld_outcome_is_none_when_nothing_was_withheld`,
+/// `withheld_outcome_counts_pregate_drops_apart_from_gate_withholds`.
 pub(crate) fn withheld_outcome(
     model: &Verdict,
     current: &Verdict,
     survivors: &[Finding],
     withheld: usize,
+    pregate: usize,
 ) -> Option<(Verdict, VerdictStatus)> {
+    debug_assert!(pregate <= withheld, "pregate drops are withheld findings");
     if withheld == 0 {
         return None;
     }
     match model {
+        // #10782: pregate-only drops are not `all_withheld`.
+        Verdict::Approve | Verdict::ApproveWithReservations
+            if survivors.is_empty() && pregate == withheld =>
+        {
+            Some((model.clone(), VerdictStatus::Parsed))
+        }
         Verdict::Approve | Verdict::ApproveWithReservations if survivors.is_empty() => {
             Some((model.clone(), VerdictStatus::AllWithheld))
         }
@@ -242,6 +257,7 @@ pub(crate) fn apply_withheld_outcome(
         &result.verdict,
         &result.findings,
         result.withheld_findings.len(),
+        pregate_withheld_count(&result.withheld_findings), // #10782
     ) else {
         return;
     };

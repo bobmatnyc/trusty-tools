@@ -302,6 +302,7 @@ async fn register_session_associates_project() {
             project_path: Some("/work/demo".into()),
             name: None,
             workdir: None,
+            tmux_socket: None,
         }),
     )
     .await
@@ -326,6 +327,7 @@ async fn list_sessions_filters_by_project() {
             project_path: Some("/work/demo".into()),
             name: None,
             workdir: None,
+            tmux_socket: None,
         }),
     )
     .await;
@@ -336,6 +338,7 @@ async fn list_sessions_filters_by_project() {
             project_path: Some("/work/other".into()),
             name: None,
             workdir: None,
+            tmux_socket: None,
         }),
     )
     .await;
@@ -376,6 +379,7 @@ async fn register_and_remove_session() {
             project_path: None,
             name: None,
             workdir: None,
+            tmux_socket: None,
         }),
     )
     .await
@@ -518,6 +522,7 @@ async fn connect_session_registers_without_deploy() {
             project_path: Some("/tmp/connect".into()),
             name: Some("tmpm-connect".into()),
             workdir: None,
+            tmux_socket: None,
         }),
     )
     .await
@@ -543,6 +548,7 @@ async fn registered_session_has_friendly_tmux_name() {
             project_path: None,
             name: None,
             workdir: None,
+            tmux_socket: None,
         }),
     )
     .await
@@ -589,6 +595,7 @@ async fn spawn_session_without_claude_returns_422() {
             project_path: Some("/tmp/spawn-no-claude".into()),
             name: None,
             workdir: Some("/tmp/spawn-no-claude".into()),
+            tmux_socket: None,
         }),
     )
     .await
@@ -630,6 +637,7 @@ async fn spawn_session_without_tmux_returns_422_on_no_tmux_host() {
             project_path: Some("/tmp/spawn-no-tmux".into()),
             name: Some("tmpm-spawn-test-no-tmux".into()),
             workdir: Some("/tmp".into()),
+            tmux_socket: None,
         }),
     )
     .await;
@@ -670,6 +678,7 @@ async fn registration_only_path_ignores_missing_claude() {
             project_path: None,
             name: None,
             workdir: None,
+            tmux_socket: None,
         }),
     )
     .await
@@ -691,6 +700,7 @@ async fn register_session_returns_id_even_without_tmux() {
             project_path: None,
             name: None,
             workdir: None,
+            tmux_socket: None,
         }),
     )
     .await

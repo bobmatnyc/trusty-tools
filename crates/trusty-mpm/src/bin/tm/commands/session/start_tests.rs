@@ -13,11 +13,10 @@
 //! [`super::start_session`] end-to-end against a real temp git repo with a
 //! `github.com` origin remote and an intentionally-unreachable daemon URL,
 //! then asserts no tm artifacts were written into the repo.
-//! `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
+//! `session_start_in_place_refuses_an_unreachable_daemon_before_any_write_10101`
 //! drives [`super::start_session_in_place`] directly with a hermetic
-//! `FrameworkPaths::under(tempdir)` and asserts the pre-#1916 in-place
-//! behavior (writes the instructions stash, hard-fails when the daemon is
-//! unreachable) is preserved unchanged.
+//! `FrameworkPaths::under(tempdir)` and asserts an unreachable daemon refuses
+//! the in-place start before anything is written (#10101 D3c).
 //! `session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends`
 //! captures the real outgoing `POST /api/v1/sessions/managed` body against a
 //! minimal in-process HTTP server and asserts it matches the literal JSON
@@ -142,80 +141,62 @@ async fn session_start_dispatches_managed_new_for_github_repo() {
     );
 }
 
-/// #1916: a directory that is NOT a recognized git repo has no live source
-/// tree to protect, so `session start` must preserve its pre-#1916 in-place
-/// behavior exactly — deploy `prepare_session` into the directory, then
-/// hard-fail (propagate `Err`) when the daemon is unreachable, matching the
-/// original `?`-propagating `POST /sessions` call.
+/// #1916/#10101 D3c: a directory that is NOT a recognized git repo keeps
+/// the in-place path, and that path refuses an unreachable daemon before it
+/// writes anything: no stash, no deployed tier, no tmux call.
 ///
-/// Why: proves the "just run claude here, no segregation" case ([`start_session`]'s
-/// doc explains why it remains supported — it mirrors what `tm connect`
-/// already documents) was not silently broken by the #1916 routing change.
-/// Calls [`start_session_in_place`] directly with a hermetic
-/// `FrameworkPaths::under(tempdir)` (never `FrameworkPaths::default()`) so the
-/// test cannot write into the developer's/CI's real `~/.claude`/`~/.trusty-mpm`.
-/// What: creates a plain (non-git) temp directory, calls
-/// `start_session_in_place` with an unreachable daemon URL, and asserts (1) it
-/// returns `Err` (the original hard-fail-on-unreachable-daemon behavior) and
-/// (2) `<dir>/.trusty-mpm/last-instructions.md` was written BEFORE the failed
-/// POST — proving `prepare_session` still ran in place.
+/// Why: a PM the daemon cannot register is invisible to every list, reaper
+/// and name check (owner ruling 2026-11-08 17:41Z). Red at f2f17d25b6:
+/// `prepare_session` wrote `.trusty-mpm/last-instructions.md` before the
+/// failed `POST /sessions`.
+/// What: calls [`start_session_in_place`] with a hermetic
+/// `FrameworkPaths::under(tempdir)` and an unreachable daemon URL; asserts
+/// `Err` naming the unreachable daemon and an empty target directory.
 /// Test: this function IS the test.
+#[serial_test::serial]
 #[tokio::test]
-async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable() {
+async fn session_start_in_place_refuses_an_unreachable_daemon_before_any_write_10101() {
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
     let target = tempfile::TempDir::new().expect("tmp target dir");
-    let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
-
-    let client = reqwest::Client::new();
-    // #5544: the home is INJECTED. Production passes `dirs::home_dir()`; this
-    // passes the same tempdir `fw` is rooted at, which is what lets the test
-    // stop repointing the process's `$HOME`.
-    let result = start_session_in_place(
-        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
-        target.path(),
-        &fw,
-        Some(tmp_home.path()),
-        None,
-    )
-    .await;
-
-    // Preserves the original in-place `Start` behavior: a daemon-unreachable
-    // `POST /sessions` propagates as a hard `Err` via `?`.
+    let tmux_dir = tempfile::TempDir::new().expect("tmux dir");
+    let (bin, log) = inplace_fake_tmux(tmux_dir.path(), 0);
+    let err = run_inplace(UNREACHABLE_URL, target.path(), tmp_home.path(), bin)
+        .await
+        .expect_err("an unreachable daemon refuses the start");
+    assert!(err.to_string().contains("cannot be reached"), "{err}");
+    let written: Vec<_> = std::fs::read_dir(target.path())
+        .expect("target")
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(written.is_empty(), "the refused start wrote {written:?}");
     assert!(
-        result.is_err(),
-        "in-place start must hard-fail when the daemon is unreachable (pre-#1916 behavior)"
-    );
-
-    // `prepare_session` ran (and wrote its stash) BEFORE the failed POST,
-    // proving the in-place deploy behavior is preserved.
-    assert!(
-        target
-            .path()
-            .join(".trusty-mpm")
-            .join("last-instructions.md")
-            .exists(),
-        "in-place start must still run prepare_session and stash instructions locally"
+        !log.exists(),
+        "tmux ran: {:?}",
+        std::fs::read_to_string(&log)
     );
 }
 
 /// #9999: `tm session start` prepares the user tier under the config dir it is
 /// handed (`CLAUDE_CONFIG_DIR` in production), never under `<home>/.claude`.
+#[serial_test::serial]
 #[tokio::test]
 async fn session_start_in_place_writes_the_user_tier_under_the_config_dir_9999() {
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
     let config_dir = tempfile::TempDir::new().expect("config dir");
     let target = tempfile::TempDir::new().expect("tmp target dir");
-    let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
-
-    let result = start_session_in_place(
-        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), UNREACHABLE_URL),
+    // #10101 D3c: a stub daemon, since an unreachable one refuses before prep.
+    let (bin, _log) = scripted_fake_tmux(target.path(), "has-session");
+    let (_seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let result = run_inplace_in(
+        &url,
         target.path(),
-        &fw,
-        Some(tmp_home.path()),
+        tmp_home.path(),
         Some(config_dir.path()),
+        bin,
     )
     .await;
-    assert!(result.is_err(), "the unreachable daemon ends this launch");
+    result.expect("the fake tmux accepts the launch");
 
     let user = std::fs::read_to_string(config_dir.path().join("settings.json"))
         .expect("prep seeds the user tier in the config dir");
@@ -233,11 +214,11 @@ async fn session_start_in_place_writes_the_user_tier_under_the_config_dir_9999()
 }
 
 /// #8405: an unreadable `config.yaml` never blocks `tm session start`. The
-/// launch proceeds — `prepare_session` runs and the only error is the
-/// unreachable daemon — and the in-place seam turns the same malformed file into
-/// the tmux option's fallback renderer plus a warning naming the file. (The seam
-/// reads the config only when the daemon answered, so the warning is asserted
-/// on the seam itself.)
+/// launch proceeds — `prepare_session` runs against a stub daemon (#10101
+/// D3c) — and the in-place seam turns the same malformed file into the tmux
+/// option's fallback renderer plus a warning naming the file. (The warning is
+/// asserted on the seam itself.)
+#[serial_test::serial]
 #[tokio::test]
 async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config() {
     use tracing_subscriber::layer::SubscriberExt;
@@ -252,16 +233,18 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
     )
     .expect("write config");
 
-    let result = start_session_in_place(
-        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), UNREACHABLE_URL),
-        target.path(),
-        &fw,
-        Some(tmp_home.path()),
-        None,
+    let tmux_dir = tempfile::TempDir::new().expect("tmux dir");
+    let (bin, _log) = scripted_fake_tmux(tmux_dir.path(), "has-session");
+    let (_seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let daemon = trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url);
+    let result = trusty_mpm::core::tmux::with_tmux_binary(
+        bin,
+        start_session_in_place(&daemon, target.path(), &fw, Some(tmp_home.path()), None),
     )
     .await;
-    let err = result.expect_err("the unreachable daemon, not the config, ends this launch");
-    assert!(!err.to_string().contains("alternate_screen"), "{err}");
+    if let Err(err) = &result {
+        assert!(!err.to_string().contains("alternate_screen"), "{err}");
+    }
     assert!(
         target
             .path()
@@ -892,4 +875,404 @@ fn an_architect_inplace_session_spec_carries_the_lockdown() {
 
     let missing = root.path().join("gone.json");
     assert!(super::inplace_session_spec(cwd, root.path(), &prompt, Some(&missing)).is_err());
+}
+
+// ── #10101: the in-place start launches on its workspace tmux server ──
+
+/// #10101 D3c: the shared stub daemon (`launch_stub_tests.rs`) with
+/// `managed` records and an empty legacy registry.
+async fn spawn_inplace_daemon(
+    managed: Vec<serde_json::Value>,
+) -> (
+    std::sync::Arc<std::sync::Mutex<crate::test_support::launch_stub::Seen>>,
+    String,
+) {
+    crate::test_support::launch_stub::spawn(managed, Vec::new(), (404, serde_json::json!({}))).await
+}
+
+/// A fake `tmux` under `dir` that logs each argv to `<dir>/argv.log` and
+/// exits `exit`.
+fn inplace_fake_tmux(dir: &std::path::Path, exit: u8) -> (std::path::PathBuf, std::path::PathBuf) {
+    let log = dir.join("argv.log");
+    let bin = dir.join("fake-tmux");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit {exit}\n",
+        log.display()
+    );
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+    (bin, log)
+}
+
+/// Run the in-place start in `target` against the stub at `url`, with every
+/// tmux call going to `tmux_bin`.
+async fn run_inplace(
+    url: &str,
+    target: &std::path::Path,
+    home: &std::path::Path,
+    tmux_bin: std::path::PathBuf,
+) -> anyhow::Result<()> {
+    run_inplace_in(url, target, home, None, tmux_bin).await
+}
+
+/// [`run_inplace`] with the user tier relocated to `config_dir` (#9999).
+async fn run_inplace_in(
+    url: &str,
+    target: &std::path::Path,
+    home: &std::path::Path,
+    config_dir: Option<&std::path::Path>,
+    tmux_bin: std::path::PathBuf,
+) -> anyhow::Result<()> {
+    let fw = trusty_mpm::core::paths::FrameworkPaths::under(home);
+    let daemon = trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), url);
+    trusty_mpm::core::tmux::with_tmux_binary(
+        tmux_bin,
+        start_session_in_place(&daemon, target, &fw, Some(home), config_dir),
+    )
+    .await
+}
+
+/// #10101: `tm session start` in place creates the PM on its workspace
+/// server and registers that server's socket. Red before #10101: the
+/// session was created on the default server (no `-L`) and the registration
+/// carried no socket.
+#[serial_test::serial]
+#[tokio::test]
+async fn session_start_in_place_launches_on_the_workspace_server_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let (bin, log) = inplace_fake_tmux(target.path(), 0);
+    let (seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    run_inplace(&url, target.path(), home.path(), bin)
+        .await
+        .expect("the fake tmux accepts every call");
+
+    // The workspace server the rule names (`cli_launch_server`), spelled with
+    // pieces that predate it so this test also runs against a pre-#10101 tree.
+    let opted_out = std::env::var("TM_WORKSPACE_TMUX").is_ok_and(|v| v.trim() == "0");
+    let expected = (!opted_out).then(|| {
+        let server = trusty_mpm::core::tmux_server::workspace_server_name(target.path());
+        let socket = trusty_mpm::core::tmux_server::ambient_socket_dir().join(&server);
+        (server, socket)
+    });
+    let posts = std::mem::take(&mut seen.lock().expect("seen").posts);
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    let argv = std::fs::read_to_string(&log).expect("tmux was called");
+    let new_session = argv
+        .lines()
+        .find(|l| l.contains("new-session"))
+        .expect("a new-session");
+    match expected {
+        Some((server, socket)) => {
+            assert_eq!(posts[0]["tmux_socket"], serde_json::json!(socket));
+            assert!(
+                argv.lines()
+                    .all(|l| l.starts_with(&format!("-L {server} "))),
+                "every call must reach {server}: {argv}"
+            );
+        }
+        // `TM_WORKSPACE_TMUX=0` in this environment: the default server.
+        None => {
+            assert!(posts[0]["tmux_socket"].is_null(), "{posts:?}");
+            assert!(!new_session.starts_with("-L "), "{new_session}");
+        }
+    }
+}
+
+/// #10101: a name a managed record holds refuses the in-place start: the
+/// error names the holder, and no tmux call or registration happens.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_held_name_refuses_the_launch_before_tmux_or_registration() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let name = trusty_mpm::core::names::name_from_dir(target.path());
+    let holder = serde_json::json!({ "id": "holder-id-10101", "name": name, "state": "active" });
+    let (bin, log) = inplace_fake_tmux(target.path(), 0);
+    let (seen, url) = spawn_inplace_daemon(vec![holder]).await;
+    let err = run_inplace(&url, target.path(), home.path(), bin)
+        .await
+        .expect_err("a held name is refused");
+    assert!(err.to_string().contains("holder-id-10101"), "{err}");
+    assert!(
+        !log.exists(),
+        "no tmux call may run: {:?}",
+        std::fs::read_to_string(&log)
+    );
+    assert!(
+        seen.lock().expect("seen").posts.is_empty(),
+        "nothing registered"
+    );
+}
+
+/// #10101: a tmux create that fails after the registration removes that
+/// registration and reports the failure; nothing names a session that never
+/// ran. Red before #10101: a hint was printed and the start returned `Ok`
+/// with the record left in place.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_failed_create_removes_the_registration() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let (bin, _log) = inplace_fake_tmux(target.path(), 1);
+    let (seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let err = run_inplace(&url, target.path(), home.path(), bin)
+        .await
+        .expect_err("a failed create is a failed start");
+    let text = format!("{err:#}");
+    assert!(text.contains("was removed"), "{text}");
+    let seen = seen.lock().expect("seen");
+    assert_eq!(seen.posts.len(), 1);
+    assert_eq!(seen.deletes, [crate::test_support::launch_stub::STUB_ID]);
+}
+
+/// A fake `tmux` under `dir` that logs each argv to `<dir>/argv.log`, exits 1
+/// for a call whose argv contains `fail_on`, and 0 for every other call.
+fn scripted_fake_tmux(
+    dir: &std::path::Path,
+    fail_on: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let log = dir.join("argv.log");
+    let bin = dir.join("fake-tmux");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *{fail_on}*) exit 1;; esac\nexit 0\n",
+        log.display()
+    );
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
+    (bin, log)
+}
+
+/// #10101 D3c: an in-place start whose session name is already live on the
+/// server attaches to it (`-A`) and never types the `claude` launch line
+/// into it, as `tm connect` does; the session it did not create is neither
+/// killed nor rolled back. Red at f2f17d25b6: the launch line was typed
+/// (`send-keys`) into the existing pane.
+#[serial_test::serial]
+#[tokio::test]
+async fn an_in_place_start_never_types_into_a_session_that_already_existed_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    // has-session answers yes; every call succeeds.
+    let (bin, log) = scripted_fake_tmux(target.path(), "no-call-fails");
+    let (seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let result = run_inplace(&url, target.path(), home.path(), bin).await;
+    let argv = std::fs::read_to_string(&log).expect("tmux was called");
+    assert!(argv.contains("has-session"), "{argv}");
+    assert!(
+        !argv.contains("send-keys"),
+        "typed into a session it did not create: {argv}"
+    );
+    assert!(!argv.contains("kill-session"), "{argv}");
+    assert!(seen.lock().expect("seen").deletes.is_empty());
+    result.expect("an existing session is left in place");
+}
+
+/// #10101: a `tm connect` that fails after its registration, here while
+/// composing the session MCP config, removes the registration. Red at
+/// c3ac72a3aa: `?` returned past the rollback and the record stayed.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_connect_failing_after_registration_rolls_it_back_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    // The session MCP config is composed under this root; a file there
+    // makes that composition fail.
+    let root = trusty_mpm::core::paths::FrameworkPaths::under(home.path()).crate_config_root();
+    std::fs::create_dir_all(root.parent().expect("a parent")).expect("parent");
+    std::fs::write(&root, "not a directory").expect("block the config root");
+    // No session of the name exists yet; every other tmux call succeeds.
+    let (bin, _log) = scripted_fake_tmux(target.path(), "has-session");
+    let (seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let client = reqwest::Client::new();
+    let result = trusty_mpm::core::tmux::with_tmux_binary(
+        bin,
+        crate::commands::launch::connect(
+            &client,
+            &url,
+            Some(target.path().display().to_string()),
+            Some(home.path()),
+            crate::commands::launch_handoff::Handoff::Detach,
+        ),
+    )
+    .await;
+    let err = result.expect_err("a blocked config root fails the connect");
+    let seen = seen.lock().expect("seen");
+    assert_eq!(seen.posts.len(), 1, "the connect registered first: {err:#}");
+    assert_eq!(
+        seen.deletes,
+        [crate::test_support::launch_stub::STUB_ID],
+        "the registration must be removed: {err:#}"
+    );
+}
+
+// ── #10101 D3c: unreachable daemon, legacy holders, resume ──
+
+/// A managed record of the start's name in `state`, belonging to
+/// `source_id`; `target` becomes a checkout whose origin is `acme/proj`
+/// (#10101 D58: only the same owner/repo resumes).
+fn held_for(target: &std::path::Path, state: &str, source_id: &str) -> serde_json::Value {
+    git(target, &["init", "-q"]);
+    git(
+        target,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/proj.git",
+        ],
+    );
+    let name = trusty_mpm::core::names::name_from_dir(target);
+    serde_json::json!({
+        "id": "held-id-10101", "name": name, "state": state,
+        "source_id": source_id, "workspace_path": "/b/proj",
+    })
+}
+
+/// [`held_for`] the start's own project.
+fn held(target: &std::path::Path, state: &str) -> serde_json::Value {
+    held_for(target, state, "acme/proj")
+}
+
+/// #10101 D3c: an in-place start under a name a `Stopped` or `Errored`
+/// managed record holds resumes that record (by its id, through the daemon's
+/// resume route) and registers, creates and types nothing. Red at
+/// f2f17d25b6: the start was refused.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_stopped_holder_is_resumed_by_session_start_10101() {
+    for state in ["stopped", "errored"] {
+        let home = tempfile::TempDir::new().expect("tmp home");
+        let target = tempfile::TempDir::new().expect("tmp target dir");
+        let holder = held(target.path(), state);
+        let reply = serde_json::json!({
+            "id": "held-id-10101", "name": holder["name"], "state": "active"
+        });
+        let (bin, log) = inplace_fake_tmux(target.path(), 0);
+        let (seen, url) =
+            crate::test_support::launch_stub::spawn(vec![holder], vec![], (200, reply)).await;
+        run_inplace(&url, target.path(), home.path(), bin)
+            .await
+            .unwrap_or_else(|e| panic!("{state}: resumed, not refused: {e:#}"));
+        let seen = seen.lock().expect("seen");
+        assert_eq!(seen.resumes, ["held-id-10101"], "{state}");
+        assert!(
+            seen.posts.is_empty(),
+            "{state}: registered {:?}",
+            seen.posts
+        );
+        assert!(!log.exists(), "{state}: tmux ran");
+        assert!(
+            !target.path().join(".trusty-mpm").exists(),
+            "{state}: prep ran"
+        );
+    }
+}
+
+/// #10101 D58: an in-place start under a name a `Stopped` managed record of
+/// ANOTHER owner/repo holds is refused with the held-name error naming the
+/// holder and its directory; nothing is resumed, written, registered or
+/// created. Red at ffc59676b4: that record was resumed on the name alone.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_stopped_holder_of_another_project_refuses_session_start_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let holder = held_for(target.path(), "stopped", "other-owner/proj");
+    let reply = serde_json::json!({
+        "id": "held-id-10101", "name": holder["name"], "state": "active"
+    });
+    let (bin, log) = inplace_fake_tmux(target.path(), 0);
+    let (seen, url) =
+        crate::test_support::launch_stub::spawn(vec![holder], vec![], (200, reply)).await;
+    let err = run_inplace(&url, target.path(), home.path(), bin)
+        .await
+        .expect_err("another project's PM is never resumed");
+    let text = err.to_string();
+    assert!(
+        text.contains("held-id-10101") && text.contains("/b/proj"),
+        "{text}"
+    );
+    let seen = seen.lock().expect("seen");
+    assert!(seen.resumes.is_empty(), "resumed {:?}", seen.resumes);
+    assert!(seen.posts.is_empty(), "registered {:?}", seen.posts);
+    assert!(!log.exists(), "tmux ran");
+    assert!(!target.path().join(".trusty-mpm").exists(), "prep ran");
+}
+
+/// #10101 D3c: a resume the daemon refuses is reported as a failure and
+/// changes nothing here: no registration, no tmux call, no delete.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_failed_resume_reports_and_creates_nothing_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let holder = held(target.path(), "stopped");
+    let refusal = (409, serde_json::json!("cannot resume: front gate holds it"));
+    let (bin, log) = inplace_fake_tmux(target.path(), 0);
+    let (seen, url) = crate::test_support::launch_stub::spawn(vec![holder], vec![], refusal).await;
+    let err = run_inplace(&url, target.path(), home.path(), bin)
+        .await
+        .expect_err("a refused resume fails the start");
+    assert!(format!("{err:#}").contains("cannot restart"), "{err:#}");
+    let seen = seen.lock().expect("seen");
+    assert_eq!(seen.resumes, ["held-id-10101"]);
+    assert!(seen.posts.is_empty() && seen.deletes.is_empty());
+    assert!(!log.exists(), "tmux ran");
+}
+
+/// #10101 D3c: an in-place start under a name a live legacy-registry record
+/// holds is refused before any write, registration or tmux call. Red at
+/// f2f17d25b6: a second record was registered under the name.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_live_legacy_record_refuses_session_start_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let name = trusty_mpm::core::names::name_from_dir(target.path());
+    let row = serde_json::json!({
+        "id": "legacy-id-10101", "workdir": "/elsewhere", "tmux_name": name, "status": "Active"
+    });
+    let (bin, log) = inplace_fake_tmux(target.path(), 0);
+    let (seen, url) =
+        crate::test_support::launch_stub::spawn(vec![], vec![row], (404, serde_json::json!({})))
+            .await;
+    let err = run_inplace(&url, target.path(), home.path(), bin)
+        .await
+        .expect_err("a held name is refused");
+    assert!(err.to_string().contains("legacy-id-10101"), "{err}");
+    assert!(seen.lock().expect("seen").posts.is_empty(), "registered");
+    assert!(!log.exists(), "tmux ran");
+    assert!(!target.path().join(".trusty-mpm").exists(), "prep ran");
+}
+
+/// #10101 D3c: `tm connect` refuses an unreachable daemon before it writes
+/// anything or calls tmux. Red at f2f17d25b6: it deployed into the checkout
+/// and launched unregistered ("connecting without registration").
+#[serial_test::serial]
+#[tokio::test]
+async fn connect_refuses_an_unreachable_daemon_before_any_write_10101() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let tmux_dir = tempfile::TempDir::new().expect("tmux dir");
+    let (bin, log) = inplace_fake_tmux(tmux_dir.path(), 0);
+    let client = reqwest::Client::new();
+    let err = trusty_mpm::core::tmux::with_tmux_binary(
+        bin,
+        crate::commands::launch::connect(
+            &client,
+            UNREACHABLE_URL,
+            Some(target.path().display().to_string()),
+            Some(home.path()),
+            crate::commands::launch_handoff::Handoff::Detach,
+        ),
+    )
+    .await
+    .expect_err("an unreachable daemon refuses the connect");
+    assert!(err.to_string().contains("cannot be reached"), "{err}");
+    let written: Vec<_> = std::fs::read_dir(target.path())
+        .expect("target")
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(written.is_empty(), "the refused connect wrote {written:?}");
+    assert!(!log.exists(), "tmux ran");
 }

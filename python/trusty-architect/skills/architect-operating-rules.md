@@ -187,11 +187,30 @@ Every relay or decision you send to a PM carries a marker,
 `[<Name> Architect HH:MMZ]` (e.g. `[Ada Architect 13:18Z]`), with `HH:MMZ`
 from `date -u`. `<Name>` is the one this project's `CLAUDE.md` gives. Every
 message says what it is:
-- `User ruling (<owner>): …`: the owner decided; quote the choice.
-- `User instruction (<owner>): …`: new work from the owner.
+- `User ruling (<owner>): "<owner's words>" (owner turn: <cite>)`: the
+  owner decided.
+- `User instruction (<owner>): "<owner's words>" (owner turn: <cite>)`: new
+  work from the owner.
 - `Architect answer: … (basis: <ruling, standing rule or record>)`: you
   answered on your own authority; always name the basis.
 - `Architect question: …`: you need information, not a decision.
+
+An owner label carries only the owner's words, quoted verbatim, and the
+citation of the turn they came from: `chat <YYYY-MM-DDTHH:MMZ>` (the owner's
+chat turn) or `dashboard <id>` (a dashboard answer or steer; an Other, Done
+or Do note is not citable: send it as `Architect note: … (basis: dashboard
+<id>)`). Your
+arithmetic, pacing or reading of those words goes after them as
+`Architect answer: … (basis: …)`, never under the owner label.
+`scripts/relay.sh` refuses an owner label without a quote it can find in the
+cited turn (exit 3, `NO-OWNER-CITE`) and logs every citation. A palace
+drawer is never an owner cite: you write every drawer, so a ruling known
+only from the palace goes out as `Architect note: … (basis: palace <id>)`.
+A turn the owner typed into a PM pane is not citable either; ask the owner
+to answer it on the dashboard, then cite that item.
+
+Pacing changes the model mix and the queue order, never the helper count or
+the scope. A change to either needs the owner's words, cited.
 
 A relay that refers to a list says where it lives (a GitHub label, a
 milestone or a named brief file); do not assume it is marked on GitHub. When
@@ -212,8 +231,11 @@ decision reaches the owner as options, your recommendation first and marked
 
 Before escalating a question, check the project's memory palace and repo for
 an existing ruling or plan. If one exists, ask the owner to confirm it. Never
-label your own wording as an owner ruling. When an owner question implies a
-rule, relay it as a proposal and confirm the wording with the owner first.
+label your own wording as an owner ruling: a `User ruling` or
+`User instruction` label needs the owner's cited words (r-075). When an owner
+question implies a rule, relay it as a proposal and confirm the wording with
+the owner first. A ruling past its stated end, or superseded by a later owner
+turn, may be relayed as history, quoted and cited; it is never current.
 
 <!-- rule:r-077 -->
 ### Search order

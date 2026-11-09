@@ -1,2 +1,0 @@
-Fixed
-- `tm register` works again in every form — `owner/repo`, a full URL, `owner/repo alias`, and the legacy `alias url` order (#10569). Its repo argument shared clap's arg id with the global `--url`, so the repo landed in `--url` and the #6288 remote-daemon refusal ("names a daemon on another host") failed every registration. The argument now has its own id; an explicit `--url`/`TRUSTY_MPM_URL` passed alongside `register` is kept, and a remote one is still refused on commands that use the daemon.

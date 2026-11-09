@@ -229,18 +229,31 @@ impl<'s> SessionService<'s> {
 /// `send-keys`), so it must not block the request handler — it runs in a
 /// short-lived background task.
 /// What: spawns a Tokio blocking task that calls
-/// [`crate::core::process::find_claude_pid_in_tmux`]; on success it records
-/// the PID via [`DaemonState::set_session_pid`]. Failure is logged, never fatal.
+/// [`crate::core::process::find_claude_pid_in_tmux_on`] on the server
+/// listening on `tmux_socket` (`None`: the default server, #10101); on success
+/// it records the PID via [`DaemonState::set_session_pid`]. Failure is logged,
+/// never fatal; a socket naming no reachable server looks up nothing.
 /// Test: `set_session_pid_updates_field` covers the state mutation it performs;
-/// the discovery itself is covered in `trusty-mpm-core`.
+/// the discovery itself is covered in `trusty-mpm-core`;
+/// `find_claude_pid_on_a_named_server_asks_only_that_server` the routing.
 pub fn spawn_pid_capture(
     state: std::sync::Arc<DaemonState>,
     id: crate::core::session::SessionId,
     tmux_name: String,
+    tmux_socket: Option<std::path::PathBuf>,
 ) {
+    let dir = crate::core::tmux_server::ambient_socket_dir();
+    let server = match crate::core::tmux_server::server_of_socket(tmux_socket.as_deref(), &dir) {
+        Ok(server) => server,
+        Err(e) => {
+            tracing::warn!("#10101: no claude PID capture for session {id:?} — {e}");
+            return;
+        }
+    };
     tokio::spawn(async move {
         let captured = tokio::task::spawn_blocking(move || {
-            crate::core::process::find_claude_pid_in_tmux(
+            crate::core::process::find_claude_pid_in_tmux_on(
+                server.as_deref(),
                 &tmux_name,
                 10,
                 std::time::Duration::from_millis(500),

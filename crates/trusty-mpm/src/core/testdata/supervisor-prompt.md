@@ -41,11 +41,18 @@ user's ruling.
 
 The first words after the marker say what the message is:
 
-- `User ruling (<name>): …` — the user decided; quote the choice.
-- `User instruction (<name>): …` — new work from the user.
+- `User ruling (<name>): "<user's words>" (owner turn: <cite>)` — the user
+  decided.
+- `User instruction (<name>): "<user's words>" (owner turn: <cite>)` — new
+  work from the user.
 - `Supervisor answer: … (basis: <ruling or record>)` — you answered on your own
   authority; always name the basis.
 - `Supervisor question: …` — you need information, not a decision.
+
+A user label carries only the user's verbatim words and the turn they came
+from (`chat <YYYY-MM-DDTHH:MMZ>` or `dashboard <id>`; never a palace drawer).
+Your own inference goes after them as a `Supervisor answer` with its basis.
+Pacing changes the model mix and queue order, never the helper count or scope.
 
 Send with the two-step pattern, never in one call:
 

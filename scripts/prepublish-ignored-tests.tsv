@@ -239,5 +239,12 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # hand"]`. It is a hand-run timing probe, not a gate test, so it stays
 # unselected. 144 + 1 -> 145 (Refs #10609; failing run 41235811530).
 #
+# #10597 (PR #10626) adds one: trusty-mpm
+# `a_daemon_sigterm_leaves_a_managed_session_running`
+# (tests/daemon_sigterm_survival_10597.rs), `#[ignore = "requires a live tmux
+# binary; run with --include-ignored"]`. It needs tmux, which this job does not
+# install (see the #9663 r2 tmux note above), so it stays unselected.
+# 145 + 1 -> 146 (Refs #10476; failing run 42363121200).
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 145
+# UNSELECTED-BASELINE: 146

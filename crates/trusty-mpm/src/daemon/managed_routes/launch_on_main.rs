@@ -236,7 +236,7 @@ pub(super) async fn spawn_managed_on_main(
     );
 
     emit(ProvisioningStage::LaunchingRuntime);
-    let tmux_arc = mgr.tmux_driver();
+    let tmux_arc = mgr.tmux_driver_for(&record).map_err(|e| e.to_string())?; // See #10101
     // #8233: the post-send launch check below needs the driver after the adapter
     // has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();

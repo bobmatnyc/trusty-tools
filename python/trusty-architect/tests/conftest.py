@@ -52,3 +52,10 @@ def _wake_alert_in_tmp(tmp_path, monkeypatch):
 def _no_live_project_registry(tmp_path_factory, monkeypatch):
     """#10571: the Projects view never reads the operator's live tm registry; a test that wants one writes its own."""
     monkeypatch.setenv("TRUSTY_MPM_ROOT", str(tmp_path_factory.mktemp("mpmroot")))
+
+
+@pytest.fixture(autouse=True)
+def _owner_provenance_files_in_tmp(tmp_path, monkeypatch):
+    """#10780: no test reads or appends to the live owner-turn record or relay-provenance log."""
+    monkeypatch.setenv("ARCHITECT_OWNER_TURNS", str(tmp_path / "owner-turns.jsonl"))
+    monkeypatch.setenv("ARCHITECT_RELAY_LOG", str(tmp_path / "relay-provenance.jsonl"))

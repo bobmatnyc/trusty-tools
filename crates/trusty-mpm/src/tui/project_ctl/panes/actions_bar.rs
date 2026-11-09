@@ -7,8 +7,10 @@
 //! change with [`Pane`] focus, not read as one fixed string: showing
 //! `[k] kill  [d] decommission  …` while the Projects or Activity pane is
 //! focused would be misleading — those keys are no-ops there.
-//! #10476: in the tree, the hint also follows the selected node's kind,
-//! because the tree holds owners, projects and sessions in one pane.
+//! #10476: in the tree, the hint also follows the selected node's kind.
+//! #10754: two-column MPM pane (Bob 11-06) — the session column has its own
+//! hint, which carries the session verbs and, since the details overlay
+//! went, the expand/collapse keys.
 //! What: [`focus_hint`] / [`confirm_prompt_text`] / [`bar_text`] are pure
 //! builders (unit tested without a terminal); [`render`] draws the result
 //! reversed, matching every other TUI screen's status bar.
@@ -23,19 +25,20 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use super::session_details::DETAILS_KEYS;
 use crate::tui::project_ctl::state::{NodeId, Pane, PendingConfirm, ProjectCtlState};
 
-/// Key-hint text while an owner bar is selected.
+/// Key-hint text while an owner bar is selected in the left column.
 pub const OWNER_HINT: &str =
     "[Enter/←→] expand  [↑↓] select  [g] workers  [Tab] switch pane  [q] quit";
-/// Key-hint text while a project node is selected.
-pub const PROJECTS_HINT: &str = "[Enter/←→] expand  [l] launch  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
-/// Key-hint text while a session node is selected.
-pub const SESSIONS_HINT: &str = "[Enter] details  [f] focus  [l] launch  [k] kill  [r] resume  [d] decommission  [a] attach-cmd  [←] up  [q] quit";
-/// Key-hint text shown while the Activity pane has focus (no verbs bound
-/// there — it is a read-only status strip).
-pub const ACTIVITY_HINT: &str = "[Tab] switch pane  [q] quit";
+/// Key-hint text while a project is selected in the left column.
+// #10754: De1 key map (Bob 11-06); see #10754 for `[l] launch`.
+pub const PROJECTS_HINT: &str = "[→/Enter] sessions  [n] new  [l] launch  [c] config  [v] deliverables  [g] workers  [Tab] switch pane  [q] quit";
+/// Key-hint text while the session column has focus.
+// #10754: De1 key map (Bob 11-06)
+pub const SESSIONS_HINT: &str = "[Enter] open  [→] details  [←] collapse/projects  [f] focus  [r] rename  [R] resume  [n] new  [l] launch  [k] kill  [d] decommission  [a] attach-cmd  [q] quit";
+/// Key-hint text shown while the Activity pane has focus. It is a read-only
+/// status strip; #10754: `n` and `l` work from it, as elsewhere.
+pub const ACTIVITY_HINT: &str = "[n] new  [l] launch  [Tab] switch pane  [q] quit";
 
 /// The indicator shown when the daemon answered its last health probe.
 pub const DAEMON_REACHABLE: &str = "daemon ●";
@@ -46,21 +49,20 @@ pub const DAEMON_UNREACHABLE: &str = "daemon ✗";
 ///
 /// Why: pulled out of [`bar_text`] so the mapping is directly unit-testable
 /// without going through the notice/confirm precedence chain.
-/// What: [`ACTIVITY_HINT`] for the Activity pane. In the tree (#10476): the
-/// details overlay's keys while it is open, else [`OWNER_HINT`] /
-/// [`PROJECTS_HINT`] / [`SESSIONS_HINT`] by the selected node (an anchor
-/// reads as a project; nothing selected reads as an owner).
+/// What: [`ACTIVITY_HINT`] for the Activity pane; [`SESSIONS_HINT`] for the
+/// session column (#10754); in the tree, [`OWNER_HINT`] / [`PROJECTS_HINT`]
+/// by the selected node (nothing selected reads as an owner).
 /// Test: `focus_hint_differs_per_node_kind`.
 pub fn focus_hint(state: &ProjectCtlState) -> &'static str {
     if state.focus == Pane::Activity {
         return ACTIVITY_HINT;
     }
-    if state.tree.details.is_some() {
-        return DETAILS_KEYS;
+    // #10754: two-column MPM pane (Bob 11-06)
+    if state.focus == Pane::Sessions {
+        return SESSIONS_HINT;
     }
     match state.selected_node() {
-        Some(NodeId::Session { .. }) => SESSIONS_HINT,
-        Some(NodeId::Project { .. } | NodeId::Anchor { .. }) => PROJECTS_HINT,
+        Some(NodeId::Project { .. }) => PROJECTS_HINT,
         Some(NodeId::Owner(_)) | None => OWNER_HINT,
     }
 }
@@ -123,16 +125,16 @@ const FOCUS_LABEL: &str = "[f] focus";
 ///
 /// Why: the owner asked for a Focus key or button (#10476 comment 2); the hint
 /// text already names the key, so that label is the button.
-/// What: the label's cells within `area` while the bar shows the session or
-/// details hint. A confirm prompt or a notice replaces the hint, and with it
-/// the button.
+/// What: the label's cells within `area` while the bar shows the session
+/// hint. A confirm prompt or a notice replaces the hint, and with it the
+/// button.
 /// Test: `focus_button_tracks_the_visible_label`.
 pub fn focus_button(state: &ProjectCtlState, area: Rect) -> Option<Rect> {
     if state.pending_confirm.is_some() || state.notice.is_some() {
         return None;
     }
     let hint = focus_hint(state);
-    if hint != SESSIONS_HINT && hint != DETAILS_KEYS {
+    if hint != SESSIONS_HINT {
         return None;
     }
     let start = hint.find(FOCUS_LABEL)?;
@@ -167,8 +169,9 @@ mod tests {
     use super::*;
     use crate::tui::project_ctl::state::ConfirmKind;
 
-    /// acme/alpha with one session, selected at `node`.
-    fn state_at(node: Option<NodeId>) -> ProjectCtlState {
+    /// acme/alpha with one session, selected at `node` (a session id selects
+    /// it in the right column and focuses that column).
+    fn state_at(node: Option<Node>) -> ProjectCtlState {
         let mut state = ProjectCtlState {
             projects: vec![crate::tui::project_ctl::state::ProjectRow {
                 name: "alpha".to_string(),
@@ -185,25 +188,28 @@ mod tests {
             }],
         );
         match node {
-            Some(node) => state.select_node(node),
+            Some(Node::Tree(node)) => state.select_node(node),
+            Some(Node::Session(id)) => assert!(state.focus_session(id)),
             None => state.rebuild_tree(),
         }
         state
     }
 
-    fn project_node() -> NodeId {
-        NodeId::Project {
-            owner: "acme".to_string(),
-            name: "alpha".to_string(),
-        }
+    /// Where a test state's selection sits.
+    enum Node {
+        Tree(NodeId),
+        Session(&'static str),
     }
 
-    fn session_node() -> NodeId {
-        NodeId::Session {
+    fn project_node() -> Node {
+        Node::Tree(NodeId::Project {
             owner: "acme".to_string(),
-            project: "alpha".to_string(),
-            id: "s1".to_string(),
-        }
+            name: "alpha".to_string(),
+        })
+    }
+
+    fn session_node() -> Node {
+        Node::Session("s1")
     }
 
     #[test]
@@ -231,10 +237,25 @@ mod tests {
         assert!(projects.contains("[c] config"));
         assert!(!sessions.contains("[c] config"));
 
-        // The details overlay shows its own keys.
-        let mut details = state_at(Some(session_node()));
-        assert!(details.open_details());
-        assert_eq!(focus_hint(&details), DETAILS_KEYS);
+        // #10754: De1 key map (Bob 11-06)
+        for keys in [
+            "[Enter] open",
+            "[→] details",
+            "[←] collapse/projects",
+            "[r] rename",
+            "[R] resume",
+            "[n] new",
+            "[l] launch",
+        ] {
+            assert!(sessions.contains(keys), "{keys}");
+        }
+        for hint in [projects, activity] {
+            assert!(hint.contains("[n] new  [l] launch"), "{hint}");
+        }
+        assert!(sessions.contains("[a] attach-cmd"));
+        let mut expanded = state_at(Some(session_node()));
+        assert!(expanded.toggle_session_details());
+        assert_eq!(focus_hint(&expanded), SESSIONS_HINT);
     }
 
     #[test]
@@ -242,11 +263,17 @@ mod tests {
         let area = Rect::new(2, 9, 100, 1);
         let mut state = state_at(Some(session_node()));
         let button = focus_button(&state, area).expect("a session shows the button");
-        let start = SESSIONS_HINT.find(FOCUS_LABEL).expect("the hint names it") as u16;
+        let byte = SESSIONS_HINT.find(FOCUS_LABEL).expect("the hint names it");
+        // #10754: the hint holds multi-byte arrows; a cell is a char.
+        let start = SESSIONS_HINT[..byte].chars().count() as u16;
         assert_eq!(button, Rect::new(2 + start, 9, FOCUS_LABEL.len() as u16, 1));
+        let drawn: String = bar_text(&state)
+            .chars()
+            .skip(start as usize)
+            .take(FOCUS_LABEL.len())
+            .collect();
         assert_eq!(
-            &bar_text(&state)[start as usize..start as usize + FOCUS_LABEL.len()],
-            FOCUS_LABEL,
+            drawn, FOCUS_LABEL,
             "the rectangle must sit on the drawn label"
         );
 
