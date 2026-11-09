@@ -1,0 +1,2 @@
+Fixed
+- An offline index read now sees a daemon identity change that a feed pass observed (#10876). The feed journals a new `observed` record when `search.index.status` reports a known identity that differs from the last one journaled; a failed write stops the pass with `JournalWrite`. `Bundle::index_backlog_offline` checks each acknowledgement and remove against that identity, so a path whose re-push or remove was refused after a re-create or generation bump stays owed. Journals with no `observed` record read as before, and older binaries skip the new line.

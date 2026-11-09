@@ -426,8 +426,26 @@ fn names_path(r: &IndexRecord, p: &str) -> bool {
         | IndexRecord::Probe { path, .. }
         | IndexRecord::RemoveAck { path, .. }
         | IndexRecord::WithdrawProbe { path, .. } => path == p,
-        IndexRecord::Reindex { .. } => false,
+        IndexRecord::Reindex { .. } | IndexRecord::Observed { .. } => false,
     }
+}
+
+/// #10876: a pass under D1 journals the identity it read; whether the
+/// journal holds nothing else.
+fn only_observed(records: &[IndexRecord]) -> bool {
+    records
+        .iter()
+        .all(|r| matches!(r, IndexRecord::Observed { .. }))
+}
+
+fn observed(records: &[IndexRecord]) -> Vec<IndexIdentity> {
+    records
+        .iter()
+        .filter_map(|r| match r {
+            IndexRecord::Observed { identity } => Some(identity.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 const ALPHA: [&str; 3] = [
@@ -569,7 +587,8 @@ async fn put_with_a_wrong_content_sha256_is_not_counted() {
     assert_eq!(r.status, FeedStatus::NotFed);
     assert_eq!(r.acknowledged, 0);
     assert!(r.errors[0].message.contains("content_sha256"), "{r:?}");
-    assert!(f.records().is_empty());
+    // #10876: the identity observation is the only line.
+    assert!(only_observed(&f.records()));
 }
 
 /// Why: criterion 47 (F5). What: a root elsewhere, a relative root and no
@@ -1104,4 +1123,142 @@ async fn file_status_with_another_identity_is_never_searchable() {
     );
     assert_eq!(f.index("a", &fake), IndexState::Acknowledged);
     assert!(!f.synced(&fake));
+}
+
+/// Why: #10876 — an offline read can only see an identity change the pass
+/// journaled, and a journal must not grow on every pass.
+/// What: a D1 fake fed twice, then after a generation bump and a re-create;
+/// one `Observed` per distinct identity, in order. A D1-absent daemon
+/// journals none. Test: itself.
+#[tokio::test]
+async fn observed_record_written_once_per_identity_change() {
+    let f = fx();
+    create(&f.root, "a", &ALPHA);
+    let fake = Fake::new(&f.index_root, true);
+    f.feed(&fake).await.unwrap();
+    f.feed(&fake).await.unwrap();
+    assert_eq!(observed(&f.records()), vec![ident("inst-1", 1)]);
+    fake.bump_generation();
+    f.feed(&fake).await.unwrap();
+    f.feed(&fake).await.unwrap();
+    fake.recreate("inst-2");
+    f.feed(&fake).await.unwrap();
+    assert_eq!(
+        observed(&f.records()),
+        vec![ident("inst-1", 1), ident("inst-1", 2), ident("inst-2", 1)]
+    );
+
+    let g = fx();
+    create(&g.root, "a", &ALPHA);
+    let plain = Fake::new(&g.index_root, false);
+    g.feed(&plain).await.unwrap();
+    assert!(observed(&g.records()).is_empty());
+}
+
+/// Why: #10876 — the observation goes through the fail-closed record path
+/// (F3): a pass that cannot journal the new identity must not run.
+/// What: after a settled pass, the generation bumps and the journal turns
+/// read-only. The pass is `JournalWrite`, sends no put or remove, and
+/// leaves the journal unchanged. Test: itself.
+#[tokio::test]
+async fn observed_write_failure_is_not_fed() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx();
+    create(&f.root, "a", &ALPHA);
+    let fake = Fake::new(&f.index_root, true);
+    assert_eq!(f.feed(&fake).await.unwrap().status, FeedStatus::Searchable);
+    fake.bump_generation();
+    fake.script(|s| {
+        s.fail_put.insert("bundle/a.md".into());
+    });
+    let jpath = f.journal().path().to_path_buf();
+    let before = f.journal_bytes();
+    std::fs::set_permissions(&jpath, std::fs::Permissions::from_mode(0o444)).unwrap();
+    fake.clear_calls();
+    let got = f.feed(&fake).await;
+    std::fs::set_permissions(&jpath, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(matches!(got, Err(OkfError::JournalWrite { .. })), "{got:?}");
+    assert_eq!(exit_code(&got), 1);
+    assert!(fake.calls("search.index.file.put").is_empty());
+    assert!(fake.calls("search.index.file.remove").is_empty());
+    assert_eq!(f.journal_bytes(), before);
+}
+
+/// Why: #10876 criterion — a journal with no `Observed` record (D1 absent,
+/// or written before #10876) reads exactly as before.
+/// What: after a D1-absent pass and an edit, and for a hand-written
+/// pre-#10876 journal whose acks name an identity, the offline backlog
+/// equals the backlog under `Unsupported` and under `Unreadable`.
+/// Test: itself.
+#[tokio::test]
+async fn index_backlog_offline_equals_index_backlog_when_no_identity() {
+    let f = fx();
+    create(&f.root, "a", &ALPHA);
+    create(&f.root, "b", &["Beta words here"]);
+    f.feed(&Fake::new(&f.index_root, false)).await.unwrap();
+    edit(&f.root, "b", &["Beta words changed"]);
+    create(&f.root, "c", &["Gamma words"]);
+
+    let g = fx();
+    create(&g.root, "a", &ALPHA);
+    let bytes = trusty_okf::format::hash::bytes_hash(&std::fs::read(g.root.join("a.md")).unwrap());
+    g.journal()
+        .append(&[
+            IndexRecord::PutAck {
+                path: "a.md".into(),
+                bytes: bytes.clone(),
+                identity: Some(ident("inst-1", 1)),
+            },
+            IndexRecord::Probe {
+                path: "a.md".into(),
+                bytes,
+                identity: Some(ident("inst-1", 1)),
+                passed: true,
+            },
+        ])
+        .unwrap();
+
+    for (x, owed) in [(&f, 2), (&g, 0)] {
+        let offline = x.bundle().index_backlog_offline(&x.state, INDEX).unwrap();
+        assert_eq!(offline.owed(), owed, "{offline:?}");
+        for live in [
+            LiveIdentity::Unsupported,
+            LiveIdentity::Unreadable("down".into()),
+        ] {
+            let online = x.bundle().index_backlog(&x.state, INDEX, &live).unwrap();
+            assert_eq!(offline, online, "{live:?}");
+        }
+    }
+}
+
+/// Why: #10876 — the new record kind is additive. What: `Observed`
+/// round-trips through its JSON line, and a reader built without it (an
+/// older binary) skips the line as malformed with no error. Test: itself.
+#[test]
+fn observed_record_round_trips_and_older_readers_skip_it() {
+    let r = IndexRecord::Observed {
+        identity: ident("inst-1", 3),
+    };
+    let line = serde_json::to_string(&r).unwrap();
+    assert_eq!(
+        line,
+        r#"{"kind":"observed","identity":{"instance_id":"inst-1","generation":3}}"#
+    );
+    assert_eq!(serde_json::from_str::<IndexRecord>(&line).unwrap(), r);
+
+    #[derive(serde::Deserialize, Debug)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum Older {
+        Reindex { identity: Option<IndexIdentity> },
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("j.jsonl");
+    std::fs::write(
+        &path,
+        format!("{{\"kind\":\"reindex\",\"identity\":null}}\n{line}\n"),
+    )
+    .unwrap();
+    let load = trusty_okf::build::jsonl::read_journal::<Older>(&path).unwrap();
+    assert_eq!((load.records.len(), load.malformed), (1, 1));
 }

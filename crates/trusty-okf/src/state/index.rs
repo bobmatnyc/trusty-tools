@@ -128,6 +128,15 @@ pub enum IndexRecord {
         /// Identity observed after the reindex.
         identity: Option<IndexIdentity>,
     },
+    /// #10876: a feed pass read this identity from `search.index.status`
+    /// and it differed from the newest `Observed` record. An offline read
+    /// checks every acknowledgement against the newest one, so a re-create
+    /// or generation bump stays visible after the pass that saw it. An
+    /// older binary skips this kind as an unparseable line (F11).
+    Observed {
+        /// The identity the status reply carried.
+        identity: IndexIdentity,
+    },
 }
 
 /// One machine's index journal for one bundle root and one index ID.
@@ -243,9 +252,20 @@ pub(crate) fn journaled_paths(records: &[IndexRecord]) -> std::collections::BTre
             | IndexRecord::Probe { path, .. }
             | IndexRecord::RemoveAck { path, .. }
             | IndexRecord::WithdrawProbe { path, .. } => Some(path.clone()),
-            IndexRecord::Reindex { .. } => None,
+            // #10876: an identity observation names no path.
+            IndexRecord::Reindex { .. } | IndexRecord::Observed { .. } => None,
         })
         .collect()
+}
+
+/// The identity of the newest [`IndexRecord::Observed`], if any (#10876).
+///
+/// Test: `observed_record_written_once_per_identity_change`.
+pub(crate) fn last_observed_identity(records: &[IndexRecord]) -> Option<&IndexIdentity> {
+    records.iter().rev().find_map(|r| match r {
+        IndexRecord::Observed { identity } => Some(identity),
+        _ => None,
+    })
 }
 
 /// Fold `records` for `path` in journal order.
