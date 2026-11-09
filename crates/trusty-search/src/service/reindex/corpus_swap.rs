@@ -33,6 +33,11 @@ use super::checkpoint::{ReindexCheckpoint, ResumeState};
 #[path = "corpus_swap_adopt.rs"]
 mod adopt;
 
+// #10738: parks a test inside the detach windows below.
+#[cfg(test)]
+#[path = "corpus_swap_detach_hook.rs"]
+pub(super) mod detach_hook;
+
 /// Resolve this run's staging corpus path for this index, or `None` when it
 /// cannot be resolved.
 ///
@@ -561,6 +566,8 @@ pub(super) async fn commit_staged_corpus_swap(
     // the only order in which both can work, and yields the token
     // `rename_staging_over_live` demands. Reordering is not expressible.
     let release = release_staging_for_promotion(handle, index_id, tmp_path).await;
+    #[cfg(test)]
+    detach_hook::at(&index_id.0, detach_hook::Window::Promotion).await;
     let live = live_path.clone();
     let rename_result = rename_staging_over_live(&release, tmp_path, &live, index_id).await;
     // The descriptor now names the replaced inode; nothing still reads it.
@@ -673,6 +680,8 @@ pub(super) async fn abort_staged_corpus_swap(
         let _ = indexer.take_corpus_store();
         indexer.storage_layout()
     };
+    #[cfg(test)]
+    detach_hook::at(&index_id.0, detach_hook::Window::Abort).await;
     let live_path = layout.file(
         &index_id.0,
         &handle.root_path,

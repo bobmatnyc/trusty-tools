@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use super::corpus_swap::detach_hook::{self, Parked, Window};
 use super::progress::ReindexProgress;
 use super::spawn_reindex_awaitable;
 use crate::core::indexer::CodeIndexer;
@@ -478,4 +479,244 @@ async fn a_prune_that_removes_a_pushed_path_raises_the_generation() {
         after > acknowledged,
         "a prune that removes a pushed path must raise the generation: {acknowledged} -> {after}"
     );
+}
+
+/// Settle a staged run on its own task, so a test can act while it is parked.
+fn resolve_spawned(
+    handle: &Arc<IndexHandle>,
+    tmp: std::path::PathBuf,
+    commit: bool,
+) -> tokio::task::JoinHandle<bool> {
+    let handle = Arc::clone(handle);
+    tokio::spawn(async move {
+        let resolution = if commit {
+            super::staging::StagingResolution::Commit
+        } else {
+            super::staging::StagingResolution::Rollback {
+                reason: "test".into(),
+            }
+        };
+        resolve(&handle, &tmp, &resolution, false).await
+    })
+}
+
+/// Wait until the parked run is inside its detach window.
+async fn reach(reached: tokio::sync::oneshot::Receiver<()>) {
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .expect("the run reaches its detach window")
+        .expect("the park stays registered until reached");
+}
+
+/// A put through the real put core, the error body on a refusal.
+async fn try_put(
+    state: &Arc<crate::service::server::SearchAppState>,
+    id: &str,
+    path: &str,
+    body: &str,
+) -> Result<serde_json::Value, serde_json::Value> {
+    crate::service::server::index_file_report(
+        state,
+        id,
+        crate::service::server::IndexFileRequest {
+            path: path.into(),
+            content: body.into(),
+        },
+    )
+    .await
+    .map_err(|(_, body)| body)
+}
+
+/// Whether the attached corpus holds `path`.
+async fn corpus_holds(handle: &Arc<IndexHandle>, path: &str) -> bool {
+    let corpus = handle
+        .indexer
+        .read()
+        .await
+        .corpus_store()
+        .expect("attached");
+    corpus
+        .list_indexed_files()
+        .expect("list")
+        .iter()
+        .any(|f| f == path)
+}
+
+/// Why: R1 — the abort takes the staging store, then deletes it and reopens
+/// live with no lock held. A put in that span wrote to memory only and was
+/// acknowledged, and the live corpus re-attached without it.
+/// What: park the abort after the take, put, release, and assert the put was
+/// refused or is in the re-attached live corpus; a put after the re-attach
+/// lands. Fails before the fix: the put answers `indexed: true` and live
+/// lacks it.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_put_during_the_abort_detach_window_is_refused_or_lands_in_live() {
+    let id = "identity-abort-window-10738";
+    let (_dir, handle, state, _live) = staged_index(id).await;
+    let tmp = begin(&handle, false).await;
+    let Parked { reached, release } = detach_hook::park(id, Window::Abort);
+    let abort = resolve_spawned(&handle, tmp, false);
+    reach(reached).await;
+    assert!(
+        !handle.indexer.read().await.has_corpus_store(),
+        "test setup: the abort detached the corpus"
+    );
+
+    let reply = try_put(&state, id, PUSHED, PUSHED_BODY).await;
+    release.send(()).expect("the abort is still parked");
+    assert!(!abort.await.expect("abort task"), "a rollback never defers");
+    match reply {
+        Err(body) => assert_eq!(body["indexed"], false, "{body}"),
+        Ok(body) => assert!(
+            corpus_holds(&handle, PUSHED).await,
+            "an acknowledged put must be in the re-attached live corpus: {body}"
+        ),
+    }
+
+    let after = try_put(&state, id, LATE, LATE_BODY)
+        .await
+        .expect("a put after the re-attach is accepted");
+    assert_eq!(after["indexed"], true, "{after}");
+    assert!(corpus_holds(&handle, LATE).await, "it lands in live");
+}
+
+/// Why: R1 — the promotion releases staging, renames it over live and
+/// reopens with no lock held. A put in that span wrote to memory only, and
+/// the promoted corpus carried a matching stamp, so nothing bumped.
+/// What: park the promotion after the release, put, release, and assert the
+/// put was refused or the generation rose past the one its reply carried; a
+/// put after the re-attach lands. Fails before the fix: the put answers
+/// `indexed: true` and the generation stays.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_put_during_the_promotion_detach_window_is_refused_or_raises_the_generation() {
+    let id = "identity-promotion-window-10738";
+    let (_dir, handle, state, _live) = staged_index(id).await;
+    let tmp = begin(&handle, false).await;
+    let Parked { reached, release } = detach_hook::park(id, Window::Promotion);
+    let commit = resolve_spawned(&handle, tmp, true);
+    reach(reached).await;
+    assert!(
+        !handle.indexer.read().await.has_corpus_store(),
+        "test setup: the promotion released the corpus"
+    );
+
+    let reply = try_put(&state, id, PUSHED, PUSHED_BODY).await;
+    release.send(()).expect("the promotion is still parked");
+    assert!(!commit.await.expect("commit task"), "the promotion lands");
+    match reply {
+        Err(body) => assert_eq!(body["indexed"], false, "{body}"),
+        Ok(body) => {
+            let acknowledged = body["identity"]["generation"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("put reply carries a generation: {body}"));
+            let after = identity(id).generation;
+            assert!(
+                after > acknowledged,
+                "a put the promotion dropped must raise the generation: {acknowledged} -> {after}"
+            );
+        }
+    }
+
+    let after = try_put(&state, id, LATE, LATE_BODY)
+        .await
+        .expect("a put after the promotion is accepted");
+    assert_eq!(after["indexed"], true, "{after}");
+    assert!(
+        corpus_holds(&handle, LATE).await,
+        "it lands in the promoted corpus"
+    );
+}
+
+/// Why: R1 with the abort's `Err` arm — the live reopen fails, so a put in
+/// the detach window can land nowhere durable, and the quarantine bump
+/// (`quarantine_detached_corpus`) had no test.
+/// What: hold the live corpus so the reopen fails, park the abort after the
+/// take, put, release, and assert the put was refused, the index is
+/// quarantined with no corpus, the generation rose, and a later put is
+/// refused. Fails before the fix: the window put answers `indexed: true`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn an_abort_whose_live_reopen_fails_quarantines_and_raises_the_generation() {
+    let id = "identity-abort-reopen-fails-10738";
+    let (_dir, handle, state, live) = staged_index(id).await;
+    let tmp = begin(&handle, false).await;
+    let before = identity(id).generation;
+    let _holder = crate::core::corpus::CorpusStore::open(&live).expect("hold the live corpus");
+    let Parked { reached, release } = detach_hook::park(id, Window::Abort);
+    let abort = resolve_spawned(&handle, tmp, false);
+    reach(reached).await;
+
+    let reply = try_put(&state, id, PUSHED, PUSHED_BODY).await;
+    release.send(()).expect("the abort is still parked");
+    assert!(!abort.await.expect("abort task"), "a rollback never defers");
+    let body = reply.expect_err("a put while the corpus is detached must be refused");
+    assert_eq!(body["indexed"], false, "{body}");
+
+    {
+        let indexer = handle.indexer.read().await;
+        assert!(
+            indexer.is_write_quarantined(),
+            "the failed reopen quarantines"
+        );
+        assert!(!indexer.has_corpus_store(), "no corpus is attached");
+    }
+    let after = identity(id).generation;
+    assert!(
+        after > before,
+        "a quarantine must raise the generation: {before} -> {after}"
+    );
+    let later = try_put(&state, id, LATE, LATE_BODY).await;
+    assert!(
+        later.is_err(),
+        "a quarantined index refuses puts: {later:?}"
+    );
+}
+
+/// Why: R1/R2 — a run that panics or is cancelled inside the abort's detach
+/// window never re-attaches and never quarantines, so every later put was
+/// acknowledged into memory only until a restart.
+/// What: put during the run, park the abort after the take, drop the release
+/// so the run panics there, and assert a later put is refused; then attach
+/// the live corpus as a restart does and assert the generation rose past the
+/// first put's reply and a put lands. Fails before the fix: the put after the
+/// panic answers `indexed: true`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_panicked_staged_run_is_covered_by_the_next_attach() {
+    let id = "identity-panicked-run-10738";
+    let (_dir, handle, state, live) = staged_index(id).await;
+    let tmp = begin(&handle, false).await;
+    let acknowledged = put_generation(&state, id).await;
+    let Parked { reached, release } = detach_hook::park(id, Window::Abort);
+    let abort = resolve_spawned(&handle, tmp, false);
+    reach(reached).await;
+    drop(release);
+    let died = abort.await.expect_err("the run dies in the detach window");
+    assert!(died.is_panic(), "{died}");
+
+    let reply = try_put(&state, id, LATE, LATE_BODY).await;
+    let body = reply.expect_err("a put after the run died detached must be refused");
+    assert_eq!(body["indexed"], false, "{body}");
+
+    let store = crate::core::corpus::CorpusStore::open(&live).expect("reopen live");
+    handle
+        .indexer
+        .write()
+        .await
+        .set_corpus_store(Arc::new(store));
+    let attached = identity(id).generation;
+    assert!(
+        attached > acknowledged,
+        "the next attach must raise the generation: {acknowledged} -> {attached}"
+    );
+    let late = try_put(&state, id, LATE, LATE_BODY)
+        .await
+        .expect("a put after the attach is accepted");
+    assert_eq!(late["indexed"], true, "{late}");
 }
