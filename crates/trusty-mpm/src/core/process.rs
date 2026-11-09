@@ -132,7 +132,8 @@ fn tmux_target_pid_on(server: Option<&str>, target: &crate::core::tmux::TmuxTarg
 /// wrapper is ever present, so this reduces to the original direct-child scan.
 /// Test: `find_claude_pid_returns_none_for_nonexistent_session`;
 /// `claude_pid_resolves_through_disclaim_wrapper` (`#[ignore]`, real tmux).
-pub(crate) fn claude_child_of(shell_pid: u32) -> Option<u32> {
+// #8878 PR2a: public so `tm fleet bind` finds the `claude` under its own pane.
+pub fn claude_child_of(shell_pid: u32) -> Option<u32> {
     let children = child_pids_of(shell_pid);
     // Direct child (the pre-#2997 / non-macOS / disclaim-disabled shape).
     if let Some(pid) = children

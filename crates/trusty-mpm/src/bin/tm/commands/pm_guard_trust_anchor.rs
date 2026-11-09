@@ -24,6 +24,9 @@
 //! APFS does.
 //! #9815: the channel question table's files are anchors too, and bind the
 //! Architect's main thread as well (`pm_guard_trust_anchor_questions.rs`).
+//! #8878 PR2a: the Architect's main thread writes an anchor only with a live
+//! presence grant (`pm_guard_presence::presence_gate`); without one it is
+//! denied with the `tm presence local` remedy, never asked.
 //! FAIL-CLOSED (Q4/Q5): an unknown home, a config location that does not
 //! resolve, a target that does not resolve, a target built from an expansion,
 //! glob or `cd` whose file name could name an anchor, an unplaceable write
@@ -57,6 +60,7 @@ use crate::commands::pm_guard::{EDIT_TOOLS, edit_tool_target_path};
 use crate::commands::pm_guard_architect_reason::{architect_main_thread, with_identity};
 use crate::commands::pm_guard_bash::{AnchorWrite, UnplaceableWrite, anchor_writes};
 use crate::commands::pm_guard_deny_log::DenyContext;
+use crate::commands::pm_guard_presence::{BRIDGE_ENV, KeyLookup, presence_gate};
 use crate::commands::pm_guard_refusal::refuse;
 use crate::commands::pm_guard_trust_anchor_paths::{
     FileId, Placed, Resolved, dequote, file_id, has_shell_pattern, is_json, place, resolve,
@@ -86,18 +90,25 @@ pub(crate) struct HookEnv {
     pub(crate) project_dir: Option<OsString>,
     /// The hook's nearest `claude` ancestor, read only when needed.
     pub(crate) claude: ClaudeLookup,
+    /// #8878 PR2a: the presence-grant key, read only for a grant on disk.
+    pub(crate) presence_key: KeyLookup,
+    /// #8878 PR2a: whether `CLAUDE_CODE_BRIDGE_SESSION_ID` is set (a hint).
+    pub(crate) bridge: bool,
 }
 
 impl HookEnv {
     /// This process's inputs. The home is `dirs::home_dir`, the directory
     /// `MpmConfig::load_default` reads, so the anchor is the file it loads.
     pub(crate) fn ambient() -> Self {
+        let home = dirs::home_dir().filter(|home| home.is_absolute());
         Self {
-            home: dirs::home_dir().filter(|home| home.is_absolute()),
+            presence_key: KeyLookup::live(home.as_deref()),
+            home,
             sub_agent: std::env::var_os(SUB_AGENT_ENV).is_some(),
             stamp: std::env::var_os(session_profile::SESSION_PROFILE_ENV),
             project_dir: std::env::var_os(session_profile::PROJECT_DIR_ENV),
             claude: ClaudeLookup::live(),
+            bridge: std::env::var_os(BRIDGE_ENV).is_some_and(|v| !v.is_empty()),
         }
     }
 }
@@ -197,6 +208,11 @@ pub(crate) fn evaluate(
     // #8878: the ONE identity decision; an identity ruling swaps this call only.
     // #8878 PR-I: the deny names the identity check that failed.
     let Err(why) = architect_main_thread(payload, env, config) else {
+        // #8878 PR2a: the Architect's anchor write needs a live presence grant.
+        let anchor = decide(writes.clone(), cwd, env.home.as_deref());
+        if let Some(reason) = anchor.and_then(|anchor| presence_gate(anchor, payload, env)) {
+            return Some(reason);
+        }
         // #9815: the question table binds the Architect too, taint or none.
         return questions::questions_verdict(&writes, cwd, env.home.as_deref());
     };
