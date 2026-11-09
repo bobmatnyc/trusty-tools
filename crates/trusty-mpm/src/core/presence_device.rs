@@ -258,8 +258,10 @@ const SPENT_PREFIX: &str = ".ticket-";
 /// enrol a second within its TTL.
 /// What: `devices/.ticket-<nonce>` holds the ticket's expiry and is written
 /// before the record, so a failed record write leaves the ticket spent
-/// (fail-closed). Markers whose expiry has passed are removed first.
-/// Test: `an_enrol_ticket_enrols_once_8878`.
+/// (fail-closed). A marker is removed only when its expiry reads, parses and
+/// is below `now`; an unreadable or unparsable marker is kept.
+/// Test: `an_enrol_ticket_enrols_once_8878`,
+/// `an_unreadable_spent_marker_keeps_the_ticket_spent_8878`.
 fn spend_ticket(root: &Path, ticket: &Ticket, now: u64) -> Result<(), DeviceError> {
     if !valid_token(&ticket.nonce, 64) {
         return Err(DeviceError::Ticket(TicketRefusal::Forged));
@@ -267,11 +269,12 @@ fn spend_ticket(root: &Path, ticket: &Ticket, now: u64) -> Result<(), DeviceErro
     let dir = devices_dir(root);
     for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
         let name = entry.file_name();
+        // #8878: fail closed — a read or parse failure keeps the marker.
         let expired = name.to_str().is_some_and(|n| n.starts_with(SPENT_PREFIX))
             && std::fs::read_to_string(entry.path())
                 .ok()
                 .and_then(|s| s.trim().parse::<u64>().ok())
-                .is_none_or(|expires| expires < now);
+                .is_some_and(|expires| expires < now);
         if expired {
             let _ = std::fs::remove_file(entry.path());
         }
