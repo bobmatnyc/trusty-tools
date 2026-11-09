@@ -2,10 +2,10 @@
 //!
 //! Why: the name must not collide with `tm supervisor` (the unattended
 //! auto-resumer) or `tm overseer` (ruling 2026-09-23).
-//! What: [`FleetAction`] — `init`, `status` and `relaunch` (#9092). `add` and
-//! `remove` arrive in phase P3 of #8436.
+//! What: [`FleetAction`] — `init`, `status`, `relaunch` (#9092) and `bind`
+//! (#8878 PR2a). `add` and `remove` arrive in phase P3 of #8436.
 //! Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`,
-//! `cli_parses_fleet_relaunch`.
+//! `cli_parses_fleet_relaunch`, `cli_parses_fleet_bind`.
 
 use clap::Subcommand;
 
@@ -77,4 +77,11 @@ pub(crate) enum FleetAction {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Bind the running Architect `claude` this command runs under (#8878).
+    ///
+    /// Run from the Architect's own tmux pane when its `claude` is not bound
+    /// (no launch record). Asks for Touch ID or the login password, then
+    /// records that `claude` as the Architect and grants presence. Refuses,
+    /// writing nothing, for any other session.
+    Bind,
 }

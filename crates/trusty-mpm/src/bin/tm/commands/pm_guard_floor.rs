@@ -23,7 +23,8 @@
 //! (`pm_guard_bash::evaluate_tmux_exact_target`); since #10033, any
 //! `tm fleet relaunch` (`pm_guard_bash::evaluate_fleet_relaunch`); since
 //! #10665, a tmux kill of the fleet's server or of a `tm-` session
-//! (`pm_guard_bash::kill_server`); its other findings are log-only (ruling
+//! (`pm_guard_bash::kill_server`); since #8878 PR2a, a write of the presence
+//! key's Keychain item (`pm_guard_presence_key`); its other findings are log-only (ruling
 //! Dac): [`ArchitectGate::record_would_refuse`] keeps one, and
 //! [`deny_floors`] records it.
 //! [`ArchitectGate`] is the one
@@ -61,7 +62,10 @@ use crate::commands::pm_guard_bash::{
     evaluate_tmux_exact_target, unclassifiable_reason,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, record_would_refuse};
+use crate::commands::pm_guard_presence::evaluate_presence_verbs;
+use crate::commands::pm_guard_presence_key::evaluate_presence_key_write;
 use crate::commands::pm_guard_refusal::refuse;
+use crate::commands::pm_guard_secret_script::presence_key::evaluate_script_body_presence_key;
 use crate::commands::pm_guard_secret_script::tmux_kill::evaluate_script_body_tmux_kill;
 use crate::commands::pm_guard_trust_anchor::{self, HookEnv, TRUST_ANCHOR_RULE};
 use trusty_mpm::core::guard_policy;
@@ -285,6 +289,27 @@ pub(crate) fn evaluate_floors(
     if let Some(reason) = command.and_then(evaluate_fleet_relaunch) {
         return Some(FloorDeny {
             rule: FLEET_RELAUNCH_RULE,
+            reason,
+        });
+    }
+    // #8878 PR2a: `tm presence` and `tm fleet bind` are anchor writes for PMs
+    // and agents; the Architect's main thread runs them bound or unbound.
+    if let Some(reason) = command.and_then(evaluate_presence_verbs)
+        && let Err(why) = gate.identity()
+        && !matches!(why, NotArchitect::Launch(_))
+    {
+        return Some(FloorDeny {
+            rule: TRUST_ANCHOR_RULE,
+            reason: with_identity(reason, why),
+        });
+    }
+    // #8878 PR2a critic HIGH: no hooked caller, the Architect included,
+    // writes the presence key's Keychain item, inline or from a script.
+    if let Some(reason) = command.and_then(|c| {
+        evaluate_presence_key_write(c).or_else(|| evaluate_script_body_presence_key(c, hook_cwd))
+    }) {
+        return Some(FloorDeny {
+            rule: TRUST_ANCHOR_RULE,
             reason,
         });
     }

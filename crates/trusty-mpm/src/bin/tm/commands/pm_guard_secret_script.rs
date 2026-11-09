@@ -106,6 +106,9 @@ mod walk;
 // #10665: a whole-server tmux kill in a script body is judged too.
 #[path = "pm_guard_secret_script_tmux.rs"]
 pub(crate) mod tmux_kill;
+// #8878 PR2a: a presence-key Keychain write in a script body is denied too.
+#[path = "pm_guard_secret_script_presence.rs"]
+pub(crate) mod presence_key;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;

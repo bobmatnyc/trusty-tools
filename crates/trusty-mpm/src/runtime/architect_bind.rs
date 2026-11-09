@@ -15,8 +15,8 @@
 //! writer every path reaches. A non-Architect launch is
 //! [`Binding::NotArchitect`] and costs nothing. The `claude` is found under
 //! the session's pane shell, never named by a caller. A session that was
-//! already running is not re-bound ([`Binding::NotStarted`]); re-binding a
-//! running Architect is #8878 PR2. The bare-`tm` in-place relaunch refuses a
+//! already running is not re-bound ([`Binding::NotStarted`]); `tm fleet bind`
+//! re-binds a running Architect after presence (#8878 PR2a). The bare-`tm` in-place relaunch refuses a
 //! supervisor session before it execs (#9092). [`DEFERRED`] names the one
 //! path that does not bind yet. Every failure is a [`Binding`] the caller
 //! reports; none grants anything, since no record means the floor denies.
@@ -46,7 +46,8 @@ pub const DEFERRED: &[(&str, &str)] = &[(
     "tm run (core/standalone/run.rs)",
     "it runs `claude` as a direct child in no tmux session, and a launch record \
      carries the session-name sidecar the #8902 pane guard and `tm fleet status` \
-     read; a session-less record is #8878 PR2",
+     read; a session-less record changes the record format, not presence, so \
+     #8878 PR2a re-defers it to PR2b-1",
 )];
 
 /// What binding a launched `claude` as the Architect came to.
@@ -77,7 +78,8 @@ impl Binding {
         };
         Some(format!(
             "warning: the Architect `claude` in tmux session {session} is NOT bound ({why}); \
-             pm-guard denies its trust-anchor writes until `tm fleet relaunch` binds it"
+             pm-guard denies its trust-anchor writes until `tm fleet bind` (from its pane) \
+             or `tm fleet relaunch` binds it"
         ))
     }
 
@@ -120,8 +122,8 @@ pub fn bind_launch(
 /// What a launch into a session that was already running binds: nothing.
 ///
 /// Why: only a `claude` this command started may be recorded; the pane's
-/// `claude` may be one it found there (#8878 critic). Re-binding a running
-/// Architect is #8878 PR2.
+/// `claude` may be one it found there (#8878 critic). `tm fleet bind`
+/// re-binds a running Architect after presence (#8878 PR2a).
 /// Test: `a_reused_session_binds_nothing_8878`.
 pub fn bind_reused(architect: bool) -> Binding {
     if architect {
