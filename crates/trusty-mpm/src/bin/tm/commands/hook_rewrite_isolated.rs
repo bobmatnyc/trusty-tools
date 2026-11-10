@@ -9,11 +9,12 @@
 //! group, no pipe, no `;` and no `$?`: one simple command, `tm compress` running
 //! the original program itself (`commands::compress_run`).
 //! What: [`rewrite_bash_command_for_cwd`] picks the shape. Outside an isolation
-//! worktree it is the unchanged brace-group rewrite. Inside one, and when the
-//! cwd cannot be read, it is [`isolated_rewrite`], which also decides the
-//! permission the rewrite carries from the ORIGINAL command, as the build-lease
-//! rewrite does, so a `deny` rule on the original is never bypassed.
+//! worktree it is the unchanged brace-group rewrite. Inside one it is
+//! [`isolated_rewrite`], which also decides the permission the rewrite carries
+//! from the ORIGINAL command, as the build-lease rewrite does, so a `deny` rule
+//! on the original is never bypassed. An unreadable cwd gets no rewrite.
 //! Test: `the_isolated_shape_is_one_simple_command`,
+//! `a_program_that_is_not_an_executable_is_not_rewritten`,
 //! `an_isolated_rewrite_refuses_what_the_brace_rewrite_refuses`,
 //! `an_isolated_rewrite_skips_an_env_prefixed_or_wrapped_command`,
 //! `an_isolated_rewrite_skips_a_denied_command_and_keeps_an_allow`,
@@ -38,10 +39,10 @@ pub(crate) struct CwdRewrite {
 
 /// The compression rewrite for `command` run from `cwd`, if one applies.
 ///
-/// Why (#10973): see the module doc. The undecidable cwd takes the isolated
-/// shape because that shape is valid everywhere, while the brace group is the
-/// one #7477 showed the classifier refuses.
-/// What: `cwd` absent, empty, or inside an isolation worktree →
+/// Why (#10973): see the module doc. An undecidable cwd gets no rewrite, as
+/// before #10973: the project's permission rules are read from the cwd's
+/// ancestors, so without one a `deny` rule could not be honoured (#10981 review).
+/// What: `cwd` absent or empty → `None`; inside an isolation worktree →
 /// [`isolated_rewrite`]; otherwise [`rewrite_bash_command_for_compression`]
 /// with no permission decision, exactly as before.
 /// Test: `outside_a_worktree_the_brace_rewrite_is_unchanged`,
@@ -56,7 +57,9 @@ pub(crate) fn rewrite_bash_command_for_cwd(
                 command,
                 permission: None,
             }),
-        dir => isolated_rewrite(command, dir.unwrap_or(Path::new(""))),
+        Some(dir) => isolated_rewrite(command, dir),
+        // #10981 review: no cwd, no permission rules to decide from.
+        None => None,
     }
 }
 
@@ -69,17 +72,26 @@ pub(crate) fn rewrite_bash_command_for_cwd(
 /// What: `None` when [`compressible_tool_name`] refuses the command (every
 /// guard of the brace rewrite applies unchanged), when the first word is not
 /// the program — a `KEY=value` prefix or a wrapper such as `sudo`/`env`/
-/// `timeout`, which `tm compress` would exec as the program — or when the
-/// original matches a `deny` permission rule. The permission decision is
-/// otherwise the one the build-lease rewrite computes for the original.
+/// `timeout`, which `tm compress` would exec as the program — when that
+/// program does not resolve to an executable file ([`resolves_to_an_executable`];
+/// a shell function or alias would be lost), or when the original matches a
+/// `deny` permission rule. The permission decision is otherwise the one the
+/// build-lease rewrite computes for the original.
 /// Test: `an_isolated_rewrite_refuses_what_the_brace_rewrite_refuses`,
+/// `a_program_that_is_not_an_executable_is_not_rewritten`,
 /// `an_isolated_rewrite_skips_an_env_prefixed_or_wrapped_command`,
 /// `an_isolated_rewrite_skips_a_denied_command_and_keeps_an_allow`.
 fn isolated_rewrite(command: &str, cwd: &Path) -> Option<CwdRewrite> {
     let trimmed = command.trim();
     let tool = compressible_tool_name(trimmed)?;
     // #10973: the program must be the first word, since `tm compress` execs it.
-    if strip_wrapper_prefix(&shlex_words(trimmed)) != Some(0) {
+    let words = shlex_words(trimmed);
+    if strip_wrapper_prefix(&words) != Some(0) {
+        return None;
+    }
+    // #10981 review: `tm compress` execs the program without a shell, so only
+    // an executable file keeps the command's meaning.
+    if !resolves_to_an_executable(words.first()?, cwd) {
         return None;
     }
     // #10973: decided from the original, so a deny rule is never bypassed.
@@ -88,6 +100,44 @@ fn isolated_rewrite(command: &str, cwd: &Path) -> Option<CwdRewrite> {
         command: format!("tm compress --tool \"{tool}\" -- {trimmed}"),
         permission,
     })
+}
+
+/// Whether `program` names an executable file the way the shell would find it.
+///
+/// Why (#10981 review): the Claude Code shell snapshot can define `rg` or `ls`
+/// as a function or alias. Run through `tm compress`, which execs the word
+/// directly, such a command fails with 127. A word with no executable file
+/// behind it is therefore left to the shell.
+/// What: a word containing `/` is resolved against `cwd` (an absolute word
+/// stays absolute); any other word is searched on `PATH`. True only for a
+/// regular file with an execute bit. A leading `\` (alias bypass) is ignored.
+/// Residual: a function that shadows a real binary of the same name still
+/// loses to the binary.
+/// Test: `a_program_that_is_not_an_executable_is_not_rewritten`.
+fn resolves_to_an_executable(program: &str, cwd: &Path) -> bool {
+    let program = program.strip_prefix('\\').unwrap_or(program);
+    if program.contains('/') {
+        return is_executable_file(&cwd.join(program));
+    }
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| is_executable_file(&dir.join(program)))
+    })
+}
+
+/// A regular file with an execute bit (any file, off Unix).
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
 }
 
 #[cfg(test)]

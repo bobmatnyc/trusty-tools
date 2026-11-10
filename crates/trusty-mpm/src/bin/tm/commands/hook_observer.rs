@@ -9,20 +9,24 @@
 //! What: on `PostToolUse` and `SubagentStop`, [`opportunity_row`] reads the
 //! result text out of the payload, dry-runs the existing compressor over at
 //! most [`OBSERVER_SCAN_CAP`] bytes of it, and [`observe`] appends one
-//! [`OpportunityRow`] to the savings ledger the statusline folds — which skips
-//! the technique, so the `💸` figure is unchanged (#7867).
+//! [`OpportunityRow`] to the bounded opportunity ledger under
+//! `usage/opportunity/` — never to `savings.jsonl`, which the statusline reads
+//! whole on every refresh, so the `💸` figure and its cost are unchanged
+//! (#7867, #10981 review).
 //! Test: `a_subagent_result_and_an_mcp_result_each_append_an_opportunity_row`
 //! (end to end), `a_bash_result_is_measured_under_its_derived_tool_name`,
 //! `a_huge_result_is_scanned_only_up_to_the_cap`,
 //! `a_subagent_stop_without_a_message_writes_no_row`,
+//! `a_large_opportunity_volume_leaves_the_savings_ledger_untouched`,
 //! `an_unwritable_ledger_does_not_fail_the_hook`.
 
 use std::path::Path;
 
 use serde_json::Value;
 use trusty_agents_common::compress::compress_tool_output;
-use trusty_mpm::core::savings::savings_log_in;
-use trusty_mpm::core::savings_opportunity::{OpportunityRow, append_opportunity, tool_type_of};
+use trusty_mpm::core::savings_opportunity::{
+    OpportunityRow, append_opportunity, opportunity_dir_in, tool_type_of,
+};
 
 use super::hook_rewrite::effective_tool_name;
 
@@ -63,11 +67,11 @@ pub(crate) fn observe_in(root: &Path, event: &str, payload: Option<&Value>, sess
     let Some(row) = payload.and_then(|p| opportunity_row(event, p, session_id)) else {
         return;
     };
-    let ledger = savings_log_in(root);
-    if let Err(e) = append_opportunity(&ledger, &row) {
+    // #10981 review: its own bounded ledger, never the statusline's file.
+    if let Err(e) = append_opportunity(root, &row) {
         eprintln!(
-            "trusty-mpm: #10973 opportunity row not written to {}: {e}",
-            ledger.display()
+            "trusty-mpm: #10973 opportunity row not written under {}: {e}",
+            opportunity_dir_in(root).display()
         );
     }
 }

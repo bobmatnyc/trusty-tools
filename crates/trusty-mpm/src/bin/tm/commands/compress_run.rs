@@ -18,6 +18,8 @@ use tokio::io::AsyncReadExt;
 
 /// Exit status a shell reports for a program it cannot find.
 const EXIT_NOT_FOUND: i32 = 127;
+/// Exit status when the program succeeded but its output could not be read.
+const EXIT_OUTPUT_LOST: i32 = 1;
 /// Exit status a shell reports for a program it found but could not run.
 const EXIT_NOT_EXECUTABLE: i32 = 126;
 
@@ -90,8 +92,18 @@ pub(crate) async fn run_compress_command(tool: &str, argv: &[String]) -> i32 {
 }
 
 /// The status to exit with, given how reading the program's stdout went.
-fn status_after_read(_read: &std::io::Result<()>, program_status: i32) -> i32 {
-    program_status
+///
+/// Why (#10981 review): output lost mid-stream is a failed call even when the
+/// program exited 0; reporting 0 would hand the agent a truncated result as a
+/// success.
+/// What: the program's status, except a failed read of a program that exited
+/// 0, which becomes [`EXIT_OUTPUT_LOST`]. The caller prints the stderr note.
+/// Test: `a_failed_stdout_read_yields_a_nonzero_status`.
+fn status_after_read(read: &std::io::Result<()>, program_status: i32) -> i32 {
+    match read {
+        Err(_) if program_status == 0 => EXIT_OUTPUT_LOST,
+        _ => program_status,
+    }
 }
 
 /// The shell-style exit status of a finished program.

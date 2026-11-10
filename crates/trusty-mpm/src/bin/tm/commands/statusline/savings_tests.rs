@@ -107,15 +107,15 @@ fn one_compress_row_moves_the_segment() {
     );
 }
 
-/// Why (#10973): an opportunity row says what COULD have been saved. Folding it
-/// into the `💸` per-call figure would break #7867's rule that only rows a tool
-/// call actually saved move that figure.
+/// Why (#10973, #10981 review): an opportunity row says what COULD have been
+/// saved. It must neither move the `💸` figure (#7867) nor add to the file the
+/// segment reads on every refresh.
 /// Test: itself.
 #[test]
 fn an_opportunity_row_never_moves_the_segment() {
     use trusty_mpm::core::savings_opportunity::{OpportunityRow, append_opportunity};
     let dir = tempfile::tempdir().expect("temp dir");
-    let ledger = dir.path().join("savings.jsonl");
+    let ledger = trusty_mpm::core::savings::savings_log_in(dir.path());
     let row = OpportunityRow::new(
         "PostToolUse",
         "sess-1",
@@ -125,14 +125,22 @@ fn an_opportunity_row_never_moves_the_segment() {
         80_000,
         8_000,
     );
-    append_opportunity(&ledger, &row).expect("append");
+    append_opportunity(dir.path(), &row).expect("append");
     assert_eq!(
         savings_segment_at(&ledger, "sess-1").as_deref(),
         Some(EMPTY_STATE),
         "an opportunity alone is not a saving"
     );
     write_row(&ledger, "sess-1", 12_000, 60_000);
-    append_opportunity(&ledger, &row).expect("append");
+    let read_by_the_segment = std::fs::metadata(&ledger).expect("stat").len();
+    for _ in 0..1_000 {
+        append_opportunity(dir.path(), &row).expect("append");
+    }
+    assert_eq!(
+        std::fs::metadata(&ledger).expect("stat").len(),
+        read_by_the_segment,
+        "opportunity volume never reaches the file the segment reads"
+    );
     assert_eq!(
         savings_segment_at(&ledger, "sess-1").as_deref(),
         Some("\u{1f4b8}20%/20%"),

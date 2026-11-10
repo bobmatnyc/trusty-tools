@@ -369,8 +369,8 @@ pub fn default_savings_log() -> PathBuf {
 /// newline. Returns the IO error unchanged; every producer treats a failure as
 /// non-fatal, since a missing savings row must never cost a session its launch.
 /// Test: `append_then_fold_round_trips`, `append_creates_the_usage_directory`.
-/// #10973: generic so a row carrying extra columns (a tagged `compress` row, an
-/// `opportunity` row) leaves through the same single-write path.
+/// #10973: generic so a tagged `compress` row leaves through the same
+/// single-write path.
 pub fn append_row<T: Serialize + ?Sized>(ledger: &Path, row: &T) -> std::io::Result<()> {
     crate::core::home_write_fence::check(ledger); // #8545
     if let Some(parent) = ledger.parent() {
@@ -927,11 +927,6 @@ fn visit_accepted_rows(
             }
         };
         if session_id.is_some_and(|wanted| row.session_id != wanted) {
-            continue;
-        }
-        // #10973: an opportunity row measures what COULD be saved; it is never
-        // a saving, so no fold counts it and none warns about its zero.
-        if row.technique == crate::core::savings_opportunity::TECHNIQUE_OPPORTUNITY {
             continue;
         }
         if row.tokens_saved <= 0 {

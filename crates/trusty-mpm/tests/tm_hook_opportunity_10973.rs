@@ -5,7 +5,8 @@
 //! the table. This drives the real binary with the `PostToolUse` payloads
 //! Claude Code sends for both and reads the ledger the scratch `$HOME` holds.
 //! What: two `tm --url <unreachable> hook` runs under one scratch home, then
-//! asserts two `opportunity` rows keyed by the payload's session, typed
+//! asserts two rows in the `usage/opportunity/` day file, keyed by the
+//! payload's session, typed
 //! `subagent` and `mcp`, and that the hook printed nothing to stdout — the
 //! observer never changes a tool's output.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_opportunity_10973::`.
@@ -43,7 +44,7 @@ fn run_hook_in(home: &Path, payload: &serde_json::Value) -> String {
     String::from_utf8(output.stdout).expect("utf8 stdout")
 }
 
-/// Every `savings.jsonl` under `dir`, wherever the framework root resolved.
+/// Every opportunity day file under `dir`, wherever the framework root resolved.
 fn ledgers_under(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -53,7 +54,11 @@ fn ledgers_under(dir: &Path) -> Vec<PathBuf> {
         let path = entry.path();
         if path.is_dir() {
             found.extend(ledgers_under(&path));
-        } else if path.file_name().is_some_and(|n| n == "savings.jsonl") {
+        } else if path
+            .parent()
+            .is_some_and(|p| p.ends_with("usage/opportunity"))
+            && path.extension().is_some_and(|e| e == "jsonl")
+        {
             found.push(path);
         }
     }
@@ -94,7 +99,6 @@ fn a_subagent_result_and_an_mcp_result_each_append_an_opportunity_row() {
                 .filter_map(|l| serde_json::from_str(l).ok())
                 .collect::<Vec<serde_json::Value>>()
         })
-        .filter(|row: &serde_json::Value| row["technique"] == "opportunity")
         .collect();
     let types: Vec<&str> = rows
         .iter()
