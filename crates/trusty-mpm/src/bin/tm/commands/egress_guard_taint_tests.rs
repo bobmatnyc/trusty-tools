@@ -193,44 +193,161 @@ fn with_taint_denies_an_allowed_gated_call_of_a_tainted_session() {
     );
 }
 
-/// 🔴 #10735 (owner ruling D6d keeps the taint arm as it was): after taint, a
-/// claude.ai connector call is allowed — the taint arm judges only the path
-/// tools in `GATED_TOOLS`, never an MCP tool — while the session's path calls
-/// stay denied and a non-connector Slack server keeps its family deny.
-#[test]
-fn a_tainted_session_keeps_its_taint_deny_and_reaches_the_connectors_10735() {
+/// The full guard verdict — family check, then the taint arm with a ready
+/// policy — for `tool` called by `session` under `home`.
+fn judge_connector(home: &Home, session: &str, tool: &str) -> Verdict {
     use crate::commands::egress_guard::decide;
     use crate::commands::egress_guard_families::FamilyTable;
+    let read = Ok(call(tool, Some(session)));
+    let first = decide(&read, &FamilyTable::builtin());
+    // Launched at the home, outside the mark's `ws`, so `s-clean` stays clean.
+    let launch = Some(home.path());
+    with_taint(first, &read, Some(home.path()), launch, || Ok(()))
+}
+
+fn is_taint_deny(verdict: &Verdict) -> bool {
+    matches!(
+        verdict,
+        Verdict::Deny {
+            check: TAINT_CHECK,
+            ..
+        }
+    )
+}
+
+/// 🔴 #10735 (Architect answer to D6d "keep taint"): after taint, a claude.ai
+/// connector tool that sends, writes or changes state is denied by the taint
+/// arm, the session's path calls stay denied, and a non-connector Slack server
+/// keeps its family deny.
+#[test]
+fn a_tainted_session_keeps_its_taint_deny_and_reaches_the_connectors_10735() {
     let home = tainted_home();
-    let table = FamilyTable::builtin();
-    let judge = |tool: &str| {
-        let read = Ok(call(tool, Some("s-tainted")));
-        let first = decide(&read, &table);
-        with_taint(first, &read, Some(home.path()), None, || Ok(()))
-    };
-    for tool in [
-        "mcp__claude_ai_Notion__notion-search",
-        "mcp__claude_ai_Slack__slack_send_message",
-    ] {
-        assert_eq!(judge(tool), Verdict::Allow, "{tool}");
-    }
+    assert!(is_taint_deny(&judge_connector(
+        &home,
+        "s-tainted",
+        "mcp__claude_ai_Slack__slack_send_message"
+    )));
+    assert_eq!(
+        judge_connector(&home, "s-tainted", "mcp__claude_ai_Notion__notion-search"),
+        Verdict::Allow
+    );
     for tool in ["Read", "Write"] {
         assert!(
-            matches!(
-                judge(tool),
-                Verdict::Deny {
-                    check: TAINT_CHECK,
-                    ..
-                }
-            ),
+            is_taint_deny(&judge_connector(&home, "s-tainted", tool)),
             "{tool}"
         );
     }
     assert!(matches!(
-        judge("mcp__slack-mcp__slack_send_message"),
+        judge_connector(&home, "s-tainted", "mcp__slack-mcp__slack_send_message"),
         Verdict::Deny {
             check: "egress-family",
             ..
         }
     ));
+}
+
+/// 🔴 #10735: every send, post, write, create, update, delete, upload or share
+/// tool of a claude.ai connector is denied once the session is tainted.
+#[test]
+fn tainted_session_denies_claude_ai_connector_writes_10735() {
+    let home = tainted_home();
+    for tool in [
+        "mcp__claude_ai_Slack__slack_send_message",
+        "mcp__claude_ai_Slack__slack_schedule_message",
+        "mcp__claude_ai_Gmail__create_draft",
+        "mcp__claude_ai_Google_Chat__send_message",
+        "mcp__claude_ai_Notion__notion-create-pages",
+        "mcp__claude_ai_Notion__notion-update-page",
+        "mcp__claude_ai_Google_Drive__upload_file",
+        "mcp__claude_ai_Google_Drive__share_file",
+        "mcp__claude_ai_Vercel__delete_project",
+        "mcp__claude_ai_Vercel__postComment",
+        // A read verb first does not lift a write verb later in the name.
+        "mcp__claude_ai_Notion__get_or_create_page",
+    ] {
+        assert!(
+            is_taint_deny(&judge_connector(&home, "s-tainted", tool)),
+            "{tool}"
+        );
+    }
+}
+
+/// 🔴 #10735: a claude.ai connector tool whose verb is a known read stays
+/// allowed in a tainted session.
+#[test]
+fn tainted_session_allows_claude_ai_connector_reads_10735() {
+    let home = tainted_home();
+    for tool in [
+        "mcp__claude_ai_Notion__notion-search",
+        "mcp__claude_ai_Notion__notion-fetch",
+        "mcp__claude_ai_Slack__slack_read_channel",
+        "mcp__claude_ai_Slack__slack_search_public",
+        "mcp__claude_ai_Gmail__search_threads",
+        "mcp__claude_ai_Gmail__get_thread",
+        "mcp__claude_ai_Google_Drive__google_drive_search",
+        "mcp__claude_ai_Vercel__list_projects",
+        "mcp__claude_ai_Vercel__getDeployment",
+    ] {
+        assert_eq!(
+            judge_connector(&home, "s-tainted", tool),
+            Verdict::Allow,
+            "{tool}"
+        );
+    }
+}
+
+/// 🔴 #10735 (fail closed): a claude.ai connector tool whose verb is not a
+/// known read is treated as a write once the session is tainted.
+#[test]
+fn tainted_session_denies_unknown_claude_ai_connector_verbs_10735() {
+    let home = tainted_home();
+    for tool in [
+        "mcp__claude_ai_Slack__slack_frobnicate",
+        "mcp__claude_ai_Hugging_Face__hf_fs",
+        "mcp__claude_ai_Notion__notion",
+        "mcp__claude_ai_Vercel__invite_member_list",
+        "mcp__claude_ai_Gmail__readandsend",
+        "mcp__claude_ai_Notion__search_and_archive",
+    ] {
+        assert!(
+            is_taint_deny(&judge_connector(&home, "s-tainted", tool)),
+            "{tool}"
+        );
+    }
+}
+
+/// 🔴 #10735: untainted, a claude.ai connector write is allowed and a native
+/// connector is denied by its family, as before the taint change.
+#[test]
+fn untainted_session_connector_verdicts_are_unchanged_10735() {
+    let home = tainted_home();
+    for tool in [
+        "mcp__claude_ai_Slack__slack_send_message",
+        "mcp__claude_ai_Notion__notion-create-pages",
+        "mcp__claude_ai_Slack__slack_frobnicate",
+    ] {
+        assert_eq!(
+            judge_connector(&home, "s-clean", tool),
+            Verdict::Allow,
+            "{tool}"
+        );
+    }
+    for session in ["s-clean", "s-tainted"] {
+        for tool in [
+            "mcp__slack-mcp__slack_send_message",
+            "mcp__notion__notion-search",
+            "mcp__gworkspace-mcp__send_gmail_message",
+        ] {
+            assert!(
+                matches!(
+                    judge_connector(&home, session, tool),
+                    Verdict::Deny {
+                        check: "egress-family",
+                        ..
+                    }
+                ),
+                "{session} {tool}"
+            );
+        }
+    }
 }

@@ -66,7 +66,7 @@ const CONNECTOR_PREFIX: &str = "claude_ai_";
 /// digit to `_`, and checks for [`CONNECTOR_PREFIX`], so the tool-name form
 /// `claude_ai_Slack` and the display form `claude.ai Slack` both match.
 /// Test: `claude_ai_connectors_are_exempt_from_the_family_deny_10735`.
-fn is_claude_ai_connector(server: &str) -> bool {
+pub(crate) fn is_claude_ai_connector(server: &str) -> bool {
     let mapped: String = server
         .chars()
         .map(|c| {

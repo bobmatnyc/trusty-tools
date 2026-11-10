@@ -1,0 +1,2 @@
+Changed
+- In a channel-tainted session, `tm hook --egress-guard` now denies a claude.ai connector tool (`mcp__claude_ai_*`) that sends, posts, writes, creates, updates, deletes, uploads, shares or otherwise changes state, and keeps its read-only tools (read, get, list, search, query, fetch, find, view, describe, lookup, retrieve) allowed. A connector tool whose verb is not a known read is treated as a write ([#10735](https://github.com/bobmatnyc/trusty-tools/issues/10735), [#10725](https://github.com/bobmatnyc/trusty-tools/issues/10725)). Untainted sessions are unchanged.
