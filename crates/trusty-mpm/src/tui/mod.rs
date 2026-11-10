@@ -28,6 +28,8 @@ pub mod project_ctl;
 // #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 pub mod session_hooks;
 pub mod terminal;
+// #10942: G01 slice 1, the console palette as named roles.
+pub mod theme;
 
 use crossterm::{
     execute,
@@ -437,6 +439,7 @@ pub(crate) fn render_screen(
     chat: &DashboardState,
     hp: &HealthScreen,
 ) {
+    theme::paint_background(frame);
     match screen {
         Screen::Chat => dashboard::render(frame, chat),
         Screen::Health => {

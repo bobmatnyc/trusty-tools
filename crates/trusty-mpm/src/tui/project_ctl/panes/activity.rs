@@ -30,10 +30,11 @@
 //! bordered `Paragraph`.
 //! Test: `tests` covers all five shapes above.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Paragraph},
 };
@@ -137,12 +138,12 @@ pub fn activity_lines(state: &ProjectCtlState) -> Vec<String> {
 /// Why: the single entry point [`super::super::layout::render`] calls for the
 /// bottom strip.
 /// What: a bordered, titled (`ACTIVITY`) `Paragraph` over [`activity_lines`];
-/// the title is styled cyan/bold when this pane has focus.
+/// the title is styled accent/bold when this pane has focus.
 pub fn render(frame: &mut Frame, area: Rect, state: &ProjectCtlState) {
     let focused = state.focus == Pane::Activity;
     let title_style = if focused {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::BOLD)

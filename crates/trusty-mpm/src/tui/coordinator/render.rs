@@ -15,8 +15,9 @@
 //! Test: `super::tests` covers representative variants (list, lifecycle, error,
 //! send, activity).
 
+use crate::tui::theme::palette;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
@@ -29,18 +30,20 @@ use crate::client::{CommandResult, HealthReport, ManagedSessionView};
 /// What: red, bold.
 /// Test: `render_error_is_red`.
 fn error_style() -> Style {
-    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(palette().err)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// The style for an informational/heading line.
 ///
 /// Why: command output headings (e.g. "managed sessions (3)") should stand out
 /// from their detail rows; centralising the accent keeps it consistent.
-/// What: cyan, bold.
+/// What: theme accent, bold.
 /// Test: covered indirectly by the list/lifecycle render tests.
 fn heading_style() -> Style {
     Style::default()
-        .fg(Color::Cyan)
+        .fg(palette().accent)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -235,7 +238,7 @@ fn short(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// Build an accent (cyan/bold) heading line.
+/// Build an accent (bold) heading line.
 fn heading_line(text: String) -> Line<'static> {
     Line::from(Span::styled(text, heading_style()))
 }
@@ -244,7 +247,7 @@ fn heading_line(text: String) -> Line<'static> {
 fn detail_line(text: String) -> Line<'static> {
     Line::from(Span::styled(
         format!("  {text}"),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(palette().muted),
     ))
 }
 
@@ -252,6 +255,6 @@ fn detail_line(text: String) -> Line<'static> {
 fn ok_line(text: String) -> Line<'static> {
     Line::from(Span::styled(
         format!("✓ {text}"),
-        Style::default().fg(Color::Green),
+        Style::default().fg(palette().ok),
     ))
 }

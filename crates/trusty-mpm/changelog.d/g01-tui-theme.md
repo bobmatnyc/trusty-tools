@@ -1,0 +1,2 @@
+Changed
+- `tm tui` now draws in the trusty-console dark palette (#10942). A new `tui::theme` module names the roles (background, surface, text, muted, accent, ok, warn, degraded, err, info, sparkline) and every screen takes its colours from them. Colour depth is detected once from `COLORTERM` and `TERM`: truecolor, 256-colour, or a 16-colour fallback that keeps the terminal's own background and text. `NO_COLOR` turns colour off and marks the selected row with reverse video.

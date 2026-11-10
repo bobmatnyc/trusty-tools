@@ -14,8 +14,9 @@
 //! Test: `super::tests` covers `controller_bullet_row`, `session_short_id`, and
 //! the two-column split via `active_row_two_col`.
 
+use crate::tui::theme::palette;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
@@ -53,13 +54,13 @@ pub const COLUMN_SEPARATOR: char = '│';
 /// managed session. Rendering it through a dedicated builder keeps that contract
 /// explicit and testable without a terminal.
 /// What: returns a [`Line`] of `● controller   <status>`; when `selected` the
-/// whole line is bold/cyan to mirror the dashboard's selection highlight.
+/// whole line is bold accent to mirror the dashboard's selection highlight.
 /// Test: `controller_bullet_row` asserts the glyph, label, and status text.
 pub fn controller_bullet_row(status: &str, selected: bool) -> Line<'static> {
-    let bullet_style = Style::default().fg(Color::Green);
+    let bullet_style = Style::default().fg(palette().ok);
     let label_style = if selected {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::BOLD)
@@ -68,7 +69,7 @@ pub fn controller_bullet_row(status: &str, selected: bool) -> Line<'static> {
         Span::styled(format!("{CONTROLLER_GLYPH} "), bullet_style),
         Span::styled("controller", label_style),
         Span::raw("   "),
-        Span::styled(status.to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(status.to_string(), Style::default().fg(palette().muted)),
     ])
 }
 
@@ -84,14 +85,14 @@ pub fn session_row(short_id: &str, prefix: &str, status: &str) -> Line<'static> 
     Line::from(vec![
         Span::styled(
             format!("{SESSION_GLYPH} "),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(palette().warn),
         ),
         Span::styled(
             format!("{short_id} "),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!("{prefix}   ")),
-        Span::styled(status.to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(status.to_string(), Style::default().fg(palette().muted)),
     ])
 }
 
@@ -114,7 +115,7 @@ pub fn numbered_session_row(
 ) -> Line<'static> {
     let mut spans = vec![Span::styled(
         format!("{number:>2}. "),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(palette().muted),
     )];
     spans.extend(session_row(short_id, prefix, status).spans);
     Line::from(spans)
@@ -127,19 +128,19 @@ pub fn numbered_session_row(
 /// `last_summary`) lands in Child #3; Child #1 renders whatever placeholder
 /// summary it is handed so the column contract (§3.3) exists and is testable.
 /// What: returns a [`Line`] of `● <short-id> │ <summary>`, the whole row
-/// bold/cyan to mark it as the selection; the `│` separator is the single
+/// bold accent to mark it as the selection; the `│` separator is the single
 /// source of the column split.
 /// Test: `active_row_two_col_splits_on_bar`.
 pub fn active_row_two_col(short_id: &str, summary_placeholder: &str) -> Line<'static> {
     let accent = Style::default()
-        .fg(Color::Cyan)
+        .fg(palette().accent)
         .add_modifier(Modifier::BOLD);
     Line::from(vec![
         Span::styled(format!("{CONTROLLER_GLYPH} "), accent),
         Span::styled(format!("{short_id} "), accent),
         Span::styled(
             format!("{COLUMN_SEPARATOR} "),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette().muted),
         ),
         Span::styled(summary_placeholder.to_string(), accent),
     ])

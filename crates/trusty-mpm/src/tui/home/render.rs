@@ -6,6 +6,7 @@
 //! [`service_lines`] are the pure text builders.
 //! Test: `home_render_draws_every_tile`, `service_view_shows_unavailable_metrics`.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -28,6 +29,7 @@ const MAX_METRIC_LINES: usize = 40;
 
 /// Draw the current view.
 pub fn render(frame: &mut Frame, state: &HomeState) {
+    crate::tui::theme::paint_background(frame);
     let [header, body, footer] = split(frame.area());
     let (title, hint) = match state.view {
         View::Home => ("trusty console — services".to_string(), HOME_HINT),
@@ -46,7 +48,7 @@ pub fn render(frame: &mut Frame, state: &HomeState) {
         title_area,
     );
     frame.render_widget(
-        Paragraph::new(Line::from(VERSION_LABEL)).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(Line::from(VERSION_LABEL)).style(Style::default().fg(palette().muted)),
         version_area,
     );
     match state.view {
@@ -94,7 +96,7 @@ fn render_grid(frame: &mut Frame, area: Rect, state: &HomeState) {
             .split(*row);
         let border = if index == state.selected {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette().accent)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -116,11 +118,11 @@ fn render_grid(frame: &mut Frame, area: Rect, state: &HomeState) {
 /// The colour a tile's status word takes.
 fn health_color(health: &TileHealth) -> Color {
     match health {
-        TileHealth::Up { .. } => Color::Green,
-        TileHealth::OnDemand => Color::Blue,
-        TileHealth::Degraded { .. } | TileHealth::Timeout => Color::Yellow,
-        TileHealth::Down { .. } => Color::Red,
-        TileHealth::Absent | TileHealth::Pending => Color::DarkGray,
+        TileHealth::Up { .. } => palette().ok,
+        TileHealth::OnDemand => palette().info,
+        TileHealth::Degraded { .. } | TileHealth::Timeout => palette().warn,
+        TileHealth::Down { .. } => palette().err,
+        TileHealth::Absent | TileHealth::Pending => palette().muted,
     }
 }
 
