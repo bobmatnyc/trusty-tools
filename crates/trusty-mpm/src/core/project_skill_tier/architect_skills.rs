@@ -123,6 +123,8 @@ const WORKFLOW: ShippedSkill = ShippedSkill {
         "bcc47e5103279f23c1af085d2d36e90fbf90d06fc1ec1f9e7d6fb65bb7c0f755",
         // #10780: the text before the owner-rulings/inferences resume split.
         "15e6c3d5bff69fccb7066adbe228ea7376f435ea91a6fe826dad3a24f5e2c2e4",
+        // #10911: the text that said the Architect never writes AGENTS.md.
+        "215f8e5b8f6d9bb04c75d2569c024d5068eab2c951a527229b353c4ff1643a0c",
     ],
 };
 
