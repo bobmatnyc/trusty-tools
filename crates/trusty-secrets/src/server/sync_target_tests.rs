@@ -768,10 +768,8 @@ async fn agent_github_push_keeps_the_value_out_of_argv_env_reply_and_audit() {
     assert!(!shim.env_log().contains(SENTINEL_VALUE), "environment");
     assert_eq!(shim.stdin("A").as_deref(), Some(SENTINEL_VALUE));
     assert_eq!(shim.stdin("C"), None, "a denied key is never sent");
-    let shapes: Vec<_> = agent_push_records(&fx, BackendId::github_actions())
-        .iter()
-        .map(shape)
-        .collect();
+    let all = agent_push_records(&fx, BackendId::github_actions());
+    let shapes: Vec<_> = all.iter().map(shape).collect();
     assert_eq!(
         shapes,
         [
@@ -827,10 +825,8 @@ async fn agent_vercel_push_keeps_the_value_out_of_argv_env_reply_and_audit() {
         assert_eq!(shim.stdin("A", target).as_deref(), Some(SENTINEL_VALUE));
         assert_eq!(shim.stdin("C", target), None, "a denied key is never sent");
     }
-    let shapes: Vec<_> = agent_push_records(&fx, BackendId::vercel())
-        .iter()
-        .map(shape)
-        .collect();
+    let all = agent_push_records(&fx, BackendId::vercel());
+    let shapes: Vec<_> = all.iter().map(shape).collect();
     assert_eq!(
         shapes,
         [
