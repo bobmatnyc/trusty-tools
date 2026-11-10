@@ -61,3 +61,17 @@ Owner ruling, 2026-11-09: "Opt-in for multi-PR epics; critic per layer; one clea
   If they do not, change the filter.
 - **Queue ownership.** The merge-queue owner's authorization should name the whole stack.
   `queue-check` should read every layer.
+
+## Trial checklist (2-layer, trusty-tools)
+
+The trial opens a throwaway stack of two docs-only PRs.
+It verifies the following.
+
+- [ ] CI and required checks run on the upper layer.
+- [ ] The upper layer's `baseRefName` before the bottom merges, and after.
+- [ ] GitHub auto-retargets and auto-rebases the upper layer after the bottom merges.
+- [ ] The upper layer's head SHA changes after the rebase.
+- [ ] A rebase that leaves the diff unchanged keeps approvals.
+- [ ] The stack REST API shape: `GET /repos/bobmatnyc/trusty-tools/stacks` and `GET /stacks/{n}`.
+
+Results: pending trial.
