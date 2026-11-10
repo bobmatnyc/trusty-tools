@@ -32,6 +32,8 @@ pub(crate) mod launch;
 mod notify_hook;
 mod poller;
 mod preflight;
+// #10861: init creates `local/quiet-sessions.txt`.
+mod quiet_list;
 // #8942: daemon registration and the ruling-2 sidecar prune.
 mod register;
 // #9092: restart the Architect's `claude` in its session and bind it.
@@ -646,3 +648,7 @@ mod tests;
 #[cfg(test)]
 #[path = "notify_hook_tests.rs"]
 mod notify_hook_tests;
+
+#[cfg(test)]
+#[path = "quiet_list_tests.rs"]
+mod quiet_list_tests;
