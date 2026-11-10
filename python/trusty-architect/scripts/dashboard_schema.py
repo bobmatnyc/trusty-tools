@@ -22,8 +22,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 SCHEMA_DIR = os.path.join(REPO, "schemas", "dashboard")
 
+# #10896: watch_changes holds the owner's Watch/Unwatch requests (scripts/watch-apply.py applies them).
 COLLECTIONS = ("items", "sessions", "goals", "goal_reorders", "goal_removals", "step_progress", "accounts",
-               "effort_tunes", "il_steers", "briefs", "questions", "media", "meta")
+               "effort_tunes", "il_steers", "briefs", "questions", "media", "watch_changes", "meta")
 META_IDS = ("state", "settings", "seen", "gh_track")
 MODES = ("off", "warn", "enforce")
 

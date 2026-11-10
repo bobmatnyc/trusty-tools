@@ -146,6 +146,7 @@ scripts/owner_answers.py|crates/trusty-mpm/src/assets/architect/scripts/owner_an
 scripts/dashboard-db.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard-db.py
 scripts/il-archive.py|crates/trusty-mpm/src/assets/architect/scripts/il-archive.py
 scripts/stale-tasks.py|crates/trusty-mpm/src/assets/architect/scripts/stale-tasks.py
+scripts/watch-apply.py|crates/trusty-mpm/src/assets/architect/scripts/watch-apply.py
 scripts/dashboard-serve.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard-serve.py
 scripts/dashboard_http.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_http.py
 scripts/dashboard_page.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_page.py
@@ -190,6 +191,7 @@ schemas/dashboard/meta-state.schema.json|crates/trusty-mpm/src/assets/architect/
 schemas/dashboard/questions.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/questions.schema.json
 schemas/dashboard/sessions.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/sessions.schema.json
 schemas/dashboard/step_progress.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/step_progress.schema.json
+schemas/dashboard/watch_changes.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/watch_changes.schema.json
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
 scripts/relay.sh|crates/trusty-mpm/src/assets/architect/scripts/relay.sh
 scripts/relay_provenance.py|crates/trusty-mpm/src/assets/architect/scripts/relay_provenance.py

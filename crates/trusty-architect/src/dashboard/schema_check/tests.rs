@@ -132,8 +132,39 @@ fn media_is_a_known_collection() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// #10896: a watch_changes doc is checked, not refused as an unknown
+/// collection, and its key pattern compiles in the port's regex subset.
+#[test]
+fn watch_changes_is_a_known_collection() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempfile::tempdir()?;
+    let schema = json!({"type": "object", "properties": {
+        "key": {"type": "string", "pattern": SHIPPED[12]},
+        "status": {"enum": ["new", "applied", "failed", "dismissed"]}}});
+    fs::write(
+        tmp.path().join("watch_changes.schema.json"),
+        schema.to_string(),
+    )?;
+    let set = SchemaDir::load(tmp.path())?;
+    assert_eq!(
+        schema_name("watch_changes", "w1").as_deref(),
+        Some("watch_changes")
+    );
+    let good = json!({"key": "proj-a.b_c", "status": "failed"});
+    assert!(
+        set.validate("watch_changes", "w1", good.as_object().ok_or("object")?)?
+            .is_empty()
+    );
+    let bad = json!({"key": "-rf", "status": "handled"});
+    assert_eq!(
+        set.validate("watch_changes", "w1", bad.as_object().ok_or("object")?)?
+            .len(),
+        2
+    );
+    Ok(())
+}
+
 /// The distinct `pattern`s of the prototype's `schemas/dashboard/*.schema.json`.
-const SHIPPED: [&str; 12] = [
+const SHIPPED: [&str; 13] = [
     "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
     "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
     "^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
@@ -146,6 +177,8 @@ const SHIPPED: [&str; 12] = [
     "^[^/]+/docs/briefs/.+[.]md$",
     "^docs/briefs/[^/].*[.]md$",
     "^https?://",
+    // #10896: watch_changes.key, a registry key.
+    "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
 ];
 
 /// Every `pattern` value under `v`.

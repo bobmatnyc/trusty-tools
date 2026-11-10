@@ -215,6 +215,8 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     embedded!("scripts/dashboard-db.py", "scripts/dashboard-db.py", true),
     embedded!("scripts/il-archive.py", "scripts/il-archive.py", false),
     embedded!("scripts/stale-tasks.py", "scripts/stale-tasks.py", true),
+    // #10896: applies the owner's watch_changes requests through `tm fleet project`.
+    embedded!("scripts/watch-apply.py", "scripts/watch-apply.py", true),
     // See #10161: the dashboard server (D3b), split into a facade and three
     // modules it imports by name, and the read-only views it serves. The page,
     // the Live view and the reader libraries sit where the server reads them.
@@ -334,6 +336,8 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     schema!("questions.schema.json"),
     schema!("sessions.schema.json"),
     schema!("step_progress.schema.json"),
+    // #10896: the owner's Watch / Unwatch request queue.
+    schema!("watch_changes.schema.json"),
     embedded!(
         "scripts/start-fleet-poll.sh",
         "scripts/start-fleet-poll.sh",
