@@ -1,6 +1,6 @@
 ---
 name: tm-architect-setup
-description: Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect.
+description: Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. `tm fleet project add|remove|list` edits the watched set; a second `init` never makes a second Architect.
 user-invocable: true
 metadata:
   version: "0.2.0"
@@ -11,10 +11,11 @@ effort: medium
 
 # tm-architect-setup — Set Up the Architect
 
-🔴 **`tm fleet init` and `tm fleet status` ship; `add` and `remove` do not.**
-They land in phase P3 of trusty-tools #8436. Run `tm fleet --help` first.
-When it reports an unknown command, your `tm` predates `tm fleet`: use
-"Without `tm fleet`" below.
+🔴 **`tm fleet init`, `tm fleet status` and `tm fleet project` ship.** Run
+`tm fleet --help` first. When it reports an unknown command, your `tm`
+predates `tm fleet`: use "Without `tm fleet`" below. When it lists no
+`project` command, your `tm` predates trusty-tools #10895: the watched set is
+the `## Watch set` list in the Architect's `CLAUDE.md`, edited by hand.
 
 ## What the Architect is
 
@@ -31,14 +32,15 @@ alias `opus` as its model.
 2. **One Architect per user.** A second run in the same directory changes
    nothing and says so. `init` refuses when another allow-listed project
    already requests the `supervisor` profile, or when `tm-architect` runs in
-   another directory. The watched set is edited separately; `init` does not
-   change it.
+   another directory. `tm fleet project` edits the watched set; `init` does
+   not change it.
 3. **Local git repo, no remote.** It runs `git init` and adds no remote. The
    repo never inherits an `origin`. A private remote is added only when you
    ask for one. A public remote is never added.
 4. **Fleet files.** `init` seeds `CLAUDE.md` with the fleet specifics (the
-   user, the watch set, the cadence, the records layout), seeds `local/` with
-   the record templates (state, actions, goals, user, instance facts, a
+   user, a pointer to the watch list, the cadence, the records layout),
+   seeds `local/` with the record templates (state, actions, goals, user,
+   instance facts, a
    per-project template, the owner model and the mandates schema), writes
    the poller and the relay scripts (`relay.sh`, `posted.sh`) to `scripts/`,
    the voice guide to `docs/architect/`, and the Architect-only skills
@@ -90,6 +92,28 @@ applied. Removing an Architect does not remove the section; delete it by hand.
 
 ## Watched projects
 
+The Architect's watch list is `local/watch.json` in its directory, changed
+only through `tm fleet project` (trusty-tools #10895). Each command takes
+`--dir` and reads the project registry from disk, so it works while the
+daemon is down.
+
+- `tm fleet project add <key|dir>` writes `local/projects/<key>.md` from the
+  record template when it is absent, then adds the project. It refuses a
+  project the registry lacks, writing nothing; `tm projects register` adds
+  one. A second `add` changes nothing and says so.
+- `tm fleet project remove <key>` appends `- Watch: removed <time>` under the
+  record's first heading, keeps the record, and drops the project.
+- `tm fleet project list [--json]` prints each project's path, session alias,
+  live tmux sessions and record, and flags a missing path, a key the registry
+  no longer holds, and a key that differs from its session alias.
+
+The first of these run with no list imports the hand-written `## Watch set`
+lines of the Architect's `CLAUDE.md`, and prints a line for each it skipped
+and why. It never edits `CLAUDE.md`; the Architect replaces those lines with
+a pointer to the list once the list shows them.
+
+## Status
+
 `tm fleet status [--dir <path>] [--json]` reports four checks, read-only:
 the allowlist entry, the profile request, the running `tm-architect` session
 in that directory, and its Architect launch stamp. It exits 1 when any check
@@ -98,8 +122,8 @@ Architect launch record, so every trust-anchor write is denied (#10448). Its `sk
 still keeps its records in the old directory; move them into `local/`
 yourself, because `tm` moves nothing. Its `notification_hook` row reads
 `on → <inbox>`, `off`, `enabled but not applied` or
-`points elsewhere: <path>`; like `skills`, it never changes the verdict. The
-watched set joins the report in P3.
+`points elsewhere: <path>`; like `skills`, it never changes the verdict.
+`tm fleet project list` reports the watched set.
 
 ## Without `tm fleet`
 
@@ -133,6 +157,7 @@ Then launch the session: `tm launch "$dir"`.
 
 ## Rules
 
-- Never create a second Architect. Edit the watched set of the existing one.
+- Never create a second Architect. Change the existing one's watched set with
+  `tm fleet project add` and `tm fleet project remove`.
 - Never add a public remote to the Architect's repo.
 - Never set `TRUSTY_MPM_PM_UNRESTRICTED`. The `supervisor` profile replaces it.

@@ -111,8 +111,9 @@ neither do you.
 - `AGENTS.md`: the owner's instance layer: this installation's owner, host,
   fleet, workarounds and project rules. The owner writes it; you edit it
   only when the owner orders a specific edit.
-- `CLAUDE.md`: the fleet specifics: the watch set, your relay name, the
-  cadence and the context bar.
+- `CLAUDE.md`: the fleet specifics: your relay name, the cadence and the
+  context bar. `tm fleet project list` prints the watch set;
+  `tm fleet project add` and `tm fleet project remove` change it.
 - `local/instance.md`: the instance facts you find and keep current: hosts,
   builder slots, accounts, services, known quirks.
 - `local/user.md`: the primary user's profile. Rewrite in place.
@@ -122,8 +123,8 @@ neither do you.
 - `local/goals.md`: ranked goals, success criteria, milestones, the
   session-to-goal map, the capacity split and open optimization proposals.
   Rewrite in place.
-- `local/state.md`: the current snapshot: monitoring status, watch set,
-  pending decisions, the context-refresh queue. Rewrite in place; it is not a
+- `local/state.md`: the current snapshot: monitoring status, the watched
+  projects' live sessions, pending decisions, the context-refresh queue. Rewrite in place; it is not a
   history. Keep it under 0.4 MB: at the end of a pass, if
   `wc -c local/state.md` exceeds 400000, move superseded watch sections to
   an archive file beside it in `local/`.

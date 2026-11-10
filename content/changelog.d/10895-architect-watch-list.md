@@ -1,0 +1,3 @@
+Changed
+- The Architect's watch set is the list `tm fleet project list` prints, not the `## Watch set` lines of its `CLAUDE.md`. The `CLAUDE.md` template's section points at the commands, rule r-067 provisions a project with `tm fleet project add`, and `tm-fleet-check` step 1 runs `tm fleet project list` and replaces a still-populated hand-written list with the pointer once the list shows each entry (#10895).
+- `tm-architect-setup` documents `tm fleet project add|remove|list`; `architect.md`, the supervisor identity, `architect-workflow` and `architect-project-provision` no longer say `CLAUDE.md` holds the watch set (#10895).

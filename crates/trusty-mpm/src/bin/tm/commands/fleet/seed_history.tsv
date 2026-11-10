@@ -1,6 +1,7 @@
 # seed_history.tsv: every byte-version `tm fleet init` has shipped per seed row (#10571).
 # A live file whose sha256 is listed for its DEST is an unedited shipped copy and is refreshed;
 # any other bytes are an edit and are kept. Generated: scripts/architect_bundle_meta.py history.
+.gitignore	55d77ba5e020c5391a8442b22253b42cc9849d96989ee8714e25f6676ce1e826
 .gitignore	9c235fe5530c12ca83f25fbbb274d001bc1d52a2673b61992e1e990961d86138
 docs/architect/bundle-provenance.json	044748f212dbba56882f5c323ec8b85e326d041172fb71f52e4c7c4a830a40fe
 docs/architect/bundle-provenance.json	047be0562e0be8c147d4637d5c152d9ffcf1ba39e983bba14b8526be27d721b2
@@ -47,6 +48,7 @@ docs/architect/bundle-provenance.json	c122b6f7e137283cd6f6028ce5cd24b6fb21739113
 docs/architect/bundle-provenance.json	c2992294584d67f2f8e0e0a0869cad0034419850103c97fe9a7e1447986d2271
 docs/architect/bundle-provenance.json	c328fee2e37bdeb7d89bb5d4aca91ce19e9823a8751f349426eae0c0a5d189d2
 docs/architect/bundle-provenance.json	c5540edc992cffccc9551eb2bb69d831d3417b934f3360cd8b2843079ce534a2
+docs/architect/bundle-provenance.json	c7742d044ccd269ee966d671240b0bfe41bf45779529d5aff3140f439c68fc97
 docs/architect/bundle-provenance.json	d014de4c90e7e3b5659b04074423eb54b46ae399975a290035df56f2e49d1b56
 docs/architect/bundle-provenance.json	d1acc63a476614635455ff13d7a770c359c377466c365c1fc85bcc4d01e5bf4f
 docs/architect/bundle-provenance.json	d3d507258a328ab0f3546a8f05dc47f7dbb3fbe9376ac8cc7b0932a89d9ffa1f
@@ -81,6 +83,7 @@ local/owner/process.md	1de60bf5dc61c1f53b5d7f4bb8cfeaae7b3144be697f5bf14e5aaa2dc
 local/owner/risk-tolerance.md	b0a31fb2b78f650d97376368c59485a34c68c2e33b23916ea6cc6763cf86c78b
 local/projects/_template.md	19f70d83b48ddb7afb2e976bf68a7406c0ce0dd468d5dc71c0a1afb09e3fa9e4
 local/state.md	5d82b7a0f6379b08df66e8f55cb21c51c1a3577fa961c7aae9d836af76c47653
+local/state.md	6746001541b363d90731bdff3f7fa0a6123b0316950e4f09e9290b2ed7c280c5
 local/state.md	9f75b93036fbe71e7acde37a98d654bc75bf23acf5a9802817e5f05374f4f7ad
 local/state.md	f503a8b437aef6150b89d6360aa42680d847bf22be4f08c046220c5f7597d7df
 local/state.md	fa873ec3b61694abff0c3e0956dbd71d1b6f14b323009a06029fd036c43445bb

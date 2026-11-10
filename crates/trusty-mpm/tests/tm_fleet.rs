@@ -1,4 +1,5 @@
-//! `tm fleet init|status` through the built binary (#8436).
+//! `tm fleet init|status` through the built binary (#8436), and `tm fleet
+//! project` against a fixture `TRUSTY_MPM_ROOT` (#10895).
 //!
 //! Why: the unit tests in `commands::fleet::tests` never start a session. Only
 //! the binary proves that `init` starts `tm-architect` detached with the
@@ -1611,4 +1612,221 @@ fn fleet_relaunch_keeps_the_session_when_the_resume_fails() {
     let third = env.launches(3).get(2).cloned().unwrap_or_default();
     assert_eq!(flag_value(&third, "--resume"), None, "{third:?}");
     assert_eq!(env.status_json()["binding"]["ok"], true);
+}
+
+// ── `tm fleet project` (#10895) ─────────────────────────────────────────────
+
+/// A fixture managed root for `tm fleet project`: `alpha` and `beta` in the
+/// registry with checkouts beside the root; `beta`'s session alias is
+/// `beta-fork`, found by its path. Returns the root.
+fn project_root(env: &FleetEnv) -> PathBuf {
+    let base = env.home.path().join("fx");
+    let root = base.join("root");
+    std::fs::create_dir_all(root.join("project-registry")).expect("registry dir");
+    for name in ["alpha", "beta"] {
+        std::fs::create_dir_all(base.join(name)).expect("checkout");
+    }
+    let row = |name: &str| serde_json::json!({ "name": name, "repo_url": base.join(name), "default_branch": "main" });
+    let projects =
+        serde_json::json!({ "projects": { "alpha": row("alpha"), "beta": row("beta") } });
+    std::fs::write(
+        root.join("project-registry/projects.json"),
+        serde_json::to_vec(&projects).expect("registry json"),
+    )
+    .expect("projects.json");
+    let aliases = serde_json::json!([
+        { "alias": "alpha", "path": base.join("alpha") },
+        { "alias": "beta-fork", "path": base.join("beta") },
+    ]);
+    std::fs::write(
+        root.join("project-paths.json"),
+        serde_json::to_vec(&aliases).expect("alias json"),
+    )
+    .expect("project-paths.json");
+    root
+}
+
+/// `tm fleet project <args> --dir <dir>` against the fixture root.
+fn fleet_project(env: &FleetEnv, root: &Path, dir: &Path, args: &[&str]) -> Output {
+    let mut all = vec!["fleet", "project"];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&["--dir", dir_arg(dir)]);
+    env.tm_with_env(&all, "TRUSTY_MPM_ROOT", root)
+}
+
+/// The keys of `<dir>/local/watch.json`.
+fn watched(dir: &Path) -> Vec<String> {
+    let raw = std::fs::read(dir.join("local/watch.json")).expect("watch.json");
+    let file: serde_json::Value = serde_json::from_slice(&raw).expect("watch.json parses");
+    assert_eq!(file["version"], 1);
+    file["projects"]
+        .as_array()
+        .expect("projects array")
+        .iter()
+        .map(|e| e["key"].as_str().expect("key").to_owned())
+        .collect()
+}
+
+#[test]
+fn fleet_project_add_of_an_unregistered_project_writes_nothing() {
+    // AC1 through the binary: no list and an empty CLAUDE.md watch set.
+    let env = FleetEnv::new();
+    let root = project_root(&env);
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join("local")).expect("architect dir");
+    let out = fleet_project(&env, &root, &dir, &["add", "gamma"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("gamma is not a registered project"),
+        "{}",
+        text(&out)
+    );
+    assert!(stderr.contains("tm projects register"), "{}", text(&out));
+    assert!(!dir.join("local/watch.json").exists());
+    assert!(!dir.join("local/projects").exists());
+}
+
+#[test]
+fn fleet_project_concurrent_adds_keep_both_entries() {
+    // AC3 through the binary: two `tm` processes at once.
+    let env = FleetEnv::new();
+    let root = project_root(&env);
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join("local")).expect("architect dir");
+    std::fs::write(
+        dir.join("local/watch.json"),
+        r#"{"version": 1, "projects": []}"#,
+    )
+    .expect("empty list");
+    let outs: Vec<Output> = std::thread::scope(|s| {
+        let handles: Vec<_> = ["alpha", "beta"]
+            .map(|key| {
+                let (env, root, dir) = (&env, &root, &dir);
+                s.spawn(move || fleet_project(env, root, dir, &["add", key]))
+            })
+            .into_iter()
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("add thread"))
+            .collect()
+    });
+    for out in &outs {
+        assert!(out.status.success(), "{}", text(out));
+    }
+    let mut keys = watched(&dir);
+    keys.sort();
+    assert_eq!(keys, ["alpha", "beta"]);
+}
+
+#[test]
+fn fleet_project_flow_migrates_adds_refuses_removes_and_lists() {
+    // AC9 (and AC2, AC5, AC6, AC7) against the built binary.
+    let env = FleetEnv::new();
+    let root = project_root(&env);
+    let base = root.parent().expect("fixture base").to_path_buf();
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join("local")).expect("architect dir");
+    let claude = format!(
+        "# Fleet\n\n## Watch set\n\nOne line each.\n\n\
+         - `tm-<project>`: `<absolute project path>`\n\
+         - `tm-alpha`: `{}` — keep it green\n\
+         - `tm-gamma`: `/nowhere/gamma`\n\n## Cadence\n",
+        base.join("alpha").display()
+    );
+    std::fs::write(dir.join("CLAUDE.md"), &claude).expect("CLAUDE.md");
+
+    // The first command imports the hand-written list and leaves CLAUDE.md.
+    let out = fleet_project(&env, &root, &dir, &["list", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        json(&out).as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        text(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipped") && stderr.contains("tm-gamma"),
+        "{}",
+        text(&out)
+    );
+    assert!(!stderr.contains("<project>"), "{}", text(&out));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap(),
+        claude
+    );
+    assert_eq!(watched(&dir), ["alpha"]);
+
+    // A second command imports nothing.
+    let out = fleet_project(&env, &root, &dir, &["list"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(out.stderr.is_empty(), "{}", text(&out));
+
+    // Add two projects: beta by its directory, alpha to write its record.
+    let beta_dir = base.join("beta");
+    let out = fleet_project(&env, &root, &dir, &["add", dir_arg(&beta_dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("added beta"),
+        "{}",
+        text(&out)
+    );
+    let out = fleet_project(&env, &root, &dir, &["add", "alpha"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        dir.join("local/projects/alpha.md").exists(),
+        "{}",
+        text(&out)
+    );
+    let out = fleet_project(&env, &root, &dir, &["add", "alpha"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "unchanged: alpha is already watched\n"
+    );
+
+    // Refuse one unregistered project, and an unlisted remove; nothing changes.
+    let before = std::fs::read(dir.join("local/watch.json")).unwrap();
+    let out = fleet_project(&env, &root, &dir, &["add", "gamma"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let out = fleet_project(&env, &root, &dir, &["remove", "gamma"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert_eq!(std::fs::read(dir.join("local/watch.json")).unwrap(), before);
+
+    // Remove one: the record is kept and marked.
+    let out = fleet_project(&env, &root, &dir, &["remove", "alpha"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let record = std::fs::read_to_string(dir.join("local/projects/alpha.md")).unwrap();
+    assert!(record.contains("\n- Watch: removed 20"), "{record}");
+    assert_eq!(watched(&dir), ["beta"]);
+
+    // The list matches.
+    let out = fleet_project(&env, &root, &dir, &["list", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let rows = json(&out);
+    assert_eq!(
+        rows,
+        serde_json::json!([{
+            "key": "beta",
+            "path": beta_dir.display().to_string(),
+            "path_exists": true,
+            "registered": true,
+            "session_alias": "beta-fork",
+            "alias_mismatch": true,
+            "live_sessions": 0,
+            "record_present": true,
+        }]),
+        "{}",
+        text(&out)
+    );
+
+    // Emptied, the list stays empty: no second import.
+    let out = fleet_project(&env, &root, &dir, &["remove", "beta"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let out = fleet_project(&env, &root, &dir, &["list", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(json(&out), serde_json::json!([]), "{}", text(&out));
+    assert!(out.stderr.is_empty(), "{}", text(&out));
 }

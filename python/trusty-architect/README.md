@@ -240,8 +240,8 @@ ships to every project.
 Edit `$dir/CLAUDE.md` for this user. Do not copy it from elsewhere.
 
 - Replace `<Name>` with the user's name for the relay marker.
-- Fill the watch set: one line per PM session, with its tmux session name
-  and project path. Goals go in `local/goals.md`.
+- Add each watched project with `tm fleet project add <project>`; the
+  project must be in the registry first. Goals go in `local/goals.md`.
 - Set the cadence only if the owner wants a value other than the default.
 
 The files under `local/` stay as seeded. The Architect fills them. Commit

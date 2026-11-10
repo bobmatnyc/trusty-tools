@@ -73,6 +73,10 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `fleet` — Set up and inspect the Architect, the one fleet supervisor per user
   - `bind` — Bind the running Architect `claude` this command runs under (#8878)
   - `init` — Set up the Architect project and start its session
+  - `project` — Add, remove or list the projects the Architect watches (#10895)
+    - `add` — Watch a registered project: write its record, then add it to the list
+    - `list` — List the watched projects with their path, alias and live sessions
+    - `remove` — Stop watching a project; its record is kept and marked removed
   - `relaunch` — Restart the Architect's `claude` in its running session and bind it
   - `status` — Report whether the Architect is set up and running (read-only)
 - `generate` — Regenerate derived, committed artifacts from live harness surfaces (issue #2913)

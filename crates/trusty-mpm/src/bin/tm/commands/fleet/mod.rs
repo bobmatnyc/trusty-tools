@@ -15,7 +15,7 @@
 //! `tm-architect` unless `--session` chose and recorded another name
 //! ([`session_name`], #8878 R1). [`relaunch`] restarts the running
 //! Architect's `claude` and binds it (#9092). Twin mode (#8878) is out of
-//! scope (ruling Q7). `add` and `remove` are phase P3.
+//! scope (ruling Q7). [`project`] edits the watch list (#10895).
 //! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
 //! `commands::fleet::relaunch::tests`, `tests/tm_fleet.rs`.
 
@@ -32,6 +32,8 @@ pub(crate) mod launch;
 mod notify_hook;
 mod poller;
 mod preflight;
+// #10895: `tm fleet project add|remove|list` over `local/watch.json`.
+mod project;
 // #10861: init creates `local/quiet-sessions.txt`.
 mod quiet_list;
 // #8942: daemon registration and the ruling-2 sidecar prune.
@@ -160,6 +162,7 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             );
             Ok(())
         }
+        FleetAction::Project { action } => project::run(action, &home).await,
     }
 }
 
