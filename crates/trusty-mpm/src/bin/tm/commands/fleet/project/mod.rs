@@ -173,7 +173,8 @@ fn render_record(dir: &Path, registry: &Registry, key: &str) -> anyhow::Result<S
 /// <stamp>` ([`record::mark_removed`]) and the entry is dropped. A missing
 /// record is reported, not an error.
 /// Test: `remove_marks_the_record_and_drops_the_entry`,
-/// `remove_of_an_unlisted_key_writes_nothing`.
+/// `remove_of_an_unlisted_key_writes_nothing`,
+/// `remove_record_mark_failure_keeps_the_entry`.
 pub(crate) fn remove(
     dir: &Path,
     registry: &Registry,

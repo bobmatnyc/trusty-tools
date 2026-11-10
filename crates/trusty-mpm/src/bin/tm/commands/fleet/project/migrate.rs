@@ -8,11 +8,12 @@
 //! else by the session name without `tm-`. It never writes; `CLAUDE.md` stays
 //! byte-identical, and the Architect replaces the section with the pointer.
 //! Test: `migration_parses_lines_with_and_without_a_goal`,
-//! `migration_imports_registered_lines_and_skips_the_rest`.
+//! `migration_imports_registered_lines_and_skips_the_rest`,
+//! `migration_notes_every_bullet_shape_and_a_missing_section`.
 
 use std::path::Path;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 
 use super::registry::Registry;
 
@@ -28,21 +29,44 @@ pub(crate) struct Plan {
     pub(crate) notes: Vec<String>,
 }
 
-/// The bullet lines of `text`'s `## Watch set` section.
-pub(crate) fn section_lines(text: &str) -> Vec<&str> {
-    text.lines()
-        .skip_while(|l| l.trim_end() != HEADING)
-        .skip(1)
-        .take_while(|l| !l.starts_with("# ") && !l.starts_with("## "))
-        .filter(|l| l.starts_with("- "))
-        .collect()
+/// Whether `line` is the `## Watch set` heading, ignoring ASCII case and
+/// the amount of whitespace around and between its words.
+fn is_heading(line: &str) -> bool {
+    let mut got = line.split_whitespace();
+    HEADING
+        .split_whitespace()
+        .all(|w| got.next().is_some_and(|g| g.eq_ignore_ascii_case(w)))
+        && got.next().is_none()
+}
+
+/// Whether `line` is a Markdown bullet at any indentation: `-`, `*` or `+`
+/// followed by whitespace or the end of the line.
+fn is_bullet(line: &str) -> bool {
+    let mut chars = line.trim_start().chars();
+    matches!(chars.next(), Some('-' | '*' | '+')) && chars.next().is_none_or(char::is_whitespace)
+}
+
+/// The bullet lines of `text`'s watch-set section; `None` with no section.
+///
+/// #10895 review: an indented or `*`/`+` bullet is kept, so [`plan`] can
+/// import it or name it in a skip note; none is dropped unseen.
+pub(crate) fn section_lines(text: &str) -> Option<Vec<&str>> {
+    let mut lines = text.lines();
+    lines.find(|l| is_heading(l))?;
+    Some(
+        lines
+            .take_while(|l| !l.starts_with("# ") && !l.starts_with("## "))
+            .filter(|l| is_bullet(l))
+            .collect(),
+    )
 }
 
 /// The `(session, path)` of a list line; `None` for any other bullet.
 pub(crate) fn parse_line(line: &str) -> Option<(&str, &str)> {
-    let (session, rest) = line.strip_prefix("- `")?.split_once('`')?;
+    let rest = line.trim_start().get(1..)?.trim_start();
+    let (session, rest) = rest.strip_prefix('`')?.split_once('`')?;
     let (path, _goal) = rest.strip_prefix(": `")?.split_once('`')?;
-    (!session.is_empty() && !path.is_empty()).then_some((session, path))
+    (is_bullet(line) && !session.is_empty() && !path.is_empty()).then_some((session, path))
 }
 
 /// The template's own example line, which the import passes over silently.
@@ -53,12 +77,18 @@ fn is_placeholder(session: &str, path: &str) -> bool {
 /// Map the `CLAUDE.md` list in `dir` onto registry keys.
 ///
 /// Why: see the module doc.
-/// What: an absent `CLAUDE.md` or section is an empty plan; an unreadable one
-/// is an error. Each list line maps by [`Registry::key_for_path`], else by
+/// What: an absent `CLAUDE.md` is an empty plan; an unreadable one is an
+/// error. A `CLAUDE.md` with no watch-set heading is an empty plan with one
+/// note saying so. Each list line maps by [`Registry::key_for_path`], else by
 /// the session name with `tm-` stripped matched to a key exactly, then
 /// ignoring ASCII case. Unmatched and unparseable bullets get a `skipped`
-/// note saying why; the template's placeholder line gets none.
-/// Test: `migration_imports_registered_lines_and_skips_the_rest`.
+/// note saying why; the template's placeholder line gets none. With no
+/// registry file and at least one project line, the plan is an error naming
+/// the registry path and `TRUSTY_MPM_ROOT`: importing then would use up the
+/// import and drop every line.
+/// Test: `migration_imports_registered_lines_and_skips_the_rest`,
+/// `migration_notes_every_bullet_shape_and_a_missing_section`,
+/// `migration_refuses_without_a_registry_file_and_writes_nothing`.
 pub(crate) fn plan(dir: &Path, registry: &Registry) -> anyhow::Result<Plan> {
     let path = dir.join("CLAUDE.md");
     let text = match std::fs::read_to_string(&path) {
@@ -67,7 +97,32 @@ pub(crate) fn plan(dir: &Path, registry: &Registry) -> anyhow::Result<Plan> {
         Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
     };
     let mut plan = Plan::default();
-    for line in section_lines(&text) {
+    let Some(lines) = section_lines(&text) else {
+        plan.notes.push(format!(
+            "watch-set import: {} has no \"{HEADING}\" section; nothing imported",
+            path.display()
+        ));
+        return Ok(plan);
+    };
+    let projects = lines
+        .iter()
+        .filter_map(|line| parse_line(line))
+        .filter(|(s, p)| !is_placeholder(s, p))
+        .count();
+    if registry.is_absent() && projects > 0 {
+        // #10895 review: an absent registry would skip every line and the
+        // written list would use the import up; refuse before any write.
+        bail!(
+            "watch-set import refused: the project registry {} does not exist, and {} lists \
+             {} project(s) under \"{HEADING}\". Check TRUSTY_MPM_ROOT, which selects the \
+             managed root the registry is read from, then run the command again; nothing was \
+             written",
+            registry.source().display(),
+            path.display(),
+            projects
+        );
+    }
+    for line in lines {
         let Some((session, checkout)) = parse_line(line) else {
             plan.notes.push(format!(
                 "watch-set import: skipped {line:?}: not a \"- `tm-<project>`: `<path>`\" line"

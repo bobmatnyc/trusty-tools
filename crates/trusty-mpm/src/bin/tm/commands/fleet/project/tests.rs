@@ -381,6 +381,29 @@ fn remove_marks_the_record_and_drops_the_entry() {
 }
 
 #[test]
+fn remove_record_mark_failure_keeps_the_entry() {
+    // #10895 review: the record exists but cannot be rewritten, so the entry
+    // stays and the list is byte-identical.
+    let fx = Fixture::new();
+    add(&fx.dir(), &fx.registry(), "alpha").unwrap();
+    let projects = fx.dir().join("local/projects");
+    let record = projects.join("alpha.md");
+    let list_before = std::fs::read(fx.list_path()).unwrap();
+    let record_before = std::fs::read(&record).unwrap();
+    let guard = ReadOnly::new(&projects);
+    let result = remove(&fx.dir(), &fx.registry(), "alpha", "t");
+    drop(guard);
+    let err = format!(
+        "{:#}",
+        result.expect_err("a failed record mark must fail remove")
+    );
+    assert!(err.contains("cannot mark"), "{err}");
+    assert_eq!(std::fs::read(fx.list_path()).unwrap(), list_before);
+    assert_eq!(fx.keys(), ["alpha"]);
+    assert_eq!(std::fs::read(&record).unwrap(), record_before);
+}
+
+#[test]
 fn remove_of_an_unlisted_key_writes_nothing() {
     // AC5: with a list, and with no list (the import's plan decides).
     let fx = Fixture::new();
@@ -482,9 +505,131 @@ fn migration_parses_lines_with_and_without_a_goal() {
         Some(("tm-a", "/x/a"))
     );
     assert_eq!(migrate::parse_line("- tm-a: /x/a"), None);
+    // #10895 review: any bullet character, at any indentation.
+    assert_eq!(
+        migrate::parse_line("  * `tm-a`: `/x/a`"),
+        Some(("tm-a", "/x/a"))
+    );
+    assert_eq!(
+        migrate::parse_line("\t+\t`tm-a`: `/x/a`"),
+        Some(("tm-a", "/x/a"))
+    );
+    assert_eq!(migrate::parse_line("-`tm-a`: `/x/a`"), None);
     let text =
         "# T\n\n## Watch set\n\nProse.\n\n- `tm-a`: `/a`\n- note\n\n## Next\n\n- `tm-b`: `/b`\n";
-    assert_eq!(migrate::section_lines(text), ["- `tm-a`: `/a`", "- note"]);
+    assert_eq!(
+        migrate::section_lines(text),
+        Some(vec!["- `tm-a`: `/a`", "- note"])
+    );
+    assert_eq!(migrate::section_lines("# T\n\n- `tm-a`: `/a`\n"), None);
+}
+
+#[test]
+fn migration_notes_every_bullet_shape_and_a_missing_section() {
+    // #10895 review: every bullet in the section imports or is named in a
+    // skip note; the heading tolerates case and whitespace.
+    let fx = Fixture::new();
+    let text = "# The Architect\n\n## watch SET  \n\nThe projects.\n\n\
+                - `tm-<project>`: `<absolute project path>`\n\
+                \x20 - `tm-alpha`: `/moved/alpha`\n\
+                * `tm-beta`: `/moved/beta` — a goal\n\
+                + a plus note\n\
+                \t- a tab-indented note\n\
+                \x20  * an indented star note\n\
+                -\n\n## Cadence\n\n- `tm-x`: `/elsewhere`\n";
+    std::fs::write(fx.dir().join("CLAUDE.md"), text).unwrap();
+    let (out, _) = list(&fx.dir(), &fx.registry(), Some(&[])).unwrap();
+    assert_eq!(fx.keys(), ["alpha", "beta"]);
+    assert_eq!(out.notes.len(), 6, "{:?}", out.notes);
+    for line in [
+        "  - `tm-alpha`: `/moved/alpha`",
+        "* `tm-beta`: `/moved/beta` — a goal",
+    ] {
+        assert!(
+            out.notes
+                .iter()
+                .any(|n| n.contains("added") && n.contains(&format!("{line:?}"))),
+            "{line}: {:?}",
+            out.notes
+        );
+    }
+    for line in [
+        "+ a plus note",
+        "\t- a tab-indented note",
+        "   * an indented star note",
+        "-",
+    ] {
+        assert!(
+            out.notes
+                .iter()
+                .any(|n| n.contains("skipped") && n.contains(&format!("{line:?}"))),
+            "{line:?}: {:?}",
+            out.notes
+        );
+    }
+    assert!(
+        !out.notes
+            .iter()
+            .any(|n| n.contains("<absolute project path>")),
+        "placeholder is silent: {:?}",
+        out.notes
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.dir().join("CLAUDE.md")).unwrap(),
+        text
+    );
+
+    // No watch-set section: one note, and an empty list.
+    let fx = Fixture::new();
+    let text = "# The Architect\n\n## Watched\n\n- `tm-alpha`: `/x`\n";
+    std::fs::write(fx.dir().join("CLAUDE.md"), text).unwrap();
+    let (out, rows) = list(&fx.dir(), &fx.registry(), Some(&[])).unwrap();
+    assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+    assert!(
+        out.notes[0].contains("has no \"## Watch set\" section"),
+        "{:?}",
+        out.notes
+    );
+    assert!(rows.is_empty() && fx.keys().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(fx.dir().join("CLAUDE.md")).unwrap(),
+        text
+    );
+}
+
+#[tokio::test]
+async fn migration_refuses_without_a_registry_file_and_writes_nothing() {
+    // #10895 review: an absent registry must not use up the import.
+    let fx = Fixture::new();
+    let root = fx.tmp.path().join("wrong-root");
+    let reg = Registry::load(&root).await.unwrap();
+    assert!(reg.is_absent());
+    fx.write_claude_md(&[
+        "- `tm-<project>`: `<absolute project path>`",
+        "- `tm-alpha`: `/x/alpha`",
+    ]);
+    let claude_before = std::fs::read(fx.dir().join("CLAUDE.md")).unwrap();
+    let registry_path = root.join("project-registry/projects.json");
+    for result in [
+        list(&fx.dir(), &reg, Some(&[])).map(|_| ()),
+        remove(&fx.dir(), &reg, "alpha", "t").map(|_| ()),
+    ] {
+        let err = format!("{:#}", result.expect_err("an absent registry refuses"));
+        assert!(err.contains(&registry_path.display().to_string()), "{err}");
+        assert!(err.contains("TRUSTY_MPM_ROOT"), "{err}");
+    }
+    assert!(!fx.list_path().exists());
+    assert!(!fx.dir().join("local/watch.json.lock").exists());
+    assert_eq!(
+        std::fs::read(fx.dir().join("CLAUDE.md")).unwrap(),
+        claude_before
+    );
+
+    // Only the placeholder: the empty list is created, as before.
+    fx.write_claude_md(&["- `tm-<project>`: `<absolute project path>`"]);
+    let (out, rows) = list(&fx.dir(), &reg, Some(&[])).unwrap();
+    assert!(out.notes.is_empty() && rows.is_empty(), "{:?}", out.notes);
+    assert!(fx.keys().is_empty());
 }
 
 #[test]
@@ -595,4 +740,42 @@ fn record_mark_removed_appends_after_the_first_bullet_block() {
         record::mark_removed("# A\n- one", stamp),
         format!("# A\n- one\n- Watch: removed {stamp}\n")
     );
+}
+
+#[test]
+fn fleet_init_seeds_the_watch_set_pointer_and_no_watch_list() {
+    // AC8: `tm fleet init`, seeded from this checkout's `content/` tree.
+    use trusty_mpm::core::content_source::Fetch;
+    use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("arch");
+    let checkout = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
+    super::super::init_with_seed(
+        &dir,
+        home.path(),
+        false,
+        super::super::tests::NO_TMUX,
+        None,
+        |_| ArchitectSeed::resolve_in(&checkout, None, None, Fetch::Never),
+    )
+    .unwrap();
+    let claude = std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+    let section: String = claude
+        .lines()
+        .skip_while(|l| *l != "## Watch set")
+        .skip(1)
+        .take_while(|l| !l.starts_with("## "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(section.contains("`tm fleet project list`"), "{section}");
+    assert!(!section.contains("- `tm-<project>`"), "{section}");
+    assert_eq!(migrate::section_lines(&claude), Some(Vec::new()));
+    let state = std::fs::read_to_string(dir.join("local/state.md")).unwrap();
+    assert!(state.contains("`local/watch.json`"), "{state}");
+    let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+    assert!(
+        gitignore.lines().any(|l| l == "local/watch.json.lock"),
+        "{gitignore}"
+    );
+    assert!(!watch::path(&dir).exists());
 }

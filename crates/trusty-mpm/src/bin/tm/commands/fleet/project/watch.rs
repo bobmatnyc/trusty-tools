@@ -118,13 +118,19 @@ pub(crate) fn update<R>(
 /// What: returns no notes when the list exists. Otherwise, under the list's
 /// lock, re-checks absence, builds [`migrate::plan`], and writes the list
 /// with the imported keys — also when none matched. The returned notes name
-/// every imported and every skipped line. `CLAUDE.md` is only read.
+/// every imported and every skipped line. `CLAUDE.md` is only read. A plan
+/// refused for an absent registry creates no directory, lock or list.
 /// Test: `migration_imports_registered_lines_and_skips_the_rest`,
-/// `migration_runs_once_and_an_emptied_list_stays_empty`.
+/// `migration_runs_once_and_an_emptied_list_stays_empty`,
+/// `migration_refuses_without_a_registry_file_and_writes_nothing`.
 pub(crate) fn ensure(dir: &Path, registry: &Registry) -> anyhow::Result<Vec<String>> {
     let path = path(dir);
     if exists(&path)? {
         return Ok(Vec::new());
+    }
+    if registry.is_absent() {
+        // #10895 review: refuse before the lock sidecar is created.
+        migrate::plan(dir, registry)?;
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

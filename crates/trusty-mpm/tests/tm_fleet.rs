@@ -1688,6 +1688,28 @@ fn fleet_project_add_of_an_unregistered_project_writes_nothing() {
 }
 
 #[test]
+fn fleet_project_list_without_a_registry_refuses_and_writes_nothing() {
+    // #10895 review: a root with no `projects.json` must not use up the import.
+    let env = FleetEnv::new();
+    let root = env.home.path().join("wrong-root");
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join("local")).expect("architect dir");
+    let claude = "# Fleet\n\n## Watch set\n\n- `tm-alpha`: `/x/alpha`\n";
+    std::fs::write(dir.join("CLAUDE.md"), claude).expect("CLAUDE.md");
+    let out = fleet_project(&env, &root, &dir, &["list"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let registry = root.join("project-registry/projects.json");
+    assert!(
+        stderr.contains(&registry.display().to_string()),
+        "{}",
+        text(&out)
+    );
+    assert!(stderr.contains("TRUSTY_MPM_ROOT"), "{}", text(&out));
+    assert!(!dir.join("local/watch.json").exists(), "{}", text(&out));
+}
+
+#[test]
 fn fleet_project_concurrent_adds_keep_both_entries() {
     // AC3 through the binary: two `tm` processes at once.
     let env = FleetEnv::new();

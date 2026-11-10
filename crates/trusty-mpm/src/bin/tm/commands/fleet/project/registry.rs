@@ -26,6 +26,8 @@ pub(crate) struct Registry {
     aliases: Vec<ProjectAliasEntry>,
     /// Where the registry is read from; refusals name it.
     source: PathBuf,
+    /// The registry file was absent when [`Registry::load`] read it.
+    absent: bool,
 }
 
 impl Registry {
@@ -34,7 +36,8 @@ impl Registry {
     /// Why: plan D2 and the issue scope: the registry is read from disk.
     /// What: `ProjectStore` over `<root>/project-registry`, `ProjectAliasStore`
     /// over `<root>/project-paths.json`; an absent file is an empty store, an
-    /// unreadable or malformed one is an error.
+    /// unreadable or malformed one is an error. An absent `projects.json` is
+    /// recorded ([`Registry::is_absent`]) so the import can refuse.
     /// Test: `registry_load_reads_both_stores_under_the_root`.
     pub(crate) async fn load(root: &Path) -> anyhow::Result<Self> {
         let data_dir = registry_data_dir_under(root);
@@ -43,7 +46,14 @@ impl Registry {
         })?;
         let projects = store.all().await?;
         let aliases = ProjectAliasStore::load(root)?.list();
-        Ok(Self::new(projects, aliases, data_dir.join("projects.json")))
+        let source = data_dir.join("projects.json");
+        let absent = !source
+            .try_exists()
+            .with_context(|| format!("cannot read {}", source.display()))?;
+        Ok(Self {
+            absent,
+            ..Self::new(projects, aliases, source)
+        })
     }
 
     /// A registry over the given rows; `source` is named in refusals.
@@ -56,12 +66,18 @@ impl Registry {
             projects,
             aliases,
             source,
+            absent: false,
         }
     }
 
     /// The registry file the rows came from.
     pub(crate) fn source(&self) -> &Path {
         &self.source
+    }
+
+    /// Whether the registry file did not exist (wrong root, fresh host).
+    pub(crate) fn is_absent(&self) -> bool {
+        self.absent
     }
 
     /// The project registered under exactly `key`.
