@@ -42,10 +42,8 @@ fn egress_family_match_normalizes_case_and_separators() {
     for (tool, family) in [
         ("mcp__slack__x", "slack"),
         ("mcp__SLACK-MCP__x", "slack"),
-        ("mcp__claude_ai_Slack__slack_send_message", "slack"),
         ("mcp__S.l.a.c.k__x", "slack"),
         ("mcp__G_Mail__x", "gmail"),
-        ("mcp__claude_ai_Gmail__x", "gmail"),
         ("mcp__Not-Ion__x", "notion"),
         ("mcp__google_chat__x", "googlechat"),
         ("mcp__G-Chat__x", "gchat"),
@@ -55,9 +53,65 @@ fn egress_family_match_normalizes_case_and_separators() {
         ("mcp__mcp-gsuite__create_gmail_draft", "gmail"),
         ("mcp__mcp-gsuite__reply_gmail_email", "gmail"),
         ("mcp__workspace-mcp__send_gmail_message", "gmail"),
-        ("mcp__claude_ai_Google_Mail__x", "googlemail"),
     ] {
         assert_eq!(family_of(tool), family, "{tool}");
+    }
+}
+
+/// 🔴 #10735 (owner ruling D6d): a claude.ai connector server is exempt from
+/// the Slack, Gmail, Notion and Google Chat families, by tool name and by the
+/// server an MCP resource tool names. The same families on any other server,
+/// and a gworkspace messaging tool, keep their deny.
+#[test]
+fn claude_ai_connectors_are_exempt_from_the_family_deny_10735() {
+    let table = FamilyTable::builtin();
+    for tool in [
+        "mcp__claude_ai_Slack__slack_send_message",
+        "mcp__claude_ai_Slack__slack_read_channel",
+        "mcp__claude_ai_Notion__notion-search",
+        "mcp__claude_ai_Notion__notion-create-pages",
+        "mcp__claude_ai_Gmail__create_draft",
+        "mcp__claude_ai_Gmail__gmail_search_messages",
+        "mcp__claude_ai_Google_Mail__x",
+        "mcp__claude_ai_Google_Chat__send_message",
+        "MCP__Claude_AI_Notion__x",
+    ] {
+        assert_eq!(table.classify(tool), Classification::Unrelated, "{tool}");
+    }
+    for server in ["claude.ai Notion", "claude_ai_Gmail", "claude.ai Slack"] {
+        assert_eq!(
+            table.classify_resource_server(server),
+            Classification::Unrelated,
+            "{server}"
+        );
+    }
+    for (tool, family) in [
+        ("mcp__slack-mcp__slack_send_message", "slack"),
+        ("mcp__notion__notion-search", "notion"),
+        ("mcp__gmail__send", "gmail"),
+        ("mcp__google_chat__x", "googlechat"),
+        ("mcp__claudeai_slack__x", "slack"),
+        ("mcp__my_claude_ai_slack__x", "slack"),
+        // #10735 fix round: only the literal `claude_ai_` prefix is exempt.
+        ("mcp__claude-ai-slack__send", "slack"),
+        ("mcp__claude.ai_slack__send", "slack"),
+        ("mcp__claude ai notion__x", "notion"),
+        ("mcp__workspace-mcp__send_gmail_message", "gmail"),
+        ("mcp__gworkspace-mcp__send_draft", "gworkspace"),
+    ] {
+        assert_eq!(family_of(tool), family, "{tool}");
+    }
+    for (server, family) in [
+        ("slack-mcp", "slack"),
+        ("claude ai slack", "slack"),
+        ("claude-ai-slack", "slack"),
+        ("claude.ai-Notion", "notion"),
+    ] {
+        assert_eq!(
+            table.classify_resource_server(server),
+            Classification::Family(family.to_owned()),
+            "{server}"
+        );
     }
 }
 

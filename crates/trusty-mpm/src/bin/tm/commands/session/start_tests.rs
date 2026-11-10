@@ -851,7 +851,7 @@ fn an_architect_inplace_session_spec_carries_the_lockdown() {
     assert_eq!(values.len(), 1, "{:?}", spec.args);
     let body: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
     assert_eq!(body["deniedMcpServers"][0]["serverName"], "x");
-    assert_eq!(body["disableClaudeAiConnectors"], true);
+    assert!(body.get("disableClaudeAiConnectors").is_none(), "{body}"); // #10735
     let deny = body["permissions"]["deny"].as_array().expect("deny");
     for glob in ARCHITECT_DENY_GLOBS {
         for rule in [(*glob).to_owned(), capitalised(glob)] {

@@ -2,7 +2,7 @@
 //! through the real binary (#10387).
 //!
 //! Why: the grant is only as narrow as the binary Claude Code runs: two exact
-//! read tools, on two exact servers, for the project the host `config.yaml`
+//! read tools, on one exact server (#10735), for the project the host `config.yaml`
 //! names, and nothing for any fault or any bypass variable.
 //! What: a canonical temp `HOME` holding `.trusty-tools/trusty-mpm/config.yaml`
 //! and two project dirs; each case pipes one `PreToolUse` payload with
@@ -19,8 +19,8 @@ use crate::tm_hook_egress_guard_8454::{assert_allowed, assert_denied, guard_comm
 /// The two read tools the allowlist may grant.
 const READS: &[&str] = &["slack_read_channel", "slack_read_thread"];
 
-/// The two exact server segments.
-const SERVERS: &[&str] = &["slack-mcp", "claude_ai_Slack"];
+/// The exact server segment; #10735 left `claude_ai_Slack` undenied.
+const SERVERS: &[&str] = &["slack-mcp"];
 
 /// A canonical temp root with `home/`, `tm-apex/` and `other/`.
 struct Fx {
@@ -215,7 +215,7 @@ fn slack_read_allowlist_bypass_envs_do_not_widen() {
         let out = fx.run("mcp__slack-mcp__slack_read_channel", Some(&other), &[env]);
         assert_refused(&out, case, "no slack_read_allowlist entry");
         let out = fx.run(
-            "mcp__claude_ai_Slack__slack_send_message",
+            "mcp__slack-mcp__slack_send_message",
             Some(&fx.apex()),
             &[env],
         );
