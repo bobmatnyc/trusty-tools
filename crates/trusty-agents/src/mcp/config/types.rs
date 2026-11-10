@@ -201,4 +201,8 @@ pub struct ProvidersSection {
     /// The provider that unpinned, provider-agnostic agents default to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_provider_id: Option<String>,
+    /// #10978: the provider lock (`bedrock`), read by
+    /// [`crate::llm::provider_lock`]. Declared so `save()` keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<String>,
 }

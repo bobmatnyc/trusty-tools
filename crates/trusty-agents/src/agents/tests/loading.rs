@@ -63,7 +63,8 @@ fn resolve_model_env_var_beats_toml() {
     unsafe {
         std::env::set_var("TAGENT_MODEL_PYTHON_ENGINEER", "env/winner");
     }
-    let (m, src) = resolve_model("python-engineer", "toml/model", Some("toml/override"));
+    let (m, src) =
+        resolve_model("python-engineer", "toml/model", Some("toml/override")).expect("resolves");
     assert_eq!(m, "env/winner");
     assert_eq!(src, ModelSource::AgentEnv);
     clear_model_env("python-engineer");
@@ -73,7 +74,7 @@ fn resolve_model_env_var_beats_toml() {
 fn resolve_model_llm_override_beats_agent_model() {
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("x-agent");
-    let (m, src) = resolve_model("x-agent", "toml/agent", Some("toml/override"));
+    let (m, src) = resolve_model("x-agent", "toml/agent", Some("toml/override")).expect("resolves");
     assert_eq!(m, "toml/override");
     assert_eq!(src, ModelSource::LlmOverride);
 }
@@ -82,7 +83,7 @@ fn resolve_model_llm_override_beats_agent_model() {
 fn resolve_model_uses_agent_model_when_no_override() {
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("y-agent");
-    let (m, src) = resolve_model("y-agent", "toml/agent", None);
+    let (m, src) = resolve_model("y-agent", "toml/agent", None).expect("resolves");
     assert_eq!(m, "toml/agent");
     assert_eq!(src, ModelSource::AgentToml);
 }
@@ -95,7 +96,7 @@ fn resolve_model_uses_default_env_when_nothing_else() {
     unsafe {
         std::env::set_var("TAGENT_DEFAULT_MODEL", "default/model");
     }
-    let (m, src) = resolve_model("z-agent", "", None);
+    let (m, src) = resolve_model("z-agent", "", None).expect("resolves");
     assert_eq!(m, "default/model");
     assert_eq!(src, ModelSource::DefaultEnv);
     // SAFETY: guarded by ENV_LOCK
@@ -108,16 +109,32 @@ fn resolve_model_uses_default_env_when_nothing_else() {
 fn resolve_model_fallback_when_nothing_set() {
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("q-agent");
-    let (m, src) = resolve_model("q-agent", "", None);
+    let (m, src) = resolve_model("q-agent", "", None).expect("resolves");
     assert_eq!(m, FALLBACK_MODEL);
     assert_eq!(src, ModelSource::Fallback);
+}
+
+/// Why: #10978 — under a provider lock the Anthropic `FALLBACK_MODEL` is a
+/// route off Bedrock, so an agent with no model is an error naming it.
+/// Test: itself.
+#[test]
+fn resolve_model_refuses_the_fallback_under_the_lock() {
+    use crate::llm::provider_lock::{ProviderLock, override_on_this_thread};
+    let _guard = ENV_LOCK.blocking_lock();
+    clear_model_env("lock-agent");
+    let _locked = override_on_this_thread(Ok(Some(ProviderLock::Bedrock)));
+    let err = resolve_model("lock-agent", "", None).expect_err("no fallback under the lock");
+    assert!(err.to_string().contains("lock-agent"), "{err}");
+    // A configured model is still returned as-is; the loader checks its slug.
+    let (m, _) = resolve_model("lock-agent", "bedrock/x", None).expect("configured model");
+    assert_eq!(m, "bedrock/x");
 }
 
 #[test]
 fn resolve_model_empty_llm_override_is_ignored() {
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("r-agent");
-    let (m, src) = resolve_model("r-agent", "toml/agent", Some(""));
+    let (m, src) = resolve_model("r-agent", "toml/agent", Some("")).expect("resolves");
     assert_eq!(m, "toml/agent");
     assert_eq!(src, ModelSource::AgentToml);
 }

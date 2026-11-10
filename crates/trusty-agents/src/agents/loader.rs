@@ -242,6 +242,8 @@ impl AgentConfig {
         }
         // claude-mpm compatibility tier (sync), symmetric with the async loader.
         if let Some(cfg) = crate::agents::claude_mpm_loader::find_agent_sync(name) {
+            // #10978: this tier skips `apply_provider_pin`; check the lock here.
+            cfg.enforce_provider_lock(&crate::llm::provider_lock::active())?;
             return Ok((cfg, false));
         }
         // Preserve the historical missing-`<name>.toml` error shape when nothing
@@ -353,7 +355,7 @@ impl AgentConfig {
             &self.agent.name,
             &self.agent.model,
             self.llm.model_override.as_deref(),
-        );
+        )?;
         self.agent.model = resolved;
         self.apply_provider_pin()?;
         self.adapter = Arc::from(adapter_for_model(&self.agent.model));
@@ -387,6 +389,9 @@ impl AgentConfig {
     /// ([`crate::llm::provider_policy`]) as its `provider_id` before any of the
     /// above runs. With no policy configured that step is a no-op and this
     /// function behaves exactly as it did.
+    ///
+    /// #10978 adds one step after: [`Self::enforce_provider_lock`] refuses the
+    /// final slug when a provider lock is in effect; with no lock it is a no-op.
     /// Test: `agent_config_honours_a_provider_pin`,
     /// `agent_config_pin_beats_the_model_slug_prefix`,
     /// `agent_config_without_a_pin_is_unchanged`,
@@ -403,7 +408,33 @@ impl AgentConfig {
         } else {
             None
         };
-        self.apply_provider_pin_with_policy(policy.as_deref())
+        self.apply_provider_pin_with_policy(policy.as_deref())?;
+        // #10978: the lock is checked on the FINAL slug, after the pin and
+        // the policy have rewritten it, so no rewrite can route around it.
+        self.enforce_provider_lock(&crate::llm::provider_lock::active())
+    }
+
+    /// Refuse this agent when a provider lock is in effect and its final
+    /// route leaves the locked provider (#10978).
+    ///
+    /// Why: [`Self::apply_provider_pin`] runs at load, after an `extends`
+    /// merge, and on every [`Self::override_model`]; the `.md` and
+    /// trusty-mpm agent projections call this directly. Checking here covers
+    /// every way an agent's slug is set.
+    /// What: delegates to [`crate::llm::provider_lock::check_agent`] with this
+    /// agent's name, model slug and runner. An unreadable lock refuses.
+    /// Test: `agents::tests::provider_lock`.
+    pub(crate) fn enforce_provider_lock(
+        &self,
+        lock: &crate::llm::provider_lock::LockState,
+    ) -> Result<()> {
+        crate::llm::provider_lock::check_agent(
+            lock,
+            &self.agent.name,
+            &self.agent.model,
+            self.agent.runner == crate::agents::RunnerKind::ClaudeCode,
+        )?;
+        Ok(())
     }
 
     /// [`Self::apply_provider_pin`] against an explicitly supplied policy
@@ -523,10 +554,22 @@ impl AgentConfig {
     /// params, and the canonical ctrl standalone-mode system prompt. Uses
     /// `from_toml_str` under the hood so the adapter is populated identically
     /// to disk-loaded configs.
+    /// Panics when a provider lock refuses the built-in model (#10978);
+    /// production paths call [`Self::try_ctrl_default`].
     /// Test: `agent_config_ctrl_default_loads_with_adapter`.
     pub fn ctrl_default() -> Self {
+        Self::try_ctrl_default().expect("built-in ctrl default TOML must parse")
+    }
+
+    /// [`Self::ctrl_default`], returning the provider-lock refusal (#10978).
+    ///
+    /// Why: the built-in model is `anthropic/…`; under a provider lock it is
+    /// refused, and a dispatch path must report that rather than panic.
+    /// What: parses the built-in TOML through the normal load path, which
+    /// applies the pin and the lock.
+    /// Test: `ctrl_default_is_refused_under_the_lock`.
+    pub fn try_ctrl_default() -> Result<Self> {
         Self::from_toml_str(CTRL_DEFAULT_TOML, Path::new("<built-in ctrl default>"))
-            .expect("built-in ctrl default TOML must parse")
     }
 
     /// Async variant of `by_name` that performs its disk read via
@@ -618,7 +661,10 @@ impl AgentConfig {
                 source = %agent.source_path.display(),
                 "loaded claude-mpm agent (fallback from missing TOML)"
             );
-            return Ok((agent.to_agent_config(), false));
+            let cfg = agent.to_agent_config();
+            // #10978: this tier skips `apply_provider_pin`; check the lock here.
+            cfg.enforce_provider_lock(&crate::llm::provider_lock::active())?;
+            return Ok((cfg, false));
         }
         // Preserve the historical missing-`<name>.toml` error shape when
         // nothing resolved — report against the primary (highest-priority)
@@ -707,7 +753,8 @@ impl AgentConfig {
             &cfg.agent.name,
             &cfg.agent.model,
             cfg.llm.model_override.as_deref(),
-        );
+        )
+        .with_context(|| format!("in {}", path.display()))?;
         cfg.agent.model = resolved;
         // #3765: the pin runs AFTER `resolve_model` (so a `TAGENT_MODEL_*`
         // override is still honoured for the model NAME) and BEFORE the

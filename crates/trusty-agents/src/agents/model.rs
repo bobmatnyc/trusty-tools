@@ -167,26 +167,38 @@ pub(crate) fn agent_model_env(agent_name: &str) -> Option<String> {
 ///   2. `[llm] model_override` TOML field
 ///   3. `[agent] model` TOML field
 ///   4. `TAGENT_DEFAULT_MODEL` env var
-///   5. Hardcoded `FALLBACK_MODEL`
-/// Test: See unit tests in `tests.rs`.
+///   5. Hardcoded `FALLBACK_MODEL` — unless a provider lock is in effect
+///      ([`crate::llm::provider_lock`], #10978), in which case this is an
+///      `Err` naming the agent. The lock is read only when tier 5 is reached.
+///
+/// Test: `resolve_model_*` in `tests.rs`;
+/// `resolve_model_refuses_the_fallback_under_the_lock`.
 pub fn resolve_model(
     agent_name: &str,
     agent_model: &str,
     llm_override: Option<&str>,
-) -> (String, ModelSource) {
+) -> Result<(String, ModelSource), crate::llm::provider_lock::ProviderLockError> {
     if let Some(v) = agent_model_env(agent_name) {
-        return (v, ModelSource::AgentEnv);
+        return Ok((v, ModelSource::AgentEnv));
     }
     if let Some(v) = llm_override.filter(|s| !s.is_empty()) {
-        return (v.to_string(), ModelSource::LlmOverride);
+        return Ok((v.to_string(), ModelSource::LlmOverride));
     }
     if !agent_model.is_empty() {
-        return (agent_model.to_string(), ModelSource::AgentToml);
+        return Ok((agent_model.to_string(), ModelSource::AgentToml));
     }
     if let Ok(v) = crate::env_compat::env_var("TAGENT_DEFAULT_MODEL", "OPEN_MPM_DEFAULT_MODEL")
         && !v.is_empty()
     {
-        return (v, ModelSource::DefaultEnv);
+        return Ok((v, ModelSource::DefaultEnv));
     }
-    (FALLBACK_MODEL.to_string(), ModelSource::Fallback)
+    // #10978: under a provider lock the Anthropic fallback is a route off the
+    // locked provider, so an agent with no model is refused instead.
+    crate::llm::provider_lock::check_agent(
+        &crate::llm::provider_lock::active(),
+        agent_name,
+        "",
+        false,
+    )?;
+    Ok((FALLBACK_MODEL.to_string(), ModelSource::Fallback))
 }

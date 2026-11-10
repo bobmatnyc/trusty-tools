@@ -1,0 +1,3 @@
+Added
+- `TAGENT_PROVIDER_LOCK=bedrock` (or `[providers] lock = "bedrock"` in `~/.trusty-agents/config.toml`) confines every LLM route to Bedrock. Under the lock an agent whose final model slug is not `bedrock/…`, or whose runner is `claude-code`, is refused with an error naming the agent and the slug; the `FALLBACK_MODEL` tier, ambient credential picking, the local Ollama fast path and non-Bedrock `/provider` overrides are off. An unsupported or unreadable lock value refuses every route (#10978).
+- Bedrock client construction resolves AWS credentials first; a failure names the profile and the region and states that no other provider is tried (#10978).
