@@ -471,6 +471,11 @@ pub(crate) enum Command {
         /// capture clicks or the wheel. `TM_TUI_MOUSE=0` does the same (#10476).
         #[arg(long)]
         no_mouse: bool,
+        /// The Architect dashboard store root the Architect view reads
+        /// (`a` on the home screen). Until #10944 the daemon does not resolve
+        /// it; afterwards this stays an override (#10966).
+        #[arg(long, env = "TM_ARCHITECT_STORE")]
+        architect_store: Option<std::path::PathBuf>,
     },
     /// Manage the Telegram remote-management bot (pair, status, start, stop).
     Telegram {

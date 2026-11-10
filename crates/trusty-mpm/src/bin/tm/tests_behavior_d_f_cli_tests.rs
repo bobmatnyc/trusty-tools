@@ -91,3 +91,20 @@ fn cli_f_does_not_shadow_another_subcommand() {
     let cli = Cli::try_parse_from(["trusty-mpm", "f", "x"]).unwrap();
     assert!(matches!(cli.command, Some(Command::F(_))));
 }
+
+/// #10966: `tm tui --architect-store` names the Architect view's store root,
+/// until #10944 resolves it daemon-side. Here because `tests.rs` is at its cap.
+#[test]
+fn cli_parses_tui_architect_store() {
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "tui", "--architect-store", "/tmp/arch-store"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Tui {
+            architect_store, ..
+        } => assert_eq!(
+            architect_store,
+            Some(std::path::PathBuf::from("/tmp/arch-store"))
+        ),
+        other => panic!("expected Tui, got {other:?}"),
+    }
+}

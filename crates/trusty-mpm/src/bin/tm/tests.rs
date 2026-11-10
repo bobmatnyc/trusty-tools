@@ -1457,6 +1457,7 @@ fn cli_parses_tui_defaults() {
             interval_ms,
             single_pane,
             no_mouse,
+            ..
         } => {
             assert_eq!(url.as_deref(), Some(DEFAULT_URL));
             assert_eq!(interval_ms, 1000);

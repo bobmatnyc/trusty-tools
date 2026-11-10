@@ -106,6 +106,20 @@ fn arrows_move_the_selection_within_the_table() {
     assert_eq!(state.selected, 6);
 }
 
+// #10966: `a` opens the read-only Architect view; Esc returns home.
+#[test]
+fn a_opens_the_architect_view_and_esc_returns() {
+    use crate::tui::architect::Tab;
+    let mut state = HomeState::default();
+    let now = Instant::now();
+    assert_eq!(handle_key(&mut state, key(KeyCode::Char('a')), now), None);
+    assert_eq!(state.view, View::Architect);
+    assert_eq!(state.architect.tab, Tab::Decisions);
+    handle_key(&mut state, key(KeyCode::Esc), now);
+    assert_eq!(state.view, View::Home);
+    assert!(!state.should_exit);
+}
+
 #[test]
 fn enter_on_mpm_opens_projects() {
     let mut state = HomeState::default();
@@ -130,7 +144,11 @@ fn enter_on_search_opens_its_view_and_esc_returns() {
 
 #[test]
 fn q_quits_from_any_view() {
-    for view in [View::Home, View::Service(ServiceId::Memory)] {
+    for view in [
+        View::Home,
+        View::Service(ServiceId::Memory),
+        View::Architect,
+    ] {
         let mut state = HomeState {
             view,
             ..HomeState::default()
@@ -475,7 +493,11 @@ fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
 fn home_header_shows_tm_version_at_80_columns() {
     let version = format!("tm {}", env!("CARGO_PKG_VERSION"));
     let mut state = HomeState::default();
-    for view in [View::Home, View::Service(ServiceId::Search)] {
+    for view in [
+        View::Home,
+        View::Service(ServiceId::Search),
+        View::Architect,
+    ] {
         state.view = view;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test backend");
         terminal
@@ -488,7 +510,7 @@ fn home_header_shows_tm_version_at_80_columns() {
         );
         let title = match view {
             // #10966: the console's own header.
-            View::Home => "TRUSTY CONSOLE  UNIT-05 · SERVICE CONSOLE".to_string(),
+            View::Home | View::Architect => "TRUSTY CONSOLE  UNIT-05 · SERVICE CONSOLE".to_string(),
             View::Service(id) => format!("trusty console › {}", id.id()),
         };
         assert!(top.starts_with(&title), "{view:?} title displaced: {top:?}");

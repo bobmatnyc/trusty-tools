@@ -14,6 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use trusty_common::console_metrics::ConsoleMetricsReport;
 
 use super::services::ServiceId;
+use crate::tui::architect::{self, ArchitectAction, ArchitectState, Tab};
 
 /// How long a fetched (or failed) `console_metrics` answer is reused before
 /// opening the view spawns the service's stdio command again.
@@ -122,6 +123,8 @@ pub enum View {
     Home,
     /// One service's first-level view.
     Service(ServiceId),
+    /// The read-only Architect dashboard (#10966).
+    Architect,
 }
 
 /// Work the event loop must do after a key.
@@ -146,6 +149,8 @@ pub struct HomeState {
     pub metrics: HashMap<ServiceId, MetricsState>,
     /// Set by `q` / Ctrl-C.
     pub should_exit: bool,
+    /// The Architect view's tab, selection and last fetch.
+    pub architect: ArchitectState,
 }
 
 impl Default for HomeState {
@@ -160,6 +165,7 @@ impl Default for HomeState {
             view: View::Home,
             metrics: HashMap::new(),
             should_exit: false,
+            architect: ArchitectState::default(),
         }
     }
 }
@@ -249,10 +255,12 @@ impl HomeState {
 /// Route one key press.
 ///
 /// Why (#10491): Enter on trusty-mpm opens today's projects view; Enter on any
-/// other row opens its service view; Esc returns home.
+/// other row opens its service view; Esc returns home. #10966: `a` opens
+/// the Architect view.
 /// What: mutates `state` and returns the I/O the event loop must start.
 /// Test: `enter_on_mpm_opens_projects`, `enter_on_search_opens_its_view_and_esc_returns`,
-/// `arrows_move_the_selection_within_the_table`, `q_quits_from_any_view`.
+/// `arrows_move_the_selection_within_the_table`, `q_quits_from_any_view`,
+/// `a_opens_the_architect_view_and_esc_returns`.
 pub fn handle_key(state: &mut HomeState, key: KeyEvent, now: Instant) -> Option<HomeAction> {
     if key.code == KeyCode::Char('q')
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
@@ -267,6 +275,12 @@ pub fn handle_key(state: &mut HomeState, key: KeyEvent, now: Instant) -> Option<
             }
             None
         }
+        View::Architect => {
+            if architect::handle_key(&mut state.architect, key) == Some(ArchitectAction::Home) {
+                state.view = View::Home;
+            }
+            None
+        }
         View::Home => match key.code {
             // #10966: the services table is one row per step.
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
@@ -275,6 +289,11 @@ pub fn handle_key(state: &mut HomeState, key: KeyEvent, now: Instant) -> Option<
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 state.move_by(-1);
+                None
+            }
+            KeyCode::Char('a') => {
+                state.architect.open(Tab::Decisions);
+                state.view = View::Architect;
                 None
             }
             KeyCode::Enter => {
