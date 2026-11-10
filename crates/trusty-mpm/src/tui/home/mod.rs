@@ -36,7 +36,7 @@ use crossterm::event::{self, Event, KeyEventKind};
 use tokio::sync::mpsc;
 
 use crate::client::DaemonClient;
-use crate::tui::architect::{ArchitectUpdate, data};
+use crate::tui::architect::{ArchitectUpdate, data, live};
 use crate::tui::terminal::TerminalGuard;
 use services::ServiceId;
 use state::{HomeAction, HomeState, MetricsUpdate, View, handle_key};
@@ -101,7 +101,8 @@ pub async fn run_tui_entry(
 /// to `project_ctl::run_in_terminal`; leaving that view (`q`) returns here.
 /// #10476: `mouse` applies to that view; this screen never captures.
 /// #10966: while the Architect view is open, a fetch task reads the store at
-/// `architect_store` every `architect::REFRESH`, over the daemon socket.
+/// `architect_store` and the Live tracker every `architect::REFRESH`, over
+/// the daemon socket.
 /// Test: the pure pieces are unit-tested; this loop is exercised by the
 /// smoke run.
 pub async fn run_home(
@@ -136,11 +137,14 @@ pub async fn run_home(
         }
         if state.view == View::Architect && state.architect.fetch_due(Instant::now()) {
             let tx = architect_tx.clone();
-            let socket = client.socket_path().map(std::path::Path::to_path_buf);
+            let client = client.clone();
             let store = architect_store.clone();
+            let selected = state.architect.selected_session();
             tokio::spawn(async move {
-                let update = data::fetch_dashboard(socket.as_deref(), store.as_deref()).await;
-                let _ = tx.send(update).await;
+                let socket = client.socket_path();
+                let dashboard = data::fetch_dashboard(socket, store.as_deref()).await;
+                let live = live::fetch_live(&client, selected.as_deref()).await;
+                let _ = tx.send(ArchitectUpdate { dashboard, live }).await;
             });
         }
         terminal.draw(|frame| render::render(frame, &state))?;

@@ -1,16 +1,19 @@
-//! The Architect view in `tm tui`: the dashboard lists, read-only.
+//! The Architect view in `tm tui`: the dashboard lists, read-only, and the
+//! Live tracker.
 //!
 //! Why (#10966, goal ar-G01): Bob asked for the Architect dashboard in the
 //! terminal — decisions, actions, goals, sessions, tasks and Q&A as lists
-//! with badges. Dc4 rules the view read-only: no key writes, and
-//! [`data`] sends only `list` and `tally`.
+//! with badges — and a vertical tracker in place of Visualize. Dc4 rules the
+//! view read-only: no key writes, and [`data`] sends only `list` and
+//! `tally`. The tracker is list-only (Dc4, Q4).
 //! What: [`ArchitectState`] holds the tab, selection and the last fetched
-//! [`data::DashSnapshot`]; [`handle_key`] routes keys; [`render::render`]
-//! draws.
+//! [`data::DashSnapshot`] and [`live::LiveSnapshot`]; [`handle_key`] routes
+//! keys; [`render::render`] draws.
 //! Design: `docs/design/UI/tm-tui-console-look.md` section 4.
 //! Test: `tests.rs` beside this file.
 
 pub mod data;
+pub mod live;
 pub mod render;
 
 #[cfg(test)]
@@ -21,11 +24,12 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent};
 
 use data::DashSnapshot;
+use live::LiveSnapshot;
 
-/// How often the open view re-reads the store.
+/// How often the open view re-reads the store and the fleet.
 pub const REFRESH: Duration = Duration::from_secs(5);
 
-/// The view's tabs, in the dashboard's order.
+/// The view's tabs, in the dashboard's order, with Live in place of Visualize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     /// Open items of kind `question`.
@@ -40,17 +44,20 @@ pub enum Tab {
     Tasks,
     /// Q&A documents.
     Qa,
+    /// The vertical session tracker (#10966).
+    Live,
 }
 
 impl Tab {
     /// Every tab, left to right.
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 7] = [
         Tab::Decisions,
         Tab::Actions,
         Tab::Goals,
         Tab::Sessions,
         Tab::Tasks,
         Tab::Qa,
+        Tab::Live,
     ];
 
     /// The tab's label.
@@ -62,6 +69,7 @@ impl Tab {
             Tab::Sessions => "Sessions",
             Tab::Tasks => "Tasks",
             Tab::Qa => "Q&A",
+            Tab::Live => "Live",
         }
     }
 
@@ -83,8 +91,14 @@ pub enum Fetch<T> {
     Failed(String),
 }
 
-/// One fetch round's result, sent from the fetch task to the UI loop.
-pub type ArchitectUpdate = Result<DashSnapshot, String>;
+/// One fetch round's results, sent from the fetch task to the UI loop.
+#[derive(Debug, Clone)]
+pub struct ArchitectUpdate {
+    /// The dashboard lists, or why not.
+    pub dashboard: Result<DashSnapshot, String>,
+    /// The tracker, or why not.
+    pub live: Result<LiveSnapshot, String>,
+}
 
 /// Everything the Architect view shows.
 #[derive(Debug, Clone)]
@@ -97,6 +111,8 @@ pub struct ArchitectState {
     pub expanded: bool,
     /// The dashboard lists.
     pub dashboard: Fetch<DashSnapshot>,
+    /// The Live tracker.
+    pub live: Fetch<LiveSnapshot>,
     in_flight: bool,
     last_fetch: Option<Instant>,
 }
@@ -108,6 +124,7 @@ impl Default for ArchitectState {
             selected: 0,
             expanded: false,
             dashboard: Fetch::Waiting,
+            live: Fetch::Waiting,
             in_flight: false,
             last_fetch: None,
         }
@@ -153,7 +170,11 @@ impl ArchitectState {
     /// Record one fetch round and keep the selection inside the list.
     pub fn apply(&mut self, update: ArchitectUpdate) {
         self.in_flight = false;
-        self.dashboard = match update {
+        self.dashboard = match update.dashboard {
+            Ok(s) => Fetch::Ready(s),
+            Err(e) => Fetch::Failed(e),
+        };
+        self.live = match update.live {
             Ok(s) => Fetch::Ready(s),
             Err(e) => Fetch::Failed(e),
         };
@@ -165,9 +186,26 @@ impl ArchitectState {
 
     /// Rows on the open tab.
     pub fn row_count(&self) -> usize {
-        match &self.dashboard {
-            Fetch::Ready(d) => d.rows(self.tab).len(),
-            _ => 0,
+        self.count(self.tab).unwrap_or(0)
+    }
+
+    /// Rows `tab` lists, or `None` before its source has answered.
+    pub fn count(&self, tab: Tab) -> Option<usize> {
+        match (tab, &self.dashboard, &self.live) {
+            (Tab::Live, _, Fetch::Ready(l)) => Some(l.sessions.len()),
+            (Tab::Live, _, _) => None,
+            (tab, Fetch::Ready(d), _) => Some(d.rows(tab).len()),
+            _ => None,
+        }
+    }
+
+    /// The session selected on the Live tab, whose current step is asked.
+    ///
+    /// Test: `selected_session_names_the_live_row_only_on_the_live_tab`.
+    pub fn selected_session(&self) -> Option<String> {
+        match (self.tab, &self.live) {
+            (Tab::Live, Fetch::Ready(l)) => l.sessions.get(self.selected).map(|s| s.name.clone()),
+            _ => None,
         }
     }
 }

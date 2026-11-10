@@ -1,4 +1,5 @@
-//! Tests for the read-only Architect view (#10966, goal ar-G01).
+//! Tests for the read-only Architect view and its Live tracker (#10966,
+//! goal ar-G01).
 
 use std::path::Path;
 use std::time::Instant;
@@ -8,7 +9,16 @@ use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{Value, json};
 
 use super::data::{DashSnapshot, STORE_NOT_SET, fetch_dashboard, snapshot_from};
-use super::{ArchitectAction, ArchitectState, Fetch, REFRESH, Tab, handle_key};
+use super::live::{LiveAgent, LiveSession, LiveSnapshot, Record, fetch_live, group, live_lines};
+use super::{ArchitectAction, ArchitectState, ArchitectUpdate, Fetch, REFRESH, Tab, handle_key};
+use crate::client::{DaemonClient, SessionRow};
+
+fn update(dashboard: Result<DashSnapshot, String>, live: LiveSnapshot) -> ArchitectUpdate {
+    ArchitectUpdate {
+        dashboard,
+        live: Ok(live),
+    }
+}
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -98,7 +108,7 @@ fn fetch_is_due_once_per_refresh_and_never_twice_in_flight() {
     let t0 = Instant::now();
     assert!(s.fetch_due(t0));
     assert!(!s.fetch_due(t0 + REFRESH), "one in flight");
-    s.apply(Err(STORE_NOT_SET.into()));
+    s.apply(update(Err(STORE_NOT_SET.into()), LiveSnapshot::default()));
     assert!(!s.fetch_due(t0 + REFRESH / 2), "fresh");
     assert!(s.fetch_due(t0 + REFRESH));
 }
@@ -106,17 +116,24 @@ fn fetch_is_due_once_per_refresh_and_never_twice_in_flight() {
 #[test]
 fn tab_keys_cycle_and_esc_closes_detail_then_returns_home() {
     let mut s = ArchitectState::default();
-    s.apply(Ok(sample()));
+    s.apply(update(Ok(sample()), LiveSnapshot::default()));
     handle_key(&mut s, key(KeyCode::BackTab));
-    assert_eq!(s.tab, Tab::Qa, "wraps left to the last of six tabs");
+    assert_eq!(s.tab, Tab::Live, "wraps left to the last of seven tabs");
     handle_key(&mut s, key(KeyCode::Tab));
     assert_eq!(s.tab, Tab::Decisions, "wraps right");
-    for want in [Tab::Actions, Tab::Goals, Tab::Sessions, Tab::Tasks, Tab::Qa] {
+    for want in [
+        Tab::Actions,
+        Tab::Goals,
+        Tab::Sessions,
+        Tab::Tasks,
+        Tab::Qa,
+        Tab::Live,
+    ] {
         handle_key(&mut s, key(KeyCode::Right));
         assert_eq!(s.tab, want);
     }
     handle_key(&mut s, key(KeyCode::Right));
-    assert_eq!(s.tab, Tab::Decisions, "six tabs, no Live until S4");
+    assert_eq!(s.tab, Tab::Decisions, "Live is the last tab");
     handle_key(&mut s, key(KeyCode::Enter));
     assert!(s.expanded);
     assert_eq!(handle_key(&mut s, key(KeyCode::Esc)), None);
@@ -144,13 +161,14 @@ fn draw(state: &ArchitectState) -> String {
 #[test]
 fn architect_render_lists_rows_with_badges_and_counts() {
     let mut s = ArchitectState::default();
-    s.apply(Ok(sample()));
+    s.apply(update(Ok(sample()), live_sample()));
     let screen = draw(&s);
     for want in [
         "ARCHITECT",
         "Decisions 1",
         "Goals 1",
         "Q&A 1",
+        "Live 2",
         " READ-ONLY ",
         "D3a",
         " OPEN ",
@@ -159,14 +177,137 @@ fn architect_render_lists_rows_with_badges_and_counts() {
     ] {
         assert!(screen.contains(want), "missing {want:?}");
     }
-    assert!(!screen.contains("Live"), "no Live tab until S4");
 }
 
 #[test]
 fn architect_render_says_why_when_the_store_is_not_set() {
     let mut s = ArchitectState::default();
-    s.apply(Err(STORE_NOT_SET.into()));
+    s.apply(update(Err(STORE_NOT_SET.into()), LiveSnapshot::default()));
     assert!(matches!(s.dashboard, Fetch::Failed(_)));
     let screen = draw(&s);
     assert!(screen.contains("--architect-store"), "{screen}");
+}
+
+fn session_row(id: &str, name: &str, workdir: &str, status: &str) -> SessionRow {
+    serde_json::from_value(json!({
+        "id": id, "workdir": workdir, "status": status, "tmux_name": name
+    }))
+    .expect("session row")
+}
+
+fn record(agent: &str, owner: &str, status: &str, age: i64) -> Record {
+    serde_json::from_value(
+        json!({"agent": agent, "owner": owner, "status": status, "age_secs": age}),
+    )
+    .expect("record")
+}
+
+const ID_A: &str = "6f1c1f2e-8b7d-4c39-9d5e-3e1f0a2b4c5d";
+const ID_B: &str = "0a2b4c5d-3e1f-4c39-9d5e-6f1c1f2e8b7d";
+
+#[test]
+fn group_attaches_agents_by_owner_label() {
+    let rows = [
+        session_row(ID_A, "tm-03", "/w/a", "Active"),
+        session_row(ID_B, "ts-01", "/w/a", "Detached"),
+    ];
+    let records = [
+        record("engineer", "session `tm-03`", "running", 360),
+        record("qa", "session `tm-03`", "queued", 60),
+        record(
+            "ops",
+            "a session the daemon holds no record of",
+            "running",
+            5,
+        ),
+    ];
+    let snap = group(&rows, &records);
+    assert_eq!(snap.sessions.len(), 2);
+    let agents: Vec<&str> = snap.sessions[0]
+        .agents
+        .iter()
+        .map(|a| a.agent.as_str())
+        .collect();
+    assert_eq!(agents, ["engineer", "qa"]);
+    assert_eq!(snap.sessions[0].id, ID_A);
+    assert!(snap.sessions[1].agents.is_empty());
+    assert_eq!(snap.sessions[1].status, "Detached");
+}
+
+fn live_sample() -> LiveSnapshot {
+    let agent = |a: &str, st: &str, age| LiveAgent {
+        agent: a.into(),
+        status: st.into(),
+        age_secs: age,
+    };
+    LiveSnapshot {
+        sessions: vec![
+            LiveSession {
+                id: ID_A.into(),
+                name: "tm-03".into(),
+                status: "Active".into(),
+                workdir: "/w/a".into(),
+                agents: vec![
+                    agent("engineer", "running", 360),
+                    agent("qa", "running", 61),
+                ],
+                step: Some("cargo test -p trusty-mpm".into()),
+            },
+            LiveSession {
+                id: ID_B.into(),
+                name: "ts-01".into(),
+                status: "Detached".into(),
+                workdir: "/w/b".into(),
+                agents: vec![],
+                step: None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn live_lines_draw_sessions_with_nested_agents() {
+    let text: Vec<String> = live_lines(&live_sample(), 0)
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert!(text[0].starts_with("● tm-03"), "{text:?}");
+    assert!(text[0].contains("2 agents"));
+    assert!(text[1].contains("step  cargo test -p trusty-mpm"));
+    assert!(text[2].starts_with("│  ├ engineer") && text[2].contains("6m"));
+    assert!(text[3].starts_with("│  └ qa") && text[3].contains("1m"));
+    assert!(text[4].starts_with("○ ts-01") && text[4].contains("no agents"));
+    assert!(text[5].contains("step  -"), "unmanaged session: {text:?}");
+}
+
+#[test]
+fn selected_session_names_the_live_row_only_on_the_live_tab() {
+    let mut s = ArchitectState::default();
+    s.apply(update(Ok(sample()), live_sample()));
+    assert_eq!(s.selected_session(), None, "Decisions tab");
+    s.open(Tab::Live);
+    handle_key(&mut s, key(KeyCode::Down));
+    assert_eq!(s.selected_session().as_deref(), Some(ID_B));
+    assert_eq!(s.row_count(), 2);
+}
+
+#[test]
+fn live_tab_draws_the_tracker_list_only() {
+    let mut s = ArchitectState::default();
+    s.apply(update(Ok(sample()), live_sample()));
+    s.open(Tab::Live);
+    let screen = draw(&s);
+    for want in ["tm-03", "engineer", "ts-01", "step  -"] {
+        assert!(screen.contains(want), "missing {want:?}");
+    }
+    assert!(!screen.contains("D3a"), "no dashboard rows on Live");
+}
+
+#[tokio::test]
+async fn fetch_live_reads_the_daemon_socket_only() {
+    // An HTTP client is refused before any call; nothing listens on port 1.
+    let err = fetch_live(&DaemonClient::new("http://127.0.0.1:1"), None)
+        .await
+        .expect_err("no socket");
+    assert!(err.contains("#10899"), "{err}");
 }

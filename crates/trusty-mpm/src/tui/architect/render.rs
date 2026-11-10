@@ -3,10 +3,11 @@
 //! Why: drawing reads `&ArchitectState` only, so a slow store or daemon never
 //! stalls a frame.
 //! What: [`render`] draws the tab bar with counts and a READ-ONLY badge
-//! (Dc4, #10966), the open tab's list, an optional detail pane, and the
-//! tally footer.
+//! (Dc4, #10966), the open tab's list or the Live tracker, an optional
+//! detail pane, and the tally footer.
 //! Test: `architect_render_lists_rows_with_badges_and_counts`,
-//! `architect_render_says_why_when_the_store_is_not_set`.
+//! `architect_render_says_why_when_the_store_is_not_set`,
+//! `live_tab_draws_the_tracker_list_only`.
 
 use ratatui::{
     Frame,
@@ -16,6 +17,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 
+use super::live::live_lines;
 use super::{ArchitectState, Fetch, Tab};
 use crate::tui::theme::{Tone, badge, palette};
 
@@ -34,7 +36,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ArchitectState) {
         ])
         .areas(area);
     render_tabs(frame, tabs, state);
-    render_list(frame, body, state, state.tab);
+    match state.tab {
+        Tab::Live => render_live(frame, body, state),
+        tab => render_list(frame, body, state, tab),
+    }
     let p = palette();
     let text = match &state.dashboard {
         Fetch::Ready(d) => d.tally.clone(),
@@ -47,13 +52,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ArchitectState) {
     );
 }
 
-fn count(state: &ArchitectState, tab: Tab) -> Option<usize> {
-    match &state.dashboard {
-        Fetch::Ready(d) => Some(d.rows(tab).len()),
-        _ => None,
-    }
-}
-
 fn render_tabs(frame: &mut Frame, area: Rect, state: &ArchitectState) {
     let p = palette();
     let mut spans = vec![Span::styled(
@@ -64,7 +62,7 @@ fn render_tabs(frame: &mut Frame, area: Rect, state: &ArchitectState) {
         if i > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(p.muted)));
         }
-        let label = match count(state, *tab) {
+        let label = match state.count(*tab) {
             Some(n) => format!("{} {n}", tab.label()),
             None => tab.label().to_string(),
         };
@@ -169,4 +167,21 @@ fn render_list(frame: &mut Frame, area: Rect, state: &ArchitectState, tab: Tab) 
             area,
         );
     }
+}
+
+// #10966: the Live tab is the tracker list and nothing else (Dc4, Q4).
+fn render_live(frame: &mut Frame, area: Rect, state: &ArchitectState) {
+    let title = Tab::Live.label();
+    let snap = match &state.live {
+        Fetch::Ready(l) => l,
+        Fetch::Waiting => return message(frame, area, title, "loading…".into()),
+        Fetch::Failed(e) => return message(frame, area, title, e.clone()),
+    };
+    if snap.sessions.is_empty() {
+        return message(frame, area, title, "no sessions".into());
+    }
+    frame.render_widget(
+        Paragraph::new(live_lines(snap, state.selected)).block(panel(title)),
+        area,
+    );
 }
