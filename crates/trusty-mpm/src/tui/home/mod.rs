@@ -29,15 +29,17 @@ mod analyze_probe_tests;
 #[cfg(test)]
 mod no_uds_endpoint_tests;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
 use tokio::sync::mpsc;
 
 use crate::client::DaemonClient;
+use crate::tui::architect::{ArchitectUpdate, data};
 use crate::tui::terminal::TerminalGuard;
 use services::ServiceId;
-use state::{HomeAction, HomeState, MetricsUpdate, handle_key};
+use state::{HomeAction, HomeState, MetricsUpdate, View, handle_key};
 
 /// How often each tile is re-probed.
 pub const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
@@ -79,9 +81,10 @@ pub async fn run_tui_entry(
     interval_ms: u64,
     single_pane: bool,
     mouse: bool,
+    architect_store: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     match tui_entry(single_pane) {
-        TuiEntry::Home => run_home(client, interval_ms, mouse).await,
+        TuiEntry::Home => run_home(client, interval_ms, mouse, architect_store).await,
         TuiEntry::SinglePane => {
             crate::tui::run_initial_view_with(client, interval_ms, None, true, false).await
         }
@@ -97,13 +100,17 @@ pub async fn run_tui_entry(
 /// [`TerminalGuard`], then loops. Enter on trusty-mpm hands the same terminal
 /// to `project_ctl::run_in_terminal`; leaving that view (`q`) returns here.
 /// #10476: `mouse` applies to that view; this screen never captures.
+/// #10966: while the Architect view is open, a fetch task reads the store at
+/// `architect_store` every `architect::REFRESH`, over the daemon socket.
 /// Test: the pure pieces are unit-tested; this loop is exercised by the
 /// smoke run.
 pub async fn run_home(
     mut client: DaemonClient,
     interval_ms: u64,
     mouse: bool,
+    architect_store: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    let (architect_tx, mut architect_rx) = mpsc::channel::<ArchitectUpdate>(4);
     let (health_tx, mut health_rx) = mpsc::channel(64);
     let (metrics_tx, mut metrics_rx) = mpsc::channel::<MetricsUpdate>(16);
     probe::spawn_health_poller(
@@ -123,6 +130,18 @@ pub async fn run_home(
         }
         while let Ok(update) = metrics_rx.try_recv() {
             state.apply_metrics(update, Instant::now());
+        }
+        while let Ok(update) = architect_rx.try_recv() {
+            state.architect.apply(update);
+        }
+        if state.view == View::Architect && state.architect.fetch_due(Instant::now()) {
+            let tx = architect_tx.clone();
+            let socket = client.socket_path().map(std::path::Path::to_path_buf);
+            let store = architect_store.clone();
+            tokio::spawn(async move {
+                let update = data::fetch_dashboard(socket.as_deref(), store.as_deref()).await;
+                let _ = tx.send(update).await;
+            });
         }
         terminal.draw(|frame| render::render(frame, &state))?;
 

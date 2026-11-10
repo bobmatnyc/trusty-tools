@@ -509,12 +509,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Agent { action }) => agent(action).await,
         Some(Command::Generate { action }) => generate(action).await,
-        Some(Command::Tui {
-            url: tui_url,
-            interval_ms,
-            single_pane,
-            no_mouse,
-        }) => commands::projects::run_tui(tui_url, interval_ms, single_pane, no_mouse).await,
+        Some(tui @ Command::Tui { .. }) => commands::projects::run_tui(tui).await,
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install {

@@ -3,8 +3,8 @@
 //! Why (#10491): drawing reads `&HomeState` only — it never probes, spawns or
 //! awaits — so a slow service can never stall a frame.
 //! What: [`render`] dispatches on [`View`]: the console look
-//! ([`super::console`], #10966) or a service view; [`service_lines`] is the
-//! pure text builder of the service view.
+//! ([`super::console`], #10966), a service view, or the Architect view
+//! (#10966); [`service_lines`] is the pure text builder of the service view.
 //! Test: `home_render_draws_every_service_row`, `service_view_shows_unavailable_metrics`.
 
 use crate::tui::theme::palette;
@@ -21,9 +21,10 @@ use super::console::{model_from_state, render_body, render_header};
 use super::services::ServiceId;
 use super::state::{HomeState, MetricsState, TileHealth, View};
 use crate::tui::VERSION_LABEL;
+use crate::tui::architect::render::ARCHITECT_HINT;
 
 /// Footer on the home screen.
-pub const HOME_HINT: &str = "[↑↓] select  [Enter] open  [q] quit";
+pub const HOME_HINT: &str = "[↑↓] select  [Enter] open  [a] architect  [q] quit";
 /// Footer on a service view.
 pub const SERVICE_HINT: &str = "[Esc] home  [q] quit";
 /// Most metrics lines a service view lists.
@@ -48,6 +49,11 @@ pub fn render(frame: &mut Frame, state: &HomeState) {
                 body,
             );
             SERVICE_HINT
+        }
+        View::Architect => {
+            render_header(frame, header);
+            crate::tui::architect::render::render(frame, body, &state.architect);
+            ARCHITECT_HINT
         }
     };
     frame.render_widget(

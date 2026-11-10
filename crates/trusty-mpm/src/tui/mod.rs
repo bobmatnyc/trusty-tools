@@ -14,6 +14,8 @@
 //!
 //! [`dashboard`]: crate::tui::dashboard
 
+// #10966: goal ar-G01, the read-only Architect view.
+pub mod architect;
 pub mod client;
 pub mod coordinator;
 pub mod dashboard;
