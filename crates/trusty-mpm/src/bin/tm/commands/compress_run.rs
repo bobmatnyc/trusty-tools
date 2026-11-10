@@ -21,6 +21,19 @@ const EXIT_NOT_FOUND: i32 = 127;
 /// Exit status a shell reports for a program it found but could not run.
 const EXIT_NOT_EXECUTABLE: i32 = 126;
 
+/// `tm compress` dispatch: the stdin filter, or the run mode for a command.
+///
+/// What: an empty `argv` → [`super::compress::run_compress`]; otherwise
+/// [`run_compress_command`], then exits with the program's status.
+/// Test: `cli_parses_compress_with_a_command`, and end to end
+/// `tm_compress_run_mode_compresses_and_keeps_the_exit_status`.
+pub(crate) async fn run(tool: &str, argv: &[String]) -> anyhow::Result<()> {
+    if argv.is_empty() {
+        return super::compress::run_compress(tool).await;
+    }
+    std::process::exit(run_compress_command(tool, argv).await)
+}
+
 /// Run `argv`, compress its stdout, and return the status to exit with.
 ///
 /// Why: see the module doc. The status is the program's, never this filter's:
