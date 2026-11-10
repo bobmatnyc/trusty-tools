@@ -1,5 +1,7 @@
 //! `tm hook --egress-guard`: deny every outbound-channel MCP tool, for every
-//! caller (#8454 G3, slice S1).
+//! caller (#8454 G3, slice S1). #10735 (owner ruling D6d): the claude.ai
+//! connector servers are exempt from the family deny; the Bash, taint and
+//! audit denies stay.
 //!
 //! Why: a tm-launched session must not message anyone through Slack, Gmail,
 //! Notion or Google Chat on its own; the daemon's owner channel is meant to be
@@ -162,7 +164,8 @@ pub(crate) fn decide(
             format!(
                 "tm hook --egress-guard denies `{tool_name}`: it is a {family} tool, and no \
                  tm-launched session, PM or subagent, may use an outbound message channel \
-                 directly (#8454); only the Architect's main thread is exempt (#10447). \
+                 directly (#8454); only the Architect's main thread is exempt (#10447), \
+                 and the claude.ai connectors are not this deny's subject (#10735). \
                  Read and list tools are denied too, except a Slack channel or thread read \
                  the host config grants this project (#10387). Ask the operator instead."
             ),

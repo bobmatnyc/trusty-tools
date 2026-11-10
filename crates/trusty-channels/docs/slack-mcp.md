@@ -74,8 +74,9 @@ channels:
       tools: [slack_read_channel, slack_read_thread]
 ```
 
-- Only `mcp__slack-mcp__<tool>` and `mcp__claude_ai_Slack__<tool>` are
-  judged; the tool must equal a listed name exactly. `slack_read_canvas`,
+- Only `mcp__slack-mcp__<tool>` is judged; the tool must equal a listed
+  name exactly. Since #10735 the claude.ai connector
+  `mcp__claude_ai_Slack__<tool>` is not denied at all, so it needs no entry. `slack_read_canvas`,
   `slack_read_file` and every posting tool stay refused.
 - The load refuses any other tool name and any `*` or `?`, and an unknown
   key anywhere in `channels:` refuses the whole section.

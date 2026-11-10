@@ -192,3 +192,45 @@ fn with_taint_denies_an_allowed_gated_call_of_a_tainted_session() {
         Verdict::Allow
     );
 }
+
+/// 🔴 #10735 (owner ruling D6d keeps the taint arm as it was): after taint, a
+/// claude.ai connector call is allowed — the taint arm judges only the path
+/// tools in `GATED_TOOLS`, never an MCP tool — while the session's path calls
+/// stay denied and a non-connector Slack server keeps its family deny.
+#[test]
+fn a_tainted_session_keeps_its_taint_deny_and_reaches_the_connectors_10735() {
+    use crate::commands::egress_guard::decide;
+    use crate::commands::egress_guard_families::FamilyTable;
+    let home = tainted_home();
+    let table = FamilyTable::builtin();
+    let judge = |tool: &str| {
+        let read = Ok(call(tool, Some("s-tainted")));
+        let first = decide(&read, &table);
+        with_taint(first, &read, Some(home.path()), None, || Ok(()))
+    };
+    for tool in [
+        "mcp__claude_ai_Notion__notion-search",
+        "mcp__claude_ai_Slack__slack_send_message",
+    ] {
+        assert_eq!(judge(tool), Verdict::Allow, "{tool}");
+    }
+    for tool in ["Read", "Write"] {
+        assert!(
+            matches!(
+                judge(tool),
+                Verdict::Deny {
+                    check: TAINT_CHECK,
+                    ..
+                }
+            ),
+            "{tool}"
+        );
+    }
+    assert!(matches!(
+        judge("mcp__slack-mcp__slack_send_message"),
+        Verdict::Deny {
+            check: "egress-family",
+            ..
+        }
+    ));
+}

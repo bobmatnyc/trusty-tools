@@ -17,7 +17,9 @@
 //! normalized tool segment contains `gmail` is denied, whatever its server. A
 //! `gworkspace`, `google_workspace` or `gsuite` server is denied only for its
 //! mail, chat and message tools. [`FamilyTable::classify_resource_server`]
-//! judges the server an MCP resource tool names.
+//! judges the server an MCP resource tool names. #10735 (owner ruling D6d):
+//! a claude.ai connector server ([`is_claude_ai_connector`]) is exempt from
+//! the four built-in families; every other server keeps its deny.
 //!
 //! Limits, by design of a name match: Unicode confusables (a Cyrillic `а` in
 //! `slаck`) are dropped by the normalization, not mapped, so they evade it; a
@@ -53,6 +55,44 @@ const GMAIL_TOOL: &str = "gmail";
 /// Normalized tool-segment fragments that make a `gworkspace` tool a messaging
 /// tool: `mail` covers `gmail` and `email`, `draft` the send-a-draft path.
 const GWORKSPACE_MESSAGING: &[&str] = &["mail", "chat", "message", "draft"];
+
+/// The server prefix Claude Code gives a claude.ai connector: `claude.ai
+/// Notion` becomes `claude_ai_Notion` (#10735).
+const CONNECTOR_PREFIX: &str = "claude_ai_";
+
+/// True when `server` names a claude.ai connector (#10735, owner ruling D6d).
+///
+/// What: lowercases `server`, maps every character but an ASCII letter or
+/// digit to `_`, and checks for [`CONNECTOR_PREFIX`], so the tool-name form
+/// `claude_ai_Slack` and the display form `claude.ai Slack` both match.
+/// Test: `claude_ai_connectors_are_exempt_from_the_family_deny_10735`.
+fn is_claude_ai_connector(server: &str) -> bool {
+    let mapped: String = server
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    mapped.starts_with(CONNECTOR_PREFIX)
+}
+
+/// `family` unless `server` is a claude.ai connector and `family` one of the
+/// built-in Slack, Gmail, Notion or Google Chat families (#10735).
+fn unless_connector(server: &str, family: Classification) -> Classification {
+    match &family {
+        Classification::Family(name)
+            if is_claude_ai_connector(server)
+                && (SERVER_FAMILIES.contains(&name.as_str()) || name == GMAIL_TOOL) =>
+        {
+            Classification::Unrelated
+        }
+        _ => family,
+    }
+}
 
 /// What a tool name is to the egress guard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,8 +163,10 @@ impl FamilyTable {
     /// [`Classification::Unrelated`]. Otherwise it splits on `__`; fewer than
     /// three segments, or an empty one, is [`Classification::Malformed`]. The
     /// segments between `mcp` and the last are the server; the last is the
-    /// tool, both judged by [`FamilyTable::server_family`].
+    /// tool, both judged by [`FamilyTable::server_family`]; a claude.ai
+    /// connector server then drops a built-in family (#10735).
     /// Test: `egress_family_match_normalizes_case_and_separators`,
+    /// `claude_ai_connectors_are_exempt_from_the_family_deny_10735`,
     /// `egress_gworkspace_denies_only_mail_chat_message_tools`,
     /// `egress_short_or_hollow_mcp_names_are_malformed`.
     pub(crate) fn classify(&self, tool_name: &str) -> Classification {
@@ -139,11 +181,12 @@ impl FamilyTable {
         if segments.iter().any(|s| s.is_empty()) {
             return Classification::Malformed("an empty `__`-separated segment");
         }
-        let (tool, server) = match segments[1..].split_last() {
-            Some((tool, server)) => (normalize(tool), normalize(&server.join("_"))),
+        let (tool, raw) = match segments[1..].split_last() {
+            Some((tool, server)) => (normalize(tool), server.join("_")),
             None => return Classification::Malformed("no server segment"),
         };
-        self.server_family(&server, Some(&tool))
+        // #10735: a claude.ai connector is exempt from the four families.
+        unless_connector(&raw, self.server_family(&normalize(&raw), Some(&tool)))
     }
 
     /// Classify the `server` an MCP resource tool names in its `tool_input`.
@@ -155,14 +198,16 @@ impl FamilyTable {
     /// no tool — a resource is not a tool, so a Google Workspace server is
     /// denied whole. A name with no ASCII letter or digit is
     /// [`Classification::Malformed`].
+    /// A claude.ai connector server drops a built-in family (#10735).
     /// Test: `egress_denies_family_mcp_resource_tools`,
-    /// `egress_allows_resource_tools_naming_unrelated_servers`.
+    /// `egress_allows_resource_tools_naming_unrelated_servers`,
+    /// `claude_ai_connectors_are_exempt_from_the_family_deny_10735`.
     pub(crate) fn classify_resource_server(&self, server: &str) -> Classification {
-        let server = normalize(server);
-        if server.is_empty() {
+        let normalized = normalize(server);
+        if normalized.is_empty() {
             return Classification::Malformed("a server name with no letter or digit");
         }
-        self.server_family(&server, None)
+        unless_connector(server, self.server_family(&normalized, None))
     }
 
     /// The family of a normalized `server`, given its normalized `tool`.
@@ -198,14 +243,16 @@ mod lockdown_tests {
     use super::{GWORKSPACE, GWORKSPACE_MESSAGING, SERVER_FAMILIES};
     use trusty_mpm::core::architect_lockdown::ARCHITECT_DENY_GLOBS;
 
-    /// #10127: the Architect's launch deny names every family this hook
-    /// denies, so a family added here and not there fails. The hook's
-    /// separator-blind spellings (`google_workspace`, `gsuite`) are hook-only.
+    /// #10127: the Architect's launch deny names every gworkspace messaging
+    /// word this hook denies. #10735: it names no Slack, Gmail, Notion or
+    /// Google Chat family, whose globs would also deny the claude.ai
+    /// connectors. The hook's separator-blind spellings (`google_workspace`,
+    /// `gsuite`) are hook-only.
     #[test]
-    fn the_architect_deny_covers_every_egress_family() {
+    fn the_architect_deny_covers_gworkspace_and_no_connector_family() {
         for family in SERVER_FAMILIES {
             let glob = format!("mcp__*{family}*");
-            assert!(ARCHITECT_DENY_GLOBS.contains(&glob.as_str()), "{glob}");
+            assert!(!ARCHITECT_DENY_GLOBS.contains(&glob.as_str()), "{glob}");
         }
         for word in GWORKSPACE_MESSAGING {
             let glob = format!("mcp__*{GWORKSPACE}*__*{word}*");

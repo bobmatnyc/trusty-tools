@@ -132,21 +132,18 @@ pub(crate) fn assert_allowed(out: &Output, case: &str) {
 
 /// One tool of every family, read/search/list tools included (Bob ruling 4),
 /// and lookalike casings and separators of each server segment.
+/// #10735: no claude.ai connector server; `connectors_allowed_10735.rs` holds those.
 const FAMILY_TOOLS: &[&str] = &[
     "mcp__slack-mcp__slack_send_message",
     "mcp__slack-mcp__slack_list_channels",
-    "mcp__claude_ai_Slack__slack_read_channel",
     "mcp__SLACK__search_messages",
     "mcp__Slack.Mcp__slack_get_thread",
-    "mcp__claude_ai_Gmail__gmail_search_messages",
     "mcp__gmail__list_labels",
     "mcp__G-Mail__send",
     "mcp__notion__notion-search",
-    "mcp__claude_ai_Notion__notion-fetch",
     "mcp__NoTion_MCP__create_page",
     "mcp__googlechat__list_spaces",
     "mcp__Google-Chat__send_message",
-    "mcp__claude_ai_Google_Chat__read_space",
     "mcp__gchat__send",
     "mcp__G_CHAT__list",
     "mcp__gworkspace-mcp__search_gmail_messages",
@@ -158,7 +155,6 @@ const FAMILY_TOOLS: &[&str] = &[
     "mcp__google_workspace__send_gmail_message",
     "mcp__Google-Workspace__send_chat_message",
     "mcp__google-mail__send",
-    "mcp__claude_ai_Google_Mail__search_threads",
     // #8454 final round: a gmail tool on an unlisted server, and `gsuite`.
     "mcp__mcp-gsuite__create_gmail_draft",
     "mcp__mcp-gsuite__reply_gmail_email",
@@ -200,7 +196,7 @@ fn egress_denies_under_unrestricted_and_disable_hooks() {
         ("CLAUDE_MPM_SUB_AGENT", "1"),
     ];
     for tool in [
-        "mcp__claude_ai_Slack__slack_send_message",
+        "mcp__slack-mcp__slack_send_message",
         "mcp__notion__notion-search",
     ] {
         assert_denied(&run(&payload(tool), &bypassed), tool);
@@ -325,7 +321,7 @@ fn egress_denies_family_mcp_resource_tools() {
         ),
         (
             "ListMcpResourcesTool",
-            serde_json::json!({"server": "claude_ai_Gmail"}),
+            serde_json::json!({"server": "gmail"}),
         ),
         (
             "ListMcpResourcesTool",
