@@ -172,10 +172,10 @@ impl DestructiveIndexDelete {
     /// opt-in.
     ///
     /// Why (#4123): trusty-search's `search.index.delete` preserves on-disk data
-    /// unless `delete_data` is `true`. Both callers opt in deliberately: the
-    /// workspace each index describes is a disposable worktree that is being (or
-    /// has been) deleted, so preserved index data would be unreachable garbage
-    /// on disk forever.
+    /// unless `delete_data` is `true`. The orphan sweep opts in deliberately:
+    /// each index it removes describes a disposable worktree that has been
+    /// deleted, so preserved index data would be unreachable garbage on disk
+    /// forever. #10988: decommission no longer calls this.
     /// What: `{"index_id": …, "delete_data": true}`. A method rather than a free
     /// function so it cannot be called without a capability in hand.
     /// Test: `delete_params_opt_into_data_deletion`.

@@ -979,6 +979,10 @@ pub struct FleetProjectGroupWire {
     /// Sessions bound to this project (may be empty).
     #[serde(default)]
     pub sessions: Vec<ManagedSessionSummary>,
+    /// Whether the project is decommissioned (#10988); absent from an older
+    /// daemon, which reads as active.
+    #[serde(default)]
+    pub decommissioned: bool,
 }
 
 /// Response body for `GET /api/v1/sessions/managed/fleet`.

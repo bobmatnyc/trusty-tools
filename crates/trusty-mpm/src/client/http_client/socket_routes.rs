@@ -238,6 +238,12 @@ pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{name}/status",
         "mpm.projects.status",
     ),
+    // #10988
+    (
+        "POST",
+        "/api/v1/projects/{name}/decommission",
+        "mpm.projects.registry.decommission",
+    ),
     (
         "POST",
         "/api/v1/projects/{project}/deliverables",

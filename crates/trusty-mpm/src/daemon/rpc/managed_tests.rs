@@ -1210,6 +1210,7 @@ async fn managed_fleet_slim_skips_only_the_stale_assets_probe() {
             commit_email: None,
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
         })
         .await
         .expect("register project");

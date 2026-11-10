@@ -1,0 +1,3 @@
+Added
+- `tm projects decommission <name>`, the `project_decommission` MCP tool and `POST /api/v1/projects/{name}/decommission` stop a project's running sessions and mark the project decommissioned. Workspaces, session records and the search index are kept. A session of the Architect refuses the verb, and a session that fails to stop leaves the project unmarked and names the failure (#10988).
+- A project record carries `decommissioned_at`; `project_list`, `project_get`, `tm projects list` and the fleet view (`decommissioned`) show it. A new session for the project clears it; a config seed, a re-register or the boot auto-registration does not (#10988).

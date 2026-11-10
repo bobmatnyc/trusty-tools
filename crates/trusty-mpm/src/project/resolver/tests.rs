@@ -29,6 +29,7 @@ fn proj(name: &str, repo_url: &str) -> Project {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
     }
 }
 
@@ -47,6 +48,7 @@ fn proj_tagged(name: &str, repo_url: &str, tags: &[&str], desc: &str) -> Project
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
     }
 }
 

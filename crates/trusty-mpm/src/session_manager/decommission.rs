@@ -934,12 +934,12 @@ impl SessionManager {
     /// | 1 | `graceful_terminate_runtime` — SIGTERM + `kill_session` the pane | no |
     /// | 2 | `remove_session_worktree` — `git worktree remove --force`, `fs::remove_dir_all` fallback, `git worktree prune`, `git branch -D` (dirty-gated, #4344) | no |
     /// | 3 | `fs::remove_dir_all` on an SM-owned workspace (containment-gated; dirt, unpushed-commit and kept-output gated, #8663) | no |
-    /// | 4 | `delete_search_index_best_effort` — cross-daemon `DELETE /indexes/{id}` (never from a test process, #4743) | no |
+    /// | 4 | none since #10988 — the trusty-search index and its data are kept and logged | — |
     /// | 5 | clears `workspace_path`/`workspace_owned` when nothing is on disk | store-only |
     /// | 6 | clears `pending_decision`/`proposed_default` (#4400) | store-only |
     /// | 7 | writes state `Decommissioned` | store-only |
     ///
-    /// Effects 1–4 destroy state outside the record store. Any new effect added
+    /// Effects 1–3 destroy state outside the record store. Any new effect added
     /// here belongs in that table. If a caller needs a subset, give it its own
     /// function rather than a flag — that is the lesson of this PR's two review
     /// rounds, each of which found a different ungated effect.
@@ -1202,21 +1202,12 @@ impl SessionManager {
             }
         }
 
-        // Effect 4. #2033: best-effort remove the trusty-search index for a
-        // disposed workspace, alongside the worktree/clone directory. Fail-soft:
-        // an unreachable/erroring search daemon must never block or fail session
-        // teardown — `delete_search_index_best_effort` logs and swallows every
-        // failure mode itself.
-        //
-        // Note the ordering contract that makes this correct ONLY here:
-        // `search_index_id` was derived at the top of this function, BEFORE any
-        // removal, because `resolve_project_root` walks up for a `.git` marker
-        // and would otherwise resolve to the parent project's index. A caller
-        // that runs against an already-absent workspace cannot satisfy that
-        // contract, which is precisely why the record-only path does not reuse
-        // this function (PR #4725 review round 2).
+        // Effect 4 is gone. #10988 (ruling Q1, epic #10987): decommission no
+        // longer deletes the trusty-search index or its data; it names the
+        // index it kept. `search_index_id` is still derived above, before any
+        // removal, so the id names this workspace and not an ancestor's.
         if let Some(index_id) = search_index_id {
-            search_gc::delete_search_index_best_effort(&index_id).await;
+            info!(id = %id, index_id, "decommission: trusty-search index kept with its data (#10988)");
         }
 
         // Tombstone: mark Decommissioned, persist. `workspace_path`/

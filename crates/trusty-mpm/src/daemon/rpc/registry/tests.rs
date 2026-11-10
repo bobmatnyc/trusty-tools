@@ -768,6 +768,7 @@ async fn seed_project(state: &Arc<DaemonState>, name: &str) {
             commit_email: None,
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
         })
         .await
         .expect("seed the project registry");
@@ -867,6 +868,51 @@ async fn parity_projects_registry_get_agrees_across_transports() {
     )
     .await;
     assert_same("mpm.projects.registry.get", body, result, &[]);
+}
+
+/// #10988: both transports decommission through one body; each marks its own
+/// project, and the reports agree apart from the name and timestamp.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn parity_projects_registry_decommission_agrees_across_transports() {
+    let (state, _dir) = hermetic();
+    seed_project(&state, "via-http").await;
+    seed_project(&state, "via-rpc").await;
+
+    let (status, body) = http(
+        &state,
+        "POST",
+        "/api/v1/projects/via-http/decommission",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let result = rpc_ok(
+        &rpc_router(&state),
+        "mpm.projects.registry.decommission",
+        json!({ "name": "via-rpc" }),
+    )
+    .await;
+    assert!(body["project"]["decommissioned_at"].is_string(), "{body}");
+    let strip = |mut v: Value| {
+        let p = v["project"].as_object_mut().expect("project");
+        for key in ["name", "repo_url", "project_key", "decommissioned_at"] {
+            p.remove(key);
+        }
+        v
+    };
+    assert_same(
+        "mpm.projects.registry.decommission",
+        strip(body),
+        strip(result),
+        &[],
+    );
+    let registry = state.project_registry().await;
+    for name in ["via-http", "via-rpc"] {
+        assert!(registry.get(name).await.expect("row").is_decommissioned());
+    }
+    let (status, _) = http(&state, "POST", "/api/v1/projects/nope/decommission", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 /// Why: an unknown project is a `404` with a plain-text body over HTTP, which

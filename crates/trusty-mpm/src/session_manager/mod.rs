@@ -50,6 +50,8 @@ pub mod pane_rebind;
 pub mod prune;
 // #7619: the stop signal both destructive prune loops read between candidates.
 pub mod prune_progress;
+// #10988: stop a project's sessions, keep its workspaces and indexes.
+pub mod project_decommission;
 pub mod reactivate;
 mod reconcile;
 pub mod record;

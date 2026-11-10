@@ -151,6 +151,86 @@ async fn decommission_issues_no_request_to_a_live_daemon_under_test() {
     );
 }
 
+/// #10988 (ruling Q1): decommission keeps the index data even in a process
+/// that IS allowed to delete it.
+///
+/// Why: the #4743 test above passes on the test-harness refusal alone, so it
+/// cannot tell "decommission no longer deletes" from "a test may not delete".
+/// What: the same owned `full` fixture with production state explicitly
+/// allowed, so `DestructiveIndexDelete::acquire` would succeed. Both a session
+/// decommission and a project decommission must reach the daemon zero times.
+/// Restoring effect 4 makes this fail with a count of 1.
+/// Test: this function IS the test.
+#[serial_test::serial]
+#[tokio::test]
+async fn decommission_keeps_index_data_when_deletion_is_allowed() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = super::tests::make_manager_with_pane(&dir).await;
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let workspace_path = managed_root.path().join("owner").join("repo").join("full");
+    std::fs::create_dir_all(&workspace_path).expect("create the fixture workspace");
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true, // owned — the path that used to delete the index
+        )
+        .await
+        .expect("create");
+
+    let (_home, _override) = isolated_daemon_home(true);
+    let daemon = CountingDaemon::start().await;
+    daemon.self_check().await;
+
+    mgr.decommission_with_root(&record.id, managed_root.path(), None)
+        .await
+        .expect("full decommission");
+    assert_eq!(
+        daemon.seen(),
+        0,
+        "session decommission sent a request to trusty-search; it must keep the index (#10988)"
+    );
+
+    let reg_dir = crate::test_support::hermetic_temp_dir();
+    let registry = crate::project::ProjectRegistry::load(reg_dir.path())
+        .await
+        .expect("registry");
+    registry
+        .register(crate::project::Project {
+            name: "full".into(),
+            repo_url: "https://github.com/owner/full".into(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: None,
+            project_key: Some("owner/full".into()),
+            decommissioned_at: None,
+        })
+        .await
+        .expect("register");
+    mgr.decommission_project(&registry, "full")
+        .await
+        .expect("project decommission");
+    assert_eq!(
+        daemon.seen(),
+        0,
+        "project decommission sent a request to trusty-search (#10988)"
+    );
+}
+
 /// The same guarantee for the second destructive site, which before #4743 had
 /// no guard of its own at all.
 ///

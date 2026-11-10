@@ -33,6 +33,7 @@ fn project(name: &str) -> Project {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
     }
 }
 
@@ -78,6 +79,7 @@ fn seeded_state() -> ProjectCtlState {
         project_name: "trusty-tools".to_string(),
         repo_url: trusty_tools.repo_url.clone(),
         sessions: vec![summary("a1b2c3d4e5f6", "active")],
+        decommissioned: false,
     };
 
     let mut state = ProjectCtlState {

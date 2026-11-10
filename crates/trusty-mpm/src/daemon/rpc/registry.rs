@@ -149,6 +149,7 @@ pub const METHODS: &[&str] = &[
     "mpm.projects.discover",
     "mpm.projects.list",
     "mpm.projects.register",
+    "mpm.projects.registry.decommission",
     "mpm.projects.registry.get",
     "mpm.projects.registry.list",
     "mpm.projects.registry.patch",

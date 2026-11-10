@@ -70,6 +70,7 @@ async fn register_project(state: &Arc<DaemonState>, name: &str, repo_url: &str) 
             commit_email: None,
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
         })
         .await
         .expect("register project");

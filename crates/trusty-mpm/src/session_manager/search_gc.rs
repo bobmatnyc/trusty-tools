@@ -7,11 +7,11 @@
 //! never-queried index registered in the daemon, and worktrees created/torn
 //! down before population left behind 0-chunk stub indexes. This module is
 //! the missing teardown half of the lifecycle: [`disposable_workspace_index_id`]
-//! together with [`delete_search_index_best_effort`] remove a single
-//! session's index at decommission time (used by
-//! `decommission::decommission_with_root`), and
+//! names a session's index at decommission time, and
 //! [`SessionManager::sweep_orphaned_search_indexes`] periodically GCs any
-//! worktree-scoped index left behind with no matching live session.
+//! worktree-scoped index left behind with no matching live session. #10988
+//! (ruling Q1): decommission itself no longer deletes the index; it logs the id
+//! it kept.
 //! What: split out of `decommission.rs`/`prune.rs` (both near/at the 500-SLOC
 //! production cap) rather than growing either file — this module's `impl
 //! SessionManager` block is additive, exactly like `adopt.rs`/`prune.rs`.
@@ -62,8 +62,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// forever. Erring short deletes live work.
 const ORPHAN_GRACE: Duration = Duration::from_secs(300);
 
-/// Whether — and under which id — a session's workspace should lose its
-/// trusty-search index on decommission (#2033).
+/// The trusty-search index id of a disposable session workspace, named at
+/// decommission (#2033; since #10988 logged as kept, never deleted).
 ///
 /// Why: pure predicate so the safety rule is unit-testable without a live
 /// daemon or a real git checkout. The rule intentionally mirrors
@@ -97,56 +97,6 @@ pub(super) fn disposable_workspace_index_id(
     let root = trusty_common::resolve_project_root(ws);
     let id = trusty_common::derive_index_id(&root);
     if id.trim().is_empty() { None } else { Some(id) }
-}
-
-/// Best-effort `search.index.delete` against the running trusty-search daemon
-/// (#2033).
-///
-/// Why: decommissioning a disposable managed-session workspace removes its
-/// directory from disk; leaving its trusty-search index registered is exactly
-/// the orphan-index problem this issue reports. Fail-soft by design: an
-/// unreachable or erroring search daemon must NEVER block or fail session
-/// teardown, so every outcome is logged and swallowed here — the caller
-/// (`decommission_with_root`) invokes this unconditionally.
-/// What: acquires the [`DestructiveIndexDelete`] capability and, when granted,
-/// issues the delete and logs which of the four outcomes it got. A refused
-/// capability — no daemon socket bound, or this is a test process (#4743) — is a
-/// no-op, logged by `acquire` itself.
-/// Test: exercised via the live-daemon decommission integration path;
-/// `decommission_issues_no_request_to_a_live_daemon_under_test` pins that a
-/// test process reaches the daemon zero times.
-pub(super) async fn delete_search_index_best_effort(index_id: &str) {
-    // #4743: no socket, no request, no `delete_data` opt-in without this. A
-    // test process cannot acquire it, so the call is never built at all.
-    let Some(deleter) = DestructiveIndexDelete::acquire() else {
-        return;
-    };
-    match deleter.delete(index_id).await {
-        DeleteOutcome::Removed => {
-            info!(
-                index_id,
-                "decommission: removed trusty-search index (#2033)"
-            );
-        }
-        DeleteOutcome::NotRemoved(detail) => {
-            warn!(
-                index_id,
-                "decommission: trusty-search kept the index: {detail}"
-            );
-        }
-        DeleteOutcome::Refused { code, message } => {
-            warn!(
-                index_id,
-                code, "decommission: trusty-search index delete refused: {message}"
-            );
-        }
-        DeleteOutcome::Transport(e) => {
-            warn!(
-                index_id,
-                "decommission: trusty-search index delete failed: {e}"
-            );
-        }
-    }
 }
 
 /// Wire shape of one row of `search.indexes.list` with `details`.
