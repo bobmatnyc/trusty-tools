@@ -6,7 +6,7 @@
 //! trusty-mpm, which has no Cargo edge on trusty-console, so the method names
 //! and the payload types it must decode live here, beside the other per-service
 //! RPC vocabularies (`memory_rpc`, `mpm_rpc`).
-//! What: the socket's service name, the two method names, the
+//! What: the socket's service name, the method names, the
 //! [`ConsoleHealth`](crate::console_rpc::ConsoleHealth) and
 //! [`ConsoleFleetStatus`](crate::console_rpc::ConsoleFleetStatus) response
 //! types, and the per-service row types
@@ -14,7 +14,10 @@
 //! [`ServiceStatus`](crate::console_rpc::ServiceStatus),
 //! [`ServiceLifecycle`](crate::console_rpc::ServiceLifecycle)) that moved here from `trusty_console::connector`,
 //! which re-exports them. Ungated: the types need only `serde`, and a reader
-//! should not compile the socket machinery to decode a payload.
+//! should not compile the socket machinery to decode a payload. The
+//! `console.machine_status` and `console.history` payloads embed host metrics,
+//! so they live in the `metrics` submodule, gated on `console-metrics` +
+//! `host-metrics` (#10942).
 //!
 //! **Forward compatibility.** No type here uses `deny_unknown_fields`, and every
 //! field a later console adds must carry `#[serde(default)]`, so an older TUI
@@ -26,6 +29,10 @@
 // See #10902
 
 use serde::{Deserialize, Serialize};
+
+// #10942: the machine-status and history payloads; see the module docs.
+#[cfg(all(feature = "console-metrics", feature = "host-metrics"))]
+pub mod metrics;
 
 /// The service name the console's socket is derived from.
 ///
@@ -39,13 +46,25 @@ pub const METHOD_HEALTH: &str = "console.health";
 /// The console's cached all-services snapshot, as [`ConsoleFleetStatus`].
 pub const METHOD_FLEET_STATUS: &str = "console.fleet_status";
 
+/// Whole-machine status, as `metrics::ConsoleMachineStatus` (#10942).
+pub const METHOD_MACHINE_STATUS: &str = "console.machine_status";
+
+/// The 10-minute host, transition and per-service window, as
+/// `metrics::HistorySnapshot` (#10942, #10943).
+pub const METHOD_HISTORY: &str = "console.history";
+
 /// Every method the console's socket serves.
 ///
 /// Why: a contract test compares the router's names against this list, so a
 /// rename shows up as a failing assertion rather than as a consumer reporting
 /// `method_not_found`. trusty-console's router test compares against it.
 /// Test: `console_fleet_status_decodes_a_payload_missing_new_fields`.
-pub const METHODS: &[&str] = &[METHOD_HEALTH, METHOD_FLEET_STATUS];
+pub const METHODS: &[&str] = &[
+    METHOD_HEALTH,
+    METHOD_FLEET_STATUS,
+    METHOD_MACHINE_STATUS,
+    METHOD_HISTORY,
+];
 
 /// The `console.health` answer.
 ///
@@ -239,6 +258,14 @@ mod console_rpc_tests {
         assert_eq!(row.status, ServiceStatus::Running);
         assert_eq!(row.lifecycle, ServiceLifecycle::Daemon);
         assert_eq!(row.cpu_pct, None);
-        assert_eq!(METHODS, [METHOD_HEALTH, METHOD_FLEET_STATUS]);
+        assert_eq!(
+            METHODS,
+            [
+                METHOD_HEALTH,
+                METHOD_FLEET_STATUS,
+                METHOD_MACHINE_STATUS,
+                METHOD_HISTORY
+            ]
+        );
     }
 }
