@@ -48,6 +48,12 @@ pub enum TileHealth {
     Timeout,
     /// Installed; runs on demand with no resident daemon.
     OnDemand,
+    /// The service has no UDS endpoint, so the TUI does not probe it. This
+    /// is not a failure (#10899).
+    NoUdsEndpoint {
+        /// The server-side gap, e.g. the issue that adds the socket.
+        detail: &'static str,
+    },
 }
 
 impl TileHealth {
@@ -61,6 +67,7 @@ impl TileHealth {
             TileHealth::Absent => "not installed",
             TileHealth::Timeout => "timeout",
             TileHealth::OnDemand => "on demand",
+            TileHealth::NoUdsEndpoint { .. } => "no UDS endpoint",
         }
     }
 

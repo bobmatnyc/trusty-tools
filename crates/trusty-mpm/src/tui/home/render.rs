@@ -120,7 +120,10 @@ fn health_color(health: &TileHealth) -> Color {
         TileHealth::OnDemand => Color::Blue,
         TileHealth::Degraded { .. } | TileHealth::Timeout => Color::Yellow,
         TileHealth::Down { .. } => Color::Red,
-        TileHealth::Absent | TileHealth::Pending => Color::DarkGray,
+        // See #10899: not UDS-reachable is neutral, never the red of Down.
+        TileHealth::Absent | TileHealth::Pending | TileHealth::NoUdsEndpoint { .. } => {
+            Color::DarkGray
+        }
     }
 }
 
@@ -140,6 +143,7 @@ pub fn tile_lines(id: ServiceId, health: &TileHealth) -> Vec<Line<'static>> {
         TileHealth::Degraded { reason } | TileHealth::Down { reason } => {
             lines.push(Line::from(reason.clone()))
         }
+        TileHealth::NoUdsEndpoint { detail } => lines.push(Line::from(*detail)),
         _ => {}
     }
     if id == ServiceId::Mpm {
@@ -163,9 +167,15 @@ pub fn service_lines(id: ServiceId, state: &HomeState) -> Vec<Line<'static>> {
         TileHealth::Degraded { reason } | TileHealth::Down { reason } => {
             lines.push(Line::from(format!("detail    {reason}")))
         }
+        TileHealth::NoUdsEndpoint { detail } => {
+            lines.push(Line::from(format!("detail    {detail}")))
+        }
         _ => {}
     }
-    if let Ok(socket) = id.socket() {
+    // See #10899: a service with no UDS endpoint has no socket to show.
+    if !matches!(health, TileHealth::NoUdsEndpoint { .. })
+        && let Ok(socket) = id.socket()
+    {
         lines.push(Line::from(format!("socket    {}", socket.display())));
     }
     lines.push(Line::from(""));
