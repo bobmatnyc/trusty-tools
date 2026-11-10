@@ -148,7 +148,8 @@ pub async fn fetch_live(
             .query(&[("cwd", dir)])
             .send()
             .await
-            .and_then(|r| r.error_for_status())
+            .map_err(|e| format!("mpm.delegation.list: {e}"))?
+            .error_for_status()
             .map_err(|e| format!("mpm.delegation.list: {e}"))?
             .json()
             .await
