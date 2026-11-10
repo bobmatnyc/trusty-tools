@@ -977,6 +977,46 @@ async fn c69_stale_hit_is_flagged_and_withdrawn_hits_are_dropped() {
     ));
 }
 
+// #10873: the retrieve-hit path of D64 (`retrieve::enrich`) had no test.
+/// Why: criterion 142 under owner ruling D64, retrieval half — a retrieval
+/// hit reports the same verification `history` as the verification axis,
+/// so a hashless event that lives only in frontmatter counts there too,
+/// once, and a malformed entry does not count.
+/// What: a hand-written concept with no record lines whose `verified` list
+/// holds one event twice, a second event and two malformed entries; a hit
+/// of an older revision and a hit of the current text both report
+/// Unverified with history 2, as `verification_state` does.
+/// Test: itself.
+#[tokio::test]
+async fn c142_retrieve_hit_counts_frontmatter_only_hashless_events() {
+    let f = fx();
+    std::fs::write(
+        f.root.join("h.md"),
+        "---\ntype: Note\nverified:\n  - { by: human:old, at: 2026-01-01T00:00:00Z }\n  \
+         - { by: human:old, at: 2026-01-01T00:00:00Z }\n  \
+         - { by: human:jo, at: 2026-02-01T00:00:00Z }\n  \
+         - { by: human:no-at }\n  - just-a-string\n---\nAlpha hashless words here\n",
+    )
+    .unwrap();
+    let fake = Fake::new(&f.index_root, true);
+    fake.seed("bundle/h.md", "Alpha old revision words no longer present");
+    fake.seed("bundle/h.md", "Alpha hashless words here");
+    let q = Query {
+        text: "alpha".into(),
+        top_k: 10,
+    };
+    let hits = retrieve(&f.bundle(), INDEX, &q, fake.as_ref(), now())
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    let want = VerificationState::Unverified { history: 2 };
+    assert_eq!(f.bundle().verification_state(&id("h")).unwrap(), want);
+    let stale = hits.iter().find(|h| h.stale_revision).unwrap();
+    assert_eq!(stale.verification, want, "stale hit: {stale:?}");
+    let current = hits.iter().find(|h| !h.stale_revision).unwrap();
+    assert_eq!(current.verification, want, "current hit: {current:?}");
+}
+
 /// Why: a leaked bookkeeping file never reaches a caller (§5.3.1). What:
 /// a hit under `_sources/`. Test: itself.
 #[tokio::test]
