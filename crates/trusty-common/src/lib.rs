@@ -118,9 +118,9 @@ pub mod chat;
 pub mod claude_config;
 
 /// Which Claude models reject `temperature` (#9318); shared by every request
-/// builder that sets it.
+/// builder that sets it, in this crate and downstream (#10939).
 #[cfg(any(feature = "bedrock", feature = "inference-client"))]
-pub(crate) mod claude_temperature;
+pub mod claude_temperature;
 
 /// Codex CLI MCP-server registration (`~/.codex/config.toml`).
 ///
