@@ -10,9 +10,11 @@ grouped by key; the newest doc (created, then id) decides the action, and one
 every doc of the group applied with the CLI's stdout; a non-zero exit, a timeout or a missing binary marks them failed
 with the CLI's stderr, whitespace-collapsed and capped at MESSAGE_MAX characters. An unwatch of a key that an existing
 local/watch.json does not hold is applied as "already not watched" with no CLI call: that covers a crash between the CLI
-run and the status write. Each status write pins if_version; a doc changed meanwhile is left for the next run. Never
-runs `tm fleet project list`, which creates watch.json when it is absent.
-Exit: 0 every request applied (or none new); 1 at least one marked failed; 2 store error.
+run and the status write. Each status write pins if_version; a doc another writer changed meanwhile keeps that writer's
+content, is reported on stderr and is left for the next run. A status write the store refuses (SchemaInvalid) leaves
+the doc "new" and is reported on stderr. Never runs `tm fleet project list`, which creates watch.json when it is absent.
+Exit: 0 every request applied, left to another writer, or none new; 1 at least one marked failed; 2 store error, or
+the store refused to record an outcome.
 Root: --root or DASHBOARD_ROOT, default local/owner-queue. --dir defaults to this Architect directory.
 Test: tests/test_watch_apply.py
 """
@@ -49,7 +51,8 @@ def refusal(data):
     action, key = data.get("action"), data.get("key")
     if action not in VERBS:
         return cap(f"unknown action {action!r}: use watch or unwatch")
-    if not isinstance(key, str) or key.startswith("-") or not KEY_RE.match(key):
+    # #10896: fullmatch, as `$` under match lets a trailing "\n" through.
+    if not isinstance(key, str) or key.startswith("-") or not KEY_RE.fullmatch(key):
         return cap(f"refused key {key!r}: not a registry key")
     return None
 
@@ -98,22 +101,28 @@ def plan(docs):
 
 
 def mark(store, doc, status, message):
-    """Write one outcome pinned to the version read; False when the doc changed meanwhile or the store refuses it."""
+    """Write one outcome pinned to the version read: "written", "conflict" (changed meanwhile) or "refused" (schema)."""
     try:
         store.update(COLL, doc["id"], {"status": status, "message": message, "done_at": ds.now_iso()},
                      if_version=doc["version"])
-        return True
-    except (ds.Conflict, ds.SchemaInvalid) as e:   # one bad doc never stops the others
-        print(f"watch-apply: {doc['id']}: {e}; not written", file=sys.stderr)
-        return False
+        return "written"
+    except ds.Conflict as e:   # one bad doc never stops the others
+        print(f"watch-apply: {doc['id']}: changed by another writer ({e}); not written, left for the next run",
+              file=sys.stderr)
+        return "conflict"
+    except ds.SchemaInvalid as e:
+        print(f"watch-apply: {doc['id']}: store refused the {status} outcome ({e}); left new", file=sys.stderr)
+        return "refused"
 
 
 def apply(store, arch_dir, tm, timeout):
-    """Apply every new request; returns [(doc id, action, key, status, message)] for the docs written."""
+    """Apply every new request; returns ([(doc id, action, key, status, message)] written, store-refused count)."""
     refused, groups = plan(store.list_docs(COLL, status="new"))
-    results = []
+    results, unrecorded = [], 0
     for doc, why in refused:
-        if mark(store, doc, "failed", why):
+        outcome = mark(store, doc, "failed", why)
+        unrecorded += outcome == "refused"
+        if outcome == "written":
             results.append((doc["id"], doc["data"].get("action"), doc["data"].get("key"), "failed", why))
     for key in sorted(groups):
         group = groups[key]
@@ -125,9 +134,11 @@ def apply(store, arch_dir, tm, timeout):
             ok, message = run_cli(tm, VERBS[action], arch_dir, key, timeout)
         status = "applied" if ok else "failed"
         for doc in group:
-            if mark(store, doc, status, message):
+            outcome = mark(store, doc, status, message)
+            unrecorded += outcome == "refused"
+            if outcome == "written":
                 results.append((doc["id"], action, key, status, message))
-    return results
+    return results, unrecorded
 
 
 def main(argv=None):
@@ -138,12 +149,15 @@ def main(argv=None):
     args = ap.parse_args(argv)
     tm = os.environ.get("TM_BIN") or "tm"
     try:
-        results = apply(ds.Store(args.root, actor="watch-apply"), os.path.abspath(args.dir), tm, args.timeout)
+        results, unrecorded = apply(ds.Store(args.root, actor="watch-apply"), os.path.abspath(args.dir), tm,
+                                    args.timeout)
     except (ds.StoreError, OSError) as e:
         print(f"watch-apply: store error: {e}", file=sys.stderr)
         return 2
     for doc_id, action, key, status, message in results:
         print(f"{doc_id} {action} {key}: {status}: {message}")
+    if unrecorded:   # #10896: an outcome the store would not record is not success
+        return 2
     return 1 if any(r[3] == "failed" for r in results) else 0
 
 

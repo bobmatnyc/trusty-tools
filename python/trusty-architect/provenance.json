@@ -88,7 +88,7 @@
     "scripts/start-fleet-poll.sh": "8f580a6cea0b5fbc2f17377a96f7fe7aa081eaa9045f1980adfa4ae73b05feef",
     "scripts/state-archive.py": "f240079c39a9937cfc6981c1f18bc20f1c574ace4c7a286c9551bd72ceaf4ba6",
     "scripts/turn-active.py": "3b297743a844a6057787c5c772bac96ad863fd726f162350a61f4ebffb049168",
-    "scripts/watch-apply.py": "a9004617257055e772039e4eacecc834a26568b258e80912802747e626059f62",
+    "scripts/watch-apply.py": "fc11a681e07248e52b8f2e111a33aede15c609166f42c9d67a23c36210b94a7a",
     "skills/architect-completion-standard.md": "b00cc7544daacb4a48d6b8335666f737cd20aab4211286160974b547fdf71403",
     "skills/architect-dashboard.md": "ac71a5540005a50c480c9834e057b98d9614e440e7f7a5be55e90773f7eb44c5",
     "skills/architect-drift-check.md": "26a86b0a4ac74bdc255e7dd5c42e5a818b0cb776ccd3f513193f30ec5a400401",
