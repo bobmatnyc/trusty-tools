@@ -31,6 +31,8 @@ pub(crate) mod auto_git_init;
 pub(crate) mod banner;
 pub(crate) mod commit_trailers;
 pub(crate) mod compress;
+// #10973: `tm compress -- <cmd>`, the run mode an isolation worktree accepts.
+pub(crate) mod compress_run;
 pub(crate) mod daemon;
 // #9034: three-state daemon pid identity, read from argv.
 pub(crate) mod daemon_pid_identity;
@@ -134,6 +136,8 @@ pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
 pub(crate) mod hook_post;
 pub(crate) mod hook_rewrite;
+// #10973: the compression rewrite an isolation worktree's classifier accepts.
+pub(crate) mod hook_rewrite_isolated;
 // #7975: the stdin payload read that names its failure, so a guard can deny on it.
 pub(crate) mod hook_stdin;
 pub(crate) mod hooks;

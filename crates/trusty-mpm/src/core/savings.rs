@@ -369,7 +369,9 @@ pub fn default_savings_log() -> PathBuf {
 /// newline. Returns the IO error unchanged; every producer treats a failure as
 /// non-fatal, since a missing savings row must never cost a session its launch.
 /// Test: `append_then_fold_round_trips`, `append_creates_the_usage_directory`.
-pub fn append_row(ledger: &Path, row: &SavingsRow) -> std::io::Result<()> {
+/// #10973: generic so a row carrying extra columns (a tagged `compress` row, an
+/// `opportunity` row) leaves through the same single-write path.
+pub fn append_row<T: Serialize + ?Sized>(ledger: &Path, row: &T) -> std::io::Result<()> {
     crate::core::home_write_fence::check(ledger); // #8545
     if let Some(parent) = ledger.parent() {
         std::fs::create_dir_all(parent)?;
@@ -555,7 +557,10 @@ fn append_row_once_locked(ledger: &Path, row: &SavingsRow) -> std::io::Result<Ap
 /// callers keep one error type.
 /// Test: `a_row_and_its_newline_leave_in_one_write`,
 /// `append_then_fold_round_trips`.
-pub fn write_row_line(sink: &mut impl std::io::Write, row: &SavingsRow) -> std::io::Result<()> {
+pub fn write_row_line<T: Serialize + ?Sized>(
+    sink: &mut impl std::io::Write,
+    row: &T,
+) -> std::io::Result<()> {
     let mut line = serde_json::to_string(row)
         .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidData, source))?;
     line.push('\n');
@@ -922,6 +927,11 @@ fn visit_accepted_rows(
             }
         };
         if session_id.is_some_and(|wanted| row.session_id != wanted) {
+            continue;
+        }
+        // #10973: an opportunity row measures what COULD be saved; it is never
+        // a saving, so no fold counts it and none warns about its zero.
+        if row.technique == crate::core::savings_opportunity::TECHNIQUE_OPPORTUNITY {
             continue;
         }
         if row.tokens_saved <= 0 {

@@ -1,0 +1,3 @@
+Fixed
+
+- `tm hook` compresses covered Bash output inside an isolation worktree again. Since #7477 it skipped every call under `.claude/worktrees/`, where delegated agents run, so the `compress` savings rows fell from hundreds a day to tens. There it now rewrites to one simple command, `tm compress --tool "<tool>" -- <command>`, which runs the program, compresses its stdout and exits with the program's own status. The `{ …; printf …; } | tm compress` shape the isolation classifier refused is still never emitted there, a `deny` permission rule on the original command still skips the rewrite, and heavy builds stay leased uncompressed (#10973).

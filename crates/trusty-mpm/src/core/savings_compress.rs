@@ -43,6 +43,7 @@ use std::path::Path;
 
 use crate::core::savings::{BYTES_PER_TOKEN, SavingsRow, TECHNIQUE_COMPRESS, append_row, now_ts};
 use crate::core::savings_divert::{MIN_COST_SAVED_USD, ParentModel, resolve_session_price};
+use crate::core::savings_opportunity::{TOOL_TYPE_BASH, TaggedSavingsRow};
 
 /// Append one `compress` row for a run that actually shrank its input.
 ///
@@ -52,13 +53,15 @@ use crate::core::savings_divert::{MIN_COST_SAVED_USD, ParentModel, resolve_sessi
 /// resolving it here) keeps this writer and the statusline reader on the SAME
 /// root, the way [`crate::core::savings_divert::record_divert`] does.
 /// What: declines on an empty `session_id`, an unpriceable session model, or a
-/// non-positive byte delta; otherwise appends to
+/// non-positive byte delta; otherwise appends — tagged `tool_type: bash` and
+/// `tool_name` (#10973) — to
 /// [`crate::core::savings::savings_log_in`]. Every failure is a log line and a
 /// return — never an error to the caller.
 /// Test: `a_compress_run_appends_exactly_one_row`, `passthrough_output_writes_no_row`.
 pub fn record_compress(
     root: &Path,
     session_id: &str,
+    tool_name: &str,
     bytes_before: usize,
     bytes_after: usize,
     compression_path: &str,
@@ -66,6 +69,7 @@ pub fn record_compress(
     record_compress_with(
         root,
         session_id,
+        tool_name,
         bytes_before,
         bytes_after,
         compression_path,
@@ -85,6 +89,7 @@ pub fn record_compress(
 fn record_compress_with(
     root: &Path,
     session_id: &str,
+    tool_name: &str,
     bytes_before: usize,
     bytes_after: usize,
     compression_path: &str,
@@ -106,7 +111,13 @@ fn record_compress_with(
     let ledger = crate::core::savings::savings_log_in(root);
     // The compressed text is already the caller's return value — a ledger
     // failure must not turn a compression that worked into one that failed.
-    if let Err(source) = append_row(&ledger, &row) {
+    // #10973: tagged with the tool, so savings break down per tool type.
+    let tagged = TaggedSavingsRow {
+        row: &row,
+        tool_type: TOOL_TYPE_BASH,
+        tool_name,
+    };
+    if let Err(source) = append_row(&ledger, &tagged) {
         tracing::warn!(
             ledger = %ledger.display(),
             %source,

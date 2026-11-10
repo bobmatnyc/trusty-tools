@@ -541,7 +541,13 @@ async fn main() -> anyhow::Result<()> {
         // #6887: the cheap worker `--divert-check` steers the agent to.
         Some(Command::Divert { action }) => commands::divert::run(action).await,
         Some(Command::Memory { action }) => memory(action).await,
-        Some(Command::Compress { tool }) => run_compress(&tool).await,
+        Some(Command::Compress { tool, command }) if command.is_empty() => {
+            run_compress(&tool).await
+        }
+        // #10973: the run mode exits with the wrapped program's own status.
+        Some(Command::Compress { tool, command }) => {
+            std::process::exit(commands::compress_run::run_compress_command(&tool, &command).await)
+        }
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
         // returns here — the `!` it yields coerces into this match's type.
         Some(Command::Wait(args)) => commands::wait::run(args),

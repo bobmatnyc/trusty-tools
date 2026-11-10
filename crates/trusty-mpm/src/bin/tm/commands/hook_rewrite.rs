@@ -126,6 +126,24 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// `rewrite_still_wraps_tools_with_a_compression_filter`.
 pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<String> {
     let trimmed = command.trim();
+    let tool = compressible_tool_name(trimmed)?;
+    // #7384: the brace group carries the wrapped command's exit status into the
+    // filter, which a pipeline otherwise discards.
+    Some(format!(
+        "{} | tm compress --tool \"{tool}\"",
+        crate::commands::compress::wrap_command_reporting_exit(trimmed)
+    ))
+}
+
+/// The `tm compress --tool` value for `trimmed`, when every rewrite guard passes.
+///
+/// Why (#10973): the brace-group rewrite above and the isolation-worktree
+/// rewrite in `hook_rewrite_isolated` must refuse exactly the same commands, so
+/// the guards live in one place.
+/// What: `None` for every case [`rewrite_bash_command_for_compression`]
+/// documents; otherwise the [`effective_tool_name`] a filter covers.
+/// Test: every `rewrite_*` case reaches this.
+pub(crate) fn compressible_tool_name(trimmed: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
@@ -157,16 +175,15 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
     if !has_filter_for(&tool) {
         return None;
     }
-    // #7384: the brace group carries the wrapped command's exit status into the
-    // filter, which a pipeline otherwise discards.
-    Some(format!(
-        "{} | tm compress --tool \"{tool}\"",
-        crate::commands::compress::wrap_command_reporting_exit(trimmed)
-    ))
+    Some(tool)
 }
 
 /// [`rewrite_bash_command_for_compression`], unless the call runs in an
 /// isolation worktree.
+///
+/// #10973: the build-lease rewrite's compression step only. A heavy build there
+/// stays leased uncompressed, because the lease finds the build by its program
+/// word; every other call goes through `hook_rewrite_isolated`.
 ///
 /// Why (#7477): Claude Code's worktree-isolation classifier refuses the
 /// rewritten `{ …; printf …; } | tm compress --tool "…"` shape, so a wrapped
@@ -202,7 +219,7 @@ pub(crate) fn rewrite_bash_command_unless_isolated(
 /// `.claude/worktrees`. Purely lexical, like that guard.
 /// Test: `no_rewrite_inside_an_isolation_worktree`,
 /// `rewrite_outside_an_isolation_worktree_is_unchanged`.
-fn is_isolation_worktree(cwd: &Path) -> bool {
+pub(crate) fn is_isolation_worktree(cwd: &Path) -> bool {
     worktree_root(cwd)
         .and_then(|root| root.parent().map(|p| p.ends_with(".claude/worktrees")))
         .unwrap_or(false)
@@ -214,7 +231,7 @@ fn is_isolation_worktree(cwd: &Path) -> bool {
 /// both hooks agree on which tree a call stands in.
 /// What: the payload's string `cwd`, else [`std::env::current_dir`], else
 /// `None` — which [`rewrite_bash_command_unless_isolated`] treats as isolated.
-/// Test: `hook_stays_silent_for_a_bash_call_in_an_isolation_worktree`.
+/// Test: `hook_never_emits_the_refused_shape_in_an_isolation_worktree`.
 pub(crate) fn hook_cwd(payload: Option<&serde_json::Value>) -> Option<PathBuf> {
     payload
         .and_then(|v| v.get("cwd"))
@@ -430,7 +447,7 @@ pub(crate) fn first_command_token(command: &str) -> Option<String> {
 /// `pm_guard_bash::unclassifiable_command`.
 /// Test: `shlex_words_lexes_split_quoting`,
 /// `shlex_words_falls_back_on_unbalanced_quoting`.
-fn shlex_words(command: &str) -> Vec<String> {
+pub(crate) fn shlex_words(command: &str) -> Vec<String> {
     shlex::split(command).unwrap_or_else(|| {
         command
             .split_whitespace()

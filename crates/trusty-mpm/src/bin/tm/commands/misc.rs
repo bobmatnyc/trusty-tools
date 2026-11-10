@@ -9,9 +9,7 @@
 //! Test: `cli_parses_*` parse tests for each command in `tests.rs`.
 
 use crate::cli::{CliCompressionLevel, OptimizerAction, OverseerAction};
-use crate::commands::hook_rewrite::{
-    build_pretooluse_rewrite_response, hook_cwd, rewrite_bash_command_unless_isolated,
-};
+use crate::commands::hook_rewrite::{build_pretooluse_rewrite_response, hook_cwd};
 use crate::formatters::session::short_id;
 use crate::types::EventRow;
 
@@ -437,10 +435,12 @@ async fn detect_idle_parking_from_payload_in(
 /// build the guard refuses gets no rewrite here; the guard's deny decides it.
 /// What: the lease response for a heavy build, the compression-only response
 /// (#1956) otherwise, `None` when neither applies. Inside an isolation
-/// worktree, or with an unreadable cwd, neither response compresses (#7477) —
-/// the lease itself still applies there.
+/// worktree, or with an unreadable cwd, a heavy build is leased uncompressed
+/// (#7477) and any other covered command takes the one-command compression
+/// shape (#10973, `hook_rewrite_isolated`).
 /// Test: `hook_emits_the_guards_lease_rewrite_for_a_heavy_build` in
-/// `tests/tm_hook_pm_guard_build_lease.rs`.
+/// `tests/tm_hook_pm_guard_build_lease.rs`;
+/// `hook_compresses_a_filter_covered_command_inside_an_isolation_worktree`.
 fn pretooluse_bash_rewrite(
     cmd: &str,
     tool_input: Option<&serde_json::Value>,
@@ -453,9 +453,18 @@ fn pretooluse_bash_rewrite(
             super::pm_guard_build_lease::rewrite_response(tool_input, &new, permission),
         ),
         (LeaseRewrite::Refuse(_), _) => None,
-        // #7477: never inside an isolation worktree, whose classifier refuses the wrap.
-        (LeaseRewrite::None, _) => rewrite_bash_command_unless_isolated(cmd, Some(cwd))
-            .map(|rewritten| build_pretooluse_rewrite_response(&rewritten).to_string()),
+        // #10973: inside an isolation worktree the rewrite takes the one-command
+        // shape its classifier accepts (#7477 refused the brace group there).
+        (LeaseRewrite::None, _) => {
+            super::hook_rewrite_isolated::rewrite_bash_command_for_cwd(cmd, Some(cwd)).map(|r| {
+                match r.permission {
+                    None => build_pretooluse_rewrite_response(&r.command).to_string(),
+                    permission => super::pm_guard_build_lease::rewrite_response(
+                        tool_input, &r.command, permission,
+                    ),
+                }
+            })
+        }
     }
 }
 
