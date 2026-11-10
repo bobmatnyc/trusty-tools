@@ -188,7 +188,7 @@ Each pass, list what the owner wrote and act on it in the same pass:
 
 - `watch_changes` (status `new`, kind `watch_change`) is the owner's Watch or
   Unwatch of a registered project. Do not apply it by hand and never edit
-  `local/watch.json`: run `python3 scripts/watch-apply.py`, which runs
+  the watch list file: run `scripts/watch-apply.py`, which runs
   `tm fleet project add|remove` once per key and records `applied` or `failed`
   with the CLI's message (`tm-fleet-check` step 1). A `failed` request waits
   for the owner's Retry or Dismiss.
