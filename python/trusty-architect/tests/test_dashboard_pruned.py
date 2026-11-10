@@ -48,7 +48,9 @@ def test_delete_logs_full_doc(env):
     assert cli(root, "--actor", "tester", "delete", "items", "D01", env=e)[0] == 0
     (rec,) = lines(root)
     assert (rec["collection"], rec["id"], rec["version"], rec["actor"]) == ("items", "D01", 1, "tester")
-    assert rec["data"] == DOC
+    stamps = ("created", "updated")   # #10678: the store stamps these itself
+    assert {k: v for k, v in rec["data"].items() if k not in stamps} == {k: v for k, v in DOC.items() if k not in stamps}
+    assert rec["data"]["created"] == rec["data"]["updated"] and rec["data"]["updated"].endswith("Z")
     assert rec["pruned_at"].endswith("Z")
     assert cli(root, "get", "items", "D01", env=e)[0] == 1
 
