@@ -10,10 +10,11 @@
 //! Test: `owner_and_project_lines_show_counters`,
 //! `tree_rows_render_counters_at_80x24`.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, HighlightSpacing, List, ListItem},
 };
@@ -41,9 +42,9 @@ pub fn counter_text(total: usize, live: usize) -> String {
 /// Style of a counter: green while anything is live.
 fn counter_style(live: usize) -> Style {
     if live > 0 {
-        Style::default().fg(Color::Green)
+        Style::default().fg(palette().ok)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette().muted)
     }
 }
 
@@ -127,11 +128,11 @@ pub fn row_line_fit(row: &TreeRow, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The style of a column title: cyan and bold while the column is focused.
+/// The style of a column title: accent and bold while the column is focused.
 pub fn title_style(focused: bool) -> Style {
     if focused {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::BOLD)
@@ -140,7 +141,7 @@ pub fn title_style(focused: bool) -> Style {
 
 /// Draw the tree (left) column into `area`.
 ///
-/// What: a bordered list titled `OWNERS / PROJECTS (<n>)`, cyan while
+/// What: a bordered list titled `OWNERS / PROJECTS (<n>)`, accent while
 /// focused, with the selected row highlighted. #10754: the
 /// [`crate::tui::VERSION_LABEL`] sits right-aligned on the top border only
 /// when `version` is set — the rightmost drawn column carries it.
@@ -169,12 +170,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState, versio
     state.tree.hit.tree_rows = block.inner(area);
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(palette().selection().add_modifier(Modifier::BOLD))
         .highlight_spacing(HighlightSpacing::Always);
     frame.render_stateful_widget(list, area, state.tree.nav.state_mut());
 }

@@ -13,10 +13,11 @@
 //! Test: `tests` covers `body_lines`' field rendering, the changed-marker,
 //! and the inline-error line.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -124,14 +125,14 @@ pub fn render(frame: &mut Frame, view: &ConfigFormView) {
     let title = Line::from(vec![Span::styled(
         format!("Config — {}", view.project_name),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD),
     )]);
     let body = body_lines(view).join("\n");
     let footer = "\n[Tab] next field  [Enter] submit  [Esc] cancel";
     frame.render_widget(
         Paragraph::new(format!("{body}{footer}"))
-            .style(Style::default().fg(Color::Reset))
+            .style(palette().overlay())
             .block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );
