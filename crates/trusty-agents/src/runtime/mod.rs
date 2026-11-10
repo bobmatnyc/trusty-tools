@@ -205,7 +205,7 @@ pub async fn run() -> Result<()> {
     // message-bus side effect on that stream would corrupt the protocol. It is
     // also daemon-less by nature — it must not spin up the agent runtime.
     if args.len() > 1 && args[1] == "mcp-serve" {
-        return mcp_serve::run_mcp_serve().await;
+        return mcp_serve::run_mcp_serve(&args).await;
     }
 
     // All pre-parse bootstrapping (env loading, tracing, the early-exit

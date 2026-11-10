@@ -73,7 +73,7 @@ use crate::tools::traits::ToolExecutor;
 /// should use the HTTP API or the REPL, both of which resolve a credential.
 /// Test: exercised by the live binary smoke; the per-message logic is unit
 /// tested via [`dispatch`] directly.
-pub async fn run_mcp_serve() -> anyhow::Result<()> {
+pub async fn run_mcp_serve(args: &[String]) -> anyhow::Result<()> {
     // Minimal stderr tracing (MEDIUM 1): the early dispatch skips
     // `run_startup_init`, so without this every `tracing` event on the
     // `dispatch_task` path — including the orphaned-tm-session WARN whose doc
@@ -93,10 +93,28 @@ pub async fn run_mcp_serve() -> anyhow::Result<()> {
     // the same best-effort deploy here. Emits nothing on stdout per its own doc.
     // #9014: one ERROR line when no instructional content is installed.
     // #10940: under the same skip decision as `run_startup_init`.
-    let args: Vec<String> = std::env::args().collect();
+    mcp_serve_home_step(args, crate::agents::bundled::ensure_bundled_agents_deployed);
+
+    run_stdio_loop(dispatch).await
+}
+
+/// mcp-serve's provisioning step: read the process skip decision, deploy the
+/// roster through `deploy` unless skipped, and log a deploy failure.
+///
+/// Why (#10940): the seam [`run_mcp_serve`] reaches the deploy through, so a
+/// test proves `TAGENT_NO_PROVISION=1` stops the mcp-serve deploy on its real
+/// call path rather than only in the pure helpers.
+/// What: [`super::startup_provision::process_provision_skip`] over `args`,
+/// then [`deploy_roster`]; a deploy error is logged via
+/// `log_deploy_failure` and kept in the returned `agents_err`.
+/// Test: `mcp_serve_tests::the_env_switch_keeps_mcp_serve_from_deploying`.
+fn mcp_serve_home_step(
+    args: &[String],
+    deploy: impl FnOnce() -> anyhow::Result<crate::agents::bundled::ReprovisionReport>,
+) -> super::startup_provision::HomeProvisioning {
     let deployed = deploy_roster(
-        super::startup_provision::process_provision_skip(&args),
-        crate::agents::bundled::ensure_bundled_agents_deployed,
+        super::startup_provision::process_provision_skip(args),
+        deploy,
     );
     if let Some(e) = deployed.agents_err.as_ref() {
         crate::agents::bundled::log_deploy_failure(
@@ -104,8 +122,7 @@ pub async fn run_mcp_serve() -> anyhow::Result<()> {
             e,
         );
     }
-
-    run_stdio_loop(dispatch).await
+    deployed
 }
 
 /// mcp-serve's `$HOME` step: the bundled-agent deploy only, gated by `skip`.
@@ -117,7 +134,8 @@ pub async fn run_mcp_serve() -> anyhow::Result<()> {
 /// `deploy_agents` and no workflow or assistant-home step; `Some(skip)` calls
 /// nothing.
 /// Test: `mcp_serve_tests::a_skip_keeps_mcp_serve_from_deploying`,
-/// `mcp_serve_tests::no_skip_lets_mcp_serve_deploy`.
+/// `mcp_serve_tests::no_skip_lets_mcp_serve_deploy`,
+/// `mcp_serve_tests::a_failed_deploy_is_kept_in_agents_err`.
 fn deploy_roster(
     skip: Option<super::startup_provision::ProvisionSkip>,
     deploy_agents: impl FnOnce() -> anyhow::Result<crate::agents::bundled::ReprovisionReport>,
@@ -332,6 +350,46 @@ mod mcp_serve_tests {
         });
         assert!(result.skipped.is_none());
         assert_eq!(result.agents_report.written, 3);
+    }
+
+    /// Why (#10940): [`run_mcp_serve`]'s own deploy seam must read the env
+    /// switch; the pure helpers above never touch the process env.
+    /// What: under `HOME_LOCK`, sets `TAGENT_NO_PROVISION=1`, calls
+    /// [`mcp_serve_home_step`] with a deploy step that records a call, restores
+    /// the variable, and checks the step never ran.
+    /// Test: itself.
+    #[test]
+    fn the_env_switch_keeps_mcp_serve_from_deploying() {
+        use super::super::startup_provision::{NO_PROVISION_ENV, ProvisionSkip};
+        let _home_lock = crate::test_env::lock_home();
+        let prev = std::env::var_os(NO_PROVISION_ENV);
+        // SAFETY: HOME_LOCK serializes every test that mutates this variable.
+        unsafe { std::env::set_var(NO_PROVISION_ENV, "1") };
+        let ran = std::cell::Cell::new(false);
+        let args = ["tagent".to_owned(), "mcp-serve".to_owned()];
+        let result = mcp_serve_home_step(&args, || {
+            ran.set(true);
+            Ok(Default::default())
+        });
+        // SAFETY: as above.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(NO_PROVISION_ENV, v),
+                None => std::env::remove_var(NO_PROVISION_ENV),
+            }
+        }
+        assert!(!ran.get(), "mcp-serve deployed under TAGENT_NO_PROVISION=1");
+        assert_eq!(result.skipped, Some(ProvisionSkip::NoProvisionEnv));
+    }
+
+    /// Why: a failed deploy must reach the caller, not vanish.
+    /// What: no skip; the deploy step returns `Err`, which lands in `agents_err`.
+    /// Test: itself.
+    #[test]
+    fn a_failed_deploy_is_kept_in_agents_err() {
+        let result = deploy_roster(None, || Err(anyhow::anyhow!("disk full")));
+        assert!(result.skipped.is_none());
+        assert!(result.agents_err.is_some());
     }
 
     /// Build a `Request` for a method with an optional params body.
