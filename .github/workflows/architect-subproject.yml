@@ -13,6 +13,10 @@
 # manifest and tests) — the shipped copies (drift), the root
 # Cargo.toml (workspace membership), the check and its selftest, and this
 # workflow. No Rust toolchain; finishes in seconds.
+#
+# A second job, `bundle-meta` (#8021), runs the bundle's history/provenance
+# --check on pull requests too; the path list carries every file
+# scripts/architect_bundle_meta.py hashes or reads.
 name: Architect sub-project
 
 on:
@@ -34,6 +38,10 @@ on:
       - "scripts/check_architect_paths.sh"
       - "scripts/check_architect_paths_selftest.sh"
       - "scripts/lib/architect_paths.py"
+      - "scripts/architect_bundle_meta.py"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_table.rs"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_history.tsv"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/il_init_sample_state.md"
       - ".github/workflows/architect-subproject.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
@@ -59,6 +67,10 @@ on:
       - "scripts/check_architect_paths.sh"
       - "scripts/check_architect_paths_selftest.sh"
       - "scripts/lib/architect_paths.py"
+      - "scripts/architect_bundle_meta.py"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_table.rs"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_history.tsv"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/il_init_sample_state.md"
       - ".github/workflows/architect-subproject.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
@@ -107,3 +119,22 @@ jobs:
       - name: pytest (python/trusty-architect)
         working-directory: python/trusty-architect
         run: python -m pytest
+
+  # #8021: seed_history.tsv / provenance drift was caught only by a pre-publish cargo test that skips PRs.
+  bundle-meta:
+    name: Architect bundle history/provenance check
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Seed history records every shipped seed version
+        run: python3 scripts/architect_bundle_meta.py history --check
+
+      - name: Provenance matches the shipped files
+        run: python3 scripts/architect_bundle_meta.py provenance --check
