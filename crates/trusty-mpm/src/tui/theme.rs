@@ -13,7 +13,7 @@
 //! is `docs/design/UI/tm-tui-console-look.md` section 7.
 //! Test: `detect_depth_reads_no_color_colorterm_and_term`,
 //! `roles_resolve_at_each_depth`, `no_color_gives_no_colour_and_reverse_selection`,
-//! `home_tile_title_and_background_use_theme_roles`.
+//! `home_header_and_background_use_theme_roles`.
 
 use std::sync::OnceLock;
 
@@ -180,6 +180,57 @@ impl Palette {
     }
 }
 
+/// The meaning a status badge carries; [`badge`] turns it into a colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Running, ready, nominal.
+    Ok,
+    /// Available, pending, elevated.
+    Warn,
+    /// Degraded.
+    Degraded,
+    /// Down, failed, critical.
+    Err,
+    /// Informational (on demand).
+    Info,
+    /// No data, unknown, done.
+    Muted,
+}
+
+impl Palette {
+    /// The colour of `tone`.
+    pub fn tone(&self, tone: Tone) -> Color {
+        match tone {
+            Tone::Ok => self.ok,
+            Tone::Warn => self.warn,
+            Tone::Degraded => self.degraded,
+            Tone::Err => self.err,
+            Tone::Info => self.info,
+            Tone::Muted => self.muted,
+        }
+    }
+}
+
+/// A console status badge: the upper-cased word, padded, on its tone's fill.
+///
+/// Why (#10966): the console draws badges as filled pills; the word carries
+/// the meaning so 16-colour mode (accent and warn share Yellow) and
+/// `NO_COLOR` (reverse video) still read.
+/// What: ` WORD ` in bold, dark ink on the tone colour; reverse video with no
+/// colour.
+/// Test: `badge_fills_with_the_tone_and_reverses_without_colour`.
+pub fn badge(word: &str, tone: Tone) -> ratatui::text::Span<'static> {
+    let p = palette();
+    let style = match p.depth {
+        ColorDepth::NoColor => Style::default().add_modifier(Modifier::REVERSED),
+        _ => Style::default().fg(p.background_ink()).bg(p.tone(tone)),
+    };
+    ratatui::text::Span::styled(
+        format!(" {} ", word.to_uppercase()),
+        style.add_modifier(Modifier::BOLD),
+    )
+}
+
 /// The process-wide palette, resolved once on first use.
 ///
 /// Why: colour depth is a property of the terminal, fixed for the session;
@@ -187,7 +238,7 @@ impl Palette {
 /// What: under `cfg(test)` the depth is fixed to truecolor so render tests are
 /// independent of the runner's `TERM`; otherwise [`detect_depth`] reads the
 /// process environment.
-/// Test: `home_tile_title_and_background_use_theme_roles`.
+/// Test: `home_header_and_background_use_theme_roles`.
 pub fn palette() -> &'static Palette {
     static PALETTE: OnceLock<Palette> = OnceLock::new();
     PALETTE.get_or_init(|| Palette::for_depth(startup_depth()))
@@ -296,6 +347,20 @@ mod tests {
         assert_eq!(a.err, Color::Red);
         assert_eq!(a.selection().bg, Some(Color::Yellow));
         assert_eq!(a.selection().fg, Some(Color::Black));
+    }
+
+    #[test]
+    fn badge_fills_with_the_tone_and_reverses_without_colour() {
+        // `palette()` is truecolor under cfg(test).
+        let b = badge("running", Tone::Ok);
+        assert_eq!(b.content, " RUNNING ");
+        assert_eq!(b.style.bg, Some(Color::Rgb(0x8f, 0xbf, 0x6a)));
+        assert_eq!(b.style.fg, Some(Color::Rgb(0x20, 0x16, 0x12)));
+        let none = Palette::for_depth(ColorDepth::NoColor);
+        assert_eq!(none.tone(Tone::Err), Color::Reset);
+        let a = Palette::for_depth(ColorDepth::Ansi16);
+        assert_eq!(a.tone(Tone::Warn), Color::Yellow);
+        assert_eq!(a.tone(Tone::Err), Color::Red);
     }
 
     #[test]

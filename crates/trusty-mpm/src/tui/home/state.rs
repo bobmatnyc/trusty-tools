@@ -15,9 +15,6 @@ use trusty_common::console_metrics::ConsoleMetricsReport;
 
 use super::services::ServiceId;
 
-/// Tiles per grid row; vertical moves step by this many.
-pub const COLUMNS: usize = 4;
-
 /// How long a fetched (or failed) `console_metrics` answer is reused before
 /// opening the view spawns the service's stdio command again.
 pub const METRICS_TTL: Duration = Duration::from_secs(30);
@@ -121,7 +118,7 @@ pub enum MetricsState {
 /// Which surface the home screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
-    /// The tile grid.
+    /// The console look: machine status and the services table.
     Home,
     /// One service's first-level view.
     Service(ServiceId),
@@ -242,7 +239,7 @@ impl HomeState {
         true
     }
 
-    /// Move the selection by `delta`, clamped to the grid.
+    /// Move the selection by `delta`, clamped to the services table.
     fn move_by(&mut self, delta: isize) {
         let last = self.tiles.len().saturating_sub(1) as isize;
         self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
@@ -252,10 +249,10 @@ impl HomeState {
 /// Route one key press.
 ///
 /// Why (#10491): Enter on trusty-mpm opens today's projects view; Enter on any
-/// other tile opens its service view; Esc returns home.
+/// other row opens its service view; Esc returns home.
 /// What: mutates `state` and returns the I/O the event loop must start.
 /// Test: `enter_on_mpm_opens_projects`, `enter_on_search_opens_its_view_and_esc_returns`,
-/// `arrows_move_the_selection_within_the_grid`, `q_quits_from_any_view`.
+/// `arrows_move_the_selection_within_the_table`, `q_quits_from_any_view`.
 pub fn handle_key(state: &mut HomeState, key: KeyEvent, now: Instant) -> Option<HomeAction> {
     if key.code == KeyCode::Char('q')
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
@@ -271,20 +268,13 @@ pub fn handle_key(state: &mut HomeState, key: KeyEvent, now: Instant) -> Option<
             None
         }
         View::Home => match key.code {
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+            // #10966: the services table is one row per step.
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                 state.move_by(1);
                 None
             }
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 state.move_by(-1);
-                None
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                state.move_by(COLUMNS as isize);
-                None
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                state.move_by(-(COLUMNS as isize));
                 None
             }
             KeyCode::Enter => {
