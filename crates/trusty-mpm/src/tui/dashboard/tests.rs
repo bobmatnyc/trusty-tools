@@ -191,7 +191,7 @@ fn status_indicator_maps_each_status() {
     assert_eq!(status_indicator(SessionStatus::Active).0, '●');
     assert_eq!(status_indicator(SessionStatus::Paused).0, '○');
     assert_eq!(status_indicator(SessionStatus::Stopped).0, '✕');
-    assert_eq!(status_indicator(SessionStatus::Stopped).1, Color::Red);
+    assert_eq!(status_indicator(SessionStatus::Stopped).1, palette().err);
 }
 
 #[test]
@@ -237,10 +237,10 @@ fn clamp_scroll_bounds_to_last_page() {
 #[test]
 fn title_style_signals_daemon_health() {
     let healthy = title_style(true);
-    assert_eq!(healthy.fg, Some(Color::Cyan));
+    assert_eq!(healthy.fg, Some(palette().accent));
     assert!(!healthy.add_modifier.contains(Modifier::REVERSED));
     let down = title_style(false);
-    assert_eq!(down.fg, Some(Color::Red));
+    assert_eq!(down.fg, Some(palette().err));
     assert!(down.add_modifier.contains(Modifier::REVERSED));
 }
 
@@ -297,7 +297,7 @@ fn scroll_up_down_adjust_offset() {
 /// Regression: the help overlay body must not paint text with
 /// `Color::White`, because that renders the same colour as the
 /// background on light terminal themes and the contents disappear.
-/// The body should use `Color::Reset` so the terminal's default
+/// The body should use the theme text role so the terminal's default
 /// foreground contrasts with whatever background the user has.
 #[test]
 fn help_overlay_body_text_is_not_white() {
@@ -345,7 +345,7 @@ fn help_overlay_body_text_is_not_white() {
 /// Regression: chat user messages must not use `Color::White` for the
 /// foreground, since on a light-themed terminal that renders the same
 /// colour as the background and the message disappears. User turns
-/// should adopt the terminal default (`Color::Reset`) instead.
+/// should adopt the theme text role instead.
 #[test]
 fn chat_user_message_is_not_white() {
     use ratatui::{Terminal, backend::TestBackend};

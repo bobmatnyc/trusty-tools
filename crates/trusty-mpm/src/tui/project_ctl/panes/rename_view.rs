@@ -9,9 +9,10 @@
 //! Test: `rename_view_lines_show_the_buffer_and_the_refusal`;
 //! `r_opens_the_rename_modal_prefilled_and_enter_submits` draws it.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -42,12 +43,12 @@ pub fn render(frame: &mut Frame, modal: &RenameModal) {
     let title = Line::from(vec![Span::styled(
         format!("Rename — {}", modal.current_name),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD),
     )]);
     frame.render_widget(
         Paragraph::new(body_lines(modal).join("\n"))
-            .style(Style::default().fg(Color::Reset))
+            .style(palette().overlay())
             .block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );

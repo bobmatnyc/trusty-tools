@@ -10,9 +10,10 @@
 //! `launch_view_long_task_shows_its_tail_and_the_cursor`;
 //! `l_opens_the_launch_form_and_enter_submits_the_request` draws it.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -82,12 +83,12 @@ pub fn render(frame: &mut Frame, modal: &LaunchModal) {
     let title = Line::from(vec![Span::styled(
         format!("Launch — {}", modal.project),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD),
     )]);
     frame.render_widget(
         Paragraph::new(body_lines(modal).join("\n"))
-            .style(Style::default().fg(Color::Reset))
+            .style(palette().overlay())
             .block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );

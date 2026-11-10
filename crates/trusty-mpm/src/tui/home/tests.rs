@@ -487,3 +487,31 @@ fn home_header_shows_tm_version_at_80_columns() {
         assert!(top.starts_with(&title), "{view:?} title displaced: {top:?}");
     }
 }
+
+// #10966: the home screen draws in the console's dark palette. Literal RGB on
+// purpose: the test must compile, and fail, against the pre-theme renderer.
+#[test]
+fn home_tile_title_and_background_use_theme_roles() {
+    use ratatui::style::Color;
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test backend");
+    let state = HomeState::default();
+    terminal
+        .draw(|f| render(f, &state))
+        .expect("draw the home screen");
+    let buffer = terminal.backend().buffer();
+    // The selected (first) tile's top-left border corner: accent on background.
+    let corner = &buffer[(0, 1)];
+    assert_eq!(corner.fg, Color::Rgb(0xd9, 0x77, 0x42), "accent border");
+    assert_eq!(
+        corner.bg,
+        Color::Rgb(0x20, 0x16, 0x12),
+        "console background"
+    );
+    // The version label at the header's right edge is muted text.
+    let version = &buffer[(119, 0)];
+    assert_eq!(
+        version.fg,
+        Color::Rgb(0xa5, 0x8a, 0x6b),
+        "muted version label"
+    );
+}

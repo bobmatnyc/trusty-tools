@@ -12,10 +12,11 @@
 //! Test: text helpers are unit-tested in `super::tests`; the full `render` is
 //! exercised by launching the TUI (terminal glue).
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Line,
     widgets::{Block, Borders, HighlightSpacing, List, ListItem, Paragraph},
 };
@@ -210,6 +211,7 @@ fn build_controller_row(state: &CoordinatorState) -> Line<'static> {
 /// Test: the text/content helpers are unit-tested; this terminal-touching path
 /// is exercised by launching the TUI.
 pub fn render(frame: &mut Frame, state: &mut CoordinatorState) {
+    crate::tui::theme::paint_background(frame);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -230,7 +232,7 @@ pub fn render(frame: &mut Frame, state: &mut CoordinatorState) {
     let input = Paragraph::new(input_line(state))
         .style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(palette().warn)
                 .add_modifier(Modifier::BOLD),
         )
         .block(Block::default().borders(Borders::ALL));
@@ -257,17 +259,12 @@ pub fn render(frame: &mut Frame, state: &mut CoordinatorState) {
             Block::default().borders(Borders::ALL).title(
                 title.style(
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(palette().accent)
                         .add_modifier(Modifier::BOLD),
                 ),
             ),
         )
-        .highlight_style(
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(palette().selection().add_modifier(Modifier::BOLD))
         // Keep every row aligned whether or not it is the selection (mirrors the
         // health screen's collections list).
         .highlight_spacing(HighlightSpacing::Always);
@@ -280,7 +277,7 @@ pub fn render(frame: &mut Frame, state: &mut CoordinatorState) {
         Block::default().borders(Borders::ALL).title(
             Line::from("OUTPUT").style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette().accent)
                     .add_modifier(Modifier::BOLD),
             ),
         ),
