@@ -65,7 +65,7 @@ pub struct DashSnapshot {
 }
 
 impl DashSnapshot {
-    /// The rows `tab` lists; the Live tab has none yet.
+    /// The rows `tab` lists.
     pub fn rows(&self, tab: Tab) -> &[DashRow] {
         match tab {
             Tab::Decisions => &self.decisions,
@@ -74,7 +74,6 @@ impl DashSnapshot {
             Tab::Sessions => &self.sessions,
             Tab::Tasks => &self.tasks,
             Tab::Qa => &self.qa,
-            Tab::Live => &[],
         }
     }
 }

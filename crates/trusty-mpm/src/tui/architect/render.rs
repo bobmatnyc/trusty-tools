@@ -4,7 +4,7 @@
 //! stalls a frame.
 //! What: [`render`] draws the tab bar with counts and a READ-ONLY badge
 //! (Dc4, #10966), the open tab's list, an optional detail pane, and the
-//! tally footer. The Live tab body is a placeholder until its slice lands.
+//! tally footer.
 //! Test: `architect_render_lists_rows_with_badges_and_counts`,
 //! `architect_render_says_why_when_the_store_is_not_set`.
 
@@ -18,9 +18,6 @@ use ratatui::{
 
 use super::{ArchitectState, Fetch, Tab};
 use crate::tui::theme::{Tone, badge, palette};
-
-/// What the Live tab says until its tracker is built (#10966).
-pub const LIVE_NOT_BUILT: &str = "the Live tracker is not built yet (#10966)";
 
 /// Footer hint on the Architect view.
 pub const ARCHITECT_HINT: &str =
@@ -37,10 +34,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ArchitectState) {
         ])
         .areas(area);
     render_tabs(frame, tabs, state);
-    match state.tab {
-        Tab::Live => message(frame, body, "Live", LIVE_NOT_BUILT.into()),
-        tab => render_list(frame, body, state, tab),
-    }
+    render_list(frame, body, state, state.tab);
     let p = palette();
     let text = match &state.dashboard {
         Fetch::Ready(d) => d.tally.clone(),
@@ -54,9 +48,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ArchitectState) {
 }
 
 fn count(state: &ArchitectState, tab: Tab) -> Option<usize> {
-    match (tab, &state.dashboard) {
-        (Tab::Live, _) => None,
-        (tab, Fetch::Ready(d)) => Some(d.rows(tab).len()),
+    match &state.dashboard {
+        Fetch::Ready(d) => Some(d.rows(tab).len()),
         _ => None,
     }
 }

@@ -8,7 +8,6 @@ use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{Value, json};
 
 use super::data::{DashSnapshot, STORE_NOT_SET, fetch_dashboard, snapshot_from};
-use super::render::LIVE_NOT_BUILT;
 use super::{ArchitectAction, ArchitectState, Fetch, REFRESH, Tab, handle_key};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -31,7 +30,7 @@ fn sample() -> DashSnapshot {
         item("D3a", "question", "open", "Read-only Architect view?"),
         item("D3b", "question", "done", "closed decision"),
         item("A10", "action", "answered", "Seed the sandbox"),
-        item("T21", "task", "open", "Live tracker tab"),
+        item("T21", "task", "open", "Detail pane"),
         item("T22", "task", "cancelled", "dropped"),
     ];
     let goals = [
@@ -109,9 +108,15 @@ fn tab_keys_cycle_and_esc_closes_detail_then_returns_home() {
     let mut s = ArchitectState::default();
     s.apply(Ok(sample()));
     handle_key(&mut s, key(KeyCode::BackTab));
-    assert_eq!(s.tab, Tab::Live, "wraps left");
+    assert_eq!(s.tab, Tab::Qa, "wraps left to the last of six tabs");
     handle_key(&mut s, key(KeyCode::Tab));
-    assert_eq!(s.tab, Tab::Decisions);
+    assert_eq!(s.tab, Tab::Decisions, "wraps right");
+    for want in [Tab::Actions, Tab::Goals, Tab::Sessions, Tab::Tasks, Tab::Qa] {
+        handle_key(&mut s, key(KeyCode::Right));
+        assert_eq!(s.tab, want);
+    }
+    handle_key(&mut s, key(KeyCode::Right));
+    assert_eq!(s.tab, Tab::Decisions, "six tabs, no Live until S4");
     handle_key(&mut s, key(KeyCode::Enter));
     assert!(s.expanded);
     assert_eq!(handle_key(&mut s, key(KeyCode::Esc)), None);
@@ -145,6 +150,7 @@ fn architect_render_lists_rows_with_badges_and_counts() {
         "ARCHITECT",
         "Decisions 1",
         "Goals 1",
+        "Q&A 1",
         " READ-ONLY ",
         "D3a",
         " OPEN ",
@@ -153,9 +159,7 @@ fn architect_render_lists_rows_with_badges_and_counts() {
     ] {
         assert!(screen.contains(want), "missing {want:?}");
     }
-    assert!(!screen.contains("Live 0"), "Live shows no count yet");
-    s.tab = Tab::Live;
-    assert!(draw(&s).contains(LIVE_NOT_BUILT));
+    assert!(!screen.contains("Live"), "no Live tab until S4");
 }
 
 #[test]

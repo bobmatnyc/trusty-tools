@@ -6,7 +6,7 @@
 //! [`data`] sends only `list` and `tally`.
 //! What: [`ArchitectState`] holds the tab, selection and the last fetched
 //! [`data::DashSnapshot`]; [`handle_key`] routes keys; [`render::render`]
-//! draws. The Live tab is a name only here; its tracker is a later slice.
+//! draws.
 //! Design: `docs/design/UI/tm-tui-console-look.md` section 4.
 //! Test: `tests.rs` beside this file.
 
@@ -25,7 +25,7 @@ use data::DashSnapshot;
 /// How often the open view re-reads the store.
 pub const REFRESH: Duration = Duration::from_secs(5);
 
-/// The view's tabs, in the dashboard's order, with Live in place of Visualize.
+/// The view's tabs, in the dashboard's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     /// Open items of kind `question`.
@@ -40,20 +40,17 @@ pub enum Tab {
     Tasks,
     /// Q&A documents.
     Qa,
-    /// The process tracker; its body is not built yet (#10966).
-    Live,
 }
 
 impl Tab {
     /// Every tab, left to right.
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Decisions,
         Tab::Actions,
         Tab::Goals,
         Tab::Sessions,
         Tab::Tasks,
         Tab::Qa,
-        Tab::Live,
     ];
 
     /// The tab's label.
@@ -65,7 +62,6 @@ impl Tab {
             Tab::Sessions => "Sessions",
             Tab::Tasks => "Tasks",
             Tab::Qa => "Q&A",
-            Tab::Live => "Live",
         }
     }
 
@@ -167,7 +163,7 @@ impl ArchitectState {
         }
     }
 
-    /// Rows on the open tab; the Live tab has none yet.
+    /// Rows on the open tab.
     pub fn row_count(&self) -> usize {
         match &self.dashboard {
             Fetch::Ready(d) => d.rows(self.tab).len(),
