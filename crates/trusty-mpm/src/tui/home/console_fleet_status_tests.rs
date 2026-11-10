@@ -3,7 +3,6 @@
 //! console's resting state, never a fallback dial.
 
 use std::path::Path;
-use std::time::Duration;
 
 use trusty_common::console_rpc::{CONSOLE_SERVICE, METHOD_FLEET_STATUS};
 
