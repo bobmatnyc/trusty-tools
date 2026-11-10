@@ -287,11 +287,9 @@ impl ProjectRegistry {
     /// means. A no-op when `record.repo_url` is `None`, a name cannot be
     /// derived, or a project with that name is already registered
     /// (never overwrites a manually-configured entry).
-    /// #10988: also clears a matching project's decommissioned state.
     /// Test: `registry_register_from_session_registers_new_project`,
     /// `registry_register_from_session_skips_when_repo_url_missing`,
-    /// `registry_register_from_session_does_not_overwrite_existing`,
-    /// `register_from_session_clears_a_decommissioned_project`.
+    /// `registry_register_from_session_does_not_overwrite_existing`.
     pub async fn register_from_session(&self, record: &SessionRecord) {
         let existing = match self.list().await {
             Ok(projects) => ExistingProjects::from_projects(&projects),
@@ -302,10 +300,6 @@ impl ProjectRegistry {
         };
         self.register_implicit_from_record(record, &existing, "register_from_session")
             .await;
-        // #10988: a new session reactivates its decommissioned project. The
-        // boot pass (`auto_register_from_sessions`) never does: it replays old
-        // records, and no new session has run.
-        self.clear_decommissioned_for_session(record).await;
     }
 
     /// Mark `name` decommissioned at `at` (#10988).
@@ -331,36 +325,35 @@ impl ProjectRegistry {
     /// (#10988).
     ///
     /// Why: Bob's ruling — a project shows decommissioned until a new session
-    /// runs. What: matches with the fleet grouping's own rule
-    /// ([`super::resolve_session_project`]); a registry error is logged, never
-    /// fatal to the spawn that called it.
-    /// Test: `register_from_session_clears_a_decommissioned_project`,
+    /// runs. The boot pass (`auto_register_from_sessions`) never calls this: it
+    /// replays old records, and no new session has run.
+    /// What: matches with the fleet grouping's own rule
+    /// ([`super::resolve_session_project`]) and returns the names it cleared.
+    /// A list or update failure is returned, never logged and dropped: the
+    /// caller (`spawn_managed`, the one place every spawn path returns
+    /// through) reports it to its client.
+    /// Test: `reactivate_for_session_clears_a_decommissioned_project`,
+    /// `reactivate_for_session_returns_a_list_failure`,
     /// `auto_register_keeps_a_decommissioned_project_decommissioned`.
-    async fn clear_decommissioned_for_session(&self, record: &SessionRecord) {
-        let projects = match self.list().await {
-            Ok(projects) => projects,
-            Err(e) => {
-                warn!("register_from_session: failed to list projects: {e}");
-                return;
-            }
-        };
+    pub async fn reactivate_for_session(
+        &self,
+        record: &SessionRecord,
+    ) -> Result<Vec<String>, ProjectStoreError> {
+        let projects = self.list().await?;
+        let mut cleared = Vec::new();
         for p in projects.iter().filter(|p| p.is_decommissioned()) {
             if super::resolve_session_project(record, std::slice::from_ref(p)).is_none() {
                 continue;
             }
-            let cleared = self
-                .update_with(&p.name, |mut p| {
-                    p.decommissioned_at = None;
-                    p
-                })
-                .await;
-            match cleared {
-                Ok(_) => {
-                    info!(name = %p.name, "register_from_session: project reactivated (#10988)")
-                }
-                Err(e) => warn!(name = %p.name, "register_from_session: failed to reactivate: {e}"),
-            }
+            self.update_with(&p.name, |mut p| {
+                p.decommissioned_at = None;
+                p
+            })
+            .await?;
+            info!(name = %p.name, "project reactivated by a new session (#10988)");
+            cleared.push(p.name.clone());
         }
+        Ok(cleared)
     }
 
     /// Shared tail of [`Self::auto_register_from_sessions`] (looped) and

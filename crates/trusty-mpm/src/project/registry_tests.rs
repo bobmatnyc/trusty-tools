@@ -972,11 +972,12 @@ async fn seed_from_config_keeps_a_decommissioned_project_decommissioned() {
 
 /// A NEW session for the project reactivates it; one for another repo does not.
 #[tokio::test]
-async fn register_from_session_clears_a_decommissioned_project() {
+async fn reactivate_for_session_clears_a_decommissioned_project() {
     let dir = TempDir::new().expect("tempdir");
     let registry = decommissioned_widget(&dir).await;
     let other = make_session_with_repo("https://github.com/acme/gadget", None);
-    registry.register_from_session(&other).await;
+    let cleared = registry.reactivate_for_session(&other).await.expect("ok");
+    assert!(cleared.is_empty(), "{cleared:?}");
     assert!(
         registry
             .get("widget")
@@ -986,7 +987,8 @@ async fn register_from_session_clears_a_decommissioned_project() {
         "a session for another repo reactivated the project"
     );
     let new = make_session_with_repo("https://github.com/acme/widget.git", None);
-    registry.register_from_session(&new).await;
+    let cleared = registry.reactivate_for_session(&new).await.expect("ok");
+    assert_eq!(cleared, vec!["widget".to_string()]);
     assert!(
         !registry
             .get("widget")
@@ -995,4 +997,14 @@ async fn register_from_session_clears_a_decommissioned_project() {
             .is_decommissioned(),
         "a new session must clear the decommissioned state"
     );
+}
+
+/// #10988: an unreadable registry is returned to the caller, not only logged.
+#[tokio::test]
+async fn reactivate_for_session_returns_a_list_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = decommissioned_widget(&dir).await;
+    std::fs::write(dir.path().join("projects.json"), "{ not json").expect("corrupt");
+    let new = make_session_with_repo("https://github.com/acme/widget.git", None);
+    assert!(registry.reactivate_for_session(&new).await.is_err());
 }
