@@ -147,6 +147,27 @@ fn hook_stays_silent_for_a_bash_call_in_an_isolation_worktree() {
     assert!(!command.contains("tm compress"), "{command}");
 }
 
+/// #10973: delegated agents run almost entirely inside isolation worktrees, so
+/// a hook that never compresses there recorded almost no `compress` rows.
+#[test]
+fn hook_compresses_a_filter_covered_command_inside_an_isolation_worktree() {
+    let payload = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": "git diff" },
+        "cwd": "/repo/.claude/worktrees/agent-a/crates/trusty-mpm",
+    });
+    let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("a worktree call must be rewritten ({e}): {stdout:?}"));
+    let command = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        command.contains("tm compress --tool \"git diff\""),
+        "{command}"
+    );
+}
+
 #[test]
 fn hook_stays_silent_for_orchestrator_command_on_pretooluse() {
     let stdout = run_hook_with_stdin(
