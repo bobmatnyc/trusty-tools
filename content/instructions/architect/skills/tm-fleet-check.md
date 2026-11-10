@@ -26,6 +26,11 @@ its `CLAUDE.md`.
 1. **Read the records.** Read `local/instance.md`, `local/user.md`,
    `local/goals.md`, `local/state.md` and the tail of `local/actions.md`.
    They are the current facts; this skill does not repeat them. Run
+   `python3 scripts/watch-apply.py` first: it applies the owner's Watch and
+   Unwatch requests from the dashboard (`watch_changes` docs with status
+   `new`) through `tm fleet project add|remove` and marks each `applied` or
+   `failed`. A `failed` request is a finding for this pass; the owner retries
+   or dismisses it on the page. Then run
    `tm fleet project list` for the watch set; a row flagged `path missing`,
    `not registered` or `no record` is a finding for this pass. The first run
    imports a hand-written `## Watch set` list from `CLAUDE.md`. When that

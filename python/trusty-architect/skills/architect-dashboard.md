@@ -112,6 +112,9 @@ control, and the Live page follows it.
   allowed), links, brief, session, status (open|cleared), answered_at,
   cleared_at, updated. When an answer changes later, update the doc in place.
 - `goal_reorders`, `goal_removals`: written by the page (status `new`).
+- `watch_changes/<id>`: key, action (watch|unwatch), status
+  (new|applied|failed|dismissed), created, by, done_at, message. Written by the
+  page; only `scripts/watch-apply.py` sets `applied` or `failed`.
 - `meta/state`: fleet_usage, updated, fleet_line, owner_name.
 
 ## Rules
@@ -180,8 +183,15 @@ Seed `goals` from `local/goals.md` and `sessions` from the first full poll.
 Each pass, list what the owner wrote and act on it in the same pass:
 `python3 scripts/dashboard-db.py list items --status answered` (and
 `cancelled`, `wont_do`), plus the `goal_reorders`, `goal_removals`,
-`effort_tunes` and `il_steers` docs with status `new`. `scripts/owner_answers.py`
-holds the full list of kinds the page writes.
+`effort_tunes`, `il_steers` and `watch_changes` docs with status `new`.
+`scripts/owner_answers.py` holds the full list of kinds the page writes.
+
+- `watch_changes` (status `new`, kind `watch_change`) is the owner's Watch or
+  Unwatch of a registered project. Do not apply it by hand and never edit
+  `local/watch.json`: run `python3 scripts/watch-apply.py`, which runs
+  `tm fleet project add|remove` once per key and records `applied` or `failed`
+  with the CLI's message (`tm-fleet-check` step 1). A `failed` request waits
+  for the owner's Retry or Dismiss.
 
 - `goal_removals` (status `new`) is the owner's ruling to remove a goal: set the
   goal `status: "removed"`, update `local/goals.md` and the palace, then set the

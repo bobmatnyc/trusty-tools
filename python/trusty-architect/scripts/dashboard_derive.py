@@ -280,6 +280,19 @@ def pending_efforts(docs):
     return out
 
 
+def pending_watch_changes(docs):
+    """#10896: Watch / Unwatch requests (watch_changes, status "new"): kind "watch_change", id = the doc id, with `key` and `action`."""
+    out = []
+    for doc in sorted(docs, key=lambda x: x["id"]):
+        d = _d(doc)
+        if d.get("status") != "new":
+            continue
+        key, action = str(d.get("key", "")), str(d.get("action", ""))
+        out.append({"id": doc["id"], "kind": "watch_change", "at": str(d.get("created", "")),
+                    "text": f"{action} {key}", "key": key, "action": action})
+    return out
+
+
 def pending_il_steers(docs):
     """Steer requests on Intent Ledger tasks (il_steers, status "new"): kind "steer", id = the doc id, with `task` and `session`."""
     out = []
@@ -345,6 +358,7 @@ def pending_goal_briefs(goals):
 
 
 def pending(snap, now):
-    """Owner events the Architect must act on, from a snapshot with items, sessions, effort_tunes, goals."""
+    """Owner events the Architect must act on, from a snapshot with items, sessions, effort_tunes, goals, watch_changes."""
     return (pending_items(snap.get("items", []), now) + pending_commands(snap.get("sessions", []))
-            + pending_efforts(snap.get("effort_tunes", [])) + pending_il_steers(snap.get("il_steers", [])) + pending_goal_parks(snap.get("goals", [])) + pending_goal_done(snap.get("goals", [])) + pending_goal_briefs(snap.get("goals", [])))
+            + pending_efforts(snap.get("effort_tunes", [])) + pending_il_steers(snap.get("il_steers", [])) + pending_goal_parks(snap.get("goals", [])) + pending_goal_done(snap.get("goals", [])) + pending_goal_briefs(snap.get("goals", []))
+            + pending_watch_changes(snap.get("watch_changes", [])))

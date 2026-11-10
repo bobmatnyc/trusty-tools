@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/watch_changes.schema.json",
+  "title": "watch or unwatch request (owner, Projects view); applied by scripts/watch-apply.py through tm fleet project add|remove",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"}
+  },
+  "required": ["key", "action", "status", "created", "by"],
+  "additionalProperties": false,
+  "properties": {
+    "key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"},
+    "action": {"enum": ["watch", "unwatch"]},
+    "status": {"enum": ["new", "applied", "failed", "dismissed"]},
+    "created": {"$ref": "#/$defs/iso"},
+    "by": {"type": "string"},
+    "done_at": {"$ref": "#/$defs/iso"},
+    "message": {"type": "string"}
+  }
+}
