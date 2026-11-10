@@ -50,6 +50,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use trusty_common::control_bus::{EventId, HarnessEvent};
 
+use super::breakdown::Breakdown;
 use super::log::DurableLog;
 
 /// Default ring capacity (DOC-73 §4.3: "an in-memory ring, capacity
@@ -156,6 +157,9 @@ struct Ring {
     ids: HashSet<EventId>,
     // #9075: set by `EventBus::close`; read under the same lock as `seq`.
     closed: bool,
+    // #10906: counted under the lock that accepts the event, so a dedup hit
+    // or a refused frame is never counted.
+    breakdown: Breakdown,
 }
 
 /// What [`EventBus::attach`] hands a new subscription.
@@ -218,6 +222,7 @@ impl EventBus {
                 events: VecDeque::with_capacity(capacity),
                 ids: HashSet::with_capacity(capacity),
                 closed: false,
+                breakdown: Breakdown::default(),
             }),
             counters: Counters::default(),
             sender,
@@ -286,6 +291,7 @@ impl EventBus {
             ring.ids.remove(&evicted.id);
             self.counters.evicted.fetch_add(1, Ordering::Relaxed);
         }
+        ring.breakdown.record(&event);
         ring.events.push_back(event.clone());
         self.counters.ingested.fetch_add(1, Ordering::Relaxed);
 
@@ -461,6 +467,15 @@ impl EventBus {
             subscribers: u64::try_from(self.sender.receiver_count()).unwrap_or(u64::MAX),
             head_seq: self.next_seq.load(Ordering::Relaxed).saturating_sub(1),
         }
+    }
+
+    /// A copy of the per-source and per-project counters (#10906).
+    ///
+    /// Why: `events.console_metrics` renders them; a copy keeps the ring lock
+    /// for the clone only, not for building the reply.
+    /// Test: `super::serve_tests::events_console_metrics_reports_by_source_messages_and_by_project`.
+    pub(crate) fn breakdown(&self) -> Breakdown {
+        self.lock_ring().breakdown.clone()
     }
 
     /// How many events the ring currently holds. Test-only introspection —

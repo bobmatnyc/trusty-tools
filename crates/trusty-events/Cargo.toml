@@ -28,8 +28,10 @@ path = "src/main.rs"
 
 [dependencies]
 # `uds`: the hardened socket, the JSON-RPC stream writer and the
-# `events.subscribe` frame types (#9075).
-trusty-common = { workspace = true, features = ["uds"] }
+# `events.subscribe` frame types (#9075). `console-metrics`: the
+# `ConsoleMetricsReport` that `events.console_metrics` answers (#10906); it
+# adds no dependency trusty-common does not already compile.
+trusty-common = { workspace = true, features = ["uds", "console-metrics"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

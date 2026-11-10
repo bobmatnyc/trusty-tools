@@ -118,8 +118,10 @@ impl HarnessPayload {
 ///       literal. `id` and `parent_id` both carry `#[serde(default)]`, so an
 ///       event serialized before issue #6847 added them still deserializes:
 ///       a missing `id` mints a fresh one, a missing `parent_id` becomes
-///       `None`.
+///       `None`. `project` (#10906) is the optional project key, absent on
+///       the wire when `None`.
 /// Test: `super::tests::harness_event_round_trips`,
+///       `super::tests::harness_event_project_is_optional_and_wire_compatible_10906`,
 ///       `super::tests::harness_event_omits_none_session`,
 ///       `super::tests::harness_event_omits_none_parent_id`,
 ///       `super::tests::harness_event_parent_id_links_to_the_causing_event`,
@@ -149,4 +151,12 @@ pub struct HarnessEvent {
     /// Omitted from JSON when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<EventId>,
+    /// The project the event belongs to, as its producer names it; `None`
+    /// when the producer does not know. Omitted from JSON when `None`, and a
+    /// frame without it reads as `None`, so the field is wire-compatible both
+    /// ways. `trusty-events` counts an event without one as
+    /// [`super::UNATTRIBUTED_PROJECT`].
+    // #10906: additive; keys the bus's `by_project` breakdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }

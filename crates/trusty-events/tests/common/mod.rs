@@ -184,6 +184,7 @@ fn payload_event(session: &str, payload: HarnessPayload) -> HarnessEvent {
         payload,
         id: Default::default(),
         parent_id: None,
+        project: None,
     }
 }
 

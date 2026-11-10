@@ -17,8 +17,9 @@
 //! than leaving producers' connects queued and unread. [`handle_connection`]
 //! checks the peer's uid, reads the first line under the ingest cap and idle
 //! timeout, and hands the connection to `ingest` or to the JSON-RPC router
-//! that serves `events.subscribe` (`crate::subscribe`) and `events.health`
-//! (`crate::health`, #10901).
+//! that serves `events.subscribe` (`crate::subscribe`), `events.health`
+//! (`crate::health`, #10901) and `events.console_metrics`
+//! (`crate::console_metrics`, #10906).
 //! Test: `super::serve_tests`, `super::tests` (the moved ingest tests), and
 //! `tests/daemon_wire.rs`, `tests/daemon_exit.rs` over the real binary.
 
@@ -39,9 +40,9 @@ use trusty_common::uds::{
 };
 
 use crate::bus::EventBus;
-use crate::health;
 use crate::ingest::{self, LineRead, READ_IDLE_TIMEOUT};
 use crate::subscribe;
+use crate::{console_metrics, health};
 
 /// Largest number of connections, producers and readers together, served at
 /// once.
@@ -172,11 +173,14 @@ impl Connection {
     pub(crate) fn new(bus: Arc<EventBus>, limits: ServeLimits) -> Self {
         // See #10901: `events.health` shares the router and the peer check;
         // uptime counts from here, when the daemon begins serving.
+        // #10906: `events.console_metrics` too.
+        let started_at = Instant::now();
         let router = health::register(
             subscribe::router(Arc::clone(&bus), limits.max_subscribers),
             Arc::clone(&bus),
-            Instant::now(),
+            started_at,
         );
+        let router = console_metrics::register(router, Arc::clone(&bus), started_at);
         Self {
             router,
             bus,

@@ -22,10 +22,13 @@
 //!
 //! Test: `tests/daemon_wire.rs`, `tests/daemon_exit.rs`,
 //! `tests/no_other_crate_links_bus.rs`, and the unit tests in `tests.rs`,
-//! `serve_tests.rs` and `log/tests.rs`.
+//! `serve_tests.rs`, `breakdown_tests.rs` and `log/tests.rs`.
 
 // #9075: moved from trusty-console's `event_bus` module.
+// #10906: per-source and per-project counters for `events.console_metrics`.
+mod breakdown;
 mod bus;
+mod console_metrics;
 pub mod daemon;
 // See #10901.
 mod health;
@@ -34,6 +37,8 @@ mod log;
 mod serve;
 mod subscribe;
 
+#[cfg(test)]
+mod breakdown_tests;
 #[cfg(test)]
 mod serve_tests;
 #[cfg(test)]

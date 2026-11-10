@@ -30,6 +30,7 @@ fn envelope(payload: HarnessPayload, session: Option<&str>) -> HarnessEvent {
         payload,
         id: EventId::new(),
         parent_id: None,
+        project: None,
     }
 }
 
@@ -666,6 +667,51 @@ fn harness_event_back_compat_missing_fields_deserializes() {
     assert!(back.parent_id.is_none());
 }
 
+/// #10906: `project` is optional and additive. An event without it serializes
+/// with no `project` key and an older frame without it reads as `None`; a set
+/// project survives the round trip.
+#[test]
+fn harness_event_project_is_optional_and_wire_compatible_10906() {
+    let ev = envelope(HarnessPayload::Ping, None);
+    let v = serde_json::to_value(&ev).expect("serialize");
+    assert!(v.get("project").is_none(), "absent when None: {v}");
+    let back: HarnessEvent = serde_json::from_value(v).expect("a frame without project");
+    assert_eq!(back.project, None);
+
+    let mut ev = envelope(HarnessPayload::Ping, Some("s"));
+    ev.project = Some("bobmatnyc/trusty-tools".into());
+    let v = serde_json::to_value(&ev).expect("serialize");
+    assert_eq!(v["project"], "bobmatnyc/trusty-tools");
+    let back: HarnessEvent = serde_json::from_value(v).expect("deserialize");
+    assert_eq!(back, ev);
+}
+
+/// #10906: the `as_str` keys the bus counts by are exactly the serde tags.
+#[test]
+fn source_and_direction_keys_match_their_serde_tags_10906() {
+    for source in [
+        HarnessSource::Agents,
+        HarnessSource::Mpm,
+        HarnessSource::Code,
+        HarnessSource::Analyze,
+    ] {
+        assert_eq!(json!(source), json!(source.as_str()));
+    }
+    for direction in [MessageDirection::Sent, MessageDirection::Received] {
+        assert_eq!(json!(direction), json!(direction.as_str()));
+    }
+}
+
+/// #10906: the method and reserved keys the bus and its readers share.
+#[test]
+fn events_console_metrics_contract_names_10906() {
+    assert_eq!(METHOD_EVENTS_CONSOLE_METRICS, "events.console_metrics");
+    assert_eq!(UNATTRIBUTED_PROJECT, "unattributed");
+    assert_eq!(OVERFLOW_PROJECT, "overflow");
+    let params: EventsConsoleMetricsParams = serde_json::from_value(json!(null)).expect("null");
+    assert_eq!(params, EventsHealthParams {});
+}
+
 /// A missing `id` mints a fresh one on every deserialize, rather than a fixed
 /// sentinel — proving the `#[serde(default)]` path actually calls
 /// `EventId::new()` and not a constant placeholder.
@@ -829,6 +875,8 @@ const MODULE_SOURCES: &[(&str, &str)] = &[
     // See #10901.
     ("control_bus/health.rs", include_str!("health.rs")),
     ("control_bus/message.rs", include_str!("message.rs")),
+    // See #10906.
+    ("control_bus/metrics.rs", include_str!("metrics.rs")),
     // #6847: `push_client.rs` is the one file in this list that DOES dial a
     // socket — see `control_bus_declares_no_transport`'s doc comment for why
     // the scan below still passes it (it holds no global state, and none of
