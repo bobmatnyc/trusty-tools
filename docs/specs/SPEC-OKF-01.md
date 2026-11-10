@@ -12,6 +12,8 @@
 
 This spec proposes what the trusty-okf crate does. Bob decided §3 (a) on 2026-11-03. Bob also approved four inputs on 2026-11-03: state separation, document-tree import, email and Google Docs import, and the Xberg extraction worker (§1). On 2026-11-03 at 06:58Z Bob decided every remaining question in §3 and §7, and every other owner choice, as recommended (§1.5). No code exists yet.
 
+**Amendments of 2026-11-05 (owner rulings, Bob; #10746).** D14 drops `convert` from §2.7.2 and §4.1. D19 pins the extraction worker to `xberg =1.3.10` in §2.16. D4b amends §2.7.2 for the local constants slice S4 uses and records that the advisory lock (§4.4) is built in slice S5. D4b items 1, 4 and 5 amend §4.3 (`put` and `verify` return `(PutOutcome, Vec<Finding>)`), §4.2 (`VerificationEvent.hash` is optional, with a `reason` such as `legacy_unbound`) and §2.3 (the root `index.md` marker is read from the first line after the frontmatter). The D14 leftovers remove the `convert.rs` references from §1.2 requirement 17, §2.8, §2.9, §2.11, §2.13 and the Appendix source list. Each change carries an inline `(Amended 2026-11-05, …)` note.
+
 **Revision r7.1 (2026-11-03).** Applies the four fixes and two MINORs of the delta review of r7 (`docs/specs/SPEC-OKF-01-review.md`, "Delta review of r7"). No owner decision changes.
 
 1. `adopt` takes `(ConceptId, ByteHash)` pairs and refuses a concept whose bytes changed since the review. It needs a `Human` actor with explicit confirmation, and its refusal reasons are named ([§4.5](#SPEC-OKF-01-4-5) "Adopt"; §4.2; §4.3; criterion 142).
@@ -148,7 +150,7 @@ Bob: "Let's also include an import function to import document trees into OKF."
 
 15. trusty-okf has an import function that imports a document tree into an OKF bundle.
 16. It has an import API and an import CLI.
-17. It reuses trusty-kb's `convert.rs` and DOC-55 instead of duplicating them.
+17. It reuses DOC-55 instead of duplicating it. (Amended 2026-11-05, #10746 D14: `convert.rs` is not reused; it has no caller.)
 18. The import expands first scope to existing document trees. It does not make trusty-okf a general document-store or search service.
 
 **Proposals under this input (not owner-approved).** Every detail in §2.14 and §4.10: hierarchy and provenance preservation, an unchanged source tree, preview, deterministic IDs and collisions, repeat-import behaviour, unsupported-format reports, exclusions and symlink confinement, interrupted-import recovery, no automatic human verification, the report categories and the adapter boundary.
@@ -291,7 +293,7 @@ Criteria 113–115 and 125 test this section.
 - trusty-okf creates, updates and moves concepts.
 - It refuses a concept named `index.md` or `log.md`. OKF §3.1 reserves those names. §2.11 gives the full ID rule.
 - It regenerates `index.md` files from concept frontmatter. Each entry uses the linked concept's `description` (OKF §8). Only the bundle-root `index.md` carries frontmatter, and only `okf_version`.
-- It overwrites an `index.md` only when the file's first line is a generator marker that trusty-okf or trusty-kb wrote. trusty-kb's marker is `structure.rs:22@c1eed98441`. A hand-written `index.md` stays unchanged, and trusty-okf reports an info finding (proposal). trusty-kb today rewrites any `index.md` whose content differs (`crates/trusty-kb/src/structure.rs:84-99@c1eed98441`).
+- It overwrites an `index.md` only when the file's first line is a generator marker that trusty-okf or trusty-kb wrote. For the root `index.md`, which carries `okf_version` frontmatter, the marker is read from the first line after the frontmatter block (Amended 2026-11-05, #10746 D4b, Bob: "approve S3 amendments 1, 4, 5"). trusty-kb's marker is `structure.rs:22@c1eed98441`. A hand-written `index.md` stays unchanged, and trusty-okf reports an info finding (proposal). trusty-kb today rewrites any `index.md` whose content differs (`crates/trusty-kb/src/structure.rs:84-99@c1eed98441`).
 - It appends to `log.md` for every lifecycle event. Date headings use ISO 8601 `YYYY-MM-DD`, newest first (OKF §9).
 - A concept ID is its path, so a move changes the ID. trusty-okf rewrites every link to the old ID across the bundle in the same operation. It records the move in `log.md`.
 - A write that changes nothing writes no bytes. trusty-kb's `write_entity_at` already compares before writing (`crates/trusty-kb/src/store.rs:129-141@c1eed98441`).
@@ -378,7 +380,7 @@ Destinations name trusty-okf modules from §4.1. Each row cites the source at `@
 | `crates/trusty-kb/src/reconcile.rs` | `trusty_okf::profile::reconcile` | Inverse edges come from the profile. |
 | `crates/trusty-kb/src/structure.rs` | `trusty_okf::bundle::index_md` | Becomes the OKF §8 `index.md` regenerator, with the marker rule in §2.3. |
 | `crates/trusty-kb/src/validate.rs` | `trusty_okf::format::validate` | Gains the error/warning/info levels in §2.2. |
-| `crates/trusty-kb/src/convert.rs` | `trusty_okf::bundle::convert` | Writes v0.2 `sources[]`. Keeps `_state/conversion-log.md` (`:259-268`). Stays an in-place converter of a bundle. Import reuses its classification and its plan shape, not its in-place apply (§2.13). |
+| `crates/trusty-kb/src/convert.rs` | **Dropped; does not move to trusty-okf** | trusty-okf has no `bundle::convert`. The lossless trusty-kb-to-v0.2 path is `bundle::migrate` (§2.9). Import takes its plan-then-apply shape from §2.13, not from this module. (Amended 2026-11-05, #10746 D14, Bob: "Amend §2.7.2 and §4.1 to drop convert.") |
 | `crates/trusty-kb/src/roots.rs`, `confine`, `assert_within` | `trusty_okf::bundle::paths` | Generic. Strengthened per §2.11. |
 | `crates/trusty-kb/src/roots.rs`, `Roots`, `resolve`, `tree_path` | **Stays in trusty-agents** | Maps an agent name to `<knowledge_dir>/<slug>` (`:25-65`). Agent home layout, so B3 and B4 exclude it. |
 | `crates/trusty-kb/src/mcp.rs`, `tooldefs.rs`, `main.rs` | **Does not move to trusty-okf** | The `kb_*` MCP stdio server. B7 excludes it. ADR-0041 Decision 4 re-homes the agent-consumed tools in a trusty-mcp-services service, which is unbuilt. `kb_ensure_structure` and `kb_validate` become trusty-okf library calls. The binary is registered nowhere today (ADR-0040, ADR-0041 `:30`). |
@@ -392,7 +394,7 @@ Destinations name trusty-okf modules from §4.1. Each row cites the source at `@
 | `crates/trusty-kb/src/okg/policy.rs` | `trusty_okf::build::policy` | Read-side allow-list. `home_default` takes the user home as an argument (`:70`), not the agent home. |
 | `crates/trusty-kb/src/okg/trust.rs` | `trusty_okf::build::trust` | Label derivation and fail-closed read. |
 | `crates/trusty-kb/src/okg/index_journal.rs` | `trusty_okf::build::index_journal` | Pure diff of tree against journal. Widened to cover every concept per §5.4. r4: the journal moves to the machine-local index state directory (§4.9.1). |
-| `crates/trusty-common/src/knowledge_document.rs` | **Stays in trusty-common** | trusty-search depends on it (`crates/trusty-search/src/core/indexer/ingest/mod.rs:425@c1eed98441`). trusty-okf depends on it. |
+| `crates/trusty-common/src/knowledge_document.rs` | **Stays in trusty-common** | trusty-search depends on it (`crates/trusty-search/src/core/indexer/ingest/mod.rs:425@c1eed98441`). The trusty-okf core does not depend on it (B8). `build::ingest` keeps local constants for `source_status` and `deleted`, and `format::tombstone` keeps a local copy of the tombstone rule, kept in step with it by a test. (Amended 2026-11-05, #10746 D4b, Bob: "Accept S4 local constants and amend §2.7.2.") |
 | `crates/trusty-agents/src/stores/index_feed.rs` (`IndexFeed`, `covers`, `feed_source`) | `trusty_okf::feed` (3e, decided A) | Generic: it imports only trusty-kb types (`:62-64`). Behind the cargo feature `search-feed`. Not chosen: 3e B (stays in trusty-agents) and 3e C (trusty-search absorbs it). |
 | `crates/trusty-agents/src/stores/index_feed_rpc.rs` (`RpcIndexFeed`) | `trusty_okf::feed` | Follows `index_feed.rs`. |
 | `crates/trusty-agents/src/stores/index_feed_tests.rs` | trusty-okf tests | Follows `index_feed.rs`. |
@@ -416,10 +418,10 @@ The table is the conversion rule. trusty-okf writes v0.2 and reads v0.1 through 
 | `type` | `put.rs:69-75` (defaults to the collection type or `Note`) | `type` | Unchanged. |
 | `title`, `description`, `tags` | `put.rs:76-79`, `schema.rs:118-131` | Same keys | Unchanged. |
 | `aliases`, `same_as`, `uid` | `schema.rs:118-131` | Extension keys | Kept verbatim. v0.2 has no equivalent. `same_as` is not mapped to `resource`, because `resource` names the underlying asset, not an authority URI (inference from OKF §4.1). |
-| `updated` | `put.rs:91-109`, `convert.rs:305-307` | `generated.at` | Mapped only when the value parses as an ISO 8601 datetime with an explicit offset. Then `updated` is removed. Otherwise `updated` stays, `generated` stays absent, and the validator reports a warning. `put_entity` takes `now: &str` and writes it verbatim (`put.rs:51`), so a date-only value is possible. trusty-okf never invents a time or an offset. |
+| `updated` | `put.rs:91-109` | `generated.at` | Mapped only when the value parses as an ISO 8601 datetime with an explicit offset. Then `updated` is removed. Otherwise `updated` stays, `generated` stays absent, and the validator reports a warning. `put_entity` takes `now: &str` and writes it verbatim (`put.rs:51`), so a date-only value is possible. trusty-okf never invents a time or an offset. |
 | (none) | — | `generated.by` | v0.1 data has no producer. The migration writes `process:trusty-kb-legacy` when it maps `updated` (proposal). A later content change replaces it with the real writer. |
-| `created` | `put.rs:85-90`, `convert.rs:302-304` | Extension key | Kept verbatim. v0.2 has no creation field. |
-| `sources` as a list of plain strings | `convert.rs:296` | `sources[]` of mappings | Each string `s` becomes `{resource: s}`. Order is kept. No `id` is invented. An entry that is already a mapping passes through. |
+| `created` | `put.rs:85-90` | Extension key | Kept verbatim. v0.2 has no creation field. |
+| `sources` as a list of plain strings | — | `sources[]` of mappings | Each string `s` becomes `{resource: s}`. Order is kept. No `id` is invented. An entry that is already a mapping passes through. |
 | `source_id`, `source_kind`, `source_item_id`, `source_timestamp` | `okg/ingest.rs:276-294` | Extension keys, top level | Kept verbatim and at the top level. `is_tombstone` needs a top-level `source_id` (`crates/trusty-common/src/knowledge_document.rs:21-27@c1eed98441`). |
 | Fetcher provenance fields (`url`, `source_path`, `from`, …) | `okg/ingest.rs:55`, `:296-302` | Extension keys, plus one `sources[]` entry | Kept verbatim. When a `url` or `source_path` field exists, ingest also writes one `sources[]` entry with that value as `resource` (proposal). No other source of a resource is invented. |
 | `trust` | `okg/ingest.rs:283-291` | Extension key | Kept verbatim. Never raised by migration. Separate from the OKF trust tier. |
@@ -429,7 +431,7 @@ The table is the conversion rule. trusty-okf writes v0.2 and reads v0.1 through 
 | Body `# Citations` (foreign v0.1 bundles) | not written by trusty-kb | `sources[]` | OKF §13 read fallback. The body is never edited; the derived `sources[]` entries are added (proposal). |
 | Per-folder `index.md` as a name/summary table with `GENERATED_MARKER` | `structure.rs:22`, `:136`, `:163` | OKF §8 `index.md` | Regenerated, because it is a derived file. A hand-written `index.md` stays (§2.3). |
 | Root `index.md` without `okf_version` | `structure.rs:163` | Root `index.md` with `okf_version: "0.2"` | Added on regeneration. |
-| `_state/conversion-log.md` | `convert.rs:259-268` | Kept, plus `log.md` | Kept unchanged. trusty-kb writes no `log.md` today (grep at `@c1eed98441`). |
+| `_state/conversion-log.md` | — | Kept, plus `log.md` | Kept unchanged. No trusty-okf module writes it (Amended 2026-11-05, #10746 D14). trusty-kb writes no `log.md` today (grep at `@c1eed98441`). |
 
 DOC-63 S-4.3 lists `ingested_at` as an existing frontmatter field. `write_item` does not write it (`okg/ingest.rs:276-294@c1eed98441`); the value lives in the ledger record (`okg/ledger.rs:59`). The mapping therefore has no `ingested_at` row.
 
@@ -452,7 +454,7 @@ A migration takes an existing trusty-kb tree to the v0.2 form in §2.8. Under §
 
 **How a migration detects loss.** A migration runs in two phases (proposal).
 
-1. **Plan.** It reads the tree and writes nothing. It returns the exact list of per-file changes. trusty-kb's `convert_tree(report_only = true, …)` already has this shape (`crates/trusty-kb/src/convert.rs:89@c1eed98441`).
+1. **Plan.** It reads the tree and writes nothing. It returns the exact list of per-file changes. (#10746 D14: no `convert_tree` precedent.)
 2. **Apply.** A migration is an operation of kind `migrate` in the operation journal (§4.11). Before its first write, it stores a full backup of every file it will change (r4). Each backup is the complete old bytes, body included, stored content-addressed at `_sources/migrations/<run-id>/blobs/sha256-<hex>`. The manifest `_sources/migrations/<run-id>.jsonl` holds one line per changed file: the path, the SHA-256 of the old bytes, the backup blob name and the SHA-256 of the new bytes. Backups and manifest are synced to disk before the intent record. Then the migration writes each file atomically (§4.4).
 3. **Audit.** After the apply phase, it compares the old inventory with the new one. It checks: equal concept ID sets; equal body bytes; every old key present with an equal value, or mapped by a §2.8 row whose inverse yields the old value; every old `sources` value present as a `resource`; equal verification event multisets; ledger, registry and journal files equal or only appended; and each old log file present as one contiguous substring of the new file.
 4. **Failure.** Any audit failure restores every changed file from its backup blob. Restore writes the blob atomically, then checks that the restored file's SHA-256 equals the manifest's old hash. The migration then returns `OkfError::MigrationLoss` with every failing item. A restore whose check fails adds a `restore_failed` item, and the blob stays in place. The migration reports no partial success.
@@ -511,7 +513,7 @@ A write that changes only lifecycle keys does none of this. `deprecate`, a tombs
 
 **Out-of-band edits.** A hand edit, a git sync merge (ADR-0022) or another tool can change content without trusty-okf. On the next read, trusty-okf compares the current hash with the hash stored for the frontmatter events. On a mismatch, it reports the verification state as Unverified, with a warning finding. The OKF trust tier stays derived from the raw frontmatter (§4.9). The next trusty-okf write applies the five steps above. Until then, a non-trusty consumer that reads the raw frontmatter still sees the old events. That is residual risk.
 
-**Where the record lives. — Decided 2026-11-03 (owner): §3 (d) option C.** The verification record is a ledger-side file under `_sources/`, and it is authoritative. Frontmatter holds a bounded copy: current `verified[]` events plus a bounded history projection. Only events in the record count toward Verified (§4.9 Axis 3). An event that appears only in frontmatter never counts as Verified, though the OKF trust tier still reads it (§4.9). Ruling D64 (#10873): a frontmatter-only event with no `hash` key does count in `history`, as "Events with no hash" states. A `rebuild` rewrites frontmatter and re-projects it from the record, so a human verification survives the rebuild. Not chosen: 3d B, the record only with no `verified` in frontmatter. Ruled out by r6: 3d A as written, the whole record in frontmatter.
+**Where the record lives. — Decided 2026-11-03 (owner): §3 (d) option C.** The verification record is a ledger-side file at `_sources/verification/<id>.jsonl`, and it is authoritative. (Amended 2026-11-05, #10746 D4b item 4: the S3 code writes this path, `record_rel` in `crates/trusty-okf/src/bundle/record.rs`.) Frontmatter holds a bounded copy: current `verified[]` events plus a bounded history projection. Only events in the record count toward Verified (§4.9 Axis 3). An event that appears only in frontmatter never counts as Verified, though the OKF trust tier still reads it (§4.9). Ruling D64 (#10873): a frontmatter-only event with no `hash` key does count in `history`, as "Events with no hash" states. A `rebuild` rewrites frontmatter and re-projects it from the record, so a human verification survives the rebuild. Not chosen: 3d B, the record only with no `verified` in frontmatter. Ruled out by r6: 3d A as written, the whole record in frontmatter.
 
 **Bounded frontmatter (r6, reconciliation row 14).** The verification events in frontmatter are a bounded projection. The projection holds the current events and at most the 10 newest history events, and at most 16 KiB of rendered entries (proposal). Every event beyond the bound lives only in the verification record, and Axis 3 reads that record (§4.9). Under the decided 3d C the record holds the overflow. The rejected 3d A had no place for it. §4.8 states the 64 KiB tombstone bound that this rule serves.
 
@@ -538,7 +540,7 @@ Every trusty-okf write stays under the bundle root. The rules apply to concept f
 4. Any segment contains `:`. This rejects Windows drive forms such as `C:` and `C:foo` on every platform.
 5. It contains NUL or a control character.
 6. Its last segment equals `index` or `log`, compared case-insensitively. macOS file systems are case-insensitive by default, so `Index.md` would collide with `index.md` (inference).
-7. Its first segment starts with `_` or `.`. `_`-prefixed directories hold build machinery (`crates/trusty-kb/src/convert.rs:135@c1eed98441`), and `.`-prefixed segments hold `.git` and other tool state.
+7. Its first segment starts with `_` or `.`. `_`-prefixed directories hold build machinery (#10746 D14: `convert.rs` cite removed), and `.`-prefixed segments hold `.git` and other tool state.
 8. It ends in `.md`. The ID never includes the suffix.
 
 This is stricter than today's `confine`. On Unix, `Path::components` returns `C:\x` as one `Normal` component, so `confine` accepts it (`crates/trusty-kb/src/roots.rs:75-89@c1eed98441`). Rule 4 closes that gap.
@@ -622,7 +624,6 @@ What must be true: the engine addresses every concept by the full `ConceptId` th
 
 | Existing code | What import reuses | What import does not reuse, and why |
 |---|---|---|
-| `crates/trusty-kb/src/convert.rs` | The plan-then-apply shape with a write-nothing default (`report_only`, `:89-121`). Fail-open handling of malformed frontmatter (`:167-181`). Type assignment: existing `type`, then collection default, then `Note` (`:199-205`). Title from the file stem (`:207-210`, `humanize` `:373-385`). Unknown-key preservation (`:286-288`). | Its in-place apply. `convert_tree` rewrites the tree it reads and deletes moved sources (`std::fs::remove_file`, `:249`), so it cannot keep a source tree unchanged. Its collection relocation (`:213-216`), because import preserves source hierarchy (proposal). Its `.md`-only filter (`:141`). |
 | `crates/trusty-kb/src/okg/docstore.rs` | The tree reader: sorted walk with `follow_links(false)` (`:85-91`), extension filter, binary skip, the 8 MiB file cap (`MAX_FILE_BYTES`, `:40`), SHA-256 fingerprints. | Name derivation from relative paths (`:180-197`). It feeds `slugify`, which can collide (§2.9). Import derives IDs by the rule in §2.14. r6: the 20,000-character part splitting (`:36`, `:179-186`). Import reads each file whole (§2.14 rule 3). |
 | `crates/trusty-kb/src/okg/policy.rs` | `DocStorePolicy`: operator-set read roots and hidden-segment rejection, re-checked at access. | — |
 | `crates/trusty-kb/src/okg/ingest.rs`, `ledger.rs`, `registry.rs` | `SourceItem`, the ledger skip test `is_current`, tombstones, `upsert`, and the editorial-key preservation of §2.9. | — |
@@ -634,7 +635,7 @@ What must be true: the engine addresses every concept by the full `ConceptId` th
 
 r4 fixes review BLOCKER 4. The fix applies the approved requirement §1.1 item 12: only evidence that matches the current revision makes it verified.
 
-**The gap today.** `write_item` copies every fetcher field that the envelope did not already set (`crates/trusty-kb/src/okg/ingest.rs:296-302@c1eed98441`). The envelope sets only `title`, the `source_*` keys it has values for, and `trust`. A fetcher field named `verified`, `status`, `superseded_by`, `source_status` or `generated` therefore lands in frontmatter. Import also reuses convert's unknown-key preservation (`crates/trusty-kb/src/convert.rs:286@c1eed98441`), which copies a source file's own frontmatter keys. Under the rejected 3d A an adapter could plant a verification-record hash equal to the deterministic content hash, and the concept would read as Verified. Under the decided 3d C a planted key cannot set the record, but it could still show a false review to OKF readers through frontmatter. The rule below covers both.
+**The gap today.** `write_item` copies every fetcher field that the envelope did not already set (`crates/trusty-kb/src/okg/ingest.rs:296-302@c1eed98441`). The envelope sets only `title`, the `source_*` keys it has values for, and `trust`. A fetcher field named `verified`, `status`, `superseded_by`, `source_status` or `generated` therefore lands in frontmatter. Under the rejected 3d A an adapter could plant a verification-record hash equal to the deterministic content hash, and the concept would read as Verified. Under the decided 3d C a planted key cannot set the record, but it could still show a false review to OKF readers through frontmatter. The rule below covers both.
 
 **What must be true.** No value from a source file, a source adapter or the extraction worker sets a protected key. Current-revision Verified comes only from events that trusty-okf's `verify` recorded.
 
@@ -664,7 +665,7 @@ A document-tree import reads one local root and writes one bundle. The local roo
    - **One source file yields one concept (r6, reconciliation row 7).** The docstore fetcher splits a file over 20,000 characters into items `<rel>#<n>` (`crates/trusty-kb/src/okg/docstore.rs:179-186@c1eed98441`). Under the one-path-one-ID rule, those parts would collide, and every large file would be refused. What must be true: import calls the docstore reader with part splitting disabled. Each source file becomes exactly one ledger item, with the source-relative path as its item ID, and one concept that holds the whole extracted text. The 8 MiB input cap (§2.16) still bounds the file. A vanished source file tombstones the one concept it produced. Criterion 137 tests this.
 4. **Collisions are refused, not guessed.** Two source paths can still map to one ID, for example names that differ only in case on a case-insensitive file system (§2.11 fold rule). The plan lists every collision. Import writes neither colliding item and reports both as failed with reason `collision`. A ledger record pins an assigned ID, so a later source file cannot take over an existing concept's ID. r6: the same rule binds `build` and `rebuild` (§2.9 "Path collisions").
 5. **Provenance is recorded.** Each concept gets `sources[]` with `{resource: <source-relative path>}`, and the top-level keys `source_id`, `source_kind: docstore`, `source_item_id` (the source-relative path) and `source_timestamp` (the file's modification time). A non-text source also gets `extracted_by: <extractor-id>@<version>`, which DOC-55 Q3 recommends (`okg-universal-importer.md:656`). Import writes no absolute path into the bundle. The registry row holds the root.
-6. **Preview writes nothing.** `plan_import` returns the full plan: each item's ID, action, extractor and every refusal. It writes no byte, as `convert_tree(report_only = true)` does today.
+6. **Preview writes nothing.** `plan_import` returns the full plan: each item's ID, action, extractor and every refusal. It writes no byte. (#10746 D14: no `convert_tree` precedent.)
 7. **Repeat import is idempotent.** An unchanged item (same fingerprint) is skipped. A changed item updates its concept, keeps the editorial keys (§2.9) and moves verification to history (§2.10). A concept that was hand-edited since its last import is refused with `Conflict` and reported, as `rebuild` does (§4.5). The hand-edit test is the §4.5 ownership proof, so a trusty-okf write is never a hand edit (r6). A vanished item is tombstoned only when the run's `deletion_safe` is true (§2.13 "Listing completeness", r6). A renamed source file is a tombstone plus a new concept. The report flags a pair with equal fingerprints as a possible move.
 8. **Unsupported formats are reported.** Each skipped item carries one reason: `excluded`, `hidden`, `symlink`, `too_large`, `binary_no_extractor`, `unsupported_format`, `worker_absent`, `worker_incompatible`, `policy_refused`, `sandbox_required` (r7, §2.16) or `collision`. No item disappears from the report.
 9. **Exclusions and symlink confinement.** The caller passes include and exclude globs. Built-in exclusions are hidden segments (`policy.rs`), VCS directories and the bundle root. Import canonicalizes the source root once and never follows a link below it. A link is reported as `symlink` and is not read. The bundle side keeps §2.11.
@@ -715,7 +716,7 @@ Scope is approved (§1.3). The rules below are proposals. Appendix C gives the p
 
 The design choice is approved (§1.4). Every rule below is a proposal. Appendix B gives the protocol messages and default limits.
 
-**Shape.** The worker is a separate binary, proposed name `trusty-okf-xberg-worker`. It depends on xberg at an exact version (`xberg = "=1.4.0"`, the assessed version, `xberg-assessment.md:579`) with a committed lockfile. trusty-okf implements one `Extractor`, `WorkerExtractor`, that forwards each item to the worker. trusty-okf never links xberg (B9). The worker is optional: trusty-okf builds and imports without it.
+**Shape.** The worker is a separate binary, proposed name `trusty-okf-xberg-worker`. It depends on xberg at an exact version (`xberg = "=1.3.10"`; Amended 2026-11-05, #10746 D19, Bob: "Amend §2.16 to =1.3.10." The assessment named 1.4.0 at `xberg-assessment.md:579`) with a committed lockfile. trusty-okf implements one `Extractor`, `WorkerExtractor`, that forwards each item to the worker. trusty-okf never links xberg (B9). The worker is optional: trusty-okf builds and imports without it.
 
 **Tiers. — Decided 2026-11-03 (owner): §3 (o) option A; revisitable at implementation.** The built-in tier handles UTF-8 text and Markdown, which is today's floor (DOC-55 §4.3). Every other format goes to the worker. Not chosen: 3o B (pure-Rust extractors also in process) and 3o C (3o B through a shared crate with trusty-search).
 
@@ -927,7 +928,7 @@ Questions (q) and (r) are new in r4. They come from the review-blocker fixes, no
 
 - `trusty_okf::format`: concept types, frontmatter, container rules, parse, render, validate, content hash. No I/O beyond files. No async.
 - `trusty_okf::profile`: pluggable collection profiles and inverse-edge reconciliation.
-- `trusty_okf::bundle`: open, create, put, move, verify, supersede, deprecate, `index.md` and `log.md` regeneration, paths, graph read, convert, migrate.
+- `trusty_okf::bundle`: open, create, put, move, verify, supersede, deprecate, `index.md` and `log.md` regeneration, paths, graph read, migrate. (Amended 2026-11-05, #10746 D14, Bob: `convert` dropped.)
 - `trusty_okf::build`: registry, ledger, ingest, docstore fetcher, read policy, trust labels, index journal, rebuild.
 - `trusty_okf::feed` (cargo feature `search-feed`): the push loop (3e, decided A).
 - `trusty_okf::retrieve` (cargo feature `search-feed`): `search.query` plus hit enrichment. Bob's requirement 3 puts retrieval in trusty-okf.
@@ -962,7 +963,7 @@ pub struct Frontmatter {
 pub struct Source { pub resource: String, pub id: Option<String>, pub title: Option<String>, /* author, usage_count, last_modified */ }
 pub struct Generated { pub by: Actor, pub at: Option<DateTime<FixedOffset>> }   // r4: OKF requires only `by`
 pub struct Verification { pub by: Actor, pub at: DateTime<FixedOffset>, pub stale_after: Option<DateTime<FixedOffset>> }   // r7.1: `verify` only; a new `stale_after` set in the same write (§2.4), not projected into `verified[]`
-pub struct VerificationEvent { pub v: Verification, pub hash: ContentHash, pub invalidated_at: Option<DateTime<FixedOffset>>, pub invalidated_by_hash: Option<ContentHash> }
+pub struct VerificationEvent { pub v: Verification, pub hash: Option<ContentHash>, pub invalidated_at: Option<DateTime<FixedOffset>>, pub invalidated_by_hash: Option<ContentHash>, pub reason: Option<String> }   // #10746 D4b (2026-11-05, Bob): `hash` is `None` for a legacy event, which moves to history with `reason` `legacy_unbound` (§2.10)
 pub enum Actor { Producer { name: String, version: String }, Human(String), Process(String), Other(String) }
 pub enum Status { Draft, Stable, Deprecated, Other(String) }   // r4: an unknown value is kept
 pub enum TrustTier { Unverified, MachineConfirmed, HumanReviewed }   // derived only
@@ -1017,9 +1018,9 @@ impl Bundle {
     pub fn create(root: &Path, okf_version: &str) -> Result<Bundle, OkfError>;
     pub fn validate(&self) -> Vec<Finding>;
     pub fn get(&self, id: &ConceptId) -> Result<Concept, OkfError>;
-    pub fn put(&mut self, c: Concept, by: Actor, mode: WriteMode, now: DateTime<FixedOffset>) -> Result<PutOutcome, OkfError>;
+    pub fn put(&mut self, c: Concept, by: Actor, mode: WriteMode, now: DateTime<FixedOffset>) -> Result<(PutOutcome, Vec<Finding>), OkfError>;   // #10746 D4b (2026-11-05, Bob): returns the write's findings, so criterion 125's `legacy_value_moved` warnings have a channel
     pub fn move_concept(&mut self, from: &ConceptId, to: &ConceptId, now: DateTime<FixedOffset>) -> Result<MoveReport, OkfError>;
-    pub fn verify(&mut self, id: &ConceptId, v: Verification, seen: &ContentHash) -> Result<PutOutcome, OkfError>;
+    pub fn verify(&mut self, id: &ConceptId, v: Verification, seen: &ContentHash) -> Result<(PutOutcome, Vec<Finding>), OkfError>;   // #10746 D4b (2026-11-05, Bob): returns findings as `put` does
     pub fn supersede(&mut self, old: &ConceptId, new: Concept, reason: &str, by: Actor, now: DateTime<FixedOffset>) -> Result<(), OkfError>;   // 3c A: deprecate old in place, create new (§2.5)
     pub fn adopt(&mut self, reviewed: &[(ConceptId, ByteHash)], by: Actor, confirmed: bool, now: DateTime<FixedOffset>) -> Result<AdoptReport, OkfError>;   // r7, 3q C: records reviewed bytes as engine-written; never hashes an event. r7.1: each pair names the bytes the person reviewed, as `verify` takes `seen`; `Human` actor and `confirmed` required (§4.5 "Adopt")
     pub fn deprecate(&mut self, id: &ConceptId, reason: &str, by: Actor, now: DateTime<FixedOffset>) -> Result<(), OkfError>;
@@ -1081,11 +1082,11 @@ pub enum OkfError {
 - No public function panics on malformed input.
 - A read never fails on a finding of any severity. Only I/O failure or unparseable YAML in the target concept fails a read.
 - A refused write changes no file. Each file write is atomic: a `create_new` temporary file in the same directory, then a rename (§2.11). An operation that writes more than one file is atomic as a set through the operation journal (§4.11, r4).
-- One writer works on a bundle at a time. trusty-okf takes an advisory lock file under `_sources/` (proposal). ADR-0022 sync must not commit it (§2.12).
+- One writer works on a bundle at a time. trusty-okf takes an advisory lock file under `_sources/` (proposal). ADR-0022 sync must not commit it (§2.12). The lock is built in slice S5 of the #10746 plan. (Amended 2026-11-05, #10746 D4b, Bob: "lock goes in S5.")
 
 ### 4.5 Idempotency and rebuild guarantee {#SPEC-OKF-01-4-5}
 
-A concept is **ledger-owned** when a ledger record names its path. Every other concept is **hand-owned**: a bundle `put`, a converted file, or a file a user created.
+A concept is **ledger-owned** when a ledger record names its path. Every other concept is **hand-owned**: a bundle `put`, a migrated file (#10746 D14: was "a converted file"), or a file a user created.
 
 - `put` of identical content returns `Unchanged` and writes no bytes.
 - `regenerate_indexes` run twice writes no bytes the second time.
@@ -1851,7 +1852,7 @@ trusty-tools (`@c1eed98441`, read-only):
 - `docs/specs/okg-universal-importer.md` (DOC-55)
 - `docs/specs/DOC-63-okg-sources.md`, `docs/specs/DOC-45-credential-authority-model.md`
 - `crates/trusty-agents/src/tools/okg/gmail.rs`, `drive.rs`, `gapi.rs`
-- `crates/trusty-kb/` (`Cargo.toml`, `src/schema.rs`, `src/entity.rs`, `src/store.rs`, `src/put.rs`, `src/structure.rs`, `src/convert.rs`, `src/roots.rs`, `src/okg/registry.rs`, `src/okg/ledger.rs`, `src/okg/ingest.rs`, `src/okg/docstore.rs`, `src/okg/policy.rs`, `src/okg/trust.rs`, `src/okg/index_journal.rs`)
+- `crates/trusty-kb/` (`Cargo.toml`, `src/schema.rs`, `src/entity.rs`, `src/store.rs`, `src/put.rs`, `src/structure.rs`, `src/roots.rs`, `src/okg/registry.rs`, `src/okg/ledger.rs`, `src/okg/ingest.rs`, `src/okg/docstore.rs`, `src/okg/policy.rs`, `src/okg/trust.rs`, `src/okg/index_journal.rs`)
 - `crates/trusty-agents/` (`Cargo.toml:111`, `src/stores/index_feed.rs`, `src/stores/index_feed_rpc.rs`, `src/stores/okg_graph.rs`, `src/tools/memory/okg_fence.rs`)
 - `crates/trusty-common/src/knowledge_document.rs`, `crates/trusty-common/src/search_rpc.rs`
 - `crates/trusty-search/src/core/indexer/ingest/mod.rs`, `crates/trusty-search/src/service/rpc/writes.rs`, `crates/trusty-search/src/service/server/files.rs`
