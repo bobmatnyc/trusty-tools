@@ -79,7 +79,9 @@ if HERE not in sys.path:  # #10161: -P / PYTHONSAFEPATH drop the script dir; the
 import datg_store  # noqa: E402  (#10161: main() sets datg_store._SESSION, which per_pm_session reads)
 from datg_store import VERB_KEY  # noqa: E402  (#10571: a batch entry's verb key)
 from datg_ready import op_ready  # noqa: E402  (#10579: datg.py ready)
-from datg_guards import SHADOW, dispatch_card, guard_lines  # noqa: E402  (#10800: G2 card, G1/G3 flags)
+from datg_guards import (  # noqa: E402  (#10800: G2 card, G1/G3 flags, an enforced hook failure denies)
+    SHADOW, dispatch_card, guard_lines, raw_guard_mode, record_guard,
+)
 from datg_store import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     CODE_RE, DEFAULT_BLOCK_AFTER, DatgError, EVENTS, ID_RE, Locked, PREFIXES, RULES, SESSION_MAX, SESSION_RE,
     SIZE_REFUSE, SIZE_WARN, STATUS, TITLE_MAX, VAGUE, WHO, _atomic_write, _dump, _jl, _largest, _size,
@@ -158,7 +160,13 @@ def hook_output(event, st, payload, project, now=None):
 
 
 def run_hook(stdin_text):
-    """Fail open: any problem returns "" (no output). No ledger is silent; any other failure is one stderr line."""
+    """Fail open: any problem returns "" (no output). No ledger is silent; any other failure is one stderr line.
+
+    #10800 critic: a dispatch (PreToolUse Agent|Task) whose check raises under guard_mode enforce is denied
+    (hook_failure); in shadow it fails open and the failure goes to guards.jsonl.
+    Test: tests/test_datg_guards.py HookFailureCase
+    """
+    payload, project = None, None
     try:
         payload = json.loads(stdin_text or "{}")
         if not isinstance(payload, dict) or payload.get("agent_id"):
@@ -170,8 +178,23 @@ def run_hook(stdin_text):
         out = hook_output(payload.get("hook_event_name"), st, payload, project)
         return json.dumps(out, separators=(",", ":")) if out else ""
     except Exception as e:  # #10109: never block the session, but report the failure
-        print(f"datg hook: failed open ({e})", file=sys.stderr)
-        return ""
+        return hook_failure(payload, project, e)
+
+
+def hook_failure(payload, project, err):
+    """The hook's answer when its check raised: deny an enforced dispatch, else fail open (#10800 critic)."""
+    dispatch = (isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse"
+                and payload.get("tool_name") in ("Agent", "Task"))
+    if dispatch and project and raw_guard_mode(project) == "enforce":
+        print(f"datg hook: check failed under guard_mode enforce; dispatch denied ({err})", file=sys.stderr)
+        reason = (f"DATG: the ledger check failed under guard_mode enforce ({type(err).__name__}); "
+                  "fix .trusty-mpm/datg/state.json or set config.guard_mode to shadow.")
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                  "permissionDecisionReason": reason}}, separators=(",", ":"))
+    print(f"datg hook: failed open ({err})", file=sys.stderr)
+    if dispatch and project:
+        record_guard(project, "hook_error", f"dispatch check failed open ({type(err).__name__}: {err})"[:300])
+    return ""
 
 
 def cmd_show(project, brief):

@@ -19,7 +19,8 @@ What:
   checker/repair cards closed in 24 h and no delivery card).
 Rollout (DOC-87 section 10): `config.guard_mode` is "shadow" (the default) or "enforce". In shadow G2 only
 warns and appends to <datg>/guards.jsonl; in enforce the dispatch is denied and the close refused. G1 and G3
-are flags in the resume digest and `datg.py guards`; they never block.
+are flags in the resume digest and `datg.py guards`; they never block. Enforce binds this Python writer and
+its hook only: the Rust `tm dbatg` writer does not apply G2 yet (#10800 critic).
 Test: tests/test_datg_guards.py
 """
 import json
@@ -47,8 +48,10 @@ EVIDENCE = re.compile(
     r"https?://\S+"                                     # a URL (PR, run, comment)
     r"|(?<![\w#])#\d{1,7}\b"                            # an issue or PR number
     r"|\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"  # a commit SHA
-    r"|\b[\w.-]+/[\w./-]*\.\w{1,8}\b"                   # a file path
-    r"|\b(?:run|job|msg|message|id|pid)\s*[:#=]?\s*\d[\w-]*", re.I)  # a run, job or message id
+    # #10800 critic: a path's directory part holds a letter and two characters (not `a/b.c`, `1.2/3.4`, `w/o.y`)
+    r"|(?<![\w./-])(?=[\w.-]*[a-z])[\w.-]{2,}/[\w./-]*\.\w{1,8}\b"
+    # #10800 critic: a run, job or message id is `<keyword> #<n>` or five digits or more (not `id 5`, `run 3`)
+    r"|\b(?:run|job|msg|message|id)\s*(?:#\s*\d+|[:=]?\s*\d{5,})\b", re.I)
 REPAIR = re.compile(r"^\s*(?:repair|check|checker|fix-?up)\s*:"
                     r"|\b(?:repair\w*|checkers?|flak(?:e|es|y|iness)|re-?runs?|retr(?:y|ies)|tooling|lint|clippy"
                     r"|fix (?:the )?(?:gate|hook|checker|harness|ci|build))\b", re.I)
@@ -57,6 +60,24 @@ REPAIR = re.compile(r"^\s*(?:repair|check|checker|fix-?up)\s*:"
 def guard_mode(st):
     """'enforce' when config.guard_mode says so, else 'shadow' (DOC-87 section 10: shadow first)."""
     return "enforce" if (st.get("config") or {}).get("guard_mode") == "enforce" else "shadow"
+
+
+def raw_guard_mode(project):
+    """guard_mode of a state.json load_state refused: its parsed config, else its raw text; 'shadow' if unknown.
+
+    Why: #10800 critic, a corrupt ledger must not turn an enforced dispatch check into an allow.
+    Test: tests/test_datg_guards.py HookFailureCase
+    """
+    try:
+        with open(paths(project)[1], encoding="utf-8", errors="replace") as f:
+            text = f.read(READ_MAX)
+    except OSError:
+        return "shadow"
+    try:
+        st = json.loads(text)
+    except ValueError:
+        return "enforce" if re.search(r'"guard_mode"\s*:\s*"enforce"', text) else "shadow"
+    return guard_mode(st) if isinstance(st, dict) and isinstance(st.get("config"), dict) else "shadow"
 
 
 def record_guard(project, guard, text, ref=""):

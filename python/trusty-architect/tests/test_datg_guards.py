@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
@@ -115,6 +116,50 @@ class EvidenceCase(Base):
             self.assertEqual(datg_guards.evidence_gaps([("task", {"id": "th-T01", "outcome": outcome})]), [],
                              outcome)
         self.assertEqual(datg_guards.evidence_gaps([("item", {"id": "th-D01", "outcome": "ok"})]), [])
+        for outcome in ("job #12 green", "message id 1794225540", "fixed in src/datg.rs"):
+            self.assertEqual(datg_guards.evidence_gaps([("task", {"id": "th-T01", "outcome": outcome})]), [],
+                             outcome)
+
+    def test_weak_evidence_is_refused_in_enforce_10800(self):
+        # #10800 critic: a one-letter or digit-only path and a short run or job id are not evidence.
+        self.enforce()
+        before = open(self.sp).read()
+        for outcome in ("see a/b.c", "bumped 1.2/3.4", "done w/o.y", "verified on id 5", "tests pass; run 3 ok"):
+            with self.assertRaises(datg.DatgError, msg=outcome):
+                datg.write_ops(self.p, [{"op": "close", "id": "th-T01", "outcome": outcome}])
+            self.assertEqual(open(self.sp).read(), before, outcome)
+
+
+class HookFailureCase(Base):
+    """#10800 critic: a failed check never allows an enforced dispatch; in shadow it fails open, recorded."""
+
+    def corrupt(self, text):
+        with open(self.sp, "w") as f:
+            f.write(text)
+
+    def test_corrupt_state_with_enforce_denies_the_dispatch_10800(self):
+        self.enforce()
+        good = open(self.sp).read()
+        for bad in (good[:-20],                                                        # truncated JSON
+                    json.dumps({"code": "th", "config": {"guard_mode": "enforce"}})):  # load_state's shape check
+            self.corrupt(bad)
+            out = self.hook("Goal: th-G01 Card: th-T01 go")
+            self.assertEqual(out["permissionDecision"], "deny", bad[:40])
+            self.assertIn("guard_mode enforce", out["permissionDecisionReason"])
+
+    def test_corrupt_state_in_shadow_fails_open_and_is_recorded_10800(self):
+        self.corrupt("garbage")
+        self.assertIsNone(self.hook("Goal: th-G01 Card: th-T01 go"))
+        self.assertEqual([r["guard"] for r in self.guards_log()], ["hook_error"])
+
+    def test_a_raising_card_check_under_enforce_denies_10800(self):
+        self.enforce()
+        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Agent",
+                              "tool_input": {"prompt": "Goal: th-G01 Card: th-T01 go"}})
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.p}), \
+                mock.patch.object(datg, "dispatch_card", side_effect=RuntimeError("boom")):
+            out = json.loads(datg.run_hook(payload))["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
 
 
 class PolicyCase(Base):
