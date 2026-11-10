@@ -11136,7 +11136,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.67.6"
+version = "0.68.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11243,7 +11243,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "axum",

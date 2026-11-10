@@ -1,0 +1,3 @@
+Added
+- trusty-console now serves its own Unix socket at `{data_dir}/trusty-console.sock` beside its HTTP listener (#10902). It answers `console.health` (`status`, `service`, `version`, `uptime_secs`) and `console.fleet_status`, which returns the same services snapshot as `GET /api/console/services`, read from the poller cache with no probe per call. The socket is `0600` in a `0700` directory, checks the peer uid, and is removed on shutdown. A failed bind logs a warning and the console keeps serving HTTP.
+- `ServiceInfo`, `ServiceStatus` and `ServiceLifecycle` now live in `trusty_common::console_rpc`; `trusty_console::connector` re-exports them, so existing paths are unchanged.
