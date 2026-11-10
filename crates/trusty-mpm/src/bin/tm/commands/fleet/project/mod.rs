@@ -5,7 +5,7 @@
 //! `local/watch.json`, changed only through these commands (plan D1, D6).
 //! What: [`run`] resolves the Architect directory, the managed root (so
 //! `TRUSTY_MPM_ROOT` is honoured), the registry from disk and the live tmux
-//! session names, then calls [`add`], [`remove`] or [`list`]. Those take
+//! session names, then calls [`add`], [`remove`] or [`list()`]. Those take
 //! every input as an argument, so the unit tests never reach the operator's
 //! home, root or tmux. A refused command writes nothing: it is validated
 //! before the one-time `CLAUDE.md` import ([`watch::ensure`]) runs.
