@@ -34,8 +34,11 @@ use super::state::SearchAppState;
 /// absolute in-root path replaces the file's root-relative chunks and one
 /// outside the root answers 400; `path` in the reply echoes the request. A
 /// copy stored under the verbatim absolute key before #9510 is purged first,
-/// and on an excluded-path 403 too.
+/// and on an excluded-path 403 too. #10738: a success reply adds
+/// `content_sha256` (the indexed bytes) and the index `identity`.
 /// Test: `index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510`,
+/// `put_reply_carries_the_sha256_of_the_content_and_the_identity`,
+/// `concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks`,
 /// `index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`,
 /// `index_file_excluded_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`,
 /// `index_file_refuses_an_absolute_path_outside_the_root_9510`,
@@ -104,6 +107,8 @@ pub(crate) async fn index_file_report(
     super::remove_path::purge_verbatim_key(&indexer, &index_id, &req.path, &key)
         .await
         .map_err(failed)?;
+    // #10738: the write core forgets and records the path's content hash under
+    // the path's write lock, for this put and for the watcher and reconcile.
     let outcome = indexer
         .index_file_outcome(&key, &req.content)
         .await
@@ -113,11 +118,15 @@ pub(crate) async fn index_file_report(
         use crate::service::write_admission::{refusal, Refusal};
         return Err(refusal(&index_id.0, &req.path, Refusal::SopsEncrypted, 0));
     }
+    // #10738: the reply carries the indexed bytes' hash and the identity.
+    let content_sha256 = crate::service::reindex::hash::hash_content(&req.content);
     // #8976: `indexed` follows the outcome; `chunks`/`reason` are additive.
     let mut body = serde_json::Map::new();
-    body.insert("index_id".into(), index_id.0.into());
+    body.insert("index_id".into(), index_id.0.clone().into());
     body.insert("path".into(), req.path.into());
     body.extend(outcome.report_fields());
+    body.insert("content_sha256".into(), content_sha256.into());
+    crate::service::index_identity::insert_into(&index_id.0, &mut body);
     Ok(serde_json::Value::Object(body))
 }
 

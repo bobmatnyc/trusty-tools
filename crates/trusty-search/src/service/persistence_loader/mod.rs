@@ -253,6 +253,11 @@ pub async fn build_indexer_from_entry(
                     // emits Failed instead of the misleading InProgress.
                     indexer.corpus_open_failed = true;
                     indexer.corpus_open_failure = Some(kind);
+                    // #10738: the index restores with no corpus.
+                    crate::service::index_identity::bump_generation_logged(
+                        &indexer.index_id,
+                        "corpus_open_failed",
+                    );
                 }
             }
         }
@@ -278,6 +283,11 @@ pub async fn build_indexer_from_entry(
             // NOTHING about the on-disk format — classify it as unclassified
             // rather than letting it inherit the corruption wording.
             indexer.corpus_open_failure = Some(CorpusOpenFailure::Unclassified);
+            // #10738: the index restores with no corpus.
+            crate::service::index_identity::bump_generation_logged(
+                &indexer.index_id,
+                "corpus_path_unresolved",
+            );
         }
     }
 
@@ -614,3 +624,6 @@ mod tests_3659;
 // #8600: the bounded warm-boot lock retry.
 #[cfg(test)]
 mod tests_8600;
+// #10738: a corpus created empty changes the index identity.
+#[cfg(test)]
+mod identity_10738_tests;

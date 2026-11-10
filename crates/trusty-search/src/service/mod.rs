@@ -27,6 +27,8 @@ pub mod grep;
 pub mod grep_glob;
 pub(crate) mod index_admission;
 pub mod index_budget;
+// #10738: the persisted `(instance_id, generation)` index identity.
+pub mod index_identity;
 pub mod indexed_files;
 pub mod lazy_loader;
 pub(crate) mod lazy_restore;

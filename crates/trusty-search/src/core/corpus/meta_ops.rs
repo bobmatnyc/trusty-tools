@@ -81,6 +81,28 @@ impl CorpusStore {
         Ok(out)
     }
 
+    /// The persisted content hash of one relative path, if any (#10738).
+    ///
+    /// Why: `search.index.file.status` reports one file's hash; loading the
+    /// whole table for it would scan every row.
+    /// What: one point read. `Ok(None)` for an absent row or table; a corrupt
+    /// (non-UTF-8) row is an `Err`, never a hash.
+    /// Test: `file_status_reports_the_put_hash_then_absent_after_remove`.
+    pub(crate) fn file_hash(&self, path: &str) -> Result<Option<String>> {
+        let txn = self.db.begin_read().context("begin file_hash read txn")?;
+        let table = match txn.open_table(FILE_HASHES_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(anyhow::anyhow!("open file_hashes table: {e}")),
+        };
+        let Some(row) = table.get(path).context("read file_hashes row")? else {
+            return Ok(None);
+        };
+        let hash = std::str::from_utf8(row.value())
+            .with_context(|| format!("corrupt file_hashes row for {path}"))?;
+        Ok(Some(hash.to_string()))
+    }
+
     /// Atomically clear the entire file-hash table (issue #662).
     ///
     /// Why: called when `force=true` or a root move is detected so the
@@ -488,10 +510,14 @@ impl CorpusStore {
                 // The end-of-reindex `save_kg_graph` writes both together.
                 // #9169: the reindex stamp too, so a resident index serving
                 // its staging corpus still reports when it was last indexed.
+                // #10738: the identity stamp and a pending bump too, so a
+                // promoted staging corpus keeps (or still owes) the identity.
                 for key in &[
                     META_KEY_INDEXED_ROOT,
                     META_KEY_SCHEMA_VERSION,
                     META_KEY_REINDEXED_UNIX,
+                    super::identity_meta::META_KEY_IDENTITY_STAMP,
+                    super::identity_meta::META_KEY_IDENTITY_BUMP_PENDING,
                 ] {
                     if let Some(val) = src_meta
                         .get(key)

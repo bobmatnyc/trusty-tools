@@ -35,6 +35,8 @@ mod fanout;
 mod fanout_deadline;
 // #9029: `search.file.get`, one indexed file and its diff.
 mod file_get;
+// #10738: the put reply's hash and `search.index.file.status`.
+mod file_status;
 mod files;
 // #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
 mod graph_refresh_ticker;
@@ -315,6 +317,8 @@ pub(crate) use health::health_report;
 pub(crate) use admin::{config_report, ConfigResponse};
 pub(crate) use contrib_graph::{graph_neighbors_report, NeighborsParams};
 pub(crate) use files::{call_chain_report, index_chunks_report, CallChainParams};
+// #10738: `search.index.file.status`.
+pub(crate) use file_status::{file_status_report, FileStatusRequest};
 pub(crate) use index_config::{index_config_report, IndexConfigView};
 pub(crate) use indexes::{list_indexes_report, ListIndexesParams};
 pub(crate) use status::{graph_report, graph_stats_report, index_status_report, GraphQueryParams};

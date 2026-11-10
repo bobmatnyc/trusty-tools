@@ -94,6 +94,10 @@ pub(super) async fn stop_pollers(
 /// covers the refusal and
 /// `super::live_corpus_lock_tests::a_rename_failure_quarantines_and_is_not_reported_as_a_deferral`
 /// covers the rename arm that must NOT borrow that status.
+/// #10738: a rollback, a memory abort and a promotion that did not land each
+/// raise the index generation, since puts taken during the run are gone from
+/// the corpus a restart attaches; `a_rollback_that_discards_a_put_raises_the_generation`
+/// and `a_deferred_promotion_raises_the_generation` cover them.
 // #7004 pushed this to 8 parameters; `rebuild_kg` below carries the same allow.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn resolve_corpus_swap(
@@ -115,10 +119,30 @@ pub(super) async fn resolve_corpus_swap(
             // run's terminal status.
             promotion_deferred =
                 !promoted && handle.indexer.read().await.promotion_deferred().is_some();
+            if !promoted {
+                // #10738: staging stays attached (deferral, unresolvable path) or
+                // nothing is; either way the corpus a restart attaches lacks the
+                // puts this run took, and its stamp still matches. No stamp here:
+                // the restart's attach sees the mismatch and bumps again.
+                crate::service::index_identity::bump_with_pending(
+                    &index_id.0,
+                    None,
+                    "promotion_not_landed",
+                );
+            }
             // #7004: force stages an EMPTY corpus and skips the prune pass, so
             // the warm map, BM25 and vector store still hold the rebuild's
             // obsolete chunks.
             if force && promoted {
+                // #10738: the promoted corpus started empty; raise the generation
+                // before the warm reconcile drops the obsolete chunks.
+                // #10738: pending marker in the promoted corpus first.
+                let corpus = handle.indexer.read().await.corpus_store();
+                crate::service::index_identity::bump_with_pending(
+                    &index_id.0,
+                    corpus.as_deref(),
+                    "force_promotion",
+                );
                 super::prune::reconcile_warm_state_to_promoted_corpus(handle, index_id).await;
             }
             // #9169: only a promoted corpus records a reindex commit.
@@ -141,6 +165,15 @@ pub(super) async fn resolve_corpus_swap(
                 );
             }
             abort_staged_corpus_swap(handle, index_id, tmp_path).await;
+            // #10738: the discarded staging corpus held every put this run took;
+            // the re-attached live corpus still carries the stored stamp, so
+            // its attach did not bump. Marked pending in that corpus first.
+            let corpus = handle.indexer.read().await.corpus_store();
+            crate::service::index_identity::bump_with_pending(
+                &index_id.0,
+                corpus.as_deref(),
+                "staged_corpus_discarded",
+            );
         }
     } else if reindex_outcome.is_ready() && !memory_aborted {
         if let Err(e) = handle.write_indexed_root(canonical_root).await {

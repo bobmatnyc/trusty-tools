@@ -402,6 +402,32 @@ impl CodeIndexer {
         file_path: &str,
         content: &str,
     ) -> Result<IndexFileOutcome> {
+        // #8959: one write per path at a time, from the superseded-id snapshot
+        // through the commit; otherwise two writes each removed only the ids
+        // they saw and both versions stayed indexed.
+        let path_lock = self.lock_path_for_write(file_path).await;
+        self.index_file_outcome_path_locked(file_path, content, &path_lock)
+            .await
+    }
+
+    /// [`Self::index_file_outcome`] for a caller that already holds
+    /// `file_path`'s lock from [`Self::lock_path_for_write`] (#10738).
+    ///
+    /// Why: the path's content hash must name the bytes its chunks came from,
+    /// whichever writer (put, watcher, reconcile) replaced them; forget and
+    /// record sit under the same lock as the write, or two writes interleave
+    /// and the stored hash names content whose chunks were replaced.
+    /// What: forgets the path's hash before any mutation, and records the
+    /// SHA-256 of `content` only when the write left chunks behind. A failed
+    /// forget or record fails the write.
+    /// Test: `concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks`,
+    /// `a_watcher_rewrite_after_a_put_never_reports_the_put_hash`.
+    pub(crate) async fn index_file_outcome_path_locked(
+        &self,
+        file_path: &str,
+        content: &str,
+        _path_lock: &supersede::PathWriteGuard<'_>,
+    ) -> Result<IndexFileOutcome> {
         // #8167: a handle that outlived DELETE must not write into it.
         self.refuse_if_deleted()?;
         // #9459: a corpus closed for shutdown would take this write in memory
@@ -415,13 +441,16 @@ impl CodeIndexer {
                 self.index_id
             );
         }
+        // #10738: a staged swap's detach window holds no corpus; the write
+        // would land in memory only and still answer success.
+        self.refuse_if_corpus_detached()?;
         // #10159: active from here, embed included, so the ticker's quiet
-        // rebuild cannot fire mid-write. Declared first, so it drops last.
+        // rebuild cannot fire mid-write.
         let _active_write = self.begin_active_write();
-        // #8959: one write per path at a time, from the superseded-id snapshot
-        // below through the commit; otherwise two writes each removed only
-        // the ids they saw and both versions stayed indexed.
-        let _path_lock = self.path_write_locks.lock(file_path).await;
+        // #10738: forget the old hash first, in every writer, so a write that
+        // fails part-way never leaves a hash naming content it replaced.
+        let hash_id = crate::core::registry::IndexId::new(self.index_id.as_str());
+        crate::service::reindex::hash::forget_file_hash(&hash_id, self, file_path).await?;
         if trusty_common::knowledge_document::is_tombstone(content) {
             // #8959: a failed redb delete fails the write with the ids still in
             // memory, so a retry removes them instead of a reopen loading them.
@@ -582,6 +611,12 @@ impl CodeIndexer {
                 dropped_by_cap
             );
         }
+        // #10738: the hash of the bytes these chunks came from, for every writer.
+        if matches!(outcome, IndexFileOutcome::Indexed { chunks } if chunks > 0) {
+            let hash = crate::service::reindex::hash::hash_content(content);
+            crate::service::reindex::hash::record_file_hash(&hash_id, self, file_path, &hash)
+                .await?;
+        }
         // #9230: stamp only a write that is reported as a success and landed.
         if durable {
             self.record_incremental_commit(file_path).await;
@@ -679,6 +714,11 @@ impl CodeIndexer {
         if files.is_empty() {
             return Ok(0);
         }
+        // #10738: the watcher rescan commits here; in a staged swap's detach
+        // window the batch would land in memory only and answer `Ok`, so the
+        // rescan recorded fingerprints for content live never got. The
+        // reindex's own batches call `commit_parsed_batch` on staging directly.
+        self.refuse_if_corpus_detached()?;
         let parsed = self.parse_and_embed_files(files.to_vec()).await?;
         let timings = self
             .commit_parsed_batch(parsed, defer_graph_rebuild)

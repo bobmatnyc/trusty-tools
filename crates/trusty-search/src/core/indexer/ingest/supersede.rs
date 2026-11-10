@@ -59,6 +59,8 @@ const PATH_LOCK_STRIPES: usize = 64;
 #[derive(Debug)]
 pub(crate) struct PathWriteLocks {
     stripes: Vec<tokio::sync::Mutex<()>>,
+    /// #10738: path writes finished, counted as each guard drops.
+    released: std::sync::atomic::AtomicU64,
 }
 
 impl Default for PathWriteLocks {
@@ -67,22 +69,69 @@ impl Default for PathWriteLocks {
             stripes: (0..PATH_LOCK_STRIPES)
                 .map(|_| tokio::sync::Mutex::new(()))
                 .collect(),
+            released: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
 
 impl PathWriteLocks {
     /// Lock the stripe that `path` hashes to.
-    pub(crate) async fn lock(&self, path: &str) -> tokio::sync::MutexGuard<'_, ()> {
+    pub(crate) async fn lock(&self, path: &str) -> PathWriteGuard<'_> {
         use std::hash::{Hash as _, Hasher as _};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         path.hash(&mut hasher);
         let stripe = usize::try_from(hasher.finish() % PATH_LOCK_STRIPES as u64).unwrap_or(0);
-        self.stripes[stripe].lock().await
+        PathWriteGuard {
+            _stripe: self.stripes[stripe].lock().await,
+            released: &self.released,
+        }
+    }
+}
+
+/// The guard [`CodeIndexer::lock_path_for_write`] returns (#10738).
+///
+/// Why: an incremental reindex copies the live corpus, then swaps staging in;
+/// a path write that lands between the two is missing from staging (#839).
+/// What: holds the path's stripe; on drop, counts one finished path write, so
+/// the swap can tell whether one finished after its copy began.
+/// Test: `a_write_in_the_carryover_window_raises_the_generation`.
+pub(crate) struct PathWriteGuard<'a> {
+    _stripe: tokio::sync::MutexGuard<'a, ()>,
+    released: &'a std::sync::atomic::AtomicU64,
+}
+
+impl Drop for PathWriteGuard<'_> {
+    fn drop(&mut self) {
+        // #10738: counted while the stripe is still held, before the caller's
+        // indexer guard can drop, so a swap under the write lock sees it.
+        self.released
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl CodeIndexer {
+    /// Take `path`'s write lock: the one every incremental write to it holds.
+    ///
+    /// Why (#10738): the put core keeps the path's content hash in step with
+    /// its chunks, so it holds this lock across forget, write and record.
+    /// What: locks the stripe `path` hashes to; not reentrant, so the holder
+    /// writes through [`Self::index_file_outcome_path_locked`].
+    /// Test: `concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks`.
+    pub(crate) async fn lock_path_for_write(&self, path: &str) -> PathWriteGuard<'_> {
+        self.path_write_locks.lock(path).await
+    }
+
+    /// Path writes finished on this indexer since it was built (#10738).
+    ///
+    /// Why: every path write holds the indexer's read guard for its whole call,
+    /// so a reader of this under the write guard sees every finished write.
+    /// Test: `a_write_in_the_carryover_window_raises_the_generation`.
+    pub(crate) fn path_writes_finished(&self) -> u64 {
+        self.path_write_locks
+            .released
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Chunk ids the corpus holds for `file_path` that `fresh` does not reuse.
     ///
     /// What: the file's current ids minus `fresh`'s ids. `file_chunk_ids`

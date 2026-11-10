@@ -24,6 +24,8 @@
 
 pub mod contrib;
 mod corpus_ops;
+// #10738: the identity stamp and pending-bump marker in `_meta`.
+mod identity_meta;
 // #10110: range reads and one-transaction deletes for a batch removal.
 mod batch_remove_ops;
 // #8959: durable "persisted symbol graph is stale" mark.
