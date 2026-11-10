@@ -240,11 +240,18 @@ fn unresolved(
     bases: &[PathBuf],
     command: &str,
 ) -> Option<(String, Unread)> {
-    let computed = |c: &Candidate| is_computed(&expand(&c.word, bases));
+    // #10748: an fd pipe is computed at run time, whatever `named_once` says.
+    let computed = |c: &Candidate| {
+        let w = expand(&c.word, bases);
+        is_computed(&w) || is_fd_pipe(&w)
+    };
     if let Some(c) = candidates
         .iter()
         .find(|c| c.role == Role::Loaded && computed(c))
     {
+        return Some((c.word.clone(), Unread::Unresolvable));
+    }
+    if let Some(c) = fd_pipe_script(candidates, bases) {
         return Some((c.word.clone(), Unread::Unresolvable));
     }
     let script = candidates
@@ -267,6 +274,35 @@ fn unresolved(
 /// or a glob.
 fn is_computed(word: &str) -> bool {
     word.contains(['$', '`', '*', '?', '[', '{', '('])
+}
+
+/// Whether `word` names a `/dev/fd/` or `/proc/self/fd/` pipe: the script
+/// shell's descriptor, which the guard's own fd table cannot stand in for.
+/// Test: `an_fd_pipe_named_twice_at_the_top_level_refuses_10748`.
+fn is_fd_pipe(word: &str) -> bool {
+    ["/dev/fd/", "/proc/self/fd/"]
+        .iter()
+        .any(|p| word.starts_with(p))
+}
+
+/// The fd-pipe candidate [`locate`] would pick if the pipe existed: any
+/// loaded file, the first positional that is a pipe or exists, else a stdin
+/// pipe. #10748: before, the guard probed its own fd N, so such a pipe was
+/// read and refused; this keeps it refused, as [`Unread::Unresolvable`].
+/// Test: `an_fd_pipe_after_a_missing_script_refuses_10748`.
+fn fd_pipe_script<'a>(candidates: &'a [Candidate], bases: &[PathBuf]) -> Option<&'a Candidate> {
+    let fd = |c: &Candidate| is_fd_pipe(&expand(&c.word, bases));
+    let exists = |c: &Candidate| !existing_paths(&c.word, bases).is_empty();
+    let loaded = candidates.iter().find(|c| c.role == Role::Loaded && fd(c));
+    let positional = candidates
+        .iter()
+        .filter(|c| c.role == Role::Positional)
+        .find(|c| fd(c) || exists(c));
+    let script = match positional {
+        Some(c) => fd(c).then_some(c),
+        None => candidates.iter().find(|c| c.role == Role::Stdin && fd(c)),
+    };
+    loaded.or(script)
 }
 
 /// `word` with a leading `$HOME`/`${HOME}` or `$PWD`/`${PWD}` replaced by the
@@ -625,11 +661,14 @@ fn locate(candidates: &[Candidate], bases: &[PathBuf]) -> Vec<(String, PathBuf, 
 }
 
 /// Every existing file `word` names under `bases`; nothing for a word the
-/// shell computes at run time.
+/// shell computes at run time, or for a `/dev/fd/` or `/proc/self/fd/` pipe.
+/// Test: `an_fd_pipe_the_guard_has_open_still_refuses_10748`.
 fn existing_paths(word: &str, bases: &[PathBuf]) -> Vec<PathBuf> {
     let word = expand(word, bases);
     let word = word.as_str();
-    if word.is_empty() || is_computed(word) {
+    // #10748: an fd path names the script shell's fd, not the guard's; probing
+    // it read whatever the guard (or a sibling test) had open at that number.
+    if word.is_empty() || is_fd_pipe(word) || is_computed(word) {
         return Vec::new();
     }
     let mut paths = Vec::new();

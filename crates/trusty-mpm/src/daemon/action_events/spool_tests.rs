@@ -208,6 +208,10 @@ fn a_torn_spool_line_is_skipped_and_the_rest_replay_10412() {
         .path();
     let mut text = std::fs::read_to_string(&file).expect("read");
     text.push_str("{\"torn\":");
+    // #10748: a sibling test's fork can inherit persist's locked fd and hold
+    // its flock until the child execs, so `take_all` counted the file held.
+    // A fresh inode carries no lock; truncating in place kept the old one.
+    std::fs::remove_file(&file).expect("unlink");
     std::fs::write(&file, text).expect("tear");
 
     let replay = spool::take_all(&spool_dir).expect("take");

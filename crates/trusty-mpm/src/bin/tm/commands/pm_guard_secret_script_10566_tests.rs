@@ -173,6 +173,83 @@ fn a_computed_script_in_a_body_substitution_refuses_10566() {
     }
 }
 
+/// 🔴 REGRESSION (#10748): a `/dev/fd/N` script refuses as computed even when
+/// the guard's own process has fd N open. The guard used to probe its own fd
+/// table, so the `d.sh` row of the test above failed whenever a parallel test
+/// held fd 63: the guard read that fd as the script, and the refusal came from
+/// another rule with another reason.
+#[test]
+fn an_fd_pipe_the_guard_has_open_still_refuses_10748() {
+    use std::os::unix::io::AsRawFd;
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "clean.sh", "echo fake-value\n");
+    let open = std::fs::File::open(dir.path().join("clean.sh")).expect("open");
+    let fd = open.as_raw_fd();
+    script(dir.path(), "f.sh", &format!("T=$(bash /dev/fd/{fd})\n"));
+    let reason = evaluate_script_body_secret_read("bash f.sh", dir.path()).unwrap_or_default();
+    assert!(
+        reason.contains("computed at run time"),
+        "`/dev/fd/{fd}` must deny as unresolvable: {reason}"
+    );
+    drop(open);
+}
+
+/// 🔴 REGRESSION (#10748 round 2, critic): at the top level an interpreted fd
+/// pipe refuses as unresolvable however often the command names it. The
+/// strict path read `/dev/fd/N` as a literal word, so naming it twice
+/// skipped the `Missing` refusal and the call allowed.
+#[test]
+fn an_fd_pipe_named_twice_at_the_top_level_refuses_10748() {
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "x.sh", "echo fake-value\n");
+    for command in [
+        "bash /dev/fd/0 < x.sh ; : /dev/fd/0",
+        "bash /dev/fd/0",
+        "bash /proc/self/fd/0 < x.sh ; : /proc/self/fd/0",
+        "bash /dev/fd/3 3< x.sh ; : /dev/fd/3",
+        "bash --rcfile /dev/fd/0 x.sh",
+    ] {
+        let reason = evaluate_script_body_secret_read(command, dir.path()).unwrap_or_default();
+        assert!(
+            reason.contains("computed at run time"),
+            "`{command}` must deny as unresolvable: {reason}"
+        );
+    }
+}
+
+/// 🔴 REGRESSION (#10748 round 2): an fd pipe the pre-#10748 probe would have
+/// read — after a missing script, run by its path, behind an inexact wrapper
+/// prefix, or in a script body — still refuses. An fd pipe after an existing
+/// script stays unread, as before.
+#[test]
+fn an_fd_pipe_after_a_missing_script_refuses_10748() {
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "x.sh", "echo fake-value\n");
+    script(
+        dir.path(),
+        "body.sh",
+        "T=$(bash ./missing.sh /dev/fd/0)\n: ./missing.sh\n",
+    );
+    for command in [
+        "bash ./missing.sh /dev/fd/0 ; : ./missing.sh",
+        "/dev/fd/3 3< x.sh",
+        "sudo -u root bash /dev/fd/0 < x.sh",
+        "bash body.sh",
+        "T=$(/proc/self/fd/3) 3< x.sh",
+    ] {
+        let reason = evaluate_script_body_secret_read(command, dir.path()).unwrap_or_default();
+        assert!(
+            reason.contains("computed at run time"),
+            "`{command}` must deny as unresolvable: {reason}"
+        );
+    }
+    assert_eq!(
+        evaluate_script_body_secret_read("bash x.sh /dev/fd/0", dir.path()),
+        None,
+        "an fd pipe after an existing script is an argument, not the script"
+    );
+}
+
 /// No over-deny (#10566 round 2): `$(git rev-parse --show-toplevel)`, bare
 /// or with a literal `-C`, resolves to the checkout root above the script,
 /// so a gate script's `$(bash "$REPO_ROOT/scripts/x.sh")` names a file.
