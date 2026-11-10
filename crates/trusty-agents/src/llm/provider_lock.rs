@@ -69,7 +69,7 @@ pub enum ProviderLockError {
     },
     /// `config.toml` mentions a lock but does not parse, so its value is unknown.
     #[error(
-        "{path} sets [providers] {CONFIG_KEY} but does not parse ({detail}); \
+        "{path} sets [providers] lock but does not parse ({detail}); \
          every LLM route is refused until it is fixed"
     )]
     UnreadableConfig { path: String, detail: String },
@@ -191,8 +191,10 @@ pub fn read_from_home(env: Option<&str>, home: Option<&Path>) -> LockState {
 /// Test: [`read_from_home`]'s tests cover the body.
 pub fn active() -> LockState {
     #[cfg(test)]
-    if let Some(state) = TEST_OVERRIDE.with(|o| o.borrow().clone()) {
-        return state;
+    {
+        if let Some(state) = TEST_OVERRIDE.with(|o| o.borrow().clone()) {
+            return state;
+        }
     }
     let env = std::env::var(LOCK_ENV).ok();
     read_from_home(env.as_deref(), dirs::home_dir().as_deref())
