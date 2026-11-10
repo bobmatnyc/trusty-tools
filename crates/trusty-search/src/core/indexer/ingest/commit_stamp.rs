@@ -91,6 +91,9 @@ impl CodeIndexer {
         // #9459: a delete against a corpus closed for shutdown leaves its rows
         // in redb; refuse it so the reconcile delta does not stamp HEAD.
         self.refuse_if_closed_for_shutdown()?;
+        // #10738: a delete in a staged swap's detach window misses redb, and
+        // the re-attached corpus brings the file back.
+        self.refuse_if_corpus_detached()?;
         let removed = self
             .purge_file_with(index_id, rel, RedbChunkDelete::FailClosed)
             .await?;
@@ -106,6 +109,9 @@ impl CodeIndexer {
     /// [`Self::purge_file_committed`] does.
     /// Test: `remove_file_report_stamps_only_a_committed_delete`.
     pub(crate) async fn remove_file_committed(&self, file_path: &str) -> Result<(usize, bool)> {
+        // #10738: a delete in a staged swap's detach window misses redb, and
+        // the re-attached corpus brings the file back.
+        self.refuse_if_corpus_detached()?;
         let removed = self
             .remove_file_with(file_path, RedbChunkDelete::FailClosed)
             .await?;
@@ -124,6 +130,10 @@ impl CodeIndexer {
         if ids.is_empty() {
             return Ok(false);
         }
+        // #10738: a removal in a staged swap's detach window misses redb, and
+        // the re-attached corpus brings the file back; refuse before memory
+        // changes so the watcher keeps the ids for a retry.
+        self.refuse_if_corpus_detached()?;
         self.remove_chunks_from_stores(ids, RedbChunkDelete::FailClosed)
             .await?;
         Ok(true)

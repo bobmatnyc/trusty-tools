@@ -441,6 +441,9 @@ impl CodeIndexer {
                 self.index_id
             );
         }
+        // #10738: a staged swap's detach window holds no corpus; the write
+        // would land in memory only and still answer success.
+        self.refuse_if_corpus_detached()?;
         // #10159: active from here, embed included, so the ticker's quiet
         // rebuild cannot fire mid-write.
         let _active_write = self.begin_active_write();
@@ -711,6 +714,11 @@ impl CodeIndexer {
         if files.is_empty() {
             return Ok(0);
         }
+        // #10738: the watcher rescan commits here; in a staged swap's detach
+        // window the batch would land in memory only and answer `Ok`, so the
+        // rescan recorded fingerprints for content live never got. The
+        // reindex's own batches call `commit_parsed_batch` on staging directly.
+        self.refuse_if_corpus_detached()?;
         let parsed = self.parse_and_embed_files(files.to_vec()).await?;
         let timings = self
             .commit_parsed_batch(parsed, defer_graph_rebuild)
