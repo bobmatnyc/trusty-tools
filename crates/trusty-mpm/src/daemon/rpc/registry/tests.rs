@@ -454,6 +454,23 @@ async fn project_init_then_registry_list_shows_the_project_10586() {
     assert_eq!(projects.len(), 1, "init must persist one record: {list}");
     assert_eq!(projects[0]["name"], init["name"], "{list}");
     assert_eq!(projects[0]["repo_url"], url, "{list}");
+
+    // A fresh process reads the same file: load a new registry from disk.
+    let store_dir = crate::project::registry_data_dir_under(state.framework_root());
+    let fresh = crate::project::ProjectRegistry::load(&store_dir)
+        .await
+        .expect("load registry from disk");
+    let names: Vec<String> = fresh
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![init["name"].as_str().unwrap_or_default().to_string()]
+    );
 }
 
 /// Init with no `origin` remote is refused and writes nothing (#10586, owner
@@ -575,6 +592,11 @@ async fn project_init_registry_write_failure_names_the_cause_10586() {
     assert!(
         error.contains("project store"),
         "the store's own text: {body}"
+    );
+    // #10586: a failed write must not leave the init half-done in memory.
+    assert!(
+        state.project(&repo).is_none(),
+        "a failed registry write must not register the project in memory"
     );
 }
 

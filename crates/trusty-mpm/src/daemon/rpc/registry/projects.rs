@@ -96,7 +96,9 @@ pub struct PathParams {
 /// name or that `origin`'s `owner/repo` already exists. A registry-B record
 /// needs a `repo_url`, so a directory with no `origin` remote is refused up
 /// front. When a record is kept rather than written, the response's
-/// `kept_existing` names it; the field is absent after a write.
+/// `kept_existing` names it; the field is absent after a write. The registry-B
+/// write runs before the in-memory insert and the worktree backfill, so a
+/// failed write leaves neither behind.
 ///
 /// # Errors
 ///
@@ -126,11 +128,13 @@ pub async fn register_project_op(
     crate::core::git_maintenance::disable_and_log(&path);
     // #8511: exclude the harness files and move legacy markers out of the trees.
     crate::session_manager::worktree_marker_migration::prepare_checkout(&path);
-    let info = state.register_project(path.clone());
     // #7588: same store, same framework root, same function as registry B.
     let store_dir = crate::project::registry_data_dir_under(state.framework_root());
     let name = crate::project::project_owning_checkout(&store_dir, &path)
-        .unwrap_or_else(|| info.name.clone());
+        .unwrap_or_else(|| crate::core::project::name_from_path(&path));
+    // #10586: persist first, so a failed write leaves no in-memory project behind.
+    let kept_existing = persist_registry_record(state, &name, &repo_url).await?;
+    let info = state.register_project(path.clone());
     let report = crate::project::backfill_checkout(&store_dir, &name, &path, chrono::Utc::now());
     if report != crate::project::BackfillReport::default() {
         tracing::info!(
@@ -144,7 +148,6 @@ pub async fn register_project_op(
         );
     }
     // #10586: a kept record rides on the 200, so init never reports a silent write.
-    let kept_existing = persist_registry_record(state, &name, &repo_url).await?;
     Ok(RegisterProjectResponse {
         info,
         kept_existing,

@@ -53,6 +53,8 @@ pub(crate) async fn project(
 ) -> anyhow::Result<()> {
     match action {
         ProjectAction::Init { dir } => {
+            // #10586: deprecated (owner ruling 2026-10-31); stderr keeps stdout stable.
+            eprintln!("note: `tm project init` is deprecated; use `tm projects register`");
             let path = resolve_dir(dir)?;
             let resp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
                 .post("/projects")
@@ -82,6 +84,8 @@ pub(crate) async fn project(
             }
         }
         ProjectAction::List => {
+            // #10586: deprecated (owner ruling 2026-10-31).
+            eprintln!("note: `tm project list` is deprecated; use `tm projects list`");
             // #5994: rows come from the persistent registry, not the daemon's
             // in-memory session-derived project map.
             for row in list_rows(client, url).await? {

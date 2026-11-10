@@ -861,3 +861,31 @@ async fn register_unless_present_matches_on_project_key() {
     let other = registry.get("other").await.expect("get");
     assert_eq!(other.project_key.as_deref(), Some("o/other"));
 }
+
+/// `register_unless_present` keeps a legacy record that stores no key (#10586).
+///
+/// Why: a pre-key record for `acme/widget` must stop an https init of the same
+/// repo; matching only a stored key wrote a second record beside it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_unless_present_keeps_a_legacy_record_without_a_key() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = registry_with_raw_records(
+        &dir,
+        serde_json::json!({ "widget-checkout": {
+            "name": "widget-checkout",
+            "repo_url": "git@github.com:acme/widget.git",
+            "default_branch": "main"
+        }}),
+    )
+    .await;
+
+    let mut init = make_project("widget");
+    init.repo_url = "https://github.com/acme/widget".into();
+    let kept = registry
+        .register_unless_present(init)
+        .await
+        .expect("no store error");
+    assert_eq!(kept.map(|p| p.name).as_deref(), Some("widget-checkout"));
+    assert_eq!(registry.list().await.expect("list").len(), 1);
+}
