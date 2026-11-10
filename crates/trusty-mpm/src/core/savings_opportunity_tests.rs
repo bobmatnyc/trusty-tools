@@ -57,9 +57,13 @@ fn the_opportunity_ledger_is_bounded_by_day_cap_and_retention() {
             written += 1;
         }
     }
-    let day = std::fs::metadata(ledger.join("2026-11-01.jsonl"))
-        .expect("stat")
-        .len();
+    // #10981 round 2: the one `day_full` sentinel is not a row.
+    let day = std::fs::read_to_string(ledger.join("2026-11-01.jsonl"))
+        .expect("read")
+        .lines()
+        .filter(|l| !l.contains("\"day_full\""))
+        .map(|l| l.len() as u64 + 1)
+        .sum::<u64>();
     assert!(written < 50, "the cap must drop rows");
     let one_row = day / written;
     assert!(

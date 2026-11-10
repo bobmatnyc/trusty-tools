@@ -25,7 +25,7 @@ use std::path::Path;
 use serde_json::Value;
 use trusty_agents_common::compress::compress_tool_output;
 use trusty_mpm::core::savings_opportunity::{
-    OpportunityRow, append_opportunity, opportunity_dir_in, tool_type_of,
+    OpportunityAppend, OpportunityRow, append_opportunity, opportunity_dir_in, tool_type_of,
 };
 
 use super::hook_rewrite::effective_tool_name;
@@ -68,11 +68,18 @@ pub(crate) fn observe_in(root: &Path, event: &str, payload: Option<&Value>, sess
         return;
     };
     // #10981 review: its own bounded ledger, never the statusline's file.
-    if let Err(e) = append_opportunity(root, &row) {
-        eprintln!(
+    match append_opportunity(root, &row) {
+        Ok(OpportunityAppend::Written | OpportunityAppend::DayFull) => {}
+        // #10981 round 2: said once a day; later drops are only counted.
+        Ok(OpportunityAppend::DayFullMarked) => eprintln!(
+            "trusty-mpm: #10973 today's opportunity ledger under {} is full; \
+             further rows are counted, not stored",
+            opportunity_dir_in(root).display()
+        ),
+        Err(e) => eprintln!(
             "trusty-mpm: #10973 opportunity row not written under {}: {e}",
             opportunity_dir_in(root).display()
-        );
+        ),
     }
 }
 

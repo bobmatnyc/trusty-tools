@@ -11,7 +11,8 @@
 //! the statusline reads that file whole on every refresh, and one row per tool
 //! call would grow it by tens of megabytes a day (#10981 review). The ledger is
 //! bounded on disk: [`append_opportunity`] drops a row once the day's file
-//! reaches [`OPPORTUNITY_DAY_CAP_BYTES`], and keeps the newest
+//! reaches [`OPPORTUNITY_DAY_CAP_BYTES`] — counting it in `<day>.dropped`, with
+//! one `day_full` sentinel line in the day file — and keeps the newest
 //! [`OPPORTUNITY_KEEP_DAYS`] day files. [`tool_type_of`] names the category a
 //! tool name belongs to; the `compress` producer tags its rows with the same
 //! names ([`TaggedSavingsRow`]).
@@ -105,13 +106,35 @@ pub fn opportunity_dir_in(root: &Path) -> PathBuf {
     root.join("usage").join("opportunity")
 }
 
+/// Largest a day's drop counter may grow: one byte per dropped row.
+///
+/// Why (#10981 round 2): the counter must be bounded like the day file it
+/// describes; a million drops a day is far past any observed day.
+/// Test: `hitting_the_day_cap_writes_one_sentinel_and_counts_the_rest`.
+pub const OPPORTUNITY_DROP_COUNTER_CAP_BYTES: u64 = 1024 * 1024;
+
 /// Whether [`append_opportunity`] wrote the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpportunityAppend {
     /// The row is on disk.
     Written,
-    /// The day's file had reached its cap; the row was dropped.
+    /// The day's file had reached its cap: this is the day's first dropped
+    /// row, so a `day_full` sentinel was written and the drop counted.
+    DayFullMarked,
+    /// The day's file had reached its cap; the row was dropped and counted.
     DayFull,
+}
+
+/// The one line a full day file gets when it first drops a row (#10981).
+///
+/// What: `event` is always `day_full`, which readers counting opportunities
+/// skip; `<day>.dropped` beside the day file holds the drop count, one byte a
+/// row.
+#[derive(Debug, Serialize)]
+struct DayFullMarker {
+    ts: String,
+    event: &'static str,
+    day_cap_bytes: u64,
 }
 
 /// Append `row` to its day file under `root`, within the ledger's bounds.
@@ -132,10 +155,11 @@ pub fn append_opportunity(root: &Path, row: &OpportunityRow) -> std::io::Result<
 ///
 /// Why: the bounds are only testable at a size a test can write.
 /// What: the day file is `<dir>/<first 10 chars of row.ts>.jsonl`. A file at or
-/// over `day_cap` drops the row. Creating a new day file first deletes the
-/// oldest `YYYY-MM-DD.jsonl` files until `keep_days - 1` remain, so the new one
-/// makes `keep_days`. Other files in `dir` are never touched. The row leaves in
-/// one write (see [`write_row_line`]).
+/// over `day_cap` drops the row and counts it ([`record_drop`]). Creating a new
+/// day file first prunes the oldest days until `keep_days - 1` remain, so the
+/// new one makes `keep_days` ([`prune_day_files`], best effort). Other files in
+/// `dir` are never touched. The row leaves in one write (see
+/// [`write_row_line`]).
 /// Test: `the_opportunity_ledger_is_bounded_by_day_cap_and_retention`.
 pub fn append_opportunity_bounded(
     dir: &Path,
@@ -165,11 +189,13 @@ fn append_opportunity_bounded_with(
     let path = dir.join(format!("{day}.jsonl"));
     crate::core::home_write_fence::check(&path); // #8545
     match std::fs::metadata(&path) {
-        Ok(meta) if meta.len() >= day_cap => return Ok(OpportunityAppend::DayFull),
+        // #10981 round 2: a dropped row is counted, never silent.
+        Ok(meta) if meta.len() >= day_cap => return record_drop(dir, day, &path, day_cap),
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir_all(dir)?;
-            prune_day_files(dir, keep_days.saturating_sub(1), remove)?;
+            // #10981 round 2: best effort — never costs the row.
+            prune_day_files(dir, keep_days.saturating_sub(1), remove);
         }
         Err(e) => return Err(e),
     }
@@ -181,28 +207,99 @@ fn append_opportunity_bounded_with(
     Ok(OpportunityAppend::Written)
 }
 
-/// Delete the oldest day files in `dir` until at most `keep` remain.
-fn prune_day_files(
+/// Count one dropped row for `day`; the day's first drop also writes the sentinel.
+///
+/// Why (#10981 round 2): a silent drop makes a full day read as a quiet one.
+/// What: appends one byte to `<dir>/<day>.dropped` (up to
+/// [`OPPORTUNITY_DROP_COUNTER_CAP_BYTES`]). `O_APPEND` keeps concurrent hook
+/// processes from losing a count. The process that creates the counter — the
+/// day's first drop — appends one [`DayFullMarker`] to the day file.
+/// Test: `hitting_the_day_cap_writes_one_sentinel_and_counts_the_rest`,
+/// `a_full_day_counts_drops_across_hook_processes`.
+fn record_drop(
     dir: &Path,
-    keep: usize,
-    remove: &dyn Fn(&Path) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    let mut days: Vec<PathBuf> = std::fs::read_dir(dir)?
+    day: &str,
+    day_file: &Path,
+    day_cap: u64,
+) -> std::io::Result<OpportunityAppend> {
+    use std::io::Write;
+    let counter_path = dir.join(format!("{day}.dropped"));
+    crate::core::home_write_fence::check(&counter_path); // #8545
+    let open = |create_new| {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create_new(create_new)
+            .open(&counter_path)
+    };
+    let (mut counter, first) = match open(true) {
+        Ok(file) => (file, true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (open(false)?, false),
+        Err(e) => return Err(e),
+    };
+    if counter.metadata()?.len() < OPPORTUNITY_DROP_COUNTER_CAP_BYTES {
+        counter.write_all(b".")?;
+    }
+    if !first {
+        return Ok(OpportunityAppend::DayFull);
+    }
+    let marker = DayFullMarker {
+        ts: crate::core::savings::now_ts(),
+        event: "day_full",
+        day_cap_bytes: day_cap,
+    };
+    let mut day_out = std::fs::OpenOptions::new().append(true).open(day_file)?;
+    write_row_line(&mut day_out, &marker)?;
+    Ok(OpportunityAppend::DayFullMarked)
+}
+
+/// Delete every file of the oldest days in `dir` until at most `keep` days remain.
+///
+/// Why (#10981 round 2): retention is housekeeping, so it must never cost the
+/// row being appended.
+/// What: a day is any `YYYY-MM-DD` with a `.jsonl` or `.dropped` file; both
+/// leave together. A file already gone (another hook pruned it) is ignored;
+/// any other failure, including an unreadable `dir`, is a warning.
+/// Test: `a_prune_that_cannot_delete_an_old_day_still_appends`,
+/// `a_prune_that_races_a_vanished_file_still_appends`,
+/// `drop_counters_are_pruned_with_their_day_files`.
+fn prune_day_files(dir: &Path, keep: usize, remove: &dyn Fn(&Path) -> std::io::Result<()>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "opportunity ledger: prune skipped");
+            return;
+        }
+    };
+    let files: Vec<(String, PathBuf)> = entries
         .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_suffix(".jsonl"))
-                .is_some_and(is_day)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let day = name
+                .strip_suffix(".jsonl")
+                .or_else(|| name.strip_suffix(".dropped"))?;
+            is_day(day).then(|| (day.to_string(), path.clone()))
         })
         .collect();
-    days.sort();
+    let mut days: Vec<&str> = files.iter().map(|(day, _)| day.as_str()).collect();
+    days.sort_unstable();
+    days.dedup();
     let excess = days.len().saturating_sub(keep);
-    for old in &days[..excess] {
-        remove(old)?;
+    let old: std::collections::HashSet<&str> = days[..excess].iter().copied().collect();
+    for (day, path) in &files {
+        if !old.contains(day.as_str()) {
+            continue;
+        }
+        match remove(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                file = %path.display(),
+                error = %e,
+                "opportunity ledger: could not prune an old day"
+            ),
+        }
     }
-    Ok(())
 }
 
 /// Whether `s` is shaped `YYYY-MM-DD`.
