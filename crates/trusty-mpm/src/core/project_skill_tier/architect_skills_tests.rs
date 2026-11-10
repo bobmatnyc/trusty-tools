@@ -260,7 +260,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     const PINNED: [(&str, &str); 17] = [
         (
             "tm-fleet-check",
-            "b465a8a024783fa5bc33737b3efa3fc8f5bd9dc8e387b9781ab820de73220918",
+            "644bb9f75ed46bb4acc28e84ae391cf00f84368d19b80fac646a3ef19edd063c",
         ),
         (
             "tm-context-refresh",
@@ -324,7 +324,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-dashboard",
-            "e08b26d58e8e9c39a43fa71752ec8b191a795a786708f3ce002103b975956e82",
+            "f475aaddd2f611daa51984c4b4991525c4818f55c5ae034210b48f6f218a38fa",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first

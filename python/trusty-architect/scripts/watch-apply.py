@@ -98,13 +98,13 @@ def plan(docs):
 
 
 def mark(store, doc, status, message):
-    """Write one outcome pinned to the version read; False when the doc changed meanwhile."""
+    """Write one outcome pinned to the version read; False when the doc changed meanwhile or the store refuses it."""
     try:
         store.update(COLL, doc["id"], {"status": status, "message": message, "done_at": ds.now_iso()},
                      if_version=doc["version"])
         return True
-    except ds.Conflict as e:
-        print(f"watch-apply: {e}; left for the next run", file=sys.stderr)
+    except (ds.Conflict, ds.SchemaInvalid) as e:   # one bad doc never stops the others
+        print(f"watch-apply: {doc['id']}: {e}; not written", file=sys.stderr)
         return False
 
 

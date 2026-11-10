@@ -82,6 +82,8 @@ pub const FLEET_CHECK: ShippedSkill = ShippedSkill {
         "90391f732f01ebcb4e9551f846e77cdc8706f4bf62ef02ea930ad0450a7ec9aa",
         // #10895: the text before step 1 ran `tm fleet project list`.
         "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
+        // #10896: the text before step 1 ran `scripts/watch-apply.py`.
+        "b465a8a024783fa5bc33737b3efa3fc8f5bd9dc8e387b9781ab820de73220918",
     ],
 };
 
@@ -176,7 +178,11 @@ const IMPROVEMENTS: ShippedSkill = ShippedSkill {
 const DASHBOARD: ShippedSkill = ShippedSkill {
     stem: "architect-dashboard",
     // R-192/R-193: the D3b text, before the owner-asks rules.
-    previous: &["c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a"],
+    // #10896: the text before the `watch_changes` queue kind.
+    previous: &[
+        "c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a",
+        "e08b26d58e8e9c39a43fa71752ec8b191a795a786708f3ce002103b975956e82",
+    ],
 };
 
 /// A skill on its first release: no earlier shipped text to recognise.
