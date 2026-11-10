@@ -227,9 +227,9 @@ async fn rpc_router_registers_every_documented_method() {
     );
     assert_eq!(
         METHODS.len(),
-        32,
-        "slice 5's twenty-nine routes plus step 2a's three delegation verbs; a new one \
-         needs a row in registry.rs's table too"
+        33,
+        "slice 5's twenty-nine routes, step 2a's three delegation verbs and #10988's \
+         project decommission; a new one needs a row in registry.rs's table too"
     );
 }
 
