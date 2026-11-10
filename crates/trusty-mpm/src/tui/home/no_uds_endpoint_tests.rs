@@ -3,8 +3,9 @@
 
 use std::time::Duration;
 
+use super::console::status_of;
 use super::probe::{no_uds_endpoint, probe_service};
-use super::render::{service_lines, tile_lines};
+use super::render::service_lines;
 use super::services::{ProbeKind, ServiceId};
 use super::state::{HealthUpdate, HomeState, TileHealth};
 
@@ -17,14 +18,9 @@ async fn agents_and_console_tiles_read_no_uds_endpoint() {
     for id in NO_UDS {
         let health = probe_service(id, Duration::from_millis(200)).await;
         assert_eq!(health.label(), "no UDS endpoint", "{id:?}: {health:?}");
-        let text: Vec<String> = tile_lines(id, &health)
-            .iter()
-            .map(|l| l.to_string())
-            .collect();
-        assert!(
-            text.iter().any(|l| l.contains("no UDS")),
-            "{id:?} tile shows its gap: {text:?}"
-        );
+        // #10966: the services row shows the gap in place of the tile.
+        let (word, _) = status_of(&health);
+        assert_eq!(word, "no UDS endpoint", "{id:?} row shows its gap");
     }
 }
 

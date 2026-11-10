@@ -10,6 +10,8 @@
 //! Test: `tm_tui_opens_on_the_console_home_screen` and the state, probe and
 //! render tests in `tests.rs`.
 
+// #10966: the console look (goal ar-G01).
+pub mod console;
 pub mod probe;
 pub mod render;
 pub mod services;
@@ -17,6 +19,9 @@ pub mod state;
 
 #[cfg(test)]
 mod tests;
+// #10966: the console look's render tests.
+#[cfg(test)]
+mod console_tests;
 // #10476: the analyze probe driven over real sockets.
 #[cfg(test)]
 mod analyze_probe_tests;

@@ -90,18 +90,20 @@ fn roster_lists_mpm_first_then_the_console_order() {
 }
 
 #[test]
-fn arrows_move_the_selection_within_the_grid() {
+fn arrows_move_the_selection_within_the_table() {
+    // #10966: the services table replaced the 4-column grid; one row per step.
     let mut state = HomeState::default();
     let now = Instant::now();
-    handle_key(&mut state, key(KeyCode::Left), now);
-    assert_eq!(state.selected, 0, "clamped at the first tile");
-    handle_key(&mut state, key(KeyCode::Down), now);
-    assert_eq!(state.selected, 4, "down moves one row");
-    handle_key(&mut state, key(KeyCode::Right), now);
-    handle_key(&mut state, key(KeyCode::Down), now);
-    assert_eq!(state.selected, 7, "clamped at the last tile");
     handle_key(&mut state, key(KeyCode::Up), now);
-    assert_eq!(state.selected, 3);
+    assert_eq!(state.selected, 0, "clamped at the first row");
+    handle_key(&mut state, key(KeyCode::Down), now);
+    assert_eq!(state.selected, 1, "down moves one row");
+    for _ in 0..10 {
+        handle_key(&mut state, key(KeyCode::Down), now);
+    }
+    assert_eq!(state.selected, 7, "clamped at the last row");
+    handle_key(&mut state, key(KeyCode::Up), now);
+    assert_eq!(state.selected, 6);
 }
 
 #[test]
@@ -407,7 +409,7 @@ async fn a_service_without_console_metrics_is_refused_without_a_spawn() {
 }
 
 #[test]
-fn home_render_draws_every_tile() {
+fn home_render_draws_every_service_row() {
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test backend");
     let mut state = HomeState::default();
     up(&mut state, ServiceId::Search);
@@ -428,8 +430,12 @@ fn home_render_draws_every_tile() {
     for id in ServiceId::ALL {
         assert!(text.contains(id.display_name()), "missing {id:?}");
     }
-    assert!(text.contains("not installed"));
-    assert!(text.contains("probing"));
+    assert!(text.contains("NOT INSTALLED"));
+    assert!(text.contains("PROBING"));
+    assert!(
+        text.contains("RUNNING"),
+        "an answering service reads RUNNING"
+    );
 }
 
 #[test]
@@ -481,7 +487,8 @@ fn home_header_shows_tm_version_at_80_columns() {
             "{view:?} header lacks {version}: {top:?}"
         );
         let title = match view {
-            View::Home => "trusty console — services".to_string(),
+            // #10966: the console's own header.
+            View::Home => "TRUSTY CONSOLE  UNIT-05 · SERVICE CONSOLE".to_string(),
             View::Service(id) => format!("trusty console › {}", id.id()),
         };
         assert!(top.starts_with(&title), "{view:?} title displaced: {top:?}");
@@ -491,7 +498,7 @@ fn home_header_shows_tm_version_at_80_columns() {
 // #10966: the home screen draws in the console's dark palette. Literal RGB on
 // purpose: the test must compile, and fail, against the pre-theme renderer.
 #[test]
-fn home_tile_title_and_background_use_theme_roles() {
+fn home_header_and_background_use_theme_roles() {
     use ratatui::style::Color;
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test backend");
     let state = HomeState::default();
@@ -499,19 +506,15 @@ fn home_tile_title_and_background_use_theme_roles() {
         .draw(|f| render(f, &state))
         .expect("draw the home screen");
     let buffer = terminal.backend().buffer();
-    // The selected (first) tile's top-left border corner: accent on background.
-    let corner = &buffer[(0, 1)];
-    assert_eq!(corner.fg, Color::Rgb(0xd9, 0x77, 0x42), "accent border");
+    // "TRUSTY CONSOLE": accent on the console background.
+    let brand = &buffer[(0, 0)];
+    assert_eq!(brand.fg, Color::Rgb(0xd9, 0x77, 0x42), "accent brand");
+    assert_eq!(brand.bg, Color::Rgb(0x20, 0x16, 0x12), "console background");
+    // The descriptor and version after it are muted text.
+    let descriptor = &buffer[(16, 0)];
     assert_eq!(
-        corner.bg,
-        Color::Rgb(0x20, 0x16, 0x12),
-        "console background"
-    );
-    // The version label at the header's right edge is muted text.
-    let version = &buffer[(119, 0)];
-    assert_eq!(
-        version.fg,
+        descriptor.fg,
         Color::Rgb(0xa5, 0x8a, 0x6b),
-        "muted version label"
+        "muted descriptor"
     );
 }
