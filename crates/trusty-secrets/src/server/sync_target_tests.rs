@@ -92,7 +92,12 @@ async fn server_copy_to_sync_target_by_agent_descendant_pushes_an_undenied_key()
             .collect();
         assert_eq!(
             all.iter().map(shape).collect::<Vec<_>>(),
-            [(AuditMethod::Copy, AuditDecision::Allow, None, Some("API_KEY"))],
+            [(
+                AuditMethod::Copy,
+                AuditDecision::Allow,
+                None,
+                Some("API_KEY")
+            )],
             "{id}"
         );
         assert_eq!(all[0].backend, Some(BackendId::new(id).unwrap()));

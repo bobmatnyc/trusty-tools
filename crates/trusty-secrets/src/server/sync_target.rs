@@ -26,9 +26,7 @@ use super::project::ProjectContext;
 use super::router::State;
 use crate::api::methods::{CopyRequest, CopyResponse};
 use crate::api::{BackendId, SecretsError};
-use crate::store::{
-    Capabilities, RemoteIdentity, SecretBackend, SecretStore, open_sync_target_at,
-};
+use crate::store::{Capabilities, RemoteIdentity, SecretBackend, SecretStore, open_sync_target_at};
 
 /// Opens a sync target for one repository; replaces the production opener
 /// in tests.
