@@ -184,8 +184,9 @@ class DeliveryCase(Base):
         self.assertEqual(len(flags), 1)
         self.assertIn("repair displacing delivery: running th-T02", flags[0])
         self.assertIn("delivery cards th-T01", flags[0])
-        datg.write_ops(self.p, [{"op": "update", "id": "th-T01", "status": "running"}])
-        self.assertEqual(datg_guards.delivery_flags(self.st(), [], self.NOW), [])
+        datg.write_ops(self.p, [{"op": "update", "id": "th-T01", "status": "running"},
+                                {"op": "add", "kind": "T", "title": "write the import", "goal": "th-G01"}])
+        self.assertEqual(datg_guards.delivery_flags(self.st(), [], self.NOW), [])   # a delivery card runs
 
     def test_repair_loop_without_a_delivery_close_is_flagged_10800(self):
         t = self.NOW - timedelta(hours=1)
