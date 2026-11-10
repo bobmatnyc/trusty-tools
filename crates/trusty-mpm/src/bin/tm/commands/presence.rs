@@ -65,7 +65,10 @@ pub(crate) fn run(action: PresenceAction) -> anyhow::Result<()> {
         }
         PresenceAction::Devices { action } => match action {
             DevicesAction::Add { name } => {
-                presence_devices::add(&LocalAuthenticator, &key, &name, &call).map(drop)
+                // #8878 PR2b-2: the enrol link needs `[presence] rp_origin`.
+                let presence = MpmConfig::load_default().presence;
+                let origin = presence.enrol_origin();
+                presence_devices::add(&LocalAuthenticator, &key, &name, origin, &call).map(drop)
             }
             DevicesAction::List => presence_devices::list(&root, &key()?).map(drop),
             DevicesAction::Revoke { credential_id } => {

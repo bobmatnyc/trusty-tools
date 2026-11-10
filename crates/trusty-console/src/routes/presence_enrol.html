@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Enrol a presence device</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.4; }
+  button { font-size: 1.1rem; padding: 0.6rem 1.2rem; }
+  #status { margin-top: 1rem; }
+  .error { color: #b00020; }
+  .ok { color: #0a7d32; }
+  .notice { color: #555; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>Enrol a presence device</h1>
+<p id="who"></p>
+<button id="go" disabled>Create passkey</button>
+<p id="status"></p>
+<p class="notice">key ACL unverified (#10865): device approvals are untrusted.</p>
+<script>
+"use strict";
+// #8878 PR2b-2: the one-time enrol page. The ticket arrives in the URL
+// fragment (never sent to a server); the page posts it to the console, which
+// relays to the tm daemon's mpm.presence.register.start / .finish.
+const START = "/api/console/presence/enrol/start";
+const FINISH = "/api/console/presence/enrol/finish";
+const statusEl = document.getElementById("status");
+const go = document.getElementById("go");
+
+function show(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
+function fail(text) { show("Not enrolled: " + text, "error"); go.disabled = true; }
+
+function b64uToBuf(s) {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out.buffer;
+}
+
+function bufToB64u(buf) {
+  let s = "";
+  for (const c of new Uint8Array(buf)) s += String.fromCharCode(c);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Every failure throws; only a confirmed finish says "Enrolled".
+async function post(path, body) {
+  let r;
+  try {
+    r = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+  } catch (e) {
+    throw new Error("the console is unreachable");
+  }
+  let data;
+  try { data = await r.json(); } catch (e) { throw new Error("the console answered " + r.status + " with no JSON"); }
+  if (!r.ok) throw new Error(data && data.error ? data.error : "the console answered " + r.status);
+  return data;
+}
+
+let ticket = null;
+try {
+  const fragment = location.hash.slice(1);
+  // Drop the ticket from the address bar and history; it lives in memory only.
+  history.replaceState(null, "", location.pathname);
+  if (fragment) ticket = JSON.parse(new TextDecoder().decode(b64uToBuf(fragment)));
+} catch (e) {
+  ticket = null;
+}
+
+if (!ticket || typeof ticket.subject !== "string") {
+  fail("this link carries no enrol ticket; run tm presence devices add again");
+} else if (!window.PublicKeyCredential || !navigator.credentials) {
+  fail("this browser cannot create passkeys here (it needs the console's https tailnet address)");
+} else {
+  document.getElementById("who").textContent = "Device name: \"" + ticket.subject + "\"";
+  go.disabled = false;
+  show("Press the button, then confirm with Face ID or Touch ID.");
+}
+
+go.addEventListener("click", async () => {
+  go.disabled = true;
+  show("Waiting for the passkey...");
+  try {
+    const started = await post(START, { ticket });
+    const pk = started && started.options && started.options.publicKey;
+    if (!pk || !pk.user) throw new Error("the daemon sent no registration options");
+    pk.challenge = b64uToBuf(pk.challenge);
+    pk.user.id = b64uToBuf(pk.user.id);
+    (pk.excludeCredentials || []).forEach((c) => { c.id = b64uToBuf(c.id); });
+    const cred = await navigator.credentials.create({ publicKey: pk });
+    if (!cred) throw new Error("no passkey was created");
+    const credential = {
+      id: cred.id,
+      rawId: bufToB64u(cred.rawId),
+      type: cred.type,
+      extensions: {},
+      response: {
+        attestationObject: bufToB64u(cred.response.attestationObject),
+        clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+      },
+    };
+    const done = await post(FINISH, { ticket, credential });
+    if (!done || typeof done.credential_id !== "string") throw new Error("the daemon did not confirm the enrolment");
+    show("Enrolled \"" + done.name + "\" (" + done.credential_id + "). This link is now used up.", "ok");
+  } catch (e) {
+    fail(e && e.message ? e.message : String(e));
+  }
+});
+</script>
+</body>
+</html>

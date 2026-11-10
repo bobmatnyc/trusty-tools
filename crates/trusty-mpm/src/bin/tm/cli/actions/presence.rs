@@ -51,11 +51,10 @@ pub(crate) enum PresenceAction {
 /// Actions for `tm presence devices`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum DevicesAction {
-    /// Start enrolling a passkey device (INCOMPLETE until #8878 PR2b-2: no
-    /// browser path finishes the ceremony yet).
+    /// Enrol a passkey device through a one-time browser link.
     ///
-    /// Needs Touch ID or the login password at the Studio first; prints the
-    /// registration options a browser would answer.
+    /// Needs `[presence] rp_origin` and Touch ID or the login password at the Studio first; prints a link
+    /// that works once, for 10 minutes, on the console's tailnet origin.
     Add {
         /// A name for the device, e.g. `iphone`.
         name: String,

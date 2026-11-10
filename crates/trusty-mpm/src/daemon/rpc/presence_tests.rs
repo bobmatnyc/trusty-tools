@@ -63,11 +63,19 @@ fn enrol(s: &PresenceService) -> (SoftToken, String) {
     )
 }
 
+/// Owner ruling D24: a device enrols, but while #10865 has not verified the
+/// key ACL neither `approve` nor `verify` runs, and no grant is written.
+/// When #10865 makes `acl_verified()` true this test must be revisited.
 #[test]
-fn a_device_approval_round_trips_through_the_service_8878() {
+fn an_approval_is_refused_while_the_key_acl_is_unverified_8878() {
     let (_d, root) = root();
     let s = live(&root);
-    let (mut token, credential_id) = enrol(&s);
+    let (_token, credential_id) = enrol(&s);
+    let listed = s.call("devices.list", json!({})).expect("list");
+    assert_eq!(
+        listed["devices"][0]["credential_id"],
+        credential_id.as_str()
+    );
     let request = ask(&s).expect("request");
     assert!(
         request["action"]
@@ -76,27 +84,18 @@ fn a_device_approval_round_trips_through_the_service_8878() {
     );
     assert_eq!(request["notice"], UNTRUSTED_NOTICE);
     let id = request["id"].as_str().expect("id");
-    let approve = s
-        .call("approve", json!({ "request_id": id }))
-        .expect("approve");
-    let options = serde_json::from_value(approve["options"].clone()).expect("options");
-    let signed = token
-        .do_authentication(Url::parse(ORIGIN).expect("url"), options)
-        .expect("sign");
-    let verified = s
-        .call(
-            "verify",
-            json!({ "request_id": id, "credential_id": credential_id,
-                "action_hash": approve["action_hash"], "credential": signed }),
-        )
-        .expect("verify");
-    assert_eq!(verified["pid"], ARCHITECT.pid);
-    assert!(presence::check(&root, &ARCHITECT, || Some(key()), NOW).is_ok());
-    let listed = s.call("devices.list", json!({})).expect("list");
-    assert_eq!(
-        listed["devices"][0]["credential_id"],
-        credential_id.as_str()
+    let before = snapshot(&root);
+    let approve = s.call("approve", json!({ "request_id": id }));
+    assert_eq!(approve, Err((1, APPROVALS_BLOCKED.to_owned())));
+    let verify = s.call(
+        "verify",
+        json!({ "request_id": id, "credential_id": credential_id,
+            "action_hash": "h", "credential": {} }),
     );
+    assert_eq!(verify, Err((1, APPROVALS_BLOCKED.to_owned())));
+    assert!(grant_files(&root).is_empty());
+    assert_eq!(snapshot(&root), before, "the request is not consumed");
+    assert!(presence::check(&root, &ARCHITECT, || Some(key()), NOW).is_err());
 }
 
 /// A request naming a pid with another start time, or no live process,

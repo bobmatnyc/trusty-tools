@@ -66,7 +66,8 @@ pub struct Ticket {
 }
 
 impl Ticket {
-    fn message(&self) -> Vec<u8> {
+    /// The bytes the seal covers (tests reseal an edited ticket with it).
+    pub(crate) fn message(&self) -> Vec<u8> {
         sealed_message(
             TAG,
             &[
@@ -101,6 +102,28 @@ pub enum TicketRefusal {
     /// #8878: the enrol ticket already enrolled a device.
     #[error("the presence ticket was already used")]
     Spent,
+}
+
+/// Where trusty-console serves the browser enrol page (#8878 PR2b-2); the
+/// console's `routes::presence::ENROL_PAGE_PATH` must match.
+pub const ENROL_PAGE_PATH: &str = "/tools/presence/enrol/";
+
+/// The one-time enrol link for `ticket` on `origin`.
+///
+/// Why: #8878 PR2b-2, Architect Q3 — the CLI hands the browser a single-use,
+/// 10-minute link; the ticket is its only credential.
+/// What: `<origin>/tools/presence/enrol/#<base64url(ticket JSON)>`. The
+/// ticket rides in the fragment, which a browser never sends to a server, so
+/// it stays out of request lines and access logs; the page posts it.
+/// Test: `the_enrol_url_carries_the_ticket_in_its_fragment_8878`.
+pub fn enrol_url(origin: &str, ticket: &Ticket) -> Result<String, String> {
+    use base64::Engine as _;
+    let json = serde_json::to_vec(ticket).map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+    Ok(format!(
+        "{}{ENROL_PAGE_PATH}#{encoded}",
+        origin.trim_end_matches('/')
+    ))
 }
 
 /// Mint a ticket for `purpose` on `subject` at `now`.

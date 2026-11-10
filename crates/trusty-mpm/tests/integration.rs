@@ -39,6 +39,8 @@ mod meta_demo_e2e;
 mod no_content_single_error;
 mod orphan_gc_sweep;
 mod pid_registry_sweep;
+// #8878 PR2b-2: passkey enrolment live through a sandbox daemon (ignored).
+mod presence_enrol_smoke_8878;
 mod project_registry_routes;
 mod project_status_route;
 mod projects_json_concurrency;

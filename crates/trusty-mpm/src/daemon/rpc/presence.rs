@@ -13,8 +13,12 @@
 //! grant through `verify_and_grant`), `register.start` / `register.finish`
 //! (enrol behind a ticket), `devices.list`, `devices.revoke` (behind a
 //! ticket). Refusals carry `data.exit` 1; a missing key, home or verifier
-//! is exit 3; bad params exit 2.
-//! Test: `presence_tests.rs` beside this file.
+//! is exit 3; bad params exit 2. #8878 PR2b-2: `register.start` refuses a
+//! spent ticket, and `status` names the browser enrol origin (`null` while
+//! `[presence] rp_origin` is unset), which trusty-console reads before it
+//! serves the enrol page. Owner ruling D24: `approve` and `verify` refuse
+//! while `acl_verified()` is false (#10865); enrolment stays open.
+//! Test: `presence_tests.rs` and `presence_enrol_tests.rs` beside this file.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +30,7 @@ use serde_json::{Value, json};
 use trusty_common::uds::server::{RpcError, RpcRouter};
 
 use crate::core::presence_device::{self, Device};
-use crate::core::presence_enrol::Ticket;
+use crate::core::presence_enrol::{Ticket, TicketRefusal};
 use crate::core::presence_key::{GrantKey, KeySource, UNTRUSTED_NOTICE, acl_verified};
 use crate::core::presence_request::{self, NewRequest};
 use crate::core::presence_verify::{Assertion, Ceremonies, VerifyEnv, verify_and_grant};
@@ -36,6 +40,10 @@ use crate::daemon::error::{CODE_UNAVAILABLE, CODE_UNPROCESSABLE};
 #[cfg(test)]
 #[path = "presence_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "presence_enrol_tests.rs"]
+mod enrol_tests;
 
 /// Every method this family serves.
 pub const METHODS: [&str; 8] = [
@@ -56,6 +64,19 @@ fn refused(e: impl std::fmt::Display) -> Failure {
     (1, e.to_string())
 }
 
+/// Why `approve` and `verify` refuse while the key ACL is unverified.
+pub const APPROVALS_BLOCKED: &str = "device approvals are refused until #10865 verifies the \
+     presence key's Keychain access list (owner ruling D24)";
+
+/// Refuse every device approval until #10865 (owner ruling D24).
+fn approvals_allowed() -> Result<(), Failure> {
+    if acl_verified() {
+        Ok(())
+    } else {
+        Err(refused(APPROVALS_BLOCKED))
+    }
+}
+
 /// The key lookup a service runs once per call.
 type KeyFn = dyn Fn() -> Option<GrantKey> + Send + Sync;
 /// The live start time of a PID.
@@ -70,6 +91,7 @@ pub struct PresenceService {
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     ceremonies: Ceremonies,
     verifier: Result<WebauthnVerifier, WebauthnRefusal>,
+    enrol_origin: Option<String>,
 }
 
 impl PresenceService {
@@ -90,7 +112,15 @@ impl PresenceService {
             now,
             ceremonies: Ceremonies::new(),
             verifier,
+            enrol_origin: None,
         }
+    }
+
+    /// The browser enrol origin `status` reports (#8878 PR2b-2); `None`
+    /// keeps the console's enrol page unserved.
+    pub fn with_enrol_origin(mut self, origin: Option<String>) -> Self {
+        self.enrol_origin = origin;
+        self
     }
 
     /// This daemon's service: `~/.trusty-mpm`, the ambient key source (read
@@ -101,6 +131,7 @@ impl PresenceService {
             .map(|h| h.join(".trusty-mpm"));
         let source = root.as_deref().map(KeySource::ambient);
         let config = crate::core::config::MpmConfig::load_default().presence;
+        let enrol_origin = config.enrol_origin().map(str::to_owned);
         Self::new(
             root,
             Box::new(move || source.as_ref()?.load().ok().flatten()),
@@ -113,6 +144,7 @@ impl PresenceService {
             Box::new(|| crate::core::presence::unix_secs(std::time::SystemTime::now())),
             WebauthnVerifier::from_config(&config),
         )
+        .with_enrol_origin(enrol_origin)
     }
 
     fn root(&self) -> Result<&std::path::Path, Failure> {
@@ -133,7 +165,7 @@ impl PresenceService {
     ///
     /// Why/What: see the module doc; nothing here grants without
     /// `verify_and_grant`, and nothing enrols or revokes without a ticket.
-    /// Test: `a_device_approval_round_trips_through_the_service_8878`,
+    /// Test: `an_approval_is_refused_while_the_key_acl_is_unverified_8878`,
     /// `a_request_for_a_dead_or_reused_pid_is_refused_8878`,
     /// `register_start_without_a_ticket_writes_nothing_8878`,
     /// `the_service_refuses_when_the_verifier_is_unconfigured_8878`.
@@ -144,18 +176,21 @@ impl PresenceService {
                 "verifier": self.verifier.as_ref().err().map_or("ready".to_owned(), ToString::to_string),
                 "acl_verified": acl_verified(),
                 "notice": UNTRUSTED_NOTICE,
+                "enrol_origin": self.enrol_origin,
             })),
             "approve" => self.approve(&parse::<ById>(params)?.request_id),
             "verify" => self.verify(parse(params)?),
             "register.start" => {
                 let p: WithTicket = parse(params)?;
-                let options = self
-                    .verifier()?
+                let verifier = self.verifier()?;
+                // #8878 PR2b-2: the enrol link is single-use (Architect Q3).
+                if presence_device::ticket_spent(self.root()?, &p.ticket) {
+                    return Err(refused(TicketRefusal::Spent));
+                }
+                let options = verifier
                     .start_registration(&self.key()?, &p.ticket, (self.now)())
                     .map_err(refused)?;
-                Ok(
-                    json!({ "options": options, "incomplete": "the browser leg arrives with PR2b-2" }),
-                )
+                Ok(json!({ "options": options }))
             }
             "register.finish" => {
                 let p: Finish = parse(params)?;
@@ -223,6 +258,8 @@ impl PresenceService {
             .filter_map(|(_, d)| d.ok())
             .collect();
         let verifier = self.verifier()?;
+        // #8878 D24: approvals stay blocked until #10865; enrolment does not.
+        approvals_allowed()?;
         let challenge = self
             .ceremonies
             .begin(root, &key, request_id, now)
@@ -241,6 +278,8 @@ impl PresenceService {
     fn verify(&self, p: VerifyParams) -> Result<Value, Failure> {
         let root = self.root()?;
         let verifier = self.verifier()?;
+        // #8878 D24: no grant is minted until #10865 verifies the key ACL.
+        approvals_allowed()?;
         let assertion = Assertion {
             request_id: p.request_id,
             credential_id: p.credential_id,
