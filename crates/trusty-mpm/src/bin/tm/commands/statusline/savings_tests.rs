@@ -107,6 +107,39 @@ fn one_compress_row_moves_the_segment() {
     );
 }
 
+/// Why (#10973): an opportunity row says what COULD have been saved. Folding it
+/// into the `💸` per-call figure would break #7867's rule that only rows a tool
+/// call actually saved move that figure.
+/// Test: itself.
+#[test]
+fn an_opportunity_row_never_moves_the_segment() {
+    use trusty_mpm::core::savings_opportunity::{OpportunityRow, append_opportunity};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = dir.path().join("savings.jsonl");
+    let row = OpportunityRow::new(
+        "PostToolUse",
+        "sess-1",
+        "mcp",
+        "mcp__x__y",
+        80_000,
+        80_000,
+        8_000,
+    );
+    append_opportunity(&ledger, &row).expect("append");
+    assert_eq!(
+        savings_segment_at(&ledger, "sess-1").as_deref(),
+        Some(EMPTY_STATE),
+        "an opportunity alone is not a saving"
+    );
+    write_row(&ledger, "sess-1", 12_000, 60_000);
+    append_opportunity(&ledger, &row).expect("append");
+    assert_eq!(
+        savings_segment_at(&ledger, "sess-1").as_deref(),
+        Some("\u{1f4b8}20%/20%"),
+        "the compress row alone decides the figure"
+    );
+}
+
 /// Why (#8063): a session with one recorded row renders that row's own
 /// reduction on both sides — the badge never goes half-blank, and the two
 /// halves agree when there is only one measurement to report.

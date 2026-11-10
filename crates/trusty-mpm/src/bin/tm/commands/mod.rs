@@ -130,6 +130,8 @@ pub(crate) mod guided_supervisor_guard;
 // #8454: the `tm hook` mode dispatch, out of `main.rs`.
 pub(crate) mod hook_mode;
 pub(crate) mod hook_notify;
+// #10973: the per-tool-result compression-opportunity observer.
+pub(crate) mod hook_observer;
 pub(crate) mod hook_payload;
 // #8433 P0 (D09): SessionStart delivery and the hook-side taint re-apply.
 pub(crate) mod hook_session_taint;

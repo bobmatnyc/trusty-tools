@@ -539,7 +539,8 @@ fn pretooluse_bash_rewrite(
 /// `tm_hook_pretooluse_rewrite` integration test exercise the stdin-driven
 /// event detection end to end through the real binary. The #6556 delivery split
 /// is covered by `a_stop_delivered_on_the_third_attempt_logs_every_one` and
-/// `a_daemon_that_never_answers_exhausts_the_attempts`.
+/// `a_daemon_that_never_answers_exhausts_the_attempts`. The #10973
+/// opportunity observer: `a_subagent_result_and_an_mcp_result_each_append_an_opportunity_row`.
 pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     // Guard 1: suppress inside MPM-spawned sub-agents.
     if std::env::var_os(SUB_AGENT_ENV).is_some() {
@@ -605,6 +606,12 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     {
         println!("{response}");
         return Ok(());
+    }
+
+    // #10973: measure every tool result and subagent result for compression
+    // opportunity. Bounded and fail-open; prints nothing to stdout.
+    if event == "PostToolUse" || event == SUBAGENT_STOP_EVENT {
+        super::hook_observer::observe(&event, stdin_payload.as_ref(), &session_id);
     }
 
     // #2610: on turn-end events (main agent Stop / delegated SubagentStop),
