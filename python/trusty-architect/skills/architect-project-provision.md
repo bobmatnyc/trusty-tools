@@ -99,11 +99,13 @@ multiple-choice question per open decision, recommendation first:
 
 ## 4. Record
 
-- `local/projects/<name>.md` from `local/projects/_template.md`, with the
+- `tm fleet project add <name>`: it starts `local/projects/<name>.md` from
+  `local/projects/_template.md` and adds the project to the watch set. A
+  project the registry lacks is refused; register it first. Then record the
   gates, the mandates in scope and the architecture baseline
-  (`architect-drift-check`, "Set a baseline").
-- `local/state.md` watch set, `local/goals.md` session-to-goal map, and one
-  `local/actions.md` entry.
+  (`architect-drift-check`, "Set a baseline") in that file.
+- `local/state.md` live sessions, `local/goals.md` session-to-goal map, and
+  one `local/actions.md` entry.
 - Offer the first architectural review (`architect-review`) as a proposal.
 
 ## Related skills

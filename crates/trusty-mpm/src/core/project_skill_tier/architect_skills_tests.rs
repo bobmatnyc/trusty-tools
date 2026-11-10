@@ -260,7 +260,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     const PINNED: [(&str, &str); 17] = [
         (
             "tm-fleet-check",
-            "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
+            "b465a8a024783fa5bc33737b3efa3fc8f5bd9dc8e387b9781ab820de73220918",
         ),
         (
             "tm-context-refresh",
@@ -276,7 +276,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-workflow",
-            "b0645b7e2ea415922472d45f2936dc844dcf2412420a7b535627ba9c1bcb81fc",
+            "59137538d1832abdab2ed80b30c6f55596898c59fef013f5ecbfdf4672fdc3c6",
         ),
         (
             "architect-search-memory",
@@ -308,7 +308,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-project-provision",
-            "954f6c37e6c800af8819e2153e803ad62d6e29e963139410dab21ee8f473cd1f",
+            "a4b3d792acb46789bf9d79a1ea7e3c2be455903af48a65bed0560fcca2a37edb",
         ),
         (
             "architect-macos",

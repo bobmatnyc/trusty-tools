@@ -80,6 +80,8 @@ pub const FLEET_CHECK: ShippedSkill = ShippedSkill {
         "7535d8bc496f17cd1a9d80e461073aa9539fd070329231cb2508a6e65981287a",
         // #9997 U1b: the `local/` text, before the 250k bar and relay.sh.
         "90391f732f01ebcb4e9551f846e77cdc8706f4bf62ef02ea930ad0450a7ec9aa",
+        // #10895: the text before step 1 ran `tm fleet project list`.
+        "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
     ],
 };
 
@@ -125,6 +127,8 @@ const WORKFLOW: ShippedSkill = ShippedSkill {
         "15e6c3d5bff69fccb7066adbe228ea7376f435ea91a6fe826dad3a24f5e2c2e4",
         // #10911: the text that said the Architect never writes AGENTS.md.
         "215f8e5b8f6d9bb04c75d2569c024d5068eab2c951a527229b353c4ff1643a0c",
+        // #10895: the text that said `CLAUDE.md` holds the watch set.
+        "b0645b7e2ea415922472d45f2936dc844dcf2412420a7b535627ba9c1bcb81fc",
     ],
 };
 
@@ -153,9 +157,11 @@ const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
     stem: "architect-project-provision",
     // #10263: the D2 text, before hook commands named an interpreter (D73).
     // #10277: the D73 text, before the board step moved to `tm issue board add`.
+    // #10895: the text before the record step ran `tm fleet project add`.
     previous: &[
         "102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8",
         "a1059ba1af14510618d08bd6f99bc46861052f3418ce3bb21fa2c627c908860b",
+        "954f6c37e6c800af8819e2153e803ad62d6e29e963139410dab21ee8f473cd1f",
     ],
 };
 
