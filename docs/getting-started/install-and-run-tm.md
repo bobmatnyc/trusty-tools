@@ -179,6 +179,8 @@ On first run, you'll see the guided setup:
 - Configures the session name (defaults to the repo name).
 - Launches a Claude Code session in a tmux window with trusty-mpm's framework loaded.
 
+Let `tm` create the project clone for you: `tm run <owner>/<repo>` clones to `~/trusty-mpm-projects/<owner>/<repo>`. Do not hand-clone into a flat directory. See [Let `tm` Create Your Project Clones](canonical-clones.md).
+
 Inside the session, you have access to all trusty-mpm tools: `tm sessions`, `tm load`, `tm doctor`, memory recall, code search, and the full agent/skill ecosystem.
 
 ---
