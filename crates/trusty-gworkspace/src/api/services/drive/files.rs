@@ -18,20 +18,28 @@ use crate::api::services::{
 
 /// Why: Folder listing is the entry point for any Drive navigation tool.
 /// What: Queries `/files` filtered by parent id, returning name/mimeType/id for each child.
-/// Test: Live API.
+/// Test: `list_contents_url_keeps_the_folder_id_inside_one_literal`.
 pub async fn list_drive_contents(client: &BaseClient, args: Value) -> Result<Value> {
     let account = account_of(&args);
     let folder_id = opt_str(&args, "folder_id").unwrap_or("root");
-    let q = format!("'{folder_id}' in parents and trashed = false");
     let max = args
         .get("max_results")
         .and_then(|v| v.as_i64())
         .unwrap_or(100);
-    let url = format!(
-        "{DRIVE_API_BASE}/files?q={}&pageSize={max}&fields=files(id,name,mimeType,modifiedTime,size,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true",
+    client
+        .get(&list_contents_url(DRIVE_API_BASE, folder_id, max), account)
+        .await
+}
+
+/// The `files.list` URL for the untrashed children of `folder_id`.
+fn list_contents_url(base: &str, folder_id: &str, max: i64) -> String {
+    // #10879: escape the ID as a Drive query literal, as the bulk walk does,
+    // so a crafted `folder_id` cannot add a clause that lists other files.
+    let q = crate::api::bulk::parents_query(folder_id);
+    format!(
+        "{base}/files?q={}&pageSize={max}&fields=files(id,name,mimeType,modifiedTime,size,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true",
         encode(&q)
-    );
-    client.get(&url, account).await
+    )
 }
 
 /// Why: Full-text/metadata search across Drive needs the Drive `q` query DSL.
@@ -461,6 +469,17 @@ mod tests {
             )
             .mount(server)
             .await;
+    }
+
+    /// #10879: a quote in `folder_id` stays inside the Drive query literal.
+    #[test]
+    fn list_contents_url_keeps_the_folder_id_inside_one_literal() {
+        let url = list_contents_url("http://x", "x' in parents or 'y", 5);
+        let want = encode(r"'x\' in parents or \'y' in parents and trashed = false");
+        assert!(
+            url.starts_with(&format!("http://x/files?q={want}&pageSize=5&")),
+            "{url}"
+        );
     }
 
     #[tokio::test]

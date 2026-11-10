@@ -42,7 +42,7 @@
 //! `put_and_verify_refuse_a_symlinked_log_with_no_file_changed`,
 //! `human_actor_without_confirmation_cannot_extend_a_review`,
 //! `human_verify_without_confirmation_is_refused`,
-//! `put_and_verify_refuse_an_actor_with_a_control_character`.
+//! `put_verify_and_correct_refuse_a_control_character`.
 
 use chrono::{DateTime, FixedOffset};
 use serde_yaml::{Mapping, Value};
@@ -241,7 +241,7 @@ fn generated_value(by: &Actor, now: &DateTime<FixedOffset>) -> Value {
 /// What: `Conflict { reason: "actor_control_character" }` when any char of
 /// `by.to_string()` is a control character (newline included), before any
 /// other check, so no file changes.
-/// Test: `put_and_verify_refuse_an_actor_with_a_control_character`.
+/// Test: `put_verify_and_correct_refuse_a_control_character`.
 fn check_actor(id: &ConceptId, by: &Actor) -> Result<(), OkfError> {
     if by.to_string().chars().any(char::is_control) {
         return Err(conflict(id, "actor_control_character"));

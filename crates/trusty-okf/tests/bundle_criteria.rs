@@ -493,6 +493,63 @@ fn move_reports_a_link_in_a_non_utf8_file_as_unreadable() {
     assert_eq!(tree(r), before, "no file changed");
 }
 
+/// Why: #10879 — a move that cannot read a concept would leave its link
+/// to the old ID dangling, so any read error other than non-UTF-8 stops it.
+/// What: a linking concept made unreadable (mode 000) fails the move with
+/// an I/O error and no file changes. Skipped when the process reads it
+/// anyway (root).
+/// Test: self-contained.
+#[cfg(unix)]
+#[test]
+fn move_stops_on_a_concept_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let r = tmp.path();
+    write(r, "other.md", "---\ntype: Note\n---\n");
+    write(r, "linker.md", "---\ntype: Note\n---\n[o](other.md)\n");
+    let mut b = open(r);
+    let before = tree(r);
+    let mode = |m: u32| {
+        std::fs::set_permissions(r.join("linker.md"), std::fs::Permissions::from_mode(m)).unwrap()
+    };
+    mode(0o000);
+    if std::fs::read(r.join("linker.md")).is_ok() {
+        mode(0o644);
+        eprintln!("move_stops_on_a_concept_it_cannot_read: mode 000 is readable here (root)");
+        return;
+    }
+    let got = b.move_concept(&id("other"), &id("moved"), now());
+    mode(0o644);
+    assert!(matches!(got, Err(OkfError::Io { .. })), "{got:?}");
+    assert_eq!(tree(r), before, "no file changed");
+}
+
+/// Why: #10879 — `open` is a lenient read (§4.4); one verification record
+/// it cannot read must not fail the whole open.
+/// What: `a`'s record path is a directory. `open` succeeds with one error
+/// `UnreadableFile` finding on the record, for `a`; `b` opens as usual,
+/// and `a`'s verification state still fails instead of reading Unverified.
+/// Test: self-contained.
+#[test]
+fn open_reports_an_unreadable_verification_record_as_a_finding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let r = tmp.path();
+    write(r, "a.md", "---\ntype: Note\n---\nA\n");
+    write(r, "b.md", "---\ntype: Note\n---\nB\n");
+    std::fs::create_dir_all(r.join("_sources/verification/a.jsonl")).unwrap();
+    let (b, findings) = Bundle::open(r).unwrap();
+    let bad: Vec<_> = findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::UnreadableFile)
+        .collect();
+    assert_eq!(bad.len(), 1, "{findings:?}");
+    assert_eq!(bad[0].path, "_sources/verification/a.jsonl");
+    assert_eq!(bad[0].severity, Severity::Error);
+    assert_eq!(bad[0].concept, Some(id("a")));
+    assert!(b.verification_state(&id("a")).is_err());
+    assert!(b.verification_state(&id("b")).is_ok());
+}
+
 /// #10746: a UTF-8 source whose YAML does not parse is refused with
 /// `Parse` before the journaled operation runs: no empty concept at the
 /// new ID, no `log.md` entry, no conflict mark; the tree is byte-identical.

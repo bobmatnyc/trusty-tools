@@ -84,7 +84,8 @@ pub fn check_write(c: &Concept, mode: WriteMode) -> Result<Vec<Finding>, OkfErro
 /// the re-parse comparison, so it is refused instead of written.
 /// What: renders, re-parses under the same ID, and compares values and body.
 /// A mismatch or a parse failure is [`OkfError::Parse`].
-/// Test: `a2_render_never_emits_duplicate_keys`.
+/// Test: `a2_render_never_emits_duplicate_keys`,
+/// `render_checked_refuses_text_that_does_not_read_back`.
 pub(crate) fn render_checked(c: &Concept) -> Result<String, OkfError> {
     let rendered = render_concept(c);
     let refuse = |message: String| OkfError::Parse {
@@ -234,5 +235,33 @@ fn io_err(path: &Path, source: std::io::Error) -> OkfError {
     OkfError::Io {
         path: path.to_path_buf(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why: #10879 — `a2_render_never_emits_duplicate_keys` cannot reach the
+    /// refusal: `Concept::set` never stores a key twice.
+    /// What: a concept with no values renders as its body alone. A body that
+    /// opens a frontmatter block reads back with values the concept lacks;
+    /// one whose block does not parse does not read back. Both are refused.
+    /// Test: self-contained.
+    #[test]
+    fn render_checked_refuses_text_that_does_not_read_back() {
+        let id = ConceptId::parse("a").unwrap();
+        for (body, why) in [
+            ("---\ntype: Forged\n---\nBody\n", "as the checked values"),
+            ("---\ntype: [unclosed\n---\nBody\n", "does not read back:"),
+        ] {
+            let c = Concept::new(id.clone(), Default::default(), body.into());
+            match render_checked(&c) {
+                Err(OkfError::Parse { message, .. }) => assert!(message.contains(why), "{message}"),
+                other => panic!("{body:?}: expected a refusal, got {other:?}"),
+            }
+        }
+        let c = Concept::new(id, Default::default(), "Body\n".into());
+        assert_eq!(render_checked(&c).unwrap(), "Body\n");
     }
 }

@@ -99,10 +99,15 @@ pub(crate) fn spec_for(a: &Args, root: &Path, now: &str) -> Result<ImportSpec, F
         // the new listing lacks, so another account or selection must
         // never take over this store's items.
         if !same(&row) {
+            // #10879: with `--store` already passed, the fix is another one.
+            let hint = match a.one("--store") {
+                Some(_) => "pass a --store that names no other selection",
+                None => "pass --store to import this one into its own store",
+            };
             return Err(Fail::Code(
                 2,
                 format!(
-                    "store {} holds another selection or account; pass --store to import this one into its own store",
+                    "store {} holds another selection or account; {hint}",
                     row.id
                 ),
             ));
