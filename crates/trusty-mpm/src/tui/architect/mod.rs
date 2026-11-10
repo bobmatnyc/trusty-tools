@@ -199,12 +199,12 @@ impl ArchitectState {
         }
     }
 
-    /// The session selected on the Live tab, whose current step is asked.
+    /// The id of the session selected on the Live tab, whose step is asked.
     ///
     /// Test: `selected_session_names_the_live_row_only_on_the_live_tab`.
     pub fn selected_session(&self) -> Option<String> {
         match (self.tab, &self.live) {
-            (Tab::Live, Fetch::Ready(l)) => l.sessions.get(self.selected).map(|s| s.name.clone()),
+            (Tab::Live, Fetch::Ready(l)) => l.sessions.get(self.selected).map(|s| s.id.clone()),
             _ => None,
         }
     }
