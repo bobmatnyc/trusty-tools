@@ -4,8 +4,8 @@ Why: datg.py passed the 500-SLOC cap; #10161 P3 split it by section, bodies move
 What: summary, dispatch_mode/check_dispatch, log_hook_warning, op_fresh, turn_tools,
 stamp_turn (the Stop hook's stale_il record) and build_digest. datg.py re-exports every name.
 #10780: the digest splits answered items by item.source and flags unsourced owner claims (unsourced_claim,
-provenance_flags).
-Test: tests/test_datg.py
+provenance_flags). #10800: the SESSION section carries the G1/G3 guard flags (datg_guards.guard_lines).
+Test: tests/test_datg.py, tests/test_datg_guards.py
 """
 import json
 import os
@@ -14,6 +14,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from datg_guards import guard_lines
 from datg_log import append_log
 from datg_store import (DEFAULT_BLOCK_AFTER, SIZE_WARN, DatgError, Locked, _atomic_write, _jl, _size, load_state,
                         now_iso, parse_iso, parse_ts, paths, per_pm_session, read_log)
@@ -312,6 +313,7 @@ def _digest_sections(project, st):
             sess += [_flag(f"{r['value']}:{n}", ln) for n, ln in (provenance_flags(hp) if hp else [])][:8]
         except OSError as e:
             sess.append(f"  FLAG handoff {r['value']} unreadable ({e})")
+    sess += guard_lines(project, st)   # #10800 G1, G3: policy-file conflicts and delivery flags, beside the holds
     goals = ["GOALS"] + [f"  {g['id']} r{g['rank']} {g['title']}" + (f" -> {g['finish']}" if g.get("finish") else "")
                          for g in sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])]
     items = ["ITEMS (open)"]

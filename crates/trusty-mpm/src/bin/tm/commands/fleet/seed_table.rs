@@ -162,6 +162,8 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     embedded!("scripts/datg_read.py", "scripts/datg_read.py", false),
     // #10579: `datg.py ready`, the clear-readiness check.
     embedded!("scripts/datg_ready.py", "scripts/datg_ready.py", false),
+    // #10800: the G1-G3 guards datg.py, datg_ops.py and datg_read.py import.
+    embedded!("scripts/datg_guards.py", "scripts/datg_guards.py", false),
     embedded!("scripts/datg-hook.sh", "scripts/datg-hook.sh", true),
     embedded!("scripts/ctx-watch.py", "scripts/ctx-watch.py", false),
     embedded!("scripts/il-cron.py", "scripts/il-cron.py", false),

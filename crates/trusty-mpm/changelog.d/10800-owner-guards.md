@@ -1,0 +1,2 @@
+Added
+- The Architect's Intent Ledger (`datg.py`, seeded by `tm fleet init`) now checks three owner guardrails from DOC-87. The resume digest and the new `datg.py guards` verb flag a policy file imported by CLAUDE.md whose threshold differs from a current owner ruling. A dispatch must name its work card (`Card: <code>-Txx`), and a closed card must cite evidence. The digest also flags idle ready work and checker or repair work that displaces delivery. The card and evidence checks warn and record to `guards.jsonl` until `config.guard_mode` is `enforce` (#10800).

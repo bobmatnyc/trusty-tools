@@ -58,6 +58,10 @@ A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, sess
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
 dispatch whose prompt lacks "Goal: <code>-G<hex2>" naming an active goal; config.mode
 ("warn"|"block") overrides the date. No network, no secrets (locations only in items).
+#10800 (DOC-87 D0c, datg_guards.py): a dispatch that passes the goal check must also name its work card
+'Card: <code>-Txx' (G2), and a task closed done must cite evidence in its outcome; both warn and record to
+guards.jsonl until config.guard_mode is "enforce". The digest and `guards` (exit 1 on a flag) report policy-file
+conflicts with owner rulings (G1) and idle ready work or repair displacing delivery (G3).
 Layout (#10161, 500-SLOC cap): this file is the CLI, the hook entry and a facade. The logic
 lives in datg_store.py (state files, commit, lock; `_SESSION`), datg_ops.py (write ops),
 datg_log.py (prune, archive, rotate, notices) and datg_read.py (digest, freshness, stamp);
@@ -75,6 +79,7 @@ if HERE not in sys.path:  # #10161: -P / PYTHONSAFEPATH drop the script dir; the
 import datg_store  # noqa: E402  (#10161: main() sets datg_store._SESSION, which per_pm_session reads)
 from datg_store import VERB_KEY  # noqa: E402  (#10571: a batch entry's verb key)
 from datg_ready import op_ready  # noqa: E402  (#10579: datg.py ready)
+from datg_guards import SHADOW, dispatch_card, guard_lines  # noqa: E402  (#10800: G2 card, G1/G3 flags)
 from datg_store import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     CODE_RE, DEFAULT_BLOCK_AFTER, DatgError, EVENTS, ID_RE, Locked, PREFIXES, RULES, SESSION_MAX, SESSION_RE,
     SIZE_REFUSE, SIZE_WARN, STATUS, TITLE_MAX, VAGUE, WHO, _atomic_write, _dump, _jl, _largest, _size,
@@ -137,11 +142,15 @@ def hook_output(event, st, payload, project, now=None):
     if event == "PreToolUse" and payload.get("tool_name") in ("Agent", "Task"):
         ti = payload.get("tool_input") or {}
         dec, msg = check_dispatch(st, ti.get("prompt") or "", now)
+        if dec == "allow":   # #10800 G2: a goal alone is not enough; the dispatch names its work card
+            dec, msg = dispatch_card(project, st, ti.get("prompt") or "")
         if dec == "block":
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                            "permissionDecision": "deny",
                                            "permissionDecisionReason": msg}}
         if dec == "warn":
+            if msg.endswith(SHADOW):   # #10800: a card warning is recorded in guards.jsonl already
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": msg}}
             log_hook_warning(project, msg)
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                            "additionalContext": msg + " (warn mode)"}}
@@ -236,6 +245,7 @@ def build_parser():
     sub.add_parser("stamp", help="Stop hook step; hook JSON on stdin")
     s = sub.add_parser("provenance", help="flag handoff lines that claim an owner ruling with no cite (#10780)")
     s.add_argument("files", nargs="+")
+    sub.add_parser("guards", help="#10800 G1/G3 flags: policy-file conflicts, idle ready work, repair displacing delivery")
     s = sub.add_parser("ready", help="exit 0 ready to clear, 1 not ready (reasons printed), 2 missing or unreadable")
     s.add_argument("--json", action="store_true", help='print {"ready", "reasons", "written_at", "hold"}')
     s.add_argument("--since", help="ISO YYYY-MM-DDTHH:MMZ or epoch seconds (as for fresh)")
@@ -337,6 +347,10 @@ def main(argv=None):
                     print(f"{path}:{n}: FLAG unsourced owner claim: {line.strip()}")
                 code = code or (1 if flags else 0)
             return code
+        if a.verb == "guards":   # #10800: exit 1 when a flag is raised, 2 when the ledger is unreadable
+            flags = guard_lines(a.project, load_state(a.project))
+            print("\n".join(f.strip() for f in flags) if flags else "no guard flags")
+            return 1 if flags else 0
         if a.verb == "fresh":
             code, msg = op_fresh(a.project, a.since, a.max_age)
             print(msg)
@@ -398,7 +412,10 @@ def main(argv=None):
             print(cmd_show(a.project, a.brief))
         elif a.verb == "check-dispatch":
             prompt = a.prompt if a.prompt is not None else sys.stdin.read()
-            dec, msg = check_dispatch(load_state(a.project), prompt)
+            st = load_state(a.project)
+            dec, msg = check_dispatch(st, prompt)
+            if dec == "allow":   # #10800 G2
+                dec, msg = dispatch_card(a.project, st, prompt)
             print(dec + (": " + msg if msg else ""))
             return 2 if dec == "block" else 0
     except DatgError as e:
