@@ -305,12 +305,13 @@ fn an_overlong_credential_id_is_refused_before_the_ticket_is_spent_8878() {
     let (_d, root) = root();
     let ticket = mint_ticket(&key(), TicketPurpose::Enrol, "iphone", NOW).expect("ticket");
     let before = snapshot(&root);
-    let long = "A".repeat(MAX_CREDENTIAL_ID + 1);
+    // Literal lengths: `<id>.json` is 256 bytes, then exactly 255.
+    let long = "A".repeat(251);
     let out = enrol(&root, &key(), &ticket, new_device(&long), NOW);
     assert_eq!(out, Err(DeviceError::InvalidId));
     assert!(!ticket_spent(&root, &ticket), "the ticket is not spent");
     assert_eq!(snapshot(&root), before, "nothing is written");
-    let longest = "B".repeat(MAX_CREDENTIAL_ID);
+    let longest = "B".repeat(250);
     let device = enrol(&root, &key(), &ticket, new_device(&longest), NOW).expect("fits");
     assert_eq!(load(&root, &key(), &longest), Ok(device));
 }
