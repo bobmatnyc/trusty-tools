@@ -17,14 +17,15 @@
 //! than leaving producers' connects queued and unread. [`handle_connection`]
 //! checks the peer's uid, reads the first line under the ingest cap and idle
 //! timeout, and hands the connection to `ingest` or to the JSON-RPC router
-//! that serves `events.subscribe` (`crate::subscribe`).
+//! that serves `events.subscribe` (`crate::subscribe`) and `events.health`
+//! (`crate::health`, #10901).
 //! Test: `super::serve_tests`, `super::tests` (the moved ingest tests), and
 //! `tests/daemon_wire.rs`, `tests/daemon_exit.rs` over the real binary.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -38,6 +39,7 @@ use trusty_common::uds::{
 };
 
 use crate::bus::EventBus;
+use crate::health;
 use crate::ingest::{self, LineRead, READ_IDLE_TIMEOUT};
 use crate::subscribe;
 
@@ -168,8 +170,15 @@ pub(crate) struct Connection {
 impl Connection {
     /// The shared state for connections on `bus` under `limits`.
     pub(crate) fn new(bus: Arc<EventBus>, limits: ServeLimits) -> Self {
+        // See #10901: `events.health` shares the router and the peer check;
+        // uptime counts from here, when the daemon begins serving.
+        let router = health::register(
+            subscribe::router(Arc::clone(&bus), limits.max_subscribers),
+            Arc::clone(&bus),
+            Instant::now(),
+        );
         Self {
-            router: subscribe::router(Arc::clone(&bus), limits.max_subscribers),
+            router,
             bus,
             idle_timeout: limits.idle_timeout,
         }

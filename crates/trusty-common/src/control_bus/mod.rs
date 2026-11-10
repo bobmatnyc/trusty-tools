@@ -25,6 +25,8 @@
 //!       `SubscribeParams`, `SubscribeFilter`, `SubscribeItem` and the
 //!       `heartbeat_ms` bounds (#10071), plus — behind
 //!       `uds`, unix only — `SubscribeRequest` and `SubscribeFrameError`.
+//!       The `events.health` contract (#10901) adds `METHOD_EVENTS_HEALTH`,
+//!       `EVENTS_HEALTH_OK`, `EventsHealthParams` and `EventsHealth`.
 //!       Everything except `PushClient` is a type with no transport: no
 //!       channel, no process-global sender, no sequence counter. A producer
 //!       stamps `seq`, `at`, and `id` itself and hands the envelope to
@@ -55,6 +57,8 @@ mod action;
 mod envelope;
 mod event_id;
 mod filter;
+// See #10901: the `events.health` contract; types only, like `subscribe`.
+mod health;
 mod lifecycle;
 // #9167: the `message` domain; types only, like `action`.
 mod message;
@@ -74,6 +78,7 @@ pub use action::{
 pub use envelope::{HarnessEvent, HarnessPayload};
 pub use event_id::EventId;
 pub use filter::Filter;
+pub use health::{EVENTS_HEALTH_OK, EventsHealth, EventsHealthParams, METHOD_EVENTS_HEALTH};
 pub use lifecycle::{HarnessSource, LifecycleEvent};
 pub use message::{MessageChannel, MessageDirection, MessageEvent};
 #[cfg(all(unix, feature = "uds"))]

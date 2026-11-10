@@ -45,7 +45,10 @@ fn agents_and_console_have_no_uds_endpoint_kind() {
         (ServiceId::Memory, ProbeKind::UdsHealth("memory.health")),
         (ServiceId::Analyze, ProbeKind::UdsHealth("analyze.health")),
         (ServiceId::Review, ProbeKind::OnDemand),
-        (ServiceId::Events, ProbeKind::SocketConnect),
+        (
+            ServiceId::Events,
+            ProbeKind::UdsHealth(trusty_common::control_bus::METHOD_EVENTS_HEALTH),
+        ),
     ];
     for (id, want) in others {
         assert_eq!(id.probe(), want, "{id:?}");

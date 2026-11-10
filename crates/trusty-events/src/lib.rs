@@ -27,6 +27,8 @@
 // #9075: moved from trusty-console's `event_bus` module.
 mod bus;
 pub mod daemon;
+// See #10901.
+mod health;
 mod ingest;
 mod log;
 mod serve;
