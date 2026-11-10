@@ -100,18 +100,35 @@ mod tests {
         rewrite_bash_command_for_cwd(command, Some(Path::new(WORKTREE))).map(|r| r.command)
     }
 
-    /// #7477: the protected case — nothing the classifier refused reaches a worktree.
+    /// #7477: the protected case — nothing the classifier refused reaches a
+    /// worktree. #10973 critic finding 2: with no cwd the project's deny rules
+    /// cannot be read, so an unknown cwd is not rewritten at all.
     #[test]
     fn the_isolated_shape_is_one_simple_command() {
-        for cwd in [Some(Path::new(WORKTREE)), Some(Path::new("")), None] {
-            let out = rewrite_bash_command_for_cwd("git diff HEAD~1", cwd)
-                .map(|r| r.command)
-                .expect("a covered command is rewritten");
-            assert_eq!(out, "tm compress --tool \"git diff\" -- git diff HEAD~1");
-            for refused in ["{", "}", "|", ";", "printf", "$?", "&", ">"] {
-                assert!(!out.contains(refused), "{refused} in {out}");
-            }
+        let out = isolated("git diff HEAD~1").expect("a covered command is rewritten");
+        assert_eq!(out, "tm compress --tool \"git diff\" -- git diff HEAD~1");
+        for refused in ["{", "}", "|", ";", "printf", "$?", "&", ">"] {
+            assert!(!out.contains(refused), "{refused} in {out}");
         }
+        for cwd in [Some(Path::new("")), None] {
+            assert!(
+                rewrite_bash_command_for_cwd("git diff HEAD~1", cwd).is_none(),
+                "an unknown cwd {cwd:?} must not be rewritten"
+            );
+        }
+    }
+
+    /// #10973 critic finding 3: `tm compress` execs the program, so a shell
+    /// function or alias of that name would be lost. Only a program that
+    /// resolves to an executable is rewritten.
+    #[test]
+    fn a_program_that_is_not_an_executable_is_not_rewritten() {
+        assert!(
+            isolated("/bin/ls -la").is_some(),
+            "an absolute executable path"
+        );
+        assert!(isolated("git diff").is_some(), "a program on PATH");
+        assert_eq!(isolated("./no-such-dir-10973/git diff"), None);
     }
 
     #[test]

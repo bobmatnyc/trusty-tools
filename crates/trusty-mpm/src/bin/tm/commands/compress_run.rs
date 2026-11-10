@@ -67,9 +67,11 @@ pub(crate) async fn run_compress_command(tool: &str, argv: &[String]) -> i32 {
         }
     };
     let mut raw = Vec::new();
-    if let Some(mut stdout) = child.stdout.take()
-        && let Err(e) = stdout.read_to_end(&mut raw).await
-    {
+    let read = match child.stdout.take() {
+        Some(mut stdout) => stdout.read_to_end(&mut raw).await.map(drop),
+        None => Ok(()),
+    };
+    if let Err(e) = &read {
         eprintln!("tm compress: reading {program}'s output failed: {e}");
     }
     let code = match child.wait().await {
@@ -79,11 +81,17 @@ pub(crate) async fn run_compress_command(tool: &str, argv: &[String]) -> i32 {
             EXIT_NOT_EXECUTABLE
         }
     };
+    let code = status_after_read(&read, code);
     let text = String::from_utf8_lossy(&raw);
     if let Err(e) = super::compress::compress_and_emit(tool, &text, Some(code)).await {
         eprintln!("tm compress: {e}");
     }
     code
+}
+
+/// The status to exit with, given how reading the program's stdout went.
+fn status_after_read(_read: &std::io::Result<()>, program_status: i32) -> i32 {
+    program_status
 }
 
 /// The shell-style exit status of a finished program.
@@ -104,6 +112,19 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #10973 critic finding 4: output lost mid-stream is not a success.
+    #[test]
+    fn a_failed_stdout_read_yields_a_nonzero_status() {
+        let failed = Err(std::io::Error::other("pipe broke"));
+        assert_ne!(status_after_read(&failed, 0), 0);
+        assert_eq!(
+            status_after_read(&failed, 3),
+            3,
+            "a failure keeps its own status"
+        );
+        assert_eq!(status_after_read(&Ok(()), 0), 0);
+    }
 
     #[tokio::test]
     async fn a_missing_program_returns_127() {

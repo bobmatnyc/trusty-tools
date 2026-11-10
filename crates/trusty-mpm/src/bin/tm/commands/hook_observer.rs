@@ -207,6 +207,26 @@ mod tests {
         assert_eq!(row.event, "SubagentStop");
     }
 
+    /// #10973 critic finding 1: the statusline reads `savings.jsonl` whole on
+    /// every refresh, so opportunity volume must never reach that file.
+    #[test]
+    fn a_large_opportunity_volume_leaves_the_savings_ledger_untouched() {
+        use trusty_mpm::core::savings::{fold_session_per_call, savings_log_in};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ledger = savings_log_in(dir.path());
+        std::fs::create_dir_all(ledger.parent().expect("parent")).expect("mkdir");
+        let compress_row = r#"{"ts":"2026-11-10T00:00:00Z","session_id":"s1","technique":"compress","tokens_saved":900,"tokens_before":1000,"cost_saved_usd":0.01,"basis":"b","model_source":""}"#;
+        std::fs::write(&ledger, format!("{compress_row}\n")).expect("seed");
+        let before = std::fs::metadata(&ledger).expect("stat").len();
+        let fold_before = fold_session_per_call(&ledger, "s1");
+        let payload = json!({"tool_name": "Read", "tool_response": "x".repeat(500)});
+        for _ in 0..2_000 {
+            observe_in(dir.path(), "PostToolUse", Some(&payload), "s1");
+        }
+        assert_eq!(std::fs::metadata(&ledger).expect("stat").len(), before);
+        assert_eq!(fold_session_per_call(&ledger, "s1"), fold_before);
+    }
+
     #[test]
     fn an_unwritable_ledger_does_not_fail_the_hook() {
         let dir = tempfile::tempdir().expect("tempdir");
