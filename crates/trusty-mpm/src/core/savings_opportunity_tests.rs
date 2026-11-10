@@ -109,3 +109,70 @@ fn a_tagged_compress_row_still_folds_as_a_saving() {
     append_row(&ledger, &tagged).expect("append");
     assert_eq!(fold_session_per_call(&ledger, "s1").tokens_saved, 900);
 }
+
+/// #10981 round 2: a prune is housekeeping. An old day it cannot delete must
+/// not cost the new day its row.
+#[test]
+fn a_prune_that_cannot_delete_an_old_day_still_appends() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = dir.path().join("opportunity");
+    // A non-empty directory under a day file's name: `remove_file` fails on it.
+    std::fs::create_dir_all(ledger.join("2026-10-01.jsonl/x")).expect("blocker");
+    let out = append_opportunity_bounded(&ledger, &row_on("2026-11-01"), 1_000, 1);
+    assert_eq!(
+        out.expect("the row is appended"),
+        OpportunityAppend::Written
+    );
+    assert!(ledger.join("2026-11-01.jsonl").is_file());
+}
+
+/// #10981 round 2: another hook process deleted the old day first.
+#[test]
+fn a_prune_that_races_a_vanished_file_still_appends() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = dir.path().join("opportunity");
+    std::fs::create_dir_all(&ledger).expect("mkdir");
+    std::fs::write(ledger.join("2026-10-01.jsonl"), "{}\n").expect("old day");
+    let vanished = |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+    let out = append_opportunity_bounded_with(&ledger, &row_on("2026-11-01"), 1_000, 1, &vanished);
+    assert_eq!(
+        out.expect("the row is appended"),
+        OpportunityAppend::Written
+    );
+}
+
+/// #10981 round 2: a full day is not silent. The first dropped row writes one
+/// `day_full` sentinel; every dropped row is counted in `<day>.dropped`.
+#[test]
+fn hitting_the_day_cap_writes_one_sentinel_and_counts_the_rest() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = dir.path().join("opportunity");
+    let mut written = 0u64;
+    for _ in 0..40 {
+        if append_opportunity_bounded(&ledger, &row_on("2026-11-01"), 1_000, 3).expect("append")
+            == OpportunityAppend::Written
+        {
+            written += 1;
+        }
+    }
+    let day = std::fs::read_to_string(ledger.join("2026-11-01.jsonl")).expect("day file");
+    let sentinels = day.lines().filter(|l| l.contains("\"day_full\"")).count();
+    assert_eq!(sentinels, 1, "{day}");
+    let dropped = std::fs::metadata(ledger.join("2026-11-01.dropped"))
+        .expect("a drop counter")
+        .len();
+    assert_eq!(dropped, 40 - written);
+}
+
+/// #10981 round 2: a drop counter leaves with its day file.
+#[test]
+fn drop_counters_are_pruned_with_their_day_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = dir.path().join("opportunity");
+    std::fs::create_dir_all(&ledger).expect("mkdir");
+    std::fs::write(ledger.join("2026-10-01.jsonl"), "{}\n").expect("old day");
+    std::fs::write(ledger.join("2026-10-01.dropped"), "...").expect("old counter");
+    append_opportunity_bounded(&ledger, &row_on("2026-11-01"), 1_000, 1).expect("append");
+    assert!(!ledger.join("2026-10-01.dropped").exists());
+    assert!(!ledger.join("2026-10-01.jsonl").exists());
+}

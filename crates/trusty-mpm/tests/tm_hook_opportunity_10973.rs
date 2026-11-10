@@ -111,3 +111,35 @@ fn a_subagent_result_and_an_mcp_result_each_append_an_opportunity_row() {
         assert!(row["would_compress_bytes"].is_u64(), "{row}");
     }
 }
+
+/// #10981 round 2: once a day's file is full, each hook process counts its
+/// dropped row in `<day>.dropped`, and only the first writes the `day_full`
+/// sentinel — the count survives across processes.
+#[test]
+fn a_full_day_counts_drops_across_hook_processes() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let payload = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "session_id": "sess-10981",
+        "tool_name": "Read",
+        "tool_response": "line\n".repeat(200),
+    });
+    // The first run creates the day file wherever the framework root resolved.
+    run_hook_in(home.path(), &payload);
+    let day_files = ledgers_under(home.path());
+    assert_eq!(day_files.len(), 1, "{day_files:?}");
+    let day_file = &day_files[0];
+    assert!(day_file.ends_with(format!("{day}.jsonl")), "{day_file:?}");
+    // Fill the day to its 8 MiB cap.
+    let filler = format!("{}\n", "x".repeat(1023));
+    std::fs::write(day_file, filler.repeat(8 * 1024)).expect("fill the day");
+
+    for _ in 0..3 {
+        run_hook_in(home.path(), &payload);
+    }
+    let text = std::fs::read_to_string(day_file).expect("day file");
+    assert_eq!(text.matches("\"day_full\"").count(), 1, "one sentinel");
+    let dropped = day_file.with_extension("dropped");
+    assert_eq!(std::fs::metadata(&dropped).expect("counter").len(), 3);
+}

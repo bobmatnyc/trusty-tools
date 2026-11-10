@@ -143,6 +143,20 @@ pub fn append_opportunity_bounded(
     day_cap: u64,
     keep_days: usize,
 ) -> std::io::Result<OpportunityAppend> {
+    append_opportunity_bounded_with(dir, row, day_cap, keep_days, &|p| std::fs::remove_file(p))
+}
+
+/// [`append_opportunity_bounded`] with the prune's file removal injected.
+///
+/// Why: a removal that fails or races another process is only reachable in a
+/// test through this seam.
+fn append_opportunity_bounded_with(
+    dir: &Path,
+    row: &OpportunityRow,
+    day_cap: u64,
+    keep_days: usize,
+    remove: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<OpportunityAppend> {
     let day = row
         .ts
         .get(..10)
@@ -155,7 +169,7 @@ pub fn append_opportunity_bounded(
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir_all(dir)?;
-            prune_day_files(dir, keep_days.saturating_sub(1))?;
+            prune_day_files(dir, keep_days.saturating_sub(1), remove)?;
         }
         Err(e) => return Err(e),
     }
@@ -168,7 +182,11 @@ pub fn append_opportunity_bounded(
 }
 
 /// Delete the oldest day files in `dir` until at most `keep` remain.
-fn prune_day_files(dir: &Path, keep: usize) -> std::io::Result<()> {
+fn prune_day_files(
+    dir: &Path,
+    keep: usize,
+    remove: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let mut days: Vec<PathBuf> = std::fs::read_dir(dir)?
         .flatten()
         .map(|e| e.path())
@@ -182,7 +200,7 @@ fn prune_day_files(dir: &Path, keep: usize) -> std::io::Result<()> {
     days.sort();
     let excess = days.len().saturating_sub(keep);
     for old in &days[..excess] {
-        std::fs::remove_file(old)?;
+        remove(old)?;
     }
     Ok(())
 }
