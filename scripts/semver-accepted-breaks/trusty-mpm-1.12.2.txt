@@ -1,10 +1,22 @@
 crate   trusty-mpm
 version 1.12.2
-reason  Accepted under the 2026-09-26 versioning ruling (a public-API break never forces a major version), per Architect D4 A (df-G01). cargo semver-checks against baseline 1.12.1 computes 3 major lints from two changes. (1) Device presence, #10884 (a0d844ccd8): adds MpmConfig.presence and the PresenceRefusal variants DeviceGrantsInert, DeviceRevoked and DeviceUnusable. (2) Home TUI services tile, #10903 (c551a00c91): adds ProbeKind::NoUdsEndpoint and TileHealth::NoUdsEndpoint, and removes ProbeKind::HttpAddr. Refs #8878.
-accept  constructible_struct_adds_field        field MpmConfig.presence
-accept  enum_variant_added                     PresenceRefusal:DeviceGrantsInert
-accept  enum_variant_added                     PresenceRefusal:DeviceRevoked
-accept  enum_variant_added                     PresenceRefusal:DeviceUnusable
-accept  enum_variant_added                     ProbeKind:NoUdsEndpoint
-accept  enum_variant_added                     TileHealth:NoUdsEndpoint
-accept  enum_variant_missing                   variant ProbeKind::HttpAddr
+reason  Accepted under the 2026-09-26 versioning ruling (a public-API break never forces a major version), per Architect D4 A (df-G01) and the D66 cut. cargo semver-checks 0.50.0 against baseline 1.12.1 computes 8 major lints, 19 entries, from the 1.12.2 changes: device presence (#10884: MpmConfig.presence, PresenceRefusal variants), the home TUI (#10899 and #10903 services tile; #10966 tm tui home screen and Architect view: View::Architect, HomeState.architect, run_home and run_tui_entry arity, tile_lines removed, COLUMNS removed), the opportunity observer (#10973: record_compress arity, append_row and write_row_line generics), the claude.ai connector narrowing (#10735: DISABLE_CLAUDE_AI_CONNECTORS removed), and Threader losing UnwindSafe and RefUnwindSafe. Refs #8878.
+accept  auto_trait_impl_removed type Threader is no longer RefUnwindSafe
+accept  auto_trait_impl_removed type Threader is no longer UnwindSafe
+accept  constructible_struct_adds_field field HomeState.architect
+accept  constructible_struct_adds_field field MpmConfig.presence
+accept  enum_variant_added variant PresenceRefusal:DeviceGrantsInert
+accept  enum_variant_added variant PresenceRefusal:DeviceRevoked
+accept  enum_variant_added variant PresenceRefusal:DeviceUnusable
+accept  enum_variant_added variant ProbeKind:NoUdsEndpoint
+accept  enum_variant_added variant TileHealth:NoUdsEndpoint
+accept  enum_variant_added variant View:Architect
+accept  enum_variant_missing variant ProbeKind::HttpAddr
+accept  function_missing function trusty_mpm::tui::home::render::tile_lines
+accept  function_parameter_count_changed trusty_mpm::core::savings_compress::record_compress now takes 6 parameters instead of 5
+accept  function_parameter_count_changed trusty_mpm::tui::home::run_home now takes 4 parameters instead of 3
+accept  function_parameter_count_changed trusty_mpm::tui::home::run_tui_entry now takes 5 parameters instead of 4
+accept  function_requires_different_generic_type_params function append_row (0 -> 1 generic types)
+accept  function_requires_different_generic_type_params function write_row_line (0 -> 1 generic types)
+accept  pub_module_level_const_missing COLUMNS
+accept  pub_module_level_const_missing DISABLE_CLAUDE_AI_CONNECTORS

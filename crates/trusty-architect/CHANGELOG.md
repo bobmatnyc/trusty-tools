@@ -12,6 +12,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - The ledger writer reads and keeps an answer's `source`, and writes the Architect form (`update` op `source`: `{by: architect, basis}`) in byte parity with the Architect's `datg.py`. It refuses `{by: owner, …}`: only `datg.py`, which checks the quote against the owner-turn record, writes an owner source (#10780).
 
+### Changed
+
+- The dashboard schema check knows the `watch_changes` collection, so a store write of the owner's Watch or Unwatch request is validated against `watch_changes.schema.json` instead of refused as a collection with no schema (#10896).
+
 ## [0.2.0] — 2026-10-30
 
 ### Added

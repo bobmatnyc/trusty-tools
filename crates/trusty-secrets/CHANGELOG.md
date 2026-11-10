@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.1] — 2026-11-10
+
+### Changed
+
+- Requires trusty-common 0.69; no source change (Refs #10735).
+
 ## [0.4.0] — 2026-10-30
 
 ### Added

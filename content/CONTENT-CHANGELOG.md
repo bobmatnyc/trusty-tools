@@ -9,6 +9,40 @@ Sections are rolled up from `content/changelog.d/` by
 
 ---
 
+## [2.4.0] — 2026-11-10
+
+### Added
+
+- The Architect core and `BASE-AGENT.md` carry a simplicity rule: prefer the simplest working solution, and add a component, service, config surface, state or abstraction only when nothing simpler works and the user has given an informed OK (owner ruling 2026-11-08).
+- The `architect-strategy` skill tells factory sessions to review open GitHub Discussions at each board check and raise each unraised one as an Intent Ledger task titled `<owner>/<repo> discussion #<n>: <title>`; board sweeps cover open Discussions too (owner instruction 2026-11-09, discussion #580).
+
+### Fixed
+
+- `tm-architect-setup` no longer names a `tm fleet add` command, which does not exist; it documents the two `[notification_hook]` keys in `~/.trusty-mpm/config.toml`, that `tm fleet init` writes them, and `tm doctor --fix --only notification_hook --yes` as the step after editing them by hand (#10885).
+
+### Changed
+
+- The generated `tm-capabilities` skill lists the new `tm fleet bind` and `tm local` commands (71 top-level commands, was 70).
+- The `tm-ticketing` milestones-and-projects reference says never to page `gh project item-list` to find one issue's project item, which spends the primary GraphQL rate limit; ask the issue's `projectItems` through `gh api graphql` instead (#10550).
+- Architect and supervisor relay rules: a `User ruling` / `User instruction` label carries only the owner's verbatim words and the cited turn; pacing changes the model mix and queue order, never the helper count or scope; handoffs split "Owner rulings (with source)" from "Architect inferences" (#10780).
+- The trusty-review stock and coverage-gating reviewer prompts ask for a verbatim `quoted_snippet` per finding and a `questions` list for notes with no code to quote, and no longer say low-confidence findings will be hedged (#10782).
+- The PM and Architect fix bar now blocks a finding of any severity that directly fails a stated acceptance criterion of the brief or issue; its fix uses the one fix round (DOC-88, #10803).
+- `code-review-standards` adds the `criterion-fail:` citation tag and a BLOCK verdict for a tagged finding after the 80% confidence filter.
+- `code-review-standards` drops its "What NOT To Do" and Handoff lines that repeated rules stated earlier in the skill, so `code-critic` stays inside its resident skill budget.
+- The Architect `CLAUDE.md` template's watch-set line is now `` `tm-<project>`: `<absolute project path>` ``, with no `<goal>` field; the section points to `local/goals.md`, where the goal rules and `tm-fleet-check` read goals. An existing Architect's `CLAUDE.md` is not rewritten (#10855).
+- The Architect's watch set is the list `tm fleet project list` prints, not the `## Watch set` lines of its `CLAUDE.md`. The `CLAUDE.md` template's section points at the commands, rule r-067 provisions a project with `tm fleet project add`, and `tm-fleet-check` step 1 runs `tm fleet project list` and replaces a still-populated hand-written list with the pointer once the list shows each entry (#10895).
+- `tm-architect-setup` documents `tm fleet project add|remove|list`; `architect.md`, the supervisor identity, `architect-workflow` and `architect-project-provision` no longer say `CLAUDE.md` holds the watch set (#10895).
+- `tm-fleet-check` step 1 runs `scripts/watch-apply.py` before `tm fleet project list`, so the owner's dashboard Watch and Unwatch requests are applied through the CLI at the start of each pass; a `failed` request is a finding (#10896).
+- `architect-dashboard` lists the `watch_changes` collection and its `watch_change` owner event, and says to apply it only through `watch-apply.py`, never by editing `local/watch.json` (#10896).
+- The Architect core, the `CLAUDE.md` template and the `architect-workflow` skill say the Architect edits `AGENTS.md` only when the owner orders a specific edit, instead of never writing it (#10911).
+- The Architect core's Simplicity rule now applies the owner's principle: name the simplest option first in every clearance, relay, brief and decision option, and an option that adds a component, service, config surface, state or abstraction states the surface it adds and why nothing simpler works, and needs the owner's informed OK (#10929).
+- `BASE-AGENT.md`'s Simplicity rule is worded for an engineer: make the simplest change that meets the criteria, add no component, abstraction, config surface or state the brief did not ask for, and report one that seems needed instead of adding it silently (#10929).
+- `BASE-AGENT.md` drops a clause that repeated "soft preference" in Native-First Connector Routing, so every composed agent stays inside its resident byte budget.
+
+### Documentation
+
+- The Architect `CLAUDE.md` template names the quiet list's location, `local/quiet-sessions.txt` under the Architect directory, and the `tm architect quiet` command that prints it (#10861).
+
 ## [2.3.4] — 2026-11-07
 
 ### Added
