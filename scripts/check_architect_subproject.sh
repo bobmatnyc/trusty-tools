@@ -129,6 +129,7 @@ scripts/datg_ops.py|crates/trusty-mpm/src/assets/architect/scripts/datg_ops.py
 scripts/datg_log.py|crates/trusty-mpm/src/assets/architect/scripts/datg_log.py
 scripts/datg_read.py|crates/trusty-mpm/src/assets/architect/scripts/datg_read.py
 scripts/datg_ready.py|crates/trusty-mpm/src/assets/architect/scripts/datg_ready.py
+scripts/datg_guards.py|crates/trusty-mpm/src/assets/architect/scripts/datg_guards.py
 scripts/datg-hook.sh|crates/trusty-mpm/src/assets/architect/scripts/datg-hook.sh
 scripts/ctx-watch.py|crates/trusty-mpm/src/assets/architect/scripts/ctx-watch.py
 scripts/il-cron.py|crates/trusty-mpm/src/assets/architect/scripts/il-cron.py

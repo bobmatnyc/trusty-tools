@@ -162,8 +162,9 @@ class HookCase(Base):
         out = json.loads(r.stdout)["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertLess(len(r.stdout.encode()), 400)
-        ok = self.hook({"hook_event_name": "PreToolUse", "tool_name": "Task",
-                        "tool_input": {"prompt": "Goal: th-G01 go"}})
+        datg.write_ops(self.p, [{"op": "add", "kind": "T", "title": "go", "goal": "th-G01"}])
+        ok = self.hook({"hook_event_name": "PreToolUse", "tool_name": "Task",   # #10800 G2: goal and card
+                        "tool_input": {"prompt": "Goal: th-G01 Card: th-T01 go"}})
         self.assertEqual(ok.stdout, "")
 
     def test_other_tools_and_subagents_silent(self):

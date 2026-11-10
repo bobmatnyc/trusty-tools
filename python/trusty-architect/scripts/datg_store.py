@@ -64,12 +64,14 @@ VERB_KEY = "op"  # a batch entry's verb key (the stdin batch protocol); datg.py 
 RULES = (
     "DATG rules (state: .trusty-mpm/datg/state.json). You are the only writer: one "
     "`python3 {py} <verb>` call at the end of EVERY turn. "
-    "1) Every Agent dispatch prompt starts 'Goal: {code}-Gxx'; no goal id, no dispatch. "
+    "1) Every Agent dispatch prompt starts 'Goal: {code}-Gxx' and names its work card 'Card: {code}-Txx'; "
+    "no goal id, no dispatch. "
     "2) Handbacks end with: Goals (rank order), Open D/A (ids), Next. "
     "3) Owner questions are D, owner actions are A (options, recommendation first); cite ids, never repeat. "
     "4) Before dispatch: does it serve the top active goal? If none, record a D 'drift:'. "
     "5) Unsettled D/A: set esc=architect and SendMessage tm-architect. "
-    "6) Relayed answer: write it in, act, close with a verified outcome. "
+    "6) Relayed answer: write it in, act, close with a verified outcome. Close a card with its evidence "
+    "(PR, SHA, URL, path or run id). "
     "Never change goal ranks. No secret values."
 )
 

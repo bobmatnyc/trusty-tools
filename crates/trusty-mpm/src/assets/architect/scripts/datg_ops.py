@@ -8,7 +8,10 @@ Test: tests/test_datg.py
 import json
 import os
 import re
+import sys
 import time
+
+import datg_guards
 
 from datg_store import (CODE_RE, DEFAULT_BLOCK_AFTER, ID_RE, PREFIXES, SESSION_MAX, STATUS, TITLE_MAX, VAGUE,
                         WHO, DatgError, Locked, commit, load_state, now_iso, parse_ts, paths)
@@ -349,7 +352,12 @@ def collect_closed(st, evs):
 
 
 def write_ops_ev(project, ops):
-    """Apply ops to a copy of the state; commit once (all-or-nothing). Returns (events, state)."""
+    """Apply ops to a copy of the state; commit once (all-or-nothing). Returns (events, state).
+
+    #10800 G2: a task closed with no evidence in its outcome is refused under guard_mode enforce; in shadow
+    the write lands, and stderr and <datg>/guards.jsonl record it (never log.jsonl: the Rust writer parity).
+    Test: tests/test_datg_guards.py EvidenceCase
+    """
     with Locked(project):
         st = load_state(project)
         evs = []
@@ -357,5 +365,12 @@ def write_ops_ev(project, ops):
             if not isinstance(a, dict):
                 raise DatgError("each op must be an object")
             evs.extend(apply_op(st, a))
-        commit(project, st, evs, collect_closed(st, evs))
+        closed = collect_closed(st, evs)
+        gaps = datg_guards.evidence_gaps(closed)
+        if gaps and datg_guards.guard_mode(st) == "enforce":
+            raise DatgError(gaps[0][1])
+        commit(project, st, evs, closed)
+        for ref, msg in gaps:
+            datg_guards.record_guard(project, "evidence", msg, ref)
+            print(msg + datg_guards.SHADOW, file=sys.stderr)
     return evs, st
