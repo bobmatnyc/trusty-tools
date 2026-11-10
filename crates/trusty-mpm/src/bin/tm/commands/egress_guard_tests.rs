@@ -92,15 +92,27 @@ fn claude_ai_connectors_are_exempt_from_the_family_deny_10735() {
         ("mcp__google_chat__x", "googlechat"),
         ("mcp__claudeai_slack__x", "slack"),
         ("mcp__my_claude_ai_slack__x", "slack"),
+        // #10735 fix round: only the literal `claude_ai_` prefix is exempt.
+        ("mcp__claude-ai-slack__send", "slack"),
+        ("mcp__claude.ai_slack__send", "slack"),
+        ("mcp__claude ai notion__x", "notion"),
         ("mcp__workspace-mcp__send_gmail_message", "gmail"),
         ("mcp__gworkspace-mcp__send_draft", "gworkspace"),
     ] {
         assert_eq!(family_of(tool), family, "{tool}");
     }
-    assert_eq!(
-        table.classify_resource_server("slack-mcp"),
-        Classification::Family("slack".to_owned())
-    );
+    for (server, family) in [
+        ("slack-mcp", "slack"),
+        ("claude ai slack", "slack"),
+        ("claude-ai-slack", "slack"),
+        ("claude.ai-Notion", "notion"),
+    ] {
+        assert_eq!(
+            table.classify_resource_server(server),
+            Classification::Family(family.to_owned()),
+            "{server}"
+        );
+    }
 }
 
 /// 🔴 #8454 S1: a gworkspace server is denied for its mail, chat and message

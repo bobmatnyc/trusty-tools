@@ -18,8 +18,10 @@
 //! `gworkspace`, `google_workspace` or `gsuite` server is denied only for its
 //! mail, chat and message tools. [`FamilyTable::classify_resource_server`]
 //! judges the server an MCP resource tool names. #10735 (owner ruling D6d):
-//! a claude.ai connector server ([`is_claude_ai_connector`]) is exempt from
-//! the four built-in families; every other server keeps its deny.
+//! a claude.ai connector server — the literal `claude_ai_` prefix
+//! ([`is_claude_ai_connector`]), or `claude.ai ` on a resource tool's server —
+//! is exempt from the four built-in families; every other server keeps its
+//! deny.
 //!
 //! Limits, by design of a name match: Unicode confusables (a Cyrillic `а` in
 //! `slаck`) are dropped by the normalization, not mapped, so they evade it; a
@@ -60,33 +62,45 @@ const GWORKSPACE_MESSAGING: &[&str] = &["mail", "chat", "message", "draft"];
 /// Notion` becomes `claude_ai_Notion` (#10735).
 const CONNECTOR_PREFIX: &str = "claude_ai_";
 
-/// True when `server` names a claude.ai connector (#10735, owner ruling D6d).
-///
-/// What: lowercases `server`, maps every character but an ASCII letter or
-/// digit to `_`, and checks for [`CONNECTOR_PREFIX`], so the tool-name form
-/// `claude_ai_Slack` and the display form `claude.ai Slack` both match.
-/// Test: `claude_ai_connectors_are_exempt_from_the_family_deny_10735`.
-pub(crate) fn is_claude_ai_connector(server: &str) -> bool {
-    let mapped: String = server
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    mapped.starts_with(CONNECTOR_PREFIX)
+/// The display form of a claude.ai connector server, as an MCP resource tool's
+/// `server` field carries it: `claude.ai Notion` (#10735).
+const CONNECTOR_DISPLAY_PREFIX: &str = "claude.ai ";
+
+/// True when `server` starts with `prefix`, ASCII letters compared
+/// case-insensitively and every other character literally.
+fn has_literal_prefix(server: &str, prefix: &str) -> bool {
+    server
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
-/// `family` unless `server` is a claude.ai connector and `family` one of the
-/// built-in Slack, Gmail, Notion or Google Chat families (#10735).
-fn unless_connector(server: &str, family: Classification) -> Classification {
+/// True when the tool-name `server` names a claude.ai connector (#10735,
+/// owner ruling D6d).
+///
+/// Why: the exemption lifts a family deny, so a lookalike such as
+/// `claude-ai-slack` or `claude ai slack` must not earn it.
+/// What: `server` starts with the literal [`CONNECTOR_PREFIX`]; `-`, `.` and
+/// spaces are never mapped to `_` first. #10735 fix round: letter case is not
+/// judged, so `Claude_AI_Notion` matches.
+/// Test: `claude_ai_connectors_are_exempt_from_the_family_deny_10735`.
+pub(crate) fn is_claude_ai_connector(server: &str) -> bool {
+    has_literal_prefix(server, CONNECTOR_PREFIX)
+}
+
+/// True when a resource tool's `server` field names a claude.ai connector:
+/// the tool-name form, or the literal display form [`CONNECTOR_DISPLAY_PREFIX`]
+/// (#10735 fix round).
+/// Test: `claude_ai_connectors_are_exempt_from_the_family_deny_10735`.
+fn is_claude_ai_resource_server(server: &str) -> bool {
+    is_claude_ai_connector(server) || has_literal_prefix(server, CONNECTOR_DISPLAY_PREFIX)
+}
+
+/// `family` unless `connector` holds and `family` is one of the built-in
+/// Slack, Gmail, Notion or Google Chat families (#10735).
+fn unless_connector(connector: bool, family: Classification) -> Classification {
     match &family {
         Classification::Family(name)
-            if is_claude_ai_connector(server)
-                && (SERVER_FAMILIES.contains(&name.as_str()) || name == GMAIL_TOOL) =>
+            if connector && (SERVER_FAMILIES.contains(&name.as_str()) || name == GMAIL_TOOL) =>
         {
             Classification::Unrelated
         }
@@ -186,7 +200,10 @@ impl FamilyTable {
             None => return Classification::Malformed("no server segment"),
         };
         // #10735: a claude.ai connector is exempt from the four families.
-        unless_connector(&raw, self.server_family(&normalize(&raw), Some(&tool)))
+        unless_connector(
+            is_claude_ai_connector(&raw),
+            self.server_family(&normalize(&raw), Some(&tool)),
+        )
     }
 
     /// Classify the `server` an MCP resource tool names in its `tool_input`.
@@ -207,7 +224,10 @@ impl FamilyTable {
         if normalized.is_empty() {
             return Classification::Malformed("a server name with no letter or digit");
         }
-        unless_connector(server, self.server_family(&normalized, None))
+        unless_connector(
+            is_claude_ai_resource_server(server),
+            self.server_family(&normalized, None),
+        )
     }
 
     /// The family of a normalized `server`, given its normalized `tool`.

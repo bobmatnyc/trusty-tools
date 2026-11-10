@@ -214,7 +214,8 @@ pub(crate) fn taint_verdict(
             "tm hook --egress-guard denies `{tool}`: this session is now channel-tainted — it was \
              launched under the workspace of managed session `{managed}`, which received an \
              answer through an outbound channel, and no SessionStart re-applied that taint — so \
-             its path tool calls are refused until the managed session ends (#9923, #8433). Ask \
+             its path tool calls and claude.ai connector writes are refused until the managed \
+             session ends (#9923, #8433). Ask \
              the operator."
         )),
         Err(err) => Some(format!(
