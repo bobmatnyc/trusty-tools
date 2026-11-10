@@ -8,7 +8,7 @@ file when it is absent. Absent -> None, shown as "watch list not created yet", n
 malformed or another version -> WatchListError, never an empty set. state() decides one key: a `new` request -> pending;
 else the newest `failed` request, when no `applied` one is newer -> failed (a dismissed request never counts); else
 list membership -> watched | not_watched, or unknown while the list is absent. alias_for() is tm's registry join
-(Registry::alias_for, crates/trusty-mpm/src/bin/tm/commands/fleet/project/registry.rs): exact alias, then the alias
+(Registry::alias_for in tm's fleet project registry): exact alias, then the alias
 equal ignoring ASCII case, then the alias row whose path is the project's managed checkout. flags() gives path_exists
 and alias_mismatch the way `tm fleet project list --json` does. overlay() adds `watch` to every row of an answer; the
 Projects view calls it on each request, outside its answer cache, so a just-written request shows at once.

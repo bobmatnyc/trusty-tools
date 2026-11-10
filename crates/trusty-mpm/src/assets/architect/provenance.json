@@ -48,7 +48,7 @@
     "scripts/dashboard_schema.py": "7f468c01a14e7db69ce3f3202c18484caa56fb6f2d0ca74e06e0ae2459b9ce11",
     "scripts/dashboard_store.py": "84abfe84695e94f0ff6029a8ea26bf94d90903241d93bc5d51152b8e9dac6697",
     "scripts/dashboard_viz.py": "6b6129409b9080b07bce579dc019821478ed56bafd202539e1bbfbe599ba1201",
-    "scripts/dashboard_watch.py": "6ffe4f11912d1356bb77aae4b1dccb5854f69200bf83a39af9373c499c220fa3",
+    "scripts/dashboard_watch.py": "c02ab333e6c8550a3632e7d658a24aedc024f98d519dd900cd0841dbb6cba0c6",
     "scripts/datg-hook.sh": "b74b3f6d17084e3e52b67700f05d550a39c0abc9312d6af63ff7cc46a2f9da6f",
     "scripts/datg.py": "8a9d44f82b5f1e1020568fb6df186e79982d6ea7a8c0dccb1b67daa5446723a7",
     "scripts/datg_guards.py": "ac57f21be212823ab75e2bf2026db9beb67046f77b2add39e99bebbc27b052db",
