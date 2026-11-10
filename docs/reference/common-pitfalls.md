@@ -40,7 +40,7 @@ Always use `tracing::info!` / `tracing::debug!` etc. (which write to stderr).
 token and shares the live port and data — start one with
 `scripts/sandbox_search_daemon.sh` only (#9121; `sandbox_daemon.sh` is the
 `tm daemon` equivalent, `sandbox_secrets_console.sh` the trusty-secrets and
-console one, #9793).
+console one, #9793, `sandbox_agents_daemon.sh` the `tagent --api` one, #10940).
 
 🟡 **A live check on a stale binary** — the build lease writes to a pool slot,
 so `tm` on PATH or the ambient `$CARGO_TARGET_DIR/debug/tcode` can predate

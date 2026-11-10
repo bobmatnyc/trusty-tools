@@ -93,6 +93,8 @@ mod session_cmds;
 mod startup;
 // #9224: tagent's credential-file loads, gated on `TRUSTY_SANDBOX=1`.
 mod startup_env;
+// #10940: the `$HOME` provisioning step and its `TAGENT_NO_PROVISION` off-switch.
+mod startup_provision;
 mod subagent_exec;
 mod subagent_mode;
 mod subcommands;
@@ -203,7 +205,7 @@ pub async fn run() -> Result<()> {
     // message-bus side effect on that stream would corrupt the protocol. It is
     // also daemon-less by nature — it must not spin up the agent runtime.
     if args.len() > 1 && args[1] == "mcp-serve" {
-        return mcp_serve::run_mcp_serve().await;
+        return mcp_serve::run_mcp_serve(&args).await;
     }
 
     // All pre-parse bootstrapping (env loading, tracing, the early-exit

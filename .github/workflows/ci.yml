@@ -301,6 +301,10 @@ jobs:
       - name: Sandbox secrets+console launcher selftest (#9793)
         run: bash scripts/sandbox_secrets_console_selftest.sh
 
+      # #10940: the tagent --api sandbox launcher; stub binary, no build.
+      - name: Sandbox agents launcher selftest (#10940)
+        run: bash scripts/sandbox_agents_daemon_selftest.sh
+
       # #8998: the PM starting-context probe's stream readout and lever argv;
       # fixture streams only, no claude and no build.
       - name: PM context probe selftest (#8998)

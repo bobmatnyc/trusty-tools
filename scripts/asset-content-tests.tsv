@@ -31,6 +31,7 @@ trusty-agents	lib	ctrl::pm_task::dispatch::persona::tests	runtime: resolves the 
 trusty-agents	lib	inspection::tests	runtime: loads the bundled roster from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
 trusty-agents	lib	repl::tests::handle_agent_command_activates_bundled_assistant_package	runtime: agents_dir points at content/agents/trusty-agents/agents (#9014)
 trusty-agents	lib	repl::tests::list_assistant_agents_into_surfaces_directory_package	runtime: agents_dir points at content/agents/trusty-agents/agents (#9014)
+trusty-agents	lib	runtime::startup_provision::tests	reads repo_tree (content/agents/trusty-agents) to deploy into a temp home (#10940)
 trusty-agents	lib	runtime::tool_registry::registry_tests::deployed_assistant_config_survives_scoping_with_delegate_to_agent	reads repo_tree (content/agents/trusty-agents/agents) (#9014)
 trusty-agents	lib	skills::manifest::tests::agent_roster_grants_only_tools_that_have_a_skill	runtime: walks content/agents/trusty-agents/agents via repo_tree_dir (#9014)
 trusty-agents	lib	workflow::engine::executor::tests::relocate::qa_receives_correct_path_for_claude_code_runner	runtime: TAGENT_CONFIG_DIR points at content/agents/trusty-agents/agents (#9014)
