@@ -86,7 +86,7 @@ deprecation warning) — set the `TAGENT_*` name in new environments.
 | `TAGENT_MODEL_<AGENT>` | Per-agent model override (e.g. `TAGENT_MODEL_PYTHON_ENGINEER`) |
 | `TAGENT_DEFAULT_MODEL` | Fallback model when an agent TOML has no model set |
 | `TAGENT_SKILLS_PROJECT_LOCAL_ONLY` | When `1`, skill discovery only walks project-local sources |
-| `TAGENT_NO_PROVISION` | `1`: startup deploys no bundled agents or workflows to `~/.trusty-agents` and creates no `~/trusty-agents/<instance>`. `0`: provision even under `TRUSTY_SANDBOX=1`. Unset: `TRUSTY_SANDBOX=1` skips it. `--help` never provisions (#10940) |
+| `TAGENT_NO_PROVISION` | `1`: startup (every mode, `mcp-serve` included) deploys no bundled agents or workflows to `~/.trusty-agents` and creates no `~/trusty-agents/<instance>`. `0`: provision even under `TRUSTY_SANDBOX=1`. Unset: `TRUSTY_SANDBOX=1` skips it. `--help` never provisions (#10940) |
 | `TRUSTY_SANDBOX` | When `1`, no `.env`/`.env.local` loads (#9224) and no `$HOME` provisioning unless `TAGENT_NO_PROVISION=0` (#10940). An isolated `tagent --api` with AWS profile pass-through: `scripts/sandbox_agents_daemon.sh` |
 
 ## Examples

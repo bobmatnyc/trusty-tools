@@ -58,6 +58,20 @@ pub(super) fn provision_skip(
     sandbox_flag_set(sandbox).then_some(ProvisionSkip::Sandbox)
 }
 
+/// [`provision_skip`] over this process's `TAGENT_NO_PROVISION` and
+/// `TRUSTY_SANDBOX` values and `args`.
+///
+/// Why (#10940): `run_startup_init` and `mcp-serve` (which returns before it)
+/// both deploy the roster; one reader keeps their skip decision identical.
+/// Test: `startup_provision_tests::the_env_switch_keeps_a_temp_home_empty`.
+pub(super) fn process_provision_skip(args: &[String]) -> Option<ProvisionSkip> {
+    provision_skip(
+        std::env::var_os(NO_PROVISION_ENV).as_deref(),
+        std::env::var_os(SANDBOX_ENV_VAR).as_deref(),
+        args,
+    )
+}
+
 /// What the provisioning step did, for the startup banner and logs.
 #[derive(Debug, Default)]
 pub(super) struct HomeProvisioning {
@@ -122,13 +136,8 @@ pub(super) fn provision_home_tier_with(
 /// best-effort.
 /// Test: `startup_provision_tests::the_env_switch_keeps_a_temp_home_empty`.
 pub(super) fn provision_home_tier(args: &[String]) -> HomeProvisioning {
-    let skip = provision_skip(
-        std::env::var_os(NO_PROVISION_ENV).as_deref(),
-        std::env::var_os(SANDBOX_ENV_VAR).as_deref(),
-        args,
-    );
     provision_home_tier_with(
-        skip,
+        process_provision_skip(args),
         bundled::ensure_bundled_agents_deployed,
         bundled::ensure_bundled_workflows_deployed,
         || {

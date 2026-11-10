@@ -1,8 +1,8 @@
 Added
 
-- `TAGENT_NO_PROVISION=1` stops every `tagent` start from writing the bundled
-  agents and workflows to `~/.trusty-agents` and from creating
-  `~/trusty-agents/<instance>`
+- `TAGENT_NO_PROVISION=1` stops `tagent` startup, `mcp-serve` included, from
+  writing the bundled agents and workflows to `~/.trusty-agents` and from
+  creating `~/trusty-agents/<instance>`
   ([#10940](https://github.com/bobmatnyc/trusty-tools/issues/10940)).
   `TRUSTY_SANDBOX=1` now implies it unless `TAGENT_NO_PROVISION=0`, and
   `--help`/`-h` never provisions. Without either variable, startup provisions
