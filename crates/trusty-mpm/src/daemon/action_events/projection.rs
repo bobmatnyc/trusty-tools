@@ -82,6 +82,8 @@ struct Thread {
     project: Option<String>,
     /// Whether the lookup was queued; it is, from the first known `cwd`.
     resolved: bool,
+    /// #10906: the cwd the first lookup used; a requeued retry reuses it.
+    lookup_cwd: Option<PathBuf>,
 }
 
 /// One session's queued project lookup (#10906).
@@ -181,8 +183,9 @@ impl Threader {
         }
     }
 
-    /// Queue `lookup` again on its session's next record with a cwd: the
-    /// publisher had no room to run it (#10906).
+    /// Queue `lookup` again on its session's next record, from the same
+    /// first cwd: the publisher had no room to run it (#10906).
+    /// Test: `a_capped_project_lookup_retries_from_its_first_cwd_10906`.
     pub fn requeue(&mut self, lookup: &Lookup) {
         if let Some(thread) = self.sessions.get_mut(&lookup.session)
             && thread.root == lookup.root
@@ -303,9 +306,11 @@ impl Threader {
             thread.cwd = Some(PathBuf::from(cwd));
         }
         // #10906: a session whose first records named no cwd queues now.
-        let lookup = match thread.cwd.clone() {
+        // #10906: a requeued retry resolves from the first cwd, never a later one.
+        let lookup = match thread.lookup_cwd.clone().or_else(|| thread.cwd.clone()) {
             Some(cwd) if !thread.resolved => {
                 thread.resolved = true;
+                thread.lookup_cwd = Some(cwd.clone());
                 Some((thread.root, cwd))
             }
             _ => None,
@@ -352,6 +357,7 @@ impl Threader {
             Thread {
                 root,
                 resolved: cwd.is_some(),
+                lookup_cwd: cwd.clone(),
                 cwd,
                 calls: Open::default(),
                 worktrees: Open::default(),

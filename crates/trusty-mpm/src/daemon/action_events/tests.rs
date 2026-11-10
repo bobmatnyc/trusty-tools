@@ -711,3 +711,59 @@ async fn a_slow_project_lookup_never_holds_the_hook_path_10906() {
     assert_eq!(threader.project_of(&a).as_deref(), Some("acme/stale"));
     assert_eq!(threader.project_of(&b).as_deref(), Some("acme/live"));
 }
+
+/// #10906 regression: a lookup requeued at [`MAX_LOOKUPS_IN_FLIGHT`] retries
+/// from the session's first cwd. The session moves to another registered
+/// checkout while the cap holds, and still lands its first cwd's key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capped_project_lookup_retries_from_its_first_cwd_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (gate, held) = std::sync::mpsc::channel::<()>();
+    let held = Arc::new(std::sync::Mutex::new(held));
+    let resolver: projection::ProjectResolver = Arc::new(move |cwd: &Path| {
+        if let Ok(n) = cwd.strip_prefix("/held") {
+            // Blocks until the test drops `gate`.
+            let _ = held.lock().expect("gate").recv();
+            return Some(format!("acme/held-{}", n.display()));
+        }
+        match cwd.to_str() {
+            Some("/first") => Some("acme/first".to_string()),
+            Some("/second") => Some("acme/second".to_string()),
+            _ => None,
+        }
+    });
+    let publisher = ActionPublisher::new(sock_in(&dir)).with_project_resolver(resolver);
+    let held_sessions: Vec<SessionId> = (0..MAX_LOOKUPS_IN_FLIGHT)
+        .map(|_| SessionId::new())
+        .collect();
+    for (i, s) in held_sessions.iter().enumerate() {
+        publisher.publish(&pre_tool_use_in(
+            *s,
+            &Path::new("/held").join(i.to_string()),
+        ));
+    }
+    let in_flight = || publisher.lookups.load(Ordering::SeqCst);
+    assert_eq!(in_flight(), MAX_LOOKUPS_IN_FLIGHT, "the cap is full");
+
+    let moved = SessionId::new();
+    publisher.publish(&pre_tool_use_in(moved, Path::new("/first")));
+    assert_eq!(in_flight(), MAX_LOOKUPS_IN_FLIGHT, "the 17th was requeued");
+    assert_eq!(publisher.threader.lock().project_of(&moved), None);
+    publisher.publish(&pre_tool_use_in(moved, Path::new("/second")));
+    assert_eq!(publisher.threader.lock().project_of(&moved), None);
+
+    drop(gate);
+    publisher.lookups_settled().await;
+    publisher.publish(&pre_tool_use_in(moved, Path::new("/second")));
+    publisher.lookups_settled().await;
+    let threader = publisher.threader.lock();
+    for (i, s) in held_sessions.iter().enumerate() {
+        let key = format!("acme/held-{i}");
+        assert_eq!(threader.project_of(s).as_deref(), Some(key.as_str()));
+    }
+    assert_eq!(
+        threader.project_of(&moved).as_deref(),
+        Some("acme/first"),
+        "the retry resolved from a later cwd, not the session's first"
+    );
+}
