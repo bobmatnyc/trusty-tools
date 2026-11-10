@@ -366,6 +366,8 @@ pub mod savings_compress;
 // #6959: the bulk-read diversion producer, the ledger's second row source.
 pub mod savings_divert;
 pub mod savings_instructions;
+// #10973: the per-tool-call compression opportunity ledger rows.
+pub mod savings_opportunity;
 // #7569: the one-shot repair that quarantines the ledger rows #7514's resolver
 // bug let unit tests write into the operator's own ledger.
 pub mod savings_repair;
