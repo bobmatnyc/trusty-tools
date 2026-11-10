@@ -6,7 +6,8 @@
 //! adapter, the Anthropic adapter, the `config keys test` auth probe, and the
 //! chat Bedrock provider.
 //! One predicate here keeps them in agreement.
-//! What: [`accepts_temperature`], read with the same model-id parse
+//! What: [`accepts_temperature`](crate::claude_temperature::accepts_temperature),
+//! read with the same model-id parse
 //! trusty-review's Bedrock client uses for #9304.
 //! Test: the inline `tests` module below; per site,
 //! `build_converse_parts_omits_temperature_only_for_claude_5_5`,
