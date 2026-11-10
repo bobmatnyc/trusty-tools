@@ -1364,11 +1364,24 @@ reached only through `secrets.copy` with `to_backend` set to
 `github-actions` or `vercel`; there is no `push` method. The rules:
 
 - The key list is required; an empty list is `invalid_params`.
-- A caller with a Claude Code ancestor is refused with `agent_use_refused`,
-  whether or not the key is denied to agents (#10386 Q3); a bridge call is
-  judged on the console's verdict. A pushed value is readable by any workflow
-  or deployment a repository writer adds, a wider release than §15.8's
-  agent use.
+- ~~A caller with a Claude Code ancestor is refused with `agent_use_refused`,
+  whether or not the key is denied to agents (#10386 Q3).~~ Superseded for
+  agent callers on 2026-11-10 (#10999; owner ruling, Bob 22:22Z: a single-user
+  machine, cross-store copy is a user-allowable action, and agents need not
+  see the value; Architect decision E). A caller with a Claude Code ancestor
+  may push a key that is not denied to agents. The caller's ancestry is still
+  judged, and an unreadable one is `grant_refused`; a bridge call is judged
+  on the console's verdict. For an agent caller, a key denied to agents fails
+  with `agent_key_denied` before its value is read, and the other keys still
+  run (Architect F); the launched Architect gets no exemption here. The value
+  goes from the server to the CLI's stdin only, never to the caller's reply,
+  argv, environment, errors or audit. Each key leaves one audit record naming
+  the target, the key, the caller's pid and `agent_parent`, never the value
+  (Architect G).
+- Residual risk, accepted (#10999, Architect E): a pushed value is readable by
+  any workflow or deployment a repository writer adds, a wider release than
+  §15.8's agent use. Under the single-user-machine premise, an agent that may
+  use a key may also push it there.
 - The destination comes from the checkout's `origin` remote
   (`github.com/<owner>/<repo>`), never from a vault name. A Vercel project
   mapping lives only in the account's machine config, keyed by
@@ -1388,7 +1401,9 @@ reached only through `secrets.copy` with `to_backend` set to
   always (D3, D4). It pushes `production` then `preview`; a failing target
   fails the key. An existing variable is overwritten in place with `--force`, never removed
   and re-added; because a listing is presence only, such a key is reported
-  failed until the live check shows how to prove an update (D9).
+  failed until the live check shows how to prove an update (D9). Its reason
+  says the new value may already be set and that a retry reports the same
+  failure (#10999), so an agent does not retry it.
 - A sync target is never a configured backend, never read back, never swept
   by `delete`, and never written to the names-only index. A sandboxed server
   opens none.
@@ -1651,9 +1666,11 @@ whose own parent chain includes Claude Code may write a deny but not remove
 one (`agent_use_refused`); an unreadable chain refuses. The allow record is
 written before the backend call, and a backend failure after it adds a deny
 record with its kind, so no deny change exists without a record.
-`secrets.delete`, removing a deny and `secrets.copy` to a sync target are
-operator-only: the server refuses a caller with a Claude Code ancestor
-(`agent_use_refused`, Architect Q2, Q3). Amendment 2026-10-29 (#10459, Bob:
+`secrets.delete` and removing a deny are operator-only: the server refuses a
+caller with a Claude Code ancestor (`agent_use_refused`, Architect Q2).
+Amendment 2026-11-10 (#10999, owner ruling and Architect E, superseding Q3
+and D63 D3 for agents): such a caller may `secrets.copy` a key with no deny
+to a sync target; a denied key fails with `agent_key_denied` (§15.4 "Push"). Amendment 2026-10-29 (#10459, Bob:
 "fix the guard, it is too restrictive"; reverses Q2 for `set`): such a
 caller may `secrets.set` (so `tm secrets import`) and locally `secrets.copy`
 a key with no deny in its project or owner scope. The deny is checked under
