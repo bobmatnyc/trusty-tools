@@ -10825,7 +10825,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents"
-version = "0.39.5"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "async-openai",
