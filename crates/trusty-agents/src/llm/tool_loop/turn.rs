@@ -225,9 +225,11 @@ pub(super) async fn dispatch_turn(
 /// via `inference_bridge`, sends through the process-wide `shared_client()`,
 /// and bridges the response back into the same `(content, tool_calls, usage)`
 /// tuple every other branch returns.
+/// Refused before any request under a provider lock (#10978).
 /// Test: `crates/trusty-agents/tests/inference_shared_adapter_e2e.rs`
-/// (offline, black-box wire-shape proof against a loopback mock).
-async fn dispatch_turn_shared(
+/// (offline, black-box wire-shape proof against a loopback mock);
+/// `dispatch_turn_shared_is_refused_under_the_provider_lock`.
+pub(super) async fn dispatch_turn_shared(
     model: &str,
     messages: &[ChatCompletionRequestMessage],
     openai_tools: &[ChatCompletionTool],
@@ -239,6 +241,10 @@ async fn dispatch_turn_shared(
     Vec<ChatCompletionMessageToolCall>,
     TokenUsage,
 )> {
+    // #10978: the shared client always routes to OpenRouter.
+    crate::llm::provider_lock::refuse_off_provider(&format!(
+        "shared-inference OpenRouter turn for model '{model}'"
+    ))?;
     let wire_model = crate::llm::credentials::qualify_openrouter_model(
         &crate::llm::credentials::LlmCredentials::OpenRouter,
         model,

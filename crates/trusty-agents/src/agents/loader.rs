@@ -558,7 +558,8 @@ impl AgentConfig {
     /// production paths call [`Self::try_ctrl_default`].
     /// Test: `agent_config_ctrl_default_loads_with_adapter`.
     pub fn ctrl_default() -> Self {
-        Self::try_ctrl_default().expect("built-in ctrl default TOML must parse")
+        Self::try_ctrl_default()
+            .unwrap_or_else(|e| panic!("built-in ctrl default failed to load: {e:#}"))
     }
 
     /// [`Self::ctrl_default`], returning the provider-lock refusal (#10978).
