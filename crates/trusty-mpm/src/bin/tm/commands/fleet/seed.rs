@@ -104,7 +104,8 @@ pub(crate) const DIRS: &[&str] = &[
     "local/improvements",
 ];
 
-/// Write every [`files`] entry and [`DIRS`] entry under `dir`; one step each.
+/// Write every [`files`] entry and [`DIRS`] entry under `dir`, then the
+/// quiet-session list (`quiet_list::step`, #10861); one step each.
 ///
 /// Why/What: see the module doc. `dir` is the preflight-checked path; `seed`
 /// was read before any write, so a missing seed file never leaves a partial
@@ -130,7 +131,7 @@ pub(crate) fn deploy_with(
     shipped_before: ShippedBefore<'_>,
 ) -> anyhow::Result<Vec<Step>> {
     let files = files(seed);
-    let mut steps = Vec::with_capacity(files.len() + DIRS.len() + 2);
+    let mut steps = Vec::with_capacity(files.len() + DIRS.len() + 3);
     // #9997: an Architect that still keeps `records/` gets no `local/` rows.
     let records_era = dir.join(super::status::STALE_RECORDS_DIR).is_dir();
     for file in &files {
@@ -162,6 +163,9 @@ pub(crate) fn deploy_with(
     }
     if records_era {
         steps.extend(records_era_steps(dir));
+    } else {
+        // #10861: the quiet list the manual names; created once, never rewritten.
+        steps.push(super::quiet_list::step(dir));
     }
     Ok(steps)
 }

@@ -7,6 +7,7 @@ fleet-poll.py loads this file by path; fleet-poll.py re-exports every name, so c
 Test: tests/test_config.py (through fleet-poll.py's re-exports)
 """
 import os
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -35,5 +36,23 @@ LOAD_FACTOR_DEFAULT = 1.5  # x cores, vs. the 5-min load avg; env LOAD_FACTOR ov
 # The watchdog's one relaunch path (fleet_poll_watchdog.py); not shipped yet, so a relaunch reports failed.
 RELAUNCH_SCRIPT = os.path.join(HERE, "session-relaunch.sh")
 
-QUIET_SESSIONS_FILE = (os.environ.get("ARCHITECT_QUIET_SESSIONS_FILE")
-                       or os.path.join(ROOT, "quiet-sessions.txt"))
+# #10861: <root>/local/, the file `tm architect quiet` and the Rust poller read.
+def resolve_quiet_sessions_file(root, env=None):
+    """The quiet list's path: env override, else <root>/local/, else the legacy <root>/ file.
+
+    #10861: legacy-path fallback. A list left at the pre-#10861 `<root>/quiet-sessions.txt` is still read,
+    with one stderr warning, so a host that has not moved it does not start alerting on quieted sessions.
+    """
+    env = os.environ if env is None else env
+    if env.get("ARCHITECT_QUIET_SESSIONS_FILE"):
+        return env["ARCHITECT_QUIET_SESSIONS_FILE"]
+    new_path = os.path.join(root, "local", "quiet-sessions.txt")
+    legacy = os.path.join(root, "quiet-sessions.txt")
+    if not os.path.exists(new_path) and os.path.exists(legacy):
+        print(f"fleet-poll: reading the quiet list from the legacy path {legacy}; "
+              f"move it to {new_path} (#10861)", file=sys.stderr)
+        return legacy
+    return new_path
+
+
+QUIET_SESSIONS_FILE = resolve_quiet_sessions_file(ROOT)

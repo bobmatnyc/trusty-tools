@@ -58,7 +58,9 @@ pub(crate) enum ArchitectAction {
     /// Print the quiet-session list, sorted, one name per line.
     ///
     /// The poller drops `idle` alerts for these sessions. Exits 1 when the
-    /// file cannot be read, a missing file included.
+    /// file cannot be read, a missing file included. The Architect directory
+    /// is `ARCHITECT_PROJECT_DIR`, else the one `tm fleet init` recorded,
+    /// else `~/trusty-mpm-projects/architect`; never the current directory.
     Quiet {
         /// The list (default: `ARCHITECT_QUIET_SESSIONS_FILE`, else
         /// `<Architect dir>/local/quiet-sessions.txt`).
