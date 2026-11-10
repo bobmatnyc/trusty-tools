@@ -202,6 +202,8 @@ pub mod gh_session_account;
 pub mod gh_session_shim;
 // #9750: tm's own gh children run the real gh, not a pinned session's shim.
 pub mod gh_shim_path;
+// #10487: a session's github.token_env binding runs through the gh shim.
+pub mod gh_token_env_shim;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
 // seam, compiled out of every `--release` build (see the module docs).
 #[cfg(any(test, debug_assertions))]
