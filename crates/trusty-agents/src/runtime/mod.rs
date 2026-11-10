@@ -93,6 +93,8 @@ mod session_cmds;
 mod startup;
 // #9224: tagent's credential-file loads, gated on `TRUSTY_SANDBOX=1`.
 mod startup_env;
+// #10940: the `$HOME` provisioning step and its `TAGENT_NO_PROVISION` off-switch.
+mod startup_provision;
 mod subagent_exec;
 mod subagent_mode;
 mod subcommands;
