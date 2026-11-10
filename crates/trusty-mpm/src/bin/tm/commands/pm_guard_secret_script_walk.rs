@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use super::{Candidate, Role, Unread, candidates, existing_paths, expand, is_computed};
+use super::{fd_pipe_script, is_fd_pipe};
 use super::{locate, segment_bases, unresolved};
 use crate::commands::pm_guard_bash::{
     MAX_SUBSTITUTION_DEPTH, Substitution, blank_shell_comments, heredoc_expansions,
@@ -124,8 +125,10 @@ pub(super) fn each_script_in<T>(
         } else {
             lenient_unresolved(&candidates, &seg_bases, walk.written)
         };
-        if exact
-            && let Some((word, why)) = why
+        // #10748: an fd pipe refuses past an inexact prefix too; the probe it
+        // replaces ran on every segment.
+        if let Some((word, why)) = why
+            && (exact || is_fd_pipe(&expand(&word, &seg_bases)))
             && let Some(answer) = judge(&word, Err(why), None, &seg_bases)
         {
             return Some(answer);
@@ -175,6 +178,10 @@ fn lenient_unresolved(
     bases: &[PathBuf],
     written: &str,
 ) -> Option<(String, Unread)> {
+    // #10748: an fd pipe refuses wherever the pre-#10748 probe would have read it.
+    if let Some(c) = fd_pipe_script(candidates, bases) {
+        return Some((c.word.clone(), Unread::Unresolvable));
+    }
     let script = candidates
         .iter()
         .find(|c| c.role == Role::Positional)
@@ -185,11 +192,8 @@ fn lenient_unresolved(
         .filter(|c| c.interpreter.is_some() && existing_paths(&c.word, bases).is_empty())
         .find(|c| {
             let word = expand(&c.word, bases);
-            is_computed(&word)
-                || ["/dev/fd/", "/proc/self/fd/"]
-                    .iter()
-                    .any(|p| word.starts_with(p))
-                || !written_literally(written, &c.word)
+            // #10748: one fd-pipe prefix list, shared with the strict path.
+            is_computed(&word) || is_fd_pipe(&word) || !written_literally(written, &c.word)
         })
         .map(|c| (c.word.clone(), Unread::Unresolvable))
 }
