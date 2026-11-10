@@ -7781,7 +7781,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
 </script>
 <script>
 /* BEGIN projectsNav */
-/* Projects nav (the owner 2026-10-27 13:3xZ; labelled owner/project and grouped by GitHub owner, 13:5xZ): GET /api/projects (scripts/dashboard_projects.py), read-only. Every string from disk is set with
+/* Projects nav (the owner 2026-10-27 13:3xZ; labelled owner/project and grouped by GitHub owner, 13:5xZ): GET /api/projects (scripts/dashboard_projects.py); its only write is a watch_changes request (watchState, #10896). Every string from disk is set with
    textContent, never markup; links are same-page hashes (#S<id> session row, #doc/<project>/<file> reader). The payload is checked for its
    shape: a server that predates the route answers /api/projects with the generic store reply {docs: []} and status 200, which must show an
    error, never "0 projects". Loads at page start (for the nav count) and again on each view of the category. */
@@ -7790,11 +7790,32 @@ html.lib-strip.rd-open body { padding-right: 0; }
   const $ = (id) => document.getElementById(id);
   const sec = $("sec-projects"); if (!sec) return;
   const main = $("main");
-  let data = null, busy = false, at = 0, status = "active";
+  let data = null, busy = false, again = false, at = 0, status = "active";
   function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
   function row(lab, val) { const l = el("div", "pj-lab", lab), v = el("div", "pj-val"); v.appendChild(val); return [l, v]; }
   const none = (t) => el("span", "pj-none", t);
   const when = (iso) => (iso ? iso.replace("T", " ").replace(/:\d\dZ$/, "Z") : "unknown");
+  /* BEGIN watchState */
+  /* #10896 (epic #10894 plan D6): Watch / Unwatch. The row's state comes from GET /api/projects (scripts/dashboard_watch.py: Watched,
+     Not watched, Watch pending, Watch failed, or "watch list not created yet"); a click only writes a watch_changes request, which
+     scripts/watch-apply.py applies with `tm fleet project add|remove`. The page never writes local/watch.json and has no Cancel for a
+     pending request (owner decision). Pure functions over the shim's db, so tests/test_dashboard_watch_page.py runs them in node. */
+  function watchLabel(p) { const w = p && p.watch; return w && typeof w.label === "string" ? w.label : "watch state unknown"; }
+  function watchRequestData(key, action, by, nowIso) { return { key: key, action: action, status: "new", created: nowIso, by: by }; }
+  /* Retry: failed -> new; the request keeps key, action, created and by, and drops the old outcome (message, done_at). */
+  function watchRetryData(req) { return { key: req.key, action: req.action, status: "new", created: req.created, by: req.by }; }
+  /* Dismiss: failed -> dismissed; the outcome stays on the doc for the record. */
+  function watchDismissData(req) {
+    const d = { key: req.key, action: req.action, status: "dismissed", created: req.created, by: req.by };
+    if (req.done_at) d.done_at = req.done_at;
+    if (typeof req.message === "string") d.message = req.message;
+    return d;
+  }
+  function watchQueue(db, key, action, by, nowIso) { return db.collection("watch_changes").add(watchRequestData(key, action, by, nowIso)); }
+  /* Retry and Dismiss replace the doc (PUT) pinned to the version the row was read at, so a doc the applier changed meanwhile is a 409. */
+  function watchRetry(db, req) { return db.collection("watch_changes").doc(req.id).set(watchRetryData(req), { if_version: req.version }); }
+  function watchDismiss(db, req) { return db.collection("watch_changes").doc(req.id).set(watchDismissData(req), { if_version: req.version }); }
+  /* END watchState */
   function sessions(p) {
     if (!p.sessions.length) return none("no live session");
     const ul = el("ul");
@@ -7854,6 +7875,66 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!p.scanned) box.appendChild(el("span", "pj-kv", p.root_note || (p.root ? "Root not found: this project's folder is missing, so its files and sessions are not shown." : "Root not found: no folder is known for this project.")));
     return box;
   }
+  /* #10896: the watch chip and the two row flags (path missing, registry key differs from the session alias). */
+  let unwatchAsk = "", watchBy = null;
+  const watchBusy = new Set(), watchErr = new Map();
+  function watchChip(p) {
+    const s = p.watch ? p.watch.state : "", c = el("span", "pj-chip" + (s === "watched" ? " live" : s === "failed" || s === "unreadable" ? " pj-err" : ""), watchLabel(p));
+    if (s === "failed" && p.watch.request && p.watch.request.message) c.title = p.watch.request.message;
+    return c;
+  }
+  function watchFlags(p, host) {
+    if (p.registered_path && p.path_exists === false) { const t = el("span", "pj-chip pj-err", "Path missing"); t.title = p.registered_path; host.appendChild(t); }
+    if (p.alias_mismatch) { const t = el("span", "pj-chip", "Alias differs"); t.title = "Registry key " + p.id + ", session alias " + p.session_alias; host.appendChild(t); }
+  }
+  function watchButton(label, aria, run, cls) {
+    const b = el("button", cls || "rm", label); b.type = "button"; b.setAttribute("aria-label", aria); b.addEventListener("click", run); return b;
+  }
+  function watchBox(p) {   /* detail view: state, why, and the one action that state allows */
+    const box = el("div"), w = p.watch || {}, req = w.request || null, busy = watchBusy.has(p.id), verb = req && req.action === "unwatch" ? "Unwatch" : "Watch";
+    box.appendChild(watchChip(p)); watchFlags(p, box);
+    if (w.state === "pending") box.appendChild(el("span", "pj-kv", verb + " requested. The Architect applies it on its next pass; a pending request cannot be cancelled."));
+    if (w.state === "failed") box.appendChild(el("span", "pj-kv", verb + " failed: " + ((req && req.message) || "no message recorded")));
+    if (w.state === "unknown") box.appendChild(el("span", "pj-kv", "The Architect's watch list (local/watch.json) does not exist yet; the first Watch creates it."));
+    if (w.state === "unreadable") box.appendChild(el("span", "pj-kv", "The watch list cannot be read: " + ((data && data.watch_list && data.watch_list.error) || "unknown error")));
+    if (p.registered_path && p.path_exists === false) { const x = el("span", "pj-kv", "Path missing: "); x.appendChild(el("code", null, p.registered_path)); box.appendChild(x); }
+    if (p.alias_mismatch) box.appendChild(el("span", "pj-kv", "The registry key " + p.id + " differs from its session alias " + p.session_alias + "."));
+    const bar = el("div", "row cmd");
+    if (w.state === "failed" && req) {
+      bar.append(watchButton("Retry", "Retry the " + verb.toLowerCase() + " request for " + name(p), () => watchAct(p, "retry")),
+        watchButton("Dismiss", "Dismiss the failed " + verb.toLowerCase() + " request for " + name(p), () => watchAct(p, "dismiss")));
+    } else if (w.state === "watched" && unwatchAsk === p.id) {
+      const c = el("div", "rm-confirm");
+      c.appendChild(el("span", null, "Unwatch " + name(p) + "? The Architect stops supervising it. Its project record (local/projects/" + p.id + ".md) is kept."));
+      c.append(watchButton("Unwatch", "Confirm: unwatch " + name(p), () => watchAct(p, "unwatch"), "rm destructive"),
+        watchButton("Cancel", "Keep watching " + name(p), () => { unwatchAsk = ""; detail(); }));
+      bar.appendChild(c);
+    } else if (w.state === "watched") {
+      bar.appendChild(watchButton("Unwatch…", "Unwatch " + name(p) + ": asks to confirm first", () => { unwatchAsk = p.id; detail(); }));
+    } else if (w.state === "not_watched" || w.state === "unknown") {
+      bar.appendChild(watchButton("Watch", "Ask the Architect to watch " + name(p), () => watchAct(p, "watch")));
+    }
+    bar.querySelectorAll("button").forEach((b) => { b.disabled = busy; });
+    if (bar.childNodes.length) box.appendChild(bar);
+    if (watchErr.get(p.id)) box.appendChild(el("p", "err", watchErr.get(p.id)));
+    return box;
+  }
+  async function watchAct(p, kind) {   /* one write (POST a new request, or PUT Retry / Dismiss with if_version), then a fresh list */
+    watchErr.delete(p.id); watchBusy.add(p.id); detail();
+    try {
+      if (!window.claude || !window.claude.use) throw new Error("this page has no store connection");
+      const db = await window.claude.use("db"), req = p.watch && p.watch.request;
+      if (kind === "retry") await watchRetry(db, req);
+      else if (kind === "dismiss") await watchDismiss(db, req);
+      else {
+        if (watchBy == null) { try { const u = await (await fetch("/api/user", { cache: "no-store" })).json(); watchBy = u && typeof u.name === "string" && u.name ? u.name : "the owner"; } catch (_) { watchBy = "the owner"; } }
+        await watchQueue(db, p.id, kind, watchBy, new Date().toISOString());
+      }
+    } catch (e) {
+      watchErr.set(p.id, e && e.status === 409 ? "This request changed since the page loaded; the list is reloaded." : "Could not save the request: " + ((e && e.message) || "unknown error") + ".");
+    }
+    watchBusy.delete(p.id); unwatchAsk = ""; at = 0; load();
+  }
   const name = (p) => p.label || p.id;   /* owner/project from the registered GitHub URL, else the alias */
   const NONE = "~none", ownerKey = (p) => (p.owner && !p.no_github_url ? p.owner : NONE), ownerName = (k) => (k === NONE ? "No owner" : k);
   function ownerGroups(ps) {   /* [{key, name, list}] by GitHub owner (case-insensitive order), "No owner" last, projects by label */
@@ -7877,6 +7958,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     a.append(el("span", "pj-id", name(p)), el("span", "pj-sub", p.no_github_url ? "" : (p.id !== p.repo ? "alias " + p.id : "")));
     if (p.no_github_url) a.appendChild(el("span", "pj-chip", "no GitHub URL"));
     if (!p.scanned) { const t = el("span", "pj-chip pj-err", "Root not found"); t.title = p.root_note || ""; a.appendChild(t); }   /* #10571: root status on every row */
+    a.appendChild(watchChip(p)); watchFlags(p, a);   /* #10896: watch state and flags on every row; the buttons sit in the detail view */
     if (kinds) a.appendChild(el("span", "pj-sub", kinds));
     chips(p, a);
     return a;
@@ -7890,7 +7972,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!data) { $("pj-d-sub").textContent = "Loading…"; return; }
     if (!p) { $("pj-d-sub").textContent = "Not in the tm project registry."; return; }
     $("pj-d-sub").textContent = p.no_github_url ? "Alias " + p.id + ". The tm registry has no GitHub URL for it, so no owner is shown." : (p.id !== p.repo ? "Alias " + p.id : "");
-    [["Root", paths(p)], ["Sessions", sessions(p)], ["Stack", stack(p)], ["Configuration", config(p)], ["Custom agents", agents(p)]].forEach((r) => row(r[0], r[1]).forEach((n) => body.appendChild(n)));
+    [["Root", paths(p)], ["Watch", watchBox(p)], ["Sessions", sessions(p)], ["Stack", stack(p)], ["Configuration", config(p)], ["Custom agents", agents(p)]].forEach((r) => row(r[0], r[1]).forEach((n) => body.appendChild(n)));
     const ac = window.projectsLc && window.projectsLc.acts(p); if (ac) body.appendChild(ac);   /* expanded view only (the owner 2026-10-27 14:5xZ) */
   }
   /* nav level 2: one collapsible group per owner (count = its projects); its first link filters the main pane to that owner */
@@ -7949,11 +8031,11 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const live = all.filter((p) => p.sessions.length).length;
     $("projects-sum").textContent = all.length + " projects, " + groups.length + (groups.length === 1 ? " owner, " : " owners, ") + live + " with live sessions" + (arch.length ? ", " + arch.length + " archived" : "");
     $("pj-note").classList.toggle("pj-err", !!err || !all.length);
-    $("pj-note").textContent = (err ? "tm registry unreadable: " + err + ". " : "") + (!all.length ? "The tm registry returned no projects. " : "") + (q ? shown + " of " + inScope + " match. " : "") + "Read-only. Config shows names, never values.";
+    $("pj-note").textContent = (err ? "tm registry unreadable: " + err + ". " : "") + (!all.length ? "The tm registry returned no projects. " : "") + (q ? shown + " of " + inScope + " match. " : "") + "Watch and Unwatch queue a request for the Architect; nothing else here writes. Config shows names, never values.";
     count(all.filter(isActive).length); detail();   /* the owner 2026-10-27 22:38Z: the badge counts active projects only; inactive ones are counted inside the Inactive group */
   }
   async function load() {
-    if (busy) return; busy = true;
+    if (busy) { again = true; return; } busy = true;
     try {
       const r = await fetch("/api/projects", { cache: "no-store" });
       if (!r.ok) throw new Error(r.status === 404 ? "this dashboard server predates the Projects route; it needs a restart" : "HTTP " + r.status);
@@ -7962,6 +8044,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       data = d; at = Date.now(); render();
     } catch (e) { fail(e.message); detail(); }
     busy = false;
+    if (again) { again = false; load(); }   /* #10896: a load asked for during this one (after a Watch write) runs once more */
   }
   window.addEventListener("hashchange", () => { if (data) render(); else detail(); });
   $("pj-refresh").addEventListener("click", load);

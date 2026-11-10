@@ -283,6 +283,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/dashboard_projects.py",
         false
     ),
+    // #10896: the Projects view's watch state; dashboard_projects imports it.
+    embedded!(
+        "scripts/dashboard_watch.py",
+        "scripts/dashboard_watch.py",
+        false
+    ),
     embedded!(
         "scripts/dashboard_archctx.py",
         "scripts/dashboard_archctx.py",

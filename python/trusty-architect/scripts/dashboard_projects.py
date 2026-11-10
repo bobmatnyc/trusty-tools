@@ -16,6 +16,8 @@ What: build() joins the tm registry, the server's doc allowlist, live tmux panes
   stack     [{kind, name, version}]  from manifests at the root (Cargo.toml, package.json, pyproject.toml, go.mod, ...);
   config    [{file, kind, bytes, fields, doc}]  which trusty-mpm / Claude files exist, with non-secret fields only;
   agents    [{file, name, description, model}]  from .claude/agents/*.md frontmatter.
+  watch     {state, label, request}, plus session_alias, path_exists, alias_mismatch per row and watch_list at the top:
+            the Watch / Unwatch state (dashboard_watch.py, #10896), read fresh on every request.
   archived  [{id, label, owner, repo, state, archived_root, original_root, at}]  projects archived or decommissioned by
             scripts/project_lifecycle.py (local/project-lifecycle.json); they leave `projects` and so the nav (ar-Tb3).
 Safety: read-only; every file read is capped at READ_CAP bytes; ~/Documents, ~/Desktop and iCloud paths are never
@@ -31,6 +33,8 @@ import subprocess
 import sys
 import threading
 import time
+
+import dashboard_watch as dw
 
 try:
     import tomllib
@@ -330,7 +334,7 @@ def project_rows(registry, allow):
         has_url = bool(owner and repo)
         row = {"id": r["name"], "label": "%s/%s" % (owner, repo) if has_url else r["name"], "no_github_url": not has_url,
                "registered_path": r.get("path"), "roots": [], "root": r.get("path"), "owner": owner, "repo": repo, "doc": None,
-               "note": r.get("note")}
+               "note": r.get("note"), "session_alias": r.get("alias")}
         rows.append(row)
         by[r["name"].lower()] = row
     for name, root in allow.items():
@@ -383,11 +387,13 @@ class Scans:
 LIFECYCLE_HIDDEN = ("archived", "decommissioned")
 
 
-def build(registry, allow, panes, sess_ids, scans=None, lifecycle=None):
+def build(registry, allow, panes, sess_ids, scans=None, lifecycle=None, watch=None):
     """{"projects": [...], "archived": [...]}: one entry per tm-registered project that is not archived or decommissioned, sorted by
     label (owner/project). A root that is forbidden (iCloud) or missing is listed with scanned=false and nothing read.
     lifecycle = {alias: {state, label, ...}} from local/project-lifecycle.json (scripts/project_lifecycle.py; tm has no archive verb):
-    those aliases leave the nav and appear in "archived" (the owner 2026-10-27, ar-Tb3)."""
+    those aliases leave the nav and appear in "archived" (the owner 2026-10-27, ar-Tb3). Each row carries session_alias,
+    path_exists and alias_mismatch (dashboard_watch.flags); watch = (arch_dir, watch_changes docs) adds the watch state
+    (dashboard_watch.overlay, #10896), which ProjectsView.get applies per request, outside its answer cache."""
     scans = scans or Scans()
     lifecycle = lifecycle or {}
     registry = [r for r in registry if (lifecycle.get(r["name"]) or {}).get("state") not in LIFECYCLE_HIDDEN]
@@ -400,11 +406,12 @@ def build(registry, allow, panes, sess_ids, scans=None, lifecycle=None):
         all_roots = [x for x in [row["registered_path"]] + row["roots"] if x]
         out.append({"id": row["id"], "label": row["label"], "no_github_url": row["no_github_url"], "registered_path": row["registered_path"], "roots": row["roots"], "root": root,
                     "owner": row["owner"], "repo": row["repo"], "scanned": ok, "root_note": root_note(row, ok),
-                    "sessions": sessions_in(all_roots, panes, sess_ids) if ok else [], **scan})
+                    "sessions": sessions_in(all_roots, panes, sess_ids) if ok else [], "session_alias": row["session_alias"],
+                    **dw.flags(row["id"], row["registered_path"], row["session_alias"]), **scan})
     arch = [{"id": a, "label": v.get("label") or a, "owner": v.get("owner"), "repo": v.get("repo"), "state": v.get("state"), "archived_root": v.get("archived_root"),
              "original_root": v.get("original_root"), "at": v.get("at")} for a, v in sorted(lifecycle.items(), key=lambda kv: (kv[1].get("label") or kv[0]).lower())
             if isinstance(v, dict) and v.get("state") in LIFECYCLE_HIDDEN]
-    return {"projects": out, "archived": arch}
+    return dw.overlay({"projects": out, "archived": arch}, *watch) if watch else {"projects": out, "archived": arch}
 
 
 GITHUB_URL = re.compile(r"github\.com[/:]([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
@@ -438,12 +445,14 @@ def registered_projects(root=None):
     What: one row per record of <root>/project-registry/projects.json, the file tm's ProjectStore writes
     ({"projects": {name: {name, repo_url, default_branch, ...}}}); name = the record key (the alias). owner and repo come
     from a github.com repo_url, None otherwise. path is the alias's row in <root>/project-paths.json ([{alias, path}],
-    tm's ProjectAliasEntry; exact alias, else case-insensitive), kept when absolute, else None; that file never adds a
-    project. When the map gives no path, the canonical clone <projects_root>/<owner>/<repo> is used (projects_root from
-    local/architect.json, default ~/trusty-mpm-projects); `path_source` says which ("project map", "canonical layout",
-    or None with no path). The path may not exist; build() says so. root defaults to mpm_root(). Absent files give [];
-    a file in another shape is a RegistryError, which the view shows as registry_error.
-    Test: tests/test_dashboard_projects_registry.py
+    tm's ProjectAliasEntry; dashboard_watch.alias_for: exact alias, else ASCII case-insensitive, else the row whose path is
+    the managed checkout), kept when absolute, else None; `alias` = that row's alias (the session alias, None with no row);
+    that file never adds a project. When the map gives no path, the managed checkout is used: an absolute repo_url, else
+    the canonical clone <projects_root>/<owner>/<repo> (projects_root from local/architect.json, default
+    ~/trusty-mpm-projects); `path_source` says which ("project map", "canonical layout", or None with no path). The path
+    may not exist; build() says so. root defaults to mpm_root(). Absent files give []; a file in another shape is a
+    RegistryError, which the view shows as registry_error.
+    Test: tests/test_dashboard_projects_registry.py, tests/test_dashboard_watch.py
     """
     root = root or mpm_root()
     projects_root = _projects_root()
@@ -454,11 +463,6 @@ def registered_projects(root=None):
     records = store.get("projects", {})
     if not isinstance(records, dict):   # #10571: never a silent empty list for a file in another shape
         raise RegistryError("The project list file has an unexpected shape, so the Projects view is empty.")
-    paths, folded = {}, {}
-    for r in rows:
-        if isinstance(r, dict) and isinstance(r.get("alias"), str) and isinstance(r.get("path"), str) and os.path.isabs(r["path"]):
-            paths.setdefault(r["alias"], r["path"])
-            folded.setdefault(r["alias"].lower(), r["path"])
     out = []
     for name, rec in records.items():
         if not isinstance(rec, dict):   # #10571: say what is wrong with this one row, keep the others
@@ -467,10 +471,16 @@ def registered_projects(root=None):
             continue
         m = GITHUB_URL.search(rec.get("repo_url") or "")
         owner, repo = (m.group(1), m.group(2)) if m else (None, None)
-        path, source = paths.get(name) or folded.get(name.lower()), "project map"
-        if not path and owner and repo and clone_slug(owner) and clone_slug(repo):
-            path, source = os.path.join(projects_root, clone_slug(owner), clone_slug(repo)), "canonical layout"
-        out.append({"name": name, "path": path, "path_source": source if path else None, "owner": owner, "repo": repo})
+        url = (rec.get("repo_url") or "").strip() if isinstance(rec.get("repo_url"), str) else ""
+        checkout = url if url.startswith("/") else (os.path.join(projects_root, clone_slug(owner), clone_slug(repo))
+                                                    if owner and repo and clone_slug(owner) and clone_slug(repo) else None)
+        # #10896: tm's join order (exact, ASCII case, then the managed checkout's path); see dashboard_watch.alias_for
+        hit = dw.alias_for(name, checkout, rows)
+        path, source = (hit["path"] if hit and os.path.isabs(hit["path"]) else None), "project map"
+        if not path and checkout:
+            path, source = checkout, "canonical layout"
+        out.append({"name": name, "path": path, "path_source": source if path else None, "owner": owner, "repo": repo,
+                    "alias": hit["alias"] if hit else None})
     return out
 
 
@@ -525,8 +535,8 @@ class ProjectsView:
     """What the server holds: injectable sources, a 10 s answer cache over the 120 s scan memo. A registry that cannot be
     read is reported in registry_error (the page shows it) and the list is empty: the allowlist never adds rows."""
 
-    def __init__(self, registry, allow, panes=tmux_panes, clock=time.time, lifecycle=None):
-        self.registry, self.allow, self.panes, self.clock = registry, allow, panes, clock
+    def __init__(self, registry, allow, panes=tmux_panes, clock=time.time, lifecycle=None, arch_dir=dw.REPO):
+        self.registry, self.allow, self.panes, self.clock, self.arch_dir = registry, allow, panes, clock, arch_dir
         self.lifecycle = lifecycle or _lifecycle_state
         self.scans, self._at, self._val, self._lock = Scans(clock=clock), 0.0, None, threading.Lock()
 
@@ -534,7 +544,8 @@ class ProjectsView:
         with self._lock:
             self._val = None
 
-    def get(self, sess_ids):
+    def get(self, sess_ids, watch_docs=()):
+        """The cached answer plus the watch state, read fresh on every call (#10896: a just-queued request shows at once)."""
         with self._lock:
             if self._val is None or self.clock() - self._at >= ANSWER_TTL_S:
                 reg, err = [], None
@@ -547,4 +558,5 @@ class ProjectsView:
                 self._val = build(reg, self.allow(), self.panes(), sess_ids, self.scans, self.lifecycle())
                 self._val["registry_error"] = err
                 self._at = self.clock()
-            return self._val
+            val = self._val
+        return dw.overlay(val, self.arch_dir, list(watch_docs))
