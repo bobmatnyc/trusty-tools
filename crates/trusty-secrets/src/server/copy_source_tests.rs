@@ -348,8 +348,9 @@ async fn copy_named_refusals_are_typed_and_write_nothing() {
 /// Why: #10998 — the per-key agent deny (#10386, #10459) still binds an
 /// agent caller: a vault source denied to agents is refused before its
 /// value is read and no deny is carried; a destination key denied to agents
-/// is refused before the item is read; an undenied copy works and its
-/// record carries `default_policy`. Red when either deny check is absent.
+/// is refused before the item is read; an undenied copy works, its record
+/// carries `default_policy`, and (fix round 1) the copied item lands denied.
+/// Red when either deny check is absent.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn copy_named_by_agent_of_a_denied_source_or_destination_is_refused() {
@@ -404,7 +405,13 @@ async fn copy_named_by_agent_of_a_denied_source_or_destination_is_refused() {
     assert_eq!(ok(open), json!({"copied": ["AGENT_OK"], "failed": []}));
     assert_eq!(held(&fx.spare, PROJECT_VAULT, "COPIED"), None);
     assert_eq!(held(&fx.keychain, PROJECT_VAULT, "DENIED_DEST"), None);
-    assert_eq!(deny_changes(&fx), before, "no deny was carried");
+    // #10998 fix round 1: no deny was carried for a refused key; the one
+    // deny written is the agent's Keychain copy landing denied.
+    assert!(before.is_empty(), "{before:?}");
+    assert_eq!(
+        deny_changes(&fx),
+        [(Some("AGENT_OK".to_string()), Some(false))]
+    );
     let shapes: Vec<_> = copy_records(&fx)
         .iter()
         .map(|r| (r.decision, r.agent_parent, r.default_policy))
@@ -416,6 +423,66 @@ async fn copy_named_by_agent_of_a_denied_source_or_destination_is_refused() {
             (AuditDecision::Deny, Some(true), None),
             (AuditDecision::Allow, Some(true), Some(true)),
         ]
+    );
+}
+
+/// Why: #10998 fix round 1 (code-critic HIGH) — an agent that copies a
+/// Keychain item must not then read it: the key lands under an agent deny,
+/// written (and recorded) before the value, so the agent's grant of it is
+/// `agent_key_denied` and no token is minted. Red when the copy writes the
+/// key open.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copy_named_by_agent_of_a_keychain_item_lands_denied() {
+    let fx = fixture();
+    let (mut state, grants) = state_with(&fx, agent_procs());
+    state.keychain_item_read = fake_item;
+    let server = fx.start_state(state).await;
+    let socket = &fx.settings.socket;
+    let copied = call(
+        socket,
+        method::COPY,
+        named_params(
+            &fx,
+            "keychain",
+            "keychain",
+            item_source(ITEM_SERVICE, ITEM_ACCOUNT),
+            &["ITEM_COPY"],
+        ),
+    )
+    .await;
+    let grant = call(
+        socket,
+        method::GRANT,
+        grant_params(&fx, me(), &["ITEM_COPY"]),
+    )
+    .await;
+    server.stop().await;
+
+    assert_eq!(ok(copied), json!({"copied": ["ITEM_COPY"], "failed": []}));
+    assert_eq!(
+        held(&fx.keychain, PROJECT_VAULT, "ITEM_COPY").as_deref(),
+        Some(SENTINEL_VALUE)
+    );
+    assert!(
+        fx.keychain
+            .control_item(
+                ControlItem::AgentDeny,
+                &vault(PROJECT_VAULT),
+                Some(&key("ITEM_COPY"))
+            )
+            .unwrap(),
+        "the copied item lands denied to agents"
+    );
+    assert_eq!(
+        fixed_error(&grant, method::GRANT),
+        ErrorKind::AgentKeyDenied
+    );
+    assert_no_value(&grant);
+    assert_eq!(grants.has_unexpired(), Ok(false), "nothing was minted");
+    assert_eq!(
+        deny_changes(&fx),
+        [(Some("ITEM_COPY".to_string()), Some(false))]
     );
 }
 

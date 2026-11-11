@@ -53,12 +53,7 @@ line that could carry one.
    the same defect as one in a LaunchAgent plist (#8236). An example file
    holds key names and `secret://` references only.
 5. Never move a value out of the Keychain — no `security … -w` export, no copy
-   into a file, a plist, `.env.local` or another store. One exception (#10998,
-   owner ruling 2026-11-10): `tm secrets copy`, including its named-source
-   form (`--from keychain --from-service S --from-account A KEY`, or
-   `--from-vault V --from-key K KEY`), moves a value between stores inside
-   the secrets server; no one sees it, and an agent may run it. A key denied
-   to agents stays refused (`agent_key_denied`).
+   into a file, a plist, `.env.local` or another store.
 6. Never call `secrets.set`, and never hand-roll a call to the `trusty-secrets`
    socket from a shell or a script. The `secrets.set` request carries the
    value. `tm hook --pm-guard` refuses `nc`.

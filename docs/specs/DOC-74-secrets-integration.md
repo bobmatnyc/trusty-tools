@@ -1410,6 +1410,21 @@ caller's project vault. The rules:
 - An agent caller is `agent_key_denied` when the vault source key or the
   destination key is denied, before any value is read. A person's copy of a
   denied vault key carries the deny to the destination key's name first.
+- An agent's copy of a Keychain item lands **denied to agents**: the
+  destination key's deny is written (with its write-ahead record) before
+  the value, and a destination that cannot hold a deny is `unsupported`.
+  Why: an item copied open could be granted, resolved or piped through
+  `tm secrets exec` by the same agent, so any login-Keychain item would be
+  one copy away from an agent transcript; the exec scrubber redacts only
+  the literal value (code-critic review of #10998). A copy is the user's
+  action, not a release to agents; a person lifts the deny with
+  `secrets.set_agents_may_use`. An agent's copy of an undenied trusty
+  vault key stays open, as that key already was.
+- A deny carried for a person's copy stays on the destination key if the
+  value read then fails; it fails closed and is lifted the same way.
+- While a timed-out read of a Keychain item still runs, a new read of that
+  item answers `backend_timeout` at once and starts no second read or
+  prompt.
 - A missing item or key is `not_found`; an unreadable one its backend kind
   (`backend_failed`, `backend_timeout`). The copy's one record per key
   carries `copy_source` (source backend and locator) beside the destination

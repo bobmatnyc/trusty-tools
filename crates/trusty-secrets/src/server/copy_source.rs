@@ -74,6 +74,7 @@ pub struct CopySourceAudit {
 /// `copy_named_owner_vault_key_lands_under_a_new_name`,
 /// `copy_named_refusals_are_typed_and_write_nothing`,
 /// `copy_named_by_agent_of_a_denied_source_or_destination_is_refused`,
+/// `copy_named_by_agent_of_a_keychain_item_lands_denied`,
 /// `copy_named_carries_a_vault_source_deny_to_the_destination_key`,
 /// `copy_named_with_unwritable_audit_writes_nothing`.
 pub(crate) fn copy_named(
@@ -177,8 +178,9 @@ fn check_locator(from_backend: &BackendId, source: &CopySource) -> Result<(), Er
     }
 }
 
-/// Whether a Keychain service is trusty's own: a vault (`trusty/...`) or a
-/// control item (`trusty-secrets.*`).
+/// Whether a Keychain service is in trusty's namespace: any service starting
+/// `trusty`, case-insensitively — a vault (`trusty/...`), a control item
+/// (`trusty-secrets.*`), or any other `trusty…` name.
 ///
 /// Why: #10998 — a trusty key named as a raw Keychain item would skip its
 /// agent deny, and a control item is no secret. Such a key is named as a
@@ -207,11 +209,15 @@ struct Ends<'a> {
 /// What: for [`Writer::Agent`], a vault source's deny, then the
 /// destination key's deny, is [`ErrorKind::AgentKeyDenied`] before any value
 /// is read; a failed lookup is its error. A vault source's deny is carried
-/// to the destination key before the value (`carry_deny_between`); a
-/// Keychain item outside trusty's namespace holds none. The value is read
-/// from the vault, or from the item through `state.keychain_item_read` under
-/// the Keychain time limit; a miss is [`ErrorKind::NotFound`]. It is written
-/// with `set_for_agent` or `set`, and dropped here.
+/// to the destination key before the value (`carry_deny_between`). If the
+/// read then misses or fails, that carried deny stays on a destination key
+/// with no value: it fails closed, and a person lifts it with
+/// `set_agents_may_use`. The value is read from the vault, or from the item
+/// through `state.keychain_item_read` under the Keychain time limit; a miss
+/// is [`ErrorKind::NotFound`]. It is written with `set_for_agent` or `set`,
+/// and dropped here. #10998 fix round 1: an agent's copy of a Keychain item
+/// lands denied — see [`agent_item_write`].
+/// Test: `copy_named_by_agent_of_a_keychain_item_lands_denied`.
 fn move_one(
     state: &State,
     source: &CopySource,
@@ -250,9 +256,38 @@ fn move_one(
         }
     };
     let value = value.ok_or(ErrorKind::NotFound)?;
-    let written = match writer {
-        Writer::Agent => ends.store.set_for_agent(vault, key, &value),
-        Writer::Architect | Writer::Person => ends.store.set(vault, key, &value),
+    let written = match (writer, source) {
+        (Writer::Agent, CopySource::KeychainItem { .. }) => {
+            return agent_item_write(ends.store, to, &value);
+        }
+        (Writer::Agent, CopySource::Vault { .. }) => ends.store.set_for_agent(vault, key, &value),
+        (Writer::Architect | Writer::Person, _) => ends.store.set(vault, key, &value),
     };
     written.map(drop).map_err(ErrorKind::from)
+}
+
+/// Write an agent's copy of a Keychain item under an agent deny (#10998).
+///
+/// Why: code-critic HIGH on f11dc5c68f — an item the agent copied landed
+/// open, so the same agent could grant and resolve it, or pipe it through
+/// `tm secrets exec`, and read any login-Keychain item; the exec scrubber
+/// redacts only the literal value. A copy is the user's action, not a
+/// release to agents.
+/// What: the destination key's deny is written first (recorded, through
+/// [`SecretStore::write_deny`]); a destination that cannot hold a deny is
+/// [`ErrorKind::Unsupported`] and nothing is written. Then the value is
+/// written with `set`, since `set_for_agent` would refuse the key it just
+/// denied; the destination was checked open before the read. A person lifts
+/// the deny with `set_agents_may_use`.
+/// Test: `copy_named_by_agent_of_a_keychain_item_lands_denied`.
+fn agent_item_write(
+    store: &SecretStore,
+    to: (&VaultName, &SecretKey),
+    value: &crate::api::SecretValue,
+) -> Result<(), ErrorKind> {
+    store.write_deny(to.0, to.1)?;
+    store
+        .set(to.0, to.1, value)
+        .map(drop)
+        .map_err(ErrorKind::from)
 }

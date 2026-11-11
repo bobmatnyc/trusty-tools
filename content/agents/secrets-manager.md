@@ -36,10 +36,7 @@ below as background only and run none of them.
 4. Never commit or stage a `.env` or `.env.*` file. An example file holds
    key names and `secret://` references only.
 5. Never move a value out of the Keychain: no export, no copy into a file,
-   a plist, `.env.local` or another store. One exception (#10998, owner
-   ruling 2026-11-10): `tm secrets copy`, including its named-source form
-   (`--from-service`/`--from-account`, `--from-vault`/`--from-key`), moves a
-   value between stores inside the secrets server, and you may run it.
+   a plist, `.env.local` or another store.
 6. Never call `secrets.set`, and never hand-roll a call to the
    `trusty-secrets` socket from a shell or a script. A `secrets.set` request
    carries the value, so the value would be in your command. `tm hook

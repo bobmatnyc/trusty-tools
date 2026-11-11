@@ -468,7 +468,23 @@ impl SecretStore {
         if source.agents_may_use(from.0, from.1)? {
             return Ok(());
         }
-        let (vault, key) = to;
+        self.write_deny(to.0, to.1)
+    }
+
+    /// Write `key`'s agent deny here (recorded first), before a copy writes
+    /// its value.
+    ///
+    /// What: [`SecretsError::Unsupported`] when this backend cannot hold a
+    /// deny; otherwise the vault is migrated and the deny written through
+    /// [`change_deny`]. #10998: also the deny an agent's copy of a Keychain
+    /// item lands under.
+    /// Test: `server_copy_of_a_denied_key_carries_the_deny`,
+    /// `copy_named_by_agent_of_a_keychain_item_lands_denied`.
+    pub(crate) fn write_deny(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+    ) -> Result<(), SecretsError> {
         if !self.backend.holds_agent_controls() {
             return Err(SecretsError::Unsupported {
                 backend: self.backend.id().to_string(),
