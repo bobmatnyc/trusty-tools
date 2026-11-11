@@ -1101,10 +1101,7 @@ async fn a_staged_run_dropped_mid_batch_refuses_or_rolls_back() {
         "live is re-attached"
     );
     drop(attached);
-    assert!(
-        corpus_holds(handle, LATE).await,
-        "the later put is in live"
-    );
+    assert!(corpus_holds(handle, LATE).await, "the later put is in live");
     assert!(
         !corpus_holds(handle, PUSHED).await,
         "the put taken into staging is discarded"
