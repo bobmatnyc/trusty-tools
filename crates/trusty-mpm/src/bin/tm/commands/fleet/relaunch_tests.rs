@@ -59,8 +59,18 @@ fn architect_ok(_: &Path, _: &str) -> anyhow::Result<()> {
 }
 
 /// The planted answers in order; `Absent` once they run out.
+/// The next queued read; #11068: the last one repeats, so a pane queued to
+/// end on `Present` keeps a `claude` through the settle wait.
 fn pane_claude(_: &str) -> PaneClaude {
-    PANE_CLAUDE.with(|q| q.borrow_mut().pop_front().unwrap_or(PaneClaude::Absent))
+    PANE_CLAUDE.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.len() > 1 {
+            q.pop_front()
+        } else {
+            q.front().copied()
+        }
+        .unwrap_or(PaneClaude::Absent)
+    })
 }
 
 fn stop_ok(pid: u32) -> Result<(), String> {
@@ -430,8 +440,29 @@ fn relaunch_names_the_stopped_pid_when_the_new_claude_fails() {
     assert!(!calls().contains(&"send".to_owned()), "{:?}", calls());
 }
 
+/// #11068: a pane that still reads `Present` once after the stop, then
+/// `Absent`, is a relaunch, not a refusal.
+#[test]
+fn relaunch_waits_for_the_pane_to_settle_after_the_stop() {
+    let reads = [PaneClaude::Present, PaneClaude::Present, PaneClaude::Absent];
+    let fx = Fixture::new(live(), &reads);
+    let report = fx.relaunch(STUB).expect("the pane settles");
+    assert!(!report.failed(), "{}", report.render());
+    assert_eq!(
+        calls(),
+        [
+            "prepare".to_owned(),
+            format!("stop {OLD_PID}"),
+            "send".to_owned()
+        ]
+    );
+}
+
+/// A pane that keeps a `claude` through the whole settle wait still refuses
+/// (#9092); #11068: the wait is bounded by [`PANE_SETTLE`].
 #[test]
 fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
+    let started = std::time::Instant::now();
     let fx = Fixture::new(live(), &[PaneClaude::Present, PaneClaude::Present]);
     let err = fx.relaunch(STUB).expect_err("a surviving claude refuses");
     assert!(
@@ -442,6 +473,15 @@ fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
         calls(),
         ["prepare".to_owned(), format!("stop {OLD_PID}")],
         "no send"
+    );
+    let waited = started.elapsed();
+    assert!(
+        waited >= PANE_SETTLE,
+        "refused before the bound: {waited:?}"
+    );
+    assert!(
+        waited < PANE_SETTLE * 2,
+        "waited past the bound: {waited:?}"
     );
 
     let fx = Fixture::new(live(), &[PaneClaude::Present]);
