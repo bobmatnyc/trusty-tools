@@ -135,15 +135,17 @@ def _rows(out, server):
     return panes
 
 
-def capture(pane, server=None):
+def capture(pane, server=None, history=80):
+    # #11065: `history` is how many scrollback lines above the screen to include; the pane tail asks up to 200.
+    start = f"-{int(history)}"
     if server:
-        return P.tmux("capture-pane", "-e", "-p", "-S", "-80", "-t", pane, server=server)
-    return P.tmux("capture-pane", "-e", "-p", "-S", "-80", "-t", pane)
+        return P.tmux("capture-pane", "-e", "-p", "-S", start, "-t", pane, server=server)
+    return P.tmux("capture-pane", "-e", "-p", "-S", start, "-t", pane)
 
 
-def capture_pane(p):
-    """Capture listed pane `p` on the server it was listed from (#8928)."""
-    return P.capture(p["pane"], p["server"]) if p.get("server") else P.capture(p["pane"])
+def capture_pane(p, **kw):
+    """Capture listed pane `p` on the server it was listed from (#8928); `kw` (history=) goes to capture()."""
+    return P.capture(p["pane"], p["server"], **kw) if p.get("server") else P.capture(p["pane"], **kw)
 
 
 def send_to_architect(pane, *keys):
