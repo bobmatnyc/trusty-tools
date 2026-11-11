@@ -205,3 +205,38 @@ fn service_state_maps_from_self_reported_health() {
         json!("unknown")
     );
 }
+
+/// Why: a newer console may add a state or status spelling; an older TUI must
+/// still decode the rest of the history answer (#10996).
+/// What: a transition with an unknown `to` and a sample with an unknown
+/// `status` decode to the `Unknown` variants; the known fields survive.
+/// Test: this test itself.
+#[test]
+fn history_snapshot_decodes_unknown_state_and_status_as_unknown() {
+    let back: HistorySnapshot = serde_json::from_value(json!({
+        "transitions": [{
+            "service_id": "trusty-search",
+            "display_name": "Search",
+            "from": "up",
+            "to": "hibernating",
+            "at_unix": 7
+        }],
+        "service_samples": {"trusty-search": [{
+            "id": "trusty-search",
+            "status": "quarantined",
+            "cpu_pct": 2.5,
+            "rss_bytes": 9
+        }]},
+        "schema_version": 1
+    }))
+    .expect("an unknown variant must not fail the whole answer");
+    let t = &back.transitions[0];
+    assert_eq!((t.from, t.to), (ServiceState::Up, ServiceState::Unknown));
+    let s = &back.service_samples["trusty-search"][0];
+    assert_eq!(
+        serde_json::to_value(&s.status).expect("encode"),
+        json!("unknown")
+    );
+    assert_eq!((s.cpu_pct, s.rss_bytes), (Some(2.5), Some(9)));
+    assert_eq!(back.schema_version, 1);
+}
