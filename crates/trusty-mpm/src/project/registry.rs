@@ -132,6 +132,54 @@ impl ProjectRegistry {
         guard.update_with(name, f).await
     }
 
+    /// Insert `project` unless a record already covers it, under ONE lock.
+    ///
+    /// Why (#10586): `tm project init` must never overwrite or duplicate a
+    /// record another writer owns. A `list` then a later `register` takes the
+    /// lock twice, so a concurrent `tm projects register` or a session
+    /// auto-registration landing between them was overwritten with defaults —
+    /// the #2481 lost-update shape [`Self::update_with`] fixed for PATCH.
+    /// What: derives the incoming `owner/repo` key outside the lock, then inside
+    /// one [`ProjectStore::mutate`] critical section answers `Ok(Some(kept))`,
+    /// a clone of the matching record, without writing when a record has the
+    /// same name, the same `repo_url` string, or a `project_key` equal to that
+    /// key (so `git@github.com:o/r.git` matches a record stored as
+    /// `https://github.com/o/r`). A legacy record with no stored key is matched
+    /// on the key [`origin_key`] derives from its `repo_url`. Otherwise it stores `project` with the key
+    /// (or a fresh `local:<uuid>` one) and answers `Ok(None)`.
+    /// Test: `register_unless_present_matches_on_project_key`,
+    /// `register_unless_present_keeps_a_legacy_record_without_a_key`,
+    /// `project_init_with_ssh_origin_keeps_the_https_record_10586`,
+    /// `project_init_reports_the_kept_record_for_a_different_origin_10586`.
+    pub async fn register_unless_present(
+        &self,
+        mut project: Project,
+    ) -> Result<Option<Project>, ProjectStoreError> {
+        let key = super::project_key::project_key_from_repo_url(&project.repo_url);
+        let mut guard = self.store.write().await;
+        guard
+            .mutate(move |projects| {
+                // #10586: hand the kept record back, so init can name it.
+                // #10586: a legacy record stores no key; derive it, as #10696 does.
+                let present = projects.values().find(|p| {
+                    p.name == project.name
+                        || p.repo_url == project.repo_url
+                        || (key.is_some()
+                            && p.project_key.clone().or_else(|| origin_key(&p.repo_url)) == key)
+                });
+                if let Some(kept) = present {
+                    return Ok(Some(kept.clone()));
+                }
+                // No record holds `key` (checked above), so the key is unique.
+                let key = key
+                    .unwrap_or_else(|| super::project_key::assign_project_key(&project.repo_url));
+                project.project_key = Some(key);
+                projects.insert(project.name.clone(), project);
+                Ok(None)
+            })
+            .await
+    }
+
     /// Seed the registry from statically-declared `projects:` config entries.
     ///
     /// Why: #1519 MR-1 — operators can declare projects in

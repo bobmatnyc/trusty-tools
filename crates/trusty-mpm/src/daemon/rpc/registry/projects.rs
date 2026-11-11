@@ -22,7 +22,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use trusty_common::uds::server::RpcRouter;
 
-use crate::core::project::ProjectInfo;
+use crate::core::project::{KeptRegistryRecord, ProjectInfo, RegisterProjectResponse};
 use crate::daemon::api::types::{
     DiscoverProjectsResponse, DiscoveredProjectInfo, ProjectsResponse,
 };
@@ -91,22 +91,50 @@ pub struct PathParams {
 /// log, and the records — which is what the operator was actually missing —
 /// reach disk.
 ///
+/// #10586: it also writes the registry-B record (`projects.json`) that
+/// `tm project list` reads, keyed on the same name, unless a record with that
+/// name or that `origin`'s `owner/repo` already exists. A registry-B record
+/// needs a `repo_url`, so a directory with no `origin` remote is refused up
+/// front. When a record is kept rather than written, the response's
+/// `kept_existing` names it; the field is absent after a write. The registry-B
+/// write runs before the in-memory insert and the worktree backfill, so a
+/// failed write leaves neither behind.
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] when `path` has no readable `origin`
+/// remote; [`DaemonError::Internal`], carrying the store's error text, when
+/// the registry-B write fails.
+///
 /// Test: `parity_projects_register_agrees_across_transports`,
 /// `register_project_op_disables_git_auto_maintenance`,
 /// `register_project_op_backfills_pre_existing_worktrees_7588`,
-/// `register_project_op_adopts_under_the_owning_projects_name_7588`.
-pub fn register_project_op(state: &Arc<DaemonState>, path: PathBuf) -> ProjectInfo {
+/// `register_project_op_adopts_under_the_owning_projects_name_7588`,
+/// `project_init_then_registry_list_shows_the_project_10586`,
+/// `project_init_without_origin_is_refused_and_persists_nothing_10586`,
+/// `project_init_keeps_an_existing_registry_record_10586`,
+/// `project_init_with_ssh_origin_keeps_the_https_record_10586`,
+/// `project_init_registry_write_failure_names_the_cause_10586`,
+/// `project_init_reports_the_kept_record_for_a_different_origin_10586`.
+pub async fn register_project_op(
+    state: &Arc<DaemonState>,
+    path: PathBuf,
+) -> Result<RegisterProjectResponse, DaemonError> {
+    // #10586: no origin, no registry-B record — refuse before any side effect.
+    let repo_url = origin_url_for_init(&path)?;
     // #7171: an explicit registration is the "operator points trusty-mpm at
     // an existing repo" case `ensure_base_clone`'s equivalent write does not
-    // cover — best-effort and non-fatal; `path` need not even be a git repo.
+    // cover — best-effort and non-fatal.
     crate::core::git_maintenance::disable_and_log(&path);
     // #8511: exclude the harness files and move legacy markers out of the trees.
     crate::session_manager::worktree_marker_migration::prepare_checkout(&path);
-    let info = state.register_project(path.clone());
     // #7588: same store, same framework root, same function as registry B.
     let store_dir = crate::project::registry_data_dir_under(state.framework_root());
     let name = crate::project::project_owning_checkout(&store_dir, &path)
-        .unwrap_or_else(|| info.name.clone());
+        .unwrap_or_else(|| crate::core::project::name_from_path(&path));
+    // #10586: persist first, so a failed write leaves no in-memory project behind.
+    let kept_existing = persist_registry_record(state, &name, &repo_url).await?;
+    let info = state.register_project(path.clone());
     let report = crate::project::backfill_checkout(&store_dir, &name, &path, chrono::Utc::now());
     if report != crate::project::BackfillReport::default() {
         tracing::info!(
@@ -119,7 +147,86 @@ pub fn register_project_op(state: &Arc<DaemonState>, path: PathBuf) -> ProjectIn
             "#7588: `tm project init` adopted pre-existing worktrees too"
         );
     }
-    info
+    // #10586: a kept record rides on the 200, so init never reports a silent write.
+    Ok(RegisterProjectResponse {
+        info,
+        kept_existing,
+    })
+}
+
+/// The `origin` URL `tm project init` records, or the refusal it answers.
+///
+/// Why (#10586, owner ruling 2026-10-31): a registry-B record requires a
+/// `repo_url`, and init with no `origin` fails with a clear error rather than
+/// registering a project `tm project list` can never show.
+/// Test: `project_init_without_origin_is_refused_and_persists_nothing_10586`.
+fn origin_url_for_init(path: &Path) -> Result<String, DaemonError> {
+    let fix = "add one with `git remote add origin <url>`, or register it with \
+               `tm projects register <name> --repo-url <url>`";
+    match crate::core::git_origin::get_origin_url(path) {
+        Ok(Some(url)) => Ok(url),
+        Ok(None) => Err(DaemonError::InvalidRequest(format!(
+            "'{}' has no `origin` remote; {fix}",
+            path.display()
+        ))),
+        Err(e) => Err(DaemonError::InvalidRequest(format!(
+            "could not read the `origin` remote of '{}' ({e}); {fix}",
+            path.display()
+        ))),
+    }
+}
+
+/// Write the registry-B record `tm project init` used to skip (#10586).
+///
+/// Why: `tm project list` reads `projects.json`; init wrote only the in-memory
+/// map, so list stayed empty. An existing record wins — the same name, or the
+/// same `owner/repo` under another name and URL form (an operator's
+/// `tm projects register`) — so init never overwrites configuration set
+/// elsewhere or duplicates a repo.
+/// What: one [`crate::project::ProjectRegistry::register_unless_present`] call,
+/// so the existence check and the insert share one lock. `Ok(None)` when the
+/// record was written; `Ok(Some(kept))` names the record kept instead, its
+/// `repo_url` without userinfo. Every store error, `DuplicateProjectKey`
+/// included, reaches the caller as a 500 that carries the store's own text.
+/// Test: `project_init_then_registry_list_shows_the_project_10586`,
+/// `project_init_keeps_an_existing_registry_record_10586`,
+/// `project_init_with_ssh_origin_keeps_the_https_record_10586`,
+/// `project_init_registry_write_failure_names_the_cause_10586`,
+/// `project_init_reports_the_kept_record_for_a_different_origin_10586`,
+/// `project_init_kept_record_url_carries_no_userinfo_10586`.
+async fn persist_registry_record(
+    state: &Arc<DaemonState>,
+    name: &str,
+    repo_url: &str,
+) -> Result<Option<KeptRegistryRecord>, DaemonError> {
+    let registry = state.project_registry().await;
+    let project = Project {
+        name: name.to_string(),
+        repo_url: repo_url.to_string(),
+        default_branch: "main".to_string(),
+        stack_hint: None,
+        tags: vec![],
+        description: None,
+        gh_user: None,
+        gh_account: None,
+        github: None,
+        commit_name: None,
+        commit_email: None,
+        worktree: None,
+        project_key: None,
+    };
+    // #10586: check and insert under one lock, so no writer lands between them.
+    // #10586: a kept record is reported, never a silent success; the
+    // `DuplicateProjectKey` arm is gone, so that error is a 500 like the rest.
+    match registry.register_unless_present(project).await {
+        Ok(kept) => Ok(kept.map(|p| KeptRegistryRecord::redacted(&p.name, &p.repo_url))),
+        Err(e) => {
+            tracing::warn!(error = %e, project = %name, "#10586: project registry write failed");
+            Err(DaemonError::Internal(format!(
+                "project registry write failed: {e}"
+            )))
+        }
+    }
 }
 
 /// `GET /projects`, `mpm.projects.list` — every announced directory.
@@ -184,10 +291,11 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     });
 
     let held = Arc::clone(state);
-    let r = r.typed::<PathParams, ProjectInfo, _, _>("mpm.projects.register", move |p| {
-        let s = Arc::clone(&held);
-        async move { Ok(register_project_op(&s, p.path)) }
-    });
+    let r =
+        r.typed::<PathParams, RegisterProjectResponse, _, _>("mpm.projects.register", move |p| {
+            let s = Arc::clone(&held);
+            async move { register_project_op(&s, p.path).await.map_err(Into::into) }
+        });
 
     let held = Arc::clone(state);
     let r = r.typed::<PathParams, ProjectInfo, _, _>("mpm.projects.current", move |p| {

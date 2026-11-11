@@ -210,13 +210,105 @@ async fn execute_adopt_unknown_session_errors() {
 #[tokio::test]
 async fn register_project_succeeds() {
     // The `[Set Active]` flow registers a project by path.
+    // #10586: registration needs a git repo with an `origin` remote.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("discovered-demo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git_ok = |args: &[&str]| {
+        trusty_common::git::command_in(&repo)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !git_ok(&["init", "-q", "."])
+        || !git_ok(&["remote", "add", "origin", "https://example.invalid/d.git"])
+    {
+        return; // no git on this runner
+    }
+    let repo = repo.to_string_lossy().into_owned();
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
-    match executor.register_project("/work/discovered-demo").await {
+    match executor.register_project(&repo).await {
         CommandResult::ProjectRegistered { path } => {
-            assert_eq!(path, "/work/discovered-demo");
+            assert_eq!(path, repo);
         }
         other => panic!("expected ProjectRegistered, got {other:?}"),
+    }
+}
+
+/// Telegram "Set Active" on a directory with no `origin` shows the daemon's
+/// 400 message, not "daemon unreachable" with a bare status (#10586).
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_project_without_origin_shows_the_daemon_message_10586() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("no-origin");
+    std::fs::create_dir_all(&repo).unwrap();
+    let init_ok = trusty_common::git::command_in(&repo)
+        .args(["init", "-q", "."])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !init_ok {
+        return; // no git on this runner
+    }
+    let repo = repo.to_string_lossy().into_owned();
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.register_project(&repo).await {
+        CommandResult::Error(msg) => {
+            assert!(msg.contains("no `origin` remote"), "{msg}");
+            assert!(msg.contains("git remote add origin"), "{msg}");
+            assert!(!msg.contains("unreachable"), "{msg}");
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+/// Telegram "Set Active" on a directory whose name a stored record already
+/// holds reports that record, its URL without userinfo (#10586).
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_project_reports_the_kept_record_10586() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("gizmo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git_ok = |args: &[&str]| {
+        trusty_common::git::command_in(&repo)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !git_ok(&["init", "-q", "."])
+        || !git_ok(&[
+            "remote",
+            "add",
+            "origin",
+            "https://gitlab.com/other/thing.git",
+        ])
+    {
+        return; // no git on this runner
+    }
+    let repo = repo.to_string_lossy().into_owned();
+    let (state, url) = spawn_test_daemon().await;
+    let token = "ghp_10586SyntheticNotARealToken";
+    let seed: crate::project::Project = serde_json::from_value(serde_json::json!({
+        "name": "gizmo",
+        "repo_url": format!("https://octo:{token}@github.com/acme/gizmo"),
+        "default_branch": "main",
+    }))
+    .unwrap();
+    state.project_registry().await.register(seed).await.unwrap();
+
+    let executor = CommandExecutor::new(url);
+    match executor.register_project(&repo).await {
+        CommandResult::ProjectKept { path, kept } => {
+            assert_eq!(path, repo);
+            assert_eq!(kept.name, "gizmo");
+            assert_eq!(kept.repo_url, "https://github.com/acme/gizmo");
+        }
+        other => panic!("expected ProjectKept, got {other:?}"),
     }
 }
 
