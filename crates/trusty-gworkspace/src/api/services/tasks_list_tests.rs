@@ -80,15 +80,16 @@ async fn list_rejects_mistyped_params_and_skips_absent_ones_10709() {
     // A present param of the wrong JSON type is an error naming the param and
     // the expected type, and no request reaches the API.
     let cases = [
-        ("show_hidden", json!("true"), "'show_hidden' must be a JSON boolean"),
-        ("show_hidden", json!("yes"), "'show_hidden' must be a JSON boolean"),
-        ("show_deleted", json!(1), "'show_deleted' must be a JSON boolean"),
-        ("max_results", json!("ten"), "'max_results' must be a positive integer"),
-        ("max_results", json!(-5), "'max_results' must be a positive integer"),
-        ("max_results", json!(2.5), "'max_results' must be a positive integer"),
-        ("page_token", json!(42), "'page_token' must be a string"),
+        ("show_hidden", json!("true"), "a JSON boolean"),
+        ("show_hidden", json!("yes"), "a JSON boolean"),
+        ("show_deleted", json!(1), "a JSON boolean"),
+        ("max_results", json!("ten"), "a positive integer"),
+        ("max_results", json!(-5), "a positive integer"),
+        ("max_results", json!(2.5), "a positive integer"),
+        ("page_token", json!(42), "a string"),
     ];
-    for (arg, value, expected) in cases {
+    for (arg, value, ty) in cases {
+        let expected = format!("manage_tasks list: '{arg}' must be {ty}");
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
@@ -101,7 +102,7 @@ async fn list_rejects_mistyped_params_and_skips_absent_ones_10709() {
         let err = manage_tasks_at(&client, args, &server.uri())
             .await
             .expect_err(&format!("{arg}={value} must be rejected"));
-        assert!(err.to_string().contains(expected), "{arg}={value}: {err}");
+        assert_eq!(err.to_string(), expected, "{arg}={value}");
         // `expect(0)` is checked when the server drops; assert it here too.
         server.verify().await;
     }

@@ -348,7 +348,9 @@ fn list_query(args: &Value) -> Result<Vec<String>> {
         query.push(format!("maxResults={n}"));
     }
     if let Some(v) = present("page_token") {
-        let token = v.as_str().ok_or_else(|| mistyped("page_token", "a string"))?;
+        let token = v
+            .as_str()
+            .ok_or_else(|| mistyped("page_token", "a string"))?;
         if !token.is_empty() {
             query.push(format!("pageToken={}", percent_encode(token)));
         }
