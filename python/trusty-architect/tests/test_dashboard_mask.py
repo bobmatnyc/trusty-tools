@@ -78,12 +78,12 @@ FIXTURES = [
      base64.b64encode(("u:" + PW).encode()).decode(), "Authorization: "),
     ("url credentials", "DATABASE=postgres://admin:" + PW + "@db.example.com:5432/app", PW, "@db.example.com:5432/app"),
     ("url credentials https", "git push https://bot:" + PW + "@git.example.com/repo.git", PW, "git push https://"),
-    ("password=", "PASSWORD=" + PW + " ./run", PW, "./run"),
+    ("password=", "PASSWORD=" + PW + " ./run", PW, "PASSWORD="),
     ("password:", "password: " + PW, PW, "password: "),
     ("secret= quoted", 'CLIENT_SECRET="' + PW + ' x"', PW, "CLIENT_SECRET="),
     ("api key: with space", "API key: " + PW, PW, "API key: "),
     ("json api_key", '{"api_key": "' + PW + '", "n": 1}', PW, '"n": 1}'),
-    ("token in query", "GET /cb?code=1&access_token=" + PW + "&state=2", PW, "&state=2"),
+    ("token in query", "GET /cb?code=1&access_token=" + PW + "&state=2", PW, "GET /cb?code=1&"),
     ("unarmored base64 body", "  " + rand(64, B64), None, None),
 ]
 
@@ -211,6 +211,41 @@ class MaskText(unittest.TestCase):
         t0 = time.monotonic()
         dm.mask_pane_text(text, max_lines=5, max_line_len=50)
         self.assertLess(time.monotonic() - t0, 5.0)
+
+
+class CriticRegression(unittest.TestCase):
+    """code-critic repros on b2453c580a (#11065): each leaked there."""
+
+    def mask(self, text):
+        return dm.mask_pane_text(text, max_lines=50, max_line_len=1000)
+
+    def test_mid_key_line_starting_with_slash_is_masked(self):
+        row = "/" + rand(63, B64)
+        out = self.mask("MIIEvQIBADANBgkq\n" + row + "\n" + rand(64, B64))
+        for w in windows(row, 8):
+            self.assertNotIn(w, out)
+        self.assertIn("[masked:base64]", out)
+
+    def test_word_segment_paths_and_identifiers_stay_readable(self):
+        paths = [
+            "/" + "Users" + "/" + "ma" + "sa" + "/trusty-mpm-projects/" + "bo" + "bmatnyc" + "/trusty-tools/cr" + "ates/x.rs",
+            "/opt/WorkSpace/ProjectAlpha/srcFiles/MainModule/Handler2024.rs",
+            "src/Components/Dashboard/DecisionPanel/LastOutputView/index.ts",
+            "TestShouldCalculateTotalWhenItemsAddedAndTaxApplied2024",
+        ]
+        for p in paths:
+            with self.subTest(path=p):
+                self.assertEqual(self.mask("open " + p + " ok"), "open " + p + " ok")
+
+    def test_quoted_value_with_escaped_quotes_is_masked_to_its_close(self):
+        out = self.mask('{"password": "a\\"b c", "n": 1}')
+        self.assertEqual(out, '{"password": [masked:secret], "n": 1}')
+
+    def test_unquoted_multi_word_value_is_masked_to_end_of_line(self):
+        for key, value in (("password: ", "hunter two words"), ("SECRET=", "correct horse battery"),
+                           ("token = ", "abc def")):
+            with self.subTest(key=key):
+                self.assertEqual(self.mask(key + value + "\nnext"), key + "[masked:secret]\nnext")
 
 
 class OldScrubRegression(unittest.TestCase):

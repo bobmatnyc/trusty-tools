@@ -47,16 +47,21 @@ _RULES = (
     ("aws-key", re.compile(r"\bAKIA[A-Za-z0-9_\-]{12,}|\bASIA[0-9A-Z]{16}\b"), MARK.format("aws-key")),
     ("google-key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}"), MARK.format("google-key")),
     ("slack-token", re.compile(r"\b(?:xox[baprse]|xapp)-[A-Za-z0-9\-]+"), MARK.format("slack-token")),
-    # Rust rule 10 and _SECRET: key=value, key: value and JSON "key": "value" for a secret-named key.
+    # Rust rule 10 and _SECRET: key=value, key: value and JSON "key": "value" for a secret-named key. A quoted
+    # value is masked to its closing quote, escaped quotes included; any other value to the end of the line
+    # (#11065: a multi-word or unterminated value must not leak its tail).
     ("secret", re.compile(
         r"(?i)\b([\w.\-]{0,64}?(?:secret|token|passw(?:or)?d|pwd|api[ _\-]?key|access[_\-]?key|private[_\-]?key"
-        r"|credentials?|bearer)[\w.\-]{0,64}[\"']?[ \t]*[:=][ \t]*)(\"[^\"\n]*\"|'[^'\n]*'|[^\s,;&\"']+)"),
+        r"|credentials?|bearer)[\w.\-]{0,64}[\"']?[ \t]*[:=][ \t]*)"
+        r"(\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'|\S[^\n]*)"),
      r"\g<1>" + MARK.format("secret")),
 )
 
-# A long standard-base64 run with upper, lower and digit: an unarmored key body line or blob. A run that starts
-# with "/" is taken as a path. Hex digests carry no upper case and are kept.
+# A long standard-base64 run with mixed case: an unarmored key body line or blob, masked even when it starts
+# with "/" (#11065: 1 in 64 PEM body lines does). A run whose "/"-separated segments are all words is a path or
+# an identifier and is kept. Hex digests carry no upper case and are kept.
 _B64 = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])")
+_WORD = re.compile(r"(?:[A-Z]?[a-z]+)+[0-9]*|[A-Z]+[0-9]*|[0-9]+")
 _PARTIAL_MARK = re.compile(r"\[(?:m(?:a(?:s(?:k(?:e(?:d(?::[a-z\-]*)?)?)?)?)?)?)?$")
 
 
@@ -89,7 +94,9 @@ def _mask_armor(text):
 
 def _b64(m):
     s = m.group(0)
-    if s.startswith("/") or not (re.search(r"[A-Z]", s) and re.search(r"[a-z]", s) and re.search(r"[0-9]", s)):
+    if not (re.search(r"[A-Z]", s) and re.search(r"[a-z]", s)):
+        return s
+    if all(_WORD.fullmatch(seg) for seg in s.split("/") if seg):
         return s
     return MARK.format("base64")
 
