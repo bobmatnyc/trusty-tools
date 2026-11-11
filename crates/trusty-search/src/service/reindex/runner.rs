@@ -30,7 +30,6 @@ use super::finish::{BatchTotals, FileHashes, FinishCtx};
 use super::guard::ReindexTerminationGuard;
 use super::hash::hashes_for;
 use super::hash_cache;
-use super::hnsw_swap::begin_staged_hnsw_swap;
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::root_gate;
@@ -90,7 +89,9 @@ pub(super) async fn run_reindex(
     // each other regardless of which reindex priority track is in play —
     // closing the gap where an interactive reindex (a separate 2-permit
     // semaphore never touched by the old guard) could still race a catch-up.
-    let _index_permit = index_semaphore(&handle.id).acquire_owned().await.expect(
+    // #10738: moved into `term_guard` once staging begins, so a rollback after
+    // a death mid-run still holds it.
+    let index_permit = index_semaphore(&handle.id).acquire_owned().await.expect(
         "per-index semaphore is never closed — it is a fresh Semaphore per IndexId, never dropped",
     );
     // #8659: name this reindex to a migration waiting on the same permit.
@@ -496,7 +497,11 @@ pub(super) async fn run_reindex(
     // not-worse fallback: `spawn_incremental_persist` never learns
     // `reindexing` was set, so it keeps writing straight to the live path
     // exactly as it did before this fix.
-    let hnsw_swap_paths = begin_staged_hnsw_swap(&handle, &index_id).await;
+    // #10738: the guard records both stagings and the index permit, so a run
+    // that dies before `finish` resolves them is rolled back, not left staged.
+    let hnsw_swap_paths = term_guard
+        .begin_staged(&handle, &corpus_swap_tmp, index_permit)
+        .await;
 
     // Per-subsystem timing accumulators.
     let mut total_parse_ms: u64 = 0;

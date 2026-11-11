@@ -321,6 +321,11 @@ const LATE_BODY: &str = "pub fn late_10738(x: u32) -> u32 {\n    x + 2\n}\n";
 /// the corpus directory must not be walked as source.
 /// Test: used by the restart and prune cases below.
 fn walkable_index(id: &str, root: &std::path::Path) -> Arc<IndexHandle> {
+    Arc::new(walkable_handle(id, root))
+}
+
+/// [`walkable_index`] before it is shared, so a test can register it.
+fn walkable_handle(id: &str, root: &std::path::Path) -> IndexHandle {
     let embedder: Arc<dyn crate::core::embed::Embedder> =
         Arc::new(crate::core::embed::MockEmbedder::new(8));
     let store: Arc<dyn crate::core::store::VectorStore> =
@@ -345,7 +350,7 @@ fn walkable_index(id: &str, root: &std::path::Path) -> Arc<IndexHandle> {
     handle
         .extra_skip_dirs
         .push(crate::service::colocated_storage::COLOCATED_DIR_NAME.into());
-    Arc::new(handle)
+    handle
 }
 
 /// Write `path` through the shared write core, as a put does.
@@ -933,4 +938,124 @@ async fn a_rescan_batch_during_the_abort_detach_window_is_refused_or_lands_in_li
             );
         }
     }
+}
+
+/// Why: R2 — a staged run that panics or is cancelled mid-batch, outside the
+/// detach windows, left staging attached. The termination guard neither
+/// re-attached live nor raised the generation, so later puts were
+/// acknowledged into a staging corpus the next attach discards, under the
+/// generation the earlier replies carried.
+/// What: park the run's batch on the embedding pause with staging attached,
+/// put, cancel the task, then put again and assert that put was refused or
+/// its reply carries a generation above the first put's. Then wait for a put
+/// to be accepted and assert it is in the attached live corpus, the first put
+/// (staging only) is not, the generation rose, and HNSW staging ended. Fails
+/// before the fix: the put after the cancel answers `indexed: true` at the
+/// first put's generation.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_staged_run_dropped_mid_batch_refuses_or_rolls_back() {
+    let id = "identity-midbatch-drop-10738";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::write(
+        root.join("a.rs"),
+        "pub fn alpha_10738() -> u8 {\n    1\n}\n",
+    )
+    .expect("a.rs");
+    let _ = index_identity::retire(id);
+    let registry = crate::core::registry::IndexRegistry::new();
+    let handle = registry.register(walkable_handle(id, &root));
+    let state = Arc::new(crate::service::server::SearchAppState::new(registry));
+    state
+        .install_embedder(Arc::new(crate::core::embed::MockEmbedder::new(8)))
+        .await;
+    reindex(&handle, false).await;
+    let live = root
+        .join(crate::service::colocated_storage::COLOCATED_DIR_NAME)
+        .join(crate::service::storage_layout::REDB_FILE);
+
+    // The next run stages, then parks its batch for `b.rs` on the pause.
+    std::fs::write(root.join("b.rs"), "pub fn beta_10738() -> u8 {\n    2\n}\n").expect("b.rs");
+    let staging_probe = handle.indexer.read().await.reindex_staging_probe();
+    handle.embedding_pause.pause();
+    let run = spawn_reindex_awaitable(handle.clone(), Arc::new(ReindexProgress::new()), false);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !staging_probe() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the run never reached its batches"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let staged = handle
+        .indexer
+        .read()
+        .await
+        .corpus_store()
+        .expect("staging attached");
+    assert_ne!(staged.path(), live, "test setup: staging is attached");
+    drop(staged);
+    let acknowledged = put_generation(&state, id).await;
+
+    run.abort();
+    let died = run.await.expect_err("the run is dropped mid-batch");
+    assert!(died.is_cancelled(), "{died}");
+    handle.embedding_pause.resume();
+
+    match try_put(&state, id, LATE, LATE_BODY).await {
+        Err(body) => assert_eq!(body["indexed"], false, "{body}"),
+        Ok(body) => {
+            let generation = body["identity"]["generation"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("put reply carries a generation: {body}"));
+            assert!(
+                generation > acknowledged,
+                "a put acknowledged after the run died must carry a raised generation, \
+                 or be refused: {acknowledged} -> {generation}, {body}"
+            );
+        }
+    }
+
+    // The rollback settles: a put is accepted again, into live.
+    let accepted = loop {
+        if let Ok(body) = try_put(&state, id, LATE, LATE_BODY).await {
+            break body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the index never settled after the run died"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(accepted["indexed"], true, "{accepted}");
+    let generation = accepted["identity"]["generation"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("put reply carries a generation: {accepted}"));
+    assert!(
+        generation > acknowledged,
+        "the rollback raises the generation: {acknowledged} -> {generation}"
+    );
+    let attached = handle
+        .indexer
+        .read()
+        .await
+        .corpus_store()
+        .expect("attached");
+    assert_eq!(
+        std::fs::canonicalize(attached.path()).ok(),
+        std::fs::canonicalize(&live).ok(),
+        "live is re-attached"
+    );
+    drop(attached);
+    assert!(
+        corpus_holds(&handle, LATE).await,
+        "the later put is in live"
+    );
+    assert!(
+        !corpus_holds(&handle, PUSHED).await,
+        "the put taken into staging is discarded"
+    );
+    assert!(!staging_probe(), "HNSW staging ended with the rollback");
 }
