@@ -162,6 +162,116 @@ async fn agent_push_of_a_denied_key_fails_it_before_its_value_is_read() {
     }
 }
 
+/// Why: #10999 with #10998 — an agent's copy of a Keychain item lands
+/// push-only, and that agent may then push it: the value goes server to
+/// target and never reaches the agent (every agent read stays refused, see
+/// `push_only_key_is_refused_to_every_agent_read_and_open_to_a_person`). A
+/// deny wins over the mark. Red while the push gates on `agents_may_use`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_push_of_a_push_only_key_sends_it() {
+    for id in TARGET_IDS {
+        let fx = fixture();
+        super::copy_source_tests::seed_push_only(&fx, "PUSHED");
+        seed(&fx, "BOTH", OPEN_VALUE, false);
+        let both = (vault(PROJECT_VAULT), key("BOTH"));
+        let marked =
+            fx.keychain
+                .set_control_item(ControlItem::PushOnly, &both.0, Some(&both.1), true);
+        marked.unwrap();
+        let procs = procs_with_me();
+        procs.set_agent(10);
+        let (state, _grants) = state_with(&fx, procs);
+        let (state, target, _opens) = with_fake_target(state);
+        let server = fx.start_state(state).await;
+        let pushed = call(
+            &fx.settings.socket,
+            method::COPY,
+            push_params(&fx, id, &["PUSHED", "BOTH"]),
+        )
+        .await;
+        server.stop().await;
+
+        assert!(!wire(&pushed).contains(SENTINEL_VALUE), "{id}");
+        assert_eq!(
+            ok(pushed),
+            json!({"copied": ["PUSHED"], "failed": ["BOTH"]}),
+            "{id}"
+        );
+        let one = ("PUSHED".to_string(), SENTINEL_VALUE.to_string());
+        assert_eq!(*target.pushed.lock().unwrap(), [one], "{id}");
+        let audit = std::fs::read_to_string(&fx.settings.audit_log).unwrap();
+        assert!(!audit.contains(SENTINEL_VALUE), "{id}");
+        let all: Vec<_> = records(&fx)
+            .into_iter()
+            .filter(|r| r.method == AuditMethod::Copy)
+            .collect();
+        assert_eq!(
+            all.iter().map(shape).collect::<Vec<_>>(),
+            [
+                (
+                    AuditMethod::Copy,
+                    AuditDecision::Allow,
+                    None,
+                    Some("PUSHED")
+                ),
+                (
+                    AuditMethod::Copy,
+                    AuditDecision::Deny,
+                    Some("agent_key_denied"),
+                    Some("BOTH")
+                ),
+            ],
+            "{id}"
+        );
+        assert!(all.iter().all(|r| r.agent_parent == Some(true)), "{all:?}");
+    }
+}
+
+/// Why: #10999 Fail-Open Check — when the source's control items cannot be
+/// read, an agent's push of a push-only key and of an open key both fail
+/// before any value is read; an unreadable mark never reads as "admitted".
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_push_with_a_failed_mark_lookup_fails_every_key() {
+    for id in TARGET_IDS {
+        let fx = fixture();
+        super::copy_source_tests::seed_push_only(&fx, "PUSHED");
+        seed(&fx, "OPEN", OPEN_VALUE, true);
+        let procs = procs_with_me();
+        procs.set_agent(10);
+        let (state, _grants) = state_with(&fx, procs);
+        let (state, target, _opens) = with_fake_target(state);
+        let server = fx.start_state(state).await;
+        fx.keychain.fail_controls(true);
+        let reads = fx.keychain.reads();
+        let pushed = call(
+            &fx.settings.socket,
+            method::COPY,
+            push_params(&fx, id, &["PUSHED", "OPEN"]),
+        )
+        .await;
+        server.stop().await;
+
+        assert_eq!(
+            ok(pushed),
+            json!({"copied": [], "failed": ["PUSHED", "OPEN"]}),
+            "{id}"
+        );
+        assert!(target.pushed.lock().unwrap().is_empty(), "{id}");
+        assert_eq!(fx.keychain.reads(), reads, "no value was read: {id}");
+        let all: Vec<_> = records(&fx)
+            .into_iter()
+            .filter(|r| r.method == AuditMethod::Copy)
+            .collect();
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert!(
+            all.iter().all(|r| r.decision == AuditDecision::Deny),
+            "{all:?}"
+        );
+    }
+}
+
 /// Why: C8, D6 — a tracked project file may not aim a push at a repository
 /// or project of its choosing, so a `github_actions:` or `vercel:` section
 /// there is refused like the vendor CLI settings, naming the key only.

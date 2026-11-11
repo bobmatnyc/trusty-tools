@@ -1373,7 +1373,10 @@ reached only through `secrets.copy` with `to_backend` set to
   judged, and an unreadable one is `grant_refused`; a bridge call is judged
   on the console's verdict. For an agent caller, a key denied to agents fails
   with `agent_key_denied` before its value is read, and the other keys still
-  run (Architect F); the launched Architect gets no exemption here. The value
+  run (Architect F). A key marked push-only for agents (§15.9, #10998) is
+  pushed: only a deny refuses, and a deny wins over the mark. A failed lookup
+  of the deny or the mark fails the key, never admits it. The launched
+  Architect gets no exemption here. The value
   goes from the server to the CLI's stdin only, never to the caller's reply,
   argv, environment, errors or audit. Each key leaves one audit record naming
   the target, the key, the caller's pid and `agent_parent`, never the value
@@ -1448,9 +1451,9 @@ caller's project vault. The rules:
     copy from an agent transcript; the exec scrubber redacts only the
     literal value. A full deny would also block the owner's trigger case,
     an agent copying a token so it can push it to a sync target; the mark
-    keeps that case agent-only. The push side honours the mark through
-    `trusty_secrets::store::is_push_only` (#10999); until then a push stays
-    operator-only as before.
+    keeps that case agent-only. The push side honours the mark (#10999,
+    §15.4 "Push"): an agent may push a push-only key, and a failed mark
+    lookup refuses the push.
   - Every other copy keeps its rule: a denied source's deny is carried as a
     deny, and an agent's copy of an undenied trusty vault key stays open, as
     that key already was. An agent may not copy over a push-only key; a

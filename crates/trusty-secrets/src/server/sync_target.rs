@@ -7,7 +7,8 @@
 //! (D4). #10999 (owner ruling 2026-11-10, Architect E/F) supersedes D3 for
 //! agents: a caller under Claude Code may push a key with no deny, because
 //! the value goes from the server to the CLI's stdin and never reaches the
-//! caller; a key denied to agents stays un-pushable by one.
+//! caller; a key denied to agents stays un-pushable by one, and a key an
+//! agent copied from a Keychain item (push-only, #10998) is pushable by one.
 //! What: [`push`], the body `methods::copy` hands a sync-target destination
 //! to, and [`State::open_sync_target`], the one place a sync target opens.
 //! The audit gate is `copy`'s own: one deny record for a refusal before the
@@ -89,8 +90,9 @@ impl State {
 /// audit log is opened, and each key is read from the project vault and
 /// written straight to the target: no index row and no compensation (D4).
 /// For a caller under Claude Code, a key denied to agents in the source, or
-/// one whose deny cannot be read, fails with [`ErrorKind::AgentKeyDenied`]
-/// (or the lookup's kind) before its value is read; its allow records say
+/// one whose deny or push-only mark cannot be read, fails with
+/// [`ErrorKind::AgentKeyDenied`] (or the lookup's kind) before its value is
+/// read; a push-only key is pushed (#10998); its allow records say
 /// `default_policy`. Every record names the caller's pid and agent verdict,
 /// never a value.
 /// A failed key lands in `failed` with a deny record and the next key runs;
@@ -99,6 +101,8 @@ impl State {
 /// Test: `server_copy_to_sync_target_without_keys_is_invalid_params`,
 /// `server_copy_to_sync_target_by_agent_descendant_pushes_an_undenied_key`,
 /// `agent_push_of_a_denied_key_fails_it_before_its_value_is_read`,
+/// `agent_push_of_a_push_only_key_sends_it`,
+/// `agent_push_with_a_failed_mark_lookup_fails_every_key`,
 /// `agent_github_push_keeps_the_value_out_of_argv_env_reply_and_audit`,
 /// `agent_vercel_push_keeps_the_value_out_of_argv_env_reply_and_audit`,
 /// `server_copy_to_sync_target_with_unreadable_ancestry_is_refused`,
@@ -148,9 +152,10 @@ pub(crate) fn push(
         let outcome = if crate::store::deadline::passed() {
             Err(ErrorKind::DeadlineExceeded)
         } else {
-            // #10999: F — a denied key, or a failed deny lookup, fails the key.
+            // #10999: F — a denied key, or a failed deny or push-only lookup,
+            // fails the key; a push-only key (#10998) is pushed.
             let admitted = match agent {
-                true => match source_store.agents_may_use(&vault, key) {
+                true => match source_store.agents_may_push(&vault, key) {
                     Ok(true) => Ok(()),
                     Ok(false) => Err(ErrorKind::AgentKeyDenied),
                     Err(e) => Err(ErrorKind::from(e)),
