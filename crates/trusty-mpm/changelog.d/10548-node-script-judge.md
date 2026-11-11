@@ -1,0 +1,2 @@
+Fixed
+- `tm hook --pm-guard` no longer refuses `node --check <file>` or `node -c <file>` for what the file contains: a syntax check parses the file and never runs it. Any other node option beside the check, or a `NODE_OPTIONS=` prefix (inline or through `env`), keeps the body judged as a run. A node run is still judged by its raw body, so a JS member access such as `x.key` still refuses; that stays open on #10548 (#10548).
