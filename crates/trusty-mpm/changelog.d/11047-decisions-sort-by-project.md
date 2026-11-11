@@ -1,3 +1,0 @@
-Added
-- The Architect dashboard's Decisions pane has a Sort select: Oldest first (the default and the previous order), Newest first, and Project (A–Z). Project mode groups the Open and Parked decisions under a header with the project name and count, projects A–Z and "No project" last, each group keeping its usual order. The choice persists in the browser (#11047).
-- Each decision row shows a project chip. `GET /api/items` computes the project from the item's session: tm's session list (`session-manager/sessions.json`) first, else the session name with a leading `tm-` and one trailing `-<digits>` removed. Nothing is stored, and an unreadable session list falls back to the name rule without dropping items (#11047).
