@@ -85,11 +85,16 @@ pub(crate) async fn doctor(
     overall = overall.worst(session_target.status);
     print_check(&session_target);
     // #11058: a kept core fleet script lacking this release's sibling wiring.
-    if let Some(home) = dirs::home_dir() {
-        let wiring = super::fleet::seed_wiring_doctor_row(&home);
-        overall = overall.worst(wiring.status);
-        print_check(&wiring);
-    }
+    let wiring = match dirs::home_dir() {
+        Some(home) => super::fleet::seed_wiring_doctor_row(&home),
+        None => DoctorCheck::new(
+            super::fleet::SEED_WIRING_CHECK,
+            CheckStatus::Unknown,
+            "no home directory, so the recorded Architects cannot be read",
+        ),
+    };
+    overall = overall.worst(wiring.status);
+    print_check(&wiring);
     // #8371: opt-in; without `--network` this spawns nothing.
     let gcloud = super::doctor_gcloud::gcloud_auth_row(flags.network).await;
     overall = overall.worst(gcloud.status);

@@ -98,34 +98,51 @@ pub(crate) fn kept_copy_warnings(dest: &str, bytes: &[u8]) -> Vec<Step> {
         .collect()
 }
 
-/// The findings for every core script below each Architect directory.
+/// The findings for every core script below each Architect directory, and
+/// how many scripts were read.
 ///
-/// What: an absent script is no finding (`init` writes it); a script that
-/// cannot be read is a finding, never a pass (#11058 Fail-Open).
-/// Test: `doctor_warns_when_a_kept_script_cannot_be_read_11058`.
-pub(crate) fn findings(dirs: &[PathBuf]) -> Vec<String> {
+/// What: an absent script is skipped (`init` writes it), but a directory
+/// where every core script is absent is a finding: nothing was checked there.
+/// A script that cannot be read is a finding, never a pass (#11058 Fail-Open).
+/// Test: `doctor_warns_when_a_kept_script_cannot_be_read_11058`,
+/// `doctor_warns_when_no_core_script_was_checked_11058`.
+pub(crate) fn findings(dirs: &[PathBuf]) -> (Vec<String>, usize) {
     let mut out = Vec::new();
+    let mut checked = 0;
+    let mut dests: Vec<&str> = REQUIRED.iter().map(|w| w.dest).collect();
+    dests.sort_unstable();
+    dests.dedup();
     for dir in dirs {
-        let mut dests: Vec<&str> = REQUIRED.iter().map(|w| w.dest).collect();
-        dests.sort_unstable();
-        dests.dedup();
-        for dest in dests {
+        let (mut read_here, mut absent_here) = (0, 0);
+        for &dest in &dests {
             let path = dir.join(dest);
             match std::fs::read(&path) {
-                Ok(bytes) => out.extend(
-                    missing(dest, &bytes)
-                        .into_iter()
-                        .map(|d| format!("{}: {d}", dir.display())),
-                ),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(bytes) => {
+                    read_here += 1;
+                    out.extend(
+                        missing(dest, &bytes)
+                            .into_iter()
+                            .map(|d| format!("{}: {d}", dir.display())),
+                    );
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => absent_here += 1,
                 Err(err) => out.push(format!(
                     "cannot read {}: {err}; its wiring is unchecked",
                     path.display()
                 )),
             }
         }
+        // #11058 review: an Architect with no core script was not checked.
+        if absent_here == dests.len() {
+            out.push(format!(
+                "{}: no core fleet script ({}) found; nothing checked, run `tm fleet init`",
+                dir.display(),
+                dests.join(", ")
+            ));
+        }
+        checked += read_here;
     }
-    out
+    (out, checked)
 }
 
 /// The `fleet_seed_wiring` row for the Architects recorded under `home`.
@@ -133,10 +150,14 @@ pub(crate) fn findings(dirs: &[PathBuf]) -> Vec<String> {
 /// Why: #11058, `tm doctor` must name a kept core script that lacks this
 /// release's wiring, not only the next `tm fleet init`.
 /// What: reads `~/.trusty-mpm/config.toml` strictly; no file or no recorded
-/// Architect is `Ok`; a config that does not parse is `Unknown`; any
-/// [`findings`] entry is `Warn`, joined.
+/// project is `Ok`; a config that does not parse is `Unknown`. A recorded
+/// `[supervisor] projects` directory that does not exist, and any
+/// [`findings`] entry, is `Warn`, joined. `Ok` names how many scripts it read.
 /// Test: `doctor_names_a_kept_poller_without_owner_answer_wiring_11058`,
-/// `doctor_warns_when_a_kept_script_cannot_be_read_11058`.
+/// `doctor_warns_when_a_kept_script_cannot_be_read_11058`,
+/// `doctor_warns_when_the_recorded_architect_dir_is_gone_11058`,
+/// `doctor_warns_when_no_core_script_was_checked_11058`,
+/// `doctor_reports_a_malformed_config_as_unknown_11058`.
 pub(crate) fn doctor_row(home: &Path) -> DoctorCheck {
     let path = super::super::user_config_path(home);
     let raw = match std::fs::read_to_string(&path) {
@@ -156,16 +177,35 @@ pub(crate) fn doctor_row(home: &Path) -> DoctorCheck {
         Ok((_, config)) => config,
         Err(err) => return DoctorCheck::new(CHECK, CheckStatus::Unknown, format!("{err:#}")),
     };
+    // #11058 review: `architects` drops an entry whose directory is gone, so
+    // the gone ones are named from the raw allowlist.
+    let gone: Vec<String> = config
+        .architect_grant()
+        .projects
+        .iter()
+        .filter(|entry| entry.is_absolute() && !entry.is_dir())
+        .map(|entry| {
+            format!(
+                "recorded `[supervisor] projects` directory {} does not exist; nothing checked there",
+                entry.display()
+            )
+        })
+        .collect();
     let dirs = super::super::config::architects(&config);
-    if dirs.is_empty() {
+    if dirs.is_empty() && gone.is_empty() {
         return DoctorCheck::new(CHECK, CheckStatus::Ok, "no Architect recorded");
     }
-    let found = findings(&dirs);
+    let (mut found, checked) = findings(&dirs);
+    found.extend(gone);
     if found.is_empty() {
         DoctorCheck::new(
             CHECK,
             CheckStatus::Ok,
-            "every core fleet script carries this release's wiring",
+            format!(
+                "{checked} core fleet script(s) read in {} Architect director(ies); \
+                 each carries this release's wiring",
+                dirs.len()
+            ),
         )
     } else {
         DoctorCheck::new(CHECK, CheckStatus::Warn, found.join("; "))

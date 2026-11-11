@@ -29,6 +29,11 @@ fn doctor_names_a_kept_poller_without_owner_answer_wiring_11058() {
     let ok = wiring::doctor_row(fx.home());
     assert_eq!(ok.name, wiring::CHECK);
     assert_eq!(ok.status, CheckStatus::Ok, "{}", ok.message);
+    assert!(
+        ok.message.starts_with("2 core fleet script(s) read in 1 "),
+        "{}",
+        ok.message
+    );
     let dest = "scripts/fleet-poll.py";
     let path = fx.dir().join(dest);
     let text = std::fs::read_to_string(&path).unwrap();
@@ -59,6 +64,51 @@ fn doctor_warns_when_a_kept_script_cannot_be_read_11058() {
         "{}",
         row.message
     );
+}
+
+/// #11058 review: a recorded Architect directory that is gone warns, naming
+/// it, instead of reading as "no Architect" or as checked.
+#[test]
+fn doctor_warns_when_the_recorded_architect_dir_is_gone_11058() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let row = wiring::doctor_row(fx.home());
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(
+        row.message
+            .contains("does not exist; nothing checked there"),
+        "{}",
+        row.message
+    );
+}
+
+/// #11058 review: an Architect with every core script absent warns that
+/// nothing was checked, never `Ok`.
+#[test]
+fn doctor_warns_when_no_core_script_was_checked_11058() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    for w in wiring::REQUIRED {
+        let _ = std::fs::remove_file(fx.dir().join(w.dest));
+    }
+    let row = wiring::doctor_row(fx.home());
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(
+        row.message.contains("no core fleet script") && row.message.contains("nothing checked"),
+        "{}",
+        row.message
+    );
+}
+
+/// A user config that does not parse is `Unknown`: neither a pass nor a finding.
+#[test]
+fn doctor_reports_a_malformed_config_as_unknown_11058() {
+    let fx = Fixture::new();
+    fx.write_config("[supervisor\nprojects = ");
+    let row = wiring::doctor_row(fx.home());
+    assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
 }
 
 /// No user config, so no Architect: nothing to check.
