@@ -28,7 +28,7 @@ pub enum ServiceId {
     Agents,
     /// trusty-events, the bus daemon, `events.health` on its socket.
     Events,
-    /// trusty-console; no UDS listener yet, so the TUI does not probe it (#10899).
+    /// trusty-console, `console.fleet_status` on its socket (#10966, #10902).
     Console,
 }
 
@@ -37,6 +37,12 @@ pub enum ServiceId {
 pub enum ProbeKind {
     /// One JSON-RPC `<method>` frame over the service's Unix socket.
     UdsHealth(&'static str),
+    /// One JSON-RPC `<method>` frame answered with a
+    /// [`ConsoleFleetStatus`](trusty_common::console_rpc::ConsoleFleetStatus);
+    /// the console's own row in it carries the tile's status and version.
+    ///
+    /// Test: `the_console_row_reads_running_with_its_version_from_fleet_status`.
+    UdsFleetStatus(&'static str),
     /// One connect to the service's Unix socket, closed at once.
     SocketConnect,
     /// The service serves no Unix socket the TUI may dial, so it is not probed.
@@ -47,7 +53,7 @@ pub enum ProbeKind {
     /// What: carries the operator-facing detail naming the server-side gap.
     /// The probe maps it straight to `TileHealth::NoUdsEndpoint` with no file
     /// read, socket or process spawn.
-    /// Test: `agents_and_console_have_no_uds_endpoint_kind`,
+    /// Test: `agents_has_no_uds_endpoint_kind`,
     /// `a_no_uds_endpoint_probe_does_no_io_and_is_not_down`.
     NoUdsEndpoint(&'static str),
     /// No resident daemon: the binary on `PATH` is the whole answer.
@@ -117,12 +123,13 @@ impl ServiceId {
             ServiceId::Events => {
                 ProbeKind::UdsHealth(trusty_common::control_bus::METHOD_EVENTS_HEALTH)
             }
-            // See #10899: the TUI sends no HTTP probe; these have no UDS yet.
+            // See #10899: the TUI sends no HTTP probe; agents has no UDS yet.
             ServiceId::Agents => {
                 ProbeKind::NoUdsEndpoint("trusty-agents has no UDS socket yet (#6433)")
             }
+            // #10966: the console's listener (#10902) serves its fleet view.
             ServiceId::Console => {
-                ProbeKind::NoUdsEndpoint("trusty-console has no UDS listener yet (ADR-0035)")
+                ProbeKind::UdsFleetStatus(trusty_common::console_rpc::METHOD_FLEET_STATUS)
             }
             ServiceId::Review => ProbeKind::OnDemand,
         }
@@ -131,9 +138,12 @@ impl ServiceId {
     /// Whether a probe that found nothing listening means "idle on demand",
     /// not "down". trusty-console's analyze connector makes the same call
     /// (#6350, #6416); any other probe failure is still down.
+    ///
+    /// Test: `an_absent_or_refused_console_socket_reads_as_on_demand_or_absent`.
     pub fn not_listening_is_on_demand(self) -> bool {
-        // #10476: analyze is on demand; not listening is idle, not down
-        matches!(self, ServiceId::Analyze)
+        // #10476: analyze is on demand; not listening is idle, not down.
+        // #10966: the console is opened when wanted; a closed one is not down.
+        matches!(self, ServiceId::Analyze | ServiceId::Console)
     }
 
     /// The stdio MCP command trusty-console spawns to call `console_metrics`

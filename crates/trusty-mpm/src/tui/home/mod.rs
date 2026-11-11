@@ -28,6 +28,9 @@ mod analyze_probe_tests;
 
 #[cfg(test)]
 mod no_uds_endpoint_tests;
+// #10966: the Console tile read over `console.fleet_status` (#10902).
+#[cfg(test)]
+mod console_fleet_status_tests;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
