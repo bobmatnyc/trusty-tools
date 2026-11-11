@@ -438,6 +438,7 @@ async fn register_10906(reg: &Path, name: &str, root: &Path) -> String {
             worktree: None,
             project_key: None,
             decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("upsert");

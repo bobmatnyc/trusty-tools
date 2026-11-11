@@ -219,6 +219,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `activity` — Show recent activity for a managed session
   - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
+  - `archive` — Move a session's project directory to ~/.trusty-tools/archive (#10991)
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
   - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)
@@ -255,6 +256,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `activity` — Show recent activity for a managed session
   - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
+  - `archive` — Move a session's project directory to ~/.trusty-tools/archive (#10991)
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
   - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)

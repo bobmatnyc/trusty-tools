@@ -72,6 +72,7 @@ async fn register_project(state: &Arc<DaemonState>, name: &str, tags: &[&str]) {
             worktree: None,
             project_key: None,
             decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("register project");

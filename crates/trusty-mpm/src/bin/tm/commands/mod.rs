@@ -45,6 +45,8 @@ pub(crate) mod dead_addr;
 pub(crate) mod dbatg;
 // #6288: one-connection daemon-socket mocks for the transport tests.
 pub(crate) mod delete;
+// #10991: `tm session archive`.
+pub(crate) mod session_archive;
 #[cfg(test)]
 pub(crate) mod socket_mock_tests;
 // #6887: the bulk-read diversion hook and its cheap worker.

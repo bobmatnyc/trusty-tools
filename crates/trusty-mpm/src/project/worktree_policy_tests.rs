@@ -41,6 +41,7 @@ fn project(name: &str, repo_url: &str, worktree: Option<bool>) -> Project {
         worktree,
         project_key: None,
         decommissioned_at: None,
+        archived_at: None,
     }
 }
 

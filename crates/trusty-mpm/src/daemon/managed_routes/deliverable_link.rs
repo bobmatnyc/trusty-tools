@@ -197,6 +197,7 @@ mod tests {
             worktree: None,
             project_key: None,
             decommissioned_at: None,
+            archived_at: None,
         }
     }
 

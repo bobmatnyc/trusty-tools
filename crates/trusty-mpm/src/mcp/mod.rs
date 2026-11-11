@@ -306,6 +306,17 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       behaviour in `crate::daemon::mcp_session_bulk`'s tests.
     async fn session_delete_records(&self, session_ids: &[String]) -> Result<Value, String>;
 
+    /// Back `session_archive` (#10991): move the session's project directory
+    /// to the 0700 archive with a manifest; `dry_run` reports the plan only.
+    /// Test: `dispatch_session_archive_tool` (mock);
+    /// `session_archive_unknown_session_is_not_found`.
+    async fn session_archive(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        force: bool,
+    ) -> Result<Value, String>;
+
     /// Back `session_activity`: capture pane + lifecycle state.
     ///
     /// Why: the driver must reason about whether a session is working / idle /

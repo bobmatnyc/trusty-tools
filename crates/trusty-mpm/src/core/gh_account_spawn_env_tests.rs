@@ -287,6 +287,7 @@ fn project(name: &str, repo_url: &str, gh_account: Option<&str>) -> Project {
         // explicit key per name keeps the store from refusing the duplicates.
         project_key: Some(format!("local:{name}")),
         decommissioned_at: None,
+        archived_at: None,
     }
 }
 

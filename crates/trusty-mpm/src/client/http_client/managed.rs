@@ -418,4 +418,26 @@ impl DaemonClient {
             .context("decoding record-only decommission response body")?;
         Ok(outcome)
     }
+
+    /// Archive a session's project directory via
+    /// `POST /api/v1/sessions/managed/{id}/archive` (#10991).
+    ///
+    /// Why: backs `tm session archive`. What: POSTs `{dry_run, force}` and
+    /// returns the report; a refusal (running session, Architect, unknown id,
+    /// failed move) is an `Err` carrying the daemon's message.
+    /// Test: `cli_parses_session_archive`; the route body in
+    /// `daemon::session_archive`'s tests.
+    pub async fn archive_managed_session(
+        &self,
+        id: &str,
+        opts: crate::session_manager::session_archive::ArchiveOptions,
+    ) -> anyhow::Result<crate::session_manager::session_archive::SessionArchiveReport> {
+        let url = format!("/api/v1/sessions/managed/{id}/archive");
+        let resp = self.post(&url).json(&opts).send().await?;
+        response_or_body_error(resp)
+            .await?
+            .json()
+            .await
+            .context("decoding archive report")
+    }
 }

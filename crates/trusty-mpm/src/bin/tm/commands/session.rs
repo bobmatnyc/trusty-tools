@@ -496,6 +496,16 @@ pub(crate) async fn session(
         SessionAction::Delete { id, force } => {
             crate::commands::delete::session_delete(daemon, id, force).await?
         }
+        // #10991: direct HTTP like `delete`; the daemon owns every guard.
+        SessionAction::Archive {
+            id,
+            dry_run,
+            force,
+            json,
+        } => {
+            crate::commands::session_archive::session_archive(daemon, &id, dry_run, force, json)
+                .await?
+        }
         // Rename a managed session. Direct HTTP (PATCH), like `delete` — a
         // distinct store+tmux mutation, not a chat-core intent.
         SessionAction::Rename { arg1, arg2 } => {

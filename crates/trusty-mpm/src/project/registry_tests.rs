@@ -119,6 +119,7 @@ async fn registry_register_idempotent() {
         worktree: None,
         project_key: None,
         decommissioned_at: None,
+        archived_at: None,
     };
     registry.register(p.clone()).await.expect("register once");
     registry
@@ -150,6 +151,7 @@ async fn registry_get() {
         worktree: None,
         project_key: None,
         decommissioned_at: None,
+        archived_at: None,
     };
     registry.register(p.clone()).await.expect("register");
 
@@ -179,6 +181,7 @@ fn make_project(name: &str) -> Project {
         worktree: None,
         project_key: None,
         decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -332,6 +335,7 @@ async fn registry_list() {
             worktree: None,
             project_key: None,
             decommissioned_at: None,
+            archived_at: None,
         };
         registry.register(p).await.expect("register");
     }
@@ -527,6 +531,7 @@ async fn registry_register_from_session_does_not_overwrite_existing() {
         worktree: None,
         project_key: None,
         decommissioned_at: None,
+        archived_at: None,
     };
     registry
         .register(manual.clone())
@@ -572,6 +577,7 @@ async fn registry_auto_register_skips_already_registered() {
         worktree: None,
         project_key: None,
         decommissioned_at: None,
+        archived_at: None,
     };
     registry.register(existing).await.expect("pre-register");
 
@@ -997,6 +1003,23 @@ async fn reactivate_for_session_clears_a_decommissioned_project() {
             .is_decommissioned(),
         "a new session must clear the decommissioned state"
     );
+}
+
+/// #10991: a new session for an archived project lifts the archived state, so
+/// the TUI stops dimming a project that runs again.
+#[tokio::test]
+async fn reactivate_for_session_clears_an_archived_project() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry.seed_from_config(&[widget_config()]).await;
+    registry
+        .mark_archived("widget", Utc::now())
+        .await
+        .expect("mark");
+    let new = make_session_with_repo("https://github.com/acme/widget.git", None);
+    let cleared = registry.reactivate_for_session(&new).await.expect("ok");
+    assert_eq!(cleared, vec!["widget".to_string()]);
+    assert!(!registry.get("widget").await.expect("get").is_archived());
 }
 
 /// #10988: an unreadable registry is returned to the caller, not only logged.

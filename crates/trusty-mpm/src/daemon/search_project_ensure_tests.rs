@@ -32,6 +32,7 @@ fn project(repo_url: &str, key: Option<&str>) -> Project {
         worktree: None,
         project_key: key.map(str::to_string),
         decommissioned_at: None,
+        archived_at: None,
     }
 }
 

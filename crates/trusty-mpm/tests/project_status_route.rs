@@ -55,6 +55,7 @@ async fn register_project(
             worktree: None,
             project_key: None,
             decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("register project");

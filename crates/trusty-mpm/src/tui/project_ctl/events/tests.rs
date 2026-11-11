@@ -46,6 +46,7 @@ fn full_project(name: &str) -> crate::project::Project {
         worktree: None,
         project_key: None,
         decommissioned_at: None,
+        archived_at: None,
     }
 }
 

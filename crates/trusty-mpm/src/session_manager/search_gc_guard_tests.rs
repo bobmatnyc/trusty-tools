@@ -218,6 +218,7 @@ async fn decommission_keeps_index_data_when_deletion_is_allowed() {
             worktree: None,
             project_key: Some("owner/full".into()),
             decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("register");

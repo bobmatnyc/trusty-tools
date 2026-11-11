@@ -325,6 +325,7 @@ fn record(gh_account: Option<&str>, github: Option<GithubConfig>) -> Project {
         worktree: None,
         project_key: None,
         decommissioned_at: None,
+        archived_at: None,
     }
 }
 

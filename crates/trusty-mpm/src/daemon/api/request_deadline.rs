@@ -152,6 +152,12 @@ pub(crate) const LONG_ROUTES: &[LongRoute] = &[
         "/api/v1/sessions/managed/{id}/delete",
         LIFECYCLE_DEADLINE,
     ),
+    // #10991: stops sessions, then moves (or copies) a directory.
+    (
+        "POST",
+        "/api/v1/sessions/managed/{id}/archive",
+        LIFECYCLE_DEADLINE,
+    ),
     (
         "POST",
         "/api/v1/sessions/managed/{id}/sync-assets",
