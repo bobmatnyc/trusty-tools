@@ -160,7 +160,9 @@ name = "trusty-mpm"
 # 1.12.3: patch — 1.12.2 is published on crates.io (release #11028);
 # post-release bump so pending `src/**` PRs clear the #4421 check.
 # Version-only commit.
-version = "1.12.3"
+# 1.13.0 (Refs #11047): minor — 1.12.2 is published on crates.io and this PR
+# adds a feature (Architect dashboard Decisions sort by project) under `src/**`.
+version = "1.13.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

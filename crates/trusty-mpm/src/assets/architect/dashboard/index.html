@@ -112,6 +112,10 @@ details[open] > summary > .chev::before { content: "▾"; }
 .pane-filter .pf-clear[hidden] { display: none; }
 .pane-filter .pf-clear:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .pane-filter .pf-status { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ink-2); }
+.pane-filter select.pf-sort { flex: none; font-size: var(--fs-sm); }   /* the Decisions Sort select (issue 11047; a hex-like tag fails the token check) */
+.dg-head { display: flex; gap: 8px; align-items: baseline; padding: 10px 4px 4px; border-top: 1px solid var(--line); font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ink-2); }
+.dg-head .n { font-weight: 400; }
+.chip.proj { color: var(--ink-2); }
 .cbar input[type=search] { flex: 1 1 180px; min-width: 0; font: inherit; font-size: var(--fs-sm); padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); }
 .cbar input[type=search]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .cbar .pg-label { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ink-2); }
@@ -463,7 +467,7 @@ button, summary, .opt { touch-action: manipulation; }
   .item > summary, .sub > summary, .sec > summary { min-height: 44px; }
   .item.prio > summary { min-height: 44px; }
   .step-top { min-height: 44px; align-items: center; }
-  .pane-filter input.pf-input, .pane-filter .pf-clear, .cbar input[type=search], .attach input[type=file], .other input, .row input, .cancel-form input, .step-note-form input, .fb-form input, .fb-form select, .wd-form textarea { min-height: 44px; font-size: 16px; }
+  .pane-filter input.pf-input, .pane-filter .pf-clear, .cbar input[type=search], .pane-filter select.pf-sort, .attach input[type=file], .other input, .row input, .cancel-form input, .step-note-form input, .fb-form input, .fb-form select, .wd-form textarea { min-height: 44px; font-size: 16px; }
 }
 @media (max-width: 600px) {
   .brand { row-gap: 8px; }
@@ -3848,6 +3852,12 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!sb) return null;
     const w = el("span", "sb-latest"); w.append("Status ", statusBriefLink(sb)); return w;
   }
+  /* #11047: a decision row's project chip, in every sort mode; data.project is computed by the server from the session (never stored). The session dashboard has one project and shows none. */
+  function projectChip(it) {
+    const p = txt(it.project).trim();
+    if (!p || askKind(it) !== "D" || (typeof SESSION !== "undefined" && SESSION)) return null;
+    const c = el("span", "chip proj", p); c.title = "Project"; return c;
+  }
   function shell(it, cls) {
     const card = el("details", "item" + (cls ? " " + cls : "") + (it.status === "open" ? " needs" : "") + (it.status === "answered" || it.status === "done" || it.status === "cancelled" || it.status === "wont_do" || it.status === "interactive" ? " faded" : ""));
     syncItemState(it);
@@ -3872,6 +3882,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     else if (it.status === "interactive") sum.appendChild(el("span", "chip", "interactive"));
     else if (it.due && !runWindow(it, Date.now())) sum.appendChild(el("span", "chip due", "by " + utc(it.due)));
     if (wasReopened(it)) sum.appendChild(el("span", "chip reopened", "reopened"));
+    { const pc = projectChip(it); if (pc) sum.appendChild(pc); }   /* #11047 */
     { const bs = briefDoc(it) ? briefSlot(it.brief) : null; if (bs) sum.appendChild(bs); }
     { const sb = statusBriefSlot(it); if (sb) sum.appendChild(sb); }
     if (isParked(it)) {
@@ -4493,7 +4504,51 @@ html.lib-strip.rd-open body { padding-right: 0; }
   function oldestFirst(a, b) {
     return txt(a.created).localeCompare(txt(b.created)) || byRank(a, b);
   }
+  /* #11047: the Decisions Sort select (D80): oldest first (default), newest first, or project A–Z. */
+  const DECISION_SORTS = [["oldest", "Oldest first"], ["newest", "Newest first"], ["project", "Project (A–Z)"]];
+  function newestFirst(a, b) {
+    return txt(b.created).localeCompare(txt(a.created)) || byRank(a, b);
+  }
+  /* Project groups of a list already in display order: projects A–Z, then "" (No project) last; each group keeps the list's order. */
+  function decisionGroups(list) {
+    const by = new Map();
+    list.forEach((i) => { const p = txt(i && i.project).trim(); if (!by.has(p)) by.set(p, []); by.get(p).push(i); });
+    const keys = Array.from(by.keys()).sort((x, y) => (x === "") - (y === "") || x.localeCompare(y, undefined, { sensitivity: "base" }) || (x < y ? -1 : x > y ? 1 : 0));
+    return keys.map((k) => ({ project: k, items: by.get(k) }));
+  }
+  /* Open decisions in display order for a sort mode; an unknown mode is oldest first. */
+  function decisionList(list, mode) {
+    if (mode === "newest") return list.sort(newestFirst);
+    list.sort(oldestFirst);
+    return mode === "project" ? decisionGroups(list).reduce((a, g) => a.concat(g.items), []) : list;
+  }
   /* END decisionOrder */
+  /* BEGIN decisionGroupsDom */
+  /* #11047: Project mode puts a header (project name + count) before each group; the other modes render the rows flat. */
+  function decisionNodes(list, mode, render) {
+    if (mode !== "project") return list.map(render);
+    return decisionGroups(list).reduce((a, g) => {
+      const h = el("div", "dg-head"), name = g.project || "No project";
+      h.dataset.dgroup = g.project;
+      h.append(el("span", "dg-name", name), el("span", "n", String(g.items.length)));
+      h.setAttribute("role", "heading"); h.setAttribute("aria-level", "4");
+      return a.concat([h], g.items.map(render));
+    }, []);
+  }
+  /* After the pane and nav filters hide rows, each group header counts its visible rows and drops out at zero. */
+  function dgSync(box) {
+    let head = null, n = 0;
+    const done = () => { if (head) { head.querySelector(".n").textContent = String(n); head.classList.toggle("nv-off", !n); } };
+    Array.from(box.children).forEach((c) => {
+      if (c.classList.contains("dg-head")) { done(); head = c; n = 0; }
+      else if (c.matches("[data-pid]") && !c.classList.contains("nv-off")) n++;
+    });
+    done();
+  }
+  /* END decisionGroupsDom */
+  const DSORT_KEY = OPEN_KEY + "-decision-sort";
+  let decisionSort = "oldest";
+  try { const v = localStorage.getItem(DSORT_KEY); if (DECISION_SORTS.some((s) => s[0] === v)) decisionSort = v; } catch (_) {}
   function newest(field) { return (x, y) => txt(y[field]).localeCompare(txt(x[field])); }
 
   /* Parked items sit in one collapsed bucket per section, soonest wake date first; they use the normal rows so answers still work. */
@@ -4501,8 +4556,10 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const by = { D: [], A: [], T: [] };
     items.filter(isParked).forEach((i) => by[askKind(i)].push(i));
     [["D", "q", renderQuestion], ["A", "a", renderAction], ["T", "t", renderTask]].forEach((k) => {
-      const list = by[k[0]].sort((x, y) => txt(x.parked.until || "").localeCompare(txt(y.parked.until || "")));
-      fillList($("list-" + k[1] + "p"), list.map(k[2]), "Nothing parked.");
+      let list = by[k[0]].sort((x, y) => txt(x.parked.until || "").localeCompare(txt(y.parked.until || "")));
+      const grouped = k[0] === "D" && decisionSort === "project";   /* #11047: Parked decisions group by project too, wake order kept */
+      if (grouped) list = decisionGroups(list).reduce((a, g) => a.concat(g.items), []);
+      fillList($("list-" + k[1] + "p"), grouped ? decisionNodes(list, "project", k[2]) : list.map(k[2]), "Nothing parked.");
       $("n-" + k[1] + "p").textContent = String(list.length);
       nl({ D: "decisions", A: "asks", T: "tasks" }[k[0]]).parked = list;
     });
@@ -4622,10 +4679,10 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const nBrief = (k) => briefing.filter((i) => askKind(i) === k).length;
     const P = partitionItems(open, answered, done);
     renderParked();
-    const q = P.q.sort(oldestFirst), qa = P.qa;
+    const q = decisionList(P.q, decisionSort), qa = P.qa;   /* #11047: the Sort select's order */
     const a = P.a.sort(sortKey), aa = P.aa;
     const t = P.t.concat(P.ta).sort(sortKey), ta = [];   /* Tasks have no Answered tab (the owner 2026-10-22 17:0xZ, ar-Tc2): an answered task counts as in progress */
-    fillList($("list-q"), q.map(renderQuestion), "Nothing to decide right now.");
+    fillList($("list-q"), decisionNodes(q, decisionSort, renderQuestion), "Nothing to decide right now.");
     fillList($("list-a"), a.map(renderAction), "No blockers right now.");
     fillList($("list-t"), t.map(renderTask), "The Architect has no open tasks.");
     /* Answered (waiting for the Architect) and Done are separate tabs, so the tab counts add up to the section summary (the owner 2026-10-21 14:34Z). */
@@ -6436,7 +6493,15 @@ html.lib-strip.rd-open body { padding-right: 0; }
       inp.addEventListener("input", () => { clr.hidden = !inp.value; clearTimeout(t); t = setTimeout(() => paneSetQuery(p[0], inp.value), 120); });
       inp.addEventListener("keydown", (e) => { if (e.key === "Escape" && inp.value) { e.preventDefault(); e.stopPropagation(); clearTimeout(t); inp.value = ""; clr.hidden = true; paneSetQuery(p[0], ""); } });
       clr.addEventListener("click", () => { clearTimeout(t); inp.value = ""; clr.hidden = true; paneSetQuery(p[0], ""); inp.focus(); });
-      box.append(inp, clr, st);
+      box.append(inp, clr);
+      if (p[0] === "decisions") {   /* #11047: the Sort select; the pane filter still applies first */
+        const sel = el("select", "ctl pf-sort"); sel.id = "decision-sort"; sel.setAttribute("aria-label", "Sort decisions"); sel.title = "Sort the open and parked decisions";
+        DECISION_SORTS.forEach((o) => { const op = el("option", null, o[1]); op.value = o[0]; sel.appendChild(op); });
+        sel.value = decisionSort;
+        sel.addEventListener("change", () => { decisionSort = sel.value; try { localStorage.setItem(DSORT_KEY, decisionSort); } catch (_) {} render(); });
+        box.appendChild(sel);
+      }
+      box.appendChild(st);
       sec.insertBefore(box, body);
     });
   }
@@ -6480,6 +6545,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
           if (!off && pq) { const rec = recFor(r); off = rec ? !paneHit(rec, pq) : r.textContent.toLowerCase().indexOf(pq) < 0; }
           r.classList.toggle("nv-off", off);
         });
+        dgSync(box);   /* #11047: group headers count what the filters left */
       });
       if (pq) sec.querySelectorAll("details.sub").forEach((b) => {   /* a status block with no match drops out while the pane filter is on */
         const shown = Array.from(b.querySelectorAll(".rows > [data-pid], .rows > .goal-row, .rows > .il-sess")).some((r) => !r.classList.contains("nv-off"));
