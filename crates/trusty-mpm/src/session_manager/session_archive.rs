@@ -126,6 +126,20 @@ pub struct PreparedArchive {
     pub mark_project: Option<String>,
 }
 
+impl PreparedArchive {
+    /// The report a dry run returns: the plan, who would stop, and whether the
+    /// project would be stamped.
+    pub fn into_dry_run_report(self) -> SessionArchiveReport {
+        SessionArchiveReport {
+            dry_run: true,
+            stopped: self.running.iter().map(ToString::to_string).collect(),
+            project_archived: self.mark_project.is_some(),
+            plan: self.plan,
+            manifest: None,
+        }
+    }
+}
+
 /// The directory a record works in: its workspace, else its start directory.
 fn session_dir(r: &SessionRecord) -> &Path {
     r.workspace_path.as_deref().unwrap_or(&r.cwd)
@@ -168,13 +182,7 @@ impl SessionManager {
     ) -> Result<SessionArchiveReport, SessionArchiveError> {
         let prepared = self.prepare_archive(registry, id, opts, root).await?;
         if opts.dry_run {
-            return Ok(SessionArchiveReport {
-                dry_run: true,
-                stopped: prepared.running.iter().map(ToString::to_string).collect(),
-                project_archived: prepared.mark_project.is_some(),
-                plan: prepared.plan,
-                manifest: None,
-            });
+            return Ok(prepared.into_dry_run_report());
         }
         self.finish_archive(registry, prepared).await
     }

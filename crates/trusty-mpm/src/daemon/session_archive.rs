@@ -11,6 +11,7 @@
 //! `crate::mcp::tests`; `every_route_names_a_served_method`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -22,7 +23,7 @@ use trusty_common::uds::server::RpcRouter;
 use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::ManagedError;
-use crate::session_manager::archive_move::{ArchiveMoveError, default_archive_root};
+use crate::session_manager::archive_move::{ArchiveMoveError, MANIFEST_FILE, default_archive_root};
 use crate::session_manager::record::ManagedSessionId;
 use crate::session_manager::session_archive::{
     ArchiveOptions, SessionArchiveError, SessionArchiveReport,
@@ -52,12 +53,17 @@ fn to_daemon_error(e: SessionArchiveError) -> DaemonError {
     }
 }
 
+/// How long a caller waits for the move before the daemon answers; under the
+/// route's 90 s `LIFECYCLE_DEADLINE`, so the answer is this module's (naming
+/// the entry), not the deadline layer's bare 504 (#10991).
+const ARCHIVE_WAIT: Duration = Duration::from_secs(75);
+
 /// The transport-neutral body of every session-archive entry point.
 ///
 /// # Errors
 ///
 /// [`DaemonError::InvalidRequest`] for an id that is not a UUID; otherwise see
-/// [`to_daemon_error`].
+/// [`to_daemon_error`] and [`session_archive_op_at`].
 /// Test: `session_archive_unknown_session_is_not_found`,
 /// `session_archive_rejects_a_bad_id`.
 pub async fn session_archive_op(
@@ -65,16 +71,54 @@ pub async fn session_archive_op(
     id: &str,
     opts: ArchiveOptions,
 ) -> Result<SessionArchiveReport, DaemonError> {
+    let root = default_archive_root().map_err(|e| DaemonError::Internal(e.to_string()))?;
+    session_archive_op_at(state, id, opts, &root, ARCHIVE_WAIT).await
+}
+
+/// [`session_archive_op`] with an explicit archive root and caller wait.
+///
+/// Why: #10991 critic MEDIUM — a caller that times out (or disconnects) used
+/// to drop the request future after the move but before the project stamp.
+/// What: checks and plans in the request, then runs the finish (stop, move,
+/// stamp) in its own task, which completes whatever the caller does. Waits
+/// `wait` for it; past that, answers [`DaemonError::ServiceUnavailable`]
+/// naming the entry and its manifest while the task finishes.
+/// Test: `a_caller_timeout_still_stamps_the_archived_project`.
+pub(crate) async fn session_archive_op_at(
+    state: &Arc<DaemonState>,
+    id: &str,
+    opts: ArchiveOptions,
+    root: &std::path::Path,
+    wait: Duration,
+) -> Result<SessionArchiveReport, DaemonError> {
     let id = id
         .parse::<uuid::Uuid>()
         .map(ManagedSessionId::from)
         .map_err(|_| DaemonError::InvalidRequest(format!("`{id}` is not a session id")))?;
-    let root = default_archive_root().map_err(|e| DaemonError::Internal(e.to_string()))?;
     let mgr = state.session_manager().await;
     let registry = state.project_registry().await;
-    mgr.archive_session(&registry, &id, opts, &root)
+    let prepared = mgr
+        .prepare_archive(&registry, &id, opts, root)
         .await
-        .map_err(to_daemon_error)
+        .map_err(to_daemon_error)?;
+    if opts.dry_run {
+        return Ok(prepared.into_dry_run_report());
+    }
+    let entry = prepared.plan.entry.clone();
+    let task = tokio::spawn(async move { mgr.finish_archive(&registry, prepared).await });
+    match tokio::time::timeout(wait, task).await {
+        Ok(Ok(done)) => done.map_err(to_daemon_error),
+        Ok(Err(join)) => Err(DaemonError::Internal(format!(
+            "archive task for {} failed: {join}",
+            entry.display()
+        ))),
+        Err(_) => Err(DaemonError::ServiceUnavailable(format!(
+            "archive to {} is still running in the daemon and will complete, \
+             project stamp included; its manifest will be {}",
+            entry.display(),
+            entry.join(MANIFEST_FILE).display()
+        ))),
+    }
 }
 
 /// `session_archive` MCP tool: [`session_archive_op`] as JSON.
@@ -158,6 +202,60 @@ mod tests {
             .await
             .expect_err("bad id");
         assert!(matches!(err, DaemonError::InvalidRequest(_)), "{err}");
+    }
+
+    /// #10991 critic MEDIUM: a caller whose wait runs out gets an answer
+    /// naming the entry, and the move still finishes and stamps the project.
+    /// Runs on the current-thread runtime, so a zero wait elapses before the
+    /// spawned finish has run at all.
+    #[tokio::test]
+    async fn a_caller_timeout_still_stamps_the_archived_project() {
+        let state = isolated_state().await;
+        let scratch = crate::test_support::hermetic_temp_dir();
+        let project_dir = scratch.path().join("widget");
+        std::fs::create_dir_all(&project_dir).expect("mkdir");
+        let archive_root = scratch.path().join("archive");
+        let repo = "https://github.com/acme/widget";
+        let registry = state.project_registry().await;
+        let project: crate::project::Project = serde_json::from_value(serde_json::json!({
+            "name": "widget", "repo_url": repo, "default_branch": "main",
+        }))
+        .expect("project");
+        registry.register(project).await.expect("register");
+        let id = ManagedSessionId::new();
+        let mut record: crate::session_manager::SessionRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": id.to_string(), "task": "t", "tmux_name": "tm-w",
+                "cwd": project_dir, "state": "stopped",
+                "created_at": "2026-11-11T00:00:00Z",
+            }))
+            .expect("record");
+        record.repo_url = Some(repo.into());
+        let mgr = state.session_manager().await;
+        mgr.store.write().await.upsert(record).await.expect("seed");
+
+        let opts = ArchiveOptions::default();
+        let err =
+            session_archive_op_at(&state, &id.to_string(), opts, &archive_root, Duration::ZERO)
+                .await
+                .expect_err("a zero wait answers before the move");
+        let msg = err.to_string();
+        assert!(matches!(err, DaemonError::ServiceUnavailable(_)), "{msg}");
+        assert!(
+            msg.contains(&*archive_root.to_string_lossy()),
+            "names no entry: {msg}"
+        );
+        assert!(msg.contains(MANIFEST_FILE), "{msg}");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !registry.get("widget").await.expect("row").is_archived() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the move finished but the project was never stamped"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!project_dir.exists(), "the directory was not moved");
     }
 
     #[test]
