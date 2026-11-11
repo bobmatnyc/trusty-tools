@@ -1072,7 +1072,7 @@ async fn a_staged_run_dropped_mid_batch_refuses_or_rolls_back() {
 
     // The rollback settles: a put is accepted again, into live.
     let accepted = loop {
-        if let Ok(body) = try_put(&state, id, LATE, LATE_BODY).await {
+        if let Ok(body) = try_put(state, id, LATE, LATE_BODY).await {
             break body;
         }
         assert!(
@@ -1097,16 +1097,16 @@ async fn a_staged_run_dropped_mid_batch_refuses_or_rolls_back() {
         .expect("attached");
     assert_eq!(
         std::fs::canonicalize(attached.path()).ok(),
-        std::fs::canonicalize(&live).ok(),
+        std::fs::canonicalize(live).ok(),
         "live is re-attached"
     );
     drop(attached);
     assert!(
-        corpus_holds(&handle, LATE).await,
+        corpus_holds(handle, LATE).await,
         "the later put is in live"
     );
     assert!(
-        !corpus_holds(&handle, PUSHED).await,
+        !corpus_holds(handle, PUSHED).await,
         "the put taken into staging is discarded"
     );
     assert!(!staging_probe(), "HNSW staging ended with the rollback");
