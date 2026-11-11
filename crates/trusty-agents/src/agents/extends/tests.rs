@@ -1517,6 +1517,9 @@ model = ""
 description = ""
 extends = "base"
 provider_id = "bedrock"
+[llm]
+temperature = 0.0
+max_tokens = 1024
 [system_prompt]
 content = "c"
 "#);
@@ -1545,8 +1548,21 @@ fn bundled_cto_assistant_keeps_its_bedrock_pin_through_extends() {
     let dir = crate::agents::bundled::content::test_support::repo_tree_dir(
         crate::agents::bundled::BundledTreeKind::Agents,
     );
-    let read =
-        |rel: &str| std::fs::read_to_string(dir.join(rel)).expect("read a bundled agent template");
+    // #11043: a directory package keeps its prompt in persona.md, so stand in
+    // a placeholder `system_prompt.content` before the strict parse.
+    let read = |rel: &str| {
+        let raw = std::fs::read_to_string(dir.join(rel)).expect("read a bundled agent template");
+        let mut table: toml::Table = toml::from_str(&raw).expect("bundled agent TOML parses");
+        let prompt = table
+            .entry("system_prompt")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let Some(prompt) = prompt.as_table_mut() {
+            prompt
+                .entry("content")
+                .or_insert_with(|| toml::Value::String("placeholder".to_string()));
+        }
+        toml::to_string(&table).expect("re-serialize bundled agent TOML")
+    };
     let base = cfg(&read("assistant/agent.toml"));
     let cto = cfg(&read("cto-assistant/agent.toml"));
     assert_eq!(cto.agent.extends.as_deref(), Some("assistant"));
