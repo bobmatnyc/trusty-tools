@@ -1,0 +1,2 @@
+Fixed
+- trusty-mpm tests that failed only in a parallel run now pass there. The action-event spool tests and the `sm serve --stdio` stop tests move each spool file onto a fresh inode before a replay, so a lock that a concurrent test's forked child inherited cannot make the replay skip the file. The complete-file hook repair test takes a framework layout under its own temp dir instead of the process-global `$HOME` (#10748).

@@ -623,6 +623,34 @@ impl Drop for HangFifo {
     }
 }
 
+/// Move every spool file in `dir` onto a fresh inode, same name, bytes and
+/// mode (#10748).
+///
+/// Why: `spool::persist` writes under an exclusive `flock`. A child that a
+/// concurrent test forks in that window inherits the locked fd and holds the
+/// lock until its `exec`, so a replay right after the write counts the file
+/// held and takes nothing. `O_CLOEXEC` closes the fd at `exec`, not at `fork`.
+/// What: reads each `.ndjson` file, unlinks it and writes the bytes again
+/// under the same name. A lock belongs to the old inode, so the new file is
+/// unlocked whatever a forked child still holds; nothing is waited on.
+/// Test: `hooks_that_evict_replayed_events_keep_their_file_10467`,
+/// `sm_stdio_stop_spools_and_next_start_replays_10464`.
+pub(crate) fn relink_spool_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.map(|e| e.expect("spool entry").path()) {
+        if path.extension().is_none_or(|x| x != "ndjson") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("read spool file");
+        let mode = std::fs::metadata(&path).expect("spool meta").permissions();
+        std::fs::remove_file(&path).expect("unlink spool file");
+        std::fs::write(&path, bytes).expect("rewrite spool file");
+        std::fs::set_permissions(&path, mode).expect("spool mode");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// #9101: the identity the fake derives names the session the pane id
