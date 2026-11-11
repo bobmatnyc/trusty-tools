@@ -51,7 +51,9 @@ pub fn change_deny(
 /// One agent-control item a backend may hold beside a key's value.
 ///
 /// What: each is present or absent; its stored text is never read.
+// #10998: non_exhaustive so a later control item is not a semver break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum ControlItem {
     /// The key is denied to callers under a Claude Code parent. Per key.
     AgentDeny,
