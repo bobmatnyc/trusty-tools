@@ -1,0 +1,19 @@
+{
+  "leak": "-",
+  "about": "Control (#10964): two true findings on one line describe different defects and quote different code on it; both survive.",
+  "diff_file": "login.diff",
+  "reviewer": {
+    "prose": "SQL injection and a plaintext password compare at login.py:6.",
+    "verdict": "BLOCK",
+    "grade": "F",
+    "findings": [
+      {"title": "SQL injection", "body": "`q = \"SELECT pw FROM users WHERE name = '\" + user` concatenates form input into SQL.", "quoted_snippet": "q = \"SELECT pw FROM users WHERE name = '\" + user", "severity": "high", "confidence": 0.95, "code_provable": true, "file": "login.py", "line": 6},
+      {"title": "Plaintext password compare", "body": "`\"' AND pw = '\" + pw` compares the stored password in plain text.", "quoted_snippet": "\"' AND pw = '\" + pw", "severity": "high", "confidence": 0.9, "code_provable": true, "file": "login.py", "line": 6}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": [],
+  "forbidden_in_body": [],
+  "expect_survivors": 2,
+  "expect_verdict": "BLOCK"
+}

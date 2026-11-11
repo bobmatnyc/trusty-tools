@@ -781,3 +781,146 @@ fn a_ranged_citation_never_contradicts_a_line_inside_it() {
     assert_eq!(n, 0, "a range may quote any line in it");
     assert_eq!(findings.len(), 2);
 }
+
+// ─── #10964: payload and fix quotes; same-line findings ──────────────────────
+
+/// `login.py`: line 6 builds a query from form input and compares the
+/// password in plain text.
+fn login_index() -> DiffContentIndex {
+    DiffContentIndex::from_filtered(&filtered(vec![kept_file(
+        "login.py",
+        vec![hunk(
+            "@@ -0,0 +1,12 @@",
+            &[
+                "+import sqlite3",
+                "+",
+                "+def login(db, form):",
+                "+    user = form[\"user\"]",
+                "+    pw = form[\"password\"]",
+                "+    q = \"SELECT pw FROM users WHERE name = '\" + user + \"' AND pw = '\" + pw + \"'\"",
+                "+    try:",
+                "+        row = db.execute(q).fetchone()",
+                "+    except:",
+                "+        return True",
+                "+    authed = row",
+                "+    return authed",
+            ],
+        )],
+    )]))
+}
+
+/// The SQL-injection quote and the plaintext-password quote, both on line 6.
+const SQL_QUOTE: &str = "q = \"SELECT pw FROM users WHERE name = '\" + user";
+const PW_QUOTE: &str = "\"' AND pw = '\" + pw";
+
+fn login_finding(kind: &str, quote: Option<&str>, body: &str) -> Finding {
+    let mut f = Finding::new("login.py", kind, body, "", 0.9, Effort::High);
+    f.line = Some(6);
+    f.quoted_snippet = quote.map(str::to_string);
+    f
+}
+
+/// #10964 (TRUE 3): two findings on one line that describe different
+/// defects are not a mutual contradiction; both are kept.
+#[test]
+fn two_defects_on_one_line_are_not_a_contradiction() {
+    let mut findings = vec![
+        login_finding(
+            "SQL injection",
+            Some(SQL_QUOTE),
+            &format!("`{SQL_QUOTE}` concatenates the form name into SQL."),
+        ),
+        login_finding(
+            "Plaintext password compare",
+            Some(PW_QUOTE),
+            &format!("`{PW_QUOTE}` compares the stored password in plain text."),
+        ),
+    ];
+    let mut withheld = Vec::new();
+    let n = enforce_citation_integrity(&mut findings, &login_index(), &mut withheld);
+    assert_eq!(n, 0, "{withheld:?}");
+    assert_eq!(findings.len(), 2);
+}
+
+/// #10964 (TRUE 3): apostrophes in prose and single quotes in SQL are not
+/// citations, so two findings quoting the same code do not contradict.
+#[test]
+fn single_quotes_in_prose_and_sql_do_not_contradict() {
+    let mut findings = vec![
+        login_finding(
+            "SQL injection",
+            None,
+            &format!("The handler doesn't escape the user's name: `{SQL_QUOTE}`."),
+        ),
+        login_finding(
+            "SQL injection",
+            None,
+            &format!("It's built by concatenation in `{SQL_QUOTE}`, so it's injectable."),
+        ),
+    ];
+    let mut withheld = Vec::new();
+    let n = enforce_citation_integrity(&mut findings, &login_index(), &mut withheld);
+    assert_eq!(n, 0, "{withheld:?}");
+}
+
+/// #10964 (TRUE 1): a labelled payload is not required to be in the file
+/// when the finding's `quoted_snippet` is.
+#[test]
+fn a_labelled_payload_does_not_drop_a_finding_whose_snippet_is_in_the_file() {
+    let mut f = login_finding(
+        "SQL injection",
+        Some(SQL_QUOTE),
+        "The name reaches SQL unescaped; an input such as `' OR '1'='1' --` doesn't need the password.",
+    );
+    f.consequence = "Fix: `cur.execute(\"... WHERE name = ?\", (user,))` closes it.".to_string();
+    let mut findings = vec![f];
+    let mut withheld = Vec::new();
+    let n = enforce_citation_integrity(&mut findings, &login_index(), &mut withheld);
+    assert_eq!(n, 0, "{withheld:?}");
+}
+
+/// #10964 fail-open guard: the same defect claim on one line with
+/// incompatible `quoted_snippet` values still drops both findings.
+#[test]
+fn the_same_defect_with_incompatible_snippets_still_contradicts() {
+    let mut findings = vec![
+        login_finding(
+            "SQL injection",
+            Some(SQL_QUOTE),
+            "The query is built by hand.",
+        ),
+        login_finding(
+            "SQL injection",
+            Some("cursor.executescript(raw_sql)"),
+            "The query is built by hand.",
+        ),
+    ];
+    let n = enforce_citation_integrity(&mut findings, &login_index(), &mut Vec::new());
+    assert_eq!(n, 2, "{findings:?}");
+}
+
+/// #10964 fail-open guard: a finding whose only backtick quote is fabricated
+/// file content still drops.
+#[test]
+fn an_unlabelled_fabricated_quote_still_drops() {
+    let mut findings = vec![login_finding(
+        "SQL injection",
+        None,
+        "`db.execute(q, trusted=True)` runs the raw query.",
+    )];
+    let n = enforce_citation_integrity(&mut findings, &login_index(), &mut Vec::new());
+    assert_eq!(n, 1);
+}
+
+/// #10964 fail-open guard: a labelled payload with no file quote beside it
+/// is still checked, so a finding quoting only a payload drops.
+#[test]
+fn a_payload_with_no_file_quote_still_drops() {
+    let mut findings = vec![login_finding(
+        "SQL injection",
+        None,
+        "A payload such as `' OR '1'='1'; DROP TABLE users --` bypasses login.",
+    )];
+    let n = enforce_citation_integrity(&mut findings, &login_index(), &mut Vec::new());
+    assert_eq!(n, 1);
+}

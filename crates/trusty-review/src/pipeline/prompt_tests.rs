@@ -768,3 +768,28 @@ fn review_schema_requires_a_quote_and_offers_questions() {
         .collect();
     assert!(required.contains(&"questions"), "{required:?}");
 }
+
+/// #10964: the schema tells the reviewer that backticks in `body` quote the
+/// file, and that a payload or fix goes in `suggested_replacement` or is
+/// labelled with a cue the citation checks read.
+#[test]
+fn review_schema_says_body_backticks_quote_the_file() {
+    let schema = review_response_schema().schema;
+    let items = &schema["properties"]["findings"]["items"]["properties"];
+    let body = items["body"]["description"].as_str().unwrap_or_default();
+    for phrase in [
+        "Text in backticks means code copied verbatim from `file`",
+        "suggested_replacement",
+        "a payload such as",
+        "Fix:",
+    ] {
+        assert!(body.contains(phrase), "{phrase:?} missing from {body:?}");
+    }
+    let consequence = items["consequence"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        consequence.contains("Backticks follow the `body` rule"),
+        "{consequence}"
+    );
+}

@@ -1,0 +1,18 @@
+{
+  "leak": "-",
+  "about": "Control (#10964): a true SQL-injection finding whose consequence quotes the attack payload, which is not in the file, survives on its placed quote.",
+  "diff_file": "login.diff",
+  "reviewer": {
+    "prose": "SQL injection at login.py:6.",
+    "verdict": "BLOCK",
+    "grade": "F",
+    "findings": [
+      {"title": "SQL injection", "body": "`q = \"SELECT pw FROM users WHERE name = '\" + user` concatenates form input into SQL.", "consequence": "An input such as `' OR '1'='1' --` logs in as any user.", "quoted_snippet": "q = \"SELECT pw FROM users WHERE name = '\" + user", "severity": "high", "confidence": 0.95, "code_provable": true, "file": "login.py", "line": 6}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": [],
+  "forbidden_in_body": [],
+  "expect_survivors": 1,
+  "expect_verdict": "BLOCK"
+}
