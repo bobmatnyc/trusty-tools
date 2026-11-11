@@ -207,6 +207,10 @@ fn an_untracked_variable_script_refuses_10672() {
     file(&s, "build_test.py", BUILD_PY.as_bytes());
     file(&s, "payload.docx", &FAKE_DOCX);
     file(&s, "notes.txt", b"plain notes\n");
+    // #10548: `$S` holding a spaced value word-splits, so the shell runs a
+    // different path than the spaced one that exists here.
+    let spaced = l.root.join("a b");
+    file(&spaced, "build_test.py", BUILD_PY.as_bytes());
     let sd = s.display();
     let computed = "computed at run time";
     let rows: Vec<(String, &str)> = vec![
@@ -242,6 +246,10 @@ fn an_untracked_variable_script_refuses_10672() {
         ),
         (
             format!("S={sd}; python3 ${{S:-/x}}/build_test.py"),
+            computed,
+        ),
+        (
+            format!("S=\"{}\"; python3 $S/build_test.py", spaced.display()),
             computed,
         ),
         (format!("python3 -X dev {sd}/payload.docx"), "not UTF-8"),

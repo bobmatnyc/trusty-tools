@@ -179,13 +179,19 @@ fn assigned_literal(text: &str, segment: &str, name: &str) -> Option<String> {
 }
 
 /// Whether an assignment's unquoted value is a plain literal: non-empty, and
-/// every character a letter, digit, non-ASCII, space or one of `/._-+,:@%=_`.
-/// No expansion, glob, tilde or substitution survives this.
+/// every character a letter, digit, non-whitespace non-ASCII, or one of
+/// `/._-+,:@%=_`. No expansion, glob, tilde, substitution or word split
+/// survives this.
+/// Test: `plain_literal_refuses_every_shell_expansion_10672`,
+/// `an_untracked_variable_script_refuses_10672`.
 fn plain_literal(value: &str) -> bool {
+    // #10548: whitespace is refused — an unquoted `$S` word-splits on it, so
+    // the shell would run a different path than the one judged.
     !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_alphanumeric() || !c.is_ascii() || "/._-+,:@%= _".contains(c))
+        && value.chars().all(|c| {
+            !c.is_whitespace()
+                && (c.is_alphanumeric() || !c.is_ascii() || "/._-+,:@%=_".contains(c))
+        })
 }
 
 #[cfg(test)]
@@ -195,9 +201,23 @@ mod tests {
     /// Only a value with no expansion, glob, tilde or quote is plain.
     #[test]
     fn plain_literal_refuses_every_shell_expansion_10672() {
-        assert!(plain_literal("/var/folders/a_b/T/.tmp-x/scratch pad"));
+        assert!(plain_literal("/var/folders/a_b/T/.tmp-x/scratch_pad"));
         for value in [
-            "", "$X", "~/x", "a*", "a?", "[a]", "{a,b}", "$(x)", "`x`", "a'b", "a\"b",
+            "",
+            "$X",
+            "~/x",
+            "a*",
+            "a?",
+            "[a]",
+            "{a,b}",
+            "$(x)",
+            "`x`",
+            "a'b",
+            "a\"b",
+            // #10548: an unquoted `$S` word-splits on whitespace.
+            "/scratch pad",
+            "a\tb",
+            "a\u{a0}b",
         ] {
             assert!(!plain_literal(value), "{value:?} must not be plain");
         }
