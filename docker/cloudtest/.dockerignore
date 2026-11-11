@@ -4,3 +4,7 @@
 **/*.pem
 **/*.key
 proxy/
+.claude
+**/.claude
+.credentials.json
+**/.credentials.json

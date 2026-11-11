@@ -57,10 +57,12 @@ is not backed up. Treat both as gone after a reboot.
 
 The app container sits on an `--internal` network with no route out. A squid
 proxy container sits on that network and on the default bridge, and allows
-`CONNECT api.anthropic.com:443` only. No port is published. The token is the
-single line `CLAUDE_CODE_OAUTH_TOKEN=<value>` in a host file, mounted read-only;
-place it with `RUNG2-TOKEN-CHECKLIST.md`. Never pass it with `--env-file`, `-e`
-or a build arg.
+`CONNECT` to port 443 of `api.anthropic.com`, `platform.claude.com` and
+`claude.ai` only. No port is published. There is no token file: the owner logs in
+to Claude Code interactively inside the container, and the credential is stored
+at `/data/home/.claude/.credentials.json` on the state volume. Never pass a
+credential with `--env-file`, `-e` or a build arg. `.dockerignore` excludes
+`.claude/` and `.credentials.json` so neither can enter an image layer.
 
 ```bash
 SHA=$(git rev-parse --short HEAD)
@@ -76,33 +78,49 @@ docker create --name tm-trusty-cloud-egress --cpus 1 --memory 256m \
 docker network connect bridge tm-trusty-cloud-egress
 docker start tm-trusty-cloud-egress
 
-# app: internal network only
+# app: internal network only, no secret mount
+chmod 700 ~/cloudtest/tm-trusty-cloud-cloudtest/state    # holds the login credential
 docker run -d --name tm-trusty-cloud-cloudtest --cpus 4 --memory 6g \
   --network tm-trusty-cloud-internal \
   -v ~/cloudtest/tm-trusty-cloud-cloudtest/state:/data \
   -v ~/.cache/fastembed:/models/fastembed:ro \
-  -v ~/cloudtest/tm-trusty-cloud-cloudtest/secrets/claude.env:/run/secrets/claude.env:ro \
   tm-trusty-cloud-cloudtest:$SHA
 
 docker exec -u cloudtest tm-trusty-cloud-cloudtest check.sh     # stores the memory sentinel
 docker exec -u cloudtest tm-trusty-cloud-cloudtest rung2.sh
-docker exec tm-trusty-cloud-egress cat /var/log/squid/access.log   # evidence: TCP_TUNNEL/200 api.anthropic.com, TCP_DENIED/403 example.com
+docker exec tm-trusty-cloud-egress cat /var/log/squid/access.log   # evidence: TCP_TUNNEL/200 for the three hosts, TCP_DENIED/403 example.com
 ```
 
-The proxy subnet ACL in `proxy/squid.conf` matches `10.250.77.0/24`; change both
-together. If a deny line names `platform.claude.com` or `claude.ai`, uncomment
-the matching `acl` and `http_access allow` lines in `squid.conf` and rebuild the
-proxy. Claude Code is the native `linux-x64` binary from downloads.claude.ai,
-pinned by `CLAUDE_CODE_VERSION` and `CLAUDE_CODE_SHA256` build args and checked
-against Anthropic's `manifest.json`; the build fails on any mismatch.
-`claude-run` reads the token file into one `claude` process only; the daemons
-never see it.
-
-### Cleanup when rung 2 ends
+### Interactive login (owner, once)
 
 ```bash
-rm -f ~/cloudtest/tm-trusty-cloud-cloudtest/secrets/claude.env
+ssh -t evo-linux docker exec -it -u cloudtest tm-trusty-cloud-cloudtest claude
+```
+
+In `claude`, run `/login`, open the printed URL in the browser on the Mac and
+approve it. Then re-run `rung2.sh`: without a stored login its two Claude steps
+print `SKIP (awaiting owner login)`; with one they run. `rung2.sh` checks login
+state with `test -s /data/home/.claude/.credentials.json` and prints only yes or
+no. Never `cat` that file or log it.
+
+The proxy subnet ACL in `proxy/squid.conf` matches `10.250.77.0/24`; change both
+together. Claude Code is the native `linux-x64` binary from downloads.claude.ai,
+pinned by `CLAUDE_CODE_VERSION` and `CLAUDE_CODE_SHA256` build args and checked
+against Anthropic's `manifest.json`; the build fails on any mismatch.
+`claude-run` runs `claude` with the stored login; if `/run/secrets/claude.env`
+exists it passes that token to one `claude` process instead. The daemons never
+see either.
+
+### Teardown when rung 2 ends
+
+```bash
+docker exec tm-trusty-cloud-cloudtest rm -f /data/home/.claude/.credentials.json
 docker rm -f tm-trusty-cloud-cloudtest tm-trusty-cloud-egress
 docker network rm tm-trusty-cloud-internal
 docker rmi tm-trusty-cloud-cloudtest:$SHA tm-trusty-cloud-egress:$SHA
+rm -rf ~/cloudtest/tm-trusty-cloud-cloudtest/state       # the whole state dir, including .claude/
+test ! -e ~/cloudtest/tm-trusty-cloud-cloudtest/state && echo state-gone
 ```
+
+The credential stays valid on Anthropic's side until it is revoked: sign out in
+`claude` (`/logout`) or revoke the session in the claude.ai account settings.

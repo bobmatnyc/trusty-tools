@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# claude-run ARGS... — run the Claude Code CLI with the OAuth token from the
-# read-only secret file. The token goes into this one process's environment and
+# claude-run ARGS... — run the Claude Code CLI. With no secret file it uses the
+# stored interactive login (/data/home/.claude/.credentials.json) and handles no
+# token. With a secret file it passes the OAuth token from that read-only file. The token goes into this one process's environment and
 # nothing else: no echo, no log, no `set -x`, not in the daemons' environment
 # (they were started by entrypoint.sh, which never reads the file). Refs #11054
 set -uo pipefail
 
 SECRET_FILE="${CLAUDE_SECRET_FILE:-/run/secrets/claude.env}"
+if [ ! -e "${SECRET_FILE}" ]; then
+    exec claude "$@"
+fi
 if [ ! -r "${SECRET_FILE}" ]; then
-    echo "claude-run: secret file ${SECRET_FILE} is missing or unreadable" >&2
+    echo "claude-run: secret file ${SECRET_FILE} is unreadable" >&2
     exit 2
 fi
 IFS= read -r line < "${SECRET_FILE}" || [ -n "${line}" ]
