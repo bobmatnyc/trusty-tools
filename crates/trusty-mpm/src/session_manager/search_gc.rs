@@ -285,11 +285,16 @@ impl SessionManager {
     /// reads each candidate's `chunk_count`, and applies [`is_orphan_index`].
     /// Under `dry_run` the matching ids are logged and returned without deleting
     /// anything (mirrors `PruneWorktreesRequest`'s dry-run-by-default
-    /// convention); otherwise each is removed via the
+    /// convention); otherwise each is deregistered via the
     /// [`DestructiveIndexDelete`] capability, logged individually (no silent
     /// truncation), and returned. Returns `Ok(vec![])` without error when no
     /// daemon answers — the sweep is best-effort, like the rest of the
     /// orphan-GC loop.
+    ///
+    /// #10988 (ruling D8e): the sweep never deletes index data. It deregisters
+    /// an orphan and the corpus stays on disk. A deregister that fails is a
+    /// `warn!` naming the index id, the id stays out of the returned list, and
+    /// nothing retries it with a data-deleting call.
     ///
     /// #6285: an unreachable daemon and an absent index are held apart at both
     /// steps. A listing that goes unanswered ends the sweep with nothing
@@ -303,7 +308,9 @@ impl SessionManager {
     /// orchestration is exercised by
     /// `sweep_orphaned_search_indexes_noop_when_daemon_unreachable`,
     /// `sweep_skips_a_candidate_whose_status_probe_failed`, and the test-process
-    /// refusal by `sweep_makes_no_request_under_a_test_harness`.
+    /// refusal by `sweep_makes_no_request_under_a_test_harness`; the kept data by
+    /// `sweep_keeps_index_data_when_deletion_is_allowed` and
+    /// `sweep_reports_a_failed_deregister_and_never_deletes_data`.
     pub async fn sweep_orphaned_search_indexes(
         &self,
         dry_run: bool,
@@ -380,15 +387,12 @@ impl SessionManager {
 
         let mut removed = Vec::new();
         for id in candidates {
-            // #4743: the `delete_data` opt-in that used to be formatted inline
-            // here lives inside the capability, so this loop and the
-            // decommission-time delete share one destructive door instead of
-            // two independently-guarded ones. Its #4123 rationale is unchanged:
-            // every candidate is a worktree-scoped index with no live session,
-            // so its data is unreachable garbage a bare delete would leak.
+            // #4743: the request is built inside the capability, never here.
+            // #10988: D8e — it deregisters and keeps the data; a failure below is
+            // reported and never retried as a data-deleting call.
             match deleter.delete(&id).await {
                 DeleteOutcome::Removed => {
-                    info!(index_id = %id, "search-index-gc: removed orphaned/0-chunk index");
+                    info!(index_id = %id, "search-index-gc: deregistered orphaned/0-chunk index; its data is kept");
                     removed.push(id);
                 }
                 // Every arm below leaves `id` OUT of `removed`: the sweep

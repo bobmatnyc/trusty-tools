@@ -200,6 +200,39 @@ async fn decommission_project_failed_stop_leaves_the_project_active() {
     assert!(ws.is_dir());
 }
 
+/// #10988: ruling D8e — project decommission keeps each session record, and the
+/// kept record still resumes.
+///
+/// Why: "kept" alone would pass for a record that survives as an unresumable
+/// tombstone; the ruling says records stay resumable.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_project_keeps_records_resumable() {
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (live, _ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+
+    mgr.decommission_project(&registry, "widget")
+        .await
+        .expect("decommission");
+
+    assert_eq!(
+        state_of(&mgr, &live).await,
+        ManagedSessionState::Stopped,
+        "the record must survive project decommission as Stopped, not as a tombstone"
+    );
+    let resumed = mgr
+        .resume(&live)
+        .await
+        .expect("a session stopped by project decommission must stay resumable");
+    assert_eq!(resumed.state, ManagedSessionState::Active);
+}
+
 /// An unknown project is the registry's `NotFound`, with nothing stopped.
 #[tokio::test]
 async fn decommission_project_unknown_name_errors() {
