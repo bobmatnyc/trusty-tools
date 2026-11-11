@@ -230,6 +230,8 @@ fn an_untracked_variable_script_refuses_10672() {
             computed,
         ),
         (format!("S={sd}; python3 '$S'/build_test.py"), computed),
+        (format!("S={sd}; python3 '$S/build_test.py'"), computed),
+        (format!("S={sd}; python3 \\$S/build_test.py"), computed),
         (
             format!("S={sd}; python3 $S/build_test.py; bash -c 'python3 $S/build_test.py'"),
             computed,
