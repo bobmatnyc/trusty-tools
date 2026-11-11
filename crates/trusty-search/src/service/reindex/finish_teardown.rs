@@ -186,15 +186,17 @@ pub(super) async fn resolve_corpus_swap(
 /// does not bump.
 /// What: logs `reason` when given, runs `abort_staged_corpus_swap` (which
 /// quarantines when live cannot be reopened), then bumps the generation with
-/// the pending marker in the attached corpus first.
+/// the pending marker in the attached corpus first. Returns whether the bump
+/// succeeded.
 /// Test: `a_rollback_that_discards_a_put_raises_the_generation`,
-/// `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`.
+/// `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`,
+/// `a_dropped_runs_rollback_whose_bump_fails_keeps_refusing_puts`.
 pub(super) async fn rollback_staged_corpus_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
     tmp_path: &Path,
     reason: Option<&str>,
-) {
+) -> bool {
     if let Some(reason) = reason {
         tracing::warn!(
             "reindex[{}]: rolling back staged corpus — {reason}",
@@ -207,7 +209,7 @@ pub(super) async fn rollback_staged_corpus_swap(
         &index_id.0,
         corpus.as_deref(),
         "staged_corpus_discarded",
-    );
+    )
 }
 
 /// Record in the live corpus that a reindex just committed it (#9169).

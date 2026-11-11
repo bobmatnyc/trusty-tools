@@ -940,23 +940,25 @@ async fn a_rescan_batch_during_the_abort_detach_window_is_refused_or_lands_in_li
     }
 }
 
-/// Why: R2 — a staged run that panics or is cancelled mid-batch, outside the
-/// detach windows, left staging attached. The termination guard neither
-/// re-attached live nor raised the generation, so later puts were
-/// acknowledged into a staging corpus the next attach discards, under the
-/// generation the earlier replies carried.
-/// What: park the run's batch on the embedding pause with staging attached,
-/// put, cancel the task, then put again and assert that put was refused or
-/// its reply carries a generation above the first put's. Then wait for a put
-/// to be accepted and assert it is in the attached live corpus, the first put
-/// (staging only) is not, the generation rose, and HNSW staging ended. Fails
-/// before the fix: the put after the cancel answers `indexed: true` at the
-/// first put's generation.
-/// Test: this function IS the test.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial_test::parallel]
-async fn a_staged_run_dropped_mid_batch_refuses_or_rolls_back() {
-    let id = "identity-midbatch-drop-10738";
+/// A registered, walkable index whose staged run was dropped mid-batch.
+struct DroppedRun {
+    _dir: tempfile::TempDir,
+    root: std::path::PathBuf,
+    handle: Arc<IndexHandle>,
+    state: Arc<crate::service::server::SearchAppState>,
+    live: std::path::PathBuf,
+    staging_probe: crate::core::store::ReindexProbe,
+    /// The generation the put taken into staging was acknowledged under.
+    acknowledged: u64,
+}
+
+/// Index `a.rs`, start a staged run that parks its `b.rs` batch on the
+/// embedding pause, put, run `before_drop`, cancel the run, and resume.
+///
+/// Why: the dropped-run cases share this setup and differ only in what they
+/// arrange just before the drop.
+/// Test: used by the dropped-run cases below.
+async fn drop_a_staged_run<T>(id: &str, before_drop: impl FnOnce() -> T) -> (DroppedRun, T) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_path_buf();
     std::fs::write(
@@ -999,12 +1001,62 @@ async fn a_staged_run_dropped_mid_batch_refuses_or_rolls_back() {
     drop(staged);
     let acknowledged = put_generation(&state, id).await;
 
+    let arranged = before_drop();
     run.abort();
     let died = run.await.expect_err("the run is dropped mid-batch");
     assert!(died.is_cancelled(), "{died}");
     handle.embedding_pause.resume();
+    let run = DroppedRun {
+        _dir: dir,
+        root,
+        handle,
+        state,
+        live,
+        staging_probe,
+        acknowledged,
+    };
+    (run, arranged)
+}
 
-    match try_put(&state, id, LATE, LATE_BODY).await {
+/// Wait until the dropped run's rollback has returned and released the
+/// index permit it held.
+async fn rollback_settled(permits: &Arc<tokio::sync::Semaphore>) {
+    let _permit = tokio::time::timeout(std::time::Duration::from_secs(60), permits.acquire())
+        .await
+        .expect("the rollback returns")
+        .expect("the per-index semaphore is never closed");
+}
+
+/// Why: R2 — a staged run that panics or is cancelled mid-batch, outside the
+/// detach windows, left staging attached. The termination guard neither
+/// re-attached live nor raised the generation, so later puts were
+/// acknowledged into a staging corpus the next attach discards, under the
+/// generation the earlier replies carried.
+/// What: park the run's batch on the embedding pause with staging attached,
+/// put, cancel the task, then put again and assert that put was refused or
+/// its reply carries a generation above the first put's. Then wait for a put
+/// to be accepted and assert it is in the attached live corpus, the first put
+/// (staging only) is not, the generation rose, and HNSW staging ended. Fails
+/// before the fix: the put after the cancel answers `indexed: true` at the
+/// first put's generation.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_staged_run_dropped_mid_batch_refuses_or_rolls_back() {
+    let id = "identity-midbatch-drop-10738";
+    let (run, ()) = drop_a_staged_run(id, || ()).await;
+    let DroppedRun {
+        handle,
+        state,
+        live,
+        staging_probe,
+        acknowledged,
+        ..
+    } = &run;
+    let (handle, state, acknowledged) = (handle, state, *acknowledged);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+
+    match try_put(state, id, LATE, LATE_BODY).await {
         Err(body) => assert_eq!(body["indexed"], false, "{body}"),
         Ok(body) => {
             let generation = body["identity"]["generation"]
@@ -1058,4 +1110,129 @@ async fn a_staged_run_dropped_mid_batch_refuses_or_rolls_back() {
         "the put taken into staging is discarded"
     );
     assert!(!staging_probe(), "HNSW staging ended with the rollback");
+}
+
+/// The identity file a bump or a mint writes for `id`.
+fn identity_file(id: &str) -> std::path::PathBuf {
+    let name = crate::service::persistence::sanitize_id_for_path(id);
+    crate::service::persistence::data_dir()
+        .expect("data dir")
+        .join("index-identity")
+        .join(format!("{name}.json"))
+}
+
+/// Why: R2 review, HIGH — a delete takes only the teardown lock's exclusive
+/// side. The dropped run released its shared side as it died, so a delete
+/// could run while the guard's rollback was in flight; the rollback then
+/// reopened live, which recreated the deleted data directory, and bumped the
+/// retired identity back into existence.
+/// What: drop a staged run, park its rollback inside the abort, start a
+/// delete, give it a window, release, and assert the delete did not finish
+/// inside the rollback and that, once it lands, neither the data directory
+/// nor an identity file is left. Fails before the fix: the delete finishes
+/// at once and the rollback recreates both.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_delete_during_a_dropped_runs_rollback_leaves_no_data_or_identity() {
+    use crate::service::server::{delete_index_report, DeleteIndexParams};
+    let id = "identity-midbatch-delete-10738";
+    let permits = super::semaphore::index_semaphore(&IndexId::new(id));
+    let (run, Parked { reached, release }) =
+        drop_a_staged_run(id, || detach_hook::park(id, Window::Abort)).await;
+    reach(reached).await;
+
+    let delete = |state: Arc<crate::service::server::SearchAppState>| {
+        tokio::spawn(async move {
+            let params = DeleteIndexParams {
+                delete_data: true,
+                expected_root_path: None,
+            };
+            delete_index_report(&state, id, params)
+                .await
+                .unwrap_or_else(|(_, body)| body)
+        })
+    };
+    let mut first = delete(Arc::clone(&run.state));
+    let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut first).await;
+    let ran_early = early.is_ok();
+    release.send(()).expect("the rollback is still parked");
+    rollback_settled(&permits).await;
+    let mut outcome = match early {
+        Ok(joined) => joined,
+        Err(_) => first.await,
+    }
+    .expect("delete task");
+    // A delete whose quiesce wait timed out changed nothing; re-issue it.
+    if outcome["removed"] != true {
+        outcome = delete(Arc::clone(&run.state)).await.expect("delete task");
+    }
+    assert_eq!(outcome["removed"], true, "{outcome}");
+
+    let data = run
+        .root
+        .join(crate::service::colocated_storage::COLOCATED_DIR_NAME);
+    assert!(
+        !data.exists(),
+        "a delete must not leave the data directory behind: {}",
+        data.display()
+    );
+    assert!(
+        !identity_file(id).exists(),
+        "a deleted index must not keep an identity file"
+    );
+    assert!(
+        !ran_early,
+        "the delete ran while the dropped run's rollback was in flight"
+    );
+}
+
+/// Makes a directory read-only; restores it on drop.
+struct ReadOnly(std::path::PathBuf);
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Why: R2 review, MEDIUM (Fail-Open) — the guard's rollback cleared the
+/// refusal flag even when its generation bump failed, so puts resumed with
+/// no raised generation for the puts the rollback discarded.
+/// What: make the identity directory read-only just before the drop, wait
+/// for the rollback to return, and assert the bump failed and a put is still
+/// refused. Fails before the fix: the put answers `indexed: true`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn a_dropped_runs_rollback_whose_bump_fails_keeps_refusing_puts() {
+    use std::os::unix::fs::PermissionsExt;
+    // Root ignores directory permissions, so the bump would not fail.
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let _isolated = crate::service::server::tests_components::IsolatedDataDir::new();
+    let id = "identity-midbatch-bump-fails-10738";
+    let permits = super::semaphore::index_semaphore(&IndexId::new(id));
+    let (run, _read_only) = drop_a_staged_run(id, || {
+        let dir = identity_file(id)
+            .parent()
+            .expect("identity dir")
+            .to_path_buf();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make the identity dir read-only");
+        ReadOnly(dir)
+    })
+    .await;
+    rollback_settled(&permits).await;
+    assert!(
+        index_identity::current(id).is_err(),
+        "test setup: the rollback's bump failed"
+    );
+
+    let reply = try_put(&run.state, id, LATE, LATE_BODY).await;
+    assert!(
+        reply.is_err(),
+        "a rollback whose bump failed must keep refusing puts: {reply:?}"
+    );
 }

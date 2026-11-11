@@ -38,11 +38,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit};
 
 use super::finish_teardown::{resolve_hnsw_swap, rollback_staged_corpus_swap};
 use super::hnsw_swap::{begin_staged_hnsw_swap, HnswSwapPaths};
 use super::progress::{ReindexProgress, ReindexStatus};
+use super::semaphore::index_cancel_flag;
 use super::staging::StagingResolution;
 use crate::core::registry::IndexHandle;
 
@@ -96,15 +97,19 @@ pub(crate) struct ReindexTerminationGuard {
 /// left the staging corpus attached. Puts kept landing there under the old
 /// generation, and the next restart's attach discarded them.
 /// What: the handle, the staging corpus path and HNSW paths not yet
-/// settled, the indexer's `swap_abandoned` flag, and the index permit, which
-/// the rollback holds so no new run or delete starts on the index first.
-/// Test: `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`.
+/// settled, the indexer's `swap_abandoned` flag, the index permit, which
+/// keeps a new run off the index until the rollback returns, and the shared
+/// side of the teardown lock, which keeps a delete off it (a delete takes
+/// only the exclusive side).
+/// Test: `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`,
+/// `a_delete_during_a_dropped_runs_rollback_leaves_no_data_or_identity`.
 struct StagedRollback {
     handle: Arc<IndexHandle>,
     corpus_tmp: Option<PathBuf>,
     hnsw: Option<HnswSwapPaths>,
     abandoned: Option<Arc<AtomicBool>>,
     _permit: OwnedSemaphorePermit,
+    _teardown: OwnedRwLockReadGuard<()>,
 }
 
 impl StagedRollback {
@@ -151,8 +156,16 @@ impl StagedRollback {
     /// What: rolls back the staged HNSW snapshot and the staging corpus
     /// (re-attach live or quarantine, then raise the generation), then clears
     /// `swap_abandoned`. A flag `Drop` could not read is set here first, under
-    /// the read lock. The permit is released when this returns.
-    /// Test: `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`.
+    /// the read lock. A delete that signalled the index's cancel flag is
+    /// waiting on the teardown lock this holds: the rollback then only takes
+    /// staging out, so it neither reopens live (which would recreate the data
+    /// directory the delete removes) nor bumps the identity the delete
+    /// retires. A failed bump leaves `swap_abandoned` set, so writes stay
+    /// refused until a restart. The permit and the teardown lock are released
+    /// when this returns.
+    /// Test: `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`,
+    /// `a_delete_during_a_dropped_runs_rollback_leaves_no_data_or_identity`,
+    /// `a_dropped_runs_rollback_whose_bump_fails_keeps_refusing_puts`.
     async fn roll_back(self) {
         let handle = &self.handle;
         let abandoned = match (&self.corpus_tmp, &self.abandoned) {
@@ -164,16 +177,36 @@ impl StagedRollback {
                 Some(flag)
             }
         };
+        // #10738: the delete signals before it waits on the teardown lock held here.
+        let cancel = index_cancel_flag(&handle.id);
         let reason = "the reindex task died mid-run (#10738)";
         let resolution = StagingResolution::Rollback {
             reason: reason.into(),
         };
-        resolve_hnsw_swap(handle, &handle.id, self.hnsw.as_ref(), &resolution).await;
-        if let Some(tmp) = &self.corpus_tmp {
-            rollback_staged_corpus_swap(handle, &handle.id, tmp, Some(reason)).await;
+        if !cancel.load(Ordering::Acquire) {
+            resolve_hnsw_swap(handle, &handle.id, self.hnsw.as_ref(), &resolution).await;
         }
-        if let Some(flag) = abandoned {
-            flag.store(false, Ordering::Release);
+        let settled = match &self.corpus_tmp {
+            None => true,
+            Some(_) if cancel.load(Ordering::Acquire) => {
+                tracing::warn!(
+                    "reindex[{}]: index is being deleted; the dead run's staging \
+                     corpus is taken out and live is not reopened (#10738)",
+                    handle.id.0
+                );
+                drop(handle.indexer.write().await.take_corpus_store());
+                true
+            }
+            Some(tmp) => rollback_staged_corpus_swap(handle, &handle.id, tmp, Some(reason)).await,
+        };
+        match abandoned {
+            Some(flag) if settled => flag.store(false, Ordering::Release),
+            Some(_) => tracing::error!(
+                "reindex[{}]: the rollback's generation bump failed; writes stay \
+                 refused until a restart, whose attach raises the generation (#10738)",
+                handle.id.0
+            ),
+            None => {}
         }
     }
 }
@@ -198,15 +231,17 @@ impl ReindexTerminationGuard {
     ///
     /// Why: #10738 — the guard is the only code that runs when the task dies,
     /// so it must own what a death leaves behind.
-    /// What: records the handle, `corpus_tmp` and the index permit before any
-    /// await, then the indexer's `swap_abandoned` flag, then runs
-    /// `begin_staged_hnsw_swap` and records its paths. Returns those paths.
+    /// What: records the handle, `corpus_tmp`, the index permit and the
+    /// run's shared teardown guard before any await, then the indexer's
+    /// `swap_abandoned` flag, then runs `begin_staged_hnsw_swap` and records
+    /// its paths. Returns those paths.
     /// Test: `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`.
     pub(super) async fn begin_staged(
         &mut self,
         handle: &Arc<IndexHandle>,
         corpus_tmp: &Option<PathBuf>,
         permit: OwnedSemaphorePermit,
+        teardown: OwnedRwLockReadGuard<()>,
     ) -> Option<HnswSwapPaths> {
         self.staged = Some(StagedRollback {
             handle: Arc::clone(handle),
@@ -214,6 +249,7 @@ impl ReindexTerminationGuard {
             hnsw: None,
             abandoned: None,
             _permit: permit,
+            _teardown: teardown,
         });
         let flag = handle.indexer.read().await.swap_abandoned_flag();
         if let Some(staged) = self.staged.as_mut() {

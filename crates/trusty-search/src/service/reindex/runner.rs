@@ -104,7 +104,7 @@ pub(super) async fn run_reindex(
     // #3049: the reindex is the longest-running writer — hold the teardown
     // lock's shared side for its whole duration. The cancel flag above is what
     // keeps a waiting DELETE bounded to one batch rather than one corpus.
-    let _teardown_guard = acquire_index_teardown_read(&handle.id).await;
+    let teardown_guard = acquire_index_teardown_read(&handle.id).await;
 
     // Arm the termination guard. Any early exit — panic, early return, or
     // `.await` cancellation — fires `ReindexTerminationGuard::drop`, which logs
@@ -497,10 +497,11 @@ pub(super) async fn run_reindex(
     // not-worse fallback: `spawn_incremental_persist` never learns
     // `reindexing` was set, so it keeps writing straight to the live path
     // exactly as it did before this fix.
-    // #10738: the guard records both stagings and the index permit, so a run
-    // that dies before `finish` resolves them is rolled back, not left staged.
+    // #10738: the guard records both stagings, the index permit and the
+    // teardown guard, so a run that dies before `finish` resolves them is
+    // rolled back, not left staged, and no delete interleaves the rollback.
     let hnsw_swap_paths = term_guard
-        .begin_staged(&handle, &corpus_swap_tmp, index_permit)
+        .begin_staged(&handle, &corpus_swap_tmp, index_permit, teardown_guard)
         .await;
 
     // Per-subsystem timing accumulators.
