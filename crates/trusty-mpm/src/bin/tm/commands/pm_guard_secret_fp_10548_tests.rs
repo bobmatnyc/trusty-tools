@@ -171,8 +171,10 @@ fn a_for_loop_keeps_the_delete_rows_refusing_10548() {
     );
     rows.extend([
         "for c in a b; do cp \"$G\" \"$A\" -X DELETE repos/o/r/actions/secrets/K; done".to_string(),
-        "for commands in cp; do cp \"$G\" \"$A\" --no-fail-fast; done".to_string(),
-        "for RUSTC_WRAPPER in ./w.sh; do cargo test -p \"$c\" \"$t\" --no-fail-fast; done"
+        // The word list names `secrets`, so these refuse on main for the
+        // same reason the allowed loop did.
+        "for commands in trusty-secrets; do cp \"$G\" \"$A\" --no-fail-fast; done".to_string(),
+        "for RUSTC_WRAPPER in trusty-secrets; do cargo test -p \"$c\" \"$t\" --no-fail-fast; done"
             .to_string(),
     ]);
     all_refuse(&rows, dir.path());
