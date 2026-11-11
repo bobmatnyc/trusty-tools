@@ -141,6 +141,26 @@ async fn archive_session_moves_the_directory_and_marks_the_project() {
     assert!(f.mgr.get(&id).await.is_ok(), "the record must be kept");
 }
 
+/// #10991 critic HIGH: archiving one worktree session of a project that still
+/// has another session elsewhere moves that worktree but does not mark (and so
+/// does not hide) the project.
+#[tokio::test]
+async fn archiving_one_worktree_session_leaves_a_live_project_unarchived() {
+    let f = fixture().await;
+    let (done, done_ws) = seed(&f, ManagedSessionState::Stopped, SessionKind::default()).await;
+    let (_other, other_ws) = seed(&f, ManagedSessionState::Stopped, SessionKind::default()).await;
+
+    let report = archive(&f, &done, false, false).await.expect("archive");
+
+    assert!(!done_ws.exists(), "the worktree was not moved");
+    assert!(other_ws.is_dir(), "the other session's worktree moved");
+    assert!(!report.project_archived, "the report claims a stamp");
+    assert!(
+        !archived(&f).await,
+        "a project with another live session was marked archived"
+    );
+}
+
 /// Closure 2: the dry run is the same path, stopping before any change.
 #[tokio::test]
 async fn archive_dry_run_changes_nothing() {

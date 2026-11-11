@@ -45,7 +45,13 @@ fn render(report: &SessionArchiveReport) -> Vec<String> {
         format!("  manifest {}", plan.manifest_path.display()),
     ];
     if let Some(project) = &plan.project {
-        lines.push(format!("  project  {project} (marked archived)"));
+        // #10991: another live session keeps the project unmarked.
+        let state = if report.project_archived {
+            "marked archived"
+        } else {
+            "still active elsewhere, not marked"
+        };
+        lines.push(format!("  project  {project} ({state})"));
     }
     if !report.stopped.is_empty() {
         let label = if report.dry_run {
@@ -78,10 +84,12 @@ mod tests {
             },
             stopped: vec!["s1".into()],
             manifest: None,
+            project_archived: true,
         };
         let lines = render(&report);
         assert_eq!(lines[0], "would archive /w/widget");
         assert!(lines.iter().any(|l| l.contains("/a/widget-x/content")));
         assert!(lines.iter().any(|l| l.contains("would stop: s1")));
+        assert!(lines.iter().any(|l| l.contains("widget (marked archived)")));
     }
 }

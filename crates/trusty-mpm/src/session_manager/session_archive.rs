@@ -22,7 +22,7 @@ use super::architect::{ProtectedVerb, refusal, refuses_verbs};
 use super::archive_move::{self, ArchiveManifest, ArchiveMoveError, ArchivePlan};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
-use crate::project::{ProjectRegistry, ProjectStoreError, resolve_session_project};
+use crate::project::{Project, ProjectRegistry, ProjectStoreError, resolve_session_project};
 
 /// The two switches every archive entry point takes (#10991).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +105,25 @@ pub struct SessionArchiveReport {
     pub stopped: Vec<String>,
     /// The manifest written; `None` in a dry run.
     pub manifest: Option<ArchiveManifest>,
+    /// Whether the project row is (or, in a dry run, would be) stamped
+    /// archived; see [`SessionManager::prepare_archive`] (#10991).
+    #[serde(default)]
+    pub project_archived: bool,
+}
+
+/// A checked, planned archive, ready for [`SessionManager::finish_archive`].
+///
+/// Why: #10991 critic round — the daemon runs the finish detached from the
+/// HTTP request, so a caller's timeout cannot drop the project stamp, and it
+/// needs the plan (the entry path) before the move starts.
+#[derive(Debug, Clone)]
+pub struct PreparedArchive {
+    /// The move.
+    pub plan: ArchivePlan,
+    /// Sessions running in the directory, to stop before the move (`force`).
+    pub running: Vec<ManagedSessionId>,
+    /// The project to stamp archived after the move, if any.
+    pub mark_project: Option<String>,
 }
 
 /// The directory a record works in: its workspace, else its start directory.
@@ -112,19 +131,25 @@ fn session_dir(r: &SessionRecord) -> &Path {
     r.workspace_path.as_deref().unwrap_or(&r.cwd)
 }
 
+/// Whether `r` works inside `dir` (lexically, or once both are canonical).
+fn works_inside(r: &SessionRecord, dir: &Path, canon: &Path) -> bool {
+    let d = session_dir(r);
+    d.starts_with(dir) || std::fs::canonicalize(d).is_ok_and(|c| c.starts_with(canon))
+}
+
+/// Whether `project` names `canon` as its own checkout: a local-path
+/// `repo_url` that resolves to the moved directory.
+fn is_own_checkout(project: &Project, canon: &Path) -> bool {
+    Path::new(&project.repo_url).is_absolute()
+        && std::fs::canonicalize(&project.repo_url).is_ok_and(|c| c == canon)
+}
+
 impl SessionManager {
     /// Archive session `id`'s project directory under `root`.
     ///
-    /// Why: see the module doc. What, in order, each step failing closed
-    /// before the next: look up the record; refuse when any non-terminal
-    /// session working inside the directory is the Architect's
-    /// ([`SessionArchiveError::Protected`]); refuse when any of them is
-    /// `Active`/`Provisioning` and `force` is off
-    /// ([`SessionArchiveError::Running`]); resolve the project row; plan the
-    /// move. A dry run returns here. Otherwise stop the running sessions (any
-    /// failure is [`SessionArchiveError::StopFailed`] with nothing moved),
-    /// execute the plan on a blocking thread, and stamp the project
-    /// archived. Session records are kept.
+    /// Why: see the module doc. What: [`Self::prepare_archive`]; a dry run
+    /// reports the plan; otherwise [`Self::finish_archive`]. Session records
+    /// are kept.
     /// Test: `archive_session_moves_the_directory_and_marks_the_project`,
     /// `archive_dry_run_changes_nothing`,
     /// `archive_refuses_a_running_session_without_force`,
@@ -132,7 +157,8 @@ impl SessionManager {
     /// `archive_refuses_an_architect_session`,
     /// `archive_failed_stop_moves_nothing`,
     /// `archive_unreadable_registry_moves_nothing`,
-    /// `archive_reports_a_failed_project_stamp`.
+    /// `archive_reports_a_failed_project_stamp`,
+    /// `archiving_one_worktree_session_leaves_a_live_project_unarchived`.
     pub async fn archive_session(
         &self,
         registry: &ProjectRegistry,
@@ -140,18 +166,46 @@ impl SessionManager {
         opts: ArchiveOptions,
         root: &Path,
     ) -> Result<SessionArchiveReport, SessionArchiveError> {
+        let prepared = self.prepare_archive(registry, id, opts, root).await?;
+        if opts.dry_run {
+            return Ok(SessionArchiveReport {
+                dry_run: true,
+                stopped: prepared.running.iter().map(ToString::to_string).collect(),
+                project_archived: prepared.mark_project.is_some(),
+                plan: prepared.plan,
+                manifest: None,
+            });
+        }
+        self.finish_archive(registry, prepared).await
+    }
+
+    /// Every check and the plan, with no side effect (#10991).
+    ///
+    /// What, each step failing closed before the next: look up the record;
+    /// refuse when any non-terminal session working inside the directory is
+    /// the Architect's ([`SessionArchiveError::Protected`]); refuse when any
+    /// of them is `Active`/`Provisioning` and `force` is off
+    /// ([`SessionArchiveError::Running`]); read the registry; plan the move.
+    /// The project is to be stamped archived only when the moved directory
+    /// is its own checkout, or when no other non-terminal session outside
+    /// the directory resolves to it — archiving one worktree must not hide a
+    /// project that still runs elsewhere.
+    /// Test: `archiving_one_worktree_session_leaves_a_live_project_unarchived`.
+    pub async fn prepare_archive(
+        &self,
+        registry: &ProjectRegistry,
+        id: &ManagedSessionId,
+        opts: ArchiveOptions,
+        root: &Path,
+    ) -> Result<PreparedArchive, SessionArchiveError> {
         let record = self.get(id).await?;
         let dir = session_dir(&record).to_path_buf();
         let canon = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-        let occupants: Vec<SessionRecord> = self
-            .list()
-            .await
-            .into_iter()
+        let all = self.list().await;
+        let occupants: Vec<&SessionRecord> = all
+            .iter()
             .filter(|r| !r.state.is_terminal() || r.id == record.id)
-            .filter(|r| {
-                let d = session_dir(r);
-                d.starts_with(&dir) || std::fs::canonicalize(d).is_ok_and(|c| c.starts_with(&canon))
-            })
+            .filter(|r| works_inside(r, &dir, &canon))
             .collect();
         // #8942: the Architect's directory is never moved, `force` or not.
         if let Some(r) = occupants.iter().find(|r| refuses_verbs(r.kind, &r.state)) {
@@ -171,34 +225,63 @@ impl SessionManager {
             })
             .map(|r| r.id)
             .collect();
-        let running_ids: Vec<String> = running.iter().map(ToString::to_string).collect();
         if !running.is_empty() && !opts.force {
             return Err(SessionArchiveError::Running {
                 path: dir,
-                running: running_ids,
+                running: running.iter().map(ToString::to_string).collect(),
             });
         }
         let projects = registry
             .list()
             .await
             .map_err(SessionArchiveError::Registry)?;
-        let project = resolve_session_project(&record, &projects).map(|p| p.name.clone());
+        let project = resolve_session_project(&record, &projects);
+        // #10991 critic HIGH: a worktree of a project that runs elsewhere is
+        // archived without hiding the project.
+        let mark_project = project
+            .filter(|p| {
+                let only = std::slice::from_ref(*p);
+                is_own_checkout(p, &canon)
+                    || !all.iter().any(|r| {
+                        r.id != record.id
+                            && !r.state.is_terminal()
+                            && !works_inside(r, &dir, &canon)
+                            && resolve_session_project(r, only).is_some()
+                    })
+            })
+            .map(|p| p.name.clone());
         let plan = archive_move::plan_archive(
             &dir,
             root,
             &record.id.to_string(),
-            project.clone(),
+            project.map(|p| p.name.clone()),
             chrono::Utc::now(),
         )?;
-        if opts.dry_run {
-            return Ok(SessionArchiveReport {
-                dry_run: true,
-                plan,
-                stopped: running_ids,
-                manifest: None,
-            });
-        }
+        Ok(PreparedArchive {
+            plan,
+            running,
+            mark_project,
+        })
+    }
 
+    /// Stop, move and stamp a [`PreparedArchive`] (#10991).
+    ///
+    /// What: stops the running sessions (any failure is
+    /// [`SessionArchiveError::StopFailed`] with nothing moved), executes the
+    /// plan on a blocking thread, then stamps `mark_project` archived (a
+    /// failure is [`SessionArchiveError::MarkFailed`], naming the entry).
+    /// Test: `archive_failed_stop_moves_nothing`,
+    /// `archive_reports_a_failed_project_stamp`.
+    pub async fn finish_archive(
+        &self,
+        registry: &ProjectRegistry,
+        prepared: PreparedArchive,
+    ) -> Result<SessionArchiveReport, SessionArchiveError> {
+        let PreparedArchive {
+            plan,
+            running,
+            mark_project,
+        } = prepared;
         let (mut stopped, mut failed) = (Vec::new(), Vec::new());
         for sid in &running {
             match self.stop(sid).await {
@@ -214,9 +297,9 @@ impl SessionManager {
         let manifest = tokio::task::spawn_blocking(move || archive_move::execute_plan(&to_run))
             .await
             .map_err(|e| SessionArchiveError::Join(e.to_string()))??;
-        if let Some(name) = project {
+        if let Some(name) = &mark_project {
             registry
-                .mark_archived(&name, manifest.archived_at)
+                .mark_archived(name, manifest.archived_at)
                 .await
                 .map_err(|error| SessionArchiveError::MarkFailed {
                     entry: plan.entry.clone(),
@@ -224,12 +307,13 @@ impl SessionManager {
                     error,
                 })?;
         }
-        info!(session = %record.id, entry = %plan.entry.display(), "session directory archived (#10991)");
+        info!(session = %plan.session_id, entry = %plan.entry.display(), "session directory archived (#10991)");
         Ok(SessionArchiveReport {
             dry_run: false,
             plan,
             stopped,
             manifest: Some(manifest),
+            project_archived: mark_project.is_some(),
         })
     }
 }
