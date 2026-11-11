@@ -97,11 +97,22 @@ docker exec tm-trusty-cloud-egress cat /var/log/squid/access.log   # evidence: T
 ssh -t evo-linux docker exec -it -u cloudtest tm-trusty-cloud-cloudtest claude
 ```
 
-In `claude`, run `/login`, open the printed URL in the browser on the Mac and
-approve it. Then re-run `rung2.sh`: without a stored login its two Claude steps
-print `SKIP (awaiting owner login)`; with one they run. `rung2.sh` checks login
-state with `test -s /data/home/.claude/.credentials.json` and prints only yes or
-no. Never `cat` that file or log it.
+In `claude`, run `/login`. The container has no browser, so the login cannot
+finish by redirect. Open the link in your own browser, approve, then copy the
+code it shows and paste it into the terminal at 'Paste code here'. Then re-run
+`rung2.sh`: without a stored login its two Claude steps print
+`SKIP (awaiting owner login)`; with one they run. `rung2.sh` checks login state
+with `test -s /data/home/.claude/.credentials.json` and prints only yes or no.
+Never `cat` that file or log it.
+
+**Cloud-host notes**
+
+- The login lives in `/data/home/.claude/.credentials.json` on the state volume
+  (0600, dir 0700). Keep the volume, or log in again after it is lost.
+- Steady state needs only `api.anthropic.com`. Login and token refresh also need
+  `platform.claude.com` and `claude.ai`.
+- `claude -p` JSON output can include account fields. Keep those logs on the
+  volume and never paste them into a chat.
 
 The proxy subnet ACL in `proxy/squid.conf` matches `10.250.77.0/24`; change both
 together. Claude Code is the native `linux-x64` binary from downloads.claude.ai,
