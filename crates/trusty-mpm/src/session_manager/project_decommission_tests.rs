@@ -208,7 +208,7 @@ async fn decommission_project_failed_stop_leaves_the_project_active() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn decommission_project_keeps_records_resumable() {
-    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (dir, _reg, fake, mgr, registry) = fixture().await;
     let (live, _ws) = seed_bound(
         &mgr,
         &dir,
@@ -216,6 +216,9 @@ async fn decommission_project_keeps_records_resumable() {
         SessionKind::default(),
     )
     .await;
+    // #8935/#9101: the record proves its pane, so a resume may act on it.
+    *fake.pane_id_override.lock().expect("pane override") = Some("%1".into());
+    super::super::tests::bind_pane(&mgr, &live).await;
 
     mgr.decommission_project(&registry, "widget")
         .await
