@@ -1155,6 +1155,95 @@ assert_eq "  and \$GITHUB_OUTPUT carries the reason" "1" \
 assert_eq "  no success line"                      "0" \
   "$(grep -c 'ci-apt-install: installed' "${allfail_dir}/out" || true)"
 rm -rf "${allfail_dir}"
+
+# The runner shape of run 43037343501: the Ubuntu sources are one
+# `mirror+file:/etc/apt/apt-mirrors.txt` URI, and the list names the hosts.
+mirror_file_sources() {
+  mkdir -p "$1/etc-apt/sources.list.d"
+  cat > "$1/etc-apt/sources.list.d/ubuntu.sources" <<'SOURCES'
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: resolute resolute-updates resolute-backports resolute-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+SOURCES
+  printf 'http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' \
+    > "$1/etc-apt/apt-mirrors.txt"
+}
+
+# quiet_update_body <fallback-ok> — real apt on a DNS outage: `apt-get update`
+# WARNS about the unresolvable host and exits 0, leaving no lists, so the
+# install that follows says `Unable to locate package` with no infra signature.
+# Against rewritten sources it behaves like outage_body.
+quiet_update_body() {
+  printf '%s\n' "FALLBACK_OK=$1" '
+d="${0%/*}"
+parts=""
+for a in "$@"; do
+  case "$a" in Dir::Etc::SourceParts=*) parts="${a#*=}" ;; esac
+done
+if [ -n "$parts" ]; then
+  cat "$parts"/* > "${d}/seen-sources"
+  if [ "$FALLBACK_OK" = 1 ] && ! grep -qE "ubuntu\.com|mirror\+file" "${d}/seen-sources"; then
+    exit 0
+  fi
+  echo "W: Failed to fetch http://mirror.test/ubuntu/dists/resolute/InRelease  Temporary failure resolving '"'"'mirror.test'"'"'" >&2
+  exit 100
+fi
+if [ "$1" = "update" ]; then
+  echo "W: Failed to fetch mirror+file:/etc/apt/apt-mirrors.txt/dists/resolute/InRelease  Temporary failure resolving '"'"'security.ubuntu.com'"'"'" >&2
+  echo "W: Some index files failed to download. They have been ignored, or old ones used instead." >&2
+  exit 0
+fi
+echo "E: Unable to locate package build-essential" >&2
+exit 100'
+}
+
+# An update that exits 0 on a DNS failure is still infra, and the mirror+file
+# source is rewritten, so route 4 rescues.
+quiet_dir="$(apt_stub_dir "$(quiet_update_body 1)")"
+mirror_file_sources "${quiet_dir}"
+assert_eq "an update exiting 0 on a DNS failure still reaches the fallback" "0" \
+  "$(apt_run "${quiet_dir}")"
+assert_eq "  the exit-0 update counts as failed"   "3" \
+  "$(grep -c 'apt-get update attempt [0-9] exited 0 but logged a fetch failure' "${quiet_dir}/out" || true)"
+assert_eq "  the mirror+file source is rewritten"  "1" \
+  "$(grep -c 'falling back to mirror http://mirror.test/ubuntu (outside \*.ubuntu.com) — 1 Ubuntu source' "${quiet_dir}/out" || true)"
+assert_eq "  no mirror+file URI is left"           "0" \
+  "$(grep -c 'mirror+file' "${quiet_dir}/seen-sources" || true)"
+assert_eq "  the mirror took its place"            "1" \
+  "$(grep -c '^URIs: http://mirror.test/ubuntu/$' "${quiet_dir}/seen-sources" || true)"
+rm -rf "${quiet_dir}"
+
+# The same outage with the mirror dead too: infra, exit 75 — never exit 1 for
+# the empty-lists `Unable to locate package` the install prints.
+quietfail_dir="$(apt_stub_dir "$(quiet_update_body 0)")"
+mirror_file_sources "${quietfail_dir}"
+assert_eq "an exit-0 DNS update with every route dead exits 75" "75" \
+  "$(apt_run "${quietfail_dir}")"
+assert_eq "  one annotation, reason dns"           "1" \
+  "$(grep -c '::error::apt-infra: dns — INFRA-FAIL: apt — apt-get update failed' "${quietfail_dir}/out" || true)"
+assert_eq "  it names both failed hosts"           "1" \
+  "$(grep -c 'failed host(s): mirror.test security.ubuntu.com;' "${quietfail_dir}/out" || true)"
+rm -rf "${quietfail_dir}"
+
+# An install whose own error is a resolve failure is infra, so route 4 runs.
+install_dns_dir="$(apt_stub_dir '
+d="${0%/*}"
+for a in "$@"; do
+  case "$a" in Dir::Etc::SourceParts=*) exit 0 ;; esac
+done
+[ "$1" = "update" ] && exit 0
+echo "E: Failed to fetch https://security.ubuntu.com/ubuntu/pool/main/d/dbus/libdbus-1-dev_1.16.2-2ubuntu4_amd64v3.deb  Temporary failure resolving '"'"'security.ubuntu.com'"'"'" >&2
+exit 100')"
+fallback_sources "${install_dns_dir}"
+assert_eq "an install failing on DNS reaches the fallback" "0" \
+  "$(apt_run "${install_dns_dir}" libdbus-1-dev)"
+assert_eq "  classified dns on the install"        "3" \
+  "$(grep -c 'apt-get install attempt [0-9] failed (exit 100) — apt infrastructure signature: dns' "${install_dns_dir}/out" || true)"
+assert_eq "  and installed from the mirror"        "1" \
+  "$(grep -c 'installed libdbus-1-dev from fallback mirror http://mirror.test/ubuntu' "${install_dns_dir}/out" || true)"
+rm -rf "${install_dns_dir}"
 unset CI_APT_UPDATE_TIMEOUT_S CI_APT_INSTALL_TIMEOUT_S
 
 # Wiring: the wrapper helps nobody while a job still inlines the raw pair.

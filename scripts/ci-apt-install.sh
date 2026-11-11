@@ -45,11 +45,15 @@
 #   3. Primary mirror. `apt-get update` then `apt-get install`, each attempt
 #      wrapped in `timeout` and each phase retried up to ATTEMPTS times. It runs
 #      to PRIMARY_DEADLINE (TOTAL_BUDGET_S minus FALLBACK_RESERVE_S), which keeps
-#      time for route 4.
+#      time for route 4. An update that exits 0 but logged a fetch or resolve
+#      failure counts as a failed attempt. When the update failed on an infra
+#      signature, the install still runs once, and that update verdict stands
+#      if the install fails.
 #   4. Fallback mirrors. Only after route 3 failed on an apt INFRASTRUCTURE
 #      signature. The configured sources are copied with every
 #      `*.archive.ubuntu.com/ubuntu` and `security.ubuntu.com/ubuntu` URI
 #      replaced by a mirror outside `*.ubuntu.com` (CI_APT_FALLBACK_MIRRORS),
+#      as is every `mirror+file:<list>` URI whose list names one of those,
 #      and apt is pointed at the copy with `-o Dir::Etc::SourceList` /
 #      `SourceParts`. The runner's own sources are not edited. Non-Ubuntu
 #      sources (NVIDIA's CUDA repo, for example) are copied unchanged. The
@@ -366,6 +370,15 @@ run_phase() {
     rc=0
     run_attempt "$ceiling" "$@" || rc=$?
 
+    # `apt-get update` exits 0 when a source fails to fetch or resolve; it
+    # only warns (`W: Failed to fetch …`, run 43037343501). Read the log rather
+    # than pass `--error-on=any`, which needs apt >= 2.1 on every runner.
+    if [ "$rc" -eq 0 ] && [ "${2:-}" = "update" ] &&
+      grep -qiE '^Err:|failed to fetch|temporary failure resolving|could not resolve|some index files failed to download' "$ATTEMPT_LOG"; then
+      echo "ci-apt-install: ${label} attempt ${attempt} exited 0 but logged a fetch failure; counting it as failed." >&2
+      rc=100
+    fi
+
     if [ "$rc" -eq 0 ]; then
       echo "ci-apt-install: ${label} OK after ${attempt} attempt(s), $(elapsed)s elapsed" >&2
       return 0
@@ -402,24 +415,50 @@ run_phase() {
   return 1
 }
 
+# all_sources — every non-comment line of SOURCES_DIR's apt sources.
+all_sources() {
+  cat "${SOURCES_DIR}/sources.list" "${SOURCES_DIR}/sources.list.d/"*.list \
+    "${SOURCES_DIR}/sources.list.d/"*.sources 2>/dev/null | grep -v '^[[:space:]]*#'
+}
+
+# mirror_file_re — an ERE matching each `mirror+file:<path>` URI whose mirror
+# list names an Ubuntu archive host. The hosted runners point their Ubuntu
+# sources at `mirror+file:/etc/apt/apt-mirrors.txt` (run 43037343501), so a
+# rewrite of plain URIs alone finds nothing there. A path under /etc/apt is
+# read from SOURCES_DIR first, so the self-test can supply the list.
+mirror_file_re() {
+  local uri path file re=""
+  for uri in $(all_sources | grep -oE 'mirror\+file:[^[:space:]]+' | sed 's#/*$##' | sort -u); do
+    path="${uri#mirror+file:}"
+    file="$path"
+    case "$path" in
+      /etc/apt/*) [ -f "${SOURCES_DIR}/${path#/etc/apt/}" ] && file="${SOURCES_DIR}/${path#/etc/apt/}" ;;
+    esac
+    grep -qE "$UBUNTU_URI_RE" "$file" 2>/dev/null || continue
+    re="${re:+${re}|}$(printf '%s' "$uri" | sed -E 's/[][\.*^$+?(){}|]/\\&/g')/?"
+  done
+  echo "$re"
+}
+
 # write_fallback_sources <mirror> <out-dir> — copy SOURCES_DIR's sources into
-# <out-dir> with every Ubuntu archive URI pointed at <mirror>. Returns 1, writing
-# nothing useful, when no source line names an Ubuntu archive host.
+# <out-dir> with every Ubuntu archive URI, and every `mirror+file:` URI whose
+# list names one, pointed at <mirror>. Returns 1, writing nothing useful, when
+# no source line names an Ubuntu archive host either way.
 write_fallback_sources() {
-  local mirror="${1%/}/" out="$2" f rewritten=0
+  local mirror="${1%/}/" out="$2" f rewritten=0 re mf_re
+  mf_re="$(mirror_file_re)"
+  re="${UBUNTU_URI_RE}${mf_re:+|${mf_re}}"
   rm -rf "$out"
   mkdir -p "${out}/parts"
   : >"${out}/sources.list"
   if [ -f "${SOURCES_DIR}/sources.list" ]; then
-    sed -E "s#${UBUNTU_URI_RE}#${mirror}#g" "${SOURCES_DIR}/sources.list" >"${out}/sources.list"
+    sed -E "s#${re}#${mirror}#g" "${SOURCES_DIR}/sources.list" >"${out}/sources.list"
   fi
   for f in "${SOURCES_DIR}/sources.list.d/"*.list "${SOURCES_DIR}/sources.list.d/"*.sources; do
     [ -f "$f" ] || continue
-    sed -E "s#${UBUNTU_URI_RE}#${mirror}#g" "$f" >"${out}/parts/${f##*/}"
+    sed -E "s#${re}#${mirror}#g" "$f" >"${out}/parts/${f##*/}"
   done
-  rewritten="$(cat "${SOURCES_DIR}/sources.list" "${SOURCES_DIR}/sources.list.d/"*.list \
-    "${SOURCES_DIR}/sources.list.d/"*.sources 2>/dev/null |
-    grep -v '^[[:space:]]*#' | grep -cE "$UBUNTU_URI_RE" || true)"
+  rewritten="$(all_sources | grep -cE "$re" || true)"
   [ "${rewritten:-0}" -gt 0 ] || return 1
   echo "$rewritten"
 }
@@ -463,12 +502,29 @@ note_hosts "cached-index install" 1 "$rc" "$SOURCES_DIR"
 # ---------------------------------------------------------------------------
 # Route 3: the configured mirrors.
 # ---------------------------------------------------------------------------
-primary_rc=0
+update_rc=0
 run_phase "apt-get update" "$UPDATE_TIMEOUT_S" "$ATTEMPTS" "$SOURCES_DIR" \
-  apt-get update -qq || primary_rc=$?
-if [ "$primary_rc" -eq 0 ]; then
-  run_phase "apt-get install" "$INSTALL_TIMEOUT_S" "$ATTEMPTS" "$SOURCES_DIR" \
-    apt-get "${INSTALL_ARGS[@]}" || primary_rc=$?
+  apt-get update -qq || update_rc=$?
+if [ "$update_rc" -ne 0 ] && [ "$update_rc" -ne "$INFRA_EXIT" ]; then
+  echo "$PHASE_FAIL_MSG"
+  exit 1
+fi
+# An update that failed on an infra signature can still have refreshed the
+# Ubuntu lists (a third-party source may be the one that failed), so the
+# install runs once anyway. If it fails without a signature of its own — say
+# `Unable to locate package` on lists that never landed — the update's infra
+# verdict stands and route 4 runs.
+install_attempts="$ATTEMPTS"
+if [ "$update_rc" -eq "$INFRA_EXIT" ]; then
+  U_REASON="$INFRA_REASON" U_LABEL="$INFRA_LABEL" U_MADE="$INFRA_MADE" U_RC="$INFRA_RC"
+  install_attempts=1
+fi
+primary_rc=0
+run_phase "apt-get install" "$INSTALL_TIMEOUT_S" "$install_attempts" "$SOURCES_DIR" \
+  apt-get "${INSTALL_ARGS[@]}" || primary_rc=$?
+if [ "$primary_rc" -eq 1 ] && [ "$update_rc" -eq "$INFRA_EXIT" ]; then
+  INFRA_REASON="$U_REASON" INFRA_LABEL="$U_LABEL" INFRA_MADE="$U_MADE" INFRA_RC="$U_RC"
+  primary_rc="$INFRA_EXIT"
 fi
 if [ "$primary_rc" -eq 0 ]; then
   echo "ci-apt-install: installed ${PKGS[*]} in $(elapsed)s" >&2
