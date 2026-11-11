@@ -406,8 +406,13 @@ pub(crate) fn parse_pane_probes(
 /// shell-out itself is I/O (a live tmux server), matching the existing
 /// `session_for_pane` / `pane_tty_for` precedent in `tmux_attach.rs`.
 pub(crate) fn session_runtime_live(session_name: &str) -> bool {
-    session_runtime_live_with_bin(
+    // #10101: list the panes on the server that holds the session.
+    let server = crate::commands::tmux_attach_server::target_server(session_name)
+        .ok()
+        .flatten();
+    session_runtime_live_on(
         &trusty_mpm::core::tmux::resolve_tmux_binary_or_bare(),
+        server.as_deref(),
         session_name,
     )
 }
@@ -421,20 +426,30 @@ pub(crate) fn session_runtime_live(session_name: &str) -> bool {
 /// answer is certain, and the kill that `false` can lead to is exact too.
 /// Every other failure still fails open (`true`).
 /// Test: `session_runtime_live_never_reports_a_prefix_sibling`.
+#[cfg(test)] // #10101: production probes go through the server-aware `_on`.
 pub(crate) fn session_runtime_live_with_bin(tmux_bin: &str, session_name: &str) -> bool {
+    session_runtime_live_on(tmux_bin, None, session_name)
+}
+
+/// [`session_runtime_live_with_bin`] on the named (`-L`) `server`; `None` is
+/// the default server (#10101).
+fn session_runtime_live_on(tmux_bin: &str, server: Option<&str>, session_name: &str) -> bool {
     let name = session_name.trim();
     if name.is_empty() {
         return true;
     }
     let mut cmd = std::process::Command::new(tmux_bin);
-    cmd.args([
-        "list-panes".to_string(),
-        "-s".to_string(),
-        "-t".to_string(),
-        trusty_mpm::core::tmux::exact_window_target(name),
-        "-F".to_string(),
-        "#{session_name}\t#{pane_current_command}\t#{pane_pid}".to_string(),
-    ]);
+    cmd.args(trusty_mpm::core::tmux_server::server_argv(
+        server,
+        [
+            "list-panes".to_string(),
+            "-s".to_string(),
+            "-t".to_string(),
+            trusty_mpm::core::tmux::exact_window_target(name),
+            "-F".to_string(),
+            "#{session_name}\t#{pane_current_command}\t#{pane_pid}".to_string(),
+        ],
+    ));
     // #6529: a tmux client with no UTF-8 locale rewrites these tabs to `_`,
     // which `parse_pane_probes` then refuses — reporting every session live.
     trusty_mpm::core::tmux::force_utf8_client_env(&mut cmd);

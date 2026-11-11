@@ -504,7 +504,8 @@ fn print_fail_closed_hint(name: &str) {
     eprintln!(
         "tm: attach from a fresh shell (outside any tmux client) with: \
          {}",
-        trusty_mpm::core::tmux::shell_attach_command(name)
+        // #10101: the server that holds the session.
+        super::tmux_attach_server::shell_attach_command_on(name)
     );
 }
 

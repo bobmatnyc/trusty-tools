@@ -106,11 +106,19 @@ pub const MAX_EPHEMERAL_AGE_HOURS: i64 = 24;
 /// `prune_stale_active_removable_without_force_*` (#2022 — same for
 /// `prune_managed`), `delete_record_refuses_when_the_tmux_probe_fails` and
 /// `prune_refuses_when_the_tmux_probe_fails` (#5859 — the error arm).
+///
+/// #10101: the probe asks the record's own server. A record whose server
+/// cannot be reached reads as running, the direction that tears nothing down.
+/// Test: `a_named_server_record_runs_only_on_its_own_server_10101`.
 pub(super) fn is_running(
     record: &SessionRecord,
     tmux: &dyn ManagedTmuxDriver,
 ) -> Result<bool, ManagedError> {
-    tmux.session_exists_checked(&record.tmux_name)
+    // #10101: never the default server's same-named session in its place.
+    match super::tmux_route::route(tmux, record) {
+        Ok(routed) => routed.session_exists_checked(&record.tmux_name),
+        Err(_) => Ok(true),
+    }
 }
 
 /// Whether a record is a terminal tombstone — the two states prune COMPACTS

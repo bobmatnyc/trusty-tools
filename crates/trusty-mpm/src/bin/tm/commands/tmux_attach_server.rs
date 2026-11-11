@@ -47,6 +47,42 @@ fn is_default(socket: &Path) -> bool {
     socket.file_name().is_some_and(|n| n == DEFAULT_SERVER)
 }
 
+/// The `-L` name of the workspace server holding session `name`, or `None`
+/// for the default server (#10101).
+///
+/// Why: a by-name probe (`has-session`, `list-panes`) with no server reads
+/// the default server, where a PM launched on its workspace server is absent.
+/// What: [`target_socket`]'s file name, or `None` when that socket is the
+/// default server's.
+///
+/// # Errors
+///
+/// As [`target_socket`].
+///
+/// Test: `the_picker_probes_read_the_workspace_server_10101`.
+pub(crate) fn target_server(name: &str) -> anyhow::Result<Option<String>> {
+    let socket = target_socket(name)?;
+    Ok((!is_default(&socket))
+        .then(|| socket.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .flatten())
+}
+
+/// A copy-pasteable command that attaches to session `name` on the server
+/// holding it (#10101): `-S '<socket>'` for a workspace server; the plain
+/// `shell_attach_command` for the default server or an unknown holder.
+/// Test: `a_printed_attach_hint_names_the_workspace_socket_10101`.
+pub(crate) fn shell_attach_command_on(name: &str) -> String {
+    let attach = trusty_mpm::core::tmux::shell_attach_command(name);
+    match target_socket(name) {
+        Ok(socket) if !is_default(&socket) => attach.replacen(
+            "tmux ",
+            &format!("tmux -S {} ", quote(&socket.to_string_lossy())),
+            1,
+        ),
+        _ => attach,
+    }
+}
+
 /// The outside-tmux attach argv for `session` on the server at `socket`:
 /// [`super::tmux_attach::attach_argv`], behind `-S <socket>` for a workspace
 /// server, unchanged for the default server.

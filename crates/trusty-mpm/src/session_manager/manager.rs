@@ -500,7 +500,7 @@ impl SessionManager {
         }
         let pane = self.owned_pane(id, &record)?;
         let claimed = self.claim_decision(id, claim).await?;
-        self.deliver_answer(id, &record.tmux_name, Ok(pane), answer, claimed)
+        self.deliver_answer(id, &record, Ok(pane), answer, claimed)
             .await
     }
 
@@ -1276,7 +1276,8 @@ impl SessionManager {
     /// `capture_pane_refuses_when_stored_pane_gone`,
     /// `capture_pane_refuses_a_legacy_record_without_pane_id` in
     /// `pane_scoped_tests.rs`;
-    /// `a_stale_record_after_a_server_restart_never_reads_the_pane`.
+    /// `a_stale_record_after_a_server_restart_never_reads_the_pane`,
+    /// `capturing_a_named_server_record_reads_its_own_server_10101`.
     pub async fn capture_pane(
         &self,
         id: &ManagedSessionId,
@@ -1284,7 +1285,8 @@ impl SessionManager {
     ) -> Result<String, ManagedError> {
         let record = self.get(id).await?;
         let pane = self.owned_pane(id, &record)?;
-        self.tmux
+        // #10101: read the pane on the server `owned_pane` proved it on.
+        super::tmux_route::route(self.tmux.as_ref(), &record)?
             .capture_pane(&record.tmux_name, &pane, lines)
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }

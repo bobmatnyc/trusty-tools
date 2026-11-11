@@ -793,7 +793,8 @@ pub(crate) fn print_non_tty_hint(
         eprintln!("tm: {n} session(s) found for {source_id}");
         eprintln!(
             "tm: to resume: {}",
-            trusty_mpm::core::tmux::shell_attach_command(&sessions[0].name)
+            // #10101: the server that holds the session.
+            crate::commands::tmux_attach_server::shell_attach_command_on(&sessions[0].name)
         );
         eprintln!("tm: to launch: run `tm` from an interactive terminal");
     }

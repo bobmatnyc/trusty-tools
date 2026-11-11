@@ -139,3 +139,53 @@ fn resume_of_a_missing_session_never_touches_a_prefix_sibling() {
         sibling.name()
     );
 }
+
+/// A live session on a fresh `tm-ws-*` server in this test binary's private
+/// `TMUX_TMPDIR` (#6542), never the operator's server; `None` without tmux.
+fn on_workspace_server(tag: &str) -> Option<(ScratchTmuxSession, String)> {
+    if !ScratchTmuxSession::tmux_available(TMUX) {
+        eprintln!("tmux not available; skipping");
+        return None;
+    }
+    let server = format!("tm-ws-{tag}-{}", std::process::id());
+    let name = reserved_session_name(tag);
+    let session = ScratchTmuxSession::spawn_on_socket(TMUX, Some(&server), &name, "sh");
+    Some((session, server))
+}
+
+/// Remove `session` and its whole server.
+fn tear_down(session: ScratchTmuxSession, server: &str) {
+    drop(session);
+    let _ = std::process::Command::new(TMUX)
+        .args(["-L", server, "kill-server"])
+        .output();
+}
+
+/// #10101: the picker's liveness probe reads the workspace server that holds
+/// the session. On the default server alone a live PM read as gone, and the
+/// resume plan reconciled and restarted it.
+#[serial_test::serial]
+#[test]
+fn the_picker_probes_read_the_workspace_server_10101() {
+    let Some((session, server)) = on_workspace_server("10101pick") else {
+        return;
+    };
+    let live = crate::formatters::banner::tmux_has_session(session.name());
+    tear_down(session, &server);
+    assert!(live, "has-session must reach the workspace server");
+}
+
+/// #10101: the attach hint the picker prints names the workspace socket.
+#[serial_test::serial]
+#[test]
+fn a_printed_attach_hint_names_the_workspace_socket_10101() {
+    let Some((session, server)) = on_workspace_server("10101hint") else {
+        return;
+    };
+    let hint = crate::commands::tmux_attach_server::shell_attach_command_on(session.name());
+    tear_down(session, &server);
+    assert!(
+        hint.starts_with("tmux -S '") && hint.contains(&format!("/{server}' attach-session")),
+        "{hint}"
+    );
+}
