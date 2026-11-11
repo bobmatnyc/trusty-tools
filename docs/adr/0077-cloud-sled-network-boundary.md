@@ -58,8 +58,8 @@ deny log show whether the boundary holds. A client that ignores
 
 - Every in-sled TCP caller of the console must send the token or move to UDS.
 - A new outbound host needs a ruling and a proxy config change.
-- `tailscaled` needs a path to the Tailscale control plane (see Open
-  questions).
+- The allowlist carries the Tailscale control hosts and the DERP host pattern
+  (D20). Tailnet traffic is relay-only, so it is slower than a direct path.
 - Token rotation means replacing the file and restarting the console.
 
 **Neutral.** Hosts other than sleds are unchanged. The token is off unless
@@ -73,15 +73,10 @@ deny log show whether the boundary holds. A client that ignores
   so their addresses change and are shared with other sites. A host-name
   allowlist on `CONNECT` is the usable control.
 
-**Open questions (pending owner decision D20).**
+**Open questions (OQ-1 and OQ-3 resolved by owner ruling D20, 2026-11-11).**
 
-- **OQ-1 (open).** Scope of the `tagent --bind` refusal. DOC-90 AG-2 refuses a
-  non-loopback `--bind` on every host. That ends token-gated LAN use of
-  `tagent --api` on the Mac. Confirm it, or limit the refusal to sleds.
-- **OQ-3 (open).** `tailscaled` must share the console's namespace, so it sits
-  in the no-route namespace. It then needs the Tailscale control plane and
-  DERP relay hosts through the proxy, or its own path. No ruling covers those
-  hosts today. IN-2 cannot run until the owner rules.
+- **OQ-1 (resolved by D20).** `tagent --bind` refuses a non-loopback address on every host, not only on sleds.
+- **OQ-3 (resolved by D20).** The sled egress allowlist adds `controlplane.tailscale.com`, `login.tailscale.com` and the `derpN*.tailscale.com` relay pattern, so `tailscale serve` works from inside the sled; client logging is off.
 
 OQ-2 (Claude Code token refresh hosts) and OQ-4 (`HF_HUB_OFFLINE`) stay in
 DOC-90 §11 and do not block this decision.

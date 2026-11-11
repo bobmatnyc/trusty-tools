@@ -20,7 +20,7 @@ The sled has exactly two network surfaces:
 - **Inbound:** trusty-console. Nothing else in the sled accepts a connection from outside the sled.
 - **Outbound:** one allowlisted network egress proxy. Nothing in the sled reaches the internet except through it.
 
-The ruling also accepts audit recommendations 2 to 8. §3 to §8 state them as testable rules. §9 states how a sled is verified. A rule here binds a sled only; Mac and EVO hosts keep today's behaviour unless a section says otherwise.
+The ruling also accepts audit recommendations 2 to 8. §3 to §8 state them as testable rules. §9 states how a sled is verified. A rule here binds a sled only; Mac and EVO hosts keep today's behaviour unless a section says otherwise. AG-2 says otherwise (owner ruling D20).
 
 ## 2. Current state {#SPEC-SLEDNET-02~draft}
 
@@ -78,7 +78,7 @@ From the audit, read at `be1ed52f98`. Spot-checked on `origin/main` `7497139ef9`
 **ID:** SPEC-SLEDNET-05~draft
 
 - **AG-1. Off on sleds now.** The sled image sets `TAGENT_NO_API=1` (named after the `TAGENT_NO_PROVISION` precedent, #10940). With it set, `tagent --api` and `tagent --serve` exit non-zero before binding, with a message that names [#6433](https://github.com/bobmatnyc/trusty-tools/issues/6433). The sled entrypoint never starts either mode.
-- **AG-2. Refuse non-loopback `--bind`, any host, in the meantime.** `serve_with_config` refuses a non-loopback bind even with a token; today it accepts one (`routes.rs:610-617`). The UDP LAN-address probe (audit L4) only runs on a non-loopback bind, so it goes with this rule. See OQ-1.
+- **AG-2. Non-loopback `--bind` refused on every host.** `serve_with_config` refuses a non-loopback bind even with a token; today it accepts one (`routes.rs:610-617`). The rule holds on every host, Mac and EVO included, not only sleds. Token-gated LAN use of `tagent --api` ends. The UDP LAN-address probe (audit L4) only runs on a non-loopback bind, so it goes with this rule. Owner ruling D20 (2026-11-11) settled OQ-1.
 - **AG-3. End state.** [#6433](https://github.com/bobmatnyc/trusty-tools/issues/6433) moves the tagent API to UDS. The console proxies `/api/agents/*` over UDS, the `http_addr` discovery file goes, and the `trusty-agents` row in `tcp_listener_allowlist.tsv` is removed. That closes the `/api/agents` bypass (audit, "What the console needs" item 7). AG-1 is then lifted for the UDS mode only.
 
 ## 6. Outbound rule {#SPEC-SLEDNET-06~draft}
@@ -97,10 +97,19 @@ From the audit, read at `be1ed52f98`. Spot-checked on `origin/main` `7497139ef9`
 | `api.anthropic.com` | steady | Claude Code sessions (audit O7); trusty inference on the Anthropic provider (O1, O2, O3) | Model API, the one provider allowed (ruling 3) |
 | `github.com` | steady | `git fetch`, `clone`, `push` over HTTPS from managed routes and tagent (O17) | Source access for the sled's repos (ruling 5) |
 | `api.github.com` | steady | `gh` and GitHub REST from managed routes, ticket tools (O13, O16) | PR and issue calls for the sled's repos (ruling 5) |
+| `controlplane.tailscale.com` | steady | `tailscaled` coordination: auth, keys, netmap (OQ-3) | `tailscale serve` needs a tailnet login (ruling D20) |
+| `login.tailscale.com` | steady | `tailscaled` login and coordination fallback | Same (ruling D20) |
+| DERP relays, matched by `dstdom_regex` `^derp[0-9]+[a-z]*(-all)?\.tailscale\.com$` | steady | `tailscaled` relayed traffic | Only path to peers through the proxy (ruling D20); see the Tailscale paragraph below |
 | `platform.claude.com` | login | Claude Code `/login` | OAuth login (ruling 3); see OQ-2 on token refresh |
 | `claude.ai` | login | Claude Code `/login` | OAuth login (ruling 3) |
 
-Not on the list, so denied: crates.io, static.crates.io, index.crates.io, registry.npmjs.org, pypi.org, files.pythonhosted.org, huggingface.co, downloads.claude.ai, objects.githubusercontent.com, every other model provider, Slack, Telegram, Google, Granola, Linear, Jira, Confluence, open-meteo.com. The Tailscale control plane and relays are also not on it; see OQ-3.
+Not on the list, so denied: crates.io, static.crates.io, index.crates.io, registry.npmjs.org, pypi.org, files.pythonhosted.org, huggingface.co, downloads.claude.ai, objects.githubusercontent.com, every other model provider, Slack, Telegram, Google, Granola, Linear, Jira, Confluence, open-meteo.com. `log.tailscale.com`, `log.tailscale.io` and `console.tailscale.com` are also denied.
+
+**Tailscale hosts (ruling D20, OQ-3).** `tailscaled` needs outbound TCP 443 to `controlplane.tailscale.com` and `login.tailscale.com`, and to the DERP relays ([Tailscale firewall ports](https://tailscale.com/kb/1082/firewall-ports)). Closed list: the two control hosts. DERP cannot be a closed list. The DERP map holds 95 hosts in 28 regions, all named `derp<region><letter>.tailscale.com`, and Tailscale says the count may grow ([DERP map](https://controlplane.tailscale.com/derpmap/default)). The proxy therefore matches that pattern only. It does not allow `.tailscale.com` as a whole, so `log`, `console` and the website stay denied. Squid rule: `acl derp dstdom_regex -i ^derp[0-9]+[a-z]*(-all)?\.tailscale\.com$`, plus `dstdomain controlplane.tailscale.com login.tailscale.com`. The control plane prefers TCP 80 and falls back to 443; the proxy accepts 443 only, so the fallback is taken.
+
+- **Relay-only.** An HTTPS `CONNECT` proxy carries TCP only. Direct WireGuard paths (UDP, source port 41641) and STUN (UDP 3478, sent to DERP servers) cannot use it, and OUT-1 leaves the app no UDP route. Every tailnet connection to a sled is relayed over DERP, with higher latency than a direct path. `tailscale serve` to the console still works.
+- **Logging decision.** The sled image sets `TS_NO_LOGS_NO_SUPPORT=true` for `tailscaled` ([logging docs](https://tailscale.com/kb/1011/log-mesh-traffic)). The log host is then not needed and stays denied. Cost: Tailscale may not give support for a sled's node ([tailscaled flags](https://tailscale.com/kb/1278/tailscaled)). A sled is a no-route namespace, so sending client logs to a third party is the wrong default.
+- **Unverified.** Tailscale's KB does not say that `tailscaled` honours `HTTPS_PROXY`. Rung 2 must start `tailscaled` with the §7 proxy env, run `tailscale serve`, and read `access.log` for every `CONNECT` host. A host seen there and not allowed is a finding for a new ruling (OUT-5).
 
 **GitHub credential.** One fine-grained token per sled, scoped to that sled's repos, mounted read-only like the console token and never set as an image env value. Only managed routes push (ruling 5).
 
@@ -137,7 +146,7 @@ The image sets each variable below in its `ENV` layer. None holds a secret.
 |---|---|---|---|
 | Console on loopback | On, token required | §3, §4 | — |
 | Console `--tailscale` / non-loopback `--http` | Off | IN-2 | — |
-| Tailscale serve in front of the console | On | IN-2 | Needs OQ-3 settled |
+| Tailscale serve in front of the console | On | IN-2 | Hosts allowed by D20; relay-only (§6) |
 | Tailscale Funnel; cloud ingress (TLS + OIDC) | Off | IN-3 | A sled that needs it, a named ruling, and ADR-0017 built with per-route exposure |
 | `tagent --api` / `--serve` | Off | AG-1 | #6433 UDS mode |
 | Update checks (memory, search, analyze, tagent) | Off | `TRUSTY_NO_UPDATE_CHECK=1`; tagent needs code (§2) | — |
@@ -202,9 +211,9 @@ V1 cannot tell an update check from a ticket call on `api.github.com`: squid see
 
 **Open questions.**
 
-- **OQ-1.** AG-2 applies the non-loopback `--bind` refusal on every host, which ends today's token-gated LAN use of `tagent --api` on the Mac. Confirm, or limit AG-2 to sleds.
+- **OQ-1. Resolved by D20 (2026-11-11).** AG-2 refuses a non-loopback `--bind` on every host. Token-gated LAN use of `tagent --api` on the Mac ends.
 - **OQ-2.** `docker/cloudtest/README.md:112-113` says Claude Code token refresh also needs `platform.claude.com` and `claude.ai`. If so, `steady` breaks at token expiry. Measure in rung 2 (run past one refresh on `steady` and read `access.log`), then either move those hosts to `steady` by ruling or keep the login window.
-- **OQ-3.** `tailscale serve` must share the console's network namespace to reach loopback, so `tailscaled` sits inside the no-route namespace. It then needs the Tailscale control plane and relays (inferred: `controlplane.tailscale.com`, `login.tailscale.com`, the DERP hosts under `tailscale.com`) through the proxy, or its own path. Neither is in ruling 3 or 5. Needs a named ruling before IN-2 can run.
+- **OQ-3. Resolved by D20 (2026-11-11).** The Tailscale control hosts and the DERP pattern join the `steady` allowlist (§6). Tailnet traffic is relay-only. Client logging is off. Rung 2 confirms `tailscaled` uses the proxy.
 - **OQ-4.** The pinned hf-hub ignores `HF_HUB_OFFLINE`. Keep the variable as ruled, or drop it as dead config.
 
 ## References
