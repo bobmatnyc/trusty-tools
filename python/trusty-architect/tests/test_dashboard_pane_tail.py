@@ -1,7 +1,8 @@
 """Pane-tail provider: dashboard_pane_tail.session_pane_tail (#11065 phase 2).
 
 Covers: the n clamp and its type refusal; masking through mask_pane_text; the line cap, trailing blank rows and
-`truncated`; exact-name session match; the capture depth handed to capture_pane; the TTL cache; the error arm
+`truncated`; exact-name session match; the capture depth and -J handed to capture_pane;
+a secret an application hard-wrapped over two rows; the TTL cache; the error arm
 (a failed capture is a PaneTailFailure, never an empty tail); and, end to end through the real fleet-poll.py with a
 stub tmux, that no pane text lands on disk under the dashboard store, the inbox or the working directory.
 Every fake secret is assembled at run time, so no literal in this file matches a secret scanner or the leak gate.
@@ -90,7 +91,8 @@ def test_each_line_is_cut_to_line_max():
 
 def test_secrets_are_masked_and_escapes_stripped():
     tok, bearer = "ghp_" + rand(36), rand(40)
-    text = f"\x1b[31mpushing with {tok}\x1b[0m\ncurl -H 'Authorization: Bearer {bearer}'\ndone"
+    # #11065: a row that ends in a secret also masks the row below it (hard wraps), so a blank row precedes "done".
+    text = f"\x1b[31mpushing with {tok} now\x1b[0m\ncurl -H 'Authorization: Bearer {bearer}'\n\ndone"
     tail, _ = provider(FakePoller(text))
     joined = "\n".join(tail.session_pane_tail("work").lines)
     assert tok not in joined and bearer not in joined and "\x1b" not in joined
@@ -101,7 +103,51 @@ def test_capture_depth_follows_the_clamped_n():
     poller = FakePoller("a")
     tail, _ = provider(poller)
     tail.session_pane_tail("work", 500)
-    assert poller.calls == [("%1", {"history": 200})]
+    assert poller.calls == [("%1", {"history": 200, "join": True})]
+
+
+def _windows(s, n=8):
+    return {s[i:i + n] for i in range(len(s) - n + 1)}
+
+
+def test_hard_wrapped_token_leaves_no_fragment():
+    """#11065 critic repro: a 40-character token an application wrapped at column 20 kept its second row."""
+    tok = "gh" + "p_" + rand(36)
+    tail, _ = provider(FakePoller(f"{tok[:20]}\n{tok[20:]}\n$ ls"))
+    joined = "\n".join(tail.session_pane_tail("work").lines)
+    assert not [w for w in _windows(tok) if w in joined], joined
+    assert joined == "[masked:gh-token]\n[masked:gh-token]\n$ ls"
+
+
+def test_hard_wrapped_password_leaves_no_fragment():
+    """#11065 critic repro: a key=value value wrapped onto the next row kept its last words."""
+    tail, _ = provider(FakePoller("password: correct horse battery\nstaple tail\n$ ls"))
+    joined = "\n".join(tail.session_pane_tail("work").lines)
+    assert "staple" not in joined and "tail" not in joined and "battery" not in joined, joined
+    assert joined.endswith("\n$ ls")
+
+
+@pytest.fixture
+def fleet_poll(monkeypatch):
+    """fleet-poll.py with tmux replaced by a recorder; returns (module, recorded argument tuples)."""
+    spec = importlib.util.spec_from_file_location("fleet_poll_capture_test", os.path.join(SCRIPTS, "fleet-poll.py"))
+    fp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fp)
+    calls = []
+    monkeypatch.setattr(fp, "tmux", lambda *a, **k: calls.append((a, k)) or "")
+    return fp, calls
+
+
+def test_capture_default_still_issues_eighty_lines_without_join(fleet_poll):
+    fp, calls = fleet_poll
+    fp.capture("%1")
+    assert calls == [(("capture-pane", "-e", "-p", "-S", "-80", "-t", "%1"), {})]
+
+
+def test_capture_pane_join_adds_minus_j_on_the_listed_server(fleet_poll):
+    fp, calls = fleet_poll
+    fp.capture_pane({"pane": "%2", "server": "tm-ws-a"}, history=40, join=True)
+    assert calls == [(("capture-pane", "-e", "-p", "-J", "-S", "-40", "-t", "%2"), {"server": "tm-ws-a"})]
 
 
 def test_session_match_is_exact_and_prefers_the_active_pane():
@@ -195,7 +241,7 @@ def test_no_pane_text_is_persisted_under_store_inbox_or_cwd(tmp_path, tmp_path_f
 
     assert isinstance(out, pt.PaneTail), out
     assert f"{sentinel} ok" in out.lines and tok not in "\n".join(out.lines)
-    assert "capture-pane -e -p -S -40 -t %1" in (stub / "args.log").read_text()
+    assert "capture-pane -e -p -J -S -40 -t %1" in (stub / "args.log").read_text()
     control = tmp_path_factory.mktemp("control")
     (control / "planted").write_text(sentinel)
     assert _files_holding(control, [sentinel]), "the scan must be able to find a planted copy"

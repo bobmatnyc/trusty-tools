@@ -135,16 +135,17 @@ def _rows(out, server):
     return panes
 
 
-def capture(pane, server=None, history=80):
+def capture(pane, server=None, history=80, join=False):
     # #11065: `history` is how many scrollback lines above the screen to include; the pane tail asks up to 200.
-    start = f"-{int(history)}"
+    # join=True adds -J, so a line tmux soft-wrapped comes back as one row and a wrapped secret is masked whole.
+    args = ("capture-pane", "-e", "-p", *(("-J",) if join else ()), "-S", f"-{int(history)}", "-t", pane)
     if server:
-        return P.tmux("capture-pane", "-e", "-p", "-S", start, "-t", pane, server=server)
-    return P.tmux("capture-pane", "-e", "-p", "-S", start, "-t", pane)
+        return P.tmux(*args, server=server)
+    return P.tmux(*args)
 
 
 def capture_pane(p, **kw):
-    """Capture listed pane `p` on the server it was listed from (#8928); `kw` (history=) goes to capture()."""
+    """Capture listed pane `p` on the server it was listed from (#8928); `kw` (history=, join=) goes to capture()."""
     return P.capture(p["pane"], p["server"], **kw) if p.get("server") else P.capture(p["pane"], **kw)
 
 

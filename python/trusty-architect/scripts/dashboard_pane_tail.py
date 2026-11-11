@@ -4,10 +4,11 @@ Why: a Decision shows the session's most recent pane lines (#11065). The text is
 secrets, so it is masked before it leaves this module and it is never written anywhere: no store document, no inbox
 file, no log line (issue constraint 2: in memory only, with a TTL).
 What: PaneTailProvider.session_pane_tail(name, n) finds the tmux pane of the session named exactly `name` through the
-poller's list_panes(), captures it through the poller's capture_pane() (fleet_poll_io.py, the one tmux path), masks it
-with dashboard_mask.mask_pane_text, drops trailing blank screen rows and keeps the last n lines, each cut to LINE_MAX
-characters. It returns a PaneTail, or a PaneTailFailure ("not_running" or "capture_failed"): a failed capture is never
-an empty tail, which would read as an idle pane. Successes are cached in a process-local dict for TTL seconds.
+poller's list_panes(), captures it through the poller's capture_pane() (fleet_poll_io.py, the one tmux path) with
+tmux soft wraps joined (-J), masks it with dashboard_mask.mask_pane_text(hard_wraps=True), drops trailing blank screen
+rows and keeps the last n lines, each cut to LINE_MAX characters. It returns a PaneTail, or a PaneTailFailure
+("not_running" or "capture_failed"): a failed capture is never an empty tail, which would read as an idle pane.
+Successes are cached in a process-local dict for TTL seconds.
 n: None gives DEFAULT_LINES; an int is clamped into [MIN_LINES, MAX_LINES], so the cap holds for every caller and an
 over-large request still gets an answer; a bool or non-int raises TypeError (a caller bug, not a request to clamp).
 The module-level session_pane_tail(name, n) uses one shared provider that loads fleet-poll.py on its first call.
@@ -66,8 +67,12 @@ def _pick_pane(panes, name):
 
 
 def _tail(raw, n):
-    """(lines, truncated): `raw` masked whole, trailing blank rows dropped, the last n lines kept."""
-    masked = dashboard_mask.mask_pane_text(raw, max_lines=raw.count("\n") + 1, max_line_len=LINE_MAX)
+    """(lines, truncated): `raw` masked whole, trailing blank rows dropped, the last n lines kept.
+
+    #11065: hard_wraps=True also masks a secret that an application wrapped onto the next row.
+    """
+    masked = dashboard_mask.mask_pane_text(raw, max_lines=raw.count("\n") + 1, max_line_len=LINE_MAX,
+                                          hard_wraps=True)
     lines = masked.split("\n") if masked else []
     while lines and not lines[-1].strip():
         lines.pop()
@@ -114,7 +119,7 @@ class PaneTailProvider:
         if pane is None:
             return PaneTailFailure(name, NOT_RUNNING, f"no tmux session named {name!r}")
         try:
-            raw = self._poller.capture_pane(pane, history=n)
+            raw = self._poller.capture_pane(pane, history=n, join=True)
         except err as e:
             return PaneTailFailure(name, CAPTURE_FAILED, str(e))
         if not isinstance(raw, str):
