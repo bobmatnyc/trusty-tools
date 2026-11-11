@@ -565,6 +565,11 @@ pub struct CodeIndexer {
     /// `purge_file_committed` refuse.
     pub(super) closed_for_shutdown: bool,
 
+    /// #10738: set while a staged reindex that died mid-run is rolled back.
+    /// Shared with the run's termination guard, which sets it from `Drop`
+    /// with no indexer lock; read by `refuse_if_corpus_detached`.
+    pub(super) swap_abandoned: Arc<AtomicBool>,
+
     /// Issue #4122: monotonic count of writes refused because
     /// [`Self::corpus_open_failed`] was set. Issue #4226 widened it from
     /// incremental writes alone to every refused durable write.
@@ -835,6 +840,7 @@ impl CodeIndexer {
             corpus_ever_wired: false,
             deleted: false,
             closed_for_shutdown: false,
+            swap_abandoned: Arc::new(AtomicBool::new(false)),
             incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,
