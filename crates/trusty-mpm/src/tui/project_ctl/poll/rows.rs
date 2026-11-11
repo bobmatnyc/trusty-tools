@@ -108,7 +108,7 @@ pub(crate) fn live_session_rows(sessions: Vec<ManagedSessionSummary>) -> Vec<Ses
 /// What: derives the 8-hex short id via [`session_short_id`] and copies the
 /// rest through unchanged, including `deliverable_id` (DOC-35 §10.6, #2383 —
 /// drives the Sessions-pane deliverable glyph) and `unresumable` (#2595 —
-/// gates the `r` resume key).
+/// gates the `R` resume key, #10754 De1).
 /// Test: `session_to_row_derives_short_id_and_copies_fields`,
 /// `session_to_row_carries_deliverable_id`,
 /// `session_to_row_carries_unresumable_flag`,
