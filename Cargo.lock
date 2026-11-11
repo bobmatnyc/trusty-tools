@@ -11136,7 +11136,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.69.0"
+version = "0.69.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11485,7 +11485,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.12.2"
+version = "1.12.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11733,7 +11733,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",
