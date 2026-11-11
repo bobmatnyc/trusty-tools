@@ -362,7 +362,7 @@ required-features = ["daemon"]
 trusty-agents-common = { workspace = true }
 # JSON-RPC / MCP primitives, extracted from `trusty_common::mcp` by ADR-0040 (#5803).
 # `memory_rpc` did NOT move — it arrives through `trusty-common/catchup` below.
-trusty-mcp = { workspace = true }
+trusty-mcp = { path = "../trusty-mcp", version = "0.2.3" }
 trusty-common = { workspace = true, features = [
     "cli-help",
     # #5811: the single palace-resolution entry point. Session launch exports
@@ -455,16 +455,16 @@ toml.workspace = true
 # #7521: `tm secrets` is a client of the trusty-secrets socket. The client
 # (`server::OnDemandSecrets`) lives behind `server`, which implies `store`
 # (`parse_dotenv` for `import`) and `api` (the method types).
-trusty-secrets = { workspace = true, features = ["server"] }
+trusty-secrets = { path = "../trusty-secrets", version = "0.4.1", default-features = false, features = ["server"] }
 # #8454 S2c: `tm doctor` loads the channel route policy read-only.
-trusty-channels = { workspace = true, optional = true }
+trusty-channels = { path = "../trusty-channels", version = "0.2.1", optional = true }
 # #9270: the memory engine's stable path, `trusty_memory::engine`. OPTIONAL and
 # enabled only by `sm-memory` / `manager-memory`: trusty-memory always carries
 # the engine (hnsw_rs + ONNX Runtime), and a default trusty-mpm
 # build must not compile it (owner ruling 2026-09-27). `default-features = false`
 # drops trusty-memory's `server` surface. `scripts/check_engine_import_path.sh
 # --dep-graph` proves both halves from the resolved graph.
-trusty-memory = { path = "../trusty-memory", version = "0.36", default-features = false, optional = true }
+trusty-memory = { path = "../trusty-memory", version = "0.36.7", default-features = false, optional = true }
 # #8436: `tm fleet init` edits ~/.trusty-mpm/config.toml keeping comments and
 # unrelated keys; already in this crate's graph through trusty-common.
 toml_edit.workspace = true
@@ -612,7 +612,7 @@ tempfile.workspace = true
 # #7521: re-declared for `test-support` — the in-memory backend the
 # `tm secrets` tests serve the socket from, so no test opens the Keychain.
 # Dev-only so `MemoryBackend` never ships in a production `tm`.
-trusty-secrets = { workspace = true, features = ["server", "test-support"] }
+trusty-secrets = { path = "../trusty-secrets", version = "0.4.1", default-features = false, features = ["server", "test-support"] }
 # #8378 PR-C: the content-cache tests build `content-vX.Y.Z.tar.gz` fixtures.
 # Both are already in this crate's normal graph through
 # `trusty-common/content-resolver`.
