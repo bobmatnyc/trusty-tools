@@ -63,7 +63,10 @@ CLAIM = re.compile(r"\b(?:user|owner)\s+(?:ruling|instruction|decision)s?\b", re
 # provenance word. A lower-case word other than those is a directive or a note, and refuses.
 NAME_WORD = re.compile(r"[^\W\d_]+(?:[.'-][^\W\d_]*)*")
 REF_TOKEN = re.compile(r"~?\d{2}:\d[\dx](?::\d{2})?Z|\d{2}-\d{2}|\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?Z)?|"
-                       r"(?:S[0-9a-f]{2}:|[a-z]{2,4}-)?[A-Z][0-9a-f]{2}|#\d+|"
+                       # #10780 critic: a record id carries a digit, so a name (Ada, Dee, do-Add) is not one;
+                       # only the ar-/mu- record namespaces keep digit-free ids (ar-Tfa, ar-Tbe in real labels).
+                       r"(?:S(?=[0-9a-f]?\d)[0-9a-f]{2}:|[a-z]{2,4}-)?[A-Z](?=[0-9a-f]?\d)[0-9a-f]{2}|"
+                       r"(?:ar|mu)-[A-Z][0-9a-f]{2}|#\d+|"
                        r"superseded|expired|dash|dashboard|chat|voice|typed|direct|verbatim|answered|relayed|"
                        r"reported|amended|re-relay")
 MARKER = re.compile(r"^\[[^\]\n]*Architect [0-9]{2}:[0-9][0-9x]Z\]")

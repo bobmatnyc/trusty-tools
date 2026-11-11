@@ -83,7 +83,7 @@
     "scripts/quiet-sessions.py": "d7bb4e96dd47cde2c42a3311c9c71c921925448b1a2544ae34af6cfb57ad9094",
     "scripts/relay-marker.py": "220317e728079d07d6903ae0cc2b5df45730a877812c43c69daa8cb37f5cefdf",
     "scripts/relay.sh": "36aecae59b868f781cf8d910efe4c7e2ffcaa5ab1aa261da5bebbe781e50961f",
-    "scripts/relay_provenance.py": "49e0dc9a98082aab83867b6e224e03c3fb951bce93882e8a6d4fcb72b417de1d",
+    "scripts/relay_provenance.py": "467ba0c7636c6e077224ee84cfa8ba79cec3d3dc8bbb15ee2a7fc0a1fbc37cd8",
     "scripts/self-clear.sh": "37982396b2416446d607b65aaa7c5150326415b62c5e69a0431f7f1d37c00def",
     "scripts/self-ctx.py": "300580b6ac6a71f55851a2216575dd4dc94052ef833732163ccb893fd81e5c89",
     "scripts/stale-tasks.py": "276858b1a266aa9ff75de41c148e6afe7e0d522af4cb406a94a08da59f753031",
