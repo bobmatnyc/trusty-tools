@@ -206,3 +206,7 @@ V1 cannot tell an update check from a ticket call on `api.github.com`: squid see
 - **OQ-2.** `docker/cloudtest/README.md:112-113` says Claude Code token refresh also needs `platform.claude.com` and `claude.ai`. If so, `steady` breaks at token expiry. Measure in rung 2 (run past one refresh on `steady` and read `access.log`), then either move those hosts to `steady` by ruling or keep the login window.
 - **OQ-3.** `tailscale serve` must share the console's network namespace to reach loopback, so `tailscaled` sits inside the no-route namespace. It then needs the Tailscale control plane and relays (inferred: `controlplane.tailscale.com`, `login.tailscale.com`, the DERP hosts under `tailscale.com`) through the proxy, or its own path. Neither is in ruling 3 or 5. Needs a named ruling before IN-2 can run.
 - **OQ-4.** The pinned hf-hub ignores `HF_HUB_OFFLINE`. Keep the variable as ruled, or drop it as dead config.
+
+## References
+
+- [ADR-0077](../adr/0077-cloud-sled-network-boundary.md) (Proposed) records the inbound, outbound and token decisions of this spec.
