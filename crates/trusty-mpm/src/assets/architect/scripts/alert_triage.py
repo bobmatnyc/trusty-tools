@@ -308,13 +308,21 @@ def parse_haiku(out):
     return res
 
 
+def haiku_argv():
+    """The `claude -p` argv for one triage call; the prompt goes on stdin, never argv."""
+    # #11026: `--tools ""` turns off ToolSearch deferral, so every user-scope MCP schema
+    # would go inline (~383k tokens); the explicit empty config loads no server. The `=`
+    # form keeps variadic `--mcp-config` from taking a later argument as a config.
+    return ["claude", "-p", "--model", MODEL, "--tools", "", "--disable-slash-commands",
+            "--strict-mcp-config", '--mcp-config={"mcpServers":{}}']
+
+
 def run_haiku(prompt):
     """One `claude -p` call on the plan login (no API key). Raises on timeout or non-zero exit."""
     env = dict(os.environ)
     env.setdefault("CLAUDE_CONFIG_DIR", CLAUDE_CONFIG_DIR)
     r = subprocess.run(
-        ["claude", "-p", "--model", MODEL, "--tools", "", "--disable-slash-commands",
-         "--strict-mcp-config"],
+        haiku_argv(),
         input=prompt, capture_output=True, text=True, timeout=HAIKU_TIMEOUT,
         cwd=tempfile.gettempdir(), env=env)
     if r.returncode != 0:
