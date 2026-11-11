@@ -111,12 +111,9 @@ pub(super) fn record_dispatch_usage(
     duration_ms: u64,
     task_for_prefix: &str,
 ) {
-    let agent = crate::env_compat::env_var("TAGENT_AGENT_ID", "OPEN_MPM_AGENT_ID")
-        .unwrap_or_else(|_| "unknown".to_string());
-    let record = crate::usage::UsageRecord::new(
-        agent,
-        model.to_string(),
-        runner.to_string(),
+    let record = dispatch_usage_record(
+        model,
+        runner,
         input_tokens,
         output_tokens,
         duration_ms,
@@ -127,6 +124,30 @@ pub(super) fn record_dispatch_usage(
     tokio::spawn(async move {
         crate::usage::append_usage(&project_dir, &record).await;
     });
+}
+
+/// Build the `UsageRecord` that `record_dispatch_usage` appends, resolving the
+/// agent from `TAGENT_AGENT_ID` (else `"unknown"`).
+// #10980: split out so the Bedrock tool-loop trace can await its own append.
+pub(super) fn dispatch_usage_record(
+    model: &str,
+    runner: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+    duration_ms: u64,
+    task_for_prefix: &str,
+) -> crate::usage::UsageRecord {
+    let agent = crate::env_compat::env_var("TAGENT_AGENT_ID", "OPEN_MPM_AGENT_ID")
+        .unwrap_or_else(|_| "unknown".to_string());
+    crate::usage::UsageRecord::new(
+        agent,
+        model.to_string(),
+        runner.to_string(),
+        input_tokens,
+        output_tokens,
+        duration_ms,
+        task_for_prefix,
+    )
 }
 
 /// Heuristic to label which provider a dispatch went through, for the
