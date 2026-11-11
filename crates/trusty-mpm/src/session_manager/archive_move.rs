@@ -293,7 +293,9 @@ impl Hooks<'_> {
 pub(crate) enum Strategy {
     /// Rename; copy only when the rename crosses filesystems.
     Auto,
-    /// Copy, as a cross-filesystem move would (tests).
+    /// Copy, as a cross-filesystem move would; tests only, since a real run
+    /// reaches the copy through a cross-device rename.
+    #[cfg(test)]
     ForceCopy,
 }
 
