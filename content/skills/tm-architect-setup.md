@@ -3,7 +3,7 @@ name: tm-architect-setup
 description: Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. `tm fleet project add|remove|list` edits the watched set; a second `init` never makes a second Architect.
 user-invocable: true
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 category: pm-reference
 tags: [architect, fleet, setup, pm-recommended]
 effort: medium
@@ -32,8 +32,9 @@ alias `opus` as its model.
 2. **One Architect per user.** A second run in the same directory changes
    nothing and says so. `init` refuses when another allow-listed project
    already requests the `supervisor` profile, or when `tm-architect` runs in
-   another directory. `tm fleet project` edits the watched set; `init` does
-   not change it.
+   another directory. `init` creates the watch list when it is absent (see
+   "Watched projects") and never changes an existing one; `tm fleet project`
+   edits it.
 3. **Local git repo, no remote.** It runs `git init` and adds no remote. The
    repo never inherits an `origin`. A private remote is added only when you
    ask for one. A public remote is never added.
@@ -96,6 +97,17 @@ The Architect's watch list is `local/watch.json` in its directory, changed
 only through `tm fleet project` (trusty-tools #10895). Each command takes
 `--dir` and reads the project registry from disk, so it works while the
 daemon is down.
+
+`tm fleet init` creates the list when it is absent (trusty-tools #11012). It
+lists each project with a live `tm-*` tmux session, matched to a registry key
+by the session's alias, else by its directory, plus any project the
+`CLAUDE.md` import below would add, and writes each project's record first.
+It prints one line per session that matches no project, or more than one,
+and leaves that session out. With no tmux or no `tm-*` session the list is
+empty, and an empty list watches every `tm-*` session. A list that exists,
+even an empty one, is never changed; one that does not parse fails `init`
+and is left as it was. To seed the list of an Architect set up before
+#11012, run `tm fleet init` again.
 
 - `tm fleet project add <key|dir>` writes `local/projects/<key>.md` from the
   record template when it is absent, then adds the project. It refuses a
