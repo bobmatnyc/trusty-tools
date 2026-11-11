@@ -52,3 +52,57 @@ falls back to `--lexical-only`; the mode is printed and saved in
 State lives in the `/data` bind mount and survives `docker restart`. Nothing
 survives an EVO reboot: the container does not restart on its own, and the state
 is not backed up. Treat both as gone after a reboot.
+
+## Rung 2: Claude Code PM session with egress only to Anthropic
+
+The app container sits on an `--internal` network with no route out. A squid
+proxy container sits on that network and on the default bridge, and allows
+`CONNECT api.anthropic.com:443` only. No port is published. The token is the
+single line `CLAUDE_CODE_OAUTH_TOKEN=<value>` in a host file, mounted read-only;
+place it with `RUNG2-TOKEN-CHECKLIST.md`. Never pass it with `--env-file`, `-e`
+or a build arg.
+
+```bash
+SHA=$(git rev-parse --short HEAD)
+docker build -t tm-trusty-cloud-egress:$SHA docker/cloudtest/proxy
+docker build -t tm-trusty-cloud-cloudtest:$SHA \
+  --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" docker/cloudtest   # after fetch.sh
+
+docker network create --internal --subnet 10.250.77.0/24 tm-trusty-cloud-internal
+
+# proxy: attach both networks before start, so squid sees both interfaces
+docker create --name tm-trusty-cloud-egress --cpus 1 --memory 256m \
+  --network tm-trusty-cloud-internal tm-trusty-cloud-egress:$SHA
+docker network connect bridge tm-trusty-cloud-egress
+docker start tm-trusty-cloud-egress
+
+# app: internal network only
+docker run -d --name tm-trusty-cloud-cloudtest --cpus 4 --memory 6g \
+  --network tm-trusty-cloud-internal \
+  -v ~/cloudtest/tm-trusty-cloud-cloudtest/state:/data \
+  -v ~/.cache/fastembed:/models/fastembed:ro \
+  -v ~/cloudtest/tm-trusty-cloud-cloudtest/secrets/claude.env:/run/secrets/claude.env:ro \
+  tm-trusty-cloud-cloudtest:$SHA
+
+docker exec -u cloudtest tm-trusty-cloud-cloudtest check.sh     # stores the memory sentinel
+docker exec -u cloudtest tm-trusty-cloud-cloudtest rung2.sh
+docker exec tm-trusty-cloud-egress cat /var/log/squid/access.log   # evidence: TCP_TUNNEL/200 api.anthropic.com, TCP_DENIED/403 example.com
+```
+
+The proxy subnet ACL in `proxy/squid.conf` matches `10.250.77.0/24`; change both
+together. If a deny line names `platform.claude.com` or `claude.ai`, uncomment
+the matching `acl` and `http_access allow` lines in `squid.conf` and rebuild the
+proxy. Claude Code is the native `linux-x64` binary from downloads.claude.ai,
+pinned by `CLAUDE_CODE_VERSION` and `CLAUDE_CODE_SHA256` build args and checked
+against Anthropic's `manifest.json`; the build fails on any mismatch.
+`claude-run` reads the token file into one `claude` process only; the daemons
+never see it.
+
+### Cleanup when rung 2 ends
+
+```bash
+rm -f ~/cloudtest/tm-trusty-cloud-cloudtest/secrets/claude.env
+docker rm -f tm-trusty-cloud-cloudtest tm-trusty-cloud-egress
+docker network rm tm-trusty-cloud-internal
+docker rmi tm-trusty-cloud-cloudtest:$SHA tm-trusty-cloud-egress:$SHA
+```

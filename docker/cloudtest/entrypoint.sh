@@ -16,6 +16,12 @@ if [ -e "${lock}" ]; then
     echo "$(date -u +%FT%TZ) removed stale lock ${lock}" >> /data/logs/supervisor.log
 fi
 
+# Rung 2: the Claude credential is read only by claude-run, per invocation. The
+# daemons below never see it. This line records presence, not the value.
+if [ -e /run/secrets/claude.env ]; then
+    echo "$(date -u +%FT%TZ) claude credential file present (not read here)" >> /data/logs/supervisor.log
+fi
+
 pids=()
 start() {
     local name="$1"; shift
