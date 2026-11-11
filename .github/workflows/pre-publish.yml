@@ -321,8 +321,7 @@ jobs:
       # the exact timing #7466 exists to stop.
       - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci-apt-install.sh \
             build-essential pkg-config libssl-dev libdbus-1-dev
 
       - name: Cache cargo artifacts
@@ -501,8 +500,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci-apt-install.sh \
             build-essential pkg-config libssl-dev
 
       - name: Install cargo-nextest
@@ -688,8 +686,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci-apt-install.sh \
             build-essential pkg-config libssl-dev
 
       # libdbus-1-dev is REQUIRED here and nowhere else in this workflow. The
@@ -700,7 +697,7 @@ jobs:
       # correctly NOT reported as a contract verdict. The other jobs build
       # narrower graphs and do not need it.
       - name: Install libdbus (contract extraction only)
-        run: sudo apt-get install -y --no-install-recommends libdbus-1-dev
+        run: bash scripts/ci-apt-install.sh libdbus-1-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2

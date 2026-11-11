@@ -76,7 +76,9 @@
 # job's whole `timeout-minutes: 30` before cargo ran — `trusty-agents-ui clippy`
 # and `trusty-code-gui clippy` both died that way at 30m21s on PR #5992. The
 # wrapper retries each phase, kills a stalled attempt at its own ceiling, and
-# caps the total at ten minutes with an `::error::` line saying which.
+# caps the total at ten minutes with an `::error::` line saying which. Since the
+# 2026-11-11 *.ubuntu.com DNS outage it also skips apt when dpkg already has
+# every package, and falls back to a mirror outside *.ubuntu.com.
 #
 # SKIP_UI_BUILD=1 is set globally: the four crates with build.rs Svelte
 # pipelines (trusty-search, trusty-memory, trusty-analyze, trusty-agents) skip
