@@ -16,6 +16,10 @@ use std::process::{Command, Output};
 
 use crate::common;
 
+// #11061: the fake `claude` process, shared with the `tm` unit tests.
+#[path = "common/fake_claude.rs"]
+mod fake_claude;
+
 /// A scratch home, a private tmux server directory and a fake `claude`.
 struct FleetEnv {
     home: tempfile::TempDir,
@@ -28,10 +32,9 @@ impl FleetEnv {
         let bin = tempfile::tempdir().expect("fake bin dir");
         let claude = bin.path().join("claude");
         // #8878 ruling A: `tm fleet init` finds its claude by process name, so
-        // the fake execs a `sleep` whose name contains `claude`. A symlink, not
-        // a copy: macOS kills an unsigned copy of a system binary.
-        let sleeper = bin.path().join("claude-sleep");
-        std::os::unix::fs::symlink("/bin/sleep", &sleeper).expect("fake claude process");
+        // the fake execs a process whose name contains `claude`. #11061: not
+        // a `/bin/sleep` symlink, which a multicall `sleep` exits at once.
+        let sleeper = fake_claude::sleeper(bin.path());
         // #8981: each start appends its argv, one line per launch. While the
         // RESUME_FAILS marker exists, a `--resume` start dies after 1 s, as
         // a `claude` that cannot load its conversation does. #9092: each start
@@ -39,15 +42,16 @@ impl FleetEnv {
         // #10459: `--version` prints the CLAUDE_VERSION file, else a version
         // the Architect gate accepts, and exits 1 while VERSION_FAILS exists.
         let sleeper = sleeper.display().to_string();
+        let (secs, args) = (fake_claude::SECS_ENV, fake_claude::argv().join(" "));
         // See #10248
         trusty_common::exec_stub::write_executable(
             &claude,
             format!(
                 "#!/bin/sh\nif [ \"$1\" = --version ]; then [ -e {fails:?} ] && exit 1; \
                  cat {version:?} 2>/dev/null || echo '2.1.312 (Claude Code)'; exit 0; fi\n\
-                 echo \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ncase \" $* \" in \
-                 *\" --resume \"*) [ -e {:?} ] && exec {sleeper:?} 1;; esac\nexec {sleeper:?} \
-                 600\n",
+                 echo \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ns=\ncase \" $* \" in \
+                 *\" --resume \"*) [ -e {:?} ] && s=1;; esac\nexport {secs}=${{s:-600}}\n\
+                 exec {sleeper:?} {args}\n",
                 bin.path().join(PID_LOG).display().to_string(),
                 bin.path().join(ARGV_LOG).display().to_string(),
                 bin.path().join(RESUME_FAILS).display().to_string(),
