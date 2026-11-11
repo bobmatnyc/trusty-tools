@@ -20,13 +20,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use trusty_common::integrity::Sha256Digest;
 
-use super::content_step::{
-    last_line, CommandRunner, ProcessRunner, CONTENT_CHECKS, MPM_CRATE, UNKNOWN_VERB,
-};
-use super::probe::probe_member_health;
-use super::probe_http::{accept_only_member, presence_only, ProbeOutcome};
-use super::stable_set::{daemon_members, StableMember};
-use super::update_engine::extract_version_from_line;
+use super::content_step::{CommandRunner, ProcessRunner};
+use super::deployment_probe::{audit_content, binary_version, probe_running};
+pub use super::deployment_probe::{classify_running, read_version, running_of};
 
 /// The record's schema; a record naming any other one is not trusted.
 const SCHEMA: u32 = 1;
@@ -36,6 +32,20 @@ const APP: &str = "trusty-installer";
 pub const RECORD_FILE: &str = "deployment.json";
 /// What an operator runs to bring the machine and the record back in line.
 const REMEDY: &str = "run `tctl install`";
+
+/// What an operator runs to bring `member` back in line with the record.
+///
+/// Why: #10607 review — a daemon still running a replaced build needs a
+/// restart; `tctl install` never restarts a loaded daemon.
+/// Test: `deployment_probe_tests::a_stale_daemon_names_tctl_restart_10607`.
+fn remedy(kind: DriftKind, member: &str) -> String {
+    let verb = if kind.is_running() {
+        "restart"
+    } else {
+        "install"
+    };
+    format!("run `tctl {verb} {member}`")
+}
 
 /// One binary as install placed it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +119,9 @@ pub enum RunningVersion {
     Unreported,
     /// It answered that it runs below its version floor.
     BelowFloor(String),
+    /// Something may be running and its version could not be read; the text is
+    /// the probe outcome (#10607).
+    Unprobed(String),
 }
 
 /// Why one member does not match the record.
@@ -133,6 +146,8 @@ pub enum DriftKind {
     Unverified,
     /// A running daemon did not name its version.
     RunningUnreported,
+    /// A daemon's probe could not read its version (#10607).
+    RunningUnprobed,
     /// The content check could not run.
     ContentUnverified,
     /// A placed member's binary predates the content check verb.
@@ -151,10 +166,22 @@ impl DriftKind {
             Self::Unrecorded
                 | Self::Unverified
                 | Self::RunningUnreported
+                | Self::RunningUnprobed
                 | Self::ContentUnverified
                 | Self::ContentUncheckable
                 | Self::NoRecord
                 | Self::RecordWriteFailed
+        )
+    }
+
+    /// Whether the finding is about a running daemon, so the remedy is a restart.
+    fn is_running(self) -> bool {
+        matches!(
+            self,
+            Self::RunningVersion
+                | Self::RunningBelowFloor
+                | Self::RunningUnreported
+                | Self::RunningUnprobed
         )
     }
 }
@@ -404,7 +431,10 @@ pub fn audit(
             findings.push(DriftFinding {
                 member: name.clone(),
                 kind: DriftKind::Unrecorded,
-                detail: format!("installed, but no install placed it; {REMEDY} {name}"),
+                detail: format!(
+                    "installed, but no install placed it; {}",
+                    remedy(DriftKind::Unrecorded, name)
+                ),
             });
         }
     }
@@ -425,7 +455,7 @@ fn audit_member(
         findings.push(DriftFinding {
             member: member.to_owned(),
             kind,
-            detail: format!("{detail}; {REMEDY} {member}"),
+            detail: format!("{detail}; {}", remedy(kind, member)),
         });
     };
     let mut present = true;
@@ -493,105 +523,14 @@ fn audit_member(
             DriftKind::RunningBelowFloor,
             format!("the running daemon reports status `{status}`"),
         ),
+        RunningVersion::Unprobed(outcome) => find(
+            DriftKind::RunningUnprobed,
+            format!("the daemon's probe could not read its version ({outcome})"),
+        ),
     }
     if present {
         audit_content(member, binaries, runner, &mut find);
     }
-}
-
-fn audit_content(
-    member: &str,
-    binaries: &[RecordedBinary],
-    runner: &dyn CommandRunner,
-    find: &mut dyn FnMut(DriftKind, String),
-) {
-    let check = if member == MPM_CRATE {
-        // Exits non-zero when no verified content serves. The `trusty-mpm` alias
-        // execs `tm`, so either answers.
-        let tm = binaries.iter().find(|b| b.name == "tm");
-        tm.or(binaries.first())
-            .map(|b| (b, ["content", "status"].as_slice()))
-    } else {
-        CONTENT_CHECKS
-            .iter()
-            .find(|(name, _)| *name == member)
-            .and_then(|(name, args)| {
-                let review = binaries.iter().find(|b| b.name == *name);
-                review.map(|b| (b, args.as_slice()))
-            })
-    };
-    let Some((binary, args)) = check else {
-        return;
-    };
-    let command = format!("{} {}", binary.path.display(), args.join(" "));
-    match runner.run(&binary.path, args) {
-        Ok(out) if out.success => {}
-        // #10588: a release older than the verb has no manifest to check.
-        Ok(out) if out.code == Some(2) && out.stderr.contains(UNKNOWN_VERB) => find(
-            DriftKind::ContentUncheckable,
-            format!("not checked: this binary predates `{}`", args.join(" ")),
-        ),
-        Ok(out) => {
-            let why = last_line(&out.stderr).unwrap_or("no output");
-            find(
-                DriftKind::ContentNotServed,
-                format!("`{command}` failed: {why}"),
-            );
-        }
-        Err(e) => find(
-            DriftKind::ContentUnverified,
-            format!("could not run `{command}`: {e}"),
-        ),
-    }
-}
-
-fn binary_version(runner: &dyn CommandRunner, path: &Path) -> Result<String, String> {
-    let out = runner
-        .run(path, &["--version"])
-        .map_err(|e| e.to_string())?;
-    if !out.success {
-        return Err(format!("`--version` exited with {:?}", out.code));
-    }
-    extract_version_from_line(&out.stdout)
-        .ok_or_else(|| format!("`--version` printed no version: {:?}", out.stdout.trim()))
-}
-
-/// What a probe outcome says about the running version.
-///
-/// Test: `classify_running_reads_each_probe_outcome`.
-pub fn classify_running(outcome: &ProbeOutcome) -> RunningVersion {
-    match outcome {
-        ProbeOutcome::Serving { status, version } => {
-            let word = status.to_ascii_lowercase();
-            if word == "stale" || word == "version_below_floor" {
-                RunningVersion::BelowFloor(status.clone())
-            } else {
-                version
-                    .clone()
-                    .map_or(RunningVersion::Unreported, RunningVersion::Reported)
-            }
-        }
-        _ => RunningVersion::NotServing,
-    }
-}
-
-/// The running version of a stable-set member, given its probe outcome.
-pub fn running_of(member: &StableMember, outcome: &ProbeOutcome) -> RunningVersion {
-    if presence_only(&member.binary) || accept_only_member(&member.binary) {
-        RunningVersion::NotApplicable
-    } else {
-        classify_running(outcome)
-    }
-}
-
-/// The running version of a recorded member, probed now.
-fn probe_running(crate_name: &str) -> RunningVersion {
-    daemon_members()
-        .iter()
-        .find(|m| m.crate_name == crate_name)
-        .map_or(RunningVersion::NotApplicable, |m| {
-            running_of(m, &probe_member_health(&m.binary, m.manage))
-        })
 }
 
 /// Audits the machine for a health rollup that already probed the daemons.
@@ -612,8 +551,11 @@ pub fn audit_for_rollup(observed: &HashMap<String, RunningVersion>) -> Deploymen
             .cloned()
             .unwrap_or(RunningVersion::NotApplicable)
     };
-    audit(&load_result, &expected, &ProcessRunner, &running)
+    audit(&load_result, &expected, &ProcessRunner::probe(), &running)
 }
+
+/// The record-and-audit step's shape, so install and upgrade take it as a seam.
+pub type Finisher<'a> = dyn Fn(&[Placement], bool) -> Option<DeploymentAudit> + 'a;
 
 /// Records what a run placed, then audits unless `--no-verify` skipped that.
 ///
@@ -621,10 +563,17 @@ pub fn audit_for_rollup(observed: &HashMap<String, RunningVersion>) -> Deploymen
 /// record is what every later health check reads, so failing to write it fails
 /// the run.
 /// What: see [`finish_at`].
-/// Test: `finish_at_records_then_audits`, `an_unwritable_record_blocks_the_install`.
+/// Test: `finish_at_records_then_audits`, `an_unwritable_record_blocks_the_install`,
+/// `deployment_probe_tests::finish_records_under_the_data_dir_10607`.
 pub fn finish(placements: &[Placement], verify: bool) -> Option<DeploymentAudit> {
     let path = default_record_path();
-    finish_at(path, placements, verify, &ProcessRunner, &probe_running)
+    finish_at(
+        path,
+        placements,
+        verify,
+        &ProcessRunner::probe(),
+        &probe_running,
+    )
 }
 
 /// [`finish`] with its dependencies named.
@@ -670,11 +619,6 @@ pub fn finish_at(
 /// caller to report.
 pub fn record_one(placement: &Placement) -> Result<(), String> {
     record_placements(&default_record_path()?, std::slice::from_ref(placement))
-}
-
-/// The version a placed binary reports, for a path that verified it some other way.
-pub fn read_version(path: &Path) -> Option<String> {
-    binary_version(&ProcessRunner, path).ok()
 }
 
 /// Prints the audit for a human.

@@ -10,6 +10,7 @@ use std::cell::Cell;
 
 use super::*;
 use crate::commands::content_step::RunOutput;
+use crate::commands::probe_http::ProbeOutcome;
 
 /// Answers `--version` with `version` and the content verbs with `content`.
 struct Scripted {

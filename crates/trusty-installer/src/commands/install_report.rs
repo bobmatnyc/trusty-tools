@@ -224,6 +224,22 @@ impl InstallReport {
         self
     }
 
+    /// Records what the install placed and folds the audit in (#10607).
+    ///
+    /// Why: the seam `tctl install` calls, so removing the record-and-audit
+    /// step fails a test rather than shipping an install that never compares.
+    /// What: runs `finish` over `placements`, auditing unless `no_verify`, then
+    /// [`Self::with_deployment`].
+    /// Test: `tests::install_records_and_audits_what_it_placed_10607`.
+    pub(super) fn finish_deployment(
+        self,
+        placements: &[crate::commands::deployment_record::Placement],
+        no_verify: bool,
+        finish: &crate::commands::deployment_record::Finisher<'_>,
+    ) -> Self {
+        self.with_deployment(finish(placements, !no_verify))
+    }
+
     /// Fold the content step's outcome into this report (#9396).
     ///
     /// Why: a failed `tm content update` leaves tm unable to compose a

@@ -1765,3 +1765,39 @@ fn a_deployment_drift_flips_all_ok() {
     assert_eq!(older.exit_code(), 0);
     assert_eq!(report().with_deployment(None).exit_code(), 0);
 }
+
+/// Why: #10607 review — removing the install's record-and-audit call left every
+/// test green.
+/// What: `finish_deployment` hands `finish` the placements with the audit on,
+/// or off under `--no-verify`, and folds what it returns into the exit code.
+/// Test: This is the test.
+#[test]
+fn install_records_and_audits_what_it_placed_10607() {
+    use crate::commands::deployment_record::{DeploymentAudit, DriftFinding, DriftKind, Placement};
+    let seen = std::cell::RefCell::new(Vec::new());
+    let finish = |placements: &[Placement], verify: bool| {
+        seen.borrow_mut().push((placements.len(), verify));
+        Some(DeploymentAudit {
+            state: "drifted",
+            findings: vec![DriftFinding {
+                member: "trusty-search".to_owned(),
+                kind: DriftKind::WrongVersion,
+                detail: String::new(),
+            }],
+        })
+    };
+    let placements = [Placement::new(
+        "trusty-search",
+        std::path::Path::new("/b/trusty-search"),
+        "1.2.3",
+    )];
+    let report = || InstallReport::build(vec![outcome("trusty-search", true, "installed")]);
+    let audited = report().finish_deployment(&placements, false, &finish);
+    assert_eq!(
+        audited.deployment.as_ref().map(|a| a.state),
+        Some("drifted")
+    );
+    assert_eq!(audited.exit_code(), 2);
+    let _ = report().finish_deployment(&placements, true, &finish);
+    assert_eq!(*seen.borrow(), [(1, true), (1, false)]);
+}

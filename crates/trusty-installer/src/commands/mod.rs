@@ -20,6 +20,7 @@ pub mod config;
 pub mod content_step;
 pub mod dependency_graph;
 // #10607: what install placed, and whether the machine still matches it.
+mod deployment_probe;
 pub mod deployment_record;
 pub mod doctor;
 pub mod ensure;

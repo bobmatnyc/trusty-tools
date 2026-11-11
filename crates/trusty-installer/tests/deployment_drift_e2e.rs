@@ -138,3 +138,35 @@ fn stack_rollups_report_each_kind_of_drift() {
     assert_eq!(json["deployment"]["state"], "drifted");
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// Why: #10607 review blocker 1 — `stack health` with a hung member wrote
+/// nothing and was killed at 20s.
+/// What: a recorded binary that never answers `--version` is killed at the
+/// probe deadline; `stack health` still writes its JSON, names the timeout as an
+/// unverified finding and does not exit 0.
+/// Test: this.
+#[test]
+fn a_hung_member_cannot_stall_stack_health_10607() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let binary = root.join("tga");
+    std::fs::write(&binary, "#!/bin/sh\nexec /bin/sleep 60\n").expect("write script");
+    let mut perms = std::fs::metadata(&binary).expect("stat").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&binary, perms).expect("chmod");
+    plant_record(root, &binary, "1.0.0", "planted");
+
+    let started = std::time::Instant::now();
+    let (out, json) = run(root, &["--json", "stack", "health"]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(45),
+        "stack health waited {:?} on a hung member",
+        started.elapsed()
+    );
+    assert!(
+        finding_kinds(&json).contains(&"unverified".to_owned()),
+        "{json}"
+    );
+    assert!(json.to_string().contains("did not exit"), "{json}");
+    assert_ne!(out.status.code(), Some(0));
+}

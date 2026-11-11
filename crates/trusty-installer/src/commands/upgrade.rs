@@ -40,7 +40,7 @@ use tokio::runtime::Handle;
 use trusty_progress::{Component, ComponentTracker};
 
 use super::content_step::{CommandRunner, ContentStepOutcome, ProcessRunner};
-use super::deployment_record::Placement;
+use super::deployment_record::{finish, Finisher, Placement};
 use super::progress_ui::{is_tty, narrator, prompt_yes_no};
 use super::runtime::with_runtime;
 use super::shadow_check;
@@ -329,9 +329,8 @@ fn resolve_and_apply(
         ApplyDecision::Decline => UpgradeReport::non_applying("declined", candidates),
         ApplyDecision::Apply => {
             let (outcomes, placed) = handle.block_on(apply_all(&candidates, json));
-            let placements = placements_of(&outcomes, &placed);
-            applied_with_content(candidates, outcomes, &placed, &ProcessRunner, json)
-                .with_deployment(super::deployment_record::finish(&placements, true))
+            let runner = ProcessRunner::fetch();
+            applied_with_content(candidates, outcomes, &placed, &runner, json, &finish)
         }
     }
 }
@@ -352,25 +351,33 @@ fn placements_of(
         .collect()
 }
 
-/// The applied report, then the content step for what `placed` holds (#9396).
+/// The applied report, the content step for what `placed` holds (#9396), then
+/// the deployment record and audit (#10607).
 ///
 /// Why: the step runs after every member's upgrade and daemon restart
 /// finished; its failure only adds to the report, never undoes a member.
-/// What: [`UpgradeReport::applied`] then [`UpgradeReport::with_content`] over
-/// [`super::content_step::run_content_steps`].
+/// What: [`UpgradeReport::applied`], [`UpgradeReport::with_content`] over
+/// [`super::content_step::run_content_steps`], then
+/// [`UpgradeReport::with_deployment`] over `finish` with the audit on.
 /// Test: `upgrade_of_trusty_mpm_runs_content_update`,
 /// `a_failed_content_update_after_an_upgrade_exits_non_zero`,
-/// `upgrade_fails_when_content_is_older_than_a_placed_binary`.
+/// `upgrade_fails_when_content_is_older_than_a_placed_binary`,
+/// `upgrade_records_and_audits_what_it_placed_10607`.
 fn applied_with_content(
     candidates: Vec<UpdateCandidate>,
     outcomes: Vec<UpgradeOutcome>,
     placed: &[(String, std::path::PathBuf)],
     runner: &dyn CommandRunner,
     json: bool,
+    finish: &Finisher<'_>,
 ) -> UpgradeReport {
     // #10588: the update, then a check that the content serves each placed binary.
     let content = super::content_step::run_content_steps(placed, runner, json);
-    UpgradeReport::applied(candidates, outcomes).with_content(content)
+    // #10607: record what landed and compare the machine with it.
+    let placements = placements_of(&outcomes, placed);
+    UpgradeReport::applied(candidates, outcomes)
+        .with_content(content)
+        .with_deployment(finish(&placements, true))
 }
 
 /// Decide whether to show the interactive confirmation prompt.

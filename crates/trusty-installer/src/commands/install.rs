@@ -312,7 +312,7 @@ pub fn run(
         report = report.with_verify(verify);
     }
     // #10607: record what landed; compare the machine with it unless --no-verify.
-    report = report.with_deployment(super::deployment_record::finish(&placements, !no_verify));
+    report = report.finish_deployment(&placements, no_verify, &super::deployment_record::finish);
 
     if json {
         // A failed machine-readable write must not exit 0: automation would
@@ -716,7 +716,7 @@ async fn install_all(
     if show_signing_tip {
         eprintln!("{}", super::macos_signing::signing_persistence_tip());
     }
-    let runner = super::content_step::ProcessRunner;
+    let runner = super::content_step::ProcessRunner::fetch();
     (
         report_with_content(outcomes, &placed, &runner, json),
         placements,
