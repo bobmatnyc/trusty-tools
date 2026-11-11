@@ -59,6 +59,8 @@ mcp_list() { MCP_METHOD=tools/list MCP_PARAMS='{}' mcp "$@"; }
 mcp_tool() { # BIN... -- TOOL ARGS_JSON handled by callers via env
     MCP_METHOD=tools/call MCP_PARAMS="{\"name\":\"${MCP_TOOL}\",\"arguments\":${MCP_ARGS}}" mcp "$@"
 }
+tm_tool() { MCP_TOOL="$1" MCP_ARGS="$2" mcp_tool tm serve --stdio; }
+search_tool() { MCP_TOOL="$1" MCP_ARGS="$2" mcp_tool trusty-search serve; }
 memory_tool() { MCP_TOOL="$1" MCP_ARGS="$2" mcp_tool trusty-memory serve --stdio --palace "${PALACE}"; }
 
 # Wait up to $2 s for a command to succeed.
@@ -94,6 +96,8 @@ else
     step "mcp tm tools/list" '"tools"' mcp_list tm serve --stdio
     step "mcp trusty-memory tools/list" '"tools"' mcp_list trusty-memory serve --stdio --palace "${PALACE}"
     step "mcp trusty-search tools/list" '"tools"' mcp_list trusty-search serve
+    step "mcp tm tools/call session_list" '"content"' tm_tool session_list '{}'
+    step "mcp trusty-search tools/call list_indexes" '"content"' search_tool list_indexes '{}'
 
     # Local demo repo for project registration and indexing.
     if [ ! -d "${WORK}/.git" ]; then
@@ -117,7 +121,11 @@ else
     step "search index add" "" trusty-search index add "${WORK}" --name "${INDEX}"
     # Try semantic first (model from FASTEMBED_CACHE_DIR, no network); fall back
     # to lexical-only and report which one ran.
-    if step "search index (semantic)" "" timeout 600 trusty-search index "${WORK}" --name "${INDEX}" --force; then
+    # The index command returns once lexical+graph are ready; vectors embed in the
+    # background. Semantic counts only when `status` reports it ready.
+    # shellcheck disable=SC2016  # evaluated by wait_for
+    if step "search index (semantic)" "" timeout 600 trusty-search index "${WORK}" --name "${INDEX}" --force \
+        && step "search semantic ready" "" wait_for 'trusty-search status "${INDEX}" | grep -qE "semantic +ready"' 300; then
         echo semantic > "${SEARCH_MODE_FILE}"
         echo "INFO search mode: semantic"
     else
@@ -129,6 +137,7 @@ else
         fi
     fi
     query_step
+    step "mcp trusty-search list_indexes shows index" "${INDEX}" search_tool list_indexes '{}'
 fi
 
 echo "log: ${LOG}"
