@@ -9,6 +9,13 @@ mkdir -p "${HOME}" "${XDG_DATA_HOME}" /data/logs /data/work
 rm -f "${XDG_DATA_HOME}/trusty-memory/trusty-memory.sock" \
       "${XDG_DATA_HOME}/trusty-search/trusty-search.sock"
 
+# See https://github.com/bobmatnyc/trusty-tools/issues/11054: pid reuse across container restarts
+lock=/data/xdg/trusty-search/daemon.lock
+if [ -e "${lock}" ]; then
+    rm -f "${lock}"
+    echo "$(date -u +%FT%TZ) removed stale lock ${lock}" >> /data/logs/supervisor.log
+fi
+
 pids=()
 start() {
     local name="$1"; shift
