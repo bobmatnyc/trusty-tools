@@ -450,9 +450,25 @@ impl SecretStore {
         vault: &VaultName,
         key: &SecretKey,
     ) -> Result<(), SecretsError> {
-        if source.agents_may_use(vault, key)? {
+        self.carry_deny_between(source, (vault, key), (vault, key))
+    }
+
+    /// [`Self::carry_deny_from`] for a source key named apart from the
+    /// destination key (#10998).
+    ///
+    /// What: reads the deny of `from` in `source`; when present, writes it
+    /// for `to` here, under the same rules as [`Self::carry_deny_from`].
+    /// Test: `copy_named_carries_a_vault_source_deny_to_the_destination_key`.
+    pub(crate) fn carry_deny_between(
+        &self,
+        source: &SecretStore,
+        from: (&VaultName, &SecretKey),
+        to: (&VaultName, &SecretKey),
+    ) -> Result<(), SecretsError> {
+        if source.agents_may_use(from.0, from.1)? {
             return Ok(());
         }
+        let (vault, key) = to;
         if !self.backend.holds_agent_controls() {
             return Err(SecretsError::Unsupported {
                 backend: self.backend.id().to_string(),

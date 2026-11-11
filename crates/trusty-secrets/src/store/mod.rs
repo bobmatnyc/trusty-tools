@@ -44,6 +44,9 @@ mod index;
 #[cfg(all(unix, feature = "cli-backends"))]
 pub mod keeper;
 mod keychain;
+// #10998: a named copy's read of any Keychain item; only the server copies.
+#[cfg(feature = "server")]
+pub(crate) mod keychain_item;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
 // #7519: the 1Password backend; spawns `op` through `cli`.

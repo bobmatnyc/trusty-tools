@@ -1,0 +1,3 @@
+Added
+
+- `secrets.copy` accepts an optional `source` locator: any Keychain item by service and account (`keychain_item`, read with `from_backend: keychain`), or a key in any trusty vault, the owner vault included (`vault`, read on `from_backend`). The one value lands in the caller's project vault under the single key `keys` names, moved inside the server only; a request without `source` behaves as before. A Keychain item in trusty's own namespace is refused, so a trusty key keeps its agent deny; an agent caller is refused (`agent_key_denied`) for a denied source or destination key; a failure is the call's typed error. Each record carries the new `copy_source` field, never the value (#10998).
