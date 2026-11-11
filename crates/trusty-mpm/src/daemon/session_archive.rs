@@ -22,12 +22,13 @@ use trusty_common::uds::server::RpcRouter;
 
 use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
-use crate::session_manager::ManagedError;
+use crate::project::ProjectRegistry;
 use crate::session_manager::archive_move::{ArchiveMoveError, MANIFEST_FILE, default_archive_root};
 use crate::session_manager::record::ManagedSessionId;
 use crate::session_manager::session_archive::{
-    ArchiveOptions, SessionArchiveError, SessionArchiveReport,
+    ArchiveOptions, PreparedArchive, SessionArchiveError, SessionArchiveReport,
 };
+use crate::session_manager::{ManagedError, SessionManager};
 
 /// Map an archive failure to its daemon error class.
 ///
@@ -77,14 +78,9 @@ pub async fn session_archive_op(
 
 /// [`session_archive_op`] with an explicit archive root and caller wait.
 ///
-/// Why: #10991 critic MEDIUM — a caller that times out (or disconnects) used
-/// to drop the request future after the move but before the project stamp.
-/// What: checks and plans in the request, then runs the finish (stop, move,
-/// stamp) in its own task, which completes whatever the caller does. Waits
-/// `wait` for it; past that, answers [`DaemonError::ServiceUnavailable`]
-/// naming the entry and its manifest while the task finishes.
-/// Test: `a_caller_timeout_still_stamps_the_archived_project`.
-pub(crate) async fn session_archive_op_at(
+/// What: checks and plans in the request, then [`run_detached`].
+/// Test: `session_archive_unknown_session_is_not_found`.
+async fn session_archive_op_at(
     state: &Arc<DaemonState>,
     id: &str,
     opts: ArchiveOptions,
@@ -104,6 +100,23 @@ pub(crate) async fn session_archive_op_at(
     if opts.dry_run {
         return Ok(prepared.into_dry_run_report());
     }
+    run_detached(mgr, registry, prepared, wait).await
+}
+
+/// Run a prepared archive's finish in its own task and wait `wait` for it.
+///
+/// Why: #10991 critic MEDIUM — a caller that times out (or disconnects) used
+/// to drop the request future after the move but before the project stamp.
+/// What: the finish (stop, move, stamp) runs in a spawned task, which
+/// completes whatever the caller does. Past `wait`, answers
+/// [`DaemonError::ServiceUnavailable`] naming the entry and its manifest.
+/// Test: `a_caller_timeout_still_stamps_the_archived_project`.
+async fn run_detached(
+    mgr: Arc<SessionManager>,
+    registry: Arc<ProjectRegistry>,
+    prepared: PreparedArchive,
+    wait: Duration,
+) -> Result<SessionArchiveReport, DaemonError> {
     let entry = prepared.plan.entry.clone();
     let task = tokio::spawn(async move { mgr.finish_archive(&registry, prepared).await });
     match tokio::time::timeout(wait, task).await {
@@ -206,8 +219,8 @@ mod tests {
 
     /// #10991 critic MEDIUM: a caller whose wait runs out gets an answer
     /// naming the entry, and the move still finishes and stamps the project.
-    /// Runs on the current-thread runtime, so a zero wait elapses before the
-    /// spawned finish has run at all.
+    /// A held registry lock pins the finish between move and stamp, so the
+    /// timeout lands in exactly the window the critic named.
     #[tokio::test]
     async fn a_caller_timeout_still_stamps_the_archived_project() {
         let state = isolated_state().await;
@@ -234,11 +247,21 @@ mod tests {
         let mgr = state.session_manager().await;
         mgr.store.write().await.upsert(record).await.expect("seed");
 
-        let opts = ArchiveOptions::default();
-        let err =
-            session_archive_op_at(&state, &id.to_string(), opts, &archive_root, Duration::ZERO)
-                .await
-                .expect_err("a zero wait answers before the move");
+        let prepared = mgr
+            .prepare_archive(&registry, &id, ArchiveOptions::default(), &archive_root)
+            .await
+            .expect("prepare");
+        // Holding the registry's write lock parks the finish at the stamp, so
+        // the caller's wait runs out after the move and before the stamp.
+        let guard = registry.hold_write_lock().await;
+        let err = run_detached(
+            Arc::clone(&mgr),
+            Arc::clone(&registry),
+            prepared,
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("the stamp is blocked, so the wait runs out");
         let msg = err.to_string();
         assert!(matches!(err, DaemonError::ServiceUnavailable(_)), "{msg}");
         assert!(
@@ -248,6 +271,11 @@ mod tests {
         assert!(msg.contains(MANIFEST_FILE), "{msg}");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while project_dir.exists() {
+            assert!(std::time::Instant::now() < deadline, "never moved");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(guard);
         while !registry.get("widget").await.expect("row").is_archived() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -255,7 +283,6 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(!project_dir.exists(), "the directory was not moved");
     }
 
     #[test]

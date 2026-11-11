@@ -340,6 +340,13 @@ impl ProjectRegistry {
         .await
     }
 
+    /// Hold the registry's write lock until the guard drops (tests only): any
+    /// writer, such as [`Self::mark_archived`], blocks meanwhile (#10991).
+    #[cfg(test)]
+    pub(crate) async fn hold_write_lock(&self) -> tokio::sync::OwnedRwLockWriteGuard<ProjectStore> {
+        Arc::clone(&self.store).write_owned().await
+    }
+
     /// Clear `decommissioned_at` and `archived_at` (#10991) on every project
     /// `record`'s `repo_url` binds to (#10988).
     ///
