@@ -1,2 +1,0 @@
-Changed
-- The `tm tui` home screen now has the trusty-console layout (#10966): a `TRUSTY CONSOLE` header, a MACHINE STATUS section with CPU, MEMORY, DISK and NETWORK cards, and a SERVICES table with a filled status badge per service. The table replaces the 4-column tile grid, so the arrow keys and `j`/`k` move one row. The machine cards and the per-service CPU and memory history read "no data yet" until the console serves that data (#10942, #10943). Agents and Console still read "no UDS endpoint" in a neutral colour, never as down.

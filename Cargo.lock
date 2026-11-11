@@ -11037,7 +11037,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-channels"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -11136,7 +11136,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.69.0"
+version = "0.69.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11418,7 +11418,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mcp"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -11485,7 +11485,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.12.2"
+version = "1.12.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11733,7 +11733,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",

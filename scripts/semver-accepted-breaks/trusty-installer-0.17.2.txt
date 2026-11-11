@@ -1,0 +1,7 @@
+crate   trusty-installer
+version 0.17.2
+reason  Accepted under the 2026-09-26 versioning ruling (a public-API break never forces a major version), per Architect df-De1 A (df-G01). cargo semver-checks against baseline 0.17.1 computes two major lints from #10607 (deployment drift): a new `deployment` field on HealthReport, DoctorReport and UpgradeReport, and ProcessRunner changed from a unit struct to a struct with fields. Refs #10607.
+accept  constructible_struct_adds_field        field HealthReport.deployment
+accept  constructible_struct_adds_field        field DoctorReport.deployment
+accept  constructible_struct_adds_field        field UpgradeReport.deployment
+accept  unit_struct_changed_kind               ProcessRunner

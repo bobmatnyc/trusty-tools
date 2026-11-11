@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.69.0] — 2026-11-10
+
+### Added
+
+- `search_rpc::METHOD_INDEX_FILE_STATUS`, `IndexIdentity` and `IndexFileStatus` decode the trusty-search index identity and per-file status replies (#10738).
+- `control_bus::METHOD_EVENTS_HEALTH` (`"events.health"`) with its `EventsHealthParams` request and `EventsHealth` reply (`status`, `service`, `version`, `uptime_secs`, `ingested`, `deduped`, `evicted`, `log_dropped`, `subscribers`, `head_seq`), the health half of the trusty-events socket contract (#10901).
+- New ungated module `console_rpc` (#10902): the method names `console.health` and `console.fleet_status`, their response types `ConsoleHealth` and `ConsoleFleetStatus`, and the per-service row types `ServiceInfo`, `ServiceStatus` and `ServiceLifecycle` (moved from trusty-console), so a client without a trusty-console dependency can decode the console socket's answers. No type uses `deny_unknown_fields`.
+- `control_bus::METHOD_EVENTS_CONSOLE_METRICS` (`"events.console_metrics"`), `EventsConsoleMetricsParams`, and the reserved `by_project` keys `UNATTRIBUTED_PROJECT` and `OVERFLOW_PROJECT` (#10906).
+- `console_metrics::by_convention`: the contract note for the `<svc>.console_metrics` UDS method and the `by_*` breakdown convention, with `check_by_convention` to test a payload against it (#10906).
+- `HarnessSource::as_str` and `MessageDirection::as_str`, the wire strings without serialising (#10906).
+
+### Changed
+
+- `HarnessEvent` gains an optional `project` field (`serde(default)`, omitted when `None`), wire-compatible both ways. A struct literal must now name it (#10906).
+- `claude_temperature::accepts_temperature` is now public (behind the `bedrock` or `inference-client` feature), so downstream request builders reuse the Opus/Sonnet 5.5 temperature rule (#10939).
+
 ## [0.67.6] — 2026-11-09
 
 ### Security

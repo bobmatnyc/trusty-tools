@@ -1,4 +1,0 @@
-Changed
-
-- `tm hook --egress-guard` no longer denies the claude.ai connector tools (`mcp__claude_ai_<Slack|Gmail|Notion|Google_Chat>__*`, and an MCP resource tool naming such a server), so a tm session can use the Notion, Slack, Gmail and Google Chat connectors (owner ruling D6d, [#10735](https://github.com/bobmatnyc/trusty-tools/issues/10735)). The Bash egress deny, the channel-taint deny, the Architect audit deny and the deny on every other Slack, Gmail, Notion, Google Chat or Google Workspace messaging server stay. The read-only Slack allowlist now covers `slack-mcp` only, since the connector needs no lift.
-- The Architect launch no longer passes `disableClaudeAiConnectors: true` or denies the Slack, Gmail, Notion and Google Chat tool families, so the claude.ai connectors load in the Architect ([#10725](https://github.com/bobmatnyc/trusty-tools/issues/10725)). It still denies the Google Workspace messaging tools and still unsets the chat tokens.
