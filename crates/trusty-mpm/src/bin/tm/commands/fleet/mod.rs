@@ -15,7 +15,8 @@
 //! `tm-architect` unless `--session` chose and recorded another name
 //! ([`session_name`], #8878 R1). [`relaunch`] restarts the running
 //! Architect's `claude` and binds it (#9092). Twin mode (#8878) is out of
-//! scope (ruling Q7). [`project`] edits the watch list (#10895).
+//! scope (ruling Q7). [`project`] edits the watch list (#10895), which
+//! `init` seeds when it is absent ([`init_full`], #11012).
 //! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
 //! `commands::fleet::relaunch::tests`, `tests/tm_fleet.rs`.
 
@@ -83,7 +84,11 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             // #8878 R1: a bad name refuses before anything is read or written.
             let session = session.as_deref().map(SessionNames::new).transpose()?;
             let dir = resolve_dir(dir.as_deref(), &home)?;
-            let mut report = init_with_session(&dir, &home, !no_launch, TMUX, session.as_ref())?;
+            // #11012: the registry and tmux sessions the watch-list seed reads.
+            let watch = project::init_watch().await;
+            let seed = |dir: &Path| ArchitectSeed::resolve_for(dir, Fetch::OnFirstUse);
+            let names = session.as_ref();
+            let mut report = init_full(&dir, &home, !no_launch, TMUX, names, seed, Some(&watch))?;
             // #10571 P1b: the dashboard's login start, once the scripts are seeded.
             if !report.failed() {
                 let shipped = seed::embedded_contents(dashboard_agent::SCRIPT).unwrap_or_default();
@@ -340,6 +345,7 @@ pub(crate) fn init(
 /// `a_rename_is_refused_while_the_recorded_session_runs`,
 /// `a_malformed_recorded_name_refuses_init_and_fails_status`,
 /// `the_default_session_writes_no_key`.
+#[cfg(test)]
 pub(crate) fn init_with_session(
     dir: &Path,
     home: &Path,
@@ -360,6 +366,7 @@ pub(crate) fn init_with_session(
 /// What: runs `load_seed` on the checked path right after the config reads,
 /// before the first write; its error ends the run.
 /// Test: `a_seed_that_does_not_resolve_writes_nothing`.
+#[cfg(test)]
 pub(crate) fn init_with_seed(
     dir: &Path,
     home: &Path,
@@ -367,6 +374,25 @@ pub(crate) fn init_with_seed(
     probe: Probe,
     session: Option<&SessionNames>,
     load_seed: impl FnOnce(&Path) -> Result<ArchitectSeed, ArchitectSeedError>,
+) -> anyhow::Result<InitReport> {
+    init_full(dir, home, launch, probe, session, load_seed, None)
+}
+
+/// [`init_with_seed`] that also seeds the watch list from `watch` (#11012).
+///
+/// Why: issue #11012 — installing the Architect creates `local/watch.json`.
+/// What: after the fleet files and before the launch, so the Architect's
+/// first pass reads the seeded list, runs [`project::init_steps`]; `None`
+/// skips that step. Its FAILED line makes `init` exit 1.
+/// Test: `init_seed_runs_inside_init_before_the_launch`.
+pub(crate) fn init_full(
+    dir: &Path,
+    home: &Path,
+    launch: bool,
+    probe: Probe,
+    session: Option<&SessionNames>,
+    load_seed: impl FnOnce(&Path) -> Result<ArchitectSeed, ArchitectSeedError>,
+    watch: Option<&project::InitWatch>,
 ) -> anyhow::Result<InitReport> {
     // #8436: the preflight runs before any read or write, and every later step
     // uses the path it checked (code-critic BLOCK: `--dir $HOME` was accepted).
@@ -434,6 +460,11 @@ pub(crate) fn init_with_seed(
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir, &seed)?);
+    // #11012: the watch list, seeded once from live sessions; never replaced.
+    if let Some(watch) = watch {
+        let own = [names.architect(), names.poll()];
+        report.steps.extend(project::init_steps(dir, watch, &own));
+    }
     // #10571/#10579: the Architect's own Intent Ledger and its hooks, on install and upgrade.
     // #10459: never before a launch's Claude Code version refusal; the launch step reports it.
     let version_ok = !launch
