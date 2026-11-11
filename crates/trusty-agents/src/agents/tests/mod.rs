@@ -7,6 +7,8 @@
 //! What: Pure `toml::from_str` round-trips asserting parsed values.
 //! Test: This module IS the test surface.
 
+// #10979: the Bedrock beta overlay pack under content/.../overlays/beta.
+mod beta_pack;
 pub(crate) mod loading;
 mod params;
 // #3766: the configured bundled-template provider policy, end to end.
