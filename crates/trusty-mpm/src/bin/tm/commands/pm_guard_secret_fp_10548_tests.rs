@@ -142,6 +142,42 @@ fn a_single_segment_operand_pair_is_no_gh_api_call_10548() {
     }
 }
 
+/// 🔴 REGRESSION (#10548 P7b): the same operand pair inside a `for` loop
+/// whose body is one plain command is no `gh api` call.
+#[test]
+fn a_for_loop_over_operand_pairs_is_no_gh_api_call_10548() {
+    let dir = tempfile::tempdir().expect("dir");
+    for command in [
+        "for c in trusty-secrets trusty-common; do cargo test -p \"$c\" \"$t\" --no-fail-fast; done",
+        "for f in a b; do rsync -a \"$SRC\" \"$DST\" --delete; done",
+    ] {
+        assert_eq!(verdict(command, dir.path()), None, "`{command}` must allow");
+    }
+}
+
+/// 🔴 CONTROL (#10548 P7b): a `for` loop opens no bypass. Every
+/// `bypass_commands()` row refuses as-is and as a loop body; so do a loop
+/// variable naming a redefiner and an upper-case loop variable, which can
+/// rebind an exported name such as `RUSTC_WRAPPER`.
+#[test]
+fn a_for_loop_keeps_the_delete_rows_refusing_10548() {
+    let dir = tempfile::tempdir().expect("dir");
+    file(dir.path(), "defs.sh", "true\n", true);
+    let mut rows = bypass_commands();
+    rows.extend(
+        bypass_commands()
+            .iter()
+            .map(|row| format!("for c in a b; do {row}; done")),
+    );
+    rows.extend([
+        "for c in a b; do cp \"$G\" \"$A\" -X DELETE repos/o/r/actions/secrets/K; done".to_string(),
+        "for commands in cp; do cp \"$G\" \"$A\" --no-fail-fast; done".to_string(),
+        "for RUSTC_WRAPPER in ./w.sh; do cargo test -p \"$c\" \"$t\" --no-fail-fast; done"
+            .to_string(),
+    ]);
+    all_refuse(&rows, dir.path());
+}
+
 /// 🔴 REGRESSION (#10548 P4): a nested refusal names the word it could not
 /// resolve, not the outer script, which exists.
 #[test]
