@@ -10,6 +10,7 @@
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
+use crate::api::auth::oauth::pkce::percent_encode;
 use crate::api::client::BaseClient;
 use crate::api::constants::TASKS_API_BASE;
 use crate::api::services::{account_of, merge_flat_fields, opt_str, require_str};
@@ -133,8 +134,12 @@ async fn manage_task_lists_at(client: &BaseClient, args: Value, base: &str) -> R
 /// Why: Task CRUD inside a list is the bulk of the Tasks API surface, plus a
 /// cross-list search agents frequently need ("find the task about X").
 /// What: Routes `list|get|create|update|delete|complete|move|search` to
-/// `lists/{id}/tasks`; `search` fans out across every tasklist.
-/// Test: `create_accepts_flat_payload_from_8629`,
+/// `lists/{id}/tasks`; `search` fans out across every tasklist. `list` takes
+/// optional paging and visibility params (#10709, see [`list_query`]) and
+/// adds `next_page_token` beside the API's `nextPageToken`. Other actions
+/// ignore those params.
+/// Test: `list_returns_next_page_token_10709`,
+/// `create_accepts_flat_payload_from_8629`,
 /// `create_accepts_task_object`, `update_applies_flat_fields`; `search`
 /// filter via `task_matches`.
 pub async fn manage_tasks(client: &BaseClient, args: Value) -> Result<Value> {
@@ -149,8 +154,18 @@ async fn manage_tasks_at(client: &BaseClient, args: Value, base: &str) -> Result
     let tasklist = opt_str(&args, "tasklist_id").unwrap_or("@default");
     match action {
         "list" => {
-            let url = format!("{base}/lists/{tasklist}/tasks");
-            client.get(&url, account).await
+            // #10709: paging and visibility params, each sent only when supplied.
+            let mut url = format!("{base}/lists/{tasklist}/tasks");
+            let query = list_query(&args)?;
+            if !query.is_empty() {
+                url = format!("{url}?{}", query.join("&"));
+            }
+            let mut page = client.get(&url, account).await?;
+            // #10709: snake_case alias of `nextPageToken`; the raw fields stay.
+            if let Some(token) = next_page_token(&page) {
+                page["next_page_token"] = Value::String(token);
+            }
+            Ok(page)
         }
         "get" => {
             let id = require_str(&args, "task_id")?;
@@ -293,6 +308,54 @@ async fn fetch_all_items(
         }
     }
     Ok(items)
+}
+
+/// Query parameters for `manage_tasks` action `list` (#10709).
+///
+/// Why: Without them `list` returned only the API's first page, with hidden
+/// and deleted tasks excluded, and a caller could not page.
+/// What: Maps `show_hidden`, `show_deleted`, `max_results` and `page_token`
+/// to `showHidden`, `showDeleted`, `maxResults` and `pageToken`. A param
+/// absent from `args`, or JSON `null`, adds nothing, so a bare `list` sends
+/// the same request as before; so does an empty `page_token`. A present
+/// param of the wrong JSON type is an error naming the param and the type.
+/// `page_token` is percent-encoded.
+/// Test: `list_without_params_sends_no_query_10709`,
+/// `list_sends_each_param_only_when_set_10709`,
+/// `list_rejects_mistyped_params_and_skips_absent_ones_10709`.
+fn list_query(args: &Value) -> Result<Vec<String>> {
+    // #10709: a mistyped param is an error, not a silent drop — dropping
+    // `show_hidden: "true"` returned a list the caller believed included
+    // hidden tasks.
+    let present = |arg: &str| args.get(arg).filter(|v| !v.is_null());
+    let mistyped =
+        |arg: &str, expected: &str| anyhow!("manage_tasks list: '{arg}' must be {expected}");
+    let mut query = Vec::new();
+    for (arg, param) in [
+        ("show_hidden", "showHidden"),
+        ("show_deleted", "showDeleted"),
+    ] {
+        if let Some(v) = present(arg) {
+            let flag = v.as_bool().ok_or_else(|| mistyped(arg, "a JSON boolean"))?;
+            query.push(format!("{param}={flag}"));
+        }
+    }
+    if let Some(v) = present("max_results") {
+        let n = v
+            .as_u64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| mistyped("max_results", "a positive integer"))?;
+        query.push(format!("maxResults={n}"));
+    }
+    if let Some(v) = present("page_token") {
+        let token = v
+            .as_str()
+            .ok_or_else(|| mistyped("page_token", "a string"))?;
+        if !token.is_empty() {
+            query.push(format!("pageToken={}", percent_encode(token)));
+        }
+    }
+    Ok(query)
 }
 
 /// Extract the next-page continuation token from a Tasks API list response.
@@ -484,3 +547,8 @@ mod tests {
         assert_eq!(out.expect("flat list rename succeeds")["id"], "t1");
     }
 }
+
+// #10709: `list` query-param and paging tests, in their own file.
+#[cfg(test)]
+#[path = "tasks_list_tests.rs"]
+mod list_tests;
