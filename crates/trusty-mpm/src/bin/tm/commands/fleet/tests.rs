@@ -1663,6 +1663,10 @@ fn a_seed_with_one_more_skill_seeds_it() {
 #[path = "seed_refresh_tests.rs"]
 mod seed_refresh_tests;
 
+/// #11058: the wiring list and the `fleet_seed_wiring` doctor row.
+#[path = "seed_wiring_tests.rs"]
+mod seed_wiring_tests;
+
 /// #10571: every seeded script passes the pm-guard credential rules.
 #[path = "seed_guard_tests.rs"]
 mod seed_guard_tests;

@@ -164,3 +164,62 @@ fn the_il_schedule_is_seeded_and_an_edited_copy_is_kept() {
         "{steps:?}"
     );
 }
+
+/// The core fleet scripts and the symbol each must name, written out here so
+/// the deploy tests compile against the pre-#11058 code.
+const CORE_WIRING: &[(&str, &str)] = &[
+    ("scripts/fleet-poll.py", "owner_answer_alerts"),
+    ("scripts/fleet-classify.py", "\"owner_answer\""),
+];
+
+/// #11058: a kept core script with its symbol removed gets a WARNING step that
+/// names the file, the symbol and both remedies, and is still not overwritten.
+#[test]
+fn an_edited_poller_without_owner_answer_wiring_is_warned_11058() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    for &(dest, symbol) in CORE_WIRING {
+        let edited = shipped(dest).replace(symbol, "removed_by_the_owner");
+        assert_ne!(edited, shipped(dest), "{dest} does not name {symbol}");
+        std::fs::write(dir.join(dest), &edited).unwrap();
+        let steps =
+            super::super::seed::deploy_with(&dir, seed(), &refresh::shipped_before).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(dest)).unwrap(), edited);
+        assert!(
+            steps.iter().any(|s| matches!(s, Step::Skipped(t)
+                if t.starts_with(&format!("WARNING {dest} lacks "))
+                    && t.contains(&format!("`{symbol}`"))
+                    && t.contains("re-run `tm fleet init`")
+                    && t.contains(&format!("merge `{symbol}`")))),
+            "{dest}: {steps:?}"
+        );
+        std::fs::write(dir.join(dest), shipped(dest)).unwrap();
+    }
+}
+
+/// #11058: a kept core script that still names its symbol gets no WARNING.
+#[test]
+fn an_edited_poller_with_owner_answer_wiring_is_not_warned_11058() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    for &(dest, _) in CORE_WIRING {
+        let edited = format!("{}\n# the owner's local tweak\n", shipped(dest));
+        std::fs::write(dir.join(dest), &edited).unwrap();
+    }
+    let steps = super::super::seed::deploy_with(&dir, seed(), &refresh::shipped_before).unwrap();
+    for &(dest, _) in CORE_WIRING {
+        assert!(
+            steps.iter().any(|s| matches!(s, Step::Skipped(t)
+                if t.starts_with(dest) && t.contains("custom copy kept"))),
+            "{dest} was not kept: {steps:?}"
+        );
+    }
+    assert!(
+        !steps
+            .iter()
+            .any(|s| matches!(s, Step::Skipped(t) if t.starts_with("WARNING scripts/fleet-"))),
+        "{steps:?}"
+    );
+}

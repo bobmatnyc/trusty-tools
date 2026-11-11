@@ -38,7 +38,7 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// What: runs the check battery in-process via [`local_report`], prints the
 /// [`project_header`] line naming the project it checked (#10565), one
 /// status-tagged line per check, appends the daemon rows from
-/// [`daemon_rows`] and the `gcloud_auth` row (#8371, which spawns `gcloud`
+/// [`daemon_rows`], the `fleet_seed_wiring` row (#11058) and the `gcloud_auth` row (#8371, which spawns `gcloud`
 /// only under `--network`), the `hook-interpreter` and `notify-supervisor-asset`
 /// rows over the machine-wide settings list (#10263), the `notification_hook`
 /// row over the managed settings (#10885), and folds every status
@@ -84,6 +84,12 @@ pub(crate) async fn doctor(
         super::doctor_session_target_dir::session_target_dir_row(project_dir.as_deref());
     overall = overall.worst(session_target.status);
     print_check(&session_target);
+    // #11058: a kept core fleet script lacking this release's sibling wiring.
+    if let Some(home) = dirs::home_dir() {
+        let wiring = super::fleet::seed_wiring_doctor_row(&home);
+        overall = overall.worst(wiring.status);
+        print_check(&wiring);
+    }
     // #8371: opt-in; without `--network` this spawns nothing.
     let gcloud = super::doctor_gcloud::gcloud_auth_row(flags.network).await;
     overall = overall.worst(gcloud.status);
