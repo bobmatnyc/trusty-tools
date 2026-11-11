@@ -69,6 +69,38 @@ fn a_symlinked_archive_root_is_refused() {
     ));
 }
 
+/// #10991 critic MEDIUM: a symlinked root is refused by the plan (so the dry
+/// run refuses too) and by the execute step, which re-checks the root as
+/// named rather than its canonical target.
+#[test]
+fn plan_and_execute_refuse_a_symlinked_archive_root() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let src = project(base.path());
+    let real = base.path().join("elsewhere");
+    fs::create_dir(&real).expect("mkdir");
+    let root = base.path().join("archive");
+    std::os::unix::fs::symlink(&real, &root).expect("symlink");
+
+    let err = plan_archive(&src, &root, "id", None, Utc::now()).expect_err("plan");
+    assert!(
+        matches!(&err, ArchiveMoveError::Refused { reason, .. } if reason.contains("symlink")),
+        "{err}"
+    );
+
+    // A root swapped for a link after planning is caught at execute time.
+    let swapped = base.path().join("archive2");
+    let plan = plan_archive(&src, &swapped, "id", None, Utc::now()).expect("plan");
+    std::os::unix::fs::symlink(&real, &swapped).expect("swap");
+    let err = execute_plan(&plan).expect_err("execute");
+    assert!(matches!(err, ArchiveMoveError::Refused { .. }), "{err}");
+    assert!(src.join("README.md").is_file(), "the source moved");
+    assert_eq!(
+        fs::read_dir(&real).expect("ls").count(),
+        0,
+        "wrote through the link"
+    );
+}
+
 #[test]
 fn plan_refuses_home_and_the_archive_itself() {
     let base = tempfile::tempdir().expect("tempdir");

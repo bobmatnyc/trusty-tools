@@ -125,7 +125,8 @@ pub struct ArchiveManifest {
 pub struct ArchivePlan {
     /// The canonical source directory.
     pub source: PathBuf,
-    /// The archive root the entry sits in.
+    /// The archive root as the caller named it (not canonicalized, so the
+    /// symlink check in [`execute_plan`] sees the same path, #10991).
     pub root: PathBuf,
     /// The archive entry directory.
     pub entry: PathBuf,
@@ -171,16 +172,25 @@ fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
 /// `an_existing_loose_archive_root_is_tightened`,
 /// `a_symlinked_archive_root_is_refused`.
 pub fn ensure_archive_root(root: &Path) -> Result<(), ArchiveMoveError> {
-    if let Ok(meta) = fs::symlink_metadata(root)
-        && meta.file_type().is_symlink()
-    {
-        return Err(ArchiveMoveError::Refused {
-            path: root.to_path_buf(),
-            reason: "the archive root is a symlink".into(),
-        });
-    }
+    refuse_symlinked_root(root)?;
     fs::create_dir_all(root).map_err(io_err(format!("create {}", root.display())))?;
     set_mode(root, ARCHIVE_DIR_MODE).map_err(io_err(format!("chmod {}", root.display())))
+}
+
+/// Refuse `root` when the path itself, as given, is a symlink.
+///
+/// Why: #10991 critic MEDIUM — the check must run on the path the caller
+/// named, before anything canonicalizes the link away.
+/// Test: `a_symlinked_archive_root_is_refused`,
+/// `plan_and_execute_refuse_a_symlinked_archive_root`.
+fn refuse_symlinked_root(root: &Path) -> Result<(), ArchiveMoveError> {
+    match fs::symlink_metadata(root) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(ArchiveMoveError::Refused {
+            path: root.to_path_buf(),
+            reason: "the archive root is a symlink".into(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// `path` canonicalized; when it does not exist yet, its nearest existing
@@ -237,6 +247,8 @@ pub fn plan_archive(
     {
         return Err(refuse("it is the home directory or contains it"));
     }
+    // #10991 critic MEDIUM: judge the root as named, before canonicalizing.
+    refuse_symlinked_root(root)?;
     let root_abs = canonical_or_nearest(root);
     if source.starts_with(&root_abs) {
         return Err(refuse("it is already inside the archive"));
@@ -266,7 +278,8 @@ pub fn plan_archive(
         destination: entry.join(CONTENT_DIR),
         manifest_path: entry.join(MANIFEST_FILE),
         entry,
-        root: root_abs,
+        // #10991: the root as named, so `execute_plan` re-checks the link.
+        root: root.to_path_buf(),
         source,
         session_id: session_id.to_string(),
         project,
