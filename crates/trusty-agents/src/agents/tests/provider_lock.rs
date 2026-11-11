@@ -39,6 +39,8 @@ fn load(name: &str, model: &str, extra: &str) -> anyhow::Result<AgentConfig> {
 /// Why: the issue's named case — with the lock set and `ANTHROPIC_API_KEY`
 /// present, a bare-slug agent must be an error naming the agent and slug,
 /// not an Anthropic-direct route. Unlocked, the same agent loads as before.
+/// Runs in the #9123 credential sandbox, which restores the environment on
+/// drop.
 /// Test: itself.
 #[test]
 #[serial_test::serial]
@@ -46,8 +48,9 @@ fn lock_refuses_a_bare_slug_agent_even_with_an_anthropic_key() {
     let _env = crate::test_env::ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var_os("ANTHROPIC_API_KEY");
-    // SAFETY: ENV_LOCK held for the entire test body.
+    let _home = crate::test_env::lock_home();
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    // SAFETY: ENV_LOCK held for the entire test body; the sandbox restores it.
     unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-api03-lock-test") }; // pragma: allowlist secret
 
     let refused = {
@@ -59,13 +62,6 @@ fn lock_refuses_a_bare_slug_agent_even_with_an_anthropic_key() {
         load("research-agent", "claude-sonnet-4-6", "")
     };
 
-    // SAFETY: ENV_LOCK still held.
-    unsafe {
-        match prev {
-            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
-            None => std::env::remove_var("ANTHROPIC_API_KEY"),
-        }
-    }
     let msg = format!(
         "{:#}",
         refused.expect_err("the lock must refuse a bare slug")
