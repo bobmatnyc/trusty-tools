@@ -157,7 +157,10 @@ name = "trusty-mpm"
 # 1.12.2 (Refs #10101): patch — 1.12.1 is published on crates.io (tag
 # trusty-mpm-v1.12.1); post-release bump so pending `src/**` PRs clear the
 # #4421 check. Version-only commit.
-version = "1.12.2"
+# 1.12.3: patch — 1.12.2 is published on crates.io (release #11028);
+# post-release bump so pending `src/**` PRs clear the #4421 check.
+# Version-only commit.
+version = "1.12.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
