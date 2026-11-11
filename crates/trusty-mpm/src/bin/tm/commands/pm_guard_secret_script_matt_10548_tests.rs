@@ -163,3 +163,103 @@ fn a_venv_python_credential_script_or_docx_script_refuses_10672() {
         assert!(reason.is_some(), "must refuse: {command}");
     }
 }
+
+/// Every row whose verdict misses `expect`, so one run names every flip.
+fn misses(rows: &[(String, &str)], hook: &Path, home: &Path) -> Vec<String> {
+    rows.iter()
+        .filter_map(|(command, expect)| {
+            let reason = gated(command, hook, home).unwrap_or_default();
+            (!reason.contains(expect)).then(|| format!("{command} => {reason:?}"))
+        })
+        .collect()
+}
+
+/// CONTROL (#10548): masking a substitution's words keeps every script it
+/// runs judged — nested, backtick, unclosed, and a top-level `.` beside it.
+#[test]
+fn substitution_runs_and_a_sourced_script_still_refuse_10548() {
+    let l = layout();
+    file(&l.proj, "reader.sh", AWS_READ_SH.as_bytes());
+    let cd = format!("cd {};", l.proj.display());
+    let rows: Vec<(String, &str)> = [
+        "f=$(echo $(. ./reader.sh) | head -1); echo \"$f\"",
+        "f=$(echo $(bash ./reader.sh)); echo \"$f\"",
+        "f=`. ./reader.sh | head -1`; echo \"$f\"",
+        ". ./reader.sh",
+        "f=$(find . sandboxes ../ -maxdepth 2 | head -1); . ./reader.sh",
+        // Fail-open arm: an unclosed `$(` still has its body judged.
+        "f=$(. ./reader.sh | head -1",
+    ]
+    .iter()
+    .map(|tail| (format!("{cd} {tail}"), "reader.sh"))
+    .collect();
+    let missed = misses(&rows, &l.hook, &l.home);
+    assert!(missed.is_empty(), "must refuse: {missed:#?}");
+}
+
+/// CONTROL (#10672): a `$NAME` script word resolves only from a plain literal
+/// assigned unconditionally just before it; every other shape stays computed
+/// at run time and refuses, though the script it would name is benign.
+#[test]
+fn an_untracked_variable_script_refuses_10672() {
+    let l = layout();
+    let s = l.root.join("scratchpad");
+    file(&s, "build_test.py", BUILD_PY.as_bytes());
+    file(&s, "payload.docx", &FAKE_DOCX);
+    file(&s, "notes.txt", b"plain notes\n");
+    let sd = s.display();
+    let computed = "computed at run time";
+    let rows: Vec<(String, &str)> = vec![
+        ("python3 $S/build_test.py".into(), computed),
+        (
+            format!("S={sd}; S=$(evil); python3 $S/build_test.py"),
+            computed,
+        ),
+        (format!("S={sd} python3 $S/build_test.py"), computed),
+        (
+            format!("false && S={sd}; python3 $S/build_test.py"),
+            computed,
+        ),
+        (format!("S={sd} | python3 $S/build_test.py"), computed),
+        (
+            format!("S={sd}; cd {sd}; python3 $S/build_test.py"),
+            computed,
+        ),
+        (
+            format!("for i in 1; do S={sd}; done; python3 $S/build_test.py"),
+            computed,
+        ),
+        (format!("S={sd}; python3 '$S'/build_test.py"), computed),
+        (
+            format!("S={sd}; python3 $S/build_test.py; bash -c 'python3 $S/build_test.py'"),
+            computed,
+        ),
+        (
+            format!("printf x > {sd}/later.py; S={sd}; python3 $S/later.py {sd}/notes.txt"),
+            computed,
+        ),
+        (
+            format!("S={sd}; python3 ${{S:-/x}}/build_test.py"),
+            computed,
+        ),
+        (format!("python3 -X dev {sd}/payload.docx"), "not UTF-8"),
+    ];
+    let missed = misses(&rows, &l.hook, &l.home);
+    assert!(missed.is_empty(), "must refuse: {missed:#?}");
+}
+
+/// #10672: the braced form after `&&` resolves too, and the operand after the
+/// script is data, never read as the script.
+#[test]
+fn a_braced_variable_script_after_and_and_allows_10672() {
+    let l = layout();
+    let s = l.root.join("scratchpad");
+    file(&s, "build_test.py", BUILD_PY.as_bytes());
+    file(&s, "payload.docx", &FAKE_DOCX);
+    let command = format!(
+        "S={} && python3 \"${{S}}/build_test.py\" $S/payload.docx",
+        s.display()
+    );
+    let reason = gated(&command, &l.hook, &l.home);
+    assert!(reason.is_none(), "must allow: {reason:?}");
+}
