@@ -739,3 +739,8 @@ mod substitution_10566_tests;
 #[cfg(test)]
 #[path = "pm_guard_secret_script_node_tests.rs"]
 mod node_10548_tests;
+
+// #10548/#10672: the two reported refusals, rebuilt with synthetic fixtures.
+#[cfg(test)]
+#[path = "pm_guard_secret_script_matt_10548_tests.rs"]
+mod matt_10548_tests;
