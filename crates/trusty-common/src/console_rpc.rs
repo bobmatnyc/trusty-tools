@@ -119,8 +119,10 @@ pub struct ConsoleFleetStatus {
 /// Why: Four states capture everything the console needs — whether the binary
 /// exists, whether a daemon is running, whether the MCP handshake succeeded but
 /// the expected tool is missing (Degraded), and whether the binary is absent.
-/// What: Serialises to a lowercase string for the JSON API.
-/// Test: `console_fleet_status_decodes_a_payload_missing_new_fields`.
+/// What: Serialises to a lowercase string for the JSON API. `Unknown` is the
+/// decode-side catch-all for a spelling this build does not know.
+/// Test: `console_fleet_status_decodes_a_payload_missing_new_fields`,
+/// `history_snapshot_decodes_unknown_state_and_status_as_unknown`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceStatus {
@@ -134,6 +136,11 @@ pub enum ServiceStatus {
     /// `console_metrics` tool was not listed in `tools/list` — check that
     /// the daemon is started in `serve --stdio` mode with the correct wiring.
     Degraded,
+    /// A status this build does not know, decoded from a newer console's
+    /// answer. Never healthy: readers render it as unknown.
+    // #10996: a newer console's new status must not fail the whole answer.
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a service is meant to run when it is healthy.

@@ -155,8 +155,9 @@ pub struct ServiceSample {
 /// "not heard from"; the timeline needs that fourth state.
 /// What: `Up` / `Degraded` map from `Ok` / `Degraded`; `Down` covers a
 /// self-reported `Error` and a report gone stale; `Unknown` is a service never
-/// observed. Serialised lowercase.
-/// Test: `service_state_maps_from_self_reported_health`.
+/// observed, or a spelling this build does not know. Serialised lowercase.
+/// Test: `service_state_maps_from_self_reported_health`,
+/// `history_snapshot_decodes_unknown_state_and_status_as_unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceState {
@@ -166,7 +167,10 @@ pub enum ServiceState {
     Degraded,
     /// The service reported `error`, or has not reported within the grace window.
     Down,
-    /// The tracker has never observed this service.
+    /// The tracker has never observed this service, or the wire carried a
+    /// state this build does not know.
+    // #10996: a newer console's new state must not fail the whole answer.
+    #[serde(other)]
     Unknown,
 }
 
