@@ -2305,7 +2305,7 @@ jobs:
     # workspace-wide required jobs it can skip at job level without leaving a
     # PR pending. An absent classifier output still runs the job (fail closed).
     if: ${{ !cancelled() && needs.changes.outputs.embedder_cuda_relevant != 'false' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CUDA_COMPUTE_CAP: "90"
