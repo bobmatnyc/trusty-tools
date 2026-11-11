@@ -256,9 +256,10 @@ jobs:
       # build.rs looks for.
       - name: Install system dependencies (libdbus for keyring-store)
         if: steps.crate.outputs.have_work == 'true'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends libdbus-1-dev
+        # 2026-11-11: the raw apt pair died on a *.ubuntu.com DNS outage and
+        # the gate read "verdict unavailable"; the wrapper retries, falls back
+        # to a non-Ubuntu mirror, and classifies an infra failure.
+        run: bash scripts/ci-apt-install.sh libdbus-1-dev
 
       # A prebuilt binary, PINNED. `cargo install cargo-semver-checks` compiles
       # ~2 minutes of tool before a single crate is checked. install-action

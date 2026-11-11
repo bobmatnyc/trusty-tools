@@ -11,13 +11,15 @@ use clap::Subcommand;
 /// Actions for the `project` subcommand.
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProjectAction {
-    /// Register a working directory as a trusty-mpm project.
+    // #10586 (owner ruling 2026-10-31): deprecated; it writes the same
+    // registry-B record `tm projects register` writes.
+    /// Register a working directory as a trusty-mpm project (deprecated: use `tm projects register`).
     Init {
         /// Directory to register (defaults to the cwd).
         #[arg(long)]
         dir: Option<String>,
     },
-    /// List all registered projects with their status.
+    /// List all registered projects with their status (deprecated: use `tm projects list`).
     List,
     /// Show the current project's registered info and config.
     Info {

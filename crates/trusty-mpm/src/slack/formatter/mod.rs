@@ -86,6 +86,10 @@ impl SlackFormatter {
             CommandResult::ProjectRegistered { path } => {
                 format!("✅ Registered project `{path}`")
             }
+            // #10586: name the kept record rather than claim a write.
+            CommandResult::ProjectKept { path, kept } => {
+                format!("ℹ️ `{path}`: {}", kept.notice())
+            }
             CommandResult::ConfigAnalysis {
                 project,
                 recommendations,

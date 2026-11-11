@@ -149,8 +149,8 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `local` — Approve the Architect's trust-anchor writes with Touch ID or the login password at this Mac
 - `project` — Define and manage projects (registered working directories)
   - `info` — Show the current project's registered info and config
-  - `init` — Register a working directory as a trusty-mpm project
-  - `list` — List all registered projects with their status
+  - `init` — Register a working directory as a trusty-mpm project (deprecated: use `tm projects register`)
+  - `list` — List all registered projects with their status (deprecated: use `tm projects list`)
   - `trust` — Grant (or revoke) consent for a project's `[session] plugins` opt-ins
 - `projects` — Manage the project registry (registry B) and its Deliverable/Milestone ledger
   - `config` — View or edit a project's deterministic config (§3.1/§6, #2120)

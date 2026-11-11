@@ -1,2 +1,0 @@
-Added
-- `tm fleet init` seeds a `watch_changes` dashboard collection and `scripts/watch-apply.py` (#10896). A `watch_changes` doc is the owner's Watch or Unwatch request for a registered project, with status `new`, `applied`, `failed` or `dismissed`; a `new` one wakes the Architect as kind `watch_change`. `watch-apply.py` runs `tm fleet project add|remove` once per key for the `new` requests, refuses a key that is not a registry key without running the CLI, and marks each request `applied` only when the CLI exits 0, else `failed` with the CLI's message.

@@ -1,3 +1,0 @@
-Added
-- The Architect dashboard's Projects view shows each registered project as Watched, Not watched, Watch pending or Watch failed, read from `local/watch.json` and the `watch_changes` requests; while `local/watch.json` does not exist a row says "watch list not created yet" (#10896). Each row also flags a missing path and a registry key that differs from its session alias, matched in `tm fleet project list` order (exact alias, then case, then the managed checkout path).
-- The project detail view has Watch and Unwatch buttons that queue a `watch_changes` request; Unwatch asks for confirmation and says the project record is kept. A failed request has Retry and Dismiss; a pending one cannot be cancelled. The dashboard never writes `local/watch.json` (#10896).

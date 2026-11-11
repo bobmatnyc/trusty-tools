@@ -286,7 +286,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "egress_guard",
-        "Whether every tm-provisioned settings file still registers the `tm hook --egress-guard` `PreToolUse` group, which denies outbound-channel MCP tools (Slack, Gmail, Notion, Google Chat). Reads each project `.claude/settings*.json` the hygiene probe reaches and the managed `claude-config/settings*.json`. `Fail` when a provisioned file lacks the group, carries it with a timeout under 10 s or a narrowed matcher, or sets `disableAllHooks`; `Unknown` when a file cannot be read or parsed; `Ok` otherwise, including a foreign project with no tm hook. Never reads `[pm_guard]` — the entry has no off switch. Read-only (issue #8454).",
+        "Whether every tm-provisioned settings file still registers the `tm hook --egress-guard` `PreToolUse` group, which denies outbound-channel MCP tools of the native servers (Slack, Gmail, Notion, Google Chat) and outbound Bash egress to those hosts. The claude.ai connectors (`claude_ai_*`) are exempt, except that their write tools are denied in a channel-tainted session. Reads each project `.claude/settings*.json` the hygiene probe reaches and the managed `claude-config/settings*.json`. `Fail` when a provisioned file lacks the group, carries it with a timeout under 10 s or a narrowed matcher, or sets `disableAllHooks`; `Unknown` when a file cannot be read or parsed; `Ok` otherwise, including a foreign project with no tm hook. Never reads `[pm_guard]` — the entry has no off switch. Read-only (issue #8454).",
     ),
     (
         "tcc_taint",

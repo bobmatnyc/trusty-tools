@@ -70,8 +70,16 @@
 //!     word names no file (#10566): prose and here-documents quote code in
 //!     backticks. A computed, `/dev/fd/` or resolved-variable word refuses.
 //!
+//! 11. A script `node --check` (`-c`) syntax-checks: it is parsed, never run,
+//!     so its body is not judged (#10548). A `NODE_OPTIONS` preload an
+//!     earlier `export` sets is not seen; an inline prefix keeps the judgment.
+//!
 //! Fail-open check: this rule only ADDS refusals and runs after the inline
 //! rules, which still judge the command text. Every [`Unread`] arm refuses.
+//! #10548 narrows one path: `node --check`/`-c` with no other option and no
+//! `NODE_OPTIONS=` prefix judges no body ([`node_check_only`]), pinned in
+//! `pm_guard_secret_script_node_tests.rs`. A node RUN is judged raw, so a JS
+//! member access (`x.key`) still refuses; that stays open on #10548.
 //! Test: `pm_guard_secret_script_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_secret_batch.rs`
 //! (`pm_guard_refuses_a_script_whose_body_reads_a_credential_8879`).
@@ -98,6 +106,7 @@ use crate::commands::pm_guard_secret_script_self::resolve_self_paths;
 use crate::commands::pm_guard_secret_script_self::{
     ToplevelRisk, passes_on_git_changes, resolve_self_paths_with,
 };
+use node::node_check_only;
 use walk::{Walk, each_script, each_script_in};
 
 // #10566: the walk that locates each script, split out for the 500-SLOC cap.
@@ -109,6 +118,9 @@ pub(crate) mod tmux_kill;
 // #8878 PR2a: a presence-key Keychain write in a script body is denied too.
 #[path = "pm_guard_secret_script_presence.rs"]
 pub(crate) mod presence_key;
+// #10548: the exact `node --check <file>` shape (500-SLOC cap).
+#[path = "pm_guard_secret_script_node.rs"]
+mod node;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;
@@ -537,7 +549,14 @@ fn candidates(argv: &[String]) -> (Vec<Candidate>, bool) {
             } else {
                 basename
             };
-            interpreter_candidates(family, &interpreter, &argv[start + 1..])
+            let args = &argv[start + 1..];
+            // #10548: `node --check <file>` parses the file and never runs it;
+            // a `NODE_OPTIONS` prefix can load code, so it keeps the judgment.
+            let preload = argv[..start].iter().any(|w| w.contains("NODE_OPTIONS="));
+            if family == Family::Node && !preload && node_check_only(args) {
+                return (Vec::new(), exact.is_some());
+            }
+            interpreter_candidates(family, &interpreter, args)
         }
         None if program.contains('/') => vec![Candidate {
             word: program.clone(),
@@ -716,3 +735,7 @@ mod fp_10548_tests;
 #[cfg(test)]
 #[path = "pm_guard_secret_script_10566_tests.rs"]
 mod substitution_10566_tests;
+
+#[cfg(test)]
+#[path = "pm_guard_secret_script_node_tests.rs"]
+mod node_10548_tests;
