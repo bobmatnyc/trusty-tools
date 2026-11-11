@@ -317,16 +317,44 @@ async fn parity_projects_list_agrees_across_transports() {
     assert_same("mpm.projects.list", body, result, &[]);
 }
 
+/// A fresh git repo at `dir/name`, with `origin` set when given (#10586).
+///
+/// Why: `POST /projects` refuses a directory with no `origin` remote, so every
+/// case that registers through it needs a real repo. `None` means git is not
+/// on this runner, and the caller returns early.
+fn git_repo(dir: &TempDir, name: &str, origin: Option<&str>) -> Option<std::path::PathBuf> {
+    let repo = dir.path().join(name);
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let git_ok = |args: &[&str]| {
+        trusty_common::git::command_in(&repo)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !git_ok(&["init", "-q", "."]) {
+        return None;
+    }
+    if let Some(url) = origin {
+        assert!(git_ok(&["remote", "add", "origin", url]), "add origin");
+    }
+    Some(repo)
+}
+
 /// Why this asserts the STORE and not just the two answers: register is a write,
 /// and two equal responses could both have persisted nothing.
 /// Test: this function IS the test.
 #[tokio::test]
+// #10586: register now writes the project registry, which seeds from `$HOME`.
+#[serial_test::serial]
 async fn parity_projects_register_agrees_across_transports() {
-    let (state, dir) = hermetic();
-    let over_http = dir.path().join("via-http");
-    let over_rpc = dir.path().join("via-rpc");
-    std::fs::create_dir_all(&over_http).expect("mkdir");
-    std::fs::create_dir_all(&over_rpc).expect("mkdir");
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(over_http) = git_repo(&dir, "via-http", Some("https://example.invalid/a.git")) else {
+        return; // no git on this runner
+    };
+    let Some(over_rpc) = git_repo(&dir, "via-rpc", Some("https://example.invalid/b.git")) else {
+        return;
+    };
 
     let (status, body) = http(
         &state,
@@ -367,20 +395,17 @@ async fn parity_projects_register_agrees_across_transports() {
 ///
 /// Test: this function IS the test.
 #[tokio::test]
+// #10586: register now writes the project registry, which seeds from `$HOME`.
+#[serial_test::serial]
 async fn register_project_op_disables_git_auto_maintenance() {
-    let (state, dir) = hermetic();
-    let repo = dir.path().join("existing-repo");
-    std::fs::create_dir_all(&repo).expect("mkdir");
-    let init_ok = trusty_common::git::command_in(&repo)
-        .args(["init", "-q", "."])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !init_ok {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(repo) = git_repo(&dir, "existing-repo", Some("https://example.invalid/r.git")) else {
         return; // no git on this runner
-    }
+    };
 
-    super::projects::register_project_op(&state, repo.clone());
+    super::projects::register_project_op(&state, repo.clone())
+        .await
+        .expect("a repo with an origin registers");
 
     let get = |key: &str| {
         trusty_common::git::command_in(&repo)
@@ -399,6 +424,271 @@ async fn register_project_op_disables_git_auto_maintenance() {
         get("gc.auto").as_deref(),
         Some("0"),
         "register_project_op must disable gc.auto on the repo it registers"
+    );
+}
+
+/// `tm project init` then `tm project list` on an empty `$HOME` (#10586).
+///
+/// Why: init posted to `/projects`, which wrote only the in-memory map, while
+/// list reads registry B (`/api/v1/projects`), so list stayed empty. Red before
+/// the fix: the registry answers zero projects.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_then_registry_list_shows_the_project_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let url = "https://example.invalid/acme/gizmo.git";
+    let Some(repo) = git_repo(&dir, "gizmo", Some(url)) else {
+        return; // no git on this runner
+    };
+
+    let (status, init) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK, "{init}");
+    // A second init of the same directory must not add a second record.
+    let (status, _) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, list) = http(&state, "GET", "/api/v1/projects", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let projects = list["projects"].as_array().expect("projects array");
+    assert_eq!(projects.len(), 1, "init must persist one record: {list}");
+    assert_eq!(projects[0]["name"], init["name"], "{list}");
+    assert_eq!(projects[0]["repo_url"], url, "{list}");
+
+    // A fresh process reads the same file: load a new registry from disk.
+    let store_dir = crate::project::registry_data_dir_under(state.framework_root());
+    let fresh = crate::project::ProjectRegistry::load(&store_dir)
+        .await
+        .expect("load registry from disk");
+    let names: Vec<String> = fresh
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![init["name"].as_str().unwrap_or_default().to_string()]
+    );
+}
+
+/// Init with no `origin` remote is refused and writes nothing (#10586, owner
+/// ruling 2026-10-31).
+///
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_without_origin_is_refused_and_persists_nothing_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(repo) = git_repo(&dir, "no-origin", None) else {
+        return; // no git on this runner
+    };
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().is_some_and(|e| e.contains("origin")),
+        "the refusal must name the missing remote: {body}"
+    );
+    let error = rpc_err(
+        &rpc_router(&state),
+        "mpm.projects.register",
+        json!({ "path": repo }),
+    )
+    .await;
+    assert_eq!(error["code"], json!(CODE_INVALID_PARAMS), "{error}");
+
+    assert!(
+        state.project(&repo).is_none(),
+        "nothing in the in-memory map"
+    );
+    let registry = state.project_registry().await;
+    assert!(
+        registry.list().await.expect("list").is_empty(),
+        "nothing in registry B"
+    );
+}
+
+/// Init never overwrites or duplicates a record `tm projects register` wrote
+/// for the same `origin` (#10586).
+///
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_keeps_an_existing_registry_record_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let url = "https://example.invalid/acme/gizmo.git";
+    let Some(repo) = git_repo(&dir, "checkout-dir", Some(url)) else {
+        return; // no git on this runner
+    };
+    let seed = json!({ "name": "gnomish", "repo_url": url, "description": "kept" });
+    let (status, _) = http(&state, "POST", "/api/v1/projects", Some(seed)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let registry = state.project_registry().await;
+    let projects = registry.list().await.expect("list");
+    assert_eq!(projects.len(), 1, "{projects:?}");
+    assert_eq!(projects[0].name, "gnomish");
+    assert_eq!(projects[0].description.as_deref(), Some("kept"));
+}
+
+/// Init with an ssh `origin` keeps a record stored under the https form of the
+/// same repo and another name (#10586 critic HIGH).
+///
+/// Why: the old check compared URL strings, so it missed this record, and
+/// `upsert` then refused the insert on the shared `owner/repo` key: a 500
+/// "project registry write failed" on every init. Red on 545160a18b.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_with_ssh_origin_keeps_the_https_record_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let origin = "git@github.com:Acme/Gizmo.git";
+    let Some(repo) = git_repo(&dir, "checkout-dir", Some(origin)) else {
+        return; // no git on this runner
+    };
+    let stored = "https://github.com/acme/gizmo";
+    let seed = json!({ "name": "gnomish", "repo_url": stored });
+    let (status, _) = http(&state, "POST", "/api/v1/projects", Some(seed)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let registry = state.project_registry().await;
+    let projects = registry.list().await.expect("list");
+    assert_eq!(projects.len(), 1, "no second record: {projects:?}");
+    assert_eq!(projects[0].name, "gnomish");
+    assert_eq!(projects[0].repo_url, stored);
+}
+
+/// A registry write failure reaches the caller with the store's own text
+/// (#10586 critic MEDIUM).
+///
+/// Why: the generic "project registry write failed" hid the cause. A directory
+/// where `projects.json` belongs makes the locked read-modify-write fail with
+/// an I/O error on every platform and as any user.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_registry_write_failure_names_the_cause_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(repo) = git_repo(&dir, "gizmo", Some("https://github.com/acme/gizmo")) else {
+        return; // no git on this runner
+    };
+    // Load the (empty) registry first, then break its backing file.
+    let _ = state.project_registry().await;
+    let store_dir = crate::project::registry_data_dir_under(state.framework_root());
+    std::fs::create_dir_all(store_dir.join("projects.json")).expect("mkdir in place of the file");
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.contains("project registry write failed: "), "{body}");
+    assert!(
+        error.contains("project store"),
+        "the store's own text: {body}"
+    );
+    // #10586: a failed write must not leave the init half-done in memory.
+    assert!(
+        state.project(&repo).is_none(),
+        "a failed registry write must not register the project in memory"
+    );
+}
+
+/// Seed a registry-B record straight into the store, bypassing the HTTP
+/// route's own URL handling (#10586).
+async fn seed_registry_record(state: &Arc<DaemonState>, name: &str, repo_url: &str) {
+    let project: crate::project::Project = serde_json::from_value(
+        json!({ "name": name, "repo_url": repo_url, "default_branch": "main" }),
+    )
+    .expect("project json");
+    let registry = state.project_registry().await;
+    registry.register(project).await.expect("seed record");
+}
+
+/// Init whose `origin` is a DIFFERENT repo that only shares `owner/repo` with a
+/// stored record reports the kept record instead of silent success (#10586
+/// delta critic M2).
+///
+/// Why: the `owner/repo` key drops the host, so `gitlab.com/acme/gizmo` matches
+/// a stored `github.com/acme/gizmo`; init wrote nothing and answered a bare
+/// 200. Red on 027373c6e9: no `kept_existing` in the body.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_reports_the_kept_record_for_a_different_origin_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(repo) = git_repo(
+        &dir,
+        "checkout-dir",
+        Some("https://gitlab.com/acme/gizmo.git"),
+    ) else {
+        return; // no git on this runner
+    };
+    let stored = "https://github.com/acme/gizmo";
+    seed_registry_record(&state, "gnomish", stored).await;
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kept_existing"]["name"], "gnomish", "{body}");
+    assert_eq!(body["kept_existing"]["repo_url"], stored, "{body}");
+
+    let registry = state.project_registry().await;
+    let projects = registry.list().await.expect("list");
+    assert_eq!(projects.len(), 1, "no second record: {projects:?}");
+    assert_eq!(projects[0].repo_url, stored);
+}
+
+/// The kept record's `repo_url` leaves the daemon with no userinfo, on both
+/// transports, and a written record carries no `kept_existing` (#10586).
+///
+/// Why: a pre-#9124 record can still hold `https://user:token@host/o/r`, and
+/// the field is shown in Telegram and the CLI.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_kept_record_url_carries_no_userinfo_10586() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    // Same directory name as the stored record, different origin: the name arm.
+    let Some(repo) = git_repo(&dir, "gizmo", Some("https://gitlab.com/other/thing.git")) else {
+        return; // no git on this runner
+    };
+    let token = "ghp_10586SyntheticNotARealToken";
+    seed_registry_record(
+        &state,
+        "gizmo",
+        &format!("https://octo:{token}@github.com/acme/gizmo"),
+    )
+    .await;
+
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": repo }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let result = rpc_ok(
+        &rpc_router(&state),
+        "mpm.projects.register",
+        json!({ "path": repo }),
+    )
+    .await;
+    for kept in [&body["kept_existing"], &result["kept_existing"]] {
+        assert_eq!(kept["name"], "gizmo", "{kept}");
+        let url = kept["repo_url"].as_str().expect("repo_url string");
+        assert_eq!(url, "https://github.com/acme/gizmo");
+        assert!(!url.contains(token) && !url.contains("octo") && !url.contains('@'));
+    }
+
+    let Some(fresh) = git_repo(&dir, "fresh", Some("https://github.com/acme/fresh.git")) else {
+        return;
+    };
+    let (status, body) = http(&state, "POST", "/projects", Some(json!({ "path": fresh }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.get("kept_existing").is_none(),
+        "a write keeps nothing: {body}"
     );
 }
 

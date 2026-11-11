@@ -1,0 +1,2 @@
+Fixed
+- A new protected OKG index binding carries the literal `exclude_globs` `_sources/**` and `_state/**` and no allowlist. An existing binding gains both globs on its next bind but keeps `include_paths: ["notes"]` until trusty-search's `config.set` can clear it (#10739). Every bind removes any indexed `_sources/` or `_state/` file, nested ones included, and does not report the OKG connected until none remain (#10740).

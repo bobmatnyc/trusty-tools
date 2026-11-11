@@ -21,7 +21,8 @@
 //! [`Bundle::verify`] binds a new event to the hash the verifier saw, and
 //! writes a `human:` event only with a [`HumanConfirmation`] (§2.4).
 //! #10746: an `Actor::Human` value alone is never a confirmation; only the
-//! `_confirmed` entry points accept one.
+//! `_confirmed` entry points accept one. An actor whose text holds a
+//! control character is refused (`actor_control_character`) by both.
 //! Order (#10746, §4.4, §4.11): every refusal, the render, and the
 //! confinement of the record and `log.md` paths run first, with no file
 //! changed. #10746 S5: then one journaled operation (`bundle::commit`)
@@ -40,7 +41,8 @@
 //! `unwritable_record_keeps_the_legacy_event_and_the_concept`,
 //! `put_and_verify_refuse_a_symlinked_log_with_no_file_changed`,
 //! `human_actor_without_confirmation_cannot_extend_a_review`,
-//! `human_verify_without_confirmation_is_refused`.
+//! `human_verify_without_confirmation_is_refused`,
+//! `put_verify_and_correct_refuse_a_control_character`.
 
 use chrono::{DateTime, FixedOffset};
 use serde_yaml::{Mapping, Value};
@@ -228,6 +230,25 @@ fn generated_value(by: &Actor, now: &DateTime<FixedOffset>) -> Value {
     Value::Mapping(m)
 }
 
+/// Refuse an actor whose text holds a control character (§2.3, §4.5).
+///
+/// Why: #10746 — the actor text lands verbatim in `generated.by`, the
+/// verification record, the operation journal and one `log.md` entry. A
+/// newline in it would forge `log.md` entries or `## date` headings, and
+/// folding it in `log.md` alone would make the log name a different actor
+/// than the record. This closes the actor channel only; the
+/// `deprecate`/`supersede` reason has its own check (`correct.rs`).
+/// What: `Conflict { reason: "actor_control_character" }` when any char of
+/// `by.to_string()` is a control character (newline included), before any
+/// other check, so no file changes.
+/// Test: `put_verify_and_correct_refuse_a_control_character`.
+fn check_actor(id: &ConceptId, by: &Actor) -> Result<(), OkfError> {
+    if by.to_string().chars().any(char::is_control) {
+        return Err(conflict(id, "actor_control_character"));
+    }
+    Ok(())
+}
+
 /// The concept on disk at `bytes`, parsed under `id`.
 fn parse_disk(id: &ConceptId, bytes: &[u8]) -> Result<Concept, OkfError> {
     let text = std::str::from_utf8(bytes).map_err(|e| OkfError::Parse {
@@ -337,6 +358,8 @@ impl Bundle {
             ConceptRef::Id(id) => id.clone(),
             ConceptRef::Foreign(p) => return Err(foreign_refusal(p)),
         };
+        // #10746: an actor that could forge a `log.md` line is refused.
+        check_actor(&id, by)?;
         let target = confined_file(&self.root, &id.file_name())?;
         let (existing, record_of) = match at {
             Some((bytes, of)) => (bytes, of),
@@ -432,7 +455,8 @@ impl Bundle {
     /// it, and only a record event bound to the current hash counts.
     /// What: a `human:` `v.by` is refused with
     /// `Conflict { reason: "human_not_confirmed" }` and nothing is written;
-    /// it needs [`Bundle::verify_confirmed`] (§2.4, #10746). `seen` must
+    /// it needs [`Bundle::verify_confirmed`] (§2.4, #10746). An `id` that
+    /// folds to another file's key is `fold_collision` (§2.11). `seen` must
     /// equal the current content hash, else
     /// `Conflict { reason: "stale_verify_hash" }` and nothing is written. A
     /// malformed `verified` first moves to `legacy_verified` (criterion 125;
@@ -446,7 +470,8 @@ impl Bundle {
     /// Test: `c35_verify_with_stale_hash_is_conflict_and_writes_nothing`,
     /// `c125_malformed_owned_values_move_to_legacy_keys`,
     /// `c146_stale_after_extension_needs_a_human_or_a_verify`,
-    /// `human_verify_without_confirmation_is_refused`.
+    /// `human_verify_without_confirmation_is_refused`,
+    /// `verify_refuses_a_fold_twin_and_writes_no_record`.
     pub fn verify(
         &mut self,
         id: &ConceptId,
@@ -502,9 +527,17 @@ impl Bundle {
         seen: &ContentHash,
         confirmed: bool,
     ) -> Result<(PutPlan, Vec<Finding>), OkfError> {
+        // #10746: an actor that could forge a `log.md` line is refused.
+        check_actor(id, &v.by)?;
         // #10746: a `human:` actor alone is not explicit confirmation (§2.4).
         if is_human(&v.by) && !confirmed {
             return Err(conflict(id, "human_not_confirmed"));
+        }
+        // #10746: the `put` fold check (§2.11). On a case-insensitive file
+        // system `get` would read the twin and the record would gain a
+        // second ID; on any file system the answer is the same refusal.
+        if fold_conflict(&self.root, &id.file_name())?.is_some() {
+            return Err(conflict(id, "fold_collision"));
         }
         let c = self.get(id)?;
         if &content_hash(&c) != seen {

@@ -172,28 +172,75 @@ pub(crate) fn has_mismatch(events: &[Line], current: &ContentHash) -> bool {
     })
 }
 
-/// The `(by, at)` strings of each well-formed event in a `verified` value
-/// (a list, or a bare mapping read as a one-element list).
-pub(crate) fn frontmatter_events(verified: Option<&Value>) -> Vec<(String, String)> {
-    let items: Vec<&Value> = match verified {
+/// The entries of a `verified` value (a list, or a bare mapping read as a
+/// one-element list).
+fn verified_items(verified: Option<&Value>) -> Vec<&Value> {
+    match verified {
         Some(Value::Sequence(seq)) => seq.iter().collect(),
         Some(one @ Value::Mapping(_)) => vec![one],
         _ => Vec::new(),
-    };
-    items
+    }
+}
+
+/// The `(by, at)` strings of one well-formed `verified` entry.
+fn by_at(v: &Value) -> Option<(String, String)> {
+    let by = v.get("by")?.as_str()?.to_string();
+    let at = v.get("at")?.as_str()?.to_string();
+    Some((by, at))
+}
+
+/// The `(by, at)` strings of each well-formed event in a `verified` value.
+pub(crate) fn frontmatter_events(verified: Option<&Value>) -> Vec<(String, String)> {
+    verified_items(verified)
         .into_iter()
-        .filter_map(|v| {
-            let by = v.get("by")?.as_str()?.to_string();
-            let at = v.get("at")?.as_str()?.to_string();
-            Some((by, at))
-        })
+        .filter_map(by_at)
         .collect()
+}
+
+/// The folded record of `id` plus, as unbound lines, the hashless events
+/// that live only in `c`'s frontmatter: the events the verification axis
+/// counts (§2.10 "Events with no hash").
+///
+/// Why: an event with no hash is history (§2.10 item 1), wherever it lives;
+/// it never counts as Verified, but it counts in `history`.
+/// What: an entry with a `hash` key, or whose `(by, at)` the record already
+/// holds, adds nothing; a repeated `(by, at)` adds one line.
+/// Test: `c142_frontmatter_only_hashless_events_count_as_history`.
+pub(crate) fn counted_events(
+    b: &Bundle,
+    id: &ConceptId,
+    c: &Concept,
+) -> Result<Vec<Line>, OkfError> {
+    let mut events = fold(read_lines(b, id)?);
+    // #10746: D64 frontmatter-only hashless events count
+    for v in verified_items(c.get("verified")) {
+        let Some((by, at)) = by_at(v) else {
+            continue;
+        };
+        if v.get("hash").is_some() || events.iter().any(|l| l.by == by && l.at == at) {
+            continue;
+        }
+        events.push(Line {
+            by,
+            at,
+            hash: None,
+            invalidated_at: None,
+            invalidated_by_hash: None,
+            reason: None,
+            op: None,
+            step: None,
+        });
+    }
+    Ok(events)
 }
 
 /// The record lines that move frontmatter events to history on a content
 /// change (§2.10 step 2). A bound event keeps its hash and gains the
 /// invalidation; an event the record never bound is `legacy_unbound`; an
-/// event already in history adds no line.
+/// event already in history adds no line. #10879: a live record event bound
+/// to another hash with no frontmatter copy moves to history too, else
+/// `has_mismatch` would warn of an out-of-band edit forever.
+/// Test: `content_change_retires_a_record_only_event`.
 pub(crate) fn invalidation_lines(
     folded: &[Line],
     events: &[(String, String)],
@@ -218,6 +265,21 @@ pub(crate) fn invalidation_lines(
             op: None,
             step: None,
         });
+    }
+    // #10879: record-only events bound to a superseded hash.
+    for l in folded {
+        let in_frontmatter = events.iter().any(|(by, at)| &l.by == by && &l.at == at);
+        let stale =
+            l.invalidated_at.is_none() && l.hash.as_deref().is_some_and(|h| h != new_hash.as_str());
+        if stale && !in_frontmatter {
+            out.push(Line {
+                invalidated_at: Some(now.to_string()),
+                invalidated_by_hash: Some(new_hash.as_str().to_string()),
+                op: None,
+                step: None,
+                ..l.clone()
+            });
+        }
     }
     out
 }
@@ -269,5 +331,5 @@ pub(crate) fn state_for(
     id: &ConceptId,
     c: &Concept,
 ) -> Result<VerificationState, OkfError> {
-    Ok(state_of(&fold(read_lines(b, id)?), &content_hash(c)))
+    Ok(state_of(&counted_events(b, id, c)?, &content_hash(c)))
 }

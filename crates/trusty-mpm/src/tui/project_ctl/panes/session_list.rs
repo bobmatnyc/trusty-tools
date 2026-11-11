@@ -14,10 +14,11 @@
 //! Test: `worker_rows_indent_and_anchor_is_dim`, `empty_hint_names_the_case`;
 //! `two_column_tests.rs` (`right_expands_a_session_and_details_render_under_it`).
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, HighlightSpacing, List, ListItem, Paragraph},
 };
@@ -44,7 +45,7 @@ pub fn row_line(state: &ProjectCtlState, row: &SessionColRow, grouped: bool) -> 
             ),
             Span::styled(
                 counter_text(*total, *live),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette().muted),
             ),
         ]),
         SessionColRow::Session {
@@ -76,14 +77,14 @@ pub fn row_line(state: &ProjectCtlState, row: &SessionColRow, grouped: bool) -> 
             Line::from(Span::styled(
                 format!("{base}{}↳ parent {short} (not listed)", "  ".repeat(*depth)),
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(palette().muted)
                     .add_modifier(Modifier::DIM),
             ))
         }
         // #10754: inline session details (Bob 11-06)
         SessionColRow::Detail { depth, text, .. } => Line::from(Span::styled(
             format!("{base}{}    {text}", "  ".repeat(*depth)),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(palette().text),
         )),
     }
 }
@@ -118,7 +119,7 @@ pub fn empty_hint(state: &ProjectCtlState) -> String {
 
 /// Draw the session (right) column into `area`.
 ///
-/// What: a bordered list titled `SESSIONS — <name> (<n>)`, cyan while
+/// What: a bordered list titled `SESSIONS — <name> (<n>)`, accent while
 /// focused, with the selected session highlighted (its detail lines are
 /// not), or the [`empty_hint`].
 /// `version` puts [`crate::tui::VERSION_LABEL`] on the top border.
@@ -142,7 +143,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState, versio
     }
     state.tree.hit.session_rows = block.inner(area);
     if state.session_col.rows.is_empty() {
-        let hint = Span::styled(empty_hint(state), Style::default().fg(Color::DarkGray));
+        let hint = Span::styled(empty_hint(state), Style::default().fg(palette().muted));
         frame.render_widget(Paragraph::new(Line::from(hint)).block(block), area);
         return;
     }
@@ -159,12 +160,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ProjectCtlState, versio
         .collect();
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(palette().selection().add_modifier(Modifier::BOLD))
         .highlight_spacing(HighlightSpacing::Always);
     let col = &mut state.session_col;
     if col.selected.is_none() {

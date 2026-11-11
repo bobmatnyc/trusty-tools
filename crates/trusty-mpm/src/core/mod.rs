@@ -366,6 +366,8 @@ pub mod savings_compress;
 // #6959: the bulk-read diversion producer, the ledger's second row source.
 pub mod savings_divert;
 pub mod savings_instructions;
+// #10973: the per-tool-call compression opportunity ledger rows.
+pub mod savings_opportunity;
 // #7569: the one-shot repair that quarantines the ledger rows #7514's resolver
 // bug let unit tests write into the operator's own ledger.
 pub mod savings_repair;
@@ -474,6 +476,15 @@ pub mod architect_sidecar_prune;
 pub mod presence;
 pub mod presence_key;
 pub mod presence_local;
+// #8878 PR2b-1a: device store, tickets, pending requests, approval verify.
+pub mod presence_config;
+pub mod presence_device;
+pub mod presence_enrol;
+pub mod presence_request;
+pub mod presence_store;
+#[cfg(test)]
+pub(crate) mod presence_test_support;
+pub mod presence_verify;
 pub mod twin_identity;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
 pub mod uncommitted_changes;

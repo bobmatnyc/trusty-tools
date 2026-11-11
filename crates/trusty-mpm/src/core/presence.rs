@@ -8,22 +8,23 @@
 //! 0600 through a temp file and a rename, sealed with the [`GrantKey`] HMAC.
 //! [`check`] accepts it only when the file is a 0600 regular file of this
 //! user's (no symlink), parses strictly, carries a valid tag, names the same
-//! PID and start time as the live `claude`, uses a known method, and was used
+//! PID and start time as the live `claude`, uses a known method (`local`, or
+//! `device:<id>` under the D67 switch [`DEVICE_GRANTS`]), and was used
 //! within [`IDLE_LIMIT`] (Bob D5b Q2: 120 min). [`refresh`] moves `last_used`
 //! forward on each guarded call. Every failure is a [`PresenceRefusal`].
 //! FAIL-CLOSED: no key, an unreadable directory or file, a future date, or a
 //! tag that does not verify is a refusal; nothing here ever allows.
 //! Test: `presence_tests.rs`.
 
-use std::io::Read as _;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
 use crate::core::architect_launch::ARCHITECT_DIR;
+use crate::core::presence_device::{self, DeviceError, METHOD_DEVICE_PREFIX};
 use crate::core::presence_key::GrantKey;
+use crate::core::presence_store::{FileFault, read_owner_only};
 use crate::core::twin_identity::ClaudeProcess;
 
 /// A grant file's extension.
@@ -32,8 +33,29 @@ pub const PRESENCE_EXT: &str = "presence";
 /// How long a grant stays valid without use (Bob D5b Q2).
 pub const IDLE_LIMIT: Duration = Duration::from_secs(120 * 60);
 
-/// The one method PR2a mints: the Studio's LocalAuthentication.
+/// The Studio's LocalAuthentication (PR2a).
 pub const METHOD_LOCAL: &str = "local";
+
+/// Whether a `device:<credential id>` grant lets a call through.
+///
+/// Why: #8878 D67 Q1: device grants either lift the deny exactly like
+/// `local`, or stay inert. Both settings are built and tested;
+/// [`DEVICE_GRANTS`] picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceGrantPolicy {
+    /// A device grant counts like `local`, while its device record is
+    /// present and sealed.
+    Honour,
+    /// Every device grant is refused with [`PresenceRefusal::DeviceGrantsInert`].
+    Inert,
+}
+
+/// #8878 D67: THE switch for device grants. The owner ruled "Honour device
+/// grants now; accept labelled caller text": a device grant lets a call
+/// through while its device record is present and sealed, and the action
+/// text stays labelled "unverified origin". [`DeviceGrantPolicy::Inert`]
+/// refuses every device grant.
+pub const DEVICE_GRANTS: DeviceGrantPolicy = DeviceGrantPolicy::Honour;
 
 /// [`refresh`] rewrites a grant at most this often, in seconds.
 const REFRESH_EVERY: u64 = 60;
@@ -52,7 +74,7 @@ pub struct Grant {
     pub pid: u32,
     /// That process's start time, Unix seconds.
     pub start_time: u64,
-    /// How presence was proven: [`METHOD_LOCAL`].
+    /// How presence was proven: [`METHOD_LOCAL`] or `device:<credential id>`.
     pub method: String,
     /// When presence was proven, Unix seconds.
     pub granted_at: u64,
@@ -117,6 +139,15 @@ pub enum PresenceRefusal {
     /// The grant has not been used for [`IDLE_LIMIT`].
     #[error("the presence grant expired after 120 idle minutes")]
     Idle,
+    /// A device grant, while [`DEVICE_GRANTS`] is [`DeviceGrantPolicy::Inert`].
+    #[error("device approvals are not honoured yet (#8878 D67); use `tm presence local`")]
+    DeviceGrantsInert,
+    /// The device that approved the grant is revoked or unknown.
+    #[error("the device that approved this grant is revoked")]
+    DeviceRevoked,
+    /// The approving device's record is unreadable, malformed or forged.
+    #[error("the record of the device that approved this grant is unusable")]
+    DeviceUnusable,
 }
 
 /// `root/architect-launch/<pid>.presence`, `root` being `~/.trusty-mpm`.
@@ -172,12 +203,32 @@ fn write(root: &Path, grant: &Grant) -> Result<PathBuf, String> {
 /// Test: `a_minted_grant_passes_the_check`, `a_grant_copied_to_another_pid_is_refused`,
 /// `a_grant_with_a_stale_start_time_is_refused`,
 /// `a_forged_grant_without_the_key_is_refused`, `a_symlinked_grant_is_refused`,
-/// `a_grant_idle_for_121_minutes_is_refused`, `a_malformed_or_open_grant_is_refused`.
+/// `a_grant_idle_for_121_minutes_is_refused`, `a_malformed_or_open_grant_is_refused`,
+/// `check_applies_the_d67_switch_8878`.
 pub fn check(
     root: &Path,
     claude: &ClaudeProcess,
     key: impl FnOnce() -> Option<GrantKey>,
     now: u64,
+) -> Result<Grant, PresenceRefusal> {
+    check_with_policy(root, claude, key, now, DEVICE_GRANTS)
+}
+
+/// [`check`] under an explicit [`DeviceGrantPolicy`].
+///
+/// Why: #8878 D67 — both answers to Q1 stay built and tested.
+/// What: as [`check`]; a `device:<id>` method is refused under
+/// [`DeviceGrantPolicy::Inert`], and under [`DeviceGrantPolicy::Honour`]
+/// passes only while that device's record is present and its seal verifies
+/// (a second kill switch beside revoke's grant sweep).
+/// Test: `a_device_grant_passes_presence_check_8878`,
+/// `device_grants_are_refused_while_inert_8878`, `revoke_kills_a_live_grant_8878`.
+pub fn check_with_policy(
+    root: &Path,
+    claude: &ClaudeProcess,
+    key: impl FnOnce() -> Option<GrantKey>,
+    now: u64,
+    policy: DeviceGrantPolicy,
 ) -> Result<Grant, PresenceRefusal> {
     let raw = read_grant(root, claude.pid)?;
     let grant: Grant = serde_json::from_slice(&raw).map_err(|_| PresenceRefusal::Malformed)?;
@@ -191,7 +242,17 @@ pub fn check(
     if grant.start_time != claude.start_time {
         return Err(PresenceRefusal::StaleStartTime);
     }
-    if grant.method != METHOD_LOCAL {
+    // #8878 PR2b-1a: `device:<id>` is the second method, behind the D67 switch.
+    if let Some(credential) = grant.method.strip_prefix(METHOD_DEVICE_PREFIX) {
+        if policy == DeviceGrantPolicy::Inert {
+            return Err(PresenceRefusal::DeviceGrantsInert);
+        }
+        match presence_device::load(root, &key, credential) {
+            Ok(_) => {}
+            Err(DeviceError::Unknown) => return Err(PresenceRefusal::DeviceRevoked),
+            Err(_) => return Err(PresenceRefusal::DeviceUnusable),
+        }
+    } else if grant.method != METHOD_LOCAL {
         return Err(PresenceRefusal::UnknownMethod);
     }
     if grant.last_used > now + SKEW || grant.granted_at > grant.last_used {
@@ -222,41 +283,14 @@ pub fn refresh(root: &Path, grant: &Grant, key: &GrantKey, now: u64) -> Result<(
 /// The grant file's bytes, read without following a symlink.
 fn read_grant(root: &Path, pid: u32) -> Result<Vec<u8>, PresenceRefusal> {
     let dir = root.join(ARCHITECT_DIR);
-    match std::fs::symlink_metadata(&dir) {
-        Ok(meta) if meta.is_dir() => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PresenceRefusal::NoGrant);
-        }
-        _ => return Err(PresenceRefusal::Unreadable),
-    }
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(grant_path(root, pid))
-    {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PresenceRefusal::NoGrant);
-        }
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-            return Err(PresenceRefusal::NotRegularFile);
-        }
-        Err(_) => return Err(PresenceRefusal::Unreadable),
-    };
-    let meta = file.metadata().map_err(|_| PresenceRefusal::Unreadable)?;
-    if !meta.is_file() {
-        return Err(PresenceRefusal::NotRegularFile);
-    }
-    // SAFETY: `geteuid` has no preconditions and cannot fail.
-    let euid = unsafe { libc::geteuid() };
-    if meta.mode() & 0o077 != 0 || meta.uid() != euid {
-        return Err(PresenceRefusal::UnsafeMode);
-    }
-    let mut raw = Vec::new();
-    file.take(MAX_GRANT_BYTES)
-        .read_to_end(&mut raw)
-        .map_err(|_| PresenceRefusal::Unreadable)?;
-    Ok(raw)
+    // #8878 PR2b-1a: the shared fail-closed read (presence_store).
+    read_owner_only(&[&dir], &grant_path(root, pid), MAX_GRANT_BYTES).map_err(|fault| match fault {
+        FileFault::Missing => PresenceRefusal::NoGrant,
+        FileFault::Unreadable => PresenceRefusal::Unreadable,
+        FileFault::NotRegularFile => PresenceRefusal::NotRegularFile,
+        FileFault::UnsafeMode => PresenceRefusal::UnsafeMode,
+        FileFault::Oversized => PresenceRefusal::Malformed,
+    })
 }
 
 #[cfg(test)]

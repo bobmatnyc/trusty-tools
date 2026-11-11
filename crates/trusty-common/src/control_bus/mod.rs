@@ -25,6 +25,11 @@
 //!       `SubscribeParams`, `SubscribeFilter`, `SubscribeItem` and the
 //!       `heartbeat_ms` bounds (#10071), plus — behind
 //!       `uds`, unix only — `SubscribeRequest` and `SubscribeFrameError`.
+//!       The `events.health` contract (#10901) adds `METHOD_EVENTS_HEALTH`,
+//!       `EVENTS_HEALTH_OK`, `EventsHealthParams` and `EventsHealth`.
+//!       The `events.console_metrics` contract (#10906) adds
+//!       `METHOD_EVENTS_CONSOLE_METRICS`, `EventsConsoleMetricsParams`,
+//!       `UNATTRIBUTED_PROJECT` and `OVERFLOW_PROJECT`.
 //!       Everything except `PushClient` is a type with no transport: no
 //!       channel, no process-global sender, no sequence counter. A producer
 //!       stamps `seq`, `at`, and `id` itself and hands the envelope to
@@ -55,9 +60,13 @@ mod action;
 mod envelope;
 mod event_id;
 mod filter;
+// See #10901: the `events.health` contract; types only, like `subscribe`.
+mod health;
 mod lifecycle;
 // #9167: the `message` domain; types only, like `action`.
 mod message;
+// #10906: the `events.console_metrics` contract; types only, like `health`.
+mod metrics;
 #[cfg(all(unix, feature = "uds"))]
 mod push_client;
 // #9075: the subscribe half of the wire contract (ADR-0065 decision 3). The
@@ -74,8 +83,13 @@ pub use action::{
 pub use envelope::{HarnessEvent, HarnessPayload};
 pub use event_id::EventId;
 pub use filter::Filter;
+pub use health::{EVENTS_HEALTH_OK, EventsHealth, EventsHealthParams, METHOD_EVENTS_HEALTH};
 pub use lifecycle::{HarnessSource, LifecycleEvent};
 pub use message::{MessageChannel, MessageDirection, MessageEvent};
+pub use metrics::{
+    EventsConsoleMetricsParams, METHOD_EVENTS_CONSOLE_METRICS, OVERFLOW_PROJECT,
+    UNATTRIBUTED_PROJECT,
+};
 #[cfg(all(unix, feature = "uds"))]
 pub use push_client::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
 pub use subscribe::{

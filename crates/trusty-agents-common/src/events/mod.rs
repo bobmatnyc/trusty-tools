@@ -57,6 +57,7 @@ mod tests {
             payload,
             id: EventId::new(),
             parent_id: None,
+            project: None,
         }
     }
 

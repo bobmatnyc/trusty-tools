@@ -395,3 +395,375 @@ async fn the_signal_path_flushes_before_removing_the_lock_6849() {
     );
     assert_eq!(frames(&received(read).await).len(), 2);
 }
+
+/// A git checkout at `base/name`, with `origin` when given, canonicalized.
+fn checkout_10906(base: &Path, name: &str, origin: Option<&str>) -> PathBuf {
+    let dir = base.join(name);
+    std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+    if let Some(origin) = origin {
+        git(&["remote", "add", "origin", origin]);
+    }
+    dir.canonicalize().expect("canonical")
+}
+
+/// Register `root` in the registry at `reg` through the store, which mints
+/// the key, and return that key.
+async fn register_10906(reg: &Path, name: &str, root: &Path) -> String {
+    let mut store = crate::project::store::ProjectStore::load(reg)
+        .await
+        .expect("store");
+    store
+        .upsert(crate::project::Project {
+            name: name.into(),
+            repo_url: root.display().to_string(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: None,
+            project_key: None,
+        })
+        .await
+        .expect("upsert");
+    store
+        .get(name)
+        .await
+        .expect("get")
+        .project_key
+        .expect("key")
+}
+
+/// One `SessionStart` with `cwd`, through the daemon's ingest point; it
+/// queues the session's project lookup (#10906).
+fn start_in(state: &DaemonState, session: SessionId, cwd: &Path) {
+    state.push_hook_event(HookEventRecord::now(
+        session,
+        HookEvent::SessionStart,
+        json!({"cwd": cwd.display().to_string()}),
+    ));
+}
+
+fn pre_tool_use_in(session: SessionId, cwd: &Path) -> HookEventRecord {
+    HookEventRecord::now(
+        session,
+        HookEvent::PreToolUse,
+        json!({"cwd": cwd.display().to_string(), "tool": "Bash", "tool_use_id": "t"}),
+    )
+}
+
+/// #10906 regression: events from a registered project carry its registry
+/// `project_key` on the wire — `owner/repo` with an origin, `local:<uuid>`
+/// without — which is the field trusty-events keys `by_project` on (its
+/// `events_console_metrics_answers_on_the_real_socket`). A session in an
+/// unregistered directory goes out as `None`, so it counts as unattributed.
+/// The `SessionStart` that queues the lookup goes out before it lands, as
+/// `None`; the tool call after it carries the key.
+#[tokio::test]
+async fn an_event_from_a_registered_project_carries_its_project_key_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = dir.path().join("registry");
+    let web = checkout_10906(dir.path(), "web", Some("https://github.com/Acme/Web.git"));
+    let solo = checkout_10906(dir.path(), "solo", None);
+    let stray = checkout_10906(dir.path(), "stray", None);
+    assert_eq!(register_10906(&reg, "web", &web).await, "acme/web");
+    let solo_key = register_10906(&reg, "solo", &solo).await;
+    assert!(solo_key.starts_with("local:"), "{solo_key}");
+    let sock = sock_in(&dir);
+    let state = DaemonState::new();
+    let publisher =
+        Arc::new(ActionPublisher::new(&sock).with_project_resolver(registry_resolver(reg.clone())));
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    let (a, b, c) = (SessionId::new(), SessionId::new(), SessionId::new());
+    // A subdirectory of the checkout resolves to the checkout's project.
+    let cwds = [(a, web.join("sub")), (b, solo.clone()), (c, stray.clone())];
+    for (s, cwd) in &cwds {
+        start_in(&state, *s, cwd);
+    }
+    publisher.lookups_settled().await;
+    for (s, cwd) in &cwds {
+        state.push_hook_event(pre_tool_use_in(*s, cwd));
+    }
+    let read = read_one(&sock);
+    let outcome = publisher.flush().await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let bytes = received(read).await;
+    let got = frames(&bytes);
+    assert_eq!(got.len(), 6, "started and tool per session: {got:?}");
+    let want = [
+        (a, Some("acme/web")),
+        (b, Some(solo_key.as_str())),
+        (c, None),
+    ];
+    for (session, project) in want {
+        let id = session.0.to_string();
+        let mine: Vec<_> = got
+            .iter()
+            .filter(|e| e.session.as_deref() == Some(&id))
+            .collect();
+        assert_eq!(mine.len(), 2, "{id}: {got:?}");
+        assert_eq!(mine[0].project, None, "queued, not yet resolved: {mine:?}");
+        assert_eq!(mine[1].project.as_deref(), project, "{mine:?}");
+    }
+    let raw = String::from_utf8_lossy(&bytes);
+    assert_eq!(raw.matches(r#""project":"acme/web""#).count(), 1, "{raw}");
+}
+
+/// #10906 error arm: a registry that cannot be read names no project, and
+/// the session's events still go out at once, with `project: None`.
+#[tokio::test]
+async fn an_unresolvable_session_still_sends_its_events_unattributed_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = dir.path().join("registry");
+    std::fs::create_dir_all(&reg).expect("mkdir");
+    std::fs::write(reg.join("projects.json"), "{not json").expect("write");
+    let root = checkout_10906(dir.path(), "web", Some("https://github.com/acme/web"));
+    let sock = sock_in(&dir);
+    let state = DaemonState::new();
+    let publisher =
+        Arc::new(ActionPublisher::new(&sock).with_project_resolver(registry_resolver(reg)));
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    let s = SessionId::new();
+    start_in(&state, s, &root);
+    publisher.lookups_settled().await;
+    state.push_hook_event(pre_tool_use_in(s, &root));
+    assert_eq!(publisher.buffered_len(), 2, "buffered on the hook path");
+    let read = read_one(&sock);
+    let outcome = publisher.flush().await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let bytes = received(read).await;
+    let got = frames(&bytes);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got.iter().all(|e| e.project.is_none()), "{got:?}");
+    assert!(!String::from_utf8_lossy(&bytes).contains("\"project\""));
+}
+
+/// Commit in `checkout` and add a linked worktree of it at `at`,
+/// returning the worktree's canonical path.
+fn linked_worktree_10906(checkout: &Path, at: &Path, branch: &str) -> PathBuf {
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c"])
+            .arg("commit.gpgsign=false")
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    // `worktree add` needs a commit to check out; a repeat is harmless.
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        branch,
+        &at.display().to_string(),
+    ]);
+    std::fs::create_dir_all(at.join("sub")).expect("mkdir");
+    at.canonicalize().expect("canonical")
+}
+
+/// The events every session in `cwds` sends, keyed by session id, through
+/// [`registry_resolver`] on `reg`: a `SessionStart`, then, once the lookups
+/// have landed, a tool call.
+async fn projects_for_10906(
+    dir: &tempfile::TempDir,
+    reg: &Path,
+    cwds: &[&Path],
+) -> Vec<(String, Vec<Option<String>>)> {
+    let sock = sock_in(dir);
+    let state = DaemonState::new();
+    let publisher = Arc::new(
+        ActionPublisher::new(&sock).with_project_resolver(registry_resolver(reg.to_path_buf())),
+    );
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    let sessions: Vec<SessionId> = cwds.iter().map(|_| SessionId::new()).collect();
+    for (s, cwd) in sessions.iter().zip(cwds) {
+        start_in(&state, *s, cwd);
+    }
+    publisher.lookups_settled().await;
+    for (s, cwd) in sessions.iter().zip(cwds) {
+        state.push_hook_event(pre_tool_use_in(*s, cwd));
+    }
+    let read = read_one(&sock);
+    let outcome = publisher.flush().await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let got = frames(&received(read).await);
+    assert_eq!(got.len(), 2 * cwds.len(), "{got:?}");
+    sessions
+        .iter()
+        .map(|s| {
+            let id = s.0.to_string();
+            let projects = got
+                .iter()
+                .filter(|e| e.session.as_deref() == Some(&id))
+                .map(|e| e.project.clone())
+                .collect();
+            (id, projects)
+        })
+        .collect()
+}
+
+/// #10906 regression: a session working in a linked worktree of a registered
+/// checkout — nested under it or beside it, at its root or in a subdirectory
+/// — carries the main checkout's registry `project_key`.
+#[tokio::test]
+async fn a_linked_worktree_session_carries_its_main_checkouts_project_key_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = dir.path().join("registry");
+    let web = checkout_10906(dir.path(), "web", Some("https://github.com/Acme/Web.git"));
+    assert_eq!(register_10906(&reg, "web", &web).await, "acme/web");
+    let nested = linked_worktree_10906(&web, &web.join(".claude/worktrees/wt"), "wt");
+    let sibling = linked_worktree_10906(&web, &dir.path().join("web-wt"), "wt2");
+    let cwds = [nested.join("sub"), nested.clone(), sibling.join("sub")];
+    let cwds: Vec<&Path> = cwds.iter().map(PathBuf::as_path).collect();
+    for (id, projects) in projects_for_10906(&dir, &reg, &cwds).await {
+        assert_eq!(projects, [None, Some("acme/web".to_string())], "{id}");
+    }
+}
+
+/// #10906 error arm: a worktree whose `gitdir:` names a missing admin dir
+/// maps to no main checkout, so its events go out at once with no project,
+/// never claimed by the registered checkout that encloses it.
+#[tokio::test]
+async fn a_worktree_with_a_broken_gitdir_sends_its_events_unattributed_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = dir.path().join("registry");
+    let web = checkout_10906(dir.path(), "web", Some("https://github.com/acme/web"));
+    assert_eq!(register_10906(&reg, "web", &web).await, "acme/web");
+    let broken = web.join(".claude/worktrees/gone");
+    std::fs::create_dir_all(broken.join("sub")).expect("mkdir");
+    std::fs::write(
+        broken.join(".git"),
+        "gitdir: /nonexistent/.git/worktrees/gone\n",
+    )
+    .expect("write");
+    let cwds = [broken.join("sub")];
+    let cwds: Vec<&Path> = cwds.iter().map(PathBuf::as_path).collect();
+    for (id, projects) in projects_for_10906(&dir, &reg, &cwds).await {
+        assert_eq!(projects, vec![None; 2], "{id}");
+    }
+}
+
+/// #10906 regression: a project lookup stuck on the disk — a stale network
+/// mount under the cwd — never holds the hook path. The hook that queues it
+/// returns within the 6849 ingest bound, and a second session's hook does
+/// not wait on it; the answer still lands once the lookup finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_project_lookup_never_holds_the_hook_path_10906() {
+    const STALL: Duration = Duration::from_secs(2);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let slow: projection::ProjectResolver = Arc::new(|cwd: &Path| {
+        if cwd == Path::new("/stale") {
+            std::thread::sleep(STALL);
+            return Some("acme/stale".to_string());
+        }
+        Some("acme/live".to_string())
+    });
+    let state = Arc::new(DaemonState::new());
+    let publisher = Arc::new(ActionPublisher::new(sock_in(&dir)).with_project_resolver(slow));
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    let (a, b) = (SessionId::new(), SessionId::new());
+
+    let hook_a = std::thread::spawn({
+        let state = Arc::clone(&state);
+        move || {
+            let started = Instant::now();
+            state.push_hook_event(pre_tool_use_in(a, Path::new("/stale")));
+            started.elapsed()
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = Instant::now();
+    state.push_hook_event(pre_tool_use_in(b, Path::new("/live")));
+    let second = started.elapsed();
+    let first = hook_a.join().expect("join");
+    let waits = format!("first session {first:?}, second session {second:?}");
+    assert!(first < STALL, "the hook waited on the lookup: {waits}");
+    assert!(
+        second < Duration::from_secs(1),
+        "the second session's hook waited on the first one's lookup: {waits}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while publisher.threader.lock().project_of(&a).is_none() {
+        assert!(Instant::now() < deadline, "the slow lookup never landed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let threader = publisher.threader.lock();
+    assert_eq!(threader.project_of(&a).as_deref(), Some("acme/stale"));
+    assert_eq!(threader.project_of(&b).as_deref(), Some("acme/live"));
+}
+
+/// #10906 regression: a lookup requeued at [`MAX_LOOKUPS_IN_FLIGHT`] retries
+/// from the session's first cwd. The session moves to another registered
+/// checkout while the cap holds, and still lands its first cwd's key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capped_project_lookup_retries_from_its_first_cwd_10906() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (gate, held) = std::sync::mpsc::channel::<()>();
+    let held = Arc::new(std::sync::Mutex::new(held));
+    let resolver: projection::ProjectResolver = Arc::new(move |cwd: &Path| {
+        if let Ok(n) = cwd.strip_prefix("/held") {
+            // Blocks until the test drops `gate`.
+            let _ = held.lock().expect("gate").recv();
+            return Some(format!("acme/held-{}", n.display()));
+        }
+        match cwd.to_str() {
+            Some("/first") => Some("acme/first".to_string()),
+            Some("/second") => Some("acme/second".to_string()),
+            _ => None,
+        }
+    });
+    let publisher = ActionPublisher::new(sock_in(&dir)).with_project_resolver(resolver);
+    let held_sessions: Vec<SessionId> = (0..MAX_LOOKUPS_IN_FLIGHT)
+        .map(|_| SessionId::new())
+        .collect();
+    for (i, s) in held_sessions.iter().enumerate() {
+        publisher.publish(&pre_tool_use_in(
+            *s,
+            &Path::new("/held").join(i.to_string()),
+        ));
+    }
+    let in_flight = || publisher.lookups.load(Ordering::SeqCst);
+    assert_eq!(in_flight(), MAX_LOOKUPS_IN_FLIGHT, "the cap is full");
+
+    let moved = SessionId::new();
+    publisher.publish(&pre_tool_use_in(moved, Path::new("/first")));
+    assert_eq!(in_flight(), MAX_LOOKUPS_IN_FLIGHT, "the 17th was requeued");
+    assert_eq!(publisher.threader.lock().project_of(&moved), None);
+    publisher.publish(&pre_tool_use_in(moved, Path::new("/second")));
+    assert_eq!(publisher.threader.lock().project_of(&moved), None);
+
+    drop(gate);
+    publisher.lookups_settled().await;
+    publisher.publish(&pre_tool_use_in(moved, Path::new("/second")));
+    publisher.lookups_settled().await;
+    let threader = publisher.threader.lock();
+    for (i, s) in held_sessions.iter().enumerate() {
+        let key = format!("acme/held-{i}");
+        assert_eq!(threader.project_of(s).as_deref(), Some(key.as_str()));
+    }
+    assert_eq!(
+        threader.project_of(&moved).as_deref(),
+        Some("acme/first"),
+        "the retry resolved from a later cwd, not the session's first"
+    );
+}

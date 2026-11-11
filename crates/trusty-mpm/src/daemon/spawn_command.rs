@@ -326,7 +326,7 @@ mod tests {
             let (deny, body) = payload(&out);
             assert!(deny.contains(&"mcp__*slack*".to_owned()), "{deny:?}");
             assert!(deny.contains(&"mcp__*Slack*".to_owned()), "{deny:?}");
-            assert_eq!(body["disableClaudeAiConnectors"], true);
+            assert!(body.get("disableClaudeAiConnectors").is_none(), "{body}"); // #10735
             // #10127: the payload file is created new, so the next line needs its path free.
             std::fs::remove_file(&out).expect("remove the payload");
         }

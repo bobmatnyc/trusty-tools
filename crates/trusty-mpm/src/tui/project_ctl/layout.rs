@@ -89,6 +89,7 @@ pub fn main_columns(area: Rect, focus: Pane) -> (Option<Rect>, Option<Rect>) {
 /// session details draw inside the session column, so no session overlay
 /// remains.
 pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
+    crate::tui::theme::paint_background(frame);
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

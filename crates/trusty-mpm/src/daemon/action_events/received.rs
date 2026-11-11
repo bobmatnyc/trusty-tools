@@ -362,6 +362,7 @@ pub fn events(
             payload: HarnessPayload::Message(received_event(&a, &to, bodies)),
             id: EventId::new(),
             parent_id: root,
+            project: None,
         })
         .collect()
 }

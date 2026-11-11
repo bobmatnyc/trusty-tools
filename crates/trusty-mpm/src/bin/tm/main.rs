@@ -29,7 +29,7 @@ use clap::Parser;
 use cli::{Cli, Command};
 use commands::{
     agent::agent,
-    compress::run_compress,
+    compress_run,
     daemon::{restart, run_daemon, start, stop_daemon},
     generate::generate,
     hooks::clean as hooks_clean,
@@ -509,12 +509,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Agent { action }) => agent(action).await,
         Some(Command::Generate { action }) => generate(action).await,
-        Some(Command::Tui {
-            url: tui_url,
-            interval_ms,
-            single_pane,
-            no_mouse,
-        }) => commands::projects::run_tui(tui_url, interval_ms, single_pane, no_mouse).await,
+        Some(tui @ Command::Tui { .. }) => commands::projects::run_tui(tui).await,
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install {
@@ -541,7 +536,8 @@ async fn main() -> anyhow::Result<()> {
         // #6887: the cheap worker `--divert-check` steers the agent to.
         Some(Command::Divert { action }) => commands::divert::run(action).await,
         Some(Command::Memory { action }) => memory(action).await,
-        Some(Command::Compress { tool }) => run_compress(&tool).await,
+        // #10973: a command after `--` selects the run mode (`compress_run`).
+        Some(Command::Compress { tool, command }) => compress_run::run(&tool, &command).await,
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
         // returns here — the `!` it yields coerces into this match's type.
         Some(Command::Wait(args)) => commands::wait::run(args),

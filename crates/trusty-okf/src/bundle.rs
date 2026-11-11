@@ -82,9 +82,11 @@ impl Bundle {
     /// adds its findings: an info per foreign path, a warning per symbolic
     /// link, an error per unreadable or unparseable file, the read warnings
     /// of each concept, a warning per fold-key group of two or more files
-    /// (§2.11), and a warning per concept whose recorded verification names
-    /// another content hash (§2.10 "Out-of-band edits").
+    /// (§2.11), a warning per concept whose recorded verification names
+    /// another content hash (§2.10 "Out-of-band edits"), and an error per
+    /// verification record it cannot read (#10879).
     /// Test: `c01_bundle_open_is_ok_on_the_google_bundles`,
+    /// `open_reports_an_unreadable_verification_record_as_a_finding`,
     /// `c54_open_on_a_missing_root_is_an_error`,
     /// `c115_bundle_open_reads_foreign_files_and_writes_never_touch_them`,
     /// `c36_out_of_band_edit_reads_unverified_with_a_warning`.
@@ -125,7 +127,12 @@ impl Bundle {
                 Ok((c, read)) => {
                     findings.extend(read);
                     if let ConceptRef::Id(id) = &entry.r {
-                        findings.extend(bundle.mismatch_finding(id, &c)?);
+                        // #10879: an unreadable record is this concept's
+                        // finding; a lenient open never fails on it (§4.4).
+                        match bundle.mismatch_finding(id, &c) {
+                            Ok(f) => findings.extend(f),
+                            Err(e) => findings.push(unreadable_record(id, &e)),
+                        }
                     }
                 }
                 Err(e) => findings.push(Finding::parse_error(entry.rel.clone(), e.to_string())),
@@ -260,6 +267,23 @@ impl Bundle {
         f.concept = Some(id.clone());
         Ok(Some(f))
     }
+}
+
+/// The error finding for a verification record `open` cannot read.
+///
+/// #10879: one unreadable record (any read error) is a
+/// finding on its concept, not a failed open (§4.4); its writes still fail.
+/// Test: `open_reports_an_unreadable_verification_record_as_a_finding`.
+fn unreadable_record(id: &ConceptId, e: &OkfError) -> Finding {
+    let mut f = Finding::new(
+        Severity::Error,
+        FindingKind::UnreadableFile,
+        record::record_rel(id),
+        format!("cannot read the verification record: {e}"),
+        "SPEC-OKF-01 §4.4",
+    );
+    f.concept = Some(id.clone());
+    f
 }
 
 /// An info finding per legacy `_sources/<id>.index.jsonl` (§4.9.1 rule 4).

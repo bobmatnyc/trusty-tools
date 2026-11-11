@@ -4,10 +4,13 @@
 //! Why: a Docs folder can be imported with deletion detection only when the
 //! listing is recursive and whole, so the adapter must report every page
 //! token it leaves, and a native Doc must be exported, never downloaded.
-//! What: the selection is `account`, then either `folder_id` (with
+//! What: every request is refused `policy_refused` unless the grant file
+//! records a passed capability-grant review for its store and account
+//! ([`authorise`], #10746). The selection is `account`, then either `folder_id` (with
 //! `recursive`) or `document_ids`, never both, and `max_items` (the
 //! adapter's ceiling, default 5,000). A folder `list` walks one Drive page
-//! (`trashed = false`, so a trashed Doc is absent) and hands the
+//! (`trashed = false`, so a trashed Doc is absent; #10746: the first page
+//! fails unless the root is a readable, untrashed folder) and hands the
 //! `DriveWalk` back as the cursor `w1:<json>`; a native Doc is an entry
 //! with its `version`, else `modifiedTime`, as the revision; any other file
 //! is an entry skipped `unsupported_format`. A `document_ids` list reads
@@ -17,10 +20,13 @@
 //! `text/markdown`, else `text/html`; a binary export arrives as a base64
 //! part (the host reports it `unsupported_format`); embedded images are
 //! dropped with a note ([`drop_embedded_images`]).
-//! Test: `gdocs::tests`, `c91_*`, `c94_*`, `c132_*` (`tests/conformance.rs`).
+//! Test: `gdocs::tests`, `c91_*`, `c94_*`, `c132_*`,
+//! `gdocs_needs_a_capability_grant_before_any_drive_request`
+//! (`tests/conformance.rs`).
 //!
 //! # Spec References
-//! - SPEC-OKF-01 §2.15 items 3, 7, 8; Appendix C.
+//! - SPEC-OKF-01 §2.15 items 3, 7, 8, "Native-Doc export"; Appendix B
+//!   "Acquire role"; Appendix C.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -44,9 +50,31 @@ const WALK: &str = "w1:";
 
 /// The `okf-adapter-gdocs` entry point; returns the exit code.
 pub fn main(args: &[OsString]) -> i32 {
-    run_main(args, |google, _config: Result<Config, String>| {
-        Docs::new(google)
-    })
+    // #10746: the grant file reaches the adapter, which enforces it.
+    run_main(args, Docs::new)
+}
+
+/// Refuse a request no passed capability-grant review covers (§2.15
+/// "Native-Doc export", item 10 B; Appendix B "Acquire role": the adapter
+/// enforces the check). The semantics of `gmail::authorise` for inbound
+/// mail: an unusable grant file, or no row for exactly this store and
+/// account, is `policy_refused`.
+pub fn authorise(
+    req: &Request,
+    account: &str,
+    config: &Result<Config, String>,
+) -> Result<(), Fault> {
+    let refuse = |why: String| Err(Fault::new("policy_refused", why));
+    match config {
+        Err(e) => refuse(format!(
+            "native Doc export refused: the grant file is unusable: {e}"
+        )),
+        Ok(c) if !c.gdocs_granted(&req.store, account) => refuse(format!(
+            "native Doc export refused: no passed capability-grant review for store {} account {account}",
+            req.store
+        )),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// What one request lists.
@@ -212,14 +240,20 @@ pub fn doc_record(meta: &Value, mime: &str, export: &Value) -> SourceRecord {
 /// The `gdocs` adapter of one process.
 pub struct Docs {
     google: Google,
+    /// #10746: the grant file ([`authorise`]).
+    config: Result<Config, String>,
     /// Entries listed so far in this process (the ceiling's count).
     listed: usize,
 }
 
 impl Docs {
-    /// An adapter over `google`.
-    pub fn new(google: Google) -> Docs {
-        Docs { google, listed: 0 }
+    /// An adapter over `google` with the grant file `config`.
+    pub fn new(google: Google, config: Result<Config, String>) -> Docs {
+        Docs {
+            google,
+            config,
+            listed: 0,
+        }
     }
 
     /// The page that stops at the ceiling with `cursor` still left.
@@ -321,6 +355,8 @@ impl Adapter for Docs {
 
     async fn list(&mut self, req: &Request) -> Result<Page, Fault> {
         let (account, source, ceiling) = selection(&req.selection)?;
+        // #10746: no Drive call before the capability-grant check.
+        authorise(req, &account, &self.config)?;
         if self.listed >= ceiling {
             return Ok(Docs::at_ceiling(req.cursor.clone()));
         }
@@ -340,6 +376,8 @@ impl Adapter for Docs {
 
     async fn fetch(&mut self, req: &Request) -> Result<SourceRecord, Fault> {
         let (account, _, _) = selection(&req.selection)?;
+        // #10746: no Drive call before the capability-grant check.
+        authorise(req, &account, &self.config)?;
         let id = req
             .item_id
             .as_deref()
@@ -461,5 +499,49 @@ mod tests {
             &json!({"content": "AAAA", "encoding": "base64"}),
         );
         assert_eq!(r.parts[0].encoding.as_deref(), Some("base64"));
+    }
+
+    /// Why: #10879 — `list` and `fetch` each check the grant, and the
+    /// conformance test is refused at `list`, so it never reaches `fetch`.
+    /// What: `fetch` straight on an adapter with no grant row, a grant for
+    /// another store, and an unusable grant file is `policy_refused`. The
+    /// token store is empty, so a Drive call would fail `auth_required`.
+    /// Test: self-contained.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_needs_a_capability_grant_before_any_drive_request() {
+        let home = tempfile::tempdir().unwrap();
+        let grant = |store: &str| -> Result<Config, String> {
+            Ok(toml::from_str(&format!(
+                "[[gdocs_grant]]\nstore = \"{store}\"\naccount = \"work\"\nreview = \"r\"\n"
+            ))
+            .unwrap())
+        };
+        let req = Request {
+            request_id: 1,
+            op: "fetch".into(),
+            kind: "gdocs".into(),
+            store: "docs-src".into(),
+            selection: json!({"account": "work", "document_ids": ["d1"]})
+                .as_object()
+                .unwrap()
+                .clone(),
+            operator_initiated: false,
+            cursor: None,
+            item_id: Some("d1".into()),
+        };
+        for (why, config) in [
+            ("no grant", Ok(Config::default())),
+            ("another store", grant("other-src")),
+            ("unusable grant file", Err("bad toml".to_string())),
+        ] {
+            let google = Google::with_home(home.path(), &Default::default()).unwrap();
+            let got = Docs::new(google, config).fetch(&req).await.unwrap_err();
+            assert_eq!(got.code, "policy_refused", "{why}: {got:?}");
+        }
+        // The control: with the grant, the fetch reaches Drive and fails
+        // on the empty token store instead.
+        let google = Google::with_home(home.path(), &Default::default()).unwrap();
+        let got = Docs::new(google, grant("docs-src")).fetch(&req).await;
+        assert_eq!(got.unwrap_err().code, "auth_required");
     }
 }

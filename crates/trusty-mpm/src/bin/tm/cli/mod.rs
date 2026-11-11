@@ -471,6 +471,11 @@ pub(crate) enum Command {
         /// capture clicks or the wheel. `TM_TUI_MOUSE=0` does the same (#10476).
         #[arg(long)]
         no_mouse: bool,
+        /// The Architect dashboard store root the Architect view reads
+        /// (`a` on the home screen). Until #10944 the daemon does not resolve
+        /// it; afterwards this stays an override (#10966).
+        #[arg(long, env = "TM_ARCHITECT_STORE")]
+        architect_store: Option<std::path::PathBuf>,
     },
     /// Manage the Telegram remote-management bot (pair, status, start, stop).
     Telegram {
@@ -685,12 +690,18 @@ pub(crate) enum Command {
     /// `trusty_agents_common::compress::compress_tool_output_async_with_path`
     /// (hoisted from `trusty-agents` in issue #1959), logs a structured
     /// stats line, and writes the compressed text to stdout.
+    /// #10973: with a command after `--`, runs it and compresses its stdout
+    /// instead of reading stdin, exiting with the command's own status — the
+    /// one-command shape an isolation worktree's classifier accepts.
     /// Test: `cli_parses_compress` plus `commands::compress`'s unit tests
     /// and the `tm_compress_pipe` integration test.
     Compress {
         /// Tool name used to select the compression filter (e.g. "cargo test").
         #[arg(long)]
         tool: String,
+        /// #10973: the program and arguments to run; empty reads stdin.
+        #[arg(last = true)]
+        command: Vec<String>,
     },
     /// Wait for a condition, in-turn, without blocking past the harness ceiling.
     ///

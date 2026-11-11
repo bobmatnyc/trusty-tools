@@ -14,7 +14,8 @@
 //! `**Superseded**` entry, as one journaled `Supersede` operation (§4.11
 //! "Step order": the add comes before the mark). [`check_tombstone`]
 //! refuses a write of `source_status: deleted` without a non-empty
-//! top-level `source_id`. Slice S6 of #10746.
+//! top-level `source_id`. Slice S6 of #10746. #10746: a `reason` holding a
+//! control character is refused (`reason_control_character`).
 //! Test: `c40_supersede_keeps_the_old_file_and_links_both_ways`,
 //! `deprecate_is_lifecycle_only_and_logged`,
 //! `c38_tombstone_without_source_id_is_refused`,
@@ -50,6 +51,21 @@ pub(crate) fn check_tombstone(id: &ConceptId, c: &Concept) -> Result<(), OkfErro
         .is_some_and(|s| !s.is_empty());
     if deleted && !has_source {
         return Err(conflict(id, "tombstone_without_source_id"));
+    }
+    Ok(())
+}
+
+/// Refuse a caller `reason` whose text holds a control character.
+///
+/// Why: #10746 — the reason goes verbatim into the `**Deprecated**` or
+/// `**Superseded**` `log.md` entry; a newline in it would forge entries or
+/// `## date` headings, as an actor would (`put`'s `check_actor`).
+/// What: `Conflict { reason: "reason_control_character" }` before any other
+/// check, so no file changes.
+/// Test: `put_verify_and_correct_refuse_a_control_character`.
+fn check_reason(id: &ConceptId, reason: &str) -> Result<(), OkfError> {
+    if reason.chars().any(char::is_control) {
+        return Err(conflict(id, "reason_control_character"));
     }
     Ok(())
 }
@@ -98,6 +114,8 @@ impl Bundle {
         by: &Actor,
         now: &DateTime<FixedOffset>,
     ) -> Result<PutPlan, OkfError> {
+        // #10746: a reason that could forge a `log.md` line is refused.
+        check_reason(id, reason)?;
         let mut c = self.get(id)?;
         c.set("status", Value::String("deprecated".into()));
         let mut plan = self.plan_put(
@@ -152,6 +170,8 @@ impl Bundle {
         by: &Actor,
         now: &DateTime<FixedOffset>,
     ) -> Result<(OpPlan, Vec<Finding>), OkfError> {
+        // #10746: a reason that could forge a `log.md` line is refused.
+        check_reason(old, reason)?;
         let new_id = match &new.id {
             ConceptRef::Id(id) => id.clone(),
             ConceptRef::Foreign(p) => return Err(foreign_refusal(p)),

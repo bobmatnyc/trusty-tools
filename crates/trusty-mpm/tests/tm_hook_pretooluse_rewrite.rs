@@ -114,10 +114,10 @@ fn hook_rewrites_plain_bash_command_on_pretooluse() {
 }
 
 #[test]
-fn hook_stays_silent_for_a_bash_call_in_an_isolation_worktree() {
-    // #7477: the harness classifier refuses the wrapped shape inside an
-    // isolation worktree, so the hook must print nothing and let the command
-    // run as written. The payload `cwd` is what Claude Code reports.
+fn hook_never_emits_the_refused_shape_in_an_isolation_worktree() {
+    // #7477: the harness classifier refuses the brace-group pipeline inside an
+    // isolation worktree. #10973 compresses there again, but only as one simple
+    // command. The payload `cwd` is what Claude Code reports.
     let cwd = "/repo/.claude/worktrees/agent-a/crates/trusty-mpm";
     for command in ["git diff", "ls -la"] {
         let payload = serde_json::json!({
@@ -126,7 +126,17 @@ fn hook_stays_silent_for_a_bash_call_in_an_isolation_worktree() {
             "cwd": cwd,
         });
         let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
-        assert_eq!(stdout.trim(), "", "{command} must not be rewritten");
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one object");
+        let rewritten = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            rewritten.ends_with(&format!(" -- {command}")),
+            "{rewritten}"
+        );
+        for refused in ["{", "|", ";", "printf", "$?"] {
+            assert!(!rewritten.contains(refused), "{refused} in {rewritten}");
+        }
     }
     // #8261: a heavy build there is still leased — the builds run in isolation
     // worktrees — but never compression-wrapped (#7477).
@@ -145,6 +155,27 @@ fn hook_stays_silent_for_a_bash_call_in_an_isolation_worktree() {
         "{command}"
     );
     assert!(!command.contains("tm compress"), "{command}");
+}
+
+/// #10973: delegated agents run almost entirely inside isolation worktrees, so
+/// a hook that never compresses there recorded almost no `compress` rows.
+#[test]
+fn hook_compresses_a_filter_covered_command_inside_an_isolation_worktree() {
+    let payload = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": "git diff" },
+        "cwd": "/repo/.claude/worktrees/agent-a/crates/trusty-mpm",
+    });
+    let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("a worktree call must be rewritten ({e}): {stdout:?}"));
+    let command = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        command.contains("tm compress --tool \"git diff\""),
+        "{command}"
+    );
 }
 
 #[test]

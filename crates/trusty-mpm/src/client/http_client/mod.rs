@@ -67,6 +67,25 @@ pub use types::{
 
 use serde::Deserialize;
 
+/// `Ok` unless a `POST /sessions/{id}/command` body says the command did not
+/// reach the pane (#10101).
+///
+/// Why: a 1.12.0 daemon answered `sent: true` for a line typed into no pane;
+/// every caller of the route must now surface `sent: false` as a failure.
+/// What: `Err` naming `send_error` when `sent` is `false`; a body with no
+/// `sent` field (an older daemon) is `Ok`.
+/// Test: `command_delivery_refuses_an_undelivered_command_10101`.
+pub fn command_delivery(body: &serde_json::Value) -> anyhow::Result<()> {
+    if body.get("sent").and_then(serde_json::Value::as_bool) != Some(false) {
+        return Ok(());
+    }
+    let reason = body
+        .get("send_error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("no reason given");
+    anyhow::bail!("command not delivered: {reason}")
+}
+
 /// Build the shared bounded-timeout `reqwest::Client` [`DaemonClient::new`] uses.
 ///
 /// Why: issue #2517 (a live-verify gap in #2471/#2512): the `DaemonClient`
@@ -488,8 +507,10 @@ impl DaemonClient {
     /// Claude Code session remotely — type a prompt, read back the pane.
     /// What: POSTs `{ command }`; returns `Ok(Some(output))` with the captured
     /// pane text on success, `Ok(None)` when the session is unknown (`404`), and
-    /// `Err` on transport failure.
-    /// Test: covered by the daemon's session-command tests.
+    /// `Err` on transport failure or when the daemon reports the command did
+    /// not reach the pane ([`command_delivery`], #10101).
+    /// Test: covered by the daemon's session-command tests and
+    /// `command_delivery_refuses_an_undelivered_command_10101`.
     pub async fn send_session_command(
         &self,
         id: &str,
@@ -505,6 +526,7 @@ impl DaemonClient {
             return Ok(None);
         }
         let body: serde_json::Value = resp.error_for_status()?.json().await?;
+        command_delivery(&body)?;
         Ok(Some(
             body.get("output")
                 .and_then(|v| v.as_str())
@@ -585,16 +607,27 @@ impl DaemonClient {
     ///
     /// Why: the `/projects` keyboard's "Set Active" button registers a
     /// discovered project with the daemon.
-    /// What: POSTs `{"path": <path>}`; returns `Ok(())` on a 2xx response.
-    /// Test: covered by the executor's projects test.
-    pub async fn register_project(&self, path: &str) -> anyhow::Result<()> {
+    /// What: POSTs `{"path": <path>}`; on a 2xx response returns the record the
+    /// daemon kept instead of writing (`None` after a write), and otherwise an
+    /// error carrying the daemon's own message.
+    /// Test: `register_project_succeeds`,
+    /// `register_project_without_origin_shows_the_daemon_message_10586`,
+    /// `register_project_reports_the_kept_record_10586`.
+    pub async fn register_project(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<Option<crate::core::project::KeptRegistryRecord>> {
         let url = "/projects".to_string();
-        self.post(&url)
+        let resp = self
+            .post(&url)
             .json(&serde_json::json!({ "path": path }))
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
+            .await?;
+        // #10586: a refused registration (no `origin` remote) names its fix.
+        let resp = error::response_or_body_error(resp).await?;
+        // #10586: a kept record is reported, not read as a silent success.
+        let body: crate::core::project::RegisterProjectResponse = resp.json().await?;
+        Ok(body.kept_existing)
     }
 
     /// Capture a tmux pane snapshot via `GET /tmux/sessions/{name}/snapshot`.

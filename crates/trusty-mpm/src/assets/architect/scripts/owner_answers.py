@@ -31,6 +31,8 @@ A doc in <root>/il_steers with status "new" (the Steer button on an Intent Ledge
 A session doc (<root>/sessions) whose command.status is "new" (the Activate, Prioritize, Park and Restart
 buttons) yields {id, kind: "owner_command", at: command.at, text, type, goal}; text is the activate text
 or the note (prioritize, park, restart). The Architect sets command.status "applied" once it has relayed and recorded it.
+A doc in <root>/watch_changes with status "new" (Watch / Unwatch in the Projects view) yields {id, kind: "watch_change", at: created,
+text: "<action> <key>", key, action}; the Architect's pass runs scripts/watch-apply.py, which sets applied or failed (#10896).
 A doc in <root>/effort_tunes with status "new" (the More/Less Effort goal tuner) yields {id, kind: "effort",
 at, text: "<goal> effort <direction> (bias <+n>)", goal, direction, bias}; the Architect sets status "applied" once handled.
 An open item whose status_request is a dict with `at` (the Status Update button) also yields {id, kind: "status_request",
@@ -63,7 +65,7 @@ import dashboard_derive as derive  # noqa: E402
 import dashboard_qual as dq  # noqa: E402
 import dashboard_store as ds  # noqa: E402
 
-COLLECTIONS = ("items", "sessions", "effort_tunes", "il_steers", "goals")
+COLLECTIONS = ("items", "sessions", "effort_tunes", "il_steers", "goals", "watch_changes")   # #10896: a new watch request wakes the Architect
 
 
 def pending(root=None, now=None, colls=COLLECTIONS):

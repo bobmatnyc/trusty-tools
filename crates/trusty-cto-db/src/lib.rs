@@ -96,7 +96,8 @@ fn query_all(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> R
     let mut stmt = conn
         .prepare(sql)
         .with_context(|| format!("prepare: {sql}"))?;
-    let columns: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+    // #10882: rusqlite 0.41 returns an iterator here, not a Vec.
+    let columns: Vec<String> = stmt.column_names().map(String::from).collect();
     let mut rows = stmt.query(params)?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {

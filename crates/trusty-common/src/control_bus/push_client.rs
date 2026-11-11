@@ -492,6 +492,7 @@ mod tests {
             }),
             id: EventId::new(),
             parent_id: None,
+            project: None,
         }
     }
 

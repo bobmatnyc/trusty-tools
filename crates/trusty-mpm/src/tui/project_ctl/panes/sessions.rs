@@ -9,7 +9,7 @@
 //! there is no live `/activity` polling in this issue's scope (#2119 wires
 //! that live "awaiting approval" / "idle Nm" detail into this pane later).
 //! A second, independent glyph (DOC-35 §10.6, #2383) marks a row whose
-//! `deliverable_id` is bound to a Deliverable — resolved (`◆`, cyan) when it
+//! `deliverable_id` is bound to a Deliverable — resolved (`◆`, accent) when it
 //! matches one of [`ProjectCtlState::deliverables`](crate::tui::project_ctl::state::ProjectCtlState::deliverables), dangling (`◈`, dim red)
 //! when it CONFIRMS the id does not resolve, and no glyph at all when the
 //! link state is [`DeliverableLinkState::Unknown`] (no successfully fetched
@@ -25,8 +25,9 @@
 //! glyph resolves without a second daemon round trip per row.
 //! Test: `tests` covers all three glyph states and the line content.
 
+use crate::tui::theme::palette;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
@@ -91,7 +92,7 @@ pub const DELIVERABLE_DANGLING_GLYPH: char = '◈';
 /// What: `None` when `deliverable_id` is `None` (unbound — the common case)
 /// OR `link_state` is [`DeliverableLinkState::Unknown`] (nothing confirmed
 /// yet — showing a glyph here would be a guess, never a confirmed dangling
-/// ref). `Some((`[`DELIVERABLE_GLYPH`]`, cyan))` when [`DeliverableLinkState::Resolved`].
+/// ref). `Some((`[`DELIVERABLE_GLYPH`]`, accent))` when [`DeliverableLinkState::Resolved`].
 /// `Some((`[`DELIVERABLE_DANGLING_GLYPH`]`, dim red))` when
 /// [`DeliverableLinkState::Dangling`].
 /// Test: `deliverable_glyph_none_when_unbound`,
@@ -105,11 +106,13 @@ pub fn deliverable_glyph(
     match link_state {
         DeliverableLinkState::Unknown => None,
         DeliverableLinkState::Resolved => {
-            Some((DELIVERABLE_GLYPH, Style::default().fg(Color::Cyan)))
+            Some((DELIVERABLE_GLYPH, Style::default().fg(palette().accent)))
         }
         DeliverableLinkState::Dangling => Some((
             DELIVERABLE_DANGLING_GLYPH,
-            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(palette().err)
+                .add_modifier(Modifier::DIM),
         )),
     }
 }
@@ -142,7 +145,7 @@ pub fn session_line(
 ) -> Line<'static> {
     let mut spans = vec![Span::styled(
         format!("{number:>2}. "),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(palette().muted),
     )];
     spans.extend(session_spans(row, deliverable_link_state));
     Line::from(spans)
@@ -179,7 +182,7 @@ pub fn session_spans(
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!("{branch}  ")),
-        Span::styled(detail, Style::default().fg(Color::DarkGray)),
+        Span::styled(detail, Style::default().fg(palette().muted)),
     ];
     if let Some((glyph, style)) =
         deliverable_glyph(row.deliverable_id.as_deref(), deliverable_link_state)
@@ -192,11 +195,11 @@ pub fn session_spans(
 /// Style a state glyph by its lifecycle state.
 fn glyph_style(state: &str) -> Style {
     match state {
-        "active" => Style::default().fg(Color::Green),
-        "provisioning" => Style::default().fg(Color::Yellow),
-        "errored" => Style::default().fg(Color::Red),
-        "decommissioned" => Style::default().fg(Color::DarkGray),
-        _ => Style::default().fg(Color::Gray),
+        "active" => Style::default().fg(palette().ok),
+        "provisioning" => Style::default().fg(palette().warn),
+        "errored" => Style::default().fg(palette().err),
+        "decommissioned" => Style::default().fg(palette().muted),
+        _ => Style::default().fg(palette().text),
     }
 }
 
@@ -325,12 +328,12 @@ mod tests {
         let (glyph, style) = deliverable_glyph(Some("d-1"), DeliverableLinkState::Resolved)
             .expect("resolved must show a glyph");
         assert_eq!(glyph, DELIVERABLE_GLYPH);
-        assert_eq!(style.fg, Some(Color::Cyan));
+        assert_eq!(style.fg, Some(palette().accent));
 
         let (glyph, style) = deliverable_glyph(Some("d-1"), DeliverableLinkState::Dangling)
             .expect("dangling must show a glyph");
         assert_eq!(glyph, DELIVERABLE_DANGLING_GLYPH);
-        assert_eq!(style.fg, Some(Color::Red));
+        assert_eq!(style.fg, Some(palette().err));
         assert!(
             style.add_modifier.contains(Modifier::DIM),
             "the dangling glyph must be dimmed so it reads distinct from the \

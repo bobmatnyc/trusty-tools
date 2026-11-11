@@ -64,6 +64,10 @@ mod lanes_tests;
 #[cfg(test)]
 mod test_support;
 
+// #10738: index identity, the put reply's hash and `search.index.file.status`.
+#[cfg(test)]
+mod identity_10738_tests;
+
 /// Restore both process-global memory limits when a test that touches them ends.
 ///
 /// Why: `core::memguard`'s two limits are `AtomicU64` cells shared by the whole

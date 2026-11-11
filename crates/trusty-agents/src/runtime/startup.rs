@@ -109,7 +109,9 @@ fn resolved_api_token(raw_args: &[String]) -> Option<String> {
 /// `a_credential_is_resolved_from_argv_then_the_environment` pins the one
 /// decision it makes that a unit test can reach; the credential-file opt-out
 /// in `startup_env_tests::sandbox_flag_skips_self_project_env_local` and
-/// `startup_env_tests::sandbox_flag_skips_cwd_dotenv`.
+/// `startup_env_tests::sandbox_flag_skips_cwd_dotenv`; the `$HOME`
+/// provisioning off-switch (#10940) in
+/// `startup_provision_tests::the_env_switch_keeps_a_temp_home_empty`.
 pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // Handle --version / -V before anything else (no env/tracing/etc.).
     // Why: `--version` must be cheap and side-effect-free so it's safe to
@@ -173,60 +175,19 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
         tools::python_skill::install_discovered_skill_plugins(&project_dir);
     }
 
-    // #3405/#3406 follow-up (v2: #3556): deploy/refresh the bundled agent
-    // roster (`assistant`, `ctrl`, `pm`, the specialist set) at
-    // `$HOME/.trusty-agents/agents/` so `tagent` launched from ANY
-    // directory — not just inside this repo checkout — resolves `assistant`
-    // instead of failing with "agent not found" and silently degrading to
-    // `ctrl`. #3556: this is now version-stamped — when the binary's
-    // bundled content changes since the last deploy, the stale
-    // on-disk bundled files are refreshed automatically (backing up any
-    // that differ from the current template first), not left permanently
-    // frozen at whatever a previous binary wrote. Best-effort: a failure
-    // (e.g. a read-only `$HOME`) is logged, not fatal — the pre-fix "not
-    // found" error is the worst case, not a crash. Runs unconditionally
-    // (even in quiet modes) since it has no stdout/stderr output of its own
-    // beyond an optional one-time note gated the same way the credentials
-    // banner is.
-    // #9014: the roster is read from instructional content. The deploy runs
-    // here, before the tracing subscriber exists, so its error is held and
-    // reported once logging is up (`report_deploy_failures` below).
-    let (bundled_agents_report, agents_deploy_err) =
-        match agents::bundled::ensure_bundled_agents_deployed() {
-            Ok(report) => (report, None),
-            Err(e) => (Default::default(), Some(e)),
-        };
-
-    // #5227: same treatment for the bundled WORKFLOW definitions. Agents were
-    // the only config kind that ever reached the `$HOME` tier, so
-    // `--workflow prescriptive` launched from a directory with no
-    // `.trusty-agents/` (the GUI sidecar runs with `cwd = /`) had no
-    // definition to read anywhere on its search hierarchy. Same best-effort
-    // posture as the roster deploy above: a read-only `$HOME` degrades to the
-    // pre-fix "workflow not found", it does not crash the harness.
-    let workflows_deploy_err = agents::bundled::ensure_bundled_workflows_deployed().err();
-
-    // #4325: create each Assistant INSTANCE's home directory
-    // (`~/trusty-agents/<instance>/`) so the layout exists before anything
-    // reaches for it. Placed here, immediately after the bundled roster is on
-    // disk, for two reasons: the roster is what this enumerates (an instance
-    // with no `agent.toml` yet is not discoverable), and this line runs BEFORE
-    // the `--api`/`--serve` early dispatch below — so one call covers the API
-    // server, the Tauri GUI (which spawns `--api` as a sidecar), the `start`
-    // daemon, the REPL/TUI, and every one-shot subcommand. It does NOT cover
-    // `config` and `mcp-serve`, which return before `run_startup_init` runs;
-    // both are deliberately daemon-less and neither touches an assistant home.
-    //
-    // Unlike the state-dir `create_dir_all` further down, this CANNOT fail the
-    // boot: `provision_startup_homes` returns a report, never a `Result`. A
-    // read-only `$HOME`, a denied permission, or a file left where a directory
-    // belongs is logged with its remedy and the app starts degraded — the same
-    // best-effort posture as the bundled-agent deploy above, and the reason the
-    // sidecar's `cwd=/` EROFS crash cannot recur here (the root resolves from
-    // `$HOME`/`$USERPROFILE`, never the cwd). It creates only what is missing
-    // and never rewrites a file the user edited; there is no migration of the
-    // existing dotted `~/.trusty-agents` tree.
-    let _assistant_homes = assistants::provision_startup_homes();
+    // #3405/#3556 (agents), #5227 (workflows), #4325 (assistant homes): the
+    // `$HOME` provisioning step, before the `--api` early dispatch below so
+    // one call covers the API server, the GUI sidecar, the REPL and every
+    // one-shot. Best-effort: deploy errors are held and reported once tracing
+    // is up (#9014). `config` and `mcp-serve` never reach this function.
+    // #10940: skipped under `TAGENT_NO_PROVISION=1`, `TRUSTY_SANDBOX=1` (unless
+    // `TAGENT_NO_PROVISION=0`) and `--help`/`-h`; see `startup_provision`.
+    let super::startup_provision::HomeProvisioning {
+        agents_report: bundled_agents_report,
+        agents_err: agents_deploy_err,
+        workflows_err: workflows_deploy_err,
+        skipped: provision_skipped,
+    } = super::startup_provision::provision_home_tier(&raw_args);
 
     // #366: Credential onboarding banner. After env loading is the right time
     // to check — both `.env.local` files and the host environment have been
@@ -342,6 +303,11 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             .with_env_filter(env_filter)
             .with_writer(std::io::stderr) // keep stdout clean for NDJSON
             .init();
+    }
+
+    // #10940: name the skip once logging exists.
+    if let Some(reason) = provision_skipped {
+        tracing::debug!(?reason, "skipped $HOME provisioning (#10940)");
     }
 
     // #9014: the deploy errors held above. Non-quiet modes printed every

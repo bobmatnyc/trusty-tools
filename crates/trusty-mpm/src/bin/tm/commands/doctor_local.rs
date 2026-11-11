@@ -40,7 +40,8 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// status-tagged line per check, appends the daemon rows from
 /// [`daemon_rows`] and the `gcloud_auth` row (#8371, which spawns `gcloud`
 /// only under `--network`), the `hook-interpreter` and `notify-supervisor-asset`
-/// rows over the machine-wide settings list (#10263), and folds every status
+/// rows over the machine-wide settings list (#10263), the `notification_hook`
+/// row over the managed settings (#10885), and folds every status
 /// into one overall verdict. When
 /// `prune_stale_skills` is set (hidden `--prune-stale-skills` flag), also runs
 /// `prune_stale_skills_locally` as a manual troubleshooting escape hatch —
@@ -93,6 +94,20 @@ pub(crate) async fn doctor(
         dirs::home_dir().as_deref(),
     );
     for check in trusty_mpm::core::hook_interpreter_doctor::hook_interpreter_rows(&settings_files) {
+        overall = overall.worst(check.status);
+        print_check(&check);
+    }
+    // #10885: the probe `--fix --only notification_hook` plans with; a config
+    // that does not parse is Unknown, never the defaults.
+    if let (Some(dir), Some(home)) = (
+        trusty_mpm::core::trusty_tools_config::managed_claude_config_dir(),
+        dirs::home_dir(),
+    ) {
+        let check = trusty_mpm::core::standalone::hooks::notification::notification_hook_row(
+            &dir.join("settings.json"),
+            None,
+            &home.join(".trusty-mpm"),
+        );
         overall = overall.worst(check.status);
         print_check(&check);
     }

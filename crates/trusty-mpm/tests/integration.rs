@@ -77,6 +77,8 @@ mod tm_architect_verbs;
 mod tm_fleet;
 mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
+// #10735: the claude.ai connectors pass the egress guard; the rest stays.
+mod connectors_allowed_10735;
 // #8454 S2: the trust anchors through the egress hook, pm-guard off.
 mod tm_hook_egress_anchor_8454;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
@@ -126,6 +128,8 @@ mod tm_hook_pm_guard_tmux_kill_server_10665;
 mod tm_hook_pm_guard_tmux_target_9001;
 mod tm_hook_pm_guard_trust_anchor_8878;
 mod tm_hook_pm_guard_unquoted_heredoc_expansion;
+// #10973: a compression-opportunity row per tool result.
+mod tm_hook_opportunity_10973;
 mod tm_hook_pretooluse_rewrite;
 mod tm_hook_session_end_8980;
 mod tm_hook_session_start_8531;

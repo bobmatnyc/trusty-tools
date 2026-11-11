@@ -260,7 +260,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     const PINNED: [(&str, &str); 17] = [
         (
             "tm-fleet-check",
-            "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
+            "b9de2a3d6218fb68e8a99b0c632902d776505d46e4fc4756da45c8929fc9c425",
         ),
         (
             "tm-context-refresh",
@@ -276,7 +276,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-workflow",
-            "215f8e5b8f6d9bb04c75d2569c024d5068eab2c951a527229b353c4ff1643a0c",
+            "59137538d1832abdab2ed80b30c6f55596898c59fef013f5ecbfdf4672fdc3c6",
         ),
         (
             "architect-search-memory",
@@ -288,7 +288,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-strategy",
-            "c09c629ca5e93fa6c540955caa7f399a28c905d9356e0366628d55feed62ecbf",
+            "a6b725c4a34f673741028e6ab772c4b5154aff845fb1e9db846d3e2d1dcb4aae",
         ),
         (
             "architect-completion-standard",
@@ -308,7 +308,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-project-provision",
-            "954f6c37e6c800af8819e2153e803ad62d6e29e963139410dab21ee8f473cd1f",
+            "a4b3d792acb46789bf9d79a1ea7e3c2be455903af48a65bed0560fcca2a37edb",
         ),
         (
             "architect-macos",
@@ -324,7 +324,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-dashboard",
-            "e08b26d58e8e9c39a43fa71752ec8b191a795a786708f3ce002103b975956e82",
+            "ac71a5540005a50c480c9834e057b98d9614e440e7f7a5be55e90773f7eb44c5",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first

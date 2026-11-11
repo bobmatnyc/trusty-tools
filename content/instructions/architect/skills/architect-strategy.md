@@ -108,13 +108,19 @@ changes go to an engineer or the owning PM. Record what you find in
   and covers all lanes from the board itself; the others do not post. Before
   posting, a sweep reads the date of the board's latest status update and
   posts nothing if one exists for the day. (Owner ruling 2026-10-30 03:18Z.)
+- **Review GitHub Discussions.** At each board check, a factory session lists
+  the open Discussions of every repository it works and raises each one it has
+  not raised before as a task in its Intent Ledger, titled
+  `<owner>/<repo> discussion #<n>: <title>`. The session closes the task with
+  the outcome (answered, converted to an issue, or declined); any comment it
+  posts to a Discussion needs the owner's answer first.
 
 ## Board sweeps
 
 <!-- rule:r-034 -->
 At the start of each working day, after a restart, and when a PM runs out of
 queued work, tell each live PM to check its project board and issue tracker
-for new or reprioritized items. Ask for the top three that serve its goal,
+and open Discussions for new or reprioritized items. Ask for the top three that serve its goal,
 and route anything that needs the owner as a question.
 
 ## Keeping the owner on track

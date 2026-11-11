@@ -1,0 +1,5 @@
+crate   trusty-architect
+version 0.2.1
+reason  Accepted under the 2026-09-26 versioning ruling (a public-API break never forces a major version), per Architect D4 A (df-G01). cargo semver-checks against baseline 0.2.0 computes one major lint: #10836 (Refs #10780, ledger relay provenance) added a source field to UpdateOp (ledger/rpc.rs) and to Item (ledger/model.rs). Refs #10882.
+accept  constructible_struct_adds_field        field UpdateOp.source
+accept  constructible_struct_adds_field        field Item.source

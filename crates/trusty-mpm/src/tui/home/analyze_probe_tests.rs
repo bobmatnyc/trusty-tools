@@ -1,5 +1,7 @@
 //! #10476: the analyze health probe over real sockets — "nothing listening"
-//! is on demand, every other failure is Down.
+//! is on demand, every other failure is Down. #10901: the Events tile's
+//! `events.health` probe over the same stub sockets; it has no on-demand
+//! lifecycle, so every failure is Down or Timeout.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,8 +11,8 @@ use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 
-use super::probe::{classify, on_demand_when_idle, uds_health};
-use super::services::ServiceId;
+use super::probe::{classify, on_demand_when_idle, uds_health, with_deadline};
+use super::services::{ProbeKind, ServiceId};
 use super::state::TileHealth;
 
 const DEADLINE: Duration = Duration::from_secs(2);
@@ -133,4 +135,100 @@ async fn a_broken_analyze_socket_reads_as_down_not_on_demand() {
     let (_dir, socket) = socket_dir();
     std::fs::write(&socket, b"").expect("a regular file at the socket path");
     assert_down(analyze_tile(&socket, DEADLINE).await, "not a socket");
+}
+
+// ─── #10901: the Events tile probes `events.health` ──────────────────────────
+
+/// The method the Events tile sends, read from the roster.
+fn events_method() -> &'static str {
+    match ServiceId::Events.probe() {
+        ProbeKind::UdsHealth(method) => method,
+        other => panic!("Events must probe UdsHealth, got {other:?}"),
+    }
+}
+
+/// The Events tile for one probe of `socket`, installed, the way
+/// `probe_service` folds it: the outer deadline bounds the whole probe.
+async fn events_tile(socket: &Path, inner: Duration, outer: Duration) -> TileHealth {
+    let observed = async {
+        on_demand_when_idle(
+            ServiceId::Events,
+            uds_health(socket, events_method(), inner).await,
+        )
+    };
+    with_deadline(observed, true, outer).await
+}
+
+#[test]
+fn events_maps_to_the_events_health_uds_probe() {
+    assert_eq!(
+        ServiceId::Events.probe(),
+        ProbeKind::UdsHealth("events.health")
+    );
+    assert_eq!(
+        events_method(),
+        trusty_common::control_bus::METHOD_EVENTS_HEALTH
+    );
+    assert!(!ServiceId::Events.not_listening_is_on_demand());
+}
+
+#[tokio::test]
+async fn an_events_socket_that_answers_health_reads_as_up() {
+    let (_dir, socket) = socket_dir();
+    serve(
+        &socket,
+        Peer::Reply(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"status\":\"ok\",\"service\":\"trusty-events\",\"version\":\"0.1.0\",\"uptime_secs\":3,\"ingested\":0,\"deduped\":0,\"evicted\":0,\"log_dropped\":0,\"subscribers\":0,\"head_seq\":0}}\n",
+        ),
+    );
+    assert_eq!(
+        events_tile(&socket, DEADLINE, DEADLINE).await,
+        TileHealth::Up {
+            version: Some("0.1.0".into())
+        }
+    );
+}
+
+#[tokio::test]
+async fn an_events_socket_that_does_not_answer_health_is_down_or_timeout() {
+    let (_dir, socket) = socket_dir();
+    assert_down(
+        events_tile(&socket, DEADLINE, DEADLINE).await,
+        "absent socket",
+    );
+
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind stub");
+    drop(listener);
+    assert_down(
+        events_tile(&socket, DEADLINE, DEADLINE).await,
+        "refused connect",
+    );
+
+    let (_dir, socket) = socket_dir();
+    serve(&socket, Peer::Hold);
+    let short = Duration::from_millis(200);
+    assert_down(events_tile(&socket, short, DEADLINE).await, "rpc timeout");
+    assert_eq!(
+        events_tile(&socket, DEADLINE, short).await,
+        TileHealth::Timeout,
+        "probe deadline"
+    );
+
+    // A connect-only peer (the pre-#10901 bus) no longer reads as Up.
+    let (_dir, socket) = socket_dir();
+    serve(&socket, Peer::HangUp);
+    assert_down(events_tile(&socket, DEADLINE, DEADLINE).await, "hang-up");
+
+    let (_dir, socket) = socket_dir();
+    serve(
+        &socket,
+        Peer::Reply(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"unknown method\"}}\n"),
+    );
+    assert!(
+        matches!(
+            events_tile(&socket, DEADLINE, DEADLINE).await,
+            TileHealth::Degraded { .. }
+        ),
+        "an RPC error is an answer, not health"
+    );
 }

@@ -155,7 +155,34 @@ fn cli_parses_hook_pm_guard() {
 fn cli_parses_compress() {
     let cli = Cli::try_parse_from(["trusty-mpm", "compress", "--tool", "bash"]).unwrap();
     match cli.command.unwrap() {
-        Command::Compress { tool } => assert_eq!(tool, "bash"),
+        Command::Compress { tool, command } => {
+            assert_eq!(tool, "bash");
+            assert!(command.is_empty());
+        }
+        other => panic!("expected Compress, got {other:?}"),
+    }
+}
+
+/// #10973: the run mode takes the program and its arguments after `--`, flags
+/// included, so `git diff --stat` reaches git rather than clap.
+#[test]
+fn cli_parses_compress_with_a_command() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "compress",
+        "--tool",
+        "git diff",
+        "--",
+        "git",
+        "diff",
+        "--stat",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Compress { tool, command } => {
+            assert_eq!(tool, "git diff");
+            assert_eq!(command, ["git", "diff", "--stat"]);
+        }
         other => panic!("expected Compress, got {other:?}"),
     }
 }

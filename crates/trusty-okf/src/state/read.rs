@@ -139,7 +139,7 @@ impl Bundle {
         let (c, _) = parse_concept(id.clone(), &text)?;
         let disk = bytes_hash(&bytes);
         let revision = content_hash(&c);
-        let events = record::fold(record::read_lines(self, id)?);
+        let events = record::counted_events(self, id, &c)?;
         let mut findings = Vec::new();
         if record::has_mismatch(&events, &revision) {
             let mut f = Finding::new(

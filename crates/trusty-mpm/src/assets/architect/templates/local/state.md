@@ -17,9 +17,9 @@ History goes in `local/actions.md`.
 
 ## Watch set
 
-The sessions you manage are listed in `CLAUDE.md`. Everything else is
-observed only when it signals. Note here a session added or dropped this pass
-until `CLAUDE.md` carries it.
+The projects you manage are listed in `local/watch.json`;
+`tm fleet project list` prints them. Everything else is observed only when it
+signals. Note here the live sessions of each this pass.
 
 None.
 

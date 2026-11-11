@@ -1,9 +1,10 @@
 //! Health probes and the `console_metrics` fetch behind the home screen.
 //!
 //! Why (#10491): every tile's state comes from an interface the service
-//! already serves — its socket health method, a socket connect, an
-//! `http_addr` file, or the stdio `console_metrics` MCP tool — bounded by a
-//! deadline so a wedged service reads as `Timeout`, never as a hang.
+//! already serves — its socket health method, a socket connect, or the stdio
+//! `console_metrics` MCP tool — bounded by a deadline so a wedged service
+//! reads as `Timeout`, never as a hang. A service with no UDS endpoint is not
+//! probed at all (#10899).
 //! What: [`probe_service`] (one bounded probe), [`classify`] (the pure verdict
 //! mapping), [`spawn_health_poller`] (one detached task per service, off the
 //! UI loop) and [`fetch_metrics`] (one bounded stdio MCP call).
@@ -101,14 +102,35 @@ where
 /// the deadline test; the live dials are the console's own probes, exercised
 /// by the smoke run.
 pub async fn probe_service(id: ServiceId, deadline: Duration) -> TileHealth {
+    if let Some(health) = no_uds_endpoint(id) {
+        return health;
+    }
     let installed = binary_on_path(id.binary());
     let observed = async move { on_demand_when_idle(id, observe(id, deadline).await) };
     with_deadline(observed, installed, deadline).await
 }
 
+/// The tile state of a service with no UDS endpoint, or `None` for a service
+/// the TUI probes.
+///
+/// Why (#10899): the TUI reaches services over UDS only, so a service without
+/// a socket is reported as such, not dialled over HTTP and not shown as down.
+/// What: a pure mapping from [`ProbeKind::NoUdsEndpoint`]; it runs before the
+/// `PATH` lookup, so these tiles do no file read, socket or spawn.
+/// Test: `a_no_uds_endpoint_probe_does_no_io_and_is_not_down`.
+pub fn no_uds_endpoint(id: ServiceId) -> Option<TileHealth> {
+    match id.probe() {
+        ProbeKind::NoUdsEndpoint(detail) => Some(TileHealth::NoUdsEndpoint { detail }),
+        _ => None,
+    }
+}
+
 /// Observe one service through its [`ProbeKind`].
 async fn observe(id: ServiceId, deadline: Duration) -> Observation {
     match id.probe() {
+        // See #10899: `probe_service` answers these before `observe` runs;
+        // this arm keeps the match total without any I/O.
+        ProbeKind::NoUdsEndpoint(detail) => Observation::Silent(detail.to_string()),
         ProbeKind::OnDemand => Observation::OnDemand,
         ProbeKind::UdsHealth(method) => match id.socket() {
             Ok(socket) => uds_health(&socket, method, deadline).await,
@@ -121,7 +143,6 @@ async fn observe(id: ServiceId, deadline: Duration) -> Observation {
             },
             Err(reason) => Observation::Silent(reason),
         },
-        ProbeKind::HttpAddr => http_addr(id.id(), deadline).await,
     }
 }
 
@@ -189,20 +210,6 @@ fn health_version(result: Option<&Value>) -> Observation {
                 .map(str::to_string),
         ),
         _ => Observation::Unhealthy("the answer is not a health envelope".to_string()),
-    }
-}
-
-/// Read `<app>`'s `http_addr` discovery file and connect once over TCP.
-async fn http_addr(app: &str, deadline: Duration) -> Observation {
-    let addr = match trusty_common::read_daemon_addr(app) {
-        Ok(Some(addr)) => addr,
-        Ok(None) => return Observation::Silent(format!("no {app} http_addr file")),
-        Err(e) => return Observation::Silent(format!("{app} http_addr unreadable: {e:#}")),
-    };
-    match tokio::time::timeout(deadline, tokio::net::TcpStream::connect(addr.as_str())).await {
-        Ok(Ok(_)) => Observation::Healthy(None),
-        Ok(Err(e)) => Observation::Silent(format!("{addr}: {e}")),
-        Err(_) => Observation::Silent(format!("{addr}: connect timed out")),
     }
 }
 

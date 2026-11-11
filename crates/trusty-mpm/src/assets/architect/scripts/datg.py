@@ -48,13 +48,20 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   file named by session ref `handoff`. `provenance FILE..` prints the same flags for any handoff file
   (exit 1 when one is found).
 Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
-intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD); a failure is logged, never fatal.
+intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD). Exit 3 means the ledger was saved
+but at least one notification was not confirmed; stderr lists each queue outcome. Do not
+replay the write/batch: reconcile delivery and retry only the needed notification. Exit 0
+confirms the sender succeeded, not that the Architect read or acted on the message.
 Hold file (#10857, ar-T8a): a `hold` set or cleared on an Architect's own ledger (<arch>/local/il) is mirrored to its
 inbox/hold.json (source "ledger"), the hold fleet-poll.py reads before it wakes the Architect.
 A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
 dispatch whose prompt lacks "Goal: <code>-G<hex2>" naming an active goal; config.mode
 ("warn"|"block") overrides the date. No network, no secrets (locations only in items).
+#10800 (DOC-87 D0c, datg_guards.py): a dispatch that passes the goal check must also name its work card
+'Card: <code>-Txx' (G2), and a task closed done must cite evidence in its outcome; both warn and record to
+guards.jsonl until config.guard_mode is "enforce". The digest and `guards` (exit 1 on a flag) report policy-file
+conflicts with owner rulings (G1) and idle ready work or repair displacing delivery (G3).
 Layout (#10161, 500-SLOC cap): this file is the CLI, the hook entry and a facade. The logic
 lives in datg_store.py (state files, commit, lock; `_SESSION`), datg_ops.py (write ops),
 datg_log.py (prune, archive, rotate, notices) and datg_read.py (digest, freshness, stamp);
@@ -72,6 +79,9 @@ if HERE not in sys.path:  # #10161: -P / PYTHONSAFEPATH drop the script dir; the
 import datg_store  # noqa: E402  (#10161: main() sets datg_store._SESSION, which per_pm_session reads)
 from datg_store import VERB_KEY  # noqa: E402  (#10571: a batch entry's verb key)
 from datg_ready import op_ready  # noqa: E402  (#10579: datg.py ready)
+from datg_guards import (  # noqa: E402  (#10800: G2 card, G1/G3 flags, an enforced hook failure denies)
+    SHADOW, dispatch_card, guard_lines, raw_guard_mode, record_guard,
+)
 from datg_store import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     CODE_RE, DEFAULT_BLOCK_AFTER, DatgError, EVENTS, ID_RE, Locked, PREFIXES, RULES, SESSION_MAX, SESSION_RE,
     SIZE_REFUSE, SIZE_WARN, STATUS, TITLE_MAX, VAGUE, WHO, _atomic_write, _dump, _jl, _largest, _size,
@@ -134,11 +144,15 @@ def hook_output(event, st, payload, project, now=None):
     if event == "PreToolUse" and payload.get("tool_name") in ("Agent", "Task"):
         ti = payload.get("tool_input") or {}
         dec, msg = check_dispatch(st, ti.get("prompt") or "", now)
+        if dec == "allow":   # #10800 G2: a goal alone is not enough; the dispatch names its work card
+            dec, msg = dispatch_card(project, st, ti.get("prompt") or "")
         if dec == "block":
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                            "permissionDecision": "deny",
                                            "permissionDecisionReason": msg}}
         if dec == "warn":
+            if msg.endswith(SHADOW):   # #10800: a card warning is recorded in guards.jsonl already
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": msg}}
             log_hook_warning(project, msg)
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                            "additionalContext": msg + " (warn mode)"}}
@@ -146,7 +160,13 @@ def hook_output(event, st, payload, project, now=None):
 
 
 def run_hook(stdin_text):
-    """Fail open: any problem returns "" (no output). No ledger is silent; any other failure is one stderr line."""
+    """Fail open: any problem returns "" (no output). No ledger is silent; any other failure is one stderr line.
+
+    #10800 critic: a dispatch (PreToolUse Agent|Task) whose check raises under guard_mode enforce is denied
+    (hook_failure); in shadow it fails open and the failure goes to guards.jsonl.
+    Test: tests/test_datg_guards.py HookFailureCase
+    """
+    payload, project = None, None
     try:
         payload = json.loads(stdin_text or "{}")
         if not isinstance(payload, dict) or payload.get("agent_id"):
@@ -158,8 +178,23 @@ def run_hook(stdin_text):
         out = hook_output(payload.get("hook_event_name"), st, payload, project)
         return json.dumps(out, separators=(",", ":")) if out else ""
     except Exception as e:  # #10109: never block the session, but report the failure
-        print(f"datg hook: failed open ({e})", file=sys.stderr)
-        return ""
+        return hook_failure(payload, project, e)
+
+
+def hook_failure(payload, project, err):
+    """The hook's answer when its check raised: deny an enforced dispatch, else fail open (#10800 critic)."""
+    dispatch = (isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse"
+                and payload.get("tool_name") in ("Agent", "Task"))
+    if dispatch and project and raw_guard_mode(project) == "enforce":
+        print(f"datg hook: check failed under guard_mode enforce; dispatch denied ({err})", file=sys.stderr)
+        reason = (f"DATG: the ledger check failed under guard_mode enforce ({type(err).__name__}); "
+                  "fix .trusty-mpm/datg/state.json or set config.guard_mode to shadow.")
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                  "permissionDecisionReason": reason}}, separators=(",", ":"))
+    print(f"datg hook: failed open ({err})", file=sys.stderr)
+    if dispatch and project:
+        record_guard(project, "hook_error", f"dispatch check failed open ({type(err).__name__}: {err})"[:300])
+    return ""
 
 
 def cmd_show(project, brief):
@@ -233,6 +268,7 @@ def build_parser():
     sub.add_parser("stamp", help="Stop hook step; hook JSON on stdin")
     s = sub.add_parser("provenance", help="flag handoff lines that claim an owner ruling with no cite (#10780)")
     s.add_argument("files", nargs="+")
+    sub.add_parser("guards", help="#10800 G1/G3 flags: policy-file conflicts, idle ready work, repair displacing delivery")
     s = sub.add_parser("ready", help="exit 0 ready to clear, 1 not ready (reasons printed), 2 missing or unreadable")
     s.add_argument("--json", action="store_true", help='print {"ready", "reasons", "written_at", "hold"}')
     s.add_argument("--since", help="ISO YYYY-MM-DDTHH:MMZ or epoch seconds (as for fresh)")
@@ -334,6 +370,10 @@ def main(argv=None):
                     print(f"{path}:{n}: FLAG unsourced owner claim: {line.strip()}")
                 code = code or (1 if flags else 0)
             return code
+        if a.verb == "guards":   # #10800: exit 1 when a flag is raised, 2 when the ledger is unreadable
+            flags = guard_lines(a.project, load_state(a.project))
+            print("\n".join(f.strip() for f in flags) if flags else "no guard flags")
+            return 1 if flags else 0
         if a.verb == "fresh":
             code, msg = op_fresh(a.project, a.since, a.max_age)
             print(msg)
@@ -354,7 +394,7 @@ def main(argv=None):
                 raise DatgError("--cite, --quote, --until and --basis need --source")
             evs, st = write_ops_ev(a.project, [entry])
             print(", ".join(e["id"] for e in evs))
-            notify_escalations(a.project, evs, st)
+            return notify_escalations(a.project, evs, st)
         elif a.verb == "close":
             print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome}]))
         elif a.verb == "batch":
@@ -366,8 +406,8 @@ def main(argv=None):
                 raise DatgError("batch input must be a JSON list")
             evs, st = write_ops_ev(a.project, ops)
             print(", ".join(e["id"] for e in evs))
-            notify_escalations(a.project, evs, st)
-            sync_ledger_hold(a.project, ops)
+            sync_ledger_hold(a.project, ops)   # #10719: before the exit-3 return, so a failed sender never skips the hold
+            return notify_escalations(a.project, evs, st)
         elif a.verb == "session":
             op = session_op(a)
             print(write_ops(a.project, [op]))
@@ -395,7 +435,10 @@ def main(argv=None):
             print(cmd_show(a.project, a.brief))
         elif a.verb == "check-dispatch":
             prompt = a.prompt if a.prompt is not None else sys.stdin.read()
-            dec, msg = check_dispatch(load_state(a.project), prompt)
+            st = load_state(a.project)
+            dec, msg = check_dispatch(st, prompt)
+            if dec == "allow":   # #10800 G2
+                dec, msg = dispatch_card(a.project, st, prompt)
             print(dec + (": " + msg if msg else ""))
             return 2 if dec == "block" else 0
     except DatgError as e:

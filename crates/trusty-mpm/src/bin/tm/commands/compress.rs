@@ -189,7 +189,22 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     // #7384: the wrapped command's status rides in on a trailing sentinel line;
     // strip it here so it never reaches the caller's output.
     let (input, exit) = split_exit_sentinel(&stdin_text);
+    compress_and_emit(tool, input, exit).await
+}
 
+/// Compress `input`, record the run in both ledgers, and write it to stdout.
+///
+/// Why (#10973): the stdin filter above and the run mode in
+/// `commands::compress_run` must record and print a run identically.
+/// What: the body [`run_compress`] documents, after its stdin read. `exit` is
+/// the wrapped command's status for the stats line, when known.
+/// Test: `run_compress_shrinks_repetitive_cargo_test_output`, and
+/// `tm_compress_run_mode_compresses_and_keeps_the_exit_status`.
+pub(crate) async fn compress_and_emit(
+    tool: &str,
+    input: &str,
+    exit: Option<i32>,
+) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let (compressed, path) = compress_with_raw_fallback(default_rtk_resolver(), tool, input).await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -197,8 +212,11 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     // #3870: durable sink, awaited (not spawned) because `tm compress` is a
     // short-lived pipe filter — see `append_compression_record`'s doc
     // comment for why a detached `tokio::spawn` would race process exit.
+    // #10973: keyed by the session, so the record joins the savings row.
+    let session_id = trusty_mpm::core::savings::claude_code_session_id();
     append_compression_record(
         &compression_log_path(),
+        session_id.as_deref(),
         tool,
         input.len(),
         compressed.len(),
@@ -208,7 +226,7 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     .await;
     // The 💸 statusline segment folds this technique too, so the same run that
     // writes the telemetry record also writes one savings row.
-    record_compress_savings(input.len(), compressed.len(), path.as_str());
+    record_compress_savings(tool, input.len(), compressed.len(), path.as_str());
 
     // Explicit `.flush()` (trusty-review finding, PR #1968): `write_all`
     // hands the bytes to Tokio's stdout writer but does not itself guarantee
@@ -283,7 +301,12 @@ async fn compress_with_raw_fallback(
 /// CHILD's environment instead. A test that appends a row keyed by the
 /// developer's own live session id is the defect #7514 names.
 /// Test: `record_compress_savings_with_declines_without_a_session_id`.
-fn record_compress_savings(bytes_before: usize, bytes_after: usize, compression_path: &str) {
+fn record_compress_savings(
+    tool: &str,
+    bytes_before: usize,
+    bytes_after: usize,
+    compression_path: &str,
+) {
     let root = match crate::commands::managed_root::resolve_managed_paths(None) {
         Ok(paths) => Some(paths.root),
         Err(source) => {
@@ -297,6 +320,7 @@ fn record_compress_savings(bytes_before: usize, bytes_after: usize, compression_
     record_compress_savings_with(
         root.as_deref(),
         trusty_mpm::core::savings::claude_code_session_id().as_deref(),
+        tool,
         bytes_before,
         bytes_after,
         compression_path,
@@ -321,6 +345,7 @@ fn record_compress_savings(bytes_before: usize, bytes_after: usize, compression_
 fn record_compress_savings_with(
     root: Option<&std::path::Path>,
     session_id: Option<&str>,
+    tool: &str,
     bytes_before: usize,
     bytes_after: usize,
     compression_path: &str,
@@ -335,6 +360,7 @@ fn record_compress_savings_with(
     trusty_mpm::core::savings_compress::record_compress(
         root,
         session_id,
+        tool,
         bytes_before,
         bytes_after,
         compression_path,
@@ -478,8 +504,8 @@ fn stats_line_is_informative(bytes_before: usize, bytes_after: usize, exit: Opti
 /// (a `pct_reduction` field with inverted-sign semantics vs. every other
 /// sink's `ratio`, and five missing fields) — fixed by matching
 /// `trusty-agents::compression::CompressionRecord` exactly.
-/// What: ts (RFC3339), session_id (always `None` — `tm compress` has no
-/// session concept), surface (always `"tm-compress"` here), surface_detail
+/// What: ts (RFC3339), session_id (#10973: the Claude Code session id the
+/// harness exports, `None` outside a session), tool_type (#10973), surface (always `"tm-compress"` here), surface_detail
 /// (the tool name), byte-proxy token counts, `ratio` (`tokens_after /
 /// tokens_before`, **not** a percentage and **not** `1 - ratio` — see
 /// [`append_compression_record`]'s doc for why this differs from
@@ -493,6 +519,8 @@ fn stats_line_is_informative(bytes_before: usize, bytes_after: usize, exit: Opti
 struct CompressionRecord {
     ts: String,
     session_id: Option<String>,
+    /// #10973: the opportunity ledger's tool category, so the two streams join.
+    tool_type: String,
     surface: &'static str,
     surface_detail: String,
     tokens_before: u32,
@@ -561,6 +589,7 @@ fn compression_log_path() -> PathBuf {
 /// `append_compression_record_appends`.
 async fn append_compression_record(
     path: &Path,
+    session_id: Option<&str>,
     tool_name: &str,
     bytes_before: usize,
     bytes_after: usize,
@@ -576,7 +605,8 @@ async fn append_compression_record(
     };
     let record = CompressionRecord {
         ts: chrono::Utc::now().to_rfc3339(),
-        session_id: None,
+        session_id: session_id.map(str::to_string),
+        tool_type: trusty_mpm::core::savings_opportunity::TOOL_TYPE_BASH.to_string(),
         surface: "tm-compress",
         surface_detail: tool_name.to_string(),
         tokens_before,
@@ -779,9 +809,16 @@ mod tests {
     fn record_compress_savings_with_declines_without_a_session_id() {
         let root = tempfile::tempdir().expect("temp root");
         for id in [None, Some(""), Some("   ")] {
-            record_compress_savings_with(Some(root.path()), id, 10_000, 1_000, "native");
+            record_compress_savings_with(
+                Some(root.path()),
+                id,
+                "cargo test",
+                10_000,
+                1_000,
+                "native",
+            );
         }
-        record_compress_savings_with(None, Some("c1"), 10_000, 1_000, "native");
+        record_compress_savings_with(None, Some("c1"), "cargo test", 10_000, 1_000, "native");
         assert!(
             !root.path().join("usage").exists(),
             "no session id, or no root, must write nothing at all"
@@ -795,7 +832,14 @@ mod tests {
     fn record_compress_savings_with_writes_under_the_named_root() {
         let root = tempfile::tempdir().expect("temp root");
 
-        record_compress_savings_with(Some(root.path()), Some("c-7514"), 10_000, 1_000, "native");
+        record_compress_savings_with(
+            Some(root.path()),
+            Some("c-7514"),
+            "cargo test",
+            10_000,
+            1_000,
+            "native",
+        );
 
         let ledger = trusty_mpm::core::savings::savings_log_in(root.path());
         let written = std::fs::read_to_string(&ledger).expect("the named root must hold the row");
@@ -803,6 +847,8 @@ mod tests {
             written.contains("c-7514") && written.contains("\"technique\":\"compress\""),
             "the row must be keyed by the supplied session id: {written}"
         );
+        // #10973: the compress row names the tool category it came from.
+        assert!(written.contains("\"tool_type\":\"bash\""), "{written}");
     }
 
     #[tokio::test]
@@ -827,6 +873,7 @@ mod tests {
         let record = CompressionRecord {
             ts: "2026-07-24T19:00:00Z".to_string(),
             session_id: None,
+            tool_type: "bash".to_string(),
             surface: "tm-compress",
             surface_detail: "cargo test".to_string(),
             tokens_before: 100,
@@ -863,7 +910,16 @@ mod tests {
         // line uses, not a second independent computation.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("compression.jsonl");
-        append_compression_record(&path, "cargo test", 400, 100, "native_fallback", 7).await;
+        append_compression_record(
+            &path,
+            Some("s-10973"),
+            "cargo test",
+            400,
+            100,
+            "native_fallback",
+            7,
+        )
+        .await;
         assert!(path.exists(), "compression.jsonl should be created");
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         let lines: Vec<&str> = contents.lines().collect();
@@ -878,15 +934,17 @@ mod tests {
         assert_eq!(parsed["rounds"], 1);
         assert_eq!(parsed["compaction_event"], false);
         assert_eq!(parsed["compression_path"], "native_fallback");
-        assert!(parsed["session_id"].is_null());
+        // #10973: the record carries the session and the tool category.
+        assert_eq!(parsed["session_id"], "s-10973");
+        assert_eq!(parsed["tool_type"], "bash");
     }
 
     #[tokio::test]
     async fn append_compression_record_appends() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("compression.jsonl");
-        append_compression_record(&path, "cargo test", 400, 100, "rtk_binary", 1).await;
-        append_compression_record(&path, "git diff", 200, 200, "native_fallback", 2).await;
+        append_compression_record(&path, None, "cargo test", 400, 100, "rtk_binary", 1).await;
+        append_compression_record(&path, None, "git diff", 200, 200, "native_fallback", 2).await;
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 2, "second append should not overwrite");
@@ -918,7 +976,7 @@ mod tests {
         let path = blocked.join("compression.jsonl");
 
         // Must return normally (best-effort swallow), not panic or hang.
-        append_compression_record(&path, "cargo test", 400, 100, "native_fallback", 1).await;
+        append_compression_record(&path, None, "cargo test", 400, 100, "native_fallback", 1).await;
         assert!(
             !path.exists(),
             "the record must not have been written under an unwritable parent"

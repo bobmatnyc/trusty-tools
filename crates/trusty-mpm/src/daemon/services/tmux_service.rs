@@ -88,6 +88,34 @@ fn input_box_from(
     }
 }
 
+/// The driver on `session`'s own tmux server (#10101).
+///
+/// Why: since #10850 a legacy `Session` may live on a `tm-ws-*` workspace
+/// server, recorded in `Session::tmux_socket`; a driver on the default server
+/// reads an empty pane or types into a same-named one.
+/// What: [`server_of_socket`](crate::core::tmux_server::server_of_socket)
+/// over the stored socket and this process's socket directory, then
+/// `discover` and `on_server`. No socket is the default server. `Err` names
+/// why — an unroutable socket (logged at warn) or tmux absent (info) — and
+/// never falls back to the default server. `op` names the call in the log.
+/// Test: `capture_and_send_reach_the_session_server_10101`,
+/// `an_unroutable_socket_neither_captures_nor_sends_10101`.
+fn session_driver(session: &Session, op: &str) -> Result<TmuxDriver, String> {
+    use crate::core::tmux_server::{ambient_socket_dir, server_of_socket};
+    let socket = session.tmux_socket.as_deref();
+    let server = server_of_socket(socket, &ambient_socket_dir()).inspect_err(|e| {
+        tracing::warn!("#10101: {op} for {} refused — {e}", session.tmux_name);
+    })?;
+    let driver = TmuxDriver::discover().map_err(|_| {
+        tracing::info!("tmux unavailable; {op} for {} skipped", session.tmux_name);
+        "tmux unavailable".to_owned()
+    })?;
+    Ok(match server.as_deref() {
+        Some(server) => driver.on_server(server),
+        None => driver,
+    })
+}
+
 impl TmuxService {
     /// Capture a session's pane output, degrading to empty when tmux is absent.
     ///
@@ -95,30 +123,22 @@ impl TmuxService {
     /// absent (CI) or the session may not be tmux-hosted. None of that is fatal
     /// — the endpoints still succeed, just without captured text. This replaces
     /// the free `capture_pane` function from `api.rs`.
-    /// What: discovers tmux and captures the last `lines` pane lines; any
-    /// failure is logged and yields an empty string.
-    /// Test: `capture_without_tmux_is_empty`.
+    /// What: captures the last `lines` pane lines on the session's own server
+    /// ([`session_driver`]); any failure, an unroutable socket included, is
+    /// logged and yields an empty string.
+    /// Test: `capture_without_tmux_is_empty`,
+    /// `capture_and_send_reach_the_session_server_10101`,
+    /// `an_unroutable_socket_neither_captures_nor_sends_10101`.
     pub fn capture(session: &Session, lines: u32) -> String {
-        match TmuxDriver::discover() {
-            Ok(driver) => {
-                // See #10101: a legacy `Session` lives on the default server only.
-                let target = TmuxTarget::session(&session.tmux_name);
-                match driver.capture(&target, Some(lines)) {
-                    Ok(text) => text,
-                    Err(e) => {
-                        tracing::warn!("tmux capture failed for {}: {e}", session.tmux_name);
-                        String::new()
-                    }
-                }
-            }
-            Err(_) => {
-                tracing::info!(
-                    "tmux unavailable; capture for {} skipped",
-                    session.tmux_name
-                );
-                String::new()
-            }
-        }
+        // #10101: the session's own server; an unroutable socket captures nothing.
+        let Ok(driver) = session_driver(session, "capture") else {
+            return String::new();
+        };
+        let target = TmuxTarget::session(&session.tmux_name);
+        driver.capture(&target, Some(lines)).unwrap_or_else(|e| {
+            tracing::warn!("tmux capture failed for {}: {e}", session.tmux_name);
+            String::new()
+        })
     }
 
     /// What a session's input box holds, or `None` when that cannot be read (#8407).
@@ -131,12 +151,21 @@ impl TmuxService {
     /// [`classify_input_box`](crate::core::input_box::classify_input_box) via
     /// [`input_box_from`]. `-u` keeps the `❯` glyph intact under a non-UTF-8
     /// locale such as launchd's. The host-state gate applies. #10101: on the
-    /// default server, the only one a legacy `Session` lives on.
-    /// Test: `input_box_from_*` in this module's tests.
+    /// session's own server (`-L <name>` from its stored socket); an
+    /// unroutable socket is `None` and runs no tmux.
+    /// Test: `input_box_from_*` in this module's tests,
+    /// `capture_and_send_reach_the_session_server_10101`.
     pub fn input_box(session: &Session) -> Option<crate::core::input_box::InputBox> {
+        use crate::core::tmux_server::{ambient_socket_dir, server_argv, server_of_socket};
+        // #10101: the stored socket picks the server; never the default in its place.
+        let server = server_of_socket(session.tmux_socket.as_deref(), &ambient_socket_dir())
+            .inspect_err(|e| {
+                tracing::warn!("#10101: input-box for {} refused — {e}", session.tmux_name);
+            })
+            .ok()?;
         let target = TmuxTarget::session(&session.tmux_name).as_target();
         let start = format!("-{INPUT_BOX_PROBE_LINES}");
-        let argv: Vec<String> = [
+        let command = [
             "-u",
             "capture-pane",
             "-t",
@@ -146,33 +175,29 @@ impl TmuxService {
             "-S",
             &start,
         ]
-        .map(str::to_string)
-        .to_vec();
+        .map(str::to_string);
+        let argv = server_argv(server.as_deref(), command);
         input_box_from(&session.tmux_name, crate::core::tmux::run_tmux_argv(&argv))
     }
 
-    /// Send a command line into a session's pane, best-effort.
+    /// Send a command line into a session's pane.
     ///
-    /// Why: remote control of a running session; a tmux failure must not fail
-    /// the request (the caller still gets whatever output was captured).
-    /// What: discovers tmux and sends `command`, logging any failure.
-    /// Test: covered indirectly by `send_command_returns_output_shape`.
-    pub fn send_command(session: &Session, command: &str) {
-        match TmuxDriver::discover() {
-            Ok(driver) => {
-                // See #10101: a legacy `Session` lives on the default server only.
-                let target = TmuxTarget::session(&session.tmux_name);
-                if let Err(e) = driver.send_line(&target, command) {
-                    tracing::warn!("tmux send_line failed for {}: {e}", session.tmux_name);
-                }
-            }
-            Err(_) => {
-                tracing::info!(
-                    "tmux unavailable; command for {} not sent",
-                    session.tmux_name
-                );
-            }
-        }
+    /// Why: remote control of a running session. The caller must learn when
+    /// the line did not reach the pane: answering "sent" for a line typed into
+    /// nothing hid #10101 behind a warning in the daemon log.
+    /// What: sends `command` and Enter on the session's own server
+    /// ([`session_driver`]). `Err` names why nothing reached the pane: an
+    /// unroutable socket, tmux absent, or a failed `send-keys`.
+    /// Test: `capture_and_send_reach_the_session_server_10101`,
+    /// `an_unroutable_socket_neither_captures_nor_sends_10101`.
+    pub fn send_command(session: &Session, command: &str) -> Result<(), String> {
+        // #10101: the session's own server; an unroutable socket sends nothing.
+        let driver = session_driver(session, "command")?;
+        let target = TmuxTarget::session(&session.tmux_name);
+        driver.send_line(&target, command).map_err(|e| {
+            tracing::warn!("tmux send_line failed for {}: {e}", session.tmux_name);
+            format!("tmux send to {} failed: {e}", session.tmux_name)
+        })
     }
 
     /// Kill the tmux session named `tmux_name`, best-effort.
@@ -967,3 +992,8 @@ mod workspace_server_tests;
 #[cfg(test)]
 #[path = "tmux_service_holder_tests.rs"]
 mod holder_tests;
+
+// #10101: capture, input box and sends route by the stored socket (fake tmux).
+#[cfg(test)]
+#[path = "tmux_service_routing_tests.rs"]
+mod routing_tests;

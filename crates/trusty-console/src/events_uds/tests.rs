@@ -156,6 +156,7 @@ fn event(seq: u64) -> HarnessEvent {
         payload: HarnessPayload::Ping,
         id: EventId::new(),
         parent_id: None,
+        project: None,
     }
 }
 

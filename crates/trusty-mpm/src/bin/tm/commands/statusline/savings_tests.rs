@@ -107,6 +107,47 @@ fn one_compress_row_moves_the_segment() {
     );
 }
 
+/// Why (#10973, #10981 review): an opportunity row says what COULD have been
+/// saved. It must neither move the `💸` figure (#7867) nor add to the file the
+/// segment reads on every refresh.
+/// Test: itself.
+#[test]
+fn an_opportunity_row_never_moves_the_segment() {
+    use trusty_mpm::core::savings_opportunity::{OpportunityRow, append_opportunity};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = trusty_mpm::core::savings::savings_log_in(dir.path());
+    let row = OpportunityRow::new(
+        "PostToolUse",
+        "sess-1",
+        "mcp",
+        "mcp__x__y",
+        80_000,
+        80_000,
+        8_000,
+    );
+    append_opportunity(dir.path(), &row).expect("append");
+    assert_eq!(
+        savings_segment_at(&ledger, "sess-1").as_deref(),
+        Some(EMPTY_STATE),
+        "an opportunity alone is not a saving"
+    );
+    write_row(&ledger, "sess-1", 12_000, 60_000);
+    let read_by_the_segment = std::fs::metadata(&ledger).expect("stat").len();
+    for _ in 0..1_000 {
+        append_opportunity(dir.path(), &row).expect("append");
+    }
+    assert_eq!(
+        std::fs::metadata(&ledger).expect("stat").len(),
+        read_by_the_segment,
+        "opportunity volume never reaches the file the segment reads"
+    );
+    assert_eq!(
+        savings_segment_at(&ledger, "sess-1").as_deref(),
+        Some("\u{1f4b8}20%/20%"),
+        "the compress row alone decides the figure"
+    );
+}
+
 /// Why (#8063): a session with one recorded row renders that row's own
 /// reduction on both sides — the badge never goes half-blank, and the two
 /// halves agree when there is only one measurement to report.

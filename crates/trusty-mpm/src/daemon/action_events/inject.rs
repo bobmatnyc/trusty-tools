@@ -49,11 +49,14 @@ impl InjectRecorder for ActionPublisher {
     /// `an_inject_after_the_settle_is_counted_lost_10412`.
     fn delivered(&self, delivery: &Delivery<'_>) {
         let threader = self.threader.lock();
-        let root = delivery
+        let session = delivery
             .claude_session_id
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .and_then(|u| threader.root_of(&SessionId(u)));
+            .map(SessionId);
+        let root = session.as_ref().and_then(|s| threader.root_of(s));
         let mut event = inject_event(delivery, threader.message_bodies(), root);
+        // #10906: the target session's project, from memory; no I/O.
+        event.project = session.as_ref().and_then(|s| threader.project_of(s));
         event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
         // #10412: through the settle lock, so a late inject is counted.
         self.buffer(event);
@@ -80,6 +83,7 @@ pub fn inject_event(delivery: &Delivery<'_>, bodies: bool, root: Option<EventId>
         payload: HarnessPayload::Message(message),
         id: EventId::new(),
         parent_id: root,
+        project: None,
     }
 }
 

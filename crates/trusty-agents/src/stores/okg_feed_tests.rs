@@ -25,18 +25,18 @@ use crate::kb::okg::registry::Locator;
 /// One machine's search daemon.
 pub(super) struct Fake {
     root: PathBuf,
-    down: bool,
-    refuse: Option<String>,
+    pub(super) down: bool,
+    pub(super) refuse: Option<String>,
     /// #10746 S12 fix round: `(entered, release)` — the status call signals
     /// `entered`, then waits for `release`, so a test can hold a pass open.
     gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// #10746 S12 last change: a D1 index identity `(instance_id,
     /// generation)`; with one, status, put and `file.status` replies carry
     /// it and the put reply carries `content_sha256`.
-    identity: Option<(String, u64)>,
+    pub(super) identity: Option<(String, u64)>,
     /// A path whose `file.remove` the daemon refuses.
-    refuse_remove: Option<String>,
-    held: Mutex<BTreeMap<String, String>>,
+    pub(super) refuse_remove: Option<String>,
+    pub(super) held: Mutex<BTreeMap<String, String>>,
     calls: Mutex<Vec<String>>,
 }
 

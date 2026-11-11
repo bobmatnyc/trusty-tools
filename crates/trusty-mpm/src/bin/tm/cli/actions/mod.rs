@@ -75,7 +75,7 @@ pub(crate) use deliverables::{
 };
 pub(crate) use divert::DivertAction;
 pub(crate) use env::EnvAction;
-pub(crate) use fleet::FleetAction;
+pub(crate) use fleet::{FleetAction, FleetProjectAction};
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
 pub(crate) use issue::{BoardCmd, EpicCmd, IssueCmd};

@@ -12,6 +12,7 @@
 //! Test: `palace_activity_from_recent_write`, `spinner_frame_for_each_state`,
 //! `activity_colour_is_distinct_per_state`.
 
+use crate::tui::theme::palette;
 use ratatui::style::Color;
 
 use crate::tui::health::types::{CollectionRow, PalaceActivity};
@@ -27,7 +28,7 @@ const INDEXING_WINDOW_SECS: i64 = 10;
 /// Threshold below which a palace is considered "recently active".
 ///
 /// Why: writes within the last minute are still relevant to the operator
-/// even if the ingestion path has finished; the cyan indicator highlights
+/// even if the ingestion path has finished; the accent indicator highlights
 /// the row without animating it.
 /// What: 60 seconds.
 /// Test: `palace_activity_from_recent_write`.
@@ -111,16 +112,16 @@ pub fn spinner_frame(activity: PalaceActivity, tick: usize) -> Option<char> {
 ///
 /// Why: alongside the glyph, each row carries an activity-driven colour so
 /// the operator can scan the pane at a glance.
-/// What: maps `Idle` to default (`Reset`), `Indexing` to yellow, `Dreaming`
-/// to magenta, `Active` to cyan, and `Error` to red.
+/// What: maps `Idle` to the theme text, `Indexing` to warn, `Dreaming`
+/// to info, `Active` to accent, and `Error` to err.
 /// Test: `activity_colour_is_distinct_per_state`.
 pub fn activity_color(activity: PalaceActivity) -> Color {
     match activity {
-        PalaceActivity::Idle => Color::Reset,
-        PalaceActivity::Indexing => Color::Yellow,
-        PalaceActivity::Dreaming => Color::Magenta,
-        PalaceActivity::Active => Color::Cyan,
-        PalaceActivity::Error => Color::Red,
+        PalaceActivity::Idle => palette().text,
+        PalaceActivity::Indexing => palette().warn,
+        PalaceActivity::Dreaming => palette().info,
+        PalaceActivity::Active => palette().accent,
+        PalaceActivity::Error => palette().err,
     }
 }
 

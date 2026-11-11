@@ -1,2 +1,0 @@
-Fixed
-- A pinned session's gh shim now refuses a call GitHub turned down on its primary GraphQL rate limit with one stderr line that names the limit and its reset time (UTC and epoch, or "unknown" when the lookup fails), exits 1, and prints none of gh's partial output. Other calls keep their output and exit status; a tty stdout, `gh run watch` and `--watch` calls still run gh directly. The call is not retried (#10550).

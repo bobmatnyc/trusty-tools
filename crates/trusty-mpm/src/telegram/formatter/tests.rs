@@ -186,6 +186,30 @@ fn adopted_and_registered_format() {
     assert!(TelegramFormatter::format(&registered).contains("/work/demo"));
 }
 
+/// Why: the kept-record line must carry no userinfo, even when the daemon sent
+/// some, and stay HTML-escaped for `ParseMode::Html` (#10586).
+/// Test: this test.
+#[test]
+fn project_kept_format_names_the_record_without_userinfo_10586() {
+    let token = "ghp_10586SyntheticNotARealToken";
+    let kept = CommandResult::ProjectKept {
+        path: "/work/<gizmo>".into(),
+        kept: crate::core::project::KeptRegistryRecord {
+            name: "a&b".into(),
+            repo_url: format!("https://octo:{token}@github.com/acme/gizmo"),
+        },
+    };
+    let text = TelegramFormatter::format(&kept);
+    assert!(
+        text.contains(
+            "already registered as a&amp;b (https://github.com/acme/gizmo); nothing written"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("/work/&lt;gizmo&gt;"), "{text}");
+    assert!(!text.contains(token) && !text.contains("octo") && !text.contains('@'));
+}
+
 #[test]
 fn project_basename_extracts_dir_name() {
     assert_eq!(project_basename("/work/demo"), "demo");

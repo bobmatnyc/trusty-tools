@@ -184,7 +184,9 @@ fn a_second_run_changes_nothing() {
         std::fs::read(fx.dir().join(".trusty-mpm.toml")).unwrap(),
         project_before
     );
-    assert_eq!(fx.config().matches(&canonical(&fx.dir())).count(), 1);
+    // #10885: quoted, so the `[notification_hook] inbox` below the dir is not counted.
+    let entry = format!("\"{}\"", canonical(&fx.dir()));
+    assert_eq!(fx.config().matches(&entry).count(), 1);
 }
 
 /// The fail-open guard: a config tm cannot parse is never rewritten or reset,
@@ -1423,6 +1425,48 @@ fn an_uncheckable_stale_dir_is_a_warning() {
     std::fs::write(&not_a_dir, "x").unwrap();
     let warning = stale_records_warning(&not_a_dir).expect("an error is a warning");
     assert!(warning.starts_with("cannot check"), "{warning}");
+}
+
+/// Why: owner ruling D9d lets the Architect edit `AGENTS.md` on the owner's
+/// specific order, so no seeded file may still ban the write outright.
+/// What: scans every file `tm fleet init` seeds, line breaks folded, for the
+/// old ban wording, and checks `local/instance.md` states the new rule.
+/// Test: `seeded_files_carry_no_agents_md_write_ban`.
+#[test]
+fn seeded_files_carry_no_agents_md_write_ban() {
+    // #10911: the old wording in instance.md, CLAUDE.md and architect-workflow.
+    const BANS: &[&str] = &[
+        "never writes `AGENTS.md`",
+        "you never write it",
+        "The owner writes it; you never do",
+    ];
+    let files = seeded_files();
+    for file in &files {
+        let flat = file
+            .contents
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for ban in BANS {
+            assert!(!flat.contains(ban), "{}: still says {ban:?}", file.dest);
+        }
+    }
+    let instance = files
+        .iter()
+        .find(|f| f.dest == "local/instance.md")
+        .expect("local/instance.md is seeded");
+    let flat = instance
+        .contents
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        flat.contains(
+            "The owner's own instructions go in `AGENTS.md`, never here. The Architect \
+             edits `AGENTS.md` only when the owner orders a specific edit."
+        ),
+        "{flat}"
+    );
 }
 
 /// #9997: every template asset is seeded byte-equal, so a template added

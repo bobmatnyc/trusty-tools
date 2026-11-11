@@ -207,7 +207,7 @@ fn a_malformed_or_open_grant_is_refused() {
         Err(PresenceRefusal::UnsafeMode)
     );
     // A method tm never mints, sealed with the real key.
-    mint(&root, &ARCHITECT, "device:x", &key(), NOW).expect("mint");
+    mint(&root, &ARCHITECT, "sms", &key(), NOW).expect("mint");
     assert_eq!(
         check_now(&root, &ARCHITECT, NOW),
         Err(PresenceRefusal::UnknownMethod)

@@ -1,4 +1,0 @@
-Changed
-- `tm launch`, `tm connect`, the in-place `tm session start` and the TUI `/connect` and `/launch` paths refuse to start when the daemon cannot be reached, instead of launching a PM it never registered; nothing is written and no tmux session is created (#10101).
-- A launch whose tmux name is held by a `Stopped` or `Errored` managed session of the same GitHub owner/repo resumes that session through the daemon's resume route instead of refusing; a holder of another or an unknown owner/repo, or a live holder, still refuses, and a name held by a live record in the legacy session registry now refuses too (#10101).
-- The in-place `tm session start` never types the `claude` launch line into a tmux session that already existed, and the TUI `/connect` and `/launch` paths now launch on the workspace tmux server, record its socket, never type into a session they did not create, and remove their registration when the launch fails (#10101).

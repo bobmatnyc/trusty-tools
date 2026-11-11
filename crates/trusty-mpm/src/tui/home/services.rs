@@ -24,11 +24,11 @@ pub enum ServiceId {
     Review,
     /// trusty-mpm, `mpm.health` on its socket. Enter opens the projects view.
     Mpm,
-    /// trusty-agents, an HTTP daemon found through its `http_addr` file.
+    /// trusty-agents; no UDS socket yet, so the TUI does not probe it (#10899).
     Agents,
-    /// trusty-events, the bus daemon; one socket connect proves it serves.
+    /// trusty-events, the bus daemon, `events.health` on its socket.
     Events,
-    /// trusty-console, an HTTP daemon found through its `http_addr` file.
+    /// trusty-console; no UDS listener yet, so the TUI does not probe it (#10899).
     Console,
 }
 
@@ -39,8 +39,17 @@ pub enum ProbeKind {
     UdsHealth(&'static str),
     /// One connect to the service's Unix socket, closed at once.
     SocketConnect,
-    /// Read the service's `http_addr` discovery file, then one TCP connect.
-    HttpAddr,
+    /// The service serves no Unix socket the TUI may dial, so it is not probed.
+    ///
+    /// Why (#10899): `tm tui` uses no native HTTP; services are reached over
+    /// UDS only (ADR-0032). A service with no UDS endpoint offers the TUI
+    /// nothing to observe, and that is not a failure.
+    /// What: carries the operator-facing detail naming the server-side gap.
+    /// The probe maps it straight to `TileHealth::NoUdsEndpoint` with no file
+    /// read, socket or process spawn.
+    /// Test: `agents_and_console_have_no_uds_endpoint_kind`,
+    /// `a_no_uds_endpoint_probe_does_no_io_and_is_not_down`.
+    NoUdsEndpoint(&'static str),
     /// No resident daemon: the binary on `PATH` is the whole answer.
     OnDemand,
 }
@@ -104,8 +113,17 @@ impl ServiceId {
             ServiceId::Memory => ProbeKind::UdsHealth("memory.health"),
             ServiceId::Analyze => ProbeKind::UdsHealth("analyze.health"),
             ServiceId::Mpm => ProbeKind::UdsHealth("mpm.health"),
-            ServiceId::Events => ProbeKind::SocketConnect,
-            ServiceId::Agents | ServiceId::Console => ProbeKind::HttpAddr,
+            // See #10901: the bus answers health, not just a connect.
+            ServiceId::Events => {
+                ProbeKind::UdsHealth(trusty_common::control_bus::METHOD_EVENTS_HEALTH)
+            }
+            // See #10899: the TUI sends no HTTP probe; these have no UDS yet.
+            ServiceId::Agents => {
+                ProbeKind::NoUdsEndpoint("trusty-agents has no UDS socket yet (#6433)")
+            }
+            ServiceId::Console => {
+                ProbeKind::NoUdsEndpoint("trusty-console has no UDS listener yet (ADR-0035)")
+            }
             ServiceId::Review => ProbeKind::OnDemand,
         }
     }

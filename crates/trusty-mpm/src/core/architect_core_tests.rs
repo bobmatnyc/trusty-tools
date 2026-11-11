@@ -71,3 +71,46 @@ fn a_spoofed_heading_does_not_count_as_the_core() {
         ARCHITECT_CORE.len()
     );
 }
+
+/// Why: #10929 — the owner made simplicity a core principle of both the
+/// Architect and every agent; a content edit must not drop either sentence.
+/// What: the Architect core and `BASE-AGENT.md` each carry their key
+/// simplicity sentence once, whitespace collapsed.
+/// Test: this test.
+#[test]
+fn both_surfaces_carry_the_simplicity_principle_10929() {
+    // #10929: the Architect names the simplest option first; an agent adds no
+    // unrequested surface.
+    let core = flat("architect/core.md");
+    let roster = crate::core::content_source::test_support::repo_roster();
+    let base = collapse_whitespace(roster.require("BASE-AGENT.md").expect("BASE-AGENT.md"));
+    for (surface, text, sentence) in [
+        (
+            "architect/core.md",
+            &core,
+            "Name the simplest option first in every clearance, relay, brief and decision option",
+        ),
+        (
+            "BASE-AGENT.md",
+            &base,
+            "Do not add a component, abstraction, config surface or state the brief did not \
+             ask for.",
+        ),
+    ] {
+        assert_eq!(text.matches(sentence).count(), 1, "{surface}: `{sentence}`");
+    }
+}
+
+/// #10911: the AGENTS.md rule lets the owner order a specific edit, with a
+/// fixed procedure, and no longer bans the write outright.
+#[test]
+fn the_agents_md_rule_allows_only_an_owner_ordered_edit() {
+    let core = flat("architect/core.md");
+    assert!(core.contains(
+        "Write `AGENTS.md` only when the owner tells you to make a specific edit. \
+         Show the diff first. Log the edit with the owner's words. Commit it locally. \
+         Never edit it on your own initiative."
+    ));
+    assert!(!core.contains("Never write `AGENTS.md`."));
+    assert!(!core.contains("Propose the edit to the owner, who makes it."));
+}

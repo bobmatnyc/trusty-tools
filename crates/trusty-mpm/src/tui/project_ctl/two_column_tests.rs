@@ -16,8 +16,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::tui::theme::palette;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Color};
+use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 use super::events::{PendingAction, handle_key, handle_mouse};
 use super::layout;
@@ -130,10 +131,10 @@ fn find(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
     })
 }
 
-/// The text of the cyan (focused) column title on the top row.
+/// The text of the accent (focused) column title on the top row.
 fn focused_title(buffer: &Buffer) -> String {
     (0..buffer.area.width)
-        .filter(|&x| buffer[(x, 0)].fg == Color::Cyan)
+        .filter(|&x| buffer[(x, 0)].fg == palette().accent)
         .map(|x| buffer[(x, 0)].symbol())
         .collect()
 }

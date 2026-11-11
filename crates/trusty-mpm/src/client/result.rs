@@ -164,6 +164,14 @@ pub enum CommandResult {
         /// The absolute path of the registered project.
         path: String,
     },
+    /// "Set Active" announced the path, but the daemon kept an existing
+    /// registry record rather than writing one (#10586).
+    ProjectKept {
+        /// The absolute path that was announced.
+        path: String,
+        /// The record kept, its `repo_url` without userinfo.
+        kept: crate::core::project::KeptRegistryRecord,
+    },
     /// `/config` — Claude Code config analyzer recommendations.
     ConfigAnalysis {
         /// Project directory analyzed.

@@ -817,3 +817,75 @@ async fn implicit_registration_warns_and_registers_nothing_when_list_fails() {
         "projects.json must be left unchanged"
     );
 }
+
+/// `register_unless_present` keys on `owner/repo`, not the URL string (#10586).
+///
+/// Why: `tm project init` read the origin as `git@github.com:o/r.git` while
+/// the record said `https://github.com/o/r`; the old string compare missed it
+/// and `upsert` then refused on the shared key. The name, the same string and
+/// the stored key must each count as "present", and nothing is written then.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_unless_present_matches_on_project_key() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(make_project("gizmo"))
+        .await
+        .expect("seed");
+
+    let mut ssh = make_project("checkout-dir");
+    ssh.repo_url = "git@github.com:O/gizmo.git".into();
+    let same_name = Project {
+        repo_url: "https://github.com/o/elsewhere".into(),
+        ..make_project("gizmo")
+    };
+    for candidate in [ssh, same_name, make_project("gizmo")] {
+        let kept = registry
+            .register_unless_present(candidate.clone())
+            .await
+            .expect("no store error");
+        // #10586: the kept record comes back, so the caller can name it.
+        let kept = kept.unwrap_or_else(|| panic!("{candidate:?} is already covered"));
+        assert_eq!(kept.name, "gizmo");
+    }
+    let all = registry.list().await.expect("list");
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].repo_url, "https://github.com/o/gizmo");
+
+    let fresh = registry
+        .register_unless_present(make_project("other"))
+        .await
+        .expect("insert");
+    assert!(fresh.is_none(), "a new repo under a new name is inserted");
+    let other = registry.get("other").await.expect("get");
+    assert_eq!(other.project_key.as_deref(), Some("o/other"));
+}
+
+/// `register_unless_present` keeps a legacy record that stores no key (#10586).
+///
+/// Why: a pre-key record for `acme/widget` must stop an https init of the same
+/// repo; matching only a stored key wrote a second record beside it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_unless_present_keeps_a_legacy_record_without_a_key() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = registry_with_raw_records(
+        &dir,
+        serde_json::json!({ "widget-checkout": {
+            "name": "widget-checkout",
+            "repo_url": "git@github.com:acme/widget.git",
+            "default_branch": "main"
+        }}),
+    )
+    .await;
+
+    let mut init = make_project("widget");
+    init.repo_url = "https://github.com/acme/widget".into();
+    let kept = registry
+        .register_unless_present(init)
+        .await
+        .expect("no store error");
+    assert_eq!(kept.map(|p| p.name).as_deref(), Some("widget-checkout"));
+    assert_eq!(registry.list().await.expect("list").len(), 1);
+}

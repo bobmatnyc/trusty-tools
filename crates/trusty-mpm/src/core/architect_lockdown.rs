@@ -1,14 +1,17 @@
 //! The Architect's own `--settings` lockdown and its env scrub (#10127 S5 P3,
 //! #8454).
 //!
-//! Why: the Architect must not hold the chat-family tools or the chat tokens
-//! (#8454 boxes 43, 44, 14). The owner-policy carrier
+//! Why: the Architect must not hold the Google Workspace messaging tools or
+//! the chat tokens (#8454 boxes 44, 14). #10735 (owner ruling D6d) dropped
+//! the Slack, Gmail, Notion and Google Chat globs and
+//! `disableClaudeAiConnectors`, so the claude.ai connectors load (#10725).
+//! The owner-policy carrier
 //! ([`crate::core::launch_policy::carrier`]) cannot carry that deny: an
 //! Architect dir normally resolves no owner, so that carrier writes no file.
 //! What: [`Lockdown`] turns one deny list and one env list into the
 //! Architect's argv and env. [`Lockdown::settings_argv`] returns ONE
 //! `--settings <json>` pair with `permissions.deny` holding every glob and its
-//! [`capitalised`] variant and `disableClaudeAiConnectors: true`, merged into
+//! [`capitalised`] variant, merged into
 //! the owner carrier file when one resolved — Claude Code keeps only the LAST
 //! `--settings` flag (Step 0, 2026-10-21), so two flags would drop one payload.
 //! A non-Architect profile, or an empty deny list, gets the carrier argv
@@ -29,30 +32,21 @@ use crate::core::launch_policy::carrier::{SETTINGS_FLAG, settings_argv};
 use crate::core::session_profile::SessionProfile;
 use crate::runtime::launch_spec::LaunchSpec;
 
-/// The settings key that turns off the claude.ai connector tools (#10127 §1a).
-pub const DISABLE_CLAUDE_AI_CONNECTORS: &str = "disableClaudeAiConnectors";
-
 /// The tool-name globs an Architect launch denies (#10127 D24 = B: the plan's
 /// full list, `s5-p3-plan.md` §1a).
 ///
-/// Why: #8454 boxes 43 and 44 — the Architect holds no Slack, Gmail, Notion or
-/// Google Chat tool, and no Google Workspace mail, chat, message or draft tool.
+/// Why: #8454 box 44 — the Architect holds no Google Workspace mail, chat,
+/// message or draft tool. #10735 (owner ruling D6d) removed the box 43 Slack,
+/// Gmail, Notion and Google Chat globs: they denied the claude.ai connectors.
 /// What: one `permissions.deny` rule per entry, each with no `(` (Claude Code
 /// skips such an `mcp__` rule); [`Lockdown::deny_rules`] adds the
 /// [`capitalised`] variant. The gworkspace braces are four plain globs.
 /// The #10387 Slack read allowlist is a hook allow, which cannot lift a
 /// `permissions.deny` rule, so it never reaches an Architect session.
-/// Test: `the_production_deny_list_is_the_plans_full_list`,
+/// Test: `the_production_deny_list_is_the_gworkspace_messaging_globs`,
 /// `the_family_deny_never_matches_ask_owner_or_the_trusty_mpm_tools`,
-/// `the_architect_deny_covers_every_egress_family`.
+/// `the_architect_deny_covers_gworkspace_and_no_connector_family`.
 pub const ARCHITECT_DENY_GLOBS: &[&str] = &[
-    "mcp__*slack*",
-    "mcp__*gmail*",
-    "mcp__*googlemail*",
-    "mcp__*notion*",
-    "mcp__*googlechat*",
-    "mcp__*google-chat*",
-    "mcp__*gchat*",
     "mcp__*gworkspace*__*mail*",
     "mcp__*gworkspace*__*chat*",
     "mcp__*gworkspace*__*message*",
@@ -252,8 +246,8 @@ impl<'a> Lockdown<'a> {
     /// What: a PM, or an empty deny list, gets [`settings_argv`]`(carrier)`
     /// unchanged — no new flag. An Architect with a non-empty list gets
     /// `["--settings", <json>]`: the carrier file's object (or `{}`) with every
-    /// [`Self::deny_rules`] entry appended to `permissions.deny` and
-    /// [`DISABLE_CLAUDE_AI_CONNECTORS`] set `true`.
+    /// [`Self::deny_rules`] entry appended to `permissions.deny`; it never
+    /// sets `disableClaudeAiConnectors` (#10735).
     /// Test: `architect_launch_carries_every_glob_and_its_capitalised_variant`,
     /// `architect_lockdown_merges_into_the_owner_carrier_file`,
     /// `a_carrier_file_that_cannot_be_read_refuses_the_architect_launch`,
@@ -288,8 +282,7 @@ impl<'a> Lockdown<'a> {
             path: carrier.map(Path::to_path_buf).unwrap_or_default(),
             reason,
         })?;
-        // #10127 §1a: the claude.ai connector tools go too.
-        body.insert(DISABLE_CLAUDE_AI_CONNECTORS.to_owned(), Value::Bool(true));
+        // #10735: no `disableClaudeAiConnectors`; the connectors load (#10725).
         Ok(Some(serde_json::to_string(&Value::Object(body))?))
     }
 
@@ -444,8 +437,9 @@ fn merge_deny(body: &mut Map<String, Value>, rules: Vec<String>) -> Result<(), S
     Ok(())
 }
 
-/// Assert `args` carries the production deny as ONE inline `--settings`
-/// (#10127 seam tests).
+/// Assert `args` carries the production deny as ONE inline `--settings`, with
+/// no connector-family glob and no `disableClaudeAiConnectors` (#10127,
+/// #10735 seam tests).
 #[cfg(test)]
 pub(crate) fn assert_production_deny(args: &[String]) {
     let values: Vec<&String> = args
@@ -466,7 +460,15 @@ pub(crate) fn assert_production_deny(args: &[String]) {
             );
         }
     }
-    assert_eq!(body[DISABLE_CLAUDE_AI_CONNECTORS], true, "{body}");
+    assert!(body.get("disableClaudeAiConnectors").is_none(), "{body}");
+    for family in ["slack", "notion", "gmail", "googlechat", "gchat"] {
+        assert!(
+            !deny.iter().any(|r| r
+                .as_str()
+                .is_some_and(|r| r.to_ascii_lowercase().contains(family))),
+            "{family} not denied: {deny:?}"
+        );
+    }
 }
 
 /// Assert `env_unset` names every production chat token (#10127 seam tests).

@@ -125,6 +125,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             serde_json::Value::Null,
         ),
+        // #10739: the per-path admission query is a read.
+        (
+            reads::METHOD_INDEX_PATH_ADMITS,
+            Lane::Free,
+            serde_json::json!({ "index_id": INDEX, "path": "index.md" }),
+        ),
         (reads::METHOD_CHUNKS_LIST, Lane::Free, scoped.clone()),
         (reads::METHOD_GRAPH_GET, Lane::Free, scoped.clone()),
         (reads::METHOD_GRAPH_STATS, Lane::Free, index.clone()),
@@ -137,6 +143,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             reads::METHOD_CALL_CHAIN,
             Lane::Free,
             serde_json::json!({ "index_id": INDEX, "entry_point": "anything" }),
+        ),
+        // #10738: a read, so `free` like the rest of slice 2.
+        (
+            reads::METHOD_INDEX_FILE_STATUS,
+            Lane::Free,
+            serde_json::json!({ "index_id": INDEX, "body": { "path": "src/a.rs" } }),
         ),
         // Slice 3's queries: every HTTP route is in `interactive_limited`.
         (queries::METHOD_QUERY, Lane::Interactive, query.clone()),

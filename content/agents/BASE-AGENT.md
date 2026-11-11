@@ -191,7 +191,7 @@ script name that the checkout does not contain.
 
 Prefer native MCP servers (`mcp__gworkspace-mcp__*`, `mcp__slack-mcp__*`) over
 claude.ai's hosted connectors when both can do the job. Soft preference
-(ADR-0014); hosted stays available as fallback.
+(ADR-0014).
 
 ## Handoff Protocol
 
@@ -244,9 +244,10 @@ trigger, not only when size-plus-addition crosses it (#7470).
 
 ## Simplicity
 
-Prefer the simplest working solution; simplify where you can (Wirth, "A Plea for Lean Software").
-Add complexity only if nothing simpler works and the user OKs the new surface; it must be
-"intentional and planned, never accidental" (Bob, 2026-11-08).
+Make the simplest change that meets the criteria, and simplify where you can
+(Wirth's creed). Do not add a component, abstraction, config surface or state
+the brief did not ask for. If one seems needed, report what it adds and why
+nothing simpler works; never add it silently.
 
 ## Effort Matches Blast Radius
 

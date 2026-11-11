@@ -15,7 +15,7 @@
 //! `tm-architect` unless `--session` chose and recorded another name
 //! ([`session_name`], #8878 R1). [`relaunch`] restarts the running
 //! Architect's `claude` and binds it (#9092). Twin mode (#8878) is out of
-//! scope (ruling Q7). `add` and `remove` are phase P3.
+//! scope (ruling Q7). [`project`] edits the watch list (#10895).
 //! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
 //! `commands::fleet::relaunch::tests`, `tests/tm_fleet.rs`.
 
@@ -28,8 +28,14 @@ mod il_init;
 mod inside_claude;
 // #8902: the pm-guard's Architect pane floor names the launch session.
 pub(crate) mod launch;
+// #10885: the Architect's Notification hook step and status row.
+mod notify_hook;
 mod poller;
 mod preflight;
+// #10895: `tm fleet project add|remove|list` over `local/watch.json`.
+mod project;
+// #10861: init creates `local/quiet-sessions.txt`.
+mod quiet_list;
 // #8942: daemon registration and the ruling-2 sidecar prune.
 mod register;
 // #9092: restart the Architect's `claude` in its session and bind it.
@@ -156,6 +162,7 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             );
             Ok(())
         }
+        FleetAction::Project { action } => project::run(action, &home).await,
     }
 }
 
@@ -421,6 +428,8 @@ pub(crate) fn init_with_seed(
         let label = format!("`[supervisor] session = \"{}\"` in", names.architect());
         report.steps.push(write_edit(&config_path, edit, &label)?);
     }
+    // #10885: after the config edits; fails `init` only on its config write.
+    report.steps.push(notify_hook::step(dir, home, None));
 
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
@@ -638,3 +647,11 @@ fn launch_step(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "notify_hook_tests.rs"]
+mod notify_hook_tests;
+
+#[cfg(test)]
+#[path = "quiet_list_tests.rs"]
+mod quiet_list_tests;

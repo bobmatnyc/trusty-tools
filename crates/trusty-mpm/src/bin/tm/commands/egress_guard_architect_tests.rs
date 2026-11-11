@@ -73,7 +73,7 @@ fn architect_main_thread_may_send_slack_and_name_the_slack_host() {
     assert_eq!(run(&slack_send(&fx), &env, config, &log), Verdict::Allow);
     assert_eq!(run(&slack_bash(&fx), &env, config, &log), Verdict::Allow);
     for tool in [
-        "mcp__claude_ai_Gmail__send_message",
+        "mcp__gmail__send_message",
         "mcp__notion__notion-create-pages",
         "mcp__google_chat__send_message",
     ] {

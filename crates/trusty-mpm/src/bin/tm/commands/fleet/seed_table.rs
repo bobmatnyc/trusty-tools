@@ -162,6 +162,8 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     embedded!("scripts/datg_read.py", "scripts/datg_read.py", false),
     // #10579: `datg.py ready`, the clear-readiness check.
     embedded!("scripts/datg_ready.py", "scripts/datg_ready.py", false),
+    // #10800: the G1-G3 guards datg.py, datg_ops.py and datg_read.py import.
+    embedded!("scripts/datg_guards.py", "scripts/datg_guards.py", false),
     embedded!("scripts/datg-hook.sh", "scripts/datg-hook.sh", true),
     embedded!("scripts/ctx-watch.py", "scripts/ctx-watch.py", false),
     embedded!("scripts/il-cron.py", "scripts/il-cron.py", false),
@@ -213,6 +215,8 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     embedded!("scripts/dashboard-db.py", "scripts/dashboard-db.py", true),
     embedded!("scripts/il-archive.py", "scripts/il-archive.py", false),
     embedded!("scripts/stale-tasks.py", "scripts/stale-tasks.py", true),
+    // #10896: applies the owner's watch_changes requests through `tm fleet project`.
+    embedded!("scripts/watch-apply.py", "scripts/watch-apply.py", true),
     // See #10161: the dashboard server (D3b), split into a facade and three
     // modules it imports by name, and the read-only views it serves. The page,
     // the Live view and the reader libraries sit where the server reads them.
@@ -279,6 +283,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/dashboard_projects.py",
         false
     ),
+    // #10896: the Projects view's watch state; dashboard_projects imports it.
+    embedded!(
+        "scripts/dashboard_watch.py",
+        "scripts/dashboard_watch.py",
+        false
+    ),
     embedded!(
         "scripts/dashboard_archctx.py",
         "scripts/dashboard_archctx.py",
@@ -332,6 +342,8 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     schema!("questions.schema.json"),
     schema!("sessions.schema.json"),
     schema!("step_progress.schema.json"),
+    // #10896: the owner's Watch / Unwatch request queue.
+    schema!("watch_changes.schema.json"),
     embedded!(
         "scripts/start-fleet-poll.sh",
         "scripts/start-fleet-poll.sh",

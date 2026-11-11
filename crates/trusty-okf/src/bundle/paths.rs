@@ -215,28 +215,63 @@ fn fill(
 /// (a torn last line) gets one first, so the new line stands alone. On Unix
 /// the file is created 0600 and set to exactly 0600 before the append
 /// (#10746). Used for the append-only verification record.
-/// Test: `a3_every_bundle_write_path_leaves_files_0600`.
+/// Test: `a3_every_bundle_write_path_leaves_files_0600`,
+/// `append_refuses_a_leaf_swapped_for_a_link`.
 pub(crate) fn append_line(root: &Path, rel: &str, line: &str) -> Result<(), OkfError> {
     let path = confined_file(root, rel)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
     }
+    append_confined(&path, line)
+}
+
+/// `opts` set so that opening a symbolic link fails instead of following it
+/// (§2.11 rule 3). On Unix the open carries `O_NOFOLLOW`; elsewhere the
+/// caller's `confined_file` check is the only guard.
+fn no_follow(opts: &mut OpenOptions) -> &mut OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    }
+    opts
+}
+
+/// Map an open error: a leaf that is a link (`ELOOP` under `O_NOFOLLOW`) is
+/// [`OkfError::PathEscape`], anything else an I/O error.
+fn open_err(path: &Path, e: std::io::Error) -> OkfError {
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+        return OkfError::PathEscape(path.to_path_buf());
+    }
+    io_err(path, e)
+}
+
+/// Append `line` to the already confined `path`, never through a link.
+///
+/// #10746 (§2.11 rule 3): a leaf swapped for a link after `confined_file`
+/// is refused with `PathEscape`; the link's target gets no byte and no
+/// `chmod`, because both opens carry `O_NOFOLLOW` and the mode is set on
+/// the opened descriptor.
+/// Test: `append_refuses_a_leaf_swapped_for_a_link`.
+fn append_confined(path: &Path, line: &str) -> Result<(), OkfError> {
     // #10746 S5: read the last byte only, so an append costs O(1) in the
     // file's size; the revision and operation journals grow with every write.
-    let needs_newline = match File::open(&path) {
+    let probe = no_follow(OpenOptions::new().read(true)).open(path);
+    let needs_newline = match probe {
         Ok(mut f) => {
-            matches!(last_byte(&mut f).map_err(|e| io_err(&path, e))?, Some(b) if b != b'\n')
+            matches!(last_byte(&mut f).map_err(|e| io_err(path, e))?, Some(b) if b != b'\n')
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => return Err(io_err(&path, e)),
+        Err(e) => return Err(open_err(path, e)),
     };
-    let mut f = bundle_open_options()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| io_err(&path, e))?;
+    // #10746: `O_NOFOLLOW` on the append open too, so a swap between the
+    // probe and this open is refused as well.
+    let mut f = no_follow(bundle_open_options().create(true).append(true))
+        .open(path)
+        .map_err(|e| open_err(path, e))?;
     // #10746: an existing record keeps no wider mode than 0600.
-    restrict_file(&f).map_err(|e| io_err(&path, e))?;
+    restrict_file(&f).map_err(|e| io_err(path, e))?;
     let mut out = String::new();
     if needs_newline {
         out.push('\n');
@@ -245,7 +280,7 @@ pub(crate) fn append_line(root: &Path, rel: &str, line: &str) -> Result<(), OkfE
     out.push('\n');
     f.write_all(out.as_bytes())
         .and_then(|()| f.sync_all())
-        .map_err(|e| io_err(&path, e))
+        .map_err(|e| io_err(path, e))
 }
 
 /// The last byte of `f`, or `None` for an empty file.
@@ -364,5 +399,34 @@ mod tests {
         assert_eq!(fold_key("Stra\u{df}e"), fold_key("STRASSE"));
         assert_eq!(fold_key("\u{3c3}"), fold_key("\u{3c2}"));
         assert_ne!(fold_key("notes/a"), fold_key("notes/b"));
+    }
+
+    /// Why: #10746 §2.11 rule 3 — a record leaf swapped for a link after
+    /// `confined_file` must not redirect an append or a `chmod`.
+    /// What: the leaf is a link to a 0644 file outside the bundle, as after
+    /// the swap; the append is `PathEscape`, and the target keeps its bytes
+    /// and its mode. Then the error arm's sibling: a missing leaf is created
+    /// and appended, so the guard refuses only a link.
+    /// Test: self-contained.
+    #[cfg(unix)]
+    #[test]
+    fn append_refuses_a_leaf_swapped_for_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "secret\n").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let root = tmp.path().join("bundle");
+        std::fs::create_dir(&root).unwrap();
+        let leaf = root.join("record.jsonl");
+        std::os::unix::fs::symlink(&outside, &leaf).unwrap();
+        let got = append_confined(&leaf, "{\"forged\":true}");
+        assert!(matches!(got, Err(OkfError::PathEscape(_))), "{got:?}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret\n");
+        let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "the link target was not chmodded");
+        let fresh = root.join("fresh.jsonl");
+        append_confined(&fresh, "{}").unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "{}\n");
     }
 }

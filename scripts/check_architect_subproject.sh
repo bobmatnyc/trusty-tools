@@ -129,6 +129,7 @@ scripts/datg_ops.py|crates/trusty-mpm/src/assets/architect/scripts/datg_ops.py
 scripts/datg_log.py|crates/trusty-mpm/src/assets/architect/scripts/datg_log.py
 scripts/datg_read.py|crates/trusty-mpm/src/assets/architect/scripts/datg_read.py
 scripts/datg_ready.py|crates/trusty-mpm/src/assets/architect/scripts/datg_ready.py
+scripts/datg_guards.py|crates/trusty-mpm/src/assets/architect/scripts/datg_guards.py
 scripts/datg-hook.sh|crates/trusty-mpm/src/assets/architect/scripts/datg-hook.sh
 scripts/ctx-watch.py|crates/trusty-mpm/src/assets/architect/scripts/ctx-watch.py
 scripts/il-cron.py|crates/trusty-mpm/src/assets/architect/scripts/il-cron.py
@@ -145,6 +146,7 @@ scripts/owner_answers.py|crates/trusty-mpm/src/assets/architect/scripts/owner_an
 scripts/dashboard-db.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard-db.py
 scripts/il-archive.py|crates/trusty-mpm/src/assets/architect/scripts/il-archive.py
 scripts/stale-tasks.py|crates/trusty-mpm/src/assets/architect/scripts/stale-tasks.py
+scripts/watch-apply.py|crates/trusty-mpm/src/assets/architect/scripts/watch-apply.py
 scripts/dashboard-serve.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard-serve.py
 scripts/dashboard_http.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_http.py
 scripts/dashboard_page.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_page.py
@@ -158,6 +160,7 @@ scripts/dashboard_fleet.py|crates/trusty-mpm/src/assets/architect/scripts/dashbo
 scripts/dashboard_harness_base.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_harness_base.py
 scripts/dashboard_attach.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_attach.py
 scripts/dashboard_projects.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_projects.py
+scripts/dashboard_watch.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_watch.py
 scripts/dashboard_archctx.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_archctx.py
 scripts/brief_ids.py|crates/trusty-mpm/src/assets/architect/scripts/brief_ids.py
 scripts/brief-id.py|crates/trusty-mpm/src/assets/architect/scripts/brief-id.py
@@ -189,6 +192,7 @@ schemas/dashboard/meta-state.schema.json|crates/trusty-mpm/src/assets/architect/
 schemas/dashboard/questions.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/questions.schema.json
 schemas/dashboard/sessions.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/sessions.schema.json
 schemas/dashboard/step_progress.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/step_progress.schema.json
+schemas/dashboard/watch_changes.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/watch_changes.schema.json
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
 scripts/relay.sh|crates/trusty-mpm/src/assets/architect/scripts/relay.sh
 scripts/relay_provenance.py|crates/trusty-mpm/src/assets/architect/scripts/relay_provenance.py

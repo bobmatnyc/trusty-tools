@@ -14,6 +14,8 @@
 //!
 //! [`dashboard`]: crate::tui::dashboard
 
+// #10966: goal ar-G01, the read-only Architect view.
+pub mod architect;
 pub mod client;
 pub mod coordinator;
 pub mod dashboard;
@@ -28,6 +30,8 @@ pub mod project_ctl;
 // #10754: S3 tm ls actions; De1 key map (Bob 11-06).
 pub mod session_hooks;
 pub mod terminal;
+// #10966: G01 slice 1, the console palette as named roles.
+pub mod theme;
 
 use crossterm::{
     execute,
@@ -437,6 +441,7 @@ pub(crate) fn render_screen(
     chat: &DashboardState,
     hp: &HealthScreen,
 ) {
+    theme::paint_background(frame);
     match screen {
         Screen::Chat => dashboard::render(frame, chat),
         Screen::Health => {

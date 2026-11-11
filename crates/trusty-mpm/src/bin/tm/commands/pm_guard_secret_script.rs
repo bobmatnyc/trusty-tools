@@ -70,8 +70,16 @@
 //!     word names no file (#10566): prose and here-documents quote code in
 //!     backticks. A computed, `/dev/fd/` or resolved-variable word refuses.
 //!
+//! 11. A script `node --check` (`-c`) syntax-checks: it is parsed, never run,
+//!     so its body is not judged (#10548). A `NODE_OPTIONS` preload an
+//!     earlier `export` sets is not seen; an inline prefix keeps the judgment.
+//!
 //! Fail-open check: this rule only ADDS refusals and runs after the inline
 //! rules, which still judge the command text. Every [`Unread`] arm refuses.
+//! #10548 narrows one path: `node --check`/`-c` with no other option and no
+//! `NODE_OPTIONS=` prefix judges no body ([`node_check_only`]), pinned in
+//! `pm_guard_secret_script_node_tests.rs`. A node RUN is judged raw, so a JS
+//! member access (`x.key`) still refuses; that stays open on #10548.
 //! Test: `pm_guard_secret_script_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_secret_batch.rs`
 //! (`pm_guard_refuses_a_script_whose_body_reads_a_credential_8879`).
@@ -98,6 +106,7 @@ use crate::commands::pm_guard_secret_script_self::resolve_self_paths;
 use crate::commands::pm_guard_secret_script_self::{
     ToplevelRisk, passes_on_git_changes, resolve_self_paths_with,
 };
+use node::node_check_only;
 use walk::{Walk, each_script, each_script_in};
 
 // #10566: the walk that locates each script, split out for the 500-SLOC cap.
@@ -109,6 +118,9 @@ pub(crate) mod tmux_kill;
 // #8878 PR2a: a presence-key Keychain write in a script body is denied too.
 #[path = "pm_guard_secret_script_presence.rs"]
 pub(crate) mod presence_key;
+// #10548: the exact `node --check <file>` shape (500-SLOC cap).
+#[path = "pm_guard_secret_script_node.rs"]
+mod node;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;
@@ -240,11 +252,18 @@ fn unresolved(
     bases: &[PathBuf],
     command: &str,
 ) -> Option<(String, Unread)> {
-    let computed = |c: &Candidate| is_computed(&expand(&c.word, bases));
+    // #10748: an fd pipe is computed at run time, whatever `named_once` says.
+    let computed = |c: &Candidate| {
+        let w = expand(&c.word, bases);
+        is_computed(&w) || is_fd_pipe(&w)
+    };
     if let Some(c) = candidates
         .iter()
         .find(|c| c.role == Role::Loaded && computed(c))
     {
+        return Some((c.word.clone(), Unread::Unresolvable));
+    }
+    if let Some(c) = fd_pipe_script(candidates, bases) {
         return Some((c.word.clone(), Unread::Unresolvable));
     }
     let script = candidates
@@ -267,6 +286,35 @@ fn unresolved(
 /// or a glob.
 fn is_computed(word: &str) -> bool {
     word.contains(['$', '`', '*', '?', '[', '{', '('])
+}
+
+/// Whether `word` names a `/dev/fd/` or `/proc/self/fd/` pipe: the script
+/// shell's descriptor, which the guard's own fd table cannot stand in for.
+/// Test: `an_fd_pipe_named_twice_at_the_top_level_refuses_10748`.
+fn is_fd_pipe(word: &str) -> bool {
+    ["/dev/fd/", "/proc/self/fd/"]
+        .iter()
+        .any(|p| word.starts_with(p))
+}
+
+/// The fd-pipe candidate [`locate`] would pick if the pipe existed: any
+/// loaded file, the first positional that is a pipe or exists, else a stdin
+/// pipe. #10748: before, the guard probed its own fd N, so such a pipe was
+/// read and refused; this keeps it refused, as [`Unread::Unresolvable`].
+/// Test: `an_fd_pipe_after_a_missing_script_refuses_10748`.
+fn fd_pipe_script<'a>(candidates: &'a [Candidate], bases: &[PathBuf]) -> Option<&'a Candidate> {
+    let fd = |c: &Candidate| is_fd_pipe(&expand(&c.word, bases));
+    let exists = |c: &Candidate| !existing_paths(&c.word, bases).is_empty();
+    let loaded = candidates.iter().find(|c| c.role == Role::Loaded && fd(c));
+    let positional = candidates
+        .iter()
+        .filter(|c| c.role == Role::Positional)
+        .find(|c| fd(c) || exists(c));
+    let script = match positional {
+        Some(c) => fd(c).then_some(c),
+        None => candidates.iter().find(|c| c.role == Role::Stdin && fd(c)),
+    };
+    loaded.or(script)
 }
 
 /// `word` with a leading `$HOME`/`${HOME}` or `$PWD`/`${PWD}` replaced by the
@@ -501,7 +549,14 @@ fn candidates(argv: &[String]) -> (Vec<Candidate>, bool) {
             } else {
                 basename
             };
-            interpreter_candidates(family, &interpreter, &argv[start + 1..])
+            let args = &argv[start + 1..];
+            // #10548: `node --check <file>` parses the file and never runs it;
+            // a `NODE_OPTIONS` prefix can load code, so it keeps the judgment.
+            let preload = argv[..start].iter().any(|w| w.contains("NODE_OPTIONS="));
+            if family == Family::Node && !preload && node_check_only(args) {
+                return (Vec::new(), exact.is_some());
+            }
+            interpreter_candidates(family, &interpreter, args)
         }
         None if program.contains('/') => vec![Candidate {
             word: program.clone(),
@@ -625,11 +680,14 @@ fn locate(candidates: &[Candidate], bases: &[PathBuf]) -> Vec<(String, PathBuf, 
 }
 
 /// Every existing file `word` names under `bases`; nothing for a word the
-/// shell computes at run time.
+/// shell computes at run time, or for a `/dev/fd/` or `/proc/self/fd/` pipe.
+/// Test: `an_fd_pipe_the_guard_has_open_still_refuses_10748`.
 fn existing_paths(word: &str, bases: &[PathBuf]) -> Vec<PathBuf> {
     let word = expand(word, bases);
     let word = word.as_str();
-    if word.is_empty() || is_computed(word) {
+    // #10748: an fd path names the script shell's fd, not the guard's; probing
+    // it read whatever the guard (or a sibling test) had open at that number.
+    if word.is_empty() || is_fd_pipe(word) || is_computed(word) {
         return Vec::new();
     }
     let mut paths = Vec::new();
@@ -677,3 +735,7 @@ mod fp_10548_tests;
 #[cfg(test)]
 #[path = "pm_guard_secret_script_10566_tests.rs"]
 mod substitution_10566_tests;
+
+#[cfg(test)]
+#[path = "pm_guard_secret_script_node_tests.rs"]
+mod node_10548_tests;

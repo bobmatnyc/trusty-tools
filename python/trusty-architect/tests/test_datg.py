@@ -162,8 +162,9 @@ class HookCase(Base):
         out = json.loads(r.stdout)["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertLess(len(r.stdout.encode()), 400)
-        ok = self.hook({"hook_event_name": "PreToolUse", "tool_name": "Task",
-                        "tool_input": {"prompt": "Goal: th-G01 go"}})
+        datg.write_ops(self.p, [{"op": "add", "kind": "T", "title": "go", "goal": "th-G01"}])
+        ok = self.hook({"hook_event_name": "PreToolUse", "tool_name": "Task",   # #10800 G2: goal and card
+                        "tool_input": {"prompt": "Goal: th-G01 Card: th-T01 go"}})
         self.assertEqual(ok.stdout, "")
 
     def test_other_tools_and_subagents_silent(self):
@@ -295,6 +296,7 @@ class EscalationNotifyCase(Base):
         env = self.stub_cmd('printf "%s\\n" "$@" > "' + self.rec + '"\necho queued\n')
         r = self.run_datg(["update", "th-D01", "--esc", "architect"], env)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(r.stdout, "th-D01\n")
         args = open(self.rec).read().split("\n")
         self.assertEqual(args[:4], ["--kind", "decision", "--session", "tm-pilot"])
         self.assertIn("th-D01", args[4])
@@ -311,13 +313,15 @@ class EscalationNotifyCase(Base):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(open(self.rec).read(), "called\n")
 
-    def test_notify_failure_does_not_fail_update_and_is_logged(self):
+    def test_notify_failure_reports_partial_success_and_is_logged(self):
         for body in ("echo boom >&2\nexit 3\n", None):
             env = self.stub_cmd(body or "")
             if body is None:
                 env["DATG_NOTIFY_CMD"] = os.path.join(self.p, "no-such-notify")
             r = self.run_datg(["update", "th-D01", "--esc", "architect"], env)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertIn("ledger saved", r.stderr)
+            self.assertIn("do not replay", r.stderr)
             self.assertIn("pm-notify", r.stderr)
             self.assertEqual(self.state()["items"][0]["esc"], "architect")
             fails = [x for x in self.log() if x.get("kind") == "notify_failure"]

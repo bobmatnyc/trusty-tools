@@ -233,14 +233,23 @@ impl CommandExecutor {
     /// project by path; that does not fit the pure `TrustyCommand` shape (the
     /// path is keyboard callback data), so the bot adapter calls this directly.
     /// What: calls `POST /projects`; returns a confirmation via the registered
-    /// path. Returns an `Error` when the daemon is unreachable.
-    /// Test: `register_project_succeeds`.
+    /// path. Returns an `Error` carrying the daemon's message when it refuses
+    /// (#10586: no `origin` remote), or the transport error when unreachable.
+    /// #10586: `ProjectKept` when the daemon kept an existing record instead.
+    /// Test: `register_project_succeeds`,
+    /// `register_project_without_origin_shows_the_daemon_message_10586`,
+    /// `register_project_reports_the_kept_record_10586`.
     pub async fn register_project(&self, path: &str) -> CommandResult {
         match self.client().register_project(path).await {
-            Ok(()) => CommandResult::ProjectRegistered {
+            Ok(None) => CommandResult::ProjectRegistered {
                 path: path.to_string(),
             },
-            Err(e) => CommandResult::Error(format!("daemon unreachable: {e}")),
+            Ok(Some(kept)) => CommandResult::ProjectKept {
+                path: path.to_string(),
+                kept,
+            },
+            // #10586: not always "unreachable" — a 400 is the daemon's refusal.
+            Err(e) => CommandResult::Error(format!("could not register {path}: {e}")),
         }
     }
 
@@ -292,8 +301,8 @@ impl CommandExecutor {
     /// What: fetches the session list, resolves `session` via the canonical
     /// [`resolve_session`] (id-exact, name-exact, then prefix), posts the prompt
     /// via `POST /sessions/{id}/command`, and returns the captured pane output
-    /// truncated to [`MAX_OUTPUT_CHARS`]. An unknown session or unreachable
-    /// daemon yields a [`CommandResult::Error`].
+    /// truncated to [`MAX_OUTPUT_CHARS`]. An unknown session, an unreachable
+    /// daemon or a command that reached no pane yields a [`CommandResult::Error`].
     /// Test: `execute_send_unknown_session_errors`.
     pub(super) async fn send(&self, session: &str, prompt: &str) -> CommandResult {
         if prompt.trim().is_empty() {
@@ -312,7 +321,8 @@ impl CommandExecutor {
                 output: truncate_output(&output),
             },
             Ok(None) => CommandResult::Error(format!("session {session} not found")),
-            Err(e) => CommandResult::Error(format!("daemon unreachable: {e}")),
+            // #10101: also an undelivered command, so not "daemon unreachable".
+            Err(e) => CommandResult::Error(format!("send to {session} failed: {e}")),
         }
     }
 

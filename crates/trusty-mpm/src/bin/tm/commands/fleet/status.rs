@@ -11,7 +11,8 @@
 //! Architect, naming the failed identity check as the hook does (#8878 PR-I).
 //! [`skills_check`] adds whether the Architect's shipped skills are current
 //! in its project tier (#9540); it is never part of `complete`. #10448: an
-//! unbound `binding` makes the setup incomplete.
+//! unbound `binding` makes the setup incomplete. #10885: the
+//! `notification_hook` row is informational too.
 //! It also warns on the pre-#9997 records directory and moves nothing.
 //! #9092: it warns, naming the PID, when the session's live `claude` has no
 //! launch record.
@@ -69,6 +70,9 @@ pub(crate) struct StatusReport {
     /// Which prototype commit and content the seeded bundle came from
     /// (#10571); informational, never part of `complete`.
     pub(crate) bundle: Check,
+    /// Whether the Architect's `Notification` hook is on and applied
+    /// (#10885); informational, never part of `complete`.
+    pub(crate) notification_hook: Check,
     /// Whether the calling session is bound as the Architect; informational,
     /// never part of `complete`. `None` when not evaluated.
     pub(crate) this_session: Option<Check>,
@@ -91,11 +95,11 @@ impl StatusReport {
             "  {mark}  {:<12} {}\n",
             self.skills.name, self.skills.detail
         ));
-        let mark = if self.bundle.ok { "ok     " } else { "WARN   " };
-        out.push_str(&format!(
-            "  {mark}  {:<12} {}\n",
-            self.bundle.name, self.bundle.detail
-        ));
+        // #10885: the notification hook row is informational like `bundle`.
+        for c in [&self.bundle, &self.notification_hook] {
+            let mark = if c.ok { "ok     " } else { "WARN   " };
+            out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
+        }
         for c in std::iter::once(&self.binding).chain(&self.this_session) {
             let mark = if c.ok { "ok     " } else { "UNBOUND" };
             out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
@@ -168,6 +172,7 @@ pub(crate) fn status(
         binding,
         skills: skills_check(&dir),
         bundle: bundle_check(&dir),
+        notification_hook: super::notify_hook::status_check(&dir, home, None),
         session: names
             .as_ref()
             .map(|n| n.architect().to_owned())

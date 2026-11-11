@@ -30,6 +30,7 @@ fn make_event(id: Option<EventId>) -> HarnessEvent {
         payload: HarnessPayload::Ping,
         id: id.unwrap_or_default(),
         parent_id: None,
+        project: None,
     }
 }
 

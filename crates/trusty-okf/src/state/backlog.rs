@@ -22,7 +22,7 @@ use crate::format::concept::parse_concept;
 use crate::format::hash::bytes_hash;
 use crate::state::index::{
     Folded, IndexIdentity, IndexJournal, IndexRecord, IndexStateDir, LiveIdentity, fold,
-    journaled_paths,
+    journaled_paths, last_observed_identity,
 };
 use crate::state::read::{undetectable_tombstone, withdraw_intended};
 
@@ -184,5 +184,34 @@ impl Bundle {
     ) -> Result<IndexBacklog, OkfError> {
         let records = IndexJournal::open(state, self.root(), index_id)?.read()?;
         backlog_from(self, &records, live)
+    }
+
+    /// The backlog for a caller that asks no daemon (#10876).
+    ///
+    /// Why: an offline read that treats every recorded identity as current
+    /// reads a path settled after the daemon was re-created or lost content,
+    /// once the pass that saw the change failed to re-push it.
+    /// What: [`Bundle::index_backlog`] under `Known` of the newest identity a
+    /// feed pass observed, so a record observed against an older identity is
+    /// owed again (§4.9.2 rule 3). With no observation (D1 absent, or a
+    /// journal that predates #10876), or when the newest observation records
+    /// D1 absent (rolled back), the live identity is `Unreadable` and the
+    /// result equals the D1-absent backlog. The caller must still never
+    /// report an offline read Searchable: the observation may be stale.
+    /// Test: `index_backlog_offline_equals_index_backlog_when_no_identity`,
+    /// `d1_rollback_journals_one_absent_observation`.
+    pub fn index_backlog_offline(
+        &self,
+        state: &IndexStateDir,
+        index_id: &str,
+    ) -> Result<IndexBacklog, OkfError> {
+        let records = IndexJournal::open(state, self.root(), index_id)?.read()?;
+        // #10876: a newest `Observed { identity: None }` (D1 rolled back)
+        // reads `None` here, so bytes decide as before D1.
+        let live = match last_observed_identity(&records) {
+            Some(i) => LiveIdentity::Known(i.clone()),
+            None => LiveIdentity::Unreadable("offline read: no daemon was asked".to_string()),
+        };
+        backlog_from(self, &records, &live)
     }
 }

@@ -218,6 +218,7 @@ fn c90_unchanged_mailbox_writes_nothing_and_a_wider_window_fetches_only_new() {
 #[test]
 fn c91_docs_exports_keep_structure_and_base64_is_unsupported() {
     let (fake, h) = (FakeGoogle::start(), Home::new(Some("work")));
+    h.docs_grant("docs-src", "work");
     let md = "# Title\n\n- one\n- two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n[site](https://example.com)\n\n\
               [image1]: <data:image/png;base64,AAAA>\n";
     let html = "<h1>Title</h1><ul><li>one</li></ul><table><tr><td>1</td></tr></table>\
@@ -337,6 +338,7 @@ fn c93_attachments_listed_quotes_kept_no_raw_mime() {
 #[test]
 fn c94_trashed_doc_on_a_complete_recursive_listing_is_tombstoned() {
     let (fake, h) = (FakeGoogle::start(), Home::new(Some("work")));
+    h.docs_grant("docs-src", "work");
     fake.with(|st| {
         st.files.push(doc("d1", "F", 1));
         st.files.push(folder("S", "F"));
@@ -562,6 +564,7 @@ fn c98_inbound_needs_an_operator_run_and_a_grant() {
 #[test]
 fn c132_docs_ceiling_blocks_tombstones_and_a_whole_listing_allows_them() {
     let (fake, h) = (FakeGoogle::start(), Home::new(Some("work")));
+    h.docs_grant("docs-src", "work");
     fake.with(|st| {
         st.page_cap = Some(2);
         for i in 0..5 {
@@ -599,6 +602,7 @@ fn c132_docs_ceiling_blocks_tombstones_and_a_whole_listing_allows_them() {
 #[test]
 fn document_ids_list_and_a_missing_one_fails_per_item() {
     let (fake, h) = (FakeGoogle::start(), Home::new(Some("work")));
+    h.docs_grant("docs-src", "work");
     fake.with(|st| {
         st.files.push(doc("d1", "F", 1));
         st.exports
@@ -735,4 +739,114 @@ fn cancel_while_waiting_on_google_kills_the_adapter() {
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(gone(&fake.url), "{:?}", processes_with(&fake.url));
     fake.with(|st| st.hold = None);
+}
+
+/// Why: #10746 review (PR 10821) — Drive answers `files.list` for an
+/// unknown or unshared folder with 200 and an empty page, so a walk that
+/// never checks its root reads as a whole, empty listing and tombstones
+/// every item of the store.
+/// What: two Docs under `F` imported; then `F` unknown (no root, no
+/// files), trashed, not a folder, and refused with 403. Each run fails
+/// before any write, with `not_found` and `permission_denied` for the HTTP
+/// cases; the Docs stay live.
+/// Test: self-contained.
+#[test]
+fn an_unknown_or_unusable_root_fails_the_run_and_tombstones_nothing() {
+    let (fake, h) = (FakeGoogle::start(), Home::new(Some("work")));
+    h.docs_grant("docs-src", "work");
+    fake.with(|st| {
+        for d in ["d1", "d2"] {
+            st.files.push(doc(d, "F", 1));
+            st.exports
+                .insert((d.into(), "text/markdown".into()), b"Doc.\n".to_vec());
+        }
+    });
+    let cmd = h.cmd(GDOCS, &fake, &[]);
+    assert_eq!(run(&cmd, &h.root, &docs(true, &[])).unwrap().created, 2);
+    type Set = fn(&mut support::State);
+    let cases: [(&str, Set); 4] = [
+        ("not_found", |st| {
+            st.roots.clear();
+            st.files.clear();
+        }),
+        ("trashed", |st| {
+            st.roots = vec![folder("F", "root")];
+            st.roots[0]["trashed"] = json!(true);
+        }),
+        ("not a folder", |st| st.roots = vec![doc("F", "root", 1)]),
+        ("permission_denied", |st| {
+            st.roots = vec![folder("F", "root")];
+            st.fail.push(("drive/v3/files/F?".into(), 403));
+        }),
+    ];
+    for (want, set) in cases {
+        fake.with(set);
+        let before = tree(&h.root);
+        let got = run(&cmd, &h.root, &docs(true, &[]));
+        let e = got.map(|r| (r.tombstoned, r.deletion_safe)).unwrap_err();
+        assert!(e.to_string().contains(want), "{want}: {e}");
+        assert_eq!(tree(&h.root), before, "{want}: the run wrote");
+    }
+    for d in ["d1", "d2"] {
+        let fm = frontmatter(&h.root, &format!("docs/docs-src/{d}.md"));
+        assert_ne!(
+            fm_str(&fm, "source_status").as_deref(),
+            Some("deleted"),
+            "{d}"
+        );
+    }
+}
+
+/// Why: #10746 review — native Google Doc export is a new source type, so
+/// the `gdocs` adapter, not the host, refuses a run until the grant file
+/// records a passed capability-grant review for the store and account
+/// (SPEC-OKF-01 §2.15 "Native-Doc export", Appendix B "Acquire role"),
+/// with the semantics of the Gmail inbound grant.
+/// What: no grant file, a grant for another store, a grant for another
+/// account and an unparsable grant file each fail the run `policy_refused`
+/// with no Drive request and nothing written; a grant for `docs-src` and
+/// `work` imports the Doc.
+/// Test: self-contained.
+#[test]
+fn gdocs_needs_a_capability_grant_before_any_drive_request() {
+    let (fake, h) = (FakeGoogle::start(), Home::new(Some("work")));
+    fake.with(|st| {
+        st.files.push(doc("d1", "F", 1));
+        st.exports
+            .insert(("d1".into(), "text/markdown".into()), b"Doc.\n".to_vec());
+    });
+    let cmd = h.cmd(GDOCS, &fake, &[]);
+    let conf = h.home.join(".config/trusty-connectors/config.toml");
+    type Grant<'a> = Box<dyn Fn() + 'a>;
+    let grants: [(&str, Grant); 4] = [
+        ("no grant file", Box::new(|| ())),
+        (
+            "another store",
+            Box::new(|| h.docs_grant("other-src", "work")),
+        ),
+        (
+            "another account",
+            Box::new(|| h.docs_grant("docs-src", "home")),
+        ),
+        (
+            "unusable grant file",
+            Box::new(|| std::fs::write(&conf, "gdocs_grant = [").unwrap()),
+        ),
+    ];
+    for (why, grant) in grants {
+        grant();
+        let e = run(&cmd, &h.root, &docs(true, &[])).unwrap_err();
+        assert!(e.to_string().contains("policy_refused"), "{why}: {e}");
+        let drive: Vec<String> = fake
+            .seen()
+            .into_iter()
+            .map(|s| s.path)
+            .filter(|p| p.contains("/drive/"))
+            .collect();
+        assert!(drive.is_empty(), "{why}: {drive:?}");
+        assert!(concepts(&h.root).is_empty(), "{why}");
+    }
+    h.docs_grant("docs-src", "work");
+    let r = run(&cmd, &h.root, &docs(true, &[])).unwrap();
+    assert_eq!(r.created, 1, "{r:?}");
 }

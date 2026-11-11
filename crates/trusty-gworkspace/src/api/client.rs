@@ -256,6 +256,20 @@ impl BaseClient {
         Ok((name, t))
     }
 
+    // #10746: ok-T20 read-only scope preset
+    /// The acting profile's name and the scopes recorded for its token.
+    ///
+    /// Why: `scope_guard` refuses a write tool on a read-only profile before
+    /// any request, so it needs the same profile `get_access_token` would use.
+    /// What: Resolves `account` exactly as a request does; `None` when no
+    /// profile resolves (the tool call then fails as it does today).
+    /// Test: `server::scope_tests`.
+    pub fn recorded_scopes(&self, account: Option<&str>) -> Option<(String, Vec<String>)> {
+        self.resolve_stored(account)
+            .ok()
+            .map(|(profile, stored)| (profile, stored.token.scopes))
+    }
+
     /// Return an access token, refreshing if expired and possible.
     ///
     /// Why: A refresh is only possible when SOME OAuth client resolves for

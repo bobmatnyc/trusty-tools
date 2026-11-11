@@ -9,6 +9,12 @@ This crate has not cut a release yet — everything written so far is pending in
 
 ---
 
+## [0.2.3] — 2026-11-10
+
+### Changed
+
+- Requires trusty-common 0.69; no source change (Refs #10735).
+
 ## [0.2.2] — 2026-10-10
 
 ### Fixed

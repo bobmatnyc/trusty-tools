@@ -346,6 +346,8 @@ pub(crate) async fn session(
                 }
                 _ => {
                     let body: serde_json::Value = resp.error_for_status()?.json().await?;
+                    // #10101: a command that reached no pane fails the verb.
+                    trusty_mpm::client::http_client::command_delivery(&body)?;
                     let output = body.get("output").and_then(|v| v.as_str()).unwrap_or("");
                     print!("{output}");
                     print_compression_stats(&body);

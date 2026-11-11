@@ -120,8 +120,8 @@ trusty-code = { path = "crates/trusty-code", version = "0.8" }
 # is the first upload. Bumped to 0.2 by #7940's delegation seam (a required
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9.4" }
-trusty-common = { path = "crates/trusty-common", version = "0.67" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9.5" }
+trusty-common = { path = "crates/trusty-common", version = "0.69" }
 # #7521: secret storage and its on-demand socket (DOC-74 §15.2). Defaults off
 # here so each member names the features it needs (#5466 pattern).
 trusty-secrets = { path = "crates/trusty-secrets", version = "0.4.0", default-features = false }
@@ -174,7 +174,7 @@ trusty-review = { path = "crates/trusty-review", version = "0.40", default-featu
 # `^0.9.0` excluded the crate's own 0.11.0 — in-tree the path override hid it, so
 # only a crates.io consumer (or `cargo publish`) resolved wrong. Guarded now by
 # scripts/check_workspace_dep_versions.sh.
-trusty-console = { path = "crates/trusty-console", version = "0.13" }
+trusty-console = { path = "crates/trusty-console", version = "0.14" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
@@ -395,8 +395,8 @@ usearch = "2.25"
 # in-memory Hnsw index is rebuilt on palace open, so direct serde of the
 # Hnsw struct is unnecessary.
 hnsw_rs = "0.3"
-# Align with trusty-memory upstream (rusqlite 0.39, bundled libsqlite3).
-rusqlite = { version = "0.39", features = ["bundled"] }
+# Align with trusty-memory upstream (rusqlite 0.41, bundled libsqlite3; #10882).
+rusqlite = { version = "0.41", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.33"
 tiktoken-rs = "0.5"

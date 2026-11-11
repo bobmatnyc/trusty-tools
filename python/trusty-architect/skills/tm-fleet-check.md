@@ -14,8 +14,9 @@ effort: high
 One pass of the Architect's supervision loop. Your Architect instructions set
 the rules: the hard limits, the relay protocol, decisions as options and the
 evidence labels. This skill is the checklist. This project's `CLAUDE.md` holds
-the fleet specifics: the watch set, the user's name for the relay marker, and
-the full-poll cadence. Read it before the first pass of a session.
+the fleet specifics: the user's name for the relay marker and the full-poll
+cadence. Read it before the first pass of a session. `tm fleet project list`
+prints the watch set.
 
 Every path below is relative to this project's root, the directory that holds
 its `CLAUDE.md`.
@@ -24,7 +25,19 @@ its `CLAUDE.md`.
 
 1. **Read the records.** Read `local/instance.md`, `local/user.md`,
    `local/goals.md`, `local/state.md` and the tail of `local/actions.md`.
-   They are the current facts; this skill does not repeat them.
+   They are the current facts; this skill does not repeat them. Run
+   `scripts/watch-apply.py` first: it applies the owner's Watch and
+   Unwatch requests from the dashboard (`watch_changes` docs with status
+   `new`) through `tm fleet project add|remove` and marks each `applied` or
+   `failed`. A `failed` request is a finding for this pass; the owner retries
+   or dismisses it on the page. Then run
+   `tm fleet project list` for the watch set; a row flagged `path missing`,
+   `not registered` or `no record` is a finding for this pass. The first run
+   imports a hand-written `## Watch set` list from `CLAUDE.md`. When that
+   section still lists sessions line by line and the list shows each of them,
+   replace those lines with the template's pointer: "`tm fleet project list`
+   prints the projects whose PM sessions you supervise; `tm fleet project add`
+   and `tm fleet project remove` change that list."
 2. **Discover, and verify the channel.** List the live sessions and panes
    with raw tmux, then cross-check the manager's inventory:
 

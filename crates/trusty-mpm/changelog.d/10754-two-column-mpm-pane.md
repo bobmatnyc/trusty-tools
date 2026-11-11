@@ -1,2 +1,0 @@
-Changed
-- `tm tui`'s MPM pane shows two columns: owners and projects on the left, and the sessions of the selected project (or of every project of the selected owner, grouped by project) on the right. Tab cycles the two columns and Activity, Right and Left move between the columns, and the session verbs act on the session selected on the right. Below 60 terminal columns only the focused column shows (Refs [#10754](https://github.com/bobmatnyc/trusty-tools/issues/10754))

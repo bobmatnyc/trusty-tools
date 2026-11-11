@@ -31,7 +31,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/architect-watchdog.py` | Classifies the Architect session as dead, frozen, silent or ok and decides on a debounced relaunch. Pure logic, no I/O. The poller runs it every cycle. A relaunch needs `scripts/session-relaunch.sh`, which is not shipped yet, so a dead Architect is reported and not restarted. |
 | `scripts/pm_intake.py` | PM-message intake: `notify` appends one line to `inbox/pm-messages.jsonl`, and the pure classifier marks each message wake or hold (decision, blocker, head and done wake; ack, progress and fyi wait for the digest) and drops a repeat within 30 minutes. Its cursor verbs (`unread`, `ack`, `ack-through`, `push-due`) need `pm_cursor.py`, which lands in P4a; until then they fail with `ModuleNotFoundError`. The shipped `fleet-poll.py` does not load it yet (#10161, P1b). |
 | `scripts/pm-digest.py` | Prints what the PMs sent since the last wake in at most 20 lines, and builds the one-line wake digest. Loads `pm_intake.py` by path, so it ships beside it. |
-| `scripts/pm-notify.sh` | The command a PM runs to queue a message for the Architect: `pm-notify.sh --kind K --session S "text"`. Runs `pm_intake.py notify`. |
+| `scripts/pm-notify.sh` | The command a PM runs to queue a message for the Architect: `pm-notify.sh --kind K --session S "text"`. Runs `pm_intake.py notify`. Exit codes (#10723): `0` with `queued-local <id>: ... delivery unconfirmed` means the line was appended and read back but the Architect has not acked it, so do not resend; `2` means nothing was appended (bad arguments or a failed write). `pm_intake.py receipt <id>` exits `0` with `acked <id>: <outcome>` once `inbox/pm-acks.jsonl` holds an ack, `3` while it does not, and `2` for an unknown id. No exit status reports delivery without that ack. |
 | `scripts/notify-supervisor.sh` | Claude Code `Notification` hook receiver: appends one line to `inbox/events.jsonl` and always exits 0. A fallback only: `tm hook` already writes the same events, so `tm fleet init` seeds it and wires no hook. |
 | `scripts/quiet-sessions.py` | Reads the quiet-session list (idle alerts dropped) and matches throwaway test-fixture session names (`exited` alerts dropped). |
 | `scripts/start-fleet-poll.sh` | Starts the poller in its own tmux session unless it is already running. Arguments pass through. |
@@ -43,6 +43,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/ctx-watch.py` | Evaluates the clear signals S1 to S5 per session from `local/il-schedule.json`, the IL session record and the session transcript, and prints the clear candidates. Sends no keys. Loads `self-ctx.py` by path. The poller runs it every cycle; a dry run writes no state. |
 | `scripts/il-cron.py` | Runs the Intent Ledger cadence jobs in `local/il-schedule.json` when due, retries a failed job up to 3 times, then raises one alert. Loads `ctx-watch.py` by path. Its `prune` job runs `il-archive.py`. The poller runs it every cycle; the jobs run at most once an hour. |
 | `scripts/self-clear.sh` | The Architect's gated self-refresh (#10599). A dry run unless `--live`. It refuses unless `datg.py --project local/il ready` exits 0, checked before and again after the idle wait. Idle means `turn-active.py` exits 10 (any other code, 3 included, is busy), `architect-idle.py` passes and the box is empty or a suggestion, three checks in a row. `--socket PATH --target PANE` pins every tmux call to one server and pane; without them it uses `TMUX_SOCKET`, the server it runs inside, or tmux's default socket, and exits 5 when that is not a live socket. Before every key and each idle wait it checks the pane still belongs to `ARCHITECT_SESSION` (exit 6 if not). Then it sends `/clear` and a resume prompt. `--locked` means the poller holds an flock on `inbox/self-clear.pid` for the whole run; a run without it refuses (exit 7) while that lock is held. |
+| `scripts/datg_guards.py` | The #10800 guards (DOC-87): `datg.py` dispatches must name a work card `Card: <code>-Txx` and a closed card must cite evidence (G2; shadow warnings in `guards.jsonl` until `config.guard_mode` is `enforce`, which binds only the Python `datg.py` writer and hook: the Rust `tm dbatg` writer does not apply G2 yet); the digest and `datg.py guards` flag a CLAUDE.md-imported policy file whose threshold differs from a current owner ruling (G1), idle ready work, and checker/repair work displacing delivery (G3). |
 | `scripts/datg_ready.py` | `datg.py ready [--json]`, the clear gate: exit 0 only when the session's task and next are set and not placeholders (`needs owner input:` counts as one), an active goal or open task item exists, `owed` and `crons` are recorded (`none` counts), and the last write is fresh (the `fresh` window); a HOLD alone never passes. 1 = not ready, one plain reason per line; 2 = the ledger is missing or unreadable. `--json` prints `{ready, reasons, written_at, hold}`. |
 | `scripts/state-archive.py` | Moves old handoff sections out of `local/state.md` into `local/state-archive.md`, keeping the newest 3 and the `NEXT IDS` line. `--dry-run` writes nothing. The shipped poller does not load it yet (#10161, P1b). |
 | `scripts/architect-idle.py` | Exits 0 when the Architect's newest transcript ends on a finished assistant turn: the transcript half of `self-clear.sh`'s idle test. Loads `self-ctx.py` by path. The shipped poller does not load it yet (#10161, P1b). |
@@ -51,6 +52,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/dashboard-db.py` | The Architect's command line over the store: `get`, `list`, `set`, `update`, `delete`, `batch`, `next`, `create`, `tally` and the reply `footer`. The footer's tailnet link needs `tailnet_url` (see Configuration). |
 | `scripts/il-archive.py` | Archives done dashboard items and closed PM-ledger lines to trusty-memory, then removes them. Live by default; `--dry-run` writes nothing. |
 | `scripts/stale-tasks.py` | Lists open, unparked dashboard tasks with no activity for `--hours` (default 24). Read only. |
+| `scripts/watch-apply.py` | Applies the owner's `watch_changes` requests (Watch / Unwatch from the dashboard) with one `tm fleet project add\|remove` per key (`TM_BIN` overrides `tm`), and marks each `applied` on exit 0, else `failed` with the CLI's message. A key that is not a registry key is refused without a CLI call. `tm-fleet-check` runs it at the start of each pass. |
 | `schemas/dashboard/` | The draft 2020-12 JSON Schemas for each dashboard collection. Seeded beside `scripts/`, where `dashboard_schema.py` reads them. |
 | `scripts/dashboard-serve.py`, `scripts/dashboard_http.py`, `scripts/dashboard_page.py`, `scripts/dashboard_docs.py` | The dashboard server on `127.0.0.1:7890`, loopback only, behind a Host/Origin guard. `dashboard-serve.py` is the command and the server; `dashboard_http.py` the request handler and guard; `dashboard_page.py` the shim injected into the page, the page revision and the reader-library lookup; `dashboard_docs.py` the reader's path rules. `/config.json` serves `tailnet_url` and `/api/user` falls back to `owner_name` from `local/architect.json`. `--mode session --root DIR` serves one PM session's Intent Ledger instead. |
 | `scripts/dashboard_il.py`, `scripts/dashboard_media.py`, `scripts/dashboard_viz.py`, `scripts/dashboard_harness.py` | The server's read-only views: every Intent Ledger (`/api/il`), the media library (`/media`), the Visualize data (`/api/viz`) and the Live snapshot (`/api/harness`). A missing input reads as a listed missing source, never an error. |
@@ -70,7 +72,7 @@ account or session name is built in.
 | `ARCHITECT_SESSION` | `tm-architect` | The Architect's tmux session: the only pane the poller sends keys to. |
 | `ARCHITECT_POLL_SESSION` | `<ARCHITECT_SESSION>-poll` | The poller's own tmux session. The dashboard never lists it as a managed session. |
 | `ARCHITECT_INBOX_DIR` | `<this dir>/inbox` | `events.jsonl`, `alerts.jsonl`, `poll-state.json`, `poll.log`, `poll.lock`, and the `il-cron.py` and `ctx-watch.py` state. |
-| `ARCHITECT_QUIET_SESSIONS_FILE` | `<this dir>/quiet-sessions.txt` | One session name per line; `#` starts a comment. |
+| `ARCHITECT_QUIET_SESSIONS_FILE` | `<this dir>/local/quiet-sessions.txt` | One session name per line; `#` starts a comment. The same file `tm architect quiet` and the Rust poller read. |
 | `ARCHITECT_PROJECT_DIR` | `~/trusty-mpm-projects/architect` | The Architect's project, used to find its transcripts. |
 | `CLAUDE_CONFIG_DIR` | `~/.trusty-tools/trusty-mpm/claude-config` | The Claude Code config dir trusty-mpm launches under. |
 | `SELF_CTX_DIR` | `<CLAUDE_CONFIG_DIR>/projects/<slug of ARCHITECT_PROJECT_DIR>` | Transcript directory override. |
@@ -239,8 +241,8 @@ ships to every project.
 Edit `$dir/CLAUDE.md` for this user. Do not copy it from elsewhere.
 
 - Replace `<Name>` with the user's name for the relay marker.
-- Fill the watch set: one line per PM session, with its tmux session name,
-  project path and goal.
+- Add each watched project with `tm fleet project add <project>`; the
+  project must be in the registry first. Goals go in `local/goals.md`.
 - Set the cadence only if the owner wants a value other than the default.
 
 The files under `local/` stay as seeded. The Architect fills them. Commit
@@ -335,3 +337,28 @@ The script is idempotent. Pass `--interval N` to change the cycle length.
   `local/actions.md`.
 
 When a step fails, report it to the owner. Do not start a second Architect.
+
+## Intent Ledger notification results
+
+`datg.py update --esc architect` and escalation entries in `datg.py batch`
+save the ledger before calling the notification sender. Exit 0 means every
+requested sender call succeeded (or no notification was requested); it does
+not prove the Architect read or acted on a message. Exit 2 retains the existing
+invalid-write contract. Exit 3 means **the ledger was saved, but notification
+queueing was not confirmed for every escalation** (#10718).
+
+The stdout item IDs are unchanged. On exit 3, stderr lists each escalation's
+sender outcome, including successful sends in a mixed batch. The `esc` field
+records requested routing; it is not proof of delivery. Nonzero sender exits
+and timeouts can occur after queueing, so reconcile the intake/log before
+retrying only the needed notification. Do not replay the saved update or batch:
+it may contain committed additions and successful notifications. No automatic
+retry or rollback occurs. Notification failures still append `notify_failure`
+when the log is writable.
+
+This result contract covers the Python CLI and its bundled script copies. The
+Rust ledger writer records `escalated` events and journals outbox records with
+the ledger commit instead of invoking this Python sender. Its exit 3 covers
+lock/I/O errors, not this Python partial-success contract. Outbox commit alone
+is not evidence of Architect ingestion or acknowledgement; migration to that
+writer requires separate delivery verification.

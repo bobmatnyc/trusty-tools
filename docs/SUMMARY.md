@@ -6,6 +6,7 @@
 
 - [Getting Started](./getting-started/README.md)
   - [Install and Run `tm`](./getting-started/install-and-run-tm.md)
+  - [Let `tm` Create Your Project Clones](./getting-started/canonical-clones.md)
   - [Claude MPM and Trusty MPM](./getting-started/claude-mpm-vs-trusty-mpm.md)
 - [Workspace Package and Code Map](./reference/crate-map.md)
 - [Documentation Layout and Authority](./reference/documentation-layout.md)

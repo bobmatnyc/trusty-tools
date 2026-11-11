@@ -98,12 +98,12 @@ impl IndexFeedReport {
     /// What: the pass ran into `index` with no pass-level reason; no path
     /// of this source's ledger failed this pass with anything but a probe
     /// failure; and the offline read finds none of them unreadable or owing
-    /// a push or a remove. The pass's own errors are needed: after an
-    /// identity change (F14) a refused re-push or old-revision remove
-    /// leaves the earlier acknowledgement at matching bytes, which the
-    /// offline read treats as settled. A failed or owed probe does not
-    /// block (acknowledgement, as before S12). Errors on other paths stay
-    /// in `errors`.
+    /// a push or a remove. After an identity change (F14) the offline read
+    /// owes a re-push for an acknowledgement under the older identity,
+    /// since the pass journals the identity it read (#10876); the pass's
+    /// own errors still block as defense in depth. A failed or owed probe
+    /// does not block (acknowledgement, as before S12). Errors on other
+    /// paths stay in `errors`.
     /// Test: `unrelated_unreadable_concept_does_not_block_publication`,
     /// `refused_put_of_own_entity_blocks_publication`,
     /// `identity_change_with_refused_own_put_blocks_publication`,
@@ -310,9 +310,9 @@ fn fold(
     // An unreadable coverage claims nothing and carries a reason, so
     // `acknowledged` is false (fail closed).
     // #10746 S12: every error this pass raised on one of this source's paths
-    // blocks, except a probe failure (acknowledgement, as before S12). The
-    // offline `blocking` alone misses a refused re-push after an identity
-    // change (F14).
+    // blocks, except a probe failure (acknowledgement, as before S12).
+    // #10876: the offline `blocking` now sees a journaled identity change;
+    // this clause stays as defense in depth.
     let (cov, mut blocked, reason) = match read {
         Ok(st) => {
             let mut blocked = st.blocking;
@@ -360,3 +360,9 @@ mod tests;
 #[cfg(test)]
 #[path = "okg_feed_lock_tests.rs"]
 mod lock_tests;
+
+// #10876: offline reads after a daemon identity change, each read through a
+// fresh `KbStore` so no pass error in memory can mask the result.
+#[cfg(test)]
+#[path = "okg_feed_identity_tests.rs"]
+mod identity_tests;

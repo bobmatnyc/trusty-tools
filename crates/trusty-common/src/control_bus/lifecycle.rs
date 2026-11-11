@@ -55,6 +55,25 @@ pub enum HarnessSource {
     Analyze,
 }
 
+impl HarnessSource {
+    /// The wire string for this source (`"agents"`, `"mpm"`, `"code"`,
+    /// `"analyze"`).
+    ///
+    /// Why: a counter keyed by source (`trusty-events`' `by_source`, #10906)
+    ///      needs the string serde writes without serialising, and a match
+    ///      outside this crate would need a wildcard arm for
+    ///      `#[non_exhaustive]`.
+    /// Test: `super::tests::source_and_direction_keys_match_their_serde_tags_10906`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HarnessSource::Agents => "agents",
+            HarnessSource::Mpm => "mpm",
+            HarnessSource::Code => "code",
+            HarnessSource::Analyze => "analyze",
+        }
+    }
+}
+
 /// Real-time lifecycle events streamed to UI clients across all harnesses.
 ///
 /// Why: A single tagged enum keeps wire-format evolution tractable —

@@ -650,3 +650,115 @@ fn c142_adopt_refusals_change_nothing() {
     );
     assert_eq!(read(&root, "notes/alpha.md"), edited);
 }
+
+/// Why: criterion 142 under owner ruling D64 — a hashless event that lives
+/// only in frontmatter is history and counts in `history`, on both the
+/// verification axis and `revision_state`. An event in frontmatter and in
+/// the record counts once; a frontmatter event carrying a `hash` key is
+/// not hashless and stays uncounted.
+/// What: three hand-written concepts with no record lines but one, read
+/// before and after a `verify` with the current hash.
+/// Test: self-contained.
+#[test]
+fn c142_frontmatter_only_hashless_events_count_as_history() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("kb");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let fm = "verified:\n  - { by: human:old, at: 2026-01-01T00:00:00Z }\n  - { by: human:jo, at: 2026-02-01T00:00:00Z }\n";
+    let both = "verified:\n  - { by: human:jo, at: 2026-02-01T00:00:00Z }\n";
+    let hashed = "verified:\n  - { by: human:jo, at: 2026-02-01T00:00:00Z, hash: abc }\n";
+    for (name, verified) in [("fm", fm), ("both", both), ("hashed", hashed)] {
+        let text = format!("---\ntype: Note\n{verified}---\nBody.\n");
+        std::fs::write(root.join(format!("{name}.md")), text).unwrap();
+    }
+    let rec = root.join("_sources/verification/both.jsonl");
+    std::fs::create_dir_all(rec.parent().unwrap()).unwrap();
+    std::fs::write(
+        rec,
+        "{\"by\":\"human:jo\",\"at\":\"2026-02-01T00:00:00Z\"}\n",
+    )
+    .unwrap();
+    let state = IndexStateDir::new(t.path().join("machine"));
+    let read = |name: &str| {
+        let b = Bundle::open(&root).unwrap().0;
+        let axis = b.verification_state(&id(name)).unwrap();
+        let rs = b.revision_state(&id(name), &state, INDEX, &live()).unwrap();
+        assert_eq!(rs.verification, axis, "{name}: both readers agree");
+        axis
+    };
+    let un = |history| VerificationState::Unverified { history };
+    assert_eq!(read("fm"), un(2), "frontmatter-only hashless events count");
+    assert_eq!(read("both"), un(1), "an event in both places counts once");
+    assert_eq!(
+        read("hashed"),
+        un(0),
+        "a hashed frontmatter event is not hashless"
+    );
+    let mut b = Bundle::open(&root).unwrap().0;
+    let h = content_hash(&b.get(&id("fm")).unwrap());
+    let v = Verification {
+        by: Actor::Human("jo".into()),
+        at: instant("2026-11-04T12:00:00Z"),
+        stale_after: None,
+    };
+    b.verify_confirmed(&id("fm"), v, &h, HumanConfirmation::explicit())
+        .unwrap();
+    assert!(
+        matches!(
+            read("fm"),
+            VerificationState::Verified {
+                human: true,
+                events: 1,
+                history: 2
+            }
+        ),
+        "{:?}",
+        read("fm")
+    );
+}
+
+// #10873: criterion 142 under D64 had no test for malformed or duplicate
+// frontmatter `verified` entries.
+/// Why: a hand-edited `verified` list can repeat an event or hold entries
+/// that are not events. A repeat must not inflate `history`, and a
+/// malformed entry must neither count nor make the read fail.
+/// What: one concept whose list holds a hashless event twice, a second
+/// event, an entry with no `at`, an entry with a non-string `by`, an entry
+/// with a non-string `at` and a bare string; both readers report history 2.
+/// A `verified` value that is neither a list nor a mapping counts nothing.
+/// Test: self-contained.
+#[test]
+fn c142_malformed_and_duplicate_frontmatter_events_count_once() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("kb");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let mixed = "verified:\n  - { by: human:old, at: 2026-01-01T00:00:00Z }\n  \
+                 - { by: human:old, at: 2026-01-01T00:00:00Z }\n  \
+                 - { by: human:jo, at: 2026-02-01T00:00:00Z }\n  \
+                 - { by: human:no-at }\n  \
+                 - { by: 7, at: 2026-03-01T00:00:00Z }\n  \
+                 - { by: human:ann, at: [2026] }\n  \
+                 - just-a-string\n";
+    let scalar = "verified: yesterday\n";
+    for (name, verified) in [("mixed", mixed), ("scalar", scalar)] {
+        let text = format!("---\ntype: Note\n{verified}---\nBody.\n");
+        std::fs::write(root.join(format!("{name}.md")), text).unwrap();
+    }
+    let state = IndexStateDir::new(t.path().join("machine"));
+    let read = |name: &str| {
+        let b = Bundle::open(&root).unwrap().0;
+        let axis = b.verification_state(&id(name)).unwrap();
+        let rs = b.revision_state(&id(name), &state, INDEX, &live()).unwrap();
+        assert_eq!(rs.verification, axis, "{name}: both readers agree");
+        axis
+    };
+    let un = |history| VerificationState::Unverified { history };
+    assert_eq!(
+        read("mixed"),
+        un(2),
+        "a repeated event counts once; malformed entries count nothing"
+    );
+    assert_eq!(read("scalar"), un(0), "a scalar `verified` counts nothing");
+}

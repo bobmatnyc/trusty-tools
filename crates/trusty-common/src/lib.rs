@@ -118,9 +118,9 @@ pub mod chat;
 pub mod claude_config;
 
 /// Which Claude models reject `temperature` (#9318); shared by every request
-/// builder that sets it.
+/// builder that sets it, in this crate and downstream (#10939).
 #[cfg(any(feature = "bedrock", feature = "inference-client"))]
-pub(crate) mod claude_temperature;
+pub mod claude_temperature;
 
 /// Codex CLI MCP-server registration (`~/.codex/config.toml`).
 ///
@@ -449,6 +449,14 @@ pub mod server;
 /// Test: `cargo test -p trusty-common --features memory-rpc`.
 #[cfg(feature = "memory-rpc")]
 pub mod memory_rpc;
+
+/// The wire vocabulary of trusty-console's own Unix socket (#10902).
+///
+/// Why: the TUI in trusty-mpm decodes the console's `console.health` and
+/// `console.fleet_status` answers and has no Cargo edge on trusty-console.
+/// What: method names and serde types only, so it is ungated.
+/// Test: `cargo test -p trusty-common --features uds console_rpc`.
+pub mod console_rpc;
 
 /// The active-project residency contract shared by every producer and
 /// consumer daemon (#7087 slice 1a).

@@ -87,17 +87,24 @@ pub(crate) async fn launch_bare_tui() -> anyhow::Result<()> {
 /// `tm tui`: the console home screen, whose MPM tile opens the projects view.
 ///
 /// Why: #9556 pins an explicit `--url`; #10491 opens `tm tui` on the home
-/// screen. Moved out of `main.rs` (#10476), which sits at the SLOC cap.
+/// screen. Moved out of `main.rs` (#10476), which sits at the SLOC cap; it
+/// takes the whole `Command::Tui` so a new flag never grows `main.rs` (#10966).
 /// Test: terminal glue, exercised by launching the TUI.
-pub(crate) async fn run_tui(
-    url: Option<String>,
-    interval_ms: u64,
-    single_pane: bool,
-    no_mouse: bool,
-) -> anyhow::Result<()> {
+pub(crate) async fn run_tui(tui: crate::cli::Command) -> anyhow::Result<()> {
+    let crate::cli::Command::Tui {
+        url,
+        interval_ms,
+        single_pane,
+        no_mouse,
+        architect_store,
+    } = tui
+    else {
+        anyhow::bail!("run_tui needs `tm tui` arguments");
+    };
     let client = trusty_mpm::tui::client_for(url.as_deref())?;
     let mouse = trusty_mpm::tui::terminal::mouse_from_env(no_mouse);
-    trusty_mpm::tui::home::run_tui_entry(client, interval_ms, single_pane, mouse).await
+    trusty_mpm::tui::home::run_tui_entry(client, interval_ms, single_pane, mouse, architect_store)
+        .await
 }
 
 /// True when `argv` is exactly a bare `tm projects` invocation (#2118).

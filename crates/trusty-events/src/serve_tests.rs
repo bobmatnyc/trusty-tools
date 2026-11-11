@@ -26,6 +26,7 @@ fn event() -> HarnessEvent {
         payload: HarnessPayload::Ping,
         id: EventId::new(),
         parent_id: None,
+        project: None,
     }
 }
 
@@ -671,4 +672,122 @@ async fn a_pump_whose_reader_left_stops_reading_the_log() {
     );
     // `second` has a writer thread waiting; let it go.
     let _reader = std::fs::File::open(&second.0);
+}
+
+// ─── #10901: events.health ───────────────────────────────────────────────────
+
+/// One unary request over a socket pair served by `handle_connection`; the
+/// response frame as JSON.
+async fn unary(shared: &Arc<Connection>, method: &str) -> serde_json::Value {
+    let (mut client, served) = UnixStream::pair().expect("socket pair");
+    let shared = Arc::clone(shared);
+    tokio::spawn(async move { handle_connection(served, &shared).await });
+    let request = serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": {}});
+    let mut line = serde_json::to_vec(&request).expect("encode request");
+    line.push(b'\n');
+    client.write_all(&line).await.expect("write request");
+    frame(&mut BufReader::new(client)).await
+}
+
+#[tokio::test]
+async fn events_health_reports_the_bus_counters() {
+    let bus = Arc::new(EventBus::new(EventBusConfig { capacity: 2 }));
+    let dup = event();
+    bus.ingest(dup.clone());
+    bus.ingest(dup);
+    bus.ingest(event());
+    bus.ingest(event());
+    let shared = Arc::new(Connection::new(Arc::clone(&bus), limits(4, 3)));
+    // One open subscription is one live receiver; wait for it to attach.
+    let _stream = subscribe(&shared, SubscribeParams::default()).await;
+    tokio::time::timeout(BOUND, async {
+        while bus.metrics().subscribers == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the subscription attaches");
+    bus.ingest(event());
+
+    let response = unary(&shared, trusty_common::control_bus::METHOD_EVENTS_HEALTH).await;
+    assert!(response.get("error").is_none(), "{response}");
+    let health: trusty_common::control_bus::EventsHealth =
+        serde_json::from_value(response["result"].clone()).expect("an EventsHealth reply");
+    assert_eq!(
+        (health.status.as_str(), health.service.as_str()),
+        ("ok", "trusty-events")
+    );
+    assert_eq!(health.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        (
+            health.ingested,
+            health.deduped,
+            health.evicted,
+            health.log_dropped
+        ),
+        (4, 1, 2, 0)
+    );
+    assert_eq!((health.subscribers, health.head_seq), (1, 4));
+}
+
+#[tokio::test]
+async fn an_unknown_method_still_answers_an_rpc_error() {
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let shared = Arc::new(Connection::new(bus, limits(4, 3)));
+    let response = unary(&shared, "events.nope").await;
+    assert!(response.get("result").is_none(), "{response}");
+    assert_eq!(
+        response["error"]["code"],
+        trusty_common::uds::server::CODE_METHOD_NOT_FOUND,
+        "{response}"
+    );
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("events.health"),
+        "known methods are listed: {message}"
+    );
+    // #10906
+    assert!(
+        message.contains("events.console_metrics"),
+        "known methods are listed: {message}"
+    );
+}
+
+/// #10906: `events.console_metrics` answers a `ConsoleMetricsReport` whose
+/// `metrics` counts accepted events only: a dedup hit is not counted, and an
+/// event refused after `close` is not either.
+#[tokio::test]
+async fn events_console_metrics_reports_by_source_messages_and_by_project() {
+    use trusty_common::console_metrics::{
+        ConsoleMetricsReport, ServiceHealth, check_by_convention,
+    };
+    use trusty_common::control_bus::METHOD_EVENTS_CONSOLE_METRICS;
+
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let mut attributed = event();
+    attributed.project = Some("acme/web".into());
+    bus.ingest(attributed.clone());
+    bus.ingest(attributed);
+    bus.ingest(event());
+    let _ = bus.close();
+    bus.ingest(event());
+    let shared = Arc::new(Connection::new(Arc::clone(&bus), limits(4, 3)));
+
+    let response = unary(&shared, METHOD_EVENTS_CONSOLE_METRICS).await;
+    assert!(response.get("error").is_none(), "{response}");
+    let report: ConsoleMetricsReport =
+        serde_json::from_value(response["result"].clone()).expect("a ConsoleMetricsReport");
+    assert_eq!(
+        (report.service_id.as_str(), report.status),
+        ("trusty-events", ServiceHealth::Ok)
+    );
+    assert_eq!(report.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(report.metrics_schema_version, 1);
+    let m = &report.metrics;
+    assert_eq!(m["events"], 2, "{m}");
+    assert_eq!(m["by_source"]["code"]["by_domain"]["ping"], 2, "{m}");
+    assert_eq!(m["messages"], serde_json::json!({"sent": 0, "received": 0}));
+    assert_eq!(m["by_project"]["acme/web"]["events"], 1, "{m}");
+    assert_eq!(m["by_project"]["unattributed"]["events"], 1, "{m}");
+    assert_eq!(check_by_convention(m), Ok(()));
 }

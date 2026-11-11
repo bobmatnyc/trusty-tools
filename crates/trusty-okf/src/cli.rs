@@ -153,7 +153,7 @@ pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
 }
 
 /// The binary's entry: [`run`], plus (#10746 S10 fix) Ctrl-C handling. In
-/// an `import run` call, SIGINT cancels the run: the in-flight worker or
+/// an `import run` or (#10818) `import plan` call, SIGINT cancels the run: the in-flight worker or
 /// adapter request fails `cancelled`, that child's process group is killed
 /// and reaped, later items are skipped `cancelled`, and the report is
 /// printed (exit 3). S9+S10 merge (Architect ruling 2c9381bdbdc9): one
@@ -161,7 +161,8 @@ pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
 /// adapter, with or without `--worker`. Only `src/main.rs` calls this.
 /// Test: `c103_sigint_cancels_the_cli_and_reaps_the_worker`,
 /// `c97_sigint_cancels_an_adapter_import_and_reaps_its_group`,
-/// `sigint_cancels_an_adapter_import_with_a_worker`.
+/// `sigint_cancels_an_adapter_import_with_a_worker`,
+/// `sigint_cancels_an_adapter_plan_and_reaps_its_group`.
 pub fn run_binary(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let ctx = Ctx {
         #[cfg(feature = "search-feed")]
@@ -196,7 +197,7 @@ fn run_ctx(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write, ctx: &Ct
     };
     let verb: Vec<&str> = parsed.pos.iter().map(String::as_str).take(2).collect();
     let result = match verb.as_slice() {
-        ["import", "plan", ..] => import_cmd::plan(&parsed, out),
+        ["import", "plan", ..] => import_cmd::plan(&parsed, out, ctx),
         ["import", "run", ..] => import_cmd::run(&parsed, out, ctx),
         ["import", "status", ..] => import_cmd::status(&parsed, out, ctx),
         ["feed", ..] => feed_verb(&parsed, out, ctx),
