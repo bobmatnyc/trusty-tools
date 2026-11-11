@@ -18,7 +18,9 @@ What: build() returns {generated_at, since, tokens, projects, ctx_hours, il_clos
              `session` are recorded; `goal` is inferred from the ledger's session.
 Goal key: a goal id ("G01") when the session's goal field starts with one, else that field's text when it has no id, else
 the goals collection's `sessions` list names the session, else "" (unattributed). Nothing is written; every file is opened read-only.
-Test: tests/test_dashboard_viz.py
+Item project (#11047): with_projects() gives GET /api/items a computed data.project per item: tm's session list first
+(tm_session_projects), else the session-name rule (_stem). It is never stored.
+Test: tests/test_dashboard_viz.py, tests/test_dashboard_item_project.py
 """
 import json
 import os
@@ -28,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 import architect_config
 import dashboard_il
 import dashboard_projects
+import dashboard_watch
 
 GOAL_ID = re.compile(r"^(G[0-9a-f]{2})\b")
 WORKTREE = re.compile(r"--claude-worktrees-.*$")
@@ -52,7 +55,84 @@ def _bodies(store, coll):
 
 
 def _stem(name):
-    return re.sub(r"-\d\d$", "", re.sub(r"^tm-", "", name or ""))
+    """The session-name rule: strip a leading "tm-" and one trailing "-<digits>" (D80, #11047: any digit count)."""
+    return re.sub(r"-\d+$", "", re.sub(r"^tm-", "", name or ""))
+
+
+_SESSION_MEMO = [(None, {})]   # #11047: one (stat key, answer) pair, swapped whole; the page polls items every few seconds
+GONE_STATES = ("deleted", "decommissioned")
+
+
+def _sig(path):
+    try:
+        st = os.stat(path)
+        return (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (path, None, None)
+
+
+def tm_session_projects(root=None):
+    """{tmux session name: project} from tm's session list; {} when the list is absent or unreadable.
+
+    Why: #11047 (D80): the Decisions pane sorts by project, and tm knows each session's project better than its name.
+    What: reads <root>/session-manager/sessions.json (the store `tm session list` reads; root = mpm_root()). A record's
+    project is the project-paths.json alias whose path is the record's workspace_path (else cwd), else the repo of its
+    "owner/repo" source_id. A record with neither is left out, so the caller uses the name rule. Live records win over
+    deleted or decommissioned ones of the same name. Memoised on both files' mtime and size.
+    Test: tests/test_dashboard_item_project.py
+    """
+    root = root or dashboard_projects.mpm_root()
+    paths = (os.path.join(root, "session-manager", "sessions.json"), os.path.join(root, "project-paths.json"))
+    key = tuple(_sig(p) for p in paths)
+    memo = _SESSION_MEMO[0]
+    if memo[0] == key:
+        return memo[1]
+    out = {}
+    try:
+        with open(paths[0], encoding="utf-8") as f:
+            recs = json.load(f).get("sessions") or {}
+        try:
+            with open(paths[1], encoding="utf-8") as f:
+                aliases = [r for r in json.load(f) if isinstance(r, dict) and isinstance(r.get("alias"), str) and isinstance(r.get("path"), str)]
+        except (OSError, ValueError, TypeError):
+            aliases = []   # no project map: source_id still names the repo
+        recs = [r for r in (recs.values() if isinstance(recs, dict) else recs) if isinstance(r, dict)]
+        for r in sorted(recs, key=lambda r: r.get("state") in GONE_STATES):
+            name, ws = r.get("tmux_name"), r.get("workspace_path") or r.get("cwd")
+            if not isinstance(name, str) or not name or name in out:
+                continue
+            hit = next((a["alias"] for a in aliases if isinstance(ws, str) and dashboard_watch.same_path(a["path"], ws)), None)
+            src = r.get("source_id")
+            repo = src.rsplit("/", 1)[-1].strip() if isinstance(src, str) and "/" in src else ""
+            if hit or repo:
+                out[name] = hit or repo
+    except Exception:  # noqa: BLE001 - #11047: an unreadable list falls back to the name rule, never fails the response
+        out = {}
+    _SESSION_MEMO[0] = (key, out)
+    return out
+
+
+def item_project(session, listed):
+    """An item's project from its session name: tm's session list (`listed`) first, else _stem; None for no session."""
+    s = session.strip() if isinstance(session, str) else ""
+    if not s:
+        return None
+    return listed.get(s) or _stem(s) or None
+
+
+def with_projects(docs, listed=None):
+    """Copies of item docs whose data carries the computed `project` (#11047); a doc with no project is unchanged.
+    `listed` defaults to tm_session_projects(); a failing lookup gives {} and every item still comes back."""
+    if listed is None:
+        try:
+            listed = tm_session_projects()
+        except Exception:  # noqa: BLE001 - #11047: never hide items because the session list failed
+            listed = {}
+    out = []
+    for d in docs:
+        p = item_project((d.get("data") or {}).get("session"), listed)
+        out.append(dict(d, data=dict(d["data"], project=p)) if p else d)
+    return out
 
 
 def session_goal(name, sessions, goals):
