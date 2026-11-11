@@ -19,7 +19,7 @@ What: build() returns {generated_at, since, tokens, projects, ctx_hours, il_clos
 Goal key: a goal id ("G01") when the session's goal field starts with one, else that field's text when it has no id, else
 the goals collection's `sessions` list names the session, else "" (unattributed). Nothing is written; every file is opened read-only.
 Item project (#11047): with_projects() gives GET /api/items a computed data.project per item: tm's session list first
-(tm_session_projects), else the session-name rule (_stem). It is never stored.
+(tm_session_projects), else the session-name rule (_name_rule). It is never stored.
 Test: tests/test_dashboard_viz.py, tests/test_dashboard_item_project.py
 """
 import json
@@ -55,7 +55,12 @@ def _bodies(store, coll):
 
 
 def _stem(name):
-    """The session-name rule: strip a leading "tm-" and one trailing "-<digits>" (D80, #11047: any digit count)."""
+    return re.sub(r"-\d\d$", "", re.sub(r"^tm-", "", name or ""))
+
+
+# #11047: Decisions' own D80 name rule; Visualize keeps _stem's two-digit match
+def _name_rule(name):
+    """The session-name rule: strip a leading "tm-" and one trailing "-<digits>", any digit count (D80)."""
     return re.sub(r"-\d+$", "", re.sub(r"^tm-", "", name or ""))
 
 
@@ -113,11 +118,11 @@ def tm_session_projects(root=None):
 
 
 def item_project(session, listed):
-    """An item's project from its session name: tm's session list (`listed`) first, else _stem; None for no session."""
+    """An item's project from its session name: tm's session list (`listed`) first, else _name_rule; None for no session."""
     s = session.strip() if isinstance(session, str) else ""
     if not s:
         return None
-    return listed.get(s) or _stem(s) or None
+    return listed.get(s) or _name_rule(s) or None
 
 
 def with_projects(docs, listed=None):
