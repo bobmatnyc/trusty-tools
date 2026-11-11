@@ -60,6 +60,10 @@ pub enum ControlItem {
     LegacyAgentsFlag,
     /// The vault was migrated to the deny model. Per vault (no key).
     DenyMigrated,
+    /// The key is push-only for agents (#10998): every agent read of its
+    /// value is refused as for [`ControlItem::AgentDeny`]; a push to a sync
+    /// target may honour it ([`is_push_only`]). Per key.
+    PushOnly,
 }
 
 impl ControlItem {
@@ -69,8 +73,65 @@ impl ControlItem {
             Self::AgentDeny => "agent_deny",
             Self::LegacyAgentsFlag => "agents_may_use",
             Self::DenyMigrated => "agent_deny_migration",
+            Self::PushOnly => "agent_push_only",
         }
     }
+}
+
+/// Whether `key` in `vault` carries the push-only mark (#10998).
+///
+/// Why: Architect decision 2026-11-11 02:35Z — an agent's copy of a
+/// Keychain item lands push-only: no agent may read it, but the sync-target
+/// push (#10999, `server/sync_target.rs`) may send it on.
+/// What: the [`ControlItem::PushOnly`] item's presence. A backend that holds
+/// no control item holds no mark (`false`). A failed lookup is the error,
+/// never "not marked"; a caller that pushes on the mark must treat an error
+/// as a refusal. Reads no value and does not migrate the vault.
+/// Test: `push_only_mark_is_read_and_fails_closed`.
+pub fn is_push_only(
+    backend: &dyn SecretBackend,
+    vault: &VaultName,
+    key: &SecretKey,
+) -> Result<bool, SecretsError> {
+    if !backend.holds_agent_controls() {
+        return Ok(false);
+    }
+    backend.control_item(ControlItem::PushOnly, vault, Some(key))
+}
+
+/// Whether agents are refused `key`'s value: a deny or the push-only mark.
+///
+/// What: the deny first; with no deny, [`is_push_only`]. Either lookup's
+/// error is returned (fail closed). The backend must hold control items.
+/// Test: `push_only_mark_is_read_and_fails_closed`.
+pub(crate) fn agent_blocked(
+    backend: &dyn SecretBackend,
+    vault: &VaultName,
+    key: &SecretKey,
+) -> Result<bool, SecretsError> {
+    // #10998: a push-only key is denied to every agent read.
+    Ok(
+        backend.control_item(ControlItem::AgentDeny, vault, Some(key))?
+            || backend.control_item(ControlItem::PushOnly, vault, Some(key))?,
+    )
+}
+
+/// Write (`present`) or remove `key`'s push-only mark, after `audit` records
+/// it as an agent refusal (`agents_allowed: false` when written).
+///
+/// What: as [`change_deny`], for [`ControlItem::PushOnly`].
+/// Test: `copy_named_by_agent_of_a_keychain_item_lands_push_only`.
+pub fn change_push_only(
+    backend: &dyn SecretBackend,
+    vault: &VaultName,
+    key: &SecretKey,
+    present: bool,
+    audit: Option<&DenyAudit>,
+) -> Result<(), SecretsError> {
+    if let Some(record) = audit {
+        record(vault, key, present)?;
+    }
+    backend.set_control_item(ControlItem::PushOnly, vault, Some(key), present)
 }
 
 /// How a vault written before #10386 moves to the deny model.
@@ -156,7 +217,8 @@ pub fn migrate_vault(
 /// keys follow `mode`'s default: open under [`AgentDenyMigration::OpenAll`],
 /// denied under [`AgentDenyMigration::KeepClosed`]. Otherwise
 /// [`migrate_vault`], then the deny item's presence. Any error is returned,
-/// never read as "not denied".
+/// never read as "not denied". #10998: a push-only key counts as denied
+/// (`agent_blocked`).
 /// Test: `agent_denied_fails_closed_when_the_lookup_fails`,
 /// `agent_denied_without_controls_follows_the_mode`.
 pub fn agent_denied(
@@ -171,7 +233,7 @@ pub fn agent_denied(
         return Ok(mode == AgentDenyMigration::KeepClosed);
     }
     migrate_vault(backend, index, vault, mode, audit)?;
-    backend.control_item(ControlItem::AgentDeny, vault, Some(key))
+    agent_blocked(backend, vault, key)
 }
 
 #[cfg(test)]

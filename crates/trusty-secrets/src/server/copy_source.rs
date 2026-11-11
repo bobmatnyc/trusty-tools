@@ -35,7 +35,7 @@ use super::ticket_checks::TicketCall;
 use crate::api::methods::{CopyRequest, CopyResponse, CopySource, KeychainLabel};
 use crate::api::{BackendId, SecretKey, VAULT_PREFIX, VaultName};
 use crate::store::keychain_item::read_keychain_item;
-use crate::store::{Capabilities, SecretBackend, SecretStore};
+use crate::store::{Capabilities, ControlItem, SecretBackend, SecretStore};
 
 /// A named copy's source, as each of its audit records names it (#10998).
 ///
@@ -74,7 +74,7 @@ pub struct CopySourceAudit {
 /// `copy_named_owner_vault_key_lands_under_a_new_name`,
 /// `copy_named_refusals_are_typed_and_write_nothing`,
 /// `copy_named_by_agent_of_a_denied_source_or_destination_is_refused`,
-/// `copy_named_by_agent_of_a_keychain_item_lands_denied`,
+/// `copy_named_by_agent_of_a_keychain_item_lands_push_only`,
 /// `copy_named_carries_a_vault_source_deny_to_the_destination_key`,
 /// `copy_named_with_unwritable_audit_writes_nothing`.
 pub(crate) fn copy_named(
@@ -216,8 +216,8 @@ struct Ends<'a> {
 /// through `state.keychain_item_read` under the Keychain time limit; a miss
 /// is [`ErrorKind::NotFound`]. It is written with `set_for_agent` or `set`,
 /// and dropped here. #10998 fix round 1: an agent's copy of a Keychain item
-/// lands denied — see [`agent_item_write`].
-/// Test: `copy_named_by_agent_of_a_keychain_item_lands_denied`.
+/// lands push-only for agents — see [`agent_item_write`].
+/// Test: `copy_named_by_agent_of_a_keychain_item_lands_push_only`.
 fn move_one(
     state: &State,
     source: &CopySource,
@@ -266,26 +266,29 @@ fn move_one(
     written.map(drop).map_err(ErrorKind::from)
 }
 
-/// Write an agent's copy of a Keychain item under an agent deny (#10998).
+/// Write an agent's copy of a Keychain item as push-only for agents
+/// (#10998).
 ///
 /// Why: code-critic HIGH on f11dc5c68f — an item the agent copied landed
 /// open, so the same agent could grant and resolve it, or pipe it through
 /// `tm secrets exec`, and read any login-Keychain item; the exec scrubber
-/// redacts only the literal value. A copy is the user's action, not a
-/// release to agents.
-/// What: the destination key's deny is written first (recorded, through
-/// [`SecretStore::write_deny`]); a destination that cannot hold a deny is
-/// [`ErrorKind::Unsupported`] and nothing is written. Then the value is
+/// redacts only the literal value. Architect decision 2026-11-11 02:35Z: the
+/// key lands push-only, not denied, so the owner's trigger case (an agent
+/// copies a token and pushes it to a sync target, #10999) stays open to
+/// agents while every agent read is refused.
+/// What: the destination key's push-only mark is written first (recorded,
+/// through `SecretStore::put_control`); a destination that cannot hold it
+/// is [`ErrorKind::Unsupported`] and nothing is written. Then the value is
 /// written with `set`, since `set_for_agent` would refuse the key it just
-/// denied; the destination was checked open before the read. A person lifts
-/// the deny with `set_agents_may_use`.
-/// Test: `copy_named_by_agent_of_a_keychain_item_lands_denied`.
+/// marked; the destination was checked open before the read. A person lifts
+/// the mark with `set_agents_may_use` (`allowed: true`).
+/// Test: `copy_named_by_agent_of_a_keychain_item_lands_push_only`.
 fn agent_item_write(
     store: &SecretStore,
     to: (&VaultName, &SecretKey),
     value: &crate::api::SecretValue,
 ) -> Result<(), ErrorKind> {
-    store.write_deny(to.0, to.1)?;
+    store.put_control(ControlItem::PushOnly, to.0, to.1)?;
     store
         .set(to.0, to.1, value)
         .map(drop)

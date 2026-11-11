@@ -1410,16 +1410,36 @@ caller's project vault. The rules:
 - An agent caller is `agent_key_denied` when the vault source key or the
   destination key is denied, before any value is read. A person's copy of a
   denied vault key carries the deny to the destination key's name first.
-- An agent's copy of a Keychain item lands **denied to agents**: the
-  destination key's deny is written (with its write-ahead record) before
-  the value, and a destination that cannot hold a deny is `unsupported`.
-  Why: an item copied open could be granted, resolved or piped through
-  `tm secrets exec` by the same agent, so any login-Keychain item would be
-  one copy away from an agent transcript; the exec scrubber redacts only
-  the literal value (code-critic review of #10998). A copy is the user's
-  action, not a release to agents; a person lifts the deny with
-  `secrets.set_agents_may_use`. An agent's copy of an undenied trusty
-  vault key stays open, as that key already was.
+- An agent's copy of a Keychain item lands **push-only for agents**, a
+  per-key mark beside the agent deny (Architect decision 2026-11-11 02:35Z,
+  confidence MEDIUM). The mark is written, with a write-ahead
+  `secrets.set_agents_may_use` record (`agents_allowed: false`), before the
+  value; a destination that cannot hold it is `unsupported`. It is stored
+  like the deny — Keychain service `trusty-secrets.agents-push-only`,
+  account `<vault>/<key>`; the file backend's `push-only/` directory — so it
+  survives restarts, and `secrets.list` reports it as `agents_push_only`
+  (`tm secrets list` suffixes the key `(push-only for agents)`), never a
+  value.
+  - For a caller under Claude Code a push-only key is denied on every
+    value-yielding path: `grant` (so `tm secrets exec`), `resolve`, a local
+    `copy` with it as the source, a named `copy` with it as the vault
+    source, and an agent `set` over it (`agent_key_denied`). The console
+    bridge reaches the same checks. A lookup failure refuses.
+  - A person's own use is unaffected. `set_agents_may_use` `allowed: true`
+    lifts the mark and any deny; `delete` removes it.
+  - Why: code-critic HIGH on the first #10998 cut — an item an agent
+    copied open could be granted, resolved or piped through
+    `tm secrets exec` by the same agent, so any login-Keychain item was one
+    copy from an agent transcript; the exec scrubber redacts only the
+    literal value. A full deny would also block the owner's trigger case,
+    an agent copying a token so it can push it to a sync target; the mark
+    keeps that case agent-only. The push side honours the mark through
+    `trusty_secrets::store::is_push_only` (#10999); until then a push stays
+    operator-only as before.
+  - Every other copy keeps its rule: a denied source's deny is carried as a
+    deny, and an agent's copy of an undenied trusty vault key stays open, as
+    that key already was. An agent may not copy over a push-only key; a
+    person may.
 - A deny carried for a person's copy stays on the destination key if the
   value read then fails; it fails closed and is lifted the same way.
 - While a timed-out read of a Keychain item still runs, a new read of that

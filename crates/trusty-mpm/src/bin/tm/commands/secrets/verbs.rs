@@ -96,7 +96,10 @@ pub(super) async fn set(
 
 /// `list`: the key names of the project scope, then the owner scope.
 ///
-/// Test: `list_prints_key_names_only`.
+/// What: one line per key; #10998: a key push-only for agents is suffixed
+/// `(push-only for agents)`.
+/// Test: `list_prints_key_names_only`,
+/// `list_marks_a_push_only_key`.
 pub(super) async fn list(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<()> {
     let scopes: ScopesResponse = ctx.call(method::SCOPES, Value::Null).await?;
     for scope in scopes.scopes {
@@ -108,7 +111,13 @@ pub(super) async fn list(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<(
             writeln!(out, "  (no keys)")?;
         }
         for meta in listed.keys {
-            writeln!(out, "  {}", meta.name)?;
+            // #10998: the mark is metadata, never a value.
+            let mark = if meta.agents_push_only {
+                " (push-only for agents)"
+            } else {
+                ""
+            };
+            writeln!(out, "  {}{mark}", meta.name)?;
         }
     }
     Ok(())

@@ -135,9 +135,8 @@ impl SecretStore {
         if !self.backend.holds_agent_controls() {
             return Ok(self.migration == AgentDenyMigration::OpenAll);
         }
-        self.backend
-            .control_item(ControlItem::AgentDeny, vault, Some(key))
-            .map(|denied| !denied)
+        // #10998: a push-only key is denied to agents too.
+        agent_deny::agent_blocked(self.backend.as_ref(), vault, key).map(|blocked| !blocked)
     }
 
     /// This store, reading CLI-backed values through `cache` (#7520), as
@@ -343,6 +342,8 @@ impl SecretStore {
         for meta in &mut keys {
             // #9070: the backend's item, never the index row's field.
             meta.agents_may_use = self.may_use_migrated(vault, &meta.name)?;
+            // #10998: the mark is shown, never a value.
+            meta.agents_push_only = self.is_push_only(vault, &meta.name)?;
         }
         Ok(keys)
     }
@@ -431,6 +432,10 @@ impl SecretStore {
         if backend.control_item(ControlItem::AgentDeny, vault, Some(key))? {
             change_deny(backend, vault, key, false, self.deny_audit.as_ref())?;
         }
+        // #10998: a deleted key keeps no push-only mark either.
+        if agent_deny::is_push_only(backend, vault, key)? {
+            agent_deny::change_push_only(backend, vault, key, false, self.deny_audit.as_ref())?;
+        }
         backend.set_control_item(ControlItem::LegacyAgentsFlag, vault, Some(key), false)
     }
 
@@ -468,37 +473,47 @@ impl SecretStore {
         if source.agents_may_use(from.0, from.1)? {
             return Ok(());
         }
-        self.write_deny(to.0, to.1)
+        self.put_control(ControlItem::AgentDeny, to.0, to.1)
     }
 
-    /// Write `key`'s agent deny here (recorded first), before a copy writes
-    /// its value.
+    /// Write `key`'s agent deny or push-only mark here (recorded first),
+    /// before a copy writes its value.
     ///
-    /// What: [`SecretsError::Unsupported`] when this backend cannot hold a
-    /// deny; otherwise the vault is migrated and the deny written through
-    /// [`change_deny`]. #10998: also the deny an agent's copy of a Keychain
-    /// item lands under.
+    /// What: `item` is [`ControlItem::AgentDeny`] or
+    /// [`ControlItem::PushOnly`]. [`SecretsError::Unsupported`] when this
+    /// backend cannot hold it; otherwise the vault is migrated and the item
+    /// written through [`change_deny`] or
+    /// [`change_push_only`](agent_deny::change_push_only). #10998: the
+    /// push-only mark is what an agent's copy of a Keychain item lands under.
     /// Test: `server_copy_of_a_denied_key_carries_the_deny`,
-    /// `copy_named_by_agent_of_a_keychain_item_lands_denied`.
-    pub(crate) fn write_deny(
+    /// `copy_named_by_agent_of_a_keychain_item_lands_push_only`.
+    pub(crate) fn put_control(
         &self,
+        item: ControlItem,
         vault: &VaultName,
         key: &SecretKey,
     ) -> Result<(), SecretsError> {
         if !self.backend.holds_agent_controls() {
             return Err(SecretsError::Unsupported {
                 backend: self.backend.id().to_string(),
-                operation: ControlItem::AgentDeny.operation(),
+                operation: item.operation(),
             });
         }
         self.migrate(vault)?;
-        change_deny(
-            self.backend.as_ref(),
-            vault,
-            key,
-            true,
-            self.deny_audit.as_ref(),
-        )
+        let (backend, audit) = (self.backend.as_ref(), self.deny_audit.as_ref());
+        match item {
+            ControlItem::PushOnly => agent_deny::change_push_only(backend, vault, key, true, audit),
+            _ => change_deny(backend, vault, key, true, audit),
+        }
+    }
+
+    /// Whether `key` in `vault` is push-only for agents (#10998).
+    ///
+    /// What: [`agent_deny::is_push_only`] on this store's backend. An error
+    /// is returned, never read as "not marked".
+    /// Test: `push_only_mark_is_read_and_fails_closed`.
+    pub fn is_push_only(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        agent_deny::is_push_only(self.backend.as_ref(), vault, key)
     }
 
     /// Allow (`true`) or deny (`false`) agents an indexed key (DOC-74 §15.8).
@@ -543,7 +558,13 @@ impl SecretStore {
             };
         }
         self.backend
-            .set_control_item(ControlItem::AgentDeny, vault, Some(key), !allowed)
+            .set_control_item(ControlItem::AgentDeny, vault, Some(key), !allowed)?;
+        // #10998: allowing agents also lifts the push-only mark.
+        if allowed {
+            self.backend
+                .set_control_item(ControlItem::PushOnly, vault, Some(key), false)?;
+        }
+        Ok(())
     }
 
     /// [`Self::set_agents_may_use`], running `before` under the same index

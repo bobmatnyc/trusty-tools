@@ -592,6 +592,26 @@ async fn list_prints_key_names_only() {
     assert!(!outcome.out.contains(HEAD) && !outcome.out.contains("chars"));
 }
 
+/// #10998: a key push-only for agents (as an agent's copy of a Keychain
+/// item lands) is marked in `list`, with no value.
+#[tokio::test]
+async fn list_marks_a_push_only_key() {
+    let h = harness().await;
+    run(&h, VALUE, &["set", "A_KEY"]).await;
+    let (vault, key) = (
+        VaultName::new(PROJECT_VAULT).expect("vault"),
+        SecretKey::new("A_KEY").expect("key"),
+    );
+    h.keychain
+        .set_control_item(ControlItem::PushOnly, &vault, Some(&key), true)
+        .expect("mark");
+    let outcome = run(&h, "", &["list"]).await;
+    assert_eq!(
+        outcome.out,
+        "trusty/acme/web (Project):\n  A_KEY (push-only for agents)\ntrusty/acme (Owner):\n  (no keys)\n"
+    );
+}
+
 /// #7521: `remove` deletes from the project scope only, and a key it does
 /// not hold exits 1 naming the key.
 #[tokio::test]

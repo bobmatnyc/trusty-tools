@@ -114,6 +114,11 @@ pub struct KeyMeta {
     /// (DOC-74 §15.8). #10386: `true` unless the backend holds the key's
     /// agent deny item; default `true`. Never taken from the index row (#9070).
     pub agents_may_use: bool,
+    /// Whether the key is push-only for agents (#10998): no agent may read
+    /// it, a push may send it. The backend's mark, never the index row;
+    /// `false` from a server older than the mark.
+    #[serde(default)]
+    pub agents_push_only: bool,
 }
 
 /// `secrets.list` request.

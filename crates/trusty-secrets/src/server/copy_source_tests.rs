@@ -349,7 +349,7 @@ async fn copy_named_refusals_are_typed_and_write_nothing() {
 /// agent caller: a vault source denied to agents is refused before its
 /// value is read and no deny is carried; a destination key denied to agents
 /// is refused before the item is read; an undenied copy works, its record
-/// carries `default_policy`, and (fix round 1) the copied item lands denied.
+/// carries `default_policy`, and (fix round 1) the copied item lands push-only.
 /// Red when either deny check is absent.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -406,7 +406,7 @@ async fn copy_named_by_agent_of_a_denied_source_or_destination_is_refused() {
     assert_eq!(held(&fx.spare, PROJECT_VAULT, "COPIED"), None);
     assert_eq!(held(&fx.keychain, PROJECT_VAULT, "DENIED_DEST"), None);
     // #10998 fix round 1: no deny was carried for a refused key; the one
-    // deny written is the agent's Keychain copy landing denied.
+    // deny written is the agent's Keychain copy landing push-only.
     assert!(before.is_empty(), "{before:?}");
     assert_eq!(
         deny_changes(&fx),
@@ -426,14 +426,15 @@ async fn copy_named_by_agent_of_a_denied_source_or_destination_is_refused() {
     );
 }
 
-/// Why: #10998 fix round 1 (code-critic HIGH) — an agent that copies a
-/// Keychain item must not then read it: the key lands under an agent deny,
-/// written (and recorded) before the value, so the agent's grant of it is
-/// `agent_key_denied` and no token is minted. Red when the copy writes the
+/// Why: #10998 fix round 1 (code-critic HIGH; Architect 2026-11-11 02:35Z)
+/// — an agent that copies a Keychain item must not then read it: the key
+/// lands push-only for agents (no deny), written and recorded before the
+/// value; `list` shows the mark, and the agent's grant is
+/// `agent_key_denied` with no token minted. Red when the copy writes the
 /// key open.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn copy_named_by_agent_of_a_keychain_item_lands_denied() {
+async fn copy_named_by_agent_of_a_keychain_item_lands_push_only() {
     let fx = fixture();
     let (mut state, grants) = state_with(&fx, agent_procs());
     state.keychain_item_read = fake_item;
@@ -457,6 +458,12 @@ async fn copy_named_by_agent_of_a_keychain_item_lands_denied() {
         grant_params(&fx, me(), &["ITEM_COPY"]),
     )
     .await;
+    let listed = ok(call(
+        socket,
+        method::LIST,
+        json!({"project": fx.project(), "vault": PROJECT_VAULT}),
+    )
+    .await);
     server.stop().await;
 
     assert_eq!(ok(copied), json!({"copied": ["ITEM_COPY"], "failed": []}));
@@ -464,16 +471,14 @@ async fn copy_named_by_agent_of_a_keychain_item_lands_denied() {
         held(&fx.keychain, PROJECT_VAULT, "ITEM_COPY").as_deref(),
         Some(SENTINEL_VALUE)
     );
-    assert!(
-        fx.keychain
-            .control_item(
-                ControlItem::AgentDeny,
-                &vault(PROJECT_VAULT),
-                Some(&key("ITEM_COPY"))
-            )
-            .unwrap(),
-        "the copied item lands denied to agents"
-    );
+    let (web, name) = (vault(PROJECT_VAULT), key("ITEM_COPY"));
+    let control = |item| fx.keychain.control_item(item, &web, Some(&name)).unwrap();
+    assert!(control(ControlItem::PushOnly), "lands push-only");
+    assert!(!control(ControlItem::AgentDeny), "not denied");
+    assert_eq!(listed["keys"][0]["name"], "ITEM_COPY");
+    assert_eq!(listed["keys"][0]["agents_push_only"], true);
+    assert_eq!(listed["keys"][0]["agents_may_use"], false);
+    assert!(!listed.to_string().contains(SENTINEL_VALUE));
     assert_eq!(
         fixed_error(&grant, method::GRANT),
         ErrorKind::AgentKeyDenied
@@ -484,6 +489,161 @@ async fn copy_named_by_agent_of_a_keychain_item_lands_denied() {
         deny_changes(&fx),
         [(Some("ITEM_COPY".to_string()), Some(false))]
     );
+}
+
+/// Seed `name` in the project vault and mark it push-only for agents.
+fn seed_push_only(fx: &Fixture, name: &str) {
+    seed(fx, name, SENTINEL_VALUE, true);
+    fx.keychain
+        .set_control_item(
+            ControlItem::PushOnly,
+            &vault(PROJECT_VAULT),
+            Some(&key(name)),
+            true,
+        )
+        .unwrap();
+}
+
+/// Why: #10998 (Architect 2026-11-11 02:35Z) — for an agent caller a
+/// push-only key behaves as denied on every value-yielding path: `grant`
+/// (so `tm secrets exec`), `resolve` of a token a person minted, a local
+/// `copy` from the project vault, a named `copy` with it as the vault
+/// source, and an agent `set` over it. A person's grant and resolve still
+/// work. Red when the mark is not read.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_only_key_is_refused_to_every_agent_read_and_open_to_a_person() {
+    let fx = fixture();
+    seed_push_only(&fx, "PUSHED");
+    let procs = procs_with_me();
+    let state = named_state(&fx, Arc::clone(&procs));
+    let server = fx.start_state(state).await;
+    let socket = &fx.settings.socket;
+    let token = granted(&fx, me(), &["PUSHED"]).await;
+    let person = ok(call(socket, method::RESOLVE, resolve_params(&token, "PUSHED")).await);
+    procs.set_agent(10);
+    let resolve = call(socket, method::RESOLVE, resolve_params(&token, "PUSHED")).await;
+    let grant = call(socket, method::GRANT, grant_params(&fx, me(), &["PUSHED"])).await;
+    let local = call(
+        socket,
+        method::COPY,
+        json!({"project": fx.project(), "from_backend": "keychain",
+            "to_backend": "spare", "keys": ["PUSHED"]}),
+    )
+    .await;
+    let named = call(
+        socket,
+        method::COPY,
+        named_params(
+            &fx,
+            "keychain",
+            "spare",
+            vault_source(PROJECT_VAULT, "PUSHED"),
+            &["OUT"],
+        ),
+    )
+    .await;
+    let set = call(
+        socket,
+        method::SET,
+        json!({"project": fx.project(), "vault": PROJECT_VAULT, "key": "PUSHED",
+            "value": OPEN_VALUE}),
+    )
+    .await;
+    server.stop().await;
+
+    assert_eq!(
+        person["value"], SENTINEL_VALUE,
+        "a person's use is unaffected"
+    );
+    for (response, name) in [
+        (&resolve, method::RESOLVE),
+        (&grant, method::GRANT),
+        (&named, method::COPY),
+        (&set, method::SET),
+    ] {
+        assert_eq!(
+            fixed_error(response, name),
+            ErrorKind::AgentKeyDenied,
+            "{name}"
+        );
+        assert_no_value(response);
+    }
+    assert_eq!(ok(local), json!({"copied": [], "failed": ["PUSHED"]}));
+    let local_reason = copy_records(&fx)
+        .into_iter()
+        .find(|r| r.key == Some(key("PUSHED")))
+        .and_then(|r| r.reason.map(|reason| reason.as_str().to_owned()));
+    assert_eq!(local_reason.as_deref(), Some("agent_key_denied"));
+    assert_eq!(held(&fx.spare, PROJECT_VAULT, "PUSHED"), None);
+    assert_eq!(held(&fx.spare, PROJECT_VAULT, "OUT"), None);
+    assert_eq!(
+        held(&fx.keychain, PROJECT_VAULT, "PUSHED").as_deref(),
+        Some(SENTINEL_VALUE),
+        "the agent's set wrote nothing"
+    );
+}
+
+/// Why: #10998 — a person lifts the push-only mark (and any deny) with
+/// `set_agents_may_use` `allowed: true`; agents may then use the key.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn person_lifts_push_only_with_set_agents_may_use() {
+    let fx = fixture();
+    seed_push_only(&fx, "PUSHED");
+    let server = fx.start_state(named_state(&fx, procs_with_me())).await;
+    let lifted = call(
+        &fx.settings.socket,
+        method::SET_AGENTS_MAY_USE,
+        json!({"project": fx.project(), "vault": PROJECT_VAULT, "key": "PUSHED",
+            "allowed": true}),
+    )
+    .await;
+    server.stop().await;
+
+    ok(lifted);
+    let store = SecretStore::new(
+        Arc::clone(&fx.keychain) as Arc<dyn SecretBackend>,
+        NamesIndex::at(&fx.settings.index_root),
+    );
+    let (web, name) = (vault(PROJECT_VAULT), key("PUSHED"));
+    assert!(matches!(store.is_push_only(&web, &name), Ok(false)));
+    assert!(matches!(store.agents_may_use(&web, &name), Ok(true)));
+}
+
+/// Why: #10998 Fail-Open Check — the mark's read API (#10999 calls it from
+/// `server/sync_target.rs`) reports the mark, reads `false` only where no
+/// control item can exist, and returns a failed lookup as an error; an
+/// agent's use of the key then fails too, never reads it open.
+/// Test: itself.
+#[test]
+fn push_only_mark_is_read_and_fails_closed() {
+    let fx = fixture();
+    seed_push_only(&fx, "PUSHED");
+    seed(&fx, "OPEN", OPEN_VALUE, true);
+    let (web, pushed, open) = (vault(PROJECT_VAULT), key("PUSHED"), key("OPEN"));
+    let backend: &dyn SecretBackend = fx.keychain.as_ref();
+    assert!(matches!(
+        crate::store::is_push_only(backend, &web, &pushed),
+        Ok(true)
+    ));
+    assert!(matches!(
+        crate::store::is_push_only(backend, &web, &open),
+        Ok(false)
+    ));
+    let bare = MemoryBackend::without_agent_controls();
+    assert!(matches!(
+        crate::store::is_push_only(&bare, &web, &pushed),
+        Ok(false)
+    ));
+    let store = SecretStore::new(
+        Arc::clone(&fx.keychain) as Arc<dyn SecretBackend>,
+        NamesIndex::at(&fx.settings.index_root),
+    );
+    assert!(matches!(store.agents_may_use(&web, &pushed), Ok(false)));
+    fx.keychain.fail_controls(true);
+    assert!(crate::store::is_push_only(backend, &web, &open).is_err());
+    assert!(store.agents_may_use(&web, &open).is_err());
 }
 
 /// Why: #10386's escape, renamed — a person's copy of a vault key denied to
