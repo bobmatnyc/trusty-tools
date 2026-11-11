@@ -43,7 +43,6 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit};
 use super::finish_teardown::{resolve_hnsw_swap, rollback_staged_corpus_swap};
 use super::hnsw_swap::{begin_staged_hnsw_swap, HnswSwapPaths};
 use super::progress::{ReindexProgress, ReindexStatus};
-use super::semaphore::index_cancel_flag;
 use super::staging::StagingResolution;
 use crate::core::registry::IndexHandle;
 
@@ -156,15 +155,16 @@ impl StagedRollback {
     /// What: rolls back the staged HNSW snapshot and the staging corpus
     /// (re-attach live or quarantine, then raise the generation), then clears
     /// `swap_abandoned`. A flag `Drop` could not read is set here first, under
-    /// the read lock. A delete that signalled the index's cancel flag is
-    /// waiting on the teardown lock this holds: the rollback then only takes
-    /// staging out, so it neither reopens live (which would recreate the data
-    /// directory the delete removes) nor bumps the identity the delete
-    /// retires. A failed bump leaves `swap_abandoned` set, so writes stay
-    /// refused until a restart. The permit and the teardown lock are released
-    /// when this returns.
+    /// the read lock. A delete waits on the teardown lock this holds, so it
+    /// runs only after the full rollback: a delete that completes closes the
+    /// reopened corpus, removes the data directory and retires the bumped
+    /// identity, and one that keeps the index finds live attached (#11022).
+    /// A failed bump leaves `swap_abandoned` set, so writes stay refused until
+    /// a restart. The permit and the teardown lock are released when this
+    /// returns.
     /// Test: `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`,
     /// `a_delete_during_a_dropped_runs_rollback_leaves_no_data_or_identity`,
+    /// `a_cancelled_rollback_whose_delete_keeps_the_index_leaves_it_attached`,
     /// `a_dropped_runs_rollback_whose_bump_fails_keeps_refusing_puts`.
     async fn roll_back(self) {
         let handle = &self.handle;
@@ -177,26 +177,15 @@ impl StagedRollback {
                 Some(flag)
             }
         };
-        // #10738: the delete signals before it waits on the teardown lock held here.
-        let cancel = index_cancel_flag(&handle.id);
         let reason = "the reindex task died mid-run (#10738)";
         let resolution = StagingResolution::Rollback {
             reason: reason.into(),
         };
-        if !cancel.load(Ordering::Acquire) {
-            resolve_hnsw_swap(handle, &handle.id, self.hnsw.as_ref(), &resolution).await;
-        }
+        // #11022: roll back in full even when a delete signalled cancel; three
+        // delete exits keep the index, and the teardown lock orders the delete after us.
+        resolve_hnsw_swap(handle, &handle.id, self.hnsw.as_ref(), &resolution).await;
         let settled = match &self.corpus_tmp {
             None => true,
-            Some(_) if cancel.load(Ordering::Acquire) => {
-                tracing::warn!(
-                    "reindex[{}]: index is being deleted; the dead run's staging \
-                     corpus is taken out and live is not reopened (#10738)",
-                    handle.id.0
-                );
-                drop(handle.indexer.write().await.take_corpus_store());
-                true
-            }
             Some(tmp) => rollback_staged_corpus_swap(handle, &handle.id, tmp, Some(reason)).await,
         };
         match abandoned {
