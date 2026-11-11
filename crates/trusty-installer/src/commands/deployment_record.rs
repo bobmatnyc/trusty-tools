@@ -398,7 +398,7 @@ pub fn refresh_digests(crate_name: &str) -> Result<(), String> {
 /// finding. A member of `expected` missing from the record is
 /// [`DriftKind::Unrecorded`]. Each recorded binary is checked for presence,
 /// digest and `--version`, each member's daemon for its running version, and
-/// the content verbs of `tm` and each [`CONTENT_CHECKS`] member.
+/// the content verbs of `tm` and each [`CONTENT_CHECKS`](super::content_step::CONTENT_CHECKS) member.
 /// Test: `deployment_record_tests.rs`.
 pub fn audit(
     load: &RecordLoad,
