@@ -240,3 +240,23 @@ fn history_snapshot_decodes_unknown_state_and_status_as_unknown() {
     assert_eq!((s.cpu_pct, s.rss_bytes), (Some(2.5), Some(9)));
     assert_eq!(back.schema_version, 1);
 }
+
+/// Why: the test above fails on whichever enum serde reaches first; this one
+/// pins `ServiceState` on its own (#10996).
+/// What: a history carrying only a transition with an unknown `to` decodes,
+/// and the unknown state reads as `Unknown`, never `Up`.
+/// Test: this test itself.
+#[test]
+fn service_state_decodes_an_unknown_spelling_as_unknown() {
+    let back: HistorySnapshot = serde_json::from_value(json!({
+        "transitions": [{
+            "service_id": "trusty-search",
+            "display_name": "Search",
+            "from": "up",
+            "to": "hibernating",
+            "at_unix": 7
+        }]
+    }))
+    .expect("an unknown state must not fail the whole answer");
+    assert_eq!(back.transitions[0].to, ServiceState::Unknown);
+}
