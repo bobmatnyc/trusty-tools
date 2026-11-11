@@ -172,7 +172,8 @@ def _quoted_in(quote, texts):
 
 
 def _name_word(w):
-    return bool(NAME_WORD.fullmatch(w)) and w[0].isupper()
+    """A capitalised name word; each part joined by `-`, `.` or `'` is capitalised too (Jean-Luc, O'Neil)."""
+    return bool(NAME_WORD.fullmatch(w)) and all(p[0].isupper() for p in re.split(r"[.'-]", w) if p)
 
 
 def owner_slot_ok(slot):
@@ -185,6 +186,7 @@ def owner_slot_ok(slot):
     names, i = 0, 0
     while i < len(toks):
         if toks[i] == "via" and i + 1 < len(toks) and _name_word(toks[i + 1]):
+            names += 1   # #10780 critic: a `via` target counts toward the three-name cap
             i += 2
             continue
         if REF_TOKEN.fullmatch(toks[i]):
