@@ -98,7 +98,7 @@ pub(crate) fn key_for_session<'r>(
 /// `init_seed_malformed_list_fails_and_is_left_unchanged`,
 /// `init_seed_write_failure_is_a_failed_step`,
 /// `init_seed_without_tmux_writes_an_empty_list`,
-/// `init_seed_keeps_the_claude_md_import_keys`,
+/// `init_seed_import_key_without_a_live_session_survives_init_reruns`,
 /// `init_seed_without_a_registry_writes_nothing`.
 pub(crate) fn steps(dir: &Path, watch: &InitWatch, own: &[&str]) -> Vec<Step> {
     let path = watch::path(dir);

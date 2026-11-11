@@ -173,20 +173,47 @@ fn init_seed_without_tmux_writes_an_empty_list() {
     }
 }
 
+/// One `init_full` run in `fx`'s Architect directory, seeded from this
+/// checkout's `content/`, with no launch and no tmux probe.
+fn init_run(fx: &Fixture, watch: Option<&InitWatch>) -> super::super::super::InitReport {
+    use trusty_mpm::core::content_source::Fetch;
+    use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
+    let home = fx.tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let checkout = trusty_common::test_harness::test_repo_root().expect("the checkout");
+    super::super::super::init_full(
+        &fx.dir(),
+        &home,
+        false,
+        super::super::super::tests::NO_TMUX,
+        None,
+        |_| ArchitectSeed::resolve_in(&checkout, None, None, Fetch::Never),
+        watch,
+    )
+    .unwrap()
+}
+
 #[test]
-fn init_seed_keeps_the_claude_md_import_keys() {
-    // An upgraded Architect's hand-written lines survive the seed.
+fn init_seed_import_key_without_a_live_session_survives_init_reruns() {
+    // #11012 Architect ruling: an Architect set up with no list and a
+    // hand-written `CLAUDE.md` line for `beta`, which has no live session,
+    // keeps `beta` when `init` re-runs, and after a second re-run.
     let fx = Fixture::new();
+    init_run(&fx, None);
+    assert!(!fx.list_path().exists(), "a pre-#11012 install has no list");
     let beta = fx.checkout("beta").display().to_string();
     fx.write_claude_md(&[&format!("- `tm-beta`: `{beta}`"), "- `tm-zeta`: `/zeta`"]);
     let watch = source(&fx, Some(vec![live("tm-alpha", None)]));
-    let out = steps(&fx.dir(), &watch, &OWN);
-    let report = text(&out);
+    let report = init_run(&fx, Some(&watch)).render();
     assert_eq!(fx.keys(), ["alpha", "beta"], "{report}");
+    assert!(report.contains("1 from live tm-* sessions"), "{report}");
     assert!(
         report.contains("skipped") && report.contains("tm-zeta"),
         "{report}"
     );
+    let report = init_run(&fx, Some(&watch)).render();
+    assert!(report.contains("init leaves it as is"), "{report}");
+    assert_eq!(fx.keys(), ["alpha", "beta"], "{report}");
 }
 
 #[tokio::test]
@@ -216,36 +243,36 @@ async fn init_seed_without_a_registry_writes_nothing() {
 }
 
 #[test]
-fn init_seed_runs_inside_init_before_the_launch() {
+fn init_full_seeds_the_list_before_the_launch_step_and_a_rerun_keeps_it() {
     // AC5: an Architect set up without a list gets one from a re-run of
-    // `init`; a second re-run changes nothing.
-    use trusty_mpm::core::content_source::Fetch;
-    use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
+    // `init`, in a step before the session start; the Architect's own
+    // sessions, the collector included, are neither watched nor reported; a
+    // second re-run changes nothing.
     let fx = Fixture::new();
-    let home = fx.tmp.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let dir = fx.dir();
-    let checkout = trusty_common::test_harness::test_repo_root().expect("the checkout");
-    let run = |watch: Option<&InitWatch>| {
-        super::super::super::init_full(
-            &dir,
-            &home,
-            false,
-            super::super::super::tests::NO_TMUX,
-            None,
-            |_| ArchitectSeed::resolve_in(&checkout, None, None, Fetch::Never),
-            watch,
-        )
-        .unwrap()
-    };
-    run(None);
+    init_run(&fx, None);
     assert!(!fx.list_path().exists(), "a pre-#11012 install has no list");
-    let watch = source(&fx, Some(sessions(&fx)));
-    let report = run(Some(&watch)).render();
-    assert!(report.contains("wrote watch list"), "{report}");
+    let mut live_now = sessions(&fx);
+    live_now.push(live("tm-architect-collector", Some(fx.dir())));
+    live_now.push(live("tm-architect-poll", Some(fx.dir())));
+    let watch = source(&fx, Some(live_now));
+    let report = init_run(&fx, Some(&watch));
+    let lines: Vec<String> = report.steps.iter().map(Step::render_line).collect();
+    let seeded = lines.iter().position(|l| l.contains("wrote watch list"));
+    let launch = lines
+        .iter()
+        .position(|l| l.contains("session start (--no-launch)"));
+    assert!(
+        matches!((seeded, launch), (Some(s), Some(l)) if s < l),
+        "{lines:?}"
+    );
+    let unwatched: Vec<&String> = lines.iter().filter(|l| l.contains("not watched")).collect();
+    assert!(
+        matches!(unwatched.as_slice(), [only] if only.contains("tm-stray")),
+        "{lines:?}"
+    );
     assert_eq!(fx.keys(), ["alpha", "beta"]);
     let bytes = std::fs::read(fx.list_path()).unwrap();
-    let report = run(Some(&watch)).render();
+    let report = init_run(&fx, Some(&watch)).render();
     assert!(report.contains("init leaves it as is"), "{report}");
     assert_eq!(std::fs::read(fx.list_path()).unwrap(), bytes);
 }

@@ -52,6 +52,7 @@ use anyhow::{Context, bail};
 use trusty_mpm::core::content_source::Fetch;
 use trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
 use trusty_mpm::core::project_skill_tier::architect_seed::{ArchitectSeed, ArchitectSeedError};
+use trusty_mpm::session_manager::architect_register::collector_session_name;
 
 use self::config::Edit;
 use self::session_name::SessionNames;
@@ -331,7 +332,8 @@ pub(crate) fn init(
     init_with_session(dir, home, launch, probe, None)
 }
 
-/// `init`, with the `--session` choice (#8878 R1); the production entry point.
+/// `init`, with the `--session` choice (#8878 R1); production runs
+/// [`init_full`] (#11012).
 ///
 /// Why: see [`session_name`]; the default run must stay what `init` was.
 /// What: the names are `session`, else the recorded `[supervisor] session`,
@@ -384,7 +386,7 @@ pub(crate) fn init_with_seed(
 /// What: after the fleet files and before the launch, so the Architect's
 /// first pass reads the seeded list, runs [`project::init_steps`]; `None`
 /// skips that step. Its FAILED line makes `init` exit 1.
-/// Test: `init_seed_runs_inside_init_before_the_launch`.
+/// Test: `init_full_seeds_the_list_before_the_launch_step_and_a_rerun_keeps_it`.
 pub(crate) fn init_full(
     dir: &Path,
     home: &Path,
@@ -462,7 +464,9 @@ pub(crate) fn init_full(
     report.steps.extend(seed::deploy(dir, &seed)?);
     // #11012: the watch list, seeded once from live sessions; never replaced.
     if let Some(watch) = watch {
-        let own = [names.architect(), names.poll()];
+        // #11012 review: the dashboard collector is the Architect's too.
+        let collector = collector_session_name(names.architect());
+        let own = [names.architect(), names.poll(), collector.as_str()];
         report.steps.extend(project::init_steps(dir, watch, &own));
     }
     // #10571/#10579: the Architect's own Intent Ledger and its hooks, on install and upgrade.
