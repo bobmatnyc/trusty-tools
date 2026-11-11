@@ -110,7 +110,10 @@ async fn session_archive_op_at(
 /// What: the finish (stop, move, stamp) runs in a spawned task, which
 /// completes whatever the caller does. Past `wait`, answers
 /// [`DaemonError::ServiceUnavailable`] naming the entry and its manifest.
-/// Test: `a_caller_timeout_still_stamps_the_archived_project`.
+/// Every error the task ends with is logged at `error!` with the session id
+/// and the entry, since a caller that timed out never sees it.
+/// Test: `a_caller_timeout_still_stamps_the_archived_project`,
+/// `a_detached_archive_failure_is_logged`.
 async fn run_detached(
     mgr: Arc<SessionManager>,
     registry: Arc<ProjectRegistry>,
@@ -118,7 +121,20 @@ async fn run_detached(
     wait: Duration,
 ) -> Result<SessionArchiveReport, DaemonError> {
     let entry = prepared.plan.entry.clone();
-    let task = tokio::spawn(async move { mgr.finish_archive(&registry, prepared).await });
+    let (session, logged_entry) = (prepared.plan.session_id.clone(), entry.clone());
+    let task = tokio::spawn(async move {
+        let done = mgr.finish_archive(&registry, prepared).await;
+        // #10991 critic HIGH: the 503 promised completion; a failure after it
+        // must still reach the operator.
+        if let Err(e) = &done {
+            tracing::error!(
+                session = %session,
+                entry = %logged_entry.display(),
+                "detached session archive failed: {e}"
+            );
+        }
+        done
+    });
     match tokio::time::timeout(wait, task).await {
         Ok(Ok(done)) => done.map_err(to_daemon_error),
         Ok(Err(join)) => Err(DaemonError::Internal(format!(
@@ -217,12 +233,19 @@ mod tests {
         assert!(matches!(err, DaemonError::InvalidRequest(_)), "{err}");
     }
 
-    /// #10991 critic MEDIUM: a caller whose wait runs out gets an answer
-    /// naming the entry, and the move still finishes and stamps the project.
-    /// A held registry lock pins the finish between move and stamp, so the
-    /// timeout lands in exactly the window the critic named.
-    #[tokio::test]
-    async fn a_caller_timeout_still_stamps_the_archived_project() {
+    /// A stopped session bound to project `widget`, whose directory is
+    /// `<scratch>/widget`; the archive root is `<scratch>/archive`.
+    struct Seeded {
+        _state: Arc<DaemonState>,
+        scratch: tempfile::TempDir,
+        project_dir: std::path::PathBuf,
+        archive_root: std::path::PathBuf,
+        mgr: Arc<SessionManager>,
+        registry: Arc<ProjectRegistry>,
+        id: ManagedSessionId,
+    }
+
+    async fn seeded_widget() -> Seeded {
         let state = isolated_state().await;
         let scratch = crate::test_support::hermetic_temp_dir();
         let project_dir = scratch.path().join("widget");
@@ -246,6 +269,116 @@ mod tests {
         record.repo_url = Some(repo.into());
         let mgr = state.session_manager().await;
         mgr.store.write().await.upsert(record).await.expect("seed");
+        Seeded {
+            _state: state,
+            scratch,
+            project_dir,
+            archive_root,
+            mgr,
+            registry,
+            id,
+        }
+    }
+
+    /// An `io::Write` over a shared buffer, for reading back `tracing` output.
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// #10991 delta-critic HIGH: an error the detached task ends with is
+    /// logged at ERROR with the session id and the entry, though the caller
+    /// stopped waiting. Runs on the current-thread runtime, so the
+    /// thread-local subscriber also covers the spawned task.
+    #[tokio::test]
+    async fn a_detached_archive_failure_is_logged() {
+        let s = seeded_widget().await;
+        let mut prepared = s
+            .mgr
+            .prepare_archive(
+                &s.registry,
+                &s.id,
+                ArchiveOptions::default(),
+                &s.archive_root,
+            )
+            .await
+            .expect("prepare");
+        // A stamp aimed at a project the registry lacks fails after the move.
+        prepared.mark_project = Some("ghost".into());
+        let entry_name = prepared
+            .plan
+            .entry
+            .file_name()
+            .expect("entry leaf")
+            .to_string_lossy()
+            .into_owned();
+        let capture = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .finish();
+        let _default = tracing::subscriber::set_default(subscriber);
+
+        let _ = run_detached(
+            Arc::clone(&s.mgr),
+            Arc::clone(&s.registry),
+            prepared,
+            Duration::ZERO,
+        )
+        .await;
+
+        let read =
+            || String::from_utf8_lossy(&capture.0.lock().expect("capture lock")).into_owned();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !read().contains("detached session archive failed") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the failure was never logged: {:?}",
+                read()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let logged = read();
+        assert!(logged.contains("ERROR"), "{logged}");
+        assert!(
+            logged.contains(&s.id.to_string()),
+            "no session id: {logged}"
+        );
+        assert!(logged.contains(&entry_name), "no entry: {logged}");
+        assert!(logged.contains("ghost"), "no cause: {logged}");
+    }
+
+    /// #10991 critic MEDIUM: a caller whose wait runs out gets an answer
+    /// naming the entry, and the move still finishes and stamps the project.
+    /// A held registry lock pins the finish between move and stamp, so the
+    /// timeout lands in exactly the window the critic named.
+    #[tokio::test]
+    async fn a_caller_timeout_still_stamps_the_archived_project() {
+        let Seeded {
+            _state,
+            scratch: _scratch,
+            project_dir,
+            archive_root,
+            mgr,
+            registry,
+            id,
+        } = seeded_widget().await;
 
         let prepared = mgr
             .prepare_archive(&registry, &id, ArchiveOptions::default(), &archive_root)
