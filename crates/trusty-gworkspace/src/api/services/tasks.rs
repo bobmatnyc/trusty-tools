@@ -156,7 +156,7 @@ async fn manage_tasks_at(client: &BaseClient, args: Value, base: &str) -> Result
         "list" => {
             // #10709: paging and visibility params, each sent only when supplied.
             let mut url = format!("{base}/lists/{tasklist}/tasks");
-            let query = list_query(&args);
+            let query = list_query(&args)?;
             if !query.is_empty() {
                 url = format!("{url}?{}", query.join("&"));
             }
@@ -316,27 +316,44 @@ async fn fetch_all_items(
 /// and deleted tasks excluded, and a caller could not page.
 /// What: Maps `show_hidden`, `show_deleted`, `max_results` and `page_token`
 /// to `showHidden`, `showDeleted`, `maxResults` and `pageToken`. A param
-/// absent from `args`, or of the wrong JSON type, adds nothing, so a bare
-/// `list` sends the same request as before. `page_token` is percent-encoded.
+/// absent from `args`, or JSON `null`, adds nothing, so a bare `list` sends
+/// the same request as before; so does an empty `page_token`. A present
+/// param of the wrong JSON type is an error naming the param and the type.
+/// `page_token` is percent-encoded.
 /// Test: `list_without_params_sends_no_query_10709`,
-/// `list_sends_each_param_only_when_set_10709`.
-fn list_query(args: &Value) -> Vec<String> {
+/// `list_sends_each_param_only_when_set_10709`,
+/// `list_rejects_mistyped_params_and_skips_absent_ones_10709`.
+fn list_query(args: &Value) -> Result<Vec<String>> {
+    // #10709: a mistyped param is an error, not a silent drop — dropping
+    // `show_hidden: "true"` returned a list the caller believed included
+    // hidden tasks.
+    let present = |arg: &str| args.get(arg).filter(|v| !v.is_null());
+    let mistyped =
+        |arg: &str, expected: &str| anyhow!("manage_tasks list: '{arg}' must be {expected}");
     let mut query = Vec::new();
     for (arg, param) in [
         ("show_hidden", "showHidden"),
         ("show_deleted", "showDeleted"),
     ] {
-        if let Some(flag) = args.get(arg).and_then(Value::as_bool) {
+        if let Some(v) = present(arg) {
+            let flag = v.as_bool().ok_or_else(|| mistyped(arg, "a JSON boolean"))?;
             query.push(format!("{param}={flag}"));
         }
     }
-    if let Some(n) = args.get("max_results").and_then(Value::as_u64) {
+    if let Some(v) = present("max_results") {
+        let n = v
+            .as_u64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| mistyped("max_results", "a positive integer"))?;
         query.push(format!("maxResults={n}"));
     }
-    if let Some(token) = opt_str(args, "page_token") {
-        query.push(format!("pageToken={}", percent_encode(token)));
+    if let Some(v) = present("page_token") {
+        let token = v.as_str().ok_or_else(|| mistyped("page_token", "a string"))?;
+        if !token.is_empty() {
+            query.push(format!("pageToken={}", percent_encode(token)));
+        }
     }
-    query
+    Ok(query)
 }
 
 /// Extract the next-page continuation token from a Tasks API list response.

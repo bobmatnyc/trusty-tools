@@ -76,14 +76,43 @@ async fn list_sends_each_param_only_when_set_10709() {
 }
 
 #[tokio::test]
-async fn list_ignores_empty_or_mistyped_params_10709() {
-    // An empty token and wrong JSON types add nothing, matching `opt_str`
-    // and the crate's other optional-arg readers.
+async fn list_rejects_mistyped_params_and_skips_absent_ones_10709() {
+    // A present param of the wrong JSON type is an error naming the param and
+    // the expected type, and no request reaches the API.
+    let cases = [
+        ("show_hidden", json!("true"), "'show_hidden' must be a JSON boolean"),
+        ("show_hidden", json!("yes"), "'show_hidden' must be a JSON boolean"),
+        ("show_deleted", json!(1), "'show_deleted' must be a JSON boolean"),
+        ("max_results", json!("ten"), "'max_results' must be a positive integer"),
+        ("max_results", json!(-5), "'max_results' must be a positive integer"),
+        ("max_results", json!(2.5), "'max_results' must be a positive integer"),
+        ("page_token", json!(42), "'page_token' must be a string"),
+    ];
+    for (arg, value, expected) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = BaseClient::for_test_with_token("a");
+        let mut args = json!({ "action": "list" });
+        args[arg] = value.clone();
+        let err = manage_tasks_at(&client, args, &server.uri())
+            .await
+            .expect_err(&format!("{arg}={value} must be rejected"));
+        assert!(err.to_string().contains(expected), "{arg}={value}: {err}");
+        // `expect(0)` is checked when the server drops; assert it here too.
+        server.verify().await;
+    }
+
+    // Absent, JSON `null` and an empty `page_token` add nothing.
     let args = json!({
         "action": "list",
         "page_token": "",
-        "show_hidden": "yes",
-        "max_results": "ten",
+        "show_hidden": null,
+        "show_deleted": null,
+        "max_results": null,
     });
     let (_, queries) = run_list("/lists/@default/tasks", json!({}), args).await;
     assert_eq!(queries, vec![None]);
