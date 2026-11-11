@@ -5,7 +5,7 @@
 //! `[supervisor] projects` allowlist, the project's `profile = "supervisor"`,
 //! and the launch stamp. Setting that up by hand meant editing the operator's
 //! config file; `tm fleet init` does it in one idempotent command.
-//! What: [`init_with_session`] creates the project (local git repo, no
+//! What: [`init_full`] creates the project (local git repo, no
 //! remote), writes the profile request and the allowlist entry — each an
 //! atomic write that keeps the rest of the file — seeds the fleet files
 //! ([`seed`]), and starts the Architect's tmux session and its poller
@@ -67,7 +67,7 @@ pub(crate) const DEFAULT_DIR: &str = "trusty-mpm-projects/architect";
 ///
 /// Why: the CLI entry point; every function below takes `home` so a test
 /// never touches the operator's `~/.trusty-mpm`.
-/// What: resolves the home and the directory, runs [`init_with_session`],
+/// What: resolves the home and the directory, runs [`init_full`],
 /// [`status()`] or [`relaunch::relaunch`], and prints the report. `init` and
 /// `relaunch` return an error, so exit 1, when a step failed; `status` does
 /// when the setup is incomplete.
@@ -378,7 +378,7 @@ pub(crate) fn init_with_seed(
     init_full(dir, home, launch, probe, session, load_seed, None)
 }
 
-/// [`init_with_seed`] that also seeds the watch list from `watch` (#11012).
+/// The `init` steps with the seed loader named, also seeding the watch list (#11012).
 ///
 /// Why: issue #11012 — installing the Architect creates `local/watch.json`.
 /// What: after the fleet files and before the launch, so the Architect's
