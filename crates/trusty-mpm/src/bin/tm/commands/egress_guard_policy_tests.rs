@@ -19,7 +19,7 @@ use trusty_channels::policy::{
     Channel, FileState, LoadReport, LoadRequest, MAX_FILE_BYTES, ProjectInput, merge_for,
     parse_host, parse_project_file,
 };
-use trusty_mpm::channels::readiness::{check, check_with};
+use trusty_mpm::channels::readiness::{KILL_MARGIN, check, check_with};
 use trusty_mpm::channels::snapshot::daemon_request;
 use trusty_mpm::core::channels_readiness::{HOOK_LOAD_LIMIT, NotReady};
 use trusty_mpm::core::channels_taint::{TaintMark, taint_dir, taint_managed_session};
@@ -321,33 +321,51 @@ fn file_not_in_effect_denies_a_gated_call() {
 }
 
 /// 🔴 #9741 B7: a load past its wait denies, and the deadline handed to the
-/// load (which kills its git) falls before the wait ends.
+/// load (which kills its git) falls the kill margin before the wait ends.
+/// #10735: the clock is read around `check_with` itself, not before the
+/// fixture, so a stalled runner cannot move the bound; the stall below
+/// stands in for one.
 #[test]
 fn load_past_deadline_denies() {
     let home = Home::tainted();
     let (tx, rx) = mpsc::channel();
+    let (release, held) = mpsc::channel::<()>();
     let limit = Duration::from_millis(200);
-    let started = Instant::now();
     let req = home.request();
     let report = bob_report(&home);
-    let verdict = gated(&home, move || {
-        check_with(
+    let mut bounds = None;
+    let verdict = gated(&home, || {
+        std::thread::sleep(Duration::from_millis(150));
+        let called = Instant::now();
+        let ready = check_with(
             move |_: &LoadRequest, deadline: Instant| {
                 let _ = tx.send(deadline);
-                std::thread::sleep(Duration::from_secs(2));
+                // Hung until the test lets go: no timing decides the wait.
+                let _ = held.recv();
                 report
             },
             req,
             limit,
-        )
+        );
+        bounds = Some((called, Instant::now()));
+        ready
     });
     assert_not_ready(&verdict, "did not finish within", "hung load");
     let deadline = rx.recv().expect("the loader ran");
+    let (called, returned) = bounds.expect("the check ran");
+    // KILL_MARGIN, halved for a wait shorter than twice it.
+    let margin = KILL_MARGIN.min(limit / 2);
+    assert!(margin > Duration::ZERO, "a kill margin is set");
     assert!(
-        deadline < started + limit,
+        deadline + margin <= returned,
         "git must be killed before the wait ends"
     );
-    assert!(started.elapsed() < Duration::from_secs(2), "it waited");
+    assert!(
+        deadline + margin >= called + limit,
+        "the deadline is set from the call"
+    );
+    // The loader is still held, so the verdict came without joining it.
+    drop(release);
 }
 
 /// 🔴 #9741 B7: a load that panics denies.
