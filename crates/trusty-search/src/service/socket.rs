@@ -97,6 +97,8 @@ pub const METHODS: &[&str] = &[
     reads::METHOD_INDEX_STATUS,
     reads::METHOD_INDEX_CONFIG_GET,
     reads::METHOD_CONFIG_GET,
+    // #10739
+    reads::METHOD_INDEX_PATH_ADMITS,
     reads::METHOD_CHUNKS_LIST,
     reads::METHOD_GRAPH_GET,
     reads::METHOD_GRAPH_STATS,
