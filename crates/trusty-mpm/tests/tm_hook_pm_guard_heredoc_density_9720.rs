@@ -13,8 +13,7 @@
 
 use crate::common;
 use crate::tm_hook_egress_guard_8454::{
-    REPRO_HANG_GUARD_9720, assert_repro_cpu_9720, time_eval_heredoc_repro_9720,
-    wait_within_9720,
+    REPRO_HANG_GUARD_9720, assert_repro_cpu_9720, time_eval_heredoc_repro_9720, wait_within_9720,
 };
 use crate::tm_hook_pm_guard_trust_anchor_8878::{Fixture, bash_payload};
 
