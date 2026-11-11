@@ -98,7 +98,9 @@ mod tests {
             let desc = props[name]["description"].as_str().unwrap_or("");
             assert!(desc.starts_with("list:"), "{name} is documented: {desc}");
         }
-        let required = tool["inputSchema"]["required"].as_array().expect("required");
+        let required = tool["inputSchema"]["required"]
+            .as_array()
+            .expect("required");
         assert_eq!(required, &vec![serde_json::json!("action")]);
     }
 }

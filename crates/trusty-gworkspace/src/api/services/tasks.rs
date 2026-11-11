@@ -322,7 +322,10 @@ async fn fetch_all_items(
 /// `list_sends_each_param_only_when_set_10709`.
 fn list_query(args: &Value) -> Vec<String> {
     let mut query = Vec::new();
-    for (arg, param) in [("show_hidden", "showHidden"), ("show_deleted", "showDeleted")] {
+    for (arg, param) in [
+        ("show_hidden", "showHidden"),
+        ("show_deleted", "showDeleted"),
+    ] {
         if let Some(flag) = args.get(arg).and_then(Value::as_bool) {
             query.push(format!("{param}={flag}"));
         }
