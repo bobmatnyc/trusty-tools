@@ -217,6 +217,7 @@ async fn persist_registry_record(
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
     };
     // #10586: check and insert under one lock, so no writer lands between them.
     // #10586: a kept record is reported, never a silent success; the
