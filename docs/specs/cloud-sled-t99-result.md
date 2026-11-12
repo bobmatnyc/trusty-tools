@@ -17,15 +17,17 @@ Finding: the headless Claude Code login needs a human to copy and paste a code f
 
 Result: PASS, with released binaries tm 1.12.2, trusty-memory 0.36.7 and trusty-search 0.63.1. Daemons came up, `tm doctor` exited 0, one MCP call per server succeeded, project register worked, and a memory and search round trip worked. State survived `docker restart` once the #11060 lock workaround was in place.
 
-Image provenance: the source comment (6805119153) was written against the draft PR #11062 and does not say the run used the post-#11062 image. Rerun on post-#11062 image pending.
+Rerun on the post-#11062 image: PASS. Image `tm-trusty-cloud-cloudtest:8760b63279` (built from `origin/main` `8760b63279`), digest `sha256:7f4fefab80d6a32a783f0c32dcc2fe58c2129f2ad7e347d4eedce6654a9baf76`. `check.sh` ran at 2026-11-12 21:42:38Z and printed "RESULT: all steps PASSED" with 16 PASS steps: daemons, `tm doctor`, MCP `tools/list` and calls for `tm`, trusty-memory and trusty-search, palace create, remember and recall, and semantic search index and query. Topology: internal network plus egress proxy, no token passed in. In-container log: `/data/logs/check-20261112T214238Z.log`.
+
+The earlier result above came from comment 6805119153, written against the draft PR #11062 before this rerun; the rerun is the rung-1 result of record.
 
 ## 3. Rung 2
 
-Pending owner login (tracked on #11054).
+Result: PASS. `rung2.sh` ran at 2026-11-12 22:07:51Z on the Linux build host, after the owner's terminal login in the container, and printed "RESULT: all steps PASSED". Steps: claude logged-in: yes; `claude -p` READY; `claude -p` plus `memory_recall`; proxy denies a test domain; proxy denies IP-literal CONNECT; direct egress blocked; no process env holds the token. In-container log: `/data/logs/rung2-20261112T220751Z.log`.
 
-Run record: the Linux build host ran `rung2.sh` and `check_v1.sh` on 2026-11-12 at 18:10-18:24Z, one run, head `c72279b33f` of PR #11105 (source: the PR #11105 live-check comment, id IC_kwDOSiXqpM8AAAABlz49Xw). `check_v1.sh` passed 19 of 19 rows. `rung2.sh` exited 0 with its non-login steps passing: proxy denies a test domain, proxy denies IP-literal CONNECT, direct egress blocked, no process env holds the token. `rung2.sh` steps 1 and 2 (`claude -p` READY, and the `memory_recall` round trip) printed SKIP because no owner Claude login exists. No run record for 19:05-19:20Z was found. Rung 2 is not a pass until the login steps run.
+Earlier run, not the result of record: on 2026-11-12 at 18:10-18:24Z `rung2.sh` and `check_v1.sh` ran once at head `c72279b33f` of PR #11105 (source: the PR #11105 live-check comment, id IC_kwDOSiXqpM8AAAABlz49Xw). `check_v1.sh` passed 19 of 19 rows. `rung2.sh` steps 1 and 2 printed SKIP because no owner Claude login existed yet.
 
-#11054 comment 6805119153 is superseded on rung 2 by this doc.
+#11054 comment 6805119153 reports a rung-2 PASS at 19:05-19:20Z. That PASS has no run record. This 22:07Z run is the rung-2 result of record, and the comment is superseded on rung 2 by this doc.
 
 ## 4. macOS-dependency list
 
