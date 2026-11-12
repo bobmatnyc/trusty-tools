@@ -49,7 +49,8 @@ impl fmt::Debug for ArgText {
 /// Actions for the `secrets` subcommand.
 ///
 /// Every verb resolves the project from the working directory's git
-/// checkout and prints names only, never a value.
+/// checkout (`assign` writes to the project it names) and prints names
+/// only, never a value.
 #[derive(Debug, Subcommand)]
 pub(crate) enum SecretsAction {
     /// Add or replace one key of the project scope. The value comes from the
@@ -128,6 +129,33 @@ pub(crate) enum SecretsAction {
         /// Stored key names (`<group>.<KEY>` for a grouped key); none means
         /// all. With a named source, exactly one: the destination key.
         keys: Vec<ArgText>,
+    },
+    // #11015: copy one vault key into another project's scope.
+    /// Copy one key of any trusty vault into a named project's scope.
+    ///
+    /// SRC is `trusty/<owner>[/<repo>]:KEY` or
+    /// `secret://<owner>[/<repo>]/KEY`. The destination is the project
+    /// `--project owner/repo` names, under the source's key name or `--as`.
+    /// The project must share this checkout's owner; under Claude Code it
+    /// must be this checkout's own project. A re-run replaces the
+    /// destination value, as `copy` does. The value never reaches tm; prints
+    /// names only.
+    Assign {
+        /// The source key: `trusty/<owner>[/<repo>]:KEY` or a `secret://`
+        /// reference naming its vault.
+        src: ArgText,
+        /// The destination project, `owner/repo`.
+        #[arg(long)]
+        project: String,
+        /// The destination key name; defaults to the source key's name.
+        #[arg(long = "as", value_name = "DEST_KEY")]
+        dest: Option<String>,
+        /// Backend the source is read from.
+        #[arg(long, default_value = "keychain")]
+        from_backend: String,
+        /// Backend the destination is written to.
+        #[arg(long, default_value = "keychain")]
+        to_backend: String,
     },
     /// Report socket and backend reachability, never a value.
     Doctor,
