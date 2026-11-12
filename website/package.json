@@ -58,6 +58,7 @@
 	"pnpm": {
 		"overrides": {
 			"cookie": "^0.7.2",
+			"minimatch@>=7.0.0 <11.0.1": "^11.0.1",
 			"nanoid": "^3.3.18",
 			"postcss": "^8.4.31"
 		}
