@@ -102,9 +102,10 @@ docker exec tm-trusty-cloud-sled-egress cat /var/log/squid/access.log
 runs `tailscale up`, `set --ssh`, `funnel` and `nc`; each must fail to reach
 a daemon. It checks that the app has no `tailscaled` process or binary and no
 writable socket, and that the sidecar runs `tailscaled` as another uid with a
-0700 socket directory, SSH off and no Funnel.
+0700 socket directory, SSH off, no Funnel, and no TCP listener (SOCKS5,
+HTTP proxy or debug) in the shared network namespace.
 `scripts/check_sled_tailscale_isolation.sh` checks the same layout statically,
-without docker, and runs in CI.
+without docker, in the `sled-static` job of `ci.yml`, which `CI gate` covers.
 `check_v1.sh` runs on the docker host, from the repo checkout. It reads
 `squid.conf`, `login.conf` and `active.conf` from the running proxy and fails
 on any rule that differs from its V1 policy or from `docker/sled/proxy/`. It

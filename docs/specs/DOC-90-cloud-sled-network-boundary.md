@@ -198,6 +198,7 @@ A sled passes when V1 to V5 all pass on the running sled. Each check prints PASS
 - In the sled, the socket path is absent and its directory is not writable by the agents' uid; no `tailscaled` process or binary is present, and no abstract unix socket names Tailscale.
 - The sidecar shares the sled's network namespace and nothing else, its `tailscaled` runs as a uid that is neither root nor the agents' uid, and its socket directory is that uid's, mode 0700.
 - In the sidecar, `RunSSH` is false and `tailscale funnel status` shows no funnel.
+- The sled network namespace has no TCP LISTEN socket owned by the sidecar uid, so `tailscaled` runs no SOCKS5, HTTP-proxy or debug listener the agents could use.
 
 `scripts/check_sled_tailscale_isolation.sh` checks the same layout statically, without docker, in CI.
 

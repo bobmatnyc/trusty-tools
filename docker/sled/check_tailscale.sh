@@ -81,6 +81,16 @@ row "app: ${SOCK} is absent and its directory is not writable by sled" "${ok}"
 unix="$(app cat /proc/net/unix 2>/dev/null)"; rc=$?
 ok=no; [ "${rc}" -eq 0 ] && ! grep -qE ' @[^ ]*tailscale' <<< "${unix}" && ok=yes
 row "app: no abstract unix socket names tailscale" "${ok}" "rc=${rc}"
+# The shared network namespace exposes any TCP listener the sidecar opens
+# (SOCKS5, HTTP proxy, debug) to the app. State 0A is LISTEN; field 8 is uid.
+tcp="$(app cat /proc/net/tcp /proc/net/tcp6 2>/dev/null)"; rc=$?
+ok=no; detail="rc=${rc}"
+if [ "${rc}" -eq 0 ] && [ -n "${tcp}" ] && [ -n "${ts_uid}" ]; then
+    l="$(awk -v u="${ts_uid}" '$4 == "0A" && $8 == u {print $2}' <<< "${tcp}" | tr '\n' ';')"
+    [ -z "${l}" ] && ok=yes
+    detail="listeners owned by ${ts_uid}: ${l:-none}"
+fi
+row "app netns: no TCP LISTEN socket owned by the sidecar uid ${ts_uid:-?}" "${ok}" "${detail}"
 
 # 5. As sled, every state-changing command fails to reach a daemon. A daemon
 # that answered and refused (an invalid key, a usage error) is a FAIL: the

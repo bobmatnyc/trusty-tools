@@ -12,16 +12,18 @@
 #   - entrypoint.sh starts no tailscaled;
 #   - no script that runs in the app container calls a state-changing
 #     `tailscale` subcommand;
-#   - the app image (the Dockerfile's last stage) installs no tailscaled and
-#     creates no /var/run/tailscale;
+#   - the app image (the Dockerfile's last stage) names no tailscaled, copies
+#     only /out/tailscale from a stage that builds it, and creates no
+#     /var/run/tailscale;
 #   - a `tailscale-sidecar` stage runs tailscaled as a user that is not
 #     `sled` or root, with a 0700 socket directory that user owns, and a uid
 #     whose default differs from the app UID and that the build refuses when
-#     equal;
+#     equal, and an ENTRYPOINT, CMD and ENV that open no SOCKS5, HTTP-proxy or
+#     debug listener;
 #   - README.md starts the sidecar in the app's network namespace.
 #   A missing file is a FAIL. Prints PASS or FAIL per row; exits 1 on any FAIL.
 # Test: scripts/check_sled_tailscale_isolation.sh is itself the regression
-#   test; .github/workflows/sled-static.yml runs it.
+#   test; the `sled-static` job in .github/workflows/ci.yml runs it.
 #
 # Usage: bash scripts/check_sled_tailscale_isolation.sh [DIR]
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI); POSIX awk and grep.
@@ -101,14 +103,21 @@ daemon_stages="$(awk 'toupper($1) == "FROM" { name = ""
                         for (i = 2; i < NF; i++) if (toupper($i) == "AS") name = $(i + 1) }
                       /tailscaled/ && name != "" { print name }' "${TMP}/df" | sort -u)"
 hits="$(grep -nE '(^|[^[:alnum:]_-])tailscaled([^[:alnum:]_-]|$)' "${TMP}/app")"
-# A COPY of a whole directory from a stage that builds tailscaled copies it too.
+ok=no; [ -z "${hits}" ] && ok=yes
+row "the app image names no tailscaled" "${ok}" "$(tr '\n' ';' <<< "${hits}")"
+# A COPY from a stage that builds tailscaled may take /out/tailscale (the
+# client) and nothing else: a directory, a glob or any other source fails.
+hits=""
 for s in ${daemon_stages}; do
-    h="$(awk -v s="${s}" 'toupper($1) == "COPY" && $2 == "--from=" s {
-            for (i = 3; i < NF; i++) if ($i ~ /\/$/) print "COPY --from=" s " " $i }' "${TMP}/app")"
+    h="$(awk -v s="${s}" 'toupper($1) == "COPY" {
+            from = 0; for (i = 2; i <= NF; i++) if ($i == "--from=" s) from = 1
+            if (!from) next
+            for (i = 2; i < NF; i++) if ($i !~ /^--/ && $i != "/out/tailscale")
+                print "COPY --from=" s " " $i }' "${TMP}/app")"
     [ -n "${h}" ] && hits="${hits}${hits:+;}${h}"
 done
 ok=no; [ -z "${hits}" ] && ok=yes
-row "the app image installs no tailscaled" "${ok}" "$(tr '\n' ';' <<< "${hits}")"
+row "the app image copies only /out/tailscale from a tailscaled stage" "${ok}" "$(tr '\n' ';' <<< "${hits}")"
 hits="$(grep -nE '/(var/)?run/tailscale' "${TMP}/app")"
 ok=no; [ -z "${hits}" ] && ok=yes
 row "the app image creates no /var/run/tailscale" "${ok}" "$(tr '\n' ';' <<< "${hits}")"
@@ -131,6 +140,12 @@ else
     grep -q 'tailscaled' <<< "${ep}" && grep -q -- '--socket=/var/run/tailscale/' <<< "${ep}" \
         && grep -q -- '--tun=userspace-networking' <<< "${ep}" && ok=yes
     row "sidecar ENTRYPOINT runs tailscaled on /var/run/tailscale in userspace mode" "${ok}" "${ep}"
+    # A SOCKS5 or HTTP proxy listener, or a debug listener, would be a
+    # loopback port the app's processes share through the network namespace.
+    hits="$(grep -E '^(ENTRYPOINT|CMD|ENV)([[:space:]]|$)' "${TMP}/side" \
+        | grep -oiE 'socks5[-_]server|outbound[-_]http[-_]proxy[-_]listen|--debug=' | sort -u | tr '\n' ';')"
+    ok=no; [ -z "${hits}" ] && ok=yes
+    row "sidecar ENTRYPOINT, CMD and ENV open no proxy or debug listener" "${ok}" "${hits}"
     ts_uid="$(sed -nE 's/^ARG TS_UID=([0-9]+).*/\1/p' "${TMP}/side" | tail -n 1)"
     app_uid="$(sed -nE 's/^ARG UID=([0-9]+).*/\1/p' "${TMP}/app" | tail -n 1)"
     ok=no
