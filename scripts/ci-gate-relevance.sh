@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# ci-gate-relevance.sh — decide whether a change set reaches one of the two
-#   pure-shell gates `ci.yml` path-filters at the job level (#8378).
+# ci-gate-relevance.sh — decide whether a change set reaches one of the
+#   pure-shell gates `ci.yml` path-filters at the job level (#8378, #11156).
 #
 # Why: `Durable writes hold the teardown guard` and `Every tmux -t target is
 #   exact` ran on every PR, docs-only ones included, because a required
@@ -20,7 +20,9 @@
 #     tmux-targets    every *.rs *.sh *.swift *.ts *.tsx *.js *.mjs *.svelte
 #                     outside node_modules, every crates/*/src/assets/**/*.md and content/**/*.md,
 #                     the allowlist TSV, and the gate's script and selftest
-#   Both modes: this script and .github/workflows/ci.yml, the workflow that
+#     sled-static     docker/sled/** and scripts/check_sled_tailscale_isolation.sh
+#                     (#11156: tailscaled isolation, DOC-90 IN-7)
+#   Every mode: this script and .github/workflows/ci.yml, the workflow that
 #   hosts the gates — a change to either must exercise the jobs it governs.
 #   The file status is ignored: a DELETE can strand an allowlist or manifest
 #   row, which is itself a gate failure.
@@ -37,7 +39,7 @@
 #
 # Output: `true` or `false` on stdout. When $GITHUB_OUTPUT is set, also
 #   `<mode>_relevant=<verdict>` with `-` mapped to `_` (teardown_guard_relevant,
-#   tmux_targets_relevant).
+#   tmux_targets_relevant, sled_static_relevant).
 #
 # Test: scripts/ci-gate-selftest.sh (`ci-gate-relevance:` cases).
 
@@ -82,6 +84,12 @@ is_relevant() {
         crates/*/src/assets/*.md | content/*.md) return 0 ;;
       esac
       ;;
+    sled-static)
+      case "$p" in
+        docker/sled/?*) return 0 ;;
+        scripts/check_sled_tailscale_isolation.sh) return 0 ;;
+      esac
+      ;;
   esac
   return 1
 }
@@ -112,9 +120,9 @@ changed_paths() {
 main() {
   local mode="${1:-}"
   case "$mode" in
-    teardown-guard | tmux-targets) ;;
+    teardown-guard | tmux-targets | sled-static) ;;
     *)
-      echo "ci-gate-relevance: usage: $0 <teardown-guard|tmux-targets> [< changed-paths]" >&2
+      echo "ci-gate-relevance: usage: $0 <teardown-guard|tmux-targets|sled-static> [< changed-paths]" >&2
       return 2
       ;;
   esac

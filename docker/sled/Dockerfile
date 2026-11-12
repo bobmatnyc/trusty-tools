@@ -1,5 +1,6 @@
-# Sled image: headless trusty stack (tm daemon, trusty-memory, trusty-search),
-# Claude Code and tailscaled behind the egress proxy (DOC-90, ADR-0076).
+# Sled image: headless trusty stack (tm daemon, trusty-memory, trusty-search)
+# and Claude Code behind the egress proxy (DOC-90, ADR-0076). tailscaled runs
+# in the separate tailscale-sidecar target, never in this image (#11156 B2).
 # Derived from docker/cloudtest. Refs #11054 #11073. Owner ruling D1b
 # (2026-11-11 21:23Z, "Accept all eight as recommended"); ruling D20 (OQ-3)
 # adds tailscaled. Nothing from trusty-tools is downloaded here: run fetch.sh
@@ -7,6 +8,7 @@
 #
 #   docker/sled/fetch.sh docker/sled/dl
 #   docker build -t tm-trusty-cloud-sled:<short-sha> docker/sled
+#   docker build --target tailscale-sidecar -t tm-trusty-cloud-sled-tailscale:<short-sha> docker/sled
 #
 # No secret, token or .env is copied or set in any layer. Tokens are files
 # mounted read-only at run time under /run/secrets (see README.md).
@@ -67,7 +69,42 @@ RUN set -eux; \
     install -m 0755 "/t/${name}/tailscale" /out/tailscale; \
     install -m 0755 "/t/${name}/tailscaled" /out/tailscaled
 
-# ---- stage 4: runtime -----------------------------------------------------
+# ---- stage 4: tailscaled sidecar (#11156 B2) -------------------------------
+# tailscaled runs here, in its own container, as its own uid, and shares only
+# the app's network namespace (`--network container:tm-trusty-cloud-sled`), so
+# `tailscale serve` still reaches the console on 127.0.0.1:7788. Its LocalAPI
+# socket is a path in this container's filesystem: no sled agent can open it,
+# so none can run `tailscale up`, `set --ssh`, `funnel`, `serve` or `nc`.
+#   docker build --target tailscale-sidecar -t tm-trusty-cloud-sled-tailscale:<short-sha> \
+#     --build-arg UID=$(id -u) docker/sled
+FROM ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS tailscale-sidecar
+ARG UID=1000
+ARG TS_UID=1999
+RUN set -eux; \
+    case "${TS_UID}" in ''|*[!0-9]*) echo "bad TS_UID" >&2; exit 1;; esac; \
+    if [ "${TS_UID}" -eq 0 ] || [ "${TS_UID}" -eq "${UID}" ]; then \
+        echo "TS_UID must be neither 0 nor the app UID" >&2; exit 1; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    (userdel -r ubuntu 2>/dev/null || true); \
+    groupadd --gid "${TS_UID}" tailscale; \
+    useradd --uid "${TS_UID}" --gid "${TS_UID}" --no-create-home \
+        --home-dir /var/lib/tailscale --shell /usr/sbin/nologin tailscale; \
+    install -d -m 0700 -o tailscale -g tailscale /var/run/tailscale /var/lib/tailscale
+COPY --from=tailscale /out/tailscale /out/tailscaled /usr/local/bin/
+# The proxy env and the logging switch of DOC-90 sections 6 and 7.
+ENV HTTPS_PROXY=http://tm-trusty-cloud-sled-egress:3128 \
+    https_proxy=http://tm-trusty-cloud-sled-egress:3128 \
+    NO_PROXY=localhost,127.0.0.1,::1 \
+    no_proxy=localhost,127.0.0.1,::1 \
+    TS_NO_LOGS_NO_SUPPORT=true
+VOLUME /var/lib/tailscale
+USER tailscale
+ENTRYPOINT ["/usr/local/bin/tailscaled", "--tun=userspace-networking", "--statedir=/var/lib/tailscale", "--socket=/var/run/tailscale/tailscaled.sock"]
+
+# ---- stage 5: runtime -----------------------------------------------------
 FROM ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
 
 # Ubuntu archive only; no third-party repositories. gh is the archive build.
@@ -87,12 +124,14 @@ RUN (userdel -r ubuntu 2>/dev/null || true) \
     && groupadd --gid "${GID}" sled \
     && useradd --uid "${UID}" --gid "${GID}" --no-create-home \
         --home-dir /data/home --shell /bin/bash sled \
-    && mkdir -p /data /models/fastembed /var/run/tailscale \
-    && chown sled:sled /data /var/run/tailscale
+    && mkdir -p /data /models/fastembed \
+    && chown sled:sled /data
 
 COPY --from=unpack /out/ /usr/local/bin/
 COPY --from=claude /out/claude /usr/local/bin/claude
-COPY --from=tailscale /out/ /usr/local/bin/
+# #11156 B2: the tailscale client only; tailscaled runs in the sidecar. The
+# client has no socket to reach here; check_tailscale.sh runs it to prove that.
+COPY --from=tailscale /out/tailscale /usr/local/bin/tailscale
 COPY entrypoint.sh check.sh exercise.sh claude-run gh-token-run /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/check.sh \
         /usr/local/bin/exercise.sh /usr/local/bin/claude-run /usr/local/bin/gh-token-run \
