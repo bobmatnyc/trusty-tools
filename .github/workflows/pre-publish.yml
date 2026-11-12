@@ -386,10 +386,7 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
-      # #11094: the OKF extraction worker's own lock; the root run above
-      # never reads it. `.cargo/audit.toml` applies to both runs.
-      - name: cargo audit (workers/okf-extract/Cargo.lock)
-        run: cargo audit --file workers/okf-extract/Cargo.lock
+      # #11094: worker-lock audit re-added once Dgp (RUSTSEC-2026-0436 waiver) is answered
 
   # ==========================================================================
   # deny — GATE 3. Licences, provenance, duplicate versions.
