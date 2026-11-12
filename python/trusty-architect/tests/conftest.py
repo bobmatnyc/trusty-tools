@@ -43,6 +43,12 @@ def _no_caller_architect_session(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_caller_task_mode(monkeypatch):
+    """#11101: the caller's TASK_TAG_MODE never turns a test's Task check or WIP cap into refuse mode."""
+    monkeypatch.delenv("TASK_TAG_MODE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _wake_alert_in_tmp(tmp_path, monkeypatch):
     """No test writes or clears the live inbox/pm-wake-alert.json (D39)."""
     monkeypatch.setenv("PM_WAKE_ALERT", str(tmp_path / "pm-wake-alert.json"))
