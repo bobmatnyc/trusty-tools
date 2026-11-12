@@ -642,7 +642,7 @@ impl CodeIndexer {
     /// Drop `file_path`'s entity list from memory and redb (issue #28: a
     /// restart would otherwise resurrect it into the symbol graph).
     /// #10209: under the fence, so a rehydrate cannot publish it back.
-    async fn remove_file_entities(&self, file_path: &str) {
+    pub(super) async fn remove_file_entities(&self, file_path: &str) {
         let _fence = self.rehydrate_write_fence().await;
         self.entities.write().await.remove(file_path);
         self.delete_entities_from_redb(file_path).await;
