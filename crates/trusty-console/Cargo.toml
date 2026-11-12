@@ -97,9 +97,11 @@ mime_guess         = { workspace = true }
 # `axum-server` (#3304): the shared same-origin write guard the console consumes
 # via `routes::origin_guard`. `uds` + `webhook-hmac` (#5089 step 3): the hardened
 # UDS dial/framing the webhook relay uses and the single GitHub HMAC verifier.
+# #11074: `daemon-token` carries `console_token`, the token-file loader the
+# console and its TCP clients share.
 # #6517: `host-metrics` adds the whole-machine sampler + the
 # `console_metrics::machine_status` aggregation the machine-status route serves.
-trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics", "host-metrics", "config-cli", "axum-server", "uds", "memory-rpc", "uds-supervisor", "webhook-hmac", "webhook-relay"] }
+trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics", "host-metrics", "config-cli", "axum-server", "uds", "memory-rpc", "uds-supervisor", "webhook-hmac", "webhook-relay", "daemon-token"] }
 reqwest            = { workspace = true }
 # #6155: `TryStreamExt::inspect_err` on the proxied upstream body, so a
 # mid-stream failure is logged instead of reaching the browser as a silent
@@ -126,5 +128,10 @@ chrono         = { workspace = true }
 # #8271: `test-util` gives the socket-budget tests a paused clock; it must
 # never reach the production build, so it lives here only.
 tokio          = { workspace = true, features = ["test-util"] }
+# #11074/#9123: a test that sets the `TOKEN`-named console variable must be
+# the unkeyed `#[serial]` and enter the shared credential sandbox. Dev-only:
+# the sandbox mutates the process environment and must never reach a build.
+serial_test    = { workspace = true }
+trusty-common  = { workspace = true, features = ["credential-test-sandbox"] }
 tower          = { workspace = true }
 http-body-util = { workspace = true }

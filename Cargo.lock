@@ -11842,7 +11842,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.69.3"
+version = "0.70.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11967,6 +11967,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "serial_test",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

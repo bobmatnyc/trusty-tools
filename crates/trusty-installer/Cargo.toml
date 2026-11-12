@@ -90,7 +90,7 @@ tracing-subscriber = { workspace = true }
 # `memory-rpc` (#6286): `ensure`'s palace stage and its `--wait` readiness probe
 # dial trusty-memory through the shared client. ADR-0032 left no `http_addr` for
 # `resolve_base_url` to read, so both read a running daemon as absent without it.
-trusty-common = { workspace = true, features = ["update-check", "config-cli", "uds", "uds-supervisor", "memory-rpc", "integrity"] }  # uds-supervisor (#6350): tctl probes trusty-analyze by starting it on demand; integrity (#8378): the one sha256 check
+trusty-common = { workspace = true, features = ["update-check", "config-cli", "uds", "uds-supervisor", "memory-rpc", "integrity", "daemon-token"] }  # uds-supervisor (#6350): tctl probes trusty-analyze by starting it on demand; integrity (#8378): the one sha256 check; daemon-token (#11074): the console token file the console /health probe sends
 # Rustup/cargo-style progress display (#1315): Narrator `info:` lines + the
 # right-aligned ComponentTracker table for install/upgrade rows.
 trusty-progress = { workspace = true }
