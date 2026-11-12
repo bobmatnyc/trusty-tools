@@ -400,3 +400,23 @@ async fn assign_to_another_owner_is_refused() {
     );
     assert_eq!(stored(&h.keychain, "trusty/other/thing", "GH_PAT"), None);
 }
+
+/// A resolver answer the server cannot resolve — a directory with no
+/// checkout — is the server's fixed refusal, and nothing is written.
+#[tokio::test]
+async fn assign_to_an_unresolvable_checkout_is_refused() {
+    let h = harness().await;
+    seed_owner(&h, "GH_PAT", VALUE).await;
+    let bare = h.tmp.path().join("bare");
+    std::fs::create_dir(&bare).expect("mkdir bare");
+    let r = FakeResolver(vec![("acme/bare", bare)]);
+    let args = ["assign", "trusty/acme:GH_PAT", "--project", "acme/bare"];
+    let outcome = assign_run(&h, &r, person, &args).await;
+    assert!(
+        outcome.err().starts_with("tm secrets: "),
+        "{}",
+        outcome.err()
+    );
+    assert_eq!(outcome.out, "");
+    assert_eq!(stored(&h.keychain, "trusty/acme/bare", "GH_PAT"), None);
+}

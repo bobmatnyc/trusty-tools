@@ -228,7 +228,8 @@ async fn vaults(ctx: &Ctx<'_>) -> anyhow::Result<Vaults> {
 /// `assign_never_touches_clipboard`,
 /// `assign_denied_source_is_refused_for_an_agent`,
 /// `assign_by_an_agent_cannot_widen_its_write_reach`,
-/// `assign_to_another_owner_is_refused`.
+/// `assign_to_another_owner_is_refused`,
+/// `assign_to_an_unresolvable_checkout_is_refused`.
 pub(crate) async fn assign(
     ctx: &Ctx<'_>,
     seam: Seam<'_>,
