@@ -141,6 +141,8 @@ pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
 pub(crate) mod hook_post;
 pub(crate) mod hook_rewrite;
+// D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
+pub(crate) mod hook_rewrite_cd;
 // #10973: the compression rewrite an isolation worktree's classifier accepts.
 pub(crate) mod hook_rewrite_isolated;
 // #7975: the stdin payload read that names its failure, so a guard can deny on it.

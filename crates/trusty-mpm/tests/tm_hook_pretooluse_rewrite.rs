@@ -286,3 +286,70 @@ fn hook_rewrites_using_stdin_hook_event_name_without_env_var() {
         EXPECTED_CARGO_TEST_REWRITE
     );
 }
+
+/// Run `script` under `/bin/sh` in `cwd` with the real `tm` on the filter
+/// stage and a scratch `$HOME`: (exit code, stdout, stderr).
+fn run_sh_in(cwd: &std::path::Path, script: &str) -> (Option<i32>, String, String) {
+    let mut shell = std::process::Command::new("/bin/sh");
+    common::isolate_spawned_tm(&mut shell, common::tm_spawn_home());
+    let out = shell
+        .args(["-c", script])
+        .current_dir(cwd)
+        .env(trusty_agents_common::compress::ENV_COMPRESS_NO_RTK, "1")
+        .output()
+        .expect("run /bin/sh");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// D60 (Refs #10973): `cd <dir> && <cmd>` is rewritten with the `cd` kept in
+/// front, and the rewrite, run through the real `tm compress`, behaves like the
+/// original: same output from inside `<dir>`, and a missing `<dir>` fails with
+/// the same status and message. On main `tm hook` printed nothing for it.
+#[test]
+fn hook_rewrites_a_cd_prefixed_command_and_it_runs_like_the_original() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let root = root.path().canonicalize().expect("canonical temp dir");
+    std::fs::create_dir_all(root.join("sub")).expect("mkdir");
+    std::fs::write(root.join("sub/marker.txt"), "alpha\nhi there\n").expect("write");
+    let bin = common::tm_bin();
+    let rewrite = |command: &str| {
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+            "cwd": root.display().to_string(),
+        });
+        let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("`{command}` must be rewritten ({e}): {stdout:?}"));
+        let rewritten = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .expect("a rewritten command")
+            .to_string();
+        let prefix = command.split_once("&& ").expect("a cd form").0;
+        assert!(
+            rewritten.starts_with(&format!("{prefix}&& {{ ")),
+            "the `cd` stays in front of the group: {rewritten}"
+        );
+        rewritten.replace("| tm compress", &format!("| '{bin}' compress"))
+    };
+
+    let ok = "cd sub && grep -n hi marker.txt";
+    let (code, out, err) = run_sh_in(&root, ok);
+    let (rcode, rout, rerr) = run_sh_in(&root, &rewrite(ok));
+    assert_eq!((code, out.as_str()), (Some(0), "2:hi there\n"), "{err}");
+    assert_eq!(
+        (rcode, rout.as_str()),
+        (Some(0), "2:hi there\n"),
+        "the rewrite runs in <dir>: {rerr}"
+    );
+
+    let missing = "cd missing && grep -n hi marker.txt";
+    let (code, out, err) = run_sh_in(&root, missing);
+    let (rcode, rout, rerr) = run_sh_in(&root, &rewrite(missing));
+    assert_ne!(code, Some(0), "a missing <dir> fails: {err}");
+    assert_eq!((code, out, err), (rcode, rout, rerr), "same cd failure");
+}
