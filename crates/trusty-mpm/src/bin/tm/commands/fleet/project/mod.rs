@@ -12,6 +12,8 @@
 //! Test: `commands::fleet::project::tests`, `tests/tm_fleet.rs`
 //! (`fleet_project_*`).
 
+// #11012: `tm fleet init` seeds the list when it is absent.
+mod init_seed;
 mod list;
 mod migrate;
 mod record;
@@ -22,6 +24,7 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 
+pub(crate) use self::init_seed::{InitWatch, LiveSession, steps as init_steps};
 use self::registry::Registry;
 use crate::cli::FleetProjectAction;
 
@@ -151,7 +154,6 @@ fn render_record(dir: &Path, registry: &Registry, key: &str) -> anyhow::Result<S
     let project = registry
         .get(key)
         .with_context(|| format!("{key} left the registry"))?;
-    let alias = registry.alias_for(project);
     let path = registry.path_for(project);
     let fields = record::Fields {
         key,
@@ -159,7 +161,7 @@ fn render_record(dir: &Path, registry: &Registry, key: &str) -> anyhow::Result<S
             .filter(|gh| gh.owner != trusty_common::github_path::UNKNOWN_OWNER)
             .map(|gh| format!("{}/{}", gh.owner, gh.repo)),
         path: path.as_deref(),
-        session: list::session_stem(alias.map_or(key, |a| a.alias.as_str())),
+        session: list::session_stem(registry.session_alias(project)),
     };
     Ok(record::render(&record::template(dir)?, &fields))
 }
@@ -240,25 +242,57 @@ pub(crate) fn list(
     Ok((Outcome { notes, message }, rows))
 }
 
+/// What `tm fleet init` seeds the watch list from (#11012).
+///
+/// Why: `init` runs sync and the registry loads async, so [`super::run`]
+/// reads both here, before `init` starts, and passes them in.
+/// What: [`Registry::load`] under the managed root (an error is kept for the
+/// seed step to report) and [`live_sessions`].
+/// Test: `fleet_init_seeds_the_watch_list_from_live_sessions`.
+pub(crate) async fn init_watch() -> InitWatch {
+    let registry = match crate::commands::managed_root::resolve_managed_paths(None) {
+        Ok(paths) => Registry::load(&paths.root).await,
+        Err(e) => Err(e),
+    };
+    InitWatch {
+        registry,
+        sessions: live_sessions(),
+    }
+}
+
 /// The live tmux session names, or `None` when tmux cannot be read.
+fn live_session_names() -> Option<Vec<String>> {
+    live_sessions().map(|all| all.into_iter().map(|s| s.name).collect())
+}
+
+/// The live tmux sessions with their paths, or `None` when tmux cannot be
+/// read.
 ///
 /// "No server" is zero sessions, not an unknown count.
-fn live_session_names() -> Option<Vec<String>> {
-    use trusty_mpm::core::tmux::{TmuxCommand, run_tmux};
-    let out = run_tmux(&TmuxCommand::ListSessions).ok()?;
+fn live_sessions() -> Option<Vec<LiveSession>> {
+    use trusty_mpm::core::tmux::run_tmux_argv;
+    // #11012: the session path lets `init` map a session by directory.
+    let argv = ["list-sessions", "-F", "#{session_name}\t#{session_path}"].map(str::to_owned);
+    let out = run_tmux_argv(&argv).ok()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let no_server = err.contains("no server running") || err.contains("error connecting");
         return no_server.then(Vec::new);
     }
-    Some(
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| line.split(':').next())
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .collect(),
-    )
+    Some(parse_sessions(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Parse `list-sessions -F '#{session_name}\t#{session_path}'` output.
+fn parse_sessions(out: &str) -> Vec<LiveSession> {
+    out.lines()
+        .filter_map(|line| {
+            let (name, path) = line.split_once('\t').unwrap_or((line, ""));
+            (!name.is_empty()).then(|| LiveSession {
+                name: name.to_owned(),
+                path: (!path.is_empty()).then(|| path.into()),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -580,7 +580,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-architect-setup.md"
-version = "0.2.0"
+version = "0.3.0"
 
 [[member]]
 path = "skills/tm-bug-reporting.md"
