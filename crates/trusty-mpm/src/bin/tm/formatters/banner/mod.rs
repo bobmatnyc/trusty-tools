@@ -404,7 +404,7 @@ pub(crate) fn tmux_has_session_with_bin(tmux_bin: &str, name: &str) -> bool {
     tmux_has_session_on(tmux_bin, None, name)
 }
 
-/// [`tmux_has_session_with_bin`] on the named (`-L`) `server`; `None` is the
+/// `tmux_has_session_with_bin` (a `#[cfg(test)]` helper) on the named (`-L`) `server`; `None` is the
 /// default server (#10101). The caller resolves `server` once
 /// (`guided_resume::resume_liveness`).
 pub(crate) fn tmux_has_session_on(tmux_bin: &str, server: Option<&str>, name: &str) -> bool {
