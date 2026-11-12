@@ -1,0 +1,2 @@
+Security
+- `tm fleet init` seeds the Architect `scripts/dashboard_mask.py`. Its `mask_pane_text` masks pane text before the dashboard shows it: it strips ANSI/OSC escapes, replaces PEM blocks, JWTs, Bearer and Authorization values, URL credentials, provider tokens and secret-named `key=value` values in place with a `[masked:<shape>]` marker, and caps the line count and line length. A PEM block cut by the cap or by the capture window is masked whole (#11065).
