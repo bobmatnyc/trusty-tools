@@ -73,6 +73,7 @@ pub(crate) mod build_lease_spawn;
 // #9239: the read-only `status` and `--census` views of `tm build-lease`.
 pub(crate) mod build_lease_status;
 pub(crate) mod build_lease_target;
+pub(crate) mod build_lease_where;
 pub(crate) mod doctor_builder_cap;
 // #8454 S2c: the read-only channel route policy rows.
 pub(crate) mod doctor_channels;

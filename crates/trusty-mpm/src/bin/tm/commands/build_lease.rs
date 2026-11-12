@@ -26,6 +26,9 @@
 //! holders, each repo's slots, and every seed in progress or abandoned with
 //! its slot, owner pid and age (#9239).
 //!
+//! `tm build-lease where <bin>` runs no build and takes no lease: it prints
+//! the freshest built binary across the pool slots and target dirs (#10835).
+//!
 //! `tm build-lease --census` runs no build; it probes slot locks like `tm
 //! doctor` (#8261 round 5). It prints the lease holders and every build group
 //! the census counts against the ceiling, attributed by pgid, leader, driver
@@ -56,6 +59,7 @@ use trusty_mpm::core::harness_root::linked_worktree_owner;
 use super::build_lease_spawn::{Lease, exit_with, spawn_and_wait, write_record};
 use super::build_lease_status::{print_census, print_status};
 use super::build_lease_target::{announce_slot, target_dir};
+use super::build_lease_where::print_where;
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
 
@@ -140,6 +144,8 @@ pub(crate) struct BuildLeaseArgs {
     expect_cwd: Option<PathBuf>,
     /// The heavy build to run, after `--`; anything else is refused. The
     /// single word `status` prints the lease and seeding status instead (#9239).
+    /// `where <BIN> [--profile debug|release] [--json]` prints the freshest
+    /// built BIN across this repo's pool slots and target dirs (#10835).
     #[arg(
         trailing_var_arg = true,
         allow_hyphen_values = true,
@@ -160,6 +166,10 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
     // #9239: `tm build-lease status` is a read-only view; no lease, no build.
     if args.command == ["status"] {
         print_status(&MpmConfig::load_default().builders)
+    }
+    // See #10835: `tm build-lease where <bin>` is read-only too.
+    if args.command.first().is_some_and(|w| w == "where") {
+        print_where(&args.command[1..], &MpmConfig::load_default().builders)
     }
     let builders: BuildersConfig = MpmConfig::load_default().builders;
     let lease = BuildLeaseConfig::load_default();
