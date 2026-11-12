@@ -190,6 +190,8 @@ impl crate::core::CodeIndexer {
         // #8959: durable stale mark before anything leaves, so a crash before
         // the caller's per-pass rebuild still rebuilds at the next boot.
         let _graph_write = self.begin_graph_write_for_removal(rel).await?;
+        // #11087: a fail-closed remove drops the hash in the chunks' own redb
+        // transaction; the forget below covers the test-only `WarnOnly` mode.
         let removed = self.remove_file_no_kg_rebuild_with(rel, mode).await?;
         forget_file_hash(index_id, self, rel).await?;
         Ok(removed)

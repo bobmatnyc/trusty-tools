@@ -93,7 +93,25 @@ impl CorpusStore {
         ids: &[String],
         entity_files: &[String],
     ) -> Result<Vec<String>> {
-        if ids.is_empty() && entity_files.is_empty() {
+        self.delete_chunk_entity_and_hash_rows(ids, entity_files, &[])
+    }
+
+    /// [`Self::delete_chunk_and_entity_rows`], plus the content-hash rows of
+    /// `hash_files`, all in ONE write transaction.
+    ///
+    /// Why (#11087): a file's hash deleted after its chunks, in a second
+    /// transaction, left a committed hash with no chunks when the process
+    /// exited between the two; the resume then hash-skipped the file forever.
+    /// What: one transaction over the chunk, entity and hash tables; any
+    /// failure commits nothing. Returns the chunk ids whose rows existed.
+    /// Test: `delete_chunk_entity_and_hash_rows_takes_all_three` below.
+    pub(crate) fn delete_chunk_entity_and_hash_rows(
+        &self,
+        ids: &[String],
+        entity_files: &[String],
+        hash_files: &[String],
+    ) -> Result<Vec<String>> {
+        if ids.is_empty() && entity_files.is_empty() && hash_files.is_empty() {
             return Ok(Vec::new());
         }
         let mut removed = Vec::with_capacity(ids.len());
@@ -114,6 +132,15 @@ impl CorpusStore {
                 entities
                     .remove(file.as_str())
                     .with_context(|| format!("delete entities for {file}"))?;
+            }
+            // #11087: the hash leaves with the chunks, never after them.
+            if !hash_files.is_empty() {
+                let mut hashes = txn.open_table(FILE_HASHES_TABLE)?;
+                for file in hash_files {
+                    hashes
+                        .remove(file.as_str())
+                        .with_context(|| format!("delete file hash entry for {file}"))?;
+                }
             }
         }
         txn.commit().context("commit batch-remove txn")?;
@@ -211,5 +238,56 @@ mod tests {
         assert_eq!(store.delete_file_hashes_under(&sel).expect("again"), 0);
         let left = store.load_file_hashes().expect("load");
         assert_eq!(left.len(), 1, "the sibling's hash stays: {left:?}");
+    }
+
+    /// #11087: one call removes a file's chunk, entity and hash rows, and
+    /// leaves another file's rows alone.
+    #[test]
+    fn delete_chunk_entity_and_hash_rows_takes_all_three() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CorpusStore::open(&dir.path().join("i.redb")).expect("open");
+        let chunk = |id: &str, file: &str| crate::core::chunker::RawChunk {
+            id: id.to_string(),
+            file: file.to_string(),
+            start_line: 1,
+            end_line: 2,
+            content: "fn x() {}".to_string(),
+            function_name: None,
+            language: Some("rust".to_string()),
+            chunk_type: crate::core::chunker::ChunkType::Code,
+            calls: Vec::new(),
+            inherits_from: Vec::new(),
+            chunk_depth: 0,
+            parent_chunk_id: None,
+            child_chunk_ids: Vec::new(),
+            nlp_keywords: Vec::new(),
+            nlp_code_refs: Vec::new(),
+            virtual_terms: Vec::new(),
+        };
+        store
+            .upsert_chunks(&[chunk("a.rs:1:2", "a.rs"), chunk("b.rs:1:2", "b.rs")])
+            .expect("upsert");
+        store
+            .upsert_file_hashes(&[("a.rs", "aa"), ("b.rs", "bb")])
+            .expect("hashes");
+        let a = vec!["a.rs".to_string()];
+        let removed = store
+            .delete_chunk_entity_and_hash_rows(&["a.rs:1:2".to_string()], &a, &a)
+            .expect("delete");
+        assert_eq!(removed, vec!["a.rs:1:2".to_string()]);
+        let files: Vec<String> = store
+            .load_all_chunks()
+            .expect("chunks")
+            .into_iter()
+            .map(|c| c.file)
+            .collect();
+        assert_eq!(files, vec!["b.rs".to_string()]);
+        let hashes: Vec<String> = store
+            .load_file_hashes()
+            .expect("load")
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert_eq!(hashes, vec!["b.rs".to_string()], "only a.rs's hash leaves");
     }
 }

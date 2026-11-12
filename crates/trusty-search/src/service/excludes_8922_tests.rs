@@ -264,9 +264,10 @@ async fn open_rescan(
 /// re-indexed instead of hash-skipped forever. One index per arm: the rescan
 /// sweep, boot reconcile's delta, the `index_file` gate, the rescan's sops
 /// arm, and `CodeIndexer::index_file`'s own sops arm (the watcher's path).
-/// Fails with `forget_file_hash` removed from `purge_file_with`, or with any one
-/// arm's purge reverted to `remove_file_no_kg_rebuild`: the second open rescan
-/// reports the file unchanged and it stays empty.
+/// Fails with the hash delete removed from `purge_file_with` and from
+/// `remove_file_rows_and_hash` (#11087), or with any one arm's purge reverted to
+/// `remove_file`: the second open rescan reports the file unchanged and it
+/// stays empty.
 #[tokio::test]
 #[serial_test::parallel]
 async fn a_purged_file_is_reindexed_once_readmitted() {

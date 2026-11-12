@@ -551,22 +551,26 @@ impl CodeIndexer {
         chunks.get(chunk_id).map(|c| c.content.clone())
     }
 
-    /// Remove every chunk belonging to a file and its entity list WITHOUT
-    /// triggering a symbol-graph rebuild (issue #848 prune pass).
+    /// Remove every chunk belonging to a file, its entity list and its
+    /// content hash WITHOUT triggering a symbol-graph rebuild (issue #848).
     ///
     /// Why: the prune pass in `service::reindex` removes multiple deleted files
     /// in a loop. Calling `remove_file` per file would trigger O(deleted_files)
     /// full KG rebuilds, which is expensive. The reindex orchestrator already
     /// rebuilds the KG once at the end of Phase 3, so the per-file rebuild is
-    /// redundant. This method is identical to `remove_file` except it does not
-    /// mark the graph stale (#9179); the caller's own rebuild corrects it.
-    /// What: removes chunk rows, entity row, and in-memory entity map entry for
-    /// `file_path`. Returns the number of chunks removed. A refused redb
-    /// delete is an `Err` with every store unchanged (#9212).
+    /// redundant. Unlike `remove_file` it does not mark the graph stale
+    /// (#9179), and it drops the hash with the chunks: a hash left after them
+    /// made a resumed reindex skip the file forever (#11087).
+    /// What: removes chunk rows, entity row, content-hash row and their
+    /// in-memory entries for `file_path`, in one redb transaction (#11087).
+    /// Returns the number of chunks removed. A refused redb delete is an `Err`
+    /// with every store unchanged, the hash included (#9212).
     /// Test: `prune_deleted_files_cleans_staging_corpus` in
     /// `service::reindex::tests`; the refused arm by
     /// `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps` and
-    /// `a_refused_pre_commit_remove_skips_the_insert_and_withholds_the_hash`.
+    /// `a_refused_pre_commit_remove_skips_the_insert_and_withholds_the_hash`;
+    /// the hash by
+    /// `a_term_between_a_batch_delete_and_insert_leaves_the_file_served_after_resume`.
     pub(crate) async fn remove_file_no_kg_rebuild(&self, file_path: &str) -> Result<usize> {
         // #9212: fail closed, so prune and the batch pre-commit remove keep
         // the rows and the hash for a retry instead of dropping memory only.
@@ -590,8 +594,16 @@ impl CodeIndexer {
         }
         let ids = self.file_chunk_ids(file_path).await?;
         let removed = ids.len();
-        self.remove_chunks_from_stores(&ids, mode).await?;
-        self.remove_file_entities(file_path).await;
+        match mode {
+            // #11087: the hash leaves in the chunks' transaction, so no
+            // committed state holds a hash whose chunks are gone.
+            RedbChunkDelete::FailClosed => self.remove_file_rows_and_hash(file_path, &ids).await?,
+            #[cfg(test)]
+            RedbChunkDelete::WarnOnly => {
+                self.remove_chunks_from_stores(&ids, mode).await?;
+                self.remove_file_entities(file_path).await;
+            }
+        }
         // NOTE: deliberately omits `self.rebuild_symbol_graph().await` —
         // the caller (prune pass) handles the rebuild once after all files.
         Ok(removed)

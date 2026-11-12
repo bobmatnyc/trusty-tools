@@ -466,6 +466,8 @@ pub(super) async fn commit_parsed_and_finalize(
             std::collections::HashSet::new();
         let mut remove_failures: usize = 0;
         for file_path in &changed_corpus_paths {
+            // #11087: the remove drops the staged hash with the chunks in one
+            // transaction; a failure keeps both and skips the insert below.
             if let Err(e) = indexer.remove_file_no_kg_rebuild(file_path).await {
                 remove_failed_files.insert(file_path.as_str());
                 remove_failures += 1;

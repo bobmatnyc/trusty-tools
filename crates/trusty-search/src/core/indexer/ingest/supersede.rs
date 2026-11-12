@@ -200,6 +200,47 @@ impl CodeIndexer {
         Ok(())
     }
 
+    /// Remove one file's chunks, entity list and content hash, redb first, in
+    /// ONE redb write transaction (#11087).
+    ///
+    /// Why: the chunks and the hash left redb in separate transactions, so a
+    /// process exit between them committed a hash with no chunks, and the
+    /// next reindex hash-skipped the file forever.
+    /// What: under the rehydrate fence, deletes `ids`, the entity row and the
+    /// hash row of `file_path` in one transaction. A failure is an `Err` with
+    /// every store unchanged. On success it drops the ids, the entity list and
+    /// the in-process hash from memory. No corpus wired: memory only.
+    /// Test: `a_term_between_a_batch_delete_and_insert_leaves_the_file_served_after_resume`;
+    /// the refused arm by `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps`.
+    pub(crate) async fn remove_file_rows_and_hash(
+        &self,
+        file_path: &str,
+        ids: &[String],
+    ) -> Result<()> {
+        let _fence = self.rehydrate_write_fence().await; // #10209
+        #[cfg(test)]
+        if TEST_FAIL_CHUNK_DELETE
+            .lock()
+            .is_ok_and(|f| f.contains(&self.index_id))
+        {
+            anyhow::bail!("injected redb chunk delete failure (#8959 test seam)");
+        }
+        if let Some(corpus) = self.corpus.clone() {
+            let (ids, file) = (ids.to_vec(), vec![file_path.to_string()]);
+            tokio::task::spawn_blocking(move || {
+                corpus.delete_chunk_entity_and_hash_rows(&ids, &file, &file)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("redb file-row delete task failed: {e}"))?
+            .map_err(|e| e.context("redb file-row delete"))?;
+        }
+        self.drop_chunk_ids_from_memory(ids).await;
+        self.entities.write().await.remove(file_path);
+        let id = crate::core::registry::IndexId::new(self.index_id.as_str());
+        crate::service::reindex::hash::hashes_for(&id).remove(std::path::Path::new(file_path));
+        Ok(())
+    }
+
     /// Delete chunk ids from the durable redb corpus, reporting failure.
     ///
     /// What: `CorpusStore::delete_chunks` on a blocking worker. No corpus
