@@ -168,24 +168,23 @@ fn a_filled_model_draws_cards_and_sparklines() {
     assert_eq!(bar.fg, Color::Rgb(0xd9, 0x77, 0x42));
 }
 
-// See #10899: Agents and Console have no UDS endpoint; their rows read so in
-// a neutral tone, never the red of Down.
+// See #10899: Agents has no UDS endpoint; its row reads so in a neutral tone,
+// never the red of Down. #10966: Console now has one (#10902).
 #[test]
 fn no_uds_endpoint_rows_are_muted_never_down() {
     let mut state = HomeState::default();
-    for id in [ServiceId::Agents, ServiceId::Console] {
-        let health = no_uds_endpoint(id).expect("no UDS endpoint");
-        assert_eq!(
-            status_of(&health),
-            ("no UDS endpoint".to_string(), Tone::Muted)
-        );
-        state.apply_health(HealthUpdate { id, health });
-    }
+    let id = ServiceId::Agents;
+    let health = no_uds_endpoint(id).expect("no UDS endpoint");
+    assert_eq!(
+        status_of(&health),
+        ("no UDS endpoint".to_string(), Tone::Muted)
+    );
+    state.apply_health(HealthUpdate { id, health });
     let mut terminal = Terminal::new(TestBackend::new(160, 30)).expect("test backend");
     terminal
         .draw(|f| render_body(f, f.area(), &model_from_state(&state)))
         .expect("draw");
     let screen = text(terminal.backend().buffer());
-    assert_eq!(screen.matches(" NO UDS ENDPOINT ").count(), 2, "{screen}");
+    assert_eq!(screen.matches(" NO UDS ENDPOINT ").count(), 1, "{screen}");
     assert!(!screen.contains(" DOWN "), "{screen}");
 }
