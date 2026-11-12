@@ -33,6 +33,15 @@
 //!
 //! Test: `tests/linux_lifecycle.rs` runs each path against real child
 //! processes; the unit tests are in `tests.rs`.
+//!
+//! [`DaemonDescriptor`]: crate::linux_lifecycle::DaemonDescriptor
+//! [`StoppedSignal`]: crate::linux_lifecycle::StoppedSignal
+//! [`StopOutcome::Stopped`]: crate::linux_lifecycle::StopOutcome::Stopped
+//! [`StopOutcome::NotRunning`]: crate::linux_lifecycle::StopOutcome::NotRunning
+//! [`LifecycleError::Survivor`]: crate::linux_lifecycle::LifecycleError::Survivor
+//! [`stop`]: crate::linux_lifecycle::stop()
+//! [`start`]: crate::linux_lifecycle::start()
+//! [`restart`]: crate::linux_lifecycle::restart()
 
 mod process;
 mod start;
