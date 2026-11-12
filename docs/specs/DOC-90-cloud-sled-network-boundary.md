@@ -113,7 +113,7 @@ Not on the list, so denied: crates.io, static.crates.io, index.crates.io, regist
 
 **GitHub credential.** One fine-grained token per sled, scoped to that sled's repos, mounted read-only like the console token and never set as an image env value. Only managed routes push (ruling 5).
 
-**Account-level exfiltration through the allowlist is accepted (Refs #11156, audit N1).** The allowlist bounds hosts, not accounts. Squid sees the host name only (OUT-3), so it cannot tell the sled's account from another one on the same host. Code in the sled can send data to another account's repo or gist on `github.com` or `api.github.com` using that account's token, or to `api.anthropic.com` using another API key. These three hosts are the channels. An earlier ruling accepted this limit; this paragraph records it. The controls sit outside the proxy: a minimum-scope GitHub token per sled (see above) and a spend limit on the Anthropic key.
+**Account-level exfiltration through the allowlist is accepted (Refs #11156, audit N1).** The allowlist bounds hosts, not accounts. Squid sees the host name only (OUT-3), so it cannot tell the sled's account from another one on the same host. Code in the sled can send data to another account's repo or gist on `github.com` or `api.github.com` using that account's token, or to `api.anthropic.com` using another API key. These three hosts are the channels. This is the current state. The Architect accepts it pending the owner's review; it is not an owner ruling. The controls sit outside the proxy: a minimum-scope GitHub token per sled (see above) and a spend limit on the Anthropic key.
 
 ## 7. Sled image environment {#SPEC-SLEDNET-07~draft}
 
