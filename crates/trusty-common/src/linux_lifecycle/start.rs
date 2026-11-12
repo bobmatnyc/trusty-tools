@@ -50,7 +50,8 @@ pub struct RestartOutcome {
 ///    still runs the daemon without serving (`RunningUnserved`).
 /// 2. Spawn it detached with `spawn_args` (new session, null stdio, no
 ///    inherited fds), so it outlives the caller. Its cwd is `working_dir`
-///    and its environment is `BASE_ENV` plus `env_passthrough` only.
+///    and its environment is `BASE_ENV` plus `env_passthrough` only, with
+///    the `instance_env` values set over them.
 /// 3. Until `ready_timeout`: an exited child is `ChildExited`; a connect whose
 ///    peer pid is the child is success. The deadline is `NotReady`.
 ///
@@ -70,7 +71,8 @@ pub struct RestartOutcome {
 /// `start_errors_when_the_child_exits_at_boot`,
 /// `start_refuses_a_socket_that_already_serves_and_spawns_no_second_daemon`,
 /// `start_runs_the_daemon_in_its_working_dir_with_only_the_allowed_environment`,
-/// `stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket`.
+/// `stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket`,
+/// `start_and_restart_start_a_stopped_instance_while_a_sibling_runs`.
 pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleError> {
     desc.validate()?;
     let program = desc.program();
@@ -168,18 +170,28 @@ fn spawn(desc: &DaemonDescriptor, program: &Path) -> Result<u32, LifecycleError>
 
 /// The spawned daemon's whole environment: each name in
 /// [`DaemonDescriptor::BASE_ENV`], then each in `desc.env_passthrough`, that
-/// `lookup` (the caller's environment) has a value for.
+/// `lookup` (the caller's environment) has a value for — except that a name
+/// in `desc.instance_env` takes that value, or is left out when it is `None`.
 ///
+/// Why: #11098 — the scan knows this instance by its `instance_env` values,
+/// so the daemon `start` spawns must carry exactly those.
 /// Test: `daemon_env_carries_the_base_and_the_allowlist_only`.
 pub(crate) fn daemon_env(
     desc: &DaemonDescriptor,
     lookup: impl Fn(&str) -> Option<OsString>,
 ) -> Vec<(String, OsString)> {
+    let pinned = |name: &str| desc.instance_env.iter().any(|(n, _)| n == name);
+    let instance = desc
+        .instance_env
+        .iter()
+        .filter_map(|(name, value)| Some((name.clone(), value.clone()?)));
     DaemonDescriptor::BASE_ENV
         .iter()
         .copied()
         .chain(desc.env_passthrough.iter().map(String::as_str))
+        .filter(|name| !pinned(name))
         .filter_map(|name| Some((name.to_string(), lookup(name)?)))
+        .chain(instance)
         .collect()
 }
 
@@ -232,7 +244,8 @@ async fn kill_and_reap(pid: u32, pinned: Option<&PinnedProcess>, limit: Duration
 /// Stop, make sure it stopped, and only then start (D1).
 ///
 /// What: [`restart_with`] with [`KernelDelivery`].
-/// Test: `restart_starts_a_daemon_that_is_not_running`.
+/// Test: `restart_starts_a_daemon_that_is_not_running`,
+/// `restart_of_one_instance_leaves_a_sibling_with_the_same_argv_serving`.
 pub async fn restart(desc: &DaemonDescriptor) -> Result<RestartOutcome, LifecycleError> {
     restart_with(desc, &KernelDelivery).await
 }
