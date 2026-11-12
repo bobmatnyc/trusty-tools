@@ -38,7 +38,8 @@
 //! [`MAX_SCRIPT_DEPTH`]; and substitutions nested past
 //! `MAX_SUBSTITUTION_DEPTH` (#10566). Nested runs are resolved as strictly as the top
 //! level (#9037). A symlinked script is judged by its target. `$HOME` and
-//! `$PWD` prefixes resolve. An interpreter's script is its first operand; a
+//! `$PWD` prefixes resolve. An interpreter's script is its first operand
+//! after its options and their values, never a later one (#10672); a
 //! leading `$NAME` on it resolves only from a plain literal assignment just
 //! before it in the same text (`operand`, #10672). A substitution's words are
 //! never read as the segment's own (#10548). A compiled executable (ELF or
@@ -58,7 +59,9 @@
 //! 4. A script run by a program not listed above (`xargs`, `make`, `find
 //!    -exec`), by an interpreter option this module does not read, or behind
 //!    a wrapper that takes options (`sudo -u x bash s.sh`, judged only when
-//!    the file exists).
+//!    the file exists). #10672: after a `node` or `ruby` long option this
+//!    module does not list, the next two operands are both judged when they
+//!    exist, since either may be the script.
 //! 5. A body changed between this check and the run.
 //! 6. A compiled executable's own behaviour.
 //! 7. A `#`-leading line inside a multi-line double-quoted string that runs a
@@ -89,11 +92,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use crate::commands::pm_guard_bash::build_lease_cwd::{BuildDir, build_dir};
-use crate::commands::pm_guard_bash::{
-    RedirectRole, evaluate_credential_print_command, input_redirect_operand, redirect_role,
-};
+use crate::commands::pm_guard_bash::evaluate_credential_print_command;
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_read_rules;
 use crate::commands::pm_guard_secret_read::{
@@ -109,8 +109,8 @@ use crate::commands::pm_guard_secret_script_self::resolve_self_paths;
 use crate::commands::pm_guard_secret_script_self::{
     ToplevelRisk, passes_on_git_changes, resolve_self_paths_with,
 };
-use node::node_check_only;
 use operand::{fd_pipe_script, locate};
+use operands::{Family, candidates, family_of};
 use walk::{Walk, each_script, each_script_in};
 
 // #10566: the walk that locates each script, split out for the 500-SLOC cap.
@@ -128,75 +128,12 @@ mod node;
 // #10672: an interpreter's script is its first operand (500-SLOC cap).
 #[path = "pm_guard_secret_script_operand.rs"]
 mod operand;
+// #10672: which argv words name the script, option values skipped (500-SLOC cap).
+#[path = "pm_guard_secret_script_operands.rs"]
+mod operands;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;
-
-/// An interpreter family: which options run inline code, and which take an
-/// attached value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Family {
-    Shell,
-    Python,
-    Node,
-    Ruby,
-    Perl,
-}
-
-impl Family {
-    /// Short option letters that make the interpreter run inline code or stdin.
-    fn inline_letters(self) -> &'static [char] {
-        match self {
-            Family::Shell => &['c', 's'],
-            Family::Python => &['c', 'm'],
-            Family::Node => &['e', 'p'],
-            Family::Ruby => &['e'],
-            Family::Perl => &['e', 'E'],
-        }
-    }
-
-    /// Short option letters whose value is the rest of the cluster.
-    fn valued_letters(self) -> &'static [char] {
-        match self {
-            Family::Shell => &['o', 'O'],
-            Family::Python => &['W', 'X'],
-            Family::Node => &['r'],
-            Family::Ruby => &['I', 'r', 'C', 'E', 'F', 'K', 'x', '0'],
-            Family::Perl => &['I', 'M', 'm', 'i', 'l', '0', 'C', 'F', 'd', 'D', 'x'],
-        }
-    }
-
-    /// Options whose separate value is a file run as code.
-    fn code_loading_options(self) -> &'static [&'static str] {
-        match self {
-            Family::Shell => &["--rcfile", "--init-file"],
-            Family::Node => &[
-                "-r",
-                "--require",
-                "--import",
-                "--loader",
-                "--experimental-loader",
-            ],
-            Family::Ruby => &["-r"],
-            Family::Python | Family::Perl => &[],
-        }
-    }
-}
-
-/// The family a program basename belongs to, if it is a listed interpreter.
-fn family_of(program: &str) -> Option<Family> {
-    let versioned_python = program
-        .strip_prefix("python")
-        .is_some_and(|v| v.is_empty() || v.chars().all(|c| c.is_ascii_digit() || c == '.'));
-    match program {
-        "bash" | "sh" | "zsh" | "dash" | "ksh" | "source" | "." => Some(Family::Shell),
-        "node" | "nodejs" => Some(Family::Node),
-        "ruby" => Some(Family::Ruby),
-        "perl" => Some(Family::Perl),
-        _ if versioned_python => Some(Family::Python),
-        _ => None,
-    }
-}
 
 /// How a candidate word reaches the interpreter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,6 +144,9 @@ enum Role {
     Loaded,
     /// The interpreter's stdin: the script when no positional one exists.
     Stdin,
+    /// #10672: the operand after a script word an unlisted `node`/`ruby` long
+    /// option may have taken as its value; judged beside the script.
+    Doubtful,
 }
 
 /// One file a segment may run: the word as written, how it is reached, and
@@ -291,12 +231,18 @@ fn unresolved(
         let interpreted = script.interpreter.is_some();
         return interpreted.then(|| (script.word.clone(), Unread::Unresolvable));
     }
-    let any_exists = candidates
+    // #10672: a computed word in doubt may be the script; it refuses too.
+    if let Some(c) = candidates
         .iter()
-        .filter(|c| c.role != Role::Loaded)
-        .any(|c| !existing_paths(c.lookup(), bases).is_empty());
+        .find(|c| c.role == Role::Doubtful && computed(c))
+    {
+        return Some((c.word.clone(), Unread::Unresolvable));
+    }
+    // #10672: only the script answers for itself; a later operand that exists
+    // is its data and never stands in for it.
+    let exists = !existing_paths(script.lookup(), bases).is_empty();
     let named_once = command.matches(script.word.as_str()).count() <= 1;
-    (!any_exists && named_once).then(|| (script.word.clone(), Unread::Missing))
+    (!exists && named_once).then(|| (script.word.clone(), Unread::Missing))
 }
 
 /// Whether the shell computes `word` at run time: a variable, a substitution
@@ -516,137 +462,6 @@ fn shebang_interpreter(body: &str) -> String {
     } else {
         program
     }
-}
-
-/// The candidate scripts of one segment's argv, and whether the program word
-/// was resolved exactly rather than found by a scan for an interpreter name.
-fn candidates(argv: &[String]) -> (Vec<Candidate>, bool) {
-    // #9037: a case arm's pattern (`pat)`) is not a command; the words after it are.
-    if let Some(first) = argv.first()
-        && first.ends_with(')')
-        && !first.contains('(')
-    {
-        return candidates(&argv[1..]);
-    }
-    let exact = strip_wrapper_prefix(argv);
-    let start = exact
-        .or_else(|| {
-            argv.iter()
-                .position(|t| family_of(&command_basename(t)).is_some())
-        })
-        .unwrap_or(0);
-    let Some(program) = argv.get(start) else {
-        return (Vec::new(), false);
-    };
-    let basename = command_basename(program);
-    let found = match family_of(&basename) {
-        Some(family) => {
-            let interpreter = if matches!(basename.as_str(), "source" | ".") {
-                "sh".to_string()
-            } else {
-                basename
-            };
-            let args = &argv[start + 1..];
-            // #10548: `node --check <file>` parses the file and never runs it;
-            // a `NODE_OPTIONS` prefix can load code, so it keeps the judgment.
-            let preload = argv[..start].iter().any(|w| w.contains("NODE_OPTIONS="));
-            if family == Family::Node && !preload && node_check_only(args) {
-                return (Vec::new(), exact.is_some());
-            }
-            interpreter_candidates(family, &interpreter, args)
-        }
-        None if program.contains('/') => vec![Candidate {
-            word: program.clone(),
-            role: Role::Positional,
-            interpreter: None,
-            resolved: None,
-        }],
-        None => Vec::new(),
-    };
-    (found, exact.is_some())
-}
-
-/// The candidates an interpreter's arguments name; empty after an option that
-/// runs inline code, because the inline rules already read that code.
-fn interpreter_candidates(family: Family, interpreter: &str, args: &[String]) -> Vec<Candidate> {
-    let mut out = Vec::new();
-    let push = |out: &mut Vec<Candidate>, word: &str, role| {
-        out.push(Candidate {
-            word: word.to_string(),
-            role,
-            interpreter: Some(interpreter.to_string()),
-            resolved: None,
-        });
-    };
-    let mut options_done = false;
-    let mut i = 0;
-    while let Some(token) = args.get(i) {
-        i += 1;
-        // A here-document or here-string is inline text the inline rules read.
-        if token.starts_with("<<") {
-            i += usize::from(matches!(token.as_str(), "<<" | "<<-" | "<<<"));
-            continue;
-        }
-        if let Some((0, attached)) = input_redirect_operand(token) {
-            let word = if attached.is_empty() {
-                i += 1;
-                args.get(i - 1).map_or("", String::as_str)
-            } else {
-                attached
-            };
-            push(&mut out, word, Role::Stdin);
-            continue;
-        }
-        match redirect_role(token) {
-            RedirectRole::None => {}
-            RedirectRole::TargetFollows => {
-                i += 1;
-                continue;
-            }
-            _ => continue,
-        }
-        if options_done || !token.starts_with('-') {
-            push(&mut out, token, Role::Positional);
-            continue;
-        }
-        if token == "--" {
-            options_done = true;
-        } else if token == "-" || runs_inline(family, token) {
-            out.retain(|c| c.role != Role::Positional);
-            return out;
-        } else if family.code_loading_options().contains(&token.as_str()) {
-            if let Some(value) = args.get(i) {
-                push(&mut out, value, Role::Loaded);
-            }
-            i += 1;
-        } else if let Some((flag, value)) = token.split_once('=')
-            && family.code_loading_options().contains(&flag)
-        {
-            push(&mut out, value, Role::Loaded);
-        }
-    }
-    out
-}
-
-/// Whether option `token` makes `family` run inline code or read stdin.
-fn runs_inline(family: Family, token: &str) -> bool {
-    if family == Family::Node {
-        return matches!(token, "-e" | "-p" | "--eval" | "--print")
-            || token.starts_with("--eval=")
-            || token.starts_with("--print=");
-    }
-    let Some(cluster) = token.strip_prefix('-').filter(|c| !c.starts_with('-')) else {
-        return false;
-    };
-    for c in cluster.chars() {
-        if family.valued_letters().contains(&c) {
-            return false;
-        }
-        if family.inline_letters().contains(&c) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Every existing file `word` names under `bases`; nothing for a word the
