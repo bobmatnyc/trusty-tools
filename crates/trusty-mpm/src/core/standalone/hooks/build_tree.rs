@@ -59,9 +59,10 @@ use std::path::Path;
 /// triad ([`super::mpm_hook_additions_with_exe`]), [`PM_GUARD_SUFFIX`] the PM
 /// enforcement guard, [`DIVERT_CHECK_SUFFIX`] the #6887 bulk-read diversion
 /// groups, [`PROMPT_FEEDBACK_SUFFIX`] the #7688 prompt-feedback capture, and
-/// [`EGRESS_GUARD_SUFFIX`] the #8454 egress guard. Anything else is not tm's
-/// to classify.
-/// What: the five tails, matched as exact string suffixes so the whole prefix
+/// [`EGRESS_GUARD_SUFFIX`] the #8454 egress guard, and
+/// [`STANDING_RULES_SUFFIX`] the #10960 Architect standing-rules injection.
+/// Anything else is not tm's to classify.
+/// What: the six tails, matched as exact string suffixes so the whole prefix
 /// is the executable path — spaces in that path included. They are mutually
 /// exclusive: a command ending in [`PM_GUARD_SUFFIX`] cannot also end in
 /// `" hook"`.
@@ -79,6 +80,8 @@ const TM_HOOK_ARGV_TAILS: &[&str] = &[
     // #8454: the build-tree shape only. The installed egress entry stays
     // unclaimed, so `tm hooks clean` and the strips never remove it.
     EGRESS_GUARD_SUFFIX,
+    // #10960: the Architect's standing-rules injection.
+    STANDING_RULES_SUFFIX,
 ];
 
 /// The `statusLine.command` argv tail (`#4492`, `#7262`).
@@ -132,6 +135,15 @@ pub(crate) const PM_GUARD_SUFFIX: &str = " hook --pm-guard";
 /// Test: `is_project_managed_hook_command_recognises_prompt_feedback`,
 /// `pm_guard_and_divert_commands_end_in_a_known_argv_tail`.
 pub(crate) const PROMPT_FEEDBACK_SUFFIX: &str = " hook --prompt-feedback";
+
+/// The `hook --standing-rules` argv tail (#10960).
+///
+/// Why: the one-definition rule [`PROMPT_FEEDBACK_SUFFIX`] follows — the
+/// Architect writer, the strip's identity predicate and [`TM_HOOK_ARGV_TAILS`]
+/// read this exact string.
+/// What: the literal suffix, including its leading space.
+/// Test: `architect_standing_rules_groups_are_architect_only`.
+pub(crate) const STANDING_RULES_SUFFIX: &str = " hook --standing-rules";
 
 /// The `hook --egress-guard` argv tail (#8454 G3).
 ///

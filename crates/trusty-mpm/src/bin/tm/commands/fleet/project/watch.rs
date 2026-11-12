@@ -6,7 +6,8 @@
 //! What: [`WatchFile`] is `{"version": 1, "projects": [{"key": ...}]}`.
 //! [`read`] parses it without a lock (writes are atomic renames); [`update`]
 //! is `json_rmw::update` with the version check; [`ensure`] creates the file
-//! once from the `CLAUDE.md` import (plan D9).
+//! once from the `CLAUDE.md` import (plan D9), through [`create_if_absent`],
+//! which `tm fleet init`'s seed also uses (#11012).
 //! Test: `concurrent_adds_for_two_projects_keep_both_entries`,
 //! `a_future_version_is_refused_and_left_unchanged`,
 //! `migration_imports_registered_lines_and_skips_the_rest`.
@@ -52,6 +53,14 @@ pub(crate) struct Entry {
 }
 
 impl WatchFile {
+    /// A list holding `keys`, in order.
+    pub(crate) fn of(keys: &[String]) -> Self {
+        Self {
+            version: VERSION,
+            projects: keys.iter().map(|key| Entry { key: key.clone() }).collect(),
+        }
+    }
+
     /// Whether `key` is on the list.
     pub(crate) fn contains(&self, key: &str) -> bool {
         self.projects.iter().any(|e| e.key == key)
@@ -132,28 +141,43 @@ pub(crate) fn ensure(dir: &Path, registry: &Registry) -> anyhow::Result<Vec<Stri
         // #10895 review: refuse before the lock sidecar is created.
         migrate::plan(dir, registry)?;
     }
+    let notes = create_if_absent(&path, || {
+        let plan = migrate::plan(dir, registry)?;
+        Ok((WatchFile::of(&plan.keys), plan.notes))
+    })?;
+    Ok(notes.unwrap_or_default())
+}
+
+/// Write the list `build` returns, only when no list exists.
+///
+/// Why: the D9 import and `tm fleet init`'s seed (#11012) both create the
+/// list once and must never replace one a concurrent command wrote.
+/// What: `None` when the list exists. Otherwise, under the list's lock,
+/// re-checks absence, runs `build`, and publishes its list by atomic rename;
+/// `Some` carries `build`'s value. A `build` error writes no list.
+/// Test: `migration_runs_once_and_an_emptied_list_stays_empty`,
+/// `init_seed_rerun_leaves_the_list_byte_identical`.
+pub(crate) fn create_if_absent<R>(
+    path: &Path,
+    build: impl FnOnce() -> anyhow::Result<(WatchFile, R)>,
+) -> anyhow::Result<Option<R>> {
+    if exists(path)? {
+        return Ok(None);
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    trusty_common::file_lock::with_exclusive_lock(&path, || -> anyhow::Result<Vec<String>> {
-        // #10895: another command may have imported while this one waited.
-        if exists(&path)? {
-            return Ok(Vec::new());
+    trusty_common::file_lock::with_exclusive_lock(path, || -> anyhow::Result<Option<R>> {
+        // #10895: another command may have created it while this one waited.
+        if exists(path)? {
+            return Ok(None);
         }
-        let plan = migrate::plan(dir, registry)?;
-        let file = WatchFile {
-            version: VERSION,
-            projects: plan
-                .keys
-                .iter()
-                .map(|key| Entry { key: key.clone() })
-                .collect(),
-        };
+        let (file, value) = build()?;
         let bytes = serde_json::to_vec_pretty(&file)?;
-        trusty_common::atomic_file::write_atomic(&path, &bytes)
+        trusty_common::atomic_file::write_atomic(path, &bytes)
             .with_context(|| format!("cannot write {}", path.display()))?;
-        Ok(plan.notes)
+        Ok(Some(value))
     })
     .with_context(|| format!("cannot lock {}", path.display()))?
 }

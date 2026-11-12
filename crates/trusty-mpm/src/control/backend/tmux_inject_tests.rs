@@ -47,6 +47,9 @@ fn backend(dir: &tempfile::TempDir, code: i32, seen: &Arc<Seen>) -> TmuxBackend 
 }
 
 /// A delivered send is one event naming the pane's session and the text.
+// #10748: the tmux spawn guard reads process-global `$HOME`, which a
+// concurrent `#[serial]` test redirects; a send then fails as refused.
+#[serial_test::serial]
 #[tokio::test]
 async fn a_delivered_send_is_one_message_event_9167() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -62,6 +65,9 @@ async fn a_delivered_send_is_one_message_event_9167() {
 }
 
 /// A send tmux refused typed nothing, so records nothing.
+// #10748: the tmux spawn guard reads process-global `$HOME`, which a
+// concurrent `#[serial]` test redirects; a send then fails as refused.
+#[serial_test::serial]
 #[tokio::test]
 async fn a_failed_send_records_nothing_9167() {
     let dir = tempfile::tempdir().expect("tempdir");

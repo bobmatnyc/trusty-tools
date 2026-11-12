@@ -50,6 +50,10 @@ pub(crate) const AGENTS_SERVICE: &str = "trusty-secrets.agents";
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) const AGENTS_DENY_SERVICE: &str = "trusty-secrets.agents-deny";
 
+/// The Keychain service holding the per-key push-only marks (#10998).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const AGENTS_PUSH_ONLY_SERVICE: &str = "trusty-secrets.agents-push-only";
+
 /// The Keychain service holding each vault's deny-migration marker (#10386).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) const DENY_MIGRATED_SERVICE: &str = "trusty-secrets.agents-deny-migrated";
@@ -65,6 +69,7 @@ pub(crate) fn control_service(item: ControlItem) -> &'static str {
         ControlItem::AgentDeny => AGENTS_DENY_SERVICE,
         ControlItem::LegacyAgentsFlag => AGENTS_SERVICE,
         ControlItem::DenyMigrated => DENY_MIGRATED_SERVICE,
+        ControlItem::PushOnly => AGENTS_PUSH_ONLY_SERVICE,
     }
 }
 
