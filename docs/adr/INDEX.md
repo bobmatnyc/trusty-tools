@@ -1,6 +1,6 @@
 # ADR Index — All Decisions
 
-**Last updated:** 2026-11-03 | **Format version:** 1.1
+**Last updated:** 2026-11-10 | **Format version:** 1.1
 
 This index is the complete, concise vetting surface for workspace ADRs. The ADR
 files remain authoritative for full context, decision text, and consequences.
@@ -86,6 +86,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0073](0073-bare-first-session-names-counter-only-on-duplicates.md) | Bare first session names; a counter only on duplicates | Accepted | A session leaf is stripped of a leading `tm-` and trailing `-NN`; the first name is bare `tm-<leaf>`, and any sibling holding the leaf (live tmux or a non-terminal record, including a legacy `-01`) gives the lowest free `-02`..`-99`; existing sessions are not renamed. | `trusty-common`, `trusty-mpm`, `trusty-agents` |
 | [0074](0074-exclude-superseded-drawers-from-default-recall.md) | Exclude superseded drawers from default recall | Accepted | Default recall leaves out replaced facts (a `superseded-by:` row marker, stamped atomically at slot retirement, plus resolved KG edges); `include_superseded` opts back in with `superseded_by` tags; a KG lookup failure sets `supersession_unverified`. Amends ADR-0028 D6. Owner ruling D83. | `trusty-memory` |
 | [0075](0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) | trusty-okf consolidates trusty-kb and owns the feed loop | Accepted | Generic `trusty-kb` code moves into the native crate `trusty-okf`, which replaces the planned `trusty-okg` name; agent glue stays in trusty-agents; the index-feed loop moves into trusty-okf behind a cargo feature, and trusty-search keeps chunking, embedding and ranking. Amends ADR-0041. | `trusty-okf`, `trusty-agents`, `trusty-search` |
+| [0076](0076-features-with-semantic-options-ship-a-preset-cli-only-writer-and-ui-selection-test.md) | Pre-canned default, CLI-only writer, UI selection test | Proposed | A feature with semantic options ships a preset embedded in the binary; the CLI is the only config writer and carries `schema_version`; UIs call the CLI or the same daemon method; a five-criterion test decides which features get a UI; preset updates never overwrite edits. Generalises epic #10894 D6. | Workspace |
 
 ## Notes
 
