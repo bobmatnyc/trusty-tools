@@ -195,7 +195,7 @@ pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
 /// (it logs nothing for it). Liveness beyond "the socket accepts" is #10071.
 /// What: `true` for `trusty-events` only.
 /// Test: `tests::events_is_probed_by_accept_not_by_a_health_method`.
-fn accept_only_member(binary: &str) -> bool {
+pub(super) fn accept_only_member(binary: &str) -> bool {
     binary == trusty_common::control_bus::EVENTS_SERVICE
 }
 
