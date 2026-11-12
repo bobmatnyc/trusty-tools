@@ -11,6 +11,7 @@ cp /etc/squid/steady.conf /etc/squid/profile.d/active.conf
 echo "$(date +%s) steady" >> /var/log/squid/profile.log
 chown -R proxy:proxy /var/log/squid
 
+rm -f /run/squid.pid
 squid -k parse -f /etc/squid/squid.conf
 tail -n 0 -F /var/log/squid/access.log &
 exec squid -N -f /etc/squid/squid.conf
