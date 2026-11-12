@@ -193,6 +193,8 @@ scripts/pending-answers.py
 scripts/pending_hook_dedupe.py
 # #11064: technical level reader, from prototype ab5a222 (hand-merged: TECH LEVEL line, per-user and per-item levels).
 scripts/technical_level.py
+# #11064: warn-only level lint, from prototype ab5a222 (hand-merged: warn_item moved here from dashboard-db.py).
+scripts/level_lint.py
 scripts/test_technical_level.py	tests/test_technical_level.py
 templates/dashboard/tokens.css
 scripts/test_brief_id.py	tests/test_brief_id.py

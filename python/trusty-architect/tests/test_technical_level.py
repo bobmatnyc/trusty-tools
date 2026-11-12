@@ -1,6 +1,6 @@
-"""Technical level setting, per-user and per-item levels, and the hook line (#11064).
+"""Technical level setting, per-user and per-item levels, the hook line and the warn-only level lint (#11064).
 
-Ported from the prototype's scripts/test_technical_level.py; the level lint cases ship with level_lint.py in a later PR.
+Ported from the prototype's scripts/test_technical_level.py (commit ab5a222), lint cases included.
 Test: tests/test_technical_level.py
 """
 import importlib.util
@@ -14,6 +14,7 @@ SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if SCRIPTS not in sys.path:
     sys.path.insert(0, SCRIPTS)
 import dashboard_store as ds  # noqa: E402
+import level_lint as ll  # noqa: E402
 import pending_hook_dedupe as ph  # noqa: E402
 import technical_level as tl  # noqa: E402
 
@@ -224,3 +225,125 @@ def test_cli_prints_the_owner_and_a_user_level(tmp_path, monkeypatch, capsys):
     (tmp_path / "ana.md").write_text("- Technical level: cto\n")
     assert tl.main(["--root", str(tmp_path)]) == 0 and capsys.readouterr().out == "engineer\n"
     assert tl.main(["--user", "ana"]) == 0 and capsys.readouterr().out == "cto\n"
+
+
+# ---- level lint (#11064 TL-11 to TL-13): flags at pm and below, warns, never blocks ----
+
+LINT_CASES = [
+    ("path", "see scripts/foo.py:12-14 for it", "scripts/foo.py:12-14"),
+    ("path", "edit config.py today", "config.py"),
+    ("sha", "fixed in 1a2b3c4d", "1a2b3c4d"),
+    ("flag", "pass --force to it", "--force"),
+    ("envvar", "set TRUSTY_MPM_FLAG first", "TRUSTY_MPM_FLAG"),
+    ("job", "the job 'build-linux' failed", "job 'build-linux'"),
+    ("tool", "run cargo now", "cargo"),
+    ("identifier", "the `slot_role` value", "`slot_role`"),
+]
+
+
+@pytest.mark.parametrize("rule,text,match", LINT_CASES)
+def test_each_lint_rule_flags_below_engineer_and_is_silent_from_engineer_up(rule, text, match):
+    for level in ("non-technical", "vibe-coder", "pm"):
+        assert {"rule": rule, "match": match, "line": 1} in ll.lint(text, level)
+    for level in ("engineer", "senior-engineer", "cto"):
+        assert ll.lint(text, level) == []
+
+
+def test_lint_allows_issue_refs_urls_and_clean_text_at_pm():
+    ok = ("Decision on #123 and example-org/example-repo#45, see https://example.com/a/b/pull/9 and https://x.io/a/b.py. "
+          "The decade facade is fine.")
+    assert ll.lint(ok, "pm") == []
+    assert ll.lint("", "pm") == [] and ll.lint(None, "pm") == []
+
+
+def test_lint_unknown_level_is_pm_and_line_numbers_count_newlines():
+    assert ll.lint("fine\nbut --force here", "wizard") == [{"rule": "flag", "match": "--force", "line": 2}]
+    assert ll.lint("x --force", None) != []
+
+
+def test_lint_cli_warns_with_exit_zero_and_strict_exits_one(tmp_path, capsys):
+    assert ll.main(["--level", "pm", "see", "a/b.py:3"]) == 0
+    assert "path `a/b.py:3`" in capsys.readouterr().out
+    assert ll.main(["--level", "pm", "--strict", "see", "a/b.py:3"]) == 1
+    assert ll.main(["--level", "senior-engineer", "--strict", "a/b.py:3"]) == 0
+    assert ll.main(["--level", "pm", "--strict", "clean words only"]) == 0
+    assert ll.main(["--level", "bogus", "--strict", "--", "--force"]) == 1   # unknown level: pm rules apply
+    assert "unknown level" in capsys.readouterr().err
+    f = tmp_path / "t.txt"
+    f.write_text("line one\nsha 1a2b3c4d\n")
+    assert ll.main(["--level", "pm", "--file", str(f)]) == 0
+    assert "sha `1a2b3c4d` (line 2)" in capsys.readouterr().out
+
+
+# The spec's worked example (section 3), at pm: decision, cost, risk, reversibility; no paths, SHAs or flags.
+PM_ITEM = {
+    "kind": "question", "status": "open", "task": "T01", "created": "2026-11-11T00:00:00Z",
+    "title": "What should a server copy do when it cannot tell whether it is the live one?",
+    "detail": ("Today it assumes live and keeps syncing to Notion, so a typo or blank setting can cause two copies to "
+               "write at once. Recommended: B now, C as a follow-up."),
+    "options": [{"label": "A", "desc": "Keep today's behaviour."},
+                {"label": "B (Recommended)", "desc": "Only an explicit \"active\" counts as live; low effort, no deploy change."},
+                "C: also treat a missing setting as idle in production; needs a deploy check first."],
+}
+EVIDENCE = " Evidence: config.py:1994-2045."
+
+
+def test_pm_fixture_item_is_clean_and_file_line_evidence_is_flagged_only_below_engineer():
+    texts = [t for _, t in ll.item_texts(PM_ITEM)]
+    assert len(texts) == 7 and all(ll.lint(t, "pm") == [] for t in texts)
+    detail = PM_ITEM["detail"] + EVIDENCE
+    assert ll.lint(detail, "pm") == [{"rule": "path", "match": "config.py:1994-2045", "line": 1}]
+    assert ll.lint(detail, "senior-engineer") == [] and ll.lint(detail, "cto") == []
+
+
+def _create(root, item):
+    assert db.main(["--root", str(root), "create", "items", "D", "--json", json.dumps(item)]) == 0
+    return max(p.stem for p in (root / "items").glob("*.json"))
+
+
+def test_item_writes_with_findings_still_commit_and_warn_on_every_path(tmp_path, capsys):
+    put_settings(tmp_path, technical_level="pm")
+    doc_id = _create(tmp_path, dict(PM_ITEM, detail=PM_ITEM["detail"] + EVIDENCE))
+    err = capsys.readouterr().err
+    assert f"warning: level_lint [pm]: item {doc_id} detail: path `config.py:1994-2045`" in err
+    assert "config.py:1994-2045" in ds.Store(str(tmp_path)).get("items", doc_id)["data"]["detail"]   # committed
+    assert db.main(["--root", str(tmp_path), "update", "items", doc_id, "--json", '{"title": "Fix b/c.rs:2?"}']) == 0
+    assert "title: path `b/c.rs:2`" in capsys.readouterr().err
+    ops = tmp_path / "ops.json"
+    ops.write_text(json.dumps([{"action": "update", "collection": "items", "id": doc_id,
+                                "data": {"options": [{"label": "Yes", "desc": "pass --force"}]}}]))
+    assert db.main(["--root", str(tmp_path), "batch", str(ops)]) == 0
+    assert "options[0].desc: flag `--force`" in capsys.readouterr().err
+    data = ds.Store(str(tmp_path)).get("items", doc_id)["data"]
+    assert data["title"] == "Fix b/c.rs:2?" and data["options"][0]["desc"] == "pass --force"
+
+
+def test_pm_fixture_item_write_is_quiet(tmp_path, capsys):
+    put_settings(tmp_path, technical_level="pm")
+    _create(tmp_path, PM_ITEM)
+    assert "level_lint" not in capsys.readouterr().err
+
+
+def test_item_write_is_quiet_at_senior_engineer_and_under_a_senior_override(tmp_path, capsys):
+    put_settings(tmp_path, technical_level="senior-engineer")
+    _create(tmp_path, dict(PM_ITEM, detail=PM_ITEM["detail"] + EVIDENCE))
+    assert "level_lint" not in capsys.readouterr().err
+    put_settings(tmp_path, technical_level="pm")
+    doc_id = _create(tmp_path, dict(PM_ITEM, level_override="senior-engineer"))
+    capsys.readouterr()
+    assert db.main(["--root", str(tmp_path), "update", "items", doc_id, "--json", json.dumps({"detail": EVIDENCE})]) == 0
+    assert "level_lint" not in capsys.readouterr().err   # the stored override sets the level, not the owner's pm
+
+
+def test_a_lint_exception_never_aborts_the_write(tmp_path, capsys, monkeypatch):
+    put_settings(tmp_path, technical_level="pm")
+
+    def boom(*a, **k):
+        raise RuntimeError("lint broke")
+    monkeypatch.setattr(ll, "lint", boom)
+    doc_id = _create(tmp_path, dict(PM_ITEM, detail=PM_ITEM["detail"] + EVIDENCE))
+    assert "level lint skipped: RuntimeError('lint broke')" in capsys.readouterr().err
+    assert ds.Store(str(tmp_path)).get("items", doc_id)["data"]["detail"].endswith(EVIDENCE.strip())
+    monkeypatch.setattr(ll, "item_level", boom)
+    assert db.main(["--root", str(tmp_path), "update", "items", doc_id, "--json", '{"title": "still saved"}']) == 0
+    assert ds.Store(str(tmp_path)).get("items", doc_id)["data"]["title"] == "still saved"

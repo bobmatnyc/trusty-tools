@@ -1,6 +1,6 @@
 {
   "export_manifest": "scripts/architect_export_manifest.txt",
-  "export_manifest_sha256": "0e3bacfcfec0129608daf0e98f25ab159d4e577710bb8d6ea01cd7bb19515122",
+  "export_manifest_sha256": "13314cc76a65e4928a544a96abef92c905823d177930c8c29cb4220e1ab4a995",
   "files": {
     "docs/voice.md": "7655db40ae8a555747910cbbd6f6f0589702e0c3a8fbca944287661ac2bcdf02",
     "schemas/dashboard/accounts.schema.json": "4a5e030ca974132b5f96b0727b6ffdbb5907e1ae0eadfc3f8200f38d5b0a80d0",
@@ -27,7 +27,7 @@
     "scripts/brief-id.py": "b0015fd6b89334aabcf4e9658be636907c8200c7180493a8fc80eaac0e6c1e88",
     "scripts/brief_ids.py": "ee0d2972d21318a93143559685be58073fe3cf1bc3b7cde34f22864b994c0c52",
     "scripts/ctx-watch.py": "dd12fa6e25a579d0525b7b5659eae842c5fc82a0d7c70e9d665ae427b38607f5",
-    "scripts/dashboard-db.py": "7e437771be3939131f4a52969cf51f877e3e2ee228f07921aad302866cbfbda0",
+    "scripts/dashboard-db.py": "d4adb909dbd91fcf69c94401a0aac47fe7564ed746cbb2e28401c717aa2ff160",
     "scripts/dashboard-serve.py": "045f0361705da35006e6ecc2b1e73dc39e0c45363632362680523da63840cf0e",
     "scripts/dashboard_archctx.py": "a0671fd9ffe327462d6da12836a7c2d30554c27a8ff081ee218afcb2fae6807e",
     "scripts/dashboard_attach.py": "6182265ac53cd527377f3fb726d211d998dabd51584b6f75926c63822afed477",
@@ -72,6 +72,7 @@
     "scripts/il-archive.py": "8ed22d8c6fdfae7153a3a8bebc71adbd339dbb1faad795617c3b2cede3a73745",
     "scripts/il-cron.py": "2eb11a753d8700bbbfbe5f60022803dec333071a5fda6a141036c72a30a80f8c",
     "scripts/input-state.py": "750ab5f5a5c6d77c667d94d705886741575e6ef7559390c81c277284b8c34704",
+    "scripts/level_lint.py": "baf23a703640869d212b1e73c641d346f1d58b17ccb21bc4f83bee959ffddd95",
     "scripts/notify-supervisor.sh": "0a43a1540aad9e57ccc030483e3241aaece12b8d08bcd6e87198a85b098d4a8d",
     "scripts/owner_answers.py": "eca5adde30b0059eb1314ef4c7c5d117b6837d3758fc7a7692eabfb3d7c7d970",
     "scripts/pending-answers-hook.sh": "2841e94bad642662c9b81054bc085cace6da3bfa0c30ffb1de231106256a82b2",
@@ -116,7 +117,7 @@
     "skills/tm-context-refresh.md": "d23af312879f54dad651abffd290af10a7ff62bcdd5148fa2486ae2f1456b8e0",
     "skills/tm-fleet-check.md": "b9de2a3d6218fb68e8a99b0c632902d776505d46e4fc4756da45c8929fc9c425",
     "templates/CLAUDE.md": "8cbd43884a0083503240583cae8536414f82205c867aeabdddfc9537ad6c004b",
-    "templates/dashboard/index.html": "4743e652c0aa9f7eab9f644291050e0275f5f81e8920624786f611e393752e95",
+    "templates/dashboard/index.html": "6f8aa9548186af3cbf700ffd1a949cb51d280916761cb70ecb7d9e5f4c61d8a7",
     "templates/dashboard/live.html": "5e51bb7de3b355b25c6c68ab8fa28d788512c76f7bad2fc175bf27b6cd5db976",
     "templates/dashboard/tokens.css": "0394694171e7780ba80322d106492612dafccc74a3c3c938c026236715890a86",
     "templates/dashboard/vendor/VERSIONS.md": "edb5c404b22baf102e8dc9a6aca0e304f821aaa2790481e20aaa4c780c64d6e0",

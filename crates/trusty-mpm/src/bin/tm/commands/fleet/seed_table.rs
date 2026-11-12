@@ -338,6 +338,8 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/technical_level.py",
         false
     ),
+    // #11064: the warn-only level lint; dashboard-db.py imports it on every item write.
+    embedded!("scripts/level_lint.py", "scripts/level_lint.py", false),
     embedded!(
         "scripts/pending-answers-hook.sh",
         "scripts/pending-answers-hook.sh",
