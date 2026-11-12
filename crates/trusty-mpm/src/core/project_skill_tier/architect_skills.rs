@@ -131,6 +131,8 @@ const WORKFLOW: ShippedSkill = ShippedSkill {
         "215f8e5b8f6d9bb04c75d2569c024d5068eab2c951a527229b353c4ff1643a0c",
         // #10895: the text that said `CLAUDE.md` holds the watch set.
         "b0645b7e2ea415922472d45f2936dc844dcf2412420a7b535627ba9c1bcb81fc",
+        // #11117: the text that limited AGENTS.md edits to an owner's order.
+        "59137538d1832abdab2ed80b30c6f55596898c59fef013f5ecbfdf4672fdc3c6",
     ],
 };
 
