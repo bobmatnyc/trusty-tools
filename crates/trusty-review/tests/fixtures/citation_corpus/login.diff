@@ -1,0 +1,16 @@
+diff --git a/login.py b/login.py
+--- a/login.py
++++ b/login.py
+@@ -0,0 +1,12 @@
++import sqlite3
++
++def login(db, form):
++    user = form["user"]
++    pw = form["password"]
++    q = "SELECT pw FROM users WHERE name = '" + user + "' AND pw = '" + pw + "'"
++    try:
++        row = db.execute(q).fetchone()
++    except:
++        return True
++    authed = row
++    return authed

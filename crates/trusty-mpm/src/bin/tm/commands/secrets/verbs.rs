@@ -18,10 +18,11 @@ use std::path::Path;
 use anyhow::{Context as _, anyhow, bail};
 use serde_json::{Value, json};
 use trusty_secrets::api::methods::{
-    CopyResponse, DeleteResponse, ListResponse, ScopesResponse, SetOutcome, SetResponse, method,
+    CopyResponse, CopySource, DeleteResponse, KeychainLabel, ListResponse, ScopesResponse,
+    SetOutcome, SetResponse, method,
 };
 use trusty_secrets::store::parse_dotenv;
-use trusty_secrets::{BackendId, SecretKey, SecretValue};
+use trusty_secrets::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 use super::Ctx;
 use super::session::{check_group, entry_key};
@@ -95,7 +96,10 @@ pub(super) async fn set(
 
 /// `list`: the key names of the project scope, then the owner scope.
 ///
-/// Test: `list_prints_key_names_only`.
+/// What: one line per key; #10998: a key push-only for agents is suffixed
+/// `(push-only for agents)`.
+/// Test: `list_prints_key_names_only`,
+/// `list_marks_a_push_only_key`.
 pub(super) async fn list(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<()> {
     let scopes: ScopesResponse = ctx.call(method::SCOPES, Value::Null).await?;
     for scope in scopes.scopes {
@@ -107,7 +111,13 @@ pub(super) async fn list(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<(
             writeln!(out, "  (no keys)")?;
         }
         for meta in listed.keys {
-            writeln!(out, "  {}", meta.name)?;
+            // #10998: the mark is metadata, never a value.
+            let mark = if meta.agents_push_only {
+                " (push-only for agents)"
+            } else {
+                ""
+            };
+            writeln!(out, "  {}{mark}", meta.name)?;
         }
     }
     Ok(())
@@ -248,6 +258,71 @@ pub(super) async fn copy(
     // #7521: no vault in the request — the server keeps the copy in-project.
     let params = json!({ "from_backend": from, "to_backend": to, "keys": keys });
     let response: CopyResponse = ctx.call(method::COPY, params).await?;
+    report_copy(&from, &to, &response, out)
+}
+
+/// The source a named copy reads (#10998), as typed on the command line.
+pub(super) enum NamedSource<'a> {
+    /// `--from-service S --from-account A`: any Keychain item.
+    Item { service: &'a str, account: &'a str },
+    /// `--from-vault V --from-key K`: a key of any trusty vault.
+    Vault { vault: &'a str, key: &'a str },
+}
+
+/// `copy --from A --to B (--from-service S --from-account A | --from-vault V
+/// --from-key K) KEY`: copy one value from a named source into this
+/// project's scope as `KEY` (#10998).
+///
+/// Why: owner ruling 2026-11-10 — copying a secret between stores is a
+/// user-allowable action that needs no one to see the value.
+/// What: validates the backends, the source names and exactly one KEY
+/// locally, then one `secrets.copy` carrying `source`. The value moves
+/// inside the server; tm sends and receives names only. Prints the same
+/// lines as [`copy`]. A refusal — an unknown or unreadable source, a key
+/// denied to agents — is the server's typed error, exit status 1.
+/// Test: `copy_named_moves_an_owner_key_without_printing_it`,
+/// `copy_named_needs_exactly_one_key_and_fails_on_a_missing_source`.
+pub(super) async fn copy_named(
+    ctx: &Ctx<'_>,
+    from: &str,
+    to: &str,
+    source: NamedSource<'_>,
+    keys: &[&str],
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let fail = |e: SecretsError| anyhow!("tm secrets copy: {e}");
+    let (from, to) = (
+        BackendId::new(from).map_err(fail)?,
+        BackendId::new(to).map_err(fail)?,
+    );
+    let [key] = keys else {
+        bail!("tm secrets copy: a named source copies exactly one KEY, the destination name");
+    };
+    let key = SecretKey::new(key).map_err(fail)?;
+    let source = match source {
+        NamedSource::Item { service, account } => CopySource::keychain_item(
+            KeychainLabel::new(service).map_err(fail)?,
+            KeychainLabel::new(account).map_err(fail)?,
+        ),
+        NamedSource::Vault { vault, key } => CopySource::vault(
+            VaultName::new(vault).map_err(fail)?,
+            SecretKey::new(key).map_err(fail)?,
+        ),
+    };
+    // #10998: the destination is still this project's vault; only the
+    // source is named.
+    let params = json!({ "from_backend": from, "to_backend": to, "keys": [key], "source": source });
+    let response: CopyResponse = ctx.call(method::COPY, params).await?;
+    report_copy(&from, &to, &response, out)
+}
+
+/// Print a copy's `copied`/`not copied` lines and count; fail on any miss.
+fn report_copy(
+    from: &BackendId,
+    to: &BackendId,
+    response: &CopyResponse,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     for key in &response.copied {
         writeln!(out, "copied {key}")?;
     }

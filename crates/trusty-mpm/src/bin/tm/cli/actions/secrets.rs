@@ -96,11 +96,15 @@ pub(crate) enum SecretsAction {
         /// Optional label applied to every key (`<group>.<KEY>`).
         group: Option<ArgText>,
     },
-    /// Copy this project's keys from one backend to another.
+    /// Copy keys into this project's scope from a backend.
     ///
     /// Copies the named keys, or every key of the project scope when none is
-    /// named. Stays inside the project and prints names only. Any key not
-    /// copied makes the exit status 1.
+    /// named, between backends. With `--from-service`/`--from-account` (a
+    /// Keychain item, `--from keychain`) or `--from-vault`/`--from-key` (a
+    /// key of any trusty vault, e.g. the owner vault), copies that one value
+    /// into the project scope as the single KEY given. The value never
+    /// reaches tm; prints names only. Any key not copied makes the exit
+    /// status 1.
     Copy {
         /// Source backend id, e.g. `keychain`.
         #[arg(long)]
@@ -108,7 +112,21 @@ pub(crate) enum SecretsAction {
         /// Destination backend id.
         #[arg(long)]
         to: String,
-        /// Stored key names (`<group>.<KEY>` for a grouped key); none means all.
+        // #10998: a named source — a Keychain item or another vault's key.
+        /// Source Keychain item's service (with `--from keychain`).
+        #[arg(long, requires = "from_account", conflicts_with_all = ["from_vault", "from_key"])]
+        from_service: Option<String>,
+        /// Source Keychain item's account.
+        #[arg(long, requires = "from_service")]
+        from_account: Option<String>,
+        /// Source vault, e.g. `trusty/<owner>`; read on the `--from` backend.
+        #[arg(long, requires = "from_key")]
+        from_vault: Option<String>,
+        /// Source key in `--from-vault`.
+        #[arg(long, requires = "from_vault")]
+        from_key: Option<String>,
+        /// Stored key names (`<group>.<KEY>` for a grouped key); none means
+        /// all. With a named source, exactly one: the destination key.
         keys: Vec<ArgText>,
     },
     /// Report socket and backend reachability, never a value.

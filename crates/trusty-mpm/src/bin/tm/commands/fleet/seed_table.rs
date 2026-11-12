@@ -273,6 +273,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/dashboard_harness_base.py",
         false
     ),
+    // #11065: the pane-tail masker the session-tail provider (phase 2) imports.
+    embedded!(
+        "scripts/dashboard_mask.py",
+        "scripts/dashboard_mask.py",
+        false
+    ),
     embedded!(
         "scripts/dashboard_attach.py",
         "scripts/dashboard_attach.py",

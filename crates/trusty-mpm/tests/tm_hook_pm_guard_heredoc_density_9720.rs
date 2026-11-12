@@ -7,12 +7,13 @@
 //! the 10 s hook timeout, and Claude Code lets a killed hook's command
 //! through.
 //! What: pipes the repro into the real binary with a `pm` session stamp and
-//! kills it past the bound, which fails the test.
+//! bounds the CPU time it spends (#11031: not its wall time, which a loaded
+//! runner stretches); a hung binary is killed, which fails the test.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_heredoc_density_9720`.
 
 use crate::common;
 use crate::tm_hook_egress_guard_8454::{
-    REPRO_BOUND_9720, time_eval_heredoc_repro_9720, wait_within_9720,
+    REPRO_HANG_GUARD_9720, assert_repro_cpu_9720, time_eval_heredoc_repro_9720, wait_within_9720,
 };
 use crate::tm_hook_pm_guard_trust_anchor_8878::{Fixture, bash_payload};
 
@@ -41,6 +42,6 @@ fn pm_guard_judges_the_dense_heredoc_repro_in_bounded_time_9720() {
     let mut pipe = child.stdin.take().expect("child stdin");
     let _ = pipe.write_all(stdin.as_bytes());
     drop(pipe);
-    let out = wait_within_9720(child, REPRO_BOUND_9720);
-    assert!(out.status.success(), "the guard exits 0: {out:?}");
+    // #11031: a CPU-time bound; the 40 s wall-clock one flaked on a loaded runner.
+    assert_repro_cpu_9720(&wait_within_9720(child, REPRO_HANG_GUARD_9720));
 }
