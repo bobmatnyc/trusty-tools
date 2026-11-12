@@ -1,5 +1,5 @@
 # Sled image: headless trusty stack (tm daemon, trusty-memory, trusty-search),
-# Claude Code and tailscaled behind the egress proxy (DOC-90, ADR-0077).
+# Claude Code and tailscaled behind the egress proxy (DOC-90, ADR-0076).
 # Derived from docker/cloudtest. Refs #11054 #11073. Owner ruling D1b
 # (2026-11-11 21:23Z, "Accept all eight as recommended"); ruling D20 (OQ-3)
 # adds tailscaled. Nothing from trusty-tools is downloaded here: run fetch.sh

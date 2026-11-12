@@ -234,6 +234,9 @@ parking_lot = "0.12"
 dirs = "5"
 colored = "2"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+# #8878 PR2b-1b (D72): passkey verifier for presence devices; ES256 only.
+webauthn-rs = "=0.6.2"
+webauthn-authenticator-rs = { version = "=0.6.2", default-features = false, features = ["softtoken"] }
 futures = "0.3"
 futures-util = "0.3"
 axum = { version = "0.8", features = ["macros"] }

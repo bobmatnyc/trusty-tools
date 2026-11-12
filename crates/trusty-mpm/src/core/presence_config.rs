@@ -2,9 +2,11 @@
 //!
 //! Why: Bob D5b Q2 sets a 5-minute request TTL; plan-pr2b1.md §1 makes it a
 //! key. The 120-minute idle window is fixed in `presence::IDLE_LIMIT`, not a
-//! key, and the WebAuthn RP id and origin arrive with PR2b-1b.
+//! key. #8878 PR2b-1b adds the WebAuthn RP id and origin, with no default:
+//! missing either leaves the device verifier unavailable (fail-closed).
 //! What: [`PresenceConfig::request_ttl`] is the configured TTL, clamped to
-//! 1 minute .. `presence_request::MAX_TTL`; a clamp is logged.
+//! 1 minute .. `presence_request::MAX_TTL`; a clamp is logged. `rp_id` and
+//! `rp_origin` feed `presence_webauthn::WebauthnVerifier::from_config`.
 //! Test: `the_request_ttl_defaults_to_five_minutes_and_is_clamped_8878`.
 
 use std::time::Duration;
@@ -22,12 +24,18 @@ pub const DEFAULT_REQUEST_TTL_MINUTES: u64 = 5;
 pub struct PresenceConfig {
     /// Minutes a pending presence request stays approvable.
     pub request_ttl_minutes: u64,
+    /// The WebAuthn relying-party id (the console's tailnet name); no default.
+    pub rp_id: Option<String>,
+    /// The one origin approvals may come from, `https://<rp_id>`; no default.
+    pub rp_origin: Option<String>,
 }
 
 impl Default for PresenceConfig {
     fn default() -> Self {
         Self {
             request_ttl_minutes: DEFAULT_REQUEST_TTL_MINUTES,
+            rp_id: None,
+            rp_origin: None,
         }
     }
 }
@@ -62,10 +70,12 @@ mod tests {
         assert_eq!(parsed.presence.request_ttl(), Duration::from_secs(420));
         let zero = PresenceConfig {
             request_ttl_minutes: 0,
+            ..PresenceConfig::default()
         };
         assert_eq!(zero.request_ttl(), Duration::from_secs(60));
         let huge = PresenceConfig {
             request_ttl_minutes: 10_000,
+            ..PresenceConfig::default()
         };
         assert_eq!(huge.request_ttl(), MAX_TTL);
     }

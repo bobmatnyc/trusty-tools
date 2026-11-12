@@ -317,18 +317,56 @@ macro_rules! row {
     };
 }
 
-row!(/// `waiting_on` row: `who` is owner, architect, ci, agent or other.
-    WaitingOn { who: String, what: String, since: String });
-row!(/// `owed` row: an exact expected value, never a vague word.
-    Owed { check: String, expect: String, #[serde(rename = "ref")] reference: String });
-row!(/// `agents` row.
-    Agent { id: String, goal: String, what: String });
-row!(/// `crons` row.
-    Cron { id: String, schedule: String, prompt: String });
-row!(/// `refs` row: a named pointer.
-    SessionRef { key: String, value: String });
-row!(/// `ctx_use`: self-reported context use at a boundary.
-    CtxUse { at: String, active: u8, stale: u8, ctx: u64, keep: String });
+row!(
+    /// `waiting_on` row: `who` is owner, architect, ci, agent or other.
+    WaitingOn {
+        who: String,
+        what: String,
+        since: String
+    }
+);
+row!(
+    /// `owed` row: an exact expected value, never a vague word.
+    Owed {
+        check: String,
+        expect: String,
+        #[serde(rename = "ref")]
+        reference: String
+    }
+);
+row!(
+    /// `agents` row.
+    Agent {
+        id: String,
+        goal: String,
+        what: String
+    }
+);
+row!(
+    /// `crons` row.
+    Cron {
+        id: String,
+        schedule: String,
+        prompt: String
+    }
+);
+row!(
+    /// `refs` row: a named pointer.
+    SessionRef {
+        key: String,
+        value: String
+    }
+);
+row!(
+    /// `ctx_use`: self-reported context use at a boundary.
+    CtxUse {
+        at: String,
+        active: u8,
+        stale: u8,
+        ctx: u64,
+        keep: String
+    }
+);
 
 /// One `archive.jsonl` line: a closed record, written before its removal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
