@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.0] — 2026-11-12
+
+### Added
+
+- `console_token` (behind `daemon-token`): the one loader for the trusty-console token file named by `TRUSTY_CONSOLE_TOKEN_FILE` (#11074). It refuses a missing file, a non-regular file, a file with a group or other permission bit, and a token shorter than 32 bytes, longer than 4 KiB or holding a byte outside visible ASCII. Errors name the path and the problem, never the content. `ConsoleToken` has a redacted `Debug` and compares in constant time.
+
 ## [0.69.3] — 2026-11-12
 
 ### Added
