@@ -83,8 +83,9 @@ async fn an_absent_or_refused_analyze_socket_reads_as_on_demand() {
     );
 
     // A socket file whose listener is gone: connect is refused.
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind stub");
-    drop(listener);
+    // #10748: a sibling test's fork can inherit the listener fd and keep the
+    // dropped socket accepting; `bind_stale` returns once a dial is refused.
+    crate::test_support::stale_socket::bind_stale(&socket);
     assert!(socket.exists(), "the stale socket file stays behind");
     assert_eq!(
         analyze_tile(&socket, DEADLINE).await,
@@ -197,8 +198,8 @@ async fn an_events_socket_that_does_not_answer_health_is_down_or_timeout() {
         "absent socket",
     );
 
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind stub");
-    drop(listener);
+    // #10748: wait out a listener fd a sibling test's fork inherited.
+    crate::test_support::stale_socket::bind_stale(&socket);
     assert_down(
         events_tile(&socket, DEADLINE, DEADLINE).await,
         "refused connect",
