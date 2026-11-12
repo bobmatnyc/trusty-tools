@@ -51,6 +51,10 @@ const ROLE_BRIDGE: &str = "tc-lc-role=bridge";
 /// this variable when its argv names none, as a real daemon derives its socket
 /// from its data-dir variable, so two instances can run with identical argv.
 const SOCKET_ENV: &str = "TC_LC_SOCKET";
+/// #11098: the fixture flag that sets the process name to [`BAD_NAME`].
+const BAD_NAME_FLAG: &str = "bad-name";
+/// A `comm` that is not UTF-8; `/proc/<pid>/status` prints it unescaped.
+const BAD_NAME: &[u8] = b"lc-\xff\xfe-bad";
 const DAEMON: &str = "lc-daemon";
 const OTHER: &str = "lc-other";
 /// Longer than `tm restart`'s 3 s health wait, which AC1 rules out.
@@ -150,6 +154,11 @@ fn daemon_main(args: &[String]) -> ! {
         // SAFETY: PR_SET_DUMPABLE takes one integer argument.
         let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
         assert_eq!(rc, 0, "prctl(PR_SET_DUMPABLE)");
+    }
+    if args.iter().any(|a| a == BAD_NAME_FLAG) {
+        // `prctl(PR_SET_NAME)` here would name only this test thread; status
+        // prints the main thread's `comm`, which this write sets.
+        fs::write("/proc/self/comm", BAD_NAME).expect("set comm");
     }
     let marker = arg(args, "marker");
     if let Some(m) = marker {
@@ -563,13 +572,13 @@ fn lock_held(lock: &Path) -> bool {
 
 /// Alive = `/proc/<pid>` exists and is not a zombie.
 fn is_alive(pid: u32) -> bool {
-    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+    // #11098: bytes, as `comm` in `stat` may be non-UTF-8.
+    let Ok(stat) = fs::read(format!("/proc/{pid}/stat")) else {
         return false;
     };
-    let state = stat
-        .rsplit_once(')')
-        .and_then(|(_, rest)| rest.trim_start().chars().next());
-    !matches!(state, None | Some('Z' | 'X'))
+    let close = stat.iter().rposition(|b| *b == b')');
+    let state = close.and_then(|i| stat[i + 1..].iter().find(|b| !b.is_ascii_whitespace()));
+    !matches!(state, None | Some(b'Z' | b'X'))
 }
 
 fn kill_pid(pid: u32) {
@@ -1282,6 +1291,38 @@ async fn stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket() 
         assert!(rec.sent().is_empty(), "{mode}: no signal may be sent");
         assert!(is_alive(d.pid()), "{mode}: the daemon is untouched");
     }
+}
+
+// #11098: the scan reads every process's status, and a `comm` that is not
+// UTF-8 once failed `read_to_string`, so one such process anywhere on the
+// host made `stop` and `start` error for every daemon.
+#[tokio::test]
+async fn stop_ignores_an_unrelated_process_whose_name_is_not_utf8() {
+    let fx = Fixture::new();
+    let marker = fx.path("marker");
+    let other = fx.launch(
+        OTHER,
+        "never-bind",
+        &fx.instance_socket("other"),
+        &[format!("marker={}", marker.display()), BAD_NAME_FLAG.into()],
+    );
+    assert!(
+        wait_for(|| !pid_lines(&marker).is_empty()),
+        "the fixture never started"
+    );
+    let status = fs::read(format!("/proc/{}/status", other.pid())).expect("read status");
+    assert!(
+        std::str::from_utf8(&status).is_err(),
+        "the fixture's status must hold its non-UTF-8 name"
+    );
+    let rec = Recording::new(true);
+    let out = stop_with(&fx.descriptor(StoppedSignal::SocketRefuses), &rec).await;
+    assert_eq!(
+        out.expect("a non-UTF-8 name on an unrelated process must not fail the scan"),
+        StopOutcome::NotRunning
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(is_alive(other.pid()), "the unrelated process is untouched");
 }
 
 // #11098: a stdio bridge runs the daemon's executable but not its arguments.

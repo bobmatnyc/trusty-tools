@@ -24,6 +24,7 @@
 //! `stop_and_start_fail_closed_when_a_matching_process_hides_its_environment`,
 //! `stop_fails_closed_when_the_scan_cannot_open_proc_files`,
 //! `stop_returns_not_running_while_only_a_bridge_of_the_same_binary_runs`,
+//! `stop_ignores_an_unrelated_process_whose_name_is_not_utf8`,
 //! `argv_match_needs_every_liveness_arg_as_a_whole_argument`,
 //! `environ_match_needs_every_instance_value_and_unset_equals_unset`,
 //! `read_error_is_skipped_only_for_a_vanished_or_foreign_entry`,
@@ -100,7 +101,7 @@ fn matching_processes(desc: &DaemonDescriptor) -> Result<Vec<u32>, LifecycleErro
 fn process_matches(pid: u32, euid: u32, desc: &DaemonDescriptor) -> Result<bool, LifecycleError> {
     // #11098: only a vanished or foreign entry is skipped; EMFILE, ENOMEM or
     // EIO here once read a live daemon as not running.
-    let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+    let status = match std::fs::read(format!("/proc/{pid}/status")) {
         Ok(s) => s,
         Err(e) if skippable(&e, pid, euid) => return Ok(false),
         Err(source) => {
@@ -154,7 +155,7 @@ fn process_matches(pid: u32, euid: u32, desc: &DaemonDescriptor) -> Result<bool,
 /// Test: `unparsable_status_fails_the_scan_instead_of_skipping_the_pid`.
 ///
 /// [`LifecycleError::Io`]: crate::linux_lifecycle::LifecycleError::Io
-pub(crate) fn status_admits(status: &str, pid: u32, euid: u32) -> Result<bool, LifecycleError> {
+pub(crate) fn status_admits(status: &[u8], pid: u32, euid: u32) -> Result<bool, LifecycleError> {
     // #11098: a skipped unparsable status once read a live daemon as not running.
     let Some((state, uid)) = parse_status(status) else {
         return Err(LifecycleError::Io {
@@ -218,18 +219,21 @@ fn argv0_name(cmdline: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// The state letter and the effective uid from `/proc/<pid>/status`.
+/// The state letter and the effective uid from `/proc/<pid>/status` bytes.
 ///
+/// What: only the `State:` and `Uid:` lines are decoded as UTF-8; other lines,
+/// such as a `Name:` holding a non-UTF-8 `comm`, are never decoded.
 /// Test: `status_parse_reads_state_and_effective_uid`.
-pub(crate) fn parse_status(status: &str) -> Option<(char, u32)> {
-    let field = |key: &str| {
-        status
-            .lines()
-            .find_map(|l| l.strip_prefix(key))
-            .map(str::trim_start)
+pub(crate) fn parse_status(status: &[u8]) -> Option<(char, u32)> {
+    // #11098: a whole-body UTF-8 read let one non-UTF-8 `comm` fail the scan.
+    let field = |key: &[u8]| {
+        let value = status
+            .split(|b| *b == b'\n')
+            .find_map(|l| l.strip_prefix(key))?;
+        std::str::from_utf8(value).ok().map(str::trim_start)
     };
-    let state = field("State:")?.chars().next()?;
+    let state = field(b"State:")?.chars().next()?;
     // `Uid:` lists real, effective, saved and filesystem uids.
-    let euid = field("Uid:")?.split_whitespace().nth(1)?.parse().ok()?;
+    let euid = field(b"Uid:")?.split_whitespace().nth(1)?.parse().ok()?;
     Some((state, euid))
 }

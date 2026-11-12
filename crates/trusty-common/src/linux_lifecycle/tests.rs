@@ -240,18 +240,27 @@ fn argv_match_needs_every_liveness_arg_as_a_whole_argument() {
 
 #[test]
 fn status_parse_reads_state_and_effective_uid() {
-    let status = "Name:\td\nState:\tS (sleeping)\nUid:\t1000\t1001\t1000\t1000\n";
+    let status = b"Name:\td\nState:\tS (sleeping)\nUid:\t1000\t1001\t1000\t1000\n";
     assert_eq!(liveness::parse_status(status), Some(('S', 1001)));
-    let zombie = "State:\tZ (zombie)\nUid:\t1\t1\t1\t1\n";
+    let zombie = b"State:\tZ (zombie)\nUid:\t1\t1\t1\t1\n";
     assert_eq!(liveness::parse_status(zombie), Some(('Z', 1)));
-    assert_eq!(liveness::parse_status("State:\tZ (zombie)\n"), None);
+    assert_eq!(liveness::parse_status(b"State:\tZ (zombie)\n"), None);
+    // #11098: a non-UTF-8 `comm` in `Name:` is never decoded.
+    let bad_name = b"Name:\tlc-\xff\xfe-bad\nState:\tS (sleeping)\nUid:\t7\t7\t7\t7\n";
+    assert_eq!(liveness::parse_status(bad_name), Some(('S', 7)));
+    // A non-UTF-8 `State:` value is unparsable, not a guess.
+    assert_eq!(
+        liveness::parse_status(b"State:\t\xff\nUid:\t7\t7\t7\t7\n"),
+        None
+    );
 }
 
 // #11098: an unparsable status body was skipped as "not a match", so a live
 // daemon could read as not running.
 #[test]
 fn unparsable_status_fails_the_scan_instead_of_skipping_the_pid() {
-    for body in ["", "Name:\td\n", "State:\tS (sleeping)\nUid:\tx\n"] {
+    let bodies: [&[u8]; 3] = [b"", b"Name:\td\n", b"State:\tS (sleeping)\nUid:\tx\n"];
+    for body in bodies {
         match liveness::status_admits(body, 42, 1000) {
             Err(LifecycleError::Io { context, .. }) => {
                 assert_eq!(context, "/proc/42/status: unparsable");
@@ -259,10 +268,10 @@ fn unparsable_status_fails_the_scan_instead_of_skipping_the_pid() {
             other => panic!("unparsable status {body:?} must fail closed, got {other:?}"),
         }
     }
-    let live = "State:\tS (sleeping)\nUid:\t1000\t1000\t1000\t1000\n";
+    let live = b"State:\tS (sleeping)\nUid:\t1000\t1000\t1000\t1000\n";
     assert!(matches!(liveness::status_admits(live, 42, 1000), Ok(true)));
     assert!(matches!(liveness::status_admits(live, 42, 1001), Ok(false)));
-    let zombie = "State:\tZ (zombie)\nUid:\t1000\t1000\t1000\t1000\n";
+    let zombie = b"State:\tZ (zombie)\nUid:\t1000\t1000\t1000\t1000\n";
     assert!(matches!(
         liveness::status_admits(zombie, 42, 1000),
         Ok(false)
