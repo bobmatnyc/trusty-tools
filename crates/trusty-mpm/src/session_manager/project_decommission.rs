@@ -50,6 +50,23 @@ pub enum ProjectDecommissionError {
         /// `(session id, error)` for each session that did not.
         failed: Vec<(String, String)>,
     },
+    /// Every stop succeeded but the registry stamp failed; the project stays
+    /// active (`decommissioned_at` unset) while the sessions in `stopped` are
+    /// already down.
+    // #10988: a bare `Registry` here lost the stopped list (fail-open).
+    #[error(
+        "project '{name}' was not decommissioned: its sessions stopped but the registry \
+         write failed ({source}); stopped: [{}]",
+        stopped.join(", ")
+    )]
+    StampFailed {
+        /// The project name.
+        name: String,
+        /// Ids of the sessions that did stop.
+        stopped: Vec<String>,
+        /// The registry write error.
+        source: ProjectStoreError,
+    },
 }
 
 /// What a completed project decommission did (#10988).
@@ -75,11 +92,13 @@ impl SessionManager {
     /// with [`Self::stop`] (workspace intact, record resumable). Any failure
     /// returns [`ProjectDecommissionError::PartialStop`] and leaves the project
     /// active. Otherwise stamps `decommissioned_at` via
-    /// [`ProjectRegistry::mark_decommissioned`]. No workspace removal, no index
-    /// call.
+    /// [`ProjectRegistry::mark_decommissioned`]; a stamp failure returns
+    /// [`ProjectDecommissionError::StampFailed`] with the stopped ids. No
+    /// workspace removal, no index call.
     /// Test: `decommission_project_stops_live_sessions_and_keeps_the_workspace`,
     /// `decommission_project_refuses_an_architect_session`,
     /// `decommission_project_failed_stop_leaves_the_project_active`,
+    /// `decommission_project_stamp_failure_reports_the_stopped_sessions`,
     /// `decommission_project_unknown_name_errors`.
     pub async fn decommission_project(
         &self,
@@ -129,7 +148,18 @@ impl SessionManager {
                 failed,
             });
         }
-        let project = registry.mark_decommissioned(name, Utc::now()).await?;
+        // #10988: a stamp failure after the stops must still name what stopped.
+        let project = match registry.mark_decommissioned(name, Utc::now()).await {
+            Ok(p) => p,
+            Err(source) => {
+                warn!(project = %name, "project decommission: stamp failed after stops: {source}");
+                return Err(ProjectDecommissionError::StampFailed {
+                    name: name.to_string(),
+                    stopped,
+                    source,
+                });
+            }
+        };
         info!(project = %name, stopped = stopped.len(), "project decommissioned (workspaces and indexes kept)");
         Ok(ProjectDecommissionReport {
             project,

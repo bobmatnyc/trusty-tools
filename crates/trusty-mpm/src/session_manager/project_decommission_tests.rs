@@ -200,6 +200,56 @@ async fn decommission_project_failed_stop_leaves_the_project_active() {
     assert!(ws.is_dir());
 }
 
+/// #10988: a registry stamp that fails after every stop succeeded names the
+/// stopped sessions and leaves the project active.
+///
+/// Why: the bare `Registry` error lost the stopped list, so a caller could not
+/// tell its sessions were already down (code-critic HIGH, fail-open).
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[tokio::test]
+async fn decommission_project_stamp_failure_reports_the_stopped_sessions() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, reg, _fake, mgr, registry) = fixture().await;
+    let (live, ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    // A read-only registry dir: reads still work, the atomic-rename write fails.
+    let perms = std::fs::metadata(reg.path()).expect("meta").permissions();
+    std::fs::set_permissions(reg.path(), std::fs::Permissions::from_mode(0o555)).expect("ro");
+
+    let result = mgr.decommission_project(&registry, "widget").await;
+    // Restore FIRST so TempDir cleanup works even on assert failure.
+    std::fs::set_permissions(reg.path(), perms).expect("restore perms");
+
+    let err = result.expect_err("a failed stamp must fail the verb");
+    match &err {
+        ProjectDecommissionError::StampFailed { stopped, .. } => {
+            assert_eq!(stopped, &vec![live.to_string()], "{err}");
+        }
+        other => panic!("expected StampFailed, got {other}"),
+    }
+    assert!(
+        err.to_string().contains(&live.to_string()),
+        "the message the MCP layer surfaces must name the stopped session: {err}"
+    );
+    assert!(
+        registry
+            .get("widget")
+            .await
+            .expect("row")
+            .decommissioned_at
+            .is_none(),
+        "a failed stamp marked the project decommissioned"
+    );
+    assert_eq!(state_of(&mgr, &live).await, ManagedSessionState::Stopped);
+    assert!(ws.is_dir());
+}
+
 /// #10988: ruling D8e — project decommission keeps each session record, and the
 /// kept record still resumes.
 ///
