@@ -8,7 +8,7 @@
 //! makes clap reject both flags and stops reading the variable.
 //! What: `daemon_binds_no_tcp_listener` boots the real binary on a scratch
 //! data dir and asserts it announces no TCP port once the socket serves.
-//! `removed_start_inputs_are_refused_or_unread` runs `start` against a
+//! `removed_start_inputs_are_refused_or_unread` runs `start` against a held
 //! lockfile naming PID 1, so a run that parses exits at the already-running
 //! check before booting.
 //! Test: `cargo test -p trusty-search --test integration daemon_no_tcp_9214::`.
@@ -59,13 +59,14 @@ fn daemon_binds_no_tcp_listener() {
 /// Run `start --foreground` on `data_dir` with `args` and `env`, and return
 /// `(exit code, combined output)`.
 ///
-/// Why: `daemon.lock` names PID 1, which is always alive, so `start` exits 1
-/// at the already-running check before it binds or opens anything — the same
-/// fast path `daemon_env_precedence.rs` uses.
+/// Why: `daemon.lock` names PID 1 and this test holds its flock
+/// (`hold_daemon_lock`, #11060), so `start` exits 1 at the already-running
+/// check before it binds or opens anything — the same fast path
+/// `daemon_env_precedence.rs` uses.
 fn run_start(data_dir: &Path, args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String) {
     let home = data_dir.join("home");
     std::fs::create_dir_all(&home).expect("create the fake HOME");
-    std::fs::write(data_dir.join("daemon.lock"), b"1").expect("write daemon.lock");
+    let _lock = test_daemon::hold_daemon_lock(data_dir);
     let mut cmd = test_daemon::command();
     cmd.args(["start", "--foreground"])
         .args(args)

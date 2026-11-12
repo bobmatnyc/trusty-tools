@@ -368,15 +368,16 @@ async fn reindex_path_refuses_when_a_same_root_index_status_503s() {
 /// running router — which the CLI is deliberately NOT pointed at — receives
 /// nothing.
 ///
-/// A `daemon.lock` naming PID 1 makes the guard wait instead of auto-spawning
-/// a real daemon (the `daemon_env_precedence.rs` / #8175 technique); the
-/// socket it waits on is one nothing serves.
+/// A held `daemon.lock` naming PID 1 makes the guard wait instead of
+/// auto-spawning a real daemon (the `daemon_env_precedence.rs` / #8175
+/// technique; #11060 needs the flock held); the socket it waits on is one
+/// nothing serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reindex_path_and_flag_when_daemon_is_down_refuses_with_no_requests() {
     let s = Scratch::new();
     let guard = RealAllowlistGuard::capture();
     let daemon = spawn_daemon(s.root_a.path(), s.root_b.path(), None).await;
-    std::fs::write(s.data_dir.path().join("daemon.lock"), b"1").expect("daemon.lock");
+    let _lock = test_daemon::hold_daemon_lock(s.data_dir.path());
     let absent = absent_socket(&s);
 
     let mut cmd = s.command(&absent, &["reindex", "--index", INDEX_A]);
