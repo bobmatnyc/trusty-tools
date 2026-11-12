@@ -201,9 +201,6 @@ makes `tctl restart` run the installed binary and check the running version.
 | D3 | trusty-events is out of scope (owner, 2026-11-11) |
 | D4 | When tctl meets an older binary that has no `restart` verb, reporting that member FAILED is acceptable (owner, 2026-11-11) |
 
-Two proposed defaults, P-a and P-b, are not ratified. They are in the plan
-document's "Open questions" section, with the effect of rejecting each.
-
 ### Ordering
 
 Phase 1 builds the lifecycle module with tests that run against real child
@@ -219,14 +216,6 @@ and installed on a Linux host. That install is the gate for Phase 3.
 
 The epic closes on a live check of O1 to O4 on a Linux host, after Phase 3 is
 released and installed there.
-
-<!-- phases:start -->
-| # | Phase | Issue | State | Gate |
-|---|-------|-------|-------|------|
-| 1 | Linux daemon lifecycle module in trusty-common | TBD | not started | None |
-| 2 | Linux start, stop and restart verbs for memory, search, console and tm | TBD | not started | Phase 1 merged, real-process tests green on Linux |
-| 3 | tctl restart on Linux runs the install-dir binary and checks the running version | TBD | not started | Phase 2 released and installed on a Linux host |
-<!-- phases:end -->
 
 ### Phase: Linux daemon lifecycle module in trusty-common
 
@@ -483,5 +472,6 @@ after creation:
 ## Maintenance
 
 The sections above are authored once. Issue numbers for this epic are not
-written back here. The `TBD` cells in the phases block are this document's own
-copy; the tracker's block supersedes them once the epic is filed.
+written back here. This document carries no phases table: the tracker's
+`phases` block is generated from each phase's `Gate:` line and from child
+issue state.
