@@ -27,7 +27,8 @@
 //! `argv_match_needs_every_liveness_arg_as_a_whole_argument`,
 //! `environ_match_needs_every_instance_value_and_unset_equals_unset`,
 //! `read_error_is_skipped_only_for_a_vanished_or_foreign_entry`,
-//! `status_parse_reads_state_and_effective_uid`.
+//! `status_parse_reads_state_and_effective_uid`,
+//! `unparsable_status_fails_the_scan_instead_of_skipping_the_pid`.
 //!
 //! [`LifecycleError::Unidentified`]: crate::linux_lifecycle::LifecycleError::Unidentified
 //! [`LifecycleError::RunningUnserved`]: crate::linux_lifecycle::LifecycleError::RunningUnserved
@@ -109,9 +110,8 @@ fn process_matches(pid: u32, euid: u32, desc: &DaemonDescriptor) -> Result<bool,
             });
         }
     };
-    match parse_status(&status) {
-        Some((state, uid)) if uid == euid && !matches!(state, 'Z' | 'X') => {}
-        _ => return Ok(false),
+    if !status_admits(&status, pid, euid)? {
+        return Ok(false);
     }
     let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
         Ok(c) => c,
@@ -145,6 +145,24 @@ fn process_matches(pid: u32, euid: u32, desc: &DaemonDescriptor) -> Result<bool,
             source,
         }),
     }
+}
+
+/// Whether a `/proc/<pid>/status` body is a live process of `euid`.
+///
+/// What: `Ok(false)` for another uid or a zombie/dead state; an unparsable
+/// body is [`LifecycleError::Io`], never a skip.
+/// Test: `unparsable_status_fails_the_scan_instead_of_skipping_the_pid`.
+///
+/// [`LifecycleError::Io`]: crate::linux_lifecycle::LifecycleError::Io
+pub(crate) fn status_admits(status: &str, pid: u32, euid: u32) -> Result<bool, LifecycleError> {
+    // #11098: a skipped unparsable status once read a live daemon as not running.
+    let Some((state, uid)) = parse_status(status) else {
+        return Err(LifecycleError::Io {
+            context: format!("/proc/{pid}/status: unparsable"),
+            source: io::Error::new(io::ErrorKind::InvalidData, "no State: or Uid: field"),
+        });
+    };
+    Ok(uid == euid && !matches!(state, 'Z' | 'X'))
 }
 
 fn vanished(e: &io::Error) -> bool {
