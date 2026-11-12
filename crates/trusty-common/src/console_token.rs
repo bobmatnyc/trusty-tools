@@ -7,19 +7,25 @@
 //! must agree on where the token lives and what counts as a valid file; a
 //! second spelling of either is the defect the common-entry-point rule
 //! forbids, so both read it through this module.
-//! What: [`load_from_env`] reads [`TOKEN_FILE_ENV`]. Unset is `Ok(None)`, the
-//! token is off. Set, the file must exist, be a regular file, carry no group
-//! or other permission bit, and hold [`MIN_TOKEN_BYTES`] to
-//! [`MAX_TOKEN_BYTES`] visible ASCII bytes after trailing whitespace is
-//! trimmed; anything else is a [`TokenFileError`] that names the path and the
-//! problem, never a byte of the file. [`ConsoleToken`] prints redacted and
+//! What: [`load_from_env`](crate::console_token::load_from_env) reads
+//! [`TOKEN_FILE_ENV`](crate::console_token::TOKEN_FILE_ENV). Unset is
+//! `Ok(None)`, the token is off. Set, the file must exist, be a regular file,
+//! carry no group or other permission bit, and hold
+//! [`MIN_TOKEN_BYTES`](crate::console_token::MIN_TOKEN_BYTES) to
+//! [`MAX_TOKEN_BYTES`](crate::console_token::MAX_TOKEN_BYTES) visible ASCII
+//! bytes after trailing whitespace is trimmed; anything else is a
+//! [`TokenFileError`](crate::console_token::TokenFileError) that names the
+//! path and the problem, never a byte of the file.
+//! [`ConsoleToken`](crate::console_token::ConsoleToken) prints redacted and
 //! compares in constant time ([`crate::daemon_token::credentials_match`]).
+//! #11074: links are crate-qualified because rustdoc resolves this module's
+//! docs, merged with the outer `pub mod` doc in `lib.rs`, from the crate root.
 //! The token never comes from an environment value or a CLI argument: the
 //! variable names a path, never the token.
 //! Test: `console_token_tests::*`.
 //!
 //! # Spec References
-//! - [`SPEC-SLEDNET-04~draft`](../../../docs/specs/DOC-90-cloud-sled-network-boundary.md#SPEC-SLEDNET-04~draft)
+//! - [`SPEC-SLEDNET-04~draft`](docs/specs/DOC-90-cloud-sled-network-boundary.md#SPEC-SLEDNET-04~draft)
 
 use std::ffi::OsString;
 use std::io::Read;

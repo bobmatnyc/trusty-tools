@@ -128,5 +128,10 @@ chrono         = { workspace = true }
 # #8271: `test-util` gives the socket-budget tests a paused clock; it must
 # never reach the production build, so it lives here only.
 tokio          = { workspace = true, features = ["test-util"] }
+# #11074/#9123: a test that sets the `TOKEN`-named console variable must be
+# the unkeyed `#[serial]` and enter the shared credential sandbox. Dev-only:
+# the sandbox mutates the process environment and must never reach a build.
+serial_test    = { workspace = true }
+trusty-common  = { workspace = true, features = ["credential-test-sandbox"] }
 tower          = { workspace = true }
 http-body-util = { workspace = true }

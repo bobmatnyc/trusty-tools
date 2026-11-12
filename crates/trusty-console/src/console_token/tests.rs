@@ -540,7 +540,10 @@ async fn tailnet_listener_checks_peer_then_token_11074() {
 /// TOK-3: with the variable set to a bad file, `run_serve` fails naming the
 /// path, before it binds. The listen address is held by this test, so a
 /// bind attempted first would fail with "address in use" instead.
+/// #9123: it sets a `TOKEN`-named variable, so it is `#[serial]` and runs in
+/// the credential sandbox.
 #[test]
+#[serial_test::serial]
 fn run_serve_refuses_a_bad_token_file_before_binding_11074() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
     let addr = held.local_addr().expect("addr");
@@ -567,6 +570,7 @@ fn run_serve_refuses_a_bad_token_file_before_binding_11074() {
     let _env = crate::detect::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
     for (path, reason) in [
         (&missing, "does not exist"),
         (&readable, "group or other"),

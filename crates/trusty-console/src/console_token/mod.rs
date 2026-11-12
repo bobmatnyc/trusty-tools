@@ -23,7 +23,7 @@
 //! Test: `console_token/tests.rs`.
 //!
 //! # Spec References
-//! - [`SPEC-SLEDNET-04~draft`](../../../docs/specs/DOC-90-cloud-sled-network-boundary.md#SPEC-SLEDNET-04~draft)
+//! - [`SPEC-SLEDNET-04~draft`](docs/specs/DOC-90-cloud-sled-network-boundary.md#SPEC-SLEDNET-04~draft)
 
 mod login;
 mod session;
