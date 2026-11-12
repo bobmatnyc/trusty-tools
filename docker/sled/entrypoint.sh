@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-# Supervisor: start the three trusty daemons and tailscaled in the background,
-# log each to /data/logs/<name>.log, forward TERM/INT, exit when any exits.
+# Supervisor: start the three trusty daemons in the background, log each to
+# /data/logs/<name>.log, forward TERM/INT, exit when any exits. tailscaled is
+# not started here: it runs in the tailscale-sidecar container as its own uid,
+# so no process in this container can drive it (#11156 B2).
 # Derived from docker/cloudtest. Refs #11054 #11073
+# Test: scripts/check_sled_tailscale_isolation.sh asserts this starts no tailscaled.
 set -uo pipefail
 
-# Owner-only files: the tailscaled log holds a live login URL until the node
-# is logged in, and the exercise logs hold command output.
+# Owner-only files: the exercise logs hold command output.
 umask 077
-mkdir -p "${HOME}" "${XDG_DATA_HOME}" /data/logs /data/work /data/tailscale
-chmod 0700 /data/tailscale /data/logs
+mkdir -p "${HOME}" "${XDG_DATA_HOME}" /data/logs /data/work
+chmod 0700 /data/logs
+# #11156 B2: tailscaled state from an image that ran it as this uid. A node key
+# here is readable by every agent; the sidecar keeps its own state volume.
+if [ -e /data/tailscale ]; then
+    rm -rf /data/tailscale
+    echo "$(date -u +%FT%TZ) removed /data/tailscale (Tailscale state lives in the sidecar)" >> /data/logs/supervisor.log
+fi
 # Logs left by an earlier container on the same volume.
 find /data/logs -type f -exec chmod 0600 {} +
 # Nothing runs yet, so a socket left by an earlier container is stale.
@@ -49,12 +57,6 @@ trap 'stop_all; exit 0' TERM INT
 start tm tm daemon
 start trusty-memory trusty-memory serve --foreground
 start trusty-search trusty-search start --foreground
-# Userspace networking: no TUN device and no added capability. tailscaled gets
-# the proxy env from the image and TS_NO_LOGS_NO_SUPPORT=true (ruling D20). The
-# internal network gives it no UDP route, so peers should be reached over DERP
-# only; that is UNVERIFIED, no tailnet has been joined (README.md, Tailscale).
-start tailscaled tailscaled --tun=userspace-networking \
-    --statedir=/data/tailscale --socket=/var/run/tailscale/tailscaled.sock
 
 # Returns when the first daemon exits; the container then stops so the failure
 # is visible in `docker ps`.
