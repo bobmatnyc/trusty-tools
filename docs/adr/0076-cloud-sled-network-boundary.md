@@ -1,4 +1,4 @@
-# 0077. Cloud sled network boundary: one inbound surface, one outbound proxy, a token on every console route
+# 0076. Cloud sled network boundary: one inbound surface, one outbound proxy, a token on every console route
 
 - **Status:** Proposed
 - **Date:** 2026-11-11

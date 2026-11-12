@@ -218,4 +218,4 @@ V1 cannot tell an update check from a ticket call on `api.github.com`: squid see
 
 ## References
 
-- [ADR-0077](../adr/0077-cloud-sled-network-boundary.md) (Proposed) records the inbound, outbound and token decisions of this spec.
+- [ADR-0076](../adr/0076-cloud-sled-network-boundary.md) (Proposed) records the inbound, outbound and token decisions of this spec.
