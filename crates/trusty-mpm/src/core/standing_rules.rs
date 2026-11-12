@@ -1,0 +1,175 @@
+//! The Architect's standing-rules block (#10960).
+//!
+//! Why: after a `/clear` and resume, an Architect session stopped applying the
+//! owner's standing rules. They reached it as one line inside a ~98 KB state
+//! file, which the model reads once and does not keep in view. A short block
+//! the owner maintains, injected at every session start and on every user turn,
+//! keeps those rules in resident context.
+//! What: [`load`] reads `<project>/`[`STANDING_RULES_REL_PATH`] under the
+//! [`STANDING_RULES_CAP_BYTES`] cap and returns a [`Load`];
+//! [`hook_output`] turns it into the `SessionStart` / `UserPromptSubmit` hook
+//! response. `tm hook --standing-rules` is the only caller; it is registered
+//! for Architect sessions only (`session_launch::architect_hooks`).
+//!
+//! FAIL-OPEN: nothing here returns an error. An absent or blank file is a
+//! no-op. An unreadable file (permissions, invalid UTF-8, a directory) is a
+//! warning and injects nothing. A file over the cap injects its whole lines up
+//! to the cap and warns; it is never cut silently.
+//! Test: `standing_rules_tests.rs`; the binary end to end in
+//! `tests/tm_hook_standing_rules_10960.rs`.
+
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use serde_json::{Value, json};
+
+/// The rules file, relative to the Architect project directory.
+///
+/// Why: the Architect keeps its owner-maintained, local-only files under
+/// `local/` (`state.md`, `owner/`, `mandates/`); the rules belong beside them.
+/// What: `local/standing-rules.md`, plain Markdown, injected verbatim.
+pub const STANDING_RULES_REL_PATH: &str = "local/standing-rules.md";
+
+/// The injected-size cap, in bytes (owner-approved fix, #10960).
+pub const STANDING_RULES_CAP_BYTES: usize = 2048;
+
+/// The two hook events the block is injected on.
+pub const STANDING_RULES_EVENTS: [&str; 2] = ["SessionStart", "UserPromptSubmit"];
+
+/// What reading the rules file produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Load {
+    /// No file, or a file holding only whitespace: inject nothing, say nothing.
+    Absent,
+    /// Rules to inject; `warning` is set when the file was over the cap.
+    Rules {
+        /// The text injected, verbatim up to the cap.
+        text: String,
+        /// The over-cap warning the operator sees, if any.
+        warning: Option<String>,
+    },
+    /// The file exists but could not be read; inject nothing, warn.
+    Unreadable(String),
+}
+
+/// The rules file for an Architect project at `project_dir`.
+pub fn rules_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(STANDING_RULES_REL_PATH)
+}
+
+/// Read the standing rules for `project_dir`.
+///
+/// Why: see the module doc.
+/// What: [`load_from`] over [`rules_path`] with [`STANDING_RULES_CAP_BYTES`].
+/// Test: `an_absent_file_is_a_silent_no_op`, `rules_under_the_cap_are_injected_verbatim`.
+pub fn load(project_dir: &Path) -> Load {
+    load_from(&rules_path(project_dir), STANDING_RULES_CAP_BYTES)
+}
+
+/// Read `path` under a `cap`-byte limit.
+///
+/// Why: the hook runs on every user turn, so it reads at most `cap + 1` bytes
+/// whatever the file's size, and it must never hand the model a partial or
+/// undecodable block.
+/// What: `NotFound` or a whitespace-only file → [`Load::Absent`]. Any other
+/// open/read error, or bytes that are not UTF-8 → [`Load::Unreadable`]. At most
+/// `cap` bytes → [`Load::Rules`] with the text verbatim. More than `cap` bytes
+/// → [`Load::Rules`] holding the whole lines that fit in `cap` (nothing past
+/// the last newline at or before `cap`) and a warning naming the file, its
+/// size and the cap; a first line longer than `cap` leaves the text empty.
+/// Postcondition: a `Rules` text is never longer than `cap` bytes.
+/// Test: `an_over_cap_file_keeps_whole_lines_and_warns`,
+/// `invalid_utf8_is_unreadable_and_injects_nothing`,
+/// `a_directory_at_the_path_is_unreadable`, `a_blank_file_is_a_silent_no_op`.
+pub fn load_from(path: &Path, cap: usize) -> Load {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Load::Absent,
+        Err(err) => return unreadable(path, &err.to_string()),
+    };
+    let size = file.metadata().map(|m| m.len()).ok();
+    let mut bytes = Vec::with_capacity(cap.saturating_add(1));
+    // `cap + 1` bytes are enough to tell "at the cap" from "over it".
+    let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
+    if let Err(err) = file.take(limit).read_to_end(&mut bytes) {
+        return unreadable(path, &err.to_string());
+    }
+    let over = bytes.len() > cap;
+    if over {
+        // A newline is one ASCII byte, so cutting just after it is always a
+        // UTF-8 boundary; no newline in the first `cap` bytes keeps nothing.
+        let keep = bytes[..cap]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |i| i + 1);
+        bytes.truncate(keep);
+    }
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => return unreadable(path, &format!("not valid UTF-8 ({})", err.utf8_error())),
+    };
+    if !over && text.trim().is_empty() {
+        return Load::Absent;
+    }
+    let warning = over.then(|| {
+        let size = size.map_or_else(|| "more than".to_owned(), |n| format!("{n}"));
+        format!(
+            "tm: standing rules {} is {size} bytes, over the {cap}-byte cap; \
+             injected {} bytes of whole lines and dropped the rest — shorten the file",
+            path.display(),
+            text.len()
+        )
+    });
+    debug_assert!(text.len() <= cap, "the injected text never exceeds the cap");
+    Load::Rules { text, warning }
+}
+
+/// The [`Load::Unreadable`] warning for `path`.
+fn unreadable(path: &Path, reason: &str) -> Load {
+    Load::Unreadable(format!(
+        "tm: standing rules {} could not be read ({reason}); no rules injected this turn",
+        path.display()
+    ))
+}
+
+/// The hook response for `load` on `event`, or `None` to print nothing.
+///
+/// Why: Claude Code adds `hookSpecificOutput.additionalContext` to the model's
+/// context on `SessionStart` and `UserPromptSubmit`, and shows `systemMessage`
+/// to the operator; a warning there is visible without blocking the turn.
+/// What: an event outside [`STANDING_RULES_EVENTS`] or [`Load::Absent`] →
+/// `None`. [`Load::Rules`] → `additionalContext` holding a one-line header
+/// naming the file and the text verbatim, plus `systemMessage` when the load
+/// warned (a text cut to nothing injects no context). [`Load::Unreadable`] →
+/// `systemMessage` only. No response carries `decision` or `continue`, so
+/// none can block the turn.
+/// Test: `the_response_injects_on_both_events`,
+/// `an_unreadable_file_warns_and_injects_nothing`,
+/// `an_unknown_event_prints_nothing`.
+pub fn hook_output(event: &str, load: &Load) -> Option<Value> {
+    if !STANDING_RULES_EVENTS.contains(&event) {
+        return None;
+    }
+    match load {
+        Load::Absent => None,
+        Load::Unreadable(warning) => Some(json!({ "systemMessage": warning })),
+        Load::Rules { text, warning } => {
+            let mut out = serde_json::Map::new();
+            if !text.trim().is_empty() {
+                let context = format!("Standing owner rules ({STANDING_RULES_REL_PATH}):\n{text}");
+                out.insert(
+                    "hookSpecificOutput".to_owned(),
+                    json!({ "hookEventName": event, "additionalContext": context }),
+                );
+            }
+            if let Some(warning) = warning {
+                out.insert("systemMessage".to_owned(), Value::from(warning.as_str()));
+            }
+            (!out.is_empty()).then_some(Value::Object(out))
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "standing_rules_tests.rs"]
+mod tests;
