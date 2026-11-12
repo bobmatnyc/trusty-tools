@@ -144,6 +144,10 @@ fn is_truthy(value: Option<&str>) -> bool {
 /// Test: `is_cargo_test_binary_*`, `detect_fails_closed_for_an_unknown_layout_with_a_cargo_hash`,
 /// `detect_is_false_for_production_shapes_beside_the_1100_layout`.
 fn is_cargo_test_binary(exe: &Path) -> bool {
+    /// A path's final component as UTF-8.
+    fn dir_name(p: Option<&Path>) -> Option<&str> {
+        p.and_then(Path::file_name).and_then(|n| n.to_str())
+    }
     let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) else {
         return false;
     };
@@ -153,7 +157,6 @@ fn is_cargo_test_binary(exe: &Path) -> bool {
     }) else {
         return false;
     };
-    let dir_name = |p: Option<&Path>| p.and_then(Path::file_name).and_then(|n| n.to_str());
     let parent = exe.parent();
     if dir_name(parent) == Some("deps") {
         return true;
