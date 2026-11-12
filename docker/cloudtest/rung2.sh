@@ -2,7 +2,7 @@
 # rung2.sh — rung-2 smoke, run inside the app container as user cloudtest:
 #   docker exec -u cloudtest tm-trusty-cloud-cloudtest rung2.sh
 # Needs check.sh to have run once (it stores the memory sentinel this reads back).
-# Five steps, each PASS/FAIL; raw output goes to /data/logs/rung2-<ts>.log.
+# Six steps, each PASS/FAIL; raw output goes to /data/logs/rung2-<ts>.log.
 # Claude steps need a login: the interactive one (/data/home/.claude/.credentials.json,
 # checked with test -s only, never read) or a token file. Without either they print
 # SKIP, not FAIL. This script, its log and its output never hold a credential. Refs #11054
@@ -82,13 +82,19 @@ out="$(curl -sS -m 10 https://example.com 2>&1)"; rc=$?
 ok=no; [ "${rc}" -ne 0 ] && grep -q '403' <<< "${out}" && ok=yes
 result "proxy denies example.com" "${rc}" "${ok}"
 
-# 4. Negative: bypassing the proxy must fail (internal network has no route out).
+# 4. Negative: a CONNECT to an IP literal must fail with a 403 (squid.conf -n).
+out="$(curl -sS -m 10 https://1.1.1.1 2>&1)"; rc=$?
+{ echo "=== proxy deny IP literal 1.1.1.1 (rc=${rc}) ==="; printf '%s\n' "${out}"; } >> "${LOG}"
+ok=no; [ "${rc}" -ne 0 ] && grep -q '403' <<< "${out}" && ok=yes
+result "proxy denies IP-literal CONNECT" "${rc}" "${ok}"
+
+# 5. Negative: bypassing the proxy must fail (internal network has no route out).
 out="$(curl -sS -m 10 --noproxy '*' https://api.anthropic.com 2>&1)"; rc=$?
 { echo "=== direct egress (rc=${rc}) ==="; printf '%s\n' "${out}"; } >> "${LOG}"
 ok=no; [ "${rc}" -ne 0 ] && ok=yes
 result "direct egress blocked" "${rc}" "${ok}"
 
-# 5. The daemons must not hold the token. Counts variable NAMES only.
+# 6. The daemons must not hold the token. Counts variable NAMES only.
 leaks=0
 for p in /proc/[0-9]*; do
     [ -r "${p}/environ" ] || continue

@@ -88,7 +88,7 @@ docker run -d --name tm-trusty-cloud-cloudtest --cpus 4 --memory 6g \
 
 docker exec -u cloudtest tm-trusty-cloud-cloudtest check.sh     # stores the memory sentinel
 docker exec -u cloudtest tm-trusty-cloud-cloudtest rung2.sh
-docker exec tm-trusty-cloud-egress cat /var/log/squid/access.log   # evidence: TCP_TUNNEL/200 for the three hosts, TCP_DENIED/403 example.com
+docker exec tm-trusty-cloud-egress cat /var/log/squid/access.log   # evidence: TCP_TUNNEL/200 for the three hosts, TCP_DENIED/403 example.com and 1.1.1.1:443
 ```
 
 ### Interactive login (owner, once)
