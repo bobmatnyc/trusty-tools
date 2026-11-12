@@ -174,6 +174,7 @@ scripts/turn-active.py|crates/trusty-mpm/src/assets/architect/scripts/turn-activ
 scripts/pm_cursor.py|crates/trusty-mpm/src/assets/architect/scripts/pm_cursor.py
 scripts/pending-answers.py|crates/trusty-mpm/src/assets/architect/scripts/pending-answers.py
 scripts/pending_hook_dedupe.py|crates/trusty-mpm/src/assets/architect/scripts/pending_hook_dedupe.py
+scripts/technical_level.py|crates/trusty-mpm/src/assets/architect/scripts/technical_level.py
 scripts/pending-answers-hook.sh|crates/trusty-mpm/src/assets/architect/scripts/pending-answers-hook.sh
 templates/dashboard/tokens.css|crates/trusty-mpm/src/assets/architect/dashboard/tokens.css
 provenance.json|crates/trusty-mpm/src/assets/architect/provenance.json

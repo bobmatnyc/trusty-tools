@@ -332,6 +332,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/pending_hook_dedupe.py",
         false
     ),
+    // #11064: the technical level reader; pending_hook_dedupe.py and dashboard_store.py import it.
+    embedded!(
+        "scripts/technical_level.py",
+        "scripts/technical_level.py",
+        false
+    ),
     embedded!(
         "scripts/pending-answers-hook.sh",
         "scripts/pending-answers-hook.sh",
