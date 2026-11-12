@@ -4,8 +4,13 @@
 # Derived from docker/cloudtest. Refs #11054 #11073
 set -uo pipefail
 
+# Owner-only files: the tailscaled log holds a live login URL until the node
+# is logged in, and the exercise logs hold command output.
+umask 077
 mkdir -p "${HOME}" "${XDG_DATA_HOME}" /data/logs /data/work /data/tailscale
-chmod 0700 /data/tailscale
+chmod 0700 /data/tailscale /data/logs
+# Logs left by an earlier container on the same volume.
+find /data/logs -type f -exec chmod 0600 {} +
 # Nothing runs yet, so a socket left by an earlier container is stale.
 rm -f "${XDG_DATA_HOME}/trusty-memory/trusty-memory.sock" \
       "${XDG_DATA_HOME}/trusty-search/trusty-search.sock"
@@ -46,7 +51,8 @@ start trusty-memory trusty-memory serve --foreground
 start trusty-search trusty-search start --foreground
 # Userspace networking: no TUN device and no added capability. tailscaled gets
 # the proxy env from the image and TS_NO_LOGS_NO_SUPPORT=true (ruling D20). The
-# internal network gives it no UDP route, so peers are reached over DERP only.
+# internal network gives it no UDP route, so peers should be reached over DERP
+# only; that is UNVERIFIED, no tailnet has been joined (README.md, Tailscale).
 start tailscaled tailscaled --tun=userspace-networking \
     --statedir=/data/tailscale --socket=/var/run/tailscale/tailscaled.sock
 

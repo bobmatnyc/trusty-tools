@@ -6,6 +6,7 @@
 # Runs every step, exits non-zero if any FAILed. Copied from docker/cloudtest. Refs #11054 #11073
 set -uo pipefail
 
+umask 077   # owner-only logs; docker exec does not inherit the entrypoint's umask
 MODE="full"
 [ "${1:-}" = "--verify-persist" ] && MODE="persist"
 

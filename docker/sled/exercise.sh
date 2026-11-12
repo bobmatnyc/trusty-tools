@@ -8,6 +8,8 @@
 # control plane; the URL is never printed. Raw output: /data/logs/exercise-<ts>.log.
 # Exits non-zero if a step that must work FAILs. Refs #11073
 set -uo pipefail
+# docker exec does not inherit the entrypoint's umask: the log is owner-only.
+umask 077
 
 REPO="${SLED_REPO:-bobmatnyc/trusty-tools}"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -49,11 +51,14 @@ done
 
 # One Claude Code session. Without a stored login it still runs, so V1 sees
 # every host it tries; the result is then INFO, not FAIL. Claude Code with no
-# login opens no connection, so a credential-free request to the model API then
-# proves the steady path (Anthropic answers 401; nothing secret is sent).
+# login opens no connection, so a credential-free request to the model API is
+# the substitute: it proves the steady path to api.anthropic.com (Anthropic
+# answers 401; nothing secret is sent), not a real session. A real session
+# stays UNVERIFIED until a run with a stored login.
 if test -s /data/home/.claude/.credentials.json || test -s /run/secrets/claude.env; then
     run "claude -p session" yes claude-run -p "Reply with the single word READY" --output-format json
 else
+    echo "UNVERIFIED real Claude Code session: no login stored; the api.anthropic.com request below is the substitute"
     run "claude -p session (no login stored)" no claude-run -p "Reply with the single word READY" --output-format json
     run "api.anthropic.com through the proxy (no credential)" yes \
         curl -sS -m 20 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com/v1/models

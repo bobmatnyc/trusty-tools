@@ -76,18 +76,37 @@ docker run -d --name tm-trusty-cloud-sled --cpus 4 --memory 6g \
 
 ```bash
 docker exec -u sled tm-trusty-cloud-sled check.sh          # stack check
-docker exec -u sled tm-trusty-cloud-sled exercise.sh       # Claude session, git fetch, gh api
+docker exec -u sled tm-trusty-cloud-sled exercise.sh       # Claude session (or the credential-free API probe), git fetch, gh api
 docker/sled/check_v1.sh tm-trusty-cloud-sled tm-trusty-cloud-sled-egress
 docker exec tm-trusty-cloud-sled-egress cat /var/log/squid/access.log
 ```
 
 `exercise.sh --tailscale-login` also runs `tailscale up` with no auth key, which
 asks the control plane for a login URL; the URL goes to the log redacted.
-`check_v1.sh` runs on the docker host. It sends the example.com and raw-IP
-probes, then grades `access.log`: every `TCP_TUNNEL` names a steady host, the
-probes are `TCP_DENIED/403`, nothing reached crates.io, huggingface.co,
+`check_v1.sh` runs on the docker host, from the repo checkout. It reads
+`squid.conf`, `login.conf` and `active.conf` from the running proxy and fails
+on any rule that differs from its V1 policy or from `docker/sled/proxy/`. It
+checks that the app has no default route, reaches no TCP port on the internal
+network's gateway, and reaches the proxy on 3128 only. It sends the example.com
+and raw-IP probes, then grades `access.log`: each probe added a fresh
+`TCP_DENIED/403` line, every `TCP_TUNNEL` names a steady host, at least one
+tunnel reached `api.anthropic.com`, nothing reached crates.io, huggingface.co,
 registry.npmjs.org, pypi.org or downloads.claude.ai, and `--noproxy` and DNS
-fail. It prints PASS or FAIL per row and exits non-zero on any FAIL.
+fail to connect. It prints PASS or FAIL per row and exits non-zero on any FAIL;
+an unreadable log, an empty `profile.log` or a stopped container is a FAIL.
+
+Logs: the entrypoint, `check.sh` and `exercise.sh` run with `umask 077`, and
+`/data/logs` is mode 0700, so every log there is 0600 and owner-only. The
+`tailscaled` log holds a live login URL until the node is logged in.
+
+### Unverified
+
+- A real Claude Code session. No login is stored in the test sled, so
+  `exercise.sh` prints `UNVERIFIED` and runs a credential-free request to
+  `api.anthropic.com` (HTTP 401) as the substitute. It shows the steady path,
+  not the hosts a logged-in session uses.
+- Relay-only (DERP) tailnet traffic and `tailscale serve`. No tailnet has been
+  joined, so neither has been exercised.
 
 ## Login profile (off by default)
 
@@ -130,9 +149,10 @@ Not yet enforced by the binaries:
 
 `tailscaled` runs as the `sled` user with `--tun=userspace-networking` (no TUN
 device, no capability), state in `/data/tailscale`, and the proxy env. The
-internal network gives it no UDP route, so direct WireGuard and STUN cannot
-work and peers are reached over DERP only. Joining a tailnet and `tailscale
-serve` need an owner login (`tailscale up`, then the URL), not done yet.
+internal network gives it no UDP route, so direct WireGuard and STUN should
+not work and peers should be reached over DERP only. That is UNVERIFIED: no
+tailnet has been joined. Joining a tailnet and `tailscale serve` need an owner
+login (`tailscale up`, then the URL), not done yet.
 
 Measured on a Linux docker host with Tailscale 1.104.6, logged out (DOC-90 section 6 marked
 proxy support Unverified):
@@ -146,6 +166,29 @@ proxy support Unverified):
   unreachable` (no route out), so nothing left the sled.
 - The login URL is written to `/data/logs/tailscaled.log` by `tailscaled`
   itself. Treat that log as sensitive until the node is logged in.
+
+## Residual risk
+
+- Token files are readable by every process that runs as `sled`. The daemons,
+  Claude Code and any code they run share that uid, so any of them can read
+  `/run/secrets/*`. Scope the GitHub token to the minimum: the sled's repos
+  and the permissions the work needs.
+- Ruling D20 residual, accepted by the owner. The allowed Tailscale hosts let
+  code in the sled run `tailscale up --auth-key=<other>`, join another tailnet
+  and tunnel out over DERP. The controls are tailnet lock or ACL tags on the
+  owner's tailnet; the proxy cannot tell tailnets apart.
+- A tunnel opened during a login window stays open after `sled-profile
+  steady`: a reconfigure applies to new connections only. `docker restart
+  tm-trusty-cloud-sled-egress` drops it.
+- Raw-IP forms with letters, such as hex (`0x01010101`, `0x7f.0.0.1`), are not
+  matched by the `raw_ip` ACL. The final `http_access deny all` denies them,
+  because no allow names them. Octal and bare-integer forms are digits and
+  dots only, so `raw_ip` matches them.
+
+- Host requirement: the docker host's firewall must stop containers on the
+  sled's `--internal` bridge from reaching host services. Only the proxy peer
+  on 3128 is reachable. The V1 row "app reaches no TCP port on the internal
+  gateway" verifies this. Do not run the sled on a host where that row fails.
 
 ## Teardown
 
