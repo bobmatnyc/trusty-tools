@@ -279,9 +279,66 @@ mod tests {
         }
     }
 
+    /// #11138: an executable path that cannot be read is undecidable, and an
+    /// undecidable process must not reach a live daemon — fail closed.
     #[test]
-    fn detect_is_false_when_exe_is_unresolvable() {
-        assert!(!detect(None, None, false, None));
+    fn detect_fails_closed_when_exe_is_unresolvable() {
+        assert!(detect(None, None, false, None));
+        // The explicit opt-in still wins, so production keeps an escape hatch.
+        assert!(!detect(Some("1"), None, false, None));
+    }
+
+    /// #11138: rustc 1.100's cargo writes test binaries to
+    /// `target/<profile>/build/<crate>/<hash>/out/<name>-<hash>`. These are
+    /// the paths main CI run 43281734883 printed.
+    #[test]
+    fn is_cargo_test_binary_accepts_the_rust_1100_build_out_layout() {
+        for exe in [
+            "/repo/target/debug/build/trusty-mpm/98af4e218cd2e034/out/trusty_mpm-98af4e218cd2e034",
+            "/repo/target/debug/build/trusty-mpm/62c73b50a0eeb776/out/tm-62c73b50a0eeb776",
+            "/repo/target/debug/build/trusty-mpm/3322f910a0c480bf/out/integration-3322f910a0c480bf",
+            "/repo/target/release/build/trusty-search/0802fde7a9957161/out/registry_isolation-0802fde7a9957161",
+        ] {
+            assert!(
+                detect(None, None, false, Some(Path::new(exe))),
+                "{exe} is a cargo test binary"
+            );
+        }
+    }
+
+    /// #11138: a binary carrying cargo's 16-hex metadata hash in a directory
+    /// layout this module does not know yet is still a test binary — the next
+    /// cargo layout change must not reopen the live-daemon hole.
+    #[test]
+    fn detect_fails_closed_for_an_unknown_layout_with_a_cargo_hash() {
+        for exe in [
+            "/repo/target/debug/artifacts/trusty_mpm-98af4e218cd2e034",
+            "/build-dir/x86_64/debug/trusty-mpm/out/tm-62c73b50a0eeb776",
+        ] {
+            assert!(
+                detect(None, None, false, Some(Path::new(exe))),
+                "{exe} carries cargo's metadata hash and must fail closed"
+            );
+        }
+    }
+
+    /// #11138: the production rule — cargo uplifts (`target/<profile>/<name>`)
+    /// and `cargo install` writes (`~/.cargo/bin/<name>`) WITHOUT the hash, so
+    /// an unhashed name is never a test, even inside the new `build/` tree.
+    #[test]
+    fn detect_is_false_for_production_shapes_beside_the_1100_layout() {
+        for exe in [
+            "/repo/target/debug/tm",
+            "/repo/target/debug/trusty-search",
+            "/Users/me/.cargo/bin/tm",
+            "/repo/target/debug/build/trusty-mpm/98af4e218cd2e034/out/build-script-build",
+            "/repo/target/debug/build/trusty-mpm/98af4e218cd2e034/out/tm",
+        ] {
+            assert!(
+                !detect(None, None, false, Some(Path::new(exe))),
+                "{exe} must not be mistaken for a test binary"
+            );
+        }
     }
 
     #[test]
