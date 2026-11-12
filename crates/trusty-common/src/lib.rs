@@ -454,7 +454,8 @@ pub mod memory_rpc;
 ///
 /// Why: the TUI in trusty-mpm decodes the console's `console.health` and
 /// `console.fleet_status` answers and has no Cargo edge on trusty-console.
-/// What: method names and serde types only, so it is ungated.
+/// What: method names and serde types only, so it is ungated; its `metrics`
+/// submodule (#10942) needs `console-metrics` + `host-metrics`.
 /// Test: `cargo test -p trusty-common --features uds console_rpc`.
 pub mod console_rpc;
 

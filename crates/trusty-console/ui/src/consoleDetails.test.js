@@ -41,13 +41,17 @@ const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const DIST_ASSETS = join(SRC_DIR, '..', 'dist', 'assets');
 const APP = readFileSync(join(SRC_DIR, 'App.svelte'), 'utf8');
 const PANE = readFileSync(join(SRC_DIR, 'ConsoleTab.svelte'), 'utf8');
+// #10942: the constant moved from trusty-console's machine_history/mod.rs into
+// trusty-common's console_rpc::metrics, which the daemon re-exports.
 const HISTORY_RS = join(
   SRC_DIR,
   '..',
   '..',
+  '..',
+  'trusty-common',
   'src',
-  'machine_history',
-  'mod.rs',
+  'console_rpc',
+  'metrics.rs',
 );
 
 // ── the schema constant ────────────────────────────────────────────────────
@@ -59,7 +63,7 @@ test('the client expects schema 4, the version the daemon now serves', () => {
 test('the expected schema version is the one the daemon compiles in', () => {
   const rust = readFileSync(HISTORY_RS, 'utf8');
   const declared = rust.match(/MACHINE_HISTORY_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/);
-  assert.ok(declared, 'MACHINE_HISTORY_SCHEMA_VERSION is gone from machine_history/mod.rs');
+  assert.ok(declared, 'MACHINE_HISTORY_SCHEMA_VERSION is gone from trusty-common console_rpc/metrics.rs');
   assert.equal(
     Number(declared[1]),
     EXPECTED_SCHEMA_VERSION,
