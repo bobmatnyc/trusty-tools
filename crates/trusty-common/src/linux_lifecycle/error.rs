@@ -55,23 +55,6 @@ pub enum LifecycleError {
         /// The held lock.
         lock: PathBuf,
     },
-    /// The socket does not serve, yet a process runs the daemon (#11098).
-    ///
-    /// Its socket was unlinked or stopped answering, so `SO_PEERCRED` cannot
-    /// pin it: nothing was signalled, and `restart` starts nothing.
-    #[error(
-        "{} is not served, but pid(s) {} run `{binary}` with the daemon's arguments; not signalled",
-        socket.display(),
-        pid_list(pids)
-    )]
-    RunningUnserved {
-        /// The socket probed.
-        socket: PathBuf,
-        /// The descriptor's binary name.
-        binary: String,
-        /// The matching pids, ascending.
-        pids: Vec<u32>,
-    },
     /// The socket's peer is not the descriptor's binary; no signal was sent.
     #[error("pid {pid} serves the socket but runs `{found}`, not `{expected}`; not signalled")]
     IdentityMismatch {
@@ -87,22 +70,6 @@ pub enum LifecycleError {
     IdentityUnreadable {
         /// The peer pid.
         pid: u32,
-        /// The read error.
-        source: io::Error,
-    },
-    /// A process runs the daemon's binary and arguments, but its environment
-    /// cannot be read, so whether it is this instance is unknown (#11098).
-    ///
-    /// Nothing was signalled, and `restart` starts nothing.
-    #[error(
-        "pid {pid} runs `{binary}` with the daemon's arguments, but its environment cannot be \
-         read ({source}); cannot tell whether it is this instance; not signalled"
-    )]
-    InstanceUnreadable {
-        /// The matching pid.
-        pid: u32,
-        /// The descriptor's binary name.
-        binary: String,
         /// The read error.
         source: io::Error,
     },
@@ -186,6 +153,39 @@ pub enum LifecycleError {
         /// What was being done.
         context: String,
         /// The error.
+        source: io::Error,
+    },
+    /// The socket does not serve, yet a process runs the daemon (#11098).
+    ///
+    /// Its socket was unlinked or stopped answering, so `SO_PEERCRED` cannot
+    /// pin it: nothing was signalled, and `restart` starts nothing.
+    #[error(
+        "{} is not served, but pid(s) {} run `{binary}` with the daemon's arguments; not signalled",
+        socket.display(),
+        pid_list(pids)
+    )]
+    RunningUnserved {
+        /// The socket probed.
+        socket: PathBuf,
+        /// The descriptor's binary name.
+        binary: String,
+        /// The matching pids, ascending.
+        pids: Vec<u32>,
+    },
+    /// A process runs the daemon's binary and arguments, but its environment
+    /// cannot be read, so whether it is this instance is unknown (#11098).
+    ///
+    /// Nothing was signalled, and `restart` starts nothing.
+    #[error(
+        "pid {pid} runs `{binary}` with the daemon's arguments, but its environment cannot be \
+         read ({source}); cannot tell whether it is this instance; not signalled"
+    )]
+    InstanceUnreadable {
+        /// The matching pid.
+        pid: u32,
+        /// The descriptor's binary name.
+        binary: String,
+        /// The read error.
         source: io::Error,
     },
 }
