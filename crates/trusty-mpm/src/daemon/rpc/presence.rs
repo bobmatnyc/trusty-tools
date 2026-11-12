@@ -7,7 +7,7 @@
 //! daemon holds them; the CLI, the hook and (PR2b-2) the console page call
 //! in. The socket admits only this uid; every write below is still gated by
 //! the sealed records, the tickets and the passkey checks.
-//! What: [`PresenceService`] runs one verb on the blocking pool:
+//! What: [`PresenceService`](crate::daemon::rpc::presence::PresenceService) runs one verb on the blocking pool:
 //! `request` (a pending request for a live `claude`), `status`, `approve`
 //! (open a challenge and the passkey options), `verify` (an assertion to a
 //! grant through `verify_and_grant`), `register.start` / `register.finish`
