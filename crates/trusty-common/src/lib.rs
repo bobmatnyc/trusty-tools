@@ -454,7 +454,8 @@ pub mod memory_rpc;
 ///
 /// Why: the TUI in trusty-mpm decodes the console's `console.health` and
 /// `console.fleet_status` answers and has no Cargo edge on trusty-console.
-/// What: method names and serde types only, so it is ungated.
+/// What: method names and serde types only, so it is ungated; its `metrics`
+/// submodule (#10942) needs `console-metrics` + `host-metrics`.
 /// Test: `cargo test -p trusty-common --features uds console_rpc`.
 pub mod console_rpc;
 
@@ -1411,6 +1412,11 @@ pub mod http_client;
 /// unification from `trusty-embedderd` and `trusty-bm25-daemon`.
 #[cfg(all(unix, feature = "uds"))]
 pub mod uds;
+
+/// Linux daemon start/stop/restart from a caller-built descriptor (#11084).
+/// Test: `tests/linux_lifecycle.rs` runs it against real processes.
+#[cfg(all(target_os = "linux", feature = "uds"))]
+pub mod linux_lifecycle;
 
 /// A stand-in trusty-* daemon on a Unix socket, for this crate's own tests
 /// (#7237). Never compiled outside `cargo test`.

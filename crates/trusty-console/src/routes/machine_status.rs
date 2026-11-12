@@ -30,10 +30,24 @@ use crate::server::AppState;
 /// Test: `machine_status_route_cold_cache_returns_503`,
 /// `machine_status_route_warm_cache_returns_json`.
 pub async fn machine_status_handler(State(state): State<AppState>) -> axum::response::Response {
-    let Some(host) = state.host_metrics_cache().get().await else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
+    match current(&state).await {
+        Some(status) => axum::Json(status).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+/// The whole-machine status from the caches, or `None` before the first host
+/// sample.
+///
+/// Why: `GET /api/console/machine-status` and the `console.machine_status` UDS
+/// method (#10942) must serve the same data from the same caches, with no
+/// second sampling path.
+/// What: reads the host cache; when it holds a sample, assembles it with every
+/// cached per-service report.
+/// Test: `machine_status_route_warm_cache_returns_json`,
+/// `machine_status_equals_the_http_machine_status_body`.
+pub async fn current(state: &AppState) -> Option<MachineStatus> {
+    let host = state.host_metrics_cache().get().await?;
     let reports = state.collect_service_reports().await;
-    let status = MachineStatus::assemble(host, &reports);
-    axum::Json(status).into_response()
+    Some(MachineStatus::assemble(host, &reports))
 }

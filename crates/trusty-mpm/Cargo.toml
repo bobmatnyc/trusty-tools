@@ -157,7 +157,12 @@ name = "trusty-mpm"
 # 1.12.2 (Refs #10101): patch — 1.12.1 is published on crates.io (tag
 # trusty-mpm-v1.12.1); post-release bump so pending `src/**` PRs clear the
 # #4421 check. Version-only commit.
-version = "1.12.2"
+# 1.12.3: patch — 1.12.2 is published on crates.io (release #11028);
+# post-release bump so pending `src/**` PRs clear the #4421 check.
+# Version-only commit.
+# 1.13.0 (Refs #11047): minor — 1.12.2 is published on crates.io and this PR
+# adds a feature (Architect dashboard Decisions sort by project) under `src/**`.
+version = "1.13.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -455,7 +460,7 @@ toml.workspace = true
 # #7521: `tm secrets` is a client of the trusty-secrets socket. The client
 # (`server::OnDemandSecrets`) lives behind `server`, which implies `store`
 # (`parse_dotenv` for `import`) and `api` (the method types).
-trusty-secrets = { path = "../trusty-secrets", version = "0.4.1", default-features = false, features = ["server"] }
+trusty-secrets = { path = "../trusty-secrets", version = "0.5.0", default-features = false, features = ["server"] }
 # #8454 S2c: `tm doctor` loads the channel route policy read-only.
 trusty-channels = { path = "../trusty-channels", version = "0.2.1", optional = true }
 # #9270: the memory engine's stable path, `trusty_memory::engine`. OPTIONAL and
@@ -612,7 +617,7 @@ tempfile.workspace = true
 # #7521: re-declared for `test-support` — the in-memory backend the
 # `tm secrets` tests serve the socket from, so no test opens the Keychain.
 # Dev-only so `MemoryBackend` never ships in a production `tm`.
-trusty-secrets = { path = "../trusty-secrets", version = "0.4.1", default-features = false, features = ["server", "test-support"] }
+trusty-secrets = { path = "../trusty-secrets", version = "0.5.0", default-features = false, features = ["server", "test-support"] }
 # #8378 PR-C: the content-cache tests build `content-vX.Y.Z.tar.gz` fixtures.
 # Both are already in this crate's normal graph through
 # `trusty-common/content-resolver`.

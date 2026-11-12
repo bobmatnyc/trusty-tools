@@ -26,7 +26,7 @@
 //!   doctor` FAIL — so an unreadable signal never reads as a free slot (#8736).
 //!
 //! Test: the `#[cfg(test)]` suite below, the `slots` suite, and
-//! `a_sigkilled_holders_live_test_run_keeps_its_slot` in
+//! `a_sigkilled_run_phase_holder_keeps_its_slot_but_frees_capacity_8692` in
 //! `tests/tm_build_lease.rs` with a real `cargo test`.
 
 use std::path::Path;

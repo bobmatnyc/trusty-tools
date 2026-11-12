@@ -68,9 +68,12 @@ pub(crate) mod egress_verdict_client;
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
 // for a lease only the TTL could have ended.
 pub(crate) mod build_lease;
+// #8692: the leased command's spawn, wait and compile-to-run flip.
+pub(crate) mod build_lease_spawn;
 // #9239: the read-only `status` and `--census` views of `tm build-lease`.
 pub(crate) mod build_lease_status;
 pub(crate) mod build_lease_target;
+pub(crate) mod build_lease_where;
 pub(crate) mod doctor_builder_cap;
 // #8454 S2c: the read-only channel route policy rows.
 pub(crate) mod doctor_channels;
@@ -138,6 +141,8 @@ pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
 pub(crate) mod hook_post;
 pub(crate) mod hook_rewrite;
+// D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
+pub(crate) mod hook_rewrite_cd;
 // #10973: the compression rewrite an isolation worktree's classifier accepts.
 pub(crate) mod hook_rewrite_isolated;
 // #7975: the stdin payload read that names its failure, so a guard can deny on it.

@@ -422,3 +422,62 @@ fn api_mask_secret_masks_a_specimen_value() {
     assert!(!masked.contains(SPECIMEN), "{masked}");
     assert_eq!(masked, "SPEC…x7Lm2 [26 chars]");
 }
+
+/// Why: #10998 — the source locator is checked at the wire: both of its
+/// forms round-trip, a bad Keychain label or an unknown field is refused,
+/// and `from_source` names exactly the one destination key.
+/// Test: itself.
+#[test]
+fn api_copy_source_round_trips_and_refuses_bad_labels() {
+    use super::methods::{CopySource, KeychainLabel};
+    let item: CopySource = serde_json::from_str(
+        r#"{"keychain_item":{"service":"gh:github.com","account":"Octo Cat"}}"#,
+    )
+    .unwrap();
+    let label = |text: &str| KeychainLabel::new(text).unwrap();
+    assert_eq!(
+        item,
+        CopySource::keychain_item(label("gh:github.com"), label("Octo Cat"))
+    );
+    let vault: CopySource =
+        serde_json::from_str(r#"{"vault":{"vault":"trusty/acme","key":"GH_PAT"}}"#).unwrap();
+    let pat = SecretKey::new("GH_PAT").unwrap();
+    assert_eq!(
+        vault,
+        CopySource::vault(VaultName::new("trusty/acme").unwrap(), pat.clone())
+    );
+    for bad in [
+        r#"{"keychain_item":{"service":"","account":"a"}}"#,
+        r#"{"keychain_item":{"service":"s\u0007","account":"a"}}"#,
+        r#"{"keychain_item":{"service":" s","account":"a"}}"#,
+        r#"{"keychain_item":{"service":"s","account":"a","value":"x"}}"#,
+        r#"{"vault":{"vault":"other/acme","key":"K"}}"#,
+        r#"{"file":{"path":"/etc/passwd"}}"#,
+    ] {
+        assert!(serde_json::from_str::<CopySource>(bad).is_err(), "{bad}");
+    }
+    assert!(KeychainLabel::new(&"x".repeat(256)).is_err());
+
+    let keychain = BackendId::keychain();
+    let request = CopyRequest::new(keychain.clone(), keychain).from_source(vault, pat.clone());
+    assert_eq!(request.keys, vec![pat]);
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(wire["source"]["vault"]["key"], "GH_PAT");
+    let back: CopyRequest = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, request);
+}
+
+/// Why: #10998 regression — a request without `source` serializes exactly
+/// as before (no `source` field), so an older server still accepts it.
+/// Test: itself.
+#[test]
+fn api_copy_request_without_source_keeps_the_old_wire_shape() {
+    let request = CopyRequest::new(BackendId::keychain(), BackendId::file())
+        .with_keys([SecretKey::new("API_KEY").unwrap()]);
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"from_backend": "keychain", "to_backend": "file", "keys": ["API_KEY"]})
+    );
+    assert!(request.source.is_none());
+}
