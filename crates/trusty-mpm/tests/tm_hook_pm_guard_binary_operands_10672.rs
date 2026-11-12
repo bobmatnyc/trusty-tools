@@ -287,6 +287,19 @@ fn a_credential_script_is_denied_whatever_its_arguments_10672() {
         ("bash creds.sh -c x", "#8596"),
         ("bash -o pipefail creds.sh", "#8596"),
         ("bash creds.sh -", "#8596"),
+        // #10672: zsh `-O` is a flag, so the next word is the script.
+        ("zsh -O creds.sh", "#8596"),
+        ("zsh +O creds.sh", "#8596"),
+        ("zsh -eO creds.sh", "#8596"),
+        // #10672: a shell's lone `-` ends option parsing like `--`.
+        ("bash - creds.sh", "#8596"),
+        ("zsh - creds.sh", "#8596"),
+        ("sh - creds.sh", "#8596"),
+        ("dash - creds.sh", "#8596"),
+        // #10672: `-` or `-s` reads the script from a later stdin redirect.
+        ("bash -s < creds.sh", "#8596"),
+        ("bash - < creds.sh", "#8596"),
+        ("python3 - < creds.py", "#8596"),
         // #10672: a cluster letter that takes the next word never hides the script.
         ("ruby -wr json dump_json.rb", "#8596"),
         ("ruby -wr json creds.rb", "the script `creds.rb`"),

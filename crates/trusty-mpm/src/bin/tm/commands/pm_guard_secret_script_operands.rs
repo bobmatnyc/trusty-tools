@@ -42,9 +42,9 @@ impl Family {
     }
 
     /// Short option letters whose value is the rest of the cluster.
-    fn valued_letters(self) -> &'static [char] {
+    fn valued_letters(self, interpreter: &str) -> &'static [char] {
         match self {
-            Family::Shell => &['o', 'O'],
+            Family::Shell => shell_valued_letters(interpreter),
             Family::Python => &['W', 'X'],
             Family::Node => &['r'],
             // #10672: `-W` takes an optional attached level (`-W:no-deprecated`).
@@ -57,9 +57,9 @@ impl Family {
     /// they end a cluster (`python3 -W ignore s.py`, `ruby -wr json s.rb`); a
     /// shell's take one each wherever they sit (`bash -oe pipefail s.sh`). The
     /// other valued letters only ever attach theirs (`perl -i.bak`).
-    fn next_word_letters(self) -> &'static [char] {
+    fn next_word_letters(self, interpreter: &str) -> &'static [char] {
         match self {
-            Family::Shell => &['o', 'O'],
+            Family::Shell => shell_valued_letters(interpreter),
             Family::Python => &['W', 'X'],
             Family::Node => &['C'],
             Family::Ruby => &['I', 'r', 'C', 'E', 'X'],
@@ -105,6 +105,16 @@ impl Family {
             // #10672: Ruby `-r` is a cluster letter, read by `cluster_value`.
             Family::Python | Family::Ruby | Family::Perl => &[],
         }
+    }
+}
+
+/// #10672: the shell letters taking a value: bash, and an `sh` that is bash,
+/// take `-O shopt_name`; zsh, dash and ksh read `-O` as a plain flag.
+fn shell_valued_letters(interpreter: &str) -> &'static [char] {
+    if matches!(interpreter, "bash" | "sh") {
+        &['o', 'O']
+    } else {
+        &['o']
     }
 }
 
@@ -183,12 +193,16 @@ pub(super) fn candidates(argv: &[String]) -> (Vec<Candidate>, bool) {
 /// [`cluster_value`]. After a `node` or `ruby` long option this module does
 /// not list, the next operand is a [`Role::Doubtful`] candidate too, judged
 /// beside the script, since that option may have taken the script word as its
-/// value. A redirected stdin counts only when no script is named.
+/// value. A shell's lone `-` ends options like `--`. After `-` elsewhere, or
+/// a shell's `-s`, the script is read from stdin: no word is a script, and an
+/// input redirect anywhere later is judged as [`Role::Stdin`]. A redirected
+/// stdin counts only when no script is named.
 /// Test: `plain_script_with_binary_args_allows_10672`,
 /// `an_unresolved_script_does_not_fall_through_to_data_10672`,
 /// `a_credential_script_is_denied_whatever_its_arguments_10672`,
 /// `option_values_are_skipped_10672`,
-/// `the_walk_stops_at_the_script_10672`.
+/// `the_walk_stops_at_the_script_10672`,
+/// `a_stdin_script_after_dash_or_s_is_judged_10672`.
 pub(super) fn interpreter_candidates(
     family: Family,
     interpreter: &str,
@@ -206,6 +220,8 @@ pub(super) fn interpreter_candidates(
     let mut options_done = false;
     let mut maybe_a_value = false;
     let mut in_doubt = false;
+    // #10672: the script comes from stdin; only redirects matter from here.
+    let mut from_stdin = false;
     let mut i = 0;
     while let Some(token) = args.get(i) {
         i += 1;
@@ -232,6 +248,9 @@ pub(super) fn interpreter_candidates(
             }
             _ => continue,
         }
+        if from_stdin {
+            continue;
+        }
         let after_unlisted = std::mem::take(&mut maybe_a_value);
         if options_done || !is_option(family, token) {
             // #10672: the script ends option parsing; what follows is its data.
@@ -246,16 +265,20 @@ pub(super) fn interpreter_candidates(
             }
             break;
         }
-        if token == "--" {
+        if token == "--" || (family == Family::Shell && token == "-") {
+            // #10672: a shell's lone `-` ends option parsing like `--`.
             options_done = true;
-        } else if token == "-" || runs_inline(family, token) {
+        } else if token == "-" || runs_inline(family, interpreter, token) {
             // #10672: after a word in doubt this option may be the script's own
             // argument, so the script stays judged.
-            if !in_doubt {
-                out.retain(|c| c.role != Role::Positional);
+            if in_doubt {
+                break;
+            }
+            out.retain(|c| c.role != Role::Positional);
+            if !reads_stdin(family, interpreter, token) {
                 return out;
             }
-            break;
+            from_stdin = true;
         } else if family.code_loading_options().contains(&token.as_str()) {
             if let Some(value) = args.get(i) {
                 push(&mut out, value, Role::Loaded);
@@ -267,7 +290,7 @@ pub(super) fn interpreter_candidates(
             push(&mut out, value, Role::Loaded);
         } else if family.next_word_long_options().contains(&token.as_str()) {
             i += 1;
-        } else if let Some((letter, rest, words)) = cluster_value(family, token) {
+        } else if let Some((letter, rest, words)) = cluster_value(family, interpreter, token) {
             // #10672: Ruby `-r` loads its value as code, attached or the next word.
             if family == Family::Ruby && letter == 'r' {
                 let value = if rest.is_empty() {
@@ -302,27 +325,46 @@ fn is_option(family: Family, token: &str) -> bool {
 /// letter, the value attached after it, and how many next words it takes.
 /// `None` for a cluster with no value-taking letter. Elsewhere the first such
 /// letter takes the rest of the cluster, or the next word when it ends it; a
-/// shell's `o`/`O` each take one next word (`bash -oe pipefail s.sh`).
+/// shell's value letters (`o`, and `O` for bash) each take one next word
+/// (`bash -oe pipefail s.sh`).
 /// Test: `option_values_are_skipped_10672`.
-fn cluster_value(family: Family, token: &str) -> Option<(char, &str, usize)> {
+fn cluster_value<'a>(
+    family: Family,
+    interpreter: &str,
+    token: &'a str,
+) -> Option<(char, &'a str, usize)> {
     let cluster = token
         .strip_prefix(['-', '+'])
         .filter(|c| !c.is_empty() && !c.starts_with('-'))?;
-    let next_word = family.next_word_letters();
+    let next_word = family.next_word_letters(interpreter);
     if family == Family::Shell {
         let letter = cluster.chars().find(|c| next_word.contains(c))?;
         let words = cluster.chars().filter(|c| next_word.contains(c)).count();
         return Some((letter, "", words));
     }
-    let valued = |c: char| next_word.contains(&c) || family.valued_letters().contains(&c);
+    let valued =
+        |c: char| next_word.contains(&c) || family.valued_letters(interpreter).contains(&c);
     let (at, letter) = cluster.char_indices().find(|&(_, c)| valued(c))?;
     let rest = &cluster[at + letter.len_utf8()..];
     let words = usize::from(rest.is_empty() && next_word.contains(&letter));
     Some((letter, rest, words))
 }
 
+/// #10672: whether inline option `token` reads the script from stdin rather
+/// than running inline code: `-` outside a shell, or a shell's `-s` cluster
+/// with no `-c`.
+fn reads_stdin(family: Family, interpreter: &str, token: &str) -> bool {
+    if token == "-" {
+        return family != Family::Shell;
+    }
+    family == Family::Shell
+        && token.strip_prefix('-').is_some_and(|cluster| {
+            !cluster.contains('c') && runs_inline(family, interpreter, token)
+        })
+}
+
 /// Whether option `token` makes `family` run inline code or read stdin.
-fn runs_inline(family: Family, token: &str) -> bool {
+fn runs_inline(family: Family, interpreter: &str, token: &str) -> bool {
     if family == Family::Node {
         return matches!(token, "-e" | "-p" | "--eval" | "--print")
             || token.starts_with("--eval=")
@@ -332,7 +374,7 @@ fn runs_inline(family: Family, token: &str) -> bool {
         return false;
     };
     for c in cluster.chars() {
-        if family.valued_letters().contains(&c) {
+        if family.valued_letters(interpreter).contains(&c) {
             return false;
         }
         if family.inline_letters().contains(&c) {

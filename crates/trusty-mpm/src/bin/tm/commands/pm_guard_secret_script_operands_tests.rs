@@ -39,6 +39,19 @@ fn option_values_are_skipped_10672() {
         ("bash -oe pipefail s.sh", "s.sh"),
         ("bash +o in.docx s.sh", "s.sh"),
         ("bash +x s.sh", "s.sh"),
+        ("bash -O extglob s.sh", "s.sh"),
+        ("sh +O extglob s.sh", "s.sh"),
+        // #10672: zsh `-O` is a plain flag; bash and sh take a shopt name.
+        ("zsh -O s.sh", "s.sh"),
+        ("zsh +O s.sh", "s.sh"),
+        ("zsh -eO s.sh", "s.sh"),
+        ("zsh -o errexit s.sh", "s.sh"),
+        // #10672: a shell's lone `-` ends option parsing like `--`.
+        ("bash - s.sh", "s.sh"),
+        ("zsh - s.sh", "s.sh"),
+        ("sh - s.sh", "s.sh"),
+        ("dash - s.sh", "s.sh"),
+        ("bash -- s.sh", "s.sh"),
         ("bash --rcfile rc s.sh", "s.sh"),
         ("zsh --emulate sh s.sh", "s.sh"),
         ("ruby -I lib s.rb", "s.rb"),
@@ -122,6 +135,28 @@ fn an_inline_option_before_the_script_names_none_10672() {
         assert!(
             words(command, Role::Positional).is_empty(),
             "`{command}` runs inline code"
+        );
+    }
+}
+
+/// #10672: `-` or a shell's `-s` reads the script from stdin, so an input
+/// redirect anywhere later in the argv is the script.
+#[test]
+fn a_stdin_script_after_dash_or_s_is_judged_10672() {
+    for (command, script) in [
+        ("bash -s < s.sh", "s.sh"),
+        ("bash -s x y < s.sh", "s.sh"),
+        ("bash -es <s.sh", "s.sh"),
+        ("zsh -s < s.sh", "s.sh"),
+        ("bash - < s.sh", "s.sh"),
+        ("python3 - < s.py", "s.py"),
+        ("python3 - x < s.py", "s.py"),
+        ("node - < s.js", "s.js"),
+    ] {
+        assert_eq!(
+            walk(command),
+            vec![(script.to_string(), Role::Stdin)],
+            "`{command}`"
         );
     }
 }
