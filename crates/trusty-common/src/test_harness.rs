@@ -357,6 +357,22 @@ mod tests {
     /// #11138: a binary carrying cargo's 16-hex metadata hash in a directory
     /// layout this module does not know yet is still a test binary — the next
     /// cargo layout change must not reopen the live-daemon hole.
+    /// #11138: on Linux `current_exe()` reads `/proc/self/exe`, which ends in
+    /// ` (deleted)` once a concurrent build has replaced the test binary. That
+    /// suffix must not turn a test process into production.
+    #[test]
+    fn is_cargo_test_binary_ignores_a_deleted_exe_suffix() {
+        for exe in [
+            "/repo/target/debug/deps/integration_tests-f54141ba75b48011 (deleted)",
+            "/repo/target/debug/build/trusty-mpm/62c73b50a0eeb776/out/tm-62c73b50a0eeb776 (deleted)",
+        ] {
+            assert!(
+                detect(None, None, false, Some(Path::new(exe))),
+                "{exe} is a replaced cargo test binary"
+            );
+        }
+    }
+
     #[test]
     fn detect_fails_closed_for_an_unknown_layout_with_a_cargo_hash() {
         for exe in [
@@ -381,6 +397,9 @@ mod tests {
             "/Users/me/.cargo/bin/tm",
             "/repo/target/debug/build/trusty-mpm/98af4e218cd2e034/out/build-script-build",
             "/repo/target/debug/build/trusty-mpm/98af4e218cd2e034/out/tm",
+            // Rule 3's width: a hex-looking suffix that is not 16 digits.
+            "/usr/local/bin/tool-deadbeef",
+            "/opt/x/bin/agent-0123456789abc",
         ] {
             assert!(
                 !detect(None, None, false, Some(Path::new(exe))),
