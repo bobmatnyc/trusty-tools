@@ -117,14 +117,18 @@ impl CorpusStore {
         let mut removed = Vec::with_capacity(ids.len());
         let txn = self.db.begin_write().context("begin batch-remove txn")?;
         {
-            let mut chunks = txn.open_table(CHUNKS_TABLE)?;
-            for id in ids {
-                let existed = chunks
-                    .remove(id.as_str())
-                    .with_context(|| format!("delete chunk {id}"))?
-                    .is_some();
-                if existed {
-                    removed.push(id.clone());
+            // #11087: a file with no chunks opens no chunk table, as
+            // `delete_chunks` returns early on no ids.
+            if !ids.is_empty() {
+                let mut chunks = txn.open_table(CHUNKS_TABLE)?;
+                for id in ids {
+                    let existed = chunks
+                        .remove(id.as_str())
+                        .with_context(|| format!("delete chunk {id}"))?
+                        .is_some();
+                    if existed {
+                        removed.push(id.clone());
+                    }
                 }
             }
             let mut entities = txn.open_table(ENTITIES_TABLE)?;
