@@ -135,6 +135,8 @@ mod tm_hook_session_end_8980;
 mod tm_hook_session_start_8531;
 // #8433 P0 (D09): a tainted session's new id reads tainted at SessionStart.
 mod tm_hook_session_start_taint_8433;
+// #10960: the Architect's standing-rules block, per turn and at resume.
+mod tm_hook_standing_rules_10960;
 mod tm_ls_state_colors;
 // #9621: `tm secrets exec` on a fake socket, and live on a real server.
 mod tm_secrets_exec;
