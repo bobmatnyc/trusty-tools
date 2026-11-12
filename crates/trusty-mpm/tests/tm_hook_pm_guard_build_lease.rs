@@ -98,16 +98,22 @@ fn a_subagent_heavy_build_is_rewritten_to_a_lease() {
         ),
     );
     let (command, input) = updated_command(&stdout);
+    // D60: a single leading `cd` no longer blocks compression, so the leased
+    // build sits inside the compression group with the `cd` kept in front.
     assert!(
-        command.starts_with("cd crates/x && CARGO_BUILD_JOBS=6 "),
+        command.starts_with("cd crates/x && { CARGO_BUILD_JOBS=6 "),
         "the composition is kept: {command}"
+    );
+    assert!(
+        command.ends_with("} | tm compress --tool \"cargo test\""),
+        "{command}"
     );
     // #8969: the relative `cd` is resolved against the payload's cwd.
     let expect = format!(
-        " build-lease --expect-cwd {}/crates/x -- cargo test -p x",
+        " build-lease --expect-cwd {}/crates/x -- cargo test -p x; printf ",
         home.path().display()
     );
-    assert!(command.ends_with(&expect), "{command}");
+    assert!(command.contains(&expect), "{command}");
     assert_eq!(
         input["run_in_background"], true,
         "a background build stays backgrounded"

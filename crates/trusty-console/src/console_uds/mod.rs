@@ -1,5 +1,6 @@
-//! trusty-console's own Unix socket: `console.health` and
-//! `console.fleet_status` (#10902, D8b (a), ADR-0065).
+//! trusty-console's own Unix socket: `console.health`,
+//! `console.fleet_status` (#10902, D8b (a), ADR-0065), `console.machine_status`
+//! and `console.history` (#10942, #10943).
 //!
 //! Why: ADR-0032 puts service-to-service traffic on UDS and keeps the console
 //! as the only HTTP surface; ADR-0035 has the console aggregate health over
@@ -19,7 +20,7 @@
 //! whose UDS IS their transport (trusty-memory, trusty-search, trusty-events,
 //! the tm daemon) exit on a failed bind instead.
 //!
-//! Test: `tests.rs` beside this file.
+//! Test: `tests.rs` and `metrics_tests.rs` beside this file.
 
 // See #10902
 
@@ -31,14 +32,20 @@ use serde::Deserialize;
 use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use trusty_common::console_rpc::metrics::{
+    ConsoleMachineStatus, HistoryRequest, HistorySnapshot, MachineStatusRequest,
+};
 use trusty_common::console_rpc::{
     CONSOLE_SERVICE, ConsoleFleetStatus, ConsoleHealth, METHOD_FLEET_STATUS, METHOD_HEALTH,
+    METHOD_HISTORY, METHOD_MACHINE_STATUS,
 };
 use trusty_common::uds::server::{RpcError, RpcRouter, RpcServeOptions, serve_until};
 use trusty_common::uds::{UdsSecurityError, bind_singleton_hardened};
 
 use crate::server::AppState;
 
+#[cfg(test)]
+mod metrics_tests;
 #[cfg(test)]
 mod tests;
 
@@ -112,12 +119,41 @@ pub async fn fleet_status(state: &AppState) -> ConsoleFleetStatus {
     }
 }
 
+/// The `console.machine_status` answer (#10942).
+///
+/// Why: `tm tui` draws the machine cards over UDS; this is the same payload
+/// `GET /api/console/machine-status` serves, read from the same caches.
+/// What: `ready: false`, `machine: null` before the first host sample (the
+/// HTTP route's `503`); otherwise `ready: true` and the assembled status.
+/// Test: `machine_status_on_a_cold_cache_answers_not_ready`,
+/// `machine_status_equals_the_http_machine_status_body`.
+pub async fn machine_status(state: &AppState) -> ConsoleMachineStatus {
+    let machine = crate::routes::machine_status::current(state).await;
+    ConsoleMachineStatus {
+        ready: machine.is_some(),
+        machine,
+    }
+}
+
+/// The `console.history` answer (#10942, #10943).
+///
+/// Why: the cards' and service rows' sparklines need the 10-minute window,
+/// including the per-service CPU/RSS rings (#10943), without HTTP.
+/// What: the same [`HistorySnapshot`] `GET /api/console/machine-status/history`
+/// serves. Before the first sample its collections are empty.
+/// Test: `history_on_a_cold_cache_is_an_empty_window`,
+/// `history_equals_the_http_history_body_and_carries_service_samples`.
+pub async fn history(state: &AppState) -> HistorySnapshot {
+    state.machine_history().snapshot().await
+}
+
 /// The console socket's method table.
 ///
 /// Why: the only console-specific half of the server; framing, the peer check
 /// and the accept loop are `trusty_common::uds::server`'s.
 /// What: `console.health` is registered with `typed_liveness` (a pure status
-/// answer); `console.fleet_status` with `typed`. Any other name gets the
+/// answer); the other three with `typed`, so a params value their request
+/// type refuses is answered `invalid_params` (#10942). Any other name gets the
 /// router's `method_not_found` error.
 /// Test: `router_answers_both_methods`,
 /// `router_registers_exactly_the_documented_methods`,
@@ -129,9 +165,23 @@ pub fn router(state: AppState) -> RpcRouter {
             let state = health_state.clone();
             async move { Ok::<_, RpcError>(health(&state)) }
         })
-        .typed::<NoParams, ConsoleFleetStatus, _, _>(METHOD_FLEET_STATUS, move |_| {
+        .typed::<NoParams, ConsoleFleetStatus, _, _>(METHOD_FLEET_STATUS, {
             let state = state.clone();
-            async move { Ok::<_, RpcError>(fleet_status(&state).await) }
+            move |_| {
+                let state = state.clone();
+                async move { Ok::<_, RpcError>(fleet_status(&state).await) }
+            }
+        })
+        .typed::<MachineStatusRequest, ConsoleMachineStatus, _, _>(METHOD_MACHINE_STATUS, {
+            let state = state.clone();
+            move |_| {
+                let state = state.clone();
+                async move { Ok::<_, RpcError>(machine_status(&state).await) }
+            }
+        })
+        .typed::<HistoryRequest, HistorySnapshot, _, _>(METHOD_HISTORY, move |_| {
+            let state = state.clone();
+            async move { Ok::<_, RpcError>(history(&state).await) }
         })
 }
 

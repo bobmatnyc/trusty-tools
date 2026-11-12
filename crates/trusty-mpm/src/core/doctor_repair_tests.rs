@@ -956,13 +956,15 @@ fn contamination_strip_then_missing_group_merge_restores_the_launch_state() {
 fn missing_group_repair_is_silent_for_a_complete_file() {
     let project = tempfile::tempdir().unwrap();
     write_missing_group_settings(project.path());
-    crate::core::session_launch::ensure_project_hooks(
-        project.path(),
-        Some(Path::new("/usr/local/bin/tm")),
-    )
-    .unwrap();
+    // #10748: the un-`_with` pair derives the layout from process-global
+    // `$HOME`, which a concurrent `#[serial]` test redirects mid-run; the merge
+    // and the check then read different `[hooks]` toggles.
+    let base = tempfile::tempdir().unwrap();
+    let fw = hermetic_fw(base.path(), project.path());
+    let exe = Some(Path::new("/usr/local/bin/tm"));
+    crate::core::session_launch::ensure_project_hooks_with(&fw, project.path(), exe).unwrap();
 
-    let steps = repair_missing_hook_group(project.path(), RepairMode::DryRun);
+    let steps = repair_missing_hook_group_with(&fw, project.path(), None, RepairMode::DryRun);
     assert!(
         steps.is_empty(),
         "a complete file must not produce a repair line: {steps:?}"

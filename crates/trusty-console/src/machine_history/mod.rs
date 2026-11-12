@@ -39,7 +39,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 use trusty_common::console_metrics::ConsoleMetricsReport;
 use trusty_common::host_metrics::HostMetrics;
@@ -51,28 +50,9 @@ use events::HistoryEvent;
 use service_samples::{ServiceSample, ServiceSampleBatch};
 use transitions::{SERVICE_REPORT_GRACE_SECS, ServiceTransition, TransitionTracker};
 
-/// The schema version the history payload advertises.
-///
-/// Why: mirrors `MachineStatus::schema_version` so the Phase 3 UI can detect a
-/// shape change instead of silently mis-rendering one.
-/// What: a monotonically increasing integer, bumped on any breaking change to
-/// [`HistorySnapshot`].
-///
-/// `2` (#6642): the payload gained `service_samples` and
-/// `service_sample_capacity`, and the stream gained a `services` event. The
-/// addition is backward-compatible on the wire, but a client built against
-/// schema 1 renders no per-service graph at all, which is exactly the
-/// difference the version exists to announce.
-///
-/// `3` (#6773): every `ServiceSample` gained `rss_bytes`. Additive on the wire
-/// for the same reason and announced for the same one — a client built against
-/// schema 2 draws the CPU graph and leaves the memory graph beside it empty.
-///
-/// `4` (#6908): the payload gained `sse_client_count`. Additive on the wire and
-/// announced for the same reason as the two before it — a client built against
-/// schema 3 renders no browser-client figure on the console's own row.
-/// Test: `history_starts_empty`.
-pub const MACHINE_HISTORY_SCHEMA_VERSION: u32 = 4;
+// #10942: the payload and its schema version moved to trusty-common so
+// `tm tui` can decode `console.history`; re-exported for every existing path.
+pub use trusty_common::console_rpc::metrics::{HistorySnapshot, MACHINE_HISTORY_SCHEMA_VERSION};
 
 /// Transitions retained before the oldest is evicted.
 ///
@@ -111,66 +91,6 @@ pub const TRANSITION_LOG_CAPACITY: usize = 256;
 /// Test: `a_subscriber_stalled_for_the_whole_window_is_not_lagged`,
 /// `stream::tests::a_lagging_subscriber_is_told_what_it_missed`.
 pub const EVENT_BUFFER: usize = HOST_HISTORY_CAPACITY * 2;
-
-/// The history payload served by the endpoint and by the stream's first event.
-///
-/// Why: one shape for both, so a client that reconnects mid-window and a client
-/// that polls the endpoint parse the same thing. The capacities and the sample
-/// interval travel with the data because the graph's x-axis is derived from
-/// them — a UI that hard-coded 120 × 5 s would silently mis-scale the moment an
-/// operator changed the cadence.
-/// What: the sample ring and the transition log oldest-first, the per-service
-/// sample rings keyed by service id (#6642), the capacities, the configured
-/// sample interval, the count of attached browser streams (#6908), and the
-/// schema version.
-/// Test: `history_starts_empty`, `the_ring_bounds_what_history_returns`,
-/// `the_snapshot_carries_a_ring_per_service`,
-/// `subscriber_count_moves_by_one_per_stream`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HistorySnapshot {
-    /// Host samples, oldest first. Empty before the first sample.
-    pub samples: Vec<HostMetrics>,
-    /// Service state changes, oldest first. Empty until a service changes state.
-    pub transitions: Vec<ServiceTransition>,
-    /// Per-service samples keyed by service id, oldest first within each id
-    /// (#6642).
-    ///
-    /// A `BTreeMap` rather than a `HashMap` so the JSON object's key order is
-    /// deterministic across responses; the UI still sorts for display, but a
-    /// stable payload makes a diff between two snapshots readable.
-    pub service_samples: BTreeMap<String, Vec<ServiceSample>>,
-    /// Maximum samples retained (the ring's capacity).
-    pub sample_capacity: usize,
-    /// Maximum samples retained PER SERVICE (#6642).
-    pub service_sample_capacity: usize,
-    /// Maximum transitions retained.
-    pub transition_capacity: usize,
-    /// Seconds between samples, as the running sampler is configured.
-    pub sample_interval_secs: u64,
-    /// Browser streams attached to the machine-status SSE endpoint right now
-    /// (#6908).
-    ///
-    /// Why it is here rather than on a service report: the number the console's
-    /// own row wants to show is how many browsers are watching it, and this
-    /// module owns the broadcast every one of those streams holds a receiver
-    /// of. Counting anywhere else would mean a second tally to keep in step
-    /// with the first.
-    ///
-    /// What it is NOT: this is not a DOC-73 bus subscriber count. No bus
-    /// transport exists yet — #6862 landed the types and #6460 owns the ingest
-    /// — and reading this as one would report zero connected services as
-    /// "connected". It counts exactly the open
-    /// `GET /api/console/machine-status/stream` responses.
-    ///
-    /// Freshness: it is the count at the instant the snapshot was built. A
-    /// stream that opens or closes afterwards does not amend a snapshot already
-    /// sent, so an open stream's `history` event carries the count as of its own
-    /// connect. The endpoint re-reads it on every request.
-    /// Test: `subscriber_count_moves_by_one_per_stream`.
-    pub sse_client_count: usize,
-    /// See [`MACHINE_HISTORY_SCHEMA_VERSION`].
-    pub schema_version: u32,
-}
 
 /// The rings and the tracker, behind one lock.
 struct Inner {

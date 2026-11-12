@@ -160,6 +160,13 @@ impl Fixture {
         state.grants = person_grants();
         // #10459 P1: never the account home's Architect launch records.
         state.architect_records = None;
+        // #10998: never the OS Keychain; a copy test that reads an item
+        // gives its own fake.
+        state.keychain_item_read = |_, _| {
+            Err(SecretsError::UnknownBackend {
+                backend: BackendId::KEYCHAIN.to_string(),
+            })
+        };
         state
     }
 

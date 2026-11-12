@@ -15,11 +15,12 @@ use super::probe::{classify, on_demand_when_idle, uds_health, with_deadline};
 use super::services::{ProbeKind, ServiceId};
 use super::state::TileHealth;
 
-const DEADLINE: Duration = Duration::from_secs(2);
+pub(super) const DEADLINE: Duration = Duration::from_secs(2);
 
-/// What the stub peer does with each accepted connection.
+/// What the stub peer does with each accepted connection. Shared with
+/// `console_fleet_status_tests`.
 #[derive(Clone, Copy)]
-enum Peer {
+pub(super) enum Peer {
     /// Write these bytes, then close.
     Reply(&'static [u8]),
     /// Close without writing anything.
@@ -30,7 +31,7 @@ enum Peer {
 
 /// A `0700` temp directory, so the dial's directory check passes and only the
 /// socket itself decides the outcome.
-fn socket_dir() -> (TempDir, PathBuf) {
+pub(super) fn socket_dir() -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("tempdir");
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
         .expect("narrow the tempdir");
@@ -39,7 +40,7 @@ fn socket_dir() -> (TempDir, PathBuf) {
 }
 
 /// Bind a hardened listener at `socket` and serve `peer` on every connection.
-fn serve(socket: &Path, peer: Peer) {
+pub(super) fn serve(socket: &Path, peer: Peer) {
     let listener: UnixListener = trusty_common::uds::bind_hardened(socket).expect("bind stub");
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
@@ -83,8 +84,9 @@ async fn an_absent_or_refused_analyze_socket_reads_as_on_demand() {
     );
 
     // A socket file whose listener is gone: connect is refused.
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind stub");
-    drop(listener);
+    // #10748: a sibling test's fork can inherit the listener fd and keep the
+    // dropped socket accepting; `bind_stale` returns once a dial is refused.
+    crate::test_support::stale_socket::bind_stale(&socket);
     assert!(socket.exists(), "the stale socket file stays behind");
     assert_eq!(
         analyze_tile(&socket, DEADLINE).await,
@@ -197,8 +199,8 @@ async fn an_events_socket_that_does_not_answer_health_is_down_or_timeout() {
         "absent socket",
     );
 
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind stub");
-    drop(listener);
+    // #10748: wait out a listener fd a sibling test's fork inherited.
+    crate::test_support::stale_socket::bind_stale(&socket);
     assert_down(
         events_tile(&socket, DEADLINE, DEADLINE).await,
         "refused connect",

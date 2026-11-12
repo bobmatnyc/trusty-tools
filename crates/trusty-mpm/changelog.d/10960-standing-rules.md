@@ -1,0 +1,2 @@
+Added
+- An Architect session now gets the owner's standing rules from `local/standing-rules.md` in context at every session start, resume and `/clear`, and on every user turn. The new `tm hook --standing-rules` is registered for Architect sessions only. The injected block, header included, is at most 2 KB: a file that does not fit injects only its whole lines plus a notice that the rules were cut, and shows a warning. An absent file does nothing. An unreadable rules file or hook payload shows a warning and the turn goes on. (#10960)

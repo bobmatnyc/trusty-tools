@@ -465,7 +465,36 @@ fn exhaustive_charges_skip_listed_dirs_to_the_budget() {
 
 /// The shallow rule with a named budget, to compare against the exhaustive one.
 fn scan_for_child_repo_within_shallow(dir: &Path, budget: usize) -> ChildRepoScan {
-    scan(dir, &[], budget, None)
+    scan_for_child_repo_within(dir, None, budget)
+}
+
+/// #10461: the shallow scan spends the caller's budget, not the shared 256,
+/// and still leaves `except` out.
+#[test]
+fn within_spends_the_budget_the_caller_names() {
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    fill(&ws, WORKSPACE_SCAN_BUDGET + 44);
+    assert_eq!(
+        scan_for_child_repo_within(&ws, None, PROJECT_SCAN_BUDGET),
+        ChildRepoScan::Clear
+    );
+    assert_eq!(
+        scan_for_child_repo_within(&ws, None, WORKSPACE_SCAN_BUDGET),
+        ChildRepoScan::Incomplete(ScanIncomplete::BudgetExhausted {
+            budget: WORKSPACE_SCAN_BUDGET
+        })
+    );
+    let local = ws.join("local");
+    std::fs::create_dir_all(local.join(".git")).unwrap();
+    assert_eq!(
+        scan_for_child_repo_within(&ws, Some(&local), PROJECT_SCAN_BUDGET),
+        ChildRepoScan::Clear
+    );
+    assert_eq!(
+        scan_for_child_repo_within(&ws, None, PROJECT_SCAN_BUDGET),
+        ChildRepoScan::Found(local)
+    );
 }
 
 /// #10457: the probe still runs before the escape check, so a symlink whose

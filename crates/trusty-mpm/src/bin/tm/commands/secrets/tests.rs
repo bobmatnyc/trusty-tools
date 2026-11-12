@@ -351,6 +351,31 @@ fn cli_parses_every_secrets_verb() {
         vec!["import", ".env", "grp"],
         vec!["copy", "--from", "keychain", "--to", "spare"],
         vec!["copy", "--from", "keychain", "--to", "spare", "A", "grp.B"],
+        // #10998: a named source.
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-service",
+            "s",
+            "--from-account",
+            "a",
+            "K",
+        ],
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-vault",
+            "trusty/acme",
+            "--from-key",
+            "P",
+            "K",
+        ],
         vec!["doctor"],
         // #9072: the tier-3 grant client.
         vec!["resolve", "K"],
@@ -371,6 +396,44 @@ fn cli_parses_every_secrets_verb() {
         vec!["import", ".env", "--owner"],
         // `copy` needs both backends.
         vec!["copy", "--from", "keychain"],
+        // #10998: each half of a named source needs the other, and the two
+        // source forms exclude each other.
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-service",
+            "s",
+            "K",
+        ],
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-key",
+            "P",
+            "K",
+        ],
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-service",
+            "s",
+            "--from-account",
+            "a",
+            "--from-vault",
+            "trusty/acme",
+            "--from-key",
+            "P",
+            "K",
+        ],
         vec!["remove"],
         vec!["import"],
         vec!["resolve"],
@@ -527,6 +590,26 @@ async fn list_prints_key_names_only() {
         "trusty/acme/web (Project):\n  A_KEY\ntrusty/acme (Owner):\n  B_KEY\n"
     );
     assert!(!outcome.out.contains(HEAD) && !outcome.out.contains("chars"));
+}
+
+/// #10998: a key push-only for agents (as an agent's copy of a Keychain
+/// item lands) is marked in `list`, with no value.
+#[tokio::test]
+async fn list_marks_a_push_only_key() {
+    let h = harness().await;
+    run(&h, VALUE, &["set", "A_KEY"]).await;
+    let (vault, key) = (
+        VaultName::new(PROJECT_VAULT).expect("vault"),
+        SecretKey::new("A_KEY").expect("key"),
+    );
+    h.keychain
+        .set_control_item(ControlItem::PushOnly, &vault, Some(&key), true)
+        .expect("mark");
+    let outcome = run(&h, "", &["list"]).await;
+    assert_eq!(
+        outcome.out,
+        "trusty/acme/web (Project):\n  A_KEY (push-only for agents)\ntrusty/acme (Owner):\n  (no keys)\n"
+    );
 }
 
 /// #7521: `remove` deletes from the project scope only, and a key it does
@@ -785,6 +868,98 @@ async fn copy_fails_by_name_on_a_missing_key() {
         "{}",
         unknown.err()
     );
+}
+
+/// #10998: a named source — here an owner-vault key — lands in the project
+/// scope under the one KEY given; stdout, the error and the logs carry no
+/// value (`run` checks all three), and the source keeps its value.
+#[tokio::test]
+async fn copy_named_moves_an_owner_key_without_printing_it() {
+    let h = harness().await;
+    seed_owner(&h, "GH_PAT", VALUE).await;
+    let args = [
+        "copy",
+        "--from",
+        "keychain",
+        "--to",
+        "spare",
+        "--from-vault",
+        OWNER_VAULT,
+        "--from-key",
+        "GH_PAT",
+        "GITHUB_TOKEN",
+    ];
+    let outcome = run(&h, "", &args).await;
+    assert_eq!(outcome.err, None);
+    assert_eq!(
+        outcome.out,
+        "copied GITHUB_TOKEN\nkeychain -> spare: 1 copied, 0 not copied\n"
+    );
+    assert_eq!(
+        stored(&h.spare, PROJECT_VAULT, "GITHUB_TOKEN").as_deref(),
+        Some(VALUE)
+    );
+    assert_eq!(
+        stored(&h.keychain, OWNER_VAULT, "GH_PAT").as_deref(),
+        Some(VALUE)
+    );
+}
+
+/// #10998: a named copy needs exactly one KEY (checked before any call), an
+/// absent source key is the server's typed `not_found`, and a Keychain item
+/// in trusty's own namespace is refused before any read. Each exits 1 and
+/// writes nothing.
+#[tokio::test]
+async fn copy_named_needs_exactly_one_key_and_fails_on_a_missing_source() {
+    let h = harness().await;
+    let named = |keys: &'static [&'static str]| {
+        let mut args = vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-vault",
+            OWNER_VAULT,
+            "--from-key",
+            "ABSENT",
+        ];
+        args.extend_from_slice(keys);
+        args
+    };
+    let none = run(&h, "", &named(&[])).await;
+    assert!(none.err().contains("exactly one KEY"), "{}", none.err());
+    let two = run(&h, "", &named(&["A", "B"])).await;
+    assert!(two.err().contains("exactly one KEY"), "{}", two.err());
+    let missing = run(&h, "", &named(&["DEST"])).await;
+    assert!(
+        missing.err().contains("the key is not in that vault"),
+        "{}",
+        missing.err()
+    );
+    let trusty_item = [
+        "copy",
+        "--from",
+        "keychain",
+        "--to",
+        "spare",
+        "--from-service",
+        PROJECT_VAULT,
+        "--from-account",
+        "API_KEY",
+        "DEST",
+    ];
+    let refused = run(&h, "", &trusty_item).await;
+    assert!(
+        refused
+            .err()
+            .contains("do not match this method's request shape"),
+        "{}",
+        refused.err()
+    );
+    for name in ["A", "B", "DEST"] {
+        assert_eq!(stored(&h.spare, PROJECT_VAULT, name), None, "{name}");
+    }
 }
 
 #[tokio::test]
