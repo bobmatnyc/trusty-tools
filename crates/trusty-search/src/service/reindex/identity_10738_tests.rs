@@ -1299,6 +1299,8 @@ async fn a_term_between_a_batch_delete_and_insert_leaves_the_file_served_after_r
         .corpus_store()
         .expect("staging attached");
     assert_ne!(staged.path(), live, "test setup: staging is attached");
+    // The run's own `index.redb.run-*.tmp`; the resume adopts it as a leftover.
+    let tmp_path = staged.path().to_path_buf();
     drop(staged);
 
     // The watcher writes b.rs into staging: chunks, then the hash.
@@ -1312,8 +1314,6 @@ async fn a_term_between_a_batch_delete_and_insert_leaves_the_file_served_after_r
     // batch's delete and before its insert. Keep staging as the exit leaves it.
     handle.embedding_pause.drain();
     reach(reached).await;
-    let tmp_path =
-        crate::service::colocated_storage::colocated_redb_tmp_path(&root).expect("tmp path");
     assert!(tmp_path.exists(), "test setup: the staging file is on disk");
     let kept = tempfile::tempdir().expect("kept dir");
     let kept_path = kept.path().join("index.redb.tmp");
