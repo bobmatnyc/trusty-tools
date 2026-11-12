@@ -146,7 +146,7 @@ features = ["encoding"]
 version = "1.0"
 
 [dependencies.zip]
-version = "8.6"
+version = "9.0.5"
 features = ["deflate"]
 default-features = false
 
