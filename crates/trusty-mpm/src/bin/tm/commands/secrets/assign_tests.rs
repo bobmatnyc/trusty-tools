@@ -12,7 +12,8 @@ use trusty_secrets::ancestry::{ProcessError, ProcessTable, StartTime};
 use super::*;
 use crate::commands::secrets::assign::{
     AGENT_OTHER_PROJECT, CHECKOUT_MISMATCH, Caller, NOT_REGISTERED, OTHER_OWNER, PROJECT_FORM,
-    ProjectName, ProjectResolver, SRC_FORMS, SRC_UNPINNED, Seam, agent_in, parse_source,
+    ProjectName, ProjectResolver, SRC_FORMS, SRC_UNPINNED, Seam, agent_in, caller_from,
+    parse_source,
 };
 
 /// The project vault of the second same-owner checkout.
@@ -141,6 +142,20 @@ impl ProcessTable for Unreadable {
 #[test]
 fn assign_agent_judgement_fails_closed() {
     assert!(agent_in(&Unreadable, 4242));
+}
+
+/// The production caller mapping, row by row: no agent ancestor is a person
+/// without consulting the Architect check; with one, only `Ok(true)` is the
+/// Architect, and `Ok(false)` or an error is an agent (fail closed).
+#[test]
+fn assign_caller_from_maps_every_row_and_fails_closed() {
+    let unbound = || Ok(false);
+    let errors = || Err(anyhow::anyhow!("no trusted home"));
+    let unasked = || -> anyhow::Result<bool> { panic!("asked without an ancestor") };
+    assert_eq!(caller_from(false, unasked), Caller::Person);
+    assert_eq!(caller_from(true, || Ok(true)), Caller::Architect);
+    assert_eq!(caller_from(true, unbound), Caller::Agent);
+    assert_eq!(caller_from(true, errors), Caller::Agent);
 }
 
 #[tokio::test]
@@ -450,4 +465,23 @@ async fn assign_to_an_unresolvable_checkout_is_refused() {
     );
     assert_eq!(outcome.out, "");
     assert_eq!(stored(&h.keychain, "trusty/acme/bare", "GH_PAT"), None);
+}
+
+/// An agent whose cwd the server cannot resolve is refused: its own project
+/// is unknown, so no `--project` can match it.
+#[tokio::test]
+async fn assign_by_an_agent_from_an_unresolvable_cwd_is_refused() {
+    let h = harness_agent().await;
+    seed_owner(&h, "GH_PAT", VALUE).await;
+    let r = resolver(&h);
+    let bare = h.tmp.path().join("bare");
+    std::fs::create_dir(&bare).expect("mkdir bare");
+    let seam = Seam {
+        resolver: &r,
+        caller: agent,
+    };
+    let args = ["assign", "trusty/acme:GH_PAT", "--project", "acme/web"];
+    let outcome = run_seam(&h.client, &bare, (SHORT, SHORT), false, seam, &args).await;
+    assert!(outcome.err.is_some());
+    assert_eq!(stored(&h.keychain, PROJECT_VAULT, "GH_PAT"), None);
 }

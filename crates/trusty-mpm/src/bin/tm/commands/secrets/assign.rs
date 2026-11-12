@@ -139,43 +139,56 @@ pub(crate) const PRODUCTION: Seam<'static> = Seam {
     caller: judge_caller,
 };
 
-/// This process's [`Caller`].
-///
-/// What: [`Caller::Person`] when [`agent_in`] finds no Claude Code above
-/// this pid; [`Caller::Architect`] when `tm fleet status`'s `this_session`
-/// check binds this session as the Architect (its stamp, profile grant and
-/// launch record, not a subagent); otherwise [`Caller::Agent`]. Any failure
-/// on the way judges the caller an agent (fail closed).
+/// This process's [`Caller`]: [`caller_from`] over the live process table
+/// and [`this_session_is_architect`].
 pub(crate) fn judge_caller() -> Caller {
-    if !agent_in(&OsProcessTable, std::process::id()) {
+    caller_from(
+        agent_in(&OsProcessTable, std::process::id()),
+        this_session_is_architect,
+    )
+}
+
+/// The [`Caller`] for an agent-ancestor answer and an Architect check.
+///
+/// What: [`Caller::Person`] when `agent` is false, without running
+/// `architect`; [`Caller::Architect`] when `architect` answers `Ok(true)`;
+/// [`Caller::Agent`] when it answers `Ok(false)` or an error (fail closed).
+/// Test: `assign_caller_from_maps_every_row_and_fails_closed`.
+pub(crate) fn caller_from(agent: bool, architect: impl FnOnce() -> anyhow::Result<bool>) -> Caller {
+    if !agent {
         return Caller::Person;
     }
-    if this_session_is_architect() {
-        Caller::Architect
-    } else {
-        Caller::Agent
+    match architect() {
+        Ok(true) => Caller::Architect,
+        Ok(false) | Err(_) => Caller::Agent,
     }
 }
 
 /// Whether this session is the bound Architect, as `tm env` judges it.
-fn this_session_is_architect() -> bool {
+///
+/// What: `tm fleet status`'s `this_session` check — the Architect's stamp,
+/// profile grant and launch record; an error finding the home or the
+/// Architect directory is returned for [`caller_from`] to judge.
+/// Limit: the only subagent marker visible here is `CLAUDE_MPM_SUB_AGENT`,
+/// set on trusty-agents' spawned processes only. An in-process Task
+/// subagent of the Architect session shares its environment and judges as
+/// the Architect. `tm env`'s binding check has the same limit, which it
+/// closes with a pm-guard grant (#8939); `assign` has no such grant.
+/// See #11015.
+fn this_session_is_architect() -> anyhow::Result<bool> {
     use crate::commands::env_file::trusted_home;
     use crate::commands::fleet::resolve_dir;
     use crate::commands::fleet::status::{this_session_check, this_session_env};
     use crate::commands::pm_guard_trust_anchor::{ANCHOR_ROOT, HookEnv};
     use trusty_mpm::core::config::MpmConfig;
-    let Ok(home) = trusted_home() else {
-        return false;
-    };
-    let Ok(dir) = resolve_dir(None, &home) else {
-        return false;
-    };
+    let home = trusted_home()?;
+    let dir = resolve_dir(None, &home)?;
     let root = home.join(ANCHOR_ROOT);
     let env = HookEnv {
         home: Some(home),
         ..this_session_env()
     };
-    this_session_check(&dir, env, || MpmConfig::load(&root)).ok
+    Ok(this_session_check(&dir, env, || MpmConfig::load(&root)).ok)
 }
 
 /// Whether `pid` or a process above it in `table` is Claude Code.
@@ -282,7 +295,8 @@ async fn vaults(ctx: &Ctx<'_>) -> anyhow::Result<Vaults> {
 /// `assign_by_an_agent_cannot_widen_its_write_reach`,
 /// `assign_by_the_architect_reaches_another_project`,
 /// `assign_to_another_owner_is_refused`,
-/// `assign_to_an_unresolvable_checkout_is_refused`.
+/// `assign_to_an_unresolvable_checkout_is_refused`,
+/// `assign_by_an_agent_from_an_unresolvable_cwd_is_refused`.
 pub(crate) async fn assign(
     ctx: &Ctx<'_>,
     seam: Seam<'_>,
