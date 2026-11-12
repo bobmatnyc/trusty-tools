@@ -483,22 +483,49 @@ pub fn is_already_running() -> Option<PathBuf> {
 /// from "stale lockfile, recover and start".
 ///
 /// What: returns `Some(pid)` if a lockfile exists, contains a parseable
-/// PID, and that PID is currently alive. Returns `None` if the lockfile
-/// is absent, unparseable, or records a dead PID (stale).
+/// PID, that PID is alive, and a process holds the lockfile's flock. Returns
+/// `None` if the lockfile is absent, unparseable, records a dead PID, or
+/// records a live PID while nobody holds the flock (stale, #11060). A flock
+/// probe that fails keeps the `Some(pid)` answer ([`holder_verdict`]).
 ///
-/// Test: with no lockfile, returns None. With a lockfile containing
-/// `std::process::id()`, returns Some(current_pid). With a lockfile
-/// containing a known-dead PID (e.g. u32::MAX), returns None.
+/// Test: `a_live_unrelated_pid_in_an_unheld_lock_does_not_block_startup_11060`
+/// (live pid, free flock, then held flock), `read_lockfile_pid_parses_pid`.
 pub fn running_daemon_pid() -> Option<u32> {
     let lock_path = daemon_lock_path().ok()?;
     if !lock_path.exists() {
         return None;
     }
     let pid = read_lockfile_pid(&lock_path)?;
-    if pid_alive(pid) {
-        Some(pid)
-    } else {
-        None
+    if !pid_alive(pid) {
+        return None;
+    }
+    // #11060: a live pid is not proof of a live holder; the flock is.
+    holder_verdict(pid, lock_is_held(&lock_path))
+}
+
+/// Decide whether a live `pid` read from the lockfile names a running daemon.
+///
+/// Why (#11060): after a container restart the lockfile on the volume names a
+/// pid from the dead pid namespace, and that pid is often live in the new one.
+/// The flock, which the kernel drops with its holder, tells the two apart.
+/// What: `Some(pid)` when the flock is held; `None` when it is free. A probe
+/// that failed (`Err`) is `Some(pid)`: an unverifiable lock is never read as
+/// free, so this pre-check fails closed as it did before #11060.
+/// Test: `a_lock_that_cannot_be_probed_is_not_treated_as_free_11060`.
+fn holder_verdict(pid: u32, held: Result<bool, DaemonError>) -> Option<u32> {
+    match held {
+        Ok(true) => Some(pid),
+        Ok(false) => {
+            tracing::info!(
+                "daemon.lock names live pid {pid} but no process holds the lock; \
+                 treating it as stale (#11060)"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!("could not probe daemon.lock for pid {pid} ({e}); treating it as held");
+            Some(pid)
+        }
     }
 }
 
@@ -560,7 +587,7 @@ pub fn pid_alive(_pid: u32) -> bool {
 // their own module, which states the singleton invariant.
 #[path = "daemon_lock.rs"]
 mod lock;
-use lock::acquire_lock;
+use lock::{acquire_lock, lock_is_held};
 pub use lock::{remove_daemon_files_if_unheld, StaleLockRemoval};
 
 // #9214: the stop wait of the socket-only daemon.

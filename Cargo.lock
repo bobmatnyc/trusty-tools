@@ -11136,7 +11136,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.69.1"
+version = "0.69.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11390,7 +11390,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "anyhow",
  "async-trait",

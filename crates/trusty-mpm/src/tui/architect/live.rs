@@ -6,7 +6,8 @@
 //! What: [`fetch_live`] reads `mpm.sessions.list`, then `mpm.delegation.list`
 //! once per distinct working directory, and `mpm.managed.activity` for the
 //! selected session only — over the daemon socket and never HTTP (#10899).
-//! [`group`] (pure) attaches each live delegation to its session by the
+//! [`merge`] (pure) adds the managed sessions `mpm.managed.list` holds and
+//! the hook registry lacks (#11104). [`group`] (pure) attaches each live delegation to its session by the
 //! listing's caller-safe owner label. [`live_lines`] draws the tree.
 //! Test: `group_attaches_agents_by_owner_label`,
 //! `live_lines_draw_sessions_with_nested_agents`,
@@ -20,7 +21,7 @@ use ratatui::{
 };
 use serde::Deserialize;
 
-use crate::client::{DaemonClient, SessionRow};
+use crate::client::{DaemonClient, ManagedSessionSummary, SessionRow};
 use crate::tui::theme::{Tone, palette};
 
 /// One live delegation under a session.
@@ -84,11 +85,33 @@ fn owner_name(owner: &str) -> Option<&str> {
     owner.strip_prefix("session `")?.strip_suffix('`')
 }
 
-/// Attach records to sessions; a record with no matching session is dropped.
+/// A managed `state` word as the status word [`glyph`] reads.
+fn managed_status(state: &str) -> String {
+    match state {
+        "active" => "Active",
+        "provisioning" | "starting" => "Starting",
+        "paused" => "Paused",
+        "detached" => "Detached",
+        other => other,
+    }
+    .to_string()
+}
+
+/// One tracker row per session, with no agents yet.
 ///
-/// Test: `group_attaches_agents_by_owner_label`.
-pub fn group(sessions: &[SessionRow], records: &[Record]) -> LiveSnapshot {
-    let sessions = sessions
+/// Why (#11104): `mpm.sessions.list` reads the hook registry only, and a
+/// session the session manager spawned is not in it, so the Live tab drew
+/// no managed session at all.
+/// What: the hook rows in the daemon's order, then each managed session not
+/// already listed (same id or same tmux name), in `mpm.managed.list` order.
+/// A hook row whose id is a record's `claude_session_id` is the same session:
+/// it takes the record's id, name and workdir and keeps its hook status, or
+/// is dropped when the record is listed already. Each hook row folds into at
+/// most one record. A deleted-slot tombstone is not a session and is skipped.
+/// Test: `merge_lists_managed_sessions_the_hook_registry_lacks`,
+/// `merge_folds_a_hook_row_into_the_managed_session_it_correlates_with`.
+pub fn merge(rows: &[SessionRow], managed: &[ManagedSessionSummary]) -> Vec<LiveSession> {
+    let mut sessions: Vec<LiveSession> = rows
         .iter()
         .map(|row| {
             let id = row.id.0.to_string();
@@ -97,25 +120,93 @@ pub fn group(sessions: &[SessionRow], records: &[Record]) -> LiveSnapshot {
             } else {
                 row.tmux_name.clone()
             };
-            let agents = records
-                .iter()
-                .filter(|r| owner_name(&r.owner) == Some(name.as_str()))
-                .map(|r| LiveAgent {
-                    agent: r.agent.clone(),
-                    status: r.status.clone(),
-                    age_secs: r.age_secs,
-                })
-                .collect();
             LiveSession {
                 id,
                 name,
                 status: row.status.as_str().to_string(),
                 workdir: row.workdir.clone(),
-                agents,
+                agents: Vec::new(),
                 step: None,
             }
         })
         .collect();
+    // #11104: managed sessions live in the session-manager store, not the
+    // hook registry; add each one the registry does not already hold.
+    let hooks = sessions.len();
+    // #11104: a hook row correlated to a managed record is used up: it folds
+    // into that one session, or is dropped when the session is listed already.
+    let mut used = vec![false; hooks];
+    let mut dropped = vec![false; hooks];
+    for m in managed.iter().filter(|m| !m.deleted) {
+        let name = if m.name.is_empty() { &m.id } else { &m.name };
+        let workdir = m
+            .cwd
+            .clone()
+            .filter(|d| !d.is_empty())
+            .or_else(|| m.workspace_path.clone())
+            .unwrap_or_default();
+        let listed = sessions
+            .iter()
+            .position(|s| s.id == m.id || &s.name == name);
+        // #11104: a SessionStart hook row is keyed by Claude's UUID, which
+        // `correlate_session_start` stores as the record's `claude_session_id`.
+        let correlated = m
+            .claude_session_id
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .and_then(|c| (0..hooks).find(|&i| !used[i] && sessions[i].id.eq_ignore_ascii_case(c)))
+            .filter(|&c| Some(c) != listed);
+        match (listed, correlated) {
+            (Some(_), Some(c)) => (used[c], dropped[c]) = (true, true),
+            (Some(_), None) => {}
+            (None, Some(c)) => {
+                used[c] = true;
+                // #11104: the managed record's id, name and workdir win (the id
+                // keys the step read, the name keys agent grouping); the hook
+                // row keeps its status, since hook events track liveness.
+                let s = &mut sessions[c];
+                s.id = m.id.clone();
+                s.name = name.clone();
+                if !workdir.is_empty() {
+                    s.workdir = workdir;
+                }
+            }
+            (None, None) => sessions.push(LiveSession {
+                id: m.id.clone(),
+                name: name.clone(),
+                status: managed_status(&m.state),
+                workdir,
+                agents: Vec::new(),
+                step: None,
+            }),
+        }
+    }
+    let keep = dropped
+        .into_iter()
+        .map(|d| !d)
+        .chain(std::iter::repeat(true));
+    sessions
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(s, keep)| keep.then_some(s))
+        .collect()
+}
+
+/// Attach records to sessions; a record with no matching session is dropped.
+///
+/// Test: `group_attaches_agents_by_owner_label`.
+pub fn group(mut sessions: Vec<LiveSession>, records: &[Record]) -> LiveSnapshot {
+    for s in &mut sessions {
+        s.agents = records
+            .iter()
+            .filter(|r| owner_name(&r.owner) == Some(s.name.as_str()))
+            .map(|r| LiveAgent {
+                agent: r.agent.clone(),
+                status: r.status.clone(),
+                age_secs: r.age_secs,
+            })
+            .collect();
+    }
     LiveSnapshot { sessions }
 }
 
@@ -140,7 +231,14 @@ pub async fn fetch_live(
         .sessions()
         .await
         .map_err(|e| format!("mpm.sessions.list: {e}"))?;
-    let dirs: BTreeSet<&str> = rows.iter().map(|r| r.workdir.as_str()).collect();
+    // #11104: a failed managed read fails the fetch; it never draws as an
+    // empty managed list.
+    let managed = client
+        .list_managed_sessions()
+        .await
+        .map_err(|e| format!("mpm.managed.list: {e}"))?;
+    let sessions = merge(&rows, &managed);
+    let dirs: BTreeSet<&str> = sessions.iter().map(|s| s.workdir.as_str()).collect();
     let mut records = Vec::new();
     for dir in dirs {
         let listing: Listing = client
@@ -156,7 +254,7 @@ pub async fn fetch_live(
             .map_err(|e| format!("mpm.delegation.list: {e}"))?;
         records.extend(listing.records);
     }
-    let mut snap = group(&rows, &records);
+    let mut snap = group(sessions, &records);
     if let Some(id) = selected
         && let Some(session) = snap.sessions.iter_mut().find(|s| s.id == id)
     {

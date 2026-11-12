@@ -91,6 +91,11 @@ fn run_macos(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i
                      all future reinstalls."
                 );
             }
+            // #10607: signing rewrites the bytes the record's digests name.
+            if let Err(why) = super::deployment_record::refresh_digests(target) {
+                eprintln!("tctl sign: could not update the install record: {why}");
+                return 1;
+            }
             0
         }
         // PR #2657 review (MEDIUM): match on the typed `SignSetError` variant

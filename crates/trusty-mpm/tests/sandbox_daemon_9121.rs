@@ -181,3 +181,103 @@ fn sandbox_refuses_unless_trusty_sandbox_is_exactly_one() {
         assert!(!stdout.contains(WRONG) && !stderr.contains(WRONG));
     }
 }
+
+/// A fake provider key for the #10721 cases. Never a real credential.
+const FAKE_ADMITTED: &str = "sk-ant-fake-10721-never-real";
+
+/// Run `tm daemon --sandbox` plus `extra` args, with `vars`; the refusal.
+fn refused_with(
+    vars: &[(&str, &str)],
+    extra: &[&str],
+    tweak: impl FnOnce(&mut Command),
+) -> (String, String) {
+    let home = tempfile::tempdir().expect("scratch home");
+    let mut cmd = sandbox_command(home.path(), vars);
+    cmd.args(extra);
+    tweak(&mut cmd);
+    let (success, stdout, stderr) = wait_bounded(cmd.spawn().expect("spawn"));
+    assert!(!success, "the sandbox started: {extra:?}\n{stderr}");
+    for (_, value) in vars {
+        assert!(
+            !stdout.contains(value) && !stderr.contains(value),
+            "a value printed"
+        );
+    }
+    (stdout, stderr)
+}
+
+/// Why (#10721, fail closed): `--sandbox-credential` naming a variable off the
+/// admission list refuses and names it; the variable is not exempted from the
+/// allowlist either. On `origin/main` the flag does not exist, so clap's error
+/// lacks the admission refusal and this fails.
+/// Test: this test.
+#[test]
+fn sandbox_credential_off_the_list_refuses() {
+    let (_, stderr) = refused_with(
+        &[("TELEGRAM_BOT_TOKEN", FAKE_TOKEN)],
+        &["--sandbox-credential", "TELEGRAM_BOT_TOKEN"],
+        |_| {},
+    );
+    assert!(
+        stderr.contains("TELEGRAM_BOT_TOKEN is not a credential a sandbox may admit"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("outside the sandbox allowlist"),
+        "stderr: {stderr}"
+    );
+}
+
+/// Why (#10721, fail closed): `--sandbox-credential NAME` with `NAME` unset
+/// refuses, naming the variable; no other tier is consulted.
+/// Test: this test.
+#[test]
+fn sandbox_credential_without_the_variable_refuses() {
+    let (_, stderr) = refused_with(&[], &["--sandbox-credential", "ANTHROPIC_API_KEY"], |_| {});
+    assert!(
+        stderr.contains("ANTHROPIC_API_KEY is not set in the environment"),
+        "stderr: {stderr}"
+    );
+}
+
+/// Why (#10721): the admitted name is the one exemption from the allowlist.
+/// With the key set and the data-dir override withheld, the binary refuses for
+/// that reason alone — the key passed the allowlist — and prints no value.
+/// Without the flag the same key still refuses: the default stays closed.
+/// Test: this test.
+#[test]
+fn sandbox_credential_admits_only_its_own_name() {
+    let vars = [("ANTHROPIC_API_KEY", FAKE_ADMITTED)];
+    let (_, stderr) = refused_with(&vars, &["--sandbox-credential", "ANTHROPIC_API_KEY"], |c| {
+        c.env_remove("TRUSTY_DATA_DIR_OVERRIDE");
+    });
+    assert!(
+        stderr.contains("TRUSTY_DATA_DIR_OVERRIDE is not set"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("outside the sandbox allowlist"),
+        "the admitted name was refused: {stderr}"
+    );
+
+    let (_, stderr) = refused_with(&vars, &[], |_| {});
+    assert!(
+        stderr.contains("outside the sandbox allowlist") && stderr.contains("ANTHROPIC_API_KEY"),
+        "a key without the flag was not refused: {stderr}"
+    );
+
+    // A second provider key is still refused by name.
+    let both = [
+        ("ANTHROPIC_API_KEY", FAKE_ADMITTED),
+        ("OPENROUTER_API_KEY", FAKE_KEY),
+    ];
+    let (_, stderr) = refused_with(
+        &both,
+        &["--sandbox-credential", "ANTHROPIC_API_KEY"],
+        |_| {},
+    );
+    assert!(
+        stderr.contains("outside the sandbox allowlist") && stderr.contains("OPENROUTER_API_KEY"),
+        "stderr: {stderr}"
+    );
+}

@@ -12,7 +12,7 @@ name = "trusty-installer"
 # trusty-search is probed over its socket only. crates.io is at 0.13.8; 0.14.0
 # is unpublished on main and the Architect set 0.15.0.
 # 0.17.1 (Refs #6637): patch — test-only edit in probe_http_tests.rs; no API change; 0.17.0 is live on crates.io.
-version = "0.17.1"
+version = "0.17.2"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"

@@ -1,0 +1,3 @@
+Fixed
+- `tm hook --pm-guard` no longer refuses `f=$(find . dir ../ … | head -1)`: the words inside a `$( … )` or backtick substitution are not read as the segment's own program and operands, so `find`'s `.` operand is no longer taken for the `source` builtin. The substitution body is still judged as a command of its own (#10548).
+- `tm hook --pm-guard` judges an interpreter's first operand as its script and no longer refuses a later data operand, such as a `.docx`, as a script that is not text. A leading `$NAME` on that operand resolves from a plain literal assignment just before it in the same command (`S=/dir; $S/venv/bin/python $S/build.py in.docx`); any other `$NAME` still refuses as computed at run time (#10672).

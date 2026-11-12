@@ -21,6 +21,7 @@ fn isolated(home: &Path, account: &Path) -> SandboxEnv {
         sandbox_flag: Some(OsString::from("1")),
         home: Some(home.to_path_buf()),
         account_home: Some(account.to_path_buf()),
+        credential: None,
     }
 }
 
@@ -318,6 +319,7 @@ fn an_isolated_clean_environment_enters_and_latches() {
 
     enter_with(&isolated(home.path(), account.path()), || {
         latched.set(latched.get() + 1);
+        Ok(())
     })
     .expect("an isolated environment enters sandbox mode");
 
@@ -332,7 +334,10 @@ fn a_refused_sandbox_never_latches() {
     env.data_dir_override = None;
     let latched = Cell::new(false);
 
-    let _ = enter_with(&env, || latched.set(true));
+    let _ = enter_with(&env, || {
+        latched.set(true);
+        Ok(())
+    });
 
     assert!(!latched.get(), "a refused sandbox set the credential latch");
 }
@@ -365,4 +370,72 @@ fn outside_sandbox_the_bot_spawn_runs() {
 
     assert!(handle.is_some());
     assert!(spawned.get());
+}
+
+/// An isolated environment that asks to admit `name`, with or without a value.
+fn with_credential(home: &Path, account: &Path, name: &str, present: bool) -> SandboxEnv {
+    SandboxEnv {
+        credential: Some(CredentialRequest {
+            name: name.to_string(),
+            present,
+        }),
+        ..isolated(home, account)
+    }
+}
+
+/// Why (#10721): the admission list is closed. `--sandbox-credential` naming
+/// any other variable refuses, names it, and never latches.
+/// Test: this test.
+#[test]
+fn refuses_a_sandbox_credential_off_the_list() {
+    let (home, account) = two_dirs();
+    for name in ["TELEGRAM_BOT_TOKEN", "GITHUB_PAT", "OPENAI_API_KEY"] {
+        let env = with_credential(home.path(), account.path(), name, true);
+        assert_eq!(
+            refusals(&env),
+            vec![Refusal::CredentialNotAdmissible(name.to_string())]
+        );
+        let msg = enter_with(&env, || panic!("a refused sandbox must not latch"))
+            .expect_err("an off-list credential must refuse")
+            .to_string();
+        assert!(msg.contains(name), "{msg}");
+    }
+}
+
+/// Why (#10721, fail closed): `--sandbox-credential NAME` with the variable
+/// unset refuses — there is no fallback to `.env.local` or the store.
+/// Test: this test.
+#[test]
+fn refuses_a_sandbox_credential_that_is_not_set() {
+    let (home, account) = two_dirs();
+    let env = with_credential(home.path(), account.path(), "ANTHROPIC_API_KEY", false);
+
+    assert_eq!(
+        refusals(&env),
+        vec![Refusal::CredentialAbsent("ANTHROPIC_API_KEY".to_string())]
+    );
+    let msg = enter_with(&env, || panic!("a refused sandbox must not latch"))
+        .expect_err("an absent credential must refuse")
+        .to_string();
+    assert!(msg.contains("ANTHROPIC_API_KEY is not set"), "{msg}");
+}
+
+/// Why (#10721): the refusal tests pass trivially if every credential refused.
+/// An admissible name with its value present enters, and latches once.
+/// Test: this test.
+#[test]
+fn an_admissible_present_sandbox_credential_enters() {
+    let (home, account) = two_dirs();
+    for name in SANDBOX_CREDENTIAL_NAMES {
+        let env = with_credential(home.path(), account.path(), name, true);
+        let latched = Cell::new(0);
+
+        enter_with(&env, || {
+            latched.set(latched.get() + 1);
+            Ok(())
+        })
+        .expect("an admissible credential enters");
+
+        assert_eq!(latched.get(), 1, "{name}");
+    }
 }
