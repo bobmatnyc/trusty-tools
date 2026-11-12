@@ -7,7 +7,7 @@
 **Spec ID:** `SPEC-SLEDNET-01~draft` … `SPEC-SLEDNET-11~draft` (DOC-90)
 **DOC-N claim:** `DOC-90`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). The catalog's next-free note on `origin/main` at 2026-11-11 (`7497139ef9`) named `DOC-90`; no file or open PR claims it.
 
-Owner ruling (Bob, D1b, 2026-11-11 21:23Z): "Accept all eight as recommended." The eight are the recommendations of the network surface audit, whose findings are recorded in issue [#11054](https://github.com/bobmatnyc/trusty-tools/issues/11054) (cited below as "audit").
+Owner ruling (Bob, D1b, 2026-11-11 21:23Z): "Accept all eight as recommended." The eight are the recommendations of the network surface audit, an owner brief that is not published in this repo; its finding IDs are cited below as "audit".
 
 A **sled** is one cloud-hosted container (or pod) that runs the headless trusty stack. A **host** is the machine or node it runs on. The reference build is `docker/cloudtest/`, on `main` since `fb3d642382`.
 
