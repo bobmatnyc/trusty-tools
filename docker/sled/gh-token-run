@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# gh-token-run CMD ARGS... — run one command with GH_TOKEN read from the
+# read-only token file (/run/secrets/github-token). `gh` reads GH_TOKEN, and git
+# reaches it through the system credential helper `gh auth git-credential`.
+# The token goes into this one process's environment and nothing else: no
+# echo, no log, no `set -x`; the daemons never see it. Refs #11073
+set -uo pipefail
+
+TOKEN_FILE="${SLED_GITHUB_TOKEN_FILE:-/run/secrets/github-token}"
+if [ ! -r "${TOKEN_FILE}" ]; then
+    echo "gh-token-run: token file ${TOKEN_FILE} is missing or unreadable" >&2
+    exit 2
+fi
+IFS= read -r token < "${TOKEN_FILE}" || [ -n "${token:-}" ]
+if [ -z "${token:-}" ]; then
+    echo "gh-token-run: token file ${TOKEN_FILE} is empty" >&2
+    exit 2
+fi
+export GH_TOKEN="${token}"
+unset token
+exec "$@"
