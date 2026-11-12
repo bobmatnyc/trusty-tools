@@ -23,17 +23,19 @@
 /// Why: see the module doc. The narrowest grammar that covers the agent habit.
 /// What: `Some((prefix, cmd))` only for
 /// `cd` BLANK+ DIR BLANK+ `&&` BLANK+ CMD, where BLANK is a space or a tab
-/// (never a newline), CMD is non-empty, and DIR is one word that is either
-/// bare, `'…'` or `"…"` as a whole (no mixed quoting, nothing touching the
-/// closing quote). DIR's text, quotes removed, is non-empty, does not start
+/// (never a newline), CMD is non-empty and holds no `\n` or `\r` (a line
+/// break would put a second command inside the wrap, where a failed `cd`
+/// skips it and its own `cd` no longer moves the shell), and DIR is one
+/// word that is either bare, `'…'` or `"…"` as a whole (no mixed quoting,
+/// nothing touching the closing quote). DIR's text, quotes removed, is non-empty, does not start
 /// with `-` (so `cd -`, `cd -P x` and `cd --` are refused), and holds only
 /// ASCII letters, digits and `/ . _ - + , : @`, plus a space inside quotes.
 /// A bare DIR may also be `~` or start with `~/`. No `$`, backtick, `\`,
 /// glob, brace, paren, redirect or other operator can appear in DIR, quoted
 /// or not, so the prefix has no expansion beyond `~`. Everything else,
 /// including a bare `cd`, `\cd`, `builtin cd` and a `cd` after any other word,
-/// is `None`. CMD is not checked here; the caller runs the existing guards on
-/// it, which refuse any further `&`, `|`, `;`, `>` or `<`.
+/// is `None`. Past the line-break check CMD is not checked here; the caller
+/// runs the existing guards on it, which refuse any further `&`, `|`, `;`, `>` or `<`.
 /// Test: `rewrite_accepts_one_leading_cd_before_a_covered_command`,
 /// `rewrite_refuses_every_other_cd_chain`.
 pub(crate) fn split_leading_cd(command: &str) -> Option<(&str, &str)> {
@@ -41,7 +43,8 @@ pub(crate) fn split_leading_cd(command: &str) -> Option<(&str, &str)> {
     let after_dir = &after_cd[dir_word_len(after_cd)?..];
     let after_and = skip_blanks(after_dir)?.strip_prefix("&&")?;
     let cmd = skip_blanks(after_and)?;
-    if cmd.is_empty() {
+    // #10973: a line break in CMD is a second command; see the What line.
+    if cmd.is_empty() || cmd.contains(['\n', '\r']) {
         return None;
     }
     Some((&command[..command.len() - cmd.len()], cmd))
@@ -209,6 +212,10 @@ mod tests {
             "cd\na && git diff",
             "cd a\n&& git diff",
             "cd a && ",
+            // a line break in CMD runs a second command the wrap would gate
+            "cd a && git diff\nls -la",
+            "cd a && git diff\ncd b",
+            "cd a && git diff\rls -la",
             // not a literal leading `cd`
             "\\cd a && git diff",
             "builtin cd a && git diff",

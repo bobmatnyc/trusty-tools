@@ -353,3 +353,17 @@ fn hook_rewrites_a_cd_prefixed_command_and_it_runs_like_the_original() {
     assert_ne!(code, Some(0), "a missing <dir> fails: {err}");
     assert_eq!((code, out, err), (rcode, rout, rerr), "same cd failure");
 }
+
+/// D60 (Refs #10973): any chain other than one leading `cd <dir> && <cmd>`
+/// passes through the binary unchanged, so `tm hook` prints nothing.
+#[test]
+fn hook_stays_silent_for_a_cd_chain_it_does_not_accept() {
+    for command in ["cd a && cd b && git diff", "cd a && git diff\nls -la"] {
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+        });
+        let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
+        assert_eq!(stdout.trim(), "", "{command:?} must not be rewritten");
+    }
+}

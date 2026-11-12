@@ -1,2 +1,3 @@
 Added
 - `tm hook` now compresses a Bash call of the form `cd <dir> && <cmd>`, when `<cmd>` alone would be compressed (D60, #10973). The `cd` stays in front of the rewrite, so `<cmd>` runs in `<dir>` and a failing `cd` fails exactly as before. Only one leading `cd` with a plain or wholly quoted directory is accepted; every other chain is still left unchanged, and an isolation worktree still leaves this form unchanged.
+- A `cd <dir> && <cmd>` whose `<cmd>` holds a line break is left unchanged, so a failing `cd` never skips a later line (D60, #10973).
