@@ -446,35 +446,8 @@ async fn session_returns_the_token_to_the_own_origin_only() {
 
 // ─── T8, T10, A7: no echo, body cap ──────────────────────────────────────────
 
-/// Every formatted tracing line this test binary emits once [`capture_logs`] ran.
-static LOGS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
-
-struct LogSink;
-
-impl std::io::Write for LogSink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        LOGS.lock()
-            .map_err(|_| std::io::Error::other("log capture poisoned"))?
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Install a global TRACE subscriber writing into [`LOGS`]. A scoped
-/// subscriber misses callsites another test thread registered first.
-fn capture_logs() {
-    static INSTALL: std::sync::Once = std::sync::Once::new();
-    INSTALL.call_once(|| {
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(|| LogSink)
-            .finish();
-        let _ = tracing::subscriber::set_global_default(subscriber);
-    });
-}
+// #11074: the capture is shared with the console-token log test.
+use crate::test_log_capture::{capture_logs, logged};
 
 #[tokio::test]
 async fn malformed_bodies_never_echo_the_value() {
@@ -505,7 +478,7 @@ async fn malformed_bodies_never_echo_the_value() {
         seen.lock().expect("lock").is_empty(),
         "nothing reached the socket"
     );
-    let logs = String::from_utf8_lossy(&LOGS.lock().expect("lock")).into_owned();
+    let logs = logged();
     assert!(
         logs.contains("secrets bridge refused"),
         "capture works: {logs}"
