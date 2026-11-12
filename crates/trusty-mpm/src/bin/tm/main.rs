@@ -550,7 +550,8 @@ async fn main() -> anyhow::Result<()> {
             mcp,
             force,
             sandbox,
-        }) => run_daemon(addr, tailscale, mcp, force, sandbox).await,
+            sandbox_credential,
+        }) => run_daemon(addr, tailscale, mcp, force, sandbox, sandbox_credential).await,
         Some(Command::Supervisor {
             interval,
             auto_resume,

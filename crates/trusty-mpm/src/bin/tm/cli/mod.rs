@@ -627,6 +627,12 @@ pub(crate) enum Command {
         /// Gmail, Notion and Google Chat MCP tool, for every caller.
         #[arg(long)]
         egress_guard: bool,
+        /// Run in standing-rules mode (#10960): on `SessionStart` /
+        /// `UserPromptSubmit`, inject the Architect's
+        /// `local/standing-rules.md` into context. Architect sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        standing_rules: bool,
     },
     /// Read back the prompt critiques `tm hook --prompt-feedback` captured
     /// (#7688).
@@ -786,6 +792,13 @@ pub(crate) enum Command {
         /// allowlist).
         #[arg(long)]
         sandbox: bool,
+        /// Admit exactly one provider credential into the sandbox (#10721):
+        /// `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`, read once from the
+        /// environment and then removed from it. Any other name, or the
+        /// variable unset, refuses. The sandbox launcher's `--credential`
+        /// sets it through `tm secrets exec`; requires `--sandbox`.
+        #[arg(long, value_name = "NAME", requires = "sandbox")]
+        sandbox_credential: Option<String>,
     },
     /// Run the unattended fleet supervisor (24/7 observer, #1206).
     ///

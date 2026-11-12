@@ -321,7 +321,7 @@ fn sandbox_mode_never_consults_the_store() {
     });
 
     let (resolved, lines) = capture(|| {
-        resolve_gated(true, SANDBOX_TEST_VAR, || {
+        resolve_gated(true, None, SANDBOX_TEST_VAR, || {
             resolve_secret_with(SANDBOX_TEST_VAR, store, Duration::from_millis(500))
         })
     });
@@ -352,7 +352,7 @@ fn outside_sandbox_mode_the_store_is_consulted() {
         calls: Arc::clone(&calls),
     });
 
-    let resolved = resolve_gated(false, SANDBOX_TEST_VAR, || {
+    let resolved = resolve_gated(false, None, SANDBOX_TEST_VAR, || {
         resolve_secret_with(SANDBOX_TEST_VAR, store, Duration::from_millis(500))
     });
 
@@ -361,6 +361,76 @@ fn outside_sandbox_mode_the_store_is_consulted() {
         "the open gate did not return the store's value"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// A fake admitted value. Never a real credential.
+const FAKE_ADMITTED: &str = "fake-10721-admitted-never-real";
+
+/// Why (#10721): the sandbox admits one credential, and only it. Under the
+/// latch the admitted value answers for its own name; a read with nothing
+/// admitted stays `None`, and neither path consults a tier.
+/// Test: this test.
+#[test]
+fn a_sandbox_answers_only_the_admitted_credential() {
+    let admitted = resolve_gated(true, Some(FAKE_ADMITTED), "ANTHROPIC_API_KEY", || {
+        panic!("a tier was consulted under the latch")
+    });
+    let other = resolve_gated(true, None, "OPENROUTER_API_KEY", || {
+        panic!("a tier was consulted under the latch")
+    });
+
+    assert!(
+        admitted.as_deref() == Some(FAKE_ADMITTED),
+        "the admitted credential did not resolve"
+    );
+    assert!(
+        other.is_none(),
+        "a credential that was not admitted resolved"
+    );
+}
+
+/// Why (#10721): the admission list is closed; any other name — a bot token,
+/// a credential with no provider-key shape — refuses, naming only the variable.
+/// Test: this test.
+#[test]
+fn a_sandbox_credential_outside_the_list_is_refused() {
+    for name in ["TELEGRAM_BOT_TOKEN", "GITHUB_PAT", "anthropic_api_key", ""] {
+        let refused = check_sandbox_credential(name, Some(FAKE_ADMITTED.into()));
+        assert_eq!(
+            refused,
+            Err(SandboxCredentialError::NameNotAllowed(name.to_string())),
+            "{name} was admitted"
+        );
+    }
+    for name in SANDBOX_CREDENTIAL_NAMES {
+        let ok = check_sandbox_credential(name, Some(FAKE_ADMITTED.into()));
+        assert!(
+            ok.as_ref()
+                .is_ok_and(|(n, v)| n == name && v == FAKE_ADMITTED),
+            "{name} was refused"
+        );
+    }
+}
+
+/// Why (#10721, fail closed): `--sandbox-credential` without the variable
+/// present refuses — no fallback to `.env.local` or the store. The message
+/// names the variable and never a value.
+/// Test: this test.
+#[test]
+fn an_absent_or_empty_sandbox_credential_is_refused() {
+    use std::os::unix::ffi::OsStringExt;
+    let not_utf8 = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
+    for value in [None, Some("".into()), Some(not_utf8)] {
+        let refused = check_sandbox_credential("OPENROUTER_API_KEY", value);
+        let Err(error) = refused else {
+            panic!("an absent credential was admitted");
+        };
+        assert_eq!(
+            error,
+            SandboxCredentialError::Absent("OPENROUTER_API_KEY".to_string())
+        );
+        assert!(error.to_string().contains("OPENROUTER_API_KEY is not set"));
+    }
 }
 
 /// Why (#9121): the classifier and the manager built their `Configurator`
