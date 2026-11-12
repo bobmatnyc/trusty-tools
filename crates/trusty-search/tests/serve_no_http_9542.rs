@@ -27,13 +27,14 @@ fn free_port() -> u16 {
 
 /// Run `serve <args>` hermetically on `data_dir`, polling `port` while it runs.
 ///
-/// Why: `daemon.lock` names PID 1, which is always alive, so the stdio path's
-/// `ensure_daemon_up` waits on a socket instead of auto-starting a daemon.
+/// Why: `daemon.lock` names PID 1 and this test holds its flock (#11060), so
+/// the stdio path's `ensure_daemon_up` waits on a socket instead of
+/// auto-starting a daemon.
 /// What: returns `(exit code, combined output, whether port answered)`.
 fn run_serve(data_dir: &Path, args: &[&str], port: u16) -> (Option<i32>, String, bool) {
     let home = data_dir.join("home");
     std::fs::create_dir_all(&home).expect("create the fake HOME");
-    std::fs::write(data_dir.join("daemon.lock"), b"1").expect("write daemon.lock");
+    let _lock = test_daemon::hold_daemon_lock(data_dir);
     let mut cmd = test_daemon::command();
     cmd.arg("serve")
         .args(args)
