@@ -361,6 +361,13 @@ name = "sandbox_latch_9121"
 path = "tests/sandbox_latch_9121.rs"
 required-features = ["daemon"]
 
+# #10721: admits the sandbox's one credential — the same one-way latch, a
+# set-once slot and a `remove_var` — so it is a binary of its own too.
+[[test]]
+name = "sandbox_credential_10721"
+path = "tests/sandbox_credential_10721.rs"
+required-features = ["daemon"]
+
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
 [dependencies]
