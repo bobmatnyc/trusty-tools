@@ -310,7 +310,7 @@ jobs:
         run: bash scripts/ci-free-disk-space.sh
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # `libdbus-1-dev` for the same reason ci.yml's `rustdoc-links` job carries
       # it (#7466): the script's `features` lane enables
@@ -496,7 +496,7 @@ jobs:
         run: bash scripts/ci-create-local-main.sh
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         run: |
@@ -682,7 +682,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         run: |
