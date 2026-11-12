@@ -71,6 +71,7 @@ on:
       - "Generation artifact lint" # generation-artifact-lint.yml
       - "Homebrew formula" # homebrew-formula.yml
       - "Line cap" # line-cap.yml
+      - "OKF extract worker" # okf-extract-worker.yml (#11094)
       - "Public docs" # public-docs.yml
       - "SLD lint" # sld-lint.yml
       - "Test count" # test-count.yml
