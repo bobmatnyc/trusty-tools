@@ -146,6 +146,15 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     ),
     // See #10161: PM intake, its digest and the Notification hook pair (P2).
     embedded!("scripts/pm_intake.py", "scripts/pm_intake.py", false),
+    // #11101: the Task-ID tag grammar pm_intake.py and datg_task.py import,
+    // and the task pulse that writes the ledger `pulse` op.
+    embedded!("scripts/task_tag.py", "scripts/task_tag.py", false),
+    embedded!("scripts/task_pulse.py", "scripts/task_pulse.py", true),
+    embedded!(
+        "scripts/task_pulse_io.py",
+        "scripts/task_pulse_io.py",
+        false
+    ),
     embedded!("scripts/pm-digest.py", "scripts/pm-digest.py", true),
     embedded!("scripts/pm-notify.sh", "scripts/pm-notify.sh", true),
     embedded!(
@@ -164,6 +173,8 @@ pub(super) const EMBEDDED: &[Embedded] = &[
     embedded!("scripts/datg_ready.py", "scripts/datg_ready.py", false),
     // #10800: the G1-G3 guards datg.py, datg_ops.py and datg_read.py import.
     embedded!("scripts/datg_guards.py", "scripts/datg_guards.py", false),
+    // #11101: the Task check and WIP cap datg_ops.py and datg_read.py import.
+    embedded!("scripts/datg_task.py", "scripts/datg_task.py", false),
     embedded!("scripts/datg-hook.sh", "scripts/datg-hook.sh", true),
     embedded!("scripts/ctx-watch.py", "scripts/ctx-watch.py", false),
     embedded!("scripts/il-cron.py", "scripts/il-cron.py", false),

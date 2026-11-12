@@ -1,7 +1,7 @@
 """datg_read.py: the read-only datg side: summary, dispatch check, freshness, stamp, digest.
 
 Why: datg.py passed the 500-SLOC cap; #10161 P3 split it by section, bodies moved verbatim.
-What: summary, dispatch_mode/check_dispatch, log_hook_warning, op_fresh, turn_tools,
+What: summary, dispatch_mode/check_dispatch (goal and, #11101, Task token), log_hook_warning, op_fresh, turn_tools,
 stamp_turn (the Stop hook's stale_il record) and build_digest. datg.py re-exports every name.
 #10780: the digest splits answered items by item.source and flags unsourced owner claims (unsourced_claim,
 provenance_flags). #10800: the SESSION section carries the G1/G3 guard flags (datg_guards.guard_lines).
@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 
 from datg_guards import guard_lines
 from datg_log import append_log
+from datg_ops import OWED_MAX
+from datg_task import task_mode, task_problem
 from datg_store import (DEFAULT_BLOCK_AFTER, SIZE_WARN, DatgError, Locked, _atomic_write, _jl, _size, load_state,
                         now_iso, parse_iso, parse_ts, paths, per_pm_session, read_log)
 
@@ -47,18 +49,37 @@ def dispatch_mode(st, now=None):
 
 
 def check_dispatch(st, prompt, now=None):
-    """Return (decision, message); decision is allow|warn|block. Pure."""
+    """Return (decision, message); decision is allow|warn|block. Pure.
+
+    The goal check keeps its date/config mode. #11101: the Task check warns unless the task mode is refuse,
+    then it follows the same dispatch mode (block after the block date).
+    Test: tests/test_datg.py TaskTagCase
+    """
     active = {g["id"] for g in st["goals"] if g["status"] == "active"}
     if not active:
         return "allow", ""
     code = st["code"]
     m = re.search(rf"Goal:\s*({re.escape(code)}-G[0-9a-f]{{2}})\b", prompt or "")
-    if m and m.group(1) in active:
+    parts, decs = [], []
+    if not (m and m.group(1) in active):
+        top = sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])[0]
+        why = f"names non-active goal {m.group(1)}" if m else "names no goal id"
+        parts.append(f"dispatch {why}. Start the prompt with 'Goal: {top['id']}' (top) or another active goal.")
+        decs.append(dispatch_mode(st, now))
+    tp = task_problem(st, prompt)
+    if tp:
+        parts.append(f"dispatch {tp}.")
+        decs.append(dispatch_mode(st, now) if task_mode(st) == "refuse" else "warn")
+    if not parts:
         return "allow", ""
-    top = sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])[0]
-    why = f"names non-active goal {m.group(1)}" if m else "names no goal id"
-    msg = f"DATG: dispatch {why}. Start the prompt with 'Goal: {top['id']}' (top) or another active goal."
-    return dispatch_mode(st, now), msg
+    return ("block" if "block" in decs else "warn"), "DATG: " + " ".join(parts)
+
+
+def goal_named(st, prompt):
+    """True when no goal is active or the prompt names an active goal: the goal half of check_dispatch (#11101)."""
+    active = {g["id"] for g in st["goals"] if g["status"] == "active"}
+    m = re.search(rf"Goal:\s*({re.escape(st['code'])}-G[0-9a-f]{{2}})\b", prompt or "")
+    return not active or bool(m and m.group(1) in active)
 
 
 def log_hook_warning(project, msg):
@@ -284,6 +305,8 @@ def _digest_sections(project, st):
     for w in ses.get("waiting_on") or []:
         sess.append(f"  waiting_on {w.get('who')}: {w.get('what')} (since {w.get('since')})")
     if "owed" in ses:
+        if ses["owed"]:   # #11101: how full the owed list is
+            sess.append(f"  owed ({len(ses['owed'])}/{OWED_MAX}):")
         for o in ses["owed"]:
             sess.append(f"  owed: {o['check']} = {o['expect']} @ {o.get('ref', '')}")
         if not ses["owed"]:
