@@ -109,7 +109,8 @@ pub const MAX_EPHEMERAL_AGE_HOURS: i64 = 24;
 ///
 /// #10101: the probe asks the record's own server. A record whose server
 /// cannot be reached reads as running, the direction that tears nothing down.
-/// Test: `a_named_server_record_runs_only_on_its_own_server_10101`.
+/// Test: `a_named_server_record_runs_only_on_its_own_server_10101`,
+/// `a_prune_leaves_an_unroutable_record_alone_10101` (the error arm).
 pub(super) fn is_running(
     record: &SessionRecord,
     tmux: &dyn ManagedTmuxDriver,
@@ -117,6 +118,7 @@ pub(super) fn is_running(
     // #10101: never the default server's same-named session in its place.
     match super::tmux_route::route(tmux, record) {
         Ok(routed) => routed.session_exists_checked(&record.tmux_name),
+        // #10101: an unroutable record skips only itself; `?` would abort the prune.
         Err(_) => Ok(true),
     }
 }

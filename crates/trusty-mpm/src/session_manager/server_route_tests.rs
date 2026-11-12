@@ -279,3 +279,53 @@ async fn a_named_server_record_runs_only_on_its_own_server_10101() {
         "{calls}"
     );
 }
+
+/// Error arm (Fail-Open Check, #10101): a record whose socket sits outside this
+/// process's tmux socket directory cannot be routed, so `is_running` reads it
+/// as running. A `stopped`-filter prune, previewed or real, selects nothing:
+/// no record is tombstoned and no tmux teardown is issued.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_prune_leaves_an_unroutable_record_alone_10101() {
+    let f = Fixture::new(FakeTmux::default()).await;
+    let id = f.seed_on("stopped", Some("%9"), Some(LIVE_SERVER)).await;
+    let mut record = f.mgr.get(&id).await.expect("record");
+    // #10101: outside the fixture's socket dir, so `route` refuses it.
+    record.tmux_socket = Some(f.dir.path().join("elsewhere").join(NAMED));
+    f.mgr
+        .store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("seed");
+
+    // The preview runs no teardown, so only the liveness gate keeps the
+    // record out of it.
+    for dry_run in [true, false] {
+        let outcome = f
+            .scoped(f.mgr.prune_managed(
+                crate::session_manager::PruneFilter::Stopped,
+                dry_run,
+                false,
+                None,
+                None,
+            ))
+            .await
+            .expect("prune");
+        assert!(
+            outcome.sessions.is_empty(),
+            "dry_run={dry_run}: an unroutable record was selected: {:?}: {}",
+            outcome.sessions,
+            f.calls()
+        );
+    }
+
+    let calls = f.calls();
+    let after = f.mgr.get(&id).await.expect("record kept");
+    assert_eq!(after.state, ManagedSessionState::Stopped, "{calls}");
+    assert!(
+        !calls.contains("kill-session") && !calls.contains("send-keys"),
+        "a teardown was issued: {calls}"
+    );
+}
