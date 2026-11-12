@@ -23,6 +23,10 @@ Image provenance: the source comment (6805119153) was written against the draft 
 
 Pending owner login (tracked on #11054).
 
+Run record: the Linux build host ran `rung2.sh` and `check_v1.sh` on 2026-11-12 at 18:10-18:24Z, one run, head `c72279b33f` of PR #11105 (source: the PR #11105 live-check comment, id IC_kwDOSiXqpM8AAAABlz49Xw). `check_v1.sh` passed 19 of 19 rows. `rung2.sh` exited 0 with its non-login steps passing: proxy denies a test domain, proxy denies IP-literal CONNECT, direct egress blocked, no process env holds the token. `rung2.sh` steps 1 and 2 (`claude -p` READY, and the `memory_recall` round trip) printed SKIP because no owner Claude login exists. No run record for 19:05-19:20Z was found. Rung 2 is not a pass until the login steps run.
+
+#11054 comment 6805119153 is superseded on rung 2 by this doc.
+
 ## 4. macOS-dependency list
 
 Closure condition 5: macOS, launchd, tmux, Keychain and logged-in-user assumptions (rung 1 bar). Source: #11054 comment 6832593577, verified at `origin/main` `59631ba6e5`. Scope is the crates the container runs (trusty-mpm `tm`, trusty-memory, trusty-search, trusty-common). trusty-installer and trusty-secrets are listed where `tm` or the daemons reach them.
@@ -31,7 +35,7 @@ Key. Handling: **workaround** (Dockerfile or entrypoint), **not needed**, **open
 
 No read of `USER`, `LOGNAME`, `whoami`, `getlogin` or `getpwuid` login lookups was found in the `src/` of tm, memory, search or common, except the `getpwuid` home fallback in row U3.
 
-### 4.1 macOS-only paths and APIs (11 rows)
+### 4.1 macOS-only paths and APIs
 
 | # | Assumption | Where | Container handling | Blocks |
 |---|---|---|---|---|
@@ -47,7 +51,7 @@ No read of `USER`, `LOGNAME`, `whoami`, `getlogin` or `getpwuid` login lookups w
 | M10 | Installer signs binaries (`codesign`) on macOS | `trusty-installer/src/commands/macos_signing/mod.rs:391` | not needed: binaries come from release tarballs (`Dockerfile:12-22`) | no |
 | M11 | Binary lookup adds `/opt/homebrew/bin` and `/usr/local/bin` to `PATH` | `trusty-common/src/bin_resolve.rs:44` | not needed: binaries install to `/usr/local/bin` (`Dockerfile:72`) | no |
 
-### 4.2 launchd (11 rows)
+### 4.2 launchd
 
 | # | Assumption | Where | Container handling | Blocks |
 |---|---|---|---|---|
@@ -63,7 +67,7 @@ No read of `USER`, `LOGNAME`, `whoami`, `getlogin` or `getpwuid` login lookups w
 | L10 | After a self-upgrade the daemon restarts only if launchd supervises it; otherwise it prints a hint | `trusty-common/src/update/upgrade.rs:507-509` | not needed: no `cargo` in the image. Whether the daemons attempt an update check is unverified (#11075) | no |
 | L11 | Daemons start at login because launchd starts them (#10597 open) | issue #10597 | workaround: the container entrypoint starts all three (`entrypoint.sh:41-43`) | no |
 
-### 4.3 tmux (5 rows)
+### 4.3 tmux
 
 | # | Assumption | Where | Container handling | Blocks |
 |---|---|---|---|---|
@@ -73,7 +77,7 @@ No read of `USER`, `LOGNAME`, `whoami`, `getlogin` or `getpwuid` login lookups w
 | T4 | `tm doctor` checks tmux options and tmux process priority; the priority row answers "not applicable" off macOS | `trusty-mpm/src/daemon/doctor.rs:803`, `:811`; `doctor_tmux_priority.rs:214-219` | not needed: `tm doctor` exit 0. The options row with no tmux server running is unverified | no |
 | T5 | The Architect fleet poller starts its tmux session from a shell script | `trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh:21` | open: not run in the container | no (Architect is outside rung 1) |
 
-### 4.4 Keychain (7 rows)
+### 4.4 Keychain
 
 | # | Assumption | Where | Container handling | Blocks |
 |---|---|---|---|---|
@@ -85,7 +89,7 @@ No read of `USER`, `LOGNAME`, `whoami`, `getlogin` or `getpwuid` login lookups w
 | K6 | `tm presence local` uses Touch ID or the login password and keeps its grant key in the login Keychain (macOS dependencies only) | `trusty-mpm/Cargo.toml:587-594` | open: not run; the Linux path is unverified | no |
 | K7 | Claude Code keeps its login in the Keychain on macOS; on Linux it is `~/.claude/.credentials.json` | `docker/cloudtest/README.md:108-111` | workaround: state volume plus an interactive owner login (`README.md:94-106`); `rung2.sh:46` tests the file with `test -s` | partial: login needs a human to paste a code; token-file path exports the token to child processes (`claude-run:22`) |
 
-### 4.5 Logged-in user, uid, HOME (6 rows)
+### 4.5 Logged-in user, uid, HOME
 
 | # | Assumption | Where | Container handling | Blocks |
 |---|---|---|---|---|
@@ -96,7 +100,7 @@ No read of `USER`, `LOGNAME`, `whoami`, `getlogin` or `getpwuid` login lookups w
 | U5 | Claude Code needs an interactive owner login; the container has no browser | `docker/cloudtest/README.md:94-106` | open: manual copy and paste of the code; rung 2 steps 1-2 still await it | yes for unattended use |
 | U6 | tm assumes a user session starts the daemon at login (#10597) | issue #10597 | see L11 | no |
 
-### 4.6 Other, found while checking (4 rows)
+### 4.6 Other, found while checking
 
 | # | Assumption | Where | Container handling | Blocks |
 |---|---|---|---|---|
@@ -105,13 +109,11 @@ No read of `USER`, `LOGNAME`, `whoami`, `getlogin` or `getpwuid` login lookups w
 | O3 | All three daemons listen on unix sockets only, no TCP, no auth (ADR-0032) | `trusty-mpm/src/daemon/doctor.rs:812-813`; issue comment 2026-11-11 | open: reach is `docker exec` or SSH stdio | yes |
 | O4 | Update, model and telemetry calls at runtime (#11075) | issue #11075 | workaround: egress allowlist and disable flags (`Dockerfile:84-92`) | no |
 
-### 4.7 Row count
+### 4.7 Open rows
 
-macOS-only paths and APIs 11. launchd 11. tmux 5. Keychain 7. Logged-in user, uid, HOME 6. Other 4. Total 44.
+16 rows are open. A row is open when its Container handling begins "open" or its ID is in the Open list below, so no Linux workaround or Linux verification exists yet. The IDs are L5, L7, L8, L9, T1, T4, T5, K1, K4, K6, K7, M7, U5, O1, O2 and O3. The seven rows whose handling begins "open" (L8, T5, K1, K4, K6, U5, O3) are all in the list.
 
-### 4.8 Open
-
-Assumptions with no Linux workaround yet:
+Open list:
 
 - L5: no Linux service unit for trusty-memory or trusty-search. Fix: ship a documented systemd unit, or move both onto `linux_lifecycle` (#11083 PHASE_2).
 - L9: no in-place restart on Linux. Fix: finish #11098 and move the daemons onto the Linux lifecycle backend.
