@@ -18,9 +18,15 @@
 //!   grace, and then waits for the descriptor's [`StoppedSignal`]. It returns
 //!   [`StopOutcome::Stopped`], [`StopOutcome::NotRunning`], or an error —
 //!   [`LifecycleError::Survivor`] when the pid outlives SIGKILL.
-//! - [`start`] spawns `<install dir>/<binary>` detached and returns only once
-//!   the spawned pid serves the socket. A failed start kills and reaps the
-//!   child it spawned, so nothing it started is left running.
+//!   A socket that does not serve is `NotRunning` only when no process of
+//!   the caller's uid runs `binary` with every one of the descriptor's
+//!   `liveness_args` (#11098); otherwise it is
+//!   [`LifecycleError::RunningUnserved`] and nothing is signalled.
+//! - [`start`] spawns `<install dir>/<binary>` detached, in the descriptor's
+//!   `working_dir` and with only [`DaemonDescriptor::BASE_ENV`] plus its
+//!   `env_passthrough` names from the caller's environment (#11098), and
+//!   returns only once the spawned pid serves the socket. A failed start kills
+//!   and reaps the child it spawned, so nothing it started is left running.
 //! - [`restart`] is [`stop`], then [`start`]; `NotRunning` counts as stopped,
 //!   and any stop error returns before a spawn.
 //!
@@ -39,10 +45,13 @@
 //! [`StopOutcome::Stopped`]: crate::linux_lifecycle::StopOutcome::Stopped
 //! [`StopOutcome::NotRunning`]: crate::linux_lifecycle::StopOutcome::NotRunning
 //! [`LifecycleError::Survivor`]: crate::linux_lifecycle::LifecycleError::Survivor
+//! [`LifecycleError::RunningUnserved`]: crate::linux_lifecycle::LifecycleError::RunningUnserved
+//! [`DaemonDescriptor::BASE_ENV`]: crate::linux_lifecycle::DaemonDescriptor::BASE_ENV
 //! [`stop`]: crate::linux_lifecycle::stop()
 //! [`start`]: crate::linux_lifecycle::start()
 //! [`restart`]: crate::linux_lifecycle::restart()
 
+mod liveness;
 mod process;
 mod start;
 mod stop;
@@ -93,10 +102,14 @@ pub enum StoppedSignal {
 /// spawns and the executable name [`stop`] requires of the socket's peer.
 /// `stop_grace` bounds the SIGTERM wait, `kill_wait` bounds the SIGKILL wait
 /// and the stopped-signal wait, and `ready_timeout` bounds [`start`].
+/// `liveness_args` tells the daemon from a stdio bridge of the same binary
+/// when the socket does not answer; `working_dir` and `env_passthrough` shape
+/// the spawned process (#11098).
 /// `#[non_exhaustive]`: build it with [`DaemonDescriptor::new`] or
 /// [`DaemonDescriptor::with_install_dir`], then assign the public fields.
 /// Test: `descriptor_rejects_a_binary_name_with_a_path_separator`,
-/// `descriptor_new_uses_the_canonical_bin_dir`.
+/// `descriptor_new_uses_the_canonical_bin_dir`,
+/// `descriptor_rejects_bad_spawn_and_liveness_fields`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DaemonDescriptor {
@@ -116,6 +129,24 @@ pub struct DaemonDescriptor {
     pub kill_wait: Duration,
     /// Bound on `start`'s readiness wait.
     pub ready_timeout: Duration,
+    /// Arguments only the daemon carries (#11098).
+    ///
+    /// When the socket does not serve, a live process of the caller's uid
+    /// whose executable is `binary` and whose argv (after `argv[0]`) holds
+    /// every one of these as a whole argument means the daemon still runs:
+    /// `stop` and `start` refuse with [`LifecycleError::RunningUnserved`].
+    /// Empty (the default) counts every process of `binary`, stdio bridges
+    /// included, which fails closed; a consumer sets the daemon-only
+    /// arguments, such as `["serve", "--foreground"]`.
+    pub liveness_args: Vec<String>,
+    /// The spawned daemon's working directory; `/` by default (#11098).
+    ///
+    /// Never the caller's cwd, which can hold a `.env.local` the daemon would
+    /// load (#9161). Must be absolute.
+    pub working_dir: PathBuf,
+    /// Names copied from the caller's environment, when set, on top of
+    /// [`DaemonDescriptor::BASE_ENV`]; nothing else reaches the daemon (#11098).
+    pub env_passthrough: Vec<String>,
 }
 
 impl DaemonDescriptor {
@@ -125,6 +156,37 @@ impl DaemonDescriptor {
     pub const DEFAULT_KILL_WAIT: Duration = Duration::from_secs(5);
     /// Default readiness bound.
     pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// The variables every spawned daemon gets from the caller, when set.
+    ///
+    /// Why: #11098 — the daemon must not inherit the caller's environment
+    /// wholesale (tokens, API keys, a parent-death stamp), but it needs its
+    /// home, search path, locale and XDG dirs to find its data.
+    /// `TRUSTY_DATA_DIR_OVERRIDE` and `TRUSTY_SANDBOX` are here because
+    /// dropping them would move a sandboxed caller's daemon onto the real data
+    /// dir and the real `.env.local` tiers. No other `TRUSTY_*` name is: some
+    /// carry credentials. A daemon-specific variable goes in `env_passthrough`.
+    /// Test: `daemon_env_carries_the_base_and_the_allowlist_only`.
+    pub const BASE_ENV: &'static [&'static str] = &[
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "TZ",
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        crate::data_dir::DATA_DIR_OVERRIDE_ENV,
+        // The `.env.local` loader's opt-out (`credentials::dotenv::SANDBOX_ENV_VAR`).
+        "TRUSTY_SANDBOX",
+    ];
 
     /// A descriptor whose install dir is [`crate::bin_resolve::canonical_bin_dir`].
     ///
@@ -163,6 +225,9 @@ impl DaemonDescriptor {
             stop_grace: Self::DEFAULT_STOP_GRACE,
             kill_wait: Self::DEFAULT_KILL_WAIT,
             ready_timeout: Self::DEFAULT_READY_TIMEOUT,
+            liveness_args: Vec::new(),
+            working_dir: PathBuf::from("/"),
+            env_passthrough: Vec::new(),
         };
         desc.validate()?;
         Ok(desc)
@@ -194,6 +259,22 @@ impl DaemonDescriptor {
         if self.socket.as_os_str().is_empty() {
             return bad("socket path is empty");
         }
+        // #11098: a relative cwd would resolve against the caller's cwd.
+        if !self.working_dir.is_absolute() {
+            return bad("working_dir must be absolute");
+        }
+        // No argv element holds a NUL, so such an arg would never match and a
+        // running daemon would read as not running.
+        if self.liveness_args.iter().any(|a| a.contains('\0')) {
+            return bad("liveness_args must not contain NUL");
+        }
+        if self
+            .env_passthrough
+            .iter()
+            .any(|n| n.is_empty() || n.contains('=') || n.contains('\0'))
+        {
+            return bad("env_passthrough names must be non-empty, without '=' or NUL");
+        }
         Ok(())
     }
 }
@@ -204,7 +285,7 @@ impl DaemonDescriptor {
 /// "I could not decide" from "the new process never came up", and report the
 /// pid involved. Each is its own variant, never a success.
 /// Test: `tests/linux_lifecycle.rs` has a real-process test for
-/// `ProbeInconclusive`, `Unidentified`, `IdentityMismatch`,
+/// `ProbeInconclusive`, `Unidentified`, `RunningUnserved`, `IdentityMismatch`,
 /// `IdentityUnreadable`, `Survivor`, `StoppedSignalNotReached`,
 /// `AlreadyRunning`, `ChildExited`, `NotReady` and `ChildUnpinned`; the unit
 /// tests in `tests.rs` cover `InvalidDescriptor` and `NoInstallDir`.
@@ -244,6 +325,23 @@ pub enum LifecycleError {
         socket: PathBuf,
         /// The held lock.
         lock: PathBuf,
+    },
+    /// The socket does not serve, yet a process runs the daemon (#11098).
+    ///
+    /// Its socket was unlinked or stopped answering, so `SO_PEERCRED` cannot
+    /// pin it: nothing was signalled, and `restart` starts nothing.
+    #[error(
+        "{} is not served, but pid(s) {} run `{binary}` with the daemon's arguments; not signalled",
+        socket.display(),
+        pid_list(pids)
+    )]
+    RunningUnserved {
+        /// The socket probed.
+        socket: PathBuf,
+        /// The descriptor's binary name.
+        binary: String,
+        /// The matching pids, ascending.
+        pids: Vec<u32>,
     },
     /// The socket's peer is not the descriptor's binary; no signal was sent.
     #[error("pid {pid} serves the socket but runs `{found}`, not `{expected}`; not signalled")]
@@ -345,6 +443,12 @@ pub enum LifecycleError {
         /// The error.
         source: io::Error,
     },
+}
+
+/// `1, 2, 3`, for an error message.
+fn pid_list(pids: &[u32]) -> String {
+    let list: Vec<String> = pids.iter().map(u32::to_string).collect();
+    list.join(", ")
 }
 
 /// The tail of a failed-start message: what became of the spawned child.

@@ -1,0 +1,3 @@
+Fixed
+- `linux_lifecycle::stop`, `start` and `restart` no longer read an unlinked or unanswering socket as "not running": a process of the daemon's binary that carries the descriptor's new `liveness_args` makes them fail with `LifecycleError::RunningUnserved`, so `restart` never starts a second daemon beside a running one (#11098).
+- `linux_lifecycle::start` spawns the daemon in the descriptor's new `working_dir` (default `/`), never the caller's cwd, and with a cleared environment holding only `DaemonDescriptor::BASE_ENV` plus the descriptor's new `env_passthrough` names, so a start from inside a checkout cannot load its `.env.local` or hand the daemon the caller's tokens (#11098).
