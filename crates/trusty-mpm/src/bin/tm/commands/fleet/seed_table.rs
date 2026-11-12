@@ -279,6 +279,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/dashboard_mask.py",
         false
     ),
+    // #11065: the ephemeral pane-tail provider (phase 2); masks through dashboard_mask.
+    embedded!(
+        "scripts/dashboard_pane_tail.py",
+        "scripts/dashboard_pane_tail.py",
+        false
+    ),
     embedded!(
         "scripts/dashboard_attach.py",
         "scripts/dashboard_attach.py",

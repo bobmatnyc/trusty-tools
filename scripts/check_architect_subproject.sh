@@ -159,6 +159,7 @@ scripts/dashboard_routes.py|crates/trusty-mpm/src/assets/architect/scripts/dashb
 scripts/dashboard_fleet.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_fleet.py
 scripts/dashboard_harness_base.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_harness_base.py
 scripts/dashboard_mask.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_mask.py
+scripts/dashboard_pane_tail.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_pane_tail.py
 scripts/dashboard_attach.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_attach.py
 scripts/dashboard_projects.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_projects.py
 scripts/dashboard_watch.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_watch.py
