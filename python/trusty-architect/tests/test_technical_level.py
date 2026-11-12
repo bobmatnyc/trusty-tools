@@ -198,6 +198,16 @@ def test_build_output_uses_the_secondary_users_own_level_for_the_turn(tmp_path, 
     assert tl.line("senior-engineer") in ctx(hook({"hook_event_name": "UserPromptSubmit", "prompt": "owner again"}, 1003.0))
 
 
+@pytest.mark.parametrize("prompt", ["[SECONDARY USER Ana Lopez via slack] status?",
+                                    "[SECONDARY USER ] status?", "[SECONDARY USER ana] status?"])
+def test_secondary_marker_with_an_unparsed_name_never_takes_the_owner_level(tmp_path, monkeypatch, prompt):
+    hook = _hook(monkeypatch, tmp_path, owner_level="cto")   # #11064 ruling (d): pm, never the owner's cto
+    out = ctx(hook({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, 1001.0))
+    levels = [x for x in out if x.startswith("TECH LEVEL: ")]
+    assert levels and all(x.startswith("TECH LEVEL: pm (") for x in levels), levels
+    assert tl.speaker(prompt) is not None
+
+
 def test_build_output_survives_a_level_read_error(tmp_path, monkeypatch, capsys):
     hook = _hook(monkeypatch, tmp_path)
 

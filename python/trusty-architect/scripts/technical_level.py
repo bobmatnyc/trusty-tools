@@ -37,7 +37,9 @@ RULES = {
     "cto": "risk to production and customers, cost, reversibility, the contract at stake; line detail stays in the brief",
 }
 
-SPEAKER = re.compile(r"^\[SECONDARY USER ([A-Za-z0-9._-]+) via ")
+SECONDARY = "[SECONDARY USER "
+SPEAKER = re.compile(r"^\[SECONDARY USER ([^\]]*?) via ")
+UNNAMED = "(unnamed)"   # a marker whose name does not parse; read_user gives it DEFAULT, never the owner's
 PROFILE_LINE = re.compile(r"^\s*[-*]?\s*Technical level:\s*`?([a-z-]+)`?\s*$", re.I | re.M)
 USER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -95,9 +97,14 @@ def read_user(name, users_dir=None):
 
 
 def speaker(prompt):
-    """The secondary user named by a `[SECONDARY USER <name> via <channel> ...]` prompt, else None (the owner)."""
-    m = SPEAKER.match(str(prompt or "").lstrip())
-    return m.group(1) if m else None
+    """The secondary user named by a `[SECONDARY USER <name> via <channel> ...]` prompt, else None (the owner). Any
+    prompt with the marker is a secondary user's (#11064 ruling d): a name that does not parse is UNNAMED, and a name
+    read_user refuses (a space, a bad character) or does not know reads DEFAULT, never the owner's level."""
+    p = str(prompt or "").lstrip()
+    if not p.startswith(SECONDARY):
+        return None
+    m = SPEAKER.match(p)
+    return (m.group(1).strip()[:64] if m else "") or UNNAMED
 
 
 def refusal(coll, doc_id, data):

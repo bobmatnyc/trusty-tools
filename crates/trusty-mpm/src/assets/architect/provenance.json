@@ -94,7 +94,7 @@
     "scripts/task_pulse.py": "503c8c686ac8c86f0ac757376ae699cb0bafe62b3e0064704e138d5e23bc99b7",
     "scripts/task_pulse_io.py": "5272566dc4ebd03171610c8eb5344cfc43bcc921f8894792537ffa3af7fe7cd3",
     "scripts/task_tag.py": "68dc586cc2ed815b3275e317188120092637dc293947be077faeb96115a639ab",
-    "scripts/technical_level.py": "3dfc28bb87d0c5dbb45fc51f3ae69ca519b180e19320035f5de5e3d7bfa2f80f",
+    "scripts/technical_level.py": "9a8cf93dc77cde029e68a49f1049bb4f915112791da60bca0ec31a623a4341e1",
     "scripts/turn-active.py": "3b297743a844a6057787c5c772bac96ad863fd726f162350a61f4ebffb049168",
     "scripts/watch-apply.py": "fc11a681e07248e52b8f2e111a33aede15c609166f42c9d67a23c36210b94a7a",
     "skills/architect-completion-standard.md": "b00cc7544daacb4a48d6b8335666f737cd20aab4211286160974b547fdf71403",
