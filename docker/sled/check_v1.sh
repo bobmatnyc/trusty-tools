@@ -174,38 +174,50 @@ SCAN_WAIT="${V1_SCAN_WAIT:-1}"       # seconds per connect
 SCAN_BOUND="${V1_SCAN_BOUND:-900}"   # seconds for the whole scan
 UDP_PORTS="53 123 443 41641"
 # The TCP scan, run by the app's bash: GW JOBS WAIT CONTROL-IP. One line per
-# port that did not pass ("port P RESULT"), then one "done I COUNT CONTROL"
-# line per worker.
+# port that did not pass ("port P RESULT"), then one "done I COUNT CONTROL BAD"
+# line per worker, BAD being its count of port lines.
 read -r -d '' TCP_SCAN <<'EOF'
 gw=$0 jobs=$1 wait=$2 ctl=$3
 command -v timeout > /dev/null || { echo "error: no timeout command in the app"; exit 3; }
-probe() {
-    local o rc
-    o="$(timeout "${wait}" bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2>&1)"; rc=$?
-    case "${rc}:${o}" in
+# probe_class RC OUTPUT — the child prints "s" just before it connects, so a
+# timeout with no marker means the connect never began (#11156): not a drop.
+probe_class() {
+    local m
+    case "$2" in s|s$'\n'*) ;; *) echo other:not-started; return ;; esac
+    case "$1:$2" in
         0:*) echo open ;;
-        124:*) echo timeout ;;
+        124:s) echo timeout ;;
         *[Rr]efused*) echo refused ;;
         *"No route to host"*|*"Network is unreachable"*) echo unreachable ;;
-        *) echo "other:${o##*: }" ;;
+        *) m="${2##*$'\n'}"; m="${m##*: }"; echo "other:rc$1:${m// /_}" ;;
     esac
 }
+probe() {
+    local o rc
+    o="$(timeout "${wait}" bash -c 'echo s; exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2>&1)"; rc=$?
+    probe_class "${rc}" "${o}"
+}
 worker() {
-    local p n=0 r
+    local p n=0 b=0 r
     for ((p = $1; p <= 65535; p += jobs)); do
         r="$(probe "${gw}" "${p}")"; n=$((n + 1))
-        case "${r}" in timeout|unreachable) ;; *) echo "port ${p} ${r}" ;; esac
+        case "${r}" in timeout|unreachable) ;; *) b=$((b + 1)); echo "port ${p} ${r}" ;; esac
     done
-    echo "done $1 ${n} $(probe "${ctl}" 3128)"
+    echo "done $1 ${n} $(probe "${ctl}" 3128) ${b}"
 }
 for ((i = 1; i <= jobs; i++)); do worker "${i}" & done
 wait
 EOF
 # The UDP probe, run by the app's bash: HOST PORT HEX-PAYLOAD WAIT. Prints
 # answered, refused (ICMP port unreachable), timeout, unreachable or other.
+# The payload goes to a file first, and cat sends it in one write, so one
+# datagram carries all of it (#11156).
 read -r -d '' UDP_PROBE <<'EOF'
-exec 3<>"/dev/udp/$0/$1" 2> /dev/null || { echo "other:socket"; exit 0; }
-printf '%b' "$(sed 's/../\\x&/g' <<< "$2")" >&3 2> /dev/null || { echo "other:write"; exit 0; }
+f="$(mktemp)" || { echo "other:mktemp"; exit 0; }
+printf '%b' "$(sed 's/../\\x&/g' <<< "$2")" > "${f}" || { rm -f "${f}"; echo "other:payload"; exit 0; }
+exec 3<>"/dev/udp/$0/$1" 2> /dev/null || { rm -f "${f}"; echo "other:socket"; exit 0; }
+cat "${f}" >&3 2> /dev/null || { rm -f "${f}"; echo "other:write"; exit 0; }
+rm -f "${f}"
 o="$(timeout "$3" head -c 1 <&3 2>&1 > /dev/null)"; rc=$?
 case "${rc}:${o}" in
     0:*) echo answered ;;
@@ -217,20 +229,27 @@ esac
 EOF
 # scan_verdict RC OUTPUT JOBS — "yes" only for a complete, clean scan; else
 # the reason. Fail-closed: anything it cannot account for is not a pass.
+# #11156: 256 workers share one stream, so a line spliced by a stray message
+# (a fork retry, say) could hide a port line. Every line must be a whole port
+# or done line, and the done lines' BAD counts must all be 0.
 scan_verdict() {
-    local rc="$1" out="$2" jobs="$3" done_n total ctl bad
+    local rc="$1" out="$2" jobs="$3" stray done_n total ctl bad nbad
     [ "${rc}" -eq 0 ] || { echo "scan exited ${rc} (124 = past the bound)"; return; }
     grep -q '^error' <<< "${out}" && { grep '^error' <<< "${out}" | head -n 1; return; }
-    done_n="$(grep -c '^done ' <<< "${out}")"
+    stray="$(grep -vE '^(port [0-9]+ [^ ]+|done [0-9]+ [0-9]+ [^ ]+ [0-9]+)$' <<< "${out}" | head -n 3 | tr '\n' ';')"
+    [ -z "${stray}" ] || { echo "unexpected scan output: ${stray}"; return; }
+    done_n="$(awk '$1=="done" {print $2}' <<< "${out}" | sort -u | wc -l | tr -d ' ')"
     total="$(awk '$1=="done" {s+=$3} END {print s+0}' <<< "${out}")"
     ctl="$(awk '$1=="done" && $4!="open"' <<< "${out}" | wc -l | tr -d ' ')"
+    nbad="$(awk '$1=="done" {s+=$5} END {print s+0}' <<< "${out}")"
     bad="$(grep '^port ' <<< "${out}" | head -n 20 | tr '\n' ';')"
-    if [ "${done_n}" -ne "${jobs}" ] || [ "${total}" -ne 65535 ]; then
+    if [ "$(grep -c '^done ' <<< "${out}")" -ne "${jobs}" ] || [ "${done_n}" -ne "${jobs}" ] \
+        || [ "${total}" -ne 65535 ]; then
         echo "incomplete: ${done_n}/${jobs} workers, ${total}/65535 ports"
     elif [ "${ctl}" -ne 0 ]; then
         echo "control probe of the proxy's 3128 not open in ${ctl} worker(s)"
-    elif [ -n "${bad}" ]; then
-        echo "answered: ${bad}"
+    elif [ "${nbad}" -ne 0 ] || [ -n "${bad}" ]; then
+        echo "answered: ${nbad} port(s) reported by the workers: ${bad}"
     else
         echo yes
     fi
@@ -254,7 +273,10 @@ if ! [[ "${SCAN_JOBS}" =~ ^[1-9][0-9]{0,4}$ ]] || [ "${SCAN_JOBS}" -gt 65535 ]; 
     detail="V1_SCAN_JOBS=${SCAN_JOBS} is not 1-65535"
 elif [ -n "${GW}" ] && [ -n "${PIP}" ]; then
     echo "INFO scanning TCP 1-65535 on ${GW}: ${SCAN_JOBS} workers, ${SCAN_WAIT}s per port, bound ${SCAN_BOUND}s"
-    out="$(timeout "${SCAN_BOUND}" docker exec -u sled "${APP}" bash -c "${TCP_SCAN}" \
+    # #11156: the bound runs inside the app, so it kills the workers too (its
+    # process group); the host timeout only backs up a hung docker CLI.
+    out="$(timeout "$((SCAN_BOUND + 30))" docker exec -u sled "${APP}" \
+        timeout -k 5 "${SCAN_BOUND}" bash -c "${TCP_SCAN}" \
         "${GW}" "${SCAN_JOBS}" "${SCAN_WAIT}" "${PIP}" 2>&1)"; rc=$?
     v="$(scan_verdict "${rc}" "${out}" "${SCAN_JOBS}")"
     [ "${v}" = yes ] && ok=yes
@@ -265,7 +287,7 @@ fi
 row "app reaches no TCP port 1-65535 on the internal gateway ${GW:-?}" "${ok}" "${detail}"
 # udp HOST PORT — one UDP probe from the app, 3 s for a reply, 30 s bound.
 udp() {
-    timeout 30 docker exec -u sled "${APP}" bash -c "${UDP_PROBE}" \
+    timeout 30 docker exec -u sled "${APP}" timeout -k 2 20 bash -c "${UDP_PROBE}" \
         "$1" "$2" "$(udp_payload "$2")" 3 2>&1 || echo "other:exec failed"
 }
 # The control: Docker's embedded DNS in the app must answer the DNS probe, so
