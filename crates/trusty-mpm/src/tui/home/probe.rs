@@ -22,7 +22,6 @@ use tokio::sync::mpsc;
 use trusty_common::console_metrics::{CONSOLE_METRICS_METHOD, ConsoleMetricsReport, parse_report};
 use trusty_common::console_rpc::{CONSOLE_SERVICE, ConsoleFleetStatus, ServiceStatus};
 use trusty_common::stdio_mcp_client::StdioMcpClient;
-use trusty_common::uds::probe::{SocketVerdict, probe_socket_verdict};
 use trusty_common::uds::server::RpcResponse;
 use trusty_common::uds::{UdsRpcError, UdsSecurityError};
 
@@ -157,13 +156,7 @@ where
             Ok(socket) => uds_fleet_status(&socket, method, deadline).await,
             Err(reason) => Observation::Silent(reason),
         },
-        ProbeKind::SocketConnect => match socket() {
-            Ok(socket) => match probe_socket_verdict(&socket, deadline).await {
-                SocketVerdict::Serving => Observation::Healthy(None),
-                _ => Observation::Silent(format!("nothing serves {}", socket.display())),
-            },
-            Err(reason) => Observation::Silent(reason),
-        },
+        // #11115: the `SocketConnect` arm went with its never-built variant
     }
 }
 

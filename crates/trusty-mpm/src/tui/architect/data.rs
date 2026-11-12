@@ -66,7 +66,8 @@ pub struct DashSnapshot {
 
 impl DashSnapshot {
     /// The rows `tab` lists; the Live tab reads the tracker, not the store.
-    pub fn rows(&self, tab: Tab) -> &[DashRow] {
+    // #11115: crate-internal, as `Tab` is
+    pub(crate) fn rows(&self, tab: Tab) -> &[DashRow] {
         match tab {
             Tab::Decisions => &self.decisions,
             Tab::Actions => &self.actions,
