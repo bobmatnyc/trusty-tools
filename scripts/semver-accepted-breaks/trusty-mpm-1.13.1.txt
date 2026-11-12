@@ -1,0 +1,5 @@
+crate   trusty-mpm
+version 1.13.1
+reason  Accepted under owner ruling D15 (2026-11-12 11:44Z): "Accept the break for 1.13.1; hide or mark the lists next." Supersedes the 2026-09-26 versioning ruling's default that a public-API break never forces a major version. cargo semver-checks 0.50.0 against baseline 1.13.0 computes 1 major lint, 2 entries: variant Tab::Live added to the public tui::architect Tab enum, and variant ProbeKind::UdsFleetStatus added to the public tui::home::services ProbeKind enum. Both are exhaustive public TUI lists; hiding them or marking them non_exhaustive is the follow-up. Refs #11108.
+accept  enum_variant_added variant Tab:Live
+accept  enum_variant_added variant ProbeKind:UdsFleetStatus
