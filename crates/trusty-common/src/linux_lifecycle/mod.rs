@@ -19,7 +19,8 @@
 //!   [`StopOutcome::Stopped`], [`StopOutcome::NotRunning`], or an error —
 //!   [`LifecycleError::Survivor`] when the pid outlives SIGKILL.
 //! - [`start`] spawns `<install dir>/<binary>` detached and returns only once
-//!   the spawned pid serves the socket.
+//!   the spawned pid serves the socket. A failed start kills and reaps the
+//!   child it spawned, so nothing it started is left running.
 //! - [`restart`] is [`stop`], then [`start`]; `NotRunning` counts as stopped,
 //!   and any stop error returns before a spawn.
 //!
@@ -193,7 +194,12 @@ impl DaemonDescriptor {
 /// Why: a caller (a CLI verb, tctl) must tell "something is still running" from
 /// "I could not decide" from "the new process never came up", and report the
 /// pid involved. Each is its own variant, never a success.
-/// Test: one real-process test per variant in `tests/linux_lifecycle.rs`.
+/// Test: `tests/linux_lifecycle.rs` has a real-process test for
+/// `ProbeInconclusive`, `Unidentified`, `IdentityMismatch`,
+/// `IdentityUnreadable`, `Survivor`, `StoppedSignalNotReached`,
+/// `AlreadyRunning`, `ChildExited`, `NotReady` and `ChildUnpinned`; the unit
+/// tests in `tests.rs` cover `InvalidDescriptor` and `NoInstallDir`.
+/// `NoPeerPid`, `Signal`, `BinaryMissing`, `Spawn` and `Io` have no test.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LifecycleError {
@@ -301,12 +307,26 @@ pub enum LifecycleError {
         pid: u32,
     },
     /// The spawned child did not serve the socket within the readiness bound.
-    #[error("pid {pid} did not serve the socket within {timeout:?}; it is left running")]
+    // #11084: the child is killed and reaped, never left running unfindable.
+    #[error("pid {pid} did not serve the socket within {timeout:?}; {}", reap_note(*killed))]
     NotReady {
-        /// The spawned pid, still running.
+        /// The spawned pid.
         pid: u32,
         /// The readiness bound.
         timeout: Duration,
+        /// Whether the child was killed and reaped within the kill wait.
+        killed: bool,
+    },
+    /// The child was spawned, but no pidfd could be opened for it.
+    // #11084: the child is killed and reaped rather than left running.
+    #[error("could not pin spawned pid {pid} with a pidfd ({source}); {}", reap_note(*killed))]
+    ChildUnpinned {
+        /// The spawned pid.
+        pid: u32,
+        /// Whether the child was killed and reaped within the kill wait.
+        killed: bool,
+        /// The `pidfd_open` error.
+        source: io::Error,
     },
     /// An OS call outside the cases above failed.
     #[error("{context}: {source}")]
@@ -316,6 +336,15 @@ pub enum LifecycleError {
         /// The error.
         source: io::Error,
     },
+}
+
+/// The tail of a failed-start message: what became of the spawned child.
+fn reap_note(killed: bool) -> &'static str {
+    if killed {
+        "it was killed and reaped"
+    } else {
+        "it was sent SIGKILL but not reaped within the kill wait"
+    }
 }
 
 /// Whether the stop signal's lock file can be locked right now.
