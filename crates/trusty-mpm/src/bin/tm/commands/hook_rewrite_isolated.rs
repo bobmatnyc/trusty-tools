@@ -24,10 +24,11 @@
 use std::path::Path;
 
 use super::hook_rewrite::{
-    compressible_tool_name, is_isolation_worktree, rewrite_bash_command_for_compression,
+    compressible_tool_decision, is_isolation_worktree, rewrite_bash_command_for_compression,
     shlex_words, strip_wrapper_prefix,
 };
 use super::pm_guard_response::RewriteDecision;
+use trusty_mpm::core::savings_opportunity::SkipReason;
 
 /// The rewritten command plus the permission decision it must carry.
 pub(crate) struct CwdRewrite {
@@ -51,15 +52,34 @@ pub(crate) fn rewrite_bash_command_for_cwd(
     command: &str,
     cwd: Option<&Path>,
 ) -> Option<CwdRewrite> {
+    cwd_rewrite_decision(command, cwd).ok()
+}
+
+/// [`rewrite_bash_command_for_cwd`], with the refusal named (#10973).
+///
+/// What: `Ok` exactly when [`rewrite_bash_command_for_cwd`] is `Some`;
+/// otherwise the guard that refused, from `compressible_tool_decision` or
+/// [`isolated_rewrite`].
+/// Test: `an_isolated_refusal_names_its_guard`,
+/// `an_isolated_worktree_refusal_is_named_on_the_row`.
+pub(crate) fn cwd_rewrite_decision(
+    command: &str,
+    cwd: Option<&Path>,
+) -> Result<CwdRewrite, SkipReason> {
     match cwd.filter(|c| !c.as_os_str().is_empty()) {
-        Some(dir) if !is_isolation_worktree(dir) => rewrite_bash_command_for_compression(command)
-            .map(|command| CwdRewrite {
-                command,
-                permission: None,
-            }),
+        Some(dir) if !is_isolation_worktree(dir) => {
+            // #10973: the guards decide; the brace rewrite then cannot refuse.
+            compressible_tool_decision(command.trim())?;
+            rewrite_bash_command_for_compression(command)
+                .map(|command| CwdRewrite {
+                    command,
+                    permission: None,
+                })
+                .ok_or(SkipReason::Unknown)
+        }
         Some(dir) => isolated_rewrite(command, dir),
         // #10981 review: no cwd, no permission rules to decide from.
-        None => None,
+        None => Err(SkipReason::NoCwd),
     }
 }
 
@@ -69,34 +89,38 @@ pub(crate) fn rewrite_bash_command_for_cwd(
 /// shape never reaches an isolation worktree. This shape carries none of its
 /// parts: `tm compress` runs the program and returns its exit status, so no
 /// brace group, `printf`, `$?` or pipe is needed.
-/// What: `None` when [`compressible_tool_name`] refuses the command (every
-/// guard of the brace rewrite applies unchanged), when the first word is not
-/// the program — a `KEY=value` prefix or a wrapper such as `sudo`/`env`/
-/// `timeout`, which `tm compress` would exec as the program — when that
-/// program does not resolve to an executable file ([`resolves_to_an_executable`];
-/// a shell function or alias would be lost), or when the original matches a
-/// `deny` permission rule. The permission decision is otherwise the one the
-/// build-lease rewrite computes for the original.
+/// What: `Err` with the refusing guard (#10973) when
+/// [`compressible_tool_decision`] refuses the command (every guard of the
+/// brace rewrite applies unchanged), when the first word is not the program —
+/// a `KEY=value` prefix or a wrapper such as `sudo`/`env`/`timeout`, which
+/// `tm compress` would exec as the program (`WrapperPrefix`) — when that
+/// program does not resolve to an executable file
+/// ([`resolves_to_an_executable`]; a shell function or alias would be lost;
+/// `NotExecutable`), or when the original matches a `deny` permission rule
+/// (`Denied`). The permission decision is otherwise the one the build-lease
+/// rewrite computes for the original.
 /// Test: `an_isolated_rewrite_refuses_what_the_brace_rewrite_refuses`,
 /// `a_program_that_is_not_an_executable_is_not_rewritten`,
 /// `an_isolated_rewrite_skips_an_env_prefixed_or_wrapped_command`,
 /// `an_isolated_rewrite_skips_a_denied_command_and_keeps_an_allow`.
-fn isolated_rewrite(command: &str, cwd: &Path) -> Option<CwdRewrite> {
+fn isolated_rewrite(command: &str, cwd: &Path) -> Result<CwdRewrite, SkipReason> {
     let trimmed = command.trim();
-    let tool = compressible_tool_name(trimmed)?;
+    let tool = compressible_tool_decision(trimmed)?;
     // #10973: the program must be the first word, since `tm compress` execs it.
     let words = shlex_words(trimmed);
     if strip_wrapper_prefix(&words) != Some(0) {
-        return None;
+        return Err(SkipReason::WrapperPrefix);
     }
     // #10981 review: `tm compress` execs the program without a shell, so only
     // an executable file keeps the command's meaning.
-    if !resolves_to_an_executable(words.first()?, cwd) {
-        return None;
+    let program = words.first().ok_or(SkipReason::Unknown)?;
+    if !resolves_to_an_executable(program, cwd) {
+        return Err(SkipReason::NotExecutable);
     }
     // #10973: decided from the original, so a deny rule is never bypassed.
-    let permission = super::pm_guard_build_lease::rewrite_permission(trimmed, cwd)?;
-    Some(CwdRewrite {
+    let permission =
+        super::pm_guard_build_lease::rewrite_permission(trimmed, cwd).ok_or(SkipReason::Denied)?;
+    Ok(CwdRewrite {
         command: format!("tm compress --tool \"{tool}\" -- {trimmed}"),
         permission,
     })
@@ -226,6 +250,36 @@ mod tests {
         );
         let allowed = rewrite_bash_command_for_cwd("git diff", Some(&tree)).expect("rewritten");
         assert_eq!(allowed.permission, Some(RewriteDecision::Allow));
+    }
+
+    /// #10973: each isolated-path refusal names its own guard.
+    #[test]
+    fn an_isolated_refusal_names_its_guard() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let tree = repo.join(".claude/worktrees/agent-a");
+        std::fs::create_dir_all(&tree).expect("mkdir");
+        std::fs::write(
+            repo.join(".claude/settings.json"),
+            r#"{"permissions":{"deny":["Bash(git log:*)"]}}"#,
+        )
+        .expect("settings");
+        let reason = |command: &str, cwd: Option<&Path>| cwd_rewrite_decision(command, cwd).err();
+        assert_eq!(
+            reason("env git diff", Some(&tree)),
+            Some(SkipReason::WrapperPrefix)
+        );
+        assert_eq!(
+            reason("./no-such-dir-10973/git diff", Some(&tree)),
+            Some(SkipReason::NotExecutable)
+        );
+        assert_eq!(reason("git log -p", Some(&tree)), Some(SkipReason::Denied));
+        assert_eq!(
+            reason("git diff | head", Some(&tree)),
+            Some(SkipReason::Chained)
+        );
+        assert_eq!(reason("git diff", None), Some(SkipReason::NoCwd));
+        assert_eq!(reason("git diff", Some(&tree)), None, "rewritten");
     }
 
     #[test]

@@ -12,8 +12,12 @@
 //! [`OpportunityRow`] to the bounded opportunity ledger under
 //! `usage/opportunity/` — never to `savings.jsonl`, which the statusline reads
 //! whole on every refresh, so the `💸` figure and its cost are unchanged
-//! (#7867, #10981 review).
-//! Test: `a_subagent_result_and_an_mcp_result_each_append_an_opportunity_row`
+//! (#7867, #10981 review). Each row carries a `skip_reason`: for Bash the
+//! `PreToolUse` decision replayed on the logged call (`hook_bash_decision`),
+//! otherwise `non_bash` or `no_gain`.
+//! Test: `a_subagent_result_and_an_mcp_result_each_append_an_opportunity_row`,
+//! `a_bash_opportunity_row_records_why_no_rewrite_applied`,
+//! `a_non_bash_row_is_non_bash_or_no_gain`
 //! (end to end), `a_bash_result_is_measured_under_its_derived_tool_name`,
 //! `a_huge_result_is_scanned_only_up_to_the_cap`,
 //! `a_subagent_stop_without_a_message_writes_no_row`,
@@ -25,10 +29,12 @@ use std::path::Path;
 use serde_json::Value;
 use trusty_agents_common::compress::compress_tool_output;
 use trusty_mpm::core::savings_opportunity::{
-    OpportunityAppend, OpportunityRow, append_opportunity, opportunity_dir_in, tool_type_of,
+    OpportunityAppend, OpportunityRow, SkipReason, append_opportunity, opportunity_dir_in,
+    tool_type_of,
 };
 
-use super::hook_rewrite::effective_tool_name;
+use super::hook_bash_decision::bash_skip_reason;
+use super::hook_rewrite::{effective_tool_name, hook_cwd};
 
 /// The most result bytes one hook invocation hands the compressor's dry run.
 ///
@@ -97,14 +103,20 @@ pub(crate) fn opportunity_row(
     payload: &Value,
     session_id: &str,
 ) -> Option<OpportunityRow> {
-    let (tool_type, dispatch, result) = match event {
+    // #10973: `bash` is `Some(reason)` for a Bash call — the hook's own decision.
+    let (tool_type, dispatch, result, bash) = match event {
         "PostToolUse" => {
             let tool = payload.get("tool_name")?.as_str()?;
             let dispatch = match payload["tool_input"]["command"].as_str() {
                 Some(cmd) if tool == "Bash" => effective_tool_name(cmd.trim()),
                 _ => tool.to_string(),
             };
-            (tool_type_of(tool), dispatch, payload.get("tool_response")?)
+            let bash = (tool == "Bash").then(|| {
+                let cwd = hook_cwd(Some(payload));
+                bash_skip_reason(payload.get("tool_input"), cwd.as_deref())
+            });
+            let result = payload.get("tool_response")?;
+            (tool_type_of(tool), dispatch, result, bash)
         }
         "SubagentStop" => {
             let message = payload.get("last_assistant_message")?;
@@ -112,6 +124,7 @@ pub(crate) fn opportunity_row(
                 tool_type_of("SubagentStop"),
                 "SubagentStop".to_string(),
                 message,
+                None,
             )
         }
         _ => return None,
@@ -123,15 +136,36 @@ pub(crate) fn opportunity_row(
     }
     let scanned = text.len() as u64;
     let compressed = compress_tool_output(&dispatch, &text).len() as u64;
-    Some(OpportunityRow::new(
-        event,
-        session_id,
-        &tool_type,
-        &dispatch,
-        returned,
-        scanned,
-        compressed + (returned - scanned),
-    ))
+    let would_compress = compressed + (returned - scanned);
+    Some(
+        OpportunityRow::new(
+            event,
+            session_id,
+            &tool_type,
+            &dispatch,
+            returned,
+            scanned,
+            would_compress,
+        )
+        .with_skip_reason(skip_reason(bash, would_compress < returned)),
+    )
+}
+
+/// The row's [`SkipReason`] from the Bash decision, if any, and the measured gain.
+///
+/// Why (#10973): a Bash call had a decision, and that decision is the reason
+/// whatever the gain — a `cd X && …` row is `Chained` even when its dry run,
+/// under the derived name `cd X`, finds nothing. Nothing compresses a
+/// non-Bash result, so there the informative split is by gain.
+/// What: `Some(reason)` → `reason`; `None` → `NonBash` with a gain, else `NoGain`.
+/// Test: `a_non_bash_row_is_non_bash_or_no_gain`,
+/// `a_bash_opportunity_row_records_why_no_rewrite_applied`.
+fn skip_reason(bash: Option<SkipReason>, gains: bool) -> SkipReason {
+    match bash {
+        Some(reason) => reason,
+        None if gains => SkipReason::NonBash,
+        None => SkipReason::NoGain,
+    }
 }
 
 /// Total bytes of every string leaf in `value`; the first `cap` of them into `out`.

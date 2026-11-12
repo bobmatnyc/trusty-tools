@@ -47,6 +47,7 @@ use trusty_agents_common::compress::tool_output::is_source_file_read;
 // #7477: the worktree resolver the `EnterWorktree` guard already uses.
 use std::path::{Path, PathBuf};
 use trusty_mpm::core::project_aliases::worktree_root;
+use trusty_mpm::core::savings_opportunity::SkipReason;
 
 /// Day-one orchestrator-command exclusion list.
 ///
@@ -160,19 +161,36 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
 /// documents; otherwise the [`effective_tool_name`] a filter covers.
 /// Test: every `rewrite_*` case reaches this.
 pub(crate) fn compressible_tool_name(trimmed: &str) -> Option<String> {
+    compressible_tool_decision(trimmed).ok()
+}
+
+/// [`compressible_tool_name`], with the guard that refused named.
+///
+/// Why (#10973): the opportunity ledger records why a result went
+/// uncompressed; asking the guards themselves keeps that reason from drifting
+/// away from the decision.
+/// What: `Ok(tool)` exactly when [`compressible_tool_name`] is `Some(tool)`;
+/// otherwise the first refusing guard, in the order below.
+/// Test: `a_bash_row_names_each_guard_refusal`,
+/// `a_bash_opportunity_row_records_why_no_rewrite_applied`.
+pub(crate) fn compressible_tool_decision(trimmed: &str) -> Result<String, SkipReason> {
     if trimmed.is_empty() {
-        return None;
+        return Err(SkipReason::EmptyCommand);
     }
     if is_orchestrator_command(trimmed) {
-        return None;
+        // #10973: an unresolvable program word is refused by the same guard.
+        return Err(match first_command_token(trimmed) {
+            Some(_) => SkipReason::Orchestrator,
+            None => SkipReason::UnresolvedProgram,
+        });
     }
     if has_unsafe_pipe_composition(trimmed) {
-        return None;
+        return Err(SkipReason::Chained);
     }
     // #7384: a comment or a trailing `\` would swallow or absorb the brace
     // group's own `printf`, so such a command is never wrapped.
     if cannot_be_brace_wrapped(trimmed) {
-        return None;
+        return Err(SkipReason::Unwrappable);
     }
     // #7120: asked of the WHOLE command, because `effective_tool_name` keeps
     // only the first two tokens and a flag displaces the path out of them —
@@ -180,18 +198,18 @@ pub(crate) fn compressible_tool_name(trimmed: &str) -> Option<String> {
     // the file-read filter the #6986 passthrough exists to keep source away
     // from.
     if is_source_file_read(trimmed) {
-        return None;
+        return Err(SkipReason::SourceRead);
     }
     let tool = effective_tool_name(trimmed);
     if !is_safe_tool_name(&tool) {
-        return None;
+        return Err(SkipReason::UnsafeToolName);
     }
     // #6566: no filter covers this tool name, so the wrap would spawn a
     // process that returns its input unchanged.
     if !has_filter_for(&tool) {
-        return None;
+        return Err(SkipReason::NoFilter);
     }
-    Some(tool)
+    Ok(tool)
 }
 
 /// [`rewrite_bash_command_for_compression`], unless the call runs in an

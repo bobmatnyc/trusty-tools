@@ -135,6 +135,8 @@ pub(crate) mod guided_supervisor_guard;
 // #8454: the `tm hook` mode dispatch, out of `main.rs`.
 pub(crate) mod hook_mode;
 pub(crate) mod hook_notify;
+// #10973: the `PreToolUse` Bash rewrite decision, and why it refused.
+pub(crate) mod hook_bash_decision;
 // #10973: the per-tool-result compression-opportunity observer.
 pub(crate) mod hook_observer;
 pub(crate) mod hook_payload;
