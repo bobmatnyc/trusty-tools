@@ -106,3 +106,48 @@ def test_both_parsers_share_one_record_shape():
 def test_pct_is_clamped_by_parse_pulse_and_rejected_by_parse_block():
     assert task_tag.parse_pulse("Task: T93 | pct: 140")[1]["pct"] == 100
     assert task_tag.parse_block(fixture("reject_pct_out_of_range.md"))[0] == "reject"
+
+
+def block_with(line):
+    """A valid block whose `done` line is replaced by `line` (a `done:` line) or followed by it (any other key)."""
+    head = "goal: tt-G01\ntask: tt-T2f@1112\npct: 5\nnext: none\n"
+    return "```il\n" + head + (line if line.startswith("done: ") else "done: x\n" + line) + "\n```"
+
+
+# #11133: grammar-valid lines that name secrets, tokens or bearer auth in prose; only a token shape rejects.
+@pytest.mark.parametrize("line", [
+    "evidence: cargo test -p trusty-secrets => test result: ok. 9 passed; EXIT=0",
+    "evidence: node scripts/check_token_drift.mjs => OK; EXIT=0",
+    "done: fixed bearer token parsing",
+])
+def test_prose_about_secrets_parses_ok(line):
+    kind, rec = task_tag.parse_block(block_with(line))
+    assert kind == "ok", rec
+
+
+# Built at run time, never stored. Each sits after "bearer token" prose, so the reason must name the token shape.
+TOKENS = [
+    ("gh" + "p_" + "A1b2" * 6, "gh-token"),
+    ("github" + "_pat_" + "A1b2" * 6, "gh-token"),
+    (SECRET, "api-key"),
+    ("AK" + "IA" + "Q7W3E5R1T9Y2U4I6", "aws-key"),
+    ("AI" + "za" + "A1b2c3D4e5" * 3 + "f6g7h", "google-key"),
+    ("xo" + "xb-" + "1234-abcd5678", "slack-token"),
+    ("ey" + "JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl", "jwt"),
+    ("https://" + "deploy:hunter2pass" + "@example.com/x", "url-credentials"),
+    ("-----BEGIN " + "PRIVATE KEY-----", "pem"),
+]
+
+
+@pytest.mark.parametrize("token, shape", TOKENS)
+def test_a_token_shape_is_rejected_by_its_own_name(token, shape):
+    kind, reason = task_tag.parse_block(block_with(f"done: fixed bearer token parsing; leaked {token}"))
+    assert kind == "reject" and f"secret-shaped span ({shape})" in reason, reason
+    assert token not in reason
+
+
+@pytest.mark.parametrize("prefix", ["\x1b]", "\x1bP", "\x1b[0m", "\x9b", "\x07"])
+def test_an_escape_or_control_prefixed_key_is_rejected(prefix):
+    kind, reason = task_tag.parse_block(block_with(f"done: x {prefix}{SECRET}"))
+    assert kind == "reject" and "control character" in reason, reason
+    assert SECRET not in reason

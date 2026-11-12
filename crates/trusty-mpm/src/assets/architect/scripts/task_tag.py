@@ -185,16 +185,30 @@ def find_block(text):
     return (found[0], found[1], None) if found else (None, None, None)
 
 
+# C0 controls, DEL and C1 controls; ESC is \x1b, inside the C0 range.
+BLOCK_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Token-shaped dashboard_mask rules only. auth, bearer, secret and base64 match prose ("bearer token",
+# "trusty-secrets =>") and are left out (#11133).
+BLOCK_TOKEN_SHAPES = ("gh-token", "api-key", "aws-key", "google-key", "slack-token", "jwt", "url-credentials")
+
+
 def _secret_shape(value):
-    """The shape name of the first secret-shaped span in value, or None. Reuses dashboard_mask's rules as a
-    detector: any span it would mask is a secret here, and the block is rejected, never masked (#11133)."""
+    """The name of the first token shape in value, or None.
+
+    Why: a block that carries a credential is rejected, never masked (#11133), but prose about secrets
+    ("fixed bearer token parsing", "cargo test -p trusty-secrets") is grammar-valid and must parse.
+    What: searches the raw value, unstripped, with the named token-shaped subset of dashboard_mask's rules
+    (BLOCK_TOKEN_SHAPES) plus its PEM armor pattern. A named subset, not architect_leak_patterns.txt: that
+    table lives outside the bundled subproject and its SECRET class covers only GitHub and sk- keys.
+    Test: test_a_token_shape_is_rejected_by_its_own_name, test_prose_about_secrets_parses_ok
+    """
     import dashboard_mask   # lazy: only a block with content pays the import
-    # mask_pane_text over the one line, compared with the same line escape-stripped: the masker's public entry.
-    masked = dashboard_mask.mask_pane_text(value, max_lines=1, max_line_len=10 * len(value) + 64)
-    if masked == dashboard_mask.strip_escapes(value):
-        return None
-    m = re.search(r"\[masked:([a-z0-9\-]+)\]", masked)
-    return m.group(1) if m else "secret"
+    if dashboard_mask._ARMOR.search(value):
+        return "pem"
+    for shape, rx, _ in dashboard_mask._RULES:
+        if shape in BLOCK_TOKEN_SHAPES and rx.search(value):
+            return shape
+    return None
 
 
 def _check_id(value, letters, key):
@@ -227,9 +241,9 @@ def parse_block(text):
     Why: DOC-89 v1 (#11133): every PM turn and agent handback carries one `il` block that scripts parse
     directly; a block that breaks the grammar is rejected with its first violation, never repaired.
     What: finds the fence (``` or ~~~, info string `il`), then reads each non-blank body line as `key: value`
-    (DOC-89 section 7). Rejects, in line order: a line outside the grammar or an unknown key, a repeated
+    (DOC-89 section 7). Rejects, in line order: a control character, a line outside the grammar or an unknown key, a repeated
     singleton, a line over 240 characters (`done` over 200), a bad id (goal G, task T with @MMDD, open D/A),
-    pct not an integer 0-100, a malformed `new`, a secret-shaped span (dashboard_mask rules); then a missing
+    pct not an integer 0-100, a malformed `new`, a token-shaped secret (_secret_shape); then a missing
     required key. The record has parse_pulse's fields (kind "il", id, stamp, done, est, remaining, pct, line)
     plus source "block", goal, next, open (list), new (list of items), evidence (list), error and feedback.
     Unlike parse_pulse, pct is rejected out of range, never clamped.
@@ -244,6 +258,8 @@ def parse_block(text):
     for n, line in enumerate(body, 1):
         if not line.strip():
             continue
+        if BLOCK_CTRL_RE.search(line):   # #11133: an escape can hide a token from any later check
+            return "reject", f"line {n}: control character (C0, C1 or ESC); remove it"
         m = BLOCK_LINE_RE.match(line)
         if not m:
             return "reject", f"line {n}: not 'key: value' (key, colon, one space)"   # never echo: may hold a secret
