@@ -82,6 +82,21 @@ pub(crate) enum ProjectsAction {
         #[arg(long)]
         json: bool,
     },
+    /// Decommission a project: stop its running sessions and mark it
+    /// decommissioned (#10988).
+    ///
+    /// Workspaces, session records, and the search index and its data are kept;
+    /// a new session for the project clears the state. Refused when one of the
+    /// project's sessions is the Architect's. Exits non-zero, naming each
+    /// session that failed to stop, when any stop fails; the project is then
+    /// NOT marked.
+    Decommission {
+        /// Project name.
+        name: String,
+        /// Emit the raw report JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
     /// View or edit a project's deterministic config (§3.1/§6, #2120).
     ///
     /// Bare (no `set`/`unset`/`tags` subcommand) is a read-only view (GET);

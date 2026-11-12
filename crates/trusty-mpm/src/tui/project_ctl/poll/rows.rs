@@ -198,6 +198,7 @@ mod tests {
             commit_email: None,
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
         }
     }
 
@@ -244,6 +245,7 @@ mod tests {
                 summary("b2222222", "provisioning"),
                 summary("c3333333", "stopped"),
             ],
+            decommissioned: false,
         };
         let row = project_to_row(&p, Some(&group));
         assert_eq!(row.live_count, 2);

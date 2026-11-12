@@ -286,6 +286,7 @@ fn project(name: &str, repo_url: &str, gh_account: Option<&str>) -> Project {
         // #10530: several fixtures deliberately share one `repo_url`; a distinct
         // explicit key per name keeps the store from refusing the duplicates.
         project_key: Some(format!("local:{name}")),
+        decommissioned_at: None,
     }
 }
 

@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-40 tools.
+41 tools.
 
 ## `session_list`
 
@@ -281,6 +281,14 @@ Resolve a natural-language query to the best-matching registered project. Accept
 | Parameter | Type | Required |
 |---|---|---|
 | `query` | `string` | yes |
+
+## `project_decommission`
+
+Decommission a registered project: stop each of its running sessions and mark the project decommissioned. Workspaces, session records, and the trusty-search index and its data are all kept; a new session for the project clears the state. Refuses when one of the project's sessions is the Architect's. When any session fails to stop the project is NOT marked and the error names each failure. Returns the project record plus `stopped` and `left_as_is` session ids.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `name` | `string` | yes |
 
 ## `session_proxy_focus`
 

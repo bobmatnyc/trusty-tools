@@ -159,6 +159,7 @@ mod tests {
             commit_email: None,
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
         }
     }
 

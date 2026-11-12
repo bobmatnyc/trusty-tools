@@ -4,9 +4,9 @@
 //! look up, and NL-resolve projects in the registry — without scraping CLI text.
 //! Keeping these descriptors in their own file mirrors the pattern of `session.rs`
 //! and keeps each file well under the 500-SLOC production cap.
-//! What: [`project_tools`] returns the four `{ name, description, inputSchema }`
-//! descriptors — `project_list`, `project_register`, `project_get`, and
-//! `project_resolve`.
+//! What: [`project_tools`] returns the five `{ name, description, inputSchema }`
+//! descriptors — `project_list`, `project_register`, `project_get`,
+//! `project_resolve`, and `project_decommission` (#10988).
 //! Test: `super::tests::project_tools_present`,
 //! `super::tests::catalog_names_match_constant`.
 
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::tool;
 
-/// Build the four project-registry tool descriptors (WI-2 + WI-5).
+/// Build the five project-registry tool descriptors (WI-2 + WI-5, #10988).
 ///
 /// Why: project listing, registration, lookup, and NL-resolution are the MCP
 /// surface the driver skill needs to interact with the project registry without
@@ -134,6 +134,28 @@ pub(super) fn project_tools() -> Vec<Value> {
                     }
                 },
                 "required": ["query"],
+                "additionalProperties": false
+            }),
+        ),
+        // #10988: the project-level decommission verb.
+        tool(
+            "project_decommission",
+            "Decommission a registered project: stop each of its running \
+             sessions and mark the project decommissioned. Workspaces, session \
+             records, and the trusty-search index and its data are all kept; a \
+             new session for the project clears the state. Refuses when one of \
+             the project's sessions is the Architect's. When any session fails \
+             to stop the project is NOT marked and the error names each failure. \
+             Returns the project record plus `stopped` and `left_as_is` session ids.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Project name to decommission."
+                    }
+                },
+                "required": ["name"],
                 "additionalProperties": false
             }),
         ),

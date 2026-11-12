@@ -658,6 +658,10 @@ impl OrchestratorBackend for StateBackend {
         super::mcp_project::project_resolve(&self.state, query).await
     }
 
+    async fn project_decommission(&self, name: &str) -> Result<Value, String> {
+        super::mcp_project_decommission::project_decommission(&self.state, name).await // #10988
+    }
+
     // ── #2550: session-manager proxy tools (delegate to mcp_proxy) ───────────
     //
     // Each builds a `SessionProxy` over the SAME shared focus store the HTTP

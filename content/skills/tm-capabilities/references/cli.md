@@ -163,6 +163,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
     - `set` — Set a field to a new value
     - `tags` — Add and/or remove tags in one call (§6: "no free-text replace-whole-list footgun" — there is no plain tags-replace form)
     - `unset` — Clear (unset) a field back to absent
+  - `decommission` — Decommission a project: stop its running sessions and mark it decommissioned (#10988)
   - `deliverables` — Manage a project's Deliverables (§10.8)
     - `add` — Create a Deliverable (starts in `proposed`)
     - `list` — List a project's Deliverables (optionally filtered by status)

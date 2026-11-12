@@ -109,6 +109,8 @@ pub(crate) mod verify_allowlist;
 // #8985: the last complete `disk_survey` pass, refreshed in the background.
 pub(crate) mod disk_survey_cache;
 pub mod mcp_project;
+// #10988: `project_decommission`, shared by the MCP tool and the socket method.
+pub mod mcp_project_decommission;
 // #7357: the backfill both registration transports share.
 pub mod mcp_proxy;
 pub mod mcp_session;
