@@ -12,6 +12,7 @@ use std::io;
 
 use tokio::time::Instant;
 
+use super::liveness::refuse_unserved_daemon;
 use super::process::{Dial, PinnedProcess, Signal, dial, exe_name};
 use super::{
     DaemonDescriptor, LifecycleError, POLL_INTERVAL, PROBE_TIMEOUT, StoppedSignal, lock_is_free,
@@ -75,8 +76,10 @@ pub async fn stop(desc: &DaemonDescriptor) -> Result<StopOutcome, LifecycleError
 /// Why: D1 — a stop that has not proven the process gone is not a stop.
 /// What, in order:
 ///
-/// 1. Dial the socket. Absent or refusing: `NotRunning`, no signal (for a
-///    lock signal, only when the lock is also free). Undecided: an error.
+/// 1. Dial the socket. Absent or refusing: `NotRunning`, no signal — only
+///    when no process of `binary` carries `liveness_args` (else
+///    `RunningUnserved`) and, for a lock signal, the lock is also free.
+///    Undecided: an error.
 /// 2. Pin the peer pid with a pidfd and require `/proc/<pid>/exe` to name
 ///    `desc.binary`. A mismatch is an error and no signal is sent.
 /// 3. SIGTERM; wait up to `stop_grace` for the pid to exit. If it has not,
@@ -85,6 +88,7 @@ pub async fn stop(desc: &DaemonDescriptor) -> Result<StopOutcome, LifecycleError
 ///
 /// Test: `stop_returns_not_running_when_socket_is_absent`,
 /// `stop_returns_not_running_when_socket_refuses_connections`,
+/// `stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket`,
 /// `stop_refuses_to_signal_a_process_with_another_name`,
 /// `stop_reports_a_survivor_when_sigkill_does_not_take`,
 /// `stop_with_lock_signal_is_not_stopped_while_another_process_holds_the_lock`.
@@ -112,11 +116,11 @@ pub async fn stop_with(
     // own: nothing was signalled, so the answer is `NotRunning` once settled.
     let Some(target) = PinnedProcess::open(pid)? else {
         settle(desc, pid).await?;
-        return Ok(StopOutcome::NotRunning);
+        return not_running(desc);
     };
     if !identity_holds(desc, &target)? {
         settle(desc, pid).await?;
-        return Ok(StopOutcome::NotRunning);
+        return not_running(desc);
     }
 
     send(delivery, &target, Signal::Term)?;
@@ -132,16 +136,11 @@ pub async fn stop_with(
     Ok(StopOutcome::Stopped { pid, forced })
 }
 
-/// The socket does not serve: `NotRunning`, unless a lock signal's lock is held.
+/// The socket does not serve: `NotRunning`, unless a lock signal's lock is
+/// held or a process still runs the daemon.
+// #11098: "socket absent ⇒ not running" let restart start a second daemon.
 fn not_running(desc: &DaemonDescriptor) -> Result<StopOutcome, LifecycleError> {
-    if let StoppedSignal::LockFree(lock) = &desc.stopped_signal
-        && !lock_is_free(lock)?
-    {
-        return Err(LifecycleError::Unidentified {
-            socket: desc.socket.clone(),
-            lock: lock.clone(),
-        });
-    }
+    refuse_unserved_daemon(desc)?;
     Ok(StopOutcome::NotRunning)
 }
 

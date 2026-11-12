@@ -38,8 +38,11 @@
 //! [`MAX_SCRIPT_DEPTH`]; and substitutions nested past
 //! `MAX_SUBSTITUTION_DEPTH` (#10566). Nested runs are resolved as strictly as the top
 //! level (#9037). A symlinked script is judged by its target. `$HOME` and
-//! `$PWD` prefixes resolve. A compiled executable (ELF or Mach-O magic) is
-//! not a script and allows.
+//! `$PWD` prefixes resolve. An interpreter's script is its first operand; a
+//! leading `$NAME` on it resolves only from a plain literal assignment just
+//! before it in the same text (`operand`, #10672). A substitution's words are
+//! never read as the segment's own (#10548). A compiled executable (ELF or
+//! Mach-O magic) is not a script and allows.
 //!
 //! Documented residuals (ruling 268's accepted trade, pinned in
 //! `pm_guard_secret_read`'s `DOCUMENTED_RESIDUALS` and
@@ -107,6 +110,7 @@ use crate::commands::pm_guard_secret_script_self::{
     ToplevelRisk, passes_on_git_changes, resolve_self_paths_with,
 };
 use node::node_check_only;
+use operand::{fd_pipe_script, locate};
 use walk::{Walk, each_script, each_script_in};
 
 // #10566: the walk that locates each script, split out for the 500-SLOC cap.
@@ -121,6 +125,9 @@ pub(crate) mod presence_key;
 // #10548: the exact `node --check <file>` shape (500-SLOC cap).
 #[path = "pm_guard_secret_script_node.rs"]
 mod node;
+// #10672: an interpreter's script is its first operand (500-SLOC cap).
+#[path = "pm_guard_secret_script_operand.rs"]
+mod operand;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;
@@ -194,7 +201,7 @@ fn family_of(program: &str) -> Option<Family> {
 /// How a candidate word reaches the interpreter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
-    /// A positional operand: the first that exists is the script.
+    /// A positional operand: the first is the script (`operand::script_operand`).
     Positional,
     /// A file an option loads as code, beside the script.
     Loaded,
@@ -209,6 +216,16 @@ struct Candidate {
     word: String,
     role: Role,
     interpreter: Option<String>,
+    /// #10672: an existing path a leading `$NAME` resolves to
+    /// ([`operand::resolve_script_operand`]).
+    resolved: Option<String>,
+}
+
+impl Candidate {
+    /// The word to look up on disk: the resolved path, else the word.
+    fn lookup(&self) -> &str {
+        self.resolved.as_deref().unwrap_or(&self.word)
+    }
 }
 
 /// Refuse a Bash command that runs a script whose body reads a credential:
@@ -254,7 +271,7 @@ fn unresolved(
 ) -> Option<(String, Unread)> {
     // #10748: an fd pipe is computed at run time, whatever `named_once` says.
     let computed = |c: &Candidate| {
-        let w = expand(&c.word, bases);
+        let w = expand(c.lookup(), bases);
         is_computed(&w) || is_fd_pipe(&w)
     };
     if let Some(c) = candidates
@@ -277,7 +294,7 @@ fn unresolved(
     let any_exists = candidates
         .iter()
         .filter(|c| c.role != Role::Loaded)
-        .any(|c| !existing_paths(&c.word, bases).is_empty());
+        .any(|c| !existing_paths(c.lookup(), bases).is_empty());
     let named_once = command.matches(script.word.as_str()).count() <= 1;
     (!any_exists && named_once).then(|| (script.word.clone(), Unread::Missing))
 }
@@ -295,26 +312,6 @@ fn is_fd_pipe(word: &str) -> bool {
     ["/dev/fd/", "/proc/self/fd/"]
         .iter()
         .any(|p| word.starts_with(p))
-}
-
-/// The fd-pipe candidate [`locate`] would pick if the pipe existed: any
-/// loaded file, the first positional that is a pipe or exists, else a stdin
-/// pipe. #10748: before, the guard probed its own fd N, so such a pipe was
-/// read and refused; this keeps it refused, as [`Unread::Unresolvable`].
-/// Test: `an_fd_pipe_after_a_missing_script_refuses_10748`.
-fn fd_pipe_script<'a>(candidates: &'a [Candidate], bases: &[PathBuf]) -> Option<&'a Candidate> {
-    let fd = |c: &Candidate| is_fd_pipe(&expand(&c.word, bases));
-    let exists = |c: &Candidate| !existing_paths(&c.word, bases).is_empty();
-    let loaded = candidates.iter().find(|c| c.role == Role::Loaded && fd(c));
-    let positional = candidates
-        .iter()
-        .filter(|c| c.role == Role::Positional)
-        .find(|c| fd(c) || exists(c));
-    let script = match positional {
-        Some(c) => fd(c).then_some(c),
-        None => candidates.iter().find(|c| c.role == Role::Stdin && fd(c)),
-    };
-    loaded.or(script)
 }
 
 /// `word` with a leading `$HOME`/`${HOME}` or `$PWD`/`${PWD}` replaced by the
@@ -562,6 +559,7 @@ fn candidates(argv: &[String]) -> (Vec<Candidate>, bool) {
             word: program.clone(),
             role: Role::Positional,
             interpreter: None,
+            resolved: None,
         }],
         None => Vec::new(),
     };
@@ -577,6 +575,7 @@ fn interpreter_candidates(family: Family, interpreter: &str, args: &[String]) ->
             word: word.to_string(),
             role,
             interpreter: Some(interpreter.to_string()),
+            resolved: None,
         });
     };
     let mut options_done = false;
@@ -650,35 +649,6 @@ fn runs_inline(family: Family, token: &str) -> bool {
     false
 }
 
-/// The existing files the candidates name: every loaded file, the first
-/// positional operand that exists, else the stdin file.
-fn locate(candidates: &[Candidate], bases: &[PathBuf]) -> Vec<(String, PathBuf, Option<String>)> {
-    let mut out = Vec::new();
-    let mut found_positional = false;
-    for role in [Role::Loaded, Role::Positional, Role::Stdin] {
-        if role == Role::Stdin && found_positional {
-            break;
-        }
-        for c in candidates.iter().filter(|c| c.role == role) {
-            let paths = existing_paths(&c.word, bases);
-            if paths.is_empty() {
-                continue;
-            }
-            let interpreter = c.interpreter.clone();
-            out.extend(
-                paths
-                    .into_iter()
-                    .map(|p| (c.word.clone(), p, interpreter.clone())),
-            );
-            if role == Role::Positional {
-                found_positional = true;
-                break;
-            }
-        }
-    }
-    out
-}
-
 /// Every existing file `word` names under `bases`; nothing for a word the
 /// shell computes at run time, or for a `/dev/fd/` or `/proc/self/fd/` pipe.
 /// Test: `an_fd_pipe_the_guard_has_open_still_refuses_10748`.
@@ -739,3 +709,8 @@ mod substitution_10566_tests;
 #[cfg(test)]
 #[path = "pm_guard_secret_script_node_tests.rs"]
 mod node_10548_tests;
+
+// #10548/#10672: the two reported refusals, rebuilt with synthetic fixtures.
+#[cfg(test)]
+#[path = "pm_guard_secret_script_matt_10548_tests.rs"]
+mod matt_10548_tests;

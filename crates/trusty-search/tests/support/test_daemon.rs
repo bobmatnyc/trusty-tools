@@ -149,6 +149,29 @@ fn is_zombie(_pid: u32) -> bool {
     false
 }
 
+/// Stand in for a live daemon on `data_dir`: `daemon.lock` names PID 1 and
+/// this test process holds its flock.
+///
+/// Why (#11060): `start` and the auto-spawn guard treat a lockfile as live
+/// only when a process holds its flock. A file naming PID 1 with no holder is
+/// the stale container-restart shape, and no longer refuses anything.
+/// What: writes `1` to `<data_dir>/daemon.lock` and takes the exclusive flock.
+/// Keep the returned `File` alive for as long as the daemon should look up;
+/// std opens it close-on-exec, so no spawned binary inherits the lock.
+/// Test: `removed_start_inputs_are_refused_or_unread`,
+/// `daemon_env_cannot_redirect_the_data_dir`.
+pub fn hold_daemon_lock(data_dir: &Path) -> std::fs::File {
+    let path = data_dir.join("daemon.lock");
+    std::fs::write(&path, b"1").expect("write daemon.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open daemon.lock");
+    file.try_lock().expect("take the daemon.lock flock");
+    file
+}
+
 /// Serialises every [`run_bounded`] spawn in this test binary.
 ///
 /// Why (#8748): on macOS std sets `FD_CLOEXEC` on a spawn's pipes after

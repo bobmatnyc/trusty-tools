@@ -11,7 +11,8 @@
 //! it was skipped unless `OKF_LIVE_PROFILE` names a token-store profile.
 //! With it set, `run_lane` first runs `trusty_connectors::live::precheck`
 //! (tokeninfo; any scope beyond the read-only preset fails the test before
-//! any import), then imports the fixtures with `plan_import` and `import`
+//! any import) and `docs_grant_precheck` (no `[[gdocs_grant]]` row for
+//! `lane-docs` fails it the same way), then imports the fixtures with `plan_import` and `import`
 //! (the library form of `trusty-okf import plan` / `import run`) through the
 //! real `okf-adapter-gmail` and `okf-adapter-gdocs`, and checks outcomes
 //! (1) to (8). The profile is never defaulted: it is the account of every
@@ -29,8 +30,8 @@
 //! 2. Record the gdocs capability-grant review once (#10824): add a
 //!    `[[gdocs_grant]]` row with `store = "lane-docs"`, `account` set to the
 //!    profile and a non-blank `review` to
-//!    `$HOME/.config/trusty-connectors/config.toml`. Without it every Docs
-//!    import is `policy_refused` and the lane fails.
+//!    `$HOME/.config/trusty-connectors/config.toml`. Without it the lane
+//!    fails before any import, naming the row and the file.
 //! 3. Run, with the fixture folder's Drive ID:
 //!    `OKF_LIVE_PROFILE=r-1mc-readonly OKF_LIVE_DRIVE_FOLDER=<folder id>
 //!    cargo test -p trusty-connectors --test live_lane -- --nocapture --test-threads=1`
@@ -58,6 +59,7 @@ use serde_json::json;
 use support::{
     FakeGoogle, GDOCS, GMAIL, Home, doc, fm_str, folder, frontmatter, message, run, s, spec, tree,
 };
+use trusty_connectors::config::{Config, default_path};
 use trusty_connectors::google::Options;
 use trusty_connectors::live::precheck;
 use trusty_gworkspace::api::constants::READONLY_SCOPES;
@@ -149,8 +151,44 @@ fn run_lane(l: &Lane) -> Result<(), String> {
     };
     let scopes = precheck(&l.home, &opts, &l.account)?;
     println!("pre-check passed: {}", scopes.join(" "));
+    // #10746: a missing gdocs grant fails here, not as policy_refused in (6)-(8)
+    docs_grant_precheck(&l.home, &l.account)?;
     mail_outcomes(l);
     docs_outcomes(l);
+    Ok(())
+}
+
+/// The gdocs capability-grant pre-check, read from the grant file the
+/// adapters read under `home`.
+///
+/// Why: without a `[[gdocs_grant]]` row for `lane-docs` the gdocs adapter
+/// refuses every request as `policy_refused`, so the lane would run the
+/// mail imports and then fail deep in outcomes (6) to (8). Fail closed, and
+/// early, with the row and the file the owner must fix.
+/// What: loads `$HOME/.config/trusty-connectors/config.toml` under `home`
+/// (`config::default_path`). A missing or malformed file, or no row with a
+/// non-blank `review` for store `lane-docs` and `account`, is an `Err`
+/// naming `[[gdocs_grant]]`, the store, the account and the path.
+/// Test: `a_missing_gdocs_grant_stops_the_lane_before_any_import`.
+fn docs_grant_precheck(home: &Path, account: &str) -> Result<(), String> {
+    let path = default_path(home);
+    let row = format!(
+        "[[gdocs_grant]] row with store = \"{DOCS_STORE}\", account = \"{account}\" and a non-blank review"
+    );
+    if !path.exists() {
+        return Err(format!(
+            "missing {row}: {} does not exist; no import ran",
+            path.display()
+        ));
+    }
+    let config =
+        Config::load(Some(&path)).map_err(|e| format!("missing {row}: {e}; no import ran"))?;
+    if !config.gdocs_granted(DOCS_STORE, account) {
+        return Err(format!(
+            "missing {row} in {}; no import ran",
+            path.display()
+        ));
+    }
     Ok(())
 }
 
@@ -642,6 +680,43 @@ fn a_refused_precheck_runs_no_import() {
         "a Google data call ran after the refusal: {seen:?}"
     );
     assert!(tree(lane.scratch.path()).is_empty(), "a bundle was written");
+}
+
+/// Why: a lane with no gdocs grant must stop before any import, naming the
+/// row and the grant file, not fail as `policy_refused` in outcomes (6) to
+/// (8). This fails if `run_lane` drops the grant pre-check.
+/// What: a read-only token and the fixtures, first with no grant file, then
+/// with a grant for another store; each `run_lane` is an `Err` naming
+/// `[[gdocs_grant]]`, `lane-docs` and the path, the fake sees only
+/// tokeninfo, and no bundle holds a concept.
+/// Test: this test.
+#[test]
+fn a_missing_gdocs_grant_stops_the_lane_before_any_import() {
+    let (fake, h) = (FakeGoogle::start(), Home::new(Some("ro")));
+    fixtures(&fake);
+    fake.with(|st| st.tokeninfo_scope = Some(READONLY_SCOPES.join(" ")));
+    let path = default_path(&h.home);
+    for grant_other_store in [false, true] {
+        if grant_other_store {
+            h.docs_grant("other-docs", "ro");
+        }
+        fake.clear_seen();
+        let lane = Lane::new(&h.home, "ro", "F", Some(&fake.url));
+        let e = run_lane(&lane).expect_err("no gdocs grant must refuse the lane");
+        assert!(
+            e.contains("[[gdocs_grant]]")
+                && e.contains(DOCS_STORE)
+                && e.contains(&path.display().to_string()),
+            "{e}"
+        );
+        let seen = fake.seen();
+        assert!(
+            seen.iter()
+                .all(|s| s.path == "/oauth2.googleapis.com/tokeninfo"),
+            "a Google data call ran without a grant: {seen:?}"
+        );
+        assert!(tree(lane.scratch.path()).is_empty(), "a bundle was written");
+    }
 }
 
 /// The S13 test-account fixtures, offline: SENT mail (a two-message

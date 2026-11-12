@@ -150,6 +150,40 @@ pub(super) fn acquire_lock(lock_path: &Path) -> Result<File, DaemonError> {
     ))))
 }
 
+/// Is the flock on the file at `lock_path` held by another descriptor?
+///
+/// Why (#11060): a live pid in the file does not prove a live holder. After a
+/// container restart the file on the volume names a pid from the old pid
+/// namespace, which in the new one is often a live, unrelated process. The
+/// kernel drops a flock when its holder dies, so the flock is the proof.
+/// What: opens the existing file (never creates it) and tries the flock.
+/// `Ok(true)` on contention; `Ok(false)` when the file is absent or we could
+/// take the flock, which we release on return. A replaced inode is retried.
+/// Any other open, flock or `stat` failure is an `Err`, never a "free".
+/// Residual: a starter that flocks inside our brief hold is refused, exactly
+/// as against [`remove_daemon_files_if_unheld`]; it can never get a second
+/// lock.
+/// Test: `a_live_unrelated_pid_in_an_unheld_lock_does_not_block_startup_11060`,
+/// `a_lock_that_cannot_be_probed_is_not_treated_as_free_11060`.
+pub(super) fn lock_is_held(lock_path: &Path) -> Result<bool, DaemonError> {
+    for _ in 0..MAX_REPLACED_RETRIES {
+        let file = match OpenOptions::new().read(true).write(true).open(lock_path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(DaemonError::Io(e)),
+        };
+        match lock_opened(&file, lock_path)? {
+            LockAttempt::Contended => return Ok(true),
+            LockAttempt::Held => return Ok(false),
+            LockAttempt::Replaced => continue,
+        }
+    }
+    Err(DaemonError::Io(std::io::Error::other(format!(
+        "{} was replaced {MAX_REPLACED_RETRIES} times while probing it",
+        lock_path.display()
+    ))))
+}
+
 /// What [`remove_daemon_files_if_unheld`] found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StaleLockRemoval {

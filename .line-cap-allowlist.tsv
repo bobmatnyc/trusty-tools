@@ -15,3 +15,12 @@ crates/trusty-mpm/src/daemon/api.rs	1176
 crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	559
 crates/trusty-search/src/main.rs	570
 scripts/check_asset_test_filter.py	677
+workers/okf-extract/vendor/calamine/src/datatype.rs	754
+workers/okf-extract/vendor/calamine/src/de.rs	588
+workers/okf-extract/vendor/calamine/src/lib.rs	713
+workers/okf-extract/vendor/calamine/src/ods.rs	716
+workers/okf-extract/vendor/calamine/src/utils.rs	1109
+workers/okf-extract/vendor/calamine/src/xls.rs	1530
+workers/okf-extract/vendor/calamine/src/xlsb/mod.rs	898
+workers/okf-extract/vendor/calamine/src/xlsx/cells_reader.rs	612
+workers/okf-extract/vendor/calamine/src/xlsx/mod.rs	2595
