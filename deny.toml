@@ -238,12 +238,23 @@ unsound = "none"
 # trusty-mpm registers and verifies ES256 passkeys only, so no RSA decryption
 # runs; no RSA credential is stored or used at approval. Owner ruling D72
 # (2026-11-09). Review by 2027-02-07. The same id is ignored in `.cargo/audit.toml`.
+#
+# RUSTSEC-2026-0436 (calamine CFB/OLE2 parser: panic and unbounded allocation
+# on a crafted .xls/.xlsb; denial of service only). Patched only in
+# calamine >= 0.38.0. The OKF extraction worker vendors calamine 0.36.1 through
+# a path patch (workers/okf-extract/vendor/calamine, #11093). cargo-deny does
+# not match an advisory against a path package, so this row may never fire;
+# it is kept so both files carry the same waiver. Owner ruling Dgp
+# (2026-11-12). EXPIRES 2026-12-12. Exit: #11154 moves the worker to
+# calamine >= 0.38.0. The same id is ignored in `.cargo/audit.toml`; remove it
+# from both in that change.
 ignore = [
   { id = "RUSTSEC-2023-0071", reason = "REVIEW BY 2027-02-07. rsa pulled by webauthn-rs crypto-glue; trusty-mpm accepts ES256 credentials only, so no RSA decryption runs; no RSA credential is stored or used at approval. Owner ruling D72, #8878. Nothing expires this row automatically." },
   { id = "RUSTSEC-2026-0367", reason = "REVIEW BY 2026-11-20. zip extract keeps SUID/SGID bits. Pinned upstream with no zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see #10019. Ruling df-D59. Nothing expires this row automatically." },
   { id = "RUSTSEC-2026-0368", reason = "REVIEW BY 2026-11-20. zip extract creates symlinks escaping the destination. Pinned upstream with no zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see #10019. Ruling df-D59. Nothing expires this row automatically." },
   { id = "RUSTSEC-2026-0369", reason = "REVIEW BY 2026-11-20. zip extract applies permissions through symlinks. Pinned upstream with no zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see #10019. Ruling df-D59. Nothing expires this row automatically." },
   { id = "RUSTSEC-2026-0429", reason = "EXPIRES 2026-12-07. See #10651 (move to zip 9 when upstream releases; re-check on expiry) and #10788. zip `ZipArchive::extract` aborts the process on a symlink entry with a large declared size; patched only in zip >= 9.0.0. Opt-in crates pinned below zip 9: candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No call to extract() on zip < 9 is reachable from a shipped crate; the workspace reader uses zip 9.0.5. Nothing expires this row automatically; a human acts on the date. Architect ruling df-D97." },
+  { id = "RUSTSEC-2026-0436", reason = "EXPIRES 2026-12-12. calamine CFB/OLE2 parser panics or allocates without bound on a crafted .xls/.xlsb; denial of service only; patched only in calamine >= 0.38.0. The OKF extraction worker vendors calamine 0.36.1 through a path patch (workers/okf-extract/vendor/calamine, #11093). Exit: #11154 moves the worker to calamine >= 0.38.0 and this id leaves deny.toml and .cargo/audit.toml. See #11094. Nothing expires this row automatically; a human acts on the date. Owner ruling Dgp (2026-11-12)." },
 ]
 
 # ---------------------------------------------------------------------------
