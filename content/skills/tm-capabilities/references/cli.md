@@ -184,7 +184,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
 - `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`. No verb prints a value
   - `__exec-stub` — The helper `exec` runs as its child; never run by hand
-  - `copy` — Copy this project's keys from one backend to another
+  - `copy` — Copy keys into this project's scope from a backend
   - `doctor` — Report socket and backend reachability, never a value
   - `exec` — Run a command with project keys in its environment or on its stdin
   - `import` — Load every `KEY=value` of a dotenv file into the project scope
