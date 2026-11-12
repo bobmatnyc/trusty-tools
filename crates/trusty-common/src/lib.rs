@@ -1412,6 +1412,11 @@ pub mod http_client;
 #[cfg(all(unix, feature = "uds"))]
 pub mod uds;
 
+/// Linux daemon start/stop/restart from a caller-built descriptor (#11084).
+/// Test: `tests/linux_lifecycle.rs` runs it against real processes.
+#[cfg(all(target_os = "linux", feature = "uds"))]
+pub mod linux_lifecycle;
+
 /// A stand-in trusty-* daemon on a Unix socket, for this crate's own tests
 /// (#7237). Never compiled outside `cargo test`.
 #[cfg(all(test, unix, feature = "uds"))]
