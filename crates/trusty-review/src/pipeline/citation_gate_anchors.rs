@@ -21,6 +21,7 @@ use crate::pipeline::citation_check::{
     BRACKET_CITATION_RE, CODE_CITATION_RE, MIN_SPAN_LEN, collect_delimited, line_suffix_span,
     normalize, normalize_path,
 };
+use crate::pipeline::citation_payload::split_backtick_spans;
 
 /// An identifier-shaped word: `name`, `a::b::c`, optionally followed by `(`.
 static IDENT_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -167,6 +168,8 @@ pub(super) fn same_file(a: &str, b: &str) -> bool {
 /// suggestion, which is the proposed fix and need not be in the diff.
 /// #8905 row 6: a `[code: …]` excerpt anchors only its own file, so it counts
 /// here only when its locator names `f.file`.
+/// #10964: a backtick span labelled as a payload, an example input or a fix
+/// (`citation_payload`) is neither required nor a placing anchor.
 pub(super) fn finding_anchors(f: &Finding) -> Anchors {
     let mut anchors = Anchors::default();
     // #10782: the structured quote is classified like a backtick span, so a
@@ -186,9 +189,11 @@ pub(super) fn finding_anchors(f: &Finding) -> Anchors {
             }
         }
         let prose = BRACKET_CITATION_RE.replace_all(text, " ");
-        let mut spans = Vec::new();
-        collect_delimited(&prose, '`', &mut spans);
-        spans.into_iter().for_each(|s| anchors.add_code_span(s));
+        // #10964: a labelled payload or proposed fix is not a quote of the file.
+        split_backtick_spans(f, &prose)
+            .file
+            .into_iter()
+            .for_each(|s| anchors.add_code_span(s));
         let outside_backticks: String = prose.split('`').step_by(2).collect::<Vec<_>>().join(" ");
         // #8949 fix 3: pair quotes outside backticks only, so a string literal
         // inside a code span never opens a prose quote.

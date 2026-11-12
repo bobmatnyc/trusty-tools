@@ -51,6 +51,8 @@ pub mod audit;
 // #9066: S3a, the console bridge's verdict.
 mod bridge;
 pub mod client;
+// #10998: `copy` from a named source (a Keychain item or another vault).
+mod copy_source;
 // #7520 S2: RLIMIT_CORE=0 at start (ruling Dd8).
 mod core_dump;
 // #7524 P2-M1: one table for the server's deadline and the client's wait.
@@ -89,6 +91,7 @@ pub use audit::{
     AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
 };
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
+pub use copy_source::CopySourceAudit;
 pub use core_dump::disable_core_dumps;
 pub use doctor::{
     BackendStatus, DOCTOR, DoctorResponse, HeadlessReadiness, StoragePosture, Unavailable,

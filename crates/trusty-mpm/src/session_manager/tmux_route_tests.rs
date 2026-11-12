@@ -298,6 +298,9 @@ fn a_socket_outside_the_socket_dir_is_refused_and_reads_unknown() {
 
 /// A named `RealTmuxDriver` sends its rename and its harness probe to its own
 /// server; the probes that read the default server are not used.
+// #10748: the tmux spawn guard reads process-global `$HOME`, which a
+// concurrent `#[serial]` test redirects; the rename then fails as refused.
+#[serial_test::serial]
 #[test]
 fn a_named_real_driver_sends_every_call_to_its_server() {
     use crate::session_manager::RealTmuxDriver;

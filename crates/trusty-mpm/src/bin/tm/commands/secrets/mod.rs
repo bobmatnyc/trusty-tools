@@ -158,9 +158,32 @@ pub(crate) async fn dispatch(
         SecretsAction::Import { path, group } => {
             verbs::import(ctx, &path, group.as_ref().map(|g| g.text()), out).await
         }
-        SecretsAction::Copy { from, to, keys } => {
+        SecretsAction::Copy {
+            from,
+            to,
+            from_service,
+            from_account,
+            from_vault,
+            from_key,
+            keys,
+        } => {
             let keys: Vec<&str> = keys.iter().map(|k| k.text()).collect();
-            verbs::copy(ctx, &from, &to, &keys, out).await
+            // #10998: clap pairs the flags; a lone half cannot reach here.
+            let source = match (&from_service, &from_account, &from_vault, &from_key) {
+                (Some(service), Some(account), _, _) => Some(verbs::NamedSource::Item {
+                    service: service.as_str(),
+                    account: account.as_str(),
+                }),
+                (_, _, Some(vault), Some(key)) => Some(verbs::NamedSource::Vault {
+                    vault: vault.as_str(),
+                    key: key.as_str(),
+                }),
+                _ => None,
+            };
+            match source {
+                Some(source) => verbs::copy_named(ctx, &from, &to, source, &keys, out).await,
+                None => verbs::copy(ctx, &from, &to, &keys, out).await,
+            }
         }
         SecretsAction::Doctor => doctor::doctor(ctx, out).await,
         SecretsAction::Resolve { key } => resolve::run(key.text(), out).await,

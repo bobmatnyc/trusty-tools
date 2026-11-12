@@ -65,6 +65,7 @@ use regex::Regex;
 use tracing::warn;
 
 use crate::models::{Finding, UNKNOWN_FILE_PLACEHOLDER, WithheldFinding};
+use crate::pipeline::citation_payload::split_backtick_spans;
 use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff};
 
 /// `WithheldFinding::reason` prefix for a citation-integrity drop.
@@ -412,16 +413,15 @@ fn unresolvable_reason(f: &Finding, index: &DiffContentIndex) -> Option<&'static
         match index.lookup(&f.file) {
             None => return Some("cited file is not part of the diff at all"),
             Some(content) => {
-                if !extracted.generic.is_empty()
-                    && !extracted
-                        .generic
-                        .iter()
-                        .any(|s| content.contains(s.as_str()))
+                let quotes = file_quotes(f, &extracted);
+                // #10964: a `quoted_snippet` in the file rescues the finding
+                // here; one that is not is left to the line gate.
+                let snippet_holds = snippet_quote(f).is_some_and(|q| content.contains(q.as_str()));
+                if !quotes.is_empty()
+                    && !snippet_holds
+                    && !quotes.iter().any(|s| content.contains(s.as_str()))
                 {
-                    let elsewhere = extracted
-                        .generic
-                        .iter()
-                        .any(|s| index.all.contains(s.as_str()));
+                    let elsewhere = quotes.iter().any(|s| index.all.contains(s.as_str()));
                     return Some(if elsewhere {
                         "quoted content belongs to a different changed file"
                     } else {
@@ -446,6 +446,34 @@ fn unresolvable_reason(f: &Finding, index: &DiffContentIndex) -> Option<&'static
     None
 }
 
+/// The prose quotes of `f.file` one of which must be in its content, unless
+/// its `quoted_snippet` is (#10964).
+///
+/// What: the unlabelled prose quotes. With none and no `quoted_snippet`, the
+/// labelled payload and fix spans stand in, so a finding that quotes only a
+/// payload is still held to the file rather than passing as quoting nothing.
+/// Test: `a_labelled_payload_does_not_drop_a_finding_whose_snippet_is_in_the_file`,
+/// `a_payload_with_no_file_quote_still_drops`.
+fn file_quotes(f: &Finding, extracted: &ExtractedCitations) -> Vec<String> {
+    if extracted.generic.is_empty() && f.quoted_snippet.is_none() {
+        return extracted.illustrative.clone();
+    }
+    extracted.generic.clone()
+}
+
+/// `f.quoted_snippet`, normalized, when long enough to verify.
+fn snippet_quote(f: &Finding) -> Option<String> {
+    f.quoted_snippet
+        .as_deref()
+        .map(normalize)
+        .filter(|q| q.len() >= MIN_SPAN_LEN)
+}
+
+/// A finding's defect claim, compared by the contradiction check (#10964).
+fn defect_key(f: &Finding) -> String {
+    normalize(&f.kind).to_lowercase()
+}
+
 /// Detect pairs of findings that cite the SAME file+line with mutually
 /// exclusive quoted content (#4042's "internal consistency" backstop).
 ///
@@ -463,25 +491,37 @@ fn unresolvable_reason(f: &Finding, index: &DiffContentIndex) -> Option<&'static
 /// one another are marked contradictory (both findings, not just one — #4042:
 /// "at least one had to be invented", and there is no deterministic way to
 /// tell which).
+/// #10964: only file-content quotes are compared — `quoted_snippet` when
+/// present, else the unlabelled backtick spans; never prose quote marks or a
+/// labelled payload or fix — and only between findings with the same defect
+/// claim (`kind`, the title). Two defects on one line are not a contradiction.
 /// Test: `drops_findings_with_line_contradiction`,
-/// `distinct_lines_are_never_contradictory`.
+/// `distinct_lines_are_never_contradictory`,
+/// `two_defects_on_one_line_are_not_a_contradiction`,
+/// `single_quotes_in_prose_and_sql_do_not_contradict`,
+/// `the_same_defect_with_incompatible_snippets_still_contradicts`.
 fn detect_line_contradictions(findings: &[Finding]) -> std::collections::HashSet<usize> {
-    let mut groups: HashMap<(String, u32), Vec<(usize, String)>> = HashMap::new();
+    let mut groups: HashMap<(String, u32, String), Vec<(usize, String)>> = HashMap::new();
 
     for (i, f) in findings.iter().enumerate() {
         let extracted = extract_citations(f);
+        let defect = defect_key(f);
         if let Some(line) = f.line {
-            for span in &extracted.generic {
+            let quotes = match f.quoted_snippet {
+                Some(_) => snippet_quote(f).into_iter().collect(),
+                None => extracted.backtick,
+            };
+            for span in quotes {
                 groups
-                    .entry((normalize_path(&f.file), line))
+                    .entry((normalize_path(&f.file), line, defect.clone()))
                     .or_default()
-                    .push((i, span.clone()));
+                    .push((i, span));
             }
         }
         for citation in &extracted.code_citations {
             if let Some(line) = citation.line {
                 groups
-                    .entry((normalize_path(&citation.path), line))
+                    .entry((normalize_path(&citation.path), line, defect.clone()))
                     .or_default()
                     .push((i, citation.excerpt.clone()));
             }
@@ -526,8 +566,14 @@ struct ExtractedCitations {
     /// `f.file`/`f.line`).
     code_citations: Vec<CodeCitation>,
     /// Free-text backtick/quote spans OUTSIDE any bracket citation, checked
-    /// against `f.file`'s content.
+    /// against `f.file`'s content. #10964: no labelled payload or fix.
     generic: Vec<String>,
+    /// #10964: the backtick spans of `generic`, the prose quotes the
+    /// same-line contradiction check compares.
+    backtick: Vec<String>,
+    /// #10964: backtick spans labelled as a payload, an example input or a
+    /// fix (`citation_payload`).
+    illustrative: Vec<String>,
     /// Every `[code: …]` locator that carries a line number (a range's start,
     /// #9188), whether or not the
     /// bracket also quotes an excerpt (#4999). `code_citations` only records a
@@ -552,7 +598,9 @@ struct ExtractedCitations {
 /// into path + optional line and pulls the excerpt from the remainder via
 /// quote-delimited scanning; then strips ALL FOUR bracket forms (`code`,
 /// `jira`, `gh`, `confluence`) and scans the remainder for backtick/double/single
-/// quoted spans ≥ [`MIN_SPAN_LEN`] chars. `suggested_replacement` and
+/// quoted spans ≥ [`MIN_SPAN_LEN`] chars. #10964: a backtick span labelled as a
+/// payload, example input or fix goes to `illustrative`, not `generic`, and
+/// quote marks pair only outside backticks. `suggested_replacement` and
 /// `suggestion` are deliberately excluded (as before #4042) — they are the
 /// PROPOSED fix, which by design need not appear in the diff.
 /// Test: `code_citation_re_captures_path_line_and_excerpt`,
@@ -560,6 +608,7 @@ struct ExtractedCitations {
 fn extract_citations(f: &Finding) -> ExtractedCitations {
     let mut code_citations = Vec::new();
     let mut generic = Vec::new();
+    let (mut backtick, mut illustrative) = (Vec::new(), Vec::new());
     let mut locators = Vec::new();
 
     for text in [f.description.as_str(), f.consequence.as_str()] {
@@ -577,7 +626,12 @@ fn extract_citations(f: &Finding) -> ExtractedCitations {
                 .map(|(start, _)| start);
             let mut excerpts = Vec::new();
             collect_delimited(rest, '"', &mut excerpts);
-            collect_delimited(rest, '\'', &mut excerpts);
+            // #10964: single quotes only when there is no double-quoted
+            // excerpt (the line gate's rule), so SQL quotes inside one are
+            // not excerpts of their own.
+            if excerpts.is_empty() {
+                collect_delimited(rest, '\'', &mut excerpts);
+            }
             for excerpt in excerpts {
                 if excerpt.len() >= MIN_SPAN_LEN {
                     code_citations.push(CodeCitation {
@@ -590,15 +644,26 @@ fn extract_citations(f: &Finding) -> ExtractedCitations {
         }
 
         let stripped = BRACKET_CITATION_RE.replace_all(text, " ");
-        collect_delimited(&stripped, '`', &mut generic);
-        collect_delimited(&stripped, '"', &mut generic);
-        collect_delimited(&stripped, '\'', &mut generic);
+        // #10964: a labelled payload or proposed fix is not a file quote, and
+        // quote marks pair only outside backticks (the line gate's rule), so
+        // SQL quotes inside a code span never open a prose span.
+        let spans = split_backtick_spans(f, &stripped);
+        backtick.extend(spans.file);
+        illustrative.extend(spans.illustrative);
+        let outside: String = stripped.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+        collect_delimited(&outside, '"', &mut generic);
+        collect_delimited(&outside, '\'', &mut generic);
     }
+    backtick.retain(|s| s.len() >= MIN_SPAN_LEN);
+    illustrative.retain(|s| s.len() >= MIN_SPAN_LEN);
     generic.retain(|s| s.len() >= MIN_SPAN_LEN);
+    generic.splice(0..0, backtick.iter().cloned());
 
     ExtractedCitations {
         code_citations,
         generic,
+        backtick,
+        illustrative,
         locators,
     }
 }

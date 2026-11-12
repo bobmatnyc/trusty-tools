@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.13.0] — 2026-11-11
+
+### Added
+
+- The Architect dashboard's Decisions pane has a Sort select: Oldest first (the default and the previous order), Newest first, and Project (A–Z). Project mode groups the Open and Parked decisions under a header with the project name and count, projects A–Z and "No project" last, each group keeping its usual order. The choice persists in the browser (#11047).
+- Each decision row shows a project chip. `GET /api/items` computes the project from the item's session: tm's session list (`session-manager/sessions.json`) first, else the session name with a leading `tm-` and one trailing `-<digits>` removed. Nothing is stored, and an unreadable session list falls back to the name rule without dropping items (#11047).
+
+### Fixed
+
+- The Architect's alert-triage Haiku call (`scripts/alert_triage.py`, seeded by `tm fleet init`) now passes `--mcp-config={"mcpServers":{}}` beside `--tools ""` and `--strict-mcp-config`. `--tools ""` turns off ToolSearch deferral, so a call that loads user-scope MCP servers sends every server's tool schemas inline (about 383k first-request tokens measured). The empty config in `=` form loads no server, and the variadic `--mcp-config` cannot take a later argument as a config path (#11026).
+
 ## [1.12.2] — 2026-11-10
 
 ### Added

@@ -377,7 +377,11 @@ class Handler(BaseHTTPRequestHandler):
                     coll, status=(q.get("status") or [None])[0], order_by=(q.get("order_by") or [None])[0],
                     desc=(q.get("dir") or ["asc"])[0] == "desc",
                     limit=int(q["limit"][0]) if q.get("limit") and q["limit"][0].isdigit() else None)
-                return self._send(200, {"docs": rows, "rev": page.rev_of(rows)})
+                rev = page.rev_of(rows)
+                if coll == "items":   # #11047: computed data.project (never stored); a change in it re-renders the page
+                    rows = dashboard_viz.with_projects(rows)
+                    rev = hashlib.sha1((rev + json.dumps([d["data"].get("project") for d in rows])).encode()).hexdigest()
+                return self._send(200, {"docs": rows, "rev": rev})
             if m == "POST":
                 return self._send(201, store.add(coll, self._body().get("data"), actor=self._actor()))
         if len(parts) == 2:
