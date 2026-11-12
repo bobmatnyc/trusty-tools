@@ -22,7 +22,7 @@ path = "src/bin/trusty-gworkspace-mcp.rs"
 loopback-seam = []
 
 [dependencies]
-trusty-common = { path = "../trusty-common", version = "0.69" }
+trusty-common = { path = "../trusty-common", version = "0.70" }
 # JSON-RPC / MCP primitives, extracted from `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { workspace = true }
 anyhow = { workspace = true }
@@ -58,4 +58,4 @@ tracing-test = "0.2"
 wiremock = { workspace = true }
 # #10873: `credential-test-sandbox` is the shared credential test sandbox
 # (#9123); it mutates the process environment, so it is dev-only.
-trusty-common = { path = "../trusty-common", version = "0.69", features = ["credential-test-sandbox"] }
+trusty-common = { path = "../trusty-common", version = "0.70", features = ["credential-test-sandbox"] }
