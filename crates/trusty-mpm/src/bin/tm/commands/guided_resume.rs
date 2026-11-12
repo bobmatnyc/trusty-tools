@@ -18,7 +18,7 @@
 //! (where the in-place relaunch gate matches), actually brought a runtime back.
 //! [`plan_resume`] now takes a third input, `runtime_live`, and maps
 //! `(active, tmux up, runtime dead)` onto the existing `ReconcileThenRestart`
-//! recovery so the first invocation does the whole job. [`session_runtime_live`]
+//! recovery so the first invocation does the whole job. [`resume_liveness`]
 //! resolves that input by reusing the daemon reaper's own
 //! [`trusty_mpm::daemon::runtime_reap::session_has_live_pane`] primitive against
 //! a session-scoped `tmux list-panes` — the CLI asks the question itself at
@@ -88,7 +88,7 @@
 
 use anyhow::Context as _;
 
-use crate::formatters::banner::tmux_has_session;
+use crate::formatters::banner::tmux_has_session_on;
 
 use super::tmux_attach::AttachOutcome;
 
@@ -355,7 +355,57 @@ pub(crate) fn parse_pane_probes(
     (!panes.is_empty()).then_some(panes)
 }
 
-/// Does ANY pane in tmux session `session_name` still show a live runtime? (#3873)
+/// `(tmux_live, runtime_live)` for session `session_name`, both read on the
+/// one tmux server that holds it (#10101).
+///
+/// Why: a PM on its workspace server is absent from the default server, and a
+/// resume plan built from "absent" reconciles and restarts it: `/runtime-stop`
+/// on a live PM. Two independent holder scans could also pick two servers.
+/// What: resolves the holder once with
+/// [`target_server`](crate::commands::tmux_attach_server::target_server) and
+/// runs `has-session`, then (only when it is up) the pane probe, on it. With
+/// no tmux binary both probes read the default server, as before. A holder
+/// that cannot be determined (a workspace server that hangs or fails its
+/// listing, a name on two servers) reads as `(true, true)`: the plan is never
+/// a reconcile or restart of a PM tm cannot see, and the attach that follows
+/// refuses on its own with the same error.
+/// Test: `a_resume_never_restarts_when_a_workspace_server_hangs_10101`,
+/// `the_picker_probes_read_the_workspace_server_10101`.
+pub(crate) fn resume_liveness(session_name: &str) -> (bool, bool) {
+    let server = if trusty_mpm::core::tmux::resolve_tmux_binary().is_none() {
+        None
+    } else {
+        match crate::commands::tmux_attach_server::target_server(session_name) {
+            Ok(server) => server,
+            Err(e) => {
+                // #10101: an unknown holder is never evidence the PM is gone.
+                eprintln!("tm: {e}; treating '{session_name}' as live, so it is not restarted");
+                return (true, true);
+            }
+        }
+    };
+    let bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let tmux_live = tmux_has_session_on(&bin, server.as_deref(), session_name);
+    let runtime_live = !tmux_live || session_runtime_live_on(&bin, server.as_deref(), session_name);
+    (tmux_live, runtime_live)
+}
+
+/// [`resume_liveness`]'s pane probe against an explicit tmux binary (#8443).
+///
+/// Why: the seam a test points at a private `-L` tmux server.
+/// What: `list-panes -s -t =<name>:` — exact, so a missing `X` can never list
+/// `X-suffix`'s panes. A reply of `can't find session` or `no server running`
+/// PROVES the session absent and returns `false`: with an exact target that
+/// answer is certain, and the kill that `false` can lead to is exact too.
+/// Every other failure still fails open (`true`).
+/// Test: `session_runtime_live_never_reports_a_prefix_sibling`.
+#[cfg(test)] // #10101: production probes go through the server-aware `_on`.
+pub(crate) fn session_runtime_live_with_bin(tmux_bin: &str, session_name: &str) -> bool {
+    session_runtime_live_on(tmux_bin, None, session_name)
+}
+
+/// Does ANY pane in tmux session `session_name`, on `server` (`None`: the
+/// default server, #10101), still show a live runtime? (#3873)
 ///
 /// Why: `tmux_has_session` proves only that the tmux SESSION exists. When a
 /// managed session's inner `claude` exits, the pane survives as a bare login
@@ -405,34 +455,6 @@ pub(crate) fn parse_pane_probes(
 /// `pane_runtime_exited_*` / `session_has_live_pane_*` tests. The tmux
 /// shell-out itself is I/O (a live tmux server), matching the existing
 /// `session_for_pane` / `pane_tty_for` precedent in `tmux_attach.rs`.
-pub(crate) fn session_runtime_live(session_name: &str) -> bool {
-    // #10101: list the panes on the server that holds the session.
-    let server = crate::commands::tmux_attach_server::target_server(session_name)
-        .ok()
-        .flatten();
-    session_runtime_live_on(
-        &trusty_mpm::core::tmux::resolve_tmux_binary_or_bare(),
-        server.as_deref(),
-        session_name,
-    )
-}
-
-/// [`session_runtime_live`] against an explicit tmux binary (#8443).
-///
-/// Why: the seam a test points at a private `-L` tmux server.
-/// What: `list-panes -s -t =<name>:` — exact, so a missing `X` can never list
-/// `X-suffix`'s panes. A reply of `can't find session` or `no server running`
-/// PROVES the session absent and returns `false`: with an exact target that
-/// answer is certain, and the kill that `false` can lead to is exact too.
-/// Every other failure still fails open (`true`).
-/// Test: `session_runtime_live_never_reports_a_prefix_sibling`.
-#[cfg(test)] // #10101: production probes go through the server-aware `_on`.
-pub(crate) fn session_runtime_live_with_bin(tmux_bin: &str, session_name: &str) -> bool {
-    session_runtime_live_on(tmux_bin, None, session_name)
-}
-
-/// [`session_runtime_live_with_bin`] on the named (`-L`) `server`; `None` is
-/// the default server (#10101).
 fn session_runtime_live_on(tmux_bin: &str, server: Option<&str>, session_name: &str) -> bool {
     let name = session_name.trim();
     if name.is_empty() {
@@ -474,7 +496,7 @@ fn session_runtime_live_on(tmux_bin: &str, server: Option<&str>, session_name: &
 ///
 /// Why: this is the single predicate standing between a parsed tmux listing and
 /// a `kill_session`, so it is extracted as a pure seam that can be unit-tested
-/// without a tmux server — the surrounding [`session_runtime_live`] is all I/O
+/// without a tmux server — the surrounding [`resume_liveness`] is all I/O
 /// and cannot be. It is phrased as "prove DEAD" rather than "is live" on purpose:
 /// the burden of proof belongs on the destructive answer, so every uncertain
 /// input falls out as `false` by construction instead of relying on a caller to
@@ -593,7 +615,8 @@ pub(crate) async fn resume_session(
     session: &trusty_mpm::client::ManagedSessionSummary,
     no_attach: bool,
 ) -> anyhow::Result<AttachOutcome> {
-    let tmux_live = tmux_has_session(&session.name);
+    // #10101: one holder lookup for both probes; an unknown holder reads live.
+    let (tmux_live, runtime_live) = resume_liveness(&session.name);
     // #3531: classify using the AUTHORITATIVE persisted state, not the
     // display-reconciled `state` the list/get endpoints may show. #3302 made
     // those endpoints reconcile `state` against live tmux FOR DISPLAY ONLY —
@@ -615,9 +638,9 @@ pub(crate) async fn resume_session(
     // session still run an agent? — before letting an `active` record fall
     // through to a bare `Attach` that would drop them into an idle shell. Only
     // worth the shell-out when tmux is up at all; when it is not, `is_zombie`
-    // already classifies the record and `session_runtime_live` could not answer
-    // anyway (the panes are gone with the session).
-    let runtime_live = !tmux_live || session_runtime_live(&session.name);
+    // already classifies the record and the pane probe could not answer
+    // anyway (the panes are gone with the session). Both come from
+    // `resume_liveness` above.
     let action = plan_resume(persisted_state, tmux_live, runtime_live);
     // #9000: attach stays open on an Architect row; a resume is refused here
     // with the daemon's sentence, before any request or pane kill.

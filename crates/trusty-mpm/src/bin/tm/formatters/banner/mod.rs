@@ -6,7 +6,7 @@
 //! What: `print_launch_banner`, `print_launch_banner_reconnecting`,
 //! `print_banner_preview`, `terminal_width`, `detect_memory`, `detect_tool`,
 //! `dirs_config_dir`, `binary_on_path`, `fallback_session_name`,
-//! `normalize_workdir`, `tmux_has_session`. The single-box compositor lives in
+//! `normalize_workdir`, `tmux_has_session_on`. The single-box compositor lives in
 //! the `two_panel` submodule. Banner loading (including stale-seed refresh)
 //! lives in `source`; previously-shipped default art used for that refresh
 //! check lives in `legacy`. Auto-sized shading lives in `shade_image` /
@@ -395,33 +395,19 @@ pub(crate) fn normalize_workdir(workdir: &str) -> String {
 /// Why: the daemon may hold a stale session record after its tmux session has
 /// exited; `tm launch` must verify the tmux session is live before attaching,
 /// otherwise it would fall through to a normal launch.
-/// What: runs `tmux has-session -t =<name>` (exact, #8443) on the server that
-/// holds `name` (#10101: a workspace server, else the default server) and
-/// returns true on exit code 0.
+/// What: runs `tmux has-session -t =<name>` (exact, #8443) on the default
+/// server and returns true on exit code 0.
 /// Test: `tmux_has_session_ignores_a_prefix_sibling`,
 /// `the_picker_probes_read_the_workspace_server_10101`.
-pub(crate) fn tmux_has_session(name: &str) -> bool {
-    // #10101: a PM on its workspace server is absent from the default server.
-    let server = crate::commands::tmux_attach_server::target_server(name)
-        .ok()
-        .flatten();
-    tmux_has_session_on(
-        &trusty_mpm::core::tmux::resolve_tmux_binary_or_bare(),
-        server.as_deref(),
-        name,
-    )
-}
-
-/// [`tmux_has_session`] against an explicit tmux binary — the seam a test
-/// points at a private `-L` server (#8443).
-#[cfg(test)] // #10101: production probes go through the server-aware `_on`.
+#[cfg(test)] // #10101: production probes name their server via `_on`.
 pub(crate) fn tmux_has_session_with_bin(tmux_bin: &str, name: &str) -> bool {
     tmux_has_session_on(tmux_bin, None, name)
 }
 
 /// [`tmux_has_session_with_bin`] on the named (`-L`) `server`; `None` is the
-/// default server (#10101).
-fn tmux_has_session_on(tmux_bin: &str, server: Option<&str>, name: &str) -> bool {
+/// default server (#10101). The caller resolves `server` once
+/// (`guided_resume::resume_liveness`).
+pub(crate) fn tmux_has_session_on(tmux_bin: &str, server: Option<&str>, name: &str) -> bool {
     // #2398 architecture consolidation: routes through the crate's single
     // tmux entry point instead of shelling out independently.
     matches!(

@@ -170,7 +170,7 @@ fn the_picker_probes_read_the_workspace_server_10101() {
     let Some((session, server)) = on_workspace_server("10101pick") else {
         return;
     };
-    let live = crate::formatters::banner::tmux_has_session(session.name());
+    let (live, _) = super::resume_liveness(session.name());
     tear_down(session, &server);
     assert!(live, "has-session must reach the workspace server");
 }
@@ -187,5 +187,38 @@ fn a_printed_attach_hint_names_the_workspace_socket_10101() {
     assert!(
         hint.starts_with("tmux -S '") && hint.contains(&format!("/{server}' attach-session")),
         "{hint}"
+    );
+}
+
+/// Error arm (Fail-Open Check, #10101): one workspace server accepts the
+/// connection and never answers, so no holder can be named. The live PM on its
+/// own workspace server must not be planned for a reconcile (`/runtime-stop`)
+/// or a restart. Red on 901fab51db, which read the unknown holder as the
+/// default server, found nothing there, and planned `ReconcileThenRestart`.
+#[serial_test::serial]
+#[test]
+fn a_resume_never_restarts_when_a_workspace_server_hangs_10101() {
+    let Some((session, server)) = on_workspace_server("10101hang") else {
+        return;
+    };
+    // A socket that accepts and never replies: tmux's listing of it outlives
+    // the probe budget, so the holder lookup errors.
+    let dir = trusty_mpm::core::tmux_server::ambient_socket_dir();
+    let hung = dir.join(format!("tm-ws-10101stuck-{}", std::process::id()));
+    let _ = std::fs::remove_file(&hung);
+    let listener = std::os::unix::net::UnixListener::bind(&hung).expect("hung socket");
+
+    let (tmux_live, runtime_live) = super::resume_liveness(session.name());
+    let action = plan_resume("active", tmux_live, runtime_live);
+
+    drop(listener);
+    let _ = std::fs::remove_file(&hung);
+    tear_down(session, &server);
+    assert!(
+        !matches!(
+            action,
+            ResumeAction::ReconcileThenRestart | ResumeAction::Restart
+        ),
+        "an unknown holder planned {action:?} for a live PM"
     );
 }
