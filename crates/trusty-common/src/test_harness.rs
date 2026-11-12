@@ -46,7 +46,8 @@ use std::path::{Path, PathBuf};
 /// Forces [`running_under_test_harness`] to report `true`.
 ///
 /// Set this on a child process a test spawns, so the child inherits the
-/// parent's test-isolation even though its own path is outside `deps/`.
+/// parent's test-isolation even though its own path (`target/<profile>/<name>`)
+/// carries no cargo metadata hash.
 pub const FORCE_ENV: &str = "TRUSTY_TEST_HARNESS";
 
 /// Opt-in escape hatch: forces [`running_under_test_harness`] to report
@@ -69,7 +70,10 @@ pub const ALLOW_PRODUCTION_ENV: &str = "TRUSTY_ALLOW_PRODUCTION_STATE";
 /// module's tests run in exactly the harness the function must detect.
 pub fn running_under_test_harness() -> bool {
     let exe = std::env::current_exe();
-    if let Err(e) = &exe {
+    let allow_production = std::env::var(ALLOW_PRODUCTION_ENV).ok();
+    if let Err(e) = &exe
+        && !is_truthy(allow_production.as_deref())
+    {
         // #11138: an unreadable exe path now fails closed (treated as a test),
         // so say once why production-state writes are being refused.
         static WARNED: std::sync::Once = std::sync::Once::new();
@@ -82,7 +86,7 @@ pub fn running_under_test_harness() -> bool {
         });
     }
     detect(
-        std::env::var(ALLOW_PRODUCTION_ENV).ok().as_deref(),
+        allow_production.as_deref(),
         std::env::var(FORCE_ENV).ok().as_deref(),
         cfg!(test),
         exe.ok().as_deref(),
@@ -129,8 +133,9 @@ fn is_truthy(value: Option<&str>) -> bool {
 /// path is the signal. #11138: rustc 1.100's cargo moved test binaries from
 /// `target/<profile>/deps/` to `target/<profile>/build/<crate>/<hash>/out/`,
 /// and the `deps`-only check returned false for every test.
-/// What: the file stem must end in `-<hex>` (cargo's metadata hash, at least
-/// 8 hex digits). Then any one of:
+/// What: after dropping a trailing ` (deleted)` (Linux `/proc/self/exe` on a
+/// replaced binary), the file stem must end in `-<hex>` (cargo's metadata
+/// hash, at least 8 hex digits). Then any one of:
 /// 1. the parent directory is `deps` (cargo up to 1.99);
 /// 2. the path ends `build/<crate>/<hash>/out/<name>-<hash>`, the same hash
 ///    twice (cargo 1.100);
@@ -148,7 +153,13 @@ fn is_cargo_test_binary(exe: &Path) -> bool {
     fn dir_name(p: Option<&Path>) -> Option<&str> {
         p.and_then(Path::file_name).and_then(|n| n.to_str())
     }
-    let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) else {
+    let Some(file_name) = exe.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    // #11138: Linux `/proc/self/exe` appends ` (deleted)` once a concurrent
+    // build has replaced the binary; read the name cargo wrote.
+    let file_name = file_name.strip_suffix(" (deleted)").unwrap_or(file_name);
+    let Some(stem) = Path::new(file_name).file_stem().and_then(|s| s.to_str()) else {
         return false;
     };
     let Some(hash) = stem.rsplit_once('-').and_then(|(name, hash)| {
