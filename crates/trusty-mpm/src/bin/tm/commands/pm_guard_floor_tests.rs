@@ -184,7 +184,14 @@ fn presence_verbs_bind_pms_and_agents_not_the_architect_8878() {
         claude: table(architect_table()),
         ..spoof_env(&fx)
     };
-    for command in ["tm presence local", "tm fleet bind"] {
+    // #8878 PR2b-1b: the device verbs are floored the same way.
+    for command in [
+        "tm presence local",
+        "tm fleet bind",
+        "tm presence request",
+        "tm presence devices add phone",
+        "tm presence devices revoke abc",
+    ] {
         for bypassed in [false, true] {
             let verdict = |fx: &Fixture, env: HookEnv, agent: bool| {
                 let mut call = bash(fx, command);

@@ -209,9 +209,10 @@ pub fn load(root: &Path, key: &GrantKey, credential_id: &str) -> Result<Device, 
 /// Why: plan-pr2b1.md §1 — no device record without a fresh Studio
 /// presence; Q4 — before PR2b-2 only tests complete a registration.
 /// What: checks the ticket, the id and the name, refuses an existing record,
-/// then writes the sealed record 0600 through a temp file and a rename.
+/// spends the ticket under the store lock (#8878: single-use), then writes
+/// the sealed record 0600 through a temp file and a rename.
 /// Test: `an_enrolled_device_loads_back_sealed_8878`,
-/// `register_start_with_no_ticket_is_refused_8878`.
+/// `register_start_with_no_ticket_is_refused_8878`, `an_enrol_ticket_enrols_once_8878`.
 pub fn enrol(
     root: &Path,
     key: &GrantKey,
@@ -227,6 +228,10 @@ pub fn enrol(
     if std::fs::symlink_metadata(&path).is_ok() {
         return Err(DeviceError::Exists);
     }
+    // #8878 (1a review): an enrol ticket is single-use within its TTL.
+    std::fs::create_dir_all(devices_dir(root)).map_err(|e| DeviceError::Write(e.to_string()))?;
+    let _lock = lock_store(root)?;
+    spend_ticket(root, ticket, now)?;
     let device = Device {
         credential_id: new.credential_id,
         name: new.name,
@@ -241,6 +246,48 @@ pub fn enrol(
     .sealed(key);
     write(root, &device)?;
     Ok(device)
+}
+
+/// The prefix of a spent enrol ticket's marker in the device directory.
+const SPENT_PREFIX: &str = ".ticket-";
+
+/// Mark `ticket` spent, under the store lock; a marker already present is
+/// [`TicketRefusal::Spent`].
+///
+/// Why: #8878 (PR #10884 review) — a ticket that enrolled one device must not
+/// enrol a second within its TTL.
+/// What: `devices/.ticket-<nonce>` holds the ticket's expiry and is written
+/// before the record, so a failed record write leaves the ticket spent
+/// (fail-closed). A marker is removed only when its expiry reads, parses and
+/// is below `now`; an unreadable or unparsable marker is kept.
+/// Test: `an_enrol_ticket_enrols_once_8878`,
+/// `an_unreadable_spent_marker_keeps_the_ticket_spent_8878`.
+fn spend_ticket(root: &Path, ticket: &Ticket, now: u64) -> Result<(), DeviceError> {
+    if !valid_token(&ticket.nonce, 64) {
+        return Err(DeviceError::Ticket(TicketRefusal::Forged));
+    }
+    let dir = devices_dir(root);
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        // #8878: fail closed — a read or parse failure keeps the marker.
+        let expired = name.to_str().is_some_and(|n| n.starts_with(SPENT_PREFIX))
+            && std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .is_some_and(|expires| expires < now);
+        if expired {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let marker = dir.join(format!("{SPENT_PREFIX}{}", ticket.nonce));
+    if std::fs::symlink_metadata(&marker).is_ok() {
+        return Err(DeviceError::Ticket(TicketRefusal::Spent));
+    }
+    crate::core::architect_session::write_owner_only(
+        &marker,
+        ticket.expires_at.to_string().as_bytes(),
+    )
+    .map_err(DeviceError::Write)
 }
 
 /// An exclusive hold on the device store; dropping it releases the lock.
