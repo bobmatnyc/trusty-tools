@@ -227,6 +227,12 @@ fn an_unresolved_script_does_not_fall_through_to_data_10672() {
         ("bash missing.sh in.docx", "missing.sh", "does not exist"),
         ("bash missing.sh notes.txt", "missing.sh", "does not exist"),
         ("node missing.js in.docx", "missing.js", "does not exist"),
+        // #10672: a computed operand in doubt may be the script; it refuses.
+        (
+            "node --title notes.txt \"$S\"",
+            "$S",
+            "computed at run time",
+        ),
     ] {
         let reason = verdict(command, dir.path()).unwrap_or_default();
         assert!(
@@ -293,7 +299,7 @@ fn a_credential_script_is_denied_whatever_its_arguments_10672() {
         // #10672: after an unlisted long option the next operand may be the
         // script too, so it is judged beside the first.
         ("node --no-warnings \"$S\" in.docx", "#8879"),
-        ("node --title notes.txt creds.js", "#8596"),
+        ("node --title notes.txt creds.js", "the script `creds.js`"),
         ("python3 x.docx", "#8596"),
         ("python3 x.docx in.docx", "#8596"),
         ("cat ~/.netrc", "#7266"),
