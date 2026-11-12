@@ -189,8 +189,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
-- `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`. No verb prints a value
+- `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`. No verb prints a value
   - `__exec-stub` — The helper `exec` runs as its child; never run by hand
+  - `assign` — Copy one key of any trusty vault into a named project's scope
   - `copy` — Copy keys into this project's scope from a backend
   - `doctor` — Report socket and backend reachability, never a value
   - `exec` — Run a command with project keys in its environment or on its stdin
