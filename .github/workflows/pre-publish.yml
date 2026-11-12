@@ -386,6 +386,8 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
+      # #11094: worker-lock audit re-added once Dgp (RUSTSEC-2026-0436 waiver) is answered
+
   # ==========================================================================
   # deny — GATE 3. Licences, provenance, duplicate versions.
   #
@@ -429,6 +431,13 @@ jobs:
       # section for why 105 duplicates are baselined rather than skipped.
       - name: cargo deny check bans + duplicate ratchet
         run: bash scripts/check_deny_duplicates.sh
+
+      # #11094: the OKF extraction worker's own graph and lock. cargo-deny
+      # finds the root deny.toml by walking up from the manifest, so the same
+      # policy applies. The duplicate ratchet is baselined on the root graph
+      # only; here duplicates stay warnings and every other check fails the step.
+      - name: cargo deny check (workers/okf-extract)
+        run: cargo deny --manifest-path workers/okf-extract/Cargo.toml check licenses sources advisories bans
 
   # ==========================================================================
   # ignored-tests — GATE 4. The `#[ignore]`d ONNX/embedder tests.
