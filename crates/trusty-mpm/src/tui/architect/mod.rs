@@ -91,13 +91,47 @@ pub enum Fetch<T> {
     Failed(String),
 }
 
-/// One fetch round's results, sent from the fetch task to the UI loop.
+/// One source's result, sent from its fetch task to the UI loop.
+///
+/// #10966: one message per source, so a slow dashboard fetch never holds
+/// the Live tracker's result back.
 #[derive(Debug, Clone)]
-pub struct ArchitectUpdate {
+pub enum ArchitectUpdate {
     /// The dashboard lists, or why not.
-    pub dashboard: Result<DashSnapshot, String>,
+    Dashboard(Result<DashSnapshot, String>),
     /// The tracker, or why not.
-    pub live: Result<LiveSnapshot, String>,
+    Live(Result<LiveSnapshot, String>),
+}
+
+/// Which sources a fetch round should ask now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Due {
+    /// Start a dashboard fetch.
+    pub dashboard: bool,
+    /// Start a Live tracker fetch.
+    pub live: bool,
+}
+
+/// One source's refresh clock: whether a fetch is out, and when it started.
+#[derive(Debug, Clone, Copy, Default)]
+struct Clock {
+    in_flight: bool,
+    last: Option<Instant>,
+}
+
+impl Clock {
+    /// Whether a fetch should start now; marks it in flight when so.
+    fn due(&mut self, now: Instant) -> bool {
+        let stale = self
+            .last
+            .is_none_or(|t| now.saturating_duration_since(t) >= REFRESH);
+        if self.in_flight || !stale {
+            return false;
+        }
+        self.in_flight = true;
+        self.last = Some(now);
+        true
+    }
 }
 
 /// Everything the Architect view shows.
@@ -113,8 +147,9 @@ pub struct ArchitectState {
     pub dashboard: Fetch<DashSnapshot>,
     /// The Live tracker.
     pub live: Fetch<LiveSnapshot>,
-    in_flight: bool,
-    last_fetch: Option<Instant>,
+    // #10966: one clock per source, so each refreshes on its own schedule.
+    dashboard_clock: Clock,
+    live_clock: Clock,
 }
 
 impl Default for ArchitectState {
@@ -125,8 +160,8 @@ impl Default for ArchitectState {
             expanded: false,
             dashboard: Fetch::Waiting,
             live: Fetch::Waiting,
-            in_flight: false,
-            last_fetch: None,
+            dashboard_clock: Clock::default(),
+            live_clock: Clock::default(),
         }
     }
 }
@@ -142,7 +177,13 @@ impl ArchitectState {
     /// Open on `tab`, asking for a fresh fetch.
     pub fn open(&mut self, tab: Tab) {
         self.switch(tab);
-        self.last_fetch = None;
+        self.refetch();
+    }
+
+    /// Make every source due at the next check.
+    fn refetch(&mut self) {
+        self.dashboard_clock.last = None;
+        self.live_clock.last = None;
     }
 
     /// Show `tab` without refetching.
@@ -152,32 +193,39 @@ impl ArchitectState {
         self.expanded = false;
     }
 
-    /// Whether a fetch should start now; marks it in flight when so.
+    /// Which sources should be fetched now; marks each due one in flight.
     ///
-    /// Test: `fetch_is_due_once_per_refresh_and_never_twice_in_flight`.
-    pub fn fetch_due(&mut self, now: Instant) -> bool {
-        let stale = self
-            .last_fetch
-            .is_none_or(|t| now.saturating_duration_since(t) >= REFRESH);
-        if self.in_flight || !stale {
-            return false;
+    /// Why (#10966): the dashboard fetch can take many seconds against a
+    /// wedged daemon; a shared clock would hold the Live tracker's refresh
+    /// behind it and leave old rows on screen.
+    /// What: each source is due once per [`REFRESH`] and never twice in
+    /// flight, independent of the other.
+    /// Test: `fetch_is_due_once_per_refresh_and_never_twice_in_flight`,
+    /// `slow_dashboard_fetch_does_not_hold_the_live_tracker`.
+    pub fn fetch_due(&mut self, now: Instant) -> Due {
+        Due {
+            dashboard: self.dashboard_clock.due(now),
+            live: self.live_clock.due(now),
         }
-        self.in_flight = true;
-        self.last_fetch = Some(now);
-        true
     }
 
-    /// Record one fetch round and keep the selection inside the list.
+    /// Record one source's result and keep the selection inside the list.
+    ///
+    /// An `Err` replaces an earlier `Ready`, so a failed fetch never leaves
+    /// stale rows drawn as current.
+    /// Test: `failed_live_fetch_replaces_the_earlier_sessions_on_screen`.
     pub fn apply(&mut self, update: ArchitectUpdate) {
-        self.in_flight = false;
-        self.dashboard = match update.dashboard {
-            Ok(s) => Fetch::Ready(s),
-            Err(e) => Fetch::Failed(e),
-        };
-        self.live = match update.live {
-            Ok(s) => Fetch::Ready(s),
-            Err(e) => Fetch::Failed(e),
-        };
+        match update {
+            ArchitectUpdate::Dashboard(r) => {
+                self.dashboard_clock.in_flight = false;
+                self.dashboard = r.map_or_else(Fetch::Failed, Fetch::Ready);
+            }
+            ArchitectUpdate::Live(r) => {
+                self.live_clock.in_flight = false;
+                // #10966: an `Err` must replace the old `Ready` (fail closed).
+                self.live = r.map_or_else(Fetch::Failed, Fetch::Ready);
+            }
+        }
         let len = self.row_count();
         if self.selected >= len {
             self.selected = len.saturating_sub(1);
@@ -227,7 +275,7 @@ pub fn handle_key(state: &mut ArchitectState, key: KeyEvent) -> Option<Architect
         }
         KeyCode::Up | KeyCode::Char('k') => state.selected = state.selected.saturating_sub(1),
         KeyCode::Enter => state.expanded = !state.expanded,
-        KeyCode::Char('r') => state.last_fetch = None,
+        KeyCode::Char('r') => state.refetch(),
         KeyCode::Esc | KeyCode::Backspace => {
             if state.expanded {
                 state.expanded = false;

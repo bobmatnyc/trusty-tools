@@ -160,6 +160,8 @@ pub async fn fetch_live(
     if let Some(id) = selected
         && let Some(session) = snap.sessions.iter_mut().find(|s| s.id == id)
     {
+        // #10966: a failed activity read also draws `step  -`, the same as
+        // an unmanaged session; a distinct `?` marker is a known LOW, deferred.
         session.step = client
             .managed_session_activity(id)
             .await

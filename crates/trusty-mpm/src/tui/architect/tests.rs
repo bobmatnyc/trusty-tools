@@ -10,14 +10,15 @@ use serde_json::{Value, json};
 
 use super::data::{DashSnapshot, STORE_NOT_SET, fetch_dashboard, snapshot_from};
 use super::live::{LiveAgent, LiveSession, LiveSnapshot, Record, fetch_live, group, live_lines};
-use super::{ArchitectAction, ArchitectState, ArchitectUpdate, Fetch, REFRESH, Tab, handle_key};
+use super::{
+    ArchitectAction, ArchitectState, ArchitectUpdate, Due, Fetch, REFRESH, Tab, handle_key,
+};
 use crate::client::{DaemonClient, SessionRow};
 
-fn update(dashboard: Result<DashSnapshot, String>, live: LiveSnapshot) -> ArchitectUpdate {
-    ArchitectUpdate {
-        dashboard,
-        live: Ok(live),
-    }
+/// Apply one dashboard and one Live result, as two fetch tasks would.
+fn feed(s: &mut ArchitectState, dashboard: Result<DashSnapshot, String>, live: LiveSnapshot) {
+    s.apply(ArchitectUpdate::Dashboard(dashboard));
+    s.apply(ArchitectUpdate::Live(Ok(live)));
 }
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -106,17 +107,51 @@ async fn fetch_dashboard_says_why_without_store_or_socket() {
 fn fetch_is_due_once_per_refresh_and_never_twice_in_flight() {
     let mut s = ArchitectState::default();
     let t0 = Instant::now();
-    assert!(s.fetch_due(t0));
-    assert!(!s.fetch_due(t0 + REFRESH), "one in flight");
-    s.apply(update(Err(STORE_NOT_SET.into()), LiveSnapshot::default()));
-    assert!(!s.fetch_due(t0 + REFRESH / 2), "fresh");
-    assert!(s.fetch_due(t0 + REFRESH));
+    let both = Due {
+        dashboard: true,
+        live: true,
+    };
+    assert_eq!(s.fetch_due(t0), both);
+    assert_eq!(s.fetch_due(t0 + REFRESH), Due::default(), "both in flight");
+    feed(&mut s, Err(STORE_NOT_SET.into()), LiveSnapshot::default());
+    assert_eq!(s.fetch_due(t0 + REFRESH / 2), Due::default(), "fresh");
+    assert_eq!(s.fetch_due(t0 + REFRESH), both);
+}
+
+// #10966: the Live tracker refreshes while a dashboard fetch is still out.
+#[test]
+fn slow_dashboard_fetch_does_not_hold_the_live_tracker() {
+    let mut s = ArchitectState::default();
+    let t0 = Instant::now();
+    s.fetch_due(t0);
+    s.apply(ArchitectUpdate::Live(Ok(live_sample())));
+    assert!(matches!(s.live, Fetch::Ready(_)), "Live lands alone");
+    assert_eq!(s.dashboard, Fetch::Waiting, "dashboard still out");
+    let due = s.fetch_due(t0 + REFRESH);
+    assert!(due.live, "Live is due again");
+    assert!(!due.dashboard, "the dashboard fetch is still in flight");
+}
+
+// #10966: an `Err` must replace an earlier `Ready`, never keep it on screen.
+#[test]
+fn failed_live_fetch_replaces_the_earlier_sessions_on_screen() {
+    let mut s = ArchitectState::default();
+    s.apply(ArchitectUpdate::Live(Ok(live_sample())));
+    s.apply(ArchitectUpdate::Live(Err(
+        "mpm.sessions.list: timeout".into()
+    )));
+    s.open(Tab::Live);
+    let screen = draw(&s);
+    assert!(screen.contains("mpm.sessions.list: timeout"), "{screen}");
+    for stale in ["tm-03", "ts-01", "engineer"] {
+        assert!(!screen.contains(stale), "stale row {stale:?} still drawn");
+    }
 }
 
 #[test]
 fn tab_keys_cycle_and_esc_closes_detail_then_returns_home() {
     let mut s = ArchitectState::default();
-    s.apply(update(Ok(sample()), LiveSnapshot::default()));
+    feed(&mut s, Ok(sample()), LiveSnapshot::default());
     handle_key(&mut s, key(KeyCode::BackTab));
     assert_eq!(s.tab, Tab::Live, "wraps left to the last of seven tabs");
     handle_key(&mut s, key(KeyCode::Tab));
@@ -161,7 +196,7 @@ fn draw(state: &ArchitectState) -> String {
 #[test]
 fn architect_render_lists_rows_with_badges_and_counts() {
     let mut s = ArchitectState::default();
-    s.apply(update(Ok(sample()), live_sample()));
+    feed(&mut s, Ok(sample()), live_sample());
     let screen = draw(&s);
     for want in [
         "ARCHITECT",
@@ -182,7 +217,7 @@ fn architect_render_lists_rows_with_badges_and_counts() {
 #[test]
 fn architect_render_says_why_when_the_store_is_not_set() {
     let mut s = ArchitectState::default();
-    s.apply(update(Err(STORE_NOT_SET.into()), LiveSnapshot::default()));
+    feed(&mut s, Err(STORE_NOT_SET.into()), LiveSnapshot::default());
     assert!(matches!(s.dashboard, Fetch::Failed(_)));
     let screen = draw(&s);
     assert!(screen.contains("--architect-store"), "{screen}");
@@ -283,7 +318,7 @@ fn live_lines_draw_sessions_with_nested_agents() {
 #[test]
 fn selected_session_names_the_live_row_only_on_the_live_tab() {
     let mut s = ArchitectState::default();
-    s.apply(update(Ok(sample()), live_sample()));
+    feed(&mut s, Ok(sample()), live_sample());
     assert_eq!(s.selected_session(), None, "Decisions tab");
     s.open(Tab::Live);
     handle_key(&mut s, key(KeyCode::Down));
@@ -294,7 +329,7 @@ fn selected_session_names_the_live_row_only_on_the_live_tab() {
 #[test]
 fn live_tab_draws_the_tracker_list_only() {
     let mut s = ArchitectState::default();
-    s.apply(update(Ok(sample()), live_sample()));
+    feed(&mut s, Ok(sample()), live_sample());
     s.open(Tab::Live);
     let screen = draw(&s);
     for want in ["tm-03", "engineer", "ts-01", "step  -"] {
