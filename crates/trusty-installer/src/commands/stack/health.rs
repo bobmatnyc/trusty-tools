@@ -15,6 +15,12 @@
 
 use serde::Serialize;
 
+use std::collections::HashMap;
+
+use crate::commands::deployment_record::{
+    audit_for_rollup, fold_verdict, print_human as print_deployment, running_of, DeploymentAudit,
+    RunningVersion,
+};
 use crate::commands::probe::{health_str, probe_member_health};
 use crate::commands::stable_set::daemon_members;
 use crate::output::render_json;
@@ -45,6 +51,9 @@ pub struct HealthReport {
     pub members: Vec<HealthRow>,
     /// Overall verdict: `ready` | `undetermined` | `degraded`.
     pub verdict: &'static str,
+    /// #10607: what is installed against what install placed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentAudit>,
 }
 
 impl HealthReport {
@@ -86,7 +95,21 @@ impl HealthReport {
             command: "stack health",
             members,
             verdict,
+            deployment: None,
         }
+    }
+
+    /// Fold the deployment audit into the verdict (#10607).
+    ///
+    /// Why: every daemon can answer healthy over a deployment that is not the
+    /// one install placed.
+    /// What: drift is `degraded`; an audit that could not tell is `undetermined`.
+    /// Test: `tests::drift_degrades_a_healthy_sweep`,
+    /// `tests::an_undetermined_audit_is_not_ready`.
+    fn with_deployment(mut self, audit: DeploymentAudit) -> Self {
+        self.verdict = fold_verdict(self.verdict, &audit);
+        self.deployment = Some(audit);
+        self
     }
 
     /// Process exit code: 0 ready, 2 degraded, 4 undetermined.
@@ -114,17 +137,23 @@ impl HealthReport {
 /// Test: side-effecting (probes); the report logic is tested via `HealthReport`.
 pub fn run_health(json: bool) -> i32 {
     // The daemon rule is pinned once in `stable_set::daemon_members`.
+    let mut running: HashMap<String, RunningVersion> = HashMap::new();
     let members: Vec<HealthRow> = daemon_members()
         .into_iter()
-        .map(|m| HealthRow {
+        .map(|m| {
             // #4246: typed probe; the rollup renders the flat word.
-            health: probe_member_health(&m.binary, m.manage)
-                .health_string()
-                .to_owned(),
-            member: m.crate_name,
+            let outcome = probe_member_health(&m.binary, m.manage);
+            let health = outcome.health_string().to_owned();
+            if health != health_str::NOT_INSTALLED {
+                running.insert(m.crate_name.clone(), running_of(&m, &outcome));
+            }
+            HealthRow {
+                health,
+                member: m.crate_name,
+            }
         })
         .collect();
-    let report = HealthReport::build(members);
+    let report = HealthReport::build(members).with_deployment(audit_for_rollup(&running));
     if json {
         if render_json(&report).is_err() {
             eprintln!("tctl stack health: failed to write JSON output");
@@ -134,6 +163,9 @@ pub fn run_health(json: bool) -> i32 {
         println!("tctl stack health");
         for m in &report.members {
             println!("  {:<18} {}", m.member, m.health);
+        }
+        if let Some(audit) = &report.deployment {
+            print_deployment(audit);
         }
         println!("verdict: {} (exit {})", report.verdict, report.exit_code());
     }
@@ -228,6 +260,37 @@ mod tests {
         ]);
         assert_eq!(stale_and_unknown.verdict, "undetermined");
         assert_eq!(stale_and_unknown.exit_code(), 4);
+    }
+
+    /// Why: #10607 — all daemons healthy with a recorded binary gone read `ready`.
+    /// What: a drifted audit makes a healthy sweep `degraded`, exit 2.
+    /// Test: This is the test.
+    #[test]
+    fn drift_degrades_a_healthy_sweep() {
+        let r = HealthReport::build(vec![row("trusty-search", "healthy")]).with_deployment(
+            DeploymentAudit {
+                state: "drifted",
+                findings: Vec::new(),
+            },
+        );
+        assert_eq!(r.verdict, "degraded");
+        assert_eq!(r.exit_code(), 2);
+    }
+
+    /// Why: #10607 Fail-Open Check — an audit that could not compare must not
+    /// read as `ready`.
+    /// What: an undetermined audit makes a healthy sweep `undetermined`, exit 4.
+    /// Test: This is the test.
+    #[test]
+    fn an_undetermined_audit_is_not_ready() {
+        let r = HealthReport::build(vec![row("trusty-search", "healthy")]).with_deployment(
+            DeploymentAudit {
+                state: "undetermined",
+                findings: Vec::new(),
+            },
+        );
+        assert_eq!(r.verdict, "undetermined");
+        assert_eq!(r.exit_code(), 4);
     }
 
     /// Why: the exit code must track the verdict.

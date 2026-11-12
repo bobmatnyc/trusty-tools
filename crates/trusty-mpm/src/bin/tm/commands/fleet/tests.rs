@@ -1455,10 +1455,11 @@ fn an_uncheckable_stale_dir_is_a_warning() {
     assert!(warning.starts_with("cannot check"), "{warning}");
 }
 
-/// Why: owner ruling D9d lets the Architect edit `AGENTS.md` on the owner's
-/// specific order, so no seeded file may still ban the write outright.
+/// Why: #11117 lets the Architect edit `AGENTS.md` on its own initiative, so
+/// no seeded file may still ban the write or limit it to an owner's order.
 /// What: scans every file `tm fleet init` seeds, line breaks folded, for the
-/// old ban wording, and checks `local/instance.md` states the new rule.
+/// old ban and owner-order wording, and checks `local/instance.md` still keeps
+/// the owner's instructions in `AGENTS.md`.
 /// Test: `seeded_files_carry_no_agents_md_write_ban`.
 #[test]
 fn seeded_files_carry_no_agents_md_write_ban() {
@@ -1467,6 +1468,8 @@ fn seeded_files_carry_no_agents_md_write_ban() {
         "never writes `AGENTS.md`",
         "you never write it",
         "The owner writes it; you never do",
+        // #11117: the owner-order limit is gone too.
+        "only when the owner orders a specific edit",
     ];
     let files = seeded_files();
     for file in &files {
@@ -1489,10 +1492,7 @@ fn seeded_files_carry_no_agents_md_write_ban() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        flat.contains(
-            "The owner's own instructions go in `AGENTS.md`, never here. The Architect \
-             edits `AGENTS.md` only when the owner orders a specific edit."
-        ),
+        flat.contains("The owner's own instructions go in `AGENTS.md`, never here."),
         "{flat}"
     );
 }

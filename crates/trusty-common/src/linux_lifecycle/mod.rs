@@ -18,9 +18,16 @@
 //!   grace, and then waits for the descriptor's [`StoppedSignal`]. It returns
 //!   [`StopOutcome::Stopped`], [`StopOutcome::NotRunning`], or an error —
 //!   [`LifecycleError::Survivor`] when the pid outlives SIGKILL.
-//! - [`start`] spawns `<install dir>/<binary>` detached and returns only once
-//!   the spawned pid serves the socket. A failed start kills and reaps the
-//!   child it spawned, so nothing it started is left running.
+//!   A socket that does not serve is `NotRunning` only when no process of
+//!   the caller's uid is this instance — runs `binary` with every one of the
+//!   descriptor's `liveness_args` and its `instance_env` values (#11098);
+//!   otherwise it is [`LifecycleError::RunningUnserved`] and nothing is
+//!   signalled. A sibling instance of the same binary does not count.
+//! - [`start`] spawns `<install dir>/<binary>` detached, in the descriptor's
+//!   `working_dir` and with only [`DaemonDescriptor::BASE_ENV`] plus its
+//!   `env_passthrough` names from the caller's environment (#11098), and
+//!   returns only once the spawned pid serves the socket. A failed start kills
+//!   and reaps the child it spawned, so nothing it started is left running.
 //! - [`restart`] is [`stop`], then [`start`]; `NotRunning` counts as stopped,
 //!   and any stop error returns before a spawn.
 //!
@@ -39,20 +46,26 @@
 //! [`StopOutcome::Stopped`]: crate::linux_lifecycle::StopOutcome::Stopped
 //! [`StopOutcome::NotRunning`]: crate::linux_lifecycle::StopOutcome::NotRunning
 //! [`LifecycleError::Survivor`]: crate::linux_lifecycle::LifecycleError::Survivor
+//! [`LifecycleError::RunningUnserved`]: crate::linux_lifecycle::LifecycleError::RunningUnserved
+//! [`DaemonDescriptor::BASE_ENV`]: crate::linux_lifecycle::DaemonDescriptor::BASE_ENV
 //! [`stop`]: crate::linux_lifecycle::stop()
 //! [`start`]: crate::linux_lifecycle::start()
 //! [`restart`]: crate::linux_lifecycle::restart()
 
+mod error;
+mod liveness;
 mod process;
 mod start;
 mod stop;
 #[cfg(test)]
 mod tests;
 
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub use error::LifecycleError;
 pub use process::{PinnedProcess, Signal};
 pub use start::{RestartOutcome, StartOutcome, restart, restart_with, start};
 pub use stop::{KernelDelivery, SignalDelivery, StopOutcome, stop, stop_with};
@@ -93,10 +106,16 @@ pub enum StoppedSignal {
 /// spawns and the executable name [`stop`] requires of the socket's peer.
 /// `stop_grace` bounds the SIGTERM wait, `kill_wait` bounds the SIGKILL wait
 /// and the stopped-signal wait, and `ready_timeout` bounds [`start`].
+/// `liveness_args` tells the daemon from a stdio bridge of the same binary
+/// when the socket does not answer, and `instance_env` tells this instance
+/// from a sibling instance of it; `working_dir`, `env_passthrough` and
+/// `instance_env` shape the spawned process (#11098).
 /// `#[non_exhaustive]`: build it with [`DaemonDescriptor::new`] or
 /// [`DaemonDescriptor::with_install_dir`], then assign the public fields.
 /// Test: `descriptor_rejects_a_binary_name_with_a_path_separator`,
-/// `descriptor_new_uses_the_canonical_bin_dir`.
+/// `descriptor_new_uses_the_canonical_bin_dir`,
+/// `descriptor_rejects_bad_spawn_and_liveness_fields`,
+/// `descriptor_pins_the_data_dir_override_as_its_default_instance_key`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DaemonDescriptor {
@@ -116,6 +135,41 @@ pub struct DaemonDescriptor {
     pub kill_wait: Duration,
     /// Bound on `start`'s readiness wait.
     pub ready_timeout: Duration,
+    /// Arguments only the daemon carries (#11098).
+    ///
+    /// When the socket does not serve, a live process of the caller's uid
+    /// whose executable is `binary` and whose argv (after `argv[0]`) holds
+    /// every one of these as a whole argument means the daemon still runs:
+    /// `stop` and `start` refuse with [`LifecycleError::RunningUnserved`].
+    /// Empty (the default) counts every process of `binary`, stdio bridges
+    /// included, which fails closed; a consumer sets the daemon-only
+    /// arguments, such as `["serve", "--foreground"]`.
+    pub liveness_args: Vec<String>,
+    /// The spawned daemon's working directory; `/` by default (#11098).
+    ///
+    /// Never the caller's cwd, which can hold a `.env.local` the daemon would
+    /// load (#9161). Must be absolute.
+    pub working_dir: PathBuf,
+    /// Names copied from the caller's environment, when set, on top of
+    /// [`DaemonDescriptor::BASE_ENV`]; nothing else reaches the daemon (#11098).
+    pub env_passthrough: Vec<String>,
+    /// The environment that makes this daemon instance this one (#11098).
+    ///
+    /// Each entry is a variable name and the value this instance runs with;
+    /// `None` means unset. [`start`] spawns the daemon with exactly these
+    /// values, over `BASE_ENV` and `env_passthrough`. When the socket does not
+    /// serve, a process that matches `binary` and `liveness_args` is this
+    /// instance only when its `/proc/<pid>/environ` holds every value, unset
+    /// equal to unset; any other is a sibling (another data dir, a sandbox)
+    /// and is ignored. An unreadable `environ` is
+    /// [`LifecycleError::InstanceUnreadable`], never a skip.
+    ///
+    /// The constructors set `TRUSTY_DATA_DIR_OVERRIDE` to the caller's value.
+    /// A consumer adds every other variable that selects its data dir or
+    /// socket — trusty-search adds `TRUSTY_DATA_DIR` — and puts any argv that
+    /// does so, such as `--data-dir <dir>`, in `liveness_args` as well.
+    /// Empty counts every argv match as this instance.
+    pub instance_env: Vec<(String, Option<OsString>)>,
 }
 
 impl DaemonDescriptor {
@@ -125,6 +179,37 @@ impl DaemonDescriptor {
     pub const DEFAULT_KILL_WAIT: Duration = Duration::from_secs(5);
     /// Default readiness bound.
     pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// The variables every spawned daemon gets from the caller, when set.
+    ///
+    /// Why: #11098 — the daemon must not inherit the caller's environment
+    /// wholesale (tokens, API keys, a parent-death stamp), but it needs its
+    /// home, search path, locale and XDG dirs to find its data.
+    /// `TRUSTY_DATA_DIR_OVERRIDE` and `TRUSTY_SANDBOX` are here because
+    /// dropping them would move a sandboxed caller's daemon onto the real data
+    /// dir and the real `.env.local` tiers. No other `TRUSTY_*` name is: some
+    /// carry credentials. A daemon-specific variable goes in `env_passthrough`.
+    /// Test: `daemon_env_carries_the_base_and_the_allowlist_only`.
+    pub const BASE_ENV: &'static [&'static str] = &[
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "TZ",
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        crate::data_dir::DATA_DIR_OVERRIDE_ENV,
+        // The `.env.local` loader's opt-out (`credentials::dotenv::SANDBOX_ENV_VAR`).
+        "TRUSTY_SANDBOX",
+    ];
 
     /// A descriptor whose install dir is [`crate::bin_resolve::canonical_bin_dir`].
     ///
@@ -163,6 +248,14 @@ impl DaemonDescriptor {
             stop_grace: Self::DEFAULT_STOP_GRACE,
             kill_wait: Self::DEFAULT_KILL_WAIT,
             ready_timeout: Self::DEFAULT_READY_TIMEOUT,
+            liveness_args: Vec::new(),
+            working_dir: PathBuf::from("/"),
+            env_passthrough: Vec::new(),
+            // #11098: the override is what tells a sandbox from production.
+            instance_env: vec![(
+                crate::data_dir::DATA_DIR_OVERRIDE_ENV.to_string(),
+                std::env::var_os(crate::data_dir::DATA_DIR_OVERRIDE_ENV),
+            )],
         };
         desc.validate()?;
         Ok(desc)
@@ -194,165 +287,34 @@ impl DaemonDescriptor {
         if self.socket.as_os_str().is_empty() {
             return bad("socket path is empty");
         }
+        // #11098: a relative cwd would resolve against the caller's cwd.
+        if !self.working_dir.is_absolute() {
+            return bad("working_dir must be absolute");
+        }
+        // No argv element holds a NUL, so such an arg would never match and a
+        // running daemon would read as not running.
+        if self.liveness_args.iter().any(|a| a.contains('\0')) {
+            return bad("liveness_args must not contain NUL");
+        }
+        let bad_name = |n: &str| n.is_empty() || n.contains('=') || n.contains('\0');
+        if self.env_passthrough.iter().any(|n| bad_name(n)) {
+            return bad("env_passthrough names must be non-empty, without '=' or NUL");
+        }
+        // #11098: a NUL value cannot be spawned, and two values for one name
+        // can never both match, so a running instance would read as stopped.
+        let mut names = std::collections::HashSet::new();
+        for (name, value) in &self.instance_env {
+            if bad_name(name) || !names.insert(name.as_str()) {
+                return bad("instance_env names must be unique, non-empty, without '=' or NUL");
+            }
+            if value
+                .as_ref()
+                .is_some_and(|v| v.as_encoded_bytes().contains(&0))
+            {
+                return bad("instance_env values must not contain NUL");
+            }
+        }
         Ok(())
-    }
-}
-
-/// Every way a lifecycle call fails.
-///
-/// Why: a caller (a CLI verb, tctl) must tell "something is still running" from
-/// "I could not decide" from "the new process never came up", and report the
-/// pid involved. Each is its own variant, never a success.
-/// Test: `tests/linux_lifecycle.rs` has a real-process test for
-/// `ProbeInconclusive`, `Unidentified`, `IdentityMismatch`,
-/// `IdentityUnreadable`, `Survivor`, `StoppedSignalNotReached`,
-/// `AlreadyRunning`, `ChildExited`, `NotReady` and `ChildUnpinned`; the unit
-/// tests in `tests.rs` cover `InvalidDescriptor` and `NoInstallDir`.
-/// `NoPeerPid`, `Signal`, `BinaryMissing`, `Spawn` and `Io` have no test.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum LifecycleError {
-    /// The descriptor cannot be used.
-    #[error("invalid daemon descriptor: {reason}")]
-    InvalidDescriptor {
-        /// What is wrong.
-        reason: String,
-    },
-    /// Neither `CARGO_HOME` nor a home directory resolves.
-    #[error("no install directory: neither CARGO_HOME nor a home directory is set")]
-    NoInstallDir,
-    /// A connect neither succeeded nor proved the socket dead.
-    #[error("cannot tell whether {} is served (connect timed out or failed)", socket.display())]
-    ProbeInconclusive {
-        /// The socket probed.
-        socket: PathBuf,
-    },
-    /// The socket serves, but the kernel reported no peer pid.
-    #[error("{} is served, but SO_PEERCRED reported no peer pid", socket.display())]
-    NoPeerPid {
-        /// The socket probed.
-        socket: PathBuf,
-    },
-    /// The socket does not serve, yet the stop lock is held by someone.
-    #[error(
-        "{} is not served but {} is locked; the holder cannot be identified",
-        socket.display(),
-        lock.display()
-    )]
-    Unidentified {
-        /// The socket probed.
-        socket: PathBuf,
-        /// The held lock.
-        lock: PathBuf,
-    },
-    /// The socket's peer is not the descriptor's binary; no signal was sent.
-    #[error("pid {pid} serves the socket but runs `{found}`, not `{expected}`; not signalled")]
-    IdentityMismatch {
-        /// The peer pid.
-        pid: u32,
-        /// The descriptor's binary name.
-        expected: String,
-        /// The peer's executable name.
-        found: String,
-    },
-    /// `/proc/<pid>/exe` could not be read; no signal was sent.
-    #[error("cannot read the executable of pid {pid}: {source}")]
-    IdentityUnreadable {
-        /// The peer pid.
-        pid: u32,
-        /// The read error.
-        source: io::Error,
-    },
-    /// Delivering a signal failed for a reason other than the pid exiting.
-    #[error("sending {signal:?} to pid {pid} failed: {source}")]
-    Signal {
-        /// The target pid.
-        pid: u32,
-        /// The signal.
-        signal: Signal,
-        /// The kernel error.
-        source: io::Error,
-    },
-    /// The pid still exists after SIGKILL and the kill wait.
-    #[error("pid {pid} survived SIGKILL; the daemon is not stopped")]
-    Survivor {
-        /// The surviving pid.
-        pid: u32,
-    },
-    /// The pid exited, but the stopped signal did not hold within the kill wait.
-    #[error("pid {pid} exited, but {signal} still does not hold")]
-    StoppedSignalNotReached {
-        /// The exited pid.
-        pid: u32,
-        /// A description of the unmet signal.
-        signal: String,
-    },
-    /// `<install_dir>/<binary>` is not a file.
-    #[error("daemon binary {} is not installed", path.display())]
-    BinaryMissing {
-        /// The program path.
-        path: PathBuf,
-    },
-    /// `start` found the socket already served.
-    #[error("{} is already served{}", socket.display(), pid.map(|p| format!(" by pid {p}")).unwrap_or_default())]
-    AlreadyRunning {
-        /// The socket.
-        socket: PathBuf,
-        /// The serving pid, when the kernel reported one.
-        pid: Option<u32>,
-    },
-    /// The spawn itself failed.
-    #[error("could not spawn {}: {message}", program.display())]
-    Spawn {
-        /// The program path.
-        program: PathBuf,
-        /// The rendered spawn error.
-        message: String,
-    },
-    /// The spawned child exited before it served the socket.
-    #[error("pid {pid} exited before serving the socket")]
-    ChildExited {
-        /// The spawned pid.
-        pid: u32,
-    },
-    /// The spawned child did not serve the socket within the readiness bound.
-    // #11084: the child is killed and reaped, never left running unfindable.
-    #[error("pid {pid} did not serve the socket within {timeout:?}; {}", reap_note(*killed))]
-    NotReady {
-        /// The spawned pid.
-        pid: u32,
-        /// The readiness bound.
-        timeout: Duration,
-        /// Whether the child was killed and reaped within the kill wait.
-        killed: bool,
-    },
-    /// The child was spawned, but no pidfd could be opened for it.
-    // #11084: the child is killed and reaped rather than left running.
-    #[error("could not pin spawned pid {pid} with a pidfd ({source}); {}", reap_note(*killed))]
-    ChildUnpinned {
-        /// The spawned pid.
-        pid: u32,
-        /// Whether the child was killed and reaped within the kill wait.
-        killed: bool,
-        /// The `pidfd_open` error.
-        source: io::Error,
-    },
-    /// An OS call outside the cases above failed.
-    #[error("{context}: {source}")]
-    Io {
-        /// What was being done.
-        context: String,
-        /// The error.
-        source: io::Error,
-    },
-}
-
-/// The tail of a failed-start message: what became of the spawned child.
-fn reap_note(killed: bool) -> &'static str {
-    if killed {
-        "it was killed and reaped"
-    } else {
-        "it was sent SIGKILL but not reaped within the kill wait"
     }
 }
 

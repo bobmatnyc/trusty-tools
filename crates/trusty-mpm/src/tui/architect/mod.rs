@@ -30,8 +30,9 @@ use live::LiveSnapshot;
 pub const REFRESH: Duration = Duration::from_secs(5);
 
 /// The view's tabs, in the dashboard's order, with Live in place of Visualize.
+// #11115: crate-internal; no caller outside trusty-mpm, so a new variant is no semver break
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
+pub(crate) enum Tab {
     /// Open items of kind `question`.
     Decisions,
     /// Open items of kind `action`.
@@ -138,7 +139,8 @@ impl Clock {
 #[derive(Debug, Clone)]
 pub struct ArchitectState {
     /// The open tab.
-    pub tab: Tab,
+    // #11115: crate-internal, as `Tab` is
+    pub(crate) tab: Tab,
     /// The selected row on that tab.
     pub selected: usize,
     /// Whether the selected row's detail pane is open.
@@ -175,7 +177,8 @@ pub enum ArchitectAction {
 
 impl ArchitectState {
     /// Open on `tab`, asking for a fresh fetch.
-    pub fn open(&mut self, tab: Tab) {
+    // #11115: crate-internal, as `Tab` is
+    pub(crate) fn open(&mut self, tab: Tab) {
         self.switch(tab);
         self.refetch();
     }
@@ -238,7 +241,8 @@ impl ArchitectState {
     }
 
     /// Rows `tab` lists, or `None` before its source has answered.
-    pub fn count(&self, tab: Tab) -> Option<usize> {
+    // #11115: crate-internal, as `Tab` is
+    pub(crate) fn count(&self, tab: Tab) -> Option<usize> {
         match (tab, &self.dashboard, &self.live) {
             (Tab::Live, _, Fetch::Ready(l)) => Some(l.sessions.len()),
             (Tab::Live, _, _) => None,
