@@ -30,7 +30,14 @@
 # No call to extract() on zip < 9 is reachable from a shipped crate. EXPIRES
 # 2026-12-07 (Architect ruling df-D97). See #10651 (move to zip 9 when upstream
 # releases; re-check on expiry) and #10788. Same reason as in `deny.toml`.
+#
+# RUSTSEC-2023-0071 — rsa Marvin Attack (timing side channel in RSA
+# decryption). rsa pulled by webauthn-rs crypto-glue; trusty-mpm accepts ES256
+# credentials only, so no RSA decryption runs; no RSA credential is stored or
+# used at approval. Review by 2027-02-07 (owner
+# ruling D72, #8878 PR2b-1b). Same reason as in `deny.toml`.
 ignore = [
+  "RUSTSEC-2023-0071",
   "RUSTSEC-2026-0429",
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",

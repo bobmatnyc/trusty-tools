@@ -215,3 +215,73 @@ fn revoke_waits_for_the_store_lock_and_sweeps_a_later_grant_8878() {
     assert_eq!(load(&root, &key(), "cred-A"), Err(DeviceError::Unknown));
     assert!(grant_files(&root).is_empty(), "the later grant is swept");
 }
+
+/// #8878 PR2b-1a review: a ticket that already enrolled a device cannot
+/// enrol another within its TTL; the refusal writes nothing.
+#[test]
+fn an_enrol_ticket_enrols_once_8878() {
+    let (_d, root) = root();
+    let ticket = mint_ticket(&key(), TicketPurpose::Enrol, "iphone", NOW).expect("ticket");
+    let first = FakeDevice::new("cred-A", 1).new_device("iphone", 0);
+    enrol(&root, &key(), &ticket, first, NOW).expect("first enrol");
+    let before = snapshot(&root);
+    let second = FakeDevice::new("cred-B", 2).new_device("iphone", 0);
+    let refused = enrol(&root, &key(), &ticket, second, NOW + 1);
+    assert!(
+        matches!(refused, Err(DeviceError::Ticket(_))),
+        "{refused:?}"
+    );
+    assert_eq!(snapshot(&root), before, "a spent ticket writes nothing");
+    assert_eq!(load(&root, &key(), "cred-B"), Err(DeviceError::Unknown));
+}
+
+/// The spent marker of the device store under `root`.
+fn spent_marker(root: &Path) -> PathBuf {
+    std::fs::read_dir(devices_dir(root))
+        .expect("devices dir")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(SPENT_PREFIX))
+        })
+        .expect("a spent marker")
+}
+
+/// #8878 (PR #10904 review): a spent marker whose expiry cannot be read or
+/// parsed is kept, so the ticket stays spent (fail closed).
+#[test]
+fn an_unreadable_spent_marker_keeps_the_ticket_spent_8878() {
+    let unparsable = |m: &Path| std::fs::write(m, b"not-a-number").expect("garble");
+    #[cfg(unix)]
+    let unreadable = |m: &Path| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(m, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    };
+    // clippy::type_complexity: name the (label, damage fn) pair.
+    type DamageCase<'a> = (&'a str, &'a dyn Fn(&Path));
+    let mut cases: Vec<DamageCase<'_>> = vec![("unparsable", &unparsable)];
+    #[cfg(unix)]
+    cases.push(("unreadable", &unreadable));
+    for (label, damage) in cases {
+        let (_d, root) = root();
+        let ticket = mint_ticket(&key(), TicketPurpose::Enrol, "iphone", NOW).expect("ticket");
+        let first = FakeDevice::new("cred-A", 1).new_device("iphone", 0);
+        enrol(&root, &key(), &ticket, first, NOW).expect("first enrol");
+        let marker = spent_marker(&root);
+        damage(&marker);
+        let second = FakeDevice::new("cred-B", 2).new_device("iphone", 0);
+        let refused = enrol(&root, &key(), &ticket, second, NOW + 1);
+        assert!(
+            matches!(refused, Err(DeviceError::Ticket(TicketRefusal::Spent))),
+            "{label}: {refused:?}"
+        );
+        assert!(marker.exists(), "{label}: the marker is kept");
+        assert_eq!(
+            load(&root, &key(), "cred-B"),
+            Err(DeviceError::Unknown),
+            "{label}: no second device record"
+        );
+    }
+}
