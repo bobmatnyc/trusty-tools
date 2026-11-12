@@ -257,7 +257,8 @@ pub(super) fn transport_failure(err: &UdsRpcError) -> Observation {
 /// Whether `err` is a dial that found no listener: the socket (or its
 /// directory) absent, or `connect` refused / not-found, seen through the
 /// bounded connect retry's wrapper.
-fn is_not_listening(err: &UdsRpcError) -> bool {
+// #10942: shared with `machine::transport_fault`.
+pub(super) fn is_not_listening(err: &UdsRpcError) -> bool {
     use std::io::ErrorKind::{ConnectionRefused, NotFound};
     match err {
         UdsRpcError::Dial { source, .. } => match source {

@@ -12,6 +12,9 @@
 
 // #10966: the console look (goal ar-G01).
 pub mod console;
+// #10942: MACHINE STATUS from `console.machine_status` and `console.history`.
+pub mod machine;
+pub mod machine_cards;
 pub mod probe;
 pub mod render;
 pub mod services;
@@ -31,6 +34,9 @@ mod no_uds_endpoint_tests;
 // #10966: the Console tile read over `console.fleet_status` (#10902).
 #[cfg(test)]
 mod console_fleet_status_tests;
+// #10942: the machine feed over real sockets and its render states.
+#[cfg(test)]
+mod machine_tests;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -106,6 +112,8 @@ pub async fn run_tui_entry(
 /// #10966: while the Architect view is open, a fetch task reads the store at
 /// `architect_store` and another reads the Live tracker, each every
 /// `architect::REFRESH`, over the daemon socket.
+/// #10942: two more tasks poll `console.machine_status` and `console.history`
+/// over the console socket for the MACHINE STATUS cards.
 /// Test: the pure pieces are unit-tested; this loop is exercised by the
 /// smoke run.
 pub async fn run_home(
@@ -117,6 +125,14 @@ pub async fn run_home(
     let (architect_tx, mut architect_rx) = mpsc::channel::<ArchitectUpdate>(4);
     let (health_tx, mut health_rx) = mpsc::channel(64);
     let (metrics_tx, mut metrics_rx) = mpsc::channel::<MetricsUpdate>(16);
+    // #10942: one poller per console method, off the UI loop.
+    let (machine_tx, mut machine_rx) = mpsc::channel::<machine::MachineUpdate>(8);
+    machine::spawn_poller(
+        machine::poll_status,
+        machine_tx.clone(),
+        machine::STATUS_INTERVAL,
+    );
+    machine::spawn_poller(machine::poll_history, machine_tx, machine::HISTORY_INTERVAL);
     probe::spawn_health_poller(
         &ServiceId::ALL,
         |id| probe::probe_service(id, PROBE_TIMEOUT),
@@ -137,6 +153,9 @@ pub async fn run_home(
         }
         while let Ok(update) = architect_rx.try_recv() {
             state.architect.apply(update);
+        }
+        while let Ok(update) = machine_rx.try_recv() {
+            state.machine.apply(update);
         }
         // #10966: one task per source, each sending its own result, so the
         // Live tracker never waits on a slow dashboard fetch.
