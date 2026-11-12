@@ -177,6 +177,12 @@ proxy support Unverified):
   code in the sled run `tailscale up --auth-key=<other>`, join another tailnet
   and tunnel out over DERP. The controls are tailnet lock or ACL tags on the
   owner's tailnet; the proxy cannot tell tailnets apart.
+- Account-level exfiltration through the allowlist is accepted (#11156). The
+  allowlist bounds hosts, not accounts. Code in the sled can send data to
+  another account's repo or gist on `github.com` or `api.github.com` with that
+  account's token, and to `api.anthropic.com` with another API key. See the
+  account-level paragraph in DOC-90 §6
+  ([SPEC-SLEDNET-06](../../docs/specs/DOC-90-cloud-sled-network-boundary.md#SPEC-SLEDNET-06~draft)).
 - A tunnel opened during a login window stays open after `sled-profile
   steady`: a reconfigure applies to new connections only. `docker restart
   tm-trusty-cloud-sled-egress` drops it.
