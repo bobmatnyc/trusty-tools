@@ -835,6 +835,8 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // session that is alive across a daemon restart (when `self.sessions`
                 // is always empty) gets one full GC interval to be re-learned before
                 // any SIGTERM is sent.
+                // #10753: and only when no live tmux pane hosts the PID; an
+                // unanswerable pane check sends no signal.
                 let live_ids = state.gather_live_session_ids().await;
                 let pid_outcome = state.pid_registry().sweep_orphans(
                     &live_ids,
@@ -844,11 +846,13 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 if pid_outcome.terminated > 0
                     || pid_outcome.removed_stale > 0
                     || pid_outcome.deferred > 0
+                    || pid_outcome.unverifiable > 0
                 {
                     info!(
                         terminated = pid_outcome.terminated,
                         removed_stale = pid_outcome.removed_stale,
                         deferred = pid_outcome.deferred,
+                        unverifiable = pid_outcome.unverifiable, // #10753
                         "orphan-GC PID-file sweep cleaned up orphaned claude process(es)"
                     );
                 }

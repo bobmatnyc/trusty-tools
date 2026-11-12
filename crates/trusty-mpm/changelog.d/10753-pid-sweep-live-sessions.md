@@ -1,0 +1,2 @@
+Fixed
+- The daemon's PID-file orphan sweep no longer sends SIGTERM to an idle `claude` session right after a daemon restart. A `claude` that still runs under a live tmux pane is kept even when no hook event has re-registered its session; a `claude` whose pane is gone is still reaped, and a process whose pane cannot be checked is left running and logged ([#10753](https://github.com/bobmatnyc/trusty-tools/issues/10753)).
