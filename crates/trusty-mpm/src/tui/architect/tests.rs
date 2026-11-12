@@ -313,6 +313,7 @@ fn merge_lists_managed_sessions_the_hook_registry_lacks() {
 fn merge_folds_a_hook_row_into_the_managed_session_it_correlates_with() {
     const CLAUDE: &str = "11111111-2222-4333-8444-555555555555";
     const ID_D: &str = "2b4c5d6f-1c1f-4e8b-9d5e-3e1f0a7d4c39";
+    const OTTER: &str = "33333333-4444-4555-8666-777777777777";
     let with_claude = |id: &str, name: &str, cwd: &str, claude: &str| -> ManagedSessionSummary {
         serde_json::from_value(json!({
             "id": id, "name": name, "state": "stopped", "cwd": cwd,
@@ -323,8 +324,11 @@ fn merge_folds_a_hook_row_into_the_managed_session_it_correlates_with() {
     let rows = [
         session_row(CLAUDE, "tm-nimble-tiger", "", "Active"),
         session_row(ID_A, "tm-03", "/w/a", "Active"),
+        // Correlated to `tm-03`, which is listed already: dropped.
+        session_row(OTTER, "tm-brave-otter", "", "Active"),
     ];
     let list = [
+        with_claude(ID_A, "tm-03", "/w/a", OTTER),
         with_claude(ID_B, "tm-proj2", "/w/proj2", CLAUDE),
         // A second record naming the same UUID is a different session.
         with_claude(ID_D, "tm-proj3", "/w/proj3", CLAUDE),

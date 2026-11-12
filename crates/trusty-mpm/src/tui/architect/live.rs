@@ -104,8 +104,12 @@ fn managed_status(state: &str) -> String {
 /// no managed session at all.
 /// What: the hook rows in the daemon's order, then each managed session not
 /// already listed (same id or same tmux name), in `mpm.managed.list` order.
-/// A deleted-slot tombstone is not a session and is skipped.
-/// Test: `merge_lists_managed_sessions_the_hook_registry_lacks`.
+/// A hook row whose id is a record's `claude_session_id` is the same session:
+/// it takes the record's id, name and workdir and keeps its hook status, or
+/// is dropped when the record is listed already. Each hook row folds into at
+/// most one record. A deleted-slot tombstone is not a session and is skipped.
+/// Test: `merge_lists_managed_sessions_the_hook_registry_lacks`,
+/// `merge_folds_a_hook_row_into_the_managed_session_it_correlates_with`.
 pub fn merge(rows: &[SessionRow], managed: &[ManagedSessionSummary]) -> Vec<LiveSession> {
     let mut sessions: Vec<LiveSession> = rows
         .iter()
@@ -128,25 +132,64 @@ pub fn merge(rows: &[SessionRow], managed: &[ManagedSessionSummary]) -> Vec<Live
         .collect();
     // #11104: managed sessions live in the session-manager store, not the
     // hook registry; add each one the registry does not already hold.
+    let hooks = sessions.len();
+    // #11104: a hook row correlated to a managed record is used up: it folds
+    // into that one session, or is dropped when the session is listed already.
+    let mut used = vec![false; hooks];
+    let mut dropped = vec![false; hooks];
     for m in managed.iter().filter(|m| !m.deleted) {
         let name = if m.name.is_empty() { &m.id } else { &m.name };
-        if sessions.iter().any(|s| s.id == m.id || &s.name == name) {
-            continue;
+        let workdir = m
+            .cwd
+            .clone()
+            .filter(|d| !d.is_empty())
+            .or_else(|| m.workspace_path.clone())
+            .unwrap_or_default();
+        let listed = sessions
+            .iter()
+            .position(|s| s.id == m.id || &s.name == name);
+        // #11104: a SessionStart hook row is keyed by Claude's UUID, which
+        // `correlate_session_start` stores as the record's `claude_session_id`.
+        let correlated = m
+            .claude_session_id
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .and_then(|c| (0..hooks).find(|&i| !used[i] && sessions[i].id.eq_ignore_ascii_case(c)))
+            .filter(|&c| Some(c) != listed);
+        match (listed, correlated) {
+            (Some(_), Some(c)) => (used[c], dropped[c]) = (true, true),
+            (Some(_), None) => {}
+            (None, Some(c)) => {
+                used[c] = true;
+                // #11104: the managed record's id, name and workdir win (the id
+                // keys the step read, the name keys agent grouping); the hook
+                // row keeps its status, since hook events track liveness.
+                let s = &mut sessions[c];
+                s.id = m.id.clone();
+                s.name = name.clone();
+                if !workdir.is_empty() {
+                    s.workdir = workdir;
+                }
+            }
+            (None, None) => sessions.push(LiveSession {
+                id: m.id.clone(),
+                name: name.clone(),
+                status: managed_status(&m.state),
+                workdir,
+                agents: Vec::new(),
+                step: None,
+            }),
         }
-        sessions.push(LiveSession {
-            id: m.id.clone(),
-            name: name.clone(),
-            status: managed_status(&m.state),
-            workdir: m
-                .cwd
-                .clone()
-                .or_else(|| m.workspace_path.clone())
-                .unwrap_or_default(),
-            agents: Vec::new(),
-            step: None,
-        });
     }
+    let keep = dropped
+        .into_iter()
+        .map(|d| !d)
+        .chain(std::iter::repeat(true));
     sessions
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(s, keep)| keep.then_some(s))
+        .collect()
 }
 
 /// Attach records to sessions; a record with no matching session is dropped.

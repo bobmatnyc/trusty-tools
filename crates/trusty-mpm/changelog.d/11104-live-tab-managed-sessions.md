@@ -1,2 +1,3 @@
 Fixed
 - The Live tab of `tm tui` now lists managed sessions. It read only `mpm.sessions.list`, the hook registry, which holds no session the session manager spawned; it now also reads `mpm.managed.list` and adds each managed session the registry lacks, with its agents and step. A failed managed read fails the Live fetch with `mpm.managed.list: <error>` rather than drawing an empty list (#11104).
+- A managed session that a `SessionStart` hook also registered draws as one Live row, not two. The hook row, keyed by Claude's session UUID, folds into the managed session whose `claude_session_id` matches it: the row shows the managed name and workdir with the hook row's status (#11104).
