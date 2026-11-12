@@ -83,7 +83,7 @@
 //! Fail-open check: this rule only ADDS refusals and runs after the inline
 //! rules, which still judge the command text. Every [`Unread`] arm refuses.
 //! #10548 narrows one path: `node --check`/`-c` with no other option and no
-//! `NODE_OPTIONS=` prefix judges no body ([`node_check_only`]), pinned in
+//! `NODE_OPTIONS=` prefix judges no body ([`node::node_check_only`]), pinned in
 //! `pm_guard_secret_script_node_tests.rs`. A node RUN is judged raw, so a JS
 //! member access (`x.key`) still refuses; that stays open on #10548.
 //! Test: `pm_guard_secret_script_tests.rs`; end to end in
