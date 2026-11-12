@@ -276,7 +276,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-workflow",
-            "59137538d1832abdab2ed80b30c6f55596898c59fef013f5ecbfdf4672fdc3c6",
+            "cd623d5af69e54c57ddc4272db7a3325626bc01ab7457ebd869b720d4bec0e5f",
         ),
         (
             "architect-search-memory",
