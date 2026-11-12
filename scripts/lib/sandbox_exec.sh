@@ -10,8 +10,9 @@
 #   (it needs the caller's HOME and project checkout to reach the vault), so
 #   this wrapper must clear everything else before the daemon starts.
 # What: usage `sandbox_exec.sh SANDBOX BIN NAME`. Refuses unless NAME is
-#   ANTHROPIC_API_KEY or OPENROUTER_API_KEY and is set. Then, in order: cd to
-#   SANDBOX/home (#9161), unset every exported variable except PATH, NAME and
+#   ANTHROPIC_API_KEY or OPENROUTER_API_KEY and is set. Then, in order: close
+#   every fd above stderr, the grant-token fd first (refusing a malformed
+#   TRUSTY_SECRETS_TOKEN_FD), cd to SANDBOX/home (#9161), unset every exported variable except PATH, NAME and
 #   the FORWARDED names below (Architect ruling Q1: an unset loop in place of
 #   `env -i`, since `env -i NAME=...` would put the value on argv), unset every
 #   exported function, set the four pinned paths, and exec
@@ -48,6 +49,28 @@ esac
 [ -n "${!NAME:-}" ] || refuse "$NAME is not set; tm secrets exec did not inject it"
 [ -x "$BIN" ] || refuse "not an executable file: $BIN"
 
+# #10721: `tm secrets exec` leaves its grant-token fd open (close-on-exec
+# cleared) and names it in TRUSTY_SECRETS_TOKEN_FD; a daemon child holding it
+# could re-resolve the credential. Close that fd, then every other fd above
+# stderr. A malformed value refuses rather than leave a named fd open.
+if [ -n "${TRUSTY_SECRETS_TOKEN_FD+set}" ]; then
+  case "$TRUSTY_SECRETS_TOKEN_FD" in
+    [1-9] | [1-9][0-9] | [1-9][0-9][0-9] | [1-9][0-9][0-9][0-9]) ;;
+    *) refuse "TRUSTY_SECRETS_TOKEN_FD is not an fd number" ;;
+  esac
+  [ "$TRUSTY_SECRETS_TOKEN_FD" -gt 2 ] || refuse "TRUSTY_SECRETS_TOKEN_FD names stdio"
+  eval "exec $TRUSTY_SECRETS_TOKEN_FD<&-" || refuse "cannot close the token fd"
+fi
+# /dev/fd lists this shell's own fds on macOS and Linux. Closing bash's own
+# script fd is safe: bash moves it to a close-on-exec fd and reads on.
+for fdpath in /dev/fd/*; do
+  fd="${fdpath##*/}"
+  case "$fd" in
+    '' | *[!0-9]*) refuse "cannot list open fds: $fdpath" ;;
+  esac
+  [ "$fd" -le 2 ] || eval "exec $fd<&-" || refuse "cannot close fd $fd"
+done
+
 # Keep in step with FORWARDED in scripts/sandbox_daemon.sh (the selftest
 # compares the two lists).
 FORWARDED="LANG LC_ALL LC_COLLATE LC_CTYPE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME \
@@ -56,7 +79,7 @@ LOGNAME RUST_LOG SHELL TERM TMPDIR USER"
 KEEP=" PATH $NAME $FORWARDED "
 # This script's own variables: a caller that exported one of these names must
 # not leak it past the loop, nor have the loop unset the script's copy.
-export -n SANDBOX BIN NAME FORWARDED KEEP var fn
+export -n SANDBOX BIN NAME FORWARDED KEEP var fn fd fdpath
 
 # #9161: before the unset loop, so the PWD and OLDPWD it sets are cleared too.
 cd "$SANDBOX/home" || refuse "cannot enter <dir>/home: $SANDBOX/home"

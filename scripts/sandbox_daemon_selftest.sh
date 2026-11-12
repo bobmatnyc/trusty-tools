@@ -65,12 +65,13 @@
 #                   plays `tm secrets exec` and the daemon: the daemon sees
 #                   exactly the pinned and forwarded names plus NAME, never a
 #                   polluting secret, exported function or the exec's token
-#                   fd; a canary value is in no output, `ps` argv or file
+#                   fd name, and holds no fd above stderr (the stub opens a
+#                   real token fd); a canary value is in no output, `ps` argv or file
 #                   under the sandbox; a bad name, a malformed or empty ref,
 #                   a repeat, and an unresolvable ref each refuse and start
 #                   no daemon; without --credential a provider key in the
 #                   caller env never arrives; the wrapper refuses a bad or
-#                   unset NAME; and its FORWARDED list matches the launcher's
+#                   unset NAME and a malformed or stdio token fd; and its FORWARDED list matches the launcher's
 #   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
@@ -507,8 +508,8 @@ SRC_ROOT_ENV=()
 # ── #10721: --credential NAME=<ref> ─────────────────────────────────────────
 # A perl stub `tm`: perl adds no variable of its own, so the daemon side sees
 # exactly what the wrapper passed. `secrets exec --env NAME=REF -- CMD...`
-# sets NAME to a canary (never on argv) plus TRUSTY_SECRETS_TOKEN_FD, as the
-# real exec does, then execs CMD; REF `unresolvable` exits 1 running nothing.
+# sets NAME to a canary (never on argv) and opens a real fd named by
+# TRUSTY_SECRETS_TOKEN_FD, as the real exec does, then execs CMD; REF `unresolvable` exits 1 running nothing.
 # `daemon ...` records names, args, cwd, `ps` argv and whether the credential
 # arrived — never its value.
 CANARY="10721-selftest-canary-credential-value"
@@ -517,6 +518,8 @@ cat > "$CRED_STUB" <<'CRED_EOF'
 #!/usr/bin/perl
 use strict;
 use warnings;
+use Fcntl qw(F_SETFD);
+use POSIX ();
 my $canary = "10721-selftest-canary-credential-value";
 if (@ARGV && $ARGV[0] eq 'secrets') {
   my ($name, $ref) = $ARGV[3] =~ /^([^=]+)=(.*)$/ or exit 2;
@@ -525,10 +528,25 @@ if (@ARGV && $ARGV[0] eq 'secrets') {
     exit 1;
   }
   $ENV{$name} = $canary;
-  $ENV{TRUSTY_SECRETS_TOKEN_FD} = '9';
+  # A real open fd, close-on-exec cleared, as exec_token.rs leaves the token.
+  open(my $tok, '<', $0) or exit 2;
+  fcntl($tok, F_SETFD, 0) or exit 2;
+  $ENV{TRUSTY_SECRETS_TOKEN_FD} = fileno($tok);
   exec { $ARGV[5] } @ARGV[5 .. $#ARGV] or exit 127;
 }
+# Before this stub opens anything: every fd above 2 the daemon inherited.
+# perl itself holds none here (it closed the script after compiling it).
+my @fds;
+for my $n (3 .. 1023) {
+  my $d = POSIX::dup($n);
+  next unless defined $d;
+  POSIX::close($d);
+  push @fds, $n;
+}
 my $h = $ENV{HOME};
+open(my $ff, '>', "$h/stub-fds") or die;
+print $ff join(' ', @fds), "\n";
+close $ff;
 open(my $f, '>', "$h/stub-env-names") or die;
 print $f join("\n", sort keys %ENV), "\n";
 close $f;
@@ -584,6 +602,15 @@ else
   else
     pass cred-allowlist
   fi
+fi
+# cred-no-inherited-fd: the daemon holds no fd above stderr, so no child of it
+# can present the exec's grant token (#10721).
+if [ ! -f "$DIRC/home/stub-fds" ]; then
+  fail cred-no-inherited-fd "the stub daemon never recorded its fds"
+elif [ -n "$(tr -d ' \n' < "$DIRC/home/stub-fds")" ]; then
+  fail cred-no-inherited-fd "the daemon inherited fds above 2: $(cat "$DIRC/home/stub-fds")"
+else
+  pass cred-no-inherited-fd
 fi
 # The canary is in no output, no ps argv, and no file under the sandbox dir.
 if printf '%s' "$OUTC" | grep -qF "$CANARY"; then
@@ -658,6 +685,10 @@ run_wrapper cred-wrapper-bad-name "credential name not allowed: GITHUB_PAT" \
   GITHUB_PAT="$FAKE_KEY" bash "$WRAPPER" "$DIRCR" "$CRED_STUB" GITHUB_PAT
 run_wrapper cred-wrapper-absent "ANTHROPIC_API_KEY is not set" \
   bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
+run_wrapper cred-wrapper-bad-fd "TRUSTY_SECRETS_TOKEN_FD is not an fd number" \
+  ANTHROPIC_API_KEY="$FAKE_KEY" TRUSTY_SECRETS_TOKEN_FD='3;x' bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
+run_wrapper cred-wrapper-stdio-fd "TRUSTY_SECRETS_TOKEN_FD names stdio" \
+  ANTHROPIC_API_KEY="$FAKE_KEY" TRUSTY_SECRETS_TOKEN_FD=2 bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]
