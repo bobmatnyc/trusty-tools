@@ -11,8 +11,8 @@ use trusty_secrets::ancestry::{ProcessError, ProcessTable, StartTime};
 
 use super::*;
 use crate::commands::secrets::assign::{
-    AGENT_OTHER_PROJECT, CHECKOUT_MISMATCH, NOT_REGISTERED, OTHER_OWNER, PROJECT_FORM, ProjectName, ProjectResolver,
-    SRC_FORMS, SRC_UNPINNED, Seam, agent_in, parse_source,
+    AGENT_OTHER_PROJECT, CHECKOUT_MISMATCH, NOT_REGISTERED, OTHER_OWNER, PROJECT_FORM, ProjectName,
+    ProjectResolver, SRC_FORMS, SRC_UNPINNED, Seam, agent_in, parse_source,
 };
 
 /// The project vault of the second same-owner checkout.
@@ -107,7 +107,15 @@ fn assign_parse_source_accepts_both_forms_and_refuses_bad_ones() {
 fn assign_project_name_accepts_owner_repo_only() {
     let name = ProjectName::parse("Acme/Web").expect("owner/repo");
     assert_eq!((name.owner.as_str(), name.repo.as_str()), ("acme", "web"));
-    for raw in ["", "acme", "/abs/path", "acme/web/x", "../web", "acme/..", "~/web"] {
+    for raw in [
+        "",
+        "acme",
+        "/abs/path",
+        "acme/web/x",
+        "../web",
+        "acme/..",
+        "~/web",
+    ] {
         let err = ProjectName::parse(raw).expect_err(raw);
         assert_eq!(err.to_string(), PROJECT_FORM, "{raw}");
     }
@@ -142,10 +150,17 @@ async fn assign_copies_vault_key_into_project_without_printing_value() {
         outcome.out,
         "assign to trusty/acme/api\ncopied GH_PAT\nkeychain -> keychain: 1 copied, 0 not copied\n"
     );
-    for text in [&outcome.out, outcome.err.as_deref().unwrap_or(""), &outcome.logs] {
+    for text in [
+        &outcome.out,
+        outcome.err.as_deref().unwrap_or(""),
+        &outcome.logs,
+    ] {
         assert!(!text.contains(VALUE), "{text}");
     }
-    assert_eq!(stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(), Some(VALUE));
+    assert_eq!(
+        stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(),
+        Some(VALUE)
+    );
     // #11015: the cwd's own project is untouched.
     assert_eq!(stored(&h.keychain, PROJECT_VAULT, "GH_PAT"), None);
 }
@@ -186,8 +201,15 @@ async fn assign_defaults_dest_to_source_key_and_honours_as() {
     ];
     let outcome = assign_run(&h, &r, person, &renamed).await;
     assert_eq!(outcome.err, None);
-    assert!(outcome.out.contains("copied GITHUB_TOKEN\n"), "{}", outcome.out);
-    assert_eq!(stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(), Some(VALUE));
+    assert!(
+        outcome.out.contains("copied GITHUB_TOKEN\n"),
+        "{}",
+        outcome.out
+    );
+    assert_eq!(
+        stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(),
+        Some(VALUE)
+    );
     assert_eq!(
         stored(&h.keychain, API_VAULT, "GITHUB_TOKEN").as_deref(),
         Some(VALUE)
@@ -207,7 +229,10 @@ async fn assign_rerun_follows_copy_conflict_behaviour() {
     let again = assign_run(&h, &r, person, &args).await;
     assert_eq!(again.err, None);
     assert!(again.out.contains("copied GH_PAT\n"), "{}", again.out);
-    assert_eq!(stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(), Some(VALUE));
+    assert_eq!(
+        stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(),
+        Some(VALUE)
+    );
 }
 
 /// The production resolver refuses every project until #10368; so does a
@@ -218,11 +243,19 @@ async fn assign_unknown_project_is_a_fixed_error_and_writes_nothing() {
     seed_owner(&h, "GH_PAT", VALUE).await;
     let args = ["assign", "trusty/acme:GH_PAT", "--project", "acme/api"];
     let pending = run_in(&h.client, &h.repo, SHORT, SHORT, &args).await;
-    assert!(pending.err().starts_with(NOT_REGISTERED), "{}", pending.err());
+    assert!(
+        pending.err().starts_with(NOT_REGISTERED),
+        "{}",
+        pending.err()
+    );
     let r = resolver(&h);
     let unknown = ["assign", "trusty/acme:GH_PAT", "--project", "acme/nope"];
     let outcome = assign_run(&h, &r, person, &unknown).await;
-    assert!(outcome.err().starts_with(NOT_REGISTERED), "{}", outcome.err());
+    assert!(
+        outcome.err().starts_with(NOT_REGISTERED),
+        "{}",
+        outcome.err()
+    );
     let path = h.repo.to_str().expect("utf-8").to_owned();
     let by_path = ["assign", "trusty/acme:GH_PAT", "--project", &path];
     let outcome = assign_run(&h, &r, person, &by_path).await;
@@ -248,7 +281,10 @@ async fn assign_never_touches_clipboard() {
     let h = harness().await;
     seed_owner(&h, "GH_PAT", VALUE).await;
     let r = resolver(&h);
-    let (clipboard, stdin) = (Tripwire(AtomicBool::new(false)), Tripwire(AtomicBool::new(false)));
+    let (clipboard, stdin) = (
+        Tripwire(AtomicBool::new(false)),
+        Tripwire(AtomicBool::new(false)),
+    );
     let ctx = Ctx {
         client: &h.client,
         project: &h.repo,
@@ -256,7 +292,14 @@ async fn assign_never_touches_clipboard() {
         stdin: &stdin,
         ci: false,
     };
-    let argv = ["tm", "secrets", "assign", "trusty/acme:GH_PAT", "--project", "acme/api"];
+    let argv = [
+        "tm",
+        "secrets",
+        "assign",
+        "trusty/acme:GH_PAT",
+        "--project",
+        "acme/api",
+    ];
     let Some(Command::Secrets { action }) = Cli::try_parse_from(argv).expect("parse").command
     else {
         panic!("not a secrets command");
@@ -266,10 +309,18 @@ async fn assign_never_touches_clipboard() {
         agent: person,
     };
     let mut out = Vec::new();
-    dispatch_with(&ctx, seam, action, &mut out).await.expect("assign");
-    assert!(!clipboard.0.load(Ordering::SeqCst), "the clipboard was read");
+    dispatch_with(&ctx, seam, action, &mut out)
+        .await
+        .expect("assign");
+    assert!(
+        !clipboard.0.load(Ordering::SeqCst),
+        "the clipboard was read"
+    );
     assert!(!stdin.0.load(Ordering::SeqCst), "stdin was read");
-    assert_eq!(stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(), Some(VALUE));
+    assert_eq!(
+        stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(),
+        Some(VALUE)
+    );
 }
 
 /// The server's per-key deny binds an agent's assign of a denied source.
@@ -283,7 +334,14 @@ async fn assign_denied_source_is_refused_for_an_agent() {
         .set_control_item(ControlItem::AgentDeny, &owner, Some(&key), true)
         .expect("deny");
     let r = resolver(&h);
-    let args = ["assign", "trusty/acme:GH_PAT", "--project", "acme/web", "--as", "DEST"];
+    let args = [
+        "assign",
+        "trusty/acme:GH_PAT",
+        "--project",
+        "acme/web",
+        "--as",
+        "DEST",
+    ];
     let outcome = assign_run(&h, &r, agent, &args).await;
     assert!(outcome.err().contains("per-key deny"), "{}", outcome.err());
     assert_eq!(stored(&h.keychain, PROJECT_VAULT, "DEST"), None);
@@ -298,11 +356,25 @@ async fn assign_by_an_agent_cannot_widen_its_write_reach() {
     let r = resolver(&h);
     let other = ["assign", "trusty/acme:GH_PAT", "--project", "acme/api"];
     let refused = assign_run(&h, &r, agent, &other).await;
-    assert!(refused.err().starts_with(AGENT_OTHER_PROJECT), "{}", refused.err());
+    assert!(
+        refused.err().starts_with(AGENT_OTHER_PROJECT),
+        "{}",
+        refused.err()
+    );
     assert_eq!(stored(&h.keychain, API_VAULT, "GH_PAT"), None);
-    let own = ["assign", "trusty/acme:GH_PAT", "--project", "acme/web", "--as", "DEST"];
+    let own = [
+        "assign",
+        "trusty/acme:GH_PAT",
+        "--project",
+        "acme/web",
+        "--as",
+        "DEST",
+    ];
     assert_eq!(assign_run(&h, &r, agent, &own).await.err, None);
-    assert_eq!(stored(&h.keychain, PROJECT_VAULT, "DEST").as_deref(), Some(VALUE));
+    assert_eq!(
+        stored(&h.keychain, PROJECT_VAULT, "DEST").as_deref(),
+        Some(VALUE)
+    );
 }
 
 /// D2: a project under another owner is refused for every caller, and so
@@ -321,6 +393,10 @@ async fn assign_to_another_owner_is_refused() {
     assert!(outcome.err().starts_with(OTHER_OWNER), "{}", outcome.err());
     let lying = ["assign", "trusty/acme:GH_PAT", "--project", "acme/thing"];
     let outcome = assign_run(&h, &r, person, &lying).await;
-    assert!(outcome.err().starts_with(CHECKOUT_MISMATCH), "{}", outcome.err());
+    assert!(
+        outcome.err().starts_with(CHECKOUT_MISMATCH),
+        "{}",
+        outcome.err()
+    );
     assert_eq!(stored(&h.keychain, "trusty/other/thing", "GH_PAT"), None);
 }

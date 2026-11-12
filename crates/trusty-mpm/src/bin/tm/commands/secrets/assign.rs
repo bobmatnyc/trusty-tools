@@ -26,7 +26,9 @@ use anyhow::{anyhow, bail};
 use serde_json::{Value, json};
 use trusty_secrets::ancestry::{OsProcessTable, ProcessTable, has_agent_ancestor};
 use trusty_secrets::api::methods::{CopyResponse, CopySource, ScopeKind, ScopesResponse, method};
-use trusty_secrets::{BackendId, OwnerName, RepoName, SecretKey, SecretRef, SecretsError, VaultName};
+use trusty_secrets::{
+    BackendId, OwnerName, RepoName, SecretKey, SecretRef, SecretsError, VaultName,
+};
 
 use super::Ctx;
 use super::verbs::report_copy;
@@ -52,8 +54,7 @@ pub(crate) const OTHER_OWNER: &str =
     "tm secrets assign: the project belongs to another owner; nothing was written";
 
 /// The refusal for an agent naming a project other than its own (D2).
-pub(crate) const AGENT_OTHER_PROJECT: &str =
-    "tm secrets assign: under Claude Code only this checkout's own project may be named; nothing was written";
+pub(crate) const AGENT_OTHER_PROJECT: &str = "tm secrets assign: under Claude Code only this checkout's own project may be named; nothing was written";
 
 /// The refusal when the resolved checkout's remote is not the named owner.
 pub(crate) const CHECKOUT_MISMATCH: &str =
@@ -81,8 +82,12 @@ pub(crate) struct ProjectName {
 impl ProjectName {
     /// Parse `owner/repo`; see the type docs.
     pub(crate) fn parse(raw: &str) -> anyhow::Result<Self> {
-        let _ = raw;
-        bail!(PROJECT_FORM)
+        let refuse = || anyhow!(PROJECT_FORM);
+        let (owner, repo) = raw.split_once('/').ok_or_else(refuse)?;
+        Ok(Self {
+            owner: OwnerName::new(owner).map_err(|_| refuse())?,
+            repo: RepoName::new(repo).map_err(|_| refuse())?,
+        })
     }
 }
 
@@ -135,8 +140,7 @@ pub(crate) fn caller_is_agent() -> bool {
 /// closed), so an agent cannot escape D2 by hiding its ancestry.
 /// Test: `assign_agent_judgement_fails_closed`.
 pub(crate) fn agent_in(table: &dyn ProcessTable, pid: u32) -> bool {
-    let _ = (table, pid);
-    false
+    has_agent_ancestor(table, pid).unwrap_or(true)
 }
 
 /// The source vault and key SRC names.
@@ -149,8 +153,19 @@ pub(crate) fn agent_in(table: &dyn ProcessTable, pid: u32) -> bool {
 /// plus the broken rule, never the input.
 /// Test: `assign_parse_source_accepts_both_forms_and_refuses_bad_ones`.
 pub(crate) fn parse_source(raw: &str) -> anyhow::Result<(VaultName, SecretKey)> {
-    let _ = raw;
-    bail!(SRC_FORMS)
+    let refuse = |e: SecretsError| anyhow!("{SRC_FORMS}: {e}");
+    if raw.starts_with(trusty_secrets::api::SCHEME) {
+        let reference = SecretRef::parse(raw).map_err(refuse)?;
+        let vault = reference
+            .pinned_vault()
+            .ok_or_else(|| anyhow!(SRC_UNPINNED))?;
+        return Ok((vault, reference.key().clone()));
+    }
+    let (vault, key) = raw.split_once(':').ok_or_else(|| anyhow!(SRC_FORMS))?;
+    Ok((
+        VaultName::new(vault).map_err(refuse)?,
+        SecretKey::new(key).map_err(refuse)?,
+    ))
 }
 
 /// The parsed `assign` command line.
@@ -220,6 +235,36 @@ pub(crate) async fn assign(
     args: AssignArgs<'_>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let _ = (ctx, seam, args, out);
-    bail!("tm secrets assign: red-first skeleton (#11015)")
+    let fail = |e: SecretsError| anyhow!("tm secrets assign: {e}");
+    let (vault, key) = parse_source(args.src)?;
+    let dest = match args.dest {
+        Some(dest) => SecretKey::new(dest).map_err(fail)?,
+        None => key.clone(),
+    };
+    let from = BackendId::new(args.from).map_err(fail)?;
+    let to = BackendId::new(args.to).map_err(fail)?;
+    let project = ProjectName::parse(args.project)?;
+    let dir = seam.resolver.checkout(&project)?;
+    // #11015: the write names the resolved checkout, never the cwd.
+    let target = Ctx {
+        project: &dir,
+        ..*ctx
+    };
+    let here = vaults(ctx).await?;
+    let there = vaults(&target).await?;
+    if there.owner != VaultName::owner(&project.owner) {
+        bail!(CHECKOUT_MISMATCH);
+    }
+    if there.owner != here.owner {
+        bail!(OTHER_OWNER);
+    }
+    if there.project != here.project && (seam.agent)() {
+        bail!(AGENT_OTHER_PROJECT);
+    }
+    let source = CopySource::vault(vault, key);
+    let params =
+        json!({ "from_backend": from, "to_backend": to, "keys": [dest], "source": source });
+    let response: CopyResponse = target.call(method::COPY, params).await?;
+    writeln!(out, "assign to {}", there.project)?;
+    report_copy(&from, &to, &response, out)
 }

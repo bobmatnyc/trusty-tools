@@ -14,7 +14,20 @@ effort: medium
 🔴 **Which `tm secrets` verbs ship depends on the release.** In trusty-mpm
 1.8.x: `set`, `list`, `remove`, `import`, `copy` and `doctor`. `exec` and
 `resolve` land in trusty-mpm 1.9.0 ([DOC-74](../../docs/specs/DOC-74-secrets-integration.md)
-§15.8). Run `tm secrets --help` before you plan around either.
+§15.8). `assign` lands in the release after 1.9.0
+([#11015](https://github.com/bobmatnyc/trusty-tools/issues/11015)); its
+`--project` refuses every project until the project registry
+([#10368](https://github.com/bobmatnyc/trusty-tools/issues/10368)) ships.
+Run `tm secrets --help` before you plan around any of them.
+
+**`tm secrets assign SRC --project owner/repo [--as KEY]`** copies one key of
+any trusty vault into the named project's vault. SRC is
+`trusty/<owner>[/<repo>]:KEY` or `secret://<owner>[/<repo>]/KEY`;
+`secret://KEY` names no vault and is refused. The destination key is the
+source's name, or `--as`. The project must share the checkout's owner, and
+under Claude Code it must be the checkout's own project. A re-run replaces
+the destination value, as `copy` does. The value moves inside the server and
+never reaches tm, the clipboard or the transcript; tm prints names only.
 
 These are designed in DOC-74 §15 and are not in any binary yet: the
 `secrets_get_ref` MCP tool
@@ -132,7 +145,7 @@ server derives the vaults from that checkout's remote.
 | `secrets.set` | `new` or `updated`, and a one-time mask: `[N chars]` only for an agent. Its request carries the value. An agent is refused a denied key (`agent_key_denied`). |
 | `secrets.delete` | Whether a key was removed. Operator-only. |
 | `secrets.set_agents_may_use` | `allowed: false` writes the key's agent deny (an agent may); `allowed: true` removes it (a person only) |
-| `secrets.copy` | Names copied and failed; a key's deny travels with it. An agent copies only keys with no deny, never to a sync target. |
+| `secrets.copy` | Names copied and failed; a key's deny travels with it. An agent copies only keys with no deny, never to a sync target. `tm secrets assign` sends it with a vault `source` and `project` set to the named project's checkout. |
 | `secrets.doctor` | Backend availability and paths |
 
 Only `secrets.set` echoes any part of a value, and only to a person: its
