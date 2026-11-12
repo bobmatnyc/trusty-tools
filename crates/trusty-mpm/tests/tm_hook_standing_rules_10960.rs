@@ -164,7 +164,16 @@ fn an_over_cap_rules_file_warns_and_injects_at_most_the_cap() {
         injected.len() <= 2048 && injected.ends_with('\n'),
         "{injected:?}"
     );
-    assert!(big.starts_with(injected));
+    // The last line is the in-band cut notice; the rest are whole rule lines.
+    let (rules, notice) = injected
+        .trim_end_matches('\n')
+        .rsplit_once('\n')
+        .expect("rule lines and a notice");
+    assert!(
+        notice.contains("2048-byte cap") && notice.contains("incomplete"),
+        "{notice:?}"
+    );
+    assert!(big.starts_with(&format!("{rules}\n")));
 }
 
 #[test]

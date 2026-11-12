@@ -13,8 +13,9 @@
 //!
 //! FAIL-OPEN: nothing here returns an error. An absent or blank file is a
 //! no-op. An unreadable file (permissions, invalid UTF-8, a directory) is a
-//! warning and injects nothing. A file over the cap injects its whole lines up
-//! to the cap and warns; it is never cut silently.
+//! warning and injects nothing. A file over the cap injects its whole lines
+//! plus an in-band cut notice, together within the cap, and warns the
+//! operator; it is never cut silently, to the model or to the operator.
 //! Test: `standing_rules_tests.rs`; the binary end to end in
 //! `tests/tm_hook_standing_rules_10960.rs`.
 
@@ -43,7 +44,8 @@ pub enum Load {
     Absent,
     /// Rules to inject; `warning` is set when the file was over the cap.
     Rules {
-        /// The text injected, verbatim up to the cap.
+        /// The text injected: verbatim, or over the cap its whole lines plus
+        /// the cut notice, never longer than the cap.
         text: String,
         /// The over-cap warning the operator sees, if any.
         warning: Option<String>,
@@ -70,15 +72,22 @@ pub fn load(project_dir: &Path) -> Load {
 ///
 /// Why: the hook runs on every user turn, so it reads at most `cap + 1` bytes
 /// whatever the file's size, and it must never hand the model a partial or
-/// undecodable block.
+/// undecodable block. A cut block must say so in band, or the model reads an
+/// incomplete rule set as the whole one (#10960, Architect cap ruling).
 /// What: `NotFound` or a whitespace-only file → [`Load::Absent`]. Any other
 /// open/read error, or bytes that are not UTF-8 → [`Load::Unreadable`]. At most
-/// `cap` bytes → [`Load::Rules`] with the text verbatim. More than `cap` bytes
-/// → [`Load::Rules`] holding the whole lines that fit in `cap` (nothing past
-/// the last newline at or before `cap`) and a warning naming the file, its
-/// size and the cap; a first line longer than `cap` leaves the text empty.
-/// Postcondition: a `Rules` text is never longer than `cap` bytes.
-/// Test: `an_over_cap_file_keeps_whole_lines_and_warns`,
+/// `cap` bytes → [`Load::Rules`] with the text verbatim and no notice. More
+/// than `cap` bytes → [`Load::Rules`] whose text is the whole lines that fit in
+/// `cap` minus the [`cut_notice`] length, followed by that notice, and a
+/// warning naming the file, its size and the cap. A first line too long to fit
+/// beside the notice yields the notice alone; a cap smaller than the notice
+/// yields an empty text (the operator warning still fires).
+/// Postcondition: a `Rules` text, notice included, is never longer than `cap`
+/// bytes.
+/// Test: `an_over_cap_file_keeps_whole_lines_and_an_in_band_notice`,
+/// `the_cap_boundary_is_verbatim_at_the_cap_and_noticed_one_byte_over`,
+/// `an_over_long_first_line_yields_the_notice_alone`,
+/// `an_over_cap_file_keeps_whole_lines_and_warns`,
 /// `invalid_utf8_is_unreadable_and_injects_nothing`,
 /// `a_directory_at_the_path_is_unreadable`, `a_blank_file_is_a_silent_no_op`.
 pub fn load_from(path: &Path, cap: usize) -> Load {
@@ -95,33 +104,55 @@ pub fn load_from(path: &Path, cap: usize) -> Load {
         return unreadable(path, &err.to_string());
     }
     let over = bytes.len() > cap;
-    if over {
+    // #10960: the notice's bytes count inside the cap.
+    let notice = over.then(|| cut_notice(path, cap));
+    if let Some(notice) = &notice {
         // A newline is one ASCII byte, so cutting just after it is always a
-        // UTF-8 boundary; no newline in the first `cap` bytes keeps nothing.
-        let keep = bytes[..cap]
+        // UTF-8 boundary; no newline within the budget keeps no rule lines.
+        let budget = cap.saturating_sub(notice.len());
+        let keep = bytes[..budget]
             .iter()
             .rposition(|b| *b == b'\n')
             .map_or(0, |i| i + 1);
         bytes.truncate(keep);
     }
-    let text = match String::from_utf8(bytes) {
+    let mut text = match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(err) => return unreadable(path, &format!("not valid UTF-8 ({})", err.utf8_error())),
     };
     if !over && text.trim().is_empty() {
         return Load::Absent;
     }
+    let kept = text.len();
+    if let Some(notice) = notice.filter(|n| n.len() <= cap) {
+        text.push_str(&notice);
+    }
     let warning = over.then(|| {
         let size = size.map_or_else(|| "more than".to_owned(), |n| format!("{n}"));
         format!(
             "tm: standing rules {} is {size} bytes, over the {cap}-byte cap; \
-             injected {} bytes of whole lines and dropped the rest — shorten the file",
+             injected {kept} bytes of whole lines plus a cut notice and dropped \
+             the rest — shorten the file",
             path.display(),
-            text.len()
         )
     });
     debug_assert!(text.len() <= cap, "the injected text never exceeds the cap");
     Load::Rules { text, warning }
+}
+
+/// The in-band notice appended to an over-cap block, naming `path` and `cap`.
+///
+/// Why: the model reading the block must know the rules are incomplete; the
+/// operator warning alone never reaches it (#10960).
+/// What: one bracketed line ending in a newline; its length counts inside
+/// `cap` in [`load_from`].
+/// Test: `an_over_cap_file_keeps_whole_lines_and_an_in_band_notice`.
+fn cut_notice(path: &Path, cap: usize) -> String {
+    format!(
+        "[tm: standing rules cut — {} is over the {cap}-byte cap; \
+         the rules above are incomplete]\n",
+        path.display()
+    )
 }
 
 /// The [`Load::Unreadable`] warning for `path`.

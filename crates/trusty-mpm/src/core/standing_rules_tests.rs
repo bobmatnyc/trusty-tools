@@ -69,19 +69,34 @@ fn an_unknown_event_prints_nothing() {
     assert_eq!(hook_output("", &load), None);
 }
 
+/// Split an over-cap `text` into its rule lines and its last line, the notice.
+fn split_notice(text: &str) -> (&str, &str) {
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    body.rsplit_once('\n')
+        .map_or(("", body), |(rules, notice)| {
+            (&text[..rules.len() + 1], notice)
+        })
+}
+
+/// Assert `notice` is the in-band cut notice for `path` and `cap`.
+fn assert_cut_notice(notice: &str, path: &Path, cap: usize) {
+    assert!(
+        notice.contains(&path.display().to_string())
+            && notice.contains(&format!("{cap}-byte cap"))
+            && notice.contains("incomplete"),
+        "no in-band cut notice naming the file and cap: {notice:?}"
+    );
+}
+
 #[test]
 fn an_over_cap_file_keeps_whole_lines_and_warns() {
-    let dir = project_with(b"aaaa\nbbbb\ncccc\n");
-    let Load::Rules { text, warning } = load_from(&rules_path(dir.path()), 12) else {
+    let dir = project_with(&b"aaaa\nbbbb\ncccc\n".repeat(20));
+    let Load::Rules { text, warning } = load_from(&rules_path(dir.path()), 250) else {
         panic!("over-cap rules still load");
     };
-    assert_eq!(
-        text, "aaaa\nbbbb\n",
-        "nothing past the last whole line in the cap"
-    );
     let warning = warning.expect("an over-cap warning");
     assert!(
-        warning.contains("15 bytes") && warning.contains("12-byte cap"),
+        warning.contains("300 bytes") && warning.contains("250-byte cap"),
         "{warning}"
     );
     let out = hook_output(
@@ -94,6 +109,75 @@ fn an_over_cap_file_keeps_whole_lines_and_warns() {
     .expect("a response");
     assert_eq!(out["systemMessage"], warning.as_str());
     assert!(out["hookSpecificOutput"]["additionalContext"].is_string());
+}
+
+#[test]
+fn an_over_cap_file_keeps_whole_lines_and_an_in_band_notice() {
+    let body = (0..100)
+        .map(|i| format!("rule {i:02}\n"))
+        .collect::<String>();
+    let dir = project_with(body.as_bytes());
+    let path = rules_path(dir.path());
+    let cap = 300;
+    let Load::Rules { text, .. } = load_from(&path, cap) else {
+        panic!("over-cap rules still load");
+    };
+    assert!(text.len() <= cap, "{} bytes over the {cap} cap", text.len());
+    let (rules, notice) = split_notice(&text);
+    assert_cut_notice(notice, &path, cap);
+    assert!(!rules.is_empty() && rules.ends_with('\n'), "{rules:?}");
+    assert!(body.starts_with(rules), "whole lines only: {rules:?}");
+}
+
+#[test]
+fn the_cap_boundary_is_verbatim_at_the_cap_and_noticed_one_byte_over() {
+    let at_cap = format!("{}\n", "x".repeat(63)).repeat(STANDING_RULES_CAP_BYTES / 64);
+    assert_eq!(at_cap.len(), STANDING_RULES_CAP_BYTES);
+    let dir = project_with(at_cap.as_bytes());
+    assert_eq!(
+        load(dir.path()),
+        Load::Rules {
+            text: at_cap.clone(),
+            warning: None
+        }
+    );
+
+    let over = format!("{at_cap}z");
+    let dir = project_with(over.as_bytes());
+    let Load::Rules { text, warning } = load(dir.path()) else {
+        panic!("over-cap rules still load");
+    };
+    assert!(warning.is_some(), "the operator warning stays");
+    assert!(
+        text.len() <= STANDING_RULES_CAP_BYTES,
+        "{} bytes",
+        text.len()
+    );
+    let (rules, notice) = split_notice(&text);
+    assert_cut_notice(notice, &rules_path(dir.path()), STANDING_RULES_CAP_BYTES);
+    assert!(at_cap.starts_with(rules), "whole lines only: {rules:?}");
+}
+
+#[test]
+fn an_over_long_first_line_yields_the_notice_alone() {
+    let body = format!("{}\n- b\n", "a".repeat(3000));
+    let dir = project_with(body.as_bytes());
+    let Load::Rules { text, .. } = load(dir.path()) else {
+        panic!("over-cap rules still load");
+    };
+    assert!(
+        text.len() <= STANDING_RULES_CAP_BYTES,
+        "{} bytes",
+        text.len()
+    );
+    let (rules, notice) = split_notice(&text);
+    assert_eq!(rules, "", "no partial first line");
+    assert_cut_notice(notice, &rules_path(dir.path()), STANDING_RULES_CAP_BYTES);
+    let out = hook_output("SessionStart", &load(dir.path())).expect("a response");
+    let context = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("the notice reaches the model");
+    assert!(context.contains("incomplete"), "{context}");
 }
 
 #[test]
