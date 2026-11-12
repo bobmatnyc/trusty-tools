@@ -53,7 +53,8 @@ fn the_response_injects_on_both_events() {
             .as_str()
             .expect("context");
         assert!(context.ends_with("- rule one\n"), "{context}");
-        assert!(context.contains(STANDING_RULES_REL_PATH), "{context}");
+        assert_eq!(context, format!("{STANDING_RULES_HEADER}- rule one\n"));
+        assert!(STANDING_RULES_HEADER.contains(STANDING_RULES_REL_PATH));
         assert!(out.get("systemMessage").is_none(), "{out}");
         assert!(out.get("decision").is_none() && out.get("continue").is_none());
     }
@@ -118,22 +119,40 @@ fn an_over_cap_file_keeps_whole_lines_and_an_in_band_notice() {
         .collect::<String>();
     let dir = project_with(body.as_bytes());
     let path = rules_path(dir.path());
-    let cap = 300;
+    let cap = 400;
     let Load::Rules { text, .. } = load_from(&path, cap) else {
         panic!("over-cap rules still load");
     };
-    assert!(text.len() <= cap, "{} bytes over the {cap} cap", text.len());
+    let whole = STANDING_RULES_HEADER.len() + text.len();
+    assert!(whole <= cap, "{whole} bytes over the {cap} cap");
     let (rules, notice) = split_notice(&text);
     assert_cut_notice(notice, &path, cap);
     assert!(!rules.is_empty() && rules.ends_with('\n'), "{rules:?}");
     assert!(body.starts_with(rules), "whole lines only: {rules:?}");
 }
 
+/// The `additionalContext` [`hook_output`] builds for `load`.
+fn context_of(load: &Load) -> String {
+    let out = hook_output("UserPromptSubmit", load).expect("a response");
+    out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("additionalContext")
+        .to_owned()
+}
+
 #[test]
 fn the_cap_boundary_is_verbatim_at_the_cap_and_noticed_one_byte_over() {
-    let at_cap = format!("{}\n", "x".repeat(63)).repeat(STANDING_RULES_CAP_BYTES / 64);
-    assert_eq!(at_cap.len(), STANDING_RULES_CAP_BYTES);
+    // #10960: the cap bounds header plus rules, so the file's room is smaller.
+    let room = STANDING_RULES_CAP_BYTES - STANDING_RULES_HEADER.len();
+    let line = format!("{}\n", "x".repeat(39));
+    let at_cap = format!("{}{}", line.repeat(room / 40), "\n".repeat(room % 40));
+    assert_eq!(at_cap.len(), room);
     let dir = project_with(at_cap.as_bytes());
+    assert_eq!(
+        context_of(&load(dir.path())).len(),
+        STANDING_RULES_CAP_BYTES,
+        "a file filling the room arrives whole, exactly at the cap"
+    );
     assert_eq!(
         load(dir.path()),
         Load::Rules {
@@ -148,10 +167,14 @@ fn the_cap_boundary_is_verbatim_at_the_cap_and_noticed_one_byte_over() {
         panic!("over-cap rules still load");
     };
     assert!(warning.is_some(), "the operator warning stays");
+    let context = context_of(&Load::Rules {
+        text: text.clone(),
+        warning,
+    });
     assert!(
-        text.len() <= STANDING_RULES_CAP_BYTES,
-        "{} bytes",
-        text.len()
+        context.len() <= STANDING_RULES_CAP_BYTES,
+        "the whole context is {} bytes",
+        context.len()
     );
     let (rules, notice) = split_notice(&text);
     assert_cut_notice(notice, &rules_path(dir.path()), STANDING_RULES_CAP_BYTES);
@@ -166,7 +189,7 @@ fn an_over_long_first_line_yields_the_notice_alone() {
         panic!("over-cap rules still load");
     };
     assert!(
-        text.len() <= STANDING_RULES_CAP_BYTES,
+        STANDING_RULES_HEADER.len() + text.len() <= STANDING_RULES_CAP_BYTES,
         "{} bytes",
         text.len()
     );
@@ -196,7 +219,7 @@ fn an_over_cap_first_line_injects_nothing_but_warns() {
 fn a_file_exactly_at_the_cap_is_not_over() {
     let dir = project_with(b"abc\n");
     assert_eq!(
-        load_from(&rules_path(dir.path()), 4),
+        load_from(&rules_path(dir.path()), STANDING_RULES_HEADER.len() + 4),
         Load::Rules {
             text: "abc\n".to_owned(),
             warning: None

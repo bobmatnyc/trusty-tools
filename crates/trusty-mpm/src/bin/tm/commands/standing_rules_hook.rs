@@ -70,7 +70,8 @@ pub(crate) fn standing_rules_hook() {
 /// [`standing_rules::load`] over `CLAUDE_PROJECT_DIR` and
 /// [`standing_rules::hook_output`] for the payload's `hook_event_name`; a
 /// `systemMessage` in that output is also returned as the stderr line.
-/// Test: `a_pm_session_gets_no_rules`, `an_unreadable_rules_file_warns_and_the_turn_proceeds`.
+/// Test: `a_pm_session_gets_no_rules`, `an_unreadable_rules_file_warns_and_the_turn_proceeds`,
+/// `an_unreadable_payload_warns_and_injects_nothing`.
 pub(crate) fn respond(
     env: impl Fn(&str) -> Option<OsString>,
     stdin: Option<String>,
@@ -108,3 +109,7 @@ pub(crate) fn respond(
         stdout: Some(out.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "standing_rules_hook_tests.rs"]
+mod tests;

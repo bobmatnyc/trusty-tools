@@ -16,6 +16,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
 
+/// The line ahead of the rules in `additionalContext`.
+const HEADER: &str = "Standing owner rules (local/standing-rules.md):\n";
+
 /// The rules every test writes.
 const RULES: &str = "- Every reply to the owner carries one Fable-use line.\n\
                      - Ordinary cases first; no extra verification paperwork.\n";
@@ -120,9 +123,10 @@ fn an_architect_session_gets_the_rules_at_resume_and_per_turn() {
         let context = out["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("additionalContext");
-        assert!(
-            context.ends_with(RULES),
-            "verbatim rules on {event}: {context}"
+        assert_eq!(
+            context,
+            format!("{HEADER}{RULES}"),
+            "verbatim rules on {event}"
         );
         assert!(out.get("systemMessage").is_none(), "{out}");
         assert!(!stderr.contains("standing rules"), "{stderr}");
@@ -159,11 +163,14 @@ fn an_over_cap_rules_file_warns_and_injects_at_most_the_cap() {
     let context = out["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .expect("the lines within the cap");
-    let injected = context.split_once('\n').map_or("", |(_, rest)| rest);
+    // #10960: the cap bounds the whole injected string, header included.
     assert!(
-        injected.len() <= 2048 && injected.ends_with('\n'),
-        "{injected:?}"
+        context.len() <= 2048,
+        "{} bytes: {context:?}",
+        context.len()
     );
+    let injected = context.strip_prefix(HEADER).expect("the header first");
+    assert!(injected.ends_with('\n'), "{injected:?}");
     // The last line is the in-band cut notice; the rest are whole rule lines.
     let (rules, notice) = injected
         .trim_end_matches('\n')

@@ -6,7 +6,8 @@
 //! the owner maintains, injected at every session start and on every user turn,
 //! keeps those rules in resident context.
 //! What: [`load`] reads `<project>/`[`STANDING_RULES_REL_PATH`] under the
-//! [`STANDING_RULES_CAP_BYTES`] cap and returns a [`Load`];
+//! [`STANDING_RULES_CAP_BYTES`] cap, which bounds the whole injected context
+//! ([`STANDING_RULES_HEADER`] plus the rules), and returns a [`Load`];
 //! [`hook_output`] turns it into the `SessionStart` / `UserPromptSubmit` hook
 //! response. `tm hook --standing-rules` is the only caller; it is registered
 //! for Architect sessions only (`session_launch::architect_hooks`).
@@ -31,8 +32,14 @@ use serde_json::{Value, json};
 /// What: `local/standing-rules.md`, plain Markdown, injected verbatim.
 pub const STANDING_RULES_REL_PATH: &str = "local/standing-rules.md";
 
-/// The injected-size cap, in bytes (owner-approved fix, #10960).
+/// The injected-size cap, in bytes (owner-approved fix, #10960): the whole
+/// `additionalContext` — [`STANDING_RULES_HEADER`], the rules and any cut
+/// notice — is never longer than this.
 pub const STANDING_RULES_CAP_BYTES: usize = 2048;
+
+/// The line [`hook_output`] puts ahead of the rules; it names
+/// [`STANDING_RULES_REL_PATH`] and counts inside [`STANDING_RULES_CAP_BYTES`].
+pub const STANDING_RULES_HEADER: &str = "Standing owner rules (local/standing-rules.md):\n";
 
 /// The two hook events the block is injected on.
 pub const STANDING_RULES_EVENTS: [&str; 2] = ["SessionStart", "UserPromptSubmit"];
@@ -44,8 +51,9 @@ pub enum Load {
     Absent,
     /// Rules to inject; `warning` is set when the file was over the cap.
     Rules {
-        /// The text injected: verbatim, or over the cap its whole lines plus
-        /// the cut notice, never longer than the cap.
+        /// The text injected after [`STANDING_RULES_HEADER`]: verbatim, or
+        /// over the cap its whole lines plus the cut notice; header and text
+        /// together are never longer than the cap.
         text: String,
         /// The over-cap warning the operator sees, if any.
         warning: Option<String>,
@@ -68,22 +76,25 @@ pub fn load(project_dir: &Path) -> Load {
     load_from(&rules_path(project_dir), STANDING_RULES_CAP_BYTES)
 }
 
-/// Read `path` under a `cap`-byte limit.
+/// Read `path` under a `cap`-byte limit on the whole injected context.
 ///
-/// Why: the hook runs on every user turn, so it reads at most `cap + 1` bytes
+/// Why: the hook runs on every user turn, so it reads a bounded prefix
 /// whatever the file's size, and it must never hand the model a partial or
 /// undecodable block. A cut block must say so in band, or the model reads an
 /// incomplete rule set as the whole one (#10960, Architect cap ruling).
-/// What: `NotFound` or a whitespace-only file → [`Load::Absent`]. Any other
+/// What: the text's room is `cap` minus [`STANDING_RULES_HEADER`] (#10960:
+/// the header counts inside the cap); at most `room + 1` bytes are read.
+/// `NotFound` or a whitespace-only file → [`Load::Absent`]. Any other
 /// open/read error, or bytes that are not UTF-8 → [`Load::Unreadable`]. At most
-/// `cap` bytes → [`Load::Rules`] with the text verbatim and no notice. More
-/// than `cap` bytes → [`Load::Rules`] whose text is the whole lines that fit in
-/// `cap` minus the [`cut_notice`] length, followed by that notice, and a
+/// `room` bytes → [`Load::Rules`] with the text verbatim and no notice. More
+/// than `room` bytes → [`Load::Rules`] whose text is the whole lines that fit
+/// in `room` minus the [`cut_notice`] length, followed by that notice, and a
 /// warning naming the file, its size and the cap. A first line too long to fit
-/// beside the notice yields the notice alone; a cap smaller than the notice
+/// beside the notice yields the notice alone; a room smaller than the notice
 /// yields an empty text (the operator warning still fires).
-/// Postcondition: a `Rules` text, notice included, is never longer than `cap`
-/// bytes.
+/// Postcondition: a `Rules` text, notice included, is never longer than
+/// `room`, so header plus text is never longer than `cap` when the text is
+/// non-empty.
 /// Test: `an_over_cap_file_keeps_whole_lines_and_an_in_band_notice`,
 /// `the_cap_boundary_is_verbatim_at_the_cap_and_noticed_one_byte_over`,
 /// `an_over_long_first_line_yields_the_notice_alone`,
@@ -97,19 +108,20 @@ pub fn load_from(path: &Path, cap: usize) -> Load {
         Err(err) => return unreadable(path, &err.to_string()),
     };
     let size = file.metadata().map(|m| m.len()).ok();
-    let mut bytes = Vec::with_capacity(cap.saturating_add(1));
-    // `cap + 1` bytes are enough to tell "at the cap" from "over it".
-    let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
+    let room = cap.saturating_sub(STANDING_RULES_HEADER.len());
+    let mut bytes = Vec::with_capacity(room.saturating_add(1));
+    // `room + 1` bytes are enough to tell "at the cap" from "over it".
+    let limit = u64::try_from(room).unwrap_or(u64::MAX).saturating_add(1);
     if let Err(err) = file.take(limit).read_to_end(&mut bytes) {
         return unreadable(path, &err.to_string());
     }
-    let over = bytes.len() > cap;
+    let over = bytes.len() > room;
     // #10960: the notice's bytes count inside the cap.
     let notice = over.then(|| cut_notice(path, cap));
     if let Some(notice) = &notice {
         // A newline is one ASCII byte, so cutting just after it is always a
         // UTF-8 boundary; no newline within the budget keeps no rule lines.
-        let budget = cap.saturating_sub(notice.len());
+        let budget = room.saturating_sub(notice.len());
         let keep = bytes[..budget]
             .iter()
             .rposition(|b| *b == b'\n')
@@ -124,19 +136,22 @@ pub fn load_from(path: &Path, cap: usize) -> Load {
         return Load::Absent;
     }
     let kept = text.len();
-    if let Some(notice) = notice.filter(|n| n.len() <= cap) {
+    if let Some(notice) = notice.filter(|n| n.len() <= room) {
         text.push_str(&notice);
     }
     let warning = over.then(|| {
         let size = size.map_or_else(|| "more than".to_owned(), |n| format!("{n}"));
         format!(
-            "tm: standing rules {} is {size} bytes, over the {cap}-byte cap; \
-             injected {kept} bytes of whole lines plus a cut notice and dropped \
-             the rest — shorten the file",
+            "tm: standing rules {} is {size} bytes; with its header that is \
+             over the {cap}-byte cap; injected {kept} bytes of whole lines plus \
+             a cut notice and dropped the rest — shorten the file",
             path.display(),
         )
     });
-    debug_assert!(text.len() <= cap, "the injected text never exceeds the cap");
+    debug_assert!(
+        text.len() <= room,
+        "header plus injected text never exceeds the cap"
+    );
     Load::Rules { text, warning }
 }
 
@@ -145,11 +160,11 @@ pub fn load_from(path: &Path, cap: usize) -> Load {
 /// Why: the model reading the block must know the rules are incomplete; the
 /// operator warning alone never reaches it (#10960).
 /// What: one bracketed line ending in a newline; its length counts inside
-/// `cap` in [`load_from`].
+/// the cap in [`load_from`].
 /// Test: `an_over_cap_file_keeps_whole_lines_and_an_in_band_notice`.
 fn cut_notice(path: &Path, cap: usize) -> String {
     format!(
-        "[tm: standing rules cut — {} is over the {cap}-byte cap; \
+        "[tm: standing rules cut — {} does not fit the {cap}-byte cap; \
          the rules above are incomplete]\n",
         path.display()
     )
@@ -169,12 +184,14 @@ fn unreadable(path: &Path, reason: &str) -> Load {
 /// context on `SessionStart` and `UserPromptSubmit`, and shows `systemMessage`
 /// to the operator; a warning there is visible without blocking the turn.
 /// What: an event outside [`STANDING_RULES_EVENTS`] or [`Load::Absent`] →
-/// `None`. [`Load::Rules`] → `additionalContext` holding a one-line header
-/// naming the file and the text verbatim, plus `systemMessage` when the load
+/// `None`. [`Load::Rules`] → `additionalContext` holding
+/// [`STANDING_RULES_HEADER`] and the text verbatim (within the cap when the
+/// text came from [`load_from`]), plus `systemMessage` when the load
 /// warned (a text cut to nothing injects no context). [`Load::Unreadable`] →
 /// `systemMessage` only. No response carries `decision` or `continue`, so
 /// none can block the turn.
 /// Test: `the_response_injects_on_both_events`,
+/// `the_cap_boundary_is_verbatim_at_the_cap_and_noticed_one_byte_over`,
 /// `an_unreadable_file_warns_and_injects_nothing`,
 /// `an_unknown_event_prints_nothing`.
 pub fn hook_output(event: &str, load: &Load) -> Option<Value> {
@@ -187,7 +204,7 @@ pub fn hook_output(event: &str, load: &Load) -> Option<Value> {
         Load::Rules { text, warning } => {
             let mut out = serde_json::Map::new();
             if !text.trim().is_empty() {
-                let context = format!("Standing owner rules ({STANDING_RULES_REL_PATH}):\n{text}");
+                let context = format!("{STANDING_RULES_HEADER}{text}");
                 out.insert(
                     "hookSpecificOutput".to_owned(),
                     json!({ "hookEventName": event, "additionalContext": context }),
