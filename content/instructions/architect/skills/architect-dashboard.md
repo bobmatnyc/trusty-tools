@@ -3,7 +3,7 @@ name: architect-dashboard
 description: Architect skill. Load at the end of every pass that changed a session, goal or owner item, when the owner says "dashboard" (terminal or Remote Control), when an owner write from the dashboard page waits, or when the dashboard is set up on a new host. Covers the served page, the data model, the per-pass update, the answer flow, the owner controls and the technical level of item text. Architect only.
 user-invocable: true
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 category: monitoring
 tags: [architect, dashboard, owner, store]
 effort: medium
@@ -84,8 +84,9 @@ control, and the Live page follows it.
     add the answer to the item's `updates`, and the item returns to the open
     list.
   - `brief` ("<project>/docs/briefs/<file>.md"): every D or A item that is not
-    truly simple links a readable brief when it is created; the Architect's own
-    briefs go to `local/briefs/`. An item without one offers "Ask for a brief",
+    truly simple, and every item written below `senior-engineer` (see
+    Technical level below), links a readable brief when it is created; the
+    Architect's own briefs go to `local/briefs/`. An item without one offers "Ask for a brief",
     which writes `brief_request`: write the brief the same pass and set `brief`.
   - `level_override` (one of the six technical levels): set by a "more
     detail" request on this item and removed when it closes; see
