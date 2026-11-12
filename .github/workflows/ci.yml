@@ -5,7 +5,7 @@
 #              below to consult (issue #4468: docs-only PRs ran the full Rust
 #              build). The exemption is applied to STEPS, never to the trigger
 #              or to the job, so required checks always report.
-#   fmt      – cargo fmt --all --check (stable)
+#   fmt      – cargo fmt --all --check (pinned 1.99.1)
 #   clippy   – cargo clippy --workspace --all-targets -D warnings (1.98.1, SKIP_UI_BUILD=1)
 #   test-shard – cargo nextest run --workspace, split 8 ways (stable,
 #              SKIP_UI_BUILD=1, full clone for git tests, .NET SDK installed
@@ -528,7 +528,7 @@ jobs:
           bash scripts/ci-gate-relevance.sh tmux-targets > /dev/null
 
   # --------------------------------------------------------------------------
-  # fmt: enforce cargo fmt --all --check (stable toolchain + rustfmt component)
+  # fmt: enforce cargo fmt --all --check (pinned 1.99.1 toolchain + rustfmt component)
   #
   # The instruction floor guard below is NOT gated on the docs-only detection:
   # it guards instruction/markdown content, which is exactly what a docs-only
@@ -549,9 +549,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install stable toolchain with rustfmt
+      - name: Install pinned 1.99.1 toolchain with rustfmt
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        # ar-T95: pinned so a stable bump (1.100.0 reformatted 3 trusty-architect
+        # files) cannot fail Format check on every PR. 1.99.1 accepts the tree
+        # both before and after that reformat. Bump deliberately, with a
+        # `cargo fmt --all` in the same PR.
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt
 
