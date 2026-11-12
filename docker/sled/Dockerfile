@@ -14,15 +14,11 @@
 # ---- stage 1: verify and unpack the tarballs ------------------------------
 FROM ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS unpack
 COPY dl/*.tar.gz dl/*.tar.gz.sha256 /dl/
-# Second sha256 check inside the build; the stage fails if any tarball differs.
-RUN set -eux; \
-    cd /dl; \
-    sha256sum -c ./*.sha256; \
-    mkdir -p /out /x; \
-    for t in /dl/*.tar.gz; do tar -xzf "$t" -C /x; done; \
-    for b in tm trusty-mpm trusty-memory trusty-search trusty-embedderd trusty-embedderd-py; do \
-        install -m 0755 "$(find /x -type f -name "$b" | head -n 1)" /out/"$b"; \
-    done
+COPY tarballs.pin pinned-tarballs.sh /pin/
+# #11156 B4: extract only the tarballs tarballs.pin names, each sha256-checked;
+# fail on an unpinned tarball, a missing .sha256 or a binary found twice.
+RUN bash /pin/pinned-tarballs.sh unpack /pin/tarballs.pin /dl /out \
+        tm trusty-mpm trusty-memory trusty-search trusty-embedderd trusty-embedderd-py
 
 # ---- stage 2: Claude Code CLI (as docker/cloudtest) -------------------------
 FROM ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS claude
