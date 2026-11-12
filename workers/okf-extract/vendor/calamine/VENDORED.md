@@ -25,3 +25,5 @@ built by the worker and is not ported to zip 9.
 ## Removal
 
 Remove when xberg accepts calamine >= 0.37.
+Delete the 9 `workers/okf-extract/vendor/calamine/...` rows from
+`.line-cap-allowlist.tsv` together with `vendor/`.
