@@ -222,8 +222,11 @@ fn lenient_unresolved(
         .find(|c| c.role == Role::Positional)
         .or_else(|| candidates.iter().find(|c| c.role == Role::Stdin));
     let loaded = candidates.iter().filter(|c| c.role == Role::Loaded);
+    // #10672: an operand in doubt may be the script; it is held to the same test.
+    let doubtful = candidates.iter().filter(|c| c.role == Role::Doubtful);
     loaded
         .chain(script)
+        .chain(doubtful)
         .filter(|c| c.interpreter.is_some() && existing_paths(c.lookup(), bases).is_empty())
         .find(|c| {
             let word = expand(c.lookup(), bases);

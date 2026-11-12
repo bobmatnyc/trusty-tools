@@ -4,7 +4,8 @@
 //! Why: an interpreter runs its FIRST positional operand; the operands after it
 //! are the script's data. The guard judged the first operand that existed, so
 //! `$S/venv/bin/python $S/build.py in.docx` skipped the computed `$S/build.py`
-//! and refused the `.docx` as a script that is not text (#10672).
+//! and refused the `.docx` as a script that is not text, and
+//! `python3 missing.py notes.txt` judged the text file and allowed (#10672).
 //! What: [`script_operand`] picks the script word, [`locate`] and
 //! [`fd_pipe_script`] read it, and [`resolve_script_operand`] gives a leading
 //! `$NAME` the literal an earlier plain assignment in the same text set.
@@ -18,34 +19,20 @@ use crate::commands::pm_guard_bash::{split_shell_segments_raw, tokenize};
 
 /// The positional candidate the interpreter runs as its script, if any.
 ///
-/// What: the first positional when it exists or is an fd pipe; the operands
-/// after it are data (#10672). A first word that names no file — a literal
-/// that is missing, or a word computed at run time that
-/// [`resolve_script_operand`] could not resolve — falls back to the first
-/// later operand that does: an option value the guard does not model
-/// (`bash -o pipefail s.sh`) or a wrapper it cannot measure moves the script
-/// right, and judging the later file is the refusing direction. A computed
-/// first word still refuses afterwards (`unresolved`).
+/// What: the first positional operand after the interpreter's options and
+/// their values (`operands::interpreter_candidates`). #10672: there is no
+/// fallback — a first word that names no file is still the script, and
+/// `unresolved` refuses it by name; a later data file never stands in.
 /// Test: `a_venv_python_script_through_a_variable_allows_matt_10672`,
-/// `a_venv_python_credential_script_or_docx_script_refuses_10672`,
+/// `an_unresolved_script_does_not_fall_through_to_data_10672`,
 /// `an_untracked_variable_script_refuses_10672`.
-pub(super) fn script_operand<'a>(
-    candidates: &'a [Candidate],
-    bases: &[PathBuf],
-) -> Option<&'a Candidate> {
-    let usable = |c: &Candidate| {
-        is_fd_pipe(&expand(c.lookup(), bases)) || !existing_paths(c.lookup(), bases).is_empty()
-    };
-    let mut positional = candidates.iter().filter(|c| c.role == Role::Positional);
-    let first = positional.next()?;
-    if usable(first) {
-        return Some(first);
-    }
-    positional.find(|c| usable(c))
+pub(super) fn script_operand(candidates: &[Candidate]) -> Option<&Candidate> {
+    candidates.iter().find(|c| c.role == Role::Positional)
 }
 
 /// The existing files the candidates name: every loaded file, the script
-/// operand ([`script_operand`]), else every stdin file.
+/// operand ([`script_operand`]) else every stdin file, and any operand in
+/// doubt (`Role::Doubtful`, #10672).
 pub(super) fn locate(
     candidates: &[Candidate],
     bases: &[PathBuf],
@@ -57,18 +44,24 @@ pub(super) fn locate(
             .collect::<Vec<_>>()
     };
     let loaded = candidates.iter().filter(|c| c.role == Role::Loaded);
-    let script: Vec<&Candidate> = match script_operand(candidates, bases) {
+    let script: Vec<&Candidate> = match script_operand(candidates) {
         Some(c) => vec![c],
         None => candidates
             .iter()
             .filter(|c| c.role == Role::Stdin)
             .collect(),
     };
-    loaded.chain(script).flat_map(found).collect()
+    let doubtful = candidates.iter().filter(|c| c.role == Role::Doubtful);
+    loaded
+        .chain(script)
+        .chain(doubtful)
+        .flat_map(found)
+        .collect()
 }
 
 /// The fd-pipe candidate [`locate`] would pick if the pipe existed: any
-/// loaded file, the script operand when it is a pipe, else a stdin pipe.
+/// loaded file, the script operand when it is a pipe, else a stdin pipe,
+/// else an operand in doubt (#10672).
 /// #10748: before, the guard probed its own fd N, so such a pipe was read and
 /// refused; this keeps it refused, as `Unread::Unresolvable`.
 /// Test: `an_fd_pipe_after_a_missing_script_refuses_10748`.
@@ -78,11 +71,16 @@ pub(super) fn fd_pipe_script<'a>(
 ) -> Option<&'a Candidate> {
     let fd = |c: &Candidate| is_fd_pipe(&expand(c.lookup(), bases));
     let loaded = candidates.iter().find(|c| c.role == Role::Loaded && fd(c));
-    let script = match script_operand(candidates, bases) {
+    let script = match script_operand(candidates) {
         Some(c) => fd(c).then_some(c),
         None => candidates.iter().find(|c| c.role == Role::Stdin && fd(c)),
     };
-    loaded.or(script)
+    let doubtful = || {
+        candidates
+            .iter()
+            .find(|c| c.role == Role::Doubtful && fd(c))
+    };
+    loaded.or(script).or_else(doubtful)
 }
 
 /// Resolve an interpreter's computed first operand from a plain assignment.
