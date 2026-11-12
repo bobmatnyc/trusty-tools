@@ -480,6 +480,13 @@ pub(super) async fn commit_parsed_and_finalize(
                 );
             }
         }
+        // #11087: a test parks here, after the delete and before the insert.
+        #[cfg(test)]
+        super::corpus_swap::detach_hook::at(
+            &ctx.index_id.0,
+            super::corpus_swap::detach_hook::Window::BatchCommit,
+        )
+        .await;
         // Filter the parsed batch to exclude files whose remove failed.
         let parsed = if remove_failures > 0 {
             // #9212: the remove fails closed, so a refused delete left the

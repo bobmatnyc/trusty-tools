@@ -22,6 +22,9 @@ pub(crate) enum Window {
     Abort,
     /// `commit_staged_corpus_swap`, after the staging store is released.
     Promotion,
+    /// #11087: `commit_parsed_and_finalize`, after the pre-commit delete and
+    /// before the insert.
+    BatchCommit,
 }
 
 struct Park {
@@ -60,7 +63,8 @@ pub(crate) fn park(index_id: &str, window: Window) -> Parked {
 }
 
 /// Park here when a test registered `window` for `index_id`.
-pub(super) async fn at(index_id: &str, window: Window) {
+// #11087: reindex-wide, so the batch commit can park too.
+pub(in crate::service::reindex) async fn at(index_id: &str, window: Window) {
     let park = parks()
         .lock()
         .unwrap_or_else(|e| e.into_inner())

@@ -1233,3 +1233,148 @@ async fn a_dropped_runs_rollback_whose_bump_fails_keeps_refusing_puts() {
         "a rollback whose bump failed must keep refusing puts: {reply:?}"
     );
 }
+
+/// Wait until `progress` has pushed a `skip` event for `file`.
+async fn skipped(progress: &ReindexProgress, file: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let events = progress.events.lock().await.clone();
+        let seen = events.iter().any(|e| {
+            serde_json::from_str::<serde_json::Value>(e)
+                .is_ok_and(|v| v["event"] == "skip" && v["file"] == file)
+        });
+        if seen {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the run never skipped {file}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// Why: #11087 — a staged batch deletes a changed file's chunks and inserts
+/// the new ones in separate redb transactions, and does not drop the hash.
+/// A SIGTERM between them leaves a staged hash with no chunks, so the resume
+/// skips the file forever (`checkpoint`: a staged hash implies its chunks).
+/// What: park a staged run's `b.rs` batch on the pause, write `b.rs` into
+/// staging as the watcher does, drain the pause as shutdown does, and stop
+/// the commit after its delete. Keep the staging file as the exit leaves it,
+/// restart, resume, and assert `b.rs` is served and every staged hash has
+/// chunks. Fails before the fix: the resume skips `b.rs`, which has none.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_term_between_a_batch_delete_and_insert_leaves_the_file_served_after_resume() {
+    const B: &str = "b.rs";
+    const B_BODY: &str = "pub fn beta_11087() -> u8 {\n    2\n}\n";
+    let id = "staged-hash-without-chunks-11087";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::write(
+        root.join("a.rs"),
+        "pub fn alpha_10738() -> u8 {\n    1\n}\n",
+    )
+    .expect("a.rs");
+    let _ = index_identity::retire(id);
+    let permits = super::semaphore::index_semaphore(&IndexId::new(id));
+    let handle = walkable_index(id, &root);
+    reindex(&handle, false).await;
+    let live = root
+        .join(crate::service::colocated_storage::COLOCATED_DIR_NAME)
+        .join(crate::service::storage_layout::REDB_FILE);
+
+    // A staged run parks its batch on the pause after hash-checking b.rs.
+    std::fs::write(root.join(B), B_BODY).expect("b.rs");
+    handle.embedding_pause.pause();
+    let Parked { reached, release } = detach_hook::park(id, Window::BatchCommit);
+    let progress = Arc::new(ReindexProgress::new());
+    let run = spawn_reindex_awaitable(handle.clone(), progress.clone(), false);
+    skipped(&progress, "a.rs").await;
+    let staged = handle
+        .indexer
+        .read()
+        .await
+        .corpus_store()
+        .expect("staging attached");
+    assert_ne!(staged.path(), live, "test setup: staging is attached");
+    drop(staged);
+
+    // The watcher writes b.rs into staging: chunks, then the hash.
+    push(&handle, B, B_BODY).await;
+    assert!(
+        corpus_holds(&handle, B).await,
+        "test setup: the watcher's write is in staging"
+    );
+
+    // SIGTERM: the drain releases the batch; the process exits after the
+    // batch's delete and before its insert. Keep staging as the exit leaves it.
+    handle.embedding_pause.drain();
+    reach(reached).await;
+    let tmp_path =
+        crate::service::colocated_storage::colocated_redb_tmp_path(&root).expect("tmp path");
+    assert!(tmp_path.exists(), "test setup: the staging file is on disk");
+    let kept = tempfile::tempdir().expect("kept dir");
+    let kept_path = kept.path().join("index.redb.tmp");
+    std::fs::copy(&tmp_path, &kept_path).expect("keep the staging file");
+    drop(release);
+    let _ = run.await;
+    rollback_settled(&permits).await;
+
+    // A restart: every handle and the process-local state go; the staging
+    // file the exit left is back in its slot.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while Arc::strong_count(&handle) > 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped run never released the handle"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    drop(handle);
+    index_identity::forget_process_state(id);
+    super::hash::file_hashes().remove(&IndexId::new(id));
+    std::fs::copy(&kept_path, &tmp_path).expect("restore the staging file");
+
+    // The resume: adopt the leftover staging corpus, then reindex.
+    let handle = walkable_index(id, &root);
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
+    let events = progress.events.lock().await.clone();
+    let start = events
+        .iter()
+        .map(|e| serde_json::from_str::<serde_json::Value>(e).expect("event json"))
+        .find(|e| e["event"] == "start")
+        .expect("a start event");
+    assert_eq!(
+        start["resumed"], true,
+        "test setup: the run resumed: {start}"
+    );
+
+    // #11087: every staged hash must have chunks behind it.
+    let indexer = handle.indexer.read().await;
+    let corpus = indexer.corpus_store().expect("attached");
+    let mut hashes_without_chunks = Vec::new();
+    for (file, _) in corpus.load_file_hashes().expect("hashes") {
+        let content = std::fs::read_to_string(root.join(&file)).unwrap_or_default();
+        let chunkless = crate::core::indexer::IndexFileOutcome::classify(&file, &content, 0)
+            .zero_chunks_is_final();
+        if !chunkless && indexer.file_chunk_ids(&file).await.expect("ids").is_empty() {
+            hashes_without_chunks.push(file);
+        }
+    }
+    drop(corpus);
+    drop(indexer);
+    assert!(
+        corpus_holds(&handle, B).await,
+        "#11087: b.rs must be served after the resume; hashes with no chunks: \
+         {hashes_without_chunks:?}; events: {events:?}"
+    );
+    assert!(
+        hashes_without_chunks.is_empty(),
+        "#11087: a staged hash implies its staged chunks: {hashes_without_chunks:?}"
+    );
+}
