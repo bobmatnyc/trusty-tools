@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use trusty_common::console_metrics::ConsoleMetricsReport;
 
+use super::machine::MachineFeeds;
 use super::services::ServiceId;
 use crate::tui::architect::{self, ArchitectAction, ArchitectState, Tab};
 
@@ -151,6 +152,8 @@ pub struct HomeState {
     pub should_exit: bool,
     /// The Architect view's tab, selection and last fetch.
     pub architect: ArchitectState,
+    /// #10942: the last `console.machine_status` and `console.history` results.
+    pub machine: MachineFeeds,
 }
 
 impl Default for HomeState {
@@ -166,6 +169,7 @@ impl Default for HomeState {
             metrics: HashMap::new(),
             should_exit: false,
             architect: ArchitectState::default(),
+            machine: MachineFeeds::default(),
         }
     }
 }
