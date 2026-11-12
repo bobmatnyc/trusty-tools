@@ -99,9 +99,12 @@ fn assign_parse_source_accepts_both_forms_and_refuses_bad_ones() {
     }
     let unpinned = parse_source("secret://GH_PAT").expect_err("unpinned");
     assert_eq!(unpinned.to_string(), SRC_UNPINNED);
-    // The refusal never quotes what was typed: it may be a pasted value.
-    let typed = format!("trusty/acme:{VALUE}");
-    let err = parse_source(&typed).expect_err("value as key").to_string();
+    // The refusal never quotes what was typed: it may be a pasted value. A
+    // space makes it no key; an `Ok` is never printed.
+    let typed = format!("trusty/acme:{VALUE} x");
+    let err = parse_source(&typed).err().map(|e| e.to_string());
+    let err = err.unwrap_or_default();
+    assert!(err.starts_with(SRC_FORMS), "a pasted value parsed as a key");
     assert!(!err.contains(MIDDLE), "{err}");
 }
 
