@@ -9,11 +9,13 @@ use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{Value, json};
 
 use super::data::{DashSnapshot, STORE_NOT_SET, fetch_dashboard, snapshot_from};
-use super::live::{LiveAgent, LiveSession, LiveSnapshot, Record, fetch_live, group, live_lines};
+use super::live::{
+    LiveAgent, LiveSession, LiveSnapshot, Record, fetch_live, group, live_lines, merge,
+};
 use super::{
     ArchitectAction, ArchitectState, ArchitectUpdate, Due, Fetch, REFRESH, Tab, handle_key,
 };
-use crate::client::{DaemonClient, SessionRow};
+use crate::client::{DaemonClient, ManagedSessionSummary, SessionRow};
 
 /// Apply one dashboard and one Live result, as two fetch tasks would.
 fn feed(s: &mut ArchitectState, dashboard: Result<DashSnapshot, String>, live: LiveSnapshot) {
@@ -256,7 +258,7 @@ fn group_attaches_agents_by_owner_label() {
             5,
         ),
     ];
-    let snap = group(&rows, &records);
+    let snap = group(merge(&rows, &[]), &records);
     assert_eq!(snap.sessions.len(), 2);
     let agents: Vec<&str> = snap.sessions[0]
         .agents
@@ -267,6 +269,41 @@ fn group_attaches_agents_by_owner_label() {
     assert_eq!(snap.sessions[0].id, ID_A);
     assert!(snap.sessions[1].agents.is_empty());
     assert_eq!(snap.sessions[1].status, "Detached");
+}
+
+fn managed(id: &str, name: &str, state: &str, cwd: &str, deleted: bool) -> ManagedSessionSummary {
+    serde_json::from_value(json!({
+        "id": id, "name": name, "state": state, "cwd": cwd, "deleted": deleted
+    }))
+    .expect("managed summary")
+}
+
+// #11104: a managed session is in `mpm.managed.list`, not the hook registry.
+#[test]
+fn merge_lists_managed_sessions_the_hook_registry_lacks() {
+    const ID_C: &str = "9d5e3e1f-0a2b-4c39-8b7d-6f1c1f2e4c5d";
+    let rows = [session_row(ID_A, "tm-03", "/w/a", "Active")];
+    let list = [
+        managed(ID_A, "tm-03", "active", "/w/a", false),
+        managed(ID_B, "tm-07", "active", "/w/m", false),
+        managed(ID_C, "tm-09", "stopped", "/w/z", true),
+    ];
+    let records = [record("engineer", "session `tm-07`", "running", 90)];
+    let snap = group(merge(&rows, &list), &records);
+    let names: Vec<&str> = snap.sessions.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["tm-03", "tm-07"],
+        "managed added once, tombstone skipped"
+    );
+    let m = &snap.sessions[1];
+    assert_eq!((m.id.as_str(), m.workdir.as_str()), (ID_B, "/w/m"));
+    assert_eq!(m.agents.len(), 1, "agents attach to a managed session");
+    let mut s = ArchitectState::default();
+    feed(&mut s, Ok(sample()), snap);
+    s.open(Tab::Live);
+    let screen = draw(&s);
+    assert!(screen.contains("● tm-07"), "{screen}");
 }
 
 fn live_sample() -> LiveSnapshot {
