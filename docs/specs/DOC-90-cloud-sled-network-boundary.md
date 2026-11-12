@@ -4,7 +4,7 @@
 **Subsystem:** sled container image (`docker/`), `trusty-console` (inbound, token), `trusty-agents` (`tagent --api`), `trusty-common` / `trusty-agents` update checks, egress proxy
 **Owner:** owner
 **Last-updated:** 2026-11-11
-**Spec ID:** `SPEC-SLEDNET-01~draft` … `SPEC-SLEDNET-11~draft` (DOC-90)
+**Spec ID:** `SPEC-SLEDNET-01~draft` … `SPEC-SLEDNET-12~draft` (DOC-90)
 **DOC-N claim:** `DOC-90`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). The catalog's next-free note on `origin/main` at 2026-11-11 (`7497139ef9`) named `DOC-90`; no file or open PR claims it.
 
 Owner ruling (Bob, D1b, 2026-11-11 21:23Z): "Accept all eight as recommended." The eight are the recommendations of the network surface audit, an owner brief that is not published in this repo; its finding IDs are cited below as "audit".
@@ -215,6 +215,15 @@ V1 cannot tell an update check from a ticket call on `api.github.com`: squid see
 - **OQ-2.** `docker/cloudtest/README.md:112-113` says Claude Code token refresh also needs `platform.claude.com` and `claude.ai`. If so, `steady` breaks at token expiry. Measure in rung 2 (run past one refresh on `steady` and read `access.log`), then either move those hosts to `steady` by ruling or keep the login window.
 - **OQ-3. Resolved by D20 (2026-11-11).** The Tailscale control hosts and the DERP pattern join the `steady` allowlist (§6). Tailnet traffic is relay-only. Client logging is off. Rung 2 confirms `tailscaled` uses the proxy.
 - **OQ-4.** The pinned hf-hub ignores `HF_HUB_OFFLINE`. Keep the variable as ruled, or drop it as dead config.
+
+## 12. Launch rule {#SPEC-SLEDNET-12~draft}
+
+**ID:** SPEC-SLEDNET-12~draft
+
+- **LR-1.** Every sled reaches the internet only through the egress proxy surface of §6. No sled container has a published port, a second network, a host namespace, privileged mode or an added capability.
+- **LR-2.** `docker/sled/launch.sh` is the only supported way to start a sled (#11156). It builds the `--internal` network on the subnet of the proxy's `internal_net` rule, starts the proxy and the app hardened, inspects them, and refuses (stops the app, exits non-zero) on any break of LR-1, on a token-like env name, on a mount outside its allowlist, on a secret file looser than 600 or owned by another uid, and on a Docker engine older than 26.0.0 (the CVE-2024-29018 fix for DNS from `--internal` networks). It reports ready only after V1, and V5 where present, pass.
+- **LR-3.** `launch.sh --check-only` re-runs the inspection on a running sled. A network attached after launch fails it.
+- **LR-4.** A `docker run` line in the sled README is reference only.
 
 ## References
 

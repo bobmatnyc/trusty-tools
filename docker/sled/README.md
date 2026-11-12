@@ -47,7 +47,26 @@ arg. `.dockerignore` excludes all three names. Check a file with `stat`, never
 `cat`. `gh-token-run git fetch ...` and `gh-token-run gh api ...` put the GitHub
 token into that one process; git reaches it through `gh auth git-credential`.
 
+## Launch (the only supported way)
+
+Every sled reaches the internet only through the egress proxy surface, and
+`docker/sled/launch.sh --tag $SHA` is the only supported way to start one
+(DOC-90 §12). It creates the `--internal` network on the `internal_net`
+subnet of `proxy/squid.conf`, starts the proxy and the app hardened (all caps
+dropped, `no-new-privileges`, read-only root, pids, memory, swap and cpu
+limits), starts the Tailscale sidecar when its image exists, and refuses on a
+published port, a second network, privileged mode, an added cap, a host
+namespace, a mount outside its allowlist, a token-like env name (allowlist:
+`TRUSTY_CONSOLE_TOKEN_FILE`), a secret file looser than 600 or not owned by
+`SLED_UID`, or Docker older than 26.0.0. It prints `RESULT: READY` only after
+`check.sh`, `exercise.sh`, V1 and V5 (where present) pass. `launch.sh
+--check-only` re-inspects a running sled. It needs `jq` on the host.
+`scripts/check_sled_launch.sh` tests it offline with a stub `docker`.
+
 ## Run
+
+Reference only: the commands below show what `launch.sh` does. Do not start a
+sled with them.
 
 ```bash
 ST=~/sled-state/tm-trusty-cloud-sled
