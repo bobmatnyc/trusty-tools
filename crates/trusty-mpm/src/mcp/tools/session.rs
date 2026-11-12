@@ -216,6 +216,40 @@ pub(super) fn session_tools() -> Vec<Value> {
                 "additionalProperties": false
             }),
         ),
+        // #10991: owner ruling D8b.
+        tool(
+            "session_archive",
+            "Move a managed session's project directory (its workspace, else \
+             its start directory) to the owner-only archive \
+             `~/.trusty-tools/archive` (mode 0700), with a manifest recording \
+             the origin path so it can be restored. A same-filesystem move is a \
+             rename; across filesystems the copy must verify before the source \
+             is removed. FAIL-CLOSED: a session still running in the directory \
+             is REFUSED unless `force` is true, which stops it first; an \
+             Architect session is always refused. `dry_run` runs the same checks \
+             and returns the plan without changing anything. Session records \
+             are kept; the project is marked archived until a new session runs. \
+             Returns `{ dry_run, plan, stopped, manifest }`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Managed session id (UUID)."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Report the plan only. Defaults to false."
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Stop sessions running in the directory instead of refusing. Defaults to false."
+                    }
+                },
+                "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        ),
         tool(
             "session_activity",
             "Inspect a managed session's recent activity. ALWAYS returns the raw \

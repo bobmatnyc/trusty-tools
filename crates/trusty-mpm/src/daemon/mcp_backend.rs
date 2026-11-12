@@ -446,6 +446,16 @@ impl OrchestratorBackend for StateBackend {
         super::mcp_session_bulk::session_delete_records(&self.state, session_ids).await
     }
 
+    async fn session_archive(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        force: bool,
+    ) -> Result<Value, String> {
+        let opts = crate::session_manager::session_archive::ArchiveOptions { dry_run, force };
+        super::session_archive::session_archive(&self.state, session_id, opts).await // #10991
+    }
+
     async fn session_activity(&self, session_id: &str, lines: u32) -> Result<Value, String> {
         super::mcp_session::session_activity(&self.state, session_id, lines).await
     }

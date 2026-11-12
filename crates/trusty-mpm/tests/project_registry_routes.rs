@@ -300,6 +300,7 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
             worktree: None,
             project_key: None,
             decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("seed project with identity binding");

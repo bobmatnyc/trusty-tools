@@ -44,6 +44,7 @@ async fn fixture() -> (
             worktree: None,
             project_key: Some("acme/widget".into()),
             decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("register");

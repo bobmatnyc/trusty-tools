@@ -51,6 +51,29 @@ pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>)
     }
 }
 
+/// The MPM pane's project rows: one per repo, archived projects hidden.
+///
+/// Why: #10991 — an archived project's directory is gone from its origin, so
+/// it leaves the active view; `tm projects list` and the registry still show
+/// it, and a new session for it brings it back (`reactivate_for_session`).
+/// What: [`crate::project::one_project_per_repo`] in registry order, minus
+/// every project with `archived_at` set, each projected by [`project_to_row`]
+/// with its matching fleet group.
+/// Test: `visible_project_rows_hides_archived_projects`.
+pub(crate) fn visible_project_rows(
+    projects: &[Project],
+    groups: &[FleetProjectGroupWire],
+) -> Vec<ProjectRow> {
+    crate::project::one_project_per_repo(projects)
+        .into_iter()
+        .filter(|p| !p.is_archived())
+        .map(|p| {
+            let group = groups.iter().find(|g| g.project_name == p.name);
+            project_to_row(p, group)
+        })
+        .collect()
+}
+
 /// Project one fleet group's sessions into Sessions-pane rows, dropping
 /// decommissioned (tombstoned) ones (#2476).
 ///
@@ -199,6 +222,7 @@ mod tests {
             worktree: None,
             project_key: None,
             decommissioned_at: None,
+            archived_at: None,
         }
     }
 
@@ -251,6 +275,19 @@ mod tests {
         assert_eq!(row.live_count, 2);
         assert_eq!(row.total_count, 3);
         assert_eq!(row.name, "widget");
+    }
+
+    /// #10991: an archived project is not offered in the MPM pane.
+    #[test]
+    fn visible_project_rows_hides_archived_projects() {
+        let live = project("widget");
+        let archived = Project {
+            archived_at: Some(chrono::Utc::now()),
+            ..project("gadget")
+        };
+        let rows = visible_project_rows(&[live, archived], &[]);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["widget"]);
     }
 
     #[test]

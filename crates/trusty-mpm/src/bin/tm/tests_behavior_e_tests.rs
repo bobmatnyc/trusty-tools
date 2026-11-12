@@ -43,6 +43,32 @@ fn cli_parses_session_decommission_force() {
     }
 }
 
+/// #10991: `tm session archive <id> --dry-run --force --json`.
+#[test]
+fn cli_parses_session_archive() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "archive",
+        "abc",
+        "--dry-run",
+        "--force",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::Archive {
+                    id,
+                    dry_run,
+                    force,
+                    json,
+                },
+        } => assert!(id == "abc" && dry_run && force && !json),
+        other => panic!("expected session archive, got {other:?}"),
+    }
+}
+
 #[test]
 fn cli_parses_sessions_plural_canonical() {
     // #2116: `sessions` (plural) is now the canonical top-level spelling —

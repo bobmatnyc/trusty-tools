@@ -69,6 +69,7 @@ mod tests {
                 worktree: None,
                 project_key: None,
                 decommissioned_at: Some(chrono::Utc::now()),
+                archived_at: None,
             },
             stopped: vec!["s1".into()],
             left_as_is: vec!["s2".into()],

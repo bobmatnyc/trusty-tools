@@ -216,6 +216,7 @@ async fn every_scoped_route_has_a_method() {
         "mpm.managed.reactivate",
         "mpm.managed.decommission",
         "mpm.managed.delete",
+        "mpm.managed.archive", // #10991
         "mpm.control.list",
         "mpm.control.run",
         "mpm.control.connect",
@@ -1211,6 +1212,7 @@ async fn managed_fleet_slim_skips_only_the_stale_assets_probe() {
             worktree: None,
             project_key: None,
             decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("register project");

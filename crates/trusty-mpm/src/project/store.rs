@@ -326,6 +326,10 @@ impl ProjectStore {
                     .get(&project.name)
                     .and_then(|p| p.decommissioned_at);
             }
+            // #10991: the same for an archived project.
+            if project.archived_at.is_none() {
+                project.archived_at = projects.get(&project.name).and_then(|p| p.archived_at);
+            }
             // Lazy: an absolute-path `repo_url` shells out to git, so mint only
             // when neither the store nor the caller supplied a key.
             let key = stored

@@ -394,6 +394,11 @@ pub fn router(state: Arc<DaemonState>) -> Router {
             "/api/v1/sessions/managed/{id}/delete",
             post(delete_managed_session),
         )
+        // #10991: move the session's directory to the 0700 archive.
+        .route(
+            "/api/v1/sessions/managed/{id}/archive",
+            post(super::session_archive::session_archive_route),
+        )
         // TELUI-6 (#1440): the local session-manager PROXY surface — the SAME
         // focus/inject/summarize state machine every channel (Telegram, Slack)
         // binds to, exposed here as plain HTTP so it is `curl`-testable before

@@ -48,14 +48,15 @@ pub mod session_context;
 /// Why: tests, the daemon's startup log, and the loopback-`/rpc` audit all want
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts.
-/// What: a static slice of the forty-one tool names — the nine core/bug tools,
-/// the twelve session-lifecycle tools, the five console-facing tools, the five
+/// What: a static slice of the forty-two tool names — the nine core/bug tools,
+/// the thirteen session-lifecycle tools (#10991 adds `session_archive`), the
+/// five console-facing tools, the five
 /// project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5, #10988), the four
 /// session-manager proxy tools (#2550), the Disk survey (#6927), and
 /// `secrets_get_ref` (#7522), `ask_owner` (#9856), `sessions_chat` (#9979)
 /// `dbatg` (#9758) and `architect_dashboard` (#10063).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 41] = [
+pub const TOOL_CATALOG: [&str; 42] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -75,6 +76,8 @@ pub const TOOL_CATALOG: [&str; 41] = [
     "session_delete",
     // #6431: record-only bulk delete over an explicit id list.
     "session_delete_records",
+    // #10991: move the session's directory to the 0700 archive.
+    "session_archive",
     "session_activity",
     "session_send",
     // #1508 bulk teardown + by-state prune.
@@ -181,8 +184,9 @@ mod tests {
         // #9856 adds ask_owner → 37; #9979 adds sessions_chat → 38.
         // #9758 adds dbatg → 39; #10063 adds architect_dashboard → 40.
         // #10988 adds project_decommission → 41.
-        assert_eq!(tool_catalog().len(), 41);
-        assert_eq!(TOOL_CATALOG.len(), 41);
+        // #10991 adds session_archive → 42.
+        assert_eq!(tool_catalog().len(), 42);
+        assert_eq!(TOOL_CATALOG.len(), 42);
     }
 
     #[test]
@@ -223,6 +227,7 @@ mod tests {
             "session_decommission",
             "session_delete",
             "session_delete_records",
+            "session_archive",
             "session_activity",
             "session_send",
             "session_context_catchup",
