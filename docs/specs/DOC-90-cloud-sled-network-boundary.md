@@ -7,9 +7,9 @@
 **Spec ID:** `SPEC-SLEDNET-01~draft` … `SPEC-SLEDNET-11~draft` (DOC-90)
 **DOC-N claim:** `DOC-90`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). The catalog's next-free note on `origin/main` at 2026-11-11 (`7497139ef9`) named `DOC-90`; no file or open PR claims it.
 
-Owner ruling (Bob, D1b, 2026-11-11 21:23Z): "Accept all eight as recommended." The eight are the recommendations of the network surface audit, `docs/briefs/2026-11-11-cloud-sled-network-surface-audit.md` on branch `feat/11054-cloudtest-container`, not yet on `main` (cited below as "audit"). Issue: [#11054](https://github.com/bobmatnyc/trusty-tools/issues/11054).
+Owner ruling (Bob, D1b, 2026-11-11 21:23Z): "Accept all eight as recommended." The eight are the recommendations of the network surface audit, whose findings are recorded in issue [#11054](https://github.com/bobmatnyc/trusty-tools/issues/11054) (cited below as "audit").
 
-A **sled** is one cloud-hosted container (or pod) that runs the headless trusty stack. A **host** is the machine or node it runs on. The reference build is `docker/cloudtest/` on the same branch.
+A **sled** is one cloud-hosted container (or pod) that runs the headless trusty stack. A **host** is the machine or node it runs on. The reference build is `docker/cloudtest/`, on `main` since `fb3d642382`.
 
 ## 1. Scope and ruling {#SPEC-SLEDNET-01~draft}
 
@@ -26,7 +26,7 @@ The ruling also accepts audit recommendations 2 to 8. §3 to §8 state them as t
 
 **ID:** SPEC-SLEDNET-02~draft
 
-From the audit, read at `be1ed52f98`. Spot-checked on `origin/main` `7497139ef9` for this spec; the cited lines still hold.
+From the audit, read at `be1ed52f98`. Spot-checked on `main` at `fb3d642382` for this spec; the cited lines still hold.
 
 | Area | Current state | Citation |
 |---|---|---|
@@ -201,13 +201,13 @@ V1 cannot tell an update check from a ticket call on `api.github.com`: squid see
 - Console as an outbound proxy. The egress proxy is network-layer; no trusty-* code proxies outbound traffic.
 - Proxy support for Slack Socket Mode websockets.
 - Rate limits, request size limits and access logging on console routes (audit, "Not checked").
-- Mac and EVO host listeners and egress. This spec changes neither.
+- Mac and EVO host listeners and egress. This spec changes neither, except AG-2, which refuses a non-loopback `tagent --bind` on every host (owner ruling D20).
 
 ## 11. ADR call and open questions {#SPEC-SLEDNET-11~draft}
 
 **ID:** SPEC-SLEDNET-11~draft
 
-**ADR.** A new ADR, not an amendment to ADR-0032. ADR-0032 and ADR-0031 cover inbound HTTP and inter-service transport; this spec's inbound rule is their rule applied to a sled, plus a token, so their Decisions stand unchanged. The outbound rule is a new decision with no ADR today: one network egress proxy with a host allowlist, changed only by named ruling. The new ADR records that rule and the console-token requirement, and cross-links ADR-0032 (immutability, DOC-46 §4) and ADR-0017, which stays Proposed. This spec does not write it.
+**ADR.** A new ADR, not an amendment to ADR-0032. ADR-0032 and ADR-0031 cover inbound HTTP and inter-service transport; this spec's inbound rule is their rule applied to a sled, plus a token, so their Decisions stand unchanged. The outbound rule is a new decision with no ADR today: one network egress proxy with a host allowlist, changed only by named ruling. The new ADR records that rule and the console-token requirement, and cross-links ADR-0032 (immutability, DOC-46 §4) and ADR-0017, which stays Proposed. The decision is recorded as [ADR-0076](../adr/0076-cloud-sled-network-boundary.md).
 
 **Open questions.**
 

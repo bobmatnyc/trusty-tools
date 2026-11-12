@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-11
-- **Scope:** Cloud sled container image (`docker/`), `trusty-console`, the egress proxy. A rule here binds a sled only; Mac and EVO hosts keep today's behaviour.
+- **Scope:** Cloud sled container image (`docker/`), `trusty-console`, the egress proxy. A rule here binds a sled only; Mac and EVO hosts keep today's behaviour, with one exception: `tagent --bind` refuses a non-loopback address on every host (DOC-90 AG-2, owner ruling D20).
 - **Reversibility Cost:** Medium — the image, the proxy config and the console token check are localized, but every sled client and every allowlisted host depends on the boundary once sleds run.
 - **Decision Drivers:** owner ruling Bob D1b (2026-11-11 21:23Z, "Accept all eight as recommended"); the network surface audit; a sled that holds model credentials and a GitHub token; the console accepts any caller that sends a matching `Host` header; no ADR covers outbound traffic
 - **Supersedes / Superseded by:** — (extends [ADR-0031](0031-uds-for-inter-crate-transport-http-for-external.md) and [ADR-0032](0032-no-service-owns-http-console-is-the-only-http-surface.md); both stand)
@@ -62,7 +62,7 @@ deny log show whether the boundary holds. A client that ignores
   (D20). Tailnet traffic is relay-only, so it is slower than a direct path.
 - Token rotation means replacing the file and restarting the console.
 
-**Neutral.** Hosts other than sleds are unchanged. The token is off unless
+**Neutral.** Hosts other than sleds are unchanged, except that `tagent --bind` refuses a non-loopback address on every host, Mac and EVO included (DOC-90 AG-2, owner ruling D20). The token is off unless
 `TRUSTY_CONSOLE_TOKEN_FILE` is set.
 
 **Alternatives considered.**
