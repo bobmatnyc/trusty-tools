@@ -306,6 +306,47 @@ fn merge_lists_managed_sessions_the_hook_registry_lacks() {
     assert!(screen.contains("● tm-07"), "{screen}");
 }
 
+// #11104: a SessionStart hook auto-registers a row keyed by Claude's UUID
+// with a friendly name and no workdir; `correlate_session_start` stores that
+// UUID on the managed record. The pair is one session and draws as one row.
+#[test]
+fn merge_folds_a_hook_row_into_the_managed_session_it_correlates_with() {
+    const CLAUDE: &str = "11111111-2222-4333-8444-555555555555";
+    const ID_D: &str = "2b4c5d6f-1c1f-4e8b-9d5e-3e1f0a7d4c39";
+    let with_claude = |id: &str, name: &str, cwd: &str, claude: &str| -> ManagedSessionSummary {
+        serde_json::from_value(json!({
+            "id": id, "name": name, "state": "stopped", "cwd": cwd,
+            "claude_session_id": claude
+        }))
+        .expect("managed summary")
+    };
+    let rows = [
+        session_row(CLAUDE, "tm-nimble-tiger", "", "Active"),
+        session_row(ID_A, "tm-03", "/w/a", "Active"),
+    ];
+    let list = [
+        with_claude(ID_B, "tm-proj2", "/w/proj2", CLAUDE),
+        // A second record naming the same UUID is a different session.
+        with_claude(ID_D, "tm-proj3", "/w/proj3", CLAUDE),
+    ];
+    let records = [record("engineer", "session `tm-proj2`", "running", 30)];
+    let snap = group(merge(&rows, &list), &records);
+    let names: Vec<&str> = snap.sessions.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["tm-proj2", "tm-03", "tm-proj3"],
+        "one row per session"
+    );
+    let m = &snap.sessions[0];
+    assert_eq!(
+        (m.id.as_str(), m.workdir.as_str(), m.status.as_str()),
+        (ID_B, "/w/proj2", "Active"),
+        "managed name, id and workdir; the hook row's live status"
+    );
+    assert_eq!(m.agents.len(), 1, "agents attach by the managed name");
+    assert_eq!(snap.sessions[2].status, "stopped");
+}
+
 fn live_sample() -> LiveSnapshot {
     let agent = |a: &str, st: &str, age| LiveAgent {
         agent: a.into(),
