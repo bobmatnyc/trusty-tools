@@ -3,7 +3,7 @@
 The sled image runs `tm daemon`, `trusty-memory`, `trusty-search`, Claude Code
 and `tailscaled` in one Ubuntu 26.04 container on an `--internal` network. The
 only way out is one squid proxy with a host allowlist. Rules: DOC-90 and
-ADR-0077 (PR #11072), owner rulings D1b and D20. Derived from
+ADR-0076 (PR #11072), owner rulings D1b and D20. Derived from
 `docker/cloudtest/` (#11054), which stays unchanged.
 
 ## Names

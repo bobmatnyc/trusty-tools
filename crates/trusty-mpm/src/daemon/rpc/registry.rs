@@ -33,6 +33,7 @@
 //! | `mpm.projects.registry.get` | `GET /api/v1/projects/{name}` |
 //! | `mpm.projects.registry.patch` | `PATCH /api/v1/projects/{name}` |
 //! | `mpm.projects.status` | `GET /api/v1/projects/{name}/status` |
+//! | `mpm.projects.registry.decommission` | `POST /api/v1/projects/{name}/decommission` |
 //! | `mpm.deliverables.create` | `POST /api/v1/projects/{name}/deliverables` |
 //! | `mpm.deliverables.list` | `GET /api/v1/projects/{name}/deliverables` |
 //! | `mpm.deliverables.get` | `GET /api/v1/projects/{name}/deliverables/{id}` |
@@ -149,6 +150,7 @@ pub const METHODS: &[&str] = &[
     "mpm.projects.discover",
     "mpm.projects.list",
     "mpm.projects.register",
+    "mpm.projects.registry.decommission",
     "mpm.projects.registry.get",
     "mpm.projects.registry.list",
     "mpm.projects.registry.patch",

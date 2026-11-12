@@ -40,6 +40,7 @@ fn project(name: &str, repo_url: &str, worktree: Option<bool>) -> Project {
         commit_email: None,
         worktree,
         project_key: None,
+        decommissioned_at: None,
     }
 }
 

@@ -32,6 +32,7 @@ use crate::core::project::ProjectInfo;
 use crate::core::session::Session;
 
 use super::error::DaemonError;
+use super::mcp_project_decommission::project_decommission_route; // #10988
 // #6288: the transport-neutral bodies these handlers and the socket's
 // `mpm.*` methods both call. One route, one implementation.
 use super::rpc::core_ops;
@@ -234,6 +235,10 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // flags for ONE named project. Pure composition over ProjectRegistry::get
         // + SessionManager::list; no LLM, no cross-project reasoning (§11).
         .route("/api/v1/projects/{name}/status", get(project_status_route))
+        .route(
+            "/api/v1/projects/{name}/decommission",
+            post(project_decommission_route),
+        )
         .route("/events", get(stream_events))
         .route("/events/poll", get(recent_events))
         .route("/hooks", post(ingest_hook))

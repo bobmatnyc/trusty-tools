@@ -9,8 +9,9 @@
 //! `managed_routes::project_status` both had headroom, so their `*_op`
 //! functions stayed next to the handlers that share them.
 //!
-//! What: [`register`] mounts nine methods — the four legacy `/projects*` verbs,
-//! the four registry-B `/api/v1/projects*` verbs, and the `/status` rollup.
+//! What: [`register`] mounts ten methods — the four legacy `/projects*` verbs,
+//! the four registry-B `/api/v1/projects*` verbs, the `/status` rollup, and
+//! the `/decommission` verb (#10988).
 //! Nothing here names an HTTP type.
 //!
 //! Test: the `parity_projects_*` and `parity_project_status_*` cases in
@@ -30,8 +31,10 @@ use crate::daemon::error::DaemonError;
 use crate::daemon::managed_routes::ProjectStatusResponse;
 use crate::daemon::managed_routes::project_registry_routes as reg;
 use crate::daemon::managed_routes::project_status;
+use crate::daemon::mcp_project_decommission::project_decommission_op;
 use crate::daemon::state::DaemonState;
 use crate::project::Project;
+use crate::session_manager::project_decommission::ProjectDecommissionReport;
 
 use super::NoParams;
 
@@ -214,6 +217,7 @@ async fn persist_registry_record(
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
     };
     // #10586: check and insert under one lock, so no writer lands between them.
     // #10586: a kept record is reported, never a silent success; the
@@ -351,6 +355,20 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
                 .map_err(Into::into)
         }
     });
+
+    // #10988: the same body as the MCP tool and the HTTP route.
+    let held = Arc::clone(state);
+    let r = r.typed::<NameParams, ProjectDecommissionReport, _, _>(
+        "mpm.projects.registry.decommission",
+        move |p| {
+            let s = Arc::clone(&held);
+            async move {
+                project_decommission_op(&s, &p.name)
+                    .await
+                    .map_err(Into::into)
+            }
+        },
+    );
 
     let held = Arc::clone(state);
     r.typed::<NameParams, ProjectStatusResponse, _, _>("mpm.projects.status", move |p| {

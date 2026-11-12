@@ -308,15 +308,24 @@ impl ProjectStore {
     /// over the incoming one; a record with none gets the incoming key or a
     /// freshly minted one. A NEW name whose key another record already holds is
     /// refused with [`ProjectStoreError::DuplicateProjectKey`]; updating an
-    /// existing record never is.
+    /// existing record never is. A stored `decommissioned_at` survives an
+    /// incoming `None` (#10988).
     /// Test: `store_upsert_idempotent`, `upsert_assigns_a_key_once_and_keeps_it`,
-    /// `upsert_refuses_a_second_project_with_the_same_key`.
+    /// `upsert_refuses_a_second_project_with_the_same_key`,
+    /// `upsert_keeps_a_stored_decommissioned_state`.
     pub async fn upsert(&mut self, mut project: Project) -> Result<(), ProjectStoreError> {
         self.mutate(move |projects| {
             let is_new = !projects.contains_key(&project.name);
             let stored = projects
                 .get(&project.name)
                 .and_then(|p| p.project_key.clone());
+            // #10988: a re-register (config seed, `project_register`) must not
+            // re-list a decommissioned project; only `update_with` clears it.
+            if project.decommissioned_at.is_none() {
+                project.decommissioned_at = projects
+                    .get(&project.name)
+                    .and_then(|p| p.decommissioned_at);
+            }
             // Lazy: an absolute-path `repo_url` shells out to git, so mint only
             // when neither the store nor the caller supplied a key.
             let key = stored

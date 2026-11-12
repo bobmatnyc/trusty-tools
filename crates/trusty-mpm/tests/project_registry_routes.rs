@@ -299,6 +299,7 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
             commit_email: Some("bob@example.com".into()),
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
         })
         .await
         .expect("seed project with identity binding");

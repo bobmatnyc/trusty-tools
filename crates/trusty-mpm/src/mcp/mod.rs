@@ -571,6 +571,12 @@ pub trait OrchestratorBackend: Send + Sync {
     /// Test: `dispatch_project_resolve_tool` (mock).
     async fn project_resolve(&self, query: &str) -> Result<Value, String>;
 
+    /// Back `project_decommission` (#10988): stop a project's sessions and
+    /// mark it decommissioned, keeping every workspace and index.
+    /// Test: `dispatch_project_decommission_tool` (mock);
+    /// `project_decommission_marks_the_project_and_lists_it`.
+    async fn project_decommission(&self, name: &str) -> Result<Value, String>;
+
     // ── #2550: session-manager PROXY tools (#1440 follow-up) ─────────────────
     //
     // These expose the channel-agnostic [`crate::client::proxy::SessionProxy`]

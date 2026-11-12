@@ -487,6 +487,8 @@ pub mod presence_store;
 #[cfg(test)]
 pub(crate) mod presence_test_support;
 pub mod presence_verify;
+// #8878 PR2b-1b: the WebAuthn passkey adapter (ES256 only, D72).
+pub mod presence_webauthn;
 pub mod twin_identity;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
 pub mod uncommitted_changes;
