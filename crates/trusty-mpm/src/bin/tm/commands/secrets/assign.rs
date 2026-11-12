@@ -7,8 +7,8 @@
 //! What: [`parse_source`] reads SRC (`trusty/<owner>[/<repo>]:KEY` or a
 //! `secret://` reference that pins its vault); [`ProjectName`] reads
 //! `--project owner/repo`; a [`ProjectResolver`] maps it to a checkout
-//! directory; [`assign`] checks the owner and, for an agent caller, the
-//! project, then sends one `secrets.copy` whose `project` field is that
+//! directory; [`assign`] checks the owner and, for an agent other than the
+//! Architect ([`judge_caller`]), the project, then sends one `secrets.copy` whose `project` field is that
 //! directory and whose `source` is the vault key. The value moves inside
 //! the server, which applies the agent deny, the Architect ticket (keyed on
 //! the destination's root) and the audit. tm prints names only.
@@ -49,12 +49,11 @@ pub(crate) const PROJECT_FORM: &str =
 pub(crate) const NOT_REGISTERED: &str =
     "tm secrets assign: project not registered (#10368); nothing was written";
 
-/// The refusal for a destination under another owner (D2).
-pub(crate) const OTHER_OWNER: &str =
-    "tm secrets assign: the project belongs to another owner; nothing was written";
+/// The refusal for a destination under another owner than the source's (D2).
+pub(crate) const OTHER_OWNER: &str = "tm secrets assign: the project belongs to another owner than the source vault; nothing was written";
 
-/// The refusal for an agent naming a project other than its own (D2).
-pub(crate) const AGENT_OTHER_PROJECT: &str = "tm secrets assign: under Claude Code only this checkout's own project may be named; nothing was written";
+/// The refusal for an agent naming a project other than its own (D2, Dfx).
+pub(crate) const AGENT_OTHER_PROJECT: &str = "tm secrets assign: an agent other than the Architect may name only its own checkout's project; nothing was written";
 
 /// The refusal when the resolved checkout's remote is not the named owner.
 pub(crate) const CHECKOUT_MISMATCH: &str =
@@ -114,24 +113,69 @@ impl ProjectResolver for RegistryPending {
     }
 }
 
+/// Who runs `assign`, for the project rule (owner ruling Dfx, 2026-11-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Caller {
+    /// No Claude Code above this process: any project of the source's owner.
+    Person,
+    /// The bound Architect session's main thread: likewise.
+    Architect,
+    /// Any other agent, a PM or a subagent: its own checkout's project only.
+    Agent,
+}
+
 /// The parts of `assign` a test replaces: the resolver and the caller check.
 #[derive(Clone, Copy)]
 pub(crate) struct Seam<'a> {
     /// Maps `--project` to a checkout.
     pub(crate) resolver: &'a dyn ProjectResolver,
-    /// Whether the caller runs under Claude Code; read only when needed.
-    pub(crate) agent: fn() -> bool,
+    /// Judges the caller.
+    pub(crate) caller: fn() -> Caller,
 }
 
-/// The production seam: [`RegistryPending`] and [`caller_is_agent`].
+/// The production seam: [`RegistryPending`] and [`judge_caller`].
 pub(crate) const PRODUCTION: Seam<'static> = Seam {
     resolver: &RegistryPending,
-    agent: caller_is_agent,
+    caller: judge_caller,
 };
 
-/// Whether this process runs under Claude Code, by the server's own walk.
-pub(crate) fn caller_is_agent() -> bool {
-    agent_in(&OsProcessTable, std::process::id())
+/// This process's [`Caller`].
+///
+/// What: [`Caller::Person`] when [`agent_in`] finds no Claude Code above
+/// this pid; [`Caller::Architect`] when `tm fleet status`'s `this_session`
+/// check binds this session as the Architect (its stamp, profile grant and
+/// launch record, not a subagent); otherwise [`Caller::Agent`]. Any failure
+/// on the way judges the caller an agent (fail closed).
+pub(crate) fn judge_caller() -> Caller {
+    if !agent_in(&OsProcessTable, std::process::id()) {
+        return Caller::Person;
+    }
+    if this_session_is_architect() {
+        Caller::Architect
+    } else {
+        Caller::Agent
+    }
+}
+
+/// Whether this session is the bound Architect, as `tm env` judges it.
+fn this_session_is_architect() -> bool {
+    use crate::commands::env_file::trusted_home;
+    use crate::commands::fleet::resolve_dir;
+    use crate::commands::fleet::status::{this_session_check, this_session_env};
+    use crate::commands::pm_guard_trust_anchor::{ANCHOR_ROOT, HookEnv};
+    use trusty_mpm::core::config::MpmConfig;
+    let Ok(home) = trusted_home() else {
+        return false;
+    };
+    let Ok(dir) = resolve_dir(None, &home) else {
+        return false;
+    };
+    let root = home.join(ANCHOR_ROOT);
+    let env = HookEnv {
+        home: Some(home),
+        ..this_session_env()
+    };
+    this_session_check(&dir, env, || MpmConfig::load(&root)).ok
 }
 
 /// Whether `pid` or a process above it in `table` is Claude Code.
@@ -166,6 +210,12 @@ pub(crate) fn parse_source(raw: &str) -> anyhow::Result<(VaultName, SecretKey)> 
         VaultName::new(vault).map_err(refuse)?,
         SecretKey::new(key).map_err(refuse)?,
     ))
+}
+
+/// The owner vault `trusty/<owner>` of any vault, `None` if it has none.
+fn owner_vault_of(vault: &VaultName) -> Option<VaultName> {
+    let owner = vault.as_str().split('/').nth(1)?;
+    OwnerName::new(owner).ok().map(|o| VaultName::owner(&o))
 }
 
 /// The parsed `assign` command line.
@@ -208,14 +258,16 @@ async fn vaults(ctx: &Ctx<'_>) -> anyhow::Result<Vaults> {
 /// named project's scope (#11015).
 ///
 /// Why: D1-D5 of the #11015 plan — client-side only, the value moves inside
-/// the server, the destination shares the caller's owner, and an agent
-/// cannot widen its write reach past its own project.
+/// the server, and every assign stays inside one remote owner. Owner ruling
+/// Dfx (2026-11-12): only a person or the Architect assigns across
+/// projects; any other agent only into its own session's project.
 /// What, in order, each refusal writing nothing: SRC ([`parse_source`]),
 /// `--as` (or the source key), the backends and `--project` are validated
 /// locally; the resolver maps the project to a checkout; `secrets.scopes`
-/// for the cwd and for that checkout must report the same owner vault, and
-/// the checkout's owner must be the named one; when the projects differ an
-/// agent caller is [`AGENT_OTHER_PROJECT`]. Then one `secrets.copy` with
+/// for that checkout must report the named owner ([`CHECKOUT_MISMATCH`]),
+/// and the source vault's owner ([`OTHER_OWNER`]); a [`Caller::Agent`]
+/// must name the cwd checkout's own project ([`AGENT_OTHER_PROJECT`]; a cwd
+/// the server cannot resolve refuses too). Then one `secrets.copy` with
 /// `project` set to the checkout and `source` the vault key: the server's
 /// agent deny, ticket and audit apply there, and a re-run replaces the
 /// destination value as `copy` does. Prints `assign to VAULT` then
@@ -228,6 +280,7 @@ async fn vaults(ctx: &Ctx<'_>) -> anyhow::Result<Vaults> {
 /// `assign_never_touches_clipboard`,
 /// `assign_denied_source_is_refused_for_an_agent`,
 /// `assign_by_an_agent_cannot_widen_its_write_reach`,
+/// `assign_by_the_architect_reaches_another_project`,
 /// `assign_to_another_owner_is_refused`,
 /// `assign_to_an_unresolvable_checkout_is_refused`.
 pub(crate) async fn assign(
@@ -251,15 +304,15 @@ pub(crate) async fn assign(
         project: &dir,
         ..*ctx
     };
-    let here = vaults(ctx).await?;
     let there = vaults(&target).await?;
     if there.owner != VaultName::owner(&project.owner) {
         bail!(CHECKOUT_MISMATCH);
     }
-    if there.owner != here.owner {
+    if owner_vault_of(&vault).as_ref() != Some(&there.owner) {
         bail!(OTHER_OWNER);
     }
-    if there.project != here.project && (seam.agent)() {
+    // #11015 Dfx: only a person or the Architect reaches another project.
+    if (seam.caller)() == Caller::Agent && vaults(ctx).await?.project != there.project {
         bail!(AGENT_OTHER_PROJECT);
     }
     let source = CopySource::vault(vault, key);

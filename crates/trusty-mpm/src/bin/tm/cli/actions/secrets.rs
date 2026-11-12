@@ -136,8 +136,9 @@ pub(crate) enum SecretsAction {
     /// SRC is `trusty/<owner>[/<repo>]:KEY` or
     /// `secret://<owner>[/<repo>]/KEY`. The destination is the project
     /// `--project owner/repo` names, under the source's key name or `--as`.
-    /// The project must share this checkout's owner; under Claude Code it
-    /// must be this checkout's own project. A re-run replaces the
+    /// The project must share the source vault's owner. Under Claude Code,
+    /// any session but the Architect's may name only this checkout's own
+    /// project. A re-run replaces the
     /// destination value, as `copy` does. The value never reaches tm; prints
     /// names only.
     Assign {

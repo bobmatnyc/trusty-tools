@@ -24,8 +24,9 @@ Run `tm secrets --help` before you plan around any of them.
 any trusty vault into the named project's vault. SRC is
 `trusty/<owner>[/<repo>]:KEY` or `secret://<owner>[/<repo>]/KEY`;
 `secret://KEY` names no vault and is refused. The destination key is the
-source's name, or `--as`. The project must share the checkout's owner, and
-under Claude Code it must be the checkout's own project. A re-run replaces
+source's name, or `--as`. The project must share the source vault's owner.
+Only a person or the Architect session may name another project; a PM or a
+subagent may name only its own checkout's project. A re-run replaces
 the destination value, as `copy` does. The value moves inside the server and
 never reaches tm, the clipboard or the transcript; tm prints names only.
 

@@ -11,8 +11,8 @@ use trusty_secrets::ancestry::{ProcessError, ProcessTable, StartTime};
 
 use super::*;
 use crate::commands::secrets::assign::{
-    AGENT_OTHER_PROJECT, CHECKOUT_MISMATCH, NOT_REGISTERED, OTHER_OWNER, PROJECT_FORM, ProjectName,
-    ProjectResolver, SRC_FORMS, SRC_UNPINNED, Seam, agent_in, parse_source,
+    AGENT_OTHER_PROJECT, CHECKOUT_MISMATCH, Caller, NOT_REGISTERED, OTHER_OWNER, PROJECT_FORM,
+    ProjectName, ProjectResolver, SRC_FORMS, SRC_UNPINNED, Seam, agent_in, parse_source,
 };
 
 /// The project vault of the second same-owner checkout.
@@ -47,25 +47,27 @@ fn resolver(h: &Harness) -> FakeResolver {
     FakeResolver(vec![("acme/web", h.repo.clone()), ("acme/api", api)])
 }
 
-fn person() -> bool {
-    false
+fn person() -> Caller {
+    Caller::Person
 }
 
-fn agent() -> bool {
-    true
+/// A PM or a subagent: any Claude Code session but the Architect's.
+fn agent() -> Caller {
+    Caller::Agent
+}
+
+fn architect() -> Caller {
+    Caller::Architect
 }
 
 /// Run `tm secrets <args>` in the harness checkout with `resolver`.
 async fn assign_run(
     h: &Harness,
     resolver: &FakeResolver,
-    is_agent: fn() -> bool,
+    caller: fn() -> Caller,
     args: &[&str],
 ) -> Outcome {
-    let seam = Seam {
-        resolver,
-        agent: is_agent,
-    };
+    let seam = Seam { resolver, caller };
     run_seam(&h.client, &h.repo, (SHORT, SHORT), false, seam, args).await
 }
 
@@ -306,7 +308,7 @@ async fn assign_never_touches_clipboard() {
     };
     let seam = Seam {
         resolver: &r,
-        agent: person,
+        caller: person,
     };
     let mut out = Vec::new();
     dispatch_with(&ctx, seam, action, &mut out)
@@ -347,8 +349,9 @@ async fn assign_denied_source_is_refused_for_an_agent() {
     assert_eq!(stored(&h.keychain, PROJECT_VAULT, "DEST"), None);
 }
 
-/// D2: an agent may assign into its own project only, so `--project`
-/// cannot carry its write past the checkout it runs in.
+/// D2, owner ruling Dfx: a PM or a subagent may assign into its own
+/// session's project only, so `--project` cannot carry its write past the
+/// checkout it runs in.
 #[tokio::test]
 async fn assign_by_an_agent_cannot_widen_its_write_reach() {
     let h = harness_agent().await;
@@ -377,8 +380,31 @@ async fn assign_by_an_agent_cannot_widen_its_write_reach() {
     );
 }
 
-/// D2: a project under another owner is refused for every caller, and so
-/// is a checkout whose remote is not the owner the name gave.
+/// Owner ruling Dfx: the Architect session assigns across projects of the
+/// source's owner; the server, judging it an agent, still applies the deny.
+#[tokio::test]
+async fn assign_by_the_architect_reaches_another_project() {
+    let h = harness_agent().await;
+    seed_owner(&h, "GH_PAT", VALUE).await;
+    let r = resolver(&h);
+    let args = ["assign", "trusty/acme:GH_PAT", "--project", "acme/api"];
+    let outcome = assign_run(&h, &r, architect, &args).await;
+    assert_eq!(outcome.err, None);
+    assert!(
+        outcome.out.starts_with("assign to trusty/acme/api\n"),
+        "{}",
+        outcome.out
+    );
+    assert_eq!(
+        stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(),
+        Some(VALUE)
+    );
+    assert_eq!(stored(&h.keychain, PROJECT_VAULT, "GH_PAT"), None);
+}
+
+/// D2: a project under another owner than the source vault's is refused for
+/// every caller, the Architect included, and so is a checkout whose remote
+/// is not the owner the name gave.
 #[tokio::test]
 async fn assign_to_another_owner_is_refused() {
     let h = harness().await;
@@ -389,8 +415,10 @@ async fn assign_to_another_owner_is_refused() {
         ("acme/thing", foreign),
     ]);
     let args = ["assign", "trusty/acme:GH_PAT", "--project", "other/thing"];
-    let outcome = assign_run(&h, &r, person, &args).await;
-    assert!(outcome.err().starts_with(OTHER_OWNER), "{}", outcome.err());
+    for caller in [person as fn() -> Caller, architect] {
+        let outcome = assign_run(&h, &r, caller, &args).await;
+        assert!(outcome.err().starts_with(OTHER_OWNER), "{}", outcome.err());
+    }
     let lying = ["assign", "trusty/acme:GH_PAT", "--project", "acme/thing"];
     let outcome = assign_run(&h, &r, person, &lying).await;
     assert!(
