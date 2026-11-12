@@ -162,7 +162,7 @@ name = "trusty-mpm"
 # Version-only commit.
 # 1.13.0 (Refs #11047): minor — 1.12.2 is published on crates.io and this PR
 # adds a feature (Architect dashboard Decisions sort by project) under `src/**`.
-version = "1.13.0"
+version = "1.13.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -359,6 +359,13 @@ required-features = ["cli"]
 [[test]]
 name = "sandbox_latch_9121"
 path = "tests/sandbox_latch_9121.rs"
+required-features = ["daemon"]
+
+# #10721: admits the sandbox's one credential — the same one-way latch, a
+# set-once slot and a `remove_var` — so it is a binary of its own too.
+[[test]]
+name = "sandbox_credential_10721"
+path = "tests/sandbox_credential_10721.rs"
 required-features = ["daemon"]
 
 # ── Always-on dependencies ─────────────────────────────────────────────────────
