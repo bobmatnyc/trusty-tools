@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# exercise.sh [--tailscale-login] — the DOC-90 section 9 V1 standard exercise,
-# run inside the app container after `check.sh`:
+# exercise.sh — the DOC-90 section 9 V1 standard exercise, run inside the app
+# container after `check.sh`:
 #   docker exec -u sled tm-trusty-cloud-sled exercise.sh
 # Steps: token-file modes (stat only), one Claude Code session, one git fetch
-# and one gh api call on SLED_REPO (default bobmatnyc/trusty-tools). With
-# --tailscale-login it also asks tailscaled for a login URL, which reaches the
-# control plane; the URL is never printed. Raw output: /data/logs/exercise-<ts>.log.
+# and one gh api call on SLED_REPO (default bobmatnyc/trusty-tools). Tailscale
+# is driven from the host through the sidecar only (README.md, Tailscale;
+# #11156 B2). Raw output: /data/logs/exercise-<ts>.log.
 # Exits non-zero if a step that must work FAILs. Refs #11073
+# Test: scripts/check_sled_tailscale_isolation.sh asserts no tailscale state change here.
 set -uo pipefail
 # docker exec does not inherit the entrypoint's umask: the log is owner-only.
 umask 077
@@ -17,7 +18,7 @@ LOG="/data/logs/exercise-${TS}.log"
 mkdir -p /data/logs /data/work
 : > "${LOG}"
 FAILS=0
-# A tailscale login URL is a live login link: every https URL is redacted.
+# A URL in command output can be a live login link: every https URL is redacted.
 redact() { sed -E 's#https://[^ ]+#<url redacted>#g'; }
 
 # run NAME MUST CMD... — run CMD with a 180 s bound and log its output,
@@ -72,19 +73,6 @@ run "git fetch ${REPO}" yes gh-token-run git -C "${FETCH_DIR}" fetch --depth 1 \
 
 # One gh api call; prints the repository name only.
 run "gh api repos/${REPO}" yes gh-token-run gh api "repos/${REPO}" --jq .full_name
-
-if [ "${1:-}" = "--tailscale-login" ]; then
-    # `tailscale up` with no auth key asks the control plane for a login URL.
-    # The URL is a live login link: it goes to the log redacted, never stdout.
-    out="$(timeout 60 tailscale up --timeout=45s 2>&1)"; rc=$?
-    { echo "=== tailscale up (rc=${rc}) ==="; printf '%s\n' "${out}" | redact; } >> "${LOG}"
-    if grep -q 'https://login.tailscale.com/' <<< "${out}"; then
-        echo "PASS tailscale up reached the control plane (login URL issued, not printed)"
-    else
-        echo "INFO tailscale up issued no login URL (rc=${rc}); see ${LOG}"
-    fi
-    run "tailscale status" no tailscale status
-fi
 
 echo "log: ${LOG}"
 if [ "${FAILS}" -gt 0 ]; then
