@@ -735,7 +735,12 @@ jobs:
 
       - name: Install stable toolchain
         if: steps.scope.outputs.scope != 'skip'
-        uses: dtolnay/rust-toolchain@stable
+        # ar-T95: every formerly-`@stable` Rust job is pinned to 1.99.1. Rust
+        # 1.100 changed the test-binary layout (target/debug/build/<pkg>/<hash>/out/
+        # instead of target/debug/deps/), which breaks the trusty-common test-harness
+        # detection (see the HIGH issue). Bump deliberately, only after that is
+        # fixed, and with a `cargo fmt --all` in the same PR.
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # `libdbus-1-dev` is this job's alone (#7466). The `features` lane enables
       # `trusty-common/keyring-store`, and `keyring`'s Linux target section
@@ -959,7 +964,7 @@ jobs:
 
       - name: Install stable toolchain
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
@@ -1495,7 +1500,7 @@ jobs:
 
       - name: Install stable toolchain
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
@@ -1646,7 +1651,7 @@ jobs:
 
       - name: Install stable toolchain
         if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # Both selectors' fixtures run before the step that consults them.
       - name: Crate-selection selftests
@@ -1713,7 +1718,7 @@ jobs:
         run: bash scripts/ci-create-local-main.sh
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         run: |
@@ -1940,7 +1945,7 @@ jobs:
 
       - name: Install stable toolchain
         if: steps.decide.outputs.run == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         if: steps.decide.outputs.run == 'true'
@@ -2317,7 +2322,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         run: |
@@ -2557,7 +2562,7 @@ jobs:
 
       - name: Install stable toolchain
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
@@ -2585,7 +2590,7 @@ jobs:
       # ci-smoke profile drops thin LTO and opt-level 3 (see the profile's
       # comment in the root Cargo.toml, which records the coverage trade this
       # makes). Named profiles are stable since Cargo 1.57; this job pins
-      # `dtolnay/rust-toolchain@stable`.
+      # `dtolnay/rust-toolchain@1.99.1`.
       #
       # Artefacts land in `target/ci-smoke/`, which rust-cache handles without
       # extra configuration: its cleanup identifies a profile directory by the
