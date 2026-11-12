@@ -1,2 +1,2 @@
-Changed
+Breaking
 - The TUI enums `tui::architect::Tab` and `tui::home::services::ProbeKind` are now crate-internal, with the `ArchitectState::tab` field and the `ArchitectState::open`, `ArchitectState::count`, `DashSnapshot::rows` and `ServiceId::probe` methods that expose them. Nothing outside trusty-mpm used them, and a new tab or probe kind is no longer a semver break. The unused `ProbeKind::SocketConnect` variant is removed (#11115).
