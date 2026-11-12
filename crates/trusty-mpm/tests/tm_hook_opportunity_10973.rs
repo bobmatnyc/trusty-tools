@@ -143,3 +143,100 @@ fn a_full_day_counts_drops_across_hook_processes() {
     let dropped = day_file.with_extension("dropped");
     assert_eq!(std::fs::metadata(&dropped).expect("counter").len(), 3);
 }
+
+/// Every opportunity row under `home`, in file order.
+fn rows_under(home: &Path) -> Vec<serde_json::Value> {
+    ledgers_under(home)
+        .iter()
+        .filter_map(|l| std::fs::read_to_string(l).ok())
+        .flat_map(|text| {
+            text.lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect::<Vec<serde_json::Value>>()
+        })
+        .collect()
+}
+
+/// The one row a `PostToolUse` Bash payload for `command`, run from `cwd`,
+/// appends under a fresh scratch home.
+fn bash_row(command: &str, cwd: &Path, stdout: &str) -> serde_json::Value {
+    let home = tempfile::tempdir().expect("scratch home");
+    let payload = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "session_id": "sess-10973-reason",
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_response": {"stdout": stdout, "stderr": "", "interrupted": false},
+    });
+    assert_eq!(run_hook_in(home.path(), &payload).trim(), "", "no output");
+    let rows = rows_under(home.path());
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    rows.into_iter().next().expect("one row")
+}
+
+/// A long grep match list: the shape the grep filter shrinks.
+fn grep_matches() -> String {
+    (0..300)
+        .map(|i| format!("src/mod{i}.rs:{i}:    let x = foo(y);\n"))
+        .collect()
+}
+
+/// #10973: a chained command is never rewritten (`has_unsafe_pipe_composition`),
+/// so its row says so rather than leaving the reader to guess.
+#[test]
+fn a_bash_opportunity_row_records_why_no_rewrite_applied() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let row = bash_row("cd /x && grep -n foo big.txt", cwd.path(), &grep_matches());
+    assert_eq!(row["skip_reason"], "chained", "{row}");
+}
+
+/// #10973: each `PreToolUse` guard decision names itself on the row.
+#[test]
+fn a_bash_row_names_each_guard_refusal() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let source: String = (0..300).map(|i| format!("let v{i} = {i};\n")).collect();
+    for (command, stdout, reason) in [
+        ("sed -n 1,400p notes.txt", grep_matches(), "no_filter"),
+        ("cat -n src/lib.rs", source, "source_read"),
+        ("git diff", "+a\n".to_string(), "compressed"),
+    ] {
+        let row = bash_row(command, cwd.path(), &stdout);
+        assert_eq!(row["skip_reason"], reason, "{command}: {row}");
+    }
+}
+
+/// #10973: inside an isolation worktree the one-command rewrite also refuses a
+/// command whose first word is not the program (`env git diff`).
+#[test]
+fn an_isolated_worktree_refusal_is_named_on_the_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tree = dir.path().join("repo/.claude/worktrees/agent-a");
+    std::fs::create_dir_all(&tree).expect("mkdir");
+    let row = bash_row("env git diff", &tree, &"+line\n".repeat(400));
+    assert_eq!(row["skip_reason"], "wrapper_prefix", "{row}");
+}
+
+/// #10973: a non-Bash result is `non_bash` when compression would shrink it,
+/// and `no_gain` when it would not.
+#[test]
+fn a_non_bash_row_is_non_bash_or_no_gain() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let long_read: String = (0..400)
+        .map(|i| format!("// comment {i}\n\nlet v{i} = {i};\n"))
+        .collect();
+    for text in [long_read, "short".to_string()] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "sess-10973-reason",
+            "tool_name": "Read",
+            "tool_response": text,
+        });
+        run_hook_in(home.path(), &payload);
+    }
+    let reasons: Vec<serde_json::Value> = rows_under(home.path())
+        .into_iter()
+        .map(|r| r["skip_reason"].clone())
+        .collect();
+    assert_eq!(reasons, ["non_bash", "no_gain"]);
+}
