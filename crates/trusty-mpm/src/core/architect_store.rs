@@ -128,12 +128,13 @@ fn unavailable(what: impl fmt::Display) -> DashError {
 /// # Errors
 /// [`DashError::Unavailable`] (exit 3) naming the path tried, its source and
 /// the fix: no usable home, an unreadable or malformed config, more than one
-/// recorded Architect, a relative path, a path that is not a directory.
+/// recorded Architect, recorded entries none of which requests the Architect
+/// profile, a relative path, a path that is not a directory.
 ///
 /// Test: `env_dashboard_root_wins_over_config`, `recorded_architect_beats_the_default`,
 /// `default_dir_is_used_when_no_config`, `missing_owner_queue_dir_is_an_error_not_empty`,
 /// `malformed_config_is_refused_not_defaulted`, `no_home_is_refused`,
-/// `root_that_is_a_file_is_refused`.
+/// `root_that_is_a_file_is_refused`, `recorded_dir_without_profile_is_refused_not_defaulted`.
 pub fn resolve_store_root(
     env: &dyn Fn(&str) -> Option<String>,
     home: Option<&Path>,
@@ -169,13 +170,11 @@ pub fn resolve_store_root(
 /// the default directory.
 fn architect_dir_from_config(home: &Path) -> Result<(PathBuf, RootSource), DashError> {
     let config_path = user_config_path(home);
-    let recorded = match std::fs::read_to_string(&config_path) {
-        Ok(raw) => toml::from_str::<MpmConfig>(&raw)
-            .map(|config| recorded_architects(&config))
-            .map_err(|e| {
-                unavailable(format_args!("{} is malformed: {e}", config_path.display()))
-            })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+    let config = match std::fs::read_to_string(&config_path) {
+        Ok(raw) => toml::from_str::<MpmConfig>(&raw).map_err(|e| {
+            unavailable(format_args!("{} is malformed: {e}", config_path.display()))
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => MpmConfig::default(),
         Err(e) => {
             return Err(unavailable(format_args!(
                 "cannot read {}: {e}",
@@ -183,6 +182,23 @@ fn architect_dir_from_config(home: &Path) -> Result<(PathBuf, RootSource), DashE
             )));
         }
     };
+    let recorded = recorded_architects(&config);
+    // #10944 critic HIGH: a recorded entry that lost its Architect profile must
+    // not fall through to the default store (the #8995 shape).
+    let listed: Vec<PathBuf> = config
+        .architect_grant()
+        .projects
+        .iter()
+        .filter(|entry| entry.is_absolute())
+        .cloned()
+        .collect();
+    if recorded.is_empty() && !listed.is_empty() {
+        return Err(unavailable(format_args!(
+            "{} records {} but none has a `.trusty-mpm.toml` requesting the Architect profile",
+            config_path.display(),
+            join_paths(&listed)
+        )));
+    }
     let source = if recorded.is_empty() {
         RootSource::Default
     } else {
@@ -192,13 +208,19 @@ fn architect_dir_from_config(home: &Path) -> Result<(PathBuf, RootSource), DashE
         unavailable(format_args!(
             "{} records more than one Architect ({})",
             config_path.display(),
-            many.iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            join_paths(&many)
         ))
     })?;
     Ok((dir.join(STORE_SUBDIR), source))
+}
+
+/// `a, b` of the paths' display forms.
+fn join_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `params` with `store.root` filled in when the caller omitted it.

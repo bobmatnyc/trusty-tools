@@ -214,6 +214,20 @@ fn two_recorded_architects_are_refused() {
 }
 
 #[test]
+fn recorded_dir_without_profile_is_refused_not_defaulted() {
+    let home = Home::new();
+    // A usable default exists; falling back to it would read and write it.
+    home.architect(DEFAULT_ARCHITECT_DIR, true);
+    let recorded = home.path().join("no-profile");
+    std::fs::create_dir_all(recorded.join(STORE_SUBDIR)).expect("mkdir");
+    home.record(&[&recorded]);
+    let text = unavailable_text(resolve_store_root(&no_env, Some(&home.path())));
+    assert!(text.contains(&recorded.display().to_string()), "{text}");
+    assert!(text.contains("config.toml"), "{text}");
+    assert!(text.contains("tm fleet init"), "{text}");
+}
+
+#[test]
 fn malformed_config_is_refused_not_defaulted() {
     let home = Home::new();
     // A usable default exists; a defaulting loader would silently pick it.
