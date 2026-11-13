@@ -1,6 +1,0 @@
-Added
-- Passkey verification for presence devices through webauthn-rs 0.6.2: registration needs an enrol ticket, the authentication state is held in daemon memory per request, and only ES256 credentials are accepted, at registration and at verify (owner ruling D72). `[presence] rp_id` and `rp_origin` have no default; with either missing the device methods are unavailable (#8878).
-- Daemon socket methods `mpm.presence.request`, `status`, `approve`, `verify`, `register.start`, `register.finish`, `devices.list` and `devices.revoke`. A request must name a live `claude` PID with its start time; enrol and revoke need a ticket (#8878).
-- `tm presence request`, `tm presence wait` (exit 0 granted, 75 still pending, 1 the request is gone with no grant) and `tm presence devices add|list|revoke`. `devices add` is labelled incomplete until the browser page ships (#8878 PR2b-2). Every device surface prints "key ACL unverified (#10865): device approvals are untrusted" (#8878).
-- When the guard denies an Architect trust-anchor write for lack of presence, it asks enrolled devices for approval within one second and names the request id; a failed request leaves the deny text unchanged (#8878).
-- An enrol ticket now enrols one device only within its 10-minute validity (#8878).
