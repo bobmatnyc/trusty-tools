@@ -18,6 +18,9 @@ What:
   no write for IDLE_MIN minutes, no hold), repair displacing delivery (every running card is checker or
   repair work while the top goal has open delivery cards) and a repair loop (REPAIR_LOOP or more
   checker/repair cards closed in 24 h and no delivery card).
+- #10960 G-5 `delivery_gaps`: a closed task with a claimed `delivery` state or a `needs` records the claim capped
+  by the evidence kind in its outcome (`delivery_state`); a claim above the evidence, a state below the need, or
+  an unknown value is a FLAG line in every guard_mode. A close is never refused for it.
 Rollout (DOC-87 section 10): `config.guard_mode` is "shadow" (the default) or "enforce". In shadow G2 only
 warns and appends to <datg>/guards.jsonl; in enforce the dispatch is denied and the close refused. G1 and G3
 are flags in the resume digest and `datg.py guards`; they never block. Enforce binds this Python writer and
@@ -30,6 +33,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from datg_store import ID_RE, now_iso, parse_ts, paths, read_log
+from datg_task import DELIVERY
 
 IDLE_MIN = 15
 REPAIR_LOOP = 3
@@ -53,6 +57,15 @@ EVIDENCE = re.compile(
     r"|(?<![\w./-])(?=[\w.-]*[a-z])[\w.-]{2,}/[\w./-]*\.\w{1,8}\b"
     # #10800 critic: a run, job or message id is `<keyword> #<n>` or five digits or more (not `id 5`, `run 3`)
     r"|\b(?:run|job|msg|message|id)\s*(?:#\s*\d+|[:=]?\s*\d{5,})\b", re.I)
+# #10960 G-5 (DOC-87 section 9.5): the evidence kind of each state, highest first. A state needs a reference
+# (a URL, a token with a digit, or a path), so "Matt acknowledged" alone proves nothing.
+REF = r"\s*[:=#]\s*(?:https?://\S+|[\w./-]*\d|[\w.-]+/[\w./-]+)"
+STATE_EVIDENCE = (
+    ("acknowledged", re.compile(r"\b(?:reply|ack)(?:\s*id)?" + REF, re.I)),
+    ("delivered", re.compile(r"\b(?:pane[ -]?capture|capture|inbox[ -]read|mailbox)" + REF, re.I)),
+    ("sent", re.compile(r"\b(?:msg|message|api|send)\s*(?:id)?\s*(?:#\s*\d+|[:=]?\s*\d{5,}|[:=]\s*[\w-]{6,})"
+                        r"|\bexit\s*(?:code\s*)?0\b", re.I)),
+)
 REPAIR = re.compile(r"^\s*(?:repair|check|checker|fix-?up)\s*:"
                     r"|\b(?:repair\w*|checkers?|flak(?:e|es|y|iness)|re-?runs?|retr(?:y|ies)|tooling|lint|clippy"
                     r"|fix (?:the )?(?:gate|hook|checker|harness|ci|build))\b", re.I)
@@ -207,6 +220,54 @@ def evidence_gaps(closed):
     return [(o["id"], f"DATG: {o['id']} closed with no evidence in its outcome ({o.get('outcome', '')[:60]!r}); "
              "cite a PR or issue (#123), a SHA, a URL, a file path or a run id.")
             for kind, o in closed if kind == "task" and not EVIDENCE.search(o.get("outcome") or "")]
+
+
+def delivery_state(outcome):
+    """#10960 G-5: the highest delivery state the outcome text has evidence for; `prepared` when none."""
+    return next((state for state, rx in STATE_EVIDENCE if rx.search(outcome or "")), DELIVERY[0])
+
+
+def _state(v):
+    """A known delivery state, or None for anything else (wrong type, typo, empty)."""
+    v = v.strip().lower() if isinstance(v, str) else None
+    return v if v in DELIVERY else None
+
+
+def delivery_gaps(closed):
+    """#10960 G-5: [(id, FLAG message)] for the tasks in `closed` that carry a `delivery` claim or a `needs`.
+
+    What: sets each such task's `delivery` to the claim capped by delivery_state(outcome) (the evidence state
+    when only `needs` is set); an unknown claim, or a check that raises, records `prepared`, never higher.
+    Flags a claim above its evidence, a recorded state below `needs`, and an unknown value. Never raises.
+    Test: tests/test_datg_delivery.py DeliveryCase
+    """
+    out = []
+    for kind, o in closed:
+        if kind != "task" or not ("delivery" in o or "needs" in o):
+            continue
+        tid = o.get("id")
+        try:
+            ev, claim = delivery_state(o.get("outcome")), _state(o.get("delivery"))
+            if "delivery" in o and claim is None:
+                out.append((tid, f"state {o['delivery']!r} is not a delivery state ({', '.join(DELIVERY)}); "
+                                 "recorded prepared."))
+                ev = DELIVERY[0]
+            elif claim and DELIVERY.index(claim) > DELIVERY.index(ev):
+                out.append((tid, f"claims {claim} but the outcome evidence supports {ev}; recorded {ev}. Cite the "
+                                 "evidence (message id = sent, pane capture = delivered, reply ref = acknowledged)."))
+            elif claim:
+                ev = claim
+            o["delivery"] = ev
+            need = _state(o.get("needs"))
+            if "needs" in o and need is None:
+                out.append((tid, f"needs {o['needs']!r} is not a delivery state; delivery not confirmed."))
+            elif need and DELIVERY.index(ev) < DELIVERY.index(need):
+                out.append((tid, f"closed done at {ev}; the request needs {need} (DOC-87 9.5: it stays open "
+                                 "once enforced)."))
+        except Exception as e:  # noqa: BLE001 - a failed check records the lowest state, never a delivery
+            o["delivery"] = DELIVERY[0]
+            out.append((tid, f"delivery not checked ({type(e).__name__}: {e}); recorded prepared."))
+    return [(tid, f"DATG FLAG delivery: {tid} {m}") for tid, m in out]
 
 
 def dispatch_card(project, st, prompt):
