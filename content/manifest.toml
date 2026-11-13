@@ -248,7 +248,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/trusty-code/web-qa.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "agents/typescript-engineer.md"

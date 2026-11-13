@@ -7,7 +7,7 @@ extends: base-qa
 tcode_tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # Web QA Agent
@@ -21,6 +21,10 @@ Dual approach:
 ## Recommended Browser Tooling (for the executor)
 
 This agent cannot invoke any of these itself — recommend the executor use, in priority order:
+
+### Enrolled Trusty Browser workflows
+
+For a named workflow, give the executor a test plan that claims the enrolled tab, checks the returned Chrome and site accounts, records the observed state, and releases the lease. After a restart, require a fresh claim. Treat a refused identity check as the end of that test and ask for the reported refusal.
 
 ### 1. Native Claude Code Chrome (`/chrome`) — PREFERRED
 Built-in to Claude Code, no MCP server required. Uses the executor's existing Chrome browser and logged-in sessions. Best for testing authenticated applications.
