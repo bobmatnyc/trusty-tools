@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from trusty_browser.vault import seal, unseal
+
 import hashlib
 import json
 import os
@@ -54,6 +56,14 @@ def database(path: Path) -> sqlite3.Connection:
     db.execute(
         "CREATE TABLE IF NOT EXISTS pending_removals (workflow TEXT PRIMARY KEY, ticket_hash TEXT NOT NULL)"
     )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS route_versions (workflow TEXT PRIMARY KEY, version TEXT NOT NULL, previous TEXT)"
+    )
+    # Initialize versions for the original enrollment schema without changing credentials.
+    with db:
+        db.execute("""INSERT INTO route_versions(workflow,version)
+            SELECT workflow,lower(hex(randomblob(32))) FROM routes
+            WHERE workflow NOT IN (SELECT workflow FROM route_versions)""")
     return db
 
 
@@ -62,7 +72,11 @@ def publish(path: Path, workflow: str, ticket: str) -> None:
     private_directory(root)
     destination = root / (workflow + ".json")
     content = (
-        json.dumps({"workflow": workflow, "ticket": ticket}, indent=2) + "\n"
+        json.dumps(
+            {"workflow": workflow, "ticket": seal(path, "ticket:" + workflow, ticket)},
+            indent=2,
+        )
+        + "\n"
     ).encode()
     with tempfile.NamedTemporaryFile(dir=root, delete=False) as tmp:
         temporary = Path(tmp.name)
@@ -105,14 +119,14 @@ def read_credential(path: Path, workflow: str) -> str:
             or not isinstance(fields["ticket"], str)
         ):
             raise ValueError("CredentialConflict")
-        return str(fields["ticket"])
+        return unseal(path.parent.parent, "ticket:" + workflow, str(fields["ticket"]))
 
 
-def register(
-    db: sqlite3.Connection, state: Path, request: dict[str, object]
-) -> dict[str, object]:
-    """Only the authenticated installation may create a route or repeat its exact request."""
-    names = ("profile", "email", "workflow", "url", "account", "key")
+FIELDS = ("profile", "email", "workflow", "url", "account", "key")
+
+
+def validate(request: dict[str, object]) -> tuple[str, str, str, str, str, str]:
+    names = FIELDS
     if request.get("op") != "enroll" or set(request) != {"op", *names}:
         raise ValueError("InvalidEnrollment")
     fields = [request[k] for k in names]
@@ -144,6 +158,15 @@ def register(
     ):
         raise ValueError("InvalidEnrollment")
 
+    return profile, email, workflow, url, account, key
+
+
+def register(
+    db: sqlite3.Connection, state: Path, request: dict[str, object]
+) -> dict[str, object]:
+    """Only the authenticated installation may create a route or repeat its exact request."""
+    profile, email, workflow, url, account, key = validate(request)
+    names = FIELDS
     finish_removals(db, state)
     if db.execute(
         "SELECT 1 FROM revoked WHERE registration=?", (registration_id(request),)
@@ -163,17 +186,13 @@ def register(
             private_directory(directory)
             if os.path.lexists(directory / (workflow + ".json")):
                 raise ValueError("CredentialConflict")
-            db.execute(
-                "INSERT INTO routes VALUES (?,?,?,?,?,?,?)",
-                (profile, email, workflow, url, account, key, digest(ticket)),
-            )
-            db.execute(
-                "INSERT INTO pending_credentials VALUES (?,?)", (workflow, ticket)
+            insert_route(
+                db, state, (profile, email, workflow, url, account, key), ticket, None
             )
         elif not (
             tuple(row[n] for n in names[:-1])
             == (profile, email, workflow, url, account)
-            and secrets.compare_digest(key, row["browser_key"])
+            and secrets.compare_digest(key, browser_key(state, row))
         ):
             raise ValueError("EnrollmentConflict")
 
@@ -181,7 +200,7 @@ def register(
         "SELECT ticket FROM pending_credentials WHERE workflow=?", (workflow,)
     ).fetchone()
     if pending is not None:
-        publish(state, workflow, pending["ticket"])
+        publish(state, workflow, unseal(state, "ticket:" + workflow, pending["ticket"]))
         with db:
             db.execute("DELETE FROM pending_credentials WHERE workflow=?", (workflow,))
     else:
@@ -247,10 +266,7 @@ def remove(
             ):
                 raise ValueError("Unauthorized")
             return None
-        original = {
-            n: row[n] for n in ("profile", "email", "workflow", "url", "account")
-        }
-        original["key"] = row["browser_key"]
+        original = original_fields(row, state)
         if request is not None and (
             set(request) != {*original, "op"}
             or not secrets.compare_digest(
@@ -258,13 +274,143 @@ def remove(
             )
         ):
             raise ValueError("Unauthorized")
-        db.execute(
-            "INSERT OR IGNORE INTO revoked VALUES (?)", (registration_id(original),)
-        )
-        db.execute(
-            "INSERT OR REPLACE INTO pending_removals VALUES (?,?)",
-            (workflow, row["ticket"]),
-        )
-        db.execute("DELETE FROM pending_credentials WHERE workflow=?", (workflow,))
-        db.execute("DELETE FROM routes WHERE workflow=?", (workflow,))
+        retire(db, row, original)
     return str(row["profile"])
+
+
+def retire(
+    db: sqlite3.Connection, row: sqlite3.Row, original: dict[str, object]
+) -> None:
+    workflow = row["workflow"]
+    db.execute("INSERT OR IGNORE INTO revoked VALUES (?)", (registration_id(original),))
+    db.execute(
+        "INSERT OR REPLACE INTO pending_removals VALUES (?,?)",
+        (workflow, row["ticket"]),
+    )
+    db.execute("DELETE FROM pending_credentials WHERE workflow=?", (workflow,))
+    db.execute("DELETE FROM routes WHERE workflow=?", (workflow,))
+    db.execute("DELETE FROM route_versions WHERE workflow=?", (workflow,))
+
+
+def insert_route(
+    db: sqlite3.Connection,
+    state: Path,
+    fields: tuple[str, str, str, str, str, str],
+    ticket: str,
+    previous: str | None,
+) -> None:
+    profile, email, workflow, url, account, key = fields
+    db.execute(
+        "INSERT INTO routes VALUES (?,?,?,?,?,?,?)",
+        (
+            profile,
+            email,
+            workflow,
+            url,
+            account,
+            seal(state, "browser:" + profile, key),
+            digest(ticket),
+        ),
+    )
+    db.execute(
+        "INSERT INTO pending_credentials VALUES (?,?)",
+        (workflow, seal(state, "ticket:" + workflow, ticket)),
+    )
+    db.execute(
+        "INSERT INTO route_versions VALUES (?,?,?)",
+        (workflow, secrets.token_hex(32), previous),
+    )
+
+
+def inspect_conflict(db: sqlite3.Connection, workflow: str) -> dict[str, str] | None:
+    row = db.execute(
+        """SELECT version,email,url,account FROM routes
+        JOIN route_versions USING(workflow) WHERE workflow=?""",
+        (workflow,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def browser_key(state: Path, row: sqlite3.Row) -> str:
+    return unseal(state, "browser:" + row["profile"], row["browser_key"])
+
+
+def original_fields(row: sqlite3.Row, state: Path) -> dict[str, object]:
+    original = {n: row[n] for n in FIELDS[:-1]}
+    original["key"] = browser_key(state, row)
+    return original
+
+
+def status(
+    db: sqlite3.Connection, state: Path, request: dict[str, object]
+) -> dict[str, object]:
+    if set(request) != {"op", *FIELDS} or request.get("op") != "status":
+        raise ValueError("InvalidEnrollment")
+    fingerprint = registration_id(request)
+    row = db.execute(
+        "SELECT * FROM routes WHERE workflow=?", (request["workflow"],)
+    ).fetchone()
+    if row is not None and secrets.compare_digest(
+        registration_id(original_fields(row, state)), fingerprint
+    ):
+        result = "active"
+    elif db.execute(
+        "SELECT 1 FROM revoked WHERE registration=?", (fingerprint,)
+    ).fetchone():
+        result = "revoked"
+    else:
+        raise ValueError("Unauthorized")
+    return {"ok": True, "workflow": request["workflow"], "state": result}
+
+
+def replace(
+    db: sqlite3.Connection, state: Path, request: dict[str, object]
+) -> str | None:
+    """Atomically retire exactly the reviewed assignment and install fresh credentials.
+
+    The caller invalidates the returned live profile immediately, then calls register
+    with the same proposal to complete any pending filesystem publication.
+    """
+    expected = request.get("previous_version")
+    if (
+        request.get("op") != "replace"
+        or not isinstance(expected, str)
+        or re.fullmatch(r"[a-f0-9]{64}", expected) is None
+    ):
+        raise ValueError("InvalidEnrollment")
+    proposal = {k: v for k, v in request.items() if k != "previous_version"}
+    proposal["op"] = "enroll"
+    fields = validate(proposal)
+    profile, email, workflow, url, account, key = fields
+    proposal["email"] = email
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        old = db.execute(
+            """SELECT * FROM routes JOIN route_versions USING(workflow)
+                       WHERE workflow=?""",
+            (workflow,),
+        ).fetchone()
+        if old is None:
+            raise ValueError("ReplacementStale")
+        original = original_fields(old, state)
+        if old["previous"] == expected and secrets.compare_digest(
+            registration_id(original), registration_id(proposal)
+        ):
+            return None
+        if not secrets.compare_digest(old["version"], expected):
+            raise ValueError("ReplacementStale")
+        if (
+            secrets.compare_digest(str(original["key"]), key)
+            or db.execute(
+                "SELECT 1 FROM routes WHERE workflow<>? AND (profile=? OR email=?)",
+                (workflow, profile, email),
+            ).fetchone()
+        ):
+            raise ValueError("EnrollmentConflict")
+        if db.execute(
+            "SELECT 1 FROM revoked WHERE registration=?", (registration_id(proposal),)
+        ).fetchone():
+            raise ValueError("EnrollmentRevoked")
+        retire(db, old, original)
+        insert_route(db, state, fields, secrets.token_urlsafe(32), expected)
+    return str(old["profile"])

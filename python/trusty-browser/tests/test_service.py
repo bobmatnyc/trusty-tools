@@ -225,6 +225,56 @@ async def exercise():
                     dict(op="snapshot", lease=q["lease"], request_id="still-travel")
                 )
             )["ok"]
+            destination = dict(
+                op="enroll",
+                profile=str(uuid.uuid4()),
+                key=secrets.token_hex(32),
+                workflow="travel",
+                email="other@example.test",
+                url="https://qa.test/",
+                account="other",
+            )
+            conflict = await broker.enrollment_request(destination)
+            assert not conflict["ok"]
+            approval = {
+                **destination,
+                "op": "replace",
+                "previous_version": conflict["previous"]["version"],
+            }
+            assert (await broker.enrollment_request(approval))["ok"]
+            assert rows[1]["profile"] not in broker.peers
+            assert not any(
+                claim.token == q["lease"] for claim in broker.claims.values()
+            )
+            _, old_browser, _, rejection = await open_client(
+                "service.sock",
+                dict(
+                    type="hello",
+                    profile=rows[1]["profile"],
+                    email=rows[1]["email"],
+                    incarnation="old-key",
+                    nonce=secrets.token_hex(32),
+                ),
+            )
+            assert rejection["error"] == "Unauthorized"
+            old_browser.close()
+            new_ticket = enrollment.read_credential(
+                state / "workflows/travel.json", "travel"
+            )
+            assert new_ticket != rows[1]["ticket"]
+            three, t3, _ = await browser(destination, "boot-transferred", "other")
+            _, new_writer, new_agent, _ = await agent(
+                {**destination, "ticket": new_ticket}
+            )
+            assert (
+                await new_agent(
+                    dict(op="snapshot", lease=q["lease"], request_id="old-handle")
+                )
+            )["error"] == "StaleLease"
+            assert (await new_agent(dict(op="claim")))["email"] == destination["email"]
+            new_writer.close()
+            three.close()
+            await t3
             await service.operator_revoke(state, "travel")
             assert rows[1]["profile"] not in broker.peers
             assert not any(

@@ -14,7 +14,17 @@ import sys
 import time
 from pathlib import Path
 from typing import BinaryIO
-from trusty_browser.enrollment import database, digest, finish_removals, register, remove
+from trusty_browser.enrollment import (
+    database,
+    digest,
+    finish_removals,
+    inspect_conflict,
+    browser_key,
+    register,
+    remove,
+    replace,
+    status,
+)
 from trusty_browser.mac_peer import verify_chrome_host
 
 from trusty_browser.protocol import (
@@ -110,10 +120,8 @@ class Broker:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> tuple[sqlite3.Row, str]:
         hello = await read_frame(reader)
-        if (
-            set(hello) != {"type", "profile", "email", "incarnation", "nonce"}
-            or hello["type"] != "hello"
-        ):
+        fields = {"type", "profile", "email", "incarnation", "nonce"}
+        if set(hello) != fields or hello["type"] != "hello":
             raise Refusal("InvalidRequest")
         row = self.route(hello, True)
         if row["email"] != string(hello, "email").casefold():
@@ -125,16 +133,17 @@ class Broker:
             raise Refusal("InvalidNonce")
         incarnation = string(hello, "incarnation")
         nonce = secrets.token_hex(32)
+        key = browser_key(self.state, row)
         await write_frame(
             writer,
             {
                 "type": "challenge",
                 "nonce": nonce,
-                "proof": pairing_proof(row["browser_key"], "broker", hello, nonce),
+                "proof": pairing_proof(key, "broker", hello, nonce),
             },
         )
         response = await read_frame(reader)
-        expected = pairing_proof(row["browser_key"], "extension", hello, nonce)
+        expected = pairing_proof(key, "extension", hello, nonce)
         if response.get("type") != "proof" or not secrets.compare_digest(
             expected.encode(), string(response, "proof").encode()
         ):
@@ -169,18 +178,14 @@ class Broker:
             # Read the enrollment key only after OS authentication.
             request = await asyncio.wait_for(read_frame(reader), 5)
             assert self.db is not None
-            if request.get("op") == "unenroll":
-                workflow = string(request, "workflow")
-                await self.revoke(workflow, request)
-                response: Frame = {"ok": True, "workflow": workflow}
-            else:
-                response = register(self.db, self.state, request)
+            response = await self.enrollment_request(request)
             await write_frame(writer, response)
         except (ValueError, OSError, sqlite3.Error, TimeoutError) as exc:
             safe = {
                 "InvalidEnrollment",
                 "EnrollmentConflict",
                 "EnrollmentRevoked",
+                "ReplacementStale",
                 "CredentialConflict",
                 "Unauthorized",
             }
@@ -198,23 +203,54 @@ class Broker:
             self.writers.discard(writer)
             writer.close()
 
+    async def enrollment_request(self, request: Frame) -> Frame:
+        assert self.db is not None
+        op = string(request, "op")
+        workflow = string(request, "workflow")
+        if op == "status":
+            return status(self.db, self.state, request)
+        if op == "unenroll":
+            await self.revoke(workflow, request)
+            return {"ok": True, "workflow": workflow}
+        if op == "replace":
+            retired = replace(self.db, self.state, request)
+            if retired is not None:
+                await self.detach(retired)
+            request = {k: v for k, v in request.items() if k != "previous_version"}
+            request["op"] = "enroll"
+        try:
+            return register(self.db, self.state, request)
+        except ValueError as exc:
+            if op == "enroll" and str(exc) == "EnrollmentConflict":
+                prior = inspect_conflict(self.db, workflow)
+                if prior is not None:
+                    return {
+                        "ok": False,
+                        "error": "EnrollmentConflict",
+                        "previous": prior,
+                    }
+            raise
+
     async def revoke(self, workflow: str, request: Frame | None = None) -> None:
         assert self.db is not None
         profile = remove(self.db, self.state, workflow, request)
         if profile is not None:
-            for w, s in list(self.sessions.items()):
-                if s.row["profile"] == profile:
-                    w.close()
-            peer = self.peers.get(profile)
-            if peer is not None:
-                # Drop the generation synchronously before waiting on any indicator.
-                old = [c for c in self.claims.values() if c.peer is peer]
-                self.forget(peer)
-                try:
-                    await asyncio.gather(*(self.clear(c) for c in old))
-                finally:
-                    peer.writer.close()
+            await self.detach(profile)
         finish_removals(self.db, self.state)
+
+    async def detach(self, profile: str) -> None:
+        for w, s in list(self.sessions.items()):
+            if s.row["profile"] == profile:
+                w.close()
+        peer = self.peers.get(profile)
+        if peer is not None:
+            # Drop the generation synchronously before waiting on any indicator.
+            old = [c for c in self.claims.values() if c.peer is peer]
+            self.forget(peer)
+            try:
+                await asyncio.gather(*(self.clear(c) for c in old))
+            finally:
+                peer.writer.close()
 
     async def operator(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
