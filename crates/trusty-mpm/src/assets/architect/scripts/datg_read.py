@@ -270,9 +270,12 @@ def _ruling_sections(items, now):
         line = f"  {i['id']} {i['title']} | answer: {i.get('answer', '')}"
         if src.get("by") == "owner":   # #10780 H3: the owner's words are the ruling; the answer is our reading
             until = parse_ts(src.get("until")) if src.get("until") else None
-            (old if until and until <= now else cur).append(
+            gone = "superseded_by" in i   # #10960 G-4: a superseded ruling is history, with its successor named
+            (old if gone or (until and until <= now) else cur).append(
                 f'  {i["id"]} {i["title"]} | ruling: "{src.get("quote")}" (owner turn: {src.get("cite")})'
-                + (f" | until {src['until']}" if until else "") + f" | Architect reading: {i.get('answer', '')}")
+                + (f" | until {src['until']}" if until else "")
+                + (f" | superseded by {i['superseded_by']}" if gone else "")
+                + f" | Architect reading: {i.get('answer', '')}")
         elif src.get("by") == "architect":
             inf.append(line + f" | basis: {src.get('basis')}")
         else:
