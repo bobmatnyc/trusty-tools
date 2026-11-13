@@ -239,8 +239,7 @@ mod tests {
             cwd_rewrite_decision("git log -p", Some(&tree)).is_err(),
             "a denied original must run unchanged so Claude Code denies it"
         );
-        let allowed = cwd_rewrite_decision("git diff", Some(&tree))
-            .expect("rewritten");
+        let allowed = cwd_rewrite_decision("git diff", Some(&tree)).expect("rewritten");
         assert_eq!(allowed.permission, Some(RewriteDecision::Allow));
     }
 
@@ -276,8 +275,8 @@ mod tests {
 
     #[test]
     fn outside_a_worktree_the_brace_rewrite_is_unchanged() {
-        let out = cwd_rewrite_decision("git diff", Some(Path::new("/repo/crates/x")))
-            .expect("rewritten");
+        let out =
+            cwd_rewrite_decision("git diff", Some(Path::new("/repo/crates/x"))).expect("rewritten");
         assert_eq!(
             Some(out.command),
             rewrite_bash_command_for_compression("git diff")
