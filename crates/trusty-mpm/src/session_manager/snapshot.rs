@@ -105,14 +105,26 @@ pub async fn capture_into(record: &mut SessionRecord, driver: &dyn ManagedTmuxDr
 /// Why: a stop proves the live session holds the record's own `%N` pane;
 /// the scrollback must come from that pane, not whichever pane is active.
 /// What: identical to [`capture_into`] except that step (1) calls
-/// `driver.capture_pane(name, pane_id, …)` when `pane_id` is `Some`.
+/// `driver.capture_pane(name, pane_id, …)` when `pane_id` is `Some`. #10101:
+/// both reads run on the record's own server; a record whose server cannot
+/// be reached captures nothing.
 /// Test: `a_foreign_stop_writes_no_scrollback_and_keeps_last_cwd`,
-/// `stopping_a_record_whose_pane_is_live_still_kills_it`.
+/// `stopping_a_record_whose_pane_is_live_still_kills_it`,
+/// `stopping_a_named_server_record_snapshots_its_pane_on_its_server_10101`.
 pub async fn capture_into_pane(
     record: &mut SessionRecord,
     driver: &dyn ManagedTmuxDriver,
     pane_id: Option<&str>,
 ) {
+    // #10101: a named-server record's pane is read on that server only.
+    let routed = match super::tmux_route::route(driver, record) {
+        Ok(routed) => routed,
+        Err(e) => {
+            warn!(name = %record.tmux_name, "snapshot skipped: {e}");
+            return;
+        }
+    };
+    let driver: &dyn ManagedTmuxDriver = &*routed;
     let name = &record.tmux_name;
 
     // Step 1: scrollback snapshot (only if we have a workspace dir to write into).
