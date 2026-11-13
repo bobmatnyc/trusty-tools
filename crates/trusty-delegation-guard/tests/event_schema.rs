@@ -133,6 +133,27 @@ fn oversized_excerpt_is_rejected() {
 }
 
 #[test]
+fn unredacted_secret_fails_validation() {
+    let event = alpha_event(Boundary::Contract);
+    assert!(event.validate().is_ok(), "captured event validates");
+    let json = event.to_json().expect("serialize");
+    for (field, secret) in [
+        ("prompt_excerpt", "deploy with AKIAABCDEFGHIJKLMNOP"),
+        ("description", "API_TOKEN=tok0synthetic0value"),
+    ] {
+        let bad = edit_json(&json, |v| {
+            v["proposed"][field] = serde_json::json!(secret);
+            v["proposed"]["redacted"] = serde_json::json!(false);
+        });
+        assert_eq!(
+            DgEvent::from_json(&bad),
+            Err(DgError::Unredacted(field)),
+            "{field}"
+        );
+    }
+}
+
+#[test]
 fn tampered_dedupe_key_is_rejected() {
     let json = alpha_event(Boundary::Contract)
         .to_json()

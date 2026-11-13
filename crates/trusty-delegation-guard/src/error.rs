@@ -39,6 +39,9 @@ pub enum DgError {
     /// Two parts of one record contradict each other.
     #[error("inconsistent record: {0}")]
     Inconsistent(&'static str),
+    /// A stored free-text field still matches a credential detector.
+    #[error("field `{0}` still matches a credential detector")]
+    Unredacted(&'static str),
     /// #10892 §3 test 5: input from one project offered to another project's
     /// bundle or event.
     #[error("foreign project: expected {expected}, found {found}")]

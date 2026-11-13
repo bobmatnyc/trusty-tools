@@ -159,7 +159,7 @@ impl DgEvent {
     /// Recomputes every derived field and checks every §3 limit.
     ///
     /// Test: `tampered_dedupe_key_is_rejected`, `worker_state_must_match_boundary`,
-    /// `oversized_excerpt_is_rejected`.
+    /// `oversized_excerpt_is_rejected`, `unredacted_secret_fails_validation`.
     pub fn validate(&self) -> Result<()> {
         if self.schema != EVENT_SCHEMA {
             return Err(DgError::SchemaMismatch {
@@ -182,6 +182,15 @@ impl DgEvent {
         }
         if self.proposed.prompt_excerpt.len() > EXCERPT_MAX_BYTES {
             return Err(DgError::LimitExceeded("prompt_excerpt over 8 KiB"));
+        }
+        // #10892: a parsed event is not trusted to have been redacted.
+        for (name, text) in [
+            ("prompt_excerpt", &self.proposed.prompt_excerpt),
+            ("description", &self.proposed.description),
+        ] {
+            if redact(text).redacted {
+                return Err(DgError::Unredacted(name));
+            }
         }
         self.policy.validate()?;
         if self

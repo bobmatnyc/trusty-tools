@@ -34,9 +34,12 @@ const DETECTORS: &[(&str, &str)] = &[
         r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}",
     ),
     ("bearer", r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]{16,}=*"),
+    // #10892: the key may sit inside an `_`-joined name (`API_TOKEN`,
+    // `AWS_SECRET_ACCESS_KEY`) and may be JSON-quoted (`"password": "..."`).
+    // An `=` or `:` must follow, so prose like "the token budget" is untouched.
     (
         "assignment",
-        r#"(?i)\b(?:api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']?[^\s"']{8,}"#,
+        r#"(?i)["']?\b[A-Za-z0-9_]*(?:api[_-]?key|secret|token|password|passwd)[A-Za-z0-9_]*["']?\s*[:=]\s*["']?[^\s"']{8,}"#,
     ),
 ];
 

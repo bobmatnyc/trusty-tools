@@ -38,6 +38,45 @@ fn each_detector_redacts_its_shape() {
 }
 
 #[test]
+fn json_quoted_and_env_style_assignments_redact() {
+    // (text, secret value that must not survive)
+    let cases = [
+        (r#"{"password": "hunter2hunter2"}"#, "hunter2hunter2"),
+        (r#"{"api_key": "abcd1234efgh5678"}"#, "abcd1234efgh5678"),
+        ("API_TOKEN=tok0synthetic0value", "tok0synthetic0value"),
+        ("access_token=acc0synthetic0value", "acc0synthetic0value"),
+        ("client_secret=cls0synthetic0value", "cls0synthetic0value"),
+        (
+            "AWS_SECRET_ACCESS_KEY=wJalrSYNTHETICbPxRfiCYEXAMPLE",
+            "wJalrSYNTHETICbPxRfiCYEXAMPLE",
+        ),
+        ("github_token=gtk0synthetic0value", "gtk0synthetic0value"),
+    ];
+    for (text, value) in cases {
+        let out = redact(&format!("before {text} after"));
+        assert!(out.redacted, "{text}: no hit");
+        assert!(
+            !out.text.contains(value),
+            "{text}: value survived: {}",
+            out.text
+        );
+    }
+}
+
+#[test]
+fn prose_mentioning_a_keyword_is_untouched() {
+    for text in [
+        "the token budget is 8000",
+        "rotate the client secret next week",
+        "password policy requires twelve characters",
+    ] {
+        let out = redact(text);
+        assert!(!out.redacted, "false positive on {text:?}: {}", out.text);
+        assert_eq!(out.text, text);
+    }
+}
+
+#[test]
 fn clean_text_is_untouched() {
     let text = "Index the parser module; start at most 2 nested workers in docs/.";
     let out = redact(text);
