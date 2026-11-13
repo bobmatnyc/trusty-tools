@@ -1,3 +1,0 @@
-Added
-- The Architect dashboard's settings pane has a technical level selector offering the six levels. It shows `pm` when no level is set, saves through the settings write path, and names the error when the store refuses the write (#11064).
-- The Architect bundle ships `scripts/level_lint.py`. At `non-technical`, `vibe-coder` and `pm` it flags file paths, `file:line` pairs, SHAs, CLI flags, environment variables, CI job names, tool names and code identifiers in item text. `dashboard-db.py` runs it on every item create, set, update and batch write and prints warnings to stderr; a finding or a lint failure never refuses the write (#11064).
