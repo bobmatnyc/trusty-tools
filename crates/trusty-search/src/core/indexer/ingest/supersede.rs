@@ -211,7 +211,9 @@ impl CodeIndexer {
     /// every store unchanged. On success it drops the ids, the entity list and
     /// the in-process hash from memory. No corpus wired: memory only.
     /// Test: `a_term_between_a_batch_delete_and_insert_leaves_the_file_served_after_resume`;
-    /// the refused arm by `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps`.
+    /// the refused arm by `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps`;
+    /// a fault inside the transaction by
+    /// `a_prune_fault_inside_the_delete_txn_keeps_rows_and_hash_11087`.
     pub(crate) async fn remove_file_rows_and_hash(
         &self,
         file_path: &str,
@@ -226,8 +228,20 @@ impl CodeIndexer {
             anyhow::bail!("injected redb chunk delete failure (#8959 test seam)");
         }
         if let Some(corpus) = self.corpus.clone() {
+            // #11087: the forget seam fails the one transaction after its
+            // removes and before its commit, as `try_delete_file_rows_from_redb`.
+            #[cfg(test)]
+            let fail_in_txn = crate::service::reindex::hash::TEST_FAIL_FORGET_HASH
+                .lock()
+                .is_ok_and(|f| f.contains(&self.index_id));
             let (ids, file) = (ids.to_vec(), vec![file_path.to_string()]);
             tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                if fail_in_txn {
+                    return corpus.delete_chunk_entity_and_hash_rows_failing_before_commit(
+                        &ids, &file, &file,
+                    );
+                }
                 corpus.delete_chunk_entity_and_hash_rows(&ids, &file, &file)
             })
             .await

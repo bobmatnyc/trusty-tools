@@ -265,7 +265,7 @@ async fn open_rescan(
 /// sweep, boot reconcile's delta, the `index_file` gate, the rescan's sops
 /// arm, and `CodeIndexer::index_file`'s own sops arm (the watcher's path).
 /// Fails with the hash delete removed from `purge_file_with` and from
-/// `remove_file_rows_and_hash` (#11087), or with any one arm's purge reverted to
+/// `remove_file_and_hash` (#11087), or with any one arm's purge reverted to
 /// `remove_file`: the second open rescan reports the file unchanged and it
 /// stays empty.
 #[tokio::test]

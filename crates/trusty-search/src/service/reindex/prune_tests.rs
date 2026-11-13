@@ -1134,3 +1134,121 @@ async fn a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps() {
     );
     assert!(!warm_ids_for(&handle, "a.rs").await.is_empty());
 }
+
+/// Whether `file` holds an entity row in the installed corpus's redb.
+async fn entity_row_for(handle: &IndexHandle, file: &str) -> bool {
+    let corpus = handle.indexer.read().await.corpus_store().unwrap();
+    let found = corpus
+        .load_all_entities()
+        .unwrap()
+        .iter()
+        .any(|(f, _)| f == file);
+    drop(corpus);
+    found
+}
+
+/// Every warm chunk's content for `file`, joined: what search serves.
+async fn landed_text(handle: &IndexHandle, file: &str) -> String {
+    let chunks = handle
+        .indexer
+        .read()
+        .await
+        .raw_chunks_snapshot()
+        .await
+        .unwrap();
+    chunks
+        .into_iter()
+        .filter(|c| c.file == file)
+        .map(|c| c.content)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Why: #11087 — the prune drops a file's chunk, entity and hash rows in one
+/// redb transaction. The #8959 seam fails before redb is touched, so nothing
+/// proved that a fault after some removes and before the commit keeps all
+/// three rows. In two transactions the chunks committed alone, and a hash
+/// with no chunks made the next reindex skip the file forever.
+/// What: indexes `a.rs` + `b.rs`, deletes `b.rs`, reindexes with the forget
+/// seam failing the transaction after its removes and before its commit,
+/// then asserts `b.rs`'s warm ids, chunk rows, entity row and hash row are
+/// unchanged, its text is still searchable and its hash still cached; a
+/// clean retry then prunes all of it.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_prune_fault_inside_the_delete_txn_keeps_rows_and_hash_11087() {
+    let (root, handle, _vectors) = colocated_fixture("x11087-prune-txn");
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha_11087() {}\n").unwrap();
+    std::fs::write(root.path().join("b.rs"), "pub fn beta_11087() {}\n").unwrap();
+    spawn_reindex_awaitable(handle.clone(), Arc::new(ReindexProgress::new()), false)
+        .await
+        .unwrap();
+
+    let warm = warm_ids_for(&handle, "b.rs").await;
+    let mut rows = corpus_ids_for(&handle, "b.rs").await;
+    rows.sort();
+    let hash = durable_hash_for(&handle, "b.rs").await;
+    let hashes = super::super::hash::hashes_for(&handle.id);
+    let cached = hashes
+        .get(&std::path::PathBuf::from("b.rs"))
+        .map(|h| h.clone());
+    assert!(!warm.is_empty() && !rows.is_empty(), "setup: b.rs chunks");
+    assert!(
+        entity_row_for(&handle, "b.rs").await,
+        "setup: b.rs entity row"
+    );
+    assert!(hash.is_some() && cached.is_some(), "setup: b.rs hash");
+    assert!(
+        landed_text(&handle, "b.rs").await.contains("beta_11087"),
+        "setup: b.rs searchable"
+    );
+
+    std::fs::remove_file(root.path().join("b.rs")).unwrap();
+    let id = handle.id.0.clone();
+    let seam = &crate::service::reindex::hash::TEST_FAIL_FORGET_HASH;
+    seam.lock().unwrap().push(id.clone());
+    let faulted = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), faulted.clone(), false)
+        .await
+        .unwrap();
+    seam.lock().unwrap().retain(|f| *f != id);
+
+    assert!(
+        faulted.errors.load(std::sync::atomic::Ordering::Acquire) >= 1,
+        "the in-transaction fault is reported"
+    );
+    assert_eq!(warm_ids_for(&handle, "b.rs").await, warm, "warm ids");
+    let mut left = corpus_ids_for(&handle, "b.rs").await;
+    left.sort();
+    assert_eq!(left, rows, "an uncommitted delete changed the chunk rows");
+    assert!(
+        entity_row_for(&handle, "b.rs").await,
+        "an uncommitted delete dropped the entity row"
+    );
+    assert_eq!(durable_hash_for(&handle, "b.rs").await, hash, "redb hash");
+    assert!(
+        landed_text(&handle, "b.rs").await.contains("beta_11087"),
+        "b.rs must stay searchable"
+    );
+    assert_eq!(
+        hashes
+            .get(&std::path::PathBuf::from("b.rs"))
+            .map(|h| h.clone()),
+        cached,
+        "cached hash"
+    );
+
+    spawn_reindex_awaitable(handle.clone(), Arc::new(ReindexProgress::new()), false)
+        .await
+        .unwrap();
+    assert!(
+        warm_ids_for(&handle, "b.rs").await.is_empty(),
+        "retry prunes"
+    );
+    assert!(corpus_ids_for(&handle, "b.rs").await.is_empty());
+    assert!(
+        !entity_row_for(&handle, "b.rs").await,
+        "retry drops entities"
+    );
+    assert_eq!(durable_hash_for(&handle, "b.rs").await, None);
+}

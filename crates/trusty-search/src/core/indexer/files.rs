@@ -579,7 +579,9 @@ impl CodeIndexer {
     }
 
     /// [`Self::remove_file_no_kg_rebuild`] with the redb-delete failure mode
-    /// chosen by the caller; `index_file`'s sops arm uses `FailClosed` (#8959).
+    /// chosen by the caller. Every production caller passes `FailClosed`.
+    /// `index_file`'s sops arm no longer comes here: it goes through
+    /// `purge_file_with` → `remove_file_and_hash` (#11087).
     pub(crate) async fn remove_file_no_kg_rebuild_with(
         &self,
         file_path: &str,

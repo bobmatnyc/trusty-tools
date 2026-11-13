@@ -104,12 +104,35 @@ impl CorpusStore {
     /// exited between the two; the resume then hash-skipped the file forever.
     /// What: one transaction over the chunk, entity and hash tables; any
     /// failure commits nothing. Returns the chunk ids whose rows existed.
-    /// Test: `delete_chunk_entity_and_hash_rows_takes_all_three` below.
+    /// Test: `delete_chunk_entity_and_hash_rows_takes_all_three` below;
+    /// `a_prune_fault_inside_the_delete_txn_keeps_rows_and_hash_11087`.
     pub(crate) fn delete_chunk_entity_and_hash_rows(
         &self,
         ids: &[String],
         entity_files: &[String],
         hash_files: &[String],
+    ) -> Result<Vec<String>> {
+        self.delete_chunk_entity_and_hash_rows_txn(ids, entity_files, hash_files, false)
+    }
+
+    /// [`Self::delete_chunk_entity_and_hash_rows`] that fails after every
+    /// remove and before the commit: the #11087 fault seam.
+    #[cfg(test)]
+    pub(crate) fn delete_chunk_entity_and_hash_rows_failing_before_commit(
+        &self,
+        ids: &[String],
+        entity_files: &[String],
+        hash_files: &[String],
+    ) -> Result<Vec<String>> {
+        self.delete_chunk_entity_and_hash_rows_txn(ids, entity_files, hash_files, true)
+    }
+
+    fn delete_chunk_entity_and_hash_rows_txn(
+        &self,
+        ids: &[String],
+        entity_files: &[String],
+        hash_files: &[String],
+        fail_before_commit: bool,
     ) -> Result<Vec<String>> {
         if ids.is_empty() && entity_files.is_empty() && hash_files.is_empty() {
             return Ok(Vec::new());
@@ -146,6 +169,11 @@ impl CorpusStore {
                         .with_context(|| format!("delete file hash entry for {file}"))?;
                 }
             }
+        }
+        // #11087: a fault after all three removes must commit none of them.
+        if fail_before_commit {
+            txn.abort().context("abort batch-remove txn")?;
+            anyhow::bail!("injected file-row delete failure before commit (#11087 test seam)");
         }
         txn.commit().context("commit batch-remove txn")?;
         Ok(removed)
