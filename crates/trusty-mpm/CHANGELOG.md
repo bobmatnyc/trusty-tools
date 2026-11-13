@@ -79,6 +79,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `seed_history.tsv` records the current `docs/architect/bundle-provenance.json` bytes again, so `every_embedded_seed_is_in_the_shipped_history` passes after #11067 (#11067).
 - The Live tab of `tm tui` now lists managed sessions. It read only `mpm.sessions.list`, the hook registry, which holds no session the session manager spawned; it now also reads `mpm.managed.list` and adds each managed session the registry lacks, with its agents and step. A failed managed read fails the Live fetch with `mpm.managed.list: <error>` rather than drawing an empty list (#11104).
 - A managed session that a `SessionStart` hook also registered draws as one Live row, not two. The hook row, keyed by Claude's session UUID, folds into the managed session whose `claude_session_id` matches it: the row shows the managed name and workdir with the hook row's status (#11104).
+- `tm hook --egress-guard` lets the main thread of a tm-launched PM session (launch stamp `TRUSTY_MPM_SESSION_PROFILE=pm`) post to the owner's Slack DM: slack-mcp `slack_send_message` with `channel` exactly `D0AJ5P0PRTK`, and `slack_create_canvas` with no `channel_id` or that id (#11194). Every other Slack target and write tool, Gmail, Notion, Google Chat and every subagent stay denied, and the read allowlist (#10387) is unchanged. Each allowed call appends an `egress-pm-dm-allowed` line to the Architect egress audit file, and an allow whose line cannot be written is denied.
 
 ### Changed
 
