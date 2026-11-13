@@ -12,10 +12,12 @@
 #   only, with no published port; start the tailscale sidecar when its image
 #   exists; inspect everything and REFUSE on any boundary break; then run
 #   check.sh, exercise.sh, check_v1.sh (V1) and check_tailscale.sh (V5) when
-#   present, and print READY only when all pass. Any refusal stops the app (and
-#   sidecar) and exits 1. An inspect error is a refusal, never a pass.
-#   --check-only re-runs the inspection of a running sled, for example to find
-#   a network attached after launch; a refusal stops the app.
+#   present, and print READY, naming the checks run, only when all pass. Any
+#   refusal stops what this run started and exits 1. An inspect error is a
+#   refusal, never a pass. --check-only re-runs the inspection of a running
+#   sled, for example to find a network attached after launch. It acts only on
+#   a container carrying the trusty.sled.launch label launch sets; a refusal
+#   stops the app, and an unlabelled target is refused and left running.
 # Test: scripts/check_sled_launch.sh (stub docker, one case per refusal).
 #
 # Names: app PREFIX, proxy PREFIX-egress, network PREFIX-internal, sidecar
@@ -48,8 +50,22 @@ APP="${PREFIX}"; PROXY="${PREFIX}-egress"; NET="${PREFIX}-internal"; SIDE="${PRE
 PROXY_ALIAS=tm-trusty-cloud-sled-egress
 STATE="${STATE:-${HOME}/sled-state/${PREFIX}}"
 SLED_UID="${SLED_UID:-$(id -u)}"; SLED_GID="${SLED_GID:-$(id -g)}"
+TRIES="${SLED_CHECK_TRIES:-3}"; PAUSE="${SLED_CHECK_PAUSE:-30}"
+for v in "SLED_UID=${SLED_UID}" "SLED_GID=${SLED_GID}" "SLED_CHECK_TRIES=${TRIES}" "SLED_CHECK_PAUSE=${PAUSE}"; do
+    case "${v#*=}" in ''|*[!0-9]*) echo "launch: ${v%%=*} must be a whole number" >&2; exit 2 ;; esac
+done
+[ "${TRIES}" -ge 1 ] || { echo "launch: SLED_CHECK_TRIES must be at least 1" >&2; exit 2; }
 V5="${HERE}/check_tailscale.sh"
+# Every container launch starts carries this label; --check-only acts on no other.
+LABEL="trusty.sled.launch"
 STARTED=""
+# started NAME — add NAME to the stop list once its create/run succeeded.
+started() { STARTED="$1 ${STARTED}"; }
+# labelled NAME — NAME exists and carries LABEL=PREFIX.
+labelled() {
+    [ "$(docker container inspect "$1" 2>/dev/null \
+        | jq -r --arg k "${LABEL}" '.[0].Config.Labels[$k] // empty' 2>/dev/null)" = "${PREFIX}" ]
+}
 
 # refuse LINES — print the refusals, stop what this run started (or the app on
 # --check-only), exit 1.
@@ -82,7 +98,7 @@ app_allow() {
 }
 
 # inspect_one NAME — the container's inspect JSON, or a refusal on stdout+rc 1.
-inspect_one() { docker inspect "$1" 2>/dev/null || { echo "REFUSE inspect: docker inspect $1 failed"; return 1; }; }
+inspect_one() { docker container inspect "$1" 2>/dev/null || { echo "REFUSE inspect: docker container inspect $1 failed"; return 1; }; }
 
 # inspect_all SIDECAR(yes|no) — every refusal line for the running sled.
 inspect_all() {
@@ -117,9 +133,12 @@ inspect_all() {
 }
 
 if [ "${CHECK_ONLY}" = yes ]; then
-    STARTED="${SIDE} ${APP}"
+    # Refuse a target launch did not start, and leave it running.
+    labelled "${APP}" || refuse "REFUSE target: ${APP} does not carry ${LABEL}=${PREFIX}; nothing stopped"
+    started "${APP}"
+    labelled "${SIDE}" && started "${SIDE}"
     side=no
-    if docker inspect "${SIDE}" > /dev/null 2>&1; then side=yes
+    if docker container inspect "${SIDE}" > /dev/null 2>&1; then side=yes
     elif [ -e "${V5}" ]; then refuse "REFUSE sidecar: ${SIDE} is not running and V5 needs it"; fi
     out="$(inspect_all "${side}")"
     [ -z "${out}" ] || refuse "${out}"
@@ -130,7 +149,7 @@ fi
 [ -n "${TAG}" ] || { echo "launch: --tag is required" >&2; exit 2; }
 # Nothing of this sled may exist yet: launch never adopts a hand-made one.
 for c in "${APP}" "${PROXY}" "${SIDE}"; do
-    docker inspect "$c" > /dev/null 2>&1 && refuse "REFUSE exists: container ${c}; tear it down first"
+    docker container inspect "$c" > /dev/null 2>&1 && refuse "REFUSE exists: container ${c}; tear it down first"
 done
 docker network inspect "${NET}" > /dev/null 2>&1 && refuse "REFUSE exists: network ${NET}; tear it down first"
 
@@ -151,14 +170,16 @@ docker network create --internal --ipv6=false --subnet "${SUBNET}" "${NET}" > /d
     || refuse "REFUSE network: docker network create ${NET} failed"
 
 proxy_caps=(); for c in ${SLED_PROXY_CAPS}; do proxy_caps+=(--cap-add "$c"); done
-STARTED="${PROXY}"
-docker create --name "${PROXY}" --network "${NET}" --network-alias "${PROXY_ALIAS}" \
+docker create --name "${PROXY}" --label "${LABEL}=${PREFIX}" \
+    --network "${NET}" --network-alias "${PROXY_ALIAS}" \
     --cap-drop ALL "${proxy_caps[@]}" --security-opt no-new-privileges \
     --read-only --tmpfs /var/log/squid --tmpfs /etc/squid/profile.d --tmpfs /run \
     --tmpfs /var/spool/squid --tmpfs /var/cache/squid --tmpfs /tmp \
     --pids-limit 128 --memory 256m --memory-swap 256m --cpus 1 \
     "${IMG_PROXY}" > /dev/null || refuse "REFUSE proxy: docker create failed"
-# Both networks before start, so squid sees both interfaces.
+started "${PROXY}"
+# Both networks before start: the entrypoint binds squid to the internal
+# address only (proxy/sled-bind-addr), so the bridge gets no answer on 3128.
 docker network connect bridge "${PROXY}" || refuse "REFUSE proxy: network connect bridge failed"
 docker start "${PROXY}" > /dev/null || refuse "REFUSE proxy: docker start failed"
 
@@ -167,19 +188,19 @@ for s in ${SECRETS}; do app_mounts+=(-v "${STATE}/secrets/${s}:/run/secrets/${s}
 app_tmpfs=(--tmpfs /tmp:mode=1777 --tmpfs /var/tmp:mode=1777)
 # Main's image runs tailscaled in the app; with a sidecar the app has no socket dir.
 [ "${SIDECAR}" = no ] && app_tmpfs+=(--tmpfs "/var/run/tailscale:mode=0700,uid=${SLED_UID},gid=${SLED_GID}")
-STARTED="${APP} ${PROXY}"
-docker run -d --name "${APP}" --network "${NET}" \
+docker run -d --name "${APP}" --label "${LABEL}=${PREFIX}" --network "${NET}" \
     --cap-drop ALL --security-opt no-new-privileges --read-only "${app_tmpfs[@]}" \
     --pids-limit 1024 --memory 6g --memory-swap 6g --cpus 4 \
     "${app_mounts[@]}" "${IMG_APP}" > /dev/null || refuse "REFUSE app: docker run failed"
+started "${APP}"
 
 if [ "${SIDECAR}" = yes ]; then
-    STARTED="${SIDE} ${APP} ${PROXY}"
-    docker run -d --name "${SIDE}" --network "container:${APP}" \
+    docker run -d --name "${SIDE}" --label "${LABEL}=${PREFIX}" --network "container:${APP}" \
         --cap-drop ALL --security-opt no-new-privileges \
         --pids-limit 256 --memory 256m --memory-swap 256m --cpus 0.5 \
         -v "${SIDE}:/var/lib/tailscale" "${IMG_SIDE}" > /dev/null \
         || refuse "REFUSE sidecar: docker run failed"
+    started "${SIDE}"
 elif [ -e "${V5}" ]; then
     refuse "REFUSE sidecar: ${IMG_SIDE} not found and V5 needs it"
 fi
@@ -189,14 +210,19 @@ out="$(inspect_all "${SIDECAR}")"
 echo "PASS inspection: ${APP} holds the enforced topology"
 
 # The V1 standard exercise, then V1 and V5. Any FAIL refuses.
-tries="${SLED_CHECK_TRIES:-3}"; n=1
+n=1
 until docker exec -u sled "${APP}" check.sh; do
-    [ "$n" -ge "$tries" ] && refuse "REFUSE check: check.sh FAILED ${tries} time(s)"
-    n=$((n + 1)); sleep "${SLED_CHECK_PAUSE:-30}"
+    [ "$n" -ge "${TRIES}" ] && refuse "REFUSE check: check.sh FAILED ${TRIES} time(s)"
+    n=$((n + 1)); sleep "${PAUSE}"
 done
 docker exec -u sled "${APP}" exercise.sh || refuse "REFUSE check: exercise.sh FAILED"
 "${HERE}/check_v1.sh" "${APP}" "${PROXY}" "${NET}" || refuse "REFUSE check: V1 FAILED"
+passed="V1 PASS"
 if [ -e "${V5}" ]; then
     "${V5}" "${APP}" "${SIDE}" || refuse "REFUSE check: V5 FAILED"
+    passed="${passed}, V5 PASS"
+else
+    passed="${passed}; V5 not present"
 fi
-echo "RESULT: READY, ${APP} is up behind ${PROXY}"
+# R2 (#11156): name what was not checked; DOC-90 §9 numbers V2-V4.
+echo "RESULT: READY (${passed}; V2-V4 not scripted, see #11167)"

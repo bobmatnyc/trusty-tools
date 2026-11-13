@@ -12,8 +12,11 @@
 #   check_tailscale.sh for stubs, then runs launch.sh once per case: the happy
 #   paths (main layout, sidecar layout, --check-only) end READY or CHECK OK;
 #   every refusal case must exit 1 with its "REFUSE <class>" line and stop the
-#   app. Prints PASS or FAIL per case; exits 1 on any FAIL. A missing file is
-#   a FAIL.
+#   app; --check-only on a target without the launch label must stop nothing;
+#   a non-numeric SLED_CHECK_TRIES exits 2. The proxy-bind cases run
+#   proxy/sled-bind-addr on a fake fib_trie: squid binds the internal address
+#   only, never the default bridge. Prints PASS or FAIL per case; exits 1 on
+#   any FAIL. A missing file is a FAIL. The CI job `sled-static` runs it.
 # Test: this script is the regression test; run it against a copy of DIR with
 #   one check removed to see that case go red.
 #
@@ -51,7 +54,8 @@ cp "${STUB}" "${T}/bin/docker"; chmod +x "${T}/bin/docker"
 base() { # NAME NETMODE NETS(json object) CAPS(json) READONLY
     jq -n --arg n "$1" --arg mode "$2" --argjson nets "$3" --argjson caps "$4" --argjson ro "$5" '[{
       Id: ("id-" + $n), Name: ("/" + $n), State: {Running: true},
-      Config: {Env: ["PATH=/usr/bin", "TRUSTY_CONSOLE_TOKEN_FILE=/run/secrets/trusty-console-token"]},
+      Config: {Env: ["PATH=/usr/bin", "TRUSTY_CONSOLE_TOKEN_FILE=/run/secrets/trusty-console-token"],
+        Labels: {"trusty.sled.launch": "tm-trusty-cloud-sled"}},
       HostConfig: {NetworkMode: $mode, PortBindings: {}, PublishAllPorts: false, Privileged: false,
         CapDrop: ["ALL"], CapAdd: $caps, SecurityOpt: ["no-new-privileges"], ReadonlyRootfs: $ro,
         PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", Devices: [],
@@ -85,6 +89,21 @@ fixtures() {
 # mutate DIR FILE JQ — apply JQ to one fixture.
 mutate() { jq "$3" "$1/$2" > "$1/$2.new" && mv "$1/$2.new" "$1/$2"; }
 
+# stop_ok LOG RC LASTARG — a refusal (rc 1) stops the app when the app ran or
+# on --check-only; NOSTOP=yes or a usage error (rc 2) must stop nothing.
+stop_ok() {
+    local log="$1"
+    if [ "${NOSTOP:-no}" = yes ] || [ "$2" = 2 ]; then
+        ! grep -q "^docker stop" "${log}" 2>/dev/null
+    elif [ "$2" = 0 ]; then
+        return 0
+    elif grep -q "^docker stop ${P}\$" "${log}" 2>/dev/null; then
+        return 0
+    else
+        [ "$3" != --check-only ] && ! grep -q "run -d --name ${P} " "${log}" 2>/dev/null
+    fi
+}
+
 # case_run NAME RC PATTERN SETUP [launch args...] — fresh sled copy and stub
 # dir; SETUP is a function name run with the stub dir as $1.
 case_run() {
@@ -100,9 +119,7 @@ case_run() {
     out="$(PATH="${T}/bin:${PATH}" STUB_DIR="$d/stub" SLED_CHECK_PAUSE=0 \
         "$d/sled/launch.sh" --state "${ST}" --models "${MODELS}" "$@" 2>&1)" || rc=$?
     if [ "${rc}" = "${want_rc}" ] && grep -qE -- "${pat}" <<< "${out}" \
-        && { [ "${want_rc}" = 0 ] || grep -q "docker stop ${P}\$" "$d/stub/calls.log" 2>/dev/null \
-             || { [ "${*: -1}" != --check-only ] \
-                  && ! grep -q "run -d --name ${P} " "$d/stub/calls.log" 2>/dev/null; }; }; then
+        && stop_ok "$d/stub/calls.log" "${want_rc}" "${*: -1}"; then
         echo "PASS ${name}"
     else
         echo "FAIL ${name} (rc=${rc}, want ${want_rc} and /${pat}/)"
@@ -133,9 +150,20 @@ v1fail() { echo 1 > "$1/stub/v1.rc"; }
 v5fail() { sidecar "$1"; echo 1 > "$1/stub/v5.rc"; }
 sidepriv() { sidecar "$1"; mutate "$1/stub" "inspect-${P}-tailscale.json" '.[0].HostConfig.Privileged = true'; }
 latenet() { live "$1"; net2 "$1"; }
+ipv6() { mutate "$1/stub" "network-${P}-internal.json" '.[0].EnableIPv6 = true'; }
+subnet() { mutate "$1/stub" "network-${P}-internal.json" '.[0].IPAM.Config[0].Subnet = "10.99.0.0/24"'; }
+puball() { mutate "$1/stub" "inspect-${P}.json" '.[0].HostConfig.PublishAllPorts = true'; }
+swap() { mutate "$1/stub" "inspect-${P}.json" '.[0].HostConfig.MemorySwap = -1'; }
+nsports() { mutate "$1/stub" "inspect-${P}.json" '.[0].NetworkSettings.Ports = {"7788/tcp": [{"HostIp": "0.0.0.0", "HostPort": "7788"}]}'; }
+nocapdrop() { mutate "$1/stub" "inspect-${P}.json" '.[0].HostConfig.CapDrop = []'; }
+extra() { mutate "$1/stub" "network-${P}-internal.json" '.[0].Containers.z = {Name: "intruder"}'; }
+checkfail() { echo 1 > "$1/stub/exec-check.sh.rc"; }
+exfail() { echo 1 > "$1/stub/exec-exercise.sh.rc"; }
+notours() { live "$1"; mutate "$1/stub" "inspect-${P}.json" '.[0].Config.Labels = {}'; }
 
-case_run happy-main 0 'RESULT: READY' none --tag t
-case_run happy-sidecar 0 'RESULT: READY' sidecar --tag t
+READY_RE='V2-V4 not scripted, see #11167\)$'
+case_run happy-main 0 "RESULT: READY \(V1 PASS; V5 not present; ${READY_RE}" none --tag t
+case_run happy-sidecar 0 "RESULT: READY \(V1 PASS, V5 PASS; ${READY_RE}" sidecar --tag t
 case_run check-only-clean 0 'RESULT: CHECK OK' live --check-only
 case_run docker-too-old 1 'REFUSE host: docker engine' old_docker --tag t
 case_run published-port 1 'REFUSE ports:' port --tag t
@@ -156,6 +184,47 @@ case_run v5-no-sidecar 1 'REFUSE sidecar:' v5 --tag t
 case_run v5-fail 1 'REFUSE check: V5 FAILED' v5fail --tag t
 case_run sidecar-privileged 1 'REFUSE privileged:' sidepriv --tag t
 case_run check-only-late-network 1 'REFUSE network: attached' latenet --check-only
+case_run network-ipv6 1 'REFUSE network: IPv6 enabled' ipv6 --tag t
+case_run network-subnet 1 'REFUSE network: subnets 10.99.0.0/24' subnet --tag t
+case_run publish-all 1 'REFUSE ports: publish-all' puball --tag t
+case_run swap-uncapped 1 'REFUSE hardening: swap not capped' swap --tag t
+case_run settings-ports 1 'REFUSE ports: published 7788/tcp' nsports --tag t
+case_run capdrop-missing 1 'REFUSE caps: CapDrop lacks ALL' nocapdrop --tag t
+case_run network-extra-container 1 'REFUSE network: unexpected container intruder' extra --tag t
+SLED_CHECK_TRIES=2 case_run check-fail 1 'REFUSE check: check.sh FAILED 2 time' checkfail --tag t
+case_run exercise-fail 1 'REFUSE check: exercise.sh FAILED' exfail --tag t
+NOSTOP=yes case_run check-only-not-ours 1 'REFUSE target: .*nothing stopped' notours --check-only
+SLED_CHECK_TRIES=abc case_run tries-not-numeric 2 'SLED_CHECK_TRIES must be a whole number' none --tag t
+
+# proxy-bind: sled-bind-addr binds squid to the internal address only, so the
+# default bridge (172.17.0.0/16) gets no answer on 3128 (#11156, ruling R3).
+bind_case() { # NAME RC FIB_ADDRS...
+    local name="$1" want="$2" d="${T}/b-$1" a rc=0 ok=yes
+    shift 2
+    mkdir -p "$d"
+    { echo "Main:"; for a in "$@"; do printf '  |-- %s\n     /32 host LOCAL\n' "$a"; done; } > "$d/fib"
+    "${SRC}/proxy/sled-bind-addr" "${SRC}/proxy/squid.conf" "$d/run.conf" "$d/fib" > "$d/out" 2>&1 || rc=$?
+    [ "${rc}" = "${want}" ] || ok=no
+    if [ "${want}" = 0 ]; then
+        grep -qx "http_port ${IN_IP}:3128" "$d/run.conf" || ok=no
+        [ "$(grep -c '^http_port' "$d/run.conf")" = 1 ] || ok=no
+        ! grep -q '172\.17\.' "$d/run.conf" || ok=no
+        # Only the http_port line differs from the built config.
+        [ "$(diff "${SRC}/proxy/squid.conf" "$d/run.conf" | grep -c '^[<>]')" = 2 ] || ok=no
+    else
+        [ ! -e "$d/run.conf" ] || ok=no
+    fi
+    if [ "${ok}" = yes ]; then echo "PASS ${name}"; else
+        echo "FAIL ${name} (rc=${rc}, want ${want})"; sed 's/^/    /' "$d/out"; FAILS=$((FAILS + 1)); fi
+}
+if [ -x "${SRC}/proxy/sled-bind-addr" ]; then
+    net="${SUBNET%/*}"; IN_IP="${net%.*}.2"
+    bind_case proxy-bind-internal-only 0 127.0.0.1 172.17.0.3 "${IN_IP}"
+    bind_case proxy-bind-no-internal 1 127.0.0.1 172.17.0.3
+    bind_case proxy-bind-two-internal 1 "${IN_IP}" "${net%.*}.3"
+else
+    echo "FAIL ${SRC}/proxy/sled-bind-addr is missing"; FAILS=$((FAILS + 1))
+fi
 
 if [ "${FAILS}" -gt 0 ]; then echo "RESULT: ${FAILS} case(s) FAILED"; exit 1; fi
 echo "RESULT: all cases passed"

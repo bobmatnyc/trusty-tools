@@ -98,7 +98,7 @@ check_ports() {
       ( if (.HostConfig.PortBindings // {} | to_entries | map(select(.value != null and (.value|length) > 0)) | length) > 0
         then "ports: port bindings \(.HostConfig.PortBindings|keys|join(","))" else empty end ),
       ( if .HostConfig.PublishAllPorts == true then "ports: publish-all" else empty end ),
-      ( if (.NetworkSettings.Ports // {} | to_entries | map(select(.value != null)) | length) > 0
+      ( if (.NetworkSettings.Ports // {} | to_entries | map(select(.value != null and (.value|length) > 0)) | length) > 0
         then "ports: published \(.NetworkSettings.Ports|keys|join(","))" else empty end )'
 }
 

@@ -172,7 +172,7 @@ The image sets each variable below in its `ENV` layer. None holds a secret.
 
 **ID:** SPEC-SLEDNET-09~draft
 
-A sled passes when V1 to V5 all pass on the running sled. Each check prints PASS or FAIL per row and exits non-zero on any FAIL.
+A sled passes when V1 to V5 all pass on the running sled. Each check prints PASS or FAIL per row and exits non-zero on any FAIL. Today only V1 (`check_v1.sh`) and V5 (`check_tailscale.sh`) are scripted, and `launch.sh` runs both (§12). V2, V3 and V4 are not scripted yet ([#11167](https://github.com/bobmatnyc/trusty-tools/issues/11167)); until they are, a launched sled is ready on V1 and V5 only, and its READY line says so.
 
 **V1 — squid deny log.** After a standard exercise (stack start, `check.sh`, one Claude Code session, one `git fetch` and one `gh api` call on a sled repo):
 
@@ -234,8 +234,8 @@ V1 cannot tell an update check from a ticket call on `api.github.com`: squid see
 **ID:** SPEC-SLEDNET-12~draft
 
 - **LR-1.** Every sled reaches the internet only through the egress proxy surface of §6. No sled container has a published port, a second network, a host namespace, privileged mode or an added capability.
-- **LR-2.** `docker/sled/launch.sh` is the only supported way to start a sled (#11156). It builds the `--internal` network on the subnet of the proxy's `internal_net` rule, starts the proxy and the app hardened, inspects them, and refuses (stops the app, exits non-zero) on any break of LR-1, on a token-like env name, on a mount outside its allowlist, on a secret file looser than 600 or owned by another uid, and on a Docker engine older than 26.0.0 (the CVE-2024-29018 fix for DNS from `--internal` networks). It reports ready only after V1, and V5 where present, pass.
-- **LR-3.** `launch.sh --check-only` re-runs the inspection on a running sled. A network attached after launch fails it.
+- **LR-2.** `docker/sled/launch.sh` is the only supported way to start a sled (#11156). It builds the `--internal` network on the subnet of the proxy's `internal_net` rule, starts the proxy and the app hardened, inspects them, and refuses (stops the app, exits non-zero) on any break of LR-1, on a token-like env name, on a mount outside its allowlist, on a secret file looser than 600 or owned by another uid, and on a Docker engine older than 26.0.0 (the CVE-2024-29018 fix for DNS from `--internal` networks). The proxy binds `http_port` to its internal-network address only, so the default bridge gets no answer on 3128. `launch.sh` then runs V1 and V5 (§9) and refuses on any FAIL. V1 is the host-firewall gate: its probe of the internal gateway, every TCP port plus UDP, is the check that the host drops sled traffic to host services; there is no separate iptables or nft assert. The READY line names the checks that passed and names V2 to V4 as not scripted ([#11167](https://github.com/bobmatnyc/trusty-tools/issues/11167)).
+- **LR-3.** `launch.sh --check-only` re-runs the inspection on a running sled. A network attached after launch fails it. It acts only on a container that carries the label `launch.sh` sets; any other target is refused and left running.
 - **LR-4.** A `docker run` line in the sled README is reference only.
 
 ## References

@@ -65,10 +65,14 @@ limits), starts the Tailscale sidecar when its image exists, and refuses on a
 published port, a second network, privileged mode, an added cap, a host
 namespace, a mount outside its allowlist, a token-like env name (allowlist:
 `TRUSTY_CONSOLE_TOKEN_FILE`), a secret file looser than 600 or not owned by
-`SLED_UID`, or Docker older than 26.0.0. It prints `RESULT: READY` only after
-`check.sh`, `exercise.sh`, V1 and V5 (where present) pass. `launch.sh
---check-only` re-inspects a running sled. It needs `jq` on the host.
-`scripts/check_sled_launch.sh` tests it offline with a stub `docker`.
+`SLED_UID`, or Docker older than 26.0.0. The proxy entrypoint binds squid to
+its internal-network address only, so nothing on the default bridge gets an
+answer on 3128. After `check.sh` and `exercise.sh`, launch runs V1 and V5 and
+prints `RESULT: READY (V1 PASS, V5 PASS; V2-V4 not scripted, see #11167)`.
+`launch.sh --check-only` re-inspects a running sled; it acts only on
+containers carrying the `trusty.sled.launch` label launch sets. It needs `jq`
+on the host. `scripts/check_sled_launch.sh` tests it offline with a stub
+`docker`.
 
 ## Run
 
@@ -280,9 +284,10 @@ support Unverified):
 ## Teardown
 
 ```bash
-docker rm -f tm-trusty-cloud-sled tm-trusty-cloud-sled-egress
+docker rm -f tm-trusty-cloud-sled-tailscale tm-trusty-cloud-sled tm-trusty-cloud-sled-egress
 docker network rm tm-trusty-cloud-sled-internal
-docker rmi tm-trusty-cloud-sled:$SHA tm-trusty-cloud-sled-egress:$SHA
+docker volume rm tm-trusty-cloud-sled-tailscale        # sidecar state: the node key
+docker rmi tm-trusty-cloud-sled:$SHA tm-trusty-cloud-sled-egress:$SHA tm-trusty-cloud-sled-tailscale:$SHA
 rm -rf ~/sled-state/tm-trusty-cloud-sled                # state and secret copies
 test ! -e ~/sled-state/tm-trusty-cloud-sled && echo state-gone
 ```
