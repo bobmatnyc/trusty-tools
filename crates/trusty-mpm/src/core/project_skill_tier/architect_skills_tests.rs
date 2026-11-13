@@ -272,11 +272,11 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-operating-rules",
-            "3e4c9ab8d8325d3a052c91e571533c7643508fda3f41a4449137d1eb3b86461e",
+            "14d0bae65aeda88741b2ea27e57afc82fa62a227dd8519a24fc3aacfda842342",
         ),
         (
             "architect-workflow",
-            "59137538d1832abdab2ed80b30c6f55596898c59fef013f5ecbfdf4672fdc3c6",
+            "cd623d5af69e54c57ddc4272db7a3325626bc01ab7457ebd869b720d4bec0e5f",
         ),
         (
             "architect-search-memory",
@@ -288,7 +288,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-strategy",
-            "a6b725c4a34f673741028e6ab772c4b5154aff845fb1e9db846d3e2d1dcb4aae",
+            "0328f1ec2d0ee9856c7bcace4d117f9d5ead4f28e13d1415463d711b1742f674",
         ),
         (
             "architect-completion-standard",
@@ -324,7 +324,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-dashboard",
-            "ac71a5540005a50c480c9834e057b98d9614e440e7f7a5be55e90773f7eb44c5",
+            "1bd4e94597f1e17172f0a1ec8106f9ecc3983b2265a0eefe4cdf2eae020e5ffc",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first

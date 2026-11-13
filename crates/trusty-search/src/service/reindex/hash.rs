@@ -12,7 +12,6 @@
 //! Test: covered indirectly by `reindex_walks_directory_and_emits_events` (the
 //! second reindex run on an unchanged workspace must skip all files).
 
-use crate::core::indexer::RedbChunkDelete;
 use crate::core::registry::IndexId;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
@@ -106,7 +105,8 @@ pub(crate) fn hash_content(content: &str) -> String {
 
 /// #9236: test-only fault seam. For each index id listed here, the durable
 /// hash-row delete in [`forget_file_hash`] fails after the cache entry is
-/// dropped — the state a refused redb write leaves. Keyed by index id so
+/// dropped — the state a refused redb write leaves. #11096: the one-transaction
+/// file delete fails before its commit instead. Keyed by index id so
 /// concurrent tests never see each other's faults.
 #[cfg(test)]
 pub(crate) static TEST_FAIL_FORGET_HASH: std::sync::Mutex<Vec<String>> =
@@ -170,13 +170,13 @@ pub(crate) async fn record_file_hash(
 
 impl crate::core::CodeIndexer {
     /// Purge one file for #8922: its chunks without a symbol-graph rebuild,
-    /// then its content hash. Returns the chunks removed; the caller rebuilds
+    /// and its content hash. Returns the chunks removed; the caller rebuilds
     /// the graph once, and only when something was removed. Stamps the
     /// durable graph-dirty mark first (#8959).
     ///
-    /// The redb chunk-delete failure mode is the caller's; `index_file`'s
-    /// sops arm and `purge_file_committed` use `FailClosed` (#8959, #9230), so
-    /// a failed delete keeps the ids and the hash for a retry.
+    /// Fail-closed (#8959, #9230): the chunk rows and the hash row leave in
+    /// one redb transaction (#11096), so a failed delete keeps both, and the
+    /// ids, for a retry.
     ///
     /// A method, not a free function, so `scripts/check_teardown_guard.sh`
     /// sees every `.purge_file_with(` call site: both writes are durable and
@@ -185,14 +185,14 @@ impl crate::core::CodeIndexer {
         &self,
         index_id: &IndexId,
         rel: &str,
-        mode: RedbChunkDelete,
     ) -> anyhow::Result<usize> {
         // #8959: durable stale mark before anything leaves, so a crash before
         // the caller's per-pass rebuild still rebuilds at the next boot.
         let _graph_write = self.begin_graph_write_for_removal(rel).await?;
-        let removed = self.remove_file_no_kg_rebuild_with(rel, mode).await?;
-        forget_file_hash(index_id, self, rel).await?;
-        Ok(removed)
+        let ids = self.file_chunk_ids(rel).await?;
+        // #11096: chunks and hash in one commit, never two.
+        self.remove_file_and_hash(index_id, rel, &ids).await?;
+        Ok(ids.len())
     }
 }
 

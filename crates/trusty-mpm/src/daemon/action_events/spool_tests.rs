@@ -496,6 +496,9 @@ fn persisted(dir: &Path, spool_dir: &Path) -> Vec<HarnessEvent> {
     publisher.publish(&hook(SessionId::new(), "t1"));
     let events = publisher.client.drain_buffered();
     assert_eq!(spool::persist(spool_dir, &events).expect("persist"), 2);
+    // #10748: a sibling test's fork can still hold persist's flock; a replay
+    // would count the file held and take nothing.
+    crate::test_support::relink_spool_files(spool_dir);
     events
 }
 
@@ -668,6 +671,8 @@ async fn a_replay_larger_than_the_buffer_loses_no_event_at_stop_10467() {
     let (older, newer) = events.split_at(2000);
     spool::persist(&spool_dir, older).expect("persist the older file");
     spool::persist(&spool_dir, newer).expect("persist the newer file");
+    // #10748: drop any flock a sibling test's fork inherited from persist.
+    crate::test_support::relink_spool_files(&spool_dir);
     let state = started(&dir.path().join("absent.sock"), &spool_dir);
 
     let settled = state.action_events().shutdown().await;
@@ -758,6 +763,8 @@ async fn a_capacity_spool_file_retires_after_a_hook_and_the_deferred_file_follow
     let full = only_file(&spool_dir);
     let later = fresh_events(3);
     spool::persist(&spool_dir, &later).expect("deferred file");
+    // #10748: drop any flock a sibling test's fork inherited from persist.
+    crate::test_support::relink_spool_files(&spool_dir);
 
     let listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
     let bus = tokio::spawn(async move {

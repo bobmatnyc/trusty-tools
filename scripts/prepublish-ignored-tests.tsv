@@ -246,5 +246,13 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # install (see the #9663 r2 tmux note above), so it stays unselected.
 # 145 + 1 -> 146 (Refs #10476; failing run 42363121200).
 #
+# #10781 (PR #10971) adds one: trusty-analyze
+# `scoped_review_p95_under_target` (tests/scoped_p95_bench.rs),
+# `#[ignore = "load test: needs an operator-named trusty-search daemon holding
+# a 300K-chunk index"]`. It needs a live daemon with a 300K-chunk index, which
+# this job does not have, so it stays unselected.
+# 146 + 1 -> 147 (Refs #10781; failing run 43129439454). The same PR's
+# macOS-only `presence_local_tests` test is not enumerated on Linux.
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 146
+# UNSELECTED-BASELINE: 147

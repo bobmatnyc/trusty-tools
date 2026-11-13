@@ -252,6 +252,9 @@ const RAW_BIN_BUDGET: &[(&str, usize)] = &[
     // A `sh -c` pipeline with `tm compress` at its tail; the isolation goes on
     // the shell.
     ("tests/tm_compress_pipe.rs", 1),
+    // D60: the hook's `cd <dir> && { …; } | tm compress` rewrite runs in a `sh -c`
+    // with the binary's path at its tail; the isolation goes on the shell.
+    ("tests/tm_hook_pretooluse_rewrite.rs", 1),
     // #8878 ruling A: the guard must be the child of a fake `claude` shell, so
     // the shell runs `tm` by path; the isolation goes on the shell.
     ("tests/tm_hook_pm_guard_trust_anchor_8878.rs", 1),

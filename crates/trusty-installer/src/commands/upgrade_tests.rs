@@ -9,6 +9,7 @@
 //! #4964 Phase 1 restart-plan and no-`upgrade_and_restart` guards.
 
 use super::*;
+use crate::commands::deployment_record::DeploymentAudit;
 
 fn candidate() -> UpdateCandidate {
     UpdateCandidate {
@@ -552,6 +553,7 @@ fn upgrade_of_trusty_mpm_runs_content_update() {
         &placed_with_mpm(dir.path()),
         &runner,
         true,
+        &no_audit,
     );
     assert_eq!(
         runner.calls(),
@@ -572,6 +574,7 @@ fn upgrade_of_trusty_mpm_runs_content_update() {
         &placed,
         &quiet,
         true,
+        &no_audit,
     );
     assert!(quiet.calls().is_empty());
     assert!(report.content.is_none());
@@ -594,6 +597,7 @@ fn a_failed_content_update_after_an_upgrade_exits_non_zero() {
         &placed_with_mpm(dir.path()),
         &runner,
         true,
+        &no_audit,
     );
     assert!(report.members.iter().all(|m| m.ok), "{report:?}");
     let content = report.content.as_ref().expect("the content step ran");
@@ -622,11 +626,109 @@ fn upgrade_fails_when_content_is_older_than_a_placed_binary() {
         &placed_with_mpm_and_review(dir.path()),
         &runner,
         true,
+        &no_audit,
     );
     assert_eq!(runner.calls().len(), 2, "update, then the check");
     assert!(report.members.iter().all(|m| m.ok), "{report:?}");
     let content = report.content.as_ref().expect("the content step ran");
     assert!(!content.ok);
     assert!(content.detail.contains(PRINCIPLES), "{content:?}");
+    assert_eq!(report.exit_code(), 2);
+}
+
+/// Why: #10607 — the same gate as install's, on the upgrade path.
+/// What: a drift finding turns an all-ok applied report into exit 2.
+/// Test: This is the test.
+#[test]
+fn a_deployment_drift_after_an_upgrade_exits_non_zero() {
+    use crate::commands::deployment_record::{DeploymentAudit, DriftFinding, DriftKind};
+    let audit = DeploymentAudit {
+        state: "drifted",
+        findings: vec![DriftFinding {
+            member: "trusty-search".to_owned(),
+            kind: DriftKind::RunningVersion,
+            detail: String::new(),
+        }],
+    };
+    let report = || UpgradeReport::applied(Vec::new(), vec![outcome("trusty-search", true, "ok")]);
+    assert_eq!(report().exit_code(), 0);
+    assert_eq!(report().with_deployment(Some(audit)).exit_code(), 2);
+    assert_eq!(report().with_deployment(None).exit_code(), 0);
+}
+
+/// Why: #10607 — the record holds the version the upgrade verified, and a member
+/// with no verified version was not placed.
+/// What: pairs each placed member with its outcome's `applied` version and skips
+/// one without.
+/// Test: This is the test.
+#[test]
+fn placements_pair_each_placed_member_with_its_version() {
+    let mut placed_ok = outcome("trusty-search", true, "ok");
+    placed_ok.applied = Some("1.2.3".to_owned());
+    let unverified = outcome("trusty-memory", true, "ok");
+    let placed = vec![
+        (
+            "trusty-search".to_owned(),
+            std::path::PathBuf::from("/b/trusty-search"),
+        ),
+        (
+            "trusty-memory".to_owned(),
+            std::path::PathBuf::from("/b/trusty-memory"),
+        ),
+    ];
+    let placements = placements_of(&[placed_ok, unverified], &placed);
+    assert_eq!(placements.len(), 1);
+    assert_eq!(placements[0].crate_name, "trusty-search");
+    assert_eq!(placements[0].version, "1.2.3");
+}
+
+/// A finisher that records and audits nothing, for tests about other steps.
+fn no_audit(_: &[Placement], _: bool) -> Option<DeploymentAudit> {
+    None
+}
+
+/// Why: #10607 review — removing the upgrade's record-and-audit call left every
+/// test green.
+/// What: the applied report hands `finish` the placed members with the audit on,
+/// and a drift audit it returns turns the upgrade's exit code to 2.
+/// Test: This is the test.
+#[test]
+fn upgrade_records_and_audits_what_it_placed_10607() {
+    use crate::commands::content_step::tests::FakeRunner;
+    use crate::commands::deployment_record::{DriftFinding, DriftKind};
+    let seen = std::cell::RefCell::new(Vec::new());
+    let finish = |placements: &[Placement], verify: bool| {
+        seen.borrow_mut().push((
+            placements
+                .iter()
+                .map(|p| p.crate_name.clone())
+                .collect::<Vec<_>>(),
+            verify,
+        ));
+        Some(DeploymentAudit {
+            state: "drifted",
+            findings: vec![DriftFinding {
+                member: "trusty-search".to_owned(),
+                kind: DriftKind::RunningVersion,
+                detail: String::new(),
+            }],
+        })
+    };
+    let mut upgraded = outcome("trusty-search", true, "upgraded");
+    upgraded.applied = Some("1.2.3".to_owned());
+    let placed = vec![(
+        "trusty-search".to_owned(),
+        std::path::PathBuf::from("/b/trusty-search"),
+    )];
+    let report = applied_with_content(
+        vec![candidate()],
+        vec![upgraded],
+        &placed,
+        &FakeRunner::succeeding(),
+        true,
+        &finish,
+    );
+    assert_eq!(*seen.borrow(), [(vec!["trusty-search".to_owned()], true)]);
+    assert_eq!(report.deployment.as_ref().map(|a| a.state), Some("drifted"));
     assert_eq!(report.exit_code(), 2);
 }

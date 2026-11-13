@@ -218,20 +218,15 @@ fn an_fd_pipe_named_twice_at_the_top_level_refuses_10748() {
 }
 
 /// 🔴 REGRESSION (#10748 round 2): an fd pipe the pre-#10748 probe would have
-/// read — after a missing script, run by its path, behind an inexact wrapper
-/// prefix, or in a script body — still refuses. An fd pipe after an existing
-/// script stays unread, as before.
+/// read — run by its path, behind an inexact wrapper prefix, or in a script
+/// body — still refuses. #10672: an fd pipe after the script is its data, so
+/// a missing script before one refuses as missing, by its own name.
 #[test]
 fn an_fd_pipe_after_a_missing_script_refuses_10748() {
     let dir = tempfile::tempdir().expect("dir");
     script(dir.path(), "x.sh", "echo fake-value\n");
-    script(
-        dir.path(),
-        "body.sh",
-        "T=$(bash ./missing.sh /dev/fd/0)\n: ./missing.sh\n",
-    );
+    script(dir.path(), "body.sh", "T=$(bash /dev/fd/0)\n");
     for command in [
-        "bash ./missing.sh /dev/fd/0 ; : ./missing.sh",
         "/dev/fd/3 3< x.sh",
         "sudo -u root bash /dev/fd/0 < x.sh",
         "bash body.sh",
@@ -243,6 +238,12 @@ fn an_fd_pipe_after_a_missing_script_refuses_10748() {
             "`{command}` must deny as unresolvable: {reason}"
         );
     }
+    let reason = evaluate_script_body_secret_read("bash ./missing.sh /dev/fd/0", dir.path())
+        .unwrap_or_default();
+    assert!(
+        reason.contains("the script `./missing.sh`") && reason.contains("does not exist"),
+        "a missing script refuses by its own name: {reason}"
+    );
     assert_eq!(
         evaluate_script_body_secret_read("bash x.sh /dev/fd/0", dir.path()),
         None,

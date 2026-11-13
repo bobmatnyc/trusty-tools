@@ -15,7 +15,8 @@
 //! a new build would wait, or when a reading is degraded.
 //! Test: the `#[cfg(test)]` suite below.
 
-use trusty_mpm::core::build_lease::admission::{Decision, decide};
+use trusty_mpm::core::build_lease::acquire::{Assessment, assess};
+use trusty_mpm::core::build_lease::admission::Decision;
 use trusty_mpm::core::build_lease::census::{LiveSampler, Sampler};
 use trusty_mpm::core::build_lease::config::BuildLeaseConfig;
 use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir};
@@ -63,10 +64,10 @@ pub(crate) fn slot_dir_check(
             ),
         );
     }
-    let holders = slots.holders();
-    let readings = sampler.sample(&holders);
-    let held = u32::try_from(holders.len()).unwrap_or(u32::MAX);
-    let decision = decide(config.0, config.1, ceiling, held, &readings);
+    // #8692: the same assessment `tm build-lease` admits by.
+    let Assessment {
+        holders, decision, ..
+    } = assess(slots, config.0, config.1, ceiling, sampler);
     let mut warnings = config.0.deprecation_warnings();
     if let Some(why) = slots.fallback_reason() {
         warnings.push(format!(

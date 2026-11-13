@@ -21,8 +21,10 @@ pub(crate) enum FleetAction {
     /// canonical path to `[supervisor] projects` in
     /// `~/.trusty-mpm/config.toml` (also when a PM runs this), and starts the
     /// session detached as tmux session `tm-architect` (or `--session`) on
-    /// the `opus` alias. Writes no twin grant. A second run changes nothing
-    /// and says so. Refuses when another Architect is already set up.
+    /// the `opus` alias. Writes no twin grant. Creates `local/watch.json`
+    /// from the live `tm-*` sessions when it is absent and never changes an
+    /// existing one (#11012). A second run changes nothing and says so.
+    /// Refuses when another Architect is already set up.
     Init {
         /// Project directory (default: the Architect recorded in `[supervisor]
         /// projects`, else `~/trusty-mpm-projects/architect`).

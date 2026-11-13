@@ -1,9 +1,9 @@
 ---
 name: architect-strategy
-description: Architect skill. Load for a goal brief, a board sweep, a factory-session designation, a capacity or urgent-work decision, machine provisioning or an install or upgrade on the host, or an optimization proposal. Holds the working procedures of the directed and standing goals, drive-not-wait and the never-block-the-loop rule. Architect only.
+description: Architect skill. Load for a goal brief, a board sweep, a factory-session designation, a capacity or urgent-work decision, machine provisioning or an install or upgrade on the host, or an optimization proposal. Holds the working procedures of the directed and standing goals, drive-not-wait, the never-block-the-loop rule and the technical level of briefs. Architect only.
 user-invocable: true
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 category: monitoring
 tags: [architect, goals, capacity, strategy]
 effort: high
@@ -186,6 +186,73 @@ recommendation, never as a dialog; `ANSWER <id>` resolves only that id.
 Between passes, drive every project on everything that does not need the
 owner, including high-confidence decisions under existing rulings. The
 pending list is the queue; "ask" is the trigger.
+
+## Technical level of briefs and messages
+
+The goal brief, the morning brief and every Slack message to the owner follow
+the owner's technical level (r-194 in `architect-operating-rules`; spec
+DOC-91). Read it from the `TECH LEVEL:` line in hook context; with none,
+write at `pm`.
+
+- **Same facts, different altitude.** The level changes vocabulary, evidence
+  and length, never the progress, risks, decisions owed or recommendation a
+  brief reports.
+- **Brief link.** A brief or message written below `senior-engineer` links
+  the full technical text, written at `engineer` or higher.
+- **Secondary users.** A brief or Slack message to a secondary user follows
+  that user's level, never the owner's.
+- **Detail on request.** "More detail" on one point answers that point one
+  level up, or at the named level, in that reply only. The setting does not
+  change.
+- **Relays stay technical.** What a brief or ruling sends on to a PM is
+  written in full technical terms, whatever the owner's level.
+
+### The six levels
+
+<!-- #11064: the same block, byte for byte, in architect-operating-rules,
+     architect-dashboard and architect-strategy; DOC-91 section 2 is the source. -->
+Every level states the same decision and the same recommendation. Only
+vocabulary, evidence and length change. A level never hides a risk; it
+restates the risk in that level's terms. An unset or unknown level is `pm`,
+never a higher one.
+
+- **non-technical.** Reader: a business owner who does not build software.
+  Everyday words, no code terms: "the system" or "the website", not "server
+  slot" or "config". Leave out all paths, line numbers, SHAs, flags, tool
+  names and job names; they go to the linked brief. Say what changes for the
+  business, what it costs in time or money, and what goes wrong on the wrong
+  pick. 2 to 3 sentences; 2 options at most, one sentence each.
+- **vibe-coder.** Reader: builds with AI tools; knows what an app, a deploy
+  and a repo are, not how they work inside. Product words (app, deploy, test,
+  repo, bug); name a tool only when the reader uses it. Leave out line
+  numbers, SHAs, CI internals and flag names; they go to the linked brief. Say
+  what the user sees, how hard the change is to undo, and whether a deploy is
+  needed. 3 to 4 sentences; each option one sentence.
+- **pm.** Reader: runs delivery; knows scope, risk, schedule, dependencies
+  and environments, not the code. Project terms (environment, release,
+  rollback, owner, blocker); component names yes, code identifiers no. Leave
+  out file paths, line numbers, SHAs, flag names and job names; issue and PR
+  links stay. Say the outcome, the cost (effort, delay), the risk, how
+  reversible it is, and what the owner must supply. 4 to 6 sentences.
+- **engineer.** Reader: writes and reviews code in this stack. Full technical
+  terms, function and module names, issue and PR links. Leave out raw logs
+  and long diffs; a path appears as a module name or a short relative path; a
+  SHA only when it decides the question. Say the behaviour, the root cause,
+  the trade-off between the options and the test evidence. 6 to 10 sentences
+  with a short evidence list.
+- **senior-engineer.** Reader: owns design across components. Everything in
+  engineer, plus failure modes, invariants, contracts, concurrency and
+  migration. Leave out only noise: path and line references stay, and the
+  blast radius is stated. Say the design trade-offs, failure modes,
+  compatibility, and the rollout and rollback plan. As long as the decision
+  needs, with evidence by `file:line`.
+- **cto.** Reader: accountable for the system and the team; decides on risk
+  and investment; reads code on request. Technical terms serve the decision,
+  not the mechanism: name the component and the contract at stake. Leave out
+  line numbers, SHAs and job names; they sit one click away in the linked
+  brief. Say the risk to production and customers, the cost, how reversible
+  it is, the precedent for other services, and your recommendation. 4 to 8
+  sentences.
 
 ## Related skills
 

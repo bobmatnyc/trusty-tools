@@ -141,9 +141,21 @@ pub(crate) const LONG_ROUTES: &[LongRoute] = &[
         "/api/v1/sessions/managed/{id}/decommission",
         LIFECYCLE_DEADLINE,
     ),
+    // #10988: stops every live session of one project.
+    (
+        "POST",
+        "/api/v1/projects/{name}/decommission",
+        LIFECYCLE_DEADLINE,
+    ),
     (
         "POST",
         "/api/v1/sessions/managed/{id}/delete",
+        LIFECYCLE_DEADLINE,
+    ),
+    // #10991: stops sessions, then moves (or copies) a directory.
+    (
+        "POST",
+        "/api/v1/sessions/managed/{id}/archive",
         LIFECYCLE_DEADLINE,
     ),
     (

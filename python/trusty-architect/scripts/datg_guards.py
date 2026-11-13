@@ -10,7 +10,8 @@ What:
   import with `@path`, five hops deep as Claude Code does. A line stating `<number> <resource>` ("2 helpers")
   is a conflict when a current owner ruling (an answered item with source.by owner, not past `until`)
   quotes the same resource with other numbers. Relative counts ("two more agents") are not thresholds.
-- G2 `card_check` (a dispatch must name `Card: <code>-Txx`, a not-done task under the named goal) and
+- G2 `card_check` (a dispatch must name `Task: <code>-Txx`, a not-done task under the named goal; #11101
+  replaced `Card:` with the prototype's `Task:` token, an optional `@MMDD` stamp after the id) and
   `evidence_gaps` (a task closed done needs evidence in its outcome: a URL, `#123`, a SHA, a file path,
   or a run/job/message id).
 - G3 `delivery_flags`: idle ready work (open cards under active goals, none running, no agent recorded,
@@ -43,7 +44,7 @@ PAIR = re.compile(r"(?<![\w:./-])(\d{1,3}|" + "|".join(NUM_WORDS) + r")(?![\w:./
 NOT_RESOURCE = {"and", "the", "for", "with", "from", "that", "this", "are", "was", "were", "not", "but", "per",
                 "each", "more", "less", "than", "into", "out", "other", "extra", "additional", "further"}
 IMPORT = re.compile(r"(?:^|(?<=\s))@((?:~/|\.{1,2}/|/)?[\w.-][\w./-]*)")
-CARD = r"Card:\s*({code}-T[0-9a-f]{{2}})\b"
+CARD = r"Task:\s*({code}-T[0-9a-f]{{2}})\b"   # #11101: `Task:` replaces `Card:`; `@MMDD` may follow
 EVIDENCE = re.compile(
     r"https?://\S+"                                     # a URL (PR, run, comment)
     r"|(?<![\w#])#\d{1,7}\b"                            # an issue or PR number
@@ -188,11 +189,11 @@ def policy_flags(project, st, now=None):
 # ---- G2: work card and outcome evidence ------------------------------------------------
 
 def card_check(st, prompt, goal):
-    """'' when `prompt` names `Card: <code>-Txx`, a not-done task under `goal`; else what is wrong."""
+    """'' when `prompt` names `Task: <code>-Txx`, a not-done task under `goal`; else what is wrong."""
     m = re.search(CARD.format(code=re.escape(st["code"])), prompt or "")
     add = f"add one with `datg.py add T --goal {goal} --title ...`"
     if not m:
-        return f"DATG: dispatch names no work card. Add 'Card: {st['code']}-Txx', an open task under {goal}; {add}."
+        return f"DATG: dispatch names no work card. Add 'Task: {st['code']}-Txx', an open task under {goal}; {add}."
     task = next((t for t in st.get("tasks") or [] if t.get("id") == m.group(1)), None)
     if task is None or task.get("status") == "done":
         return f"DATG: card {m.group(1)} is not an open task; {add}."

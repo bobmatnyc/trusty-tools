@@ -51,3 +51,14 @@ favicon, under the standing exemption recorded in
 
 The prohibitions above apply unchanged: no recoloring the robot, no shadows, no
 circular clip, and the `UNIT-05` descriptor stays on the primary lockup.
+
+## Trusty Browser
+
+Trusty Browser uses the Foundry robot head with its antenna, square eyes and three console readouts. Its geometry and toolbar colors come from the canonical Trusty Console mark. The horizontal signature uses Chakra Petch Bold and an IBM Plex Mono descriptor. The lettering is outlined so the exported assets render consistently without installed fonts.
+
+- [Paper lockup](trusty-browser-logo.svg)
+- [Night Shift lockup](trusty-browser-logo-reversed.svg)
+- [Light and dark preview](trusty-browser-lockups.png)
+- [Source mark and packaged Chrome icons](../../../../python/trusty-browser/src/trusty_browser/extension/icons)
+
+Use the standalone robot mark for Chrome's toolbar and extensions page. The extension manifest references PNGs at 16, 32, 48 and 128 pixels.

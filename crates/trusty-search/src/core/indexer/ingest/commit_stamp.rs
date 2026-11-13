@@ -94,28 +94,72 @@ impl CodeIndexer {
         // #10738: a delete in a staged swap's detach window misses redb, and
         // the re-attached corpus brings the file back.
         self.refuse_if_corpus_detached()?;
-        let removed = self
-            .purge_file_with(index_id, rel, RedbChunkDelete::FailClosed)
-            .await?;
+        let removed = self.purge_file_with(index_id, rel).await?;
         Ok((removed, removed > 0))
     }
 
-    /// [`Self::remove_file`], fail-closed, reporting whether it committed (#9230).
+    /// [`Self::remove_file`] plus the content hash, fail-closed, reporting
+    /// whether it committed (#9230, #11096).
     ///
     /// Why: `POST /indexes/{id}/remove-file` must stamp a committed delete,
-    /// and must not answer success for a delete redb refused.
-    /// What: removes fail-closed. A failed redb delete is an `Err` with the
-    /// chunk ids still in memory. Returns `(removed, committed)`, as
-    /// [`Self::purge_file_committed`] does.
-    /// Test: `remove_file_report_stamps_only_a_committed_delete`.
+    /// and must not answer success for a delete redb refused. #11096: the
+    /// chunks and the hash used to leave in two transactions, so a failed
+    /// second one left the chunks gone and the hash kept, and the next
+    /// reindex skipped the file.
+    /// What: stamps the durable graph mark when anything will leave, then
+    /// [`Self::remove_file_and_hash`]. A failed delete is an `Err` with the
+    /// chunks and the hash still in redb and in memory. Returns
+    /// `(removed, committed)`, as [`Self::purge_file_committed`] does.
+    /// Test: `remove_file_report_stamps_only_a_committed_delete`,
+    /// `remove_file_fault_in_the_hash_delete_keeps_chunks_and_hash_11096`.
     pub(crate) async fn remove_file_committed(&self, file_path: &str) -> Result<(usize, bool)> {
         // #10738: a delete in a staged swap's detach window misses redb, and
         // the re-attached corpus brings the file back.
         self.refuse_if_corpus_detached()?;
-        let removed = self
-            .remove_file_with(file_path, RedbChunkDelete::FailClosed)
+        let ids = self.file_chunk_ids(file_path).await?;
+        // #8959: as `remove_file_with`, the durable mark precedes the removal.
+        let _graph_write = if !ids.is_empty() || self.entities.read().await.contains_key(file_path)
+        {
+            Some(self.begin_graph_write().await?)
+        } else {
+            None
+        };
+        let index_id = IndexId::new(self.index_id.as_str());
+        self.remove_file_and_hash(&index_id, file_path, &ids)
             .await?;
-        Ok((removed, removed > 0))
+        Ok((ids.len(), !ids.is_empty()))
+    }
+
+    /// Remove `rel`'s chunk `ids` and its content hash as one durable commit.
+    ///
+    /// Why (#11096): a file's chunks and its hash must leave together. Chunks
+    /// gone with the hash kept make the next reindex skip the file, so it is
+    /// lost; a hash gone with the chunks kept leaves orphaned search hits.
+    /// What: one redb write transaction deletes the chunk rows and the hash
+    /// row. Only after it commits do the ids leave memory, the hash leave the
+    /// in-process cache and the entity list go. A failed transaction is an
+    /// `Err` with every store unchanged. The caller holds the graph guard.
+    /// Test: `remove_file_fault_in_the_hash_delete_keeps_chunks_and_hash_11096`,
+    /// `remove_file_drops_chunk_rows_and_hash_row_together_11096`.
+    pub(crate) async fn remove_file_and_hash(
+        &self,
+        index_id: &IndexId,
+        rel: &str,
+        ids: &[String],
+    ) -> Result<()> {
+        {
+            // #10209: a rehydrate that read these rows must not publish them
+            // back after they leave, as in `remove_superseded_chunks`.
+            let _fence = self.rehydrate_write_fence().await;
+            // #11096: one transaction for the chunk rows and the hash row.
+            self.try_delete_file_rows_from_redb(ids, rel).await?;
+            if !ids.is_empty() {
+                self.drop_chunk_ids_from_memory(ids).await;
+            }
+        }
+        crate::service::reindex::hash::hashes_for(index_id).remove(std::path::Path::new(rel));
+        self.remove_file_entities(rel).await;
+        Ok(())
     }
 
     /// Drop chunk `ids` from every store; `Ok(true)` when they left redb (#9230).

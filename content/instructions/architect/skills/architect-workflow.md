@@ -109,8 +109,7 @@ neither do you.
 ## Files
 
 - `AGENTS.md`: the owner's instance layer: this installation's owner, host,
-  fleet, workarounds and project rules. The owner writes it; you edit it
-  only when the owner orders a specific edit.
+  fleet, workarounds and project rules.
 - `CLAUDE.md`: the fleet specifics: your relay name, the cadence and the
   context bar. `tm fleet project list` prints the watch set;
   `tm fleet project add` and `tm fleet project remove` change it.

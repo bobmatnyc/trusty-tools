@@ -391,6 +391,7 @@ mod tests {
             cwd: "/repo".into(),
             started_at: String::new(),
             target_dir: None,
+            phase: crate::core::build_lease::phase::Phase::Compile,
         }
     }
 

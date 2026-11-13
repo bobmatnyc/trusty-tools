@@ -21,10 +21,12 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use trusty_mpm::core::presence::{self, PresenceRefusal};
-use trusty_mpm::core::presence_key::{GrantKey, KeySource};
+use trusty_mpm::core::presence_key::{GrantKey, KeySource, is_account_root};
 
 use crate::commands::pm_guard_bash::fleet_relaunch::{VerbHit, Verbs, find_tm_verb};
 use crate::commands::pm_guard_trust_anchor::{ANCHOR_ROOT, HookEnv};
+use crate::commands::presence_client;
+use crate::commands::presence_request::fire_from_hook;
 
 /// The verbs that ask for presence or bind the Architect.
 pub(crate) const PRESENCE_VERBS: Verbs = &[&["presence"], &["fleet", "bind"]];
@@ -44,13 +46,25 @@ const REMEDY: &str = "Run `tm presence local` from the Architect session at the 
 /// from a non-Architect caller; it stays the first sentence.
 /// Test: `an_architect_anchor_write_without_a_grant_is_denied_8878`,
 /// `an_architect_anchor_write_with_a_grant_passes_and_refreshes_8878`,
-/// `a_grant_idle_121_minutes_denies_the_write_8878`.
+/// `a_grant_idle_121_minutes_denies_the_write_8878`,
+/// `hook_request_failure_does_not_change_the_deny_8878`.
 pub(crate) fn presence_gate(anchor: String, payload: &Value, env: &HookEnv) -> Option<String> {
     let refusal = live_grant(env).err()?;
     let hint = rc_hint(payload, env);
+    // #8878 PR2b-1b: ask enrolled devices; a failure leaves the text as is.
+    let asked = env
+        .presence_key
+        .request(env)
+        .map(|id| {
+            format!(
+                " A device approval was requested ({id}; its action text is labelled \
+                 unverified origin); once approved, run `tm presence wait --request {id}`."
+            )
+        })
+        .unwrap_or_default();
     Some(format!(
         "{anchor} Presence required (#8878): this is the Architect's main thread, but {refusal}. \
-         {REMEDY}{hint}"
+         {REMEDY}{asked}{hint}"
     ))
 }
 
@@ -120,20 +134,37 @@ pub(crate) fn evaluate_presence_verbs(command: &str) -> Option<String> {
     ))
 }
 
-/// The presence-grant key lookup a [`HookEnv`] carries; [`Default`] fails
-/// closed.
+/// The presence lookups a [`HookEnv`] carries: the grant key, and (#8878
+/// PR2b-1b) the device-approval request. [`Default`] fails closed and
+/// requests nothing.
 #[derive(Clone)]
-pub(crate) struct KeyLookup(Arc<KeyLookupFn>);
+pub(crate) struct KeyLookup(Arc<KeyLookupFn>, Arc<RequestFn>);
 
 /// The closure a [`KeyLookup`] runs.
 type KeyLookupFn = dyn Fn() -> Result<Option<GrantKey>, String> + Send + Sync;
+
+/// The device-approval request: the pending id, or `None`.
+type RequestFn = dyn Fn(&HookEnv) -> Option<String> + Send + Sync;
 
 impl KeyLookup {
     /// A lookup running `f`.
     pub(crate) fn new(
         f: impl Fn() -> Result<Option<GrantKey>, String> + Send + Sync + 'static,
     ) -> Self {
-        Self(Arc::new(f))
+        Self(Arc::new(f), Arc::new(|_| None))
+    }
+
+    /// This lookup, asking for device approvals with `request`.
+    pub(crate) fn with_request(
+        self,
+        request: impl Fn(&HookEnv) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        Self(self.0, Arc::new(request))
+    }
+
+    /// Ask for a device approval for the `claude` above `env`.
+    pub(crate) fn request(&self, env: &HookEnv) -> Option<String> {
+        (self.1)(env)
     }
 
     /// The process's key source under `home` ([`KeySource::ambient`]).
@@ -141,8 +172,16 @@ impl KeyLookup {
         let Some(root) = home.map(|h| h.join(ANCHOR_ROOT)) else {
             return Self::default();
         };
+        let account = is_account_root(&root);
         let source = KeySource::ambient(&root);
-        Self::new(move || source.load().map_err(|e| e.to_string()))
+        let lookup = Self::new(move || source.load().map_err(|e| e.to_string()));
+        if !account {
+            return lookup;
+        }
+        // #8878 PR2b-1b: only the real home reaches the operator's daemon.
+        lookup.with_request(|env| {
+            fire_from_hook(env, &presence_client::live(presence_client::HOOK_TIMEOUT))
+        })
     }
 
     /// Run the lookup.

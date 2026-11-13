@@ -424,6 +424,7 @@ async fn scope_all_top5_matches_the_golden() {
 /// the `gold-a` and `gold-b` hits in order, and compares the first five with a
 /// default-scope call.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11039: holding the open locks is the point
 async fn default_top5_is_the_resident_subset_of_scope_all() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = golden_state(tmp.path()).await;
@@ -440,8 +441,50 @@ async fn default_top5_is_the_resident_subset_of_scope_all() {
         .take(5)
         .map(|r| r["content"].as_str().unwrap_or_default().to_string())
         .collect();
+    // #11039: wait out the detached reopen of gold-c and gold-d, and keep
+    // them closed, so the default call sees only gold-a and gold-b resident.
+    let locks = [PalaceId::new("gold-c"), PalaceId::new("gold-d")]
+        .map(|id| (state.registry.open_lock_for_test(&id), id));
+    let _held = hold_closed(&state, &locks).await;
     let default5 = mcp(&state, json!({"q": GOLDEN_QUERY, "top_k": 5})).await;
     assert_eq!(contents(&default5), restricted, "default: {default5}");
+}
+
+/// Keep each palace in `locks` out of the registry until the guards drop.
+///
+/// Why (#11039): a `scope: "all"` call reopens each served palace on a
+/// detached blocking task to record its accesses (#9881). A reopen still in
+/// flight made the next default call search three palaces, not two.
+/// What: takes each palace's open-queue lock (`locks` pairs it with its id),
+/// which `open_palace` holds until the handle is registered. A reopen that has
+/// not started then cannot register; one that already registered is awaited
+/// until its release. Each wait fails after 15 s. Polls `list`, never `peek`:
+/// a cloned `Arc` would make `release_if_unreferenced` skip the release.
+/// Test: `default_top5_is_the_resident_subset_of_scope_all`.
+#[allow(clippy::await_holding_lock)] // #11039: holding the open locks is the point
+async fn hold_closed<'a>(
+    state: &AppState,
+    locks: &'a [(std::sync::Arc<parking_lot::Mutex<()>>, PalaceId)],
+) -> Vec<parking_lot::MutexGuard<'a, ()>> {
+    let bound = Duration::from_secs(15);
+    let held = locks
+        .iter()
+        .map(|(lock, id)| {
+            lock.try_lock_for(bound)
+                .unwrap_or_else(|| panic!("open lock of {id} not free within {bound:?}"))
+        })
+        .collect();
+    let cold: Vec<&PalaceId> = locks.iter().map(|(_, id)| id).collect();
+    let deadline = tokio::time::Instant::now() + bound;
+    while state.registry.list().iter().any(|id| cold.contains(&id)) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "detached reopen still resident after {bound:?}: {:?}",
+            state.registry.list()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    held
 }
 
 /// Write one drawer through `memory_remember`; returns its id.

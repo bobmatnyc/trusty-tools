@@ -303,6 +303,8 @@ pub(super) async fn finish_reindex(
     // #5024: the HNSW resolve subsumes an AWAITED full snapshot save, so it is
     // real per-run cost, not just a rename.
     let hnsw_commit_started = Instant::now();
+    // #10738: resolved below, so the guard no longer rolls it back on a drop.
+    term_guard.settle_hnsw();
     resolve_hnsw_swap(
         &handle,
         &index_id,
@@ -319,6 +321,8 @@ pub(super) async fn finish_reindex(
     // and that run never stages, so it is not this failure and is unaffected.
     let quarantined_before_swap = handle.indexer.read().await.is_write_quarantined();
     let corpus_commit_started = Instant::now();
+    // #10738: a death inside the swap is the detach-window case, not the guard's.
+    term_guard.settle_corpus();
     let promotion_deferred = resolve_corpus_swap(
         &handle,
         &index_id,

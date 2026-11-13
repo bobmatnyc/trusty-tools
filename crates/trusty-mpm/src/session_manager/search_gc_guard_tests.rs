@@ -21,11 +21,11 @@
 //! onto the socket, and the sweep's decision to delete rests on what those reads
 //! return. A read that fails must not resolve to a value that licenses a delete.
 //!
-//! Test: the four functions below.
+//! Test: the test functions below.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -148,6 +148,87 @@ async fn decommission_issues_no_request_to_a_live_daemon_under_test() {
         0,
         "a test process must reach the trusty-search daemon zero times — this delete \
          carries the delete_data opt-in and destroys a real index named `full` (#4743)"
+    );
+}
+
+/// #10988 (ruling Q1): decommission keeps the index data even in a process
+/// that IS allowed to delete it.
+///
+/// Why: the #4743 test above passes on the test-harness refusal alone, so it
+/// cannot tell "decommission no longer deletes" from "a test may not delete".
+/// What: the same owned `full` fixture with production state explicitly
+/// allowed, so `DestructiveIndexDelete::acquire` would succeed. Both a session
+/// decommission and a project decommission must reach the daemon zero times.
+/// Restoring effect 4 makes this fail with a count of 1.
+/// Test: this function IS the test.
+#[serial_test::serial]
+#[tokio::test]
+async fn decommission_keeps_index_data_when_deletion_is_allowed() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = super::tests::make_manager_with_pane(&dir).await;
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let workspace_path = managed_root.path().join("owner").join("repo").join("full");
+    std::fs::create_dir_all(&workspace_path).expect("create the fixture workspace");
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true, // owned — the path that used to delete the index
+        )
+        .await
+        .expect("create");
+
+    let (_home, _override) = isolated_daemon_home(true);
+    let daemon = CountingDaemon::start().await;
+    daemon.self_check().await;
+
+    mgr.decommission_with_root(&record.id, managed_root.path(), None)
+        .await
+        .expect("full decommission");
+    assert_eq!(
+        daemon.seen(),
+        0,
+        "session decommission sent a request to trusty-search; it must keep the index (#10988)"
+    );
+
+    let reg_dir = crate::test_support::hermetic_temp_dir();
+    let registry = crate::project::ProjectRegistry::load(reg_dir.path())
+        .await
+        .expect("registry");
+    registry
+        .register(crate::project::Project {
+            name: "full".into(),
+            repo_url: "https://github.com/owner/full".into(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: None,
+            project_key: Some("owner/full".into()),
+            decommissioned_at: None,
+            archived_at: None,
+        })
+        .await
+        .expect("register");
+    mgr.decommission_project(&registry, "full")
+        .await
+        .expect("project decommission");
+    assert_eq!(
+        daemon.seen(),
+        0,
+        "project decommission sent a request to trusty-search (#10988)"
     );
 }
 
@@ -301,5 +382,149 @@ async fn sweep_skips_a_candidate_whose_status_probe_failed() {
         collected,
         vec![ORPHAN_ID.to_string()],
         "fixture premise: the same candidate IS collectable once the daemon answers"
+    );
+}
+
+/// Every `(method, params)` a sweep daemon was asked.
+type Recorder = Arc<Mutex<Vec<(String, Value)>>>;
+
+/// A daemon that lists [`ORPHAN_ID`] at a root that is gone from disk, answers
+/// its status with 0 chunks, records every call, and answers the index delete
+/// with `delete` — or refuses it when `delete` is `None`.
+fn recording_sweep_daemon(
+    calls: Recorder,
+    delete: Option<Value>,
+) -> impl Fn(&str, Value) -> MockFuture + Send + Sync {
+    let root = PathBuf::from("/nonexistent/owner/repo/.worktrees/gone-session");
+    move |method, params| {
+        calls
+            .lock()
+            .expect("recorder lock")
+            .push((method.to_string(), params));
+        let answer = if method == search_rpc::METHOD_INDEXES_LIST {
+            Ok(json!({
+                "indexes": [{ "id": ORPHAN_ID, "root_path": root.to_string_lossy() }]
+            }))
+        } else if method == search_rpc::METHOD_INDEX_STATUS {
+            Ok(json!({ "chunk_count": 0 }))
+        } else if method == search_rpc::METHOD_INDEX_DELETE {
+            match &delete {
+                Some(body) => Ok(body.clone()),
+                None => Err(RpcError::new(
+                    crate::daemon::error::CODE_UNAVAILABLE,
+                    "index delete unavailable",
+                )),
+            }
+        } else {
+            Err(RpcError::new(
+                -32601,
+                format!("unexpected method: {method}"),
+            ))
+        };
+        Box::pin(async move { answer })
+    }
+}
+
+/// The params of every `search.index.delete` the daemon saw.
+fn delete_params_seen(calls: &Recorder) -> Vec<Value> {
+    calls
+        .lock()
+        .expect("recorder lock")
+        .iter()
+        .filter(|(method, _)| method == search_rpc::METHOD_INDEX_DELETE)
+        .map(|(_, params)| params.clone())
+        .collect()
+}
+
+/// #10988 (ruling D8e): the orphan sweep keeps index data even in a process
+/// that IS allowed to delete it.
+///
+/// Why: `sweep_makes_no_request_under_a_test_harness` passes on the
+/// test-harness refusal alone, so it cannot tell "the sweep keeps data" from "a
+/// test may not delete". Production deletion is allowed here.
+/// What: a real, non-dry-run sweep over one orphan whose root is gone. The
+/// sweep must deregister it with an explicit `delete_data: false`, and no call
+/// may opt into data deletion. Fails on `1e319d497b`, which sent `true`.
+/// Test: this function IS the test.
+#[serial_test::serial]
+#[tokio::test]
+async fn sweep_keeps_index_data_when_deletion_is_allowed() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let (_home, _override) = isolated_daemon_home(true);
+    let calls: Recorder = Arc::new(Mutex::new(Vec::new()));
+    let socket = search_rpc::search_socket().expect("derive the trusty-search socket");
+    let _daemon = uds_mock::spawn_at(
+        socket,
+        recording_sweep_daemon(Arc::clone(&calls), Some(json!({ "removed": true }))),
+    )
+    .await;
+
+    let swept = mgr
+        .sweep_orphaned_search_indexes(false)
+        .await
+        .expect("sweep");
+
+    assert_eq!(
+        delete_params_seen(&calls),
+        vec![json!({ "index_id": ORPHAN_ID, "delete_data": false })],
+        "the orphan sweep must deregister the index and keep its data (#10988 D8e)"
+    );
+    assert_eq!(
+        swept,
+        vec![ORPHAN_ID.to_string()],
+        "fixture premise: the orphan was found and deregistered"
+    );
+}
+
+/// #10988 (ruling D8e) Fail-Open Check: a deregister the daemon refuses is
+/// reported, and the sweep never falls back to a data-deleting call.
+///
+/// What: the daemon refuses `search.index.delete`. The sweep keeps its error
+/// contract — `Ok`, with the id left out of the result — logs a `WARN` naming
+/// the index id, and sends exactly one delete, carrying `delete_data: false`.
+/// Fails on `1e319d497b`, whose one delete carried `true`.
+/// Test: this function IS the test.
+#[serial_test::serial]
+#[tokio::test]
+async fn sweep_reports_a_failed_deregister_and_never_deletes_data() {
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let (_home, _override) = isolated_daemon_home(true);
+    let calls: Recorder = Arc::new(Mutex::new(Vec::new()));
+    let socket = search_rpc::search_socket().expect("derive the trusty-search socket");
+    let _daemon =
+        uds_mock::spawn_at(socket, recording_sweep_daemon(Arc::clone(&calls), None)).await;
+
+    // #4931: a thread-local capture needs the global level raised first.
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let swept = mgr
+        .sweep_orphaned_search_indexes(false)
+        .with_subscriber(subscriber)
+        .await
+        .expect("a refused deregister keeps the sweep's Ok contract");
+
+    assert_eq!(
+        delete_params_seen(&calls),
+        vec![json!({ "index_id": ORPHAN_ID, "delete_data": false })],
+        "one deregister, and no data-deleting fallback after it failed (#10988 D8e)"
+    );
+    assert!(
+        swept.is_empty(),
+        "a refused deregister must not be reported as removed: {swept:?}"
+    );
+    let lines = buffer.tail(64);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("WARN") && l.contains(ORPHAN_ID)),
+        "the failure must be a WARN naming the index id: {lines:#?}"
     );
 }

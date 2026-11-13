@@ -602,6 +602,36 @@ fn cli_parses_daemon_mcp() {
     }
 }
 
+/// #10721: `--sandbox-credential NAME` parses with `--sandbox`, and refuses
+/// without it.
+#[test]
+fn cli_parses_daemon_sandbox_credential() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "daemon",
+        "--sandbox",
+        "--sandbox-credential",
+        "ANTHROPIC_API_KEY",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Daemon {
+            sandbox_credential, ..
+        } => assert_eq!(sandbox_credential.as_deref(), Some("ANTHROPIC_API_KEY")),
+        other => panic!("expected Daemon, got {other:?}"),
+    }
+    assert!(
+        Cli::try_parse_from([
+            "trusty-mpm",
+            "daemon",
+            "--sandbox-credential",
+            "ANTHROPIC_API_KEY",
+        ])
+        .is_err(),
+        "--sandbox-credential parsed without --sandbox"
+    );
+}
+
 #[test]
 fn cli_parses_repair_deploy() {
     // `tm repair deploy` must parse to Command::Repair { action: RepairAction::Deploy { force: false } }.

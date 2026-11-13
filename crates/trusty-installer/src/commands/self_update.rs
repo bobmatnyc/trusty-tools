@@ -177,7 +177,9 @@ pub fn run(json: bool) -> i32 {
             match health_gate_verdict(&bin_path, &version, probed) {
                 Ok(msg) => {
                     let _ = narr.info(&msg);
-                    0
+                    // #10607: the record must name the build just placed, or
+                    // the next `stack health` reads this update as drift.
+                    record_or_report(&bin_path, Some(&version), json)
                 }
                 Err(msg) => {
                     let _ = narr.error(&msg);
@@ -222,6 +224,28 @@ enum Next {
     CargoFallback(String),
     /// Terminal. Narrate at ERROR level, exit 1, never run cargo.
     Abort(String),
+}
+
+/// Records the installer build just placed, returning the exit code (#10607).
+///
+/// Why: a self-update that leaves the record naming the old build reads as drift
+/// on the next `stack health`, and an unrecorded placement must not exit 0.
+/// What: `version` is the verified version, or read from `path` when `None`.
+/// Test: `deployment_record::tests::a_repeat_install_writes_the_same_record`
+/// covers the record; this call site is side-effecting.
+fn record_or_report(path: &Path, version: Option<&str>, json: bool) -> i32 {
+    use crate::commands::deployment_record::{read_version, record_one, Placement};
+    let version = version.map(str::to_owned).or_else(|| read_version(path));
+    let recorded = version
+        .ok_or_else(|| format!("could not read the version of {}", path.display()))
+        .and_then(|v| record_one(&Placement::new("trusty-installer", path, &v)));
+    match recorded {
+        Ok(()) => 0,
+        Err(why) => {
+            let _ = narrator(json).error(&format!("could not record the update: {why}"));
+            1
+        }
+    }
 }
 
 /// Decide what follows a finished prebuilt self-update attempt.
@@ -463,7 +487,9 @@ fn run_cargo_fallback(json: bool, original_dir: &Path) -> i32 {
                     let cargo_dir = cargo_install_dir();
                     let msg = cargo_updated_message(cargo_dir.as_deref(), original_dir);
                     let _ = narr.info(&msg);
-                    0
+                    // #10607: as in the prebuilt branch.
+                    let dir = cargo_dir.unwrap_or_else(|| original_dir.to_path_buf());
+                    record_or_report(&dir.join("trusty-installer"), None, json)
                 }
                 Err(e) => {
                     let _ = narr.error(&format!("cargo install failed: {e}"));

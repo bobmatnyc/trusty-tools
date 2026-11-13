@@ -1,8 +1,8 @@
 //! Tests for the console look of the home screen (#10966).
 //!
 //! The filled model below exists only under `cfg(test)`: it proves the machine
-//! cards and per-service history draw once #10942 and #10943 give them a live
-//! source. Production code never builds it; the live screen says "no data yet".
+//! cards and per-service history draw the same way the live
+//! feeds (#10942, #10943) do; `machine_tests.rs` drives the live model.
 
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Color};
 
@@ -42,6 +42,8 @@ fn filled() -> ConsoleModel {
         meta: meta.into(),
         badge: ("ok".into(), Tone::Ok),
         samples,
+        max: None,
+        graph_note: String::new(),
     };
     let machine = Machine {
         badge: ("nominal".into(), Tone::Ok),
@@ -102,6 +104,7 @@ fn filled() -> ConsoleModel {
             svc("Search", "0.57.1", "running", Tone::Ok, "3.8", "1.2 GiB", 7),
         ],
         selected: 4,
+        history_note: NO_DATA.into(),
     }
 }
 
@@ -115,7 +118,7 @@ fn console_home_shows_no_data_yet_for_machine_and_history() {
         },
     });
     let model = model_from_state(&state);
-    assert_eq!(model.machine, None, "no host-metrics source yet (#10942)");
+    assert_eq!(model.machine, None, "machine_status not asked yet (#10942)");
     assert!(
         model
             .rows
@@ -132,7 +135,9 @@ fn console_home_shows_no_data_yet_for_machine_and_history() {
     for title in ["CPU", "MEMORY", "DISK", "NETWORK"] {
         assert!(screen.contains(title), "card {title}");
     }
-    assert!(screen.matches(NO_DATA).count() >= 4 + 2 * ServiceId::ALL.len());
+    assert!(screen.matches(NO_DATA).count() >= 4);
+    // #10943: every history cell names the feed it waits for.
+    assert!(screen.matches("waiting for console.history").count() >= 2 * ServiceId::ALL.len());
     assert!(screen.contains("CPU · last 10 min"));
     assert!(screen.contains("0.57.1"));
     // Under 100 columns the history columns drop.
@@ -168,24 +173,23 @@ fn a_filled_model_draws_cards_and_sparklines() {
     assert_eq!(bar.fg, Color::Rgb(0xd9, 0x77, 0x42));
 }
 
-// See #10899: Agents and Console have no UDS endpoint; their rows read so in
-// a neutral tone, never the red of Down.
+// See #10899: Agents has no UDS endpoint; its row reads so in a neutral tone,
+// never the red of Down. #10966: Console now has one (#10902).
 #[test]
 fn no_uds_endpoint_rows_are_muted_never_down() {
     let mut state = HomeState::default();
-    for id in [ServiceId::Agents, ServiceId::Console] {
-        let health = no_uds_endpoint(id).expect("no UDS endpoint");
-        assert_eq!(
-            status_of(&health),
-            ("no UDS endpoint".to_string(), Tone::Muted)
-        );
-        state.apply_health(HealthUpdate { id, health });
-    }
+    let id = ServiceId::Agents;
+    let health = no_uds_endpoint(id).expect("no UDS endpoint");
+    assert_eq!(
+        status_of(&health),
+        ("no UDS endpoint".to_string(), Tone::Muted)
+    );
+    state.apply_health(HealthUpdate { id, health });
     let mut terminal = Terminal::new(TestBackend::new(160, 30)).expect("test backend");
     terminal
         .draw(|f| render_body(f, f.area(), &model_from_state(&state)))
         .expect("draw");
     let screen = text(terminal.backend().buffer());
-    assert_eq!(screen.matches(" NO UDS ENDPOINT ").count(), 2, "{screen}");
+    assert_eq!(screen.matches(" NO UDS ENDPOINT ").count(), 1, "{screen}");
     assert!(!screen.contains(" DOWN "), "{screen}");
 }

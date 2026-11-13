@@ -458,6 +458,10 @@ fn reap_refuses_a_worktree_a_live_process_is_standing_in() {
     let wt = harness_worktree(&fx, "agent-occupied");
     std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
     GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+    // #10558: the fixture's `git fetch` can leave a detached auto-maintenance
+    // child in the tree, and the probe names only the FIRST occupant. Wait
+    // until the tree is empty so the sleeper is its sole occupant.
+    await_no_occupant(&wt);
 
     // A real child process whose cwd is the worktree, held open for the probe.
     let mut child = std::process::Command::new("sleep")
@@ -483,6 +487,28 @@ fn reap_refuses_a_worktree_a_live_process_is_standing_in() {
         "the refusal must name the process it found (pid {pid}): {reason}"
     );
     assert!(wt.exists(), "the directory must survive");
+}
+
+/// Block until the liveness probe finds no process standing in `wt`.
+///
+/// Why: #10558 — a transient fixture child (git auto-maintenance) in the tree
+/// would be named instead of the process the test placed there.
+/// What: polls `process_holding` for up to 20 s; panics with the last holder if
+/// the tree never empties, so a probe failure still fails the test by name.
+fn await_no_occupant(wt: &std::path::Path) {
+    use crate::session_manager::worktree_liveness::process_holding;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let Some(holder) = process_holding(wt) else {
+            return;
+        };
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} never emptied before the occupant probe: {holder}",
+            wt.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// #4311 REGRESSION: a sibling agent in ANOTHER session still holds its tree.

@@ -242,7 +242,7 @@ jobs:
       # `have_work` alone, which is what keeps #5149's decision intact.
       - name: Install stable toolchain
         if: steps.crate.outputs.have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # #5440: trusty-common's `keyring-store` feature pulls in libdbus-sys,
       # whose build.rs shells out to `pkg-config dbus-1`. That package is

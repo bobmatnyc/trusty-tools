@@ -103,6 +103,8 @@ async fn sm_stdio_setup_error_still_settles_replayed_events_10464() {
     let first = started(dir.path());
     deliver(&first, 3);
     assert_eq!(first.action_events().shutdown().await.spooled, 3);
+    // #10748: a sibling test's fork can still hold the stop's spool flock.
+    crate::test_support::relink_spool_files(&spool::spool_dir(dir.path()));
     let state = started(dir.path());
     let publisher = state.action_events().publisher().expect("attached");
     assert_eq!(publisher.buffered_len(), 3, "not replayed");
@@ -136,6 +138,8 @@ async fn sm_stdio_stop_spools_and_next_start_replays_10464() {
 
     assert!(matches!(ended, signal::Ended::Served(Ok(()))), "{ended:?}");
     assert_eq!(spooled(dir.path()), 2, "the stop did not spool");
+    // #10748: a sibling test's fork can still hold the stop's spool flock.
+    crate::test_support::relink_spool_files(&spool::spool_dir(dir.path()));
     let next = started(dir.path());
     let publisher = next.action_events().publisher().expect("attached");
     assert_eq!(publisher.buffered_len(), 2, "not replayed");

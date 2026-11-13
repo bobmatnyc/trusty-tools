@@ -54,6 +54,7 @@ search-daemon-smoke|trusty-search daemon smoke test|-
 rustdoc-links|Rustdoc intra-doc links|-
 teardown-guard|Durable writes hold the teardown guard|teardown_guard_relevant
 tmux-exact-targets|Every tmux -t target is exact|tmux_targets_relevant
+sled-static|Sled tailscaled isolation (static)|sled_static_relevant
 parity-selftest|Parity gate self-test (must catch a drifted tag)|-
 check5-decision|CHECK 5 decision self-test (0 compared must never print PASS)|-
 check8-decision|CHECK 8 decision self-test (a run's head_sha is not what it gated)|-

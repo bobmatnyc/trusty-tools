@@ -36,7 +36,9 @@
 use serde::{Deserialize, Serialize};
 use trusty_common::host_metrics::history::HOST_HISTORY_CAPACITY;
 
-use crate::connector::ServiceStatus;
+// #10942: the sample type moved to trusty-common so `tm tui` can decode
+// `console.history`; re-exported so every existing path still resolves.
+pub use trusty_common::console_rpc::metrics::ServiceSample;
 
 /// Samples retained per service — the same 10-minute window the host ring holds.
 ///
@@ -47,51 +49,6 @@ use crate::connector::ServiceStatus;
 /// What: [`HOST_HISTORY_CAPACITY`] — 600 points at the 1 s cadence.
 /// Test: `the_service_window_matches_the_host_window`.
 pub const SERVICE_HISTORY_CAPACITY: usize = HOST_HISTORY_CAPACITY;
-
-/// One service's state, CPU and memory at one instant (#6642, #6773).
-///
-/// Why: the row needs all three together. CPU alone cannot say whether a
-/// missing bar means "idle" or "stopped", status alone cannot draw a graph, and
-/// a memory figure sampled on a different tick than the CPU figure would put two
-/// different seconds beside each other in one row.
-/// What: the service id (the same `ServiceInfo::id` the services route serves,
-/// so the UI joins the two by string), the status the poller last detected, the
-/// CPU percentage, and the resident-memory figure in bytes — each `None`
-/// whenever no measurement was taken. The percentage follows `sysinfo`'s
-/// convention: `100.0` is one fully-saturated core, so a multi-threaded daemon
-/// can exceed 100.
-/// Test: `a_sample_serialises_the_shape_the_ui_reads`,
-/// `an_absent_cpu_serialises_as_null`, `an_absent_memory_serialises_as_null`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ServiceSample {
-    /// Stable service identifier, e.g. `"trusty-search"`.
-    pub id: String,
-    /// The status the health poller last detected for this service.
-    pub status: ServiceStatus,
-    /// Process CPU percentage, or `None` when no measurement was taken.
-    ///
-    /// Serialised UNCONDITIONALLY, as `null` when absent — unlike the optional
-    /// fields on `ServiceInfo`, which are skipped. The UI must distinguish "no
-    /// measurement" from a value, and a key that is sometimes missing and
-    /// sometimes `null` is two spellings of the same fact for the client to
-    /// handle.
-    pub cpu_pct: Option<f32>,
-    /// Process resident memory in bytes, or `None` when nothing was measured.
-    ///
-    /// Why it rides on this struct rather than on a second event (#6773): the
-    /// owner's ruling puts a CPU graph and a memory graph side by side in one
-    /// row, and two events would let the two graphs show different seconds. One
-    /// sample carries both, so they cannot disagree.
-    ///
-    /// Why bytes: the UI formats to `MiB`/`GiB`, and a megabyte-granular figure
-    /// quantises a small daemon's 1 s curve into a staircase.
-    ///
-    /// Same `null`-not-zero contract as `cpu_pct`, for the same reason and with
-    /// the same unconditional serialisation. `#[serde(default)]` so a payload
-    /// written before #6773 still deserialises.
-    #[serde(default)]
-    pub rss_bytes: Option<u64>,
-}
 
 /// The whole service roster at one instant (#6642).
 ///
@@ -114,6 +71,7 @@ pub struct ServiceSampleBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connector::ServiceStatus;
 
     fn sample(id: &str, cpu: Option<f32>) -> ServiceSample {
         ServiceSample {

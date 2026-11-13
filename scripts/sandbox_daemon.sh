@@ -55,8 +55,25 @@
 #   Sources: the workspace crates `cargo tree -p trusty-mpm` names, plus
 #   crates/trusty-mpm/examples/issue-state (include_str!), under
 #   SANDBOX_SRC_ROOT (default: this script's checkout); see bin_fresh.sh.
+#   Credential (#10721): `--credential NAME=<ref>` hands the daemon ONE
+#   provider key by vault reference. NAME must be ANTHROPIC_API_KEY or
+#   OPENROUTER_API_KEY; any other name, or a malformed pair, refuses before
+#   anything is created or started. The script then runs, from the caller's
+#   cwd (the project checkout whose vault the reference names) and with the
+#   caller's environment:
+#     <tm> secrets exec --env NAME=<ref> -- \
+#          scripts/lib/sandbox_exec.sh <dir> <tm> NAME
+#   `tm secrets exec` resolves the reference into NAME, never onto an argv,
+#   and exits 1 running nothing when it does not resolve. The wrapper clears
+#   every exported name but PATH, NAME and FORWARDED, sets the pinned names,
+#   and execs `<tm> daemon --sandbox --sandbox-credential NAME`; the daemon
+#   reads NAME once and removes it from its environment. Without
+#   --credential nothing changes: `env -i` as above, no credential.
+#   Residual risk (Architect ruling Q3, accepted): until the daemon removes
+#   NAME, a process of the same user can read it with `ps eww`.
 #
 # Usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR]
+#                                  [--credential NAME=<ref>]
 #                                  [--allow-stale] [--dry-run]
 #   --bin PATH  the tm binary (default: `tm` on PATH). A build-lease slot's
 #               binary is <slot>/debug/tm; the lease prints <slot> on stderr
@@ -66,6 +83,8 @@
 #   --dir DIR   an existing sandbox directory (default: a new `mktemp -d`);
 #               must not be, or resolve to, the real home, nor sit under a
 #               `.env.local`
+#   --credential NAME=<ref>  admit one provider key, resolved from <ref> by
+#               `tm secrets exec` (#10721); the ref is never printed
 #   --dry-run   validate and print what would run; create and start nothing
 # Exit: the daemon's status; 1 on a refusal; 2 on a usage error.
 #
@@ -96,7 +115,7 @@ die() {
 }
 
 usage() {
-  echo "usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR] [--allow-stale] [--dry-run]" >&2
+  echo "usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR] [--credential NAME=<ref>] [--allow-stale] [--dry-run]" >&2
   exit 2
 }
 
@@ -119,6 +138,9 @@ BIN=""
 DIR=""
 DRY_RUN=0
 ALLOW_STALE=0
+CRED_SPEC=""
+# #10721: `tm secrets exec` derives the vault from the caller's checkout.
+CALLER_CWD="$(pwd -P)"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bin) [ "$#" -ge 2 ] || usage; BIN="$2"; shift 2 ;;
@@ -128,12 +150,34 @@ while [ "$#" -gt 0 ]; do
       echo "sandbox_daemon: --port is ignored: the daemon binds no TCP port (#6288)" >&2
       shift 2 ;;
     --dir) [ "$#" -ge 2 ] || usage; DIR="$2"; shift 2 ;;
+    # #10721: one provider key by vault reference; validated below.
+    --credential)
+      [ "$#" -ge 2 ] || usage
+      [ -z "$CRED_SPEC" ] || die "--credential may be given once"
+      CRED_SPEC="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --allow-stale) ALLOW_STALE=1; shift ;;
     -h|--help) usage ;;
     *) echo "sandbox_daemon: unknown argument: $1" >&2; usage ;;
   esac
 done
+
+# #10721: refuse a bad --credential before anything is created or started.
+# Only NAME is ever printed; the ref stays out of every message.
+CRED_NAME=""
+CRED_REF=""
+if [ -n "$CRED_SPEC" ]; then
+  case "$CRED_SPEC" in
+    *=*) CRED_NAME="${CRED_SPEC%%=*}"; CRED_REF="${CRED_SPEC#*=}" ;;
+    *) die "--credential takes NAME=<ref>" ;;
+  esac
+  # Keep in step with SANDBOX_CREDENTIAL_NAMES in secret_source.rs.
+  case "$CRED_NAME" in
+    ANTHROPIC_API_KEY|OPENROUTER_API_KEY) ;;
+    *) die "--credential name not allowed (allowed: ANTHROPIC_API_KEY, OPENROUTER_API_KEY)" ;;
+  esac
+  [ -n "$CRED_REF" ] || die "--credential $CRED_NAME has an empty reference"
+fi
 
 if [ -z "$BIN" ]; then
   BIN="$(command -v tm || true)"
@@ -221,13 +265,20 @@ for name in $FORWARDED; do
   fi
 done
 
+[ -z "$CRED_NAME" ] || PASSED_NAMES="$PASSED_NAMES $CRED_NAME"
+
 echo "sandbox_daemon: sandbox dir: $SANDBOX"
 echo "sandbox_daemon: daemon socket: $DAEMON_SOCK"
 echo "sandbox_daemon: client: TRUSTY_MPM_SOCKET=$DAEMON_SOCK tm <command>"
 echo "sandbox_daemon: variables passed (names only): $PASSED_NAMES"
 echo "sandbox_daemon: working directory: $SANDBOX/home"
 echo "sandbox_daemon: tmux socket: $SOCK"
-echo "sandbox_daemon: command: env -i $PASSED_NAMES $BIN daemon --sandbox"
+if [ -z "$CRED_NAME" ]; then
+  echo "sandbox_daemon: command: env -i $PASSED_NAMES $BIN daemon --sandbox"
+else
+  echo "sandbox_daemon: credential: $CRED_NAME, by vault reference (not shown)"
+  echo "sandbox_daemon: command: $BIN secrets exec --env $CRED_NAME=<ref> -- $SCRIPT_DIR/lib/sandbox_exec.sh $SANDBOX $BIN $CRED_NAME"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "sandbox_daemon: dry run; nothing started"
@@ -248,15 +299,24 @@ teardown() {
   fi
 }
 
-# `${EXTRA[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
-env -i \
-  HOME="$SANDBOX/home" \
-  PATH="$PATH" \
-  TRUSTY_DATA_DIR_OVERRIDE="$SANDBOX/data" \
-  TRUSTY_SANDBOX=1 \
-  TMUX_TMPDIR="$TMUX_DIR" \
-  ${EXTRA[@]+"${EXTRA[@]}"} \
-  "$BIN" daemon --sandbox &
+if [ -z "$CRED_NAME" ]; then
+  # `${EXTRA[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
+  env -i \
+    HOME="$SANDBOX/home" \
+    PATH="$PATH" \
+    TRUSTY_DATA_DIR_OVERRIDE="$SANDBOX/data" \
+    TRUSTY_SANDBOX=1 \
+    TMUX_TMPDIR="$TMUX_DIR" \
+    ${EXTRA[@]+"${EXTRA[@]}"} \
+    "$BIN" daemon --sandbox &
+else
+  # #10721: from the caller's cwd, so `tm secrets exec` names the caller's
+  # vault; the wrapper moves the daemon to <dir>/home and clears the env.
+  # The subshell execs, so DAEMON_PID is `tm secrets exec` itself, which
+  # forwards the signals below to the daemon.
+  (cd "$CALLER_CWD" && exec "$BIN" secrets exec --env "$CRED_NAME=$CRED_REF" -- \
+    "$SCRIPT_DIR/lib/sandbox_exec.sh" "$SANDBOX" "$BIN" "$CRED_NAME") &
+fi
 DAEMON_PID=$!
 trap 'kill -TERM "$DAEMON_PID" 2>/dev/null || true' INT TERM HUP
 # A trapped signal ends `wait` early; wait again until the daemon is reaped.

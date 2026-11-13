@@ -30,6 +30,10 @@ from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+if HERE not in sys.path:     # python3 -I drops the script directory
+    sys.path.insert(0, HERE)
+import task_tag  # noqa: E402  (#11101: a pure Task: tag line never asks)
+
 WAKE_MSG_KINDS = {"decision", "blocker", "head", "done"}
 HOLD_MSG_KINDS = {"ack", "progress", "fyi"}
 ASKS = re.compile(r"\?|\b(approve|choose|which)\b", re.I)
@@ -66,7 +70,7 @@ def classify(msg):
     if kind in WAKE_MSG_KINDS:
         return "wake", kind
     if kind in HOLD_MSG_KINDS:
-        if ASKS.search(str(msg.get("text") or "")):
+        if ASKS.search(task_tag.strip_tags(str(msg.get("text") or ""))):   # #11101: a Task: tag line never asks
             return "wake", f"{kind} text asks for a ruling"
         if SNAPSHOT.search(str(msg.get("text") or "")):
             return "wake", "snapshot ready for refresh"

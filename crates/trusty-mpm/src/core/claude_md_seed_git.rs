@@ -28,7 +28,9 @@
 
 use std::path::Path;
 
-use crate::core::child_repo_scan::{ChildRepoScan, scan_for_child_repo};
+use crate::core::child_repo_scan::{
+    ChildRepoScan, PROJECT_SCAN_BUDGET, scan_for_child_repo_within,
+};
 use crate::core::claude_md_seed::{SeedRefusal, refuse_seed_at};
 
 /// Does any strict ancestor of `dir` contain a `.git` entry?
@@ -65,6 +67,7 @@ fn has_git_ancestor(dir: &Path) -> bool {
 /// Test: `a_workspace_parent_is_refused_naming_the_child`,
 /// `a_wide_node_modules_sibling_never_lets_a_workspace_parent_seed`,
 /// `an_exhausted_scan_refuses_to_seed`,
+/// `a_project_wider_than_the_workspace_budget_may_seed`,
 /// `an_unreadable_child_directory_refuses_to_seed`,
 /// `git_init_is_never_offered_inside_an_existing_repository`,
 /// `a_non_interactive_caller_declines_git_init_and_still_may_seed`,
@@ -88,7 +91,9 @@ pub fn offer_git_init(
     // #7673: only a scan that checked everything may reach the offer or the seed.
     // #7774 review: the scan runs BEFORE the filesystem-only ancestor check, so
     // a stale or broken ancestor `.git` cannot skip the workspace-parent refusal.
-    match scan_for_child_repo(dir) {
+    // #10461: the project budget, so a project wider than 256 directories may
+    // seed; exhaustion still refuses below.
+    match scan_for_child_repo_within(dir, None, PROJECT_SCAN_BUDGET) {
         ChildRepoScan::Clear => {}
         ChildRepoScan::Found(child) => return Err(SeedRefusal::WorkspaceParent(child)),
         ChildRepoScan::Incomplete(stop) => return Err(SeedRefusal::ScanIncomplete(stop)),

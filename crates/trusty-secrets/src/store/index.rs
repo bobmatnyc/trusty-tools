@@ -419,5 +419,7 @@ fn to_meta(path: &Path, name: &str, row: &IndexRow) -> Result<KeyMeta, SecretsEr
         updated_at: row.updated_at,
         // #9070: a hand-edited `"agents_may_use": true` is never reported.
         agents_may_use: false,
+        // #10998: likewise only the backend reports the push-only mark.
+        agents_push_only: false,
     })
 }

@@ -277,6 +277,9 @@ pub struct State {
     pub(crate) sandbox_override: bool,
     /// Replaces the account-config sync-target opener; tests only (#9069).
     pub(crate) sync_targets: Option<super::sync_target::SyncTargetFactory>,
+    /// Reads one named Keychain item for a named copy (#10998).
+    // The OS read; tests give a fake so none touches the Keychain.
+    pub(crate) keychain_item_read: crate::store::keychain_item::ItemRead,
     /// The Architect launch-record directory under the account's home;
     /// `None` grants no Architect exemption.
     // #10459 P1: from the password database, never `$HOME`, so a spawner
@@ -367,6 +370,7 @@ impl State {
             sandboxed: sandbox.flag_set(),
             sandbox_override: sandbox::sandbox_consent_config(sandbox, account_home).is_some(),
             sync_targets: None,
+            keychain_item_read: crate::store::keychain_item::os_read,
             architect_records: super::architect::records_dir(account_home),
             tickets: Arc::new(TicketStore::os_default()),
             tm_bin_dir: super::ticket_checks::tm_bin_dir(account_home),

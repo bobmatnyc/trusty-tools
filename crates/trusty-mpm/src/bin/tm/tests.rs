@@ -1771,6 +1771,7 @@ fn cli_parses_daemon_defaults() {
             mcp,
             force,
             sandbox,
+            sandbox_credential,
         } => {
             // #6288 S3a: no bind default; the deprecated flag is unset.
             assert_eq!(addr, None);
@@ -1778,6 +1779,8 @@ fn cli_parses_daemon_defaults() {
             assert!(!mcp);
             assert!(!force);
             assert!(!sandbox);
+            // #10721: the default stays closed — no credential admitted.
+            assert_eq!(sandbox_credential, None);
         }
         other => panic!("expected Daemon, got {other:?}"),
     }
@@ -1875,7 +1878,8 @@ fn cli_exact_match_wins_over_prefix_ambiguity() {
             // #7688: a bare `tm hook` is still the daemon relay, never the
             // prompt-feedback capture.
             prompt_feedback: false,
-            egress_guard: false
+            egress_guard: false,
+            standing_rules: false
         }
     ));
 

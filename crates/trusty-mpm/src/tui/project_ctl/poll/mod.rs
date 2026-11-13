@@ -41,13 +41,14 @@
 mod rows;
 pub(crate) mod tick;
 
-pub(crate) use rows::{activity_from_response, live_session_rows, project_to_row};
+pub(crate) use rows::{activity_from_response, live_session_rows};
 // Only reachable from `super::tests` (this module's daemon-down test
 // fixtures) and `super::super::tests` (the project_ctl-level integration
 // tests) — both `#[cfg(test)]`-gated, so a plain `cargo build` never sees a
-// caller and would otherwise warn on the re-export.
+// caller and would otherwise warn on the re-export. #10991: `project_to_row`
+// joined them once `visible_project_rows` took over the poll's call.
 #[cfg(test)]
-pub(crate) use rows::session_to_row;
+pub(crate) use rows::{project_to_row, session_to_row};
 
 use crate::client::{DaemonClient, ManagedActivityResponse};
 use crate::tui::project_ctl::trace::CallTimings;
@@ -337,14 +338,8 @@ async fn fetch_projects_and_sessions(
         sessions_by_project.insert(group.project_name.clone(), rows);
     }
 
-    // #10476: one row per repo, matching the fleet's one group per repo.
-    let rows = crate::project::one_project_per_repo(&projects)
-        .into_iter()
-        .map(|p| {
-            let group = groups.iter().find(|g| g.project_name == p.name);
-            project_to_row(p, group)
-        })
-        .collect();
+    // #10476: one row per repo; #10991: archived projects are hidden.
+    let rows = rows::visible_project_rows(&projects, &groups);
 
     let projects_full = projects.into_iter().map(|p| (p.name.clone(), p)).collect();
 

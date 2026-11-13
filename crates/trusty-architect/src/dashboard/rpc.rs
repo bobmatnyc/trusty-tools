@@ -74,8 +74,13 @@ macro_rules! request {
     };
 }
 
-request!(/// `get` one document.
-    GetRequest { collection: String, id: String });
+request!(
+    /// `get` one document.
+    GetRequest {
+        collection: String,
+        id: String
+    }
+);
 request!(/// `list` a collection: `status` filter, `order_by` key, `desc`, `limit`.
     ListRequest { collection: String,
         #[serde(default)] status: Option<String>, #[serde(default)] order_by: Option<String>,
@@ -89,14 +94,20 @@ request!(/// `batch`: the prototype's ops `{op, collection, id, data, if_version
     BatchRequest { ops: Vec<Value> });
 request!(/// `pruned`: prune-log lines matching `id` and `collection`, oldest first.
     PrunedRequest { #[serde(default)] id: Option<String>, #[serde(default)] collection: Option<String> });
-request!(/// `validate` every document against the schema directory `schemas`.
-    ValidateRequest { schemas: PathBuf });
-request!(/// `fsck` or `tally`: the store alone.
-    StoreRequest {});
+request!(
+    /// `validate` every document against the schema directory `schemas`.
+    ValidateRequest { schemas: PathBuf }
+);
+request!(
+    /// `fsck` or `tally`: the store alone.
+    StoreRequest {}
+);
 request!(/// `footer`: the reply footer; `local` defaults to [`LOCAL_URL`].
     FooterRequest { #[serde(default)] local: Option<String>, tailnet: String });
-request!(/// `ids`: the next free id of `prefix` (one capital letter), the free count and retire candidates.
-    IdsRequest { prefix: String });
+request!(
+    /// `ids`: the next free id of `prefix` (one capital letter), the free count and retire candidates.
+    IdsRequest { prefix: String }
+);
 
 /// `pruned` reply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

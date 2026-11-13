@@ -87,11 +87,7 @@ impl Keychain for LoginKeychain {
 
 /// `tm env set|keys`, for the calling process.
 pub(crate) fn run(action: EnvAction) -> anyhow::Result<()> {
-    let account = match nix::unistd::User::from_uid(nix::unistd::Uid::current()) {
-        Ok(Some(user)) if !user.dir.as_os_str().is_empty() => Some(user.dir),
-        _ => None,
-    };
-    let home = verb_home(dirs::home_dir(), account)?;
+    let home = trusted_home()?;
     let architect_dir = resolve_dir(None, &home)?;
     let env = HookEnv {
         home: Some(home.clone()),
@@ -107,6 +103,16 @@ pub(crate) fn run(action: EnvAction) -> anyhow::Result<()> {
         &LoginKeychain,
         out,
     )
+}
+
+/// [`verb_home`] of `$HOME` and this user's password-database home.
+// #11015: shared with `tm secrets assign`'s Architect check.
+pub(crate) fn trusted_home() -> anyhow::Result<PathBuf> {
+    let account = match nix::unistd::User::from_uid(nix::unistd::Uid::current()) {
+        Ok(Some(user)) if !user.dir.as_os_str().is_empty() => Some(user.dir),
+        _ => None,
+    };
+    verb_home(dirs::home_dir(), account)
 }
 
 /// The home `tm env` trusts: the password database's, and `$HOME` must agree.

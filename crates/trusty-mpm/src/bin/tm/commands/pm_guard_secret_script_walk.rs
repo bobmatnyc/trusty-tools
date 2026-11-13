@@ -7,8 +7,10 @@
 //! What: [`each_script`] and the pass it runs ([`each_script_in`], [`Walk`]).
 //! Test: `pm_guard_secret_script_tests.rs`, `pm_guard_secret_script_10566_tests.rs`.
 
+use std::ops::Range;
 use std::path::PathBuf;
 
+use super::operand::resolve_script_operand;
 use super::{Candidate, Role, Unread, candidates, existing_paths, expand, is_computed};
 use super::{fd_pipe_script, is_fd_pipe};
 use super::{locate, segment_bases, unresolved};
@@ -93,24 +95,28 @@ pub(super) fn each_script_in<T>(
     };
     for segment in split_shell_segments(&argv_text) {
         let trimmed = segment.trim();
-        let spans: Vec<Substitution> = if walk.subs {
-            segment_substitution_spans(trimmed)
-                .into_iter()
-                .map(|(_, body)| body)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let found = segment_substitution_spans(trimmed);
+        // #10548: a substitution's words are not the segment's words; its body
+        // is judged below as a command of its own.
         let argv = if walk.own {
-            tokenize(trimmed).unwrap_or_default()
+            let masked = masked(trimmed, &found);
+            tokenize(&masked)
+                .or_else(|_| tokenize(trimmed))
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
-        let (candidates, exact) = candidates(&argv);
+        let spans: Vec<Substitution> = if walk.subs {
+            found.into_iter().map(|(_, body)| body).collect()
+        } else {
+            Vec::new()
+        };
+        let (mut candidates, exact) = candidates(&argv);
         if spans.is_empty() && candidates.is_empty() {
             continue;
         }
         let seg_bases = segment_bases(&argv_text, trimmed, bases);
+        resolve_script_operand(&mut candidates, &argv_text, trimmed, &seg_bases);
         if let Some(answer) = bodies(Some(spans), &seg_bases, inner, sub_depth, judge) {
             return Some(answer);
         }
@@ -135,6 +141,35 @@ pub(super) fn each_script_in<T>(
         }
     }
     None
+}
+
+/// `segment` with each substitution span replaced by a placeholder word —
+/// `$(…)`, `<(…)`, `>(…)` or `` `…` `` — that the shell computes at run time.
+///
+/// Why: `f=$(find . dir | head -1)` lexed as `f=$(find`, `.`, …; the
+/// assignment was skipped, so `.` read as the `source` builtin and the next
+/// existing operand as its script (#10548).
+/// What: an unclosed span runs to the segment's end, as the scanner reports
+/// it. The placeholder keeps an interpreter's substituted script word
+/// computed, so `bash $(…)` still refuses.
+/// Test: `a_find_dot_operand_in_a_substitution_allows_matt_10548`,
+/// `substitution_runs_and_a_sourced_script_still_refuse_10548`.
+fn masked(segment: &str, spans: &[(Range<usize>, Substitution)]) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut at = 0;
+    for (range, _) in spans {
+        out.push_str(&segment[at..range.start]);
+        match segment.get(range.start..range.start + 2) {
+            Some(opener) if !opener.starts_with('`') && opener.ends_with('(') => {
+                out.push_str(opener);
+                out.push_str("…)");
+            }
+            _ => out.push_str("`…`"),
+        }
+        at = range.end;
+    }
+    out.push_str(&segment[at..]);
+    out
 }
 
 /// Judge each substitution body one level deeper; `None` bodies (a
@@ -187,11 +222,14 @@ fn lenient_unresolved(
         .find(|c| c.role == Role::Positional)
         .or_else(|| candidates.iter().find(|c| c.role == Role::Stdin));
     let loaded = candidates.iter().filter(|c| c.role == Role::Loaded);
+    // #10672: an operand in doubt may be the script; it is held to the same test.
+    let doubtful = candidates.iter().filter(|c| c.role == Role::Doubtful);
     loaded
         .chain(script)
-        .filter(|c| c.interpreter.is_some() && existing_paths(&c.word, bases).is_empty())
+        .chain(doubtful)
+        .filter(|c| c.interpreter.is_some() && existing_paths(c.lookup(), bases).is_empty())
         .find(|c| {
-            let word = expand(&c.word, bases);
+            let word = expand(c.lookup(), bases);
             // #10748: one fd-pipe prefix list, shared with the strict path.
             is_computed(&word) || is_fd_pipe(&word) || !written_literally(written, &c.word)
         })

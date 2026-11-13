@@ -116,6 +116,8 @@ const OPERATING_RULES: ShippedSkill = ShippedSkill {
         "fa119b43da0dd7275659d652eea2448472743920f33e5d5da68a4e953d06b4c3",
         // #10780: the text before owner labels needed a cited quote.
         "821edcc7c292dc6263ddaa2538bee3e235155679d5f3282c9823b9de1ceb0109",
+        // #11064: the text before the technical-level rule.
+        "3e4c9ab8d8325d3a052c91e571533c7643508fda3f41a4449137d1eb3b86461e",
     ],
 };
 
@@ -131,6 +133,8 @@ const WORKFLOW: ShippedSkill = ShippedSkill {
         "215f8e5b8f6d9bb04c75d2569c024d5068eab2c951a527229b353c4ff1643a0c",
         // #10895: the text that said `CLAUDE.md` holds the watch set.
         "b0645b7e2ea415922472d45f2936dc844dcf2412420a7b535627ba9c1bcb81fc",
+        // #11117: the text that limited AGENTS.md edits to an owner's order.
+        "59137538d1832abdab2ed80b30c6f55596898c59fef013f5ecbfdf4672fdc3c6",
     ],
 };
 
@@ -140,10 +144,12 @@ const STRATEGY: ShippedSkill = ShippedSkill {
     // #10161: the U1b text, before the factory issue-tracking rule.
     // The text before the daily factory status-update rule.
     // #10886: the text before the factory-discussions sweep.
+    // #11064: the text before the technical level of briefs.
     previous: &[
         "2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77",
         "5388a82b3a5bcab32b10486084d185da24770620aa825099b19327d7a8203dd9",
         "c09c629ca5e93fa6c540955caa7f399a28c905d9356e0366628d55feed62ecbf",
+        "a6b725c4a34f673741028e6ab772c4b5154aff845fb1e9db846d3e2d1dcb4aae",
     ],
 };
 
@@ -179,9 +185,13 @@ const DASHBOARD: ShippedSkill = ShippedSkill {
     stem: "architect-dashboard",
     // R-192/R-193: the D3b text, before the owner-asks rules.
     // #10896: the text before the `watch_changes` queue kind.
+    // #11064: the text before the technical level of item text.
     previous: &[
         "c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a",
         "e08b26d58e8e9c39a43fa71752ec8b191a795a786708f3ce002103b975956e82",
+        "ac71a5540005a50c480c9834e057b98d9614e440e7f7a5be55e90773f7eb44c5",
+        // #11064: the text before items below senior-engineer always linked a brief.
+        "6a2f6fcf1f8f50523e110cb3216f496bc1b0d2c16905d6fca2b8ffe9dbba345f",
     ],
 };
 

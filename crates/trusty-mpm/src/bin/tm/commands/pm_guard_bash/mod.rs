@@ -486,7 +486,9 @@ fn expand_shell_segments(command: &str, depth: usize, out: &mut Vec<String>) {
 /// `continuation_tests::split_shell_segments_keep_a_continued_command_whole_9180`,
 /// `split_shell_segments_still_splits_an_unterminated_heredoc`,
 /// `split_shell_segments_still_splits_a_shell_heredoc_body`.
-fn split_shell_segments_raw(command: &str) -> Vec<&str> {
+// #10672: crate-visible so the script rule reads the separators between
+// segments as written, with no wrapper descent.
+pub(crate) fn split_shell_segments_raw(command: &str) -> Vec<&str> {
     let scan = QuoteScan::new(command);
     let quoted = |i: usize| scan.balanced && !scan.is_unquoted(i);
     let bodies = heredoc::HeredocBodies::scan(command);

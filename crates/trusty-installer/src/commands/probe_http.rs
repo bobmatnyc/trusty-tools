@@ -195,7 +195,7 @@ pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
 /// (it logs nothing for it). Liveness beyond "the socket accepts" is #10071.
 /// What: `true` for `trusty-events` only.
 /// Test: `tests::events_is_probed_by_accept_not_by_a_health_method`.
-fn accept_only_member(binary: &str) -> bool {
+pub(super) fn accept_only_member(binary: &str) -> bool {
     binary == trusty_common::control_bus::EVENTS_SERVICE
 }
 
@@ -592,6 +592,50 @@ pub fn build_probe_client_with(
     trusty_common::http_client::loopback_client_builder()
         .connect_timeout(connect)
         .timeout(request)
+        .build()
+}
+
+/// The console token to send, for the console only, when one is configured.
+///
+/// Why (#11074, DOC-90 TOK-8): with `TRUSTY_CONSOLE_TOKEN_FILE` set the
+/// console answers `401` on every TCP route, `/health` included, so a probe
+/// without the token reads a healthy console as an HTTP error.
+/// What: `None` for any other member. For `trusty-console`,
+/// [`trusty_common::console_token::load_from_env`]; a bad file is logged by
+/// path and reason (never content) and sends no header, so the probe reports
+/// the console's `401`.
+/// Test: `tests::console_token_is_for_the_console_only_11074`.
+fn console_token_for(binary: &str) -> Option<trusty_common::console_token::ConsoleToken> {
+    if binary != "trusty-console" {
+        return None;
+    }
+    trusty_common::console_token::load_from_env()
+        .inspect_err(|e| tracing::warn!("console probe sends no token: {e}"))
+        .ok()
+        .flatten()
+}
+
+/// [`build_probe_client`] that also sends `Authorization: Bearer <token>`.
+///
+/// Why (#11074): the console's token gate covers `/health`.
+/// What: the same proxy-free, bounded client, with the header as a default,
+/// marked sensitive so reqwest never prints it.
+/// Test: `tests::console_probe_sends_the_token_11074`.
+pub fn build_console_probe_client(
+    token: &trusty_common::console_token::ConsoleToken,
+) -> reqwest::Result<reqwest::Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    // A loaded token is visible ASCII, so the value always parses.
+    if let Ok(mut value) =
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.expose()))
+    {
+        value.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+    trusty_common::http_client::loopback_client_builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .default_headers(headers)
         .build()
 }
 
@@ -1036,7 +1080,12 @@ pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
         return probe_socket(&socket, method).await;
     }
 
-    let client = match build_probe_client() {
+    // #11074: the console's `/health` needs its token when one is configured.
+    let built = match console_token_for(binary) {
+        Some(token) => build_console_probe_client(&token),
+        None => build_probe_client(),
+    };
+    let client = match built {
         Ok(c) => c,
         Err(e) => {
             return ProbeOutcome::ProbeFailed {

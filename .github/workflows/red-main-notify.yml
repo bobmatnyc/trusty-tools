@@ -64,6 +64,7 @@ on:
       - "Agent assets" # agent-assets.yml
       - "AL2023 load-dynamic build gate" # al2023-build.yml
       - "Architect sub-project" # architect-subproject.yml
+      - "Trusty Browser" # trusty-browser.yml
       - "build.rs sync" # buildrs-sync.yml
       - "Capabilities drift" # capabilities-drift.yml
       - "Doc numbers" # doc-numbers.yml
@@ -71,6 +72,7 @@ on:
       - "Generation artifact lint" # generation-artifact-lint.yml
       - "Homebrew formula" # homebrew-formula.yml
       - "Line cap" # line-cap.yml
+      - "OKF extract worker" # okf-extract-worker.yml (#11094)
       - "Public docs" # public-docs.yml
       - "SLD lint" # sld-lint.yml
       - "Test count" # test-count.yml

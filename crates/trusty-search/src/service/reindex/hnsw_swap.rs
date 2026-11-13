@@ -68,6 +68,8 @@ use crate::core::store::StagedSwapOutcome;
 use std::path::{Path, PathBuf};
 
 /// The (live, staging) HNSW snapshot path pair for one index.
+// #10738: cloned into the termination guard, which rolls it back on a drop.
+#[derive(Clone)]
 pub(super) struct HnswSwapPaths {
     pub(super) live: PathBuf,
     pub(super) staging: PathBuf,

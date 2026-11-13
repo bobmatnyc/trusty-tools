@@ -455,6 +455,9 @@ impl CopySelection {
 /// #9069: a sync-target destination goes to `sync_target::push` after the
 /// project resolves; a sync-target source is [`ErrorKind::Unsupported`]
 /// (`server_copy_from_a_sync_target_is_unsupported`).
+/// #10998: a request with `source` copies one key from that named source
+/// through `copy_source::copy_named` instead; one without is unchanged
+/// (`copy_without_source_is_unchanged_by_10998`).
 pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     audited(
         state,
@@ -465,6 +468,11 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             let (dir, rest) = split_project(params)?;
             let request: CopyRequest = decode(rest)?;
             gate.backend(&request.to_backend);
+            // #10998: a named source has its own path; without one the
+            // copy below is unchanged.
+            if let Some(source) = &request.source {
+                return super::copy_source::copy_named(state, caller, gate, dir, &request, source);
+            }
             if request.from_backend == request.to_backend {
                 return Err(ErrorKind::SameBackend);
             }

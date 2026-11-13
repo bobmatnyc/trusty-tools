@@ -34,8 +34,11 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
-use trusty_common::console_metrics::{ConsoleMetricsReport, ServiceHealth};
+use trusty_common::console_metrics::ConsoleMetricsReport;
+
+// #10942: the log's row types moved to trusty-common so `tm tui` can decode
+// `console.history`; re-exported so every existing path still resolves.
+pub use trusty_common::console_rpc::metrics::{ServiceState, ServiceTransition};
 
 /// How long a service may go without a fresh report before it reads `down`.
 ///
@@ -49,64 +52,6 @@ use trusty_common::console_metrics::{ConsoleMetricsReport, ServiceHealth};
 /// test can shrink it.
 /// Test: `a_stale_report_transitions_to_down`.
 pub const SERVICE_REPORT_GRACE_SECS: u64 = 60;
-
-/// The state a service is in, as the transition log records it (#6641).
-///
-/// Why: [`ServiceHealth`] describes what a service says about ITSELF and has no
-/// way to say "we have not heard from you". The timeline needs that fourth
-/// state, so the console derives its own.
-/// What: `Up` / `Degraded` map from the service's own `Ok` / `Degraded`; `Down`
-/// covers both a self-reported `Error` and a report that has gone stale past the
-/// grace window; `Unknown` is the state of a service the tracker has never
-/// observed. Serialised lowercase.
-/// Test: `repeated_identical_reports_log_one_transition`,
-/// `an_unseen_service_reads_unknown`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ServiceState {
-    /// The service reported `ok` within the grace window.
-    Up,
-    /// The service reported `degraded` within the grace window.
-    Degraded,
-    /// The service reported `error`, or has not reported within the grace window.
-    Down,
-    /// The tracker has never observed this service.
-    Unknown,
-}
-
-impl From<&ServiceHealth> for ServiceState {
-    /// Map a service's self-reported health onto the log's state.
-    fn from(h: &ServiceHealth) -> Self {
-        match h {
-            ServiceHealth::Ok => ServiceState::Up,
-            ServiceHealth::Degraded => ServiceState::Degraded,
-            ServiceHealth::Error => ServiceState::Down,
-        }
-    }
-}
-
-/// One recorded change of a service's state (#6641).
-///
-/// Why: the timeline draws a band per state, so it needs both endpoints of the
-/// change and when it happened — a `to` alone would leave the UI re-deriving the
-/// previous state by scanning backwards.
-/// What: the service's id and display name (so the UI need not join against the
-/// rollup), the state it left, the state it entered, and the wall-clock second
-/// the console observed the change.
-/// Test: `repeated_identical_reports_log_one_transition`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServiceTransition {
-    /// Machine-readable service id (e.g. `"trusty-search"`).
-    pub service_id: String,
-    /// Human-readable display name for the timeline row.
-    pub display_name: String,
-    /// The state the service was in before this observation.
-    pub from: ServiceState,
-    /// The state the service is in now.
-    pub to: ServiceState,
-    /// Unix seconds when the console observed the change.
-    pub at_unix: u64,
-}
 
 /// What the tracker remembers about one service between observations.
 struct Observed {
@@ -313,7 +258,7 @@ impl TransitionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_common::console_metrics::make_report;
+    use trusty_common::console_metrics::{ServiceHealth, make_report};
 
     fn unix_now() -> u64 {
         std::time::SystemTime::now()

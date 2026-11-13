@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use trusty_mpm::core::build_lease::census_detail::{header, live_breakdown};
-use trusty_mpm::core::build_lease::slots::SlotDir;
+use trusty_mpm::core::build_lease::slots::{SlotDir, compiling};
 use trusty_mpm::core::builder_slot_pool::staging::{StagingKind, pool_status};
 use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
 
@@ -24,7 +24,8 @@ use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
 pub(crate) fn print_census() -> ! {
     let slots = SlotDir::resolve(dirs::home_dir().as_deref());
     let holders = slots.as_ref().map(SlotDir::holders).unwrap_or_default();
-    let details = match live_breakdown(&holders) {
+    // #8692: a run-phase holder's compilers are foreign, as admission counts them.
+    let details = match live_breakdown(&compiling(&holders)) {
         Ok(details) => details,
         Err(err) => {
             eprintln!("tm build-lease: the process census cannot be read: {err}");

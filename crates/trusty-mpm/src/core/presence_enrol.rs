@@ -98,6 +98,9 @@ pub enum TicketRefusal {
     /// The ticket is dated in the future or valid longer than the TTL.
     #[error("the presence ticket's dates are out of range")]
     BadDates,
+    /// #8878: the enrol ticket already enrolled a device.
+    #[error("the presence ticket was already used")]
+    Spent,
 }
 
 /// Mint a ticket for `purpose` on `subject` at `now`.

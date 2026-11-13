@@ -1158,3 +1158,110 @@ fn spawn_managed_on_main_warns_on_concurrent_main_checkout_session() {
         "no sessions means no collision"
     );
 }
+
+// ── #10988: a new session reactivates its decommissioned project ────────────
+
+/// Guards and directories one decommission-spawn test holds until it ends.
+struct WidgetFixture {
+    state: Arc<DaemonState>,
+    checkout: std::path::PathBuf,
+    _dirs: [tempfile::TempDir; 3],
+    _home: HomeGuard,
+    _root: crate::core::trusty_tools_config::WorkspaceRootEnv,
+}
+
+/// A GitHub checkout AT the managed path, so the launch-on-main route runs
+/// there without cloning, and a daemon whose registry holds `widget`
+/// (`acme/widget`) marked decommissioned.
+async fn decommissioned_widget_on_main() -> WidgetFixture {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let home_guard = set_home(home.path());
+    let root = tempfile::TempDir::new().expect("workspace root");
+    let root_guard = crate::core::trusty_tools_config::WorkspaceRootEnv::pin(root.path());
+    let checkout = crate::core::repo_paths::base_clone_path("acme", "widget");
+    std::fs::create_dir_all(&checkout).expect("checkout dir");
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["remote", "add", "origin", "https://github.com/acme/widget"][..],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "git {args:?}");
+    }
+    let data = tempfile::TempDir::new().expect("data root");
+    let state = Arc::new(DaemonState::with_root_isolated_managed(data.path().to_path_buf()).await);
+    let registry = state.project_registry().await;
+    registry
+        .seed_from_config(&[crate::core::trusty_tools_config::ProjectConfig {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            ..Default::default()
+        }])
+        .await;
+    registry
+        .mark_decommissioned("widget", chrono::Utc::now())
+        .await
+        .expect("mark");
+    WidgetFixture {
+        state,
+        checkout,
+        _dirs: [home, root, data],
+        _home: home_guard,
+        _root: root_guard,
+    }
+}
+
+fn on_main_params(checkout: &std::path::Path) -> SpawnParams {
+    SpawnParams {
+        repo_url: checkout.to_string_lossy().into_owned(),
+        git_ref: "main".into(),
+        task: String::new(),
+        name_hint: None,
+        runtime: None,
+        ephemeral: Some(true),
+        mcp_initiated: false,
+        inject_task: None,
+        deliverable_id: None,
+        force_new: true,
+        worktree: false,
+    }
+}
+
+/// #10988 criterion 1: a new session on the default launch-on-main route
+/// (#5274) clears the project's decommissioned state.
+/// Test: itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_launch_on_main_spawn_reactivates_a_decommissioned_project() {
+    let fx = decommissioned_widget_on_main().await;
+    let params = on_main_params(&fx.checkout);
+    let record = spawn_managed(&fx.state, ManagedSessionId::new(), params)
+        .await
+        .expect("launch-on-main spawn");
+    assert_eq!(record.cwd, fx.checkout, "the launch-on-main route ran");
+    let widget = fx.state.project_registry().await.get("widget").await;
+    assert!(
+        !widget.expect("get").is_decommissioned(),
+        "a new launch-on-main session left the project decommissioned"
+    );
+}
+
+/// #10988: a registry the spawn cannot read when it clears the state is an
+/// error the caller sees, not a `warn!` behind a successful spawn.
+/// Test: itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_spawn_reports_a_failed_reactivation() {
+    let fx = decommissioned_widget_on_main().await;
+    let dir = crate::project::registry_data_dir_under(fx.state.framework_root());
+    std::fs::write(dir.join("projects.json"), "{ not json").expect("corrupt projects.json");
+    let params = on_main_params(&fx.checkout);
+    let err = spawn_managed(&fx.state, ManagedSessionId::new(), params)
+        .await
+        .expect_err("a failed reactivation must reach the caller");
+    assert!(err.contains("still reads decommissioned"), "{err}");
+}

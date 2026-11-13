@@ -898,6 +898,8 @@ mod tests {
             }
         }
         let _resident = resident.expect("hot palace handle kept");
+        // #11080: the evicted palace's writer task must be gone before the read.
+        await_kg_released(&data_root.join("cold")).await;
 
         let mut state = crate::AppState::new(data_root);
         state.registry = std::sync::Arc::new(registry);

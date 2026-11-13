@@ -352,3 +352,95 @@ fn a_slot_whose_directory_is_busy_is_skipped() {
         "a ceiling of one with slot 0 busy waits"
     );
 }
+
+/// Lease a slot and mark its record as `phase`.
+fn hold_in(slots: &SlotDir, slot: u32, phase: crate::core::build_lease::phase::Phase) -> SlotGuard {
+    let mut guard = slots.try_acquire(slot).expect("io").expect("free");
+    let mut record = HolderRecord::new(slot, "cargo test -p x", "/repo");
+    record.phase = phase;
+    guard.write_record(&record).expect("write");
+    guard
+}
+
+/// #8692: with ceiling 1, a run-phase holder frees the compile slot, so a
+/// second build is admitted — into another slot, never the run-phase one —
+/// while a compile-phase holder still makes it wait.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_run_phase_holder_frees_capacity_but_not_its_slot_8692() {
+    use crate::core::build_lease::phase::Phase;
+    let (_tmp, slots) = slot_dir();
+    let c = configs();
+    let p = params(&c, 1, 200);
+    let running = hold_in(&slots, 0, Phase::Run);
+    let second = leased(acquire(
+        &slots,
+        &p,
+        &mut scripted(PressureLevel::Normal),
+        &mut |d, _| panic!("a run-phase holder must not make it wait: {d:?}"),
+    ));
+    assert_eq!(second.slot(), 1, "the run-phase slot is never reused");
+    drop(second);
+    drop(running);
+    let compiling = hold_in(&slots, 0, Phase::Compile);
+    assert!(
+        matches!(
+            acquire(
+                &slots,
+                &p,
+                &mut scripted(PressureLevel::Normal),
+                &mut |_, _| {}
+            ),
+            Outcome::TimedOut { .. }
+        ),
+        "a compile-phase holder still fills a ceiling of one"
+    );
+    drop(compiling);
+}
+
+/// #8692 (Q3): `builders.max_run_slots` bounds the slot directories run-phase
+/// holders keep; at the cap a new build waits, naming the reason.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_run_slot_cap_withholds_with_a_named_reason_8692() {
+    use crate::core::build_lease::phase::Phase;
+    let (_tmp, slots) = slot_dir();
+    let builders = BuildersConfig::default();
+    // Cap 0: run-phase owners get no room beyond the ceiling of 1.
+    let lease = BuildLeaseConfig::from_toml("[builders]\nmax_run_slots = 0\n");
+    let c = (builders, lease);
+    let p = params(&c, 1, 200);
+    let first = hold_in(&slots, 0, Phase::Run);
+    match acquire(
+        &slots,
+        &p,
+        &mut scripted(PressureLevel::Normal),
+        &mut |_, _| {},
+    ) {
+        Outcome::TimedOut { decision, holders } => {
+            assert_eq!(
+                decision.held, 0,
+                "a run-phase holder is not compile capacity"
+            );
+            assert_eq!(holders.len(), 1, "but it is named as an owner");
+            assert!(
+                decision
+                    .withheld
+                    .iter()
+                    .any(|w| w.contains("1 run-phase slot(s)")
+                        && w.contains("builders.max_run_slots")),
+                "{decision:?}"
+            );
+        }
+        other => panic!("the run-slot cap must withhold: {other:?}"),
+    }
+    let unbounded = (BuildersConfig::default(), BuildLeaseConfig::default());
+    let second = leased(acquire(
+        &slots,
+        &params(&unbounded, 1, 200),
+        &mut scripted(PressureLevel::Normal),
+        &mut |_, _| {},
+    ));
+    assert_eq!(second.slot(), 1, "the default cap (the ceiling) admits one");
+    drop((first, second));
+}

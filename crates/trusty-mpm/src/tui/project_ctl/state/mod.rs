@@ -147,9 +147,9 @@ pub struct SessionRow {
     /// workdir candidate left on disk, so a resume is guaranteed to fail
     /// (mirrors `ManagedSessionSummary::unresumable`, #2595).
     ///
-    /// Why: the Sessions pane's `r` (resume) key must refuse a dead session
-    /// with the same "workspace removed — decommission instead" guidance the
-    /// CLI picker gives (`bin/tm/commands/session_picker.rs`'s
+    /// Why: the session column's `R` (resume) key (`r` before #10754 De1)
+    /// must refuse a dead session with the same "workspace removed —
+    /// decommission instead" guidance the CLI picker gives (`bin/tm/commands/session_picker.rs`'s
     /// `PickerDecision::Unresumable`), rather than firing a daemon round trip
     /// that can only 422.
     /// What: copied verbatim from the fleet DTO by

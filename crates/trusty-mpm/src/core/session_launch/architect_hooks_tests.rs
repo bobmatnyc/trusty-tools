@@ -68,9 +68,109 @@ fn entries(additions: &Value) -> Vec<(String, Value)> {
     out
 }
 
+/// The exact `tm hook --standing-rules` group (#10960).
+fn standing_rules_group() -> Value {
+    json!({
+        "matcher": "",
+        "hooks": [{
+            "type": "command",
+            "command": format!("{EXE}{STANDING_RULES_SUFFIX}"),
+            "timeout": 10
+        }]
+    })
+}
+
+/// The number of standing-rules entries on `event` (#10960).
+fn standing_rules_on(settings: &Value, event: &str) -> usize {
+    settings["hooks"][event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .filter(|entry| {
+            entry["command"]
+                .as_str()
+                .is_some_and(is_standing_rules_hook_command)
+        })
+        .count()
+}
+
+/// #10960: an Architect registers `tm hook --standing-rules` once on
+/// `SessionStart` and once on `UserPromptSubmit` — with the prompt-context
+/// hook off too — and no PM toggle combination registers it at all.
+#[test]
+fn architect_standing_rules_groups_are_architect_only() {
+    for inject_prompt_context in [false, true] {
+        let got = project_managed_hook_additions_for_profile(
+            Some(Path::new(EXE)),
+            inject_prompt_context,
+            false,
+            false,
+            true,
+            Some(ArchitectHooks {
+                direct_commands: false,
+            }),
+        )
+        .expect("architect additions");
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            assert_eq!(standing_rules_on(&got, event), 1, "{event}: {got}");
+        }
+        assert_eq!(
+            entries(&got)
+                .iter()
+                .filter(|(_, e)| e["command"]
+                    .as_str()
+                    .is_some_and(is_standing_rules_hook_command))
+                .count(),
+            2,
+            "{got}"
+        );
+    }
+    for bits in 0u8..32 {
+        let on = |bit: u8| bits & (1 << bit) != 0;
+        let pm = project_managed_hook_additions_for_profile(
+            Some(Path::new(EXE)),
+            on(0),
+            on(1),
+            on(2),
+            on(3),
+            None,
+        )
+        .expect("pm additions");
+        assert!(
+            !pm.to_string().contains(STANDING_RULES_SUFFIX),
+            "bits {bits:05b}: {pm}"
+        );
+    }
+}
+
+/// #10960: a relaunch keeps one standing-rules group per event, and a flip to
+/// PM strips both.
+#[test]
+fn a_flip_to_pm_strips_the_standing_rules_groups() {
+    let dir = tempdir().unwrap();
+    write(dir.path(), architect(false));
+    let again = write(dir.path(), architect(false));
+    assert_eq!(standing_rules_on(&again, "SessionStart"), 1);
+    assert_eq!(standing_rules_on(&again, "UserPromptSubmit"), 1);
+    let pm = project_managed_hook_additions_for_profile(
+        Some(Path::new(EXE)),
+        true,
+        false,
+        false,
+        true,
+        None,
+    )
+    .expect("pm");
+    let flipped = write(dir.path(), pm);
+    for event in ["SessionStart", "UserPromptSubmit"] {
+        assert_eq!(standing_rules_on(&flipped, event), 0, "{event}: {flipped}");
+    }
+}
+
 /// The golden: the Architect's block is the PM block with the guard group
-/// swapped for the exec-form one and, with the flag on, two prompt groups
-/// appended. Nothing else differs.
+/// swapped for the exec-form one, with the flag on two prompt groups
+/// appended, and (#10960) the standing-rules groups last. Nothing else differs.
 #[test]
 fn architect_hook_settings_golden() {
     let pm = project_managed_hook_additions_with_pm_guard(
@@ -94,6 +194,13 @@ fn architect_hook_settings_golden() {
             submit.push(json!({ "matcher": "", "hooks": [guard_entry(false)] }));
             expected["hooks"]["UserPromptExpansion"] =
                 json!([{ "matcher": "tm-run", "hooks": [guard_entry(false)] }]);
+        }
+        // #10960: the standing-rules groups close both events, every Architect.
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            expected["hooks"][event]
+                .as_array_mut()
+                .expect(event)
+                .push(standing_rules_group());
         }
         let got = architect(direct_commands);
         assert_eq!(got, expected, "direct_commands = {direct_commands}");

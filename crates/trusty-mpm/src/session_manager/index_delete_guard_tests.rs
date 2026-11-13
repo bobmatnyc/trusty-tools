@@ -121,9 +121,8 @@ async fn acquire_succeeds_when_production_state_is_explicitly_allowed() {
 
 // ---- what goes on the wire -----------------------------------------------
 
-/// The opt-in that makes the call destructive must survive refactoring — a
-/// request that lost `delete_data` would silently leak index data forever
-/// (#4123), the failure this whole module is downstream of.
+/// #10988 (ruling D8e): the call deregisters and keeps the index data, with an
+/// explicit `delete_data: false`.
 ///
 /// Why at the wire rather than on the params function: the method NAME is the
 /// other half. trusty-mpm has no Cargo edge on trusty-search, so a drifted name
@@ -131,7 +130,7 @@ async fn acquire_succeeds_when_production_state_is_explicitly_allowed() {
 /// Test: this function IS the test.
 #[serial_test::serial]
 #[tokio::test]
-async fn delete_params_opt_into_data_deletion() {
+async fn delete_params_keep_index_data() {
     let (_dir, _scope) = isolated_daemon_home(true);
     let seen: Recorder = Arc::new(Mutex::new(Vec::new()));
     let _daemon = uds_mock::spawn_at(
@@ -148,9 +147,9 @@ async fn delete_params_opt_into_data_deletion() {
         calls,
         vec![(
             "search.index.delete".to_string(),
-            json!({ "index_id": "my-index", "delete_data": true })
+            json!({ "index_id": "my-index", "delete_data": false })
         )],
-        "the destructive call must name trusty-search's own method and carry the opt-in"
+        "the call must name trusty-search's own method and keep the index data (#10988 D8e)"
     );
 }
 

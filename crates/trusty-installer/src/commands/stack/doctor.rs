@@ -19,8 +19,14 @@
 //! neither a pass nor a failure, so it has its own verdict (`undetermined`) and
 //! its own exit code (4), leaving exit 2 to mean a member is genuinely broken.
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 
+use crate::commands::deployment_record::{
+    audit_for_rollup, fold_verdict, print_human as print_deployment, running_of, DeploymentAudit,
+    RunningVersion,
+};
 use crate::commands::plist_label::plist_path_for;
 use crate::commands::probe::{health_str, probe_member_health};
 use crate::commands::stable_set::{daemon_members, ManageStrategy, StableMember};
@@ -101,6 +107,9 @@ pub struct DoctorReport {
     pub members: Vec<MemberDoctor>,
     /// Overall verdict: `ok` | `undetermined` | `degraded`.
     pub verdict: &'static str,
+    /// #10607: what is installed against what install placed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentAudit>,
 }
 
 impl DoctorReport {
@@ -124,7 +133,19 @@ impl DoctorReport {
             command: "stack doctor",
             members,
             verdict,
+            deployment: None,
         }
+    }
+
+    /// Fold the deployment audit into the verdict (#10607).
+    ///
+    /// Why: the same reason as `HealthReport::with_deployment`.
+    /// What: drift is `degraded`; an audit that could not tell is `undetermined`.
+    /// Test: `tests::drift_degrades_an_ok_report`.
+    fn with_deployment(mut self, audit: DeploymentAudit) -> Self {
+        self.verdict = fold_verdict(self.verdict, &audit);
+        self.deployment = Some(audit);
+        self
     }
 
     /// Process exit code: 0 ok, 2 degraded, 4 undetermined.
@@ -149,8 +170,11 @@ impl DoctorReport {
 /// Why: isolating the per-member probe keeps `run_doctor` a thin loop.
 /// What: runs the health probe + the four checks (PATH, plist, recorded address,
 /// version). `plist_installed` is only checked for launchd members.
+/// #10607: also returns what the probe said about the running version.
 /// Test: side-effecting (PATH/FS); the `ok` reduction is unit-tested.
-fn diagnose(m: &StableMember) -> MemberDoctor {
+fn diagnose(m: &StableMember) -> (MemberDoctor, RunningVersion) {
+    // #4246: typed probe; the doctor row renders the flat word.
+    let outcome = probe_member_health(&m.binary, m.manage);
     let on_path = which::which(&m.binary).is_ok();
     let plist_installed = match m.manage {
         ManageStrategy::Launchd => Some(
@@ -167,17 +191,15 @@ fn diagnose(m: &StableMember) -> MemberDoctor {
         trusty_common::read_daemon_addr(&m.binary),
         Ok(Some(a)) if !a.is_empty()
     );
-    MemberDoctor {
-        // #4246: typed probe; the doctor row renders the flat word.
-        health: probe_member_health(&m.binary, m.manage)
-            .health_string()
-            .to_owned(),
+    let row = MemberDoctor {
+        health: outcome.health_string().to_owned(),
         on_path,
         plist_installed,
         port_recorded,
         version: installed_version(&m.binary),
         member: m.crate_name.clone(),
-    }
+    };
+    (row, running_of(m, &outcome))
 }
 
 /// Handle `tctl stack doctor [<member>]`.
@@ -211,8 +233,21 @@ pub fn run_doctor(member: Option<&str>, json: bool) -> i32 {
         }
     };
 
-    let members: Vec<MemberDoctor> = scoped.iter().map(diagnose).collect();
-    let report = DoctorReport::build(members);
+    let mut running: HashMap<String, RunningVersion> = HashMap::new();
+    let mut members: Vec<MemberDoctor> = Vec::with_capacity(scoped.len());
+    for m in &scoped {
+        let (row, now) = diagnose(m);
+        if row.health != health_str::NOT_INSTALLED {
+            running.insert(row.member.clone(), now);
+        }
+        members.push(row);
+    }
+    let mut audit = audit_for_rollup(&running);
+    if member.is_some() {
+        let names: Vec<String> = members.iter().map(|m| m.member.clone()).collect();
+        audit = audit.scoped_to(&names);
+    }
+    let report = DoctorReport::build(members).with_deployment(audit);
     if json {
         if render_json(&report).is_err() {
             eprintln!("tctl stack doctor: failed to write JSON output");
@@ -248,12 +283,42 @@ fn print_human(report: &DoctorReport) {
             m.health,
         );
     }
+    if let Some(audit) = &report.deployment {
+        print_deployment(audit);
+    }
     println!("verdict: {} (exit {})", report.verdict, report.exit_code());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why: #10607 — a report whose members all pass still answers for the
+    /// deployment.
+    /// What: drift degrades an `ok` report to exit 2; an undetermined audit is exit 4.
+    /// Test: This is the test.
+    #[test]
+    fn drift_degrades_an_ok_report() {
+        let audit = |state| DeploymentAudit {
+            state,
+            findings: Vec::new(),
+        };
+        let row = MemberDoctor {
+            member: "trusty-search".to_owned(),
+            health: health_str::HEALTHY.to_owned(),
+            on_path: true,
+            plist_installed: Some(true),
+            port_recorded: true,
+            version: Some("1.0.0".to_owned()),
+        };
+        let report = || DoctorReport::build(vec![row.clone()]);
+        assert_eq!(report().with_deployment(audit("clean")).exit_code(), 0);
+        assert_eq!(report().with_deployment(audit("drifted")).exit_code(), 2);
+        assert_eq!(
+            report().with_deployment(audit("undetermined")).exit_code(),
+            4
+        );
+    }
 
     fn md(member: &str, health: &str, on_path: bool) -> MemberDoctor {
         MemberDoctor {

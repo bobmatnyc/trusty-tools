@@ -12,6 +12,7 @@
     "sleep_end": {"type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$"},
     "tz": {"type": "string", "minLength": 1},
     "user_state": {"enum": ["active", "remote", "away", "sleeping"]},
+    "technical_level": {"enum": ["non-technical", "vibe-coder", "pm", "engineer", "senior-engineer", "cto"]},
     "user_state_at": {"$ref": "#/$defs/iso"},
     "user_state_by": {"type": "string"},
     "owner_signal_at": {"$ref": "#/$defs/iso"},

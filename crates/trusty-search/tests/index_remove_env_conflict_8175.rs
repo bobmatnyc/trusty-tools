@@ -241,7 +241,7 @@ async fn remove_with_no_argument_and_env_only_refuses() {
 /// real daemon — which the CLI is deliberately NOT pointed at — must receive
 /// nothing at all, delete included.
 ///
-/// Why: closes the daemon-guard's own "is anything listening?" gap. A
+/// Why: closes the daemon-guard's own "is anything listening?" gap. A held
 /// `daemon.lock` naming PID 1 (always alive, same trick
 /// `daemon_env_precedence.rs` uses) makes the guard take its "already
 /// running, waiting" branch instead of auto-spawning a real daemon
@@ -259,9 +259,9 @@ async fn remove_with_path_and_flag_when_daemon_is_down_refuses_with_no_requests(
     // CLI below is pointed elsewhere, at a socket nothing serves.
     let daemon = spawn_daemon_with_two_indexes(root_a.path(), root_b.path(), false).await;
     let absent = data_dir.path().join("absent.sock");
-    // PID 1 (init) is always alive — matches daemon_env_precedence.rs's
-    // established trick for making the guard skip auto-spawn.
-    std::fs::write(data_dir.path().join("daemon.lock"), b"1").expect("write daemon.lock");
+    // A held lock naming PID 1 — matches daemon_env_precedence.rs's trick for
+    // making the guard skip auto-spawn. #11060: an unheld one is stale.
+    let _lock = test_daemon::hold_daemon_lock(data_dir.path());
 
     let mut cmd = remove_command(&absent, data_dir.path(), fake_home.path());
     cmd.arg(root_a.path())

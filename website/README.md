@@ -53,14 +53,15 @@ the DOCS-ONLY definition:
 
 ### `pnpm.overrides` — do not remove without checking Dependabot
 
-Three transitive pins in `package.json`. Each exists to hold a security floor
+Four transitive pins in `package.json`. Each exists to hold a security floor
 no direct dependency reaches on its own, so dropping one reopens an alert.
 
-| Override          | Why                                                                                                                                                                                                                                                                                                                 |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cookie ^0.7.2`   | GHSA-pxg6-pf52-xh8x. SvelteKit still declares `cookie ^0.6.0` and resolves 0.6.0; kit [#13037](https://github.com/sveltejs/kit/pull/13037) stopped overriding the default decoder precisely so consumers can raise this themselves. Bumping SvelteKit does not fix it — 2.6.2 moved to `^0.7.0` and 2.6.3 reverted. |
-| `nanoid ^3.3.18`  | GHSA-2v37-7h3g-55p8. Reached only through `postcss`, which floors it at `^3.3.11`.                                                                                                                                                                                                                                  |
-| `postcss ^8.4.31` | GHSA-fxqj-rqcc-2cmp / GHSA-r28c-9q8g-f849. Currently satisfied without the pin; it is a floor guard, not a correction.                                                                                                                                                                                              |
+| Override                            | Why                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cookie ^0.7.2`                     | GHSA-pxg6-pf52-xh8x. SvelteKit still declares `cookie ^0.6.0` and resolves 0.6.0; kit [#13037](https://github.com/sveltejs/kit/pull/13037) stopped overriding the default decoder precisely so consumers can raise this themselves. Bumping SvelteKit does not fix it — 2.6.2 moved to `^0.7.0` and 2.6.3 reverted. |
+| `minimatch@>=7.0.0 <11.0.1 ^11.0.1` | Dependabot #415. Reached only through `glob` and `@typescript-eslint/typescript-estree` (dev/build). Scoped to the vulnerable range so eslint's `minimatch 3.x` stays.                                                                                                                                              |
+| `nanoid ^3.3.18`                    | GHSA-2v37-7h3g-55p8. Reached only through `postcss`, which floors it at `^3.3.11`.                                                                                                                                                                                                                                  |
+| `postcss ^8.4.31`                   | GHSA-fxqj-rqcc-2cmp / GHSA-r28c-9q8g-f849. Currently satisfied without the pin; it is a floor guard, not a correction.                                                                                                                                                                                              |
 
 ## Vercel project settings
 

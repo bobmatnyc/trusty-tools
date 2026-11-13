@@ -9,7 +9,11 @@
 //! exactly `1` ([`Refusal::SandboxFlagNotSet`] otherwise, so trusty-common reads
 //! no `.env.local`, #9178), and `$HOME` is not the account's home. On success
 //! it latches `trusty_mpm::secret_source::enter_sandbox`, so no credential tier
-//! is read.
+//! is read. #10721: `--sandbox-credential NAME` admits exactly one provider
+//! key (`ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`) from the process
+//! environment, which the launcher filled through `tm secrets exec`; the
+//! daemon reads it once and removes it. Residual risk (Architect ruling Q3,
+//! accepted): until that read, a same-user `ps eww` can see the value.
 //! [`gate_channel_pollers`] keeps the Telegram bot down. Every check fails
 //! closed: an answer that cannot be determined refuses.
 //! Test: `daemon_sandbox_tests.rs`; end to end, `tests/sandbox_daemon_9121.rs`.
@@ -20,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use trusty_common::DATA_DIR_OVERRIDE_ENV;
 use trusty_common::credentials::{SANDBOX_ENV_VAR, sandbox_flag_set};
+use trusty_mpm::secret_source::{self, SANDBOX_CREDENTIAL_NAMES, SandboxCredentialError};
 
 /// The only variables a sandbox daemon may inherit, compared exactly.
 ///
@@ -121,21 +126,41 @@ pub(crate) struct SandboxEnv {
     pub(crate) home: Option<PathBuf>,
     /// The account's home from the password database, when it resolves.
     pub(crate) account_home: Option<PathBuf>,
+    /// `--sandbox-credential NAME` (#10721), when given.
+    pub(crate) credential: Option<CredentialRequest>,
+}
+
+/// The one credential `--sandbox-credential` asks the sandbox to admit
+/// (#10721). Holds the NAME and whether a value is present — never the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CredentialRequest {
+    /// The variable name, as given on the command line.
+    pub(crate) name: String,
+    /// Whether the process environment holds a non-empty value for it.
+    pub(crate) present: bool,
 }
 
 impl SandboxEnv {
     /// Read this process's environment. Values are dropped at the iterator,
     /// before anything stores them; only [`CF_TEXT_ENCODING`]'s is inspected.
-    fn capture() -> Self {
+    /// #10721: `credential`, when it is on `SANDBOX_CREDENTIAL_NAMES`, is the
+    /// one name exempted from the allowlist; an off-list name is not.
+    fn capture(credential: Option<&str>) -> Self {
+        let admissible = credential.filter(|n| SANDBOX_CREDENTIAL_NAMES.contains(n));
         let names = std::env::vars_os()
             .filter(|(name, value)| !is_cf_text_encoding(name, value))
-            .map(|(name, _)| name);
+            .map(|(name, _)| name)
+            .filter(|name| admissible.is_none_or(|admitted| name.to_str() != Some(admitted)));
         Self {
             disallowed_names: disallowed_names(names),
             data_dir_override: std::env::var_os(DATA_DIR_OVERRIDE_ENV),
             sandbox_flag: std::env::var_os(SANDBOX_ENV_VAR),
             home: std::env::var_os("HOME").map(PathBuf::from),
             account_home: account_home(),
+            credential: credential.map(|name| CredentialRequest {
+                name: name.to_string(),
+                present: std::env::var_os(name).is_some_and(|v| !v.is_empty()),
+            }),
         }
     }
 }
@@ -157,6 +182,10 @@ pub(crate) enum Refusal {
     AccountHomeUnknown,
     /// `$HOME` resolves to the account's real home.
     HomeIsAccountHome(PathBuf),
+    /// `--sandbox-credential` names a variable off the admission list (#10721).
+    CredentialNotAdmissible(String),
+    /// `--sandbox-credential NAME` with `NAME` unset or empty (#10721).
+    CredentialAbsent(String),
 }
 
 impl fmt::Display for Refusal {
@@ -188,6 +217,17 @@ impl fmt::Display for Refusal {
                 "$HOME ({}) is this user's real home; a sandbox needs its own",
                 home.display()
             ),
+            // #10721: the library error owns the wording; names only.
+            Self::CredentialNotAdmissible(name) => {
+                write!(
+                    f,
+                    "{}",
+                    SandboxCredentialError::NameNotAllowed(name.clone())
+                )
+            }
+            Self::CredentialAbsent(name) => {
+                write!(f, "{}", SandboxCredentialError::Absent(name.clone()))
+            }
         }
     }
 }
@@ -197,12 +237,20 @@ impl fmt::Display for Refusal {
 /// Why: the refusal has to run before the daemon does anything else, and the
 /// latch has to be set before anything can read a credential.
 /// What: [`enter_with`] over this process's environment and the library latch.
-/// Test: `enter_with`'s tests; end to end, `tests/sandbox_daemon_9121.rs`.
-pub(crate) fn enter() -> anyhow::Result<()> {
-    enter_with(
-        &SandboxEnv::capture(),
-        trusty_mpm::secret_source::enter_sandbox,
-    )
+/// With `credential` (#10721, `--sandbox-credential NAME`), the latch is
+/// `enter_sandbox_with_credential`, which admits that one variable and removes
+/// it from the environment. Without it, behaviour is unchanged: no credential.
+/// Test: `enter_with`'s tests; end to end, `tests/sandbox_daemon_9121.rs` and
+/// `tests/sandbox_credential_10721.rs`.
+pub(crate) fn enter(credential: Option<&str>) -> anyhow::Result<()> {
+    enter_with(&SandboxEnv::capture(credential), || match credential {
+        None => {
+            secret_source::enter_sandbox();
+            Ok(())
+        }
+        Some(name) => secret_source::enter_sandbox_with_credential(name)
+            .map_err(|e| anyhow::anyhow!("refusing to start `tm daemon --sandbox` (#10721): {e}")),
+    })
 }
 
 /// [`enter`] with the environment and the latch injected.
@@ -210,10 +258,14 @@ pub(crate) fn enter() -> anyhow::Result<()> {
 /// Why: the latch is process-wide, so a test that set it would change what
 /// every parallel sibling's credential read returns.
 /// What: every [`refusals`] entry becomes one clause of the error, and `latch`
-/// is never called; with no refusal, `latch` runs once.
+/// is never called; with no refusal, `latch` runs once and its error, if any,
+/// is the result.
 /// Test: `an_isolated_clean_environment_enters_and_latches`,
 /// `a_refused_sandbox_never_latches`.
-pub(crate) fn enter_with(env: &SandboxEnv, latch: impl FnOnce()) -> anyhow::Result<()> {
+pub(crate) fn enter_with(
+    env: &SandboxEnv,
+    latch: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let refused = refusals(env);
     if !refused.is_empty() {
         let reasons: Vec<String> = refused.iter().map(ToString::to_string).collect();
@@ -225,7 +277,7 @@ pub(crate) fn enter_with(env: &SandboxEnv, latch: impl FnOnce()) -> anyhow::Resu
             reasons.join("; ")
         );
     }
-    latch();
+    latch()?;
     tracing::info!(
         "sandbox mode (#9121): no channel poller starts and no credential tier is consulted"
     );
@@ -240,11 +292,21 @@ pub(crate) fn enter_with(env: &SandboxEnv, latch: impl FnOnce()) -> anyhow::Resu
 /// `refuses_when_home_is_the_account_home`,
 /// `refuses_when_home_symlinks_to_the_account_home`,
 /// `refuses_when_the_account_home_is_unknown`,
-/// `refuses_when_home_does_not_exist`.
+/// `refuses_when_home_does_not_exist`,
+/// `refuses_a_sandbox_credential_off_the_list`,
+/// `refuses_a_sandbox_credential_that_is_not_set`.
 pub(crate) fn refusals(env: &SandboxEnv) -> Vec<Refusal> {
     let mut out = Vec::new();
     if !env.disallowed_names.is_empty() {
         out.push(Refusal::DisallowedEnv(env.disallowed_names.clone()));
+    }
+    // #10721: one admissible name, and its value present; no other tier.
+    if let Some(request) = &env.credential {
+        if !SANDBOX_CREDENTIAL_NAMES.contains(&request.name.as_str()) {
+            out.push(Refusal::CredentialNotAdmissible(request.name.clone()));
+        } else if !request.present {
+            out.push(Refusal::CredentialAbsent(request.name.clone()));
+        }
     }
     if env
         .data_dir_override

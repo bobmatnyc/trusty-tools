@@ -256,6 +256,11 @@ pub struct AuditRecord {
     /// (#10459 PR1). `None` otherwise, and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<super::ticket::TicketAudit>,
+    /// Where a named `secrets.copy` read its key (#10998): the source
+    /// backend and the store-native name, never a value. `None` otherwise,
+    /// and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_source: Option<super::copy_source::CopySourceAudit>,
 }
 
 impl AuditRecord {
@@ -283,6 +288,7 @@ impl AuditRecord {
             architect: None,
             architect_refusal: None,
             ticket: None,
+            copy_source: None,
         }
     }
 

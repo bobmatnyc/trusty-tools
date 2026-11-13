@@ -1,0 +1,10 @@
+.env
+.env.*
+**/.git
+**/*.pem
+**/*.key
+proxy/
+.claude
+**/.claude
+.credentials.json
+**/.credentials.json

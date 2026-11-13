@@ -121,10 +121,10 @@ trusty-code = { path = "crates/trusty-code", version = "0.8" }
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9.5" }
-trusty-common = { path = "crates/trusty-common", version = "0.69" }
+trusty-common = { path = "crates/trusty-common", version = "0.70" }
 # #7521: secret storage and its on-demand socket (DOC-74 §15.2). Defaults off
 # here so each member names the features it needs (#5466 pattern).
-trusty-secrets = { path = "crates/trusty-secrets", version = "0.4.0", default-features = false }
+trusty-secrets = { path = "crates/trusty-secrets", version = "0.5.0", default-features = false }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }
@@ -164,7 +164,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 #      this line existed. Both consumers name what they need: trusty-analyze's
 #      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
 #      only touches `integrations`, which is unconditional.
-trusty-review = { path = "crates/trusty-review", version = "0.40", default-features = false }
+trusty-review = { path = "crates/trusty-review", version = "0.41", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
@@ -234,6 +234,9 @@ parking_lot = "0.12"
 dirs = "5"
 colored = "2"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+# #8878 PR2b-1b (D72): passkey verifier for presence devices; ES256 only.
+webauthn-rs = "=0.6.2"
+webauthn-authenticator-rs = { version = "=0.6.2", default-features = false, features = ["softtoken"] }
 futures = "0.3"
 futures-util = "0.3"
 axum = { version = "0.8", features = ["macros"] }

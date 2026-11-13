@@ -52,7 +52,8 @@ pub const DAEMON_UNREACHABLE: &str = "daemon ✗";
 /// What: [`ACTIVITY_HINT`] for the Activity pane; [`SESSIONS_HINT`] for the
 /// session column (#10754); in the tree, [`OWNER_HINT`] / [`PROJECTS_HINT`]
 /// by the selected node (nothing selected reads as an owner).
-/// Test: `focus_hint_differs_per_node_kind`.
+/// Test: `focus_hint_differs_per_node_kind`,
+/// `session_column_draws_exactly_the_de1_key_hints` (two_column_tests.rs).
 pub fn focus_hint(state: &ProjectCtlState) -> &'static str {
     if state.focus == Pane::Activity {
         return ACTIVITY_HINT;

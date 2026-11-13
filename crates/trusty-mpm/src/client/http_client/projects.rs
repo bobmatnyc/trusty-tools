@@ -269,6 +269,27 @@ impl DaemonClient {
         Ok(project)
     }
 
+    /// Decommission a project via `POST /api/v1/projects/{name}/decommission`
+    /// (#10988).
+    ///
+    /// Why: backs `tm projects decommission`. What: POSTs, returns the report;
+    /// a 404 or a 422 (Architect refusal, partial stop) surfaces as an error
+    /// carrying the daemon's message. Test:
+    /// `parity_projects_registry_decommission_agrees_across_transports`.
+    pub async fn registry_decommission_project(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<crate::session_manager::project_decommission::ProjectDecommissionReport>
+    {
+        let url = format!("/api/v1/projects/{name}/decommission");
+        let resp = self.post(&url).send().await?;
+        response_or_body_error(resp)
+            .await?
+            .json()
+            .await
+            .context("deserialize decommission report")
+    }
+
     /// Partially update a project via `PATCH /api/v1/projects/{name}`.
     ///
     /// Why: backs `tm projects config <name> set/unset` and the TUI config form

@@ -163,6 +163,20 @@ class TestBuild(Fx):
         self.assertEqual(r["tokens"], [])
 
 
+class TestSessionStem(unittest.TestCase):
+    """#11047: Visualize strips exactly two trailing digits; the Decisions name rule is separate."""
+
+    def test_stem_strips_only_a_two_digit_suffix(self):
+        for name, want in (("tm-foo-02", "foo"), ("tm-foo-2024", "foo-2024"), ("tm-python-3", "python-3"), ("tm-foo", "foo")):
+            with self.subTest(name=name):
+                self.assertEqual(dv._stem(name), want)
+
+    def test_project_sessions_keeps_a_year_suffixed_name(self):
+        sessions = [{"name": "tm-foo-2024"}]
+        self.assertEqual(dv.project_sessions("foo-2024", sessions), (["tm-foo-2024"], "session name"))
+        self.assertEqual(dv.project_sessions("foo", sessions), ([], "session project text"))
+
+
 class TestEndpoint(Fx):
     def setUp(self):
         super().setUp()

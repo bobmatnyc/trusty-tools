@@ -38,6 +38,8 @@ pub const TOKENINFO_URL: &str = "https://oauth2.googleapis.com/tokeninfo";
 /// says the field is missing or empty. A preset scope the token lacks is not
 /// a refusal: it cannot widen what the lane may do.
 /// Test: `check_readonly_accepts_only_the_preset`,
+/// `check_readonly_accepts_tokeninfo_email_alias`,
+/// `check_readonly_refuses_unknown_scope`,
 /// `precheck_refuses_every_write_scope`.
 pub fn check_readonly(scope_field: Option<&str>) -> Result<Vec<String>, String> {
     let scopes: Vec<String> = scope_field
@@ -53,7 +55,7 @@ pub fn check_readonly(scope_field: Option<&str>) -> Result<Vec<String>, String> 
     let beyond: Vec<&str> = scopes
         .iter()
         .map(String::as_str)
-        .filter(|s| !READONLY_SCOPES.contains(s))
+        .filter(|s| !READONLY_SCOPES.contains(&consent_name(s)))
         .collect();
     if beyond.is_empty() {
         Ok(scopes)
@@ -63,6 +65,26 @@ pub fn check_readonly(scope_field: Option<&str>) -> Result<Vec<String>, String> 
              refusing the live lane, no import was run",
             beyond.join(" ")
         ))
+    }
+}
+
+/// The consent-time name of a scope tokeninfo reported.
+///
+/// Why: tokeninfo reports `userinfo.email` as the bare name `email` and
+/// `userinfo.profile` as `profile`, so an exact compare against the preset
+/// refuses a correctly minted read-only token.
+/// What: maps exactly `email` and `profile` to their long names; every other
+/// string comes back unchanged. Whole-string match only, so no other scope
+/// is widened. `profile` maps to a scope the preset does not hold, so it
+/// still refuses.
+/// Test: `check_readonly_accepts_tokeninfo_email_alias`,
+/// `check_readonly_refuses_bare_profile`, `check_readonly_refuses_unknown_scope`.
+// #10746: tokeninfo reports userinfo.email as `email`; the exact compare refused the preset
+fn consent_name(reported: &str) -> &str {
+    match reported {
+        "email" => "https://www.googleapis.com/auth/userinfo.email",
+        "profile" => "https://www.googleapis.com/auth/userinfo.profile",
+        other => other,
     }
 }
 
@@ -163,6 +185,103 @@ mod tests {
         }
         assert!(check_readonly(Some("  ")).is_err());
         assert!(check_readonly(None).is_err());
+    }
+
+    const USERINFO_EMAIL: &str = "https://www.googleapis.com/auth/userinfo.email";
+
+    /// The preset as tokeninfo reports it: `userinfo.email` comes back as `email`.
+    fn preset_as_tokeninfo() -> String {
+        READONLY_SCOPES
+            .iter()
+            .map(|s| if *s == USERINFO_EMAIL { "email" } else { s })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Why: tokeninfo reports `userinfo.email` as `email`; refusing it
+    /// refuses every correctly minted read-only token (#10746).
+    /// What: `email` alone, and the preset in tokeninfo's form, both pass;
+    /// the reported names are returned unchanged.
+    /// Test: this test.
+    #[test]
+    fn check_readonly_accepts_tokeninfo_email_alias() {
+        assert_eq!(check_readonly(Some("email")).unwrap(), ["email"]);
+        let reported = preset_as_tokeninfo();
+        assert!(reported.split(' ').any(|s| s == "email"), "{reported}");
+        assert!(check_readonly(Some(&reported)).is_ok(), "{reported}");
+    }
+
+    /// Why: the long form must keep passing next to the alias.
+    /// What: the preset with `userinfo.email` written long, and that scope
+    /// alone, both pass.
+    /// Test: this test.
+    #[test]
+    fn check_readonly_accepts_long_userinfo_email() {
+        assert!(check_readonly(Some(&READONLY_SCOPES.join(" "))).is_ok());
+        assert!(check_readonly(Some(USERINFO_EMAIL)).is_ok());
+    }
+
+    /// Why: the preset does not request `userinfo.profile`, so its tokeninfo
+    /// alias `profile` is a scope beyond the preset.
+    /// What: `profile` alone and next to the preset is refused by name.
+    /// Test: this test.
+    #[test]
+    fn check_readonly_refuses_bare_profile() {
+        assert!(!READONLY_SCOPES.contains(&"https://www.googleapis.com/auth/userinfo.profile"));
+        for field in [
+            "profile".to_string(),
+            format!("{} profile", preset_as_tokeninfo()),
+        ] {
+            let e = check_readonly(Some(&field)).unwrap_err();
+            assert!(e.contains("profile") && e.contains("no import"), "{e}");
+        }
+    }
+
+    /// Why: the alias must not open a door for any write scope.
+    /// What: each write scope alone is refused by name.
+    /// Test: this test.
+    #[test]
+    fn check_readonly_refuses_each_write_scope_alone() {
+        for w in [
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/drive.file",
+            "https://www.googleapis.com/auth/documents",
+        ] {
+            let e = check_readonly(Some(w)).unwrap_err();
+            assert!(e.contains(w) && e.contains("no import"), "{w}: {e}");
+        }
+    }
+
+    /// Why: the alias is an exact match; prefix or substring matching would
+    /// let near-names through.
+    /// What: an unlisted scope and near-names of `email` are each refused.
+    /// Test: this test.
+    #[test]
+    fn check_readonly_refuses_unknown_scope() {
+        for u in [
+            "https://www.googleapis.com/auth/calendar",
+            "emails",
+            "Email",
+            "userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.email.write",
+        ] {
+            let e = check_readonly(Some(u)).unwrap_err();
+            assert!(e.contains(u) && e.contains("no import"), "{u}: {e}");
+        }
+    }
+
+    /// Why: a token with the alias and one write scope is still write-capable.
+    /// What: preset (tokeninfo form) plus one write scope is refused, naming
+    /// the write scope.
+    /// Test: this test.
+    #[test]
+    fn check_readonly_refuses_preset_email_plus_write_scope() {
+        let w = "https://www.googleapis.com/auth/gmail.modify";
+        let e = check_readonly(Some(&format!("{} {w}", preset_as_tokeninfo()))).unwrap_err();
+        assert!(e.contains(w) && e.contains("no import"), "{e}");
     }
 
     #[test]

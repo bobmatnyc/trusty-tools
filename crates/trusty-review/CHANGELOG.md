@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.41.0] — 2026-11-11
+
+### Breaking
+
+- `ParsedReview` gains the public `questions` field and is not `#[non_exhaustive]`, so a caller that builds one with a struct literal must add `questions`. This is why the release is 0.41.0 and not 0.40.3. `cargo-semver-checks` against 0.40.2 reports `constructible_struct_adds_field` (#10782).
+
+### Added
+
+- Each finding in the `review_diff` / `review_pr` result and the CLI JSON now carries `quoted_snippet`, the code it quotes from its cited `file` at `line`. The reviewer schema requires it; a reply from a reviewer that omits it takes the first code the finding body quotes (#10782).
+- The reviewer schema has a top-level `questions` array for "confirm / check / verify X" notes with no code to quote. The result reports them as `questions`, absent when empty; no gate, grade or verdict reads them (#10782).
+- A finding with no quote is withheld before grading and the line-citation gate, under the new reason class `no_quote_pregate`, so `withheld_by_reason` and the withheld headline still count it. An APPROVE with no surviving finding whose only withholds are `no_quote_pregate` reads `verdict_status: parsed`, not `all_withheld`, and carries the new `pregate_only_approve: true` (absent when false). Any gate withhold, alone or beside pregate drops, keeps `all_withheld` on APPROVE; a blocking review keeps `suppressed_reject` whatever the reason. Each review logs one info event with the pregate and gate-withhold counts (#10782).
+- The line-citation gate places a finding that carries `quoted_snippet` on that quote alone: the cited line must hold it, or the finding moves to its one occurrence, or is withheld. A quote absent from the file is withheld, and every other snippet the finding quotes must still be in the file. A quote that is only a bare identifier (`step_4`, `run()`) or a path is no quote, by the same rule as a backtick span: the finding takes its body's quote, or is withheld `no_quote_pregate` (#10782).
+
+### Fixed
+
+- The line-citation gate and the citation-integrity check no longer withhold a finding for a backtick span in its body or consequence that it labels as an exploit payload, an example input or a proposed fix ("a payload such as `' OR '1'='1' --`", "e.g.", "suggest", "replace with", "should be", "Fix:", "… `x` instead"), or that equals its own `suggested_replacement`. The finding still needs a quote of the cited file that places it; a payload-only finding, an unlabelled quote absent from the file, and a cue in another sentence still withhold it (Refs #10964).
+- Citation integrity drops two findings on one line as a mutual contradiction only when they make the same defect claim (title) and their file quotes conflict: `quoted_snippet` when present, else the unlabelled backtick spans. Apostrophes in prose and quote marks inside SQL are no longer read as citations, and an unterminated quote mark no longer opens a span to the end of the text (Refs #10964).
+- The reviewer schema now says backticks in `body` quote the file, and that a proposed fix goes in `suggested_replacement` or a payload is labelled (Refs #10964).
+
 ## [0.40.2] — 2026-11-08
 
 ### Fixed

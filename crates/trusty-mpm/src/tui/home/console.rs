@@ -2,11 +2,11 @@
 //!
 //! Why (#10966, goal ar-G01): `tm tui` should read like trusty-console's
 //! Overview tab. Drawing takes a plain view model, so the live data and a
-//! filled model (once #10942 and #10943 supply one) go through the same code.
+//! filled model go through the same code.
 //! What: [`ConsoleModel`] holds what the screen shows; [`model_from_state`]
-//! builds it from the live [`HomeState`]. The machine cards and the
-//! per-service history have no UDS source yet (#10942, #10943), so the live
-//! model carries `None` there and the screen says "no data yet".
+//! builds it from the live [`HomeState`]: probe results for the rows, and the
+//! `console.machine_status` / `console.history` feeds for the machine cards
+//! and the per-service history (#10942, #10943, via `machine_cards`).
 //! [`render_header`] and [`render_body`] draw it. Layout:
 //! `docs/design/UI/tm-tui-console-look.md` section 3.
 //! Test: `console_home_shows_no_data_yet_for_machine_and_history`,
@@ -20,6 +20,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table, TableState},
 };
 
+use super::machine_cards::{TITLES, history_note, machine_model, service_figures};
 use super::state::{HomeState, TileHealth};
 use crate::tui::VERSION_LABEL;
 use crate::tui::theme::{Tone, badge, palette};
@@ -46,6 +47,10 @@ pub struct Card {
     pub badge: (String, Tone),
     /// The sparkline samples; `None` is a gap, never zero (console rule).
     pub samples: Vec<Option<u64>>,
+    /// The sparkline's ceiling; `None` scales to the window's own maximum.
+    pub max: Option<u64>,
+    /// What the graph row says when `samples` is empty (#10942).
+    pub graph_note: String,
 }
 
 /// MACHINE STATUS: the section badge and four cards.
@@ -79,10 +84,12 @@ pub struct ServiceRow {
 /// Everything the console home body draws.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConsoleModel {
-    /// `None` until a host-metrics source exists (#10942).
+    /// `None` until `console.machine_status` has been asked (#10942).
     pub machine: Option<Machine>,
     /// One row per service, in roster order.
     pub rows: Vec<ServiceRow>,
+    /// What a history cell with no series says (#10943).
+    pub history_note: String,
     /// The selected row.
     pub selected: usize,
 }
@@ -107,31 +114,39 @@ pub fn status_of(health: &TileHealth) -> (String, Tone) {
     (word.to_string(), tone)
 }
 
-/// The live model: probe results only; no host metrics, no history.
+/// The live model: probe results for the rows, the console feeds for the
+/// machine cards and the per-service history.
 ///
-/// Test: `console_home_shows_no_data_yet_for_machine_and_history`.
+/// Test: `console_home_shows_no_data_yet_for_machine_and_history`,
+/// `a_ready_feed_fills_every_card_with_live_values`.
 pub fn model_from_state(state: &HomeState) -> ConsoleModel {
+    let history = &state.machine.history;
     let rows = state
         .tiles
         .iter()
-        .map(|(id, health)| ServiceRow {
-            name: id.display_name().to_string(),
-            version: match health {
-                TileHealth::Up { version: Some(v) } => v.clone(),
-                _ => "-".to_string(),
-            },
-            status: status_of(health),
-            // #10943: per-service CPU/RSS has no UDS source yet.
-            cpu: None,
-            mem: None,
-            cpu_history: None,
-            mem_history: None,
+        .map(|(id, health)| {
+            // #10943: %CPU, MEM and their history from `service_samples`.
+            let figures = service_figures(history, id.id());
+            ServiceRow {
+                name: id.display_name().to_string(),
+                version: match health {
+                    TileHealth::Up { version: Some(v) } => v.clone(),
+                    _ => "-".to_string(),
+                },
+                status: status_of(health),
+                cpu: figures.cpu,
+                mem: figures.mem,
+                cpu_history: figures.cpu_history,
+                mem_history: figures.mem_history,
+            }
         })
         .collect();
     ConsoleModel {
-        machine: None,
+        // #10942: the cards come from `console.machine_status` over UDS.
+        machine: machine_model(&state.machine),
         rows,
         selected: state.selected,
+        history_note: history_note(history),
     }
 }
 
@@ -198,14 +213,16 @@ pub fn render_body(frame: &mut Frame, area: Rect, model: &ConsoleModel) {
 
 /// The four cards; with no source each says so.
 fn render_cards(frame: &mut Frame, area: Rect, machine: Option<&Machine>) {
-    let placeholder: Vec<Card> = ["CPU", "MEMORY", "DISK", "NETWORK"]
+    let placeholder: Vec<Card> = TITLES
         .into_iter()
         .map(|title| Card {
             title,
             value: NO_DATA.to_string(),
-            meta: "awaits console.machine_status (#10942)".to_string(),
+            meta: "waiting for console.machine_status".to_string(),
             badge: ("no data".to_string(), Tone::Muted),
             samples: Vec::new(),
+            max: None,
+            graph_note: String::new(),
         })
         .collect();
     let cards = machine.map(|m| m.cards.as_slice()).unwrap_or(&placeholder);
@@ -252,20 +269,35 @@ fn render_card(frame: &mut Frame, area: Rect, card: &Card) {
     );
     if empty {
         frame.render_widget(
-            Paragraph::new("no history (#10942)").style(Style::default().fg(p.muted)),
+            Paragraph::new(card.graph_note.clone()).style(Style::default().fg(p.muted)),
             graph,
         );
     } else {
-        frame.render_widget(sparkline(&card.samples, p.sparkline), graph);
+        frame.render_widget(
+            sparkline(&card.samples, card.max, graph, p.sparkline),
+            graph,
+        );
     }
 }
 
-/// A sparkline in `color`; `None` samples draw as gaps.
-fn sparkline(samples: &[Option<u64>], color: ratatui::style::Color) -> Sparkline<'static> {
-    Sparkline::default()
-        .data(samples.to_vec())
+/// A sparkline in `color` over the newest samples that fit `area`; `None`
+/// samples draw as gaps. `max` fixes the ceiling (a percentage's 100%).
+fn sparkline(
+    samples: &[Option<u64>],
+    max: Option<u64>,
+    area: Rect,
+    color: ratatui::style::Color,
+) -> Sparkline<'static> {
+    // #10942: ratatui draws from the left, so keep the newest `width` samples.
+    let tail = samples.len().saturating_sub(usize::from(area.width));
+    let spark = Sparkline::default()
+        .data(samples[tail..].to_vec())
         .style(Style::default().fg(color))
-        .absent_value_symbol(" ")
+        .absent_value_symbol(" ");
+    match max {
+        Some(max) => spark.max(max),
+        None => spark,
+    }
 }
 
 /// The SERVICES table; history sparklines are drawn into their cells after.
@@ -277,7 +309,8 @@ fn render_services(frame: &mut Frame, area: Rect, model: &ConsoleModel) {
         Constraint::Length(10),
         // Fits the widest badge, ` NO UDS ENDPOINT `.
         Constraint::Length(17),
-        Constraint::Length(6),
+        // #10943: fits `unknown`.
+        Constraint::Length(7),
         Constraint::Length(9),
     ];
     let mut header = vec!["Service", "Version", "Status", "%CPU", "MEM"];
@@ -310,7 +343,7 @@ fn render_services(frame: &mut Frame, area: Rect, model: &ConsoleModel) {
     }
 }
 
-/// One sparkline (or "no data yet") per row in each history column.
+/// One sparkline (or a note saying why there is none) per row in each history column.
 fn render_history_cells(
     frame: &mut Frame,
     area: Rect,
@@ -336,25 +369,26 @@ fn render_history_cells(
         } else {
             p.sparkline
         };
-        for (col, hist, issue) in [
-            (cpu_col, &row.cpu_history, "#10943"),
-            (mem_col, &row.mem_history, "#10943"),
+        for (col, hist, max) in [
+            (cpu_col, &row.cpu_history, Some(1000)),
+            (mem_col, &row.mem_history, None),
         ] {
             let cell = Rect::new(col.x, y, col.width, 1);
-            match hist {
-                Some(samples) => frame.render_widget(sparkline(samples, ink), cell),
-                None => {
-                    let style = if selected {
-                        p.selection()
-                    } else {
-                        Style::default().fg(p.muted)
-                    };
-                    frame.render_widget(
-                        Paragraph::new(format!("{NO_DATA} ({issue})")).style(style),
-                        cell,
-                    );
+            // #10943: a series draws; no series or no samples says why.
+            let note = match hist {
+                Some(samples) if !samples.is_empty() => {
+                    frame.render_widget(sparkline(samples, max, cell, ink), cell);
+                    continue;
                 }
-            }
+                Some(_) => "no samples yet",
+                None => model.history_note.as_str(),
+            };
+            let style = if selected {
+                p.selection()
+            } else {
+                Style::default().fg(p.muted)
+            };
+            frame.render_widget(Paragraph::new(note.to_string()).style(style), cell);
         }
     }
 }

@@ -50,11 +50,16 @@ pub mod pane_rebind;
 pub mod prune;
 // #7619: the stop signal both destructive prune loops read between candidates.
 pub mod prune_progress;
+// #10988: stop a project's sessions, keep its workspaces and indexes.
+pub mod project_decommission;
+// #10991: move a session's project directory to the 0700 archive.
+pub mod archive_move;
 pub mod reactivate;
 mod reconcile;
 pub mod record;
 pub mod relaunch;
 pub mod rename;
+pub mod session_archive;
 // #9238: a record follows its own pane through a `tmux rename-session`.
 pub mod rename_follow;
 pub mod residency_state;

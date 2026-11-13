@@ -77,42 +77,96 @@ macro_rules! message {
     };
 }
 
-message!(/// `mpm.dbatg.init`: same code and session is a no-op.
-    InitRequest { project: PathBuf, session: String, code: String });
-message!(/// `mpm.dbatg.init` reply.
-    InitResponse { store: StoreRef, v: u64 });
+message!(
+    /// `mpm.dbatg.init`: same code and session is a no-op.
+    InitRequest {
+        project: PathBuf,
+        session: String,
+        code: String
+    }
+);
+message!(
+    /// `mpm.dbatg.init` reply.
+    InitResponse {
+        store: StoreRef,
+        v: u64
+    }
+);
 message!(/// `mpm.dbatg.batch`: all ops or none; a retried `request_id` returns the first result.
     BatchRequest { store: StoreRef, request_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")] if_v: Option<u64>, ops: Vec<Op> });
 message!(/// `mpm.dbatg.batch` reply: new `v`, the events logged, the ids archived.
     BatchResponse { v: u64, events: Vec<BatchEvent>, archived: Vec<String>, warnings: Vec<String> });
-message!(/// One logged event.
-    BatchEvent { id: String, ev: String, #[serde(default)] note: String });
-message!(/// `mpm.dbatg.show`.
-    ShowRequest { store: StoreRef, #[serde(default)] brief: bool });
+message!(
+    /// One logged event.
+    BatchEvent {
+        id: String,
+        ev: String,
+        #[serde(default)]
+        note: String
+    }
+);
+message!(
+    /// `mpm.dbatg.show`.
+    ShowRequest {
+        store: StoreRef,
+        #[serde(default)]
+        brief: bool
+    }
+);
 message!(/// `mpm.dbatg.digest`.
     DigestRequest { store: StoreRef, #[serde(default)] max_tokens: Option<u32> });
-message!(/// `mpm.dbatg.show`, `digest` and `archive_show` reply.
-    TextResponse { text: String });
+message!(
+    /// `mpm.dbatg.show`, `digest` and `archive_show` reply.
+    TextResponse { text: String }
+);
 message!(/// `mpm.dbatg.fresh`: `since` is ISO or epoch seconds; `max_age` minutes.
     FreshRequest { store: StoreRef, #[serde(default)] since: Option<String>,
         #[serde(default)] max_age: Option<u32> });
 message!(/// `mpm.dbatg.fresh` reply.
     FreshResponse { fresh: bool, written_at: Option<String> });
-message!(/// `mpm.dbatg.archive_show`.
-    ArchiveShowRequest { store: StoreRef, id: String });
-message!(/// `mpm.dbatg.stamp`: harness-neutral turn facts; keyed on `turn_id`.
-    StampRequest { store: StoreRef, turn_id: String, ended_at: String, mutated: bool });
-message!(/// `mpm.dbatg.stamp` reply: consecutive stale turns.
-    StampResponse { stale_n: u32 });
-message!(/// `mpm.dbatg.check_dispatch`.
-    CheckDispatchRequest { store: StoreRef, prompt: String });
-message!(/// `mpm.dbatg.check_dispatch` reply.
-    CheckDispatchResponse { decision: DispatchDecision, msg: String });
-message!(/// `mpm.dbatg.rotate`.
-    RotateRequest { store: StoreRef });
-message!(/// `mpm.dbatg.rotate` reply: log lines moved.
-    RotateResponse { moved: u64 });
+message!(
+    /// `mpm.dbatg.archive_show`.
+    ArchiveShowRequest {
+        store: StoreRef,
+        id: String
+    }
+);
+message!(
+    /// `mpm.dbatg.stamp`: harness-neutral turn facts; keyed on `turn_id`.
+    StampRequest {
+        store: StoreRef,
+        turn_id: String,
+        ended_at: String,
+        mutated: bool
+    }
+);
+message!(
+    /// `mpm.dbatg.stamp` reply: consecutive stale turns.
+    StampResponse { stale_n: u32 }
+);
+message!(
+    /// `mpm.dbatg.check_dispatch`.
+    CheckDispatchRequest {
+        store: StoreRef,
+        prompt: String
+    }
+);
+message!(
+    /// `mpm.dbatg.check_dispatch` reply.
+    CheckDispatchResponse {
+        decision: DispatchDecision,
+        msg: String
+    }
+);
+message!(
+    /// `mpm.dbatg.rotate`.
+    RotateRequest { store: StoreRef }
+);
+message!(
+    /// `mpm.dbatg.rotate` reply: log lines moved.
+    RotateResponse { moved: u64 }
+);
 
 /// A dispatch check's verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,8 +202,14 @@ message!(/// `add`: `kind` is the id letter.
         #[serde(default)] rank: Option<u32>, #[serde(default)] finish: Option<String>,
         #[serde(default)] maps: Option<String>, #[serde(default)] status: Option<String>,
         #[serde(default)] to: Option<String>, #[serde(default)] opts: Option<Vec<OptInput>> });
-message!(/// `{l, rec}`; any other key is refused.
-    OptInput { l: String, #[serde(default)] rec: bool });
+message!(
+    /// `{l, rec}`; any other key is refused.
+    OptInput {
+        l: String,
+        #[serde(default)]
+        rec: bool
+    }
+);
 message!(/// `update`.
     UpdateOp { id: String,
         #[serde(default)] title: Option<String>, #[serde(default)] rank: Option<u32>,
@@ -164,8 +224,13 @@ message!(/// `update.source` (#10780): `by` is owner or architect.
         #[serde(default, skip_serializing_if = "Option::is_none")] quote: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")] until: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")] basis: Option<String> });
-message!(/// `close`.
-    CloseOp { id: String, outcome: String });
+message!(
+    /// `close`.
+    CloseOp {
+        id: String,
+        outcome: String
+    }
+);
 message!(/// `session`: a list field replaces the stored list.
     SessionOp {
         #[serde(default)] task: Option<String>, #[serde(default)] next: Option<String>,
@@ -180,16 +245,50 @@ message!(/// `prune`.
         #[serde(default)] require_outcome: bool });
 message!(/// `waiting_on` input row.
     WaitingOnInput { who: String, what: String, #[serde(default)] since: Option<String> });
-message!(/// `owed` input row.
-    OwedInput { check: String, expect: String, #[serde(default, rename = "ref")] reference: String });
-message!(/// `agents` input row.
-    AgentInput { id: String, #[serde(default)] goal: String, #[serde(default)] what: String });
-message!(/// `crons` input row.
-    CronInput { id: String, schedule: String, prompt: String });
-message!(/// `refs` input row.
-    RefInput { key: String, value: String });
-message!(/// `ctx_use` input.
-    CtxUseInput { active: u8, stale: u8, ctx: u64, #[serde(default)] keep: String });
+message!(
+    /// `owed` input row.
+    OwedInput {
+        check: String,
+        expect: String,
+        #[serde(default, rename = "ref")]
+        reference: String
+    }
+);
+message!(
+    /// `agents` input row.
+    AgentInput {
+        id: String,
+        #[serde(default)]
+        goal: String,
+        #[serde(default)]
+        what: String
+    }
+);
+message!(
+    /// `crons` input row.
+    CronInput {
+        id: String,
+        schedule: String,
+        prompt: String
+    }
+);
+message!(
+    /// `refs` input row.
+    RefInput {
+        key: String,
+        value: String
+    }
+);
+message!(
+    /// `ctx_use` input.
+    CtxUseInput {
+        active: u8,
+        stale: u8,
+        ctx: u64,
+        #[serde(default)]
+        keep: String
+    }
+);
 
 impl StoreRef {
     /// The store's files, `project` normalised to its launch directory.

@@ -38,10 +38,16 @@
 //! still ahead of any resolution, and the `delete_data` opt-in still exists in
 //! exactly one place.
 //!
+//! What #10988 (ruling D8e) changed: the request no longer destroys data. The
+//! orphan sweep, the capability's only caller, sends `delete_data: false`, so
+//! an orphan index is deregistered and its corpus stays on disk. The
+//! test-harness refusal stays: deregistering the operator's real index from a
+//! test run is still a fault.
+//!
 //! Test: `acquire_is_refused_under_a_test_harness`,
 //! `acquire_refuses_when_no_daemon_socket_is_bound`,
 //! `acquire_succeeds_when_production_state_is_explicitly_allowed`,
-//! `delete_params_opt_into_data_deletion`,
+//! `delete_params_keep_index_data`,
 //! `delete_over_a_stale_socket_is_a_transport_failure`,
 //! `a_refusal_is_never_reported_as_removed`,
 //! `a_result_that_did_not_remove_is_not_reported_as_removed`; end-to-end,
@@ -168,19 +174,18 @@ impl DestructiveIndexDelete {
         Some(Self { socket })
     }
 
-    /// The destructive params for `index_id` — the crate's only `delete_data`
-    /// opt-in.
+    /// The params for `index_id`: deregister the index, keep its data.
     ///
-    /// Why (#4123): trusty-search's `search.index.delete` preserves on-disk data
-    /// unless `delete_data` is `true`. Both callers opt in deliberately: the
-    /// workspace each index describes is a disposable worktree that is being (or
-    /// has been) deleted, so preserved index data would be unreachable garbage
-    /// on disk forever.
-    /// What: `{"index_id": …, "delete_data": true}`. A method rather than a free
+    /// Why: ruling Q1 — tm never deletes search index data. #10988: D8e extends
+    /// it to the orphan sweep, this method's only caller. The opt-out is
+    /// explicit rather than an absent field, so a change to trusty-search's
+    /// default cannot turn this call destructive.
+    /// What: `{"index_id": …, "delete_data": false}`. A method rather than a free
     /// function so it cannot be called without a capability in hand.
-    /// Test: `delete_params_opt_into_data_deletion`.
+    /// Test: `delete_params_keep_index_data`.
     fn delete_params(&self, index_id: &str) -> Value {
-        serde_json::json!({ "index_id": index_id, "delete_data": true })
+        // #10988: D8e — the sweep deregisters an orphan; its corpus stays on disk.
+        serde_json::json!({ "index_id": index_id, "delete_data": false })
     }
 
     /// Issue the delete and classify the result.

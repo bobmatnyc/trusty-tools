@@ -1852,3 +1852,49 @@ fn fleet_project_flow_migrates_adds_refuses_removes_and_lists() {
     assert_eq!(json(&out), serde_json::json!([]), "{}", text(&out));
     assert!(out.stderr.is_empty(), "{}", text(&out));
 }
+
+#[test]
+fn fleet_init_seeds_the_watch_list_from_live_sessions() {
+    // #11012 AC6: `init` seeds the list from the live `tm-*` sessions on the
+    // private server, `list --json` shows it, and a second `init` leaves it.
+    let env = FleetEnv::new();
+    let root = project_root(&env);
+    let dir = env.dir();
+    for (name, cwd) in [("tm-alpha", "/tmp"), ("tm-stray", "/tmp")] {
+        let started = Command::new("tmux")
+            .args(["new-session", "-d", "-s", name, "-c", cwd, "sleep 600"])
+            .env("TMUX_TMPDIR", env.tmux_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_SOCKET")
+            .status()
+            .expect("run tmux");
+        assert!(started.success(), "tmux new-session {name}");
+    }
+    let init = ["fleet", "init", "--no-launch", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_env(&init, "TRUSTY_MPM_ROOT", &root);
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("tmux session tm-stray not watched"),
+        "{stdout}"
+    );
+    assert_eq!(watched(&dir), ["alpha"]);
+    let out = fleet_project(&env, &root, &dir, &["list", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let keys: Vec<serde_json::Value> = json(&out)
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|row| row["key"].clone())
+        .collect();
+    assert_eq!(keys, [serde_json::json!("alpha")], "{}", text(&out));
+    let before = std::fs::read(dir.join("local/watch.json")).expect("watch.json");
+    let out = env.tm_with_env(&init, "TRUSTY_MPM_ROOT", &root);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("init leaves it as is"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(std::fs::read(dir.join("local/watch.json")).unwrap(), before);
+}

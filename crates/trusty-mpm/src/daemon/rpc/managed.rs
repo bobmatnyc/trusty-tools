@@ -96,5 +96,7 @@ use crate::daemon::state::DaemonState;
 pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     let router = sessions::register(router, state);
     let router = control::register(router, state);
+    // #10991: `mpm.managed.archive`.
+    let router = crate::daemon::session_archive::register(router, state);
     proxy::register(router, state)
 }

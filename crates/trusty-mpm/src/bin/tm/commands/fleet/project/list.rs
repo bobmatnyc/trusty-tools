@@ -61,7 +61,7 @@ pub(crate) fn rows(
             let project = registry.get(key);
             let alias = project.and_then(|p| registry.alias_for(p));
             let path = project.and_then(|p| registry.path_for(p));
-            let stem = alias.map_or(key, |a| a.alias.as_str());
+            let stem = project.map_or(key, |p| registry.session_alias(p));
             Row {
                 key: key.to_owned(),
                 path_exists: path.as_deref().is_some_and(Path::exists),

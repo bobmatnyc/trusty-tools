@@ -48,6 +48,8 @@ pub const DEFAULT_PORT: u16 = 7788;
 pub mod bind;
 // #6285: the console's own SPA, split out of `server` at the 500-SLOC cap.
 pub mod connector;
+// #11074: the token gate on every TCP route (DOC-90 §4).
+pub mod console_token;
 pub mod console_ui;
 // #10902: console's own socket (`console.health`, `console.fleet_status`).
 #[cfg(unix)]
@@ -336,11 +338,15 @@ pub fn run_port(args: PortArgs) -> Result<()> {
 /// Every address is served by `tailnet_peer::serve_listeners`, which gates
 /// each non-loopback listener behind the tailnet peer gate (#7524) and each
 /// loopback listener behind its own Host/Origin check (#9792); all run until
-/// the shared shutdown signal fires.
+/// the shared shutdown signal fires. #11074: with `TRUSTY_CONSOLE_TOKEN_FILE`
+/// set, the token file is validated first and every TCP route needs the token.
 /// Test: Server integration tests in `server.rs` cover the router directly
 /// without exercising this function (to avoid real TCP binding in unit tests);
-/// the listener wiring is `explicit_non_loopback_listener_is_gated_7524`.
+/// the listener wiring is `explicit_non_loopback_listener_is_gated_7524`;
+/// `run_serve_refuses_a_bad_token_file_before_binding_11074`.
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
+    // #11074: a bad token file stops the console here, before anything binds.
+    let token_gate = console_token::TokenGate::from_env()?;
     // ── resolve bind mode ───────────────────────────────────────────────────
     let mode = bind::BindMode::from_env_and_flags(&args.http, DEFAULT_HTTP, args.tailscale);
     let port = bind::port_from_addr(&args.http, DEFAULT_PORT);
@@ -531,6 +537,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     );
     webhook::start_retry_sweep(ingress.clone(), WEBHOOK_RETRY_INTERVAL);
     let router = server::build_router_with_webhooks(state.clone(), self_origins, ingress);
+    // #11074: inside the listener guards, so Host/Origin and the peer gate run first.
+    let router = console_token::guard(router, token_gate);
 
     // #9075: console no longer binds an event-bus ingest socket; producers
     // push to the trusty-events daemon (ADR-0065). #9076: console subscribes
@@ -612,6 +620,10 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
+
+// #11074: the one global tracing capture tests share.
+#[cfg(all(test, unix))]
+mod test_log_capture;
 
 #[cfg(test)]
 mod tests {

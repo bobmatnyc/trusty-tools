@@ -1,0 +1,2 @@
+Fixed
+- `trusty-search start` no longer refuses to start when `daemon.lock` names a live process that does not hold the lock (#11060). After a container restart the lockfile on the volume names a pid from the old pid namespace, which is often a live, unrelated process in the new one, so every restart exited 1 with "daemon already running". The start pre-check now also requires the lock's flock to be held; a lock nobody holds is stale. A flock probe that fails still counts as held, and a running daemon is still refused.

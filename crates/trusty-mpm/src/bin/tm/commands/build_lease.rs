@@ -14,7 +14,8 @@
 //! command with inherited stdio, forward SIGINT/SIGTERM/SIGHUP to it, and exit
 //! with its status. The slot's
 //! `flock` is held by this process until the command exits; if this process
-//! dies the kernel releases it. When no lease can be taken, the build runs
+//! dies the kernel releases it. #8692: once cargo releases its build lock the
+//! record reads `run`, which frees compile capacity but not the slot. When no lease can be taken, the build runs
 //! UNLEASED only while the census counts fewer than the ceiling (owner ruling
 //! "allow up to the cap", #8261 round 3), with a degraded warning naming the
 //! store, the OS error and the repair; an unreadable census refuses. On
@@ -24,6 +25,9 @@
 //! `tm build-lease status` runs no build and takes no lease: it lists the
 //! holders, each repo's slots, and every seed in progress or abandoned with
 //! its slot, owner pid and age (#9239).
+//!
+//! `tm build-lease where <bin>` runs no build and takes no lease: it prints
+//! the freshest built binary across the pool slots and target dirs (#10835).
 //!
 //! `tm build-lease --census` runs no build; it probes slot locks like `tm
 //! doctor` (#8261 round 5). It prints the lease holders and every build group
@@ -42,7 +46,8 @@ use trusty_mpm::core::build_lease::admission::Decision;
 use trusty_mpm::core::build_lease::census::LiveSampler;
 use trusty_mpm::core::build_lease::config::{BuildLeaseConfig, clamp_wait};
 use trusty_mpm::core::build_lease::deps_rotate::{lease_notice, rotate_before_build};
-use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, SlotGuard, summarize_command};
+use trusty_mpm::core::build_lease::phase::flip_lock_dir;
+use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, summarize_command};
 use trusty_mpm::core::build_lease::stale_guard::{cargo_lock_held, checkout_root};
 use trusty_mpm::core::build_lease::target_dir::{
     SharedDirs, TargetPlan, explicit_target_dir_arg, plan_with_worktree, resolve_pool,
@@ -51,8 +56,10 @@ use trusty_mpm::core::build_lease::target_dir::{
 use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
 use trusty_mpm::core::harness_root::linked_worktree_owner;
 
+use super::build_lease_spawn::{Lease, exit_with, spawn_and_wait, write_record};
 use super::build_lease_status::{print_census, print_status};
 use super::build_lease_target::{announce_slot, target_dir};
+use super::build_lease_where::print_where;
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
 
@@ -137,6 +144,8 @@ pub(crate) struct BuildLeaseArgs {
     expect_cwd: Option<PathBuf>,
     /// The heavy build to run, after `--`; anything else is refused. The
     /// single word `status` prints the lease and seeding status instead (#9239).
+    /// `where <BIN> [--profile debug|release] [--json]` prints the freshest
+    /// built BIN across this repo's pool slots and target dirs (#10835).
     #[arg(
         trailing_var_arg = true,
         allow_hyphen_values = true,
@@ -157,6 +166,10 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
     // #9239: `tm build-lease status` is a read-only view; no lease, no build.
     if args.command == ["status"] {
         print_status(&MpmConfig::load_default().builders)
+    }
+    // See #10835: `tm build-lease where <bin>` is read-only too.
+    if args.command.first().is_some_and(|w| w == "where") {
+        print_where(&args.command[1..], &MpmConfig::load_default().builders)
     }
     let builders: BuildersConfig = MpmConfig::load_default().builders;
     let lease = BuildLeaseConfig::load_default();
@@ -300,9 +313,10 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
             let mut record =
                 HolderRecord::new(guard.slot(), command_line.clone(), checkout.clone());
             record.target_dir.clone_from(&target);
-            write_record(&mut guard, &record);
+            let _ = write_record(&mut guard, &record);
             post_decision(daemon.as_ref(), "admitted", &command_line, &decision, &[]).await;
-            // #8736: cargo run/watch slot handling is tracked in #8692
+            // #8692: only a slot-owned dir flips to run; PR B (#9223) lifts this.
+            let lock_dir = flip_lock_dir(&target_plan, target.as_deref());
             // #8261 round 6 (critic LOW): an explicit `--target-dir` in argv
             // outranks `CARGO_TARGET_DIR`, so it must carry the slot too.
             let run_argv = match (&explicit_target_dir, &target) {
@@ -313,7 +327,11 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
                 &run_argv,
                 target.as_deref(),
                 pinned.as_deref(),
-                Some((&mut guard, &mut record)),
+                Some(Lease {
+                    guard: &mut guard,
+                    record: &mut record,
+                    lock_dir,
+                }),
             )
             .await;
             drop(guard);
@@ -410,80 +428,6 @@ fn render(decision: &Decision, holders: &[HolderRecord]) -> String {
          (builders.max_concurrent).{degraded}",
         decision.readings, decision.n_effective, decision.ceiling
     )
-}
-
-fn write_record(guard: &mut SlotGuard, record: &HolderRecord) {
-    if let Err(err) = guard.write_record(record) {
-        eprintln!(
-            "tm build-lease: could not write the holder record to {}: {err}",
-            guard.path().display()
-        );
-    }
-}
-
-/// Spawn the build, record its pid, forward termination signals, and wait.
-///
-/// What: the signal handlers are installed BEFORE the spawn (#8261 round 3),
-/// so a SIGTERM that lands between the spawn and the handler cannot kill this
-/// holder with the default action and orphan the build.
-/// `dir` is the `--chdir` directory the build runs in (#8969).
-async fn spawn_and_wait(
-    command: &[String],
-    target_dir: Option<&str>,
-    dir: Option<&Path>,
-    lease: Option<(&mut SlotGuard, &mut HolderRecord)>,
-) -> std::io::Result<std::process::ExitStatus> {
-    let Some((program, rest)) = command.split_first() else {
-        return Err(std::io::Error::other("no command given after `--`"));
-    };
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
-    let mut hup = signal(SignalKind::hangup())?;
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(rest);
-    if let Some(dir) = dir {
-        cmd.current_dir(dir).env("PWD", dir);
-    }
-    if let Some(dir) = target_dir {
-        cmd.env("CARGO_TARGET_DIR", dir);
-    }
-    // #8736: a SIGKILL between spawn and the child_pid write leaves the slot Free; waived as unreachable, tracked in #8692
-    let mut child = cmd.spawn()?;
-    let pid = child.id();
-    if let (Some((guard, record)), Some(pid)) = (lease, pid) {
-        record.child_pid = Some(pid);
-        write_record(guard, record);
-    }
-    loop {
-        let sig = tokio::select! {
-            status = child.wait() => return status,
-            _ = term.recv() => libc::SIGTERM,
-            _ = int.recv() => libc::SIGINT,
-            _ = hup.recv() => libc::SIGHUP,
-        };
-        if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
-            // SAFETY: kill(2) on the child's pid with a valid signal number.
-            unsafe { libc::kill(pid, sig) };
-        }
-    }
-}
-
-/// Exit with the build's status: its code, or 128 + the signal that ended it.
-fn exit_with(status: std::io::Result<std::process::ExitStatus>) -> ! {
-    use std::os::unix::process::ExitStatusExt;
-    match status {
-        Ok(status) => std::process::exit(
-            status
-                .code()
-                .or_else(|| status.signal().map(|s| 128 + s))
-                .unwrap_or(1),
-        ),
-        Err(err) => {
-            eprintln!("tm build-lease: could not run the command: {err}");
-            std::process::exit(127)
-        }
-    }
 }
 
 /// Log one admission decision in the daemon, best effort.

@@ -116,7 +116,15 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// already fails `has_filter_for`, but `cat -n foo.rs` derives `"cat -n"` and
 /// reaches the file-read filter, so the flagged spelling bypass-permissions
 /// mode uses paid a compress spawn for its own bytes back.
+/// One chained form is accepted (D60): a single leading `cd <dir> && <cmd>`,
+/// in the grammar [`super::hook_rewrite_cd::split_leading_cd`] names. Every
+/// guard above runs against `<cmd>` alone, a `<cmd>` that is itself a `cd` is
+/// refused, and the result keeps the prefix verbatim in front:
+/// `cd <dir> && { <cmd>; <exit sentinel>; } | tm compress --tool "…"`.
 /// Test: `rewrite_appends_compress_pipe_for_plain_command`,
+/// `rewrite_accepts_one_leading_cd_before_a_covered_command`,
+/// `rewrite_refuses_every_other_cd_chain`,
+/// `a_cd_rewrite_runs_like_the_original_in_a_real_shell`,
 /// `rewrite_skips_a_flagged_source_read`,
 /// `rewrite_appends_compress_pipe_with_subcommand_tool_name`,
 /// `rewrite_skips_orchestrator_commands`, `rewrite_skips_piped_commands`,
@@ -126,12 +134,19 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// `rewrite_still_wraps_tools_with_a_compression_filter`.
 pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<String> {
     let trimmed = command.trim();
-    let tool = compressible_tool_name(trimmed)?;
+    // D60 (Refs #10973): one leading `cd <dir> && ` stays outside the group, so
+    // a failing `cd` short-circuits and the shell keeps the `cd`'s cwd.
+    let (cd_prefix, inner) =
+        super::hook_rewrite_cd::split_leading_cd(trimmed).unwrap_or(("", trimmed));
+    if !cd_prefix.is_empty() && first_command_token(inner).as_deref() == Some("cd") {
+        return None;
+    }
+    let tool = compressible_tool_name(inner)?;
     // #7384: the brace group carries the wrapped command's exit status into the
     // filter, which a pipeline otherwise discards.
     Some(format!(
-        "{} | tm compress --tool \"{tool}\"",
-        crate::commands::compress::wrap_command_reporting_exit(trimmed)
+        "{cd_prefix}{} | tm compress --tool \"{tool}\"",
+        crate::commands::compress::wrap_command_reporting_exit(inner)
     ))
 }
 
@@ -139,7 +154,8 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
 ///
 /// Why (#10973): the brace-group rewrite above and the isolation-worktree
 /// rewrite in `hook_rewrite_isolated` must refuse exactly the same commands, so
-/// the guards live in one place.
+/// the guards live in one place. D60's `cd <dir> && ` split runs before this,
+/// in the brace rewrite only, so the isolated shape still refuses that form.
 /// What: `None` for every case [`rewrite_bash_command_for_compression`]
 /// documents; otherwise the [`effective_tool_name`] a filter covers.
 /// Test: every `rewrite_*` case reaches this.

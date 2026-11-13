@@ -12,6 +12,7 @@ This file is the primary user's profile. Each other user gets
 - Call them: <name>
 - Roles and accounts: <roles; which account for which work>
 - Time zone: <zone>
+- Technical level: <non-technical | vibe-coder | pm | engineer | senior-engineer | cto; unset means pm. Read from `local/users/` only; the primary user sets theirs in the dashboard settings>
 
 ## Decisions and questions
 

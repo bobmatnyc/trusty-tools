@@ -14,18 +14,20 @@
 //! than `ceiling` builds running without one ([`decide_unleased`]); otherwise
 //! it waits and times out like a leased one. A census that cannot be read
 //! refuses. The outcome carries the store, the error and the repair, so the
-//! degraded run is always named.
+//! degraded run is always named. #8692: only compile-phase holders count
+//! against the ceiling ([`assess`]); run-phase holders still own their slots
+//! and widen the candidate range, bounded by `builders.max_run_slots`.
 //! Test: `acquire_tests.rs`.
 
 use std::time::{Duration, Instant};
 
 use std::path::PathBuf;
 
-use super::admission::{Decision, decide, decide_unleased};
+use super::admission::{Decision, decide, decide_unleased, run_slot_gate};
 use super::census::Sampler;
 use super::config::BuildLeaseConfig;
 use super::orphan::Leftover;
-use super::slots::{HolderRecord, SlotDir, SlotGuard};
+use super::slots::{HolderRecord, SlotDir, SlotGuard, compiling};
 use crate::core::builders::BuildersConfig;
 
 /// How one acquire ended.
@@ -207,18 +209,20 @@ pub fn acquire(
                 return acquire_unleased(params, deadline, fault, sampler, on_wait);
             }
         };
-        let holders = slots.holders();
-        let held = u32::try_from(holders.len()).unwrap_or(u32::MAX);
-        let readings = sampler.sample(&holders);
-        let decision = decide(
+        let Assessment {
+            holders,
+            owners,
+            decision,
+        } = assess(
+            slots,
             params.builders,
             params.lease,
             params.ceiling,
-            held,
-            &readings,
+            sampler,
         );
         if decision.admit {
-            match take_a_slot(slots, params, held) {
+            // #8692: every owner, compiling or running, widens the range.
+            match take_a_slot(slots, params, owners) {
                 Ok(Some(guard)) => {
                     drop(admission);
                     slots.remember_checkout(guard.slot(), params.checkout);
@@ -251,17 +255,65 @@ pub fn acquire(
 
 /// The timed-out outcome, with one last reading for the message.
 fn timed_out(slots: &SlotDir, params: &AcquireParams<'_>, sampler: &mut dyn Sampler) -> Outcome {
-    let holders = slots.holders();
-    let readings = sampler.sample(&holders);
-    let held = u32::try_from(holders.len()).unwrap_or(u32::MAX);
-    let decision = decide(
+    let Assessment {
+        holders, decision, ..
+    } = assess(
+        slots,
         params.builders,
         params.lease,
         params.ceiling,
-        held,
-        &readings,
+        sampler,
     );
     Outcome::TimedOut { decision, holders }
+}
+
+/// The slot owners and the decision taken from them.
+///
+/// Test: `run_phase_holders_free_capacity_but_keep_their_slots`.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Assessment {
+    /// Every slot owner, compiling or running, lowest slot first.
+    pub holders: Vec<HolderRecord>,
+    /// `holders.len()`.
+    pub owners: u32,
+    /// The decision, counting compile-phase holders only.
+    pub decision: Decision,
+}
+
+/// Read the slot owners and decide, the one way `acquire` and `tm doctor` do.
+///
+/// Why: #8692 — a run-phase holder owns its slot but compiles nothing, so it
+/// must not count against the ceiling, and its later compilers must reach the
+/// census as foreign builds.
+/// What: `decision.held` counts the [`compiling`] holders only, and only
+/// their compilers are excluded from the census. [`run_slot_gate`] then
+/// bounds the run-phase owners at `builders.max_run_slots`.
+/// Test: `run_phase_holders_free_capacity_but_keep_their_slots`,
+/// `a_run_slot_cap_withholds_with_a_named_reason_8692`.
+pub fn assess(
+    slots: &SlotDir,
+    builders: &BuildersConfig,
+    lease: &BuildLeaseConfig,
+    ceiling: u32,
+    sampler: &mut dyn Sampler,
+) -> Assessment {
+    let holders = slots.holders();
+    let compiling = compiling(&holders);
+    let owners = u32::try_from(holders.len()).unwrap_or(u32::MAX);
+    let held = u32::try_from(compiling.len()).unwrap_or(u32::MAX);
+    let readings = sampler.sample(&compiling);
+    let mut decision = decide(builders, lease, ceiling, held, &readings);
+    run_slot_gate(
+        &mut decision,
+        owners,
+        lease.effective_max_run_slots(ceiling),
+    );
+    Assessment {
+        holders,
+        owners,
+        decision,
+    }
 }
 
 /// Wait, without any lease, for the census to admit this build.
@@ -306,8 +358,9 @@ pub fn acquire_unleased(
 
 /// Take the first free slot in preference order.
 ///
-/// What: candidates are `0..ceiling + held + broken`, so neither a holder left
-/// above a lowered ceiling nor a broken slot file hides a usable index — a
+/// What: candidates are `0..ceiling + owners + broken`, so neither a holder
+/// left above a lowered ceiling, a run-phase owner (#8692) nor a broken slot
+/// file hides a usable index — a
 /// broken file is skipped, never a reason to disable the cap. A free slot whose
 /// leftover record names a live build counts as held; one whose record cannot
 /// be read or checked counts as broken (`orphan`, #8736). A free slot whose
@@ -317,12 +370,12 @@ pub fn acquire_unleased(
 fn take_a_slot(
     slots: &SlotDir,
     params: &AcquireParams<'_>,
-    held: u32,
+    owners: u32,
 ) -> Result<Option<SlotGuard>, String> {
     let broken = u32::try_from(slots.broken().len()).unwrap_or(u32::MAX);
     let limit = params
         .ceiling
-        .saturating_add(held)
+        .saturating_add(owners)
         .saturating_add(broken)
         .max(1);
     let mut errors = Vec::new();

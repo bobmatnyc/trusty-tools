@@ -1,0 +1,7 @@
+# Pinned release tarballs: one "<release-tag> <tarball-file-name>" per line.
+# The one list both fetch.sh and the image build read (#11156 B4). Bump a line
+# to roll the image. The build extracts only these file names, each checked
+# against its .sha256, and fails on any other *.tar.gz in dl/.
+trusty-mpm-v1.12.2 trusty-mpm-1.12.2-x86_64-unknown-linux-gnu.tar.gz
+trusty-memory-v0.36.7 trusty-memory-0.36.7-x86_64-unknown-linux-gnu.tar.gz
+trusty-search-v0.63.1 trusty-search-0.63.1-x86_64-unknown-linux-gnu.tar.gz

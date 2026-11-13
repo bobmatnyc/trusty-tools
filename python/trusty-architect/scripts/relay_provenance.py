@@ -6,7 +6,8 @@ when the owner had said only "reset was done just now", and the PM cut the owner
 to two for six hours. The relay protocol reserves the owner labels for the owner's words, and nothing
 checked that at send time.
 What: `check <session> <text>` finds every `User ruling (<name>):` and `User instruction (<name>):` label
-in <text>. Each one must be followed by the owner's words in double quotes, then the citation
+in <text>. Its parentheses hold the owner's name, then only references (a date, a time, a record id,
+`via <Name>`, `superseded`, `expired`), never words of a directive. Each one must be followed by the owner's words in double quotes, then the citation
 `(owner turn: <cite>)`, then nothing or another label (`Architect answer:`, `Architect note:`,
 `Architect question:`, `Architect proposal:`, or an owner label). <cite> is one of:
   chat <YYYY-MM-DDTHH:MMZ>   an owner turn in the Architect chat, read from the owner-turn record that
@@ -57,6 +58,17 @@ DASH = re.compile(r"^dashboard ((?:S[0-9a-f]{2}:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,79
 PALACE = re.compile(r"^palace\b", re.I)
 # #10780 critic H1: an owner claim in any spelling; only the two exact labels may make one.
 CLAIM = re.compile(r"\b(?:user|owner)\s+(?:ruling|instruction|decision)s?\b", re.I)
+# #10780 item 2: the label's parentheses hold the owner's name (at most three capitalised words in all) and
+# reference tokens only: a date or time, a record id (D97, S1a:D97, ar-T5e, #10780), `via <Name>` or a fixed
+# provenance word. A lower-case word other than those is a directive or a note, and refuses.
+NAME_WORD = re.compile(r"[^\W\d_]+(?:[.'-][^\W\d_]*)*")
+REF_TOKEN = re.compile(r"~?\d{2}:\d[\dx](?::\d{2})?Z|\d{2}-\d{2}|\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?Z)?|"
+                       # #10780 critic: a record id carries a digit, so a name (Ada, Dee, do-Add) is not one;
+                       # only the ar-/mu- record namespaces keep digit-free ids (ar-Tfa, ar-Tbe in real labels).
+                       r"(?:S(?=[0-9a-f]?\d)[0-9a-f]{2}:|[a-z]{2,4}-)?[A-Z](?=[0-9a-f]?\d)[0-9a-f]{2}|"
+                       r"(?:ar|mu)-[A-Z][0-9a-f]{2}|#\d+|"
+                       r"superseded|expired|dash|dashboard|chat|voice|typed|direct|verbatim|answered|relayed|"
+                       r"reported|amended|re-relay")
 MARKER = re.compile(r"^\[[^\]\n]*Architect [0-9]{2}:[0-9][0-9x]Z\]")
 ARCH_LABEL = re.compile(r"\s*Architect (?:answer|note|question|proposal):")
 WINDOW = timedelta(minutes=2)
@@ -162,6 +174,34 @@ def _quoted_in(quote, texts):
     return False
 
 
+def _name_word(w):
+    """A capitalised name word; each part joined by `-`, `.` or `'` is capitalised too (Jean-Luc, O'Neil)."""
+    return bool(NAME_WORD.fullmatch(w)) and all(p[0].isupper() for p in re.split(r"[.'-]", w) if p)
+
+
+def owner_slot_ok(slot):
+    """True when a label's parentheses hold the owner's name and reference tokens only (see REF_TOKEN).
+
+    Test: test_relay_refuses_a_directive_in_the_owner_labels_parentheses_10780,
+    test_relay_sends_an_owner_label_whose_parentheses_hold_a_name_and_dates_10780
+    """
+    toks = [t for t in re.split(r"[,;/+\s]+", slot) if t]
+    names, i = 0, 0
+    while i < len(toks):
+        if toks[i] == "via" and i + 1 < len(toks) and _name_word(toks[i + 1]):
+            names += 1   # #10780 critic: a `via` target counts toward the three-name cap
+            i += 2
+            continue
+        if REF_TOKEN.fullmatch(toks[i]):
+            pass
+        elif _name_word(toks[i]):
+            names += 1
+        else:
+            return False
+        i += 1
+    return bool(toks) and names <= 3
+
+
 def check_segment(seg):
     """(quotes, cite, rest) of one labelled segment; Refused when it is not quote(s) + citation."""
     quotes, pos = [], 0
@@ -227,6 +267,10 @@ def check(text):
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
         label = f"User {m.group(1)} ({m.group(2)})"
+        if not owner_slot_ok(m.group(2)):   # #10780 item 2: a directive cannot ride in the parentheses
+            raise Refused(f"{label}: the parentheses hold the owner's name and references only (a date, a "
+                          "time, a record id, `via <Name>`, `superseded`, `expired`); put your reading after "
+                          "`Architect answer:`")
         try:
             quotes, cite, _ = check_segment(text[m.end():end])
             out.append((label, m.group(2), cite, verify(cite, quotes), quotes))

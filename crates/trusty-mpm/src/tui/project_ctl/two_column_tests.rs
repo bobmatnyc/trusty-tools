@@ -11,7 +11,8 @@
 //! session order does not follow the poll order; plus the column's edge
 //! cases (headers, blank clicks, narrow widths). S3 — #10754: De1 key map
 //! (Bob 11-06): Right toggles details and Enter does not; `r` renames
-//! through a pre-filled modal; `n` starts a new session.
+//! through a pre-filled modal; `n` starts a new session; the drawn hint
+//! line lists exactly that map.
 //! Test: this file is the test.
 
 use std::collections::BTreeMap;
@@ -707,6 +708,40 @@ fn right_toggles_details_and_enter_does_not() {
     );
     press(&mut state, KeyCode::Right);
     assert!(!right_lines(&mut state, 30).join("\n").contains("id:"));
+}
+
+/// #10754: De1 key map (Bob 11-06) — the drawn bottom row lists exactly the
+/// session column's keys, in order, with Enter = open and → = details.
+#[test]
+fn session_column_draws_exactly_the_de1_key_hints() {
+    let mut state = polled();
+    press(&mut state, KeyCode::Tab);
+    let buffer = draw(&mut state, 220, 30);
+    let bottom = region(&buffer, 0, 220)
+        .lines()
+        .last()
+        .map(str::to_string)
+        .unwrap_or_default();
+    let hint = bottom.split("   ·   ").next().unwrap_or_default();
+    let keys: Vec<&str> = hint.trim_end().split("  ").collect();
+    assert_eq!(
+        keys,
+        [
+            "[Enter] open",
+            "[→] details",
+            "[←] collapse/projects",
+            "[f] focus",
+            "[r] rename",
+            "[R] resume",
+            "[n] new",
+            "[l] launch",
+            "[k] kill",
+            "[d] decommission",
+            "[a] attach-cmd",
+            "[q] quit",
+        ],
+        "{bottom:?}"
+    );
 }
 
 /// S3 (c): `r` opens the rename modal with the current name typed. Typing

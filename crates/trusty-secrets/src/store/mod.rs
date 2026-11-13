@@ -44,6 +44,9 @@ mod index;
 #[cfg(all(unix, feature = "cli-backends"))]
 pub mod keeper;
 mod keychain;
+// #10998: a named copy's read of any Keychain item; only the server copies.
+#[cfg(feature = "server")]
+pub(crate) mod keychain_item;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
 // #7519: the 1Password backend; spawns `op` through `cli`.
@@ -60,7 +63,9 @@ mod secret_store;
 // #7524 P2-L7: the time limit on every Keychain call.
 mod time_limit;
 
-pub use agent_deny::{AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION, DenyAudit};
+pub use agent_deny::{
+    AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION, DenyAudit, is_push_only,
+};
 // #7524: only the server's `State` reads it; unused without `server`.
 #[cfg(feature = "server")]
 pub(crate) use backend::KEYCHAIN_COMPILED;

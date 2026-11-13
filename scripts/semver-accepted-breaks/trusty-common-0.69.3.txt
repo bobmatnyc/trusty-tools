@@ -1,0 +1,4 @@
+crate   trusty-common
+version 0.69.3
+reason  Accepted under the 2026-09-26 versioning ruling (a public-API break never forces a major version). cargo semver-checks 0.50.0 against baseline 0.69.1 computes one inherited major lint: #10996 (commit 4564a730a, merged after the trusty-common-v0.69.1 tag) added ServiceStatus::Unknown to the public console_rpc ServiceStatus enum. Refs #10996, #11098.
+accept  enum_variant_added  variant ServiceStatus:Unknown

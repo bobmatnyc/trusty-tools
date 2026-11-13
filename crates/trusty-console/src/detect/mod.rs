@@ -95,7 +95,7 @@ pub fn all_connectors() -> Vec<Box<dyn ServiceConnector>> {
 ///
 /// Why: #6370 — the dashboard showed connector-registration order, so a service
 /// that is not installed could sit above the one the operator is running.
-/// What: Running 0, Degraded 1, Available 2, Absent 3 — the order in which a
+/// What: Running 0, Degraded 1, Available 2, Absent/Unknown 3 — the order in which a
 /// service has something to show: a live daemon, a reachable-but-impaired
 /// daemon, an installed binary, then nothing.
 /// Test: `order_for_display_puts_running_first`.
@@ -104,7 +104,8 @@ fn liveness_rank(info: &ServiceInfo) -> u8 {
         ServiceStatus::Running => 0,
         ServiceStatus::Degraded => 1,
         ServiceStatus::Available => 2,
-        ServiceStatus::Absent => 3,
+        // #10996: a status this build cannot read shows nothing; sort it last.
+        ServiceStatus::Absent | ServiceStatus::Unknown => 3,
     }
 }
 

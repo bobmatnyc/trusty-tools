@@ -1,4 +1,4 @@
-"""Dashboard settings pane (user state), id links, on both HTML files (node, no browser).
+"""Dashboard settings pane (user state, technical level), id links, on both HTML files (node, no browser).
 
 Test: scripts/test_dashboard_settings.py
 """
@@ -12,6 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 from test_dashboard_progress import PAGES  # noqa: E402
+from test_dashboard_store import ServerCase  # noqa: E402
 
 
 def block(page, name):
@@ -115,6 +116,78 @@ class TestSettingsPane(unittest.TestCase):
             self.assertIn(needle, pane)
         self.assertIn('db.doc("meta/settings")', src)
         self.assertIn("if_version", src[src.index("async function saveSettings"):src.index("async function chooseUserState")])
+
+
+# #11064: the technical level selector offers exactly the six levels, shows pm when unset, and a refused write shows an error.
+LEVELS = ["non-technical", "vibe-coder", "pm", "engineer", "senior-engineer", "cto"]
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestTechLevelLogic(unittest.TestCase):
+    def test_level_of_defaults_to_pm_and_payload_takes_only_the_six(self):
+        body = """console.log(JSON.stringify([TECH_LEVELS, techLevelOf(null), techLevelOf({}), techLevelOf({technical_level: "wizard"}),
+          techLevelOf({technical_level: "cto"}), techLevelPayload("senior-engineer"), techLevelPayload("CTO").error, techLevelPayload("").error]));"""
+        for page in PAGES:
+            got = run(page, ["techLevel"], body)
+            self.assertEqual(got[0], LEVELS)
+            self.assertEqual(got[1:5], ["pm", "pm", "pm", "cto"])
+            self.assertEqual(got[5], {"payload": {"technical_level": "senior-engineer"}})
+            self.assertTrue(all(isinstance(e, str) and e for e in got[6:]))
+
+    def test_a_refused_write_shows_the_error_and_puts_the_stored_level_back(self):
+        body = """
+        const els = { "set-level": { value: "cto" }, "set-level-err": { textContent: "" } };
+        const $ = (id) => els[id];
+        let db = {}, readOnly = false, settings = { technical_level: "engineer" }, sent = [];
+        let saveSettings = async (p) => { sent.push(p); throw new Error("op 1 refused: meta/settings technical_level is not a technical level"); };
+        (async () => {
+          await saveLevelSettings();
+          const refused = [els["set-level"].value, els["set-level-err"].textContent, sent.slice()];
+          saveSettings = async (p) => { sent.push(p); settings = Object.assign({}, settings, p); };
+          els["set-level"].value = "vibe-coder";
+          await saveLevelSettings();
+          const saved = [els["set-level"].value, els["set-level-err"].textContent, settings.technical_level];
+          readOnly = true; els["set-level"].value = "pm";
+          await saveLevelSettings();
+          console.log(JSON.stringify([refused, saved, [els["set-level"].value, els["set-level-err"].textContent, sent.length]]));
+        })();"""
+        refused, saved, ro = run(PAGES[0], ["techLevel", "techLevelSave"], body)
+        self.assertEqual(refused[0], "engineer")
+        self.assertIn("Could not save the technical level: op 1 refused", refused[1])
+        self.assertEqual(refused[2], [{"technical_level": "cto"}])
+        self.assertEqual(saved, ["vibe-coder", "", "vibe-coder"])
+        self.assertEqual(ro[0], "vibe-coder")
+        self.assertIn("Read-only", ro[1])
+        self.assertEqual(ro[2], 2)   # a read-only view sends nothing
+
+
+class TestTechLevelPane(unittest.TestCase):
+    def test_pane_offers_exactly_the_six_levels_and_saves_through_the_one_write_path(self):
+        for page in PAGES:
+            src = open(page, encoding="utf-8").read()
+            pane = src[src.index('<dialog id="settings-pane"'):src.index("</dialog>")]
+            sel = pane[pane.index('<select id="set-level">'):pane.index("</select>")]
+            self.assertEqual(re.findall(r'<option value="([^"]+)"', sel), LEVELS)
+            self.assertIn('id="set-level-err"', pane)
+            save = src[src.index("async function saveLevelSettings"):]
+            self.assertIn("await saveSettings(r.payload)", save[:save.index("/* END techLevelSave */")])
+            self.assertIn('$("set-level").addEventListener("change", saveLevelSettings)', src)
+            self.assertIn("lv.value = techLevelOf(settings)", src[src.index("function paintSettings"):])
+
+
+class TestTechLevelRoundTrip(ServerCase):
+    """The page's write path (PUT /api/meta/settings, as saveSettings sends it) keeps a level across a reload and refuses others."""
+
+    def test_level_survives_a_reload_and_a_bad_level_is_refused(self):
+        self.store.set("meta", "settings", {"user_state": "active"}, 0)
+        status, _ = self.call("PUT", "/api/meta/settings", {"data": {"user_state": "active", "technical_level": "cto"}, "if_version": 1})
+        self.assertEqual(status, 200)
+        status, body = self.call("GET", "/api/meta/settings")
+        self.assertEqual((status, json.loads(body)["data"]["technical_level"]), (200, "cto"))
+        status, body = self.call("PUT", "/api/meta/settings", {"data": {"technical_level": "wizard"}, "if_version": 2})
+        self.assertEqual(status, 400)
+        self.assertIn("technical_level", json.loads(body)["error"])
+        self.assertEqual(self.store.get("meta", "settings")["data"]["technical_level"], "cto")
 
 
 if __name__ == "__main__":

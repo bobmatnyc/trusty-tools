@@ -26,7 +26,8 @@
 
 // #10459: the Architect's exec-form guard and prompt-hook groups.
 use super::architect_hooks::{
-    ArchitectHooks, architect_pm_guard_hook_value, push_prompt_hook_groups,
+    ArchitectHooks, architect_pm_guard_hook_value, is_standing_rules_hook_command,
+    push_prompt_hook_groups, push_standing_rules_groups,
 };
 use super::divert_hooks::{divert_hook_groups, is_divert_hook_command};
 // #7688: the prompt-feedback capture's groups and its identity predicate.
@@ -164,8 +165,9 @@ pub(super) fn project_managed_hook_additions_with_pm_guard(
 /// What: `None` builds exactly what the function above documents. `Some`
 /// puts [`architect_pm_guard_hook_value`] where the PM guard group goes (only
 /// when `pm_guard_enabled`, so `[pm_guard] enabled = false` still removes it),
-/// and appends [`push_prompt_hook_groups`] last, so every other group keeps
-/// its bytes and position.
+/// and appends [`push_prompt_hook_groups`] then (#10960)
+/// [`push_standing_rules_groups`] last, so every other group keeps its bytes
+/// and position.
 /// Test: `architect_hook_settings_golden`, `pm_session_registers_no_ticket_handler`.
 pub(super) fn project_managed_hook_additions_for_profile(
     exe_override: Option<&std::path::Path>,
@@ -271,6 +273,8 @@ pub(super) fn project_managed_hook_additions_for_profile(
     if let (Some(architect), Some(hooks_obj)) = (architect, hooks.as_object_mut()) {
         let on = pm_guard_enabled && architect.direct_commands;
         push_prompt_hook_groups(hooks_obj, &exe, on);
+        // #10960: the standing-rules block, every Architect, no toggle.
+        push_standing_rules_groups(hooks_obj, &exe);
     }
 
     Ok(serde_json::json!({ "hooks": hooks }))
@@ -364,6 +368,9 @@ pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
         || is_prompt_feedback_hook_command(cmd)
         // #8454: a stale exe path is replaced, never duplicated.
         || is_egress_guard_hook_command(cmd)
+        // #10960: a stale standing-rules group is replaced, and stripped when
+        // the project stops being an Architect.
+        || is_standing_rules_hook_command(cmd)
 }
 
 /// Recognise a hook command only the PROJECT tier ever writes.
