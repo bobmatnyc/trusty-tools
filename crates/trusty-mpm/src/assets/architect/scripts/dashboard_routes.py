@@ -8,7 +8,7 @@ one content-free line per save in <inbox>/doc-edits.jsonl); `attach` (POST /api/
 Intent Ledger attachment, GET /api/attach/<item id>/<stored name> serves it sandboxed; dashboard_attach.py); `fleet`
 (GET /api/fleet: count plus working|waiting|paused|inactive per managed session); `projects` (GET /api/projects;
 dashboard_projects.py, with the watch state from the watch_changes docs); `cli_profiles` (GET /api/cli-profiles, only when the optional cli_profiles module is present,
-else 404); `pane` (GET /api/pane?session=<tm-name>&lines=<n>: the session's masked pane tail, #11065 phase 3);
+else 404); `pane` (GET /api/pane?session=<tm-name>&lines=<n>: a managed session's masked pane tail, #11065 phase 3);
 `static` (GET /static/<name>, the fixed STATIC_FILES names only). Every function returns the handler's
 _send/_err result. Standard library only.
 Test: tests/test_dashboard_doc.py, tests/test_dashboard_attach.py, tests/test_dashboard_routes.py,
@@ -140,18 +140,21 @@ def attach(h, rest, q, digits):
                                                        h.server.architect_il, root, actor=h._actor()))
 
 
-def fleet(h):
-    """GET /api/fleet: {sessions: {name: {status, alive, managed}}, count, inactive}; architect mode only, cached ~4 s."""
-    if _architect_get(h):
-        return None
-    sv = h.server
-
+def _fleet_snapshot(sv):
+    """The /api/fleet body, from sv.fleet_cache (~4 s); /api/pane reads its managed set from the same build (#11180)."""
     def build():
         live = dashboard_harness.read_json(os.path.join(sv.inbox, "dashboard-live.json"))
         return dashboard_harness.fleet_status([d["data"] for d in sv.store.list_docs("sessions")],
                                               [d["data"] for d in sv.store.list_docs("goals")],
                                               dashboard_harness.tmux_sessions(), live)
-    return h._send(200, sv.fleet_cache.get(build))
+    return sv.fleet_cache.get(build)
+
+
+def fleet(h):
+    """GET /api/fleet: {sessions: {name: {status, alive, managed}}, count, inactive}; architect mode only, cached ~4 s."""
+    if _architect_get(h):
+        return None
+    return h._send(200, _fleet_snapshot(h.server))
 
 
 def projects(h):
@@ -178,18 +181,34 @@ def cli_profiles(h, url):
 
 
 PANE_SESSION_MAX = 200   # characters; a longer ?session= is a 400, never a tmux lookup
+PANE_LINES_DIGITS_MAX = 6   # #11180: int() refuses over 4300 digits (a 500); the clamp makes more than 6 pointless
+
+
+def _managed_sessions(sv):
+    """Names /api/fleet lists as managed, or None when the fleet build fails or returns no session map (#11180)."""
+    try:
+        sessions = _fleet_snapshot(sv).get("sessions")
+    except Exception as e:  # noqa: BLE001 - any failure means the managed set is unknown; the caller fails closed
+        sys.stderr.write(f"pane: managed set unavailable: {e!r}\n")
+        return None
+    if not isinstance(sessions, dict):
+        return None
+    return {n for n, v in sessions.items() if isinstance(v, dict) and v.get("managed")}
 
 
 def pane(h, url):
     """GET /api/pane?session=<tm-name>&lines=<n>: {session, lines, captured_at, truncated}; architect mode only.
 
     Why: a Decision shows the session's most recent pane lines (#11065 phase 3). The dashboard reads them at click
-    time; nothing is stored and nothing goes on the daemon bus.
+    time; nothing is stored and nothing goes on the daemon bus. Only managed sessions: list_panes covers every tmux
+    server, including personal shells (#11180).
     What: `session` is required and matched exactly; `lines` defaults to 40 and is clamped into [10, 200] by
-    dashboard_pane_tail.clamp_lines, a non-integer is a 400. The tail comes from h.server.pane_tail (default
-    dashboard_pane_tail.session_pane_tail: masked, line-capped, cached 3 s in memory). `captured_at` is ISO-8601 UTC.
-    404 not_running when no tmux session has that exact name, 503 capture_failed when tmux did not answer; the
-    failure detail goes to stderr only. The Host/Origin guard in dashboard_http.py runs before this function.
+    dashboard_pane_tail.clamp_lines, a non-integer or one over PANE_LINES_DIGITS_MAX digits is a 400. `session`
+    must be in the /api/fleet managed set (_fleet_snapshot) before any pane lookup: outside it is 404 not_running,
+    and a set that cannot be built is 503 fleet_unavailable (fail closed). The tail comes from h.server.pane_tail
+    (default dashboard_pane_tail.session_pane_tail: masked, line-capped, cached 3 s in memory). `captured_at` is
+    ISO-8601 UTC. 404 not_running when no tmux session has that exact name, 503 capture_failed when tmux did not
+    answer; the failure detail goes to stderr only. The Host/Origin guard in dashboard_http.py runs before this.
     Test: tests/test_dashboard_pane_route.py
     """
     if _architect_get(h):
@@ -199,9 +218,15 @@ def pane(h, url):
     if not name or len(name) > PANE_SESSION_MAX:
         return h._err(400, "bad_request", f"session must be 1..{PANE_SESSION_MAX} characters")
     raw = (q.get("lines") or [None])[0]
-    if raw is not None and not (raw.isascii() and raw.isdigit()):   # isdigit alone passes "²"; int() refuses it
+    # isdigit alone passes "²"; the length cap keeps int() under its digit limit (#11180)
+    if raw is not None and not (raw.isascii() and raw.isdigit() and len(raw) <= PANE_LINES_DIGITS_MAX):
         return h._err(400, "bad_request", "lines must be an integer")
     n = dashboard_pane_tail.clamp_lines(None if raw is None else int(raw))
+    managed = _managed_sessions(h.server)
+    if managed is None:
+        return h._err(503, "fleet_unavailable", "managed sessions unavailable")
+    if name not in managed:   # same answer as a stopped session: the route does not reveal other tmux sessions
+        return h._err(404, "not_running", "no running session with that name")
     tail = h.server.pane_tail(name, n)
     if isinstance(tail, dashboard_pane_tail.PaneTailFailure):
         sys.stderr.write(f"pane tail {tail.kind}: {tail.detail}\n")
