@@ -330,22 +330,29 @@ descendants() {
 # held_under DIR: pids of this user with a cwd, an open file or a bound unix
 # socket at DIR or below it. #10922: a probe that cannot run returns 1 and
 # names the missing check on stderr; it never reads as "nothing held".
-# SANDBOX_LSOF (selftest only) forces the lsof probe with that binary.
+# SANDBOX_LSOF (selftest only) forces the lsof probe with that binary;
+# SANDBOX_PROC (selftest only) moves the Linux probe off /proc.
 held_under() {
-  local lsof="${SANDBOX_LSOF:-}" raw inodes uid
+  local lsof="${SANDBOX_LSOF:-}" proc="${SANDBOX_PROC:-/proc}" raw inodes uid
   uid="$(id -u)"
-  if [ -z "$lsof" ] && [ -d /proc/self/fd ]; then
+  if [ -z "$lsof" ] && [ -d "$proc/self/fd" ]; then
     # Linux: /proc/<pid>/{cwd,fd/*}, plus /proc/net/unix for socket paths.
-    [ -r /proc/net/unix ] || { echo "sandbox_daemon: survivor check failed: /proc/net/unix is not readable" >&2; return 1; }
-    command -v find >/dev/null 2>&1 || { echo "sandbox_daemon: survivor check failed: no find for /proc" >&2; return 1; }
-    inodes=" $(awk -v d="$1" 'NR > 1 && ($8 == d || index($8, d "/") == 1) { printf "%s ", $7 }' /proc/net/unix) "
+    [ -r "$proc/net/unix" ] || { echo "sandbox_daemon: survivor check failed: $proc/net/unix is not readable" >&2; return 1; }
+    command -v find >/dev/null 2>&1 || { echo "sandbox_daemon: survivor check failed: no find for $proc" >&2; return 1; }
+    # #10922: prove find can read and print links under $proc before trusting
+    # its output; a find without -printf, or one denied $proc/self, would
+    # otherwise read as "nothing held".
+    [ -n "$(find "$proc/self/cwd" -maxdepth 0 -printf '%l' 2>/dev/null)" ] \
+      && [ -n "$(find "$proc/self/fd" -mindepth 1 -maxdepth 1 -printf '%l' 2>/dev/null)" ] \
+      || { echo "sandbox_daemon: survivor check failed: find cannot list $proc/<pid>/cwd and fd links" >&2; return 1; }
+    inodes=" $(awk -v d="$1" 'NR > 1 && ($8 == d || index($8, d "/") == 1) { printf "%s ", $7 }' "$proc/net/unix") "
     # find exits non-zero when a pid vanishes mid-walk; that is not a failure.
-    { find /proc/[0-9]*/cwd -maxdepth 0 -user "$uid" -printf '%p\t%l\n' 2>/dev/null || true
-      find /proc/[0-9]*/fd -mindepth 1 -maxdepth 1 -user "$uid" -printf '%p\t%l\n' 2>/dev/null || true
+    { find "$proc"/[0-9]*/cwd -maxdepth 0 -user "$uid" -printf '%p\t%l\n' 2>/dev/null || true
+      find "$proc"/[0-9]*/fd -mindepth 1 -maxdepth 1 -user "$uid" -printf '%p\t%l\n' 2>/dev/null || true
     } | awk -F '\t' -v d="$1" -v inodes="$inodes" '{
-        split($1, a, "/"); t = $2
-        if (t == d || index(t, d "/") == 1) print a[3]
-        else if (t ~ /^socket:\[/ && index(inodes, " " substr(t, 9, length(t) - 9) " ")) print a[3]
+        pid = $1; sub(/\/(cwd|fd\/[^\/]*)$/, "", pid); sub(/.*\//, "", pid); t = $2
+        if (t == d || index(t, d "/") == 1) print pid
+        else if (t ~ /^socket:\[/ && index(inodes, " " substr(t, 9, length(t) - 9) " ")) print pid
       }' | sort -u
     return 0
   fi
@@ -463,6 +470,9 @@ while :; do
   set -e
   kill -0 "$DAEMON_PID" 2>/dev/null || break
 done
+# #10922: the daemon is reaped, so its pid may be reused; a signal during
+# teardown must not reach `kill -TERM "$DAEMON_PID"`.
+trap '' INT TERM HUP
 # #10922: a survivor turns a clean daemon exit into exit 1.
 if ! teardown && [ "$STATUS" -eq 0 ]; then STATUS=1; fi
 exit "$STATUS"

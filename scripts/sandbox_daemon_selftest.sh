@@ -65,6 +65,9 @@
 #     teardown-dead-pane  (#10922) a pane tmux reports dead is never signalled
 #     teardown-socket-survivor  (#10922) a process with cwd / holding a bound
 #                   unix socket under <dir> is named; exit 1
+#     teardown-find-probe-failed  (#10922) the Linux probe on a find that
+#                   cannot print links (fake find, fake SANDBOX_PROC) exits 1
+#                   naming the check; runs on macOS and Linux.
 #     teardown-probe-failed  (#10922) a survivor probe that fails or is missing
 #                   (SANDBOX_LSOF) is named on stderr; exit 1, never clean
 #     bin-fresh-*   (#10755) against a temp git source root (SANDBOX_SRC_ROOT)
@@ -651,6 +654,29 @@ for probe in "$PROBEBIN/lsof:exited 1" "$TMP_ROOT/no-such-lsof:is missing or not
     pass "teardown-probe-failed (${probe#*:})"
   fi
 done
+
+# 10i. teardown-find-probe-failed (#10922): the Linux probe on a `find` that
+# cannot print links (BusyBox has no -printf) is a failure naming the check,
+# never "nothing held". SANDBOX_PROC points the Linux branch at a fake proc
+# tree, so the case runs on macOS and Linux alike.
+FAKEPROC="$TMP_ROOT/fake-proc"
+FINDBIN="$TMP_ROOT/find-bin"
+mkdir -p "$FAKEPROC/self/fd" "$FAKEPROC/net" "$FINDBIN"
+: > "$FAKEPROC/net/unix"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$FINDBIN/find"
+chmod +x "$FINDBIN/find"
+DIRFP="$TMP_ROOT/casefp"
+mkdir -p "$DIRFP"
+set +e
+OUTFP="$(env -i PATH="$FINDBIN:$PATH" SANDBOX_PROC="$FAKEPROC" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRFP" 2>&1)"
+STATUSFP=$?
+set -e
+if [ "$STATUSFP" -ne 1 ] || ! printf '%s' "$OUTFP" | grep -qF "survivor check failed: find cannot list $FAKEPROC/<pid>/cwd and fd links"; then
+  fail teardown-find-probe-failed "exit $STATUSFP (want 1), failed check not named"
+  printf '%s\n' "$OUTFP" | sed 's/^/    /'
+else
+  pass "teardown-find-probe-failed"
+fi
 
 # 11. bin-fresh (#10755): a temp source root and a stubbed dependency tree
 # (BIN_FRESH_SOURCES_CMD), so neither the real tree nor cargo changes the
