@@ -191,6 +191,9 @@ scripts/turn-active.py
 scripts/pm_cursor.py
 scripts/pending-answers.py
 scripts/pending_hook_dedupe.py
+# #11064: technical level reader, from prototype ab5a222 (hand-merged: TECH LEVEL line, per-user and per-item levels).
+scripts/technical_level.py
+scripts/test_technical_level.py	tests/test_technical_level.py
 templates/dashboard/tokens.css
 scripts/test_brief_id.py	tests/test_brief_id.py
 scripts/test_ctx_watch.py	tests/test_ctx_watch.py
