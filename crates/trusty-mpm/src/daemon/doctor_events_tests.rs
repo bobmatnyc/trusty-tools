@@ -199,16 +199,19 @@ async fn an_unreadable_parent_is_unreadable() {
 /// Why (fail-closed): every observation other than `Serving` is a fault or an
 /// unknown, never health — a refactor that defaulted an arm to `Ok` would ship
 /// a green row for a dead bus.
-/// What: each non-serving state grades `Fail`, except `Undetermined`,
-/// `VersionSkew` and `NotInstalled`, which are `Warn`; none is `Ok`.
+/// What: each non-serving state grades `Fail`, except `Undetermined` and
+/// `VersionSkew`, which are `Warn`; none is `Ok`. #10975: `NotInstalled` is no
+/// fault but a host without the bus, so it alone reads `Ok`, and only as an
+/// `info:` line.
 /// Test: This is the test.
 #[test]
 fn every_non_serving_state_is_never_ok() {
     let p = Path::new("/x/trusty-events.sock");
+    let info = grade(p, &SocketState::NotInstalled);
+    assert_eq!(info.status, CheckStatus::Ok, "{}", info.message);
+    assert!(info.message.starts_with("info: "), "{}", info.message);
     for (state, want) in [
         (SocketState::Absent, CheckStatus::Fail),
-        // #10151: a host without the bus is supported.
-        (SocketState::NotInstalled, CheckStatus::Warn),
         (SocketState::Stale, CheckStatus::Fail),
         (SocketState::NotASocket, CheckStatus::Fail),
         (
@@ -260,22 +263,27 @@ fn agents_in(dir: &tempfile::TempDir, installed: bool) -> std::path::PathBuf {
 
 /// Why (#10151, Architect ruling 2026-10-26): a host without the bus is a
 /// supported setup. It read `Fail` and named `tctl install trusty-events`,
-/// which exits 3 because the bus is internal (#10130).
-/// What: no socket and no trusty-events plist grades `Warn`, says no action is
-/// needed, and names no `tctl` command — every `tctl` verb on the bus exits
-/// non-zero on a host without its plist, so the only remedy that exits 0 is
-/// none.
+/// which exits 3 because the bus is internal (#10130). #10975 (owner ruling
+/// 2026-11-13): it is an INFO line, not a warning, and names no fix command.
+/// What: no socket and no trusty-events plist grades `Ok` with the INFO
+/// message `info: trusty-events: not installed (internal, optional)`, names no
+/// command, and leaves a report of otherwise-healthy rows `Ok`.
 /// Test: This is the test.
 #[tokio::test]
-async fn a_host_without_the_bus_warns_and_names_no_failing_remedy() {
+async fn a_host_without_the_bus_is_an_info_line_with_no_fix_command() {
     let dir = tempfile::tempdir().expect("tempdir");
     let agents = agents_in(&dir, false);
     let row = grade_resolved(Ok(sock_in(&dir)), &agents).await;
     assert_eq!(row.name, CHECK_NAME);
-    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
-    assert!(row.message.contains("not installed"), "{}", row.message);
-    assert!(row.message.contains("needs no action"), "{}", row.message);
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    assert_eq!(
+        row.message,
+        "info: trusty-events: not installed (internal, optional)"
+    );
     assert!(!row.message.contains("tctl"), "{}", row.message);
+    assert!(!row.message.contains('`'), "{}", row.message);
+    let report = crate::core::doctor::DoctorReport::from_checks(vec![row]);
+    assert_eq!(report.overall, CheckStatus::Ok);
 }
 
 /// Why (#10151 fail-open check): only "no socket and no plist" may be
@@ -545,7 +553,8 @@ async fn a_bus_that_sends_a_heartbeat_is_ok() {
 /// Why (#10071: lockstep, no fallback): a bus older than the heartbeat refuses
 /// `heartbeat_ms`; that is version skew, neither healthy nor hung.
 /// What: a stub refusing `heartbeat_ms` the way a pre-#10071 bus did grades
-/// `Warn`, naming the skew and the upgrade remedy.
+/// `Warn`, naming the skew. #10975: the remedy is a rebuild from a checkout
+/// and `tctl restart`, never `tctl upgrade`, which skips the internal bus.
 /// Test: This is the test.
 #[tokio::test]
 async fn a_bus_that_refuses_heartbeat_ms_is_version_skew() {
@@ -561,10 +570,17 @@ async fn a_bus_that_refuses_heartbeat_ms_is_version_skew() {
     );
     assert!(row.message.contains("heartbeat_ms"), "{}", row.message);
     assert!(
-        row.message.contains("`tctl upgrade trusty-events`"),
+        row.message
+            .contains("Rebuild it from a trusty-tools checkout at this tm's revision"),
         "{}",
         row.message
     );
+    assert!(
+        row.message.contains("`tctl restart trusty-events`"),
+        "{}",
+        row.message
+    );
+    assert!(!row.message.contains("tctl upgrade"), "{}", row.message);
 }
 
 /// Why (fail-closed): a bus that closes the subscription without a frame did

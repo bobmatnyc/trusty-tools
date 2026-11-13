@@ -23,9 +23,10 @@
 //! that cannot be read, or a subscription that ends without a frame is `Fail`;
 //! a connect that neither completes nor is refused is `Warn`. #10151: a host
 //! without the bus is supported (Architect ruling 2026-10-26), so a missing
-//! socket with no trusty-events LaunchAgent plist is `NotInstalled`, a `Warn`
-//! that names no command. Only that pair is downgraded: every other state, and
-//! a missing socket beside an installed plist, grades as above. Read-only.
+//! socket with no trusty-events LaunchAgent plist is `NotInstalled`. #10975:
+//! that is an INFO line (an `Ok` row whose message starts `info:`) that names
+//! no command. Only that pair is downgraded: every other state, and a missing
+//! socket beside an installed plist, grades as above. Read-only.
 //!
 //! Test: `doctor_events_tests.rs`.
 
@@ -170,12 +171,13 @@ fn refuses_heartbeat(error: &RpcError) -> bool {
 /// Grade one observation of the socket at `socket` as a doctor row.
 ///
 /// Why: a pure function, so every verdict is testable without a daemon.
-/// What: `Serving` is `Ok`; `VersionSkew`, `Undetermined` and `NotInstalled`
-/// are `Warn`; every other state is `Fail` with its remedy. #10151: the
-/// not-running remedy no longer names `tctl install trusty-events`, which exits
-/// 3 since the bus is internal (#10130); `NotInstalled` names no command,
-/// because every `tctl` verb on the bus exits non-zero on a host without its
-/// plist. #10042: the not-running remedy
+/// What: `Serving` is `Ok`; `NotInstalled` is an INFO line (`Ok`, message
+/// starting `info:`); `VersionSkew` and `Undetermined` are `Warn`; every other
+/// state is `Fail` with its remedy. #10151: the not-running remedy no longer
+/// names `tctl install trusty-events`, which exits 3 since the bus is internal
+/// (#10130); `NotInstalled` names no command. #10975: no row names
+/// `tctl upgrade`, which skips internal members, so version skew is rebuilt
+/// from a checkout and restarted. #10042: the not-running remedy
 /// `tctl start trusty-events` works because the LaunchAgent restarts the bus
 /// after any exit, so a loaded job is never left stopped. #10071: a hung bus
 /// has not exited, so launchd leaves it alone and `tctl start` answers
@@ -186,7 +188,8 @@ fn refuses_heartbeat(error: &RpcError) -> bool {
 /// Test: `serving_is_ok_and_says_the_bus_answered`,
 /// `every_non_serving_state_is_never_ok`, `the_not_running_remedy_is_tctl_start`,
 /// `a_silent_bus_is_hung_within_the_bound`, `the_stale_remedy_restarts_a_hung_bus`,
-/// `a_host_without_the_bus_warns_and_names_no_failing_remedy`.
+/// `a_host_without_the_bus_is_an_info_line_with_no_fix_command`,
+/// `a_bus_that_refuses_heartbeat_ms_is_version_skew`.
 pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
     let at = socket.display();
     let (status, message) = match state {
@@ -212,7 +215,8 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
             format!(
                 "trusty-events at {at} is older than this tm: it refused the `heartbeat_ms` \
                  liveness request ({refusal}), so whether it is hung cannot be checked. The \
-                 two ship in lockstep; run `tctl upgrade trusty-events`."
+                 two ship in lockstep. Rebuild it from a trusty-tools checkout at this tm's \
+                 revision, then run `tctl restart trusty-events`."
             ),
         ),
         SocketState::Unanswered(err) => (
@@ -231,14 +235,11 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
                  `tctl start trusty-events`."
             ),
         ),
-        // #10151: a host without the bus is supported; nothing to run.
+        // #10975: a host without the bus is supported, so this is an INFO line
+        // with no fix command (owner ruling 2026-11-13).
         SocketState::NotInstalled => (
-            CheckStatus::Warn,
-            format!(
-                "trusty-events is not installed on this host: no socket at {at} and no \
-                 trusty-events LaunchAgent. The bus is optional and internal, so this is a \
-                 supported setup and needs no action; producers drop their events."
-            ),
+            CheckStatus::Ok,
+            "info: trusty-events: not installed (internal, optional)".to_owned(),
         ),
         SocketState::Stale => (
             CheckStatus::Fail,
@@ -291,7 +292,7 @@ pub(super) async fn check_events(home: &Path) -> DoctorCheck {
 ///
 /// What: observes the socket and grades it. #10151: only an `Absent` socket
 /// with no trusty-events plist in `agents_dir` becomes `NotInstalled`.
-/// Test: `a_host_without_the_bus_warns_and_names_no_failing_remedy`,
+/// Test: `a_host_without_the_bus_is_an_info_line_with_no_fix_command`,
 /// `a_host_with_the_bus_still_fails_on_every_fault`.
 async fn grade_resolved(
     socket: anyhow::Result<std::path::PathBuf>,

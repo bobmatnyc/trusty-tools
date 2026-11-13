@@ -1,6 +1,5 @@
 # trusty-events
 
-[![crates.io](https://img.shields.io/crates/v/trusty-events.svg)](https://crates.io/crates/trusty-events)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 The event bus for the trusty-* tools, run as its own daemon. Producers push
@@ -13,8 +12,13 @@ Tracking: epic [#9074](https://github.com/bobmatnyc/trusty-tools/issues/9074),
 
 ## Install and run
 
+trusty-events is internal and optional. It is not published to crates.io
+(owner ruling 2026-10-02, [#10130](https://github.com/bobmatnyc/trusty-tools/issues/10130)),
+so `tctl install` and `tctl upgrade` skip it. Build it from a trusty-tools
+checkout at the same revision as your `tm`:
+
 ```bash
-cargo install trusty-events --locked
+cargo install --path crates/trusty-events --locked
 trusty-events serve
 ```
 
@@ -22,10 +26,14 @@ trusty-events serve
 `--ring-capacity` (default 8192). Logs go to stderr; set `RUST_LOG` to change
 the level.
 
-`tctl install trusty-events` installs the binary and its LaunchAgent, and
-`tctl start|stop|status trusty-events` manage it. `tm doctor` reports the
-socket in its `events` row, and the console lists it as Trusty Events
-([#10042](https://github.com/bobmatnyc/trusty-tools/issues/10042)).
+With the binary on `PATH`, `tctl start trusty-events` writes its LaunchAgent
+and starts it, and `tctl stop|restart|status trusty-events` manage it.
+`tm doctor` reports the socket in its `events` row, and the console lists it
+as Trusty Events
+([#10042](https://github.com/bobmatnyc/trusty-tools/issues/10042)). A host
+without the bus is a supported setup: the row reads
+`info: trusty-events: not installed (internal, optional)`
+([#10975](https://github.com/bobmatnyc/trusty-tools/issues/10975)).
 
 ## The socket
 
