@@ -61,6 +61,17 @@
 #                   installed-style stub passes with a notice; the override
 #                   is announced, and ignored with a warning unless
 #                   BIN_FRESH_TEST=1
+#     cred-*        (#10721) --credential NAME=<ref> against a perl stub that
+#                   plays `tm secrets exec` and the daemon: the daemon sees
+#                   exactly the pinned and forwarded names plus NAME, never a
+#                   polluting secret, exported function or the exec's token
+#                   fd name, and holds no fd above stderr (the stub opens a
+#                   real token fd); a canary value is in no output, `ps` argv or file
+#                   under the sandbox; a bad name, a malformed or empty ref,
+#                   a repeat, and an unresolvable ref each refuse and start
+#                   no daemon; without --credential a provider key in the
+#                   caller env never arrives; the wrapper refuses a bad or
+#                   unset NAME and a malformed or stdio token fd; and its FORWARDED list matches the launcher's
 #   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
@@ -493,6 +504,191 @@ SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$TMP_ROOT/not-a-repo" "BIN_FRESH_TEST=1" "BIN_FR
 expect_refusal bin-fresh-no-source 1 "no source file of trusty-mpm found by git" \
   --bin "$TGT11/release/tm" --dir "$DIR2" --dry-run
 SRC_ROOT_ENV=()
+
+# ── #10721: --credential NAME=<ref> ─────────────────────────────────────────
+# A perl stub `tm`: perl adds no variable of its own, so the daemon side sees
+# exactly what the wrapper passed. `secrets exec --env NAME=REF -- CMD...`
+# sets NAME to a canary (never on argv) and opens a real fd named by
+# TRUSTY_SECRETS_TOKEN_FD, as the real exec does, then execs CMD; REF `unresolvable` exits 1 running nothing.
+# `daemon ...` records names, args, cwd, `ps` argv and whether the credential
+# arrived — never its value.
+CANARY="10721-selftest-canary-credential-value"
+CRED_STUB="$TMP_ROOT/stub-cred-tm"
+cat > "$CRED_STUB" <<'CRED_EOF'
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Fcntl qw(F_SETFD);
+use POSIX ();
+my $canary = "10721-selftest-canary-credential-value";
+if (@ARGV && $ARGV[0] eq 'secrets') {
+  my ($name, $ref) = $ARGV[3] =~ /^([^=]+)=(.*)$/ or exit 2;
+  if ($ref eq 'unresolvable') {
+    print STDERR "tm secrets exec: a key did not resolve; nothing ran\n";
+    exit 1;
+  }
+  $ENV{$name} = $canary;
+  # A real open fd, close-on-exec cleared, as exec_token.rs leaves the token.
+  open(my $tok, '<', $0) or exit 2;
+  fcntl($tok, F_SETFD, 0) or exit 2;
+  $ENV{TRUSTY_SECRETS_TOKEN_FD} = fileno($tok);
+  exec { $ARGV[5] } @ARGV[5 .. $#ARGV] or exit 127;
+}
+# Before this stub opens anything: every fd above 2 the daemon inherited.
+# perl itself holds none here (it closed the script after compiling it).
+my @fds;
+for my $n (3 .. 1023) {
+  my $d = POSIX::dup($n);
+  next unless defined $d;
+  POSIX::close($d);
+  push @fds, $n;
+}
+my $h = $ENV{HOME};
+open(my $ff, '>', "$h/stub-fds") or die;
+print $ff join(' ', @fds), "\n";
+close $ff;
+open(my $f, '>', "$h/stub-env-names") or die;
+print $f join("\n", sort keys %ENV), "\n";
+close $f;
+open($f, '>', "$h/stub-args") or die;
+print $f join("\n", @ARGV), "\n";
+close $f;
+system("pwd -P > '$h/stub-pwd'");
+system("ps -A -ww -o args= > '$h/stub-ps'");
+my $got = (grep { defined $ENV{$_} && $ENV{$_} eq $canary } keys %ENV) ? 'present' : 'absent';
+open($f, '>', "$h/stub-cred") or die;
+print $f "$got\n";
+close $f;
+CRED_EOF
+chmod +x "$CRED_STUB"
+
+# cred-forwarded-in-step: the wrapper keeps the launcher's FORWARDED list.
+WRAPPER="$SCRIPT_DIR/lib/sandbox_exec.sh"
+fwd_list() { sed -n '/^FORWARDED="/,/"$/p' "$1" | sed -e 's/^FORWARDED="//' | tr -d '\\"' | tr ' ' '\n' | grep . | sort; }
+if [ "$(fwd_list "$LAUNCHER")" = "$(fwd_list "$WRAPPER")" ] && [ -n "$(fwd_list "$WRAPPER")" ]; then
+  pass cred-forwarded-in-step
+else
+  fail cred-forwarded-in-step "FORWARDED differs between the launcher and $WRAPPER"
+fi
+
+# cred-allowlist + cred-canary: a real (stubbed) run with a polluted caller,
+# an exported shell function, and exported names that shadow the wrapper's own
+# variables.
+DIRC="$TMP_ROOT/cred1"
+mkdir -p "$DIRC"
+set +e
+OUTC="$(env -i PATH="$PATH" LANG=C RUST_LOG=warn TELEGRAM_BOT_TOKEN="$FAKE_TOKEN" \
+  OPENAI_API_KEY="$FAKE_KEY" OPENROUTER_API_KEY="$FAKE_KEY" KEEP="$FAKE_KEY" NAME="$FAKE_KEY" \
+  'BASH_FUNC_leak%%=() { echo '"$FAKE_KEY"'; }' \
+  bash "$LAUNCHER" --bin "$CRED_STUB" --dir "$DIRC" --credential ANTHROPIC_API_KEY=selftest-ref 2>&1)"
+STATUSC=$?
+set -e
+if [ "$STATUSC" -ne 0 ]; then
+  fail cred-allowlist "launcher exit $STATUSC"
+  printf '%s\n' "$OUTC" | sed 's/^/    /'
+elif [ ! -f "$DIRC/home/stub-env-names" ]; then
+  fail cred-allowlist "the stub daemon never ran"
+else
+  GOT="$(tr '\n' ' ' < "$DIRC/home/stub-env-names")"
+  WANT="ANTHROPIC_API_KEY HOME LANG PATH RUST_LOG TMUX_TMPDIR TRUSTY_DATA_DIR_OVERRIDE TRUSTY_SANDBOX "
+  if [ "$GOT" != "$WANT" ]; then
+    fail cred-allowlist "daemon saw [$GOT], want [$WANT]"
+  elif [ "$(tr '\n' ' ' < "$DIRC/home/stub-args")" != "daemon --sandbox --sandbox-credential ANTHROPIC_API_KEY " ]; then
+    fail cred-allowlist "daemon args were [$(tr '\n' ' ' < "$DIRC/home/stub-args")]"
+  elif [ "$(cat "$DIRC/home/stub-pwd")" != "$DIRC/home" ]; then
+    fail cred-allowlist "daemon cwd was not <dir>/home"
+  elif [ "$(cat "$DIRC/home/stub-cred")" != "present" ]; then
+    fail cred-allowlist "the credential did not reach the daemon"
+  else
+    pass cred-allowlist
+  fi
+fi
+# cred-no-inherited-fd: the daemon holds no fd above stderr, so no child of it
+# can present the exec's grant token (#10721).
+if [ ! -f "$DIRC/home/stub-fds" ]; then
+  fail cred-no-inherited-fd "the stub daemon never recorded its fds"
+elif [ -n "$(tr -d ' \n' < "$DIRC/home/stub-fds")" ]; then
+  fail cred-no-inherited-fd "the daemon inherited fds above 2: $(cat "$DIRC/home/stub-fds")"
+else
+  pass cred-no-inherited-fd
+fi
+# The canary is in no output, no ps argv, and no file under the sandbox dir.
+if printf '%s' "$OUTC" | grep -qF "$CANARY"; then
+  fail cred-canary "the credential value reached the launcher's output"
+elif [ ! -s "$DIRC/home/stub-ps" ]; then
+  fail cred-canary "no ps argv was captured"
+elif grep -rqF "$CANARY" "$DIRC"; then
+  fail cred-canary "the credential value is in a file under the sandbox: $(grep -rlF "$CANARY" "$DIRC")"
+elif printf '%s' "$OUTC" | grep -qF -e "$FAKE_KEY" -e "$FAKE_TOKEN" -e selftest-ref; then
+  fail cred-canary "a fake value or the ref reached the output"
+else
+  pass cred-canary
+fi
+
+# cred-dry-run: names the credential and passes it; starts nothing.
+DIRCD="$TMP_ROOT/cred-dry"
+mkdir -p "$DIRCD"
+expect_refusal cred-dry-run 0 "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_SANDBOX TMUX_TMPDIR LANG RUST_LOG ANTHROPIC_API_KEY" \
+  --bin "$CRED_STUB" --dir "$DIRCD" --credential ANTHROPIC_API_KEY=selftest-ref --dry-run
+[ ! -e "$DIRCD/home" ] || fail cred-dry-run "a dry run created $DIRCD/home"
+
+# Refusals before anything starts: each fails on a launcher without --credential.
+DIRCR="$TMP_ROOT/cred-refuse"
+mkdir -p "$DIRCR"
+expect_refusal cred-bad-name 1 "--credential name not allowed" \
+  --bin "$CRED_STUB" --dir "$DIRCR" --credential TELEGRAM_BOT_TOKEN=selftest-ref
+expect_refusal cred-malformed 1 "--credential takes NAME=<ref>" \
+  --bin "$CRED_STUB" --dir "$DIRCR" --credential ANTHROPIC_API_KEY
+expect_refusal cred-empty-ref 1 "--credential ANTHROPIC_API_KEY has an empty reference" \
+  --bin "$CRED_STUB" --dir "$DIRCR" --credential ANTHROPIC_API_KEY=
+expect_refusal cred-twice 1 "--credential may be given once" \
+  --bin "$CRED_STUB" --dir "$DIRCR" --credential ANTHROPIC_API_KEY=a --credential OPENROUTER_API_KEY=b
+[ ! -e "$DIRCR/home" ] || fail cred-refusals-start-nothing "a refused --credential created $DIRCR/home"
+
+# cred-unresolvable: `tm secrets exec` exits 1 and no daemon runs.
+DIRCU="$TMP_ROOT/cred-unres"
+mkdir -p "$DIRCU"
+expect_refusal cred-unresolvable 1 "a key did not resolve" \
+  --bin "$CRED_STUB" --dir "$DIRCU" --credential OPENROUTER_API_KEY=unresolvable
+[ ! -e "$DIRCU/home/stub-args" ] || fail cred-unresolvable "a daemon ran on an unresolvable ref"
+
+# cred-default-closed: a provider key in the caller env, no --credential:
+# the daemon sees none and gets no --sandbox-credential.
+DIRCN="$TMP_ROOT/cred-none"
+mkdir -p "$DIRCN"
+set +e
+env -i PATH="$PATH" ANTHROPIC_API_KEY="$CANARY" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRCN" >/dev/null 2>&1
+set -e
+if grep -qx ANTHROPIC_API_KEY "$DIRCN/home/stub-env-names" 2>/dev/null; then
+  fail cred-default-closed "a provider key reached the daemon without --credential"
+elif [ "$(tr '\n' ' ' < "$DIRCN/home/stub-args" 2>/dev/null)" != "daemon --sandbox " ]; then
+  fail cred-default-closed "the daemon args changed without --credential"
+else
+  pass cred-default-closed
+fi
+
+# The wrapper's own refusals, run directly.
+run_wrapper() {
+  local name="$1" needle="$2" out status
+  shift 2
+  set +e
+  out="$(env -i PATH="$PATH" "$@" 2>&1)"
+  status=$?
+  set -e
+  if [ "$status" -eq 1 ] && printf '%s' "$out" | grep -qF -- "$needle"; then
+    pass "$name"
+  else
+    fail "$name" "exit $status, output: $out"
+  fi
+}
+run_wrapper cred-wrapper-bad-name "credential name not allowed: GITHUB_PAT" \
+  GITHUB_PAT="$FAKE_KEY" bash "$WRAPPER" "$DIRCR" "$CRED_STUB" GITHUB_PAT
+run_wrapper cred-wrapper-absent "ANTHROPIC_API_KEY is not set" \
+  bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
+run_wrapper cred-wrapper-bad-fd "TRUSTY_SECRETS_TOKEN_FD is not an fd number" \
+  ANTHROPIC_API_KEY="$FAKE_KEY" TRUSTY_SECRETS_TOKEN_FD='3;x' bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
+run_wrapper cred-wrapper-stdio-fd "TRUSTY_SECRETS_TOKEN_FD names stdio" \
+  ANTHROPIC_API_KEY="$FAKE_KEY" TRUSTY_SECRETS_TOKEN_FD=2 bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

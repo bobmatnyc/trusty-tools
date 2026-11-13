@@ -265,4 +265,43 @@ impl CodeIndexer {
             .map_err(|e| anyhow::anyhow!("redb chunk delete task failed: {e}"))?
             .map_err(|e| e.context("redb chunk delete"))
     }
+
+    /// Delete a file's chunk `ids` and its file-hash row in one redb commit.
+    ///
+    /// What: `CorpusStore::delete_file_rows` on a blocking worker. Runs with
+    /// empty `ids` too, so the hash row still goes. No corpus wired is `Ok`.
+    /// The #8959 chunk-delete seam refuses before redb; the #9236 forget seam
+    /// fails inside the transaction, before its commit.
+    pub(crate) async fn try_delete_file_rows_from_redb(
+        &self,
+        ids: &[String],
+        file: &str,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if TEST_FAIL_CHUNK_DELETE
+            .lock()
+            .is_ok_and(|f| f.contains(&self.index_id))
+        {
+            anyhow::bail!("injected redb chunk delete failure (#8959 test seam)");
+        }
+        let Some(corpus) = self.corpus.clone() else {
+            return Ok(());
+        };
+        #[cfg(test)]
+        let fail_in_txn = crate::service::reindex::hash::TEST_FAIL_FORGET_HASH
+            .lock()
+            .is_ok_and(|f| f.contains(&self.index_id));
+        let (ids, file) = (ids.to_vec(), file.to_string());
+        // #11096: chunks and hash leave in one transaction, or neither does.
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if fail_in_txn {
+                return corpus.delete_file_rows_failing_before_commit(&ids, &file);
+            }
+            corpus.delete_file_rows(&ids, &file)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("redb file rows delete task failed: {e}"))?
+        .map_err(|e| e.context("redb file rows delete"))
+    }
 }

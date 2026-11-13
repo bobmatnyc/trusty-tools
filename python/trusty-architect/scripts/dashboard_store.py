@@ -9,12 +9,14 @@ local/owner-queue, the ArtifactData mirror). A file holds the document body plus
 integer "version"; a file with no "version" (the old mirror shape) counts as version 1.
 Every write takes an exclusive flock on <root>/.lock, checks the optional if_version
 (0 = must not exist), bumps the version and replaces files with temp file + os.replace.
-batch() stages every op in memory first and restores the previous bytes if a write
+batch() stages every operation in memory first and restores the previous bytes if a write
 fails midway, so it is all-or-nothing. Reads take no lock (replace is atomic).
 Format: DASHBOARD_FORMAT=dir (default, the layout above) or jsonl (one canonical <coll>.jsonl per collection plus
 changes.jsonl, see dashboard_jsonl.py). A jsonl write renders the whole collection file and validates every touched
 document against schemas/dashboard/ (DASHBOARD_SCHEMA=off|warn|enforce; default warn for jsonl, off for dir).
 A store of the other format is refused loudly, never read as empty.
+A set or update carrying meta/settings.technical_level or an item's level_override outside the six levels is refused
+(technical_level.refusal, #11064), whatever the schema mode.
 No network, no secrets.
 Test: tests/test_dashboard_store.py, tests/test_dashboard_jsonl.py
 """
@@ -33,6 +35,7 @@ if HERE not in sys.path:     # python3 -I drops the script directory
     sys.path.insert(0, HERE)
 import dashboard_jsonl as dj  # noqa: E402
 import dashboard_schema as dsch  # noqa: E402
+import technical_level as tlevel  # noqa: E402
 
 REPO = os.path.dirname(HERE)
 DEFAULT_ROOT = os.path.join(REPO, "local", "owner-queue")
@@ -40,8 +43,6 @@ DEFAULT_STATE_MD = os.path.join(REPO, "local", "state.md")
 
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 
-
-BATCH_VERB_KEY = "op"   # a batch entry's verb key; dashboard-db.py also accepts "action" (#10571)
 
 class StoreError(Exception):
     """Invalid request (bad id, bad body)."""
@@ -336,6 +337,9 @@ class Store:
             cur.update(exists=False, data=None, dirty=True)
             return {"collection": coll, "id": doc_id, "deleted": True}
         data = normalize_timestamps(_check_body(op.get("data")))
+        why = tlevel.refusal(coll, doc_id, data)   # #11064: a level outside the six is refused on every write path
+        if why:
+            raise StoreError(why)
         if kind == "update":
             if not cur["exists"]:
                 raise NotFound(f"{coll}/{doc_id} not found")
@@ -500,3 +504,7 @@ class Store:
             return True
         except Conflict:
             return False
+
+
+# #10570: last in the module: pm-guard reads this value, then any later backtick, as a run-time 1Password call.
+BATCH_VERB_KEY = "op"   # a batch entry's verb key; dashboard-db.py also accepts "action" (#10571)

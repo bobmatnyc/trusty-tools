@@ -1,0 +1,107 @@
+# CI for the OKF extraction worker, `workers/okf-extract` (#11094).
+#
+# Why: the worker is its own Cargo workspace with its own `Cargo.lock`, kept out
+#   of the root workspace by `[workspace] exclude` (SPEC-OKF-01 §3 (n) B). Every
+#   `ci.yml` job runs against the root workspace, so none of them compiled or
+#   tested the worker, and nothing ran `scripts/check_worker_dir_excluded.sh`.
+# What: two jobs.
+#   - `exclusion` runs the exclusion guard: the root workspace must not absorb
+#     the worker directory.
+#   - `build-test` builds and tests the worker through `--manifest-path` on its
+#     MSRV (1.94, `rust-version` in its Cargo.toml) and on its pinned toolchain
+#     (1.98.1, its `rust-toolchain.toml`).
+#   This workflow runs no audit or deny. The worker lock's coverage lives where
+#   the root lock's does, and like it never runs on a PR:
+#   `cargo audit --file workers/okf-extract/Cargo.lock` in `cargo-audit.yml`
+#   (weekly cron) and `pre-publish.yml` Gate 2, under the root
+#   `.cargo/audit.toml`; `cargo deny --manifest-path` in Gate 3, under the root
+#   `deny.toml`. RUSTSEC-2026-0436 (vendored calamine 0.36.1) is waived in both
+#   files until 2026-12-12 (owner ruling Dgp).
+#
+# TRIGGERS. No `paths:` filter and no job-level `if:`: the worker's tests
+#   compile `crates/trusty-okf` and its path dependencies, so a change far from
+#   `workers/` can break it. Both jobs run and report on every PR and every push
+#   to main. `red-main-notify.yml` watches this workflow by name.
+
+name: OKF extract worker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Explicit activity types (#4179); matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+  workflow_dispatch: {}
+
+# Per-commit group on push, per-ref on pull_request; `edited` and
+# `ready_for_review` never cancel an in-flight run (#4179, #9189). Matches ci.yml.
+concurrency:
+  group: okf-extract-worker-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' && github.event.action != 'ready_for_review' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # #11094: the guard existed but no workflow ran it.
+  exclusion:
+    name: okf-extract stays outside the workspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (1.94)
+        uses: dtolnay/rust-toolchain@1.94
+
+      # `cargo metadata --no-deps --offline` only; no registry fetch, no build.
+      - name: Worker directory is excluded from the root workspace
+        run: bash scripts/check_worker_dir_excluded.sh
+
+  # #11094: build and test the worker on its MSRV and its pinned toolchain.
+  build-test:
+    name: okf-extract build + test (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.94: the crate's `rust-version`. 1.98.1: its `rust-toolchain.toml`.
+        toolchain: ["1.94", "1.98.1"]
+    env:
+      # The worker's `rust-toolchain.toml` would pick 1.98.1 for any cargo run
+      # from inside its directory. RUSTUP_TOOLCHAIN outranks the file, so each
+      # leg builds on the toolchain its name says.
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        run: bash scripts/ci-free-disk-space.sh
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      # A leg that silently ran on another toolchain would prove nothing.
+      - name: Assert the toolchain in use
+        run: |
+          rustc --version
+          rustc --version | grep -q "^rustc ${{ matrix.toolchain }}" \
+            || { echo "::error::expected rustc ${{ matrix.toolchain }}"; exit 1; }
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: workers/okf-extract -> target
+          key: okf-extract-${{ matrix.toolchain }}
+          # Save only from main, as ci.yml does (repo-wide cache quota).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: cargo build (worker)
+        run: cargo build --locked --manifest-path workers/okf-extract/Cargo.toml --all-targets
+
+      - name: cargo test (worker)
+        run: cargo test --locked --manifest-path workers/okf-extract/Cargo.toml --no-fail-fast

@@ -18,6 +18,8 @@
 //! rendering/serialization tests live in each submodule.
 
 pub(crate) mod convert;
+// #10988: `tm projects decommission`.
+pub(crate) mod decommission;
 pub(crate) mod deliverables;
 pub(crate) mod milestones;
 // #7406: the one predicate every surface that OFFERS a project shares.
@@ -185,6 +187,10 @@ pub(crate) async fn projects(
         }
         ProjectsAction::Show { name, json } => registry::show(client, url, &name, json).await,
         ProjectsAction::Status { name, json } => registry::status(client, url, &name, json).await,
+        // #10988
+        ProjectsAction::Decommission { name, json } => {
+            decommission::decommission(client, url, &name, json).await
+        }
         ProjectsAction::Config { name, json, action } => {
             registry::config(client, url, &name, json, action).await
         }

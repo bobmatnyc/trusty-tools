@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Stub `docker` for scripts/check_sled_launch.sh (#11156). Serves canned files
+# from $STUB_DIR and records every call in $STUB_DIR/calls.log:
+#   version                   -> $STUB_DIR/version (missing: exit 1)
+#   container inspect NAME    -> $STUB_DIR/inspect-NAME.json, only once NAME was
+#                                created by run/create (or $STUB_DIR/live/NAME exists)
+#   network inspect NAME      -> $STUB_DIR/network-NAME.json, same rule
+#   image inspect IMG         -> exit 0 when IMG is a line of $STUB_DIR/images
+#   run/create --name NAME, network create NAME -> mark NAME live
+#   start/stop/network connect -> exit 0
+#   exec ... SCRIPT           -> exit $(cat $STUB_DIR/exec-SCRIPT.rc), default 0
+# Anything else, untyped `docker inspect` included, exits 1, so an unexpected
+# call fails closed.
+set -uo pipefail
+D="${STUB_DIR:?}"
+echo "docker $*" >> "${D}/calls.log"
+mkdir -p "${D}/live"
+live() { [ -e "${D}/live/$1" ]; }
+name_of() {
+    while [ $# -gt 0 ]; do
+        [ "$1" = --name ] && { echo "$2"; return; }
+        shift
+    done
+}
+case "${1:-}" in
+    version) [ -f "${D}/version" ] && cat "${D}/version" ;;
+    container) [ "$2" = inspect ] && live "$3" && [ -f "${D}/inspect-$3.json" ] && cat "${D}/inspect-$3.json" ;;
+    image) [ "$2" = inspect ] && [ -f "${D}/images" ] && grep -qxF "$3" "${D}/images" ;;
+    network)
+        case "$2" in
+            inspect) live "$3" && [ -f "${D}/network-$3.json" ] && cat "${D}/network-$3.json" ;;
+            create) eval "n=\${$#}"; touch "${D}/live/${n:?}" ;;
+            connect) exit 0 ;;
+            *) exit 1 ;;
+        esac ;;
+    run | create) n="$(name_of "$@")"; touch "${D}/live/${n:?}"; echo "id-${n}" ;;
+    start | stop) exit 0 ;;
+    exec) s="${*: -1}"; exit "$(cat "${D}/exec-${s}.rc" 2>/dev/null || echo 0)" ;;
+    *) exit 1 ;;
+esac

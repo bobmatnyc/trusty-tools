@@ -84,6 +84,8 @@ fn project(name: &str, repo_url: &str) -> Project {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 

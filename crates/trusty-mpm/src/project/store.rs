@@ -308,15 +308,28 @@ impl ProjectStore {
     /// over the incoming one; a record with none gets the incoming key or a
     /// freshly minted one. A NEW name whose key another record already holds is
     /// refused with [`ProjectStoreError::DuplicateProjectKey`]; updating an
-    /// existing record never is.
+    /// existing record never is. A stored `decommissioned_at` survives an
+    /// incoming `None` (#10988).
     /// Test: `store_upsert_idempotent`, `upsert_assigns_a_key_once_and_keeps_it`,
-    /// `upsert_refuses_a_second_project_with_the_same_key`.
+    /// `upsert_refuses_a_second_project_with_the_same_key`,
+    /// `upsert_keeps_a_stored_decommissioned_state`.
     pub async fn upsert(&mut self, mut project: Project) -> Result<(), ProjectStoreError> {
         self.mutate(move |projects| {
             let is_new = !projects.contains_key(&project.name);
             let stored = projects
                 .get(&project.name)
                 .and_then(|p| p.project_key.clone());
+            // #10988: a re-register (config seed, `project_register`) must not
+            // re-list a decommissioned project; only `update_with` clears it.
+            if project.decommissioned_at.is_none() {
+                project.decommissioned_at = projects
+                    .get(&project.name)
+                    .and_then(|p| p.decommissioned_at);
+            }
+            // #10991: the same for an archived project.
+            if project.archived_at.is_none() {
+                project.archived_at = projects.get(&project.name).and_then(|p| p.archived_at);
+            }
             // Lazy: an absolute-path `repo_url` shells out to git, so mint only
             // when neither the store nor the caller supplied a key.
             let key = stored
@@ -416,6 +429,24 @@ pub(super) fn read_projects_blocking(data_dir: &Path) -> Option<Vec<Project>> {
         .inspect_err(|e| tracing::warn!(path = %path.display(), "projects.json unparseable: {e}"))
         .ok()?;
     Some(data.projects.into_values().collect())
+}
+
+/// Read the registry's projects without a lock or a runtime, failing closed.
+///
+/// Why: #10368 — a secrets resolver must tell "no such project" from "the
+/// registry could not be read"; [`read_projects_blocking`] answers `None` for both.
+/// What: an absent `projects.json` is an empty list, as in [`ProjectStore::load`];
+/// any other read error and any parse error is returned.
+/// Test: `session_start_registration_failure_is_an_error_not_a_registration`.
+pub(super) fn read_projects(data_dir: &Path) -> Result<Vec<Project>, ProjectStoreError> {
+    let bytes = match std::fs::read(data_dir.join("projects.json")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(ProjectStoreError::Io(e)),
+    };
+    let data: StoredData =
+        serde_json::from_slice(&bytes).map_err(|e| ProjectStoreError::Serialize(e.to_string()))?;
+    Ok(data.projects.into_values().collect())
 }
 
 #[cfg(test)]

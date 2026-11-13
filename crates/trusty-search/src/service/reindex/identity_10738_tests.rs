@@ -1153,6 +1153,10 @@ async fn a_delete_during_a_dropped_runs_rollback_leaves_no_data_or_identity() {
     let mut first = delete(Arc::clone(&run.state));
     let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut first).await;
     let ran_early = early.is_ok();
+    // #11022: the parked rollback holds the shared side, so no delete can win.
+    let exclusive_free = super::semaphore::index_teardown_lock(&IndexId::new(id))
+        .try_write()
+        .is_ok();
     release.send(()).expect("the rollback is still parked");
     rollback_settled(&permits).await;
     let mut outcome = match early {
@@ -1181,6 +1185,60 @@ async fn a_delete_during_a_dropped_runs_rollback_leaves_no_data_or_identity() {
     assert!(
         !ran_early,
         "the delete ran while the dropped run's rollback was in flight"
+    );
+    assert!(
+        !exclusive_free,
+        "the teardown lock's exclusive side was free while the rollback was parked"
+    );
+}
+
+/// Why: #11022 — the rollback skipped the HNSW resolve, the live reopen and
+/// the bump whenever a delete had signalled cancel, but three of the
+/// delete's exits keep the index registered. The surviving index then had
+/// no corpus attached, refused puts until a restart, and status did not
+/// report it.
+/// What: signal cancel before the run is dropped, so the rollback starts
+/// with it set, wait for the rollback, then run a delete that times out on
+/// a teardown guard the test holds. Assert the delete kept the index and
+/// the index has a corpus attached or is quarantined. Fails before the
+/// fix: no corpus is attached and the index is not quarantined.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_cancelled_rollback_whose_delete_keeps_the_index_leaves_it_attached() {
+    use crate::service::server::{delete_index_report, DeleteIndexParams};
+    let id = "identity-midbatch-cancel-kept-10738";
+    let index_id = IndexId::new(id);
+    let permits = super::semaphore::index_semaphore(&index_id);
+    let (run, writer) = drop_a_staged_run(id, || {
+        let writer = super::semaphore::index_teardown_lock(&IndexId::new(id))
+            .try_read_owned()
+            .expect("test setup: take the teardown lock's shared side");
+        super::semaphore::signal_index_cancel(&IndexId::new(id));
+        writer
+    })
+    .await;
+    rollback_settled(&permits).await;
+
+    let params = DeleteIndexParams {
+        delete_data: true,
+        expected_root_path: None,
+    };
+    let outcome = delete_index_report(&run.state, id, params)
+        .await
+        .unwrap_or_else(|(_, body)| body);
+    drop(writer);
+    assert_eq!(outcome["removed"], false, "{outcome}");
+    assert_eq!(outcome["quiesced"], false, "{outcome}");
+    assert!(
+        run.state.registry.get(&index_id).is_some(),
+        "test setup: the timed-out delete keeps the index registered"
+    );
+
+    let indexer = run.handle.indexer.read().await;
+    assert!(
+        indexer.corpus_store().is_some() || indexer.is_write_quarantined(),
+        "a surviving index must have a corpus attached or be quarantined"
     );
 }
 

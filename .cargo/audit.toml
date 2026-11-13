@@ -15,9 +15,10 @@
 
 [advisories]
 # RUSTSEC-2026-0367 / -0368 / -0369 — zip extract-to-disk bugs, patched only in
-# zip >= 9.0.0. Pinned upstream with no zip-9 release: calamine 0.36 (zip
-# 8.6.0), candle-core 0.10.2 via fastembed (7.2.0), candle-core 0.8.4 optional
-# candle (1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (3.0.0). No
+# zip >= 9.0.0. Pinned upstream with no zip-9 release: candle-core 0.10.2 via
+# fastembed (7.2.0), candle-core 0.8.4 optional candle (1.1.4),
+# utoipa-swagger-ui 9.0.2 build-only swagger-ui (3.0.0). calamine 0.38.0 is on
+# zip 9.0.5. No
 # extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see
 # #10019. Review by 2026-11-20 (Architect ruling df-D59); the date also sits in
 # each id's `deny.toml` reason.
@@ -29,7 +30,25 @@
 # No call to extract() on zip < 9 is reachable from a shipped crate. EXPIRES
 # 2026-12-07 (Architect ruling df-D97). See #10651 (move to zip 9 when upstream
 # releases; re-check on expiry) and #10788. Same reason as in `deny.toml`.
+#
+# RUSTSEC-2023-0071 — rsa Marvin Attack (timing side channel in RSA
+# decryption). rsa pulled by webauthn-rs crypto-glue; trusty-mpm accepts ES256
+# credentials only, so no RSA decryption runs; no RSA credential is stored or
+# used at approval. Review by 2027-02-07 (owner
+# ruling D72, #8878 PR2b-1b). Same reason as in `deny.toml`.
+#
+# RUSTSEC-2026-0436 — calamine CFB/OLE2 parser panics or allocates without
+# bound on a crafted .xls/.xlsb; denial of service only, no memory unsafety.
+# Patched only in calamine >= 0.38.0. The OKF extraction worker vendors
+# calamine 0.36.1 through a path patch (workers/okf-extract/vendor/calamine,
+# #11093), so it reaches this file only through
+# `cargo audit --file workers/okf-extract/Cargo.lock`. EXPIRES 2026-12-12 (owner
+# ruling Dgp, 2026-11-12, 30 days). Exit: #11154 moves the worker to
+# calamine >= 0.38.0 and this id leaves both files. See #11094. Same reason as
+# in `deny.toml`.
 ignore = [
+  "RUSTSEC-2023-0071",
+  "RUSTSEC-2026-0436",
   "RUSTSEC-2026-0429",
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",

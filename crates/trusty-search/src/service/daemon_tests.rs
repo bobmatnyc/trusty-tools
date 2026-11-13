@@ -1069,3 +1069,63 @@ async fn run_daemon_with_socket_leaves_an_existing_parent_mode_unchanged() {
     })
     .await;
 }
+
+/// #11060: a lockfile naming a live pid that does not hold the lock must not
+/// block startup, and a real holder must still be reported.
+///
+/// Why: after a container restart, `daemon.lock` on the volume names a pid
+/// from the old pid namespace that is live and unrelated in the new one. The
+/// pid-only check refused every restart.
+/// What: writes this test process's pid (live, not a lock holder) into the
+/// data dir's `daemon.lock` and asserts `running_daemon_pid` is `None`. Then
+/// takes the lock with `acquire_lock` and asserts it reports our pid.
+/// `#[serial]`: mutates `TRUSTY_DATA_DIR`.
+/// Test: this function.
+#[test]
+#[serial]
+fn a_live_unrelated_pid_in_an_unheld_lock_does_not_block_startup_11060() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let lock = tmp.path().join("daemon.lock");
+    let me = std::process::id();
+    std::fs::write(&lock, me.to_string()).expect("seed the stale lockfile");
+    assert!(pid_alive(me), "precondition: the recorded pid is live");
+    // SAFETY: test-only; `#[serial]` keeps every other TRUSTY_DATA_DIR user out.
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR", tmp.path());
+    }
+    let stale = running_daemon_pid();
+    let holder = acquire_lock(&lock).expect("the stale lock must be acquirable");
+    let held = running_daemon_pid();
+    drop(holder);
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+    }
+    assert_eq!(
+        stale, None,
+        "a live pid with no flock holder is a stale lock and must not block startup"
+    );
+    assert_eq!(
+        held,
+        Some(me),
+        "a held lock must still be reported as running"
+    );
+}
+
+/// #11060 Fail-Open Check: a lock whose flock cannot be probed is not free.
+///
+/// Why: reading an unverifiable lock as free would let `start` proceed past
+/// its pre-check against a daemon it could not see.
+/// What: probes a directory at the lock path (open fails with EISDIR), checks
+/// the probe is an `Err`, and that `holder_verdict` keeps the pid.
+/// Test: this function.
+#[test]
+fn a_lock_that_cannot_be_probed_is_not_treated_as_free_11060() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let probe = lock_is_held(tmp.path());
+    assert!(
+        probe.is_err(),
+        "a directory at the lock path must fail the probe"
+    );
+    assert_eq!(holder_verdict(4242, probe), Some(4242));
+    assert_eq!(holder_verdict(4242, Ok(false)), None);
+}

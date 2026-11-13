@@ -120,6 +120,9 @@ pub async fn project_register(
         worktree: existing.as_ref().and_then(|p| p.worktree),
         // #10530: carried forward; the store assigns it on first register.
         project_key: existing.as_ref().and_then(|p| p.project_key.clone()),
+        // #10988: an upsert never clears a decommissioned state.
+        decommissioned_at: existing.as_ref().and_then(|p| p.decommissioned_at),
+        archived_at: existing.as_ref().and_then(|p| p.archived_at),
     };
     registry
         .register(project.clone())

@@ -55,6 +55,10 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 serde_yaml = "0.9"
 tempfile = "3"
 
+# #11093: calamine 0.36.1 with zip >= 9.0.5. See vendor/calamine/VENDORED.md.
+[patch.crates-io]
+calamine = { path = "vendor/calamine" }
+
 [lints.rust]
 # One reviewed `unsafe` call site: the macOS `sandbox_check` probe (src/sandbox.rs).
 unsafe_code = "deny"

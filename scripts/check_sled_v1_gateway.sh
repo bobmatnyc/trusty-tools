@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+#
+# check_sled_v1_gateway.sh — static and grading test for the gateway and
+# raw-CONNECT rows of docker/sled/check_v1.sh (issue #11156, audit B3).
+#
+# Why: check_v1.sh runs on a docker host only, so nothing in CI showed that
+#   its gateway row probed six TCP ports and no UDP while the README called it
+#   the host-firewall guarantee. This check pins the coverage without docker.
+# What: asserts the in-app TCP scan walks every port 1-65535 under a whole-scan
+#   bound, the UDP set is 53 123 443 41641, the fixed six-port loop is gone,
+#   and the raw-CONNECT rows send the four IP literals over /dev/tcp and pass
+#   only on 400 or 403. It then extracts scan_verdict and udp_verdict and runs
+#   them on canned scan output: a clean scan passes; a timed-out scan, a
+#   missing tool, a lost worker, a short count, a closed control port, an
+#   answering port, a spliced line and a worker BAD count above 0 each fail.
+#   It extracts probe_class too: a timeout with no start marker is not a drop.
+#   #11156: it runs the scan's pid-budget block on a stub cgroup (the workers
+#   fit under the app's --pids-limit) and udp() on a stub docker: an exec that
+#   fails to start is retried a bounded number of times, a probe result never.
+#   The reap block kills only argv "bash -c gw=$0 jobs=$1 ..." processes.
+#
+# Usage: ./scripts/check_sled_v1_gateway.sh [path/to/check_v1.sh]
+# Exit:  0 when every assertion holds; 1 naming each one that does not.
+#
+# Portability: bash 3.2 (macOS) and bash 5 (Linux CI). Needs no docker.
+
+# The patterns are literal check_v1.sh source; nothing in them should expand.
+# shellcheck disable=SC2016
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+V1="${1:-$SCRIPT_DIR/../docker/sled/check_v1.sh}"
+PASSED=0
+FAILED=0
+
+check() {
+  if [ "$2" = yes ]; then
+    PASSED=$((PASSED + 1))
+  else
+    FAILED=$((FAILED + 1))
+    echo "FAIL: $1"
+  fi
+}
+# has FIXED-STRING — "yes" when check_v1.sh holds the line fragment.
+has() { if grep -qF -- "$1" "$V1"; then echo yes; else echo no; fi; }
+lacks() { if grep -qF -- "$1" "$V1"; then echo no; else echo yes; fi; }
+
+[ -r "$V1" ] || { echo "FAIL: cannot read $V1"; exit 1; }
+
+# 1. TCP coverage: every port, a bounded scan, no fixed port list.
+check "the scan walks ports 1-65535, one stride per worker" \
+  "$(has 'for ((p = $1; p <= 65535; p += jobs)); do')"
+check "the scan starts one worker per index 1..JOBS" \
+  "$(has 'for ((i = 1; i <= jobs; i++)); do worker "${i}" & done')"
+# bash 3.2 misparses an unbalanced $( inside single quotes in $( ), so the
+# patterns holding one are assigned first.
+check "the bound runs inside the app, killing the workers too" \
+  "$(has 'timeout -k 5 "${SCAN_BOUND}" bash -c "${TCP_SCAN}"')"
+old_bound_pat='out="$(timeout "${SCAN_BOUND}" docker exec'
+check "the bound no longer wraps only the docker CLI" "$(lacks "$old_bound_pat")"
+check "each worker probes the proxy's 3128 as a control and reports BAD" \
+  "$( [ "$(has 'probe "${ctl}" 3128')$(has 'echo "done $1 ${n} ${R} ${b}"')" = yesyes ] && echo yes || echo no)"
+marker_pat="bash -c 'echo s; exec 3<>\"/dev/tcp/\$0/\$1\"'"
+check "the connect child prints its start marker first" "$(has "$marker_pat")"
+check "the six-port gateway loop is gone" \
+  "$(lacks 'for port in 22 53 80 443 2375 3128; do')"
+
+# 2. UDP coverage and its control.
+check "UDP_PORTS is 53 123 443 41641" "$(has 'UDP_PORTS="53 123 443 41641"')"
+check "the UDP probe sends its payload in one write" "$(has 'cat "${f}" >&3')"
+check "the UDP bound runs inside the app" "$(has 'timeout -k 2 20 bash -c "${UDP_PROBE}"')"
+check "every UDP port gets a gateway row" "$(has 'for port in ${UDP_PORTS}; do')"
+ctl_pat='res="$(udp 127.0.0.11 53 | tail -n 1)"; ok=no; [ "${res}" = answered ] && ok=yes'
+check "the UDP control asks the embedded DNS 127.0.0.11:53" "$(has "$ctl_pat")"
+
+# 3. The raw-CONNECT rows: a raw socket, four literals, 400 or 403 only.
+raw_pat="line=\"\$(app timeout 10 bash -c 'exec 3<>\"/dev/tcp/\$0/3128\" || exit 1"
+check "rawconnect opens /dev/tcp to the proxy's 3128" "$(has "$raw_pat")"
+check "rawconnect sends CONNECT TARGET HTTP/1.1" \
+  "$(has 'printf "CONNECT %s HTTP/1.1')"
+check "the four IP literals are probed" \
+  "$(has 'for target in 0x01010101:443 0x01.0x01.0x01.0x01:443 0001.0001.0001.0001:443 16843009:443; do')"
+check "a raw CONNECT row passes on 400 or 403 only" \
+  "$(has 'case "${code}" in 400|403) ok=yes ;; esac')"
+
+# 4. The verdicts, run on canned output. Extract the two functions only.
+FUNCS="$(awk '/^scan_verdict\(\) \{/ {f=1} f {print} f && /^\}/ {f=0} /^udp_verdict\(\) /' "$V1")"
+if [ -z "$FUNCS" ] || ! eval "$FUNCS" 2> /dev/null \
+  || ! declare -F scan_verdict > /dev/null || ! declare -F udp_verdict > /dev/null; then
+  check "scan_verdict and udp_verdict are defined in check_v1.sh" no
+else
+  # #11156: every scan names its worker count on one "jobs" line first.
+  J='jobs 2 pids 47/1024'
+  ok_scan="$(printf '%s\ndone 1 32768 open 0\ndone 2 32767 open 0' "$J")"
+  # verdict WANT NAME RC OUTPUT — scan_verdict on 2 workers gives WANT (yes|no).
+  verdict() {
+    local got
+    got="$(scan_verdict "$3" "$4" 2)"
+    if [ "$1" = yes ]; then [ "$got" = yes ] && got=yes || got=no
+    else [ "$got" != yes ] && got=yes || got=no; fi
+    check "scan_verdict: $2 ($(scan_verdict "$3" "$4" 2))" "$got"
+  }
+  verdict yes "a clean full scan passes" 0 "$ok_scan"
+  verdict no "a scan past the bound (124) fails" 124 "$ok_scan"
+  verdict no "a missing tool (127) fails" 127 ""
+  verdict no "an error line fails" 0 "error: no timeout command in the app"
+  verdict no "empty output fails" 0 ""
+  verdict no "a lost worker fails" 0 "$(printf '%s\ndone 1 32768 open 0' "$J")"
+  verdict no "a repeated worker index fails" 0 "$(printf '%s\ndone 1 32768 open 0\ndone 1 32767 open 0' "$J")"
+  verdict no "a short count fails" 0 "$(printf '%s\ndone 1 32768 open 0\ndone 2 100 open 0' "$J")"
+  verdict no "a closed control port fails" 0 "$(printf '%s\ndone 1 32768 open 0\ndone 2 32767 refused 0' "$J")"
+  verdict no "an open port fails" 0 "$(printf '%s\nport 2222 open\ndone 1 32768 open 1\ndone 2 32767 open 0' "$J")"
+  verdict no "a refused port fails" 0 "$(printf 'port 8080 refused\n%s' "$ok_scan")"
+  verdict no "an unexplained probe error fails" 0 "$(printf 'port 9 other:rc1:Bad_file\n%s' "$ok_scan")"
+  verdict no "a port line spliced after a stray message fails" 0 \
+    "$(printf '%s\ndone 1 32768 open 0\nbash: fork: retry: port 2222 open\ndone 2 32767 open 0' "$J")"
+  verdict no "a worker reporting BAD above 0 fails" 0 \
+    "$(printf '%s\ndone 1 32768 open 1\ndone 2 32767 open 0' "$J")"
+  verdict no "an old four-field done line fails" 0 "$(printf '%s\ndone 1 32768 open\ndone 2 32767 open' "$J")"
+  verdict no "a scan with no jobs line fails" 0 "$(printf 'done 1 32768 open 0\ndone 2 32767 open 0')"
+  verdict no "two jobs lines fail" 0 "$(printf '%s\n%s' "$J" "$ok_scan")"
+  verdict no "a jobs line above JOBS fails" 0 \
+    "$(printf 'jobs 3 pids 1/9\ndone 1 21845 open 0\ndone 2 21845 open 0\ndone 3 21845 open 0')"
+  verdict yes "fewer workers than JOBS pass when they cover every port" 0 \
+    "$(printf 'jobs 1 pids 47/1024\ndone 1 65535 open 0')"
+  verdict no "fewer workers fail on a short count" 0 "$(printf 'jobs 1 pids 47/1024\ndone 1 32768 open 0')"
+  for r in timeout unreachable; do
+    v=no; [ "$(udp_verdict "$r")" = yes ] && v=yes
+    check "udp_verdict: $r passes" "$v"
+  done
+  for r in answered refused other:socket other:write "other:exec failed" ""; do
+    v=no; [ "$(udp_verdict "$r")" != yes ] && v=yes
+    check "udp_verdict: '$r' fails" "$v"
+  done
+fi
+
+# 5. probe_class, extracted from the in-app TCP scan: a timeout counts as a
+# drop only after the child printed its start marker.
+PC="$(awk '/^probe_class\(\) \{/ {f=1} f {print} f && /^\}/ {f=0}' "$V1")"
+if [ -z "$PC" ] || ! eval "$PC" 2> /dev/null || ! declare -F probe_class > /dev/null; then
+  check "probe_class (a timeout with no start marker is not a drop) is defined" no
+else
+  # pc WANT RC OUTPUT — probe_class RC OUTPUT prints WANT.
+  pc() {
+    local got v=no
+    got="$(probe_class "$2" "$3")"
+    [ "$got" = "$1" ] && v=yes
+    check "probe_class $2 '$3' -> $1 (got $got)" "$v"
+  }
+  pc timeout 124 "s"
+  pc other:not-started 124 ""
+  pc other:not-started 0 ""
+  pc open 0 "s"
+  pc refused 1 "$(printf 's\nbash: connect: Connection refused')"
+  pc unreachable 1 "$(printf 's\nbash: connect: No route to host')"
+  pc other:rc126:Permission_denied 126 "$(printf 's\nbash: x: Permission denied')"
+fi
+
+# 6. #11156: the scan sizes its workers to the app's pid cap. Run its budget
+# block with cat reading a stub cgroup: 256 workers at 5 tasks each must not
+# reach launch.sh's --pids-limit 1024.
+BUDGET="$(awk '/^max="\$\(cat \/sys\/fs\/cgroup\/pids.max/ {f=1} f {print} f && /^echo "jobs / {f=0}' "$V1")"
+if [ -z "$BUDGET" ]; then
+  check "the scan sizes its workers to the app's pid cap (budget block present)" no
+else
+  # budget MAX CUR JOBS — the scan's "jobs" line for that cgroup state.
+  # shellcheck disable=SC2034,SC2329 # jobs and cat are used by the eval'd block
+  budget() {
+    (_MAX="$1" _CUR="$2" jobs="$3"
+     cat() {
+       case "$1" in *pids.max) v="${_MAX}" ;; *pids.current) v="${_CUR}" ;; esac
+       [ "$v" = none ] && return 1; echo "$v"
+     }
+     eval "$BUDGET")
+  }
+  while read -r mx cu ask; do
+    line="$(budget "$mx" "$cu" "$ask")"; n="$(awk '$1=="jobs" {print $2}' <<< "$line")"
+    v=no
+    if ! [[ "$mx$cu" =~ ^[0-9]+$ ]]; then
+      [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -le 150 ] && [ "$n" -le "$ask" ] && v=yes
+    elif [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -le "$ask" ] \
+      && [ $((n * 5 + cu)) -le $((mx - mx / 4)) ]; then v=yes; fi
+    check "pid budget max=$mx current=$cu asked=$ask -> '$line' fits 3/4 of the cap (150 if unreadable)" "$v"
+  done <<'ST'
+1024 47 256
+1024 300 256
+4096 47 256
+max 47 256
+none none 256
+none 47 256
+1024 47 8
+none none 8
+ST
+  v=no; line="$(budget 1024 1000 256)"; case "$line" in "error: no pid headroom"*) v=yes ;; esac
+  check "pid budget with no headroom is an error line" "$v"
+fi
+
+# 7. #11156: udp() on a stub docker. An exec with no result line and rc
+# 125-127 is tried again up to EXEC_TRIES times; any other rc is not, and a
+# result line is never retried: with rc != 0 it is "other:exec rc=N after R".
+UDPF="$(awk '/^udp\(\) \{/ {f=1} f {print} f && /^\}/ {f=0}' "$V1")"
+if [ -z "$UDPF" ] || ! eval "$UDPF" 2> /dev/null || ! declare -F udp > /dev/null; then
+  check "udp() is defined in check_v1.sh" no
+else
+  UT="$(mktemp -d)"
+  # shellcheck disable=SC2034 # read by the eval'd udp()
+  UDP_PROBE=probe
+  # STUB: each docker call pops the next "RC OUTPUT" line of $UT/plan.
+  timeout() { shift; "$@"; }
+  sleep() { :; }
+  udp_payload() { echo 00; }
+  docker() {
+    local l rc
+    l="$(head -n 1 "$UT/plan")"; tail -n +2 "$UT/plan" > "$UT/p2"; mv "$UT/p2" "$UT/plan"
+    echo x >> "$UT/calls"
+    rc="${l%% *}"; [ "$l" = "$rc" ] || echo "${l#* }"
+    return "$rc"
+  }
+  # uc WANT-PREFIX CALLS PLAN... — udp's last line starts WANT after CALLS execs.
+  uc() {
+    local want="$1" calls="$2" got n; shift 2
+    printf '%s\n' "$@" > "$UT/plan"; : > "$UT/calls"
+    got="$(APP=a EXEC_TRIES=3 udp 10.0.0.1 53 | tail -n 1)"; n="$(wc -l < "$UT/calls" | tr -d ' ')"
+    v=no; case "$got" in "$want"*) [ "$n" = "$calls" ] && v=yes ;; esac
+    check "udp: plan '$*' -> '$got' after $n exec(s), want '$want' after $calls" "$v"
+  }
+  uc timeout 2 "126 OCI runtime exec failed: resource temporarily unavailable" "0 timeout"
+  uc answered 1 "0 answered" "0 timeout"
+  uc "other:exec failed rc=126 try 3" 3 "126 a" "126 b" "126 c" "0 timeout"
+  uc "other:exec failed rc=124" 1 "124 x" "0 timeout"
+  uc refused 3 "125 a" "127 b" "0 refused"
+  uc "other:exec failed rc=254 try 1" 1 "254 b" "0 timeout"
+  uc "other:exec failed rc=0 try 1" 1 "0 garbage" "0 timeout"
+  # A probe that ran must never be re-rolled into a timeout (a PASS).
+  uc "other:exec rc=1 after refused" 1 "1 refused" "0 timeout"
+  uc "other:exec rc=255 after answered" 1 "255 answered" "0 timeout"
+  uc "other:exec rc=143 after refused" 1 "143 refused" "0 timeout"
+  uc "other:exec rc=130 after answered" 1 "130 answered" "0 timeout"
+  uc "other:exec rc=126 after other:socket" 1 "126 other:socket" "0 timeout"
+  rm -rf "$UT"
+fi
+
+# 8. #11156: the reap uses bash builtins on /proc (no procps in the image) and
+# matches the scan's argv only.
+check "the reap reads argv with mapfile from /proc" \
+  "$(has 'mapfile -d '"''"' -t a < "${d}/cmdline"')"
+check "the reap matches bash -c gw=\$0 jobs=\$1 only" \
+  "$(has "case \"\${a[2]:-}\" in 'gw=\$0 jobs=\$1 '*)")"
+check "the reap runs as sled in the app" "$(has 'docker exec -u sled "${APP}" bash -c "${REAP}"')"
+check "a failed reap prints an INFO line" "$(has 'INFO reap of leftover scan workers failed')"
+check "pkill is gone (no procps dependency)" "$(lacks 'pkill')"
+
+echo "check_sled_v1_gateway: ${PASSED} passed, ${FAILED} failed"
+[ "$FAILED" -eq 0 ]

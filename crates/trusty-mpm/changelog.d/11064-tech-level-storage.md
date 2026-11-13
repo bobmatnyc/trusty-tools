@@ -1,0 +1,3 @@
+Added
+- The Architect bundle stores a settable technical level for owner-facing text: `technical_level` in the dashboard settings (`non-technical`, `vibe-coder`, `pm`, `engineer`, `senior-engineer`, `cto`), a per-item `level_override`, and a per-user level for secondary users from `local/users/`. A write with any other value is refused; an unset or unknown value reads as `pm` (#11064).
+- The Architect's prompt hook adds `TECH LEVEL: <level>` beside `USER STATE`, on the first call after a change and on the same reminder cadence. A secondary user's turn uses that user's own level, and their message no longer counts as an owner turn (#11064).

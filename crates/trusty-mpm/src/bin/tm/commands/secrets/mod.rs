@@ -11,7 +11,8 @@
 //! directory as the project, the system clipboard and stdin — and
 //! [`dispatch`]es one verb from `verbs`. Output goes to one writer; errors
 //! carry fixed text, key names and paths only. Nothing here logs. Every
-//! write — `set`, `remove`, `import`, `copy` — stays in the project scope.
+//! write — `set`, `remove`, `import`, `copy` — stays in the project scope;
+//! `assign` (#11015) writes the scope of the project it names.
 //! Test: `tests.rs` beside this file, against an in-process server over a
 //! `MemoryBackend` in a temp dir, plus a second one as the `copy` target.
 //!
@@ -23,6 +24,9 @@ use std::io::Write;
 
 use crate::cli::SecretsAction;
 
+// #11015: `tm secrets assign`.
+#[cfg(unix)]
+mod assign;
 #[cfg(unix)]
 mod doctor;
 // #9621: `tm secrets exec` and its hidden stub.
@@ -135,6 +139,20 @@ pub(crate) async fn dispatch(
     action: SecretsAction,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
+    dispatch_with(ctx, assign::PRODUCTION, action, out).await
+}
+
+/// [`dispatch`], with `assign`'s project resolver and caller check from
+/// `seam` (#11015).
+///
+/// Test: `assign_tests.rs`.
+#[cfg(unix)]
+pub(crate) async fn dispatch_with(
+    ctx: &Ctx<'_>,
+    seam: assign::Seam<'_>,
+    action: SecretsAction,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     match action {
         SecretsAction::Set {
             key,
@@ -158,9 +176,48 @@ pub(crate) async fn dispatch(
         SecretsAction::Import { path, group } => {
             verbs::import(ctx, &path, group.as_ref().map(|g| g.text()), out).await
         }
-        SecretsAction::Copy { from, to, keys } => {
+        SecretsAction::Copy {
+            from,
+            to,
+            from_service,
+            from_account,
+            from_vault,
+            from_key,
+            keys,
+        } => {
             let keys: Vec<&str> = keys.iter().map(|k| k.text()).collect();
-            verbs::copy(ctx, &from, &to, &keys, out).await
+            // #10998: clap pairs the flags; a lone half cannot reach here.
+            let source = match (&from_service, &from_account, &from_vault, &from_key) {
+                (Some(service), Some(account), _, _) => Some(verbs::NamedSource::Item {
+                    service: service.as_str(),
+                    account: account.as_str(),
+                }),
+                (_, _, Some(vault), Some(key)) => Some(verbs::NamedSource::Vault {
+                    vault: vault.as_str(),
+                    key: key.as_str(),
+                }),
+                _ => None,
+            };
+            match source {
+                Some(source) => verbs::copy_named(ctx, &from, &to, source, &keys, out).await,
+                None => verbs::copy(ctx, &from, &to, &keys, out).await,
+            }
+        }
+        SecretsAction::Assign {
+            src,
+            project,
+            dest,
+            from_backend,
+            to_backend,
+        } => {
+            let args = assign::AssignArgs {
+                src: src.text(),
+                project: &project,
+                dest: dest.as_deref(),
+                from: &from_backend,
+                to: &to_backend,
+            };
+            assign::assign(ctx, seam, args, out).await
         }
         SecretsAction::Doctor => doctor::doctor(ctx, out).await,
         SecretsAction::Resolve { key } => resolve::run(key.text(), out).await,

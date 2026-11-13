@@ -6,6 +6,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.0] — 2026-11-12
+
+### Added
+
+- `console_token` (behind `daemon-token`): the one loader for the trusty-console token file named by `TRUSTY_CONSOLE_TOKEN_FILE` (#11074). It refuses a missing file, a non-regular file, a file with a group or other permission bit, and a token shorter than 32 bytes, longer than 4 KiB or holding a byte outside visible ASCII. Errors name the path and the problem, never the content. `ConsoleToken` has a redacted `Debug` and compares in constant time.
+
+## [0.69.3] — 2026-11-12
+
+### Added
+
+- `console_rpc` gains the method names `console.machine_status` and `console.history` (#10942), and a `console_rpc::metrics` submodule, gated on `console-metrics` + `host-metrics`, with their request types `MachineStatusRequest` and `HistoryRequest` and response types `ConsoleMachineStatus` (`ready` plus the `MachineStatus` body) and `HistorySnapshot`. The request types accept absent, `null`, an object or `[]` and refuse anything else.
+- `HistorySnapshot`, `ServiceSample`, `ServiceTransition`, `ServiceState` and `MACHINE_HISTORY_SCHEMA_VERSION` moved here from trusty-console, so a client without a trusty-console dependency can decode the history, including the per-service CPU/RSS rings in `service_samples` (#10943). Every `HistorySnapshot` field now defaults on decode.
+- `ServiceStatus` gains an `Unknown` variant, and an unrecognised `ServiceStatus` or `ServiceState` string now decodes to `Unknown` instead of failing the whole answer, so an older `tm tui` still reads a newer console (#10996).
+
+### Fixed
+
+- A failed git step in `catchup::session_refs` now names the child's exit code, or the signal that killed it, and says when stderr was empty (#10667).
+- `linux_lifecycle::stop`, `start` and `restart` no longer read an unlinked or unanswering socket as "not running": a process of the daemon's binary that carries the descriptor's new `liveness_args` makes them fail with `LifecycleError::RunningUnserved`, so `restart` never starts a second daemon beside a running one (#11098).
+- `linux_lifecycle::start` spawns the daemon in the descriptor's new `working_dir` (default `/`), never the caller's cwd, and with a cleared environment holding only `DaemonDescriptor::BASE_ENV` plus the descriptor's new `env_passthrough` names, so a start from inside a checkout cannot load its `.env.local` or hand the daemon the caller's tokens (#11098).
+- The `linux_lifecycle` liveness scan counts only processes of this daemon instance: the descriptor's new `instance_env` names the variables, and their values, that identify the instance (default: the caller's `TRUSTY_DATA_DIR_OVERRIDE`), and `start` spawns the daemon with exactly those values. A sibling instance with the same binary and argv but another data dir, such as a sandbox, no longer makes `stop`, `start` or `restart` refuse, so `restart` brings the daemon back and a stopped daemon is started (#11098).
+- The scan fails closed: a matching process whose environment cannot be read is the new `LifecycleError::InstanceUnreadable`, and a `/proc` read error other than a vanished process or another uid's hidden entry (for example `EMFILE`), or a `/proc/<pid>/status` that cannot be parsed, is an error instead of "not running" (#11098).
+- The `linux_lifecycle` liveness scan reads `/proc/<pid>/status` as bytes, so a process anywhere on the host whose name is not valid UTF-8 no longer makes `stop`, `start` or `restart` fail for an unrelated daemon (#11098).
+
+## [0.69.1] — 2026-11-12
+
+### Added
+
+- New Linux-only `linux_lifecycle` module (feature `uds`): `stop`, `start` and `restart` for a daemon described by a caller-built `DaemonDescriptor`. `stop` identifies the listener by the socket's `SO_PEERCRED` pid and its `/proc/<pid>/exe` name, signals it through a pidfd (SIGTERM, then SIGKILL after the grace), and returns `Stopped` only once the pid has exited and the descriptor's stopped signal holds; a pid that outlives SIGKILL is a `Survivor` error. `start` spawns `<install dir>/<binary>` detached and succeeds only when the spawned pid serves the socket; when it fails after the spawn it kills and reaps the child, and `NotReady` and `ChildUnpinned` (no pidfd for the child) carry `killed`. `restart` starts only after a `Stopped` or `NotRunning` stop ([#11084](https://github.com/bobmatnyc/trusty-tools/issues/11084))
+
 ## [0.69.0] — 2026-11-10
 
 ### Added

@@ -96,6 +96,7 @@ mod tm_hook_pm_guard;
 mod tm_hook_pm_guard_absolute_write_7228;
 mod tm_hook_pm_guard_architect_envfile_8939;
 mod tm_hook_pm_guard_architect_pane_8902;
+mod tm_hook_pm_guard_binary_operands_10672;
 mod tm_hook_pm_guard_build_lease;
 mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
@@ -135,6 +136,8 @@ mod tm_hook_session_end_8980;
 mod tm_hook_session_start_8531;
 // #8433 P0 (D09): a tainted session's new id reads tainted at SessionStart.
 mod tm_hook_session_start_taint_8433;
+// #10960: the Architect's standing-rules block, per turn and at resume.
+mod tm_hook_standing_rules_10960;
 mod tm_ls_state_colors;
 // #9621: `tm secrets exec` on a fake socket, and live on a real server.
 mod tm_secrets_exec;

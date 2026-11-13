@@ -161,12 +161,9 @@ impl ProjectRegistry {
             .mutate(move |projects| {
                 // #10586: hand the kept record back, so init can name it.
                 // #10586: a legacy record stores no key; derive it, as #10696 does.
-                let present = projects.values().find(|p| {
-                    p.name == project.name
-                        || p.repo_url == project.repo_url
-                        || (key.is_some()
-                            && p.project_key.clone().or_else(|| origin_key(&p.repo_url)) == key)
-                });
+                let present = projects
+                    .values()
+                    .find(|p| holds_registration(p, &project, key.as_deref()));
                 if let Some(kept) = present {
                     return Ok(Some(kept.clone()));
                 }
@@ -217,6 +214,8 @@ impl ProjectRegistry {
                 worktree: entry.worktree,
                 // #10530: the store assigns the key at first register and keeps it.
                 project_key: None,
+                decommissioned_at: None,
+                archived_at: None,
             };
             let name = project.name.clone();
             if let Err(e) = self.register(project).await {
@@ -301,6 +300,90 @@ impl ProjectRegistry {
             .await;
     }
 
+    /// Mark `name` decommissioned at `at` (#10988).
+    ///
+    /// Why: a decommissioned project keeps its row so implicit registration
+    /// cannot re-list it; the row carries the state.
+    /// What: one [`Self::update_with`] that stamps `decommissioned_at`.
+    /// `NotFound` propagates without writing.
+    /// Test: `decommission_project_stops_live_sessions_and_keeps_the_workspace`.
+    pub async fn mark_decommissioned(
+        &self,
+        name: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Project, ProjectStoreError> {
+        self.update_with(name, move |mut p| {
+            p.decommissioned_at = Some(at);
+            p
+        })
+        .await
+    }
+
+    /// Mark `name` archived at `at` (#10991).
+    ///
+    /// Why: owner ruling D8b — the TUI dims a project whose directory moved to
+    /// the archive. What: one [`Self::update_with`] that stamps `archived_at`;
+    /// `NotFound` propagates without writing.
+    /// Test: `archive_session_moves_the_directory_and_marks_the_project`.
+    pub async fn mark_archived(
+        &self,
+        name: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Project, ProjectStoreError> {
+        self.update_with(name, move |mut p| {
+            p.archived_at = Some(at);
+            p
+        })
+        .await
+    }
+
+    /// Hold the registry's write lock until the guard drops (tests only): any
+    /// writer, such as [`Self::mark_archived`], blocks meanwhile (#10991).
+    #[cfg(test)]
+    pub(crate) async fn hold_write_lock(&self) -> tokio::sync::OwnedRwLockWriteGuard<ProjectStore> {
+        Arc::clone(&self.store).write_owned().await
+    }
+
+    /// Clear `decommissioned_at` and `archived_at` (#10991) on every project
+    /// `record`'s `repo_url` binds to (#10988).
+    ///
+    /// Why: Bob's ruling — a project shows decommissioned until a new session
+    /// runs. The boot pass (`auto_register_from_sessions`) never calls this: it
+    /// replays old records, and no new session has run.
+    /// What: matches with the fleet grouping's own rule
+    /// ([`super::resolve_session_project`]) and returns the names it cleared.
+    /// A list or update failure is returned, never logged and dropped: the
+    /// caller (`spawn_managed`, the one place every spawn path returns
+    /// through) reports it to its client.
+    /// Test: `reactivate_for_session_clears_a_decommissioned_project`,
+    /// `reactivate_for_session_returns_a_list_failure`,
+    /// `auto_register_keeps_a_decommissioned_project_decommissioned`.
+    pub async fn reactivate_for_session(
+        &self,
+        record: &SessionRecord,
+    ) -> Result<Vec<String>, ProjectStoreError> {
+        let projects = self.list().await?;
+        let mut cleared = Vec::new();
+        // #10991: a new session also lifts the archived state.
+        for p in projects
+            .iter()
+            .filter(|p| p.is_decommissioned() || p.is_archived())
+        {
+            if super::resolve_session_project(record, std::slice::from_ref(p)).is_none() {
+                continue;
+            }
+            self.update_with(&p.name, |mut p| {
+                p.decommissioned_at = None;
+                p.archived_at = None;
+                p
+            })
+            .await?;
+            info!(name = %p.name, "project reactivated by a new session (#10988)");
+            cleared.push(p.name.clone());
+        }
+        Ok(cleared)
+    }
+
     /// Shared tail of [`Self::auto_register_from_sessions`] (looped) and
     /// [`Self::register_from_session`] (single-record): derive an implicit
     /// `Project` from `record`'s `repo_url` and upsert it unless `existing`
@@ -362,6 +445,8 @@ impl ProjectRegistry {
             // #3455: no declared preference; defaults to worktree-ON.
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         };
         if let Err(e) = self.register(project).await {
             warn!(name = %name, "{log_prefix}: failed to register: {e}");
@@ -413,6 +498,24 @@ impl ExistingProjects {
         self.origin_urls.contains(repo_url.trim())
             || origin_key(repo_url).is_some_and(|key| self.origin_keys.contains(&key))
     }
+}
+
+/// Whether stored row `p` already holds `project`: same name, same `repo_url`,
+/// or the same `owner/repo` `key` (a legacy row's derived from its URL).
+///
+/// Why: #10368 — the session-start pre-check and
+/// [`ProjectRegistry::register_unless_present`] must agree on "present".
+/// Test: `register_unless_present_matches_on_project_key`,
+/// `session_start_second_start_leaves_the_bytes_alone`.
+pub(super) fn holds_registration(p: &Project, project: &Project, key: Option<&str>) -> bool {
+    p.name == project.name
+        || p.repo_url == project.repo_url
+        || (key.is_some()
+            && p.project_key
+                .clone()
+                .or_else(|| origin_key(&p.repo_url))
+                .as_deref()
+                == key)
 }
 
 /// The `owner/repo` key of a remote URL, or `None` for a checkout path.

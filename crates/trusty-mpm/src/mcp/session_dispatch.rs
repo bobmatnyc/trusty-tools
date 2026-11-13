@@ -77,6 +77,16 @@ pub async fn try_dispatch<B: OrchestratorBackend>(
             Ok(ids) => backend.session_delete_records(&ids).await,
             Err(e) => Err(e),
         },
+        // #10991
+        "session_archive" => match required_str(args, "session_id") {
+            Ok(id) => {
+                let flag = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(false);
+                backend
+                    .session_archive(&id, flag("dry_run"), flag("force"))
+                    .await
+            }
+            Err(e) => Err(e),
+        },
         "session_activity" => match required_str(args, "session_id") {
             Ok(id) => {
                 let lines = args

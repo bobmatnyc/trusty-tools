@@ -106,6 +106,8 @@ normative grammar — this note does not restate it.
 | DOC-87 | `SPEC-OWNERCON-01~draft` … `-08~draft` | [Typed owner constraints](./DOC-87-typed-owner-constraints.md) | `trusty-architect` ledger, Architect relay, PM dispatch, `trusty-mpm` pm-guard — shared owner-provenance guardrails: typed owner constraints, enforcement points, lifecycle. Follow-up to [#10780](https://github.com/bobmatnyc/trusty-tools/issues/10780) |
 | DOC-88 | `SPEC-FIXBAR-01~draft` … `-08~draft` | [Fix bar: acceptance-criterion class](./DOC-88-fix-bar-acceptance-criterion-class.md) | Completion Standard (framework core, Architect core, `tm-workflow`, `architect-completion-standard`), `code-review-standards` rubric, prompt goldens. A finding of any severity that fails a stated acceptance criterion blocks; [#10803](https://github.com/bobmatnyc/trusty-tools/issues/10803) |
 | DOC-89 | `SPEC-OKF-01~draft` | [trusty-okf: building and maintaining OKF bundles](./SPEC-OKF-01.md) | `trusty-okf` (new) — OKF bundle build, validation, migration, import and the `search-feed` index-feed loop; `trusty-agents` — agent glue, binding, index creation; `trusty-search` — index identity and path admission (D1, D2). Accepted r7.1 2026-11-03 (owner); design only, no code. Filed under [#10743](https://github.com/bobmatnyc/trusty-tools/issues/10743) with [ADR-0075](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) |
+| DOC-90 | `SPEC-SLEDNET-01~draft` … `-11~draft` | [Cloud sled network boundary](./DOC-90-cloud-sled-network-boundary.md) | sled image, `trusty-console` (inbound, token), `trusty-agents` (`tagent --api`), update checks, egress proxy — console is the one inbound surface, one allowlisted egress proxy the one outbound surface. Owner ruling D1b 2026-11-11; [#11054](https://github.com/bobmatnyc/trusty-tools/issues/11054) |
+| DOC-91 | `SPEC-TECHLEVEL-01~draft` … `-08~draft` | [Settable technical level for Architect owner-facing text](./DOC-91-architect-technical-level.md) | `python/trusty-architect` — level reader, hook line, settings selector, level lint; Architect manual and skills under `content/instructions/architect/`; `trusty-architect` dashboard store. Six levels (non-technical to cto), default `pm`, per-item detail on request, per-user level for secondary users; relays and records stay technical. Owner ruling 2026-11-11; [#11064](https://github.com/bobmatnyc/trusty-tools/issues/11064) |
 
 > **Related catalog — Trusty Code implementation status.** [Trusty Code
 > specification and ADR reconciliation](../trusty-code/spec-adr-reconciliation.md)
@@ -117,8 +119,12 @@ normative grammar — this note does not restate it.
 > **Catalog note — `DOC-73` claim.** `DOC-72` is claimed by open pull request
 > [#6607](https://github.com/bobmatnyc/trusty-tools/pull/6607) on branch
 > `docs/6606-analyze-lsp-spec`, which the note below could not have seen when it
-> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-90`** (updated
-> 2026-11-08 — `DOC-89` claimed by
+> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-92`** (updated
+> 2026-11-12 — `DOC-91` claimed by
+> [Settable technical level for Architect owner-facing text](./DOC-91-architect-technical-level.md) under #11064.
+> Prior note: 2026-11-11 — `DOC-90` claimed by
+> [Cloud sled network boundary](./DOC-90-cloud-sled-network-boundary.md) under #11054.
+> Prior note: 2026-11-08 — `DOC-89` claimed by
 > [SPEC-OKF-01 trusty-okf](./SPEC-OKF-01.md) under #10743.
 > Prior note: 2026-11-08 — `DOC-87` and `DOC-88` claimed by
 > [Typed owner constraints](./DOC-87-typed-owner-constraints.md) and

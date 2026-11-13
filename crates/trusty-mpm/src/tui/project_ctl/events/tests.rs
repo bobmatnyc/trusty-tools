@@ -45,6 +45,8 @@ fn full_project(name: &str) -> crate::project::Project {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 

@@ -162,7 +162,7 @@ name = "trusty-mpm"
 # Version-only commit.
 # 1.13.0 (Refs #11047): minor — 1.12.2 is published on crates.io and this PR
 # adds a feature (Architect dashboard Decisions sort by project) under `src/**`.
-version = "1.13.0"
+version = "1.13.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -361,6 +361,13 @@ name = "sandbox_latch_9121"
 path = "tests/sandbox_latch_9121.rs"
 required-features = ["daemon"]
 
+# #10721: admits the sandbox's one credential — the same one-way latch, a
+# set-once slot and a `remove_var` — so it is a binary of its own too.
+[[test]]
+name = "sandbox_credential_10721"
+path = "tests/sandbox_credential_10721.rs"
+required-features = ["daemon"]
+
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
 [dependencies]
@@ -460,7 +467,7 @@ toml.workspace = true
 # #7521: `tm secrets` is a client of the trusty-secrets socket. The client
 # (`server::OnDemandSecrets`) lives behind `server`, which implies `store`
 # (`parse_dotenv` for `import`) and `api` (the method types).
-trusty-secrets = { path = "../trusty-secrets", version = "0.4.1", default-features = false, features = ["server"] }
+trusty-secrets = { path = "../trusty-secrets", version = "0.5.0", default-features = false, features = ["server"] }
 # #8454 S2c: `tm doctor` loads the channel route policy read-only.
 trusty-channels = { path = "../trusty-channels", version = "0.2.1", optional = true }
 # #9270: the memory engine's stable path, `trusty_memory::engine`. OPTIONAL and
@@ -491,6 +498,10 @@ tempfile.workspace = true
 sha2.workspace = true
 # #8878 PR2a (Bob D5b Q3): presence grants are HMAC-SHA256 sealed; the tag is hex.
 hmac.workspace = true
+# #8878 PR2b-1b (D72): passkey (WebAuthn) verifier for presence devices.
+webauthn-rs.workspace = true
+# #8878 PR2b-1b: base64url credential ids (already in the tree at 0.22).
+base64.workspace = true
 hex.workspace = true
 regex.workspace = true
 # Glob compilation for the `tm ls` picker's `d <glob>` bulk delete (#5539).
@@ -588,6 +599,8 @@ keyring = { version = "3", default-features = false, features = ["apple-native"]
 
 # ── Dev dependencies ───────────────────────────────────────────────────────────
 [dev-dependencies]
+# #8878 PR2b-1b: SoftToken, the software passkey the presence tests sign with.
+webauthn-authenticator-rs.workspace = true
 # Re-declare trusty-common with test-only features: Cargo merges
 # dev-dependency features ONLY for test/bench/example builds, so none of them
 # leaks into a production build. #9271: the engine's mock embedder and palace
@@ -617,7 +630,7 @@ tempfile.workspace = true
 # #7521: re-declared for `test-support` — the in-memory backend the
 # `tm secrets` tests serve the socket from, so no test opens the Keychain.
 # Dev-only so `MemoryBackend` never ships in a production `tm`.
-trusty-secrets = { path = "../trusty-secrets", version = "0.4.1", default-features = false, features = ["server", "test-support"] }
+trusty-secrets = { path = "../trusty-secrets", version = "0.5.0", default-features = false, features = ["server", "test-support"] }
 # #8378 PR-C: the content-cache tests build `content-vX.Y.Z.tar.gz` fixtures.
 # Both are already in this crate's normal graph through
 # `trusty-common/content-resolver`.

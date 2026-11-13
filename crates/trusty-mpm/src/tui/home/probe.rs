@@ -4,7 +4,8 @@
 //! already serves — its socket health method, a socket connect, or the stdio
 //! `console_metrics` MCP tool — bounded by a deadline so a wedged service
 //! reads as `Timeout`, never as a hang. A service with no UDS endpoint is not
-//! probed at all (#10899).
+//! probed at all (#10899). The Console tile reads `console.fleet_status` over
+//! the console's own socket (#10966, #10902).
 //! What: [`probe_service`] (one bounded probe), [`classify`] (the pure verdict
 //! mapping), [`spawn_health_poller`] (one detached task per service, off the
 //! UI loop) and [`fetch_metrics`] (one bounded stdio MCP call).
@@ -13,14 +14,14 @@
 //! `a_hung_probe_does_not_hold_back_the_other_tiles`.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use trusty_common::console_metrics::{CONSOLE_METRICS_METHOD, ConsoleMetricsReport, parse_report};
+use trusty_common::console_rpc::{CONSOLE_SERVICE, ConsoleFleetStatus, ServiceStatus};
 use trusty_common::stdio_mcp_client::StdioMcpClient;
-use trusty_common::uds::probe::{SocketVerdict, probe_socket_verdict};
 use trusty_common::uds::server::RpcResponse;
 use trusty_common::uds::{UdsRpcError, UdsSecurityError};
 
@@ -102,11 +103,23 @@ where
 /// the deadline test; the live dials are the console's own probes, exercised
 /// by the smoke run.
 pub async fn probe_service(id: ServiceId, deadline: Duration) -> TileHealth {
+    probe_service_at(id, move || id.socket(), deadline).await
+}
+
+/// [`probe_service`] with the socket resolver injected, so a test can point a
+/// tile at a stub socket. The resolver runs only for a socket probe.
+///
+/// Test: `the_console_row_reads_running_with_its_version_from_fleet_status`,
+/// `an_absent_or_refused_console_socket_reads_as_on_demand_or_absent`.
+pub(super) async fn probe_service_at<S>(id: ServiceId, socket: S, deadline: Duration) -> TileHealth
+where
+    S: FnOnce() -> Result<PathBuf, String>,
+{
     if let Some(health) = no_uds_endpoint(id) {
         return health;
     }
     let installed = binary_on_path(id.binary());
-    let observed = async move { on_demand_when_idle(id, observe(id, deadline).await) };
+    let observed = async move { on_demand_when_idle(id, observe(id, socket, deadline).await) };
     with_deadline(observed, installed, deadline).await
 }
 
@@ -125,24 +138,25 @@ pub fn no_uds_endpoint(id: ServiceId) -> Option<TileHealth> {
     }
 }
 
-/// Observe one service through its [`ProbeKind`].
-async fn observe(id: ServiceId, deadline: Duration) -> Observation {
+/// Observe one service through its [`ProbeKind`], dialling `socket()`.
+async fn observe<S>(id: ServiceId, socket: S, deadline: Duration) -> Observation
+where
+    S: FnOnce() -> Result<PathBuf, String>,
+{
     match id.probe() {
         // See #10899: `probe_service` answers these before `observe` runs;
         // this arm keeps the match total without any I/O.
         ProbeKind::NoUdsEndpoint(detail) => Observation::Silent(detail.to_string()),
         ProbeKind::OnDemand => Observation::OnDemand,
-        ProbeKind::UdsHealth(method) => match id.socket() {
+        ProbeKind::UdsHealth(method) => match socket() {
             Ok(socket) => uds_health(&socket, method, deadline).await,
             Err(reason) => Observation::Silent(reason),
         },
-        ProbeKind::SocketConnect => match id.socket() {
-            Ok(socket) => match probe_socket_verdict(&socket, deadline).await {
-                SocketVerdict::Serving => Observation::Healthy(None),
-                _ => Observation::Silent(format!("nothing serves {}", socket.display())),
-            },
+        ProbeKind::UdsFleetStatus(method) => match socket() {
+            Ok(socket) => uds_fleet_status(&socket, method, deadline).await,
             Err(reason) => Observation::Silent(reason),
         },
+        // #11115: the `SocketConnect` arm went with its never-built variant
     }
 }
 
@@ -168,6 +182,63 @@ pub(super) async fn uds_health(socket: &Path, method: &str, deadline: Duration) 
     health_version(response.result.as_ref())
 }
 
+/// One `console.fleet_status` frame over the console's `socket`.
+///
+/// Why (#10966): the Console tile shows the console's real status and version
+/// from the listener #10902 added, over UDS only (ADR-0032) — no HTTP.
+/// What: a transport failure maps through [`transport_failure`], so an absent
+/// or refused socket is `NotListening`; an RPC error is `Unhealthy`; a body
+/// that is not a [`ConsoleFleetStatus`] is `Silent`; an answer folds through
+/// [`fleet_observation`].
+/// Test: `the_console_row_reads_running_with_its_version_from_fleet_status`,
+/// `a_broken_console_socket_reads_as_down`.
+pub(super) async fn uds_fleet_status(
+    socket: &Path,
+    method: &str,
+    deadline: Duration,
+) -> Observation {
+    let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}});
+    let sent =
+        trusty_common::uds::send_framed_request::<_, RpcResponse>(socket, &request, deadline).await;
+    let response = match sent {
+        Ok(response) => response,
+        Err(e) => return transport_failure(&e),
+    };
+    if let Some(error) = response.error {
+        return Observation::Unhealthy(format!(
+            "{method} answered an error (code {}): {}",
+            error.code, error.message
+        ));
+    }
+    match response
+        .result
+        .map(serde_json::from_value::<ConsoleFleetStatus>)
+    {
+        Some(Ok(fleet)) => fleet_observation(&fleet),
+        Some(Err(e)) => Observation::Silent(format!("{method} answer did not decode: {e}")),
+        None => Observation::Silent(format!("{method} answered no result")),
+    }
+}
+
+/// Read the console's own row out of its fleet view.
+///
+/// Why: the console lists itself (#6908) at its crate version, so its row is
+/// the console's status. A cold cache (`ready: false`) has no rows yet, but
+/// the console answered, so it is up with no version to show.
+/// Test: `the_console_row_reads_running_with_its_version_from_fleet_status`,
+/// `a_cold_or_degraded_console_answer_maps_to_up_or_degraded`.
+pub(super) fn fleet_observation(fleet: &ConsoleFleetStatus) -> Observation {
+    match fleet.services.iter().find(|row| row.id == CONSOLE_SERVICE) {
+        Some(row) if row.status == ServiceStatus::Degraded => Observation::Unhealthy(
+            row.hint
+                .clone()
+                .unwrap_or_else(|| "trusty-console reports itself degraded".to_string()),
+        ),
+        Some(row) => Observation::Healthy(row.version.clone()),
+        None => Observation::Healthy(None),
+    }
+}
+
 /// Map a failed health exchange: [`Observation::NotListening`] when the kernel
 /// proved nothing listens, [`Observation::Silent`] for every other failure.
 ///
@@ -186,7 +257,8 @@ pub(super) fn transport_failure(err: &UdsRpcError) -> Observation {
 /// Whether `err` is a dial that found no listener: the socket (or its
 /// directory) absent, or `connect` refused / not-found, seen through the
 /// bounded connect retry's wrapper.
-fn is_not_listening(err: &UdsRpcError) -> bool {
+// #10942: shared with `machine::transport_fault`.
+pub(super) fn is_not_listening(err: &UdsRpcError) -> bool {
     use std::io::ErrorKind::{ConnectionRefused, NotFound};
     match err {
         UdsRpcError::Dial { source, .. } => match source {

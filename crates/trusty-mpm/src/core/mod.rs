@@ -296,6 +296,8 @@ pub mod pane_foreground;
 #[cfg(test)]
 pub(crate) mod pane_foreground_tests;
 pub mod paths;
+// #10753: tmux-ancestry evidence that a pid file's session still exists.
+pub mod pid_host;
 pub mod pid_registry;
 // #8992: the built-in tools a tm-launched PM does not load.
 pub mod pm_tool_trim;
@@ -436,6 +438,8 @@ pub mod stack_profile;
 pub mod staged_paths;
 pub mod stale_skills;
 pub mod standalone;
+// #10960: the Architect's standing-rules block, injected by `tm hook --standing-rules`.
+pub mod standing_rules;
 // #6556: a `SubagentStop` the hook could not deliver, parked on disk where the
 // daemon's reap loop replays it — instead of the record sitting Running for the
 // six hours of `RUNNING_STALE_AFTER_SECS`.
@@ -485,6 +489,8 @@ pub mod presence_store;
 #[cfg(test)]
 pub(crate) mod presence_test_support;
 pub mod presence_verify;
+// #8878 PR2b-1b: the WebAuthn passkey adapter (ES256 only, D72).
+pub mod presence_webauthn;
 pub mod twin_identity;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
 pub mod uncommitted_changes;

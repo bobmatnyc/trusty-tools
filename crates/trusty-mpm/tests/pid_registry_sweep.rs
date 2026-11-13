@@ -17,14 +17,19 @@
 //! `cargo test -p trusty-mpm --test integration pid_registry_sweep::`.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use trusty_mpm::core::pid_registry::{PidOrphanGc, PidRegistry, ProcessProbe};
+use trusty_mpm::core::pid_registry::{
+    HostEvidence, PidOrphanGc, PidRegistry, ProcessProbe, SweepOutcome,
+};
 
-/// A scripted probe: per-PID liveness / `claude`-name answers; records SIGTERMs.
+/// A scripted probe: per-PID liveness / `claude`-name / tmux-host answers;
+/// records SIGTERMs. A PID with no host answer reads `Unhosted` — its tmux
+/// pane is gone, the true-orphan case (#10753).
 struct RecordingProbe {
     alive: HashSet<u32>,
     claude: HashSet<u32>,
+    hosts: RefCell<HashMap<u32, HostEvidence>>,
     terminated: RefCell<Vec<u32>>,
 }
 
@@ -33,8 +38,14 @@ impl RecordingProbe {
         Self {
             alive: alive.iter().copied().collect(),
             claude: claude.iter().copied().collect(),
+            hosts: RefCell::new(HashMap::new()),
             terminated: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Script the tmux-host answer for `pid` (changeable between sweeps).
+    fn set_host(&self, pid: u32, evidence: HostEvidence) {
+        self.hosts.borrow_mut().insert(pid, evidence);
     }
 }
 
@@ -48,6 +59,13 @@ impl ProcessProbe for RecordingProbe {
     fn terminate(&self, pid: u32) -> bool {
         self.terminated.borrow_mut().push(pid);
         true
+    }
+    fn host_evidence(&self, pid: u32) -> HostEvidence {
+        self.hosts
+            .borrow()
+            .get(&pid)
+            .copied()
+            .unwrap_or(HostEvidence::Unhosted)
     }
 }
 
@@ -184,9 +202,105 @@ fn restart_does_not_kill_still_alive_legacy_session_on_first_sweep() {
 
     // A second sweep with the session STILL untracked (e.g. it never got
     // re-registered and is genuinely gone) is what finally reaps it — proving
-    // the debounce is a grace period, not a permanent exemption.
+    // the debounce is a grace period, not a permanent exemption. The probe
+    // reports no tmux host for 9001, so this is a true orphan (#10753).
     let second_sweep = reg.sweep_orphans(&live_ids, &probe, &mut gc);
     assert_eq!(second_sweep.terminated, 1);
     assert_eq!(*probe.terminated.borrow(), vec![9001]);
     assert!(reg.entries().unwrap().is_empty());
+}
+
+/// The #10753 regression: after a daemon restart, with an EMPTY live set and
+/// no hook event, an idle `claude` whose tmux pane still exists is never
+/// signalled — not on the first sweep and not on the second.
+///
+/// Why: the #1918 debounce is time only; before #10753 the second sweep
+/// SIGTERMed this process (the same inputs as
+/// `restart_does_not_kill_still_alive_legacy_session_on_first_sweep`, which
+/// reaps on sweep two). The live tmux pane is the evidence that spares it.
+#[test]
+fn restart_with_empty_live_set_spares_tmux_hosted_claude_across_two_sweeps() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let reg = PidRegistry::new(tmp.path());
+    reg.register("legacy-idle-in-tmux", 9002).unwrap();
+
+    // Post-restart: fresh debounce, empty live set, pid alive + claude, and a
+    // tmux pane still hosts it.
+    let live_ids: HashSet<String> = HashSet::new();
+    let probe = RecordingProbe::new(&[9002], &[9002]);
+    probe.set_host(9002, HostEvidence::Hosted);
+    let mut gc = PidOrphanGc::new();
+
+    let spared = SweepOutcome {
+        scanned: 1,
+        ..SweepOutcome::default()
+    };
+    assert_eq!(reg.sweep_orphans(&live_ids, &probe, &mut gc), spared);
+    assert_eq!(reg.sweep_orphans(&live_ids, &probe, &mut gc), spared);
+    assert!(
+        probe.terminated.borrow().is_empty(),
+        "a claude whose tmux pane still exists must never receive SIGTERM"
+    );
+    assert_eq!(
+        reg.entries().unwrap().len(),
+        1,
+        "the hosted session's pidfile must survive both sweeps"
+    );
+}
+
+/// The #10753 pair: same restart shape, but the tmux pane is gone (the
+/// `claude` was reparented away from tmux) — the true orphan is still reaped
+/// on the second sweep.
+#[test]
+fn restart_with_empty_live_set_reaps_claude_whose_tmux_is_gone() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let reg = PidRegistry::new(tmp.path());
+    reg.register("legacy-orphaned", 9003).unwrap();
+
+    let live_ids: HashSet<String> = HashSet::new();
+    let probe = RecordingProbe::new(&[9003], &[9003]);
+    probe.set_host(9003, HostEvidence::Unhosted);
+    let mut gc = PidOrphanGc::new();
+
+    let first = reg.sweep_orphans(&live_ids, &probe, &mut gc);
+    assert_eq!(first.terminated, 0);
+    assert_eq!(first.deferred, 1);
+    let second = reg.sweep_orphans(&live_ids, &probe, &mut gc);
+    assert_eq!(second.terminated, 1);
+    assert_eq!(*probe.terminated.borrow(), vec![9003]);
+    assert!(reg.entries().unwrap().is_empty());
+}
+
+/// The #10753 error arm: when the process table cannot say whether a tmux
+/// pane hosts the PID, the sweep fails closed — no SIGTERM on any number of
+/// sweeps, the file is kept, and once the answer returns as `Unhosted` the
+/// kill still needs two fresh confirmed sightings.
+#[test]
+fn sweep_never_signals_when_host_cannot_be_determined() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let reg = PidRegistry::new(tmp.path());
+    reg.register("host-unknown", 9004).unwrap();
+
+    let live_ids: HashSet<String> = HashSet::new();
+    let probe = RecordingProbe::new(&[9004], &[9004]);
+    probe.set_host(9004, HostEvidence::Unknown);
+    let mut gc = PidOrphanGc::new();
+
+    for _ in 0..3 {
+        let outcome = reg.sweep_orphans(&live_ids, &probe, &mut gc);
+        assert_eq!(outcome.terminated, 0);
+        assert_eq!(outcome.deferred, 0);
+        assert_eq!(outcome.unverifiable, 1);
+    }
+    assert!(probe.terminated.borrow().is_empty());
+    assert_eq!(reg.entries().unwrap().len(), 1);
+
+    // The check answers again and the pane is gone: a fresh first sighting.
+    probe.set_host(9004, HostEvidence::Unhosted);
+    let first = reg.sweep_orphans(&live_ids, &probe, &mut gc);
+    assert_eq!(first.terminated, 0);
+    assert_eq!(first.deferred, 1);
+    let second = reg.sweep_orphans(&live_ids, &probe, &mut gc);
+    assert_eq!(second.terminated, 1);
+    assert_eq!(*probe.terminated.borrow(), vec![9004]);
 }

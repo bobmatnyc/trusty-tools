@@ -270,6 +270,19 @@ async fn run_ci(
     ci: bool,
     args: &[&str],
 ) -> Outcome {
+    let seam = assign::PRODUCTION;
+    run_seam(client, project, (clipboard, stdin), ci, seam, args).await
+}
+
+/// [`run_ci`], with `assign`'s resolver and caller check from `seam` (#11015).
+async fn run_seam(
+    client: &OnDemandSecrets,
+    project: &Path,
+    (clipboard, stdin): (&'static str, &'static str),
+    ci: bool,
+    seam: assign::Seam<'_>,
+    args: &[&str],
+) -> Outcome {
     let argv = ["tm", "secrets"].into_iter().chain(args.iter().copied());
     let Some(Command::Secrets { action }) = Cli::try_parse_from(argv).expect("parse").command
     else {
@@ -291,7 +304,7 @@ async fn run_ci(
         ci,
     };
     let mut out = Vec::new();
-    let result = dispatch(&ctx, action, &mut out).await;
+    let result = dispatch_with(&ctx, seam, action, &mut out).await;
     out.flush().expect("flush");
     let logs = String::from_utf8_lossy(&sink.0.lock().expect("log sink")).into_owned();
     let outcome = Outcome {
@@ -351,9 +364,48 @@ fn cli_parses_every_secrets_verb() {
         vec!["import", ".env", "grp"],
         vec!["copy", "--from", "keychain", "--to", "spare"],
         vec!["copy", "--from", "keychain", "--to", "spare", "A", "grp.B"],
+        // #10998: a named source.
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-service",
+            "s",
+            "--from-account",
+            "a",
+            "K",
+        ],
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-vault",
+            "trusty/acme",
+            "--from-key",
+            "P",
+            "K",
+        ],
         vec!["doctor"],
         // #9072: the tier-3 grant client.
         vec!["resolve", "K"],
+        // #11015: assign, with and without its options.
+        vec!["assign", "trusty/acme:K", "--project", "acme/api"],
+        vec![
+            "assign",
+            "secret://acme/K",
+            "--project",
+            "acme/api",
+            "--as",
+            "D",
+            "--from-backend",
+            "keychain",
+            "--to-backend",
+            "spare",
+        ],
     ] {
         let argv = ["tm", "secrets"].into_iter().chain(args.iter().copied());
         let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{args:?}: {e}"));
@@ -371,9 +423,50 @@ fn cli_parses_every_secrets_verb() {
         vec!["import", ".env", "--owner"],
         // `copy` needs both backends.
         vec!["copy", "--from", "keychain"],
+        // #10998: each half of a named source needs the other, and the two
+        // source forms exclude each other.
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-service",
+            "s",
+            "K",
+        ],
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-key",
+            "P",
+            "K",
+        ],
+        vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-service",
+            "s",
+            "--from-account",
+            "a",
+            "--from-vault",
+            "trusty/acme",
+            "--from-key",
+            "P",
+            "K",
+        ],
         vec!["remove"],
         vec!["import"],
         vec!["resolve"],
+        // #11015: assign needs SRC and --project.
+        vec!["assign", "trusty/acme:K"],
+        vec!["assign", "--project", "acme/api"],
     ] {
         let argv = ["tm", "secrets"].into_iter().chain(args.iter().copied());
         assert!(Cli::try_parse_from(argv).is_err(), "{args:?} parsed");
@@ -527,6 +620,26 @@ async fn list_prints_key_names_only() {
         "trusty/acme/web (Project):\n  A_KEY\ntrusty/acme (Owner):\n  B_KEY\n"
     );
     assert!(!outcome.out.contains(HEAD) && !outcome.out.contains("chars"));
+}
+
+/// #10998: a key push-only for agents (as an agent's copy of a Keychain
+/// item lands) is marked in `list`, with no value.
+#[tokio::test]
+async fn list_marks_a_push_only_key() {
+    let h = harness().await;
+    run(&h, VALUE, &["set", "A_KEY"]).await;
+    let (vault, key) = (
+        VaultName::new(PROJECT_VAULT).expect("vault"),
+        SecretKey::new("A_KEY").expect("key"),
+    );
+    h.keychain
+        .set_control_item(ControlItem::PushOnly, &vault, Some(&key), true)
+        .expect("mark");
+    let outcome = run(&h, "", &["list"]).await;
+    assert_eq!(
+        outcome.out,
+        "trusty/acme/web (Project):\n  A_KEY (push-only for agents)\ntrusty/acme (Owner):\n  (no keys)\n"
+    );
 }
 
 /// #7521: `remove` deletes from the project scope only, and a key it does
@@ -785,6 +898,98 @@ async fn copy_fails_by_name_on_a_missing_key() {
         "{}",
         unknown.err()
     );
+}
+
+/// #10998: a named source — here an owner-vault key — lands in the project
+/// scope under the one KEY given; stdout, the error and the logs carry no
+/// value (`run` checks all three), and the source keeps its value.
+#[tokio::test]
+async fn copy_named_moves_an_owner_key_without_printing_it() {
+    let h = harness().await;
+    seed_owner(&h, "GH_PAT", VALUE).await;
+    let args = [
+        "copy",
+        "--from",
+        "keychain",
+        "--to",
+        "spare",
+        "--from-vault",
+        OWNER_VAULT,
+        "--from-key",
+        "GH_PAT",
+        "GITHUB_TOKEN",
+    ];
+    let outcome = run(&h, "", &args).await;
+    assert_eq!(outcome.err, None);
+    assert_eq!(
+        outcome.out,
+        "copied GITHUB_TOKEN\nkeychain -> spare: 1 copied, 0 not copied\n"
+    );
+    assert_eq!(
+        stored(&h.spare, PROJECT_VAULT, "GITHUB_TOKEN").as_deref(),
+        Some(VALUE)
+    );
+    assert_eq!(
+        stored(&h.keychain, OWNER_VAULT, "GH_PAT").as_deref(),
+        Some(VALUE)
+    );
+}
+
+/// #10998: a named copy needs exactly one KEY (checked before any call), an
+/// absent source key is the server's typed `not_found`, and a Keychain item
+/// in trusty's own namespace is refused before any read. Each exits 1 and
+/// writes nothing.
+#[tokio::test]
+async fn copy_named_needs_exactly_one_key_and_fails_on_a_missing_source() {
+    let h = harness().await;
+    let named = |keys: &'static [&'static str]| {
+        let mut args = vec![
+            "copy",
+            "--from",
+            "keychain",
+            "--to",
+            "spare",
+            "--from-vault",
+            OWNER_VAULT,
+            "--from-key",
+            "ABSENT",
+        ];
+        args.extend_from_slice(keys);
+        args
+    };
+    let none = run(&h, "", &named(&[])).await;
+    assert!(none.err().contains("exactly one KEY"), "{}", none.err());
+    let two = run(&h, "", &named(&["A", "B"])).await;
+    assert!(two.err().contains("exactly one KEY"), "{}", two.err());
+    let missing = run(&h, "", &named(&["DEST"])).await;
+    assert!(
+        missing.err().contains("the key is not in that vault"),
+        "{}",
+        missing.err()
+    );
+    let trusty_item = [
+        "copy",
+        "--from",
+        "keychain",
+        "--to",
+        "spare",
+        "--from-service",
+        PROJECT_VAULT,
+        "--from-account",
+        "API_KEY",
+        "DEST",
+    ];
+    let refused = run(&h, "", &trusty_item).await;
+    assert!(
+        refused
+            .err()
+            .contains("do not match this method's request shape"),
+        "{}",
+        refused.err()
+    );
+    for name in ["A", "B", "DEST"] {
+        assert_eq!(stored(&h.spare, PROJECT_VAULT, name), None, "{name}");
+    }
 }
 
 #[tokio::test]
@@ -1089,3 +1294,7 @@ async fn every_verb_fails_without_a_value_when_the_socket_is_unreachable() {
     assert!(doctor.out.ends_with(": unreachable\n"), "{}", doctor.out);
     assert!(h.keychain.is_empty() && h.spare.is_empty());
 }
+
+// #11015: `tm secrets assign`, on this harness.
+#[path = "assign_tests.rs"]
+mod assign_tests;

@@ -45,6 +45,8 @@ pub(crate) mod dead_addr;
 pub(crate) mod dbatg;
 // #6288: one-connection daemon-socket mocks for the transport tests.
 pub(crate) mod delete;
+// #10991: `tm session archive`.
+pub(crate) mod session_archive;
 #[cfg(test)]
 pub(crate) mod socket_mock_tests;
 // #6887: the bulk-read diversion hook and its cheap worker.
@@ -68,9 +70,12 @@ pub(crate) mod egress_verdict_client;
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
 // for a lease only the TTL could have ended.
 pub(crate) mod build_lease;
+// #8692: the leased command's spawn, wait and compile-to-run flip.
+pub(crate) mod build_lease_spawn;
 // #9239: the read-only `status` and `--census` views of `tm build-lease`.
 pub(crate) mod build_lease_status;
 pub(crate) mod build_lease_target;
+pub(crate) mod build_lease_where;
 pub(crate) mod doctor_builder_cap;
 // #8454 S2c: the read-only channel route policy rows.
 pub(crate) mod doctor_channels;
@@ -138,6 +143,8 @@ pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
 pub(crate) mod hook_post;
 pub(crate) mod hook_rewrite;
+// D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
+pub(crate) mod hook_rewrite_cd;
 // #10973: the compression rewrite an isolation worktree's classifier accepts.
 pub(crate) mod hook_rewrite_isolated;
 // #7975: the stdin payload read that names its failure, so a guard can deny on it.
@@ -206,6 +213,11 @@ pub(crate) mod pm_guard_presence_key;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
 pub(crate) mod presence;
+// #8878 PR2b-1b: the daemon client and the device verbs.
+pub(crate) mod presence_client;
+pub(crate) mod presence_devices;
+pub(crate) mod presence_request;
+pub(crate) mod presence_wait;
 // #6892: the machine-wide concurrent-builder denial. Fails CLOSED, unlike its
 // #4480 sibling — see its module doc.
 pub(crate) mod pm_guard_build_lease;
@@ -321,6 +333,8 @@ pub(crate) mod session_picker_prune;
 pub(crate) mod session_picker_rename;
 pub(crate) mod session_picker_render;
 pub(crate) mod session_picker_view;
+// #10368: a session start registers its checkout as a project.
+pub(crate) mod session_project;
 pub(crate) mod session_tui;
 // The `tm shell-init` wrapper emitter — print-only; it never writes an rc file.
 pub(crate) mod shell_init;
@@ -330,6 +344,8 @@ pub(crate) mod sm_serve;
 pub(crate) mod socket_dispatch;
 pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
+// #10960: `tm hook --standing-rules`, the Architect's per-turn rules block.
+pub(crate) mod standing_rules_hook;
 // #8025: `tm status`'s daemon line, derived from the SAME `/health` probe
 // `tm doctor` uses — see its module doc for why the two disagreed.
 pub(crate) mod status_daemon;

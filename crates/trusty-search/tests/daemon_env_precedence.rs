@@ -13,7 +13,7 @@
 //! binary, exactly as `no_auto_discover_env.rs` does for #4823.
 //!
 //! What: points `TRUSTY_DATA_DIR` at a scratch directory holding a `daemon.env`
-//! and a `daemon.lock` naming PID 1. Argument parsing runs first; the daemon
+//! and a held `daemon.lock` naming PID 1. Argument parsing runs first; the daemon
 //! then sees a live lockfile and exits 1 with "another daemon is already
 //! running" before it binds a port, opens an index, or touches this machine's
 //! real daemon. That yields a clean two-valued signal: exit 2 means clap SAW
@@ -69,16 +69,17 @@ fn run_to_completion(cmd: &mut Command) -> (i32, String) {
 /// Why: the child gets its own environment, so the real clap env path is
 /// exercised with no shared-state hazard against a parallel test binary.
 /// What: writes `daemon.env` and a `daemon.lock` holding PID 1 (init — always
-/// alive, so `pid_alive` reports true) into a fresh tempdir, then starts the
-/// daemon there. `TRUSTY_NO_AUTO_DISCOVER` is removed from the child env so the
-/// file is the only source of the value under test.
+/// alive) into a fresh tempdir, holds its flock, then starts the daemon there.
+/// `TRUSTY_NO_AUTO_DISCOVER` is removed from the child env so the file is the
+/// only source of the value under test.
 /// Test: used by every test in this file.
 fn run_start(daemon_env: &str) -> (i32, String) {
     let scratch = tempfile::tempdir().expect("create scratch dir");
     std::fs::write(scratch.path().join("daemon.env"), daemon_env).expect("write daemon.env");
-    // PID 1 is always alive, so the lockfile fast-path aborts startup right
-    // after argument handling — no port bound, no index opened.
-    std::fs::write(scratch.path().join("daemon.lock"), b"1").expect("write daemon.lock");
+    // PID 1 is alive and the flock is held (#11060), so the lockfile fast-path
+    // aborts startup right after argument handling — no port bound, no index
+    // opened.
+    let _lock = test_daemon::hold_daemon_lock(scratch.path());
 
     run_to_completion(daemon_command(scratch.path()).env_remove("TRUSTY_NO_AUTO_DISCOVER"))
 }
@@ -161,7 +162,7 @@ fn process_env_still_beats_daemon_env() {
         "TRUSTY_NO_AUTO_DISCOVER=ture\n",
     )
     .expect("write daemon.env");
-    std::fs::write(scratch.path().join("daemon.lock"), b"1").expect("write daemon.lock");
+    let _lock = test_daemon::hold_daemon_lock(scratch.path());
 
     let (code, output) =
         run_to_completion(daemon_command(scratch.path()).env("TRUSTY_NO_AUTO_DISCOVER", "1"));
@@ -192,7 +193,7 @@ fn daemon_env_cannot_redirect_the_data_dir() {
         format!("TRUSTY_DATA_DIR={}\n", decoy.path().display()),
     )
     .expect("write daemon.env");
-    std::fs::write(scratch.path().join("daemon.lock"), b"1").expect("write daemon.lock");
+    let _lock = test_daemon::hold_daemon_lock(scratch.path());
 
     let (_code, output) = run_to_completion(&mut daemon_command(scratch.path()));
     assert!(

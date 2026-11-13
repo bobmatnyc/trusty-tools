@@ -32,6 +32,8 @@ pub enum ProtectedVerb {
     Resume,
     /// `tm sessions delete`.
     Delete,
+    /// `tm session archive` (#10991).
+    Archive,
 }
 
 impl ProtectedVerb {
@@ -41,6 +43,8 @@ impl ProtectedVerb {
             Self::Decommission => ("decommission", "exit claude in its pane to stop it"),
             Self::Resume => ("resume", "relaunch it with `tm fleet init`"),
             Self::Delete => ("delete", "`tm fleet init` replaces its record"),
+            // #10991
+            Self::Archive => ("archive", "exit claude in its pane to stop it"),
         }
     }
 }

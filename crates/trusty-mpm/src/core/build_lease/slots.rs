@@ -21,7 +21,10 @@
 //! server) cannot pin the slot after the build ends. A `cargo run` program is
 //! not such a child: cargo replaces itself with the program, so the program is
 //! the build the holder waits on and keeps the slot until it exits, as does a
-//! `cargo watch` watcher (unchanged; tracked in #8692). The other side of
+//! `cargo watch` watcher. #8692: once cargo drops its build lock the record's
+//! [`Phase`] reads `run`, and that holder still owns the slot but no longer
+//! counts against the ceiling ([`HolderRecord::counts_for_capacity`],
+//! `phase`). The other side of
 //! close-on-exec: when the `tm build-lease` holder is SIGKILLed, its build
 //! keeps running while the flock reads free. The record the dead holder left
 //! in the slot file keeps the slot taken while the build it names is alive
@@ -44,6 +47,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::orphan::{Leftover, read_leftover};
+pub use super::phase::Phase;
 
 /// The directory name under `~/.trusty-mpm`.
 pub const SLOT_DIR_NAME: &str = "build-slots";
@@ -54,8 +58,10 @@ pub const SLOT_DIR_NAME: &str = "build-slots";
 /// which compiler processes belong to a lease. Both read this.
 /// What: the `tm build-lease` pid, the build's own pid once spawned, the
 /// command summary ([`summarize_command`] — never the full argv), the
-/// checkout, the start time and the target directory it was given.
-/// Test: `a_held_slot_is_reported_with_its_record`.
+/// checkout, the start time, the target directory it was given, and its
+/// [`Phase`] (#8692: additive; a record without it reads as compiling).
+/// Test: `a_held_slot_is_reported_with_its_record`,
+/// `a_record_without_a_phase_counts_for_capacity`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct HolderRecord {
@@ -73,6 +79,10 @@ pub struct HolderRecord {
     pub started_at: String,
     /// The `CARGO_TARGET_DIR` the build was given, if any.
     pub target_dir: Option<String>,
+    // #8692: `serde(default)` so a record an older `tm` wrote reads as compiling.
+    /// Compiling, or running once cargo released its build lock.
+    #[serde(default)]
+    pub phase: Phase,
 }
 
 impl HolderRecord {
@@ -87,10 +97,22 @@ impl HolderRecord {
             cwd: cwd.into(),
             started_at: chrono::Utc::now().to_rfc3339(),
             target_dir: None,
+            phase: Phase::Compile,
         }
     }
 
-    /// `slot 1: cargo test -p x (pid 4412, 12m, /repo)`.
+    /// Whether this holder counts against the compile ceiling.
+    ///
+    /// Why: #8692 — a holder whose cargo has released its build lock keeps
+    /// its slot and target directory but compiles nothing.
+    /// Test: `run_phase_holders_free_capacity_but_keep_their_slots`.
+    #[must_use]
+    pub fn counts_for_capacity(&self) -> bool {
+        self.phase == Phase::Compile
+    }
+
+    /// `slot 1: cargo test -p x (pid 4412, 12m, /repo)`; a run-phase holder
+    /// reads `(pid 4412, 12m, running, /repo)` (#8692).
     ///
     /// What: the command is summarized again here, so a record an older
     /// binary wrote with the full argv never prints its arguments (#8261
@@ -105,6 +127,11 @@ impl HolderRecord {
                 format!("{}m", secs.max(0) / 60)
             })
             .unwrap_or_else(|_| "?m".to_string());
+        let phase = if self.counts_for_capacity() {
+            ""
+        } else {
+            ", running"
+        };
         let argv = shlex::split(&self.command).unwrap_or_else(|| {
             self.command
                 .split_whitespace()
@@ -112,13 +139,28 @@ impl HolderRecord {
                 .collect()
         });
         format!(
-            "slot {}: {} (pid {}, {age}, {})",
+            "slot {}: {} (pid {}, {age}{phase}, {})",
             self.slot,
             summarize_command(&argv),
             self.pid,
             self.cwd
         )
     }
+}
+
+/// The holders that count against the compile ceiling (#8692).
+///
+/// What: every [`Phase::Compile`] holder, in order. Admission counts these,
+/// and the census excludes only their compilers, so a run-phase holder's
+/// later rebuild is counted as a foreign build.
+/// Test: `run_phase_holders_free_capacity_but_keep_their_slots`.
+#[must_use]
+pub fn compiling(holders: &[HolderRecord]) -> Vec<HolderRecord> {
+    holders
+        .iter()
+        .filter(|h| h.counts_for_capacity())
+        .cloned()
+        .collect()
 }
 
 /// The part of a build command that is safe to show another session.
@@ -358,6 +400,8 @@ impl SlotDir {
                     cwd: String::new(),
                     started_at: String::new(),
                     target_dir: None,
+                    // #8692: an unreadable record counts as compiling.
+                    phase: Phase::Compile,
                 })),
                 SlotState::Free | SlotState::Broken(_) => None,
             })
@@ -623,6 +667,7 @@ mod tests {
             cwd: "/repo".into(),
             started_at: chrono::Utc::now().to_rfc3339(),
             target_dir: None,
+            phase: Phase::Compile,
         }
     }
 

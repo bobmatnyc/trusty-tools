@@ -276,6 +276,62 @@ fn delete_removes_chunk() {
     assert_eq!(store.chunk_count().unwrap(), 1);
 }
 
+/// A store with chunks `a:1:1`, `b:1:1` and hash rows for `src/a.rs`, `src/b.rs`.
+fn store_with_two_files(dir: &std::path::Path) -> CorpusStore {
+    let store = CorpusStore::open(&dir.join("index.redb")).unwrap();
+    store
+        .upsert_chunks(&[raw("a:1:1", "x"), raw("b:1:1", "y")])
+        .unwrap();
+    store
+        .upsert_file_hashes(&[("src/a.rs", "ha"), ("src/b.rs", "hb")])
+        .unwrap();
+    store
+}
+
+/// #11096: the chunk rows and the hash row leave in one commit.
+#[test]
+fn delete_file_rows_removes_chunks_and_hash_together_11096() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_two_files(dir.path());
+    store
+        .delete_file_rows(&["a:1:1".to_string()], "src/a.rs")
+        .unwrap();
+    let ids: Vec<String> = store
+        .load_all_chunks()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(ids, vec!["b:1:1".to_string()]);
+    assert_eq!(
+        store.load_file_hashes().unwrap(),
+        vec![("src/b.rs".to_string(), "hb".to_string())]
+    );
+    // No chunk ids still drops the hash row; a repeat is a no-op.
+    store.delete_file_rows(&[], "src/b.rs").unwrap();
+    store.delete_file_rows(&[], "src/b.rs").unwrap();
+    assert!(store.load_file_hashes().unwrap().is_empty());
+    assert_eq!(store.chunk_count().unwrap(), 1);
+}
+
+/// #11096: a failure after both removes and before the commit changes
+/// neither table, and the error reaches the caller.
+#[test]
+fn delete_file_rows_fault_before_commit_changes_neither_table_11096() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_two_files(dir.path());
+    let err = store
+        .delete_file_rows_failing_before_commit(&["a:1:1".to_string()], "src/a.rs")
+        .expect_err("the injected fault must be an error");
+    assert!(format!("{err:#}").contains("#11096"), "{err:#}");
+    assert_eq!(store.chunk_count().unwrap(), 2, "no chunk row left");
+    assert_eq!(
+        store.load_file_hashes().unwrap().len(),
+        2,
+        "no hash row left"
+    );
+}
+
 #[test]
 fn empty_batches_are_noops() {
     let dir = tempfile::tempdir().unwrap();

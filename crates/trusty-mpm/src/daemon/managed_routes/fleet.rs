@@ -39,6 +39,8 @@ pub struct FleetProjectGroup {
     pub repo_url: String,
     /// Sessions bound to this project (may be empty).
     pub sessions: Vec<SessionSummary>,
+    /// Whether the project is decommissioned (#10988), for the dim TUI row.
+    pub decommissioned: bool,
 }
 
 /// Response for GET /api/v1/sessions/managed/fleet.
@@ -117,6 +119,7 @@ pub(crate) async fn fleet_core(state: &Arc<DaemonState>, slim: bool) -> RouteOut
         project_groups.push(FleetProjectGroup {
             project_name: pf.project.name.clone(),
             repo_url: pf.project.repo_url.clone(),
+            decommissioned: pf.project.is_decommissioned(), // #10988
             // #10476: the default (non-slim) call is unchanged.
             sessions: if slim {
                 checked_summaries_with(&pf.sessions, false).await

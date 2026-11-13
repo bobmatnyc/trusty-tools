@@ -30,6 +30,8 @@ fn make_project(name: &str) -> Project {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -64,6 +66,59 @@ async fn store_upsert_idempotent() {
     let all = store.all().await.expect("all");
     assert_eq!(all.len(), 1, "idempotent upsert must not duplicate");
     assert_eq!(all[0].description.as_deref(), Some("updated"));
+}
+
+/// #10988: an upsert carrying no `decommissioned_at` keeps the stored one; only
+/// `update_with` clears it.
+#[tokio::test]
+async fn upsert_keeps_a_stored_decommissioned_state() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = ProjectStore::load(dir.path()).await.expect("load");
+    let at = chrono::Utc::now();
+    store
+        .upsert(Project {
+            decommissioned_at: Some(at),
+            ..make_project("gamma")
+        })
+        .await
+        .expect("first upsert");
+    store
+        .upsert(make_project("gamma"))
+        .await
+        .expect("re-register");
+    assert_eq!(
+        store.get("gamma").await.expect("get").decommissioned_at,
+        Some(at)
+    );
+    store
+        .update_with("gamma", |mut p| {
+            p.decommissioned_at = None;
+            p
+        })
+        .await
+        .expect("clear");
+    assert!(!store.get("gamma").await.expect("get").is_decommissioned());
+}
+
+/// #10991: an upsert carrying no `archived_at` keeps the stored one, so a
+/// config re-seed cannot un-archive a project.
+#[tokio::test]
+async fn upsert_keeps_a_stored_archived_state() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = ProjectStore::load(dir.path()).await.expect("load");
+    let at = chrono::Utc::now();
+    store
+        .upsert(Project {
+            archived_at: Some(at),
+            ..make_project("gamma")
+        })
+        .await
+        .expect("first upsert");
+    store
+        .upsert(make_project("gamma"))
+        .await
+        .expect("re-register");
+    assert_eq!(store.get("gamma").await.expect("get").archived_at, Some(at));
 }
 
 #[tokio::test]
@@ -153,6 +208,8 @@ async fn json_round_trip_preserves_all_fields() {
         worktree: None,
         // #10530: a key the record already carries is kept as-is.
         project_key: Some("owner/full-project".into()),
+        decommissioned_at: None,
+        archived_at: None,
     };
     store.upsert(full.clone()).await.expect("upsert full");
 
