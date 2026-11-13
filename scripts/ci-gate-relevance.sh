@@ -22,7 +22,9 @@
 #                     the allowlist TSV, and the gate's script and selftest
 #     sled-static     docker/sled/**, scripts/check_sled_tailscale_isolation.sh,
 #                     scripts/check_sled_launch.sh and its stub under
-#                     scripts/test-data/sled-launch/ (#11156: tailscaled
+#                     scripts/test-data/sled-launch/, the B3/B4 tests
+#                     check_sled_v1_gateway.sh and check_sled_pinned_tarballs.sh,
+#                     and the docker/cloudtest files B4 reads (#11156: tailscaled
 #                     isolation, DOC-90 IN-7; the launch rule, DOC-90 §12)
 #   Every mode: this script and .github/workflows/ci.yml, the workflow that
 #   hosts the gates — a change to either must exercise the jobs it governs.
@@ -91,6 +93,10 @@ is_relevant() {
         docker/sled/?*) return 0 ;;
         scripts/check_sled_tailscale_isolation.sh) return 0 ;;
         scripts/check_sled_launch.sh | scripts/test-data/sled-launch/?*) return 0 ;;
+        # #11156: the B3 and B4 offline tests, and the cloudtest files B4 reads.
+        scripts/check_sled_v1_gateway.sh | scripts/check_sled_pinned_tarballs.sh) return 0 ;;
+        docker/cloudtest/Dockerfile | docker/cloudtest/fetch.sh) return 0 ;;
+        docker/cloudtest/tarballs.pin | docker/cloudtest/pinned-tarballs.sh) return 0 ;;
       esac
       ;;
   esac

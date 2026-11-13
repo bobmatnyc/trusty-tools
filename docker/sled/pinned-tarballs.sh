@@ -34,6 +34,7 @@ read_pins() {
     PIN_TAGS=(); PIN_FILES=()
     while read -r tag file extra || [ -n "${tag}" ]; do
         case "${tag}" in ''|'#'*) continue ;; esac
+        # shellcheck disable=SC2015 # B is a die/fail guard whose own status cannot be false; the || arm is the intended failure path
         [ -n "${file}" ] && [ -z "${extra}" ] || die "malformed pin line: ${tag} ${file} ${extra}"
         case "${tag}${file}" in *[!A-Za-z0-9._-]*) die "bad character in pin line: ${tag} ${file}" ;; esac
         case "${file}" in .*|*..*) die "bad pinned file name: ${file}" ;; esac
@@ -76,6 +77,7 @@ cmd_unpack() {
 
     local want got i=0
     for f in "${PIN_FILES[@]}"; do
+        # shellcheck disable=SC2015 # B is a die/fail guard whose own status cannot be false; the || arm is the intended failure path
         [ -f "${dl}/${f}" ] && [ ! -L "${dl}/${f}" ] || die "missing pinned tarball: ${f}"
         [ -f "${dl}/${f}.sha256" ] || die "missing ${f}.sha256"
         want="$(awk 'NR==1{print $1}' "${dl}/${f}.sha256")"
@@ -104,6 +106,7 @@ cmd_unpack() {
             n=$((n + 1)); one="${m}"
         done <<< "$(find "${WORK}" -name "${b}")"
         [ "${n}" -eq 1 ] || die "binary ${b} found ${n} times in the pinned tarballs (want exactly 1)"
+        # shellcheck disable=SC2015 # B is a die/fail guard whose own status cannot be false; the || arm is the intended failure path
         [ -f "${one}" ] && [ ! -L "${one}" ] || die "binary ${b} is not a regular file"
         install -m 0755 "${one}" "${out}/${b}"
     done

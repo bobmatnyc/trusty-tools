@@ -168,6 +168,7 @@ else
   # shellcheck disable=SC2034,SC2329 # jobs and cat are used by the eval'd block
   budget() {
     (_MAX="$1" _CUR="$2" jobs="$3"
+     # shellcheck disable=SC2317 # cat is a stub invoked by the eval'd BUDGET block
      cat() {
        case "$1" in *pids.max) v="${_MAX}" ;; *pids.current) v="${_CUR}" ;; esac
        [ "$v" = none ] && return 1; echo "$v"

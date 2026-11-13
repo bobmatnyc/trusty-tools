@@ -296,6 +296,12 @@ support Unverified):
   the owner's tailnet do not govern another tailnet. V5 fails while such a
   process runs (no `tailscaled` in the app); it cannot stop one being
   started.
+- Account-level exfiltration through the allowlist is accepted (#11156). The
+  allowlist bounds hosts, not accounts. Code in the sled can send data to
+  another account's repo or gist on `github.com` or `api.github.com` with that
+  account's token, and to `api.anthropic.com` with another API key. See the
+  account-level paragraph in DOC-90 §6
+  ([SPEC-SLEDNET-06](../../docs/specs/DOC-90-cloud-sled-network-boundary.md#SPEC-SLEDNET-06~draft)).
 - A tunnel opened during a login window stays open after `sled-profile
   steady`: a reconfigure applies to new connections only. `docker restart
   tm-trusty-cloud-sled-egress` drops it.
