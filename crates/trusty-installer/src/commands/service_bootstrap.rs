@@ -336,6 +336,20 @@ pub trait ServiceEnv {
     fn binary_resolves(&self, binary: &str) -> bool {
         super::probe::resolve_binary_path(binary).is_some()
     }
+
+    /// #10975: [`Self::plist_present`] that reports a probe it could not run
+    /// as `Err` (naming the probe) instead of folding it into "absent". The
+    /// lifecycle verbs read this one, because "absent" there means "skip".
+    /// The default wraps the bool, for fakes that never fail.
+    fn probe_plist(&self, binary: &str) -> Result<bool, String> {
+        Ok(self.plist_present(binary))
+    }
+
+    /// #10975: [`Self::is_loaded`] with the same `Err` for a probe that could
+    /// not run; see [`Self::probe_plist`].
+    fn probe_loaded(&self, binary: &str) -> Result<bool, String> {
+        Ok(self.is_loaded(binary))
+    }
 }
 
 /// Decide and (via the seam) execute the service bootstrap for one member.
@@ -661,6 +675,21 @@ impl ServiceEnv for RealServiceEnv {
     fn is_loaded(&self, binary: &str) -> bool {
         let label = super::plist_label::plist_label_for(binary);
         super::verify_launchd_state::is_label_loaded(&label)
+    }
+
+    // #10975: a probe that could not run is an `Err` naming it, not "absent".
+    fn probe_plist(&self, binary: &str) -> Result<bool, String> {
+        let label = super::plist_label::plist_label_for(binary);
+        let path = super::plist_label::plist_path_for(binary).ok_or_else(|| {
+            format!("plist probe failed: no home directory to find {label}.plist")
+        })?;
+        path.try_exists()
+            .map_err(|e| format!("plist probe failed: {}: {e}", path.display()))
+    }
+
+    fn probe_loaded(&self, binary: &str) -> Result<bool, String> {
+        let label = super::plist_label::plist_label_for(binary);
+        super::verify_launchd_state::probe_label_loaded(&label)
     }
 
     // #4470: the one shared implementation of the foreign-port check; the

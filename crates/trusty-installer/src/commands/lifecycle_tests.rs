@@ -32,12 +32,16 @@ fn member(binary: &str, manage: ManageStrategy) -> StableMember {
 /// the port guard first, so an empty record proves no such branch ran.
 /// What: the port guard REFUSES unless `port_clear` is set, so a test that
 /// wrongly reaches a restart stops before `restart_gracefully` and never bounces
-/// a daemon on the machine running the tests.
+/// a daemon on the machine running the tests. A binary in `plist_probe_fails`
+/// or `loaded_probe_fails` answers that probe with `Err`, and its bool form
+/// with `false`, the way `RealServiceEnv` collapses a probe it could not run.
 #[derive(Default)]
 struct HostFake {
     binaries: Vec<&'static str>,
     plists: Vec<&'static str>,
     loaded: Vec<&'static str>,
+    plist_probe_fails: Vec<&'static str>,
+    loaded_probe_fails: Vec<&'static str>,
     port_clear: bool,
     port_guard_calls: RefCell<Vec<String>>,
     installs: RefCell<Vec<String>>,
@@ -74,6 +78,18 @@ impl ServiceEnv for HostFake {
     }
     fn binary_resolves(&self, binary: &str) -> bool {
         self.binaries.contains(&binary)
+    }
+    fn probe_plist(&self, binary: &str) -> Result<bool, String> {
+        if self.plist_probe_fails.contains(&binary) {
+            return Err(format!("plist probe failed for {binary}: test fake"));
+        }
+        Ok(self.plist_present(binary))
+    }
+    fn probe_loaded(&self, binary: &str) -> Result<bool, String> {
+        if self.loaded_probe_fails.contains(&binary) {
+            return Err(format!("launchd probe failed for {binary}: test fake"));
+        }
+        Ok(self.is_loaded(binary))
     }
 }
 
@@ -188,22 +204,22 @@ fn own_verb_path_for_absent_binary_errors() {
 fn presence_reads_all_three_signals() {
     let b = "trusty-search";
     let none = HostFake::default();
-    assert!(!member_installed(&none, b));
+    assert_eq!(member_installed(&none, b), Ok(false));
     let binary = HostFake {
         binaries: vec![b],
         ..HostFake::default()
     };
-    assert!(member_installed(&binary, b));
+    assert_eq!(member_installed(&binary, b), Ok(true));
     let plist = HostFake {
         plists: vec![b],
         ..HostFake::default()
     };
-    assert!(member_installed(&plist, b));
+    assert_eq!(member_installed(&plist, b), Ok(true));
     let loaded = HostFake {
         loaded: vec![b],
         ..HostFake::default()
     };
-    assert!(member_installed(&loaded, b));
+    assert_eq!(member_installed(&loaded, b), Ok(true));
 }
 
 /// REGRESSION (#10975): a bare `tctl start|stop|restart` skips every member
@@ -219,7 +235,7 @@ fn presence_reads_all_three_signals() {
 fn bare_verbs_skip_members_that_are_not_installed() {
     for verb in [Verb::Restart, Verb::Start, Verb::Stop] {
         let host = HostFake::default();
-        let code = run_lifecycle_in(&host, verb, &[], true, false);
+        let (code, _) = run_lifecycle_in(&host, verb, &[], true, false);
         assert_eq!(code, 0, "bare {} on an empty host must exit 0", verb.name());
         assert!(host.port_guard_calls.borrow().is_empty(), "{}", verb.name());
         assert!(host.installs.borrow().is_empty(), "{}", verb.name());
@@ -244,7 +260,7 @@ fn named_member_not_installed_exits_2_with_no_action() {
                 binaries: vec!["trusty-search"],
                 ..HostFake::default()
             };
-            let code = run_lifecycle_in(&host, verb, &names(named), true, false);
+            let (code, _) = run_lifecycle_in(&host, verb, &names(named), true, false);
             assert_eq!(code, 2, "{} {named:?}", verb.name());
             assert!(
                 host.port_guard_calls.borrow().is_empty(),
@@ -273,7 +289,7 @@ fn start_installs_a_member_whose_plist_is_absent() {
         port_clear: true,
         ..HostFake::default()
     };
-    let code = run_lifecycle_in(&host, Verb::Start, &names(&["trusty-search"]), true, false);
+    let (code, _) = run_lifecycle_in(&host, Verb::Start, &names(&["trusty-search"]), true, false);
     assert_eq!(code, 0);
     assert_eq!(*host.installs.borrow(), vec!["trusty-search".to_owned()]);
 }
@@ -294,7 +310,7 @@ fn loaded_label_without_plist_errors_before_bootout() {
         loaded: vec!["trusty-search"],
         ..HostFake::default()
     };
-    let code = run_lifecycle_in(
+    let (code, _) = run_lifecycle_in(
         &host,
         Verb::Restart,
         &names(&["trusty-search"]),
@@ -304,7 +320,8 @@ fn loaded_label_without_plist_errors_before_bootout() {
     assert_eq!(code, 2);
     assert!(host.port_guard_calls.borrow().is_empty());
     for verb in [Verb::Restart, Verb::Stop] {
-        let err = launchd_preflight(&host, verb, "trusty-search").expect_err("loaded, no plist");
+        let err =
+            launchd_preflight(&host, verb, "trusty-search", true).expect_err("loaded, no plist");
         assert!(err.to_string().contains("plist is gone"), "{err}");
     }
 }
@@ -314,8 +331,9 @@ fn loaded_label_without_plist_errors_before_bootout() {
 ///
 /// Why: `tctl upgrade` restarts through the same path and printed the raw
 /// launchd error for such a member.
-/// What: the preflight answers with a note for restart and stop, and lets
-/// start through to its `service install`.
+/// What: on macOS the preflight answers with a note for restart and stop, and
+/// lets start through to its `service install`. Off macOS it answers nothing,
+/// so `launchd_control`'s stub error stands, as on main (#10975 review).
 /// Test: This is the test.
 #[test]
 fn preflight_skips_an_unloaded_member_without_plist() {
@@ -324,12 +342,103 @@ fn preflight_skips_an_unloaded_member_without_plist() {
         ..HostFake::default()
     };
     for verb in [Verb::Restart, Verb::Stop] {
-        let note = launchd_preflight(&host, verb, "trusty-search")
+        let note = launchd_preflight(&host, verb, "trusty-search", true)
             .expect("no error")
             .expect("a skip note");
         assert!(note.contains("no launchd plist"), "{note}");
+        assert!(launchd_preflight(&host, verb, "trusty-search", false)
+            .expect("no error")
+            .is_none());
     }
-    assert!(launchd_preflight(&host, Verb::Start, "trusty-search")
+    assert!(launchd_preflight(&host, Verb::Start, "trusty-search", true)
         .expect("no error")
         .is_none());
+}
+
+/// REGRESSION (#10975 review): a presence probe that could not run is an
+/// error, never an ok "not installed" skip.
+///
+/// Why: `RealServiceEnv` folds a failed `launchctl list` or an unresolved home
+/// directory into "absent". Read as a skip, a loaded label whose plist is gone
+/// reported success, and through `tctl upgrade` left the old binary running.
+/// What: a named restart whose launchd probe fails, and a bare restart whose
+/// plist probe fails for one member, both exit 2 with no port-guard call; the
+/// preflight's error names the failed probe.
+/// Test: This is the test.
+#[test]
+fn failed_presence_probe_is_an_error_not_a_skip() {
+    let host = HostFake {
+        binaries: vec!["trusty-search"],
+        loaded_probe_fails: vec!["trusty-search"],
+        ..HostFake::default()
+    };
+    let (code, _) = run_lifecycle_in(
+        &host,
+        Verb::Restart,
+        &names(&["trusty-search"]),
+        true,
+        false,
+    );
+    assert_eq!(
+        code, 2,
+        "a failed launchd probe must not read as an ok skip"
+    );
+    assert!(host.port_guard_calls.borrow().is_empty());
+    let err = launchd_preflight(&host, Verb::Restart, "trusty-search", true)
+        .expect_err("a failed probe is an error");
+    assert!(err.to_string().contains("launchd probe failed"), "{err}");
+
+    let host = HostFake {
+        plist_probe_fails: vec!["trusty-events"],
+        ..HostFake::default()
+    };
+    let (code, outcomes) = run_lifecycle_in(&host, Verb::Restart, &[], true, false);
+    assert_eq!(
+        code, 2,
+        "a failed plist probe must not read as not installed"
+    );
+    assert!(host.port_guard_calls.borrow().is_empty());
+    let events = outcome(&outcomes, "trusty-events");
+    assert!(
+        !events.ok && events.detail.contains("plist probe failed"),
+        "{events:?}"
+    );
+}
+
+fn outcome<'a>(outcomes: &'a [LifecycleOutcome], member: &str) -> &'a LifecycleOutcome {
+    outcomes
+        .iter()
+        .find(|o| o.member == member)
+        .unwrap_or_else(|| panic!("no outcome for {member}: {outcomes:?}"))
+}
+
+/// REGRESSION (#10975 review): a bare verb on a mixed host acts on the present
+/// member and skips only the absent one.
+///
+/// Why: an all-absent host cannot tell the filter from an early `return 0` or
+/// a predicate that skips installed members too.
+/// What: trusty-search has its binary, trusty-events nothing. A bare restart
+/// gives trusty-events the not-installed skip and sends trusty-search through
+/// `apply_to_member`: the preflight's no-plist note on macOS, the launchd stub's
+/// error elsewhere. Neither reaches a real `launchctl` call.
+/// Test: This is the test.
+#[test]
+fn bare_verb_acts_on_present_and_skips_absent_members() {
+    let host = HostFake {
+        binaries: vec!["trusty-search"],
+        ..HostFake::default()
+    };
+    let (_, outcomes) = run_lifecycle_in(&host, Verb::Restart, &[], true, false);
+    let events = outcome(&outcomes, "trusty-events");
+    assert!(
+        events.ok && events.detail == NOT_INSTALLED_NOTE,
+        "{events:?}"
+    );
+    let search = outcome(&outcomes, "trusty-search");
+    let acted = if cfg!(target_os = "macos") {
+        "no launchd plist"
+    } else {
+        "only supported on macOS"
+    };
+    assert!(search.detail.contains(acted), "{search:?}");
 }

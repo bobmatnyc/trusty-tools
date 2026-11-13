@@ -193,7 +193,7 @@ pub fn run_restart(members: &[String], yes: bool, json: bool) -> i32 {
 /// Test: `tests::bare_verbs_skip_members_that_are_not_installed` drives the
 /// shared body through a fake.
 fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
-    run_lifecycle_in(&RealServiceEnv, verb, members, yes, json)
+    run_lifecycle_in(&RealServiceEnv, verb, members, yes, json).0
 }
 
 /// Is any trace of `binary` on this host — the binary, its plist, or its
@@ -205,10 +205,27 @@ fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
 /// wrong test: a binary without its plist still needs `start` to install the
 /// service (#2556), and a loaded label whose plist is gone must reach
 /// [`launchd_preflight`] so it errors instead of being skipped.
-/// What: `true` when any of the three [`ServiceEnv`] signals holds.
-/// Test: `tests::presence_reads_all_three_signals`.
-fn member_installed(env: &dyn ServiceEnv, binary: &str) -> bool {
-    env.binary_resolves(binary) || env.plist_present(binary) || env.is_loaded(binary)
+/// What: `Ok(true)` when any of the three [`ServiceEnv`] signals holds. A plist
+/// or launchd probe that could not run is `Err` naming it, never "absent".
+/// Test: `tests::presence_reads_all_three_signals`,
+/// `tests::failed_presence_probe_is_an_error_not_a_skip`.
+fn member_installed(env: &dyn ServiceEnv, binary: &str) -> Result<bool, String> {
+    if env.binary_resolves(binary) {
+        return Ok(true);
+    }
+    Ok(env.probe_plist(binary)? || env.probe_loaded(binary)?)
+}
+
+/// The outcome for a member whose presence probe failed (#10975 review): a
+/// failure naming the probe, never the ok not-installed skip.
+fn probe_failed(verb: Verb, m: &StableMember, err: &str) -> LifecycleOutcome {
+    let detail = format!("cannot tell whether it is installed: {err}");
+    eprintln!("tctl {}: {}: {detail}", verb.name(), m.crate_name);
+    LifecycleOutcome {
+        member: m.crate_name.clone(),
+        ok: false,
+        detail,
+    }
 }
 
 /// Shared orchestration for all three lifecycle verbs, over a [`ServiceEnv`].
@@ -219,20 +236,23 @@ fn member_installed(env: &dyn ServiceEnv, binary: &str) -> bool {
 /// off the members [`member_installed`] says are absent. A NAMED absent member
 /// exits 2 with `<name>: not installed` before any action; with no member named,
 /// each absent one gets an ok [`NOT_INSTALLED_NOTE`] outcome and is left out of
-/// the prompt. Confirms the blast radius unless `--yes`/non-interactive/`--json`,
+/// the prompt. A member whose presence probe failed gets a failed outcome and
+/// no action. Confirms the blast radius unless `--yes`/non-interactive/`--json`,
 /// applies the verb to each present member via [`apply_to_member`], then renders
-/// the report and returns its exit code.
+/// the report. Returns the exit code and the outcomes (empty on an early exit).
 /// Test: `tests::bare_verbs_skip_members_that_are_not_installed`,
+/// `tests::bare_verb_acts_on_present_and_skips_absent_members`,
 /// `tests::named_member_not_installed_exits_2_with_no_action`,
 /// `tests::start_installs_a_member_whose_plist_is_absent`,
-/// `tests::loaded_label_without_plist_errors_before_bootout`.
+/// `tests::loaded_label_without_plist_errors_before_bootout`,
+/// `tests::failed_presence_probe_is_an_error_not_a_skip`.
 fn run_lifecycle_in(
     env: &dyn ServiceEnv,
     verb: Verb,
     members: &[String],
     yes: bool,
     json: bool,
-) -> i32 {
+) -> (i32, Vec<LifecycleOutcome>) {
     let (selected, unknown) = select_members(members);
     if !unknown.is_empty() {
         let msg = format!("unknown member(s): {}", unknown.join(", "));
@@ -241,20 +261,25 @@ fn run_lifecycle_in(
         } else {
             eprintln!("tctl {}: {msg}", verb.name());
         }
-        return 3;
+        return (3, Vec::new());
     }
 
     let ordered = order_for(verb, &selected);
     if ordered.is_empty() {
         eprintln!("tctl {}: no daemon members selected", verb.name());
-        return 0;
+        return (0, Vec::new());
     }
 
     // #10975: act only on members present on this host. Sits before the
     // prompt so the prompt lists only what will be acted on.
-    let (present, absent): (Vec<StableMember>, Vec<StableMember>) = ordered
-        .into_iter()
-        .partition(|m| member_installed(env, &m.binary));
+    let (mut present, mut absent, mut unprobed) = (Vec::new(), Vec::new(), Vec::new());
+    for m in ordered {
+        match member_installed(env, &m.binary) {
+            Ok(true) => present.push(m),
+            Ok(false) => absent.push(m),
+            Err(e) => unprobed.push(probe_failed(verb, &m, &e)),
+        }
+    }
     if !members.is_empty() && !absent.is_empty() {
         let msg = absent
             .iter()
@@ -266,7 +291,7 @@ fn run_lifecycle_in(
         } else {
             eprintln!("tctl {}: {msg}", verb.name());
         }
-        return 2;
+        return (2, Vec::new());
     }
 
     if !present.is_empty() && !yes && !json && super::progress_ui::is_tty() {
@@ -279,7 +304,7 @@ fn run_lifecycle_in(
         );
         if !super::progress_ui::prompt_yes_no(&q) {
             eprintln!("tctl {}: aborted (no confirmation).", verb.name());
-            return 3;
+            return (3, Vec::new());
         }
     }
 
@@ -303,13 +328,14 @@ fn run_lifecycle_in(
             }
         }
     });
-    let outcomes: Vec<LifecycleOutcome> = skipped.chain(applied).collect();
+    let outcomes: Vec<LifecycleOutcome> =
+        unprobed.into_iter().chain(skipped).chain(applied).collect();
 
     let report = LifecycleReport::build(verb, outcomes);
     if json {
         if render_json(&report).is_err() {
             eprintln!("tctl {}: failed to write JSON output", verb.name());
-            return 1;
+            return (1, report.members);
         }
     } else {
         for m in &report.members {
@@ -317,7 +343,7 @@ fn run_lifecycle_in(
             println!("  {:<18} {:<8} {}", m.member, mark, m.detail);
         }
     }
-    report.exit_code()
+    (report.exit_code(), report.members)
 }
 
 /// Bounce ONE member, connection-safely, by its lifecycle strategy (#4964).
@@ -370,10 +396,12 @@ pub fn restart_member(binary: &str, manage: ManageStrategy) -> anyhow::Result<St
 /// calls themselves are side-effecting.
 fn apply_to_member(env: &dyn ServiceEnv, verb: Verb, m: &StableMember) -> anyhow::Result<String> {
     match m.manage {
-        ManageStrategy::Launchd => match launchd_preflight(env, verb, &m.binary)? {
-            Some(note) => Ok(note),
-            None => launchd_control(env, verb, &m.binary),
-        },
+        ManageStrategy::Launchd => {
+            match launchd_preflight(env, verb, &m.binary, cfg!(target_os = "macos"))? {
+                Some(note) => Ok(note),
+                None => launchd_control(env, verb, &m.binary),
+            }
+        }
         ManageStrategy::OwnVerb => own_verb_control(env, verb, &m.binary),
         // #6290, #6350: a member whose service is RETIRED lands here too, and
         // that is the point — reaching `launchd_control` would bootstrap the
@@ -393,22 +421,31 @@ fn apply_to_member(env: &dyn ServiceEnv, verb: Verb, m: &StableMember) -> anyhow
 /// to bootstrap it (`Bootstrap failed: 5: Input/output error`). If the label
 /// was loaded, that bootout killed a running daemon that nothing can bring
 /// back. `tctl upgrade` reaches the same path through [`restart_member`].
-/// What: `Ok(None)` (proceed) for `Start` — its plist-absent case is the #2556
-/// `service install` — and whenever the plist is present. With the plist
-/// absent: a loaded label is an `Err` naming the missing plist; an unloaded one
-/// is `Ok(Some(note))`, a skip with no `launchctl` call.
+/// What: `Ok(None)` (proceed) off macOS, where `launchd_control`'s stub answers
+/// as before; for `Start`, whose plist-absent case is the #2556 `service
+/// install`; and whenever the plist is present. With the plist absent: a loaded
+/// label is an `Err` naming the missing plist; an unloaded one is
+/// `Ok(Some(note))`, a skip with no `launchctl` call. A probe that could not
+/// run is an `Err` naming it. `macos` is a parameter, as in `upgrade.rs`'s
+/// `restart_plan`, so both arms are testable on every host.
 /// Test: `tests::loaded_label_without_plist_errors_before_bootout`,
-/// `tests::preflight_skips_an_unloaded_member_without_plist`.
+/// `tests::preflight_skips_an_unloaded_member_without_plist`,
+/// `tests::failed_presence_probe_is_an_error_not_a_skip`.
 fn launchd_preflight(
     env: &dyn ServiceEnv,
     verb: Verb,
     binary: &str,
+    macos: bool,
 ) -> anyhow::Result<Option<String>> {
-    if verb == Verb::Start || env.plist_present(binary) {
+    // #10975 review: a probe error must never fall through to the skip below.
+    let probe = |r: Result<bool, String>| {
+        r.map_err(|e| anyhow::anyhow!("cannot tell whether {binary} is installed: {e}"))
+    };
+    if !macos || verb == Verb::Start || probe(env.probe_plist(binary))? {
         return Ok(None);
     }
     let label = super::plist_label::plist_label_for(binary);
-    if env.is_loaded(binary) {
+    if probe(env.probe_loaded(binary))? {
         anyhow::bail!(
             "{label} is loaded but its launchd plist is gone; refusing to boot it out, \
              because launchd could not bootstrap it again (`tctl start {binary}` \
