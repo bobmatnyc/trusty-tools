@@ -8,7 +8,7 @@
 //! This module restores compression there with a shape that has no brace
 //! group, no pipe, no `;` and no `$?`: one simple command, `tm compress` running
 //! the original program itself (`commands::compress_run`).
-//! What: [`rewrite_bash_command_for_cwd`] picks the shape. Outside an isolation
+//! What: [`cwd_rewrite_decision`] picks the shape. Outside an isolation
 //! worktree it is the unchanged brace-group rewrite. Inside one it is
 //! [`isolated_rewrite`], which also decides the permission the rewrite carries
 //! from the ORIGINAL command, as the build-lease rewrite does, so a `deny` rule
@@ -38,29 +38,18 @@ pub(crate) struct CwdRewrite {
     pub(crate) permission: Option<RewriteDecision>,
 }
 
-/// The compression rewrite for `command` run from `cwd`, if one applies.
+/// The compression rewrite for `command` run from `cwd`, or why none applies.
 ///
 /// Why (#10973): see the module doc. An undecidable cwd gets no rewrite, as
 /// before #10973: the project's permission rules are read from the cwd's
 /// ancestors, so without one a `deny` rule could not be honoured (#10981 review).
-/// What: `cwd` absent or empty → `None`; inside an isolation worktree →
+/// What: `cwd` absent or empty → `Err(NoCwd)`; inside an isolation worktree →
 /// [`isolated_rewrite`]; otherwise [`rewrite_bash_command_for_compression`]
-/// with no permission decision, exactly as before.
+/// with no permission decision, exactly as before. A refusal names the guard
+/// that refused, from `compressible_tool_decision` or [`isolated_rewrite`].
 /// Test: `outside_a_worktree_the_brace_rewrite_is_unchanged`,
-/// `the_isolated_shape_is_one_simple_command`.
-pub(crate) fn rewrite_bash_command_for_cwd(
-    command: &str,
-    cwd: Option<&Path>,
-) -> Option<CwdRewrite> {
-    cwd_rewrite_decision(command, cwd).ok()
-}
-
-/// [`rewrite_bash_command_for_cwd`], with the refusal named (#10973).
-///
-/// What: `Ok` exactly when [`rewrite_bash_command_for_cwd`] is `Some`;
-/// otherwise the guard that refused, from `compressible_tool_decision` or
-/// [`isolated_rewrite`].
-/// Test: `an_isolated_refusal_names_its_guard`,
+/// `the_isolated_shape_is_one_simple_command`,
+/// `an_isolated_refusal_names_its_guard`,
 /// `an_isolated_worktree_refusal_is_named_on_the_row`.
 pub(crate) fn cwd_rewrite_decision(
     command: &str,
@@ -171,7 +160,9 @@ mod tests {
     const WORKTREE: &str = "/repo/.claude/worktrees/agent-a/crates/x";
 
     fn isolated(command: &str) -> Option<String> {
-        rewrite_bash_command_for_cwd(command, Some(Path::new(WORKTREE))).map(|r| r.command)
+        cwd_rewrite_decision(command, Some(Path::new(WORKTREE)))
+            .ok()
+            .map(|r| r.command)
     }
 
     /// #7477: the protected case — nothing the classifier refused reaches a
@@ -186,7 +177,7 @@ mod tests {
         }
         for cwd in [Some(Path::new("")), None] {
             assert!(
-                rewrite_bash_command_for_cwd("git diff HEAD~1", cwd).is_none(),
+                cwd_rewrite_decision("git diff HEAD~1", cwd).is_err(),
                 "an unknown cwd {cwd:?} must not be rewritten"
             );
         }
@@ -245,10 +236,11 @@ mod tests {
         )
         .expect("settings");
         assert!(
-            rewrite_bash_command_for_cwd("git log -p", Some(&tree)).is_none(),
+            cwd_rewrite_decision("git log -p", Some(&tree)).is_err(),
             "a denied original must run unchanged so Claude Code denies it"
         );
-        let allowed = rewrite_bash_command_for_cwd("git diff", Some(&tree)).expect("rewritten");
+        let allowed = cwd_rewrite_decision("git diff", Some(&tree))
+            .expect("rewritten");
         assert_eq!(allowed.permission, Some(RewriteDecision::Allow));
     }
 
@@ -284,7 +276,7 @@ mod tests {
 
     #[test]
     fn outside_a_worktree_the_brace_rewrite_is_unchanged() {
-        let out = rewrite_bash_command_for_cwd("git diff", Some(Path::new("/repo/crates/x")))
+        let out = cwd_rewrite_decision("git diff", Some(Path::new("/repo/crates/x")))
             .expect("rewritten");
         assert_eq!(
             Some(out.command),
