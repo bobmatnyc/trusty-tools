@@ -2,20 +2,28 @@ const $ = id => document.getElementById(id);
 const activate = $("activate");
 const statusLine = $("status");
 const robot = $("robot");
-const stage = $("stage");
+const eyes = [...robot.querySelectorAll(".eye")];
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
 document.addEventListener("pointermove", event => {
   if (event.pointerType === "touch" || reduceMotion.matches) return;
-  const rect = stage.getBoundingClientRect();
-  const direction = (point, start, size) => Math.max(-1, Math.min(1, 2 * (point - start) / size - 1));
-  const x = direction(event.clientX, rect.left, rect.width);
-  const y = direction(event.clientY, rect.top, rect.height);
-  robot.style.transform = `translate(${x * 7}px, ${y * 4}px) rotateY(${x * 19}deg) rotateX(${-y * 12}deg)`;
+  for (const eye of eyes) {
+    const rect = eye.getBoundingClientRect();
+    const dx = event.clientX - rect.left - rect.width / 2;
+    const dy = event.clientY - rect.top - rect.height / 2;
+    const distance = Math.max(rect.width, Math.hypot(dx, dy));
+    eye.style.setProperty("--look-x", (5 * dx / distance) + "%");
+    eye.style.setProperty("--look-y", (5 * dy / distance) + "%");
+  }
 });
-const centerRobot = () => robot.style.removeProperty("transform");
-document.documentElement.addEventListener("pointerleave", centerRobot);
-window.addEventListener("blur", centerRobot);
-reduceMotion.addEventListener("change", centerRobot);
+function centerEyes() {
+  for (const eye of eyes) {
+    eye.style.removeProperty("--look-x");
+    eye.style.removeProperty("--look-y");
+  }
+}
+document.documentElement.addEventListener("pointerleave", centerEyes);
+window.addEventListener("blur", centerEyes);
+reduceMotion.addEventListener("change", centerEyes);
 
 let preview;
 let confirmation;

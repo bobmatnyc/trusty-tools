@@ -33,11 +33,19 @@ def test_activation_popup():
             activate = page.get_by_role("button", name="Activate Extension")
             expect(activate).to_be_enabled()
             assert page.get_by_role("textbox").count() == 0
+            head = page.locator("#robot > img")
+            bounds = head.bounding_box()
             page.mouse.move(260, 80)
-            robot = page.locator("#robot")
-            assert "rotateY(" in robot.get_attribute("style")
+            for eye in page.locator(".eye").all():
+                assert float(eye.evaluate('el => el.style.getPropertyValue("--look-x")')[:-1]) > 0
+            page.mouse.move(5, 80)
+            for eye in page.locator(".eye").all():
+                assert float(eye.evaluate('el => el.style.getPropertyValue("--look-x")')[:-1]) < 0
+            assert head.bounding_box() == bounds
+            expect(head).to_have_css("transform", "none")
             page.emulate_media(reduced_motion="reduce")
-            expect(robot).to_have_css("transform", "none")
+            for iris in page.locator(".iris").all():
+                expect(iris).to_have_css("transform", "none")
             activate.focus()
             page.keyboard.press("Enter")
             expect(page.get_by_role("status")).to_have_text("Extension active")

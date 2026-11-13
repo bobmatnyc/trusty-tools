@@ -18,7 +18,7 @@ To run in the foreground, use `trusty-browser install-host` and `trusty-browser 
 
 ## Enroll and use a workflow
 
-Open the supported, signed-in site. Click **Trusty Browser** in the Chrome toolbar. Choose **Activate Extension**. Chrome may ask for access to the selected site. Trusty verifies the signed-in Chrome profile and site account, selects the workflow, and pairs the extension. The robot follows the pointer unless reduced motion is enabled. After activation, expand **Activation details** to see the route and workflow ID.
+Open the supported, signed-in site. Click **Trusty Browser** in the Chrome toolbar. Choose **Activate Extension**. Chrome may ask for access to the selected site. Trusty verifies the signed-in Chrome profile and site account, selects the workflow, and pairs the extension. Only the robot’s eyes follow the pointer unless reduced motion is enabled. After activation, expand **Activation details** to see the route and workflow ID.
 
 If the workflow already belongs to another profile, the popup shows the current and proposed Chrome profiles, URLs and site accounts. Choose **Confirm replacement** to transfer the workflow and revoke its old grant, or **Cancel** to keep its route.
 

@@ -54,7 +54,7 @@ circular clip, and the `UNIT-05` descriptor stays on the primary lockup.
 
 ## Trusty Browser
 
-Trusty Browser uses the Foundry robot head with its antenna, square eyes and three console readouts. Its geometry and toolbar colors come from the canonical Trusty Console mark. The horizontal signature uses Chakra Petch Bold and an IBM Plex Mono descriptor. The lettering is outlined so the exported assets render consistently without installed fonts.
+Trusty Browser uses the supplied orange industrial robot portrait, with illuminated round eyes and a worn metal housing. The horizontal signature uses Chakra Petch Bold and an IBM Plex Mono descriptor. The lettering is outlined so the exported assets render consistently without installed fonts.
 
 - [Paper lockup](trusty-browser-logo.svg)
 - [Night Shift lockup](trusty-browser-logo-reversed.svg)
