@@ -54,11 +54,11 @@ circular clip, and the `UNIT-05` descriptor stays on the primary lockup.
 
 ## Trusty Browser
 
-The Trusty Browser extension combines a raised browser tab and window controls with the Foundry robot's square eyes and terminal mouth. The toolbar mark uses oxide, copper and sand. The horizontal signature uses Chakra Petch Bold and an IBM Plex Mono descriptor. The lettering is outlined so the exported assets render consistently without installed fonts.
+Trusty Browser uses the Foundry robot head with its antenna, square eyes and three console readouts. Its geometry and toolbar colors come from the canonical Trusty Console mark. The horizontal signature uses Chakra Petch Bold and an IBM Plex Mono descriptor. The lettering is outlined so the exported assets render consistently without installed fonts.
 
 - [Paper lockup](trusty-browser-logo.svg)
 - [Night Shift lockup](trusty-browser-logo-reversed.svg)
 - [Light and dark preview](trusty-browser-lockups.png)
 - [Source mark and packaged Chrome icons](../../../../python/trusty-browser/src/trusty_browser/extension/icons)
 
-Use the standalone tab mark for Chrome's toolbar and extensions page. The extension manifest references PNGs at 16, 32, 48 and 128 pixels.
+Use the standalone robot mark for Chrome's toolbar and extensions page. The extension manifest references PNGs at 16, 32, 48 and 128 pixels.
