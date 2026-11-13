@@ -97,9 +97,10 @@ def test_handoff_citing_a_superseded_ruling_shows_the_successor_x8_10960(il):
     answer(il, "ar-D02", T2, supersedes="ar-D01")
     sources(il, handoff=["- helpers: " + line(T1)], rules=["- helpers: " + line(T2)])
     fl = flags(il)
-    # critic M: the SUPERSEDED line names ar-D02 as applied, so no second "missing ... restored: ar-D02" line
     assert fl == ["  FLAG reconcile: state.md:1 cites ar-D01, SUPERSEDED, not applied; ledger applies "
-                  f'ar-D02 "{T2["text"]}" (owner turn: {cite(T2)})'], fl
+                  f'ar-D02 "{T2["text"]}" (owner turn: {cite(T2)})',
+                  "  FLAG reconcile: owner ruling active in the ledger, missing from handoff; "
+                  f'restored: ar-D02 "{T2["text"]}" (owner turn: {cite(T2)})'], fl
 
 
 def test_ledger_hold_absent_from_handoff_is_restored_x9_10960(il):
@@ -134,23 +135,24 @@ def test_owner_reversal_old_line_superseded_new_applied_and_never_missing_10960(
     assert fl == ["  FLAG reconcile: standing-rules.md:1 cites ar-D01, SUPERSEDED, not applied; ledger applies "
                   f'ar-D02 "{T2["text"]}" (owner turn: {cite(T2)})'], fl
     assert not any("missing from" in f for f in fl)   # the reversed T1 is history, not a missing ruling
-    # the owner goes back to two (T3 supersedes T2): the old lines point at the chain's end, which they name
+    # the owner goes back to two (T3 supersedes T2): the old lines point at the chain's end, T3 is restored
     answer(il, "ar-D04", T3, supersedes="ar-D02")
     fl = flags(il)
     assert sum("ledger applies ar-D04" in f for f in fl) == 3, fl   # handoff:1, rules:1, rules:2
-    assert not any("missing from" in f for f in fl), fl   # critic M: named as applied, not restored again
+    assert [f for f in fl if "missing from" in f] == [
+        "  FLAG reconcile: owner ruling active in the ledger, missing from handoff and standing-rules.md; "
+        f'restored: ar-D04 "{T3["text"]}" (owner turn: {cite(T3)})']
 
 
-def test_a_successor_named_by_a_superseded_line_is_not_restored_twice_10960(il):
+def test_a_handoff_superseded_line_never_hides_a_successor_missing_from_standing_rules_10960(il):
     answer(il, "ar-D01", T1)
     answer(il, "ar-D02", T2, supersedes="ar-D01")
-    answer(il, "ar-D03", HOLD)
-    sources(il, handoff=["- helpers: " + line(T1)], rules=["- " + line(T2), "- " + line(HOLD)])
+    sources(il, handoff=["- helpers: " + line(T1), "- helpers now ar-D02"], rules=["# Standing rules"])
     fl = flags(il)
-    assert [f.split(";")[0] for f in fl] == [
-        "  FLAG reconcile: state.md:1 cites ar-D01, SUPERSEDED, not applied",
-        "  FLAG reconcile: owner ruling active in the ledger, missing from handoff"], fl   # ar-D03 only
-    assert "ar-D03" in fl[1] and not any("restored: ar-D02" in f for f in fl), fl
+    assert fl == ["  FLAG reconcile: state.md:1 cites ar-D01, SUPERSEDED, not applied; ledger applies "
+                  f'ar-D02 "{T2["text"]}" (owner turn: {cite(T2)})',
+                  "  FLAG reconcile: owner ruling active in the ledger, missing from standing-rules.md; "
+                  f'restored: ar-D02 "{T2["text"]}" (owner turn: {cite(T2)})'], fl
 
 
 def test_the_cap_never_drops_stale_or_missing_lines_for_no_source_lines_10960(il):
@@ -163,10 +165,11 @@ def test_the_cap_never_drops_stale_or_missing_lines_for_no_source_lines_10960(il
     fl = [ln for ln in b if ln.startswith("  FLAG reconcile")]
     assert len(fl) == datg_read.RECONCILE_MAX, b   # bounded
     assert fl[0].startswith("  FLAG reconcile: state.md:1 cites ar-D01, SUPERSEDED"), fl
-    assert fl[1].startswith("  FLAG reconcile: owner ruling active in the ledger, missing from handoff and "
-                            "standing-rules.md; restored: ar-D03"), fl
-    assert all("has no ledger source" in f for f in fl[2:]), fl
-    assert b[-1] == f"  +{16 - (datg_read.RECONCILE_MAX - 2)} more reconcile flags not shown", b
+    for n, iid in ((1, "ar-D02"), (2, "ar-D03")):   # both restored rulings sit ahead of every no-source line
+        assert fl[n].startswith("  FLAG reconcile: owner ruling active in the ledger, missing from handoff and "
+                                f"standing-rules.md; restored: {iid}"), fl
+    assert all("has no ledger source" in f for f in fl[3:]), fl
+    assert b[-1] == f"  +{16 - (datg_read.RECONCILE_MAX - 3)} more reconcile flags not shown", b
 
 
 def test_all_reconciled_when_every_source_matches_10960(il):

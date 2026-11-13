@@ -311,17 +311,17 @@ def _ruling(i):
 
 
 def _stale_ref(where, item, by_id, cur):
-    """(FLAG, applied id or None) for a line citing a ruling that is not current: superseded (the ledger's
-    successor named, and returned as the applied id) or expired."""
+    """The FLAG for a line citing a ruling that is not current: superseded (the ledger's successor named) or expired."""
     if "superseded_by" not in item:
-        return f"  FLAG reconcile: {where} cites {item['id']}, EXPIRED at {item['source'].get('until')}, not applied", None
+        return f"  FLAG reconcile: {where} cites {item['id']}, EXPIRED at {item['source'].get('until')}, not applied"
     succ, hops = by_id.get(item["superseded_by"]), 0
     while succ is not None and "superseded_by" in succ and hops < SUCCESSOR_HOPS:   # #10960 G-4: the chain's end
         succ, hops = by_id.get(succ["superseded_by"]), hops + 1
-    applied = succ.get("id") if succ is not None and succ.get("id") in cur else None
-    now_rule = (f"ledger applies {_ruling(succ)}" if applied
-                else f"successor {item['superseded_by']} is not a current owner ruling; ask the owner")
-    return f"  FLAG reconcile: {where} cites {item['id']}, SUPERSEDED, not applied; {now_rule}", applied
+    if succ is not None and succ.get("id") in cur:
+        now_rule = f"ledger applies {_ruling(succ)}"
+    else:
+        now_rule = f"successor {item['superseded_by']} is not a current owner ruling; ask the owner"
+    return f"  FLAG reconcile: {where} cites {item['id']}, SUPERSEDED, not applied; {now_rule}"
 
 
 def reconcile_failed(err):
@@ -338,7 +338,7 @@ def reconcile_lines(project, st, now=None):
     What: each handoff line that cites or claims an owner ruling, and each standing-rules rule line, is looked up
     in the ledger by item id or `(owner turn: <cite>)`. A superseded or expired cite is flagged with the ledger
     value; a line with no ledger record is flagged; a current owner ruling a present source omits is restored. A
-    superseded ruling is history, never missing; a successor a SUPERSEDED line names is not restored again. The
+    superseded ruling is history, never missing; its successor is still restored per source that omits it. The
     cap keeps stale, then missing, then no-source lines, so a no-source line never displaces the other two. An
     unreadable source or ledger is flagged, never "all reconciled".
     Test: tests/test_datg_reconcile.py
@@ -356,7 +356,7 @@ def _reconcile(project, st, now):
              and i["source"].get("by") == "owner"]
     current = owner_rulings(st, now)
     cur = {i["id"] for i, _ in current}
-    loud, stale, unsourced, note, seen, ok, applied = [], [], [], [], {}, [], set()
+    loud, stale, unsourced, note, seen, ok = [], [], [], [], {}, []
     srcs = [("handoff", r["value"], _handoff_path(project, r["value"]))
             for r in (st.get("session") or {}).get("refs") or [] if r.get("key") == "handoff"]
     if not srcs:
@@ -384,17 +384,14 @@ def _reconcile(project, st, now):
             if any(i["id"] in cur for i in refs):
                 seen[kind] |= {i["id"] for i in refs if i["id"] in cur}
             elif refs:
-                for i in refs:
-                    flag, succ = _stale_ref(f"{label}:{n}", i, by_id, cur)
-                    stale.append(flag)
-                    applied.add(succ)
+                stale += [_stale_ref(f"{label}:{n}", i, by_id, cur) for i in refs]
             elif _rule_line(ln) if kind == RULES_FILE else (OWNER_CLAIM.search(ln) or CITE_OF.search(ln)):
                 unsourced.append(f"  FLAG reconcile: {label}:{n} has no ledger source (not an owner ruling until the "
                              f"ledger holds it): {_short(ln, 120)}")
     missing = []
     for i, _ in current:
         miss = [k for k, ids in seen.items() if ids is not None and i["id"] not in ids]
-        if miss and i["id"] not in applied:   # a SUPERSEDED line already names it as the ruling that applies
+        if miss:   # #10960 ruling (b): per source, even when a SUPERSEDED line names it as the applied successor
             missing.append(f"  FLAG reconcile: owner ruling active in the ledger, missing from {' and '.join(miss)}; "
                          f"restored: {_ruling(i)}")
     flags = stale + missing + unsourced   # #10960 critic: the cap cuts no-source lines first, never X7-X9 lines
