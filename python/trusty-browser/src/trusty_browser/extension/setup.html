@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Trusty Browser enrollment</title>
+<link rel="stylesheet" href="setup.css">
+<main><img src="icons/trusty-browser-48.png" width="48" height="48" alt="">
+<h1>Trusty Browser</h1>
+<button id="enable" hidden>Enable access to this site</button>
+<dl hidden id="route"><dt>Chrome profile</dt><dd id="profile"></dd>
+<dt>Site</dt><dd id="site"></dd><dt>Site account</dt><dd id="account"></dd></dl>
+<form id="setup" hidden><label for="workflow">Workflow name</label>
+<input id="workflow" required maxlength="120" autocomplete="off">
+<button id="enroll">Enroll this workflow</button></form>
+<button id="remove" hidden>Remove workflow</button>
+<output id="status" aria-live="polite">Checking active tab…</output></main>
+<script src="setup.js"></script></html>

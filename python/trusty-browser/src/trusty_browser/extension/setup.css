@@ -1,0 +1,10 @@
+:root { font: 16px system-ui, sans-serif; color: #2b1c13; background: #f5efe6; }
+main { width: 320px; padding: 18px; }
+h1 { margin: 8px 0 20px; }
+label, output { display: block; }
+textarea { box-sizing: border-box; width: 100%; margin: 8px 0; }
+button { background: #6f351c; border: 0; border-radius: 4px; color: white; padding: 8px 12px; }
+output { margin-top: 12px; }
+dd { margin: 2px 0 10px; overflow-wrap: anywhere; }
+dt { font-weight: 600; }
+input { box-sizing: border-box; width: 100%; margin: 6px 0 12px; padding: 5px; }

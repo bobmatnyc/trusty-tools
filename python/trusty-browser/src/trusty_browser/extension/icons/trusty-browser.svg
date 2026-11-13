@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Trusty Browser</title>
+  <desc id="desc">A Foundry robot face in a browser window with one raised tab.</desc>
+  <path fill="#2B1C12" d="M4 12a5 5 0 0 1 5-5h18q2 0 4 3l3 5h21a5 5 0 0 1 5 5v33a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z"/>
+  <path fill="#D97742" d="M8 24h48v28a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2z"/>
+  <path fill="#E9B98A" d="M11 13h13l2 4H11z"/>
+  <path fill="#E9B98A" d="M42 18h6v3h-6zm9 0h3v3h-3z"/>
+  <g fill="#2B1C12">
+    <rect x="17" y="30" width="8" height="8" rx="1.5"/>
+    <rect x="39" y="30" width="8" height="8" rx="1.5"/>
+  </g>
+  <path d="m20 43 5 3-5 3m11 0h12" fill="none" stroke="#2B1C12" stroke-width="3.4" stroke-linecap="square" stroke-linejoin="round"/>
+</svg>

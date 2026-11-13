@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trusty-browser"
+version = "0.1.0"
+description = "Route web-QA workflows to enrolled Chrome profiles over Unix sockets"
+requires-python = ">=3.12"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["mcp>=1.30.0,<2"]
+
+[project.scripts]
+trusty-browser = "trusty_browser.cli:main"
+trusty-browser-mcp = "trusty_browser.agent_mcp:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "playwright==1.60.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+trusty_browser = ["extension/*", "extension/icons/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
