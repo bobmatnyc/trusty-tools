@@ -143,6 +143,28 @@ tunnel reached `api.anthropic.com`, nothing reached crates.io, huggingface.co,
 registry.npmjs.org, pypi.org or downloads.claude.ai, and `--noproxy` and DNS
 fail to connect. It prints PASS or FAIL per row and exits non-zero on any FAIL;
 an unreadable log, an empty `profile.log` or a stopped container is a FAIL.
+The TCP scan sizes its workers to the app's pid cap (`--pids-limit 1024`),
+at most `V1_SCAN_JOBS` (256), so it never exhausts the cap that every later
+`docker exec` needs (#11156). An exec that fails to start is tried again up to
+`V1_EXEC_TRIES` (3) times; a probe that ran is never retried.
+
+### Live cases
+
+Run on a docker host with the sled images built as `:ltest` from this
+directory, on the free subnet of `proxy/squid.conf`. Dummy secrets only;
+`ST` is a state dir (0700) with `state/` and `secrets/github-token`,
+`secrets/trusty-console-token` (0600).
+
+| Case | Command | Expected |
+|---|---|---|
+| 1 launch | `./launch.sh --tag ltest --name tm-ltest --state $ST` | With a dummy token: `exercise.sh` fails on `gh api` (401), `RESULT: REFUSED`, exit 1, containers stopped. A real token ends `RESULT: READY`. |
+| 1b restart | `docker start tm-ltest-egress tm-ltest`, then `docker start tm-ltest-tailscale`; `./launch.sh --check-only --name tm-ltest --state $ST` | `RESULT: CHECK OK`, exit 0. |
+| 2 V1 | `./check_v1.sh tm-ltest tm-ltest-egress tm-ltest-internal` | Every row PASS except, after a restart, the two tunnel rows ("run exercise.sh first"): the restart clears the proxy's log tmpfs. |
+| 3 bridge | `docker run --rm --network bridge curlimages/curl -sS -m 5 -x http://$B:3128 https://example.com`, `B` = the proxy's bridge address | curl exit 7, connect refused. |
+| 4 foreign target | `docker run -d --name tm-lother busybox sleep 300`; `./launch.sh --check-only --name tm-lother --state $ST` | `REFUSE target: ... nothing stopped`, exit 1, tm-lother still up. |
+| 5 late network | `docker network connect bridge tm-ltest`; `./launch.sh --check-only --name tm-ltest --state $ST` | `REFUSE network`, exit 1, app and sidecar stopped, proxy up. |
+| 6 loose secret | remove the sled, `chmod 644 $ST/secrets/github-token`, `./launch.sh --tag ltest --name tm-ltest --state $ST` | `REFUSE secrets: ... mode 644`, exit 1, no container created. |
+| 7 bad tries | `SLED_CHECK_TRIES=x ./launch.sh --tag ltest --name tm-ltest --state $ST` | `SLED_CHECK_TRIES must be a whole number`, exit 2. |
 
 Logs: the entrypoint, `check.sh` and `exercise.sh` run with `umask 077`, and
 `/data/logs` is mode 0700, so every log there is 0600 and owner-only.

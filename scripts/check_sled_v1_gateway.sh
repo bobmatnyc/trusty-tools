@@ -14,6 +14,9 @@
 #   missing tool, a lost worker, a short count, a closed control port, an
 #   answering port, a spliced line and a worker BAD count above 0 each fail.
 #   It extracts probe_class too: a timeout with no start marker is not a drop.
+#   #11156: it runs the scan's pid-budget block on a stub cgroup (the workers
+#   fit under the app's --pids-limit) and udp() on a stub docker: an exec that
+#   fails to start is retried a bounded number of times, a probe result never.
 #
 # Usage: ./scripts/check_sled_v1_gateway.sh [path/to/check_v1.sh]
 # Exit:  0 when every assertion holds; 1 naming each one that does not.
@@ -55,8 +58,8 @@ check "the bound runs inside the app, killing the workers too" \
   "$(has 'timeout -k 5 "${SCAN_BOUND}" bash -c "${TCP_SCAN}"')"
 old_bound_pat='out="$(timeout "${SCAN_BOUND}" docker exec'
 check "the bound no longer wraps only the docker CLI" "$(lacks "$old_bound_pat")"
-done_pat='echo "done $1 ${n} $(probe "${ctl}" 3128) ${b}"'
-check "each worker probes the proxy's 3128 as a control and reports BAD" "$(has "$done_pat")"
+check "each worker probes the proxy's 3128 as a control and reports BAD" \
+  "$( [ "$(has 'probe "${ctl}" 3128')$(has 'echo "done $1 ${n} ${R} ${b}"')" = yesyes ] && echo yes || echo no)"
 marker_pat="bash -c 'echo s; exec 3<>\"/dev/tcp/\$0/\$1\"'"
 check "the connect child prints its start marker first" "$(has "$marker_pat")"
 check "the six-port gateway loop is gone" \
@@ -86,7 +89,9 @@ if [ -z "$FUNCS" ] || ! eval "$FUNCS" 2> /dev/null \
   || ! declare -F scan_verdict > /dev/null || ! declare -F udp_verdict > /dev/null; then
   check "scan_verdict and udp_verdict are defined in check_v1.sh" no
 else
-  ok_scan="$(printf 'done 1 32768 open 0\ndone 2 32767 open 0')"
+  # #11156: every scan names its worker count on one "jobs" line first.
+  J='jobs 2 pids 47/1024'
+  ok_scan="$(printf '%s\ndone 1 32768 open 0\ndone 2 32767 open 0' "$J")"
   # verdict WANT NAME RC OUTPUT — scan_verdict on 2 workers gives WANT (yes|no).
   verdict() {
     local got
@@ -100,18 +105,25 @@ else
   verdict no "a missing tool (127) fails" 127 ""
   verdict no "an error line fails" 0 "error: no timeout command in the app"
   verdict no "empty output fails" 0 ""
-  verdict no "a lost worker fails" 0 "done 1 32768 open 0"
-  verdict no "a repeated worker index fails" 0 "$(printf 'done 1 32768 open 0\ndone 1 32767 open 0')"
-  verdict no "a short count fails" 0 "$(printf 'done 1 32768 open 0\ndone 2 100 open 0')"
-  verdict no "a closed control port fails" 0 "$(printf 'done 1 32768 open 0\ndone 2 32767 refused 0')"
-  verdict no "an open port fails" 0 "$(printf 'port 2222 open\ndone 1 32768 open 1\ndone 2 32767 open 0')"
+  verdict no "a lost worker fails" 0 "$(printf '%s\ndone 1 32768 open 0' "$J")"
+  verdict no "a repeated worker index fails" 0 "$(printf '%s\ndone 1 32768 open 0\ndone 1 32767 open 0' "$J")"
+  verdict no "a short count fails" 0 "$(printf '%s\ndone 1 32768 open 0\ndone 2 100 open 0' "$J")"
+  verdict no "a closed control port fails" 0 "$(printf '%s\ndone 1 32768 open 0\ndone 2 32767 refused 0' "$J")"
+  verdict no "an open port fails" 0 "$(printf '%s\nport 2222 open\ndone 1 32768 open 1\ndone 2 32767 open 0' "$J")"
   verdict no "a refused port fails" 0 "$(printf 'port 8080 refused\n%s' "$ok_scan")"
   verdict no "an unexplained probe error fails" 0 "$(printf 'port 9 other:rc1:Bad_file\n%s' "$ok_scan")"
   verdict no "a port line spliced after a stray message fails" 0 \
-    "$(printf 'done 1 32768 open 0\nbash: fork: retry: port 2222 open\ndone 2 32767 open 0')"
+    "$(printf '%s\ndone 1 32768 open 0\nbash: fork: retry: port 2222 open\ndone 2 32767 open 0' "$J")"
   verdict no "a worker reporting BAD above 0 fails" 0 \
-    "$(printf 'done 1 32768 open 1\ndone 2 32767 open 0')"
-  verdict no "an old four-field done line fails" 0 "$(printf 'done 1 32768 open\ndone 2 32767 open')"
+    "$(printf '%s\ndone 1 32768 open 1\ndone 2 32767 open 0' "$J")"
+  verdict no "an old four-field done line fails" 0 "$(printf '%s\ndone 1 32768 open\ndone 2 32767 open' "$J")"
+  verdict no "a scan with no jobs line fails" 0 "$(printf 'done 1 32768 open 0\ndone 2 32767 open 0')"
+  verdict no "two jobs lines fail" 0 "$(printf '%s\n%s' "$J" "$ok_scan")"
+  verdict no "a jobs line above JOBS fails" 0 \
+    "$(printf 'jobs 3 pids 1/9\ndone 1 21845 open 0\ndone 2 21845 open 0\ndone 3 21845 open 0')"
+  verdict yes "fewer workers than JOBS pass when they cover every port" 0 \
+    "$(printf 'jobs 1 pids 47/1024\ndone 1 65535 open 0')"
+  verdict no "fewer workers fail on a short count" 0 "$(printf 'jobs 1 pids 47/1024\ndone 1 32768 open 0')"
   for r in timeout unreachable; do
     v=no; [ "$(udp_verdict "$r")" = yes ] && v=yes
     check "udp_verdict: $r passes" "$v"
@@ -142,6 +154,75 @@ else
   pc refused 1 "$(printf 's\nbash: connect: Connection refused')"
   pc unreachable 1 "$(printf 's\nbash: connect: No route to host')"
   pc other:rc126:Permission_denied 126 "$(printf 's\nbash: x: Permission denied')"
+fi
+
+# 6. #11156: the scan sizes its workers to the app's pid cap. Run its budget
+# block with cat reading a stub cgroup: 256 workers at 5 tasks each must not
+# reach launch.sh's --pids-limit 1024.
+BUDGET="$(awk '/^max="\$\(cat \/sys\/fs\/cgroup\/pids.max/ {f=1} f {print} f && /^echo "jobs / {f=0}' "$V1")"
+if [ -z "$BUDGET" ]; then
+  check "the scan sizes its workers to the app's pid cap (budget block present)" no
+else
+  # budget MAX CUR JOBS — the scan's "jobs" line for that cgroup state.
+  # shellcheck disable=SC2034,SC2329 # jobs and cat are used by the eval'd block
+  budget() {
+    (_MAX="$1" _CUR="$2" jobs="$3"
+     cat() { case "$1" in *pids.max) echo "${_MAX}" ;; *pids.current) echo "${_CUR}" ;; esac; }
+     eval "$BUDGET")
+  }
+  while read -r mx cu ask; do
+    line="$(budget "$mx" "$cu" "$ask")"; n="$(awk '$1=="jobs" {print $2}' <<< "$line")"
+    v=no
+    if [ "$mx" = max ]; then [ "$n" = "$ask" ] && v=yes
+    elif [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -le "$ask" ] \
+      && [ $((n * 5 + cu)) -le $((mx - mx / 4)) ]; then v=yes; fi
+    check "pid budget max=$mx current=$cu asked=$ask -> '$line' fits 3/4 of the cap" "$v"
+  done <<'ST'
+1024 47 256
+1024 300 256
+4096 47 256
+max 47 256
+1024 47 8
+ST
+  v=no; line="$(budget 1024 1000 256)"; case "$line" in "error: no pid headroom"*) v=yes ;; esac
+  check "pid budget with no headroom is an error line" "$v"
+fi
+
+# 7. #11156: udp() on a stub docker. An exec that fails to start (rc 126) is
+# tried again up to EXEC_TRIES times; a bound hit (124) and a probe result are
+# not; the last failure is still "other:exec failed".
+UDPF="$(awk '/^udp\(\) \{/ {f=1} f {print} f && /^\}/ {f=0}' "$V1")"
+if [ -z "$UDPF" ] || ! eval "$UDPF" 2> /dev/null || ! declare -F udp > /dev/null; then
+  check "udp() is defined in check_v1.sh" no
+else
+  UT="$(mktemp -d)"
+  # shellcheck disable=SC2034 # read by the eval'd udp()
+  UDP_PROBE=probe
+  # STUB: each docker call pops the next "RC OUTPUT" line of $UT/plan.
+  timeout() { shift; "$@"; }
+  sleep() { :; }
+  udp_payload() { echo 00; }
+  docker() {
+    local l rc
+    l="$(head -n 1 "$UT/plan")"; tail -n +2 "$UT/plan" > "$UT/p2"; mv "$UT/p2" "$UT/plan"
+    echo x >> "$UT/calls"
+    rc="${l%% *}"; [ "$l" = "$rc" ] || echo "${l#* }"
+    return "$rc"
+  }
+  # uc WANT-PREFIX CALLS PLAN... — udp's last line starts WANT after CALLS execs.
+  uc() {
+    local want="$1" calls="$2" got n; shift 2
+    printf '%s\n' "$@" > "$UT/plan"; : > "$UT/calls"
+    got="$(APP=a EXEC_TRIES=3 udp 10.0.0.1 53 | tail -n 1)"; n="$(wc -l < "$UT/calls" | tr -d ' ')"
+    v=no; case "$got" in "$want"*) [ "$n" = "$calls" ] && v=yes ;; esac
+    check "udp: plan '$*' -> '$got' after $n exec(s), want '$want' after $calls" "$v"
+  }
+  uc timeout 2 "126 OCI runtime exec failed: resource temporarily unavailable" "0 timeout"
+  uc answered 1 "0 answered" "0 timeout"
+  uc "other:exec failed rc=126 try 3" 3 "126 a" "126 b" "126 c" "0 timeout"
+  uc "other:exec failed rc=124" 1 "124 x" "0 timeout"
+  uc refused 3 "125 a" "254 b" "0 refused"
+  rm -rf "$UT"
 fi
 
 echo "check_sled_v1_gateway: ${PASSED} passed, ${FAILED} failed"
