@@ -1,0 +1,52 @@
+{
+  "other_tab": {
+    "unclaimed_same_origin_valid_page": "/identity",
+    "banner_absent": true,
+    "profile_toolbar_title_matches_active_workflow": true,
+    "toolbar_action_badge_visible": "ON",
+    "toolbar_action_crop": "unclaimed-tab-toolbar.png"
+  },
+  "cancel_preserved_source": true,
+  "old_session": "SessionClosed",
+  "old_ticket": "Unauthorized",
+  "source_and_destination_accounts_shown": true,
+  "replacement_confirmed_in_destination_popup": true,
+  "new_route": {
+    "claim_then_snapshot_verified": true,
+    "new_existing_profile_attested": true,
+    "new_server_backed_account_verified": true,
+    "marker": "travel-transfer-confirmed",
+    "released": true
+  },
+  "server_marker_only_in_new_account": true,
+  "source_popup_returned_to_unenrolled_state": true,
+  "destination_removed_in_popup": true,
+  "failed_enrollment_retry": {
+    "service_stopped_before_enrollment": true,
+    "error_in_popup_and_form_stayed_editable": true,
+    "no_agent_credential_issued_on_failure": true,
+    "same_popup_retry_after_restart_enrolled": true,
+    "account_verified": "personal-fixture",
+    "removed_from_popup": true
+  },
+  "wheel_sha256": "ede63b73e766c5bf90cfc0ba256bb92f50bcce6479652a922799dedb94b0cace",
+  "site_cookie_journal": {
+    "personal-fixture": [
+      "personal-before-restart",
+      "personal-after-restart",
+      "personal-model"
+    ],
+    "travel-fixture": [
+      "travel-before-restart",
+      "travel-after-restart",
+      "travel-model",
+      "travel-transfer-confirmed"
+    ]
+  },
+  "profiles": "Two existing signed-in Chrome profiles, same QA site",
+  "cleanup": {
+    "both_workflows_removed": true,
+    "both_extensions_uninstalled": true,
+    "both_temporary_QA_cookies_cleared": true
+  }
+}
