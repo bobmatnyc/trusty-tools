@@ -15,6 +15,8 @@ from typing import Any, BinaryIO
 
 from mcp.server.fastmcp import FastMCP
 
+from trusty_browser import vault
+
 HEADER = struct.Struct("=I")
 MAX_FRAME = 1024 * 1024
 
@@ -45,6 +47,12 @@ def run(state: Path, credential: Path) -> None:
         ):
             raise ValueError("Use an owner-only workflow credential file (0600)")
         grant = json.load(handle)
+    if credential.parent.resolve() == (state / "workflows").resolve() or grant[
+        "ticket"
+    ].startswith(vault.PREFIX):
+        grant["ticket"] = vault.unseal(
+            state, "ticket:" + grant["workflow"], grant["ticket"]
+        )
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wire:
         wire.settimeout(30)

@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["mcp>=1.30.0,<2"]
+dependencies = ["mcp>=1.30.0,<2", "cryptography>=43", "keyring>=25,<26"]
 
 [project.scripts]
 trusty-browser = "trusty_browser.cli:main"

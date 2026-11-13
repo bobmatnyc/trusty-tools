@@ -60,3 +60,7 @@ uv run --extra test playwright install chromium
 uv run --extra test pytest -q
 node --test tests/test*.mjs
 ```
+
+## Local trust boundary
+
+The installed native hosts and Python interpreter are trusted code. Chrome and the broker authenticate each other during pairing. Subsequent command frames rely on the local pipes and Unix socket connecting those processes. The service wraps browser pairing keys and locally issued workflow tickets using an AES-GCM key in the macOS login Keychain. Copying the SQLite database and grant files alone does not reveal those credentials. An application that can execute code inside the trusted interpreter or access the same unlocked Keychain item can still act as the local user.
