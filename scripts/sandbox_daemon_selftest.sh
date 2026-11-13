@@ -58,6 +58,15 @@
 #     teardown-survivor  (#10922) a stub daemon leaves a process outside tmux
 #                   with its cwd under <dir>; the launcher names its pid and
 #                   exits 1
+#     teardown-symlink-entry  (#10922) a socket entry symlinked to a scratch
+#                   decoy socket is skipped: no tmux call names it or its target
+#     teardown-symlink-dir  (#10922) tmux-<uid> symlinked to a scratch decoy
+#                   dir refuses the tmux step: no tmux call, exit 1
+#     teardown-dead-pane  (#10922) a pane tmux reports dead is never signalled
+#     teardown-socket-survivor  (#10922) a process with cwd / holding a bound
+#                   unix socket under <dir> is named; exit 1
+#     teardown-probe-failed  (#10922) a survivor probe that fails or is missing
+#                   (SANDBOX_LSOF) is named on stderr; exit 1, never clean
 #     bin-fresh-*   (#10755) against a temp git source root (SANDBOX_SRC_ROOT)
 #                   and a stubbed dependency tree (BIN_FRESH_SOURCES_CMD): a
 #                   stale build artifact refuses, in a dry run and in a real
@@ -499,6 +508,149 @@ else
   pass teardown-survivor
 fi
 [ -z "$SVPID" ] || kill -KILL "$SVPID" 2>/dev/null || true
+
+# 10d-10f use a fake tmux that logs every call and answers no list-sessions;
+# $TMP_ROOT/fake-panes, when present, answers list-panes. The paths are baked
+# in: the launcher runs tmux under `env -i`.
+if command -v python3 >/dev/null 2>&1; then
+  bind_sock() { python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
+  LOGBIN="$TMP_ROOT/logtmux-bin"
+  mkdir -p "$LOGBIN"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\ncase "$*" in *list-sessions*) exit 1 ;; *list-panes*) cat "%s" 2>/dev/null ;; esac\nexit 0\n' \
+    "$TMP_ROOT/calls" "$TMP_ROOT/fake-panes" > "$LOGBIN/tmux"
+  chmod +x "$LOGBIN/tmux"
+  # Scratch decoys only: a socket and a socket dir outside every case dir.
+  DECOY_DIR="$TMP_ROOT/decoy/tmux-$(id -u)"
+  mkdir -p "$DECOY_DIR"
+  DECOY_SOCK="$DECOY_DIR/default"
+  bind_sock "$DECOY_SOCK"
+
+  # 10d. teardown-symlink-entry (#10922): a socket entry symlinked to the
+  # decoy is skipped; `default` beside it is still stopped.
+  DIRSE="$TMP_ROOT/casese"
+  mkdir -p "$DIRSE/data/tmux/tmux-$(id -u)"
+  chmod 700 "$DIRSE/data/tmux" "$DIRSE/data/tmux/tmux-$(id -u)"
+  bind_sock "$DIRSE/data/tmux/tmux-$(id -u)/default"
+  ln -s "$DECOY_SOCK" "$DIRSE/data/tmux/tmux-$(id -u)/tm-ws-decoy"
+  rm -f "$TMP_ROOT/calls" "$TMP_ROOT/fake-panes"
+  set +e
+  OUTSE="$(env -i PATH="$LOGBIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRSE" 2>&1)"
+  STATUSSE=$?
+  set -e
+  CALLSSE="$(cat "$TMP_ROOT/calls" 2>/dev/null || true)"
+  if printf '%s\n' "$CALLSSE" | grep -qe "tm-ws-decoy" -e "$TMP_ROOT/decoy"; then
+    fail teardown-symlink-entry "a tmux -S call named the symlinked entry or its decoy target: [$CALLSSE]"
+  elif ! printf '%s\n' "$CALLSSE" | grep -qxF -- "-S $DIRSE/data/tmux/tmux-$(id -u)/default kill-server"; then
+    fail teardown-symlink-entry "default was not stopped: [$CALLSSE]"
+  elif [ "$STATUSSE" -ne 0 ]; then
+    fail teardown-symlink-entry "launcher exit $STATUSSE"
+    printf '%s\n' "$OUTSE" | sed 's/^/    /'
+  else
+    pass teardown-symlink-entry
+  fi
+
+  # 10e. teardown-symlink-dir (#10922): tmux-<uid> symlinked to the decoy dir
+  # refuses the tmux step: no tmux call at all, exit 1, the refusal named.
+  DIRSD="$TMP_ROOT/casesd"
+  mkdir -p "$DIRSD/data/tmux"
+  chmod 700 "$DIRSD/data/tmux"
+  ln -s "$DECOY_DIR" "$DIRSD/data/tmux/tmux-$(id -u)"
+  rm -f "$TMP_ROOT/calls" "$TMP_ROOT/fake-panes"
+  set +e
+  OUTSD="$(env -i PATH="$LOGBIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRSD" 2>&1)"
+  STATUSSD=$?
+  set -e
+  CALLSSD="$(cat "$TMP_ROOT/calls" 2>/dev/null || true)"
+  if [ -n "$CALLSSD" ]; then
+    fail teardown-symlink-dir "tmux was called through the symlinked dir: [$CALLSSD]"
+  elif [ "$STATUSSD" -ne 1 ] || ! printf '%s' "$OUTSD" | grep -q "teardown refused the tmux socket dir"; then
+    fail teardown-symlink-dir "exit $STATUSSD (want 1), refusal not named"
+    printf '%s\n' "$OUTSD" | sed 's/^/    /'
+  else
+    pass teardown-symlink-dir
+  fi
+
+  # 10f. teardown-dead-pane (#10922): a pane tmux reports dead keeps its pid
+  # out of the TERM list, so a reused pid is never signalled.
+  DIRDP="$TMP_ROOT/casedp"
+  mkdir -p "$DIRDP/data/tmux/tmux-$(id -u)"
+  chmod 700 "$DIRDP/data/tmux" "$DIRDP/data/tmux/tmux-$(id -u)"
+  bind_sock "$DIRDP/data/tmux/tmux-$(id -u)/default"
+  # Detached, so a stopped one is reaped by init, not left a zombie of ours.
+  (sleep 614 > /dev/null 2>&1 & echo $! > "$TMP_ROOT/srv-dp")
+  (sleep 615 > /dev/null 2>&1 & echo $! > "$TMP_ROOT/dead-dp")
+  SRVDP="$(cat "$TMP_ROOT/srv-dp")"
+  DEADDP="$(cat "$TMP_ROOT/dead-dp")"
+  rm -f "$TMP_ROOT/calls"
+  echo "$SRVDP $DEADDP 1" > "$TMP_ROOT/fake-panes"
+  set +e
+  OUTDP="$(env -i PATH="$LOGBIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRDP" 2>&1)"
+  STATUSDP=$?
+  set -e
+  if ! kill -0 "$DEADDP" 2>/dev/null; then
+    fail teardown-dead-pane "the dead pane's pid $DEADDP was signalled"
+  elif kill -0 "$SRVDP" 2>/dev/null; then
+    fail teardown-dead-pane "the server pid $SRVDP was not stopped"
+  elif [ "$STATUSDP" -ne 0 ]; then
+    fail teardown-dead-pane "launcher exit $STATUSDP"
+    printf '%s\n' "$OUTDP" | sed 's/^/    /'
+  else
+    pass teardown-dead-pane
+  fi
+  kill -KILL "$SRVDP" "$DEADDP" 2>/dev/null || true
+
+  # 10g. teardown-socket-survivor (#10922): a process with its cwd at / that
+  # holds a bound unix socket under <dir> is a survivor; exit 1 names it.
+  DIRSS="$TMP_ROOT/casess"
+  mkdir -p "$DIRSS"
+  SS_STUB="$TMP_ROOT/stub-ss-tm"
+  # shellcheck disable=SC2016  # expands in the stub, not here
+  printf '%s\n' '#!/bin/sh' 'cd / || exit 1' \
+    'python3 -I -c "import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(616)" "$HOME/held.sock" > /dev/null 2>&1 &' \
+    'echo $! > "$HOME/ss-pid"' \
+    'i=0; while [ "$i" -lt 50 ] && [ ! -S "$HOME/held.sock" ]; do sleep 0.1; i=$((i + 1)); done' > "$SS_STUB"
+  chmod +x "$SS_STUB"
+  set +e
+  OUTSS="$(env -i PATH="$PATH" bash "$LAUNCHER" --bin "$SS_STUB" --dir "$DIRSS" 2>&1)"
+  STATUSSS=$?
+  set -e
+  SSPID="$(cat "$DIRSS/home/ss-pid" 2>/dev/null || true)"
+  if [ -z "$SSPID" ] || [ ! -S "$DIRSS/home/held.sock" ]; then
+    fail teardown-socket-survivor "the stub never bound its socket"
+  elif [ "$STATUSSS" -ne 1 ] || ! printf '%s' "$OUTSS" | grep -q "teardown left processes under $DIRSS:.* $SSPID"; then
+    fail teardown-socket-survivor "exit $STATUSSS (want 1), socket holder $SSPID not named"
+    printf '%s\n' "$OUTSS" | sed 's/^/    /'
+  else
+    pass teardown-socket-survivor
+  fi
+  [ -z "$SSPID" ] || kill -KILL "$SSPID" 2>/dev/null || true
+else
+  echo "skip teardown-symlink-entry, teardown-symlink-dir, teardown-dead-pane, teardown-socket-survivor: no python3"
+fi
+
+# 10h. teardown-probe-failed (#10922): a survivor check that cannot run is a
+# failure naming the check, never a clean teardown. SANDBOX_LSOF points the
+# probe at a failing or a missing binary; a failing `lsof` also leads PATH.
+PROBEBIN="$TMP_ROOT/probe-bin"
+mkdir -p "$PROBEBIN"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$PROBEBIN/lsof"
+chmod +x "$PROBEBIN/lsof"
+NPF=0
+for probe in "$PROBEBIN/lsof:exited 1" "$TMP_ROOT/no-such-lsof:is missing or not executable"; do
+  NPF=$((NPF + 1))
+  DIRPF="$TMP_ROOT/casepf$NPF"
+  mkdir -p "$DIRPF"
+  set +e
+  OUTPF="$(env -i PATH="$PROBEBIN:$PATH" SANDBOX_LSOF="${probe%%:*}" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRPF" 2>&1)"
+  STATUSPF=$?
+  set -e
+  if [ "$STATUSPF" -ne 1 ] || ! printf '%s' "$OUTPF" | grep -qF "survivor check failed: ${probe%%:*} ${probe#*:}"; then
+    fail teardown-probe-failed "probe ${probe%%:*}: exit $STATUSPF (want 1), failed check not named"
+    printf '%s\n' "$OUTPF" | sed 's/^/    /'
+  else
+    pass "teardown-probe-failed (${probe#*:})"
+  fi
+done
 
 # 11. bin-fresh (#10755): a temp source root and a stubbed dependency tree
 # (BIN_FRESH_SOURCES_CMD), so neither the real tree nor cargo changes the
