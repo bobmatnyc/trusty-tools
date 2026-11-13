@@ -553,3 +553,25 @@ async fn a_failed_session_start_registration_leaves_assign_refusing() {
         "no home is reported"
     );
 }
+
+/// #10368: a session start in a second clone of a registered project names
+/// both checkouts, adds no row, and leaves the registry bytes as they were.
+#[tokio::test]
+async fn a_session_start_reports_a_project_registered_to_another_clone() {
+    let h = harness().await;
+    let home = TempDir::new().expect("tmp home");
+    let old = checkout(&h, "old-api", "git@github.com:Acme/Api.git");
+    let api = checkout(&h, "api", "git@github.com:Acme/Api.git");
+    assert_eq!(project_notice(&old, Some(home.path())).await, None);
+    let registry = registry_dir_under_home(home.path()).join("projects.json");
+    let before = std::fs::read(&registry).expect("registered");
+
+    let notice = project_notice(&api, Some(home.path())).await;
+
+    let notice = notice.expect("the other clone is reported");
+    let old = old.canonicalize().expect("canonical old");
+    let api = api.canonicalize().expect("canonical api");
+    assert!(notice.contains(&old.display().to_string()), "{notice}");
+    assert!(notice.contains(&api.display().to_string()), "{notice}");
+    assert_eq!(std::fs::read(&registry).expect("still there"), before);
+}

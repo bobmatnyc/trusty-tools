@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use trusty_mpm::project::register_session_checkout;
+use trusty_mpm::project::{SessionRegistration, register_session_checkout};
 
 /// The registry directory of the framework root under `home`.
 ///
@@ -39,17 +39,42 @@ pub(crate) async fn register_at_session_start(dir: &Path, home: Option<&Path>) {
     }
 }
 
-/// [`register_at_session_start`]'s work: the warning to print, or `None`.
+/// [`register_at_session_start`]'s work: the line to print, or `None`.
 ///
+/// What: a failure's warning; for a row kept for another checkout, a note
+/// naming both paths; otherwise `None`.
 /// Test: `a_session_started_checkout_is_an_assign_target`,
-/// `a_failed_session_start_registration_leaves_assign_refusing`.
+/// `a_failed_session_start_registration_leaves_assign_refusing`,
+/// `a_session_start_reports_a_project_registered_to_another_clone`.
 pub(crate) async fn project_notice(dir: &Path, home: Option<&Path>) -> Option<String> {
     let Some(home) = home else {
         return Some(failure_notice("no home directory"));
     };
     let result = register_session_checkout(&registry_dir_under_home(home), dir, Some(home)).await;
-    // #10368: a failure is reported, never taken as registered.
-    result.err().map(|e| failure_notice(&e.to_string()))
+    match result {
+        // #10368: a row for another clone is reported, never rewritten.
+        Ok(SessionRegistration::AlreadyRegistered {
+            name,
+            checkout,
+            root,
+        }) if checkout.as_ref() != Some(&root) => {
+            Some(stale_checkout_notice(&name, checkout.as_deref(), &root))
+        }
+        Ok(_) => None,
+        // #10368: a failure is reported, never taken as registered.
+        Err(e) => Some(failure_notice(&e.to_string())),
+    }
+}
+
+/// The note for a project whose registered checkout is not this session's.
+fn stale_checkout_notice(name: &str, checkout: Option<&Path>, root: &Path) -> String {
+    let registered = checkout.map_or_else(|| "none".to_string(), |c| c.display().to_string());
+    format!(
+        "note: project {name} is registered with checkout {registered}, not this session's \
+         checkout {}; the registry was not changed, and `tm secrets assign` uses the \
+         registered one (#10368)",
+        root.display()
+    )
 }
 
 /// The warning a failed registration prints.

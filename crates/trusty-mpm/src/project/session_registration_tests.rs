@@ -84,6 +84,7 @@ async fn session_start_registration_is_idempotent() {
         SessionRegistration::AlreadyRegistered {
             name: "widget".into(),
             checkout: Some(root.clone()),
+            root: root.clone(),
         }
     );
     assert_eq!(registry_bytes(&registry), Some(after_first));
@@ -199,4 +200,88 @@ fn registered_checkout_refuses_two_checkouts() {
         registered_checkout(&registry, "Acme/Web"),
         Err(CheckoutLookupError::Ambiguous(_))
     ));
+}
+
+/// A `.git` entry git does not accept is refused with no write: an invalid
+/// `.git` file, and an empty `.git` dir inside a parent repository, which git
+/// resolves to the parent (so the child would take the parent's owner/repo).
+#[tokio::test]
+async fn session_start_refuses_a_root_git_does_not_confirm() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = tmp.path().join("registry");
+
+    let garbage = tmp.path().join("garbage");
+    std::fs::create_dir(&garbage).expect("mkdir garbage");
+    std::fs::write(garbage.join(".git"), "not a gitdir pointer\n").expect("bad .git");
+    let outcome = register_session_checkout(&registry, &garbage, None).await;
+    assert!(
+        matches!(outcome, Err(SessionRegistrationError::UnverifiedRoot(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(registry_bytes(&registry), None);
+
+    let parent = checkout(&tmp.path().join("parent"), "https://github.com/acme/parent");
+    let child = parent.join("child");
+    std::fs::create_dir_all(child.join(".git")).expect("empty .git dir");
+    let outcome = register_session_checkout(&registry, &child, None).await;
+    assert!(
+        matches!(&outcome, Err(SessionRegistrationError::UnverifiedRoot(p)) if *p == child),
+        "{outcome:?}"
+    );
+    assert_eq!(registry_bytes(&registry), None);
+}
+
+/// A second start reads and writes nothing back: two rows, one carrying a
+/// field this binary does not know, keep their exact bytes and order.
+#[tokio::test]
+async fn session_start_second_start_leaves_the_bytes_alone() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = tmp.path().join("registry");
+    let root = checkout(&tmp.path().join("widget"), "https://github.com/acme/widget");
+    std::fs::create_dir(&registry).expect("mkdir registry");
+    let doc = format!(
+        "{{\n  \"projects\": {{\n    \"zeta\": {{\"name\": \"zeta\", \"repo_url\": \"https://github.com/acme/zeta\", \"default_branch\": \"main\", \"project_key\": \"acme/zeta\"}},\n    \"widget\": {{\"name\": \"widget\", \"repo_url\": {:?}, \"default_branch\": \"main\", \"project_key\": \"acme/widget\", \"field_from_a_newer_tm\": [1, 2]}}\n  }}\n}}\n",
+        root.to_string_lossy()
+    );
+    std::fs::write(registry.join("projects.json"), &doc).expect("seed");
+
+    let outcome = register_session_checkout(&registry, &root, None)
+        .await
+        .expect("second start");
+
+    assert!(
+        matches!(&outcome, SessionRegistration::AlreadyRegistered { name, .. } if name == "widget"),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        registry_bytes(&registry).as_deref(),
+        Some(doc.as_bytes()),
+        "the registry was rewritten"
+    );
+}
+
+/// D50 through a symlink: a session directory that is a link to the home
+/// directory, or to a repository above it, is refused, not registered.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_start_through_a_symlink_to_home_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = tmp.path().join("registry");
+    let parent = checkout(&tmp.path().join("parent"), "https://github.com/me/parent");
+    let home = parent.join("home");
+    std::fs::create_dir(&home).expect("mkdir home");
+    let to_parent = tmp.path().join("to-parent");
+    std::os::unix::fs::symlink(&parent, &to_parent).expect("symlink parent");
+    let to_home = tmp.path().join("to-home");
+    std::os::unix::fs::symlink(&home, &to_home).expect("symlink home");
+
+    for dir in [&to_parent, &to_home] {
+        let outcome = register_session_checkout(&registry, dir, Some(&home)).await;
+        assert!(
+            matches!(&outcome, Err(SessionRegistrationError::Unregistrable(p)) if *p == parent),
+            "{}: {outcome:?}",
+            dir.display()
+        );
+    }
+    assert_eq!(registry_bytes(&registry), None);
 }

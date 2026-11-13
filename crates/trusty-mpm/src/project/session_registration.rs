@@ -34,6 +34,8 @@ pub enum SessionRegistration {
         name: String,
         /// The kept row's checkout, which may differ from this session's.
         checkout: Option<PathBuf>,
+        /// This session's canonical checkout root.
+        root: PathBuf,
     },
     /// The directory is in no git checkout; nothing was written.
     NotACheckout,
@@ -49,6 +51,11 @@ pub enum SessionRegistrationError {
         "refusing to register {0} as a project: it is the home directory, above it, or the filesystem root"
     )]
     Unregistrable(PathBuf),
+    /// Git could not confirm the directory holding `.git` as its own top level.
+    #[error(
+        "refusing to register {0} as a project: git does not confirm it as a checkout's top level"
+    )]
+    UnverifiedRoot(PathBuf),
     /// Another repository's row already holds the checkout's name.
     #[error("project name {name} already belongs to another repository; {root} was not registered")]
     NameTaken {
@@ -66,26 +73,34 @@ pub enum SessionRegistrationError {
 ///
 /// Why: #10368 — a session started in a checkout must be a registered target
 /// for `tm secrets` with no manual `tm project init`.
-/// What: finds the git root above `cwd`; no root is [`SessionRegistration::NotACheckout`]
+/// What: finds the git root above `cwd`'s canonical path; no root is [`SessionRegistration::NotACheckout`]
 /// and a linked worktree is [`SessionRegistration::LinkedWorktree`], both
 /// without a write. A root that is `/`, `home` or an ancestor of `home` is
-/// [`SessionRegistrationError::Unregistrable`] (D50). Otherwise one
-/// `register_unless_present` call stores a row whose `repo_url` is the
-/// canonical root and whose name is its basename. A kept row with the same key
-/// or path is [`SessionRegistration::AlreadyRegistered`]; a kept row that
-/// matched on name only is [`SessionRegistrationError::NameTaken`]. A kept row
-/// is never rewritten.
+/// [`SessionRegistrationError::Unregistrable`] (D50). A root git does not
+/// report as its own `--show-toplevel`, or whose git-dir check fails, is
+/// [`SessionRegistrationError::UnverifiedRoot`]. A row already present (same
+/// name, path or key) is found by a plain read and nothing is written;
+/// otherwise one `register_unless_present` call stores a row whose `repo_url`
+/// is the canonical root and whose name is its basename. A kept row with the
+/// same key or path is [`SessionRegistration::AlreadyRegistered`], carrying
+/// both checkouts; one that matched on name only is
+/// [`SessionRegistrationError::NameTaken`]. A kept row is never rewritten.
 /// Test: `session_start_registers_the_checkout_and_assign_resolves_it`,
 /// `session_start_registration_is_idempotent`,
 /// `session_start_registration_failure_is_an_error_not_a_registration`,
-/// `session_start_never_registers_home_or_its_ancestors`.
+/// `session_start_never_registers_home_or_its_ancestors`,
+/// `session_start_refuses_a_root_git_does_not_confirm`,
+/// `session_start_second_start_leaves_the_bytes_alone`,
+/// `session_start_through_a_symlink_to_home_is_refused`.
 pub async fn register_session_checkout(
     registry_dir: &Path,
     cwd: &Path,
     home: Option<&Path>,
 ) -> Result<SessionRegistration, SessionRegistrationError> {
     use crate::core::project_aliases::{find_git_root, git_dir_differs_from_common};
-    let Some(root) = find_git_root(cwd) else {
+    // #10368: walk the real path, so a symlink cannot hide home or a parent.
+    let cwd = cwd.canonicalize().map_err(ProjectStoreError::Io)?;
+    let Some(root) = find_git_root(&cwd) else {
         return Ok(SessionRegistration::NotACheckout);
     };
     let root = root.canonicalize().map_err(ProjectStoreError::Io)?;
@@ -94,19 +109,35 @@ pub async fn register_session_checkout(
     if root.parent().is_none() || home.is_some_and(|h| h.starts_with(&root)) {
         return Err(SessionRegistrationError::Unregistrable(root));
     }
-    if git_dir_differs_from_common(&root) == Some(true) {
-        return Ok(SessionRegistration::LinkedWorktree);
+    // #10368: a `.git` entry is not proof; git must name this root its top
+    // level, and any git failure refuses.
+    if git_toplevel(&root).as_ref() != Some(&root) {
+        return Err(SessionRegistrationError::UnverifiedRoot(root));
+    }
+    match git_dir_differs_from_common(&root) {
+        Some(false) => {}
+        Some(true) => return Ok(SessionRegistration::LinkedWorktree),
+        None => return Err(SessionRegistrationError::UnverifiedRoot(root)),
     }
     let repo_url = root.to_string_lossy().into_owned();
     let name = crate::core::project::name_from_path(&root);
-    let registry = ProjectRegistry::load(registry_dir).await?;
-    let Some(kept) = registry
-        .register_unless_present(session_project(&name, &repo_url))
-        .await?
-    else {
-        return Ok(SessionRegistration::Registered { name });
-    };
+    let project = session_project(&name, &repo_url);
     let key = super::project_key_from_repo_url(&repo_url);
+    // #10368: a present row is answered from a plain read; the locked write
+    // would republish the whole file on every start.
+    let present = super::store::read_projects(registry_dir)?
+        .into_iter()
+        .find(|p| super::registry::holds_registration(p, &project, key.as_deref()));
+    let kept = match present {
+        Some(kept) => kept,
+        None => {
+            let registry = ProjectRegistry::load(registry_dir).await?;
+            match registry.register_unless_present(project).await? {
+                None => return Ok(SessionRegistration::Registered { name }),
+                Some(kept) => kept,
+            }
+        }
+    };
     let same_repo = kept.repo_url == repo_url || (key.is_some() && kept_key(&kept) == key);
     if !same_repo {
         return Err(SessionRegistrationError::NameTaken { name, root });
@@ -114,7 +145,21 @@ pub async fn register_session_checkout(
     Ok(SessionRegistration::AlreadyRegistered {
         checkout: super::local_checkout_for(&kept),
         name: kept.name,
+        root,
     })
+}
+
+/// `git -C root rev-parse --show-toplevel`, canonicalized; `None` on any failure.
+fn git_toplevel(root: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let top = String::from_utf8(out.stdout).ok()?;
+    PathBuf::from(top.trim()).canonicalize().ok()
 }
 
 /// The row a session start writes: identity fields only, every option unset.
