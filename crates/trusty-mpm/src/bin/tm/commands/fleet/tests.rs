@@ -349,7 +349,9 @@ fn dir_overrides_the_default() {
     );
     init(&other, fx.home(), false, NO_TMUX).unwrap();
     assert!(other.join(".trusty-mpm.toml").exists());
-    let default = fx.home().join(DEFAULT_DIR);
+    let default = fx
+        .home()
+        .join(trusty_mpm::core::architect_store::DEFAULT_ARCHITECT_DIR);
     assert!(!default.exists(), "the default directory was created");
     assert!(fx.config().contains(&canonical(&other)));
 }

@@ -301,6 +301,26 @@ pub(super) fn is_label_loaded(label: &str) -> bool {
     matches!(launchd_list_raw(label), LaunchdList::Found(_))
 }
 
+/// [`is_label_loaded`] that keeps "launchd could not be asked" apart (#10975).
+///
+/// Why: `tctl start|stop|restart` skip a member that reads as absent, so a
+/// failed `launchctl list` must not read as "not loaded" there.
+/// What: `Found` → `Ok(true)`, `NotFound` → `Ok(false)`; `Unavailable` is an
+/// `Err` naming the probe on macOS, and `Ok(false)` elsewhere, where launchd
+/// does not exist and so loads nothing.
+/// Test: side-effecting (subprocess); the lifecycle's handling of the `Err` is
+/// `lifecycle::tests::failed_presence_probe_is_an_error_not_a_skip`.
+pub(super) fn probe_label_loaded(label: &str) -> Result<bool, String> {
+    match launchd_list_raw(label) {
+        LaunchdList::Found(_) => Ok(true),
+        LaunchdList::NotFound => Ok(false),
+        LaunchdList::Unavailable if cfg!(target_os = "macos") => Err(format!(
+            "launchd probe failed: could not run `launchctl list {label}`"
+        )),
+        LaunchdList::Unavailable => Ok(false),
+    }
+}
+
 /// Classify why a LAUNCHD member is still `down` after the poll wait (#3833).
 ///
 /// Why: `verify_tail::verify_one` calls this once it has a final `down`
