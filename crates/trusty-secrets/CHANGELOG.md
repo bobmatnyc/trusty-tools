@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.0] — 2026-11-13
+
+### Breaking
+
+- `store::ControlItem` gains the `PushOnly` variant and is now `#[non_exhaustive]`. A `match` on it outside trusty-secrets needs a wildcard arm. Later control items are no longer a semver break (#10998).
+
+### Added
+
+- `secrets.copy` accepts an optional `source` locator: any Keychain item by service and account (`keychain_item`, read with `from_backend: keychain`), or a key in any trusty vault, the owner vault included (`vault`, read on `from_backend`). The one value lands in the caller's project vault under the single key `keys` names, moved inside the server only; a request without `source` behaves as before. A Keychain item in trusty's own namespace is refused, so a trusty key keeps its agent deny; an agent caller is refused (`agent_key_denied`) for a denied source or destination key, and an agent's copy of a Keychain item lands push-only for agents — a new per-key mark (`ControlItem::PushOnly`, read with `store::is_push_only`, listed as `agents_push_only`) that refuses every agent read of the value until a person lifts it with `secrets.set_agents_may_use`; a retry of a Keychain item whose earlier read timed out fails at once instead of starting another read; a failure is the call's typed error. Each record carries the new `copy_source` field, never the value (#10998).
+
 ## [0.4.1] — 2026-11-10
 
 ### Changed
