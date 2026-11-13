@@ -217,6 +217,16 @@ bind_case() { # NAME RC FIB_ADDRS...
     if [ "${ok}" = yes ]; then echo "PASS ${name}"; else
         echo "FAIL ${name} (rc=${rc}, want ${want})"; sed 's/^/    /' "$d/out"; FAILS=$((FAILS + 1)); fi
 }
+# V1 row 0 grades the config squid runs, and its bound http_port (static).
+v1="${SRC}/check_v1.sh"
+if [ -f "${v1}" ] && grep -q '^pget /run/squid-run.conf squid.conf$' "${v1}" \
+    && grep -q 'squid -k parse -f /run/squid-run.conf' "${v1}" \
+    && grep -qF 'grep -qxF "http_port ${PIN}:3128"' "${v1}"; then
+    echo "PASS v1-grades-the-running-config"
+else
+    echo "FAIL v1-grades-the-running-config (check_v1.sh row 0 must read /run/squid-run.conf)"
+    FAILS=$((FAILS + 1))
+fi
 if [ -x "${SRC}/proxy/sled-bind-addr" ]; then
     net="${SUBNET%/*}"; IN_IP="${net%.*}.2"
     bind_case proxy-bind-internal-only 0 127.0.0.1 172.17.0.3 "${IN_IP}"

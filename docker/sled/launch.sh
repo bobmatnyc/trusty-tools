@@ -157,7 +157,9 @@ out="$(check_private "${STATE}" "${SLED_UID}" d; check_private "${STATE}/state" 
        check_private "${STATE}/secrets" "${SLED_UID}" d
        for s in ${SECRETS}; do check_private "${STATE}/secrets/${s}" "${SLED_UID}" f; done)"
 [ -z "${out}" ] || refuse "${out}"
-[ -d "${MODELS}" ] && [ ! -L "${MODELS}" ] || refuse "REFUSE mounts: model cache ${MODELS} is not a directory"
+if [ ! -d "${MODELS}" ] || [ -L "${MODELS}" ]; then
+    refuse "REFUSE mounts: model cache ${MODELS} is not a directory"
+fi
 
 IMG_APP="tm-trusty-cloud-sled:${TAG}"; IMG_PROXY="tm-trusty-cloud-sled-egress:${TAG}"
 IMG_SIDE="tm-trusty-cloud-sled-tailscale:${TAG}"

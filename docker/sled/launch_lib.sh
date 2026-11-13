@@ -46,7 +46,7 @@ version_ge() {
 squid_subnet() {
     local v
     v="$(awk '$1=="acl" && $2=="internal_net" && $3=="src" {print $4}' "$1" 2>/dev/null)"
-    [ -n "$v" ] && [ "$(printf '%s\n' "$v" | wc -l | tr -d ' ')" = 1 ] || return 1
+    if [ -z "$v" ] || [ "$(printf '%s\n' "$v" | wc -l | tr -d ' ')" != 1 ]; then return 1; fi
     printf '%s\n' "$v"
 }
 

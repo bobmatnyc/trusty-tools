@@ -91,7 +91,9 @@ alog() { pget /var/log/squid/access.log access.log; }
 
 # 0. The running proxy holds the V1 policy (drift check).
 running "${PROXY}" || die "proxy container ${PROXY} is not running"
-pget /etc/squid/squid.conf squid.conf
+# #11156: squid runs /run/squid-run.conf, squid.conf with http_port bound to
+# the internal address (proxy/sled-bind-addr); grade that file.
+pget /run/squid-run.conf squid.conf
 pget /etc/squid/login.conf login.conf
 pget /etc/squid/profile.d/active.conf active.conf
 d="$(diff <(policy "${TMP}/squid.conf") <(printf '%s\n' "${POLICY}") | grep '^[<>]' | tr '\n' ';')"
@@ -102,13 +104,19 @@ ok=no; [ -z "${d}" ] && ok=yes
 row "running login.conf rules equal the V1 login policy" "${ok}" "${d}"
 for f in squid.conf login.conf; do
     ok=no
-    [ -r "${HERE}/proxy/${f}" ] && diff -q <(conf "${TMP}/${f}") <(conf "${HERE}/proxy/${f}") > /dev/null && ok=yes
+    # The bound http_port line is graded below; normalize it here.
+    [ -r "${HERE}/proxy/${f}" ] && diff -q <(conf "${TMP}/${f}" | sed -E 's/^http_port [0-9.]+:3128$/http_port 3128/') \
+        <(conf "${HERE}/proxy/${f}") > /dev/null && ok=yes
     row "running ${f} equals docker/sled/proxy/${f}" "${ok}"
 done
+PIN="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${NET}\"}}{{.IPAddress}}{{end}}" "${PROXY}" 2>/dev/null)"
+ok=no; [ -n "${PIN}" ] && [ "$(grep -c '^http_port' "${TMP}/squid.conf")" = 1 ] \
+    && grep -qxF "http_port ${PIN}:3128" "${TMP}/squid.conf" && ok=yes
+row "squid listens on its internal address ${PIN:-?}:3128 only, not a bare 3128" "${ok}"
 d="$(policy "${TMP}/active.conf" | tr '\n' ';')"
 ok=no; [ -z "${d}" ] && ok=yes
 row "proxy is in the steady profile (active.conf holds no rule)" "${ok}" "${d}"
-ok=no; docker exec "${PROXY}" squid -k parse -f /etc/squid/squid.conf > /dev/null 2>&1 && ok=yes
+ok=no; docker exec "${PROXY}" squid -k parse -f /run/squid-run.conf > /dev/null 2>&1 && ok=yes
 row "squid -k parse accepts the running squid.conf" "${ok}"
 
 # 1. No route out and no external DNS from the app (OUT-1). Each row first
