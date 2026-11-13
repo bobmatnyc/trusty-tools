@@ -99,7 +99,7 @@ No read of `USER`, `LOGNAME`, `whoami`, `getlogin` or `getpwuid` login lookups w
 | U2 | Daemon sockets accept a peer only with the daemon's own uid (`SO_PEERCRED`) | `trusty-common/src/uds/peer.rs:246-248`; `trusty-common/src/uds/server/mod.rs:421` | workaround: non-root `cloudtest` user (`Dockerfile:58-70`); exec as that user (`README.md:35-43`); no `docker run --user` | partial: any remote path must run as the daemon uid; root exec is refused |
 | U3 | Home dir comes from `$HOME`, then the passwd entry (`getpwuid`) | `trusty-search/src/service/data_dir.rs:96-123`, `:137-143` | workaround: `HOME=/data/home` and the passwd home match (`Dockerfile:68,80`) | no |
 | U4 | State volume must be owned by the daemon uid, so uid and gid are build args | `Dockerfile:58-70`; `README.md:12-18` | workaround: build with the host uid and gid | partial: a cloud volume needs a matching owner |
-| U5 | Claude Code needs an interactive owner login; the container has no browser | `docker/cloudtest/README.md:94-106` | open: manual copy and paste of the code; rung 2 steps 1-2 still await it | yes for unattended use |
+| U5 | Claude Code needs an interactive owner login; the container has no browser | `docker/cloudtest/README.md:94-106` | open: manual copy and paste of the code; the login was done on 2026-11-12 and rung 2 steps 1-2 passed | yes for unattended use |
 | U6 | tm assumes a user session starts the daemon at login (#10597) | issue #10597 | see L11 | no |
 
 ### 4.6 Other, found while checking
