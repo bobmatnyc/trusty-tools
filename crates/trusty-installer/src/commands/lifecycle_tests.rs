@@ -231,8 +231,10 @@ fn bare_verbs_skip_members_that_are_not_installed() {
 ///
 /// Why: `tctl stop trusty-events` printed "ok booted out" for a unit that never
 /// existed; `restart` failed with launchd's raw error 5.
-/// What: trusty-search fully present, trusty-events absent. Naming the absent
+/// What: trusty-search present, trusty-events absent. Naming the absent
 /// member, alone or beside the present one, exits 2 with no port-guard call.
+/// trusty-search has its binary only, so a regression that did act on it
+/// stops at the preflight or the refusing port guard, never a real bootout.
 /// Test: This is the test.
 #[test]
 fn named_member_not_installed_exits_2_with_no_action() {
@@ -240,8 +242,6 @@ fn named_member_not_installed_exits_2_with_no_action() {
         for named in [&["trusty-events"][..], &["trusty-search", "trusty-events"]] {
             let host = HostFake {
                 binaries: vec!["trusty-search"],
-                plists: vec!["trusty-search"],
-                loaded: vec!["trusty-search"],
                 ..HostFake::default()
             };
             let code = run_lifecycle_in(&host, verb, &names(named), true, false);
@@ -282,21 +282,28 @@ fn start_installs_a_member_whose_plist_is_absent() {
 /// any bootout, so the running daemon is left alone.
 ///
 /// Why: booting it out killed a daemon launchd could not bootstrap again.
-/// What: restart and stop of such a member exit 2 without reaching the port
-/// guard, which the restart path calls before its bootout; the preflight error
-/// names the missing plist.
+/// What: `tctl restart` of such a member exits 2 without reaching the port
+/// guard, which the restart path calls before its bootout. Stop is checked at
+/// the preflight only: driving it end to end would, on a regression, issue a
+/// real `launchctl bootout` on the test host. Both errors name the plist.
 /// Test: This is the test.
 #[test]
 fn loaded_label_without_plist_errors_before_bootout() {
+    let host = HostFake {
+        binaries: vec!["trusty-search"],
+        loaded: vec!["trusty-search"],
+        ..HostFake::default()
+    };
+    let code = run_lifecycle_in(
+        &host,
+        Verb::Restart,
+        &names(&["trusty-search"]),
+        true,
+        false,
+    );
+    assert_eq!(code, 2);
+    assert!(host.port_guard_calls.borrow().is_empty());
     for verb in [Verb::Restart, Verb::Stop] {
-        let host = HostFake {
-            binaries: vec!["trusty-search"],
-            loaded: vec!["trusty-search"],
-            ..HostFake::default()
-        };
-        let code = run_lifecycle_in(&host, verb, &names(&["trusty-search"]), true, false);
-        assert_eq!(code, 2, "{}", verb.name());
-        assert!(host.port_guard_calls.borrow().is_empty(), "{}", verb.name());
         let err = launchd_preflight(&host, verb, "trusty-search").expect_err("loaded, no plist");
         assert!(err.to_string().contains("plist is gone"), "{err}");
     }
