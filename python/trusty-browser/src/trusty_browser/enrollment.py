@@ -185,7 +185,7 @@ def register(
             directory = state / "workflows"
             private_directory(directory)
             if os.path.lexists(directory / (workflow + ".json")):
-                raise ValueError("CredentialConflict")
+                raise ValueError("WorkflowCredentialOccupied")
             insert_route(
                 db, state, (profile, email, workflow, url, account, key), ticket, None
             )
@@ -237,6 +237,10 @@ def finish_removals(db: sqlite3.Connection, state: Path) -> None:
                 path.unlink(missing_ok=True)
         except FileNotFoundError:
             pass
+        except (ValueError, OSError):
+            # Corrupt, inaccessible or foreign credentials are never removed. Keep
+            # the cleanup record so a transient Keychain/file error can recover.
+            continue
         with db:
             db.execute(
                 "DELETE FROM pending_removals WHERE workflow=?", (old["workflow"],)

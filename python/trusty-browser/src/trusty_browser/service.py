@@ -187,6 +187,7 @@ class Broker:
                 "EnrollmentRevoked",
                 "ReplacementStale",
                 "CredentialConflict",
+                "WorkflowCredentialOccupied",
                 "Unauthorized",
             }
             with contextlib.suppress(ConnectionError, TimeoutError):

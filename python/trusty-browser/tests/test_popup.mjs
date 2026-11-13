@@ -117,3 +117,19 @@ test("clear enrollment only on verified bootstrap tombstone",async()=>{
   assert.equal((await f.call({type:"preview"})).enrolled,undefined);
   assert.equal(f.stored.enrollment,undefined);
 });
+
+test("only a pre-commit occupied name clears the pending enrollment", async()=>{
+  const f=await fixture();
+  const {route}=await f.call({type:"preview"});
+  const enroll=workflow=>f.call({type:"enroll",workflow,route});
+  f.refuse({ok:false,error:"WorkflowCredentialOccupied"});
+  assert.equal((await enroll("occupied")).error,"WorkflowCredentialOccupied");
+  assert.equal(f.stored.pending,undefined);
+  f.refuse({ok:false,error:"CredentialConflict"});
+  assert.equal((await enroll("other")).error,"CredentialConflict");
+  const key=f.stored.pending.key;
+  assert.equal((await enroll("wrong")).ok,false);
+  f.refuse(null);
+  assert.equal((await enroll("other")).ok,true);
+  assert.equal(f.stored.enrollment.key,key);
+});

@@ -244,7 +244,7 @@ function bootstrap(request) {
 }
 let enrollmentBusy = false;
 let replacement = null;
-const definiteRefusals = new Set(["InvalidEnrollment","InvalidRequest","Unauthorized","EnrollmentConflict",
+const definiteRefusals = new Set(["WorkflowCredentialOccupied","InvalidEnrollment","InvalidRequest","Unauthorized","EnrollmentConflict",
   "ReplacementStale","EnrollmentRevoked","NotTrusted","UnsupportedOperation"]);
 function approvedReplacement(msg,route) {
   return replacement && replacement.id === msg.confirmation && replacement.workflow === msg.workflow &&

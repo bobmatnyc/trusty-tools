@@ -156,3 +156,108 @@ def test_kernel_process_queries_read_actual_executable_and_direct_parent():
     assert mac_peer.process_exe(os.getpid()).is_file()
     assert mac_peer.parent_pid(os.getpid()) == os.getppid()
     assert len(mac_peer.process_argv(os.getpid())) >= 1
+
+
+def test_orphan_grant_is_definitive_before_any_registration(tmp_path):
+    with contextlib.closing(enrollment.database(tmp_path)) as db:
+        req = request()
+        root = tmp_path / "workflows"
+        root.mkdir(mode=0o700)
+        path = root / (req["workflow"] + ".json")
+        path.write_text("unrelated credential file")
+        with pytest.raises(ValueError, match="^WorkflowCredentialOccupied$"):
+            enrollment.register(db, tmp_path, req)
+        assert not db.execute("SELECT workflow FROM routes").fetchall()
+        assert not db.execute("SELECT workflow FROM pending_credentials").fetchall()
+        assert enrollment.register(db, tmp_path, {**req, "workflow": "fresh"})["ok"]
+        assert path.read_text() == "unrelated credential file"
+
+
+def test_damaged_pending_removal_preserves_foreign_file_and_service_startup():
+    async def check(state):
+        req = request()
+        with contextlib.closing(enrollment.database(state)) as db:
+            enrollment.register(db, state, req)
+            enrollment.remove(db, state, req["workflow"])
+        path = state / "workflows" / (req["workflow"] + ".json")
+        path.write_text("do not unlink")
+        async with service.Broker(state) as broker:
+            assert path.read_text() == "do not unlink"
+            assert (
+                broker.db.execute("SELECT workflow FROM pending_removals").fetchone()[0]
+                == req["workflow"]
+            )
+            assert enrollment.register(
+                broker.db, state, {**request(), "workflow": "another"}
+            )["ok"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        asyncio.run(check(Path(tmp)))
+
+
+@pytest.mark.parametrize("action", ["popup", "cli"])
+def test_removed_extension_cannot_prove_its_old_browser_key(action, monkeypatch):
+    async def check(state):
+        req = request()
+        async with service.Broker(state) as broker:
+            await broker.enrollment_request(req)
+
+            async def pair():
+                reader, writer = await asyncio.open_unix_connection(
+                    state / "service.sock"
+                )
+                hello = dict(
+                    type="hello",
+                    profile=req["profile"],
+                    email=req["email"],
+                    incarnation="browser",
+                    nonce=secrets.token_hex(32),
+                )
+                try:
+                    await service.write_frame(writer, hello)
+                    challenge = await service.read_frame(reader)
+                    if not challenge.get("nonce"):
+                        return challenge
+                    assert challenge["proof"] == service.pairing_proof(
+                        req["key"], "broker", hello, challenge["nonce"]
+                    )
+                    await service.write_frame(
+                        writer,
+                        dict(
+                            type="proof",
+                            proof=service.pairing_proof(
+                                req["key"], "extension", hello, challenge["nonce"]
+                            ),
+                        ),
+                    )
+                    return await service.read_frame(reader)
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+
+            assert (await pair())["ok"]
+            if action == "popup":
+                # Exercise the signed popup request handler including frame decoding.
+                monkeypatch.setattr(service, "verify_chrome_host", lambda *_: None)
+                reader, writer = await asyncio.open_unix_connection(
+                    state / "enrollment.sock"
+                )
+                await service.write_frame(writer, {**req, "op": "unenroll"})
+                assert (await service.read_frame(reader))["ok"]
+                writer.close()
+                await writer.wait_closed()
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    service.__file__,
+                    "--state",
+                    str(state),
+                    "revoke",
+                    req["workflow"],
+                )
+                assert await proc.wait() == 0
+            assert await pair() == {"ok": False, "error": "Unauthorized"}
+            assert req["profile"] not in broker.peers
+
+    with tempfile.TemporaryDirectory() as tmp:
+        asyncio.run(check(Path(tmp)))
