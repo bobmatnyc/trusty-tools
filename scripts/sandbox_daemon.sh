@@ -39,9 +39,17 @@
 #   The daemon admits tmux only on a TMUX_TMPDIR inside its data dir
 #   (crates/trusty-mpm/src/core/tmux_access.rs). The socket path must fit
 #   sun_path, so a --dir whose socket path exceeds 103 bytes refuses; pick a
-#   shorter --dir (e.g. under /tmp). Teardown: when the daemon exits, the script
-#   runs `tmux -S <that socket> kill-server`, which stops only the sandbox's
-#   server. SIGINT, SIGTERM and SIGHUP are passed to the daemon first.
+#   shorter --dir (e.g. under /tmp). Teardown (#10922): when the daemon exits,
+#   the script runs `tmux -S <socket> kill-server` for every socket in
+#   <dir>/data/tmux/tmux-<uid>/ (`default` and each per-workspace tm-ws-*
+#   server), having first listed their server and pane pids. It then sends
+#   TERM to those pids and every descendant of the panes (a `claude` survives
+#   kill-server's SIGHUP), and KILL 3 s later. Last it confirms that no tmux
+#   server answers under that dir and that no process of this user has a cwd
+#   under <dir>; a survivor is named on stderr and the exit becomes 1. No tmux
+#   call addresses any server but by -S path, and each runs under `env -i`, so
+#   an inherited TMUX never reaches tmux. SIGINT, SIGTERM and SIGHUP are passed
+#   to the daemon first.
 #   Socket (#6288): every tm client reaches the daemon over its Unix socket,
 #   <dir>/data/trusty-mpm/trusty-mpm.sock; the script prints that path and the
 #   TRUSTY_MPM_SOCKET pin a client uses to reach this sandbox. A --dir whose
@@ -86,7 +94,8 @@
 #   --credential NAME=<ref>  admit one provider key, resolved from <ref> by
 #               `tm secrets exec` (#10721); the ref is never printed
 #   --dry-run   validate and print what would run; create and start nothing
-# Exit: the daemon's status; 1 on a refusal; 2 on a usage error.
+# Exit: the daemon's status; 1 on a refusal, or when teardown leaves a process
+#   under <dir> after a clean daemon exit; 2 on a usage error.
 #
 # Test: scripts/sandbox_daemon_selftest.sh.
 # Portability: bash 3.2 (macOS) and bash 5 (Linux).
@@ -292,11 +301,93 @@ cd "$SANDBOX/home" || die "cannot enter <dir>/home: $SANDBOX/home"
 # #9557: 0700, since the daemon refuses a socket dir others can write.
 { mkdir -p "$TMUX_DIR" && chmod 700 "$TMUX_DIR"; } || die "cannot create the tmux socket dir: $TMUX_DIR"
 
-# teardown: stop the sandbox's own tmux server, addressed by socket path only.
-teardown() {
-  if [ -S "$SOCK" ] && command -v tmux >/dev/null 2>&1; then
-    env -i PATH="$PATH" tmux -S "$SOCK" kill-server >/dev/null 2>&1 || true
+# sbx_tmux ARGS...: tmux with no inherited TMUX; callers always pass -S.
+sbx_tmux() { env -i PATH="$PATH" tmux "$@"; }
+
+# descendants PID...: every descendant of the given pids, from one ps table.
+descendants() {
+  local table frontier next all="" pid ppid
+  table="$(ps -A -o pid= -o ppid= 2>/dev/null || true)"
+  frontier=" $* "
+  while [ -n "${frontier// /}" ]; do
+    next=""
+    while read -r pid ppid; do
+      case "$frontier" in *" $ppid "*) next="$next $pid" ;; esac
+    done <<< "$table"
+    all="$all$next"
+    frontier=" $next "
+  done
+  echo "$all"
+}
+
+# cwd_under DIR: pids of this user whose cwd is DIR or below it.
+cwd_under() {
+  local p c
+  if [ -d /proc/self ]; then
+    for p in /proc/[0-9]*; do
+      c="$(readlink "$p/cwd" 2>/dev/null || true)"
+      case "$c" in "$1"|"$1"/*) echo "${p#/proc/}" ;; esac
+    done
+  else
+    lsof -a -u "$(id -u)" -d cwd -Fpn 2>/dev/null | while read -r c; do
+      case "$c" in
+        p*) p="${c#p}" ;;
+        n"$1"|n"$1"/*) echo "$p" ;;
+      esac
+    done
   fi
+}
+
+# teardown: stop every tmux server under the sandbox's socket dir, then the
+# processes they ran, then confirm nothing is left. Returns 1 on a survivor.
+# #10922: managed sessions run on per-workspace servers (tm-ws-*) beside
+# `default`, and `claude` outlives the SIGHUP kill-server sends its pane.
+teardown() {
+  local dir s tracked="" panes="" pid sp pp survivors="" i
+  dir="${SOCK%/*}"
+  # Off <dir>, so this script is not counted as a cwd survivor.
+  cd / || true
+  if command -v tmux >/dev/null 2>&1; then
+    for s in "$dir"/*; do
+      [ -S "$s" ] || continue
+      while read -r sp pp; do
+        tracked="$tracked $sp"
+        panes="$panes $pp"
+      done <<< "$(sbx_tmux -S "$s" list-panes -a -F '#{pid} #{pane_pid}' 2>/dev/null || true)"
+    done
+    # shellcheck disable=SC2086  # $panes is a word list of pids
+    [ -z "${panes// /}" ] || tracked="$tracked $panes $(descendants $panes)"
+    for s in "$dir"/*; do
+      [ -S "$s" ] || continue
+      sbx_tmux -S "$s" kill-server >/dev/null 2>&1 || true
+    done
+  fi
+  # TERM what kill-server left, 3 s, then KILL, 2 s.
+  for pid in $tracked; do kill -TERM "$pid" 2>/dev/null || true; done
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    survivors=""
+    for pid in $tracked; do kill -0 "$pid" 2>/dev/null && survivors="$survivors $pid"; done
+    [ -n "$survivors" ] || break
+    [ "$i" -ne 15 ] || break
+    [ "$i" -ne 10 ] || for pid in $survivors; do kill -KILL "$pid" 2>/dev/null || true; done
+    sleep 0.3
+  done
+  # Confirm: no server answers under <dir>, no process holds a cwd under it.
+  if command -v tmux >/dev/null 2>&1; then
+    for s in "$dir"/*; do
+      [ -S "$s" ] || continue
+      sbx_tmux -S "$s" list-sessions >/dev/null 2>&1 && survivors="$survivors tmux:$s"
+    done
+  fi
+  for pid in $(cwd_under "$SANDBOX"); do
+    [ "$pid" != "$$" ] || continue
+    case " $survivors " in *" $pid "*) ;; *) survivors="$survivors $pid" ;; esac
+  done
+  if [ -n "${survivors// /}" ]; then
+    echo "sandbox_daemon: teardown left processes under $SANDBOX:$survivors" >&2
+    return 1
+  fi
+  return 0
 }
 
 if [ -z "$CRED_NAME" ]; then
@@ -327,5 +418,6 @@ while :; do
   set -e
   kill -0 "$DAEMON_PID" 2>/dev/null || break
 done
-teardown
+# #10922: a survivor turns a clean daemon exit into exit 1.
+if ! teardown && [ "$STATUS" -eq 0 ]; then STATUS=1; fi
 exit "$STATUS"

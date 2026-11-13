@@ -48,8 +48,16 @@
 #     cd-fails      under umask 0777 mkdir makes a home the launcher cannot
 #                   enter; it exits 1 and the daemon never starts
 #     teardown      after the daemon exits, the launcher runs
-#                   `tmux -S <dir>/data/tmux/tmux-<uid>/default kill-server`
-#                   and no other tmux call (#9557); skips without python3
+#                   `tmux -S <socket> kill-server` for `default` and a
+#                   tm-ws-* socket beside it, and every tmux call addresses a
+#                   sandbox socket by -S (#9557, #10922); skips without python3
+#     teardown-ws   (#10922) a stub daemon starts a real tm-ws-* tmux server
+#                   whose pane and its child ignore HUP and TERM; after
+#                   teardown the server is gone, both processes are dead and
+#                   the exit is 0; skips without tmux
+#     teardown-survivor  (#10922) a stub daemon leaves a process outside tmux
+#                   with its cwd under <dir>; the launcher names its pid and
+#                   exits 1
 #     bin-fresh-*   (#10755) against a temp git source root (SANDBOX_SRC_ROOT)
 #                   and a stubbed dependency tree (BIN_FRESH_SOURCES_CMD): a
 #                   stale build artifact refuses, in a dry run and in a real
@@ -393,19 +401,29 @@ if command -v python3 >/dev/null 2>&1; then
   mkdir -p "$DIR10/data/tmux/tmux-$(id -u)" "$FAKE_BIN"
   chmod 700 "$DIR10/data/tmux" "$DIR10/data/tmux/tmux-$(id -u)"
   SOCK10="$DIR10/data/tmux/tmux-$(id -u)/default"
-  python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$SOCK10"
-  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$TMP_ROOT/tmux-calls" > "$FAKE_BIN/tmux"
+  # #10922: a per-workspace server's socket beside `default`.
+  WS10="$DIR10/data/tmux/tmux-$(id -u)/tm-ws-selftest-0123"
+  for s in "$SOCK10" "$WS10"; do
+    python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$s"
+  done
+  # The fake answers no list-sessions, as a stopped server does.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\ncase "$*" in *list-sessions*) exit 1 ;; esac\n' \
+    "$TMP_ROOT/tmux-calls" > "$FAKE_BIN/tmux"
   chmod +x "$FAKE_BIN/tmux"
   set +e
   OUT10="$(env -i PATH="$FAKE_BIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIR10" 2>&1)"
   STATUS10=$?
   set -e
   CALLS10="$(cat "$TMP_ROOT/tmux-calls" 2>/dev/null || true)"
+  KILLS10="$(printf '%s\n' "$CALLS10" | grep 'kill-server' | tr '\n' ' ')"
+  UNSCOPED10="$(printf '%s\n' "$CALLS10" | grep -v "^-S $DIR10/data/tmux/tmux-$(id -u)/" || true)"
   if [ "$STATUS10" -ne 0 ]; then
     fail teardown "launcher exit $STATUS10"
     printf '%s\n' "$OUT10" | sed 's/^/    /'
-  elif [ "$CALLS10" != "-S $SOCK10 kill-server" ]; then
-    fail teardown "tmux calls were [$CALLS10], want [-S $SOCK10 kill-server]"
+  elif [ "$KILLS10" != "-S $SOCK10 kill-server -S $WS10 kill-server " ]; then
+    fail teardown "kill-server calls were [$KILLS10], want one per socket in the sandbox dir"
+  elif [ -n "$UNSCOPED10" ]; then
+    fail teardown "a tmux call did not address a sandbox socket by -S: [$UNSCOPED10]"
   elif ! printf '%s' "$OUT10" | grep -qF "tmux socket: $SOCK10"; then
     fail teardown "the launcher did not name the sandbox socket"
   else
@@ -414,6 +432,73 @@ if command -v python3 >/dev/null 2>&1; then
 else
   echo "skip teardown: no python3 to bind a fake socket"
 fi
+
+# 10b. teardown-ws (#10922): a stub daemon starts a REAL per-workspace tmux
+# server under the sandbox's TMUX_TMPDIR whose pane, and the pane's child,
+# ignore HUP and TERM, as a `claude` outliving kill-server does; then it
+# exits. Every tmux call here passes -S and runs with TMUX unset.
+if command -v tmux >/dev/null 2>&1; then
+  DIRWS="$TMP_ROOT/casews"
+  mkdir -p "$DIRWS"
+  WS_STUB="$TMP_ROOT/stub-ws-tm"
+  cat > "$WS_STUB" <<'WS_EOF'
+#!/bin/sh
+# The launcher's env -i leaves TMUX unset; -L resolves under its TMUX_TMPDIR.
+tmux -L tm-ws-selftest-4567 new-session -d -s ws \
+  "sh -c 'trap \"\" HUP TERM; sleep 611 & echo \$! > \"$HOME/child-pid\"; echo \$\$ > \"$HOME/pane-pid\"; exec sleep 612'"
+i=0
+while [ "$i" -lt 50 ] && [ ! -s "$HOME/pane-pid" ]; do sleep 0.1; i=$((i + 1)); done
+WS_EOF
+  chmod +x "$WS_STUB"
+  WSSOCK="$DIRWS/data/tmux/tmux-$(id -u)/tm-ws-selftest-4567"
+  set +e
+  OUTWS="$(env -i PATH="$PATH" bash "$LAUNCHER" --bin "$WS_STUB" --dir "$DIRWS" 2>&1)"
+  STATUSWS=$?
+  set -e
+  PANE="$(cat "$DIRWS/home/pane-pid" 2>/dev/null || true)"
+  CHILD="$(cat "$DIRWS/home/child-pid" 2>/dev/null || true)"
+  if [ -z "$PANE" ] || [ -z "$CHILD" ]; then
+    fail teardown-ws "the stub never started its tmux pane"
+    printf '%s\n' "$OUTWS" | sed 's/^/    /'
+  elif env -u TMUX tmux -S "$WSSOCK" list-sessions >/dev/null 2>&1; then
+    fail teardown-ws "the tm-ws server still answers on $WSSOCK"
+  elif kill -0 "$PANE" 2>/dev/null || kill -0 "$CHILD" 2>/dev/null; then
+    fail teardown-ws "a pane process outlived teardown (pane $PANE, child $CHILD)"
+  elif [ "$STATUSWS" -ne 0 ]; then
+    fail teardown-ws "launcher exit $STATUSWS"
+    printf '%s\n' "$OUTWS" | sed 's/^/    /'
+  else
+    pass teardown-ws
+  fi
+  # Whatever the result, leave nothing running: by -S path and by pid only.
+  env -u TMUX tmux -S "$WSSOCK" kill-server >/dev/null 2>&1 || true
+  for p in $PANE $CHILD; do kill -KILL "$p" 2>/dev/null || true; done
+else
+  echo "skip teardown-ws: no tmux"
+fi
+
+# 10c. teardown-survivor (#10922): a process outside tmux with its cwd under
+# <dir> is not the launcher's to kill; teardown names it and exits 1.
+DIRSV="$TMP_ROOT/casesv"
+mkdir -p "$DIRSV"
+SV_STUB="$TMP_ROOT/stub-sv-tm"
+# shellcheck disable=SC2016  # expands in the stub, not here
+printf '%s\n' '#!/bin/sh' 'sleep 613 > /dev/null 2>&1 &' 'echo $! > "$HOME/sv-pid"' > "$SV_STUB"
+chmod +x "$SV_STUB"
+set +e
+OUTSV="$(env -i PATH="$PATH" bash "$LAUNCHER" --bin "$SV_STUB" --dir "$DIRSV" 2>&1)"
+STATUSSV=$?
+set -e
+SVPID="$(cat "$DIRSV/home/sv-pid" 2>/dev/null || true)"
+if [ -z "$SVPID" ]; then
+  fail teardown-survivor "the stub never started its process"
+elif [ "$STATUSSV" -ne 1 ] || ! printf '%s' "$OUTSV" | grep -q "teardown left processes under $DIRSV:.* $SVPID"; then
+  fail teardown-survivor "exit $STATUSSV (want 1), survivor $SVPID not named"
+  printf '%s\n' "$OUTSV" | sed 's/^/    /'
+else
+  pass teardown-survivor
+fi
+[ -z "$SVPID" ] || kill -KILL "$SVPID" 2>/dev/null || true
 
 # 11. bin-fresh (#10755): a temp source root and a stubbed dependency tree
 # (BIN_FRESH_SOURCES_CMD), so neither the real tree nor cargo changes the
