@@ -1,4 +1,0 @@
-Fixed
-- `running_under_test_harness()` recognises test binaries again under rustc 1.100, whose cargo writes them to `target/<profile>/build/<crate>/<hash>/out/<name>-<hash>` instead of `target/<profile>/deps/`; the daemon guards had stopped skipping, and test processes sent real requests to live daemons (#11138)
-  - detection now fails closed: an unreadable executable path, or a name carrying cargo's 16-hex metadata hash in an unknown layout, counts as a test process; a binary without the hash (`target/<profile>/<name>`, `~/.cargo/bin/<name>`) still counts as production, and `TRUSTY_ALLOW_PRODUCTION_STATE=1` still overrides
-  - a Linux `/proc/self/exe` path ending in ` (deleted)`, left when a concurrent build replaces the running test binary, is read without that suffix and still counts as a test process
