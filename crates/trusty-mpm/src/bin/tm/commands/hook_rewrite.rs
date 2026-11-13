@@ -164,27 +164,18 @@ pub(crate) fn compression_rewrite_decision(command: &str) -> Result<String, Skip
     ))
 }
 
-/// The `tm compress --tool` value for `trimmed`, when every rewrite guard passes.
+/// The `tm compress --tool` value for `trimmed`, or the guard that refused it.
 ///
 /// Why (#10973): the brace-group rewrite above and the isolation-worktree
 /// rewrite in `hook_rewrite_isolated` must refuse exactly the same commands, so
-/// the guards live in one place. D60's `cd <dir> && ` split runs before this,
-/// in the brace rewrite only, so the isolated shape still refuses that form.
-/// What: `None` for every case [`rewrite_bash_command_for_compression`]
-/// documents; otherwise the [`effective_tool_name`] a filter covers.
-/// Test: every `rewrite_*` case reaches this.
-pub(crate) fn compressible_tool_name(trimmed: &str) -> Option<String> {
-    compressible_tool_decision(trimmed).ok()
-}
-
-/// [`compressible_tool_name`], with the guard that refused named.
-///
-/// Why (#10973): the opportunity ledger records why a result went
-/// uncompressed; asking the guards themselves keeps that reason from drifting
-/// away from the decision.
-/// What: `Ok(tool)` exactly when [`compressible_tool_name`] is `Some(tool)`;
-/// otherwise the first refusing guard, in the order below.
-/// Test: `a_bash_row_names_each_guard_refusal`,
+/// the guards live in one place; naming the refusing guard gives the
+/// opportunity ledger its reason from the decision itself. D60's
+/// `cd <dir> && ` split runs before this, in the brace rewrite only, so the
+/// isolated shape still refuses that form.
+/// What: `Err` with the first refusing guard, in the order below, for every
+/// case [`rewrite_bash_command_for_compression`] documents; otherwise
+/// `Ok` with the [`effective_tool_name`] a filter covers.
+/// Test: every `rewrite_*` case reaches this; `a_bash_row_names_each_guard_refusal`,
 /// `a_bash_opportunity_row_records_why_no_rewrite_applied`.
 pub(crate) fn compressible_tool_decision(trimmed: &str) -> Result<String, SkipReason> {
     if trimmed.is_empty() {
