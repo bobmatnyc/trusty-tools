@@ -325,6 +325,17 @@ pub trait ServiceEnv {
     /// all-[`EvictionOutcome::Absent`] return is the steady state on every host
     /// after the first pass.
     fn evict_retired(&self, binary: &str) -> Vec<LabelEviction>;
+
+    /// #10975: does the member's binary resolve, on `PATH` or in the default
+    /// install directory? One of the three presence signals `tctl
+    /// start|stop|restart` reads before acting on a member.
+    ///
+    /// The default is the real lookup, [`super::probe::resolve_binary_path`],
+    /// so an existing fake that never reaches the lifecycle path needs no
+    /// change; a fake that does reach it overrides this.
+    fn binary_resolves(&self, binary: &str) -> bool {
+        super::probe::resolve_binary_path(binary).is_some()
+    }
 }
 
 /// Decide and (via the seam) execute the service bootstrap for one member.
