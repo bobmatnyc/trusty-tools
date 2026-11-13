@@ -6,7 +6,7 @@
 //! (Dc4, #10966), the open tab's list or the Live tracker, an optional
 //! detail pane, and the tally footer.
 //! Test: `architect_render_lists_rows_with_badges_and_counts`,
-//! `architect_render_says_why_when_the_store_is_not_set`,
+//! `daemon_resolution_error_reaches_the_failed_state_and_the_screen`,
 //! `live_tab_draws_the_tracker_list_only`.
 
 use ratatui::{

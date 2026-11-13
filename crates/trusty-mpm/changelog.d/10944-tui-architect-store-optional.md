@@ -1,0 +1,2 @@
+Changed
+- `tm tui`'s Architect view no longer needs `--architect-store` or `TM_ARCHITECT_STORE` (#10944). Without one it calls the daemon's `mpm.architect.dashboard.*` methods with no `store` and shows the daemon's rows, or the daemon's resolution error on screen. The flag and env var still override the root. Against a daemon too old to resolve the root, the screen shows its "missing field `store`" error with a hint to restart or upgrade the daemon.
