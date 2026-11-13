@@ -11,18 +11,20 @@
 //! absent or that string. The call must come from a main thread
 //! ([`thread_kind`] is `Main`: no payload `agent_id`, a `session_id`, and
 //! `CLAUDE_MPM_SUB_AGENT` unset) — the same thread test the #10447 identity
-//! uses. A main thread that is not the Architect is a PM, as
-//! `session_profile::hook_profile` defaults it. [`audited`] lets the allow
-//! stand only once one line is appended to the Architect audit file.
+//! uses. The session must carry the tm PM launch stamp ([`pm_launch_stamp`]);
+//! `hook_profile` defaults an unstamped session to PM, so it is not used
+//! here. [`audited`] lets the allow stand only once one line is appended to
+//! the Architect audit file.
 //! FAIL-CLOSED: any other tool, server, key shape or value, a non-object
-//! input, an unreadable payload, a subagent or an unknown thread keeps the
-//! deny. An audit line that cannot be written denies, as for the Architect.
+//! input, an unreadable payload, a subagent, an unknown thread, and a missing,
+//! empty or non-PM launch stamp keep the deny. An audit line that cannot be written denies, as for the Architect.
 //! Test: `egress_guard_pm_dm_tests.rs`; end to end in
 //! `tests/tm_hook_egress_pm_dm_11194.rs`.
 
 use std::path::Path;
 
 use serde_json::Value;
+use trusty_mpm::core::session_profile::{SessionProfile, launch_env};
 use trusty_mpm::core::twin_identity::{ThreadKind, thread_kind};
 
 use crate::commands::egress_guard::Verdict;
@@ -92,6 +94,19 @@ fn owner_dm_target(tool: &str, input: &Value) -> Option<Option<&'static str>> {
     }
 }
 
+/// Whether the session carries the stamp `tm` writes for a PM launch.
+///
+/// Why: the egress hook also runs in sessions tm did not launch as a PM, and
+/// `session_profile::hook_profile` reads a missing stamp as PM (fail open here).
+/// What: `env.stamp` equals the value of `session_profile::launch_env(Pm)`,
+/// exactly, as `architect_compat::is_architect_stamp` matches its stamp.
+/// Test: `pm_unstamped_main_thread_dm_send_stays_denied`,
+/// `pm_non_pm_stamped_main_thread_dm_send_stays_denied`.
+fn pm_launch_stamp(env: &HookEnv) -> bool {
+    let (_, pm) = launch_env(SessionProfile::Pm);
+    env.stamp.as_deref() == Some(std::ffi::OsStr::new(&pm))
+}
+
 /// Lift a Slack family deny for a main thread's send to the owner's DM.
 ///
 /// Why / What: see the module doc.
@@ -100,7 +115,8 @@ fn owner_dm_target(tool: &str, input: &Value) -> Option<Option<&'static str>> {
 /// `pm_subagent_dm_send_stays_denied`,
 /// `pm_canvas_with_another_channel_id_stays_denied`,
 /// `pm_canvas_with_no_channel_id_is_allowed`,
-/// `pm_send_with_malformed_input_stays_denied`.
+/// `pm_send_with_malformed_input_stays_denied`,
+/// `pm_unstamped_main_thread_dm_send_stays_denied`.
 pub(crate) fn lift(
     first: Verdict,
     read: &Result<Value, HookStdinError>,
@@ -122,6 +138,10 @@ pub(crate) fn lift(
     };
     // #11194: the #10447 thread test; a subagent or unknown thread keeps the deny.
     if thread_kind(payload, env.sub_agent) != ThreadKind::Main {
+        return (first, None);
+    }
+    // #11194 fix round: only a tm-launched PM; an unmanaged or non-PM session keeps the deny.
+    if !pm_launch_stamp(env) {
         return (first, None);
     }
     let allowed = PmDmAllowed {
