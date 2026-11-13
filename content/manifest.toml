@@ -264,7 +264,7 @@ version = "0.1.3"
 
 [[member]]
 path = "agents/web-qa.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "agents/web-ui-engineer.md"

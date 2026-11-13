@@ -1,0 +1,24 @@
+name: Trusty Browser
+on:
+  pull_request:
+    paths: ["python/trusty-browser/**", ".github/workflows/trusty-browser.yml"]
+  push:
+    branches: [main]
+    paths: ["python/trusty-browser/**", ".github/workflows/trusty-browser.yml"]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: python/trusty-browser
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install ".[test]"
+      - run: python -m playwright install chromium
+      - run: python -m pytest -q
+      - run: node --test tests/*.mjs

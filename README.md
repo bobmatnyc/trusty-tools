@@ -178,6 +178,7 @@ package to its manifest, source, and documentation, use the
 
 | Crate | Description | License |
 |---|---|---|
+| [`trusty-browser`](python/trusty-browser/README.md) | Python service for web-QA workflows in enrolled Chrome profiles over Unix domain sockets | MIT |
 | `trusty-console` | Web console for the local trusty service fleet | MIT |
 | `trusty-channels` | Native Slack and Telegram MCP servers | MIT |
 
