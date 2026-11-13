@@ -228,25 +228,48 @@ function bootstrap(request) {
       settled = true;
       clearTimeout(timeout);
       port.disconnect();
-      if (error) reject(new Error(error)); else resolve(reply);
+      if (error) reject(error instanceof Error ? error : new Error(error)); else resolve(reply);
     };
     const timeout = setTimeout(() => finish(null,"Enrollment timed out. Reopen the popup to retry."),8000);
     port.onDisconnect.addListener(() => finish(null,chrome.runtime.lastError?.message || "Enrollment disconnected"));
     port.onMessage.addListener(reply => {
-      finish(reply,reply?.ok === true && reply.workflow === request.workflow ? null :
-        reply?.error || "Enrollment refused");
+      if (reply?.ok === true && reply.workflow === request.workflow) return finish(reply,null);
+      const error = new Error(typeof reply?.error === "string" ? reply.error : "Invalid enrollment reply");
+      // Only the verified enrollment host can report a definitive protocol refusal.
+      if (reply?.ok === false && typeof reply.error === "string") error.response = reply;
+      finish(null,error);
     });
     port.postMessage(request);
   });
 }
 let enrollmentBusy = false;
+let replacement = null;
+const definiteRefusals = new Set(["InvalidEnrollment","InvalidRequest","Unauthorized","EnrollmentConflict",
+  "ReplacementStale","EnrollmentRevoked","NotTrusted","UnsupportedOperation"]);
+function approvedReplacement(msg,route) {
+  return replacement && replacement.id === msg.confirmation && replacement.workflow === msg.workflow &&
+    replacement.tab === route.tab && replacement.document === route.document && sameRoute(replacement,route);
+}
+function usablePrevious(previous) {
+  return isHex(previous?.version) && ["email","url","account"].every(k =>
+    typeof previous[k] === "string" && previous[k].length > 0 && previous[k].length <= 8192);
+}
 async function setup(msg) {
   await storageReady;
   if (msg.type === "enable") return await enableSite(msg.pattern);
+  if (msg.type === "cancel") {
+    if (replacement?.id === msg.confirmation) replacement = null;
+    return {ok:true};
+  }
   const {enrollment,pending} = await chrome.storage.local.get(["enrollment","pending"]);
   if (msg.type === "preview" && enrollment) {
     const {email,url,account} = enrollment;
-    return {ok:true,enrolled:enrollment.workflow,route:{email,url,account}};
+    if (await identity() !== email) throw new Error("The enrolled profile changed.");
+    const status = await bootstrap({op:"status",...enrollment});
+    if (status.state === "active") return {ok:true,enrolled:enrollment.workflow,route:{email,url,account}};
+    if (status.state !== "revoked") throw new Error("Could not verify enrollment status.");
+    await chrome.storage.local.remove(["enrollment","pending"]);
+    reconnect();
   }
   if (msg.type === "unenroll") {
     if (!enrollment || enrollment.workflow !== msg.workflow || enrollment.email !== await identity()) {
@@ -277,18 +300,36 @@ async function setup(msg) {
     throw new Error("The profile, tab or site changed. Reopen the popup.");
   }
   const workflow = msg.workflow;
-  if (typeof workflow !== "string" || workflow.trim() !== workflow || !workflow || workflow.length > 120) {
-    throw new Error("Enter a workflow name.");
+  if (typeof workflow !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(workflow)) {
+    throw new Error("Use 1–64 lowercase letters, digits, underscores or hyphens, starting with a letter or digit.");
+  }
+  if (msg.type === "replace" && !approvedReplacement(msg,route)) {
+    throw new Error("The confirmation expired. Check the workflow again.");
   }
   if (pending && (!sameRoute(pending,route) || pending.workflow !== workflow)) {
     throw new Error("A pending enrollment must be retried using its original workflow and site.");
   }
   enrollmentBusy = true;
   try {
-    const data = pending || {profile:crypto.randomUUID(),key:hex(crypto.getRandomValues(new Uint8Array(32))),
+    const data = pending ? {...pending} : {profile:crypto.randomUUID(),key:hex(crypto.getRandomValues(new Uint8Array(32))),
       email:route.email,url:route.url,account:route.account,workflow};
-    await chrome.storage.local.set({pending:data});
-    await bootstrap({op:"enroll",...data});
+    // An interrupted confirmed replacement must retry its original compare-and-swap.
+    const version = pending?.previous_version || (msg.type === "replace" ? replacement.version : null);
+    delete data.previous_version;
+    await chrome.storage.local.set({pending:version ? {...data,previous_version:version} : data});
+    replacement = null;
+    try {
+      await bootstrap(version ? {op:"replace",...data,previous_version:version} : {op:"enroll",...data});
+    } catch (error) {
+      const response = error.response;
+      if (response && definiteRefusals.has(response.error)) await chrome.storage.local.remove("pending");
+      if (response?.error === "EnrollmentConflict" && usablePrevious(response.previous)) {
+        const {email,url,account,version} = response.previous;
+        replacement = {...route,workflow,version,id:crypto.randomUUID()};
+        return {ok:true,previous:{email,url,account},confirmation:replacement.id};
+      }
+      throw error;
+    }
     await chrome.storage.local.set({enrollment:data});
     await chrome.storage.local.remove("pending");
     reconnect();
@@ -297,7 +338,7 @@ async function setup(msg) {
 }
 chrome.runtime.onMessage.addListener((msg,sender,reply) => {
   if (sender.id !== chrome.runtime.id || sender.url !== origin + "/setup.html" ||
-      !["enroll","preview","enable","unenroll"].includes(msg.type)) return;
+      !["enroll","replace","cancel","preview","enable","unenroll"].includes(msg.type)) return;
   setup(msg).then(reply,error => reply({ok:false,error:error.message}));
   return true;
 });

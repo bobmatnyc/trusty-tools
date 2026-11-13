@@ -38,17 +38,44 @@ async function preview() {
   statusLine.textContent = "";
   workflow.focus();
 }
-form.addEventListener("submit", async event => {
-  event.preventDefault();
-  button.disabled = true;
+const transfer = document.querySelector("#transfer");
+const cancel = document.querySelector("#cancel");
+const confirm = document.querySelector("#replace");
+let confirmation;
+async function submit(type) {
+  button.disabled = confirm.disabled = true;
+  statusLine.textContent = "";
   try {
-    const reply = await request({type:"enroll",workflow:workflow.value.trim(),route});
+    const reply = await request({type,workflow:workflow.value.trim(),route,confirmation});
     form.hidden = true;
+    if (reply.previous) {
+      confirmation = reply.confirmation;
+      const old = reply.previous;
+      document.querySelector("#transfer-route").textContent =
+        "Move " + workflow.value + " from " + old.email + " (" + old.account + " at " + old.url +
+        ") to " + route.email + " (" + route.account + " at " + route.url + ")?";
+      transfer.hidden = false;
+      cancel.focus();
+      return;
+    }
+    transfer.hidden = true;
     enrolledWorkflow = reply.workflow;
     remove.hidden = false;
     statusLine.textContent = "Enrolled workflow: " + reply.workflow;
-  } catch (error) { statusLine.textContent = error.message; }
-  finally { button.disabled = false; }
+  } catch (error) {
+    transfer.hidden = true;
+    form.hidden = false;
+    statusLine.textContent = error.message;
+  } finally { button.disabled = confirm.disabled = false; }
+}
+form.addEventListener("submit",event => { event.preventDefault(); void submit("enroll"); });
+confirm.addEventListener("click",() => submit("replace"));
+cancel.addEventListener("click",async () => {
+  await request({type:"cancel",confirmation});
+  confirmation = null;
+  transfer.hidden = true;
+  form.hidden = false;
+  workflow.focus();
 });
 enable.addEventListener("click", async () => {
   try {

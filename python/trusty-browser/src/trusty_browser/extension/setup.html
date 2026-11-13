@@ -7,8 +7,11 @@
 <dl hidden id="route"><dt>Chrome profile</dt><dd id="profile"></dd>
 <dt>Site</dt><dd id="site"></dd><dt>Site account</dt><dd id="account"></dd></dl>
 <form id="setup" hidden><label for="workflow">Workflow name</label>
-<input id="workflow" required maxlength="120" autocomplete="off">
+<input id="workflow" required maxlength="64" pattern="[a-z0-9][a-z0-9_\-]{0,63}" autocomplete="off">
 <button id="enroll">Enroll this workflow</button></form>
+<section id="transfer" hidden><p id="transfer-route"></p>
+<button id="cancel" type="button">Cancel</button>
+<button id="replace" type="button">Confirm replacement</button></section>
 <button id="remove" hidden>Remove workflow</button>
 <output id="status" aria-live="polite">Checking active tab…</output></main>
 <script src="setup.js"></script></html>

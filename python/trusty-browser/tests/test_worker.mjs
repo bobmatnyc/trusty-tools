@@ -17,6 +17,7 @@ function event() {
 async function fixture() {
   const sent = [], actions = [];
   let user = email;
+  const timers = new Map();let serial=0;
   const port = {onMessage:event(),onDisconnect:event(), postMessage(m){sent.push(m);},
     disconnect(){this.closed=true;},closed:false};
   const local = {setAccessLevel:async()=>{},get:async()=>({enrollment:{profile,key:secret}})};
@@ -28,10 +29,10 @@ async function fixture() {
       actions.push({id,msg,doc});
       return {ok:true,url:route,account:"site-user",result:{count:0}};
     }},alarms:{onAlarm:event(),create(){}}};
-  vm.runInNewContext(source,{importScripts:()=>{},TrustyControlIndicator:{clear(){},clearAll(){}},chrome,crypto:webcrypto,TextEncoder,URL,setTimeout:()=>0,clearTimeout:()=>{}});
+  vm.runInNewContext(source,{importScripts:()=>{},TrustyControlIndicator:{clear(){},clearAll(){}},chrome,crypto:webcrypto,TextEncoder,URL,setTimeout:(fn,ms)=>{timers.set(++serial,{fn,ms});return serial;},clearTimeout:id=>timers.delete(id)});
   for (let i=0;!sent.length && i<50;i++) await new Promise(r=>setImmediate(r));
   assert.equal(sent[0]?.type,"hello");
-  return {chrome,port,sent,actions,switchAccount(){user="other@example.org";}};
+  return {chrome,port,sent,actions,timers,switchAccount(){user="other@example.org";}};
 }
 
 function sign(role,h,serverNonce) {
@@ -66,4 +67,21 @@ test("valid role-bound proofs admit a pinned top-level document and recheck Chro
   await f.port.onMessage.fire({...req,id:"b",op:"click",tab:7,marker:"mark"});
   assert.equal(f.sent.at(-1).error,"ProfileMismatch");
   assert.equal(f.actions.length,1);
+});
+
+test("duplicate authenticated registration backs off then reconnects with fresh proof",async()=>{
+  const f=await fixture(), nonce="c".repeat(64);
+  const challenge=hello=>f.port.onMessage.fire({type:"challenge",nonce,proof:sign("broker",hello,nonce)});
+  await challenge(f.sent[0]);
+  await f.port.onMessage.fire({ok:false,error:"DuplicateProfile"});
+  assert.equal(f.port.closed,true);
+  const retry=[...f.timers.values()].find(job=>job.ms===250);
+  assert.ok(retry);
+  await retry.fn();
+  const hello=f.sent.at(-1);
+  assert.equal(hello.type,"hello");
+  assert.notEqual(hello.nonce,f.sent[0].nonce);
+  await challenge(hello);
+  await f.port.onMessage.fire({ok:true,generation:"new-connection"});
+  assert.equal(f.sent.at(-1).proof,sign("extension",hello,nonce));
 });

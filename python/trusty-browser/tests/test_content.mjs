@@ -21,6 +21,7 @@ function fixture() {
     }
   }
   const field=new Input(),button=new Button();
+  field.value="";
   doc.querySelector=name=>({"#account":{textContent:account},"#field":field,"#count":{textContent:"0"},"#apply":button})[name];
   const runtime={id:"id",connect:()=>({onDisconnect:{addListener(){}}}),
     onMessage:{addListener(fn){listener=fn;}}};
@@ -32,9 +33,9 @@ function fixture() {
     return {ok:true,json:async()=>({account:cooked})};
   };
   vm.runInNewContext(source,{chrome:{runtime},document:doc,window:page,top:page,location:{href:url},
-    fetch,URL,HTMLInputElement:Input,HTMLButtonElement:Button,Event,setTimeout,clearTimeout});
+    fetch,URL,TextEncoder,HTMLInputElement:Input,HTMLButtonElement:Button,Event,setTimeout,clearTimeout});
   const call=(op)=>new Promise(resolve=>listener({op,url,account,marker:"run"},{id:"id"},resolve));
-  return {call,received,swap(){cooked="travel";},swapOnClick(){switchOnClick=true;}};
+  return {call,received,field,swap(){cooked="travel";},swapOnClick(){switchOnClick=true;}};
 }
 test("site preview and snapshot revalidate active cookie subject even when the DOM still names the prior account",async()=>{
   const f=fixture();
@@ -51,4 +52,14 @@ test("a cookie switch after verification cannot commit a cross-account click",as
   f.swapOnClick();
   assert.equal((await f.call("click")).error,"SiteAccountMismatch");
   assert.deepEqual(f.received,["personal"]);
+});
+
+test("snapshot rejects multi-byte or JSON-expanded field values before leaving the renderer", async () => {
+  const f=fixture();
+  for (const value of ["å".repeat(33000),"\u0000".repeat(12000),"x".repeat(65537)]) {
+    f.field.value=value;
+    const reply=await f.call("snapshot");
+    assert.equal(reply.error,"SnapshotTooLarge");
+    assert.ok(!("result" in reply));
+  }
 });

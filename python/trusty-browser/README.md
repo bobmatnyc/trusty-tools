@@ -20,6 +20,8 @@ To run in the foreground, use `trusty-browser install-host` and `trusty-browser 
 
 Open the supported, signed-in site. Click **Trusty Browser** in the Chrome toolbar. On HTTPS, choose **Enable access to this site**. Review the Chrome profile, site URL and site account shown in the popup. Enter a lowercase workflow name and choose **Enroll this workflow**.
 
+If the workflow already belongs to another profile, the popup shows the current and proposed Chrome profiles, URLs and site accounts. Choose **Confirm replacement** to transfer the workflow and revoke its old grant, or **Cancel** to keep its route.
+
 Configure one stdio MCP server per agent workflow. This example grants access to the workflow named `travel-qa`.
 
 ```json

@@ -120,3 +120,20 @@ def test_fake_bootstrap_service_receives_no_credential(short_path):
             with fake.accept()[0] as peer:
                 assert process.wait(5) != 0
                 assert peer.recv(1) == b""
+
+
+def test_chrome_stdin_eof_terminates_host_during_partial_service_frame(short_path):
+    manifest = install_host.install(short_path, short_path / "manifests")
+    host = json.loads(manifest.read_text())["path"]
+    path = short_path / "service.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(path))
+        os.chmod(path, 0o600)
+        server.listen()
+        server.settimeout(3)
+        with subprocess.Popen([host, ORIGIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+            with server.accept()[0] as peer:
+                peer.sendall(struct.pack("=I", 12) + b"{")
+                child.stdin.close()
+                assert child.wait(3) == 0
+                assert child.stdout.read() == b""

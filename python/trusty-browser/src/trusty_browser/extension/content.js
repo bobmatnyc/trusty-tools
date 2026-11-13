@@ -59,7 +59,14 @@ chrome.runtime.onMessage.addListener((request, sender, reply) => {
       await verifiedAccount();
     } else if (!["preview","inspect","snapshot"].includes(request.op)) throw new Error("InvalidOperation");
     check(account);
-    return {account,url:location.href,result:{count:Number(count.textContent),field:field.value}};
+    // Bound encoded size before crossing the renderer boundary. JSON may expand a
+    // control character to six bytes and a Unicode scalar to four UTF-8 bytes.
+    const value = field.value;
+    if (typeof value !== "string" || value.length > 65536 ||
+        new TextEncoder().encode(JSON.stringify(value)).byteLength > 65536) {
+      throw new Error("SnapshotTooLarge");
+    }
+    return {account,url:location.href,result:{count:Number(count.textContent),field:value}};
   };
   run().then(value => reply({ok:true, ...value}), error => reply({ok:false,error:error.message}));
   return true;
