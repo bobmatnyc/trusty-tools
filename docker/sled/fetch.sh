@@ -16,6 +16,7 @@ dest="${here}/dl"
 if [ "$#" -gt 1 ]; then echo "usage: fetch.sh [DL_DIR]" >&2; exit 2; fi
 if [ -n "${1:-}" ]; then
     mkdir -p "${dest}"
+    # shellcheck disable=SC2015 # the || true deliberately maps a failed cd to an empty arg; pwd -P cannot fail after cd succeeds
     arg="$(cd "$1" 2>/dev/null && pwd -P || true)"
     [ "${arg}" = "${dest}" ] || { echo "fetch.sh: DL_DIR must be ${dest}" >&2; exit 2; }
 fi
@@ -47,6 +48,7 @@ while read -r tag base; do
     else
         fail "neither gh nor curl available"
     fi
+    # shellcheck disable=SC2015 # B is a die/fail guard whose own status cannot be false; the || arm is the intended failure path
     [ -s "${dest}/${base}" ] && [ -s "${dest}/${base}.sha256" ] || fail "missing ${base} or its .sha256"
 done <<< "${pins}"
 
