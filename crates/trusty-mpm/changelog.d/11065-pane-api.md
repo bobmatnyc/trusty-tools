@@ -1,0 +1,2 @@
+Added
+- The Architect dashboard serves `GET /api/pane?session=<tm-name>&lines=<n>`, the named session's masked pane tail as `{session, lines, captured_at, truncated}`. `lines` defaults to 40 and is clamped to 10-200; the session name must match exactly. It answers 404 `not_running` when no tmux session has that name and 503 `capture_failed` when tmux does not answer. It is architect-mode only and sits behind the Host/Origin guard; pane text is masked by `mask_pane_text` and cached in memory for 3 seconds (#11065).
