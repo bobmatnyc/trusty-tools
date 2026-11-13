@@ -2760,8 +2760,16 @@ jobs:
       - name: launch.sh refuses every boundary break
         run: ./scripts/check_sled_launch.sh
 
+      # #11156: audit B3 (V1 gateway and raw-CONNECT probe coverage) and B4
+      # (pinned, hash-verified tarballs). Both run offline, no docker.
+      - name: V1 gateway and raw-CONNECT probes cover the audited set (B3)
+        run: ./scripts/check_sled_v1_gateway.sh
+
+      - name: images extract only pinned, hash-verified tarballs (B4)
+        run: ./scripts/check_sled_pinned_tarballs.sh
+
       - name: shellcheck the sled scripts
-        run: shellcheck -x docker/sled/check_tailscale.sh docker/sled/entrypoint.sh docker/sled/exercise.sh scripts/check_sled_tailscale_isolation.sh docker/sled/launch.sh docker/sled/launch_lib.sh docker/sled/proxy/sled-bind-addr docker/sled/proxy/entrypoint.sh scripts/check_sled_launch.sh scripts/test-data/sled-launch/docker
+        run: shellcheck -x docker/sled/check_tailscale.sh docker/sled/entrypoint.sh docker/sled/exercise.sh scripts/check_sled_tailscale_isolation.sh docker/sled/launch.sh docker/sled/launch_lib.sh docker/sled/proxy/sled-bind-addr docker/sled/proxy/entrypoint.sh scripts/check_sled_launch.sh scripts/test-data/sled-launch/docker docker/sled/check_v1.sh scripts/check_sled_v1_gateway.sh docker/sled/pinned-tarballs.sh docker/sled/fetch.sh scripts/check_sled_pinned_tarballs.sh
 
   # The three release-decision selftests (#5620, #5755). Each gate can only run
   # where a publish runs, so CI runs its fixtures to keep it able to fail.
