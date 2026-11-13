@@ -25,7 +25,11 @@ owner author, so a drawer can hold an Architect inference. A ruling known only f
 `Architect note: ... (basis: palace <id>)`.
 The text is NFKC-normalised first. Any owner claim, `user|owner` then `ruling|instruction|decision` in any
 case, that is not exactly one of the two labels refuses, and so does unlabelled text between the relay
-marker and the first owner label. Each quote (split on an ellipsis) must appear in the cited turn, case and whitespace aside. A quote that
+marker and the first owner label. Each quote (split on an ellipsis) must appear in the cited turn, case and whitespace aside,
+on word boundaries and with its fragments in order. #10960 (DOC-87 G-6 X17-X19, X22): no span an ellipsis elides may
+hold a negation (not, no, never, n't, without, cannot); a quote under 3 words and under 12 characters must be the
+whole turn; the owner-turn record is read under its shared lock (pending_hook_dedupe.owner_turns_lock), and a lock
+timeout, a read error or a record ending mid-line refuses. A quote that
 is in the turn but does not say the relayed thing cannot pass: the owner label carries only the quote,
 and the Architect's reading of it goes after `Architect answer:` with its basis. Text with no owner
 label passes untouched; so does a quoted owner ruling relayed as history once it is cited.
@@ -71,6 +75,12 @@ REF_TOKEN = re.compile(r"~?\d{2}:\d[\dx](?::\d{2})?Z|\d{2}-\d{2}|\d{4}-\d{2}-\d{
                        r"reported|amended|re-relay")
 MARKER = re.compile(r"^\[[^\]\n]*Architect [0-9]{2}:[0-9][0-9x]Z\]")
 ARCH_LABEL = re.compile(r"\s*Architect (?:answer|note|question|proposal):")
+ELLIPSIS = re.compile(r"…|\.\.\.")
+# #10960 (DOC-87 G-6 X17): a word that flips the meaning of what an ellipsis leaves out.
+NEGATION = re.compile(r"\b(?:not|no|never|without|cannot)\b|n't")
+MIN_QUOTE_WORDS, MIN_QUOTE_CHARS = 3, 12   # #10960 X18: below both, the quote must be the whole turn
+EDGE = " .,;:!?"
+NOT_IN, NEGATED, SHORT = "not in", "negated", "short"
 WINDOW = timedelta(minutes=2)
 HOW = ("Quote the owner verbatim and cite the turn: User ruling (<owner>): \"<owner's words>\" "
        "(owner turn: chat <YYYY-MM-DDTHH:MMZ> | dashboard <id>). "
@@ -87,7 +97,8 @@ def _norm(s):
 
 
 def owner_turns_path():
-    return os.environ.get("ARCHITECT_OWNER_TURNS") or os.path.join(ROOT, "inbox", "owner-turns.jsonl")
+    import pending_hook_dedupe as ph   # the writer owns the record's path and lock
+    return ph.owner_turns_path()
 
 
 def relay_log_path():
@@ -104,17 +115,31 @@ def _ts(s):
 
 
 def chat_turns(at):
-    """Owner chat turns recorded within WINDOW of `at`."""
-    want, out = _ts(at), []
+    """Owner chat turns recorded within WINDOW of `at`, read under the record's shared lock.
+
+    Refused (#10960, DOC-87 X22) when the lock is not held in time, the record cannot be read, or it ends mid-line
+    (a write cut short): the check denies rather than trust a torn read. A missing record has no turns. A line that
+    is not UTF-8 JSON is skipped; it cannot be a cite.
+    Test: test_relay_refuses_a_torn_or_unreadable_owner_turn_record_10960,
+    test_relay_refuses_while_a_writer_holds_the_owner_turn_lock_10960,
+    test_relay_reads_the_owner_turn_a_locked_writer_finishes_10960
+    """
+    import pending_hook_dedupe as ph
+    want, out, path = _ts(at), [], owner_turns_path()
     try:
-        with open(owner_turns_path(), encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError:
+        with ph.owner_turns_lock(path, shared=True):
+            with open(path, "rb") as f:
+                raw = f.read()
+    except FileNotFoundError:
         return out
-    for ln in lines:
+    except OSError as e:   # a lock timeout is a TimeoutError, an OSError: refuse, never read unlocked
+        raise Refused(f"the owner-turn record could not be read under its lock ({e})")
+    if raw and not raw.endswith(b"\n"):
+        raise Refused("the owner-turn record ends mid-line (a write was cut short or the record was truncated)")
+    for ln in raw.splitlines():
         try:
-            rec = json.loads(ln)
-        except ValueError:
+            rec = json.loads(ln.decode("utf-8"))
+        except ValueError:   # also UnicodeDecodeError
             continue
         t = _ts(rec.get("at")) if isinstance(rec, dict) else None
         if t and want and abs(t - want) <= WINDOW and isinstance(rec.get("text"), str):
@@ -161,17 +186,53 @@ def dashboard_turns(ref):
     return out
 
 
-def _quoted_in(quote, texts):
-    parts = [p for p in re.split(r"…|\.\.\.", _norm(quote)) if p.strip(" ,;")]
-    for text in map(_norm, texts):
-        pos = 0
-        for p in parts:
-            pos = text.find(p.strip(), pos)
-            if pos < 0:
-                break
-        else:
-            return bool(parts)
-    return False
+def _fragment(p):
+    """A pattern for one quote fragment that matches on word boundaries only (#10960 X18: "no" is not in "now")."""
+    head = r"(?<!\w)" if re.match(r"\w", p[0]) else ""
+    tail = r"(?!\w)" if re.match(r"\w", p[-1]) else ""
+    return re.compile(head + re.escape(p) + tail)
+
+
+def _in_order(frags, text, negation_ok=False):
+    """True when the fragments occur in `text` in order, and (unless negation_ok) no span between two of them holds
+    a NEGATION word (#10960 X17). Every placement is tried, so a negated first match cannot hide a clean later one."""
+    pats, seen = [_fragment(p) for p in frags], {}
+
+    def ok(i, pos):
+        if i == len(pats):
+            return True
+        if (i, pos) not in seen:
+            seen[(i, pos)] = False
+            for m in pats[i].finditer(text, pos):
+                if i and not negation_ok and NEGATION.search(text[pos:m.start()]):
+                    break   # every later placement elides this negation too
+                if ok(i + 1, m.end()):
+                    seen[(i, pos)] = True
+                    break
+        return seen[(i, pos)]
+    return ok(0, 0)
+
+
+def quote_problem(quote, texts):
+    """None when `quote` is the owner's words in one of `texts`; else NOT_IN, NEGATED or SHORT.
+
+    What: the quote, normalised (_norm) and split on an ellipsis, must occur in one text in order on word boundaries
+    (X18); an elided span holding a negation does not count (NEGATED, X17); a quote under MIN_QUOTE_WORDS words and
+    MIN_QUOTE_CHARS characters must equal a whole text, edge punctuation aside (SHORT, X18; X19 accepts it whole).
+    The length counts the quote as written, ellipsis included, so `"do ... reduce"` is long enough.
+    Test: test_relay_refuses_a_quote_whose_ellipsis_drops_a_negation_10960,
+    test_relay_refuses_a_short_quote_unless_it_is_the_whole_turn_10960
+    """
+    q = _norm(quote)
+    frags = [p.strip() for p in ELLIPSIS.split(q) if p.strip(" ,;")]
+    norm = [_norm(t) for t in texts]
+    found = [t for t in norm if frags and _in_order(frags, t)]
+    if not found:
+        return NEGATED if len(frags) > 1 and any(_in_order(frags, t, True) for t in norm) else NOT_IN
+    if len(q.split()) < MIN_QUOTE_WORDS and len(q) < MIN_QUOTE_CHARS and \
+            not any(q.strip(EDGE) == t.strip(EDGE) for t in found):
+        return SHORT
+    return None
 
 
 def _name_word(w):
@@ -244,7 +305,14 @@ def verify(cite, quotes):
     if not turns:
         raise Refused(f"no owner turn recorded for `{cite}`")
     for q in quotes:
-        if not _quoted_in(q, turns):
+        why = quote_problem(q, turns)
+        if why == NEGATED:   # #10960 X17
+            raise Refused(f"the quote \"{q[:60]}\" leaves out a negation the owner turn `{cite}` holds between its "
+                          "parts, so it says the opposite; quote the words without the ellipsis")
+        if why == SHORT:   # #10960 X18
+            raise Refused(f"the quote \"{q[:60]}\" is under {MIN_QUOTE_WORDS} words and {MIN_QUOTE_CHARS} "
+                          f"characters and is not the whole owner turn `{cite}`; quote more of the turn")
+        if why:
             raise Refused(f"the quote \"{q[:60]}\" is not in the owner turn `{cite}`")
     return kind
 

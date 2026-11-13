@@ -1,0 +1,2 @@
+Fixed
+- The Architect's `relay.sh` owner-quote check is stricter (#10960). A quote whose ellipsis leaves out a negation the cited owner turn holds (`"do ... reduce"` against "do not reduce") is refused. A quote matches on word boundaries only, and a quote under 3 words and 12 characters must be the whole owner turn (`"no"` no longer matches "just now"). The owner-turn record is written under an exclusive lock and read under a shared one; a lock timeout, a read error or a record that ends mid-line refuses the cite. Text with no owner label is unchanged.
