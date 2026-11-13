@@ -1,0 +1,23 @@
+{
+  "case_id": "c06-beta-model-exception-eligible",
+  "project_id": "beta",
+  "boundary": "contract",
+  "description": "Plan schema migration",
+  "subagent_type": "engineer",
+  "model": "model-large",
+  "run_in_background": false,
+  "prompt": "Plan the schema migration for the synthetic orders table.",
+  "rules": [
+    {
+      "rule_id": "beta-model-1",
+      "source_kind": "ledger",
+      "source_ref": "ledger/beta/0009",
+      "span_start": 0,
+      "text": "Children use model-small; a schema migration task may use model-large.",
+      "authority": "owner_verified",
+      "status": "active"
+    }
+  ],
+  "inherits": [],
+  "worker_state": null
+}
