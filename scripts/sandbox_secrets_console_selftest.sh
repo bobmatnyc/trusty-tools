@@ -37,6 +37,11 @@
 #                 without it both keep /usr/bin:/bin (#9979)
 #     tm-bin-bad  a missing path, a dir or file with no executable tm, and a
 #                 relative path refuse (exit 1)
+#     events-*    (#11159) under umask 002 <dir>/data/trusty-events is 0700
+#                 once the children run (the console stub mkdirs it as the
+#                 real console does), in a new --dir, over a reused 0775 dir,
+#                 over a 0777 dir, and with a relative --dir; a symlinked
+#                 <dir>/data or <dir>/data/trusty-events refuses (exit 1)
 #
 # Usage: ./scripts/sandbox_secrets_console_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -87,6 +92,9 @@ env | grep -E '^(TRUSTY_SANDBOX|TRUSTY_DATA_DIR_OVERRIDE|TRUSTY_MPM_ROOT|TRUSTY_
   | LC_ALL=C sort > "$HOME/$role.values"
 printf '%s\n' "$@" > "$HOME/$role.args"
 pwd -P > "$HOME/$role.pwd"
+# #11159: the real console resolves the bus socket with create_dir_all, so
+# under umask 002 it makes <data>/trusty-events 0775 unless it already exists.
+[ "$role" != stub-console ] || mkdir -p "$TRUSTY_DATA_DIR_OVERRIDE/trusty-events"
 trap 'exit 0' TERM INT
 while :; do sleep 0.1; done
 STUB_EOF
@@ -94,6 +102,14 @@ STUB_EOF
 done
 SB="$TMP_ROOT/bin/stub-secrets"
 CB="$TMP_ROOT/bin/stub-console"
+
+# mode_of PATH: the permission bits in octal, e.g. 700; empty when absent.
+mode_of() {
+  case "$(uname -s)" in
+    Darwin) stat -f %Lp "$1" 2>/dev/null || true ;;
+    *) stat -c %a "$1" 2>/dev/null || true ;;
+  esac
+}
 
 # The launcher from a cleared environment carrying fake secrets.
 run_launcher() {
@@ -335,6 +351,50 @@ for bad in "$TMP_ROOT/no-such-dir" "$TMP_ROOT/tmbin-empty" "$TMP_ROOT/tmbin-empt
   expect_refusal "tm-bin-bad-${bad##*/}" 1 --secrets-bin "$SB" --console-bin "$CB" --dir "$DIR5" --tm-bin "$bad"
 done
 [ -z "$(ls -A "$DIR5")" ] || fail tm-bin-bad-created "a refused run created files in --dir"
+
+# #11159: under umask 002 the bus dir is 0700 once the children run.
+# run_events_case NAME PREMODE [rel]: PREMODE is a mode to pre-create the dir
+# with, or "-" for none; "rel" passes --dir as a relative path.
+run_events_case() {
+  local name="$1" pre="$2" rel="${3:-}" d="$TMP_ROOT/case-$1" arg old_umask
+  mkdir -p "$d"
+  arg="$d"
+  [ "$rel" != rel ] || arg="${d##*/}"
+  old_umask="$(umask)"
+  umask 002
+  [ "$pre" = "-" ] || { mkdir -p "$d/data/trusty-events"; chmod "$pre" "$d/data/trusty-events"; }
+  ( cd "$TMP_ROOT" && exec env -i PATH="$PATH" TMPDIR="$TMP_ROOT" SANDBOX_SOCKET_WAIT_SECS=0 \
+      bash "$LAUNCHER" --secrets-bin "$SB" --console-bin "$CB" --dir "$arg" \
+      --bind "127.0.0.1:$PORT" --projects 1 ) > "$TMP_ROOT/out-$name" 2>&1 &
+  LAUNCHER_PID=$!
+  umask "$old_umask"
+  if wait_for "$d/home/stub-console.pwd"; then
+    expect_eq "$name dir mode" "$(mode_of "$d/data/trusty-events")" 700
+  else
+    fail "$name" "the stubs never ran"
+    sed 's/^/    /' "$TMP_ROOT/out-$name"
+  fi
+  kill -TERM "$LAUNCHER_PID" 2>/dev/null || true
+  wait "$LAUNCHER_PID" 2>/dev/null || true
+  LAUNCHER_PID=""
+  bash "$LAUNCHER" --stop "$d" > /dev/null 2>&1 || true
+}
+run_events_case events-new -
+run_events_case events-reused 775
+run_events_case events-wrong-mode 777
+run_events_case events-rel-dir - rel
+
+# A symlinked <dir>/data or <dir>/data/trusty-events refuses, creating nothing.
+DIR7="$TMP_ROOT/case7"
+mkdir -p "$DIR7/real"
+ln -s "$DIR7/real" "$DIR7/data"
+expect_refusal events-data-symlink 1 --secrets-bin "$SB" --console-bin "$CB" --dir "$DIR7"
+[ -z "$(ls -A "$DIR7/real")" ] || fail events-data-symlink-created "a refused run wrote through the symlink"
+DIR8="$TMP_ROOT/case8"
+mkdir -p "$DIR8/data" "$DIR8/real"
+ln -s "$DIR8/real" "$DIR8/data/trusty-events"
+expect_refusal events-dir-symlink 1 --secrets-bin "$SB" --console-bin "$CB" --dir "$DIR8"
+[ -z "$(ls -A "$DIR8/real")" ] || fail events-dir-symlink-created "a refused run wrote through the symlink"
 
 echo "sandbox_secrets_console_selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]
