@@ -113,7 +113,7 @@ from datg_log import (  # noqa: E402,F401  (#10161: re-exported for callers and 
 from datg_read import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     MUTATING_BASH, MUTATING_TOOLS, _digest_sections, _read_json, _short, _stamp_path, _to_epoch, build_digest,
     check_dispatch, dispatch_mode, goal_named, log_hook_warning, op_fresh, provenance_flags, stamp_turn, summary, turn_tools,
-    unsourced_claim,
+    reconcile_failed, reconcile_lines, unsourced_claim,
 )
 
 
@@ -140,7 +140,7 @@ def session_start_context(st, project):
         dig = "\n" + build_digest(project, max(50, room // 4))
     except Exception as e:  # #10109: fail open, but visibly
         print(f"datg hook: SessionStart digest failed ({e})", file=sys.stderr)
-        dig = ""
+        dig = "\n" + "\n".join(reconcile_failed(e))   # #10960 G-3: never a silent "reconciled"
     ctx = head + dig
     if "\nTRUNCATED:" in dig or len(ctx) > HOOK_CONTEXT_MAX:
         ctx = ctx[:HOOK_CONTEXT_MAX - len(ptr) - 1] + "\n" + ptr
@@ -223,6 +223,9 @@ def hook_failure(payload, project, err):
         return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                   "permissionDecisionReason": reason}}, separators=(",", ":"))
     print(f"datg hook: failed open ({err})", file=sys.stderr)
+    if isinstance(payload, dict) and payload.get("hook_event_name") == "SessionStart":   # #10960 G-3: say it
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(
+            reconcile_failed(err))}}, separators=(",", ":"))
     if dispatch and project:
         record_guard(project, "hook_error", f"dispatch check failed open ({type(err).__name__}: {err})"[:300])
     return ""
@@ -457,7 +460,11 @@ def main(argv=None):
         elif a.verb == "archive-show":
             print(archive_lookup(a.project, a.id))
         elif a.verb == "digest":
-            print(build_digest(a.project, a.max_tokens))
+            try:
+                print(build_digest(a.project, a.max_tokens))
+            except DatgError as e:   # #10960 G-3: the unreadable ledger is said on stdout too; exit code unchanged
+                print("\n".join(reconcile_failed(e)))
+                raise
             if not a.no_log:
                 try:
                     append_log(a.project, {"ts": now_iso(), "session": os.environ.get("DATG_SESSION", ""), "kind": "digest"})
