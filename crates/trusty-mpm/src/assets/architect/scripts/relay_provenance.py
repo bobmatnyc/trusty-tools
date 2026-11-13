@@ -34,11 +34,12 @@ is in the turn but does not say the relayed thing cannot pass: the owner label c
 and the Architect's reading of it goes after `Architect answer:` with its basis. Text with no owner
 label passes untouched; so does a quoted owner ruling relayed as history once it is cited.
 #10960 (DOC-87 G-4 X10-X13): a verified quote whose owner turn is a ledger owner ruling marked `superseded_by`
-(`datg.py update --supersedes`) refuses and names the successor; a successor with `until` is bounded, so the cite
-passes with a FLAG on stderr (X11). A label whose parentheses say `superseded` relays history and is not refused.
-The ledgers are the Architect IL (ARCHITECT_IL, default local/il) and every IL_SCHEDULE session, state.json and
-archive.jsonl. A missing ledger holds no link; an unreadable or corrupt one, or an archive line naming
-`superseded_by` that does not parse, refuses (fail closed: it may hold the link).
+(`datg.py update --supersedes`) refuses and names the successor; it passes with a FLAG on stderr (X11) only when
+every successor on the chain is bounded and the last `until` is still ahead. A label whose parentheses say
+`superseded` relays history and is not refused. The ledgers are the Architect IL (ARCHITECT_IL, default local/il)
+and every IL_SCHEDULE session, state.json and archive.jsonl. A missing ledger holds no link. A damaged record (an
+unreadable or corrupt schedule, state.json or archive line) refuses only a cite whose chain touches it (see
+touches); every other cite passes with a FLAG on stderr and a `finding` row in the log (Di9: no blanket gate).
 Every labelled relay checked, passed or refused, is appended to inbox/relay-provenance.jsonl.
 Exit 0: no owner label, or every label verified (one `cite ok` line each). Exit 3: refused (the reason,
 and how to resend as an Architect answer). Exit 2: usage. Paths: ARCHITECT_OWNER_TURNS,
@@ -341,8 +342,8 @@ def verify(cite, quotes):
     return kind
 
 
-def check(text):
-    """[(label, name, cite, kind, quotes, flag)] for every owner label in `text`; Refused on the first bad one."""
+def check(text, findings=None):
+    """[(label, name, cite, kind, quotes, flag)] per owner label; Refused on the first bad one. Damage -> `findings`."""
     text = unicodedata.normalize("NFKC", text).replace("\u201c", '"').replace("\u201d", '"')   # #10780 H1
     marks = list(LABEL.finditer(text))
     starts = {m.start() for m in marks}
@@ -355,7 +356,7 @@ def check(text):
         lead = text[m0.end() if m0 else 0:marks[0].start()]
         if lead.strip() and not ARCH_LABEL.match(lead):
             raise Refused("text before the first owner label is not the owner's; label it `Architect answer: ...`")
-    out, items = [], None
+    out, items, damage = [], None, findings if findings is not None else []
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
         label = f"User {m.group(1)} ({m.group(2)})"
@@ -367,19 +368,24 @@ def check(text):
             quotes, cite, _ = check_segment(text[m.end():end])
             kind, flag = verify(cite, quotes), None
             if not re.search(r"\bsuperseded\b", m.group(2)):   # #10960 G-4; a `superseded` label relays history
-                items = ledger_items() if items is None else items
-                hit = superseded(cite, quotes, items)
-                if hit and hit[0]:
-                    raise Refused(hit[1])
-                flag = hit[1] if hit else None
+                if items is None:
+                    items, got = ledger_items()
+                    damage += got
+                refuse, flag, chain, located = superseded(cite, quotes, items)
+                if refuse:
+                    raise Refused(flag)
+                for d in damage:
+                    if touches(d, cite, quotes, chain, located):
+                        raise Refused(f"the ledger record {d['path']} {d['reason']} and may hold this cite's "
+                                      "supersession link; repair it, or cite a ruling recorded in a sound ledger")
             out.append((label, m.group(2), cite, kind, quotes, flag))
         except Refused as e:
             raise Refused(f"{label}: {e}")
     return out
 
 
-def _ledger_paths():
-    """state.json paths of the Architect IL and every IL_SCHEDULE session; Refused when the schedule is unreadable."""
+def _ledger_paths(damage):
+    """state.json paths of the Architect IL and every IL_SCHEDULE session; an unreadable schedule is bytes-less damage."""
     import dashboard_il as dil
     sched = os.environ.get("IL_SCHEDULE") or os.path.join(ROOT, "local", "il-schedule.json")
     try:
@@ -387,52 +393,73 @@ def _ledger_paths():
             json.loads(f.read().decode("utf-8"))
     except FileNotFoundError:
         pass
-    except (OSError, ValueError) as e:   # also UnicodeDecodeError: a session ledger would go unread
-        raise Refused(f"the IL schedule {sched} cannot be read ({e}), so a superseded owner ruling is not ruled out")
+    except (OSError, ValueError) as e:   # also UnicodeDecodeError
+        damage.append({"path": sched, "reason": f"cannot be read ({e}), so its sessions' ledgers were not read",
+                       "raw": None})
     arch = os.environ.get("ARCHITECT_IL") or os.path.join(ROOT, "local", "il")
     return [r["state_path"] for r in dil.discover({}, sched, arch)]
 
 
-def _read(path):
-    """The bytes of `path`; None when it does not exist; Refused when it cannot be read."""
+def _read(path, damage):
+    """The bytes of `path`; None when it does not exist, or when it cannot be read (recorded in `damage`)."""
     try:
         with open(path, "rb") as f:
             return f.read()
     except FileNotFoundError:
         return None
     except OSError as e:
-        raise Refused(f"the ledger file {path} cannot be read ({e}), so a superseded owner ruling is not ruled out")
+        damage.append({"path": path, "reason": f"cannot be read ({e})", "raw": None})
+        return None
 
 
 def ledger_items():
-    """Every ledger item, open (state.json) and archived (archive.jsonl), for the supersession check (#10960).
-
-    Fail closed: a state.json that cannot be read or parsed, and an archive line that names `superseded_by` but does
-    not parse, refuse, because either may hold the link. A missing file holds no link (a ledger never started).
-    Test: test_relay_refuses_when_a_ledger_cannot_be_read_10960
-    """
-    out = []
-    for sp in _ledger_paths():
-        raw = _read(sp)
+    """(items, damage): every ledger item, open (state.json) and archived (archive.jsonl), and each damaged record as
+    {path, reason, raw: its bytes, or None when unreadable}. A missing file holds no link and is not damage."""
+    items, damage = [], []
+    for sp in _ledger_paths(damage):
+        raw = _read(sp, damage)
         if raw is not None:
             try:
-                items = json.loads(raw.decode("utf-8")).get("items")
-                if not isinstance(items, list):
+                got = json.loads(raw.decode("utf-8")).get("items")
+                if not isinstance(got, list):
                     raise ValueError("no items list")
+                items += [i for i in got if isinstance(i, dict)]
             except (ValueError, AttributeError) as e:
-                raise Refused(f"the ledger {sp} is corrupt ({e}), so a superseded owner ruling is not ruled out")
-            out += [i for i in items if isinstance(i, dict)]
-        for ln in (_read(os.path.join(os.path.dirname(sp), "archive.jsonl")) or b"").splitlines():
+                damage.append({"path": sp, "reason": f"is corrupt ({e})", "raw": raw})
+        ap = os.path.join(os.path.dirname(sp), "archive.jsonl")
+        for n, ln in enumerate((_read(ap, damage) or b"").splitlines(), 1):
             try:
                 item = json.loads(ln.decode("utf-8")).get("item")
             except (ValueError, AttributeError):
-                if b"superseded_by" in ln:
-                    raise Refused(f"an archive line of {sp} naming superseded_by is corrupt, so a superseded "
-                                  "owner ruling is not ruled out")
+                damage.append({"path": f"{ap}:{n}", "reason": "is a corrupt archive line", "raw": ln})
                 continue
             if isinstance(item, dict):
-                out.append(item)
-    return out
+                items.append(item)
+    return items, damage
+
+
+def touches(d, cite, quotes, chain, located):
+    """True when the damaged record `d` may hold a link on this cite's chain (#10960, Di9).
+
+    What: with its bytes, when they name the cite's turn (`chat YYYY-MM-DDTHH:MM` for any minute within 2 of the
+    cited time or of a turn the quote matched; `dashboard [S..:]<id>`) or quote an id on the cite's chain. Bytes
+    lost to the damage hold no link, as a missing ledger holds none. Without bytes (unreadable file or schedule):
+    unless a sound record located the cite, since its links live beside it in that ledger.
+    Test: test_relay_refuses_a_damaged_record_on_the_cites_chain_10960,
+    test_relay_flags_a_damaged_ledger_off_the_cites_chain_and_sends_10960
+    """
+    if d["raw"] is None:
+        return not located
+    pats = [b'"' + re.escape(i.encode()) + b'"' for i in chain if isinstance(i, str)]
+    m, dash = CHAT.match(cite), DASH.match(cite)
+    if m:
+        for t in filter(None, [_ts(m.group(1))] + [_ts(k[1]) for k in turn_keys(cite, quotes)]):
+            pats += [re.escape(("chat " + (t + timedelta(minutes=k)).strftime("%Y-%m-%dT%H:%M")).encode())
+                     for k in range(-2, 3)]
+    elif dash:
+        pats.append(rb"dashboard (?:S[0-9a-f]{2}:)?" + re.escape(dash.group(1).split(":")[-1].encode()) +
+                    rb"(?![\w.-])")
+    return bool(pats) and re.search(b"|".join(pats), d["raw"]) is not None
 
 
 def turn_keys(cite, quotes):
@@ -451,42 +478,73 @@ def _src(item):
     return item.get("source") if isinstance(item.get("source"), dict) else {}
 
 
-def superseded(cite, quotes, items):
-    """(refuse, message) when the owner turn `cite` + `quotes` resolves to a ledger item marked `superseded_by`,
-    else None.
+def _maybe(icite, cite):
+    """Cheap pre-check: can the ledger cite `icite` name the same owner turn as `cite`?"""
+    a, b = CHAT.match(icite), CHAT.match(cite)
+    if a and b:
+        ta, tb = _ts(a.group(1)), _ts(b.group(1))
+        return bool(ta and tb) and abs(ta - tb) <= 3 * WINDOW
+    a, b = DASH.match(icite), DASH.match(cite)
+    return bool(a and b) and a.group(1).split(":")[-1] == b.group(1).split(":")[-1] or _norm(icite) == _norm(cite)
 
-    What: the turn is matched by identity (turn_keys), or by the cite text when the item's own turn is no longer
-    recorded. The message names the successor and, along the chain, the current ruling. A successor that no ledger
-    holds refuses; one with `until` is bounded and only flags (DOC-87 X11).
-    Test: test_relay_refuses_a_cite_of_a_superseded_owner_ruling_10960,
-    test_relay_flags_a_cite_superseded_by_a_bounded_ruling_10960
-    """
-    linked = [i for i in items if "superseded_by" in i]
-    if not linked:
-        return None
-    by_id, mine = {i.get("id"): i for i in items}, turn_keys(cite, quotes)
-    for old in linked:
-        src = _src(old)
-        keys = turn_keys(src.get("cite"), [src.get("quote")])
-        if not (keys & mine if keys else _norm(src.get("cite") or "") == _norm(cite)):
-            continue
-        nxt = old["superseded_by"]
+
+def _hops(old, by_id):
+    """(the successors of `old` in order, the id the chain breaks at: one no ledger holds, or a loop; else None)."""
+    hops, seen, cur = [], {old.get("id")}, old
+    while "superseded_by" in cur:
+        nxt = cur["superseded_by"]
         succ = by_id.get(nxt) if isinstance(nxt, str) else None
-        if succ is None:
-            return True, (f"the owner turn `{cite}` is ledger ruling {old.get('id')}, superseded by {nxt!r}, which "
-                          "no ledger holds; ask the owner for the current ruling")
-        latest, seen = succ, {old.get("id")}
-        while isinstance(latest.get("superseded_by"), str) and latest.get("id") not in seen:
-            seen.add(latest.get("id"))
-            latest = by_id.get(latest["superseded_by"]) or latest
-        s = _src(succ)
-        msg = (f"the owner turn `{cite}` is ledger ruling {old.get('id')}, superseded by {nxt} \"{s.get('quote')}\" "
-               f"(owner turn: {s.get('cite')})" + (f"; the current ruling is {latest.get('id')}" if latest is not succ
-                                                    else "") + "; cite the current ruling")
-        if s.get("until"):
-            return False, msg + f" (the successor holds until {s['until']}, so this is flagged, not refused)"
-        return True, msg
-    return None
+        if succ is None or nxt in seen:
+            return hops, nxt
+        hops.append(succ)
+        seen.add(nxt)
+        cur = succ
+    return hops, None
+
+
+def _verdict(old, hops, broken, cite, now):
+    """(refuse, message) for a cite of the superseded ruling `old`. It only flags (DOC-87 X11) when every successor
+    is bounded and the last one's `until` is still ahead; an unbounded end or a passed `until` refuses."""
+    head = f"the owner turn `{cite}` is ledger ruling {old.get('id')}, superseded by "
+    if broken is not None:
+        return True, head + (f"{old['superseded_by']!r}; the chain breaks at {broken!r}, which no ledger holds; ask "
+                             "the owner for the current ruling")
+    s, last = _src(hops[0]), hops[-1]
+    msg = (head + f"{hops[0].get('id')} \"{s.get('quote')}\" (owner turn: {s.get('cite')})"
+           + (f"; the current ruling is {last.get('id')}" if last is not hops[0] else "") + "; cite the current ruling")
+    untils = [_ts(_src(h).get("until")) for h in hops]
+    if all(untils) and untils[-1] > now:
+        return False, msg + f" (every successor is bounded, the last until {_src(last)['until']}; flagged, not refused)"
+    return True, msg + (f" (its until {_src(last)['until']} has passed)" if untils[-1] else "")
+
+
+def superseded(cite, quotes, items, now=None):
+    """(refuse, message, chain, located) for an owner cite against the ledger items (#10960 G-4).
+
+    What: an item matches when its owner turn is the cite's (turn_keys, or the cite text when the turn is gone);
+    `located` says one did. A matched superseded item gives the verdict (_verdict; a refusal wins); message is None
+    when none is superseded. `chain` holds the matched and successor ids, for touches.
+    Test: test_relay_refuses_a_cite_of_a_superseded_owner_ruling_10960,
+    test_relay_flags_a_cite_superseded_by_a_bounded_ruling_10960,
+    test_relay_refuses_past_a_bounded_successor_to_an_unbounded_one_10960
+    """
+    now = now or datetime.now(timezone.utc)
+    by_id, mine, chain, located, verdict = {i.get("id"): i for i in items}, turn_keys(cite, quotes), set(), False, None
+    for it in items:
+        src = _src(it)
+        if not isinstance(src.get("cite"), str) or not _maybe(src["cite"], cite):
+            continue
+        keys = turn_keys(src["cite"], [src.get("quote")])
+        if not (keys & mine if keys else _norm(src["cite"]) == _norm(cite)):
+            continue
+        located = True
+        chain.add(it.get("id"))
+        if "superseded_by" in it:
+            hops, broken = _hops(it, by_id)
+            chain.update([h.get("id") for h in hops] + [broken])
+            v = _verdict(it, hops, broken, cite, now)
+            verdict = v if verdict is None or (v[0] and not verdict[0]) else verdict
+    return (verdict or (False, None)) + (chain, located)
 
 
 def log(session, outcome, detail):
@@ -500,14 +558,23 @@ def log(session, outcome, detail):
         print(f"relay_provenance: log not written ({e})", file=sys.stderr)
 
 
+def report_damage(session, damage):
+    """#10960 (Di9): each damaged ledger record is a `finding` log row and a loud FLAG on stderr, never a halt."""
+    for d in damage:
+        log(session, "finding", {"damaged": d["path"], "reason": d["reason"]})
+        print(f"FLAG DAMAGED LEDGER: {d['path']} {d['reason']}. Owner cites whose link chain does not touch it were "
+              "checked without it; repair it.", file=sys.stderr)
+
+
 def main(argv):
     if len(argv) != 3 or argv[0] != "check" or not argv[1] or not argv[2]:
         print("usage: relay_provenance.py check <session> <text>", file=sys.stderr)
         return 2
-    session, text = argv[1], argv[2]
+    session, text, findings = argv[1], argv[2], []
     try:
-        found = check(text)
+        found = check(text, findings)
     except Refused as e:
+        report_damage(session, findings)
         log(session, "refused", {"reason": str(e)})
         print(f"NO-OWNER-CITE: {e}. {HOW}")
         return 3
@@ -517,6 +584,7 @@ def main(argv):
         print(f"cite ok: {label} {cite} ({kind})")
         if flag:   # #10960 X11: stderr, so relay.sh still sends and the caller sees it
             print(f"FLAG superseded-bounded: {label}: {flag}", file=sys.stderr)
+    report_damage(session, findings)
     return 0
 
 

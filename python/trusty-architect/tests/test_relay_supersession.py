@@ -160,12 +160,35 @@ def test_relay_sends_a_cite_no_link_supersedes_10960(tmp_path, il):
 def test_relay_flags_a_cite_superseded_by_a_bounded_ruling_10960(tmp_path, il):
     """X11: T2 holds only until a time; the T1 cite is ambiguous, so it is sent with a FLAG, not refused."""
     answer(il, "ar-D01", T1)
-    datg.write_ops(il, [{"op": "update", "id": "ar-D02", "answer": T2["text"], "supersedes": "ar-D01",
-                         "source": owner(T2, until="2026-11-09T09:00Z")}])
+    bounded(il, "ar-D02", T2, "ar-D01", FUTURE)
     stub, out = relay(tmp_path, T1, "t1")
     sent(stub, out)
     assert "FLAG superseded-bounded" in out.stderr and "ar-D02" in out.stderr, out
-    assert "until 2026-11-09T09:00Z" in relay_log()[0]["flag"]
+    assert f"until {FUTURE}" in relay_log()[0]["flag"]
+
+
+FUTURE, PAST = "2099-01-01T00:00Z", "2026-11-09T09:00Z"
+
+
+def bounded(p, iid, turn, old, until):
+    datg.write_ops(p, [{"op": "update", "id": iid, "answer": turn["text"], "supersedes": old,
+                        "source": owner(turn, until=until)}])
+
+
+def test_relay_refuses_past_a_bounded_successor_to_an_unbounded_one_10960(tmp_path, il):
+    """critic HIGH: T1 -> T2 (until ahead) -> T3 (unbounded). The chain ends unbounded, so a T1 cite refuses."""
+    answer(il, "ar-D01", T1)
+    bounded(il, "ar-D02", T2, "ar-D01", FUTURE)
+    answer(il, "ar-D03", T3, supersedes="ar-D02")
+    refused(*relay(tmp_path, T1, "t1"), "superseded by ar-D02", "the current ruling is ar-D03")
+
+
+def test_relay_refuses_a_cite_whose_bounded_successor_has_expired_10960(tmp_path, il):
+    """critic HIGH: a successor whose `until` has passed no longer makes the cite ambiguous; it refuses."""
+    answer(il, "ar-D01", T1)
+    bounded(il, "ar-D02", T2, "ar-D01", PAST)
+    stub, out = relay(tmp_path, T1, "t1")
+    refused(stub, out, "superseded by ar-D02", f"its until {PAST} has passed")
 
 
 def test_relay_sends_a_superseded_ruling_labelled_as_history_10960(tmp_path, il):
@@ -182,37 +205,39 @@ def test_relay_reads_the_archive_for_a_link_or_its_successor_10960(tmp_path, il,
     refused(*relay(tmp_path, T1, "t1"), "superseded by ar-D02")
 
 
-# --- fail closed --------------------------------------------------------------------------
+# --- damaged ledgers (Di9: refuse only a cite whose chain touches the damage) ----------------
 
 def _state(p):
     return datg.paths(p)[1]
 
 
-def _corrupt_state(p, tmp_path):
-    with open(_state(p), "w") as f:
-        f.write('{"code": "ar", "items": [')
+def _archive(p):
+    return os.path.join(datg.paths(p)[0], "archive.jsonl")
 
 
-def _no_items(p, tmp_path):
-    with open(_state(p), "w") as f:
-        f.write("[]")
+def _append(path, text):
+    with open(path, "a") as f:
+        f.write(text)
 
 
-def _torn_archive_link(p, tmp_path):
-    with open(os.path.join(datg.paths(p)[0], "archive.jsonl"), "a") as f:
-        f.write('{"item": {"id": "ar-D05", "superseded_by": "ar-D0\n')
+def _corrupt_tail(p, tmp_path):   # the cite's own record is still in the bytes
+    _append(_state(p), "}garbage")
 
 
-def _bad_schedule(p, tmp_path):
-    path = tmp_path / "schedule.json"
-    path.write_text("{not json")
-    os.environ["IL_SCHEDULE"] = str(path)   # conftest's monkeypatch restores it
-
-
-def _unreadable(p, tmp_path):
+def _unreadable(p, tmp_path):     # no bytes, and no sound record locates the cite
     if os.geteuid() == 0:
         pytest.skip("root reads a mode-000 file")
     os.chmod(_state(p), 0)
+
+
+def _torn_archive_on_chain(p, tmp_path):
+    _append(_archive(p), '{"item": {"id": "ar-D05", "source": {"cite": "%s"}, "superseded_by": "ar-D0\n' % cite(T1))
+
+
+def _bad_schedule(p, tmp_path):   # the schedule's sessions go unread
+    path = tmp_path / "schedule.json"
+    path.write_text("{not json")
+    os.environ["IL_SCHEDULE"] = str(path)   # conftest's monkeypatch restores it
 
 
 def _dangling(p, tmp_path):
@@ -222,14 +247,17 @@ def _dangling(p, tmp_path):
         json.dump(st, f)
 
 
-@pytest.mark.parametrize("damage,why", [
-    (_corrupt_state, "is corrupt"), (_no_items, "is corrupt"), (_unreadable, "cannot be read"),
-    (_torn_archive_link, "naming superseded_by is corrupt"), (_bad_schedule, "IL schedule"),
-    (_dangling, "which no ledger holds"),
+@pytest.mark.parametrize("damage,recorded,why", [
+    (_corrupt_tail, True, "is corrupt"),
+    (_unreadable, True, "cannot be read"),
+    (_torn_archive_on_chain, True, "is a corrupt archive line"),
+    (_bad_schedule, False, "schedule.json cannot be read"),     # nothing sound locates the cite: cannot tell, refuse
+    (_dangling, True, "which no ledger holds"),
 ])
-def test_relay_refuses_when_a_ledger_cannot_be_read_10960(tmp_path, il, damage, why):
-    """Fail closed: a ledger the check cannot read may hold the link, so the owner-labelled cite is refused."""
-    answer(il, "ar-D01", T1)
+def test_relay_refuses_a_damaged_record_on_the_cites_chain_10960(tmp_path, il, damage, recorded, why):
+    """Fail closed where it matters: the damaged record may hold this cite's link, so the cite is refused."""
+    if recorded:
+        answer(il, "ar-D01", T1)
     damage(il, tmp_path)
     try:
         refused(*relay(tmp_path, T1, "t1"), why)
@@ -237,8 +265,48 @@ def test_relay_refuses_when_a_ledger_cannot_be_read_10960(tmp_path, il, damage, 
         os.chmod(_state(il), 0o644)
 
 
-def test_relay_ignores_a_torn_archive_line_that_holds_no_link_10960(tmp_path, il):
+def _other_project(tmp_path, monkeypatch, state):
+    """A second scheduled PM ledger whose state.json holds `state` (bytes), or is mode 000 when `state` is None."""
+    proj = tmp_path / "pm-other"
+    d = proj / ".trusty-mpm" / "datg"
+    d.mkdir(parents=True)
+    (d / "state.json").write_bytes(state or b"{}")
+    if state is None:
+        if os.geteuid() == 0:
+            pytest.skip("root reads a mode-000 file")
+        os.chmod(d / "state.json", 0)
+    sched = tmp_path / "il-schedule.json"
+    sched.write_text(json.dumps({"sessions": [{"name": "pm-other", "project": str(proj), "code": "po"}]}))
+    monkeypatch.setenv("IL_SCHEDULE", str(sched))
+    return str(d / "state.json")
+
+
+@pytest.mark.parametrize("where", ["other-corrupt", "other-unreadable", "own-archive-line", "own-state-emptied",
+                                   "schedule"])
+def test_relay_flags_a_damaged_ledger_off_the_cites_chain_and_sends_10960(tmp_path, il, monkeypatch, where):
+    """Di9, no blanket gate: damage that cannot hold this cite's link is a loud FLAG and a finding row; the
+    relay is sent."""
     answer(il, "ar-D01", T1)
-    with open(os.path.join(datg.paths(il)[0], "archive.jsonl"), "a") as f:
-        f.write('{"item": {"id": "ar-D05", "title": "cut sh\n')
-    sent(*relay(tmp_path, T1, "t1"))
+    if where == "other-corrupt":
+        path = _other_project(tmp_path, monkeypatch, b'{"code": "po", "items": [{"id": "po-D01"')
+    elif where == "other-unreadable":
+        path = _other_project(tmp_path, monkeypatch, None)
+    elif where == "own-archive-line":   # a torn line that names nothing on the chain
+        path = _archive(il) + ":1"
+        _append(_archive(il), '{"item": {"id": "ar-D05", "title": "cut sh\n')
+    elif where == "own-state-emptied":  # the bytes that could hold a link are gone, as with a missing ledger
+        path = _state(il)
+        with open(path, "w") as f:
+            f.write("[]")
+    else:
+        path = str(tmp_path / "schedule.json")
+        _bad_schedule(il, tmp_path)
+    try:
+        stub, out = relay(tmp_path, T1, "t1")
+    finally:
+        os.chmod(path.rsplit(":", 1)[0], 0o644)
+    sent(stub, out)
+    assert "FLAG DAMAGED LEDGER" in out.stderr and path in out.stderr, out
+    rows = relay_log()
+    assert [r["damaged"] for r in rows if r["outcome"] == "finding"] == [path], rows
+    assert [r["outcome"] for r in rows].count("verified") == 1, rows
