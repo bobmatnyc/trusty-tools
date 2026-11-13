@@ -180,8 +180,8 @@ tcp() {
 SCAN_JOBS="${V1_SCAN_JOBS:-256}"     # most parallel workers in the app
 SCAN_WAIT="${V1_SCAN_WAIT:-1}"       # seconds per connect
 SCAN_BOUND="${V1_SCAN_BOUND:-900}"   # seconds for the whole scan
-# #11156: an exec that fails to start (the docker CLI, runc, a fork) is tried
-# again, at most EXEC_TRIES times in all; a probe that ran is never retried.
+# #11156: an exec that fails to start (docker rc 125-127, no probe output) is
+# tried again, at most EXEC_TRIES times in all; a probe that ran is never retried.
 EXEC_TRIES="${V1_EXEC_TRIES:-3}"
 [[ "${EXEC_TRIES}" =~ ^([1-9]|10)$ ]] || die "V1_EXEC_TRIES=${EXEC_TRIES} is not 1-10"
 UDP_PORTS="53 123 443 41641"
@@ -196,12 +196,16 @@ command -v timeout > /dev/null || { echo "error: no timeout command in the app";
 # to 5 (itself, timeout and its thread, the connect child, a spare), so 256
 # workers hit the cap: forks fail with EAGAIN and the scan's leftover workers
 # hold the cap for minutes. Size the workers to fit in 3/4 of the headroom.
+# An unreadable cap (cgroup v1, cgroupns=host, "max") gets 128 workers, which
+# fit launch.sh's --pids-limit 1024 with room to spare.
 max="$(cat /sys/fs/cgroup/pids.max 2> /dev/null)"; cur="$(cat /sys/fs/cgroup/pids.current 2> /dev/null)"
 if [[ "${max}" =~ ^[0-9]+$ && "${cur}" =~ ^[0-9]+$ ]]; then
     fit=$(((max - cur - max / 4) / 5))
     [ "${fit}" -ge 1 ] || { echo "error: no pid headroom in the app (${cur}/${max} tasks)"; exit 3; }
-    [ "${jobs}" -gt "${fit}" ] && jobs=${fit}
+else
+    fit=128
 fi
+[ "${jobs}" -gt "${fit}" ] && jobs=${fit}
 echo "jobs ${jobs} pids ${cur:-?}/${max:-?}"
 # probe_class RC OUTPUT — the child prints "s" just before it connects, so a
 # timeout with no marker means the connect never began (#11156): not a drop.
@@ -234,6 +238,20 @@ worker() {
 }
 for ((i = 1; i <= jobs; i++)); do worker "${i}" & done
 wait
+EOF
+# #11156: the reap, run by the app's bash as sled: kill every process whose
+# argv is the scan's (bash -c "gw=$0 jobs=$1 ..."), twice, with builtins only
+# (mapfile, kill), so it needs no fork and no procps.
+read -r -d '' REAP <<'EOF'
+n=0
+for pass in 1 2; do
+    for d in /proc/[0-9]*; do
+        mapfile -d '' -t a < "${d}/cmdline" 2> /dev/null || continue
+        [ "${a[0]:-}" = bash ] && [ "${a[1]:-}" = -c ] || continue
+        case "${a[2]:-}" in 'gw=$0 jobs=$1 '*) kill -9 "${d#/proc/}" 2> /dev/null && n=$((n + 1)) ;; esac
+    done
+done
+echo "reaped ${n} leftover scan process(es)"
 EOF
 # The UDP probe, run by the app's bash: HOST PORT HEX-PAYLOAD WAIT. Prints
 # answered, refused (ICMP port unreachable), timeout, unreachable or other.
@@ -321,27 +339,35 @@ elif [ -n "${GW}" ] && [ -n "${PIP}" ]; then
         # they hold the app's pid cap and every later exec fails.
         echo "INFO scan rc=${rc}, $(grep -c '^port ' <<< "${out}") port line(s); other lines:"
         grep -vE '^(port|done|jobs) ' <<< "${out}" | sort | uniq -c | sort -rn | head -n 10 | sed 's/^/INFO   /'
-        for _ in 1 2 3; do
-            timeout 20 docker exec -u sled "${APP}" pkill -u sled -f 'gw=[$]0 jobs=[$]1' > /dev/null 2>&1
-            [ $? -le 1 ] && break; sleep 2   # pkill: 0 killed, 1 none left
+        # #11156: bash and /proc only, so the reap needs no procps in the image.
+        for t in 1 2 3; do
+            r="$(timeout 20 docker exec -u sled "${APP}" bash -c "${REAP}" 2>&1)"; rc=$?
+            [ "${rc}" -eq 0 ] && break; sleep 2
         done
+        if [ "${rc}" -eq 0 ]; then echo "INFO ${r}"
+        else echo "INFO reap of leftover scan workers failed, rc=${rc} after ${t} tries: $(tail -n 1 <<< "${r}")"; fi
     fi
 elif [ -n "${GW}" ]; then
     detail="no proxy address on ${NET} for the scan's control probe"
 fi
 row "app reaches no TCP port 1-65535 on the internal gateway ${GW:-?}" "${ok}" "${detail}"
 # udp HOST PORT — one UDP probe from the app, 3 s for a reply, 30 s bound.
-# #11156: UDP_PROBE always exits 0 once it runs, so another rc is the exec
-# failing to start (docker 125-127, runc, a fork EAGAIN). Only that is tried
-# again, EXEC_TRIES times in all; a bound hit (124, 137) is not. The last
-# failure stays a FAIL ("other:exec failed ...") with its output.
+# #11156: a result line means the probe ran: it is never retried, and with a
+# non-zero rc it is reported as "other:exec rc=N after RESULT", a FAIL. Only
+# an exec with no result line and docker's no-start rc (125, 126, 127) is tried
+# again, EXEC_TRIES times in all. 254 is not in that set: on EVO the scan exec
+# returned 254 after its processes ran. The last failure stays a FAIL.
 udp() {
-    local out rc n=1
+    local out rc res n=1
     while :; do
         out="$(timeout 30 docker exec -u sled "${APP}" timeout -k 2 20 bash -c "${UDP_PROBE}" \
             "$1" "$2" "$(udp_payload "$2")" 3 2>&1)"; rc=$?
-        [ "${rc}" -eq 0 ] && { printf '%s\n' "${out}"; return; }
-        case "${rc}" in 124|137) break ;; esac
+        res="$(grep -E '^(answered|refused|timeout|unreachable|other:.*)$' <<< "${out}" | tail -n 1)"
+        if [ -n "${res}" ]; then
+            [ "${rc}" -eq 0 ] && { echo "${res}"; return; }
+            echo "other:exec rc=${rc} after ${res}"; return
+        fi
+        case "${rc}" in 125|126|127) ;; *) break ;; esac
         [ "${n}" -ge "${EXEC_TRIES}" ] && break
         n=$((n + 1)); sleep 2
     done

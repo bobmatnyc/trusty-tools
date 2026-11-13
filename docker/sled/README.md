@@ -144,9 +144,12 @@ registry.npmjs.org, pypi.org or downloads.claude.ai, and `--noproxy` and DNS
 fail to connect. It prints PASS or FAIL per row and exits non-zero on any FAIL;
 an unreadable log, an empty `profile.log` or a stopped container is a FAIL.
 The TCP scan sizes its workers to the app's pid cap (`--pids-limit 1024`),
-at most `V1_SCAN_JOBS` (256), so it never exhausts the cap that every later
-`docker exec` needs (#11156). An exec that fails to start is tried again up to
-`V1_EXEC_TRIES` (3) times; a probe that ran is never retried.
+at most `V1_SCAN_JOBS` (256), or 128 when the cap is unreadable, so it never
+exhausts the cap that every later `docker exec` needs (#11156). A failed scan
+prints its output and kills its leftover workers. A UDP exec that printed no
+result and exited 125-127 (docker could not start it) is tried again, up to
+`V1_EXEC_TRIES` (3) times in all. A probe that printed a result is never
+retried; a non-zero exit after a result is a FAIL.
 
 ### Live cases
 

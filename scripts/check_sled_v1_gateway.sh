@@ -17,6 +17,7 @@
 #   #11156: it runs the scan's pid-budget block on a stub cgroup (the workers
 #   fit under the app's --pids-limit) and udp() on a stub docker: an exec that
 #   fails to start is retried a bounded number of times, a probe result never.
+#   The reap block kills only argv "bash -c gw=$0 jobs=$1 ..." processes.
 #
 # Usage: ./scripts/check_sled_v1_gateway.sh [path/to/check_v1.sh]
 # Exit:  0 when every assertion holds; 1 naming each one that does not.
@@ -167,30 +168,37 @@ else
   # shellcheck disable=SC2034,SC2329 # jobs and cat are used by the eval'd block
   budget() {
     (_MAX="$1" _CUR="$2" jobs="$3"
-     cat() { case "$1" in *pids.max) echo "${_MAX}" ;; *pids.current) echo "${_CUR}" ;; esac; }
+     cat() {
+       case "$1" in *pids.max) v="${_MAX}" ;; *pids.current) v="${_CUR}" ;; esac
+       [ "$v" = none ] && return 1; echo "$v"
+     }
      eval "$BUDGET")
   }
   while read -r mx cu ask; do
     line="$(budget "$mx" "$cu" "$ask")"; n="$(awk '$1=="jobs" {print $2}' <<< "$line")"
     v=no
-    if [ "$mx" = max ]; then [ "$n" = "$ask" ] && v=yes
+    if ! [[ "$mx$cu" =~ ^[0-9]+$ ]]; then
+      [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -le 150 ] && [ "$n" -le "$ask" ] && v=yes
     elif [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -le "$ask" ] \
       && [ $((n * 5 + cu)) -le $((mx - mx / 4)) ]; then v=yes; fi
-    check "pid budget max=$mx current=$cu asked=$ask -> '$line' fits 3/4 of the cap" "$v"
+    check "pid budget max=$mx current=$cu asked=$ask -> '$line' fits 3/4 of the cap (150 if unreadable)" "$v"
   done <<'ST'
 1024 47 256
 1024 300 256
 4096 47 256
 max 47 256
+none none 256
+none 47 256
 1024 47 8
+none none 8
 ST
   v=no; line="$(budget 1024 1000 256)"; case "$line" in "error: no pid headroom"*) v=yes ;; esac
   check "pid budget with no headroom is an error line" "$v"
 fi
 
-# 7. #11156: udp() on a stub docker. An exec that fails to start (rc 126) is
-# tried again up to EXEC_TRIES times; a bound hit (124) and a probe result are
-# not; the last failure is still "other:exec failed".
+# 7. #11156: udp() on a stub docker. An exec with no result line and rc
+# 125-127 is tried again up to EXEC_TRIES times; any other rc is not, and a
+# result line is never retried: with rc != 0 it is "other:exec rc=N after R".
 UDPF="$(awk '/^udp\(\) \{/ {f=1} f {print} f && /^\}/ {f=0}' "$V1")"
 if [ -z "$UDPF" ] || ! eval "$UDPF" 2> /dev/null || ! declare -F udp > /dev/null; then
   check "udp() is defined in check_v1.sh" no
@@ -221,9 +229,27 @@ else
   uc answered 1 "0 answered" "0 timeout"
   uc "other:exec failed rc=126 try 3" 3 "126 a" "126 b" "126 c" "0 timeout"
   uc "other:exec failed rc=124" 1 "124 x" "0 timeout"
-  uc refused 3 "125 a" "254 b" "0 refused"
+  uc refused 3 "125 a" "127 b" "0 refused"
+  uc "other:exec failed rc=254 try 1" 1 "254 b" "0 timeout"
+  uc "other:exec failed rc=0 try 1" 1 "0 garbage" "0 timeout"
+  # A probe that ran must never be re-rolled into a timeout (a PASS).
+  uc "other:exec rc=1 after refused" 1 "1 refused" "0 timeout"
+  uc "other:exec rc=255 after answered" 1 "255 answered" "0 timeout"
+  uc "other:exec rc=143 after refused" 1 "143 refused" "0 timeout"
+  uc "other:exec rc=130 after answered" 1 "130 answered" "0 timeout"
+  uc "other:exec rc=126 after other:socket" 1 "126 other:socket" "0 timeout"
   rm -rf "$UT"
 fi
+
+# 8. #11156: the reap uses bash builtins on /proc (no procps in the image) and
+# matches the scan's argv only.
+check "the reap reads argv with mapfile from /proc" \
+  "$(has 'mapfile -d '"''"' -t a < "${d}/cmdline"')"
+check "the reap matches bash -c gw=\$0 jobs=\$1 only" \
+  "$(has "case \"\${a[2]:-}\" in 'gw=\$0 jobs=\$1 '*)")"
+check "the reap runs as sled in the app" "$(has 'docker exec -u sled "${APP}" bash -c "${REAP}"')"
+check "a failed reap prints an INFO line" "$(has 'INFO reap of leftover scan workers failed')"
+check "pkill is gone (no procps dependency)" "$(lacks 'pkill')"
 
 echo "check_sled_v1_gateway: ${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ]
