@@ -1,6 +1,6 @@
 # Trusty Browser
 
-Trusty Browser routes a web-QA workflow to one enrolled Google Chrome profile, one exact page URL and one signed-in site account. The Python service listens on private Unix domain sockets. Chrome starts the bundled native messaging hosts over stdio. A claimed page shows its workflow in a banner and the profile's extension badge.
+Trusty Browser routes a web-QA workflow to one enrolled Google Chrome profile, one exact page URL and one signed-in site account. The Python service listens on private Unix domain sockets. Chrome starts the bundled native messaging hosts over stdio. A rust-colored border marks the edges of the controlled tab. The robot toolbar icon shows an ON badge while any tab in that profile is under control.
 
 ## Install on macOS
 
@@ -67,4 +67,4 @@ node --test tests/test*.mjs
 
 The installed native hosts and Python interpreter are trusted code. Chrome and the broker authenticate each other during pairing. Subsequent command frames rely on the local pipes and Unix socket connecting those processes. The service wraps browser pairing keys and locally issued workflow tickets using an AES-GCM key in the macOS login Keychain. Copying the SQLite database and grant files alone does not reveal those credentials. An application that can execute code inside the trusted interpreter or access the same unlocked Keychain item can still act as the local user.
 
-The [two-profile Chrome restart receipt](tests/evidence/two-profile-restart.json) records the workflow account checks, independent site journal, lease and control-indicator behavior, socket observations and cleanup for the pre-transfer build. The [installed-wheel transfer receipt](tests/evidence/workflow-transfer.json) covers cancel, confirm, recovery, revocation and the [live toolbar badge](tests/evidence/unclaimed-tab-toolbar.png).
+The [two-profile Chrome restart receipt](tests/evidence/two-profile-restart.json) records the workflow account checks, independent site journal, lease and control-indicator behavior, socket observations and cleanup for the earlier build with a banner. The [installed-wheel transfer receipt](tests/evidence/workflow-transfer.json) covers cancel, confirm, recovery, revocation and the [live toolbar badge](tests/evidence/unclaimed-tab-toolbar.png).

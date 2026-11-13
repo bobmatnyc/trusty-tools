@@ -1,4 +1,4 @@
-// The global badge is private to this Chrome profile. Each banner is pinned to one document.
+// The global badge is private to this Chrome profile. Each border is pinned to one document.
 globalThis.TrustyControlIndicator = (() => {
   const claims = new Map();
   let pending = Promise.resolve();
@@ -25,7 +25,7 @@ globalThis.TrustyControlIndicator = (() => {
     try {
       await chrome.tabs.sendMessage(tabId, {type:"trusty-control-indicator",action:"clear",claim:item.claim},
         {documentId:item.documentId});
-    } catch { /* A closed tab or navigated document already removed its banner. */ }
+    } catch { /* A closed tab or navigated document already removed its border. */ }
     await badge();
   }
   function update(tabId, documentId, state) {

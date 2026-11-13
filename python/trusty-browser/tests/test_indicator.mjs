@@ -27,7 +27,7 @@ function profile() {
 }
 const state = (claim,workflow) => ({claim,workflow,ttl_ms:30000});
 
-test("badge is per profile and banner is pinned to the leased document", async () => {
+test("badge is per profile and border is pinned to the leased document", async () => {
   const a = profile(), b = profile();
   await a.control.update(7,"doc-a",state("a","travel"));
   assert.equal(a.view.badge,"ON");
