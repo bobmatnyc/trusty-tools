@@ -134,18 +134,31 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// `rewrite_skips_tools_with_no_compression_filter`,
 /// `rewrite_still_wraps_tools_with_a_compression_filter`.
 pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<String> {
+    compression_rewrite_decision(command).ok()
+}
+
+/// [`rewrite_bash_command_for_compression`], with the guard that refused named.
+///
+/// Why (#10973): the opportunity row's `skip_reason` must come from the same
+/// decision as the rewrite, D60's `cd <dir> && ` split included.
+/// What: `Ok(rewrite)` exactly when [`rewrite_bash_command_for_compression`] is
+/// `Some(rewrite)`. A `cd` after the one leading `cd <dir> && ` is `Chained`;
+/// any other refusal is [`compressible_tool_decision`]'s for the inner command.
+/// Test: `the_skip_reason_replays_the_rewrite_decision`,
+/// `a_bash_opportunity_row_records_why_no_rewrite_applied`.
+pub(crate) fn compression_rewrite_decision(command: &str) -> Result<String, SkipReason> {
     let trimmed = command.trim();
     // D60 (Refs #10973): one leading `cd <dir> && ` stays outside the group, so
     // a failing `cd` short-circuits and the shell keeps the `cd`'s cwd.
     let (cd_prefix, inner) =
         super::hook_rewrite_cd::split_leading_cd(trimmed).unwrap_or(("", trimmed));
     if !cd_prefix.is_empty() && first_command_token(inner).as_deref() == Some("cd") {
-        return None;
+        return Err(SkipReason::Chained);
     }
-    let tool = compressible_tool_name(inner)?;
+    let tool = compressible_tool_decision(inner)?;
     // #7384: the brace group carries the wrapped command's exit status into the
     // filter, which a pipeline otherwise discards.
-    Some(format!(
+    Ok(format!(
         "{cd_prefix}{} | tm compress --tool \"{tool}\"",
         crate::commands::compress::wrap_command_reporting_exit(inner)
     ))

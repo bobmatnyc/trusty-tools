@@ -24,8 +24,8 @@
 use std::path::Path;
 
 use super::hook_rewrite::{
-    compressible_tool_decision, is_isolation_worktree, rewrite_bash_command_for_compression,
-    shlex_words, strip_wrapper_prefix,
+    compressible_tool_decision, compression_rewrite_decision, is_isolation_worktree, shlex_words,
+    strip_wrapper_prefix,
 };
 use super::pm_guard_response::RewriteDecision;
 use trusty_mpm::core::savings_opportunity::SkipReason;
@@ -44,9 +44,9 @@ pub(crate) struct CwdRewrite {
 /// before #10973: the project's permission rules are read from the cwd's
 /// ancestors, so without one a `deny` rule could not be honoured (#10981 review).
 /// What: `cwd` absent or empty → `Err(NoCwd)`; inside an isolation worktree →
-/// [`isolated_rewrite`]; otherwise [`rewrite_bash_command_for_compression`]
-/// with no permission decision, exactly as before. A refusal names the guard
-/// that refused, from `compressible_tool_decision` or [`isolated_rewrite`].
+/// [`isolated_rewrite`]; otherwise `compression_rewrite_decision`, the brace
+/// rewrite with D60's `cd <dir> && ` split, with no permission decision. A
+/// refusal names the guard that refused.
 /// Test: `outside_a_worktree_the_brace_rewrite_is_unchanged`,
 /// `the_isolated_shape_is_one_simple_command`,
 /// `an_isolated_refusal_names_its_guard`,
@@ -56,15 +56,12 @@ pub(crate) fn cwd_rewrite_decision(
     cwd: Option<&Path>,
 ) -> Result<CwdRewrite, SkipReason> {
     match cwd.filter(|c| !c.as_os_str().is_empty()) {
+        // #10973: the brace rewrite's own decision, D60's `cd` split included.
         Some(dir) if !is_isolation_worktree(dir) => {
-            // #10973: the guards decide; the brace rewrite then cannot refuse.
-            compressible_tool_decision(command.trim())?;
-            rewrite_bash_command_for_compression(command)
-                .map(|command| CwdRewrite {
-                    command,
-                    permission: None,
-                })
-                .ok_or(SkipReason::Unknown)
+            compression_rewrite_decision(command).map(|command| CwdRewrite {
+                command,
+                permission: None,
+            })
         }
         Some(dir) => isolated_rewrite(command, dir),
         // #10981 review: no cwd, no permission rules to decide from.
@@ -155,6 +152,7 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::hook_rewrite::rewrite_bash_command_for_compression;
     use super::*;
 
     const WORKTREE: &str = "/repo/.claude/worktrees/agent-a/crates/x";
@@ -267,6 +265,11 @@ mod tests {
         assert_eq!(reason("git log -p", Some(&tree)), Some(SkipReason::Denied));
         assert_eq!(
             reason("git diff | head", Some(&tree)),
+            Some(SkipReason::Chained)
+        );
+        // D60's `cd <dir> && ` form stays refused in the isolated shape.
+        assert_eq!(
+            reason("cd /tmp && git diff", Some(&tree)),
             Some(SkipReason::Chained)
         );
         assert_eq!(reason("git diff", None), Some(SkipReason::NoCwd));

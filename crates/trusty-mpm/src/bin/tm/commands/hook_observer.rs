@@ -154,8 +154,8 @@ pub(crate) fn opportunity_row(
 /// The row's [`SkipReason`] from the Bash decision, if any, and the measured gain.
 ///
 /// Why (#10973): a Bash call had a decision, and that decision is the reason
-/// whatever the gain — a `cd X && …` row is `Chained` even when its dry run,
-/// under the derived name `cd X`, finds nothing. Nothing compresses a
+/// whatever the gain — a `git diff | head` row is `Chained` even when its dry
+/// run finds nothing. Nothing compresses a
 /// non-Bash result, so there the informative split is by gain.
 /// What: `Some(reason)` → `reason`; `None` → `NonBash` with a gain, else `NoGain`.
 /// Test: `a_non_bash_row_is_non_bash_or_no_gain`,

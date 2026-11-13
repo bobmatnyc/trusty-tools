@@ -183,12 +183,19 @@ fn grep_matches() -> String {
 }
 
 /// #10973: a chained command is never rewritten (`has_unsafe_pipe_composition`),
-/// so its row says so rather than leaving the reader to guess.
+/// so its row says so rather than leaving the reader to guess. D60's one
+/// leading `cd <dir> && ` is the exception, and its row reads `compressed`.
 #[test]
 fn a_bash_opportunity_row_records_why_no_rewrite_applied() {
     let cwd = tempfile::tempdir().expect("cwd");
-    let row = bash_row("cd /x && grep -n foo big.txt", cwd.path(), &grep_matches());
-    assert_eq!(row["skip_reason"], "chained", "{row}");
+    for (command, reason) in [
+        ("cd /x && grep -n foo big.txt", "compressed"),
+        ("cd /x && cd /y && grep -n foo big.txt", "chained"),
+        ("grep -n foo big.txt | head", "chained"),
+    ] {
+        let row = bash_row(command, cwd.path(), &grep_matches());
+        assert_eq!(row["skip_reason"], reason, "{command}: {row}");
+    }
 }
 
 /// #10973: each `PreToolUse` guard decision names itself on the row.

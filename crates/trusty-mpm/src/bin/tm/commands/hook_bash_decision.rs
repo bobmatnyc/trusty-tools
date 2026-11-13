@@ -132,7 +132,10 @@ mod tests {
         let cwd = cwd.path().to_str().expect("utf8");
         for (command, expected) in [
             ("git diff", SkipReason::Compressed),
-            ("cd /x && grep -n foo big.txt", SkipReason::Chained),
+            // D60: one leading `cd <dir> && ` compresses; a second `cd` or a pipe does not.
+            ("cd /x && grep -n foo big.txt", SkipReason::Compressed),
+            ("cd a && cd b && git diff", SkipReason::Chained),
+            ("git diff | head", SkipReason::Chained),
             ("grep -c '#include' f.c", SkipReason::Unwrappable),
             ("make build", SkipReason::Orchestrator),
             ("cat -n src/lib.rs", SkipReason::SourceRead),

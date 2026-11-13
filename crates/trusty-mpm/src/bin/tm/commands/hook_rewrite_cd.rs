@@ -97,7 +97,7 @@ fn dir_word_len(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::super::hook_rewrite::rewrite_bash_command_for_compression;
-    use super::super::hook_rewrite_isolated::rewrite_bash_command_for_cwd;
+    use super::super::hook_rewrite_isolated::cwd_rewrite_decision;
     use std::path::Path;
 
     /// What `hook_rewrite` emits for `<prefix><cmd>`, built from the producer.
@@ -242,11 +242,12 @@ mod tests {
         // Requirement: the isolated shape behaves as before for every form.
         let tree = Some(Path::new("/repo/.claude/worktrees/agent-a"));
         assert!(
-            rewrite_bash_command_for_cwd("git diff", tree).is_some(),
+            cwd_rewrite_decision("git diff", tree).is_ok(),
             "a covered command is rewritten there, or this test proves nothing"
         );
-        assert!(rewrite_bash_command_for_cwd("cd /tmp && git diff", tree).is_none());
-        let outside = rewrite_bash_command_for_cwd("cd /tmp && git diff", Some(Path::new("/repo")))
+        assert!(cwd_rewrite_decision("cd /tmp && git diff", tree).is_err());
+        let outside = cwd_rewrite_decision("cd /tmp && git diff", Some(Path::new("/repo")))
+            .ok()
             .map(|r| r.command);
         assert_eq!(
             outside,

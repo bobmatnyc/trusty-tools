@@ -3,7 +3,7 @@
 //!
 //! Why: an opportunity row measured what compression could have saved but not
 //! why the `PreToolUse` rewrite left the result alone, so a reader could not
-//! tell a chained `cd X && …` from a tool with no filter. And most rows are no
+//! tell a piped `git diff | head` from a tool with no filter. And most rows are no
 //! opportunity at all: a report counting every row overstates the gap.
 //! What: [`SkipReason`] is the `skip_reason` field of an
 //! [`OpportunityRow`](crate::core::savings_opportunity::OpportunityRow).
