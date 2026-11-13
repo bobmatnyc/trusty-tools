@@ -20,8 +20,10 @@
 #     tmux-targets    every *.rs *.sh *.swift *.ts *.tsx *.js *.mjs *.svelte
 #                     outside node_modules, every crates/*/src/assets/**/*.md and content/**/*.md,
 #                     the allowlist TSV, and the gate's script and selftest
-#     sled-static     docker/sled/** and scripts/check_sled_tailscale_isolation.sh
-#                     (#11156: tailscaled isolation, DOC-90 IN-7)
+#     sled-static     docker/sled/**, scripts/check_sled_tailscale_isolation.sh,
+#                     scripts/check_sled_launch.sh and its stub under
+#                     scripts/test-data/sled-launch/ (#11156: tailscaled
+#                     isolation, DOC-90 IN-7; the launch rule, DOC-90 §12)
 #   Every mode: this script and .github/workflows/ci.yml, the workflow that
 #   hosts the gates — a change to either must exercise the jobs it governs.
 #   The file status is ignored: a DELETE can strand an allowlist or manifest
@@ -88,6 +90,7 @@ is_relevant() {
       case "$p" in
         docker/sled/?*) return 0 ;;
         scripts/check_sled_tailscale_isolation.sh) return 0 ;;
+        scripts/check_sled_launch.sh | scripts/test-data/sled-launch/?*) return 0 ;;
       esac
       ;;
   esac

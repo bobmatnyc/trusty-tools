@@ -2756,8 +2756,12 @@ jobs:
       - name: tailscaled runs in a sidecar the agents cannot reach
         run: ./scripts/check_sled_tailscale_isolation.sh
 
+      # DOC-90 §12: launch.sh starts only the enforced topology. Stub docker.
+      - name: launch.sh refuses every boundary break
+        run: ./scripts/check_sled_launch.sh
+
       - name: shellcheck the sled scripts
-        run: shellcheck docker/sled/check_tailscale.sh docker/sled/entrypoint.sh docker/sled/exercise.sh scripts/check_sled_tailscale_isolation.sh
+        run: shellcheck -x docker/sled/check_tailscale.sh docker/sled/entrypoint.sh docker/sled/exercise.sh scripts/check_sled_tailscale_isolation.sh docker/sled/launch.sh docker/sled/launch_lib.sh docker/sled/proxy/sled-bind-addr docker/sled/proxy/entrypoint.sh scripts/check_sled_launch.sh scripts/test-data/sled-launch/docker
 
   # The three release-decision selftests (#5620, #5755). Each gate can only run
   # where a publish runs, so CI runs its fixtures to keep it able to fail.
