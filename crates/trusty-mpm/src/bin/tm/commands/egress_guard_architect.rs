@@ -87,7 +87,7 @@ impl ArchitectAllowed {
 
 /// `raw` with every byte outside `[A-Za-z0-9._:-]` dropped, capped at
 /// [`MAX_FIELD`]; `-` when nothing is left.
-fn field(raw: &str) -> String {
+pub(crate) fn field(raw: &str) -> String {
     let kept: String = raw
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
@@ -201,11 +201,29 @@ pub(crate) fn audited(
     path: Option<&Path>,
     time: &str,
 ) -> Verdict {
-    let (Verdict::Allow, Some(allowed)) = (&verdict, allowed) else {
+    let line = allowed.map(|allowed| allowed.audit_line(time));
+    audited_line(verdict, line, path, "Architect call (#10447)")
+}
+
+/// [`audited`] over a ready audit line; `what` names the allow in the deny.
+///
+/// Why: #11194's PM owner-DM allow is audited in the same file, with the
+/// same rule — no line written, no allow.
+/// What: `verdict` unchanged unless it is [`Verdict::Allow`] and `line` is
+/// set; then `line` is appended to `path`, and a `None` path or a failed
+/// write is an [`AUDIT_CHECK`] deny.
+/// Test: `architect_allow_needs_its_audit_line`, `pm_dm_allow_needs_its_audit_line`.
+pub(crate) fn audited_line(
+    verdict: Verdict,
+    line: Option<String>,
+    path: Option<&Path>,
+    what: &str,
+) -> Verdict {
+    let (Verdict::Allow, Some(line)) = (&verdict, line) else {
         return verdict;
     };
     let written = match path {
-        Some(path) => append(path, &allowed.audit_line(time)).map_err(|err| err.kind().to_string()),
+        Some(path) => append(path, &line).map_err(|err| err.kind().to_string()),
         None => Err("the trusty-mpm data directory is unknown".to_owned()),
     };
     match written {
@@ -213,7 +231,7 @@ pub(crate) fn audited(
         Err(why) => Verdict::Deny {
             check: AUDIT_CHECK,
             reason: format!(
-                "tm hook --egress-guard would allow this Architect call (#10447), but its audit \
+                "tm hook --egress-guard would allow this {what}, but its audit \
                  line could not be written ({why}), so it denies it. Fix the trusty-mpm data \
                  directory and retry."
             ),
