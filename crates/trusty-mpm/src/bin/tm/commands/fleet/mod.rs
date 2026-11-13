@@ -61,9 +61,6 @@ use crate::cli::FleetAction;
 pub(crate) use self::launch::ARCHITECT_SESSION;
 pub(crate) use self::status::status;
 
-/// The Architect's directory under the user home (ruling Q4).
-pub(crate) const DEFAULT_DIR: &str = "trusty-mpm-projects/architect";
-
 /// Dispatch `tm fleet <action>` against the process home.
 ///
 /// Why: the CLI entry point; every function below takes `home` so a test
@@ -173,7 +170,9 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
 }
 
 /// The Architect directory: `--dir` made absolute, else the one Architect
-/// `home`'s config records, else [`DEFAULT_DIR`] under `home`.
+/// `home`'s config records, else
+/// [`DEFAULT_ARCHITECT_DIR`](trusty_mpm::core::architect_store::DEFAULT_ARCHITECT_DIR)
+/// under `home` (#10944 Q5: the pick is the lib's, shared with the daemon).
 ///
 /// Why: #8995 — a bare `tm fleet status` checked the default while the
 /// operator's Architect was recorded elsewhere.
@@ -195,10 +194,10 @@ pub(crate) fn resolve_dir(dir: Option<&str>, home: &Path) -> anyhow::Result<Path
         .and_then(|raw| config::parse_user_config(&raw, &path))
         .map(|(_, typed)| config::architects(&typed))
         .unwrap_or_default();
-    match recorded.as_slice() {
-        [] => Ok(home.join(DEFAULT_DIR)),
-        [one] => Ok(one.clone()),
-        many => bail!(
+    // #10944 Q5: the pick is the lib's, so the daemon resolves the same directory.
+    match trusty_mpm::core::architect_store::pick_architect_dir(&recorded, home) {
+        Ok(dir) => Ok(dir),
+        Err(many) => bail!(
             "{} records more than one Architect in `[supervisor] projects` ({}); pass --dir",
             path.display(),
             many.iter()
@@ -496,7 +495,7 @@ pub(crate) fn init_full(
 
 /// `~/.trusty-mpm/config.toml` under `home`.
 pub(crate) fn user_config_path(home: &Path) -> PathBuf {
-    home.join(".trusty-mpm").join("config.toml")
+    trusty_mpm::core::architect_store::user_config_path(home)
 }
 
 /// A file's text, or `""` when it does not exist.

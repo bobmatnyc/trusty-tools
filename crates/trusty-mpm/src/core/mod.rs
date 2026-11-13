@@ -151,6 +151,8 @@ pub mod daemon_identity;
 pub mod dbatg;
 // #10063: the `mpm.architect.dashboard.*` host facts and verb routing.
 pub mod architect_dashboard;
+// #10944: the Architect directory and the dashboard store root the daemon resolves.
+pub mod architect_store;
 pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;

@@ -84,7 +84,7 @@ fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
     // #9758: the PM ledger writer.
     let router = rpc::dbatg::register(router);
     // #10063: the Architect dashboard store.
-    let router = rpc::architect_dashboard::register(router);
+    let router = rpc::architect_dashboard::register(router, state);
     // #8878 PR2b-1b: presence-device approvals (in-memory ceremony state).
     let router = rpc::presence::register(router, Arc::new(rpc::presence::PresenceService::live()));
     rpc::coordinator::register(router, state)
