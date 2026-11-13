@@ -58,10 +58,10 @@ EVIDENCE = re.compile(
     # #10800 critic: a run, job or message id is `<keyword> #<n>` or five digits or more (not `id 5`, `run 3`)
     r"|\b(?:run|job|msg|message|id)\s*(?:#\s*\d+|[:=]?\s*\d{5,})\b", re.I)
 # #10960 G-5 (DOC-87 section 9.5): the evidence kind of each state, highest first. A state needs a reference
-# (a URL, a token with a digit, or a path), so "Matt acknowledged" alone proves nothing.
+# (a URL, a token with a digit, or a path), so "recipient acknowledged" alone proves nothing.
 REF = r"\s*[:=#]\s*(?:https?://\S+|[\w./-]*\d|[\w.-]+/[\w./-]+)"
 STATE_EVIDENCE = (
-    ("acknowledged", re.compile(r"\b(?:reply|ack)(?:\s*id)?" + REF, re.I)),
+    ("acknowledged", re.compile(r"\b(?:reply|ack)(?:\s*(?:id|ref))?" + REF, re.I)),
     ("delivered", re.compile(r"\b(?:pane[ -]?capture|capture|inbox[ -]read|mailbox)" + REF, re.I)),
     ("sent", re.compile(r"\b(?:msg|message|api|send)\s*(?:id)?\s*(?:#\s*\d+|[:=]?\s*\d{5,}|[:=]\s*[\w-]{6,})"
                         r"|\bexit\s*(?:code\s*)?0\b", re.I)),

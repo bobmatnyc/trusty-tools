@@ -53,7 +53,7 @@
     "scripts/dashboard_watch.py": "c02ab333e6c8550a3632e7d658a24aedc024f98d519dd900cd0841dbb6cba0c6",
     "scripts/datg-hook.sh": "b74b3f6d17084e3e52b67700f05d550a39c0abc9312d6af63ff7cc46a2f9da6f",
     "scripts/datg.py": "2585e0b8628b50b866941f7d62bfc7375438b282b0e5cc5b05787188f89c1e6b",
-    "scripts/datg_guards.py": "6dff2c7307ba89c6eaa3424ae4962d7f622ca0caca7e49dc8cc11a5eb15347f9",
+    "scripts/datg_guards.py": "194ecf043b3792c0b4a06e6535d80e09a23ca7c4b335c7f520dc27cb726a86f2",
     "scripts/datg_log.py": "891c95a5c366cce85beb7533538d1d5d41f83d5c031b0d21137ce98c81c391d1",
     "scripts/datg_ops.py": "0ecf86a3eaec84d3a1957d1cae6c57f8b9e0bd088465b4ee4da0cc71fa517471",
     "scripts/datg_read.py": "88354f04e3f7682fb781bda87d12e78faffb638d59f0cb9ce0693325fcc47816",

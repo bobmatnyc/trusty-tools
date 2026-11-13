@@ -19,8 +19,8 @@ import datg  # noqa: E402
 import datg_guards  # noqa: E402
 
 DATG = os.path.join(SCRIPTS, "datg.py")
-MSG = "Notice sent to Matt, message id 1794225540"
-PANE = "told Matt; pane capture: captures/matt-0412.txt"
+MSG = "Notice sent to the recipient, message id: msg-test-0001, logged in logs/example-send.txt"
+PANE = "told the recipient; pane capture: captures/example-pane.txt"
 
 
 class Base(unittest.TestCase):
@@ -29,8 +29,8 @@ class Base(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.p = self._tmp.name
         datg.op_init(self.p, "th")
-        datg.write_ops(self.p, [{"op": "add", "kind": "G", "title": "keep Matt informed"},
-                                {"op": "add", "kind": "T", "title": "tell Matt the window moved", "goal": "th-G01"}])
+        datg.write_ops(self.p, [{"op": "add", "kind": "G", "title": "keep the recipient informed"},
+                                {"op": "add", "kind": "T", "title": "tell the recipient the window moved", "goal": "th-G01"}])
         self.sp = datg.paths(self.p)[1]
 
     def cli(self, *args, stdin=None):
@@ -57,16 +57,22 @@ class Base(unittest.TestCase):
 
 class DeliveryCase(Base):
     def test_evidence_kinds_rank_prepared_sent_delivered_acknowledged_10960(self):
-        for outcome, want in (("draft in notes/matt.md", "prepared"), ("Matt acknowledged", "prepared"),
+        for outcome, want in (("draft in notes/example-draft.md", "prepared"), ("recipient acknowledged", "prepared"),
                               (MSG, "sent"), ("api id: req-7f3a91", "sent"), ("send ok, exit 0", "sent"),
                               (PANE, "delivered"), ("inbox read: inbox-55120", "delivered"),
                               (MSG + "; reply #4471", "acknowledged"), ("ack: https://example.com/m/9", "acknowledged")):
             self.assertEqual(datg_guards.delivery_state(outcome), want, outcome)
 
+    def test_reply_ref_counts_as_acknowledged_10960(self):
+        # Plan section 1 G-5: "reply ref = acknowledged"; the id, number and ack forms keep working.
+        for outcome in ("reply ref: msg-test-0002", "Reply Ref #4471", "reply id: msg-test-0003",
+                        "reply #4471", "ack: https://example.com/m/9"):
+            self.assertEqual(datg_guards.delivery_state(outcome), "acknowledged", outcome)
+
     def test_sent_with_only_a_message_id_records_sent_and_flags_an_acknowledged_claim_10960(self):
         # X14: the request needs an acknowledgement; a message id proves only `sent`.
         self.cli("update", "th-T01", "--needs", "acknowledged")
-        r = self.cli("close", "th-T01", "--state", "acknowledged", "--outcome", MSG + "; Matt acknowledged")
+        r = self.cli("close", "th-T01", "--state", "acknowledged", "--outcome", MSG + "; recipient acknowledged")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.archived()["delivery"], "sent")
         self.assertIn("claims acknowledged but the outcome evidence supports sent", r.stderr)
@@ -83,15 +89,15 @@ class DeliveryCase(Base):
 
     def test_a_claim_with_no_evidence_is_downgraded_to_prepared_10960(self):
         # X16
-        r = self.cli("close", "th-T01", "--state", "delivered", "--outcome", "told Matt in notes/matt.md")
+        r = self.cli("close", "th-T01", "--state", "delivered", "--outcome", "told the recipient in notes/example-draft.md")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.archived()["delivery"], "prepared")
         self.assertIn("claims delivered but the outcome evidence supports prepared", r.stderr)
 
     def test_prepared_closed_done_against_a_delivery_request_is_flagged_10960(self):
-        r = self.cli("add", "T", "--goal", "th-G01", "--title", "send Matt the notice", "--needs", "delivered")
+        r = self.cli("add", "T", "--goal", "th-G01", "--title", "send the recipient the notice", "--needs", "delivered")
         self.assertEqual(r.returncode, 0, r.stderr)
-        r = self.cli("close", "th-T02", "--outcome", "notice drafted in notes/matt-notice.md")
+        r = self.cli("close", "th-T02", "--outcome", "notice drafted in notes/example-notice.md")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.archived("th-T02")["delivery"], "prepared")
         self.assertIn("th-T02 closed done at prepared; the request needs delivered", r.stderr)
@@ -140,7 +146,7 @@ class DeliveryCase(Base):
         self.assertEqual(self.cli("update", "th-T01", "--needs", "sent").returncode, 0)
         r = self.cli("close", "th-T01", "--state", "sent", "--outcome", MSG)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
-        self.cli("add", "T", "--goal", "th-G01", "--title", "ask Matt to confirm", "--needs", "acknowledged")
+        self.cli("add", "T", "--goal", "th-G01", "--title", "ask the recipient to confirm", "--needs", "acknowledged")
         self.assertEqual(self.cli("update", "th-T02", "--needs", "none").returncode, 0)
         r = self.cli("close", "th-T02", "--outcome", "cancelled by the owner, see #10960")
         self.assertEqual((r.returncode, r.stderr), (0, ""))
