@@ -177,16 +177,36 @@ tcp() {
 # fails. The scan grades itself: each worker reports how many ports it probed
 # and probes the proxy's 3128 the same way, which must be open. A missing tool,
 # a lost worker, a short count or a scan past SCAN_BOUND seconds is a FAIL.
-SCAN_JOBS="${V1_SCAN_JOBS:-256}"     # parallel workers in the app
+SCAN_JOBS="${V1_SCAN_JOBS:-256}"     # most parallel workers in the app
 SCAN_WAIT="${V1_SCAN_WAIT:-1}"       # seconds per connect
 SCAN_BOUND="${V1_SCAN_BOUND:-900}"   # seconds for the whole scan
+# #11156: an exec that fails to start (docker rc 125-127, no probe output) is
+# tried again, at most EXEC_TRIES times in all; a probe that ran is never retried.
+EXEC_TRIES="${V1_EXEC_TRIES:-3}"
+[[ "${EXEC_TRIES}" =~ ^([1-9]|10)$ ]] || die "V1_EXEC_TRIES=${EXEC_TRIES} is not 1-10"
 UDP_PORTS="53 123 443 41641"
-# The TCP scan, run by the app's bash: GW JOBS WAIT CONTROL-IP. One line per
-# port that did not pass ("port P RESULT"), then one "done I COUNT CONTROL BAD"
-# line per worker, BAD being its count of port lines.
+# The TCP scan, run by the app's bash: GW JOBS WAIT CONTROL-IP. First one
+# "jobs N pids CUR/MAX" line, then one line per port that did not pass
+# ("port P RESULT"), then one "done I COUNT CONTROL BAD" line per worker, BAD
+# being its count of port lines.
 read -r -d '' TCP_SCAN <<'EOF'
 gw=$0 jobs=$1 wait=$2 ctl=$3
 command -v timeout > /dev/null || { echo "error: no timeout command in the app"; exit 3; }
+# #11156: launch.sh caps the app at --pids-limit 1024 tasks. A worker holds up
+# to 5 (itself, timeout and its thread, the connect child, a spare), so 256
+# workers hit the cap: forks fail with EAGAIN and the scan's leftover workers
+# hold the cap for minutes. Size the workers to fit in 3/4 of the headroom.
+# An unreadable cap (cgroup v1, cgroupns=host, "max") gets 128 workers, which
+# fit launch.sh's --pids-limit 1024 with room to spare.
+max="$(cat /sys/fs/cgroup/pids.max 2> /dev/null)"; cur="$(cat /sys/fs/cgroup/pids.current 2> /dev/null)"
+if [[ "${max}" =~ ^[0-9]+$ && "${cur}" =~ ^[0-9]+$ ]]; then
+    fit=$(((max - cur - max / 4) / 5))
+    [ "${fit}" -ge 1 ] || { echo "error: no pid headroom in the app (${cur}/${max} tasks)"; exit 3; }
+else
+    fit=128
+fi
+[ "${jobs}" -gt "${fit}" ] && jobs=${fit}
+echo "jobs ${jobs} pids ${cur:-?}/${max:-?}"
 # probe_class RC OUTPUT — the child prints "s" just before it connects, so a
 # timeout with no marker means the connect never began (#11156): not a drop.
 probe_class() {
@@ -200,21 +220,38 @@ probe_class() {
         *) m="${2##*$'\n'}"; m="${m##*: }"; echo "other:rc$1:${m// /_}" ;;
     esac
 }
+# probe HOST PORT — sets R to the class. #11156: no $( ) around probe, so
+# no extra shell stays alive beside each connect.
 probe() {
     local o rc
     o="$(timeout "${wait}" bash -c 'echo s; exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2>&1)"; rc=$?
-    probe_class "${rc}" "${o}"
+    R="$(probe_class "${rc}" "${o}")"
 }
 worker() {
-    local p n=0 b=0 r
+    local p n=0 b=0
     for ((p = $1; p <= 65535; p += jobs)); do
-        r="$(probe "${gw}" "${p}")"; n=$((n + 1))
-        case "${r}" in timeout|unreachable) ;; *) b=$((b + 1)); echo "port ${p} ${r}" ;; esac
+        probe "${gw}" "${p}"; n=$((n + 1))
+        case "${R}" in timeout|unreachable) ;; *) b=$((b + 1)); echo "port ${p} ${R}" ;; esac
     done
-    echo "done $1 ${n} $(probe "${ctl}" 3128) ${b}"
+    probe "${ctl}" 3128
+    echo "done $1 ${n} ${R} ${b}"
 }
 for ((i = 1; i <= jobs; i++)); do worker "${i}" & done
 wait
+EOF
+# #11156: the reap, run by the app's bash as sled: kill every process whose
+# argv is the scan's (bash -c "gw=$0 jobs=$1 ..."), twice, with builtins only
+# (mapfile, kill), so it needs no fork and no procps.
+read -r -d '' REAP <<'EOF'
+n=0
+for pass in 1 2; do
+    for d in /proc/[0-9]*; do
+        mapfile -d '' -t a < "${d}/cmdline" 2> /dev/null || continue
+        [ "${a[0]:-}" = bash ] && [ "${a[1]:-}" = -c ] || continue
+        case "${a[2]:-}" in 'gw=$0 jobs=$1 '*) kill -9 "${d#/proc/}" 2> /dev/null && n=$((n + 1)) ;; esac
+    done
+done
+echo "reaped ${n} leftover scan process(es)"
 EOF
 # The UDP probe, run by the app's bash: HOST PORT HEX-PAYLOAD WAIT. Prints
 # answered, refused (ICMP port unreachable), timeout, unreachable or other.
@@ -240,12 +277,19 @@ EOF
 # #11156: 256 workers share one stream, so a line spliced by a stray message
 # (a fork retry, say) could hide a port line. Every line must be a whole port
 # or done line, and the done lines' BAD counts must all be 0.
+# #11156: the scan may run fewer workers than JOBS (its pid budget); it names
+# the count on one "jobs" line, which must be 1-JOBS. The 65535-port total
+# still proves full coverage.
 scan_verdict() {
-    local rc="$1" out="$2" jobs="$3" stray done_n total ctl bad nbad
+    local rc="$1" out="$2" jobs stray done_n total ctl bad nbad
     [ "${rc}" -eq 0 ] || { echo "scan exited ${rc} (124 = past the bound)"; return; }
     grep -q '^error' <<< "${out}" && { grep '^error' <<< "${out}" | head -n 1; return; }
-    stray="$(grep -vE '^(port [0-9]+ [^ ]+|done [0-9]+ [0-9]+ [^ ]+ [0-9]+)$' <<< "${out}" | head -n 3 | tr '\n' ';')"
+    stray="$(grep -vE '^(port [0-9]+ [^ ]+|done [0-9]+ [0-9]+ [^ ]+ [0-9]+|jobs [0-9]+ pids [^ ]+)$' <<< "${out}" | head -n 3 | tr '\n' ';')"
     [ -z "${stray}" ] || { echo "unexpected scan output: ${stray}"; return; }
+    jobs="$(awk '$1=="jobs" {print $2}' <<< "${out}")"
+    if ! [[ "${jobs}" =~ ^[1-9][0-9]*$ ]] || [ "${jobs}" -gt "$3" ]; then
+        echo "no single jobs line of 1-$3 workers: '${jobs//$'\n'/,}'"; return
+    fi
     done_n="$(awk '$1=="done" {print $2}' <<< "${out}" | sort -u | wc -l | tr -d ' ')"
     total="$(awk '$1=="done" {s+=$3} END {print s+0}' <<< "${out}")"
     ctl="$(awk '$1=="done" && $4!="open"' <<< "${out}" | wc -l | tr -d ' ')"
@@ -289,14 +333,45 @@ elif [ -n "${GW}" ] && [ -n "${PIP}" ]; then
     v="$(scan_verdict "${rc}" "${out}" "${SCAN_JOBS}")"
     [ "${v}" = yes ] && ok=yes
     detail="${v}"
+    grep '^jobs ' <<< "${out}" | sed 's/^/INFO scan ran /'
+    if [ "${v}" != yes ]; then
+        # #11156: show what the scan printed, and stop its leftover workers, or
+        # they hold the app's pid cap and every later exec fails.
+        echo "INFO scan rc=${rc}, $(grep -c '^port ' <<< "${out}") port line(s); other lines:"
+        grep -vE '^(port|done|jobs) ' <<< "${out}" | sort | uniq -c | sort -rn | head -n 10 | sed 's/^/INFO   /'
+        # #11156: bash and /proc only, so the reap needs no procps in the image.
+        for t in 1 2 3; do
+            r="$(timeout 20 docker exec -u sled "${APP}" bash -c "${REAP}" 2>&1)"; rc=$?
+            [ "${rc}" -eq 0 ] && break; sleep 2
+        done
+        if [ "${rc}" -eq 0 ]; then echo "INFO ${r}"
+        else echo "INFO reap of leftover scan workers failed, rc=${rc} after ${t} tries: $(tail -n 1 <<< "${r}")"; fi
+    fi
 elif [ -n "${GW}" ]; then
     detail="no proxy address on ${NET} for the scan's control probe"
 fi
 row "app reaches no TCP port 1-65535 on the internal gateway ${GW:-?}" "${ok}" "${detail}"
 # udp HOST PORT — one UDP probe from the app, 3 s for a reply, 30 s bound.
+# #11156: a result line means the probe ran: it is never retried, and with a
+# non-zero rc it is reported as "other:exec rc=N after RESULT", a FAIL. Only
+# an exec with no result line and docker's no-start rc (125, 126, 127) is tried
+# again, EXEC_TRIES times in all. 254 is not in that set: on EVO the scan exec
+# returned 254 after its processes ran. The last failure stays a FAIL.
 udp() {
-    timeout 30 docker exec -u sled "${APP}" timeout -k 2 20 bash -c "${UDP_PROBE}" \
-        "$1" "$2" "$(udp_payload "$2")" 3 2>&1 || echo "other:exec failed"
+    local out rc res n=1
+    while :; do
+        out="$(timeout 30 docker exec -u sled "${APP}" timeout -k 2 20 bash -c "${UDP_PROBE}" \
+            "$1" "$2" "$(udp_payload "$2")" 3 2>&1)"; rc=$?
+        res="$(grep -E '^(answered|refused|timeout|unreachable|other:.*)$' <<< "${out}" | tail -n 1)"
+        if [ -n "${res}" ]; then
+            [ "${rc}" -eq 0 ] && { echo "${res}"; return; }
+            echo "other:exec rc=${rc} after ${res}"; return
+        fi
+        case "${rc}" in 125|126|127) ;; *) break ;; esac
+        [ "${n}" -ge "${EXEC_TRIES}" ] && break
+        n=$((n + 1)); sleep 2
+    done
+    echo "other:exec failed rc=${rc} try ${n}: $(tail -n 1 <<< "${out}" | tr -s ' ' '_')"
 }
 # The control: Docker's embedded DNS in the app must answer the DNS probe, so
 # a probe that cannot see a reply cannot pass the gateway rows.
