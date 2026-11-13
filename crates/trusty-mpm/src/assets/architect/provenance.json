@@ -1,6 +1,6 @@
 {
   "export_manifest": "scripts/architect_export_manifest.txt",
-  "export_manifest_sha256": "2b3daae10520aeb70d9d41de533f9753fddd773675c5f5357da3f259aa3a1592",
+  "export_manifest_sha256": "0e3bacfcfec0129608daf0e98f25ab159d4e577710bb8d6ea01cd7bb19515122",
   "files": {
     "docs/voice.md": "7655db40ae8a555747910cbbd6f6f0589702e0c3a8fbca944287661ac2bcdf02",
     "schemas/dashboard/accounts.schema.json": "4a5e030ca974132b5f96b0727b6ffdbb5907e1ae0eadfc3f8200f38d5b0a80d0",
@@ -10,11 +10,11 @@
     "schemas/dashboard/goal_reorders.schema.json": "ec35fdca01ef31a5a0a1f0a336bd9f356ef04537009bf8b9fc46fe223ea3cd32",
     "schemas/dashboard/goals.schema.json": "62b41362c0b6dd3b1105536c7aa638ae48f86c5ccdc451147ef243ff3940beac",
     "schemas/dashboard/il_steers.schema.json": "ef242e5d8c4d614fa4df94a195dbfcdaafffc24829458e00c0d9e64c702edb2a",
-    "schemas/dashboard/items.schema.json": "ac6a9c6e014c74ecf1ae4479080f93e46936e55e789f35d60fe3470255415f43",
+    "schemas/dashboard/items.schema.json": "1085ceac3e1e11340f9b24589211da287ce8964c8e4990ee0df708cca8f29edb",
     "schemas/dashboard/media.schema.json": "7e3d2102fb908aaaf49731b85db85d045e053dae87b5fbd4bb26f79195e47568",
     "schemas/dashboard/meta-gh_track.schema.json": "24b7158bb052bee864664cc22408d3fbb780f6217cf124367ea5aec0ab3aec0a",
     "schemas/dashboard/meta-seen.schema.json": "05dca1877d05807a571b3eab831f6d9dfca294a521ffb4b275069e3221a56ef4",
-    "schemas/dashboard/meta-settings.schema.json": "3aa818c7693d85be6301e372bcb7b46af3b07dfe9c588e2408d6bdc0c54316cf",
+    "schemas/dashboard/meta-settings.schema.json": "b3de3c376d9bff7b3b72a0689abe18b12ca0ce146a15499d339cb2ab0dccb4b8",
     "schemas/dashboard/meta-state.schema.json": "055a430cb58858efc9d8415980c6d0cf43f63b51664959dfb285b3b44dfd99d4",
     "schemas/dashboard/questions.schema.json": "654c0dd33ffcf9b6daf5378d5acecc59f1791be7d21f9d4ce854b91b4487cb44",
     "schemas/dashboard/sessions.schema.json": "d56f6141a8810752e23dc4b908ce21134802ddc3438edd022ab85f9dca483c05",
@@ -48,7 +48,7 @@
     "scripts/dashboard_qual.py": "cfca46862dcf7e56249a6b70ae6792f625595f7ff9f938f6319a83a76531d904",
     "scripts/dashboard_routes.py": "9b16537464adf27799947193c7c2294541a01ef2b580c08d64bb28450cc3f37c",
     "scripts/dashboard_schema.py": "7f468c01a14e7db69ce3f3202c18484caa56fb6f2d0ca74e06e0ae2459b9ce11",
-    "scripts/dashboard_store.py": "e7fc8635f4a08d75f121999bef83949054eaf3b5c4947b00534fea281e2d1810",
+    "scripts/dashboard_store.py": "0adaeac05947d38b41c89aefc8adf48a3ddd93fcddf7a411a41f4f84ee2fdf81",
     "scripts/dashboard_viz.py": "1489a1ba6c87170ea94320d45db46fd1830439a6caa12b1d6c54ec6e24b5802b",
     "scripts/dashboard_watch.py": "c02ab333e6c8550a3632e7d658a24aedc024f98d519dd900cd0841dbb6cba0c6",
     "scripts/datg-hook.sh": "b74b3f6d17084e3e52b67700f05d550a39c0abc9312d6af63ff7cc46a2f9da6f",
@@ -76,7 +76,7 @@
     "scripts/owner_answers.py": "eca5adde30b0059eb1314ef4c7c5d117b6837d3758fc7a7692eabfb3d7c7d970",
     "scripts/pending-answers-hook.sh": "2841e94bad642662c9b81054bc085cace6da3bfa0c30ffb1de231106256a82b2",
     "scripts/pending-answers.py": "89e82710c2975924c1a8f63085b5fc3b2bd997d6235548b088dbdfe1967515d1",
-    "scripts/pending_hook_dedupe.py": "bb34b9522fdd0feb6e4814d2b1ed19021dd9bf1e2f11ae274a7d96204be8043e",
+    "scripts/pending_hook_dedupe.py": "1f216f322b4ecb7592798b4ca2b518d4386eb28a8576fe135f82f88a28f99007",
     "scripts/pm-digest.py": "41a639bda169a8fec181c909652a6061ff92cd4c6fdf073a02996e47ead31fe4",
     "scripts/pm-notify.sh": "5e387052fad3098d8c7278d043ea7a850da9cfbd6783466f4fb2250d7ef81467",
     "scripts/pm_cursor.py": "fdb416935e4eff5ea329ea9b3d0056757627ad9303160df614ed93c99219621b",
@@ -94,6 +94,7 @@
     "scripts/task_pulse.py": "503c8c686ac8c86f0ac757376ae699cb0bafe62b3e0064704e138d5e23bc99b7",
     "scripts/task_pulse_io.py": "5272566dc4ebd03171610c8eb5344cfc43bcc921f8894792537ffa3af7fe7cd3",
     "scripts/task_tag.py": "68dc586cc2ed815b3275e317188120092637dc293947be077faeb96115a639ab",
+    "scripts/technical_level.py": "9a8cf93dc77cde029e68a49f1049bb4f915112791da60bca0ec31a623a4341e1",
     "scripts/turn-active.py": "3b297743a844a6057787c5c772bac96ad863fd726f162350a61f4ebffb049168",
     "scripts/watch-apply.py": "fc11a681e07248e52b8f2e111a33aede15c609166f42c9d67a23c36210b94a7a",
     "skills/architect-completion-standard.md": "b00cc7544daacb4a48d6b8335666f737cd20aab4211286160974b547fdf71403",
@@ -139,7 +140,7 @@
     "templates/local/owner/risk-tolerance.md": "b0a31fb2b78f650d97376368c59485a34c68c2e33b23916ea6cc6763cf86c78b",
     "templates/local/projects/_template.md": "19f70d83b48ddb7afb2e976bf68a7406c0ce0dd468d5dc71c0a1afb09e3fa9e4",
     "templates/local/state.md": "6746001541b363d90731bdff3f7fa0a6123b0316950e4f09e9290b2ed7c280c5",
-    "templates/local/user.md": "72f55df770ee14b5857a6a85fd901ddb1bd7d2c01a9e19133008fb5cbda2933f"
+    "templates/local/user.md": "b95f07d045c4e829de3462b6f8ff2fb139b8f56f7182efedcb5f99c3182e26b9"
   },
   "fixtures": {
     "il_init_sample_state.md": "ce3232d32909271ba14b77bf30438384d132aa6429626a9a6da33cb64511d161"

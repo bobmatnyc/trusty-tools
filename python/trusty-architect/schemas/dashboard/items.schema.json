@@ -51,6 +51,7 @@
     "doc": {"type": "string", "pattern": "^[^/]+/docs/briefs/.+[.]md$"},
     "brief": {"type": "string", "pattern": "^[^/]+/docs/briefs/.+[.]md$"},
     "brief_request": {"$ref": "#/$defs/req"},
+    "level_override": {"enum": ["non-technical", "vibe-coder", "pm", "engineer", "senior-engineer", "cto"]},
     "session": {"type": "string"},
     "task": {"type": "string", "pattern": "^T[0-9a-f]+$"},
     "goal": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^G[0-9a-f]{2}$"}]},

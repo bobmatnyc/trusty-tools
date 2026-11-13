@@ -15,6 +15,8 @@ Format: DASHBOARD_FORMAT=dir (default, the layout above) or jsonl (one canonical
 changes.jsonl, see dashboard_jsonl.py). A jsonl write renders the whole collection file and validates every touched
 document against schemas/dashboard/ (DASHBOARD_SCHEMA=off|warn|enforce; default warn for jsonl, off for dir).
 A store of the other format is refused loudly, never read as empty.
+A set or update carrying meta/settings.technical_level or an item's level_override outside the six levels is refused
+(technical_level.refusal, #11064), whatever the schema mode.
 No network, no secrets.
 Test: tests/test_dashboard_store.py, tests/test_dashboard_jsonl.py
 """
@@ -33,6 +35,7 @@ if HERE not in sys.path:     # python3 -I drops the script directory
     sys.path.insert(0, HERE)
 import dashboard_jsonl as dj  # noqa: E402
 import dashboard_schema as dsch  # noqa: E402
+import technical_level as tlevel  # noqa: E402
 
 REPO = os.path.dirname(HERE)
 DEFAULT_ROOT = os.path.join(REPO, "local", "owner-queue")
@@ -334,6 +337,9 @@ class Store:
             cur.update(exists=False, data=None, dirty=True)
             return {"collection": coll, "id": doc_id, "deleted": True}
         data = normalize_timestamps(_check_body(op.get("data")))
+        why = tlevel.refusal(coll, doc_id, data)   # #11064: a level outside the six is refused on every write path
+        if why:
+            raise StoreError(why)
         if kind == "update":
             if not cur["exists"]:
                 raise NotFound(f"{coll}/{doc_id} not found")

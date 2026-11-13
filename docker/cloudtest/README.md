@@ -13,8 +13,10 @@ docker build -t tm-trusty-cloud-cloudtest:<short-sha> \
   --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" docker/cloudtest
 ```
 
-`fetch.sh` uses `gh` (or `~/.local/bin/gh`, else curl). The build re-checks every
-`.sha256`. The UID build args make the daemon user (`cloudtest`, home
+`fetch.sh` uses `gh` (or `~/.local/bin/gh`, else curl) and downloads the
+tarballs `tarballs.pin` lists into `docker/cloudtest/dl`, after clearing stale
+tarballs there. The build extracts only those tarballs, each checked against
+its `.sha256`, and fails on any other tarball in `dl/`. The UID build args make the daemon user (`cloudtest`, home
 `/data/home`) own the host state directory.
 
 ## Run

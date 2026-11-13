@@ -9,7 +9,7 @@
 # FAIL per row and exits non-zero on any FAIL. Fail-closed: an unreadable
 # file, a stopped container or a missing log line is a FAIL, never a PASS.
 # It prints host names, addresses and squid result codes only; no secret.
-# Refs #11073
+# Refs #11073, #11156
 set -uo pipefail
 
 APP="${1:-tm-trusty-cloud-sled}"
@@ -171,19 +171,146 @@ tcp() {
         *) echo "other: $(tail -n 1 <<< "${o}" | sed 's/.*: //')" ;;
     esac
 }
-ok=no; detail="no gateway address for network ${NET}"
-if [ -n "${GW}" ]; then
-    ok=yes; detail=""
-    for port in 22 53 80 443 2375 3128; do
-        res="$(tcp "${GW}" "${port}")"
-        echo "INFO gateway ${GW}:${port} -> ${res}"
-        detail="${detail}${port}=${res};"
-        # Only a silent drop or no route passes; a RST (refused) means the
-        # host answered, so the gateway is reachable.
-        case "${res}" in timeout|"other: No route to host"|"other: Network is unreachable") ;; *) ok=no ;; esac
+# #11156 B3: the gateway rows probe every TCP port and the common UDP ports,
+# so a host service on any port (2222, say) fails V1. Only a silent drop or no
+# route passes; an open port, a refusal (the host answered) or any other result
+# fails. The scan grades itself: each worker reports how many ports it probed
+# and probes the proxy's 3128 the same way, which must be open. A missing tool,
+# a lost worker, a short count or a scan past SCAN_BOUND seconds is a FAIL.
+SCAN_JOBS="${V1_SCAN_JOBS:-256}"     # parallel workers in the app
+SCAN_WAIT="${V1_SCAN_WAIT:-1}"       # seconds per connect
+SCAN_BOUND="${V1_SCAN_BOUND:-900}"   # seconds for the whole scan
+UDP_PORTS="53 123 443 41641"
+# The TCP scan, run by the app's bash: GW JOBS WAIT CONTROL-IP. One line per
+# port that did not pass ("port P RESULT"), then one "done I COUNT CONTROL BAD"
+# line per worker, BAD being its count of port lines.
+read -r -d '' TCP_SCAN <<'EOF'
+gw=$0 jobs=$1 wait=$2 ctl=$3
+command -v timeout > /dev/null || { echo "error: no timeout command in the app"; exit 3; }
+# probe_class RC OUTPUT — the child prints "s" just before it connects, so a
+# timeout with no marker means the connect never began (#11156): not a drop.
+probe_class() {
+    local m
+    case "$2" in s|s$'\n'*) ;; *) echo other:not-started; return ;; esac
+    case "$1:$2" in
+        0:*) echo open ;;
+        124:s) echo timeout ;;
+        *[Rr]efused*) echo refused ;;
+        *"No route to host"*|*"Network is unreachable"*) echo unreachable ;;
+        *) m="${2##*$'\n'}"; m="${m##*: }"; echo "other:rc$1:${m// /_}" ;;
+    esac
+}
+probe() {
+    local o rc
+    o="$(timeout "${wait}" bash -c 'echo s; exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2>&1)"; rc=$?
+    probe_class "${rc}" "${o}"
+}
+worker() {
+    local p n=0 b=0 r
+    for ((p = $1; p <= 65535; p += jobs)); do
+        r="$(probe "${gw}" "${p}")"; n=$((n + 1))
+        case "${r}" in timeout|unreachable) ;; *) b=$((b + 1)); echo "port ${p} ${r}" ;; esac
     done
+    echo "done $1 ${n} $(probe "${ctl}" 3128) ${b}"
+}
+for ((i = 1; i <= jobs; i++)); do worker "${i}" & done
+wait
+EOF
+# The UDP probe, run by the app's bash: HOST PORT HEX-PAYLOAD WAIT. Prints
+# answered, refused (ICMP port unreachable), timeout, unreachable or other.
+# The payload goes to a file first, and cat sends it in one write, so one
+# datagram carries all of it (#11156).
+read -r -d '' UDP_PROBE <<'EOF'
+f="$(mktemp)" || { echo "other:mktemp"; exit 0; }
+printf '%b' "$(sed 's/../\\x&/g' <<< "$2")" > "${f}" || { rm -f "${f}"; echo "other:payload"; exit 0; }
+exec 3<>"/dev/udp/$0/$1" 2> /dev/null || { rm -f "${f}"; echo "other:socket"; exit 0; }
+cat "${f}" >&3 2> /dev/null || { rm -f "${f}"; echo "other:write"; exit 0; }
+rm -f "${f}"
+o="$(timeout "$3" head -c 1 <&3 2>&1 > /dev/null)"; rc=$?
+case "${rc}:${o}" in
+    0:*) echo answered ;;
+    124:*) echo timeout ;;
+    *[Rr]efused*) echo refused ;;
+    *"No route to host"*|*"unreachable"*) echo unreachable ;;
+    *) echo "other:${o##*: }" ;;
+esac
+EOF
+# scan_verdict RC OUTPUT JOBS — "yes" only for a complete, clean scan; else
+# the reason. Fail-closed: anything it cannot account for is not a pass.
+# #11156: 256 workers share one stream, so a line spliced by a stray message
+# (a fork retry, say) could hide a port line. Every line must be a whole port
+# or done line, and the done lines' BAD counts must all be 0.
+scan_verdict() {
+    local rc="$1" out="$2" jobs="$3" stray done_n total ctl bad nbad
+    [ "${rc}" -eq 0 ] || { echo "scan exited ${rc} (124 = past the bound)"; return; }
+    grep -q '^error' <<< "${out}" && { grep '^error' <<< "${out}" | head -n 1; return; }
+    stray="$(grep -vE '^(port [0-9]+ [^ ]+|done [0-9]+ [0-9]+ [^ ]+ [0-9]+)$' <<< "${out}" | head -n 3 | tr '\n' ';')"
+    [ -z "${stray}" ] || { echo "unexpected scan output: ${stray}"; return; }
+    done_n="$(awk '$1=="done" {print $2}' <<< "${out}" | sort -u | wc -l | tr -d ' ')"
+    total="$(awk '$1=="done" {s+=$3} END {print s+0}' <<< "${out}")"
+    ctl="$(awk '$1=="done" && $4!="open"' <<< "${out}" | wc -l | tr -d ' ')"
+    nbad="$(awk '$1=="done" {s+=$5} END {print s+0}' <<< "${out}")"
+    bad="$(grep '^port ' <<< "${out}" | head -n 20 | tr '\n' ';')"
+    if [ "$(grep -c '^done ' <<< "${out}")" -ne "${jobs}" ] || [ "${done_n}" -ne "${jobs}" ] \
+        || [ "${total}" -ne 65535 ]; then
+        echo "incomplete: ${done_n}/${jobs} workers, ${total}/65535 ports"
+    elif [ "${ctl}" -ne 0 ]; then
+        echo "control probe of the proxy's 3128 not open in ${ctl} worker(s)"
+    elif [ "${nbad}" -ne 0 ] || [ -n "${bad}" ]; then
+        echo "answered: ${nbad} port(s) reported by the workers: ${bad}"
+    else
+        echo yes
+    fi
+}
+# udp_verdict RESULT — "yes" for a drop or no route, else the result.
+udp_verdict() { case "$1" in timeout|unreachable) echo yes ;; *) echo "$1" ;; esac; }
+# Payloads: a DNS query for the root NS, an NTP client request, a QUIC packet
+# of an unknown version (a QUIC server answers with version negotiation), and
+# two bytes for WireGuard (Tailscale), which answers nothing; there only an
+# ICMP refusal shows the host is reachable.
+udp_payload() {
+    case "$1" in
+        53) echo 7631010000010000000000000000020001 ;;
+        123) printf '1b%094d\n' 0 ;;
+        443) printf 'c01a2a3a4a08010203040506070800%02370d\n' 0 ;;
+        *) echo 7631 ;;
+    esac
+}
+ok=no; detail="no gateway address for network ${NET}"
+if ! [[ "${SCAN_JOBS}" =~ ^[1-9][0-9]{0,4}$ ]] || [ "${SCAN_JOBS}" -gt 65535 ]; then
+    detail="V1_SCAN_JOBS=${SCAN_JOBS} is not 1-65535"
+elif [ -n "${GW}" ] && [ -n "${PIP}" ]; then
+    echo "INFO scanning TCP 1-65535 on ${GW}: ${SCAN_JOBS} workers, ${SCAN_WAIT}s per port, bound ${SCAN_BOUND}s"
+    # #11156: the bound runs inside the app, so it kills the workers too (its
+    # process group); the host timeout only backs up a hung docker CLI.
+    out="$(timeout "$((SCAN_BOUND + 30))" docker exec -u sled "${APP}" \
+        timeout -k 5 "${SCAN_BOUND}" bash -c "${TCP_SCAN}" \
+        "${GW}" "${SCAN_JOBS}" "${SCAN_WAIT}" "${PIP}" 2>&1)"; rc=$?
+    v="$(scan_verdict "${rc}" "${out}" "${SCAN_JOBS}")"
+    [ "${v}" = yes ] && ok=yes
+    detail="${v}"
+elif [ -n "${GW}" ]; then
+    detail="no proxy address on ${NET} for the scan's control probe"
 fi
-row "app reaches no TCP port on the internal gateway ${GW:-?}" "${ok}" "${detail}"
+row "app reaches no TCP port 1-65535 on the internal gateway ${GW:-?}" "${ok}" "${detail}"
+# udp HOST PORT — one UDP probe from the app, 3 s for a reply, 30 s bound.
+udp() {
+    timeout 30 docker exec -u sled "${APP}" timeout -k 2 20 bash -c "${UDP_PROBE}" \
+        "$1" "$2" "$(udp_payload "$2")" 3 2>&1 || echo "other:exec failed"
+}
+# The control: Docker's embedded DNS in the app must answer the DNS probe, so
+# a probe that cannot see a reply cannot pass the gateway rows.
+res="$(udp 127.0.0.11 53 | tail -n 1)"; ok=no; [ "${res}" = answered ] && ok=yes
+row "UDP probe control: the app's embedded DNS 127.0.0.11:53 answers" "${ok}" "${res}"
+for port in ${UDP_PORTS}; do
+    ok=no; detail="no gateway address for network ${NET}"
+    if [ -n "${GW}" ]; then
+        res="$(udp "${GW}" "${port}" | tail -n 1)"; detail="$(udp_verdict "${res}")"
+        echo "INFO udp ${GW}:${port} -> ${res}"
+        [ "${detail}" = yes ] && ok=yes
+    fi
+    row "app gets no UDP answer from the internal gateway ${GW:-?}:${port}" "${ok}" "${detail}"
+done
 ok=no; detail="no proxy address on ${NET}"
 if [ -n "${PIP}" ]; then
     res="$(tcp "${PIP}" 3128)"; detail="3128=${res};"
@@ -218,6 +345,31 @@ for p in "${probes[@]}"; do
         "${TMP}/probe.log" && ok=yes
     row "CONNECT ${target} logged TCP_DENIED/403 after the probe began" "${ok}" \
         "$(awk -v t="${target}" '$7==t {print $4, $6, $7}' "${TMP}/probe.log" | head -n 3 | tr '\n' ';')"
+done
+
+# 3b. IP literals curl would rewrite to dotted form, sent as a raw CONNECT so
+# the proxy sees the literal itself (#11156): hex, dotted hex, octal, integer
+# forms of 1.1.1.1. Pass: 403 (http_access deny) or 400 (squid rejects the
+# authority). A 200 is a tunnel; a 5xx means an allow matched.
+# rawconnect TARGET — the proxy's status code for CONNECT TARGET, or "none".
+rawconnect() {
+    local line
+    # shellcheck disable=SC2016 # $0 and $1 expand in the app's bash, not here
+    line="$(app timeout 10 bash -c 'exec 3<>"/dev/tcp/$0/3128" || exit 1
+        printf "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n" "$1" "$1" >&3
+        IFS= read -r l <&3 && printf "%s\n" "${l}"' "${PIP}" "$1" 2>/dev/null)"
+    case "${line}" in
+        HTTP/*) awk '{print $2}' <<< "${line}" ;;
+        *) echo none ;;
+    esac
+}
+for target in 0x01010101:443 0x01.0x01.0x01.0x01:443 0001.0001.0001.0001:443 16843009:443; do
+    ok=no; detail="no proxy address on ${NET}"
+    if [ -n "${PIP}" ]; then
+        code="$(rawconnect "${target}")"; detail="status=${code}"
+        case "${code}" in 400|403) ok=yes ;; esac
+    fi
+    row "raw CONNECT ${target} refused by the proxy (403 or 400)" "${ok}" "${detail}"
 done
 
 # 4. Every tunnel names a steady host, or a login host inside a logged login
