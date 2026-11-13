@@ -20,7 +20,8 @@
 //! read the host `channels.slack_read_allowlist` grants this project
 //! (`egress_guard_slack_read`, #10387), lifts a family or Bash channel deny
 //! for the Architect's main thread (`egress_guard_architect`, #10447; the
-//! allow stands only once audited), applies the channel-taint
+//! allow stands only once audited), lifts a main thread's Slack send to the
+//! owner's DM (`egress_guard_pm_dm`, #11194; audited the same way), applies the channel-taint
 //! arm with its policy readiness gate ([`with_taint_async`], #8433, #9741;
 //! the daemon's verdict first, #8454 VC), and on
 //! a deny records it through `pm_guard_deny_log`, prints the deny from
@@ -39,6 +40,7 @@ use crate::commands::egress_guard_bash::{
     BASH_CHECK, bash_deny_reason, bash_egress_deny, bash_oversize_reason,
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
+use crate::commands::egress_guard_pm_dm as pm_dm;
 use crate::commands::egress_guard_slack_read::{lift, load_allowlist};
 use crate::commands::egress_guard_taint::{
     POLICY_CHECK, TAINT_CHECK, policy_not_ready_reason, taint_verdict,
@@ -165,7 +167,7 @@ pub(crate) fn decide(
                 "tm hook --egress-guard denies `{tool_name}`: it is a {family} tool, and no \
                  tm-launched session, PM or subagent, may use an outbound message channel \
                  directly (#8454); only the Architect's main thread is exempt (#10447), \
-                 and the claude.ai connectors are not this deny's subject (#10735). \
+                 a main thread may send to the owner's Slack DM (#11194), and the claude.ai connectors are not this deny's subject (#10735). \
                  Read and list tools are denied too, except a Slack channel or thread read \
                  the host config grants this project (#10387). Ask the operator instead."
             ),
@@ -384,6 +386,8 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     // #10447: the Architect's main thread, after the floor and the read lift.
     let (first, architect_allowed) =
         architect::lift(first, &read, &table, &env, MpmConfig::load_default);
+    // #11194: a main thread's Slack send to the owner's DM, after the Architect lift.
+    let (first, pm_dm_allowed) = pm_dm::lift(first, &read, &env);
     // #9923 (Architect Q10): the launch directory, which a `cd` does not move.
     let launch = session_profile::hook_project_dir(env.project_dir.clone());
     // #9741: the policy loads under the same home the taint is read from.
@@ -394,6 +398,8 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let audit = architect::audit_path();
     let verdict = architect::audited(verdict, architect_allowed, audit.as_deref(), &now);
+    // #11194: the owner-DM allow, audited to the same file under the same rule.
+    let verdict = pm_dm::audited(verdict, pm_dm_allowed, audit.as_deref(), &now);
     let Verdict::Deny { check, reason } = verdict else {
         // #10387: one audit line per allowed read, no call content.
         if let Some(allowed) = slack_read {
