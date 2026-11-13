@@ -49,7 +49,7 @@ h1 { flex: 0 1 auto; min-width: min-content; overflow-wrap: normal; word-break: 
 .st-opt:hover, .st-opt:focus-visible { background: color-mix(in srgb, var(--accent) 14%, var(--surface-1)); }
 .st-opt[aria-checked="true"] .sp-name::after { content: " \2713"; }
 .sp-field { display: grid; gap: 4px; font-size: var(--fs-sm); }
-.sp-field input { font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); min-width: 0; box-sizing: border-box; width: 100%; }
+.sp-field input, .sp-field select { font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); min-width: 0; box-sizing: border-box; width: 100%; }
 .sp-field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .sp-row .sp-field { flex: 1 1 8rem; min-width: 0; }
 .sp-field input[type="time"] { -webkit-appearance: none; appearance: none; display: block; max-width: 100%; min-height: 2.2rem; }   /* iOS gives time inputs an intrinsic width wider than a phone fieldset */
@@ -995,6 +995,20 @@ html.lib-strip.rd-open body { padding-right: 0; }
       <datalist id="set-tz-list"></datalist>
       <label class="sp-field">Sleep from<input type="time" id="set-sleep-start" step="900"></label>
       <p class="err" id="set-time-err" role="status"></p>
+    </fieldset>
+    <!-- #11064: the owner's technical level (meta/settings.technical_level); a secondary user keeps their own level -->
+    <fieldset class="sp-group" data-arch-only id="set-level-group">
+      <legend>Technical level</legend>
+      <p class="sp-note">How technical the Architect's questions, briefs and messages to you are. Linked briefs keep the full detail; ask for more detail on any item. Secondary users keep their own level.</p>
+      <label class="sp-field">Write for<select id="set-level">
+        <option value="non-technical">Non-technical</option>
+        <option value="vibe-coder">Vibe-coder</option>
+        <option value="pm">PM (default)</option>
+        <option value="engineer">Engineer</option>
+        <option value="senior-engineer">Senior engineer</option>
+        <option value="cto">CTO</option>
+      </select></label>
+      <p class="err" id="set-level-err" role="status"></p>
     </fieldset>
     <fieldset class="sp-group" data-arch-only id="set-brief-group">
       <legend>Morning brief</legend>
@@ -5951,6 +5965,15 @@ html.lib-strip.rd-open body { padding-right: 0; }
     return { payload: { morning_brief: Object.assign({}, existing && typeof existing === "object" ? existing : {}, { enabled: !!enabled, time: time, days: spec }) } };
   }
   /* END morningBrief */
+  /* BEGIN techLevel */
+  /* #11064: the six levels, in technical_level.py LEVELS order; unset or unknown reads as pm. The store refuses any other value. */
+  const TECH_LEVELS = ["non-technical", "vibe-coder", "pm", "engineer", "senior-engineer", "cto"];
+  function techLevelOf(s) { const v = s && typeof s === "object" ? s.technical_level : null; return TECH_LEVELS.indexOf(v) >= 0 ? v : "pm"; }
+  function techLevelPayload(level) {
+    if (TECH_LEVELS.indexOf(level) < 0) return { error: "Pick one of the six levels." };
+    return { payload: { technical_level: level } };
+  }
+  /* END techLevel */
   function browserTz() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) { return ""; } }
   function paintSettings() {
     const st = optimisticState || userStateOf(settings);
@@ -5971,6 +5994,9 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (document.activeElement !== bt) bt.value = b.time;
     bd.forEach((i) => { if (document.activeElement !== i) i.checked = b.days.indexOf(i.dataset.day) >= 0; });
     [be, bt].concat(bd).forEach((i) => { i.disabled = readOnly; });
+    const lv = $("set-level");   /* #11064 */
+    if (document.activeElement !== lv) lv.value = techLevelOf(settings);
+    lv.disabled = readOnly;
   }
   /* One write path for every setting: read meta/settings, merge the patch, set with if_version, retry once on a 409. */
   async function saveSettings(patch) {
@@ -6014,6 +6040,18 @@ html.lib-strip.rd-open body { padding-right: 0; }
     try { await saveSettings(r.payload); }
     catch (e) { err.textContent = "Could not save the settings: " + (e && e.message ? e.message : "unknown error") + "."; }
   }
+  /* BEGIN techLevelSave */
+  /* #11064: a refused or failed write puts the stored level back and names the error; never a silent success. */
+  async function saveLevelSettings() {
+    const err = $("set-level-err"), sel = $("set-level"); err.textContent = "";
+    const back = () => { sel.value = techLevelOf(settings); };
+    if (!db || readOnly) { err.textContent = "Read-only view: the settings cannot be saved."; back(); return; }
+    const r = techLevelPayload(sel.value);
+    if (r.error) { err.textContent = r.error; back(); return; }
+    try { await saveSettings(r.payload); }
+    catch (e) { back(); err.textContent = "Could not save the technical level: " + (e && e.message ? e.message : "unknown error") + "."; }
+  }
+  /* END techLevelSave */
   (function wireUserStateMenu() {
     const btn = $("user-state-badge"), menu = $("user-state-menu");
     const opts = () => Array.from(menu.querySelectorAll(".st-opt"));
@@ -6052,6 +6090,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     ["set-tz", "set-sleep-start"].forEach((id) => $(id).addEventListener("change", saveTimeSettings));
     ["set-brief-enabled", "set-brief-time"].forEach((id) => $(id).addEventListener("change", saveBriefSettings));
     document.querySelectorAll("#set-brief-days input").forEach((i) => i.addEventListener("change", saveBriefSettings));
+    $("set-level").addEventListener("change", saveLevelSettings);   /* #11064 */
     try {   /* the one theme control (the owner 2026-10-23): light, dark or system; stored under architect-theme, applied before first paint by the head script */
       let cur = "system"; try { const v = localStorage.getItem("architect-theme"); if (v === "light" || v === "dark") cur = v; } catch (_) {}
       dlg.querySelectorAll('input[name="set-theme"]').forEach((r) => {

@@ -251,8 +251,8 @@ class TestPageGates(ServerCase):
                        'id="set-tz"', 'id="pool-gd"', '<h1>Architect<span class="dash"> Dashboard</span></h1>', "<title>Architect Dashboard</title>"):
             self.assertIn(needle, self.page_src)
         # 14 = 11 (7 + sec-il + sec-visualize + the Live link + the morning brief settings group) + sec-projects, sec-cliprof
-        # and the reader's edit button (rd-edit-btn): the page at prototype 23da8a9 (#10571)
-        self.assertEqual(self.page_src.count(" data-arch-only"), 14)
+        # and the reader's edit button (rd-edit-btn): the page at prototype 23da8a9 (#10571); 15 with the technical level group (#11064)
+        self.assertEqual(self.page_src.count(" data-arch-only"), 15)
         self.assertIn('html[data-mode="session"] [data-arch-only] { display: none !important; }', self.page_src)
 
     def test_page_reads_config_json_and_falls_back_to_architect(self):
