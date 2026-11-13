@@ -93,7 +93,7 @@
     "scripts/state-archive.py": "f240079c39a9937cfc6981c1f18bc20f1c574ace4c7a286c9551bd72ceaf4ba6",
     "scripts/task_pulse.py": "503c8c686ac8c86f0ac757376ae699cb0bafe62b3e0064704e138d5e23bc99b7",
     "scripts/task_pulse_io.py": "5272566dc4ebd03171610c8eb5344cfc43bcc921f8894792537ffa3af7fe7cd3",
-    "scripts/task_tag.py": "68dc586cc2ed815b3275e317188120092637dc293947be077faeb96115a639ab",
+    "scripts/task_tag.py": "3c76c62d0d91516d8443588a1de4ea1b6cde9b9b5a291f70b38e1b8426b59b97",
     "scripts/technical_level.py": "9a8cf93dc77cde029e68a49f1049bb4f915112791da60bca0ec31a623a4341e1",
     "scripts/turn-active.py": "3b297743a844a6057787c5c772bac96ad863fd726f162350a61f4ebffb049168",
     "scripts/watch-apply.py": "fc11a681e07248e52b8f2e111a33aede15c609166f42c9d67a23c36210b94a7a",
