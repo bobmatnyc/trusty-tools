@@ -161,6 +161,22 @@ def validate(request: dict[str, object]) -> tuple[str, str, str, str, str, str]:
     return profile, email, workflow, url, account, key
 
 
+def resolve_workflow(db: sqlite3.Connection, request: dict[str, object]) -> dict[str, object]:
+    """Select a workflow on the authenticated enrollment socket without changing grants."""
+    if set(request) != {"op", "email", "url", "account"} or request["op"] != "resolve":
+        raise ValueError("InvalidEnrollment")
+    values = [request[k] for k in ("email", "url", "account")]
+    if not all(isinstance(v, str) and v and v.strip() == v and len(v) <= 8192 for v in values):
+        raise ValueError("InvalidEnrollment")
+    email, url, account = map(str, values)
+    email = email.casefold()
+    row = db.execute("SELECT workflow FROM routes WHERE email=?", (email,)).fetchone()
+    if row is not None:
+        return {"ok": True, "workflow": row["workflow"]}
+    route = json.dumps([email, url, account], ensure_ascii=False, separators=(",", ":"))
+    return {"ok": True, "workflow": "browser-" + digest(route)[:32]}
+
+
 def register(
     db: sqlite3.Connection, state: Path, request: dict[str, object]
 ) -> dict[str, object]:

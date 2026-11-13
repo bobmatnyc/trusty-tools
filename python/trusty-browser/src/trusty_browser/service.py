@@ -21,6 +21,7 @@ from trusty_browser.enrollment import (
     inspect_conflict,
     browser_key,
     register,
+    resolve_workflow,
     remove,
     replace,
     status,
@@ -207,6 +208,8 @@ class Broker:
     async def enrollment_request(self, request: Frame) -> Frame:
         assert self.db is not None
         op = string(request, "op")
+        if op == "resolve":
+            return resolve_workflow(self.db, request)
         workflow = string(request, "workflow")
         if op == "status":
             return status(self.db, self.state, request)

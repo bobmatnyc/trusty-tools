@@ -261,3 +261,22 @@ def test_removed_extension_cannot_prove_its_old_browser_key(action, monkeypatch)
 
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(check(Path(tmp)))
+
+
+def test_activation_selects_distinct_workflows_and_preserves_existing_names():
+    async def run(tmp_path):
+        async with service.Broker(tmp_path) as broker:
+            req = request()
+            target = {k: req[k] for k in ("email", "url", "account")}
+            resolve = dict(op="resolve", **target)
+            managed = (await broker.enrollment_request(resolve))["workflow"]
+            assert managed.startswith("browser-")
+            assert (await broker.enrollment_request(resolve))["workflow"] == managed
+            for change in ({"account": "second"}, {"url": "https://second.test"}, {"email": "t@t.test"}):
+                assert (await broker.enrollment_request({**resolve, **change}))["workflow"] != managed
+            assert not (tmp_path / "workflows").exists()
+            assert (await broker.enrollment_request(req))["ok"]
+            assert (await broker.enrollment_request(resolve))["workflow"] == req["workflow"]
+
+    with tempfile.TemporaryDirectory() as root:
+        asyncio.run(run(Path(root)))

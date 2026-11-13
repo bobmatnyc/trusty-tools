@@ -110,7 +110,7 @@ def main() -> None:
         "--state", type=Path, default=Path.home() / ".trusty" / "browser"
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--workflow", help="Workflow name enrolled in the browser popup")
+    group.add_argument("--workflow", help="Workflow ID shown under Activation details")
     group.add_argument(
         "--credential", type=Path, help="Explicit private workflow credential file"
     )

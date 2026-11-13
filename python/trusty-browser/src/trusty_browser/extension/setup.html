@@ -1,17 +1,35 @@
 <!doctype html>
-<html lang="en"><meta charset="utf-8"><title>Trusty Browser enrollment</title>
-<link rel="stylesheet" href="setup.css">
-<main><img src="icons/trusty-browser-48.png" width="48" height="48" alt="">
-<h1>Trusty Browser</h1>
-<button id="enable" hidden>Enable access to this site</button>
-<dl hidden id="route"><dt>Chrome profile</dt><dd id="profile"></dd>
-<dt>Site</dt><dd id="site"></dd><dt>Site account</dt><dd id="account"></dd></dl>
-<form id="setup" hidden><label for="workflow">Workflow name</label>
-<input id="workflow" required maxlength="64" pattern="[a-z0-9][a-z0-9_\-]{0,63}" autocomplete="off">
-<button id="enroll">Enroll this workflow</button></form>
-<section id="transfer" hidden><p id="transfer-route"></p>
-<button id="cancel" type="button">Cancel</button>
-<button id="replace" type="button">Confirm replacement</button></section>
-<button id="remove" hidden>Remove workflow</button>
-<output id="status" aria-live="polite">Checking active tab…</output></main>
-<script src="setup.js"></script></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trusty Browser</title>
+  <link rel="stylesheet" href="setup.css">
+</head>
+<body>
+  <main>
+    <h1>Trusty Browser</h1>
+    <div id="stage" aria-hidden="true">
+      <div id="robot"><img src="icons/trusty-browser.svg" alt="" width="116" height="116"></div>
+    </div>
+    <button id="activate" disabled>Activate Extension</button>
+    <output id="status" aria-live="polite"></output>
+    <section id="transfer" hidden>
+      <p id="transfer-route"></p>
+      <button id="replace">Confirm replacement</button>
+      <button class="secondary" id="cancel">Cancel</button>
+    </section>
+    <details id="details" hidden>
+      <summary>Activation details</summary>
+      <dl>
+        <dt>Chrome profile</dt><dd id="profile"></dd>
+        <dt>Site</dt><dd id="site"></dd>
+        <dt>Site account</dt><dd id="account"></dd>
+        <dt>Workflow</dt><dd id="workflow"></dd>
+      </dl>
+      <button class="secondary" id="remove">Remove workflow</button>
+    </details>
+  </main>
+  <script src="setup.js"></script>
+</body>
+</html>

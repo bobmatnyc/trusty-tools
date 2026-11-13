@@ -22,7 +22,7 @@ async function fixture() {
           requests.push(msg);
           queueMicrotask(()=>{
             if (refuse === "disconnect") return this.onDisconnect.fire();
-            this.onMessage.fire(refuse || {ok:true,workflow:msg.workflow,state:"active"});
+            this.onMessage.fire(refuse || {ok:true,workflow:msg.op === "resolve" ? "browser-managed" : msg.workflow,state:"active"});
           });
         }};
       return port;
@@ -132,4 +132,27 @@ test("only a pre-commit occupied name clears the pending enrollment", async()=>{
   f.refuse(null);
   assert.equal((await enroll("other")).ok,true);
   assert.equal(f.stored.enrollment.key,key);
+});
+
+test("one-click activation uses the service-selected workflow and resumes pending grants", async()=>{
+  const f = await fixture();
+  const {route} = await f.call({type:"preview"});
+  const response = await f.call({type:"activate",route,workflow:"ignored"});
+  assert.equal(response.workflow,"browser-managed");
+  assert.deepEqual(f.requests.map(m => m.op),["resolve","enroll"]);
+  assert.equal(f.requests[0].email,email);
+  assert.equal(f.requests[0].account,account);
+  assert.equal(f.requests[0].url,url);
+  assert.equal(f.stored.enrollment.workflow,"browser-managed");
+
+  const retry = await fixture();
+  const preview = await retry.call({type:"preview"});
+  retry.refuse("disconnect");
+  await retry.call({type:"enroll",workflow:"prior-name",route:preview.route});
+  const key = retry.stored.pending.key;
+  retry.refuse(null);
+  const resumed = await retry.call({type:"activate",route:preview.route});
+  assert.equal(resumed.workflow,"prior-name");
+  assert.equal(retry.stored.enrollment.key,key);
+  assert.deepEqual(retry.requests.map(m => m.op),["enroll","enroll"]);
 });
