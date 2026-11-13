@@ -12,8 +12,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY squid.conf login.conf steady.conf /etc/squid/
-COPY entrypoint.sh sled-profile /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/sled-profile \
+COPY entrypoint.sh sled-profile sled-bind-addr /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/sled-profile /usr/local/bin/sled-bind-addr \
     && mkdir -p /var/log/squid /etc/squid/profile.d \
     && cp /etc/squid/steady.conf /etc/squid/profile.d/active.conf \
     && chown -R proxy:proxy /var/log/squid
