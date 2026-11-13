@@ -153,5 +153,3 @@ def qa_site():
         finally:
             server.shutdown()
             thread.join()
-
-
