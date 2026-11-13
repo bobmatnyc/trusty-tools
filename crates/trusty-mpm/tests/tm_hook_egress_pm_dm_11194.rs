@@ -23,10 +23,28 @@ const OWNER_DM: &str = "D0AJ5P0PRTK";
 const SEND: &str = "mcp__slack-mcp__slack_send_message";
 const CANVAS: &str = "mcp__slack-mcp__slack_create_canvas";
 
-/// Run the guard over `payload` with `data` as `TRUSTY_DATA_DIR_OVERRIDE`.
+/// The launch stamp `tm` writes for a PM session.
+const STAMP: &str = "TRUSTY_MPM_SESSION_PROFILE";
+
+/// Run the guard over `payload` as a tm-launched PM, with `data` as
+/// `TRUSTY_DATA_DIR_OVERRIDE`.
 fn run_in(data: &Path, payload: &serde_json::Value, env: &[(&str, &str)]) -> Output {
-    let mut child = guard_command_in(common::tm_spawn_home(), data, env)
-        .env("TRUSTY_MPM_SESSION_PROFILE", "pm")
+    run_stamped(data, payload, env, Some("pm"))
+}
+
+/// [`run_in`] with the launch stamp `stamp`, or none at all.
+fn run_stamped(
+    data: &Path,
+    payload: &serde_json::Value,
+    env: &[(&str, &str)],
+    stamp: Option<&str>,
+) -> Output {
+    let mut command = guard_command_in(common::tm_spawn_home(), data, env);
+    command.env_remove(STAMP);
+    if let Some(stamp) = stamp {
+        command.env(STAMP, stamp);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .spawn()
         .expect("spawn tm hook --egress-guard");
@@ -106,6 +124,19 @@ fn pm_dm_allow_refuses_every_other_target_and_subagents() {
     let main = call(SEND, dm);
     let env = [("CLAUDE_MPM_SUB_AGENT", "1")];
     assert_denied(&run_in(tmp.path(), &main, &env), "subagent env");
+    assert_eq!(audit(tmp.path()), "", "no deny writes an allow line");
+}
+
+/// 🔴 #11194 fix round: the same DM send from a main thread with no tm PM
+/// launch stamp — an unmanaged `claude` — is denied.
+#[test]
+fn pm_dm_send_without_the_pm_launch_stamp_is_denied() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let send = call(
+        SEND,
+        serde_json::json!({ "channel": OWNER_DM, "text": "x" }),
+    );
+    assert_denied(&run_stamped(tmp.path(), &send, &[], None), "unstamped");
     assert_eq!(audit(tmp.path()), "", "no deny writes an allow line");
 }
 

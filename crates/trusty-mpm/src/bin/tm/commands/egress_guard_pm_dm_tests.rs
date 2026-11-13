@@ -168,6 +168,41 @@ fn pm_subagent_dm_send_stays_denied() {
     assert!(!log.exists());
 }
 
+/// 🔴 #11194 fix round: a main thread with no launch stamp — an unmanaged
+/// `claude` the user-tier hook also runs in — keeps the deny.
+#[test]
+fn pm_unstamped_main_thread_dm_send_stays_denied() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    let env = HookEnv {
+        stamp: None,
+        ..pm_env(&fx)
+    };
+    let call = send(&fx, json!(OWNER_DM));
+    assert_eq!(denied(run(&call, &env, &log), "unstamped"), "egress-family");
+    let canvas = payload(&fx, CANVAS_TOOL, json!({ "markdown": BODY }));
+    let verdict = run(&canvas, &env, &log);
+    assert_eq!(denied(verdict, "unstamped canvas"), "egress-family");
+    assert!(!log.exists());
+}
+
+/// 🔴 #11194 fix round: an empty, unknown or non-PM stamp keeps the deny —
+/// including an Architect stamp on a session without the Architect grant.
+#[test]
+fn pm_non_pm_stamped_main_thread_dm_send_stays_denied() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    for stamp in ["", "supervisor", "architect", "twin", "PM", " pm", "pm "] {
+        let env = HookEnv {
+            stamp: Some(stamp.into()),
+            ..pm_env(&fx)
+        };
+        let call = send(&fx, json!(OWNER_DM));
+        assert_eq!(denied(run(&call, &env, &log), stamp), "egress-family");
+    }
+    assert!(!log.exists());
+}
+
 /// 🔴 #11194: a canvas whose `channel_id` is anything but the owner's DM
 /// string stays denied.
 #[test]
