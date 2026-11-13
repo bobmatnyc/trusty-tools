@@ -23,9 +23,12 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::savings::{SavingsRow, write_row_line};
+pub use crate::core::savings_opportunity_reason::{
+    OpportunityTally, SkipReason, fold_real_opportunities,
+};
 
 /// `tool_type` of a Bash call, on both `compress` and opportunity rows.
 pub const TOOL_TYPE_BASH: &str = "bash";
@@ -53,8 +56,10 @@ pub const OPPORTUNITY_KEEP_DAYS: usize = 14;
 /// understate the opportunity. `event` is the hook event that observed it:
 /// a subagent's result is seen both as the `Agent` call's `PostToolUse` and as
 /// its own `SubagentStop`, so an aggregate picks one event per question.
-/// Test: `an_opportunity_row_lands_in_its_day_file`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// `skip_reason` says why the result was not compressed (#10973).
+/// Test: `an_opportunity_row_lands_in_its_day_file`,
+/// `a_legacy_row_without_a_skip_reason_parses_as_unknown`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpportunityRow {
     /// RFC 3339 UTC timestamp; its date names the day file.
     pub ts: String,
@@ -73,10 +78,20 @@ pub struct OpportunityRow {
     pub bytes_scanned: u64,
     /// Size the result would have had after compression.
     pub would_compress_bytes: u64,
+    /// #10973: why the result was not compressed; additive, so a row written
+    /// before the field existed reads as [`SkipReason::Unknown`].
+    #[serde(default)]
+    pub skip_reason: SkipReason,
 }
 
 impl OpportunityRow {
-    /// Build a row from a measurement, stamped now.
+    /// This row with its [`SkipReason`] set.
+    pub fn with_skip_reason(mut self, skip_reason: SkipReason) -> Self {
+        self.skip_reason = skip_reason;
+        self
+    }
+
+    /// Build a row from a measurement, stamped now; its reason is `Unknown`.
     pub fn new(
         event: &str,
         session_id: &str,
@@ -95,6 +110,7 @@ impl OpportunityRow {
             bytes_returned,
             bytes_scanned,
             would_compress_bytes,
+            skip_reason: SkipReason::Unknown,
         }
     }
 }
