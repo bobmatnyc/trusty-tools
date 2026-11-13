@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.6] — 2026-11-13
+
+### Changed
+
+- The `web-qa` entry in the roster tools fixture (`roster_tools_tests.rs`) now lists `mcp__trusty-browser`, matching the enrolled-browser web-QA agent; no API change (#11181).
+
 ## [0.9.5] — 2026-11-10
 
 ### Changed
