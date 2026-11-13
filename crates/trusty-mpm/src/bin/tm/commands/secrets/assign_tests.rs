@@ -12,9 +12,10 @@ use trusty_secrets::ancestry::{ProcessError, ProcessTable, StartTime};
 use super::*;
 use crate::commands::secrets::assign::{
     AGENT_OTHER_PROJECT, CHECKOUT_MISMATCH, Caller, NOT_REGISTERED, OTHER_OWNER, PROJECT_FORM,
-    ProjectName, ProjectResolver, SRC_FORMS, SRC_UNPINNED, Seam, agent_in, caller_from,
-    parse_source,
+    ProjectName, ProjectResolver, REGISTRY_UNREADABLE, RegistryResolver, SRC_FORMS, SRC_UNPINNED,
+    Seam, agent_in, caller_from, parse_source,
 };
+use crate::commands::session_project::{project_notice, registry_dir_under_home};
 
 /// The project vault of the second same-owner checkout.
 const API_VAULT: &str = "trusty/acme/api";
@@ -64,7 +65,7 @@ fn architect() -> Caller {
 /// Run `tm secrets <args>` in the harness checkout with `resolver`.
 async fn assign_run(
     h: &Harness,
-    resolver: &FakeResolver,
+    resolver: &dyn ProjectResolver,
     caller: fn() -> Caller,
     args: &[&str],
 ) -> Outcome {
@@ -255,14 +256,17 @@ async fn assign_rerun_follows_copy_conflict_behaviour() {
     );
 }
 
-/// The production resolver refuses every project until #10368; so does a
-/// fake asked for a name it does not hold, and a path is never a project.
+/// The registry resolver refuses a project no row holds; so does a fake
+/// asked for a name it does not hold, and a path is never a project.
 #[tokio::test]
 async fn assign_unknown_project_is_a_fixed_error_and_writes_nothing() {
     let h = harness().await;
     seed_owner(&h, "GH_PAT", VALUE).await;
     let args = ["assign", "trusty/acme:GH_PAT", "--project", "acme/api"];
-    let pending = run_in(&h.client, &h.repo, SHORT, SHORT, &args).await;
+    let empty = RegistryResolver {
+        dir: Some(h.tmp.path().join("empty-registry")),
+    };
+    let pending = assign_run(&h, &empty, person, &args).await;
     assert!(
         pending.err().starts_with(NOT_REGISTERED),
         "{}",
@@ -484,4 +488,90 @@ async fn assign_by_an_agent_from_an_unresolvable_cwd_is_refused() {
     let outcome = run_seam(&h.client, &bare, (SHORT, SHORT), false, seam, &args).await;
     assert!(outcome.err.is_some());
     assert_eq!(stored(&h.keychain, PROJECT_VAULT, "GH_PAT"), None);
+}
+
+/// #10368 regression: a session start in a checkout registers it, and
+/// `assign --project` then resolves it through the real registry resolver
+/// instead of refusing with `NOT_REGISTERED`. The registry lives under a
+/// temp home, never the real one.
+#[tokio::test]
+async fn a_session_started_checkout_is_an_assign_target() {
+    let h = harness().await;
+    seed_owner(&h, "GH_PAT", VALUE).await;
+    let home = TempDir::new().expect("tmp home");
+    let api = checkout(&h, "api", "git@github.com:Acme/Api.git");
+
+    let notice = project_notice(&api, Some(home.path())).await;
+
+    assert_eq!(notice, None, "the session start registered the checkout");
+    let registry = RegistryResolver {
+        dir: Some(registry_dir_under_home(home.path())),
+    };
+    let args = ["assign", "trusty/acme:GH_PAT", "--project", "acme/api"];
+    let outcome = assign_run(&h, &registry, person, &args).await;
+    assert_eq!(outcome.err, None);
+    assert!(
+        outcome.out.starts_with("assign to trusty/acme/api\n"),
+        "{}",
+        outcome.out
+    );
+    assert_eq!(
+        stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(),
+        Some(VALUE)
+    );
+}
+
+/// #10368 fail closed: a session start against a corrupt registry warns and
+/// registers nothing, and `assign` refuses with a fixed error and writes
+/// nothing.
+#[tokio::test]
+async fn a_failed_session_start_registration_leaves_assign_refusing() {
+    let h = harness().await;
+    seed_owner(&h, "GH_PAT", VALUE).await;
+    let home = TempDir::new().expect("tmp home");
+    let dir = registry_dir_under_home(home.path());
+    std::fs::create_dir_all(&dir).expect("mkdir registry");
+    std::fs::write(dir.join("projects.json"), "{ not json").expect("corrupt");
+    let api = checkout(&h, "api", "git@github.com:Acme/Api.git");
+
+    let notice = project_notice(&api, Some(home.path())).await;
+
+    let notice = notice.expect("a failed registration is reported");
+    assert!(notice.contains("was not registered"), "{notice}");
+    let registry = RegistryResolver { dir: Some(dir) };
+    let args = ["assign", "trusty/acme:GH_PAT", "--project", "acme/api"];
+    let outcome = assign_run(&h, &registry, person, &args).await;
+    assert!(
+        outcome.err().starts_with(REGISTRY_UNREADABLE),
+        "{}",
+        outcome.err()
+    );
+    assert_eq!(outcome.out, "");
+    assert_eq!(stored(&h.keychain, API_VAULT, "GH_PAT"), None);
+    assert!(
+        project_notice(&api, None).await.is_some(),
+        "no home is reported"
+    );
+}
+
+/// #10368: a session start in a second clone of a registered project names
+/// both checkouts, adds no row, and leaves the registry bytes as they were.
+#[tokio::test]
+async fn a_session_start_reports_a_project_registered_to_another_clone() {
+    let h = harness().await;
+    let home = TempDir::new().expect("tmp home");
+    let old = checkout(&h, "old-api", "git@github.com:Acme/Api.git");
+    let api = checkout(&h, "api", "git@github.com:Acme/Api.git");
+    assert_eq!(project_notice(&old, Some(home.path())).await, None);
+    let registry = registry_dir_under_home(home.path()).join("projects.json");
+    let before = std::fs::read(&registry).expect("registered");
+
+    let notice = project_notice(&api, Some(home.path())).await;
+
+    let notice = notice.expect("the other clone is reported");
+    let old = old.canonicalize().expect("canonical old");
+    let api = api.canonicalize().expect("canonical api");
+    assert!(notice.contains(&old.display().to_string()), "{notice}");
+    assert!(notice.contains(&api.display().to_string()), "{notice}");
+    assert_eq!(std::fs::read(&registry).expect("still there"), before);
 }

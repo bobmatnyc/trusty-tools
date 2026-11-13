@@ -12,8 +12,8 @@
 //! directory and whose `source` is the vault key. The value moves inside
 //! the server, which applies the agent deny, the Architect ticket (keyed on
 //! the destination's root) and the audit. tm prints names only.
-//! Until #10368's project registry lands, the only resolver is
-//! [`RegistryPending`], which refuses every project.
+//! The production resolver is [`RegistryResolver`], which reads the
+//! `projects.json` row a session start writes (#10368).
 //! Test: `assign_tests.rs` (a child of `tests.rs`).
 //!
 //! Governing document: DOC-74 §9, §15.2
@@ -45,9 +45,17 @@ pub(crate) const SRC_UNPINNED: &str =
 pub(crate) const PROJECT_FORM: &str =
     "tm secrets assign: --project is `owner/repo`, never a path; nothing was written";
 
-/// The refusal of [`RegistryPending`]: no project resolves before #10368.
+/// The refusal when no registered checkout holds the project.
 pub(crate) const NOT_REGISTERED: &str =
-    "tm secrets assign: project not registered (#10368); nothing was written";
+    "tm secrets assign: project not registered; nothing was written";
+
+/// The refusal when two registered checkouts hold the project.
+pub(crate) const AMBIGUOUS_PROJECT: &str =
+    "tm secrets assign: more than one registered checkout holds the project; nothing was written";
+
+/// The refusal when the project registry cannot be read.
+pub(crate) const REGISTRY_UNREADABLE: &str =
+    "tm secrets assign: the project registry could not be read; nothing was written";
 
 /// The refusal for a destination under another owner than the source's (D2).
 pub(crate) const OTHER_OWNER: &str = "tm secrets assign: the project belongs to another owner than the source vault; nothing was written";
@@ -92,8 +100,8 @@ impl ProjectName {
 
 /// Maps a project name to the checkout directory the server resolves.
 ///
-/// Why: D1 — the mapping belongs to #10368's project registry, which does
-/// not exist yet; the seam lets the verb ship and be tested without it.
+/// Why: D1 — the mapping belongs to #10368's project registry; the seam
+/// lets a test map projects without one.
 /// What: the checkout's absolute directory, or an error with fixed text
 /// that names no path the caller did not give.
 pub(crate) trait ProjectResolver: Sync {
@@ -101,15 +109,36 @@ pub(crate) trait ProjectResolver: Sync {
     fn checkout(&self, project: &ProjectName) -> anyhow::Result<PathBuf>;
 }
 
-/// The resolver until #10368: every project is unregistered.
+/// The registry-backed resolver (#10368).
 ///
-/// Test: `assign_unknown_project_is_a_fixed_error_and_writes_nothing`.
-pub(crate) struct RegistryPending;
+/// Why: a session start registers its checkout in `projects.json`; `assign`
+/// writes only into a checkout found there.
+/// What: [`registered_checkout`](trusty_mpm::project::registered_checkout)
+/// for `owner/repo` under `dir`, or under `registry_data_dir()` when `dir` is
+/// `None`. No row is [`NOT_REGISTERED`], two checkouts [`AMBIGUOUS_PROJECT`],
+/// a read error [`REGISTRY_UNREADABLE`]: every arm refuses (fail closed).
+/// Test: `a_session_started_checkout_is_an_assign_target`,
+/// `assign_unknown_project_is_a_fixed_error_and_writes_nothing`,
+/// `a_failed_session_start_registration_leaves_assign_refusing`.
+pub(crate) struct RegistryResolver {
+    /// The registry directory; `None` is the production one.
+    pub(crate) dir: Option<PathBuf>,
+}
 
-impl ProjectResolver for RegistryPending {
-    fn checkout(&self, _project: &ProjectName) -> anyhow::Result<PathBuf> {
-        // #11015: the registry-backed resolver lands with #10368.
-        bail!(NOT_REGISTERED)
+impl ProjectResolver for RegistryResolver {
+    fn checkout(&self, project: &ProjectName) -> anyhow::Result<PathBuf> {
+        use trusty_mpm::project::CheckoutLookupError as Lookup;
+        let dir = self
+            .dir
+            .clone()
+            .unwrap_or_else(trusty_mpm::project::registry_data_dir);
+        let key = format!("{}/{}", project.owner, project.repo);
+        // #10368: every lookup failure refuses; none falls back to a path.
+        trusty_mpm::project::registered_checkout(&dir, &key).map_err(|e| match e {
+            Lookup::NotRegistered(_) => anyhow!(NOT_REGISTERED),
+            Lookup::Ambiguous(_) => anyhow!(AMBIGUOUS_PROJECT),
+            Lookup::Store(_) => anyhow!(REGISTRY_UNREADABLE),
+        })
     }
 }
 
@@ -133,9 +162,9 @@ pub(crate) struct Seam<'a> {
     pub(crate) caller: fn() -> Caller,
 }
 
-/// The production seam: [`RegistryPending`] and [`judge_caller`].
+/// The production seam: [`RegistryResolver`] and [`judge_caller`].
 pub(crate) const PRODUCTION: Seam<'static> = Seam {
-    resolver: &RegistryPending,
+    resolver: &RegistryResolver { dir: None },
     caller: judge_caller,
 };
 

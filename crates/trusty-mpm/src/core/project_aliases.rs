@@ -401,7 +401,7 @@ pub fn main_checkout_root(path: &Path) -> Option<PathBuf> {
 /// Evaluation is lazy: `--git-common-dir` is not spawned when `--git-dir` fails.
 /// Test: not directly unit-testable (spawns a subprocess); `is_worktree_path`
 /// covers the same detection cases for unit tests.
-fn git_dir_differs_from_common(path: &Path) -> Option<bool> {
+pub(crate) fn git_dir_differs_from_common(path: &Path) -> Option<bool> {
     let run = |arg: &str| -> Option<String> {
         std::process::Command::new("git")
             .args(["-C", &path.to_string_lossy(), "rev-parse", arg])
@@ -426,7 +426,7 @@ fn git_dir_differs_from_common(path: &Path) -> Option<bool> {
 /// Returns `None` when no such ancestor exists (non-git directory or bare repo).
 /// Test: `find_git_root_returns_none_outside_repo`,
 /// `find_git_root_returns_some_in_this_repo`.
-fn find_git_root(cwd: &Path) -> Option<PathBuf> {
+pub(crate) fn find_git_root(cwd: &Path) -> Option<PathBuf> {
     for ancestor in cwd.ancestors() {
         if ancestor.join(".git").exists() {
             return Some(ancestor.to_path_buf());
