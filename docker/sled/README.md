@@ -109,8 +109,11 @@ without docker, in the `sled-static` job of `ci.yml`, which `CI gate` covers.
 `check_v1.sh` runs on the docker host, from the repo checkout. It reads
 `squid.conf`, `login.conf` and `active.conf` from the running proxy and fails
 on any rule that differs from its V1 policy or from `docker/sled/proxy/`. It
-checks that the app has no default route, reaches no TCP port on the internal
-network's gateway, and reaches the proxy on 3128 only. It sends the example.com
+checks that the app has no default route, reaches no TCP port 1-65535 and gets
+no answer on UDP 53, 123, 443 or 41641 from the internal network's gateway, and
+reaches the proxy on 3128 only. It sends raw `CONNECT`s for hex, dotted-hex,
+octal and integer forms of `1.1.1.1` and requires a 403 or 400 for each. It
+sends the example.com
 and raw-IP probes, then grades `access.log`: each probe added a fresh
 `TCP_DENIED/403` line, every `TCP_TUNNEL` names a steady host, at least one
 tunnel reached `api.anthropic.com`, nothing reached crates.io, huggingface.co,
@@ -248,15 +251,26 @@ support Unverified):
 - A tunnel opened during a login window stays open after `sled-profile
   steady`: a reconfigure applies to new connections only. `docker restart
   tm-trusty-cloud-sled-egress` drops it.
-- Raw-IP forms with letters, such as hex (`0x01010101`, `0x7f.0.0.1`), are not
-  matched by the `raw_ip` ACL. The final `http_access deny all` denies them,
-  because no allow names them. Octal and bare-integer forms are digits and
-  dots only, so `raw_ip` matches them.
+- Raw-IP forms: squid 7.7 rewrites hex, dotted-hex and integer literals
+  (`0x01010101`, `0x01.0x01.0x01.0x01`, `16843009`) to dotted decimal before
+  it matches ACLs, so `raw_ip` denies them; octal forms are digits and dots
+  only, so `raw_ip` matches them as written (measured, #11156). V1 sends each
+  form as a raw `CONNECT` and fails on any status but 403 or 400. A PTR record
+  that maps an IP to an allowed name is not tested.
 
-- Host requirement: the docker host's firewall must stop containers on the
-  sled's `--internal` bridge from reaching host services. Only the proxy peer
-  on 3128 is reachable. The V1 row "app reaches no TCP port on the internal
-  gateway" verifies this. Do not run the sled on a host where that row fails.
+- Host requirement: the docker host's firewall must drop all traffic from the
+  sled's `--internal` bridge to the host. Only the proxy peer on 3128 is
+  reachable. V1 checks this by behavior, not by reading the firewall rules: it
+  connects from the app to every TCP port 1-65535 on the network's gateway
+  (256 parallel workers, 1 s per port, at most about 5 minutes, bound 900 s)
+  and sends UDP probes to 53, 123, 443 and 41641. An open port, a TCP refusal,
+  a UDP reply or an ICMP port-unreachable is a FAIL; only a silent drop or no
+  route passes. Each worker also connects to the proxy's 3128, which must
+  open, and the embedded DNS at 127.0.0.11 must answer the UDP probe, so a
+  broken probe cannot pass. A short count, a missing tool or a scan past the
+  bound is a FAIL. A UDP service that answers nothing, such as WireGuard, is
+  not distinguishable from a drop. Do not run the sled on a host where a
+  gateway row fails.
 
 ## Teardown
 
