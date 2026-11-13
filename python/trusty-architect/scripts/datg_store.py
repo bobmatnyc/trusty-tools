@@ -2,7 +2,7 @@
 
 Why: datg.py passed the 500-SLOC cap; #10161 P3 split it by section, bodies moved verbatim.
 What: constants and RULES, DatgError, the per-PM directory (`_SESSION` lives here and
-datg.py main() sets it from --session), load_state, commit (with its one automatic prune),
+datg.py main() sets it from --session; `_STATE_DIR` likewise from --state-dir, #11101), load_state, commit (with its one automatic prune),
 reconcile_archive and Locked, plus the log readers and prune policy commit() falls back on.
 datg.py re-exports every name.
 Test: tests/test_datg.py
@@ -22,7 +22,7 @@ STATUS = {
     "G": ("active", "done", "parked"),
     "D": ("open", "answered", "done"),
     "A": ("open", "answered", "done"),
-    "T": ("open", "running", "done"),
+    "T": ("open", "running", "done", "parked"),   # #11101: parked is set aside, outside the WIP cap
 }
 EVENTS = ("open", "escalated", "answered", "done", "drift", "reprio", "update")
 CODE_RE = re.compile(r"^[a-z][a-z0-9]{1,7}$")
@@ -59,13 +59,17 @@ SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 WHO = ("owner", "architect", "ci", "agent", "other")
 VAGUE = {"latest", "main", "master", "head", "current", "tbd", "unknown", "?", "n/a", "none", "-"}
 _SESSION = None  # set by --session; forces the per-PM directory
+_STATE_DIR = None  # #11101: set by --state-dir or $DATG_STATE_DIR; the exact directory, no resolution at all
 
 RULES = (
     "DATG rules (state: .trusty-mpm/datg/state.json). You are the only writer: one "
     "`python3 {py} <verb>` call at the end of EVERY turn. "
-    "1) Every Agent dispatch prompt starts 'Goal: {code}-Gxx' and names its work card 'Card: {code}-Txx'; "
-    "no goal id, no dispatch. "
-    "2) Handbacks end with: Goals (rank order), Open D/A (ids), Next. "
+    # #11101: `Task:` replaces `Card:`, as in the Architect prototype; the handback ends with the pulse tag.
+    "1) Every Agent dispatch prompt starts 'Goal: {code}-Gxx' and carries 'Task: {code}-Txx@MMDD' "
+    "(an open task of the PM, never a new one for a subagent: it carries its parent's id); no goal id, no dispatch; "
+    "a missing task id is logged. Unplanned work stacks on an existing task or waits. "
+    "2) Handbacks end with the last line 'Task: <id>@MMDD | done: <x> | est: <x> | remaining: <x> | pct: <n>', "
+    "above it: Goals (rank order), Open D/A (ids), Next. "
     "3) Owner questions are D, owner actions are A (options, recommendation first); cite ids, never repeat. "
     "4) Before dispatch: does it serve the top active goal? If none, record a D 'drift:'. "
     "5) Unsettled D/A: set esc=architect and SendMessage tm-architect. "
@@ -122,6 +126,11 @@ def per_pm_session(project):
 
 
 def datg_dir(project):
+    """The state directory. An explicit --state-dir / $DATG_STATE_DIR wins (#11101): scheduler callers pass the
+    one their il-schedule.json entry names, so the answer never depends on tmux or the caller's environment."""
+    forced = _STATE_DIR or os.environ.get("DATG_STATE_DIR")
+    if forced:
+        return forced
     base = os.path.join(project, ".trusty-mpm", "datg")
     s = per_pm_session(project)
     return os.path.join(base, s) if s else base
@@ -184,6 +193,38 @@ def _largest(st, n=3):
     objs = [(len(json.dumps(o, ensure_ascii=False).encode()), o.get("id", "?"))
             for k in ("goals", "items", "tasks") for o in st[k]]
     return ", ".join(f"{i} ({b} B)" for b, i in sorted(objs, reverse=True)[:n])
+
+
+def size_report(st, n=3):
+    """Where the bytes are: biggest collections (entries, status mix), the biggest field of the biggest one,
+    and the biggest single items. Names what to close or shorten; pure, reads only `st`.
+
+    #11101: ported from the prototype for callers; commit() keeps the `largest:` text the Rust writer
+    reproduces byte for byte (tests/fixtures/ledger/writer).
+    """
+    def b(o):
+        return len(json.dumps(o, ensure_ascii=False).encode())
+    cols = sorted(((b(st.get(k) or []), k) for k in ("goals", "items", "tasks")), reverse=True)
+    parts = []
+    for size, k in cols[:2]:
+        rows = st.get(k) or []
+        mix = {}
+        for o in rows:
+            mix[o.get("status", "?")] = mix.get(o.get("status", "?"), 0) + 1
+        parts.append(f"{k} {size} B ({len(rows)} entries: " + ", ".join(f"{v} {s}" for s, v in sorted(mix.items())) + ")")
+    top = cols[0][1]
+    fields = {}
+    for o in st.get(top) or []:
+        for f, v in o.items():
+            fields[f] = fields.get(f, 0) + b(v)
+    if fields:
+        f, size = max(fields.items(), key=lambda kv: kv[1])
+        parts.append(f"biggest field {top}[].{f} {size} B")
+    ses = st.get("session") or {}
+    if ses:
+        f, size = max(((f, b(v)) for f, v in ses.items()), key=lambda kv: kv[1])
+        parts.append(f"session.{f} {size} B")
+    return "; ".join(parts) + "; largest: " + _largest(st, n)
 
 
 def commit(project, st, events, archived=()):

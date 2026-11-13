@@ -35,6 +35,9 @@ scripts/notify-supervisor.sh
 scripts/pm-digest.py
 scripts/pm-notify.sh
 scripts/pm_intake.py
+# #11101: the Task-ID tag grammar (pm_intake.py and datg_task.py import it) and the task pulse.
+scripts/task_tag.py
+scripts/task_pulse.py
 
 # Intent Ledger set (P3). datg.py stages whole; the subproject splits it into
 # datg_store/ops/log/read.py behind a datg.py facade (500-SLOC cap).
@@ -188,10 +191,15 @@ scripts/turn-active.py
 scripts/pm_cursor.py
 scripts/pending-answers.py
 scripts/pending_hook_dedupe.py
+# #11064: technical level reader, from prototype ab5a222 (hand-merged: TECH LEVEL line, per-user and per-item levels).
+scripts/technical_level.py
+scripts/test_technical_level.py	tests/test_technical_level.py
 templates/dashboard/tokens.css
 scripts/test_brief_id.py	tests/test_brief_id.py
 scripts/test_ctx_watch.py	tests/test_ctx_watch.py
 scripts/test_datg.py	tests/test_datg.py
+scripts/test_task_tag.py	tests/test_task_tag.py
+scripts/test_task_pulse.py	tests/test_task_pulse.py
 scripts/test_il_cron.py	tests/test_il_cron.py
 scripts/test_pm_cursor.py	tests/test_pm_cursor.py
 scripts/test_pending_answers_hook.py	tests/test_pending_answers_hook.py

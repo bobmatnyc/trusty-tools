@@ -64,6 +64,12 @@ assert_eq "tmux: docs only"                     "false" "$(rel tmux-targets 'doc
 README.md')"
 assert_eq "tmux: node_modules is not scanned"   "false" "$(rel tmux-targets 'website/node_modules/x/y.js')"
 assert_eq "tmux: website content"               "false" "$(rel tmux-targets 'website/src/content/tools/x.md')"
+assert_eq "sled: its Dockerfile (#11156)"       "true"  "$(rel sled-static 'docker/sled/Dockerfile')"
+assert_eq "sled: its proxy config"              "true"  "$(rel sled-static 'docker/sled/proxy/squid.conf')"
+assert_eq "sled: the static check"              "true"  "$(rel sled-static 'scripts/check_sled_tailscale_isolation.sh')"
+assert_eq "sled: the hosting workflow"          "true"  "$(rel sled-static '.github/workflows/ci.yml')"
+assert_eq "sled: cloudtest is not the sled"     "false" "$(rel sled-static 'docker/cloudtest/Dockerfile')"
+assert_eq "sled: docs only"                     "false" "$(rel sled-static 'docs/a.md')"
 assert_eq "C-quoted path (fail closed)"         "true"  "$(rel teardown-guard '"crates/caf\303\251.rs"')"
 assert_eq "empty change set (fail closed)"      "true"  "$(rel tmux-targets '')"
 assert_eq "no usable base (fail closed)" "true" \
@@ -178,8 +184,10 @@ assert_eq "teardown-guard skips only on an explicit false" "1" \
   "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.teardown_guard_relevant != 'false' }}" "$ci")"
 assert_eq "tmux-exact-targets skips only on an explicit false" "1" \
   "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.tmux_targets_relevant != 'false' }}" "$ci")"
-assert_eq "changes exports both relevance outputs" "2" \
-  "$(grep -cE '^      (teardown_guard|tmux_targets)_relevant: \$\{\{ steps\.detect-shell-gates\.outputs\.' "$ci")"
+assert_eq "sled-static skips only on an explicit false" "1" \
+  "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.sled_static_relevant != 'false' }}" "$ci")"
+assert_eq "changes exports all three relevance outputs" "3" \
+  "$(grep -cE '^      (teardown_guard|tmux_targets|sled_static)_relevant: \$\{\{ steps\.detect-shell-gates\.outputs\.' "$ci")"
 # Owner ruling 2026-09-27: trusty-common is tested by its coverage lanes and
 # nowhere else, so no single `-p trusty-common` run can pass for the crate.
 lanes_job="$(sed -n '/^  trusty-common-lanes:$/,/^  # ----/p' "$ci")"
@@ -221,7 +229,7 @@ assert_eq "no other ci.yml job runs the fastembed selftest" "1" \
   "$(grep -c 'run: .*check_fastembed_cache_selftest\.sh$' "$ci")"
 assert_eq "ci.yml triggers carry no path filter" "0" \
   "$(sed -n '/^on:$/,/^[a-z]/p' "$ci" | grep -cE '^[[:space:]]+paths(-ignore)?:')"
-for moved in teardown-guard tmux-exact-targets tag-publish-parity changelog-fragment; do
+for moved in teardown-guard tmux-exact-targets tag-publish-parity changelog-fragment sled-static; do
   assert_eq "${moved}.yml is gone (one check run per name)" "0" \
     "$([ -e ".github/workflows/${moved}.yml" ] && echo 1 || echo 0)"
 done

@@ -1,14 +1,15 @@
 //! #10063 PR 3: `fsck` dangling references (DOC-82 LDG-2.2.5), the change
 //! log's first batch and legacy baseline, symlinked parents on every write
 //! path, an unreadable reference check, and the method names DOC-82 gives
-//! the daemon (owner ruling D34).
+//! the daemon (owner ruling D34). #11064: a technical level outside the six
+//! is refused on every write path, whatever the schema mode.
 
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
-use trusty_architect::dashboard::store::{dir, jsonl};
+use trusty_architect::dashboard::store::{Versioned, dir, jsonl};
 use trusty_architect::dashboard::{DashError, DeleteArchive, Format, Op, PruneLog, Removed, Store};
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -327,5 +328,105 @@ fn doc82_names_the_dashboard_methods_with_the_mpm_prefix() -> R {
         !text.contains("| `architect.dashboard."),
         "DOC-82 still names the unprefixed methods"
     );
+    Ok(())
+}
+
+/// `(version, body)` of `coll/id`, or `None` when it does not exist.
+fn snap(s: &Store, coll: &str, id: &str) -> Result<Option<Versioned>, DashError> {
+    match s.get(coll, id) {
+        Ok(d) => Ok(Some((d.version, d.data))),
+        Err(DashError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// #11064 ruling (a): a store with no schemas attached (the shipped
+/// `verbs::open` store) still refuses a `set` of a level outside the six.
+#[test]
+fn technical_level_outside_the_six_is_refused_on_set() -> R {
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        let (s, _) = store(tmp.path(), format)?;
+        s.set("meta", "settings", json!({"technical_level": "pm"}), None)?;
+        let before = snap(&s, "meta", "settings")?;
+        let bad = s.set(
+            "meta",
+            "settings",
+            json!({"technical_level": "CTO"}),
+            Some(1),
+        );
+        assert!(
+            matches!(&bad, Err(DashError::Invalid(m)) if m.contains("technical_level")),
+            "{format:?}: {bad:?}"
+        );
+        assert_eq!(snap(&s, "meta", "settings")?, before, "{format:?}");
+        let new = s.set("items", "D01", json!({"level_override": "guru"}), None);
+        assert!(
+            matches!(&new, Err(DashError::Invalid(_))),
+            "{format:?}: {new:?}"
+        );
+        assert_eq!(snap(&s, "items", "D01")?, None, "{format:?}");
+    }
+    Ok(())
+}
+
+/// #11064 ruling (a): an `update` of a level outside the six is refused and
+/// the stored document is unchanged; a valid level still writes.
+#[test]
+fn technical_level_outside_the_six_is_refused_on_update() -> R {
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        let (s, _) = store(tmp.path(), format)?;
+        s.set(
+            "items",
+            "D01",
+            json!({"status": "open", "level_override": "engineer"}),
+            None,
+        )?;
+        let before = snap(&s, "items", "D01")?;
+        for value in [json!("guru"), json!(null), json!(3)] {
+            let bad = s.update("items", "D01", json!({"level_override": value}), None);
+            assert!(
+                matches!(&bad, Err(DashError::Invalid(m)) if m.contains("level_override")),
+                "{format:?}: {bad:?}"
+            );
+            assert_eq!(snap(&s, "items", "D01")?, before, "{format:?}");
+        }
+        s.update("items", "D01", json!({"level_override": "cto"}), None)?;
+    }
+    Ok(())
+}
+
+/// #11064 ruling (a): one refused op aborts the whole batch; nothing the
+/// batch named is written.
+#[test]
+fn technical_level_outside_the_six_aborts_the_batch() -> R {
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        let (s, _) = store(tmp.path(), format)?;
+        s.set("meta", "settings", json!({"technical_level": "pm"}), None)?;
+        let before = snap(&s, "meta", "settings")?;
+        let ops = [
+            Op::Set {
+                collection: "items".into(),
+                id: "D01".into(),
+                data: json!({"status": "open"}),
+                if_version: None,
+            },
+            Op::Update {
+                collection: "meta".into(),
+                id: "settings".into(),
+                data: json!({"technical_level": "CTO"}),
+                if_version: None,
+            },
+        ];
+        let bad = s.batch(&ops);
+        assert!(
+            matches!(&bad, Err(DashError::Invalid(m)) if m.contains("op 2")),
+            "{format:?}: {bad:?}"
+        );
+        assert_eq!(snap(&s, "meta", "settings")?, before, "{format:?}");
+        assert_eq!(snap(&s, "items", "D01")?, None, "{format:?}");
+    }
     Ok(())
 }

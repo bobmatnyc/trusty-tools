@@ -36,8 +36,19 @@
 # credentials only, so no RSA decryption runs; no RSA credential is stored or
 # used at approval. Review by 2027-02-07 (owner
 # ruling D72, #8878 PR2b-1b). Same reason as in `deny.toml`.
+#
+# RUSTSEC-2026-0436 — calamine CFB/OLE2 parser panics or allocates without
+# bound on a crafted .xls/.xlsb; denial of service only, no memory unsafety.
+# Patched only in calamine >= 0.38.0. The OKF extraction worker vendors
+# calamine 0.36.1 through a path patch (workers/okf-extract/vendor/calamine,
+# #11093), so it reaches this file only through
+# `cargo audit --file workers/okf-extract/Cargo.lock`. EXPIRES 2026-12-12 (owner
+# ruling Dgp, 2026-11-12, 30 days). Exit: #11154 moves the worker to
+# calamine >= 0.38.0 and this id leaves both files. See #11094. Same reason as
+# in `deny.toml`.
 ignore = [
   "RUSTSEC-2023-0071",
+  "RUSTSEC-2026-0436",
   "RUSTSEC-2026-0429",
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",

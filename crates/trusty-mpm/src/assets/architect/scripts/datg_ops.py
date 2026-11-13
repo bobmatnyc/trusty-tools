@@ -1,8 +1,9 @@
-"""datg_ops.py: validate and apply datg write ops (add, update, session, close).
+"""datg_ops.py: validate and apply datg write ops (add, update, session, pulse, close).
 
 Why: datg.py passed the 500-SLOC cap; #10161 P3 split it by section, bodies moved verbatim.
-What: id and option checks, apply_add/update/session/op, collect_closed and write_ops_ev
-(one locked, all-or-nothing commit). datg.py re-exports every name.
+What: id and option checks, apply_add/update/session/pulse/op, collect_closed and write_ops_ev
+(one locked, all-or-nothing commit). #11101: `add T` stamps `created` and runs the WIP cap check
+(datg_task). datg.py re-exports every name.
 Test: tests/test_datg.py
 """
 import json
@@ -12,6 +13,7 @@ import sys
 import time
 
 import datg_guards
+from datg_task import wip_check
 
 from datg_store import (CODE_RE, DEFAULT_BLOCK_AFTER, ID_RE, PREFIXES, SESSION_MAX, STATUS, TITLE_MAX, VAGUE,
                         WHO, DatgError, Locked, commit, load_state, now_iso, parse_ts, paths)
@@ -127,7 +129,8 @@ def apply_add(st, a):
         _check_goal(st, a.get("goal"))
         if pre == "T":
             obj = {"id": new_id, "goal": a["goal"], "title": title, "status": a.get("status") or "open",
-                   "to": a.get("to") or "", "outcome": ""}
+                   "to": a.get("to") or "", "outcome": "", "created": now_iso()}   # #11101: the @MMDD stamp
+            wip_check(st, new_id)
             if obj["status"] not in STATUS["T"][:2]:
                 raise DatgError("new task status must be open or running")
             st["tasks"].append(obj)
@@ -243,11 +246,14 @@ def _bad(msg):
 
 def _rows(a, key, mx, name):
     rows = a[key]
-    if not isinstance(rows, list) or len(rows) > mx or any(not isinstance(r, dict) for r in rows):
+    if isinstance(rows, list) and len(rows) > mx:   # #11101: name the cap that was hit
+        raise DatgError(f"{name}: {len(rows)} rows is over the cap of {mx} (max {mx}); drop or merge rows")
+    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
         raise DatgError(f"{name}: a list of at most {mx} objects")
     return rows
 
 
+OWED_MAX = 8   # #11101: the digest prints owed (n/OWED_MAX)
 REF_KEY = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
 REFS_MAX = 12
 
@@ -289,7 +295,7 @@ def apply_session(st, a):
             for r in _rows(a, "waiting_on", 5, "waiting_on")]
     if "owed" in a:
         owed = []
-        for r in _rows(a, "owed", 8, "owed"):
+        for r in _rows(a, "owed", OWED_MAX, "owed"):
             exp = _lim(r.get("expect"), "owed.expect", 80, True)
             if exp.lower() in VAGUE:
                 raise DatgError(f"owed.expect must be an exact value (SHA, run id, count), not {exp!r}")
@@ -326,6 +332,19 @@ def apply_session(st, a):
     return {"id": f"{st['code']}-session", "ev": "update", "note": ses.get("task", "")[:120]}
 
 
+def apply_pulse(st, a):
+    """Record a pulse on a task: note, last_msg_at, last_signal_at. Never touches status or outcome (#11101)."""
+    pre, o = _find(st, a.get("id"))
+    if pre != "T":
+        raise DatgError("pulse applies to tasks")
+    if a.get("note") is not None:
+        o["pulse"] = _lim(a["note"], "pulse", 200)
+    for k in ("last_msg_at", "last_signal_at"):
+        if a.get(k):
+            o[k] = _lim(a[k], k, 30, req=True)
+    return {"id": o["id"], "ev": "update", "note": "pulse"}
+
+
 def apply_op(st, a):
     verb = a.get("op")
     if verb == "add":
@@ -334,6 +353,8 @@ def apply_op(st, a):
         return apply_update(st, a)
     if verb == "session":
         return [apply_session(st, a)]
+    if verb == "pulse":   # #11101: task_pulse.py writes it
+        return [apply_pulse(st, a)]
     if verb == "close":
         if not a.get("outcome"):
             raise DatgError("close needs --outcome")
