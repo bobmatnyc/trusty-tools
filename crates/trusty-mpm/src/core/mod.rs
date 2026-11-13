@@ -296,6 +296,8 @@ pub mod pane_foreground;
 #[cfg(test)]
 pub(crate) mod pane_foreground_tests;
 pub mod paths;
+// #10753: tmux-ancestry evidence that a pid file's session still exists.
+pub mod pid_host;
 pub mod pid_registry;
 // #8992: the built-in tools a tm-launched PM does not load.
 pub mod pm_tool_trim;

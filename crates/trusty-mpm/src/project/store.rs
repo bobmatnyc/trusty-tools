@@ -431,6 +431,24 @@ pub(super) fn read_projects_blocking(data_dir: &Path) -> Option<Vec<Project>> {
     Some(data.projects.into_values().collect())
 }
 
+/// Read the registry's projects without a lock or a runtime, failing closed.
+///
+/// Why: #10368 — a secrets resolver must tell "no such project" from "the
+/// registry could not be read"; [`read_projects_blocking`] answers `None` for both.
+/// What: an absent `projects.json` is an empty list, as in [`ProjectStore::load`];
+/// any other read error and any parse error is returned.
+/// Test: `session_start_registration_failure_is_an_error_not_a_registration`.
+pub(super) fn read_projects(data_dir: &Path) -> Result<Vec<Project>, ProjectStoreError> {
+    let bytes = match std::fs::read(data_dir.join("projects.json")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(ProjectStoreError::Io(e)),
+    };
+    let data: StoredData =
+        serde_json::from_slice(&bytes).map_err(|e| ProjectStoreError::Serialize(e.to_string()))?;
+    Ok(data.projects.into_values().collect())
+}
+
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;

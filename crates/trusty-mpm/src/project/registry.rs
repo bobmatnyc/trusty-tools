@@ -161,12 +161,9 @@ impl ProjectRegistry {
             .mutate(move |projects| {
                 // #10586: hand the kept record back, so init can name it.
                 // #10586: a legacy record stores no key; derive it, as #10696 does.
-                let present = projects.values().find(|p| {
-                    p.name == project.name
-                        || p.repo_url == project.repo_url
-                        || (key.is_some()
-                            && p.project_key.clone().or_else(|| origin_key(&p.repo_url)) == key)
-                });
+                let present = projects
+                    .values()
+                    .find(|p| holds_registration(p, &project, key.as_deref()));
                 if let Some(kept) = present {
                     return Ok(Some(kept.clone()));
                 }
@@ -501,6 +498,24 @@ impl ExistingProjects {
         self.origin_urls.contains(repo_url.trim())
             || origin_key(repo_url).is_some_and(|key| self.origin_keys.contains(&key))
     }
+}
+
+/// Whether stored row `p` already holds `project`: same name, same `repo_url`,
+/// or the same `owner/repo` `key` (a legacy row's derived from its URL).
+///
+/// Why: #10368 — the session-start pre-check and
+/// [`ProjectRegistry::register_unless_present`] must agree on "present".
+/// Test: `register_unless_present_matches_on_project_key`,
+/// `session_start_second_start_leaves_the_bytes_alone`.
+pub(super) fn holds_registration(p: &Project, project: &Project, key: Option<&str>) -> bool {
+    p.name == project.name
+        || p.repo_url == project.repo_url
+        || (key.is_some()
+            && p.project_key
+                .clone()
+                .or_else(|| origin_key(&p.repo_url))
+                .as_deref()
+                == key)
 }
 
 /// The `owner/repo` key of a remote URL, or `None` for a checkout path.

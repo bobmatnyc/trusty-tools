@@ -1,8 +1,9 @@
 # sled: trusty stack behind the egress proxy (#11073)
 
-The sled image runs `tm daemon`, `trusty-memory`, `trusty-search`, Claude Code
-and `tailscaled` in one Ubuntu 26.04 container on an `--internal` network. The
-only way out is one squid proxy with a host allowlist. Rules: DOC-90 and
+The sled image runs `tm daemon`, `trusty-memory`, `trusty-search` and Claude
+Code in one Ubuntu 26.04 container on an `--internal` network. `tailscaled`
+runs in a sidecar container, as its own uid, in the app's network namespace
+(#11156). The only way out is one squid proxy with a host allowlist. Rules: DOC-90 and
 ADR-0076 (PR #11072), owner rulings D1b and D20. Derived from
 `docker/cloudtest/` (#11054), which stays unchanged.
 
@@ -12,6 +13,7 @@ ADR-0076 (PR #11072), owner rulings D1b and D20. Derived from
 |---|---|
 | App container and image | `tm-trusty-cloud-sled` |
 | Proxy container and image | `tm-trusty-cloud-sled-egress` |
+| Tailscale sidecar container and image | `tm-trusty-cloud-sled-tailscale`, state volume of the same name |
 | Internal network | `tm-trusty-cloud-sled-internal`, subnet `10.250.78.0/24` |
 
 The proxy name is the host in the Dockerfile's `HTTPS_PROXY`. The subnet is the
@@ -25,7 +27,12 @@ docker/sled/fetch.sh docker/sled/dl          # downloads and sha256-verifies; fa
 docker build -t tm-trusty-cloud-sled-egress:$SHA docker/sled/proxy
 docker build -t tm-trusty-cloud-sled:$SHA \
   --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" docker/sled
+docker build --target tailscale-sidecar -t tm-trusty-cloud-sled-tailscale:$SHA \
+  --build-arg UID="$(id -u)" docker/sled
 ```
+
+The sidecar's `tailscale` user has uid `TS_UID` (default 1999). The build
+refuses a `TS_UID` of 0 or equal to `UID`.
 
 The build reaches the network; the running sled does not. Claude Code is pinned
 by `CLAUDE_CODE_VERSION`/`CLAUDE_CODE_SHA256`, Tailscale by
@@ -47,7 +54,30 @@ arg. `.dockerignore` excludes all three names. Check a file with `stat`, never
 `cat`. `gh-token-run git fetch ...` and `gh-token-run gh api ...` put the GitHub
 token into that one process; git reaches it through `gh auth git-credential`.
 
+## Launch (the only supported way)
+
+Every sled reaches the internet only through the egress proxy surface, and
+`docker/sled/launch.sh --tag $SHA` is the only supported way to start one
+(DOC-90 §12). It creates the `--internal` network on the `internal_net`
+subnet of `proxy/squid.conf`, starts the proxy and the app hardened (all caps
+dropped, `no-new-privileges`, read-only root, pids, memory, swap and cpu
+limits), starts the Tailscale sidecar when its image exists, and refuses on a
+published port, a second network, privileged mode, an added cap, a host
+namespace, a mount outside its allowlist, a token-like env name (allowlist:
+`TRUSTY_CONSOLE_TOKEN_FILE`), a secret file looser than 600 or not owned by
+`SLED_UID`, or Docker older than 26.0.0. The proxy entrypoint binds squid to
+its internal-network address only, so nothing on the default bridge gets an
+answer on 3128. After `check.sh` and `exercise.sh`, launch runs V1 and V5 and
+prints `RESULT: READY (V1 PASS, V5 PASS; V2-V4 not scripted, see #11167)`.
+`launch.sh --check-only` re-inspects a running sled; it acts only on
+containers carrying the `trusty.sled.launch` label launch sets. It needs `jq`
+on the host. `scripts/check_sled_launch.sh` tests it offline with a stub
+`docker`.
+
 ## Run
+
+Reference only: the commands below show what `launch.sh` does. Do not start a
+sled with them.
 
 ```bash
 ST=~/sled-state/tm-trusty-cloud-sled
@@ -70,7 +100,16 @@ docker run -d --name tm-trusty-cloud-sled --cpus 4 --memory 6g \
   -v $ST/secrets/github-token:/run/secrets/github-token:ro \
   -v $ST/secrets/trusty-console-token:/run/secrets/trusty-console-token:ro \
   tm-trusty-cloud-sled:$SHA
+
+# tailscaled sidecar: the app's network namespace, its own uid and filesystem
+docker run -d --name tm-trusty-cloud-sled-tailscale --cpus 0.5 --memory 256m \
+  --network container:tm-trusty-cloud-sled \
+  -v tm-trusty-cloud-sled-tailscale:/var/lib/tailscale \
+  tm-trusty-cloud-sled-tailscale:$SHA
 ```
+
+The sidecar lives in the app's network namespace, so restart it after any
+restart of the app. Mount nothing from `$ST/secrets` into it.
 
 ## Verify (DOC-90 section 9, V1)
 
@@ -78,26 +117,61 @@ docker run -d --name tm-trusty-cloud-sled --cpus 4 --memory 6g \
 docker exec -u sled tm-trusty-cloud-sled check.sh          # stack check
 docker exec -u sled tm-trusty-cloud-sled exercise.sh       # Claude session (or the credential-free API probe), git fetch, gh api
 docker/sled/check_v1.sh tm-trusty-cloud-sled tm-trusty-cloud-sled-egress
+docker/sled/check_tailscale.sh tm-trusty-cloud-sled tm-trusty-cloud-sled-tailscale   # V5
 docker exec tm-trusty-cloud-sled-egress cat /var/log/squid/access.log
 ```
 
-`exercise.sh --tailscale-login` also runs `tailscale up` with no auth key, which
-asks the control plane for a login URL; the URL goes to the log redacted.
+`check_tailscale.sh` (V5) runs on the docker host. As the app's `sled` uid it
+runs `tailscale up`, `set --ssh`, `funnel` and `nc`; each must fail to reach
+a daemon. It checks that the app has no `tailscaled` process or binary and no
+writable socket, and that the sidecar runs `tailscaled` as another uid with a
+0700 socket directory, SSH off, no Funnel, and no TCP listener (SOCKS5,
+HTTP proxy or debug) in the shared network namespace.
+`scripts/check_sled_tailscale_isolation.sh` checks the same layout statically,
+without docker, in the `sled-static` job of `ci.yml`, which `CI gate` covers.
 `check_v1.sh` runs on the docker host, from the repo checkout. It reads
 `squid.conf`, `login.conf` and `active.conf` from the running proxy and fails
 on any rule that differs from its V1 policy or from `docker/sled/proxy/`. It
-checks that the app has no default route, reaches no TCP port on the internal
-network's gateway, and reaches the proxy on 3128 only. It sends the example.com
+checks that the app has no default route, reaches no TCP port 1-65535 and gets
+no answer on UDP 53, 123, 443 or 41641 from the internal network's gateway, and
+reaches the proxy on 3128 only. It sends raw `CONNECT`s for hex, dotted-hex,
+octal and integer forms of `1.1.1.1` and requires a 403 or 400 for each. It
+sends the example.com
 and raw-IP probes, then grades `access.log`: each probe added a fresh
 `TCP_DENIED/403` line, every `TCP_TUNNEL` names a steady host, at least one
 tunnel reached `api.anthropic.com`, nothing reached crates.io, huggingface.co,
 registry.npmjs.org, pypi.org or downloads.claude.ai, and `--noproxy` and DNS
 fail to connect. It prints PASS or FAIL per row and exits non-zero on any FAIL;
 an unreadable log, an empty `profile.log` or a stopped container is a FAIL.
+The TCP scan sizes its workers to the app's pid cap (`--pids-limit 1024`),
+at most `V1_SCAN_JOBS` (256), or 128 when the cap is unreadable, so it never
+exhausts the cap that every later `docker exec` needs (#11156). A failed scan
+prints its output and kills its leftover workers. A UDP exec that printed no
+result and exited 125-127 (docker could not start it) is tried again, up to
+`V1_EXEC_TRIES` (3) times in all. A probe that printed a result is never
+retried; a non-zero exit after a result is a FAIL.
+
+### Live cases
+
+Run on a docker host with the sled images built as `:ltest` from this
+directory, on the free subnet of `proxy/squid.conf`. Dummy secrets only;
+`ST` is a state dir (0700) with `state/` and `secrets/github-token`,
+`secrets/trusty-console-token` (0600).
+
+| Case | Command | Expected |
+|---|---|---|
+| 1 launch | `./launch.sh --tag ltest --name tm-ltest --state $ST` | With a dummy token: `exercise.sh` fails on `gh api` (401), `RESULT: REFUSED`, exit 1, containers stopped. A real token ends `RESULT: READY`. |
+| 1b restart | `docker start tm-ltest-egress tm-ltest`, then `docker start tm-ltest-tailscale`; `./launch.sh --check-only --name tm-ltest --state $ST` | `RESULT: CHECK OK`, exit 0. |
+| 2 V1 | `./check_v1.sh tm-ltest tm-ltest-egress tm-ltest-internal` | Every row PASS except, after a restart, the two tunnel rows ("run exercise.sh first"): the restart clears the proxy's log tmpfs. |
+| 3 bridge | `docker run --rm --network bridge curlimages/curl -sS -m 5 -x http://$B:3128 https://example.com`, `B` = the proxy's bridge address | curl exit 7, connect refused. |
+| 4 foreign target | `docker run -d --name tm-lother busybox sleep 300`; `./launch.sh --check-only --name tm-lother --state $ST` | `REFUSE target: ... nothing stopped`, exit 1, tm-lother still up. |
+| 5 late network | `docker network connect bridge tm-ltest`; `./launch.sh --check-only --name tm-ltest --state $ST` | `REFUSE network`, exit 1, app and sidecar stopped, proxy up. |
+| 6 loose secret | remove the sled, `chmod 644 $ST/secrets/github-token`, `./launch.sh --tag ltest --name tm-ltest --state $ST` | `REFUSE secrets: ... mode 644`, exit 1, no container created. |
+| 7 bad tries | `SLED_CHECK_TRIES=x ./launch.sh --tag ltest --name tm-ltest --state $ST` | `SLED_CHECK_TRIES must be a whole number`, exit 2. |
 
 Logs: the entrypoint, `check.sh` and `exercise.sh` run with `umask 077`, and
-`/data/logs` is mode 0700, so every log there is 0600 and owner-only. The
-`tailscaled` log holds a live login URL until the node is logged in.
+`/data/logs` is mode 0700, so every log there is 0600 and owner-only.
+`tailscaled` logs to the sidecar's `docker logs`, outside the app.
 
 ### Unverified
 
@@ -147,15 +221,54 @@ Not yet enforced by the binaries:
 
 ## Tailscale
 
-`tailscaled` runs as the `sled` user with `--tun=userspace-networking` (no TUN
-device, no capability), state in `/data/tailscale`, and the proxy env. The
-internal network gives it no UDP route, so direct WireGuard and STUN should
-not work and peers should be reached over DERP only. That is UNVERIFIED: no
-tailnet has been joined. Joining a tailnet and `tailscale serve` need an owner
-login (`tailscale up`, then the URL), not done yet.
+`tailscaled` runs in the `tm-trusty-cloud-sled-tailscale` sidecar as the
+`tailscale` user (`TS_UID`), with `--tun=userspace-networking` (no TUN device,
+no capability), state in the sidecar's own volume, and the proxy env. It
+shares only the app's network namespace, so `tailscale serve` reaches the
+console on `127.0.0.1:7788`. Its LocalAPI socket,
+`/var/run/tailscale/tailscaled.sock`, is a path in the sidecar's filesystem in
+a 0700 directory, so no process in the app can open it. No sled agent or
+Claude Code process can run `tailscale up`, `login`, `set`, `funnel`, `serve`
+or `nc` against it, and none gets a read-only status either. The app image
+carries the `tailscale` client only, so V5 can show it reaches no daemon.
+An earlier image kept state in `/data/tailscale`; the entrypoint deletes it.
 
-Measured on a Linux docker host with Tailscale 1.104.6, logged out (DOC-90 section 6 marked
-proxy support Unverified):
+The internal network gives `tailscaled` no UDP route, so direct WireGuard and
+STUN should not work and peers should be reached over DERP only. That is
+UNVERIFIED: no tailnet has been joined.
+
+### Joining a tailnet (operator)
+
+Run every Tailscale command from the docker host through the sidecar:
+
+```bash
+# one-time, tagged, pre-approved auth key; read from stdin, never argv or a file in the app
+docker exec -i tm-trusty-cloud-sled-tailscale \
+  tailscale up --auth-key=file:/dev/stdin --advertise-tags=tag:sled < <host-key-file>
+docker exec tm-trusty-cloud-sled-tailscale tailscale serve --bg http://127.0.0.1:7788
+docker exec tm-trusty-cloud-sled-tailscale tailscale status
+```
+
+`--auth-key=file:/dev/stdin` is UNVERIFIED with Tailscale 1.104.6; no tailnet
+has been joined. The repo cannot enforce the tailnet side. Before a sled
+joins, the tailnet owner must have:
+
+- **A tagged pre-auth key.** One-time, short expiry, carrying the sled tag
+  (`tag:sled` above, or the tailnet's own name for it). Never a reusable key,
+  and never an untagged key, which would make the node act as the user who
+  made the key.
+- **Tailnet lock** on, with the sled's node signed by a trusted lock key (or
+  the auth key pre-signed). A node that is not signed cannot talk to the
+  tailnet.
+- **An ACL policy that denies SSH and Funnel to the sled tag:** no `ssh`
+  rule whose `dst` names the sled tag, and no `nodeAttrs` entry granting
+  `funnel` to it. Tailscale denies both by default, so the requirement is that
+  no rule grants them. Grant inbound only to the console port, from the
+  owner's devices.
+
+Measured on a Linux docker host with Tailscale 1.104.6, logged out, when
+`tailscaled` still ran in the app container (DOC-90 section 6 marked proxy
+support Unverified):
 
 - Logged out and idle, `tailscaled` opened no connection.
 - `tailscale up` used the proxy: `tshttpproxy` logged `CONNECT
@@ -164,8 +277,9 @@ proxy support Unverified):
 - Its bootstrap-DNS fallback dialled DERP servers by raw IP on TCP 443
   directly, not through the proxy. Each dial failed with `network is
   unreachable` (no route out), so nothing left the sled.
-- The login URL is written to `/data/logs/tailscaled.log` by `tailscaled`
-  itself. Treat that log as sensitive until the node is logged in.
+- The login URL is written to the `tailscaled` log by `tailscaled` itself.
+  It now goes to the sidecar's `docker logs`. Treat that log as sensitive
+  until the node is logged in.
 
 ## Residual risk
 
@@ -173,10 +287,15 @@ proxy support Unverified):
   Claude Code and any code they run share that uid, so any of them can read
   `/run/secrets/*`. Scope the GitHub token to the minimum: the sled's repos
   and the permissions the work needs.
-- Ruling D20 residual, accepted by the owner. The allowed Tailscale hosts let
-  code in the sled run `tailscale up --auth-key=<other>`, join another tailnet
-  and tunnel out over DERP. The controls are tailnet lock or ACL tags on the
-  owner's tailnet; the proxy cannot tell tailnets apart.
+- Ruling D20 residual, accepted by the owner. Code in the app cannot drive the
+  sled's own `tailscaled` (#11156). It can still bring a `tailscaled` binary
+  of its own, for example in a git clone from github.com, and run it in
+  userspace mode through the proxy. That node could join another tailnet,
+  tunnel out over DERP, and take inbound traffic over that tailnet, Funnel
+  included. The proxy cannot tell tailnets apart, and tailnet lock or ACLs on
+  the owner's tailnet do not govern another tailnet. V5 fails while such a
+  process runs (no `tailscaled` in the app); it cannot stop one being
+  started.
 - Account-level exfiltration through the allowlist is accepted (#11156). The
   allowlist bounds hosts, not accounts. Code in the sled can send data to
   another account's repo or gist on `github.com` or `api.github.com` with that
@@ -186,22 +305,34 @@ proxy support Unverified):
 - A tunnel opened during a login window stays open after `sled-profile
   steady`: a reconfigure applies to new connections only. `docker restart
   tm-trusty-cloud-sled-egress` drops it.
-- Raw-IP forms with letters, such as hex (`0x01010101`, `0x7f.0.0.1`), are not
-  matched by the `raw_ip` ACL. The final `http_access deny all` denies them,
-  because no allow names them. Octal and bare-integer forms are digits and
-  dots only, so `raw_ip` matches them.
+- Raw-IP forms: squid 7.7 rewrites hex, dotted-hex and integer literals
+  (`0x01010101`, `0x01.0x01.0x01.0x01`, `16843009`) to dotted decimal before
+  it matches ACLs, so `raw_ip` denies them; octal forms are digits and dots
+  only, so `raw_ip` matches them as written (measured, #11156). V1 sends each
+  form as a raw `CONNECT` and fails on any status but 403 or 400. A PTR record
+  that maps an IP to an allowed name is not tested.
 
-- Host requirement: the docker host's firewall must stop containers on the
-  sled's `--internal` bridge from reaching host services. Only the proxy peer
-  on 3128 is reachable. The V1 row "app reaches no TCP port on the internal
-  gateway" verifies this. Do not run the sled on a host where that row fails.
+- Host requirement: the docker host's firewall must drop all traffic from the
+  sled's `--internal` bridge to the host. Only the proxy peer on 3128 is
+  reachable. V1 checks this by behavior, not by reading the firewall rules: it
+  connects from the app to every TCP port 1-65535 on the network's gateway
+  (256 parallel workers, 1 s per port, at most about 5 minutes, bound 900 s)
+  and sends UDP probes to 53, 123, 443 and 41641. An open port, a TCP refusal,
+  a UDP reply or an ICMP port-unreachable is a FAIL; only a silent drop or no
+  route passes. Each worker also connects to the proxy's 3128, which must
+  open, and the embedded DNS at 127.0.0.11 must answer the UDP probe, so a
+  broken probe cannot pass. A short count, a missing tool or a scan past the
+  bound is a FAIL. A UDP service that answers nothing, such as WireGuard, is
+  not distinguishable from a drop. Do not run the sled on a host where a
+  gateway row fails.
 
 ## Teardown
 
 ```bash
-docker rm -f tm-trusty-cloud-sled tm-trusty-cloud-sled-egress
+docker rm -f tm-trusty-cloud-sled-tailscale tm-trusty-cloud-sled tm-trusty-cloud-sled-egress
 docker network rm tm-trusty-cloud-sled-internal
-docker rmi tm-trusty-cloud-sled:$SHA tm-trusty-cloud-sled-egress:$SHA
+docker volume rm tm-trusty-cloud-sled-tailscale        # sidecar state: the node key
+docker rmi tm-trusty-cloud-sled:$SHA tm-trusty-cloud-sled-egress:$SHA tm-trusty-cloud-sled-tailscale:$SHA
 rm -rf ~/sled-state/tm-trusty-cloud-sled                # state and secret copies
 test ! -e ~/sled-state/tm-trusty-cloud-sled && echo state-gone
 ```

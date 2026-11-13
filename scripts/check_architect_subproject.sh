@@ -130,6 +130,10 @@ scripts/datg_log.py|crates/trusty-mpm/src/assets/architect/scripts/datg_log.py
 scripts/datg_read.py|crates/trusty-mpm/src/assets/architect/scripts/datg_read.py
 scripts/datg_ready.py|crates/trusty-mpm/src/assets/architect/scripts/datg_ready.py
 scripts/datg_guards.py|crates/trusty-mpm/src/assets/architect/scripts/datg_guards.py
+scripts/datg_task.py|crates/trusty-mpm/src/assets/architect/scripts/datg_task.py
+scripts/task_tag.py|crates/trusty-mpm/src/assets/architect/scripts/task_tag.py
+scripts/task_pulse.py|crates/trusty-mpm/src/assets/architect/scripts/task_pulse.py
+scripts/task_pulse_io.py|crates/trusty-mpm/src/assets/architect/scripts/task_pulse_io.py
 scripts/datg-hook.sh|crates/trusty-mpm/src/assets/architect/scripts/datg-hook.sh
 scripts/ctx-watch.py|crates/trusty-mpm/src/assets/architect/scripts/ctx-watch.py
 scripts/il-cron.py|crates/trusty-mpm/src/assets/architect/scripts/il-cron.py
@@ -159,6 +163,7 @@ scripts/dashboard_routes.py|crates/trusty-mpm/src/assets/architect/scripts/dashb
 scripts/dashboard_fleet.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_fleet.py
 scripts/dashboard_harness_base.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_harness_base.py
 scripts/dashboard_mask.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_mask.py
+scripts/dashboard_pane_tail.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_pane_tail.py
 scripts/dashboard_attach.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_attach.py
 scripts/dashboard_projects.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_projects.py
 scripts/dashboard_watch.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_watch.py
@@ -169,6 +174,8 @@ scripts/turn-active.py|crates/trusty-mpm/src/assets/architect/scripts/turn-activ
 scripts/pm_cursor.py|crates/trusty-mpm/src/assets/architect/scripts/pm_cursor.py
 scripts/pending-answers.py|crates/trusty-mpm/src/assets/architect/scripts/pending-answers.py
 scripts/pending_hook_dedupe.py|crates/trusty-mpm/src/assets/architect/scripts/pending_hook_dedupe.py
+scripts/technical_level.py|crates/trusty-mpm/src/assets/architect/scripts/technical_level.py
+scripts/level_lint.py|crates/trusty-mpm/src/assets/architect/scripts/level_lint.py
 scripts/pending-answers-hook.sh|crates/trusty-mpm/src/assets/architect/scripts/pending-answers-hook.sh
 templates/dashboard/tokens.css|crates/trusty-mpm/src/assets/architect/dashboard/tokens.css
 provenance.json|crates/trusty-mpm/src/assets/architect/provenance.json

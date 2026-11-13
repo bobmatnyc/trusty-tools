@@ -276,7 +276,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-dashboard.md"
-version = "0.2.0"
+version = "0.3.1"
 
 [[member]]
 path = "instructions/architect/skills/architect-drift-check.md"
@@ -300,7 +300,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-operating-rules.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-owner-model.md"
@@ -320,7 +320,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-strategy.md"
-version = "0.2.0"
+version = "0.3.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-tmux-ops.md"

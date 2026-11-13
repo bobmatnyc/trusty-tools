@@ -36,6 +36,8 @@ mod changes;
 pub mod dir;
 mod fsck;
 pub mod jsonl;
+// #11064: the always-on technical-level refusal.
+mod level;
 mod lock;
 pub mod pruned;
 // #10063 PR 3: LDG-2.2.5 dangling references, for `fsck`.
@@ -415,7 +417,7 @@ impl Store {
     /// [`DashError::Conflict`] (stale `if_version`), [`DashError::NotFound`],
     /// [`DashError::Invalid`] (bad op, body, name, a case variant of an
     /// existing name, a delete with no archive, a batch with no secret
-    /// scan), [`DashError::SecretRefused`], [`DashError::SchemaInvalid`]
+    /// scan, a technical level outside the six), [`DashError::SecretRefused`], [`DashError::SchemaInvalid`]
     /// (enforce mode), [`DashError::Unavailable`] (lock wait passed), the
     /// archive's error, or an I/O or corrupt-file error, a torn or
     /// unrotatable change log included. Nothing is written on
@@ -431,6 +433,8 @@ impl Store {
         }
         // #10063 PR 2: before the lock and before any message can quote a value.
         self.refuse_secrets(ops)?;
+        // #11064: a level outside the six is refused whatever the schema mode.
+        self.refuse_bad_levels(ops)?;
         let _lock = lock::acquire(&self.root, self.lock_wait)?;
         let mut staged = Staged::default();
         let results = ops

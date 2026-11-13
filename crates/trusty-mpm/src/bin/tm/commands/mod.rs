@@ -333,6 +333,8 @@ pub(crate) mod session_picker_prune;
 pub(crate) mod session_picker_rename;
 pub(crate) mod session_picker_render;
 pub(crate) mod session_picker_view;
+// #10368: a session start registers its checkout as a project.
+pub(crate) mod session_project;
 pub(crate) mod session_tui;
 // The `tm shell-init` wrapper emitter — print-only; it never writes an rc file.
 pub(crate) mod shell_init;

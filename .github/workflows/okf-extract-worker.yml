@@ -10,8 +10,13 @@
 #   - `build-test` builds and tests the worker through `--manifest-path` on its
 #     MSRV (1.94, `rust-version` in its Cargo.toml) and on its pinned toolchain
 #     (1.98.1, its `rust-toolchain.toml`).
-#   The worker lock's audit and deny coverage lives where the root lock's does:
-#   `cargo-audit.yml` and `pre-publish.yml` Gates 2 and 3.
+#   This workflow runs no audit or deny. The worker lock's coverage lives where
+#   the root lock's does, and like it never runs on a PR:
+#   `cargo audit --file workers/okf-extract/Cargo.lock` in `cargo-audit.yml`
+#   (weekly cron) and `pre-publish.yml` Gate 2, under the root
+#   `.cargo/audit.toml`; `cargo deny --manifest-path` in Gate 3, under the root
+#   `deny.toml`. RUSTSEC-2026-0436 (vendored calamine 0.36.1) is waived in both
+#   files until 2026-12-12 (owner ruling Dgp).
 #
 # TRIGGERS. No `paths:` filter and no job-level `if:`: the worker's tests
 #   compile `crates/trusty-okf` and its path dependencies, so a change far from

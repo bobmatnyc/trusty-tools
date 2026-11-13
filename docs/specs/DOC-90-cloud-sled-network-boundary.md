@@ -3,8 +3,8 @@
 **Status:** Draft
 **Subsystem:** sled container image (`docker/`), `trusty-console` (inbound, token), `trusty-agents` (`tagent --api`), `trusty-common` / `trusty-agents` update checks, egress proxy
 **Owner:** owner
-**Last-updated:** 2026-11-11
-**Spec ID:** `SPEC-SLEDNET-01~draft` … `SPEC-SLEDNET-11~draft` (DOC-90)
+**Last-updated:** 2026-11-12
+**Spec ID:** `SPEC-SLEDNET-01~draft` … `SPEC-SLEDNET-12~draft` (DOC-90)
 **DOC-N claim:** `DOC-90`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). The catalog's next-free note on `origin/main` at 2026-11-11 (`7497139ef9`) named `DOC-90`; no file or open PR claims it.
 
 Owner ruling (Bob, D1b, 2026-11-11 21:23Z): "Accept all eight as recommended." The eight are the recommendations of the network surface audit, an owner brief that is not published in this repo; its finding IDs are cited below as "audit".
@@ -54,6 +54,8 @@ From the audit, read at `be1ed52f98`. Spot-checked on `main` at `fb3d642382` for
 - **IN-4.** Every request on the console's TCP listener carries a valid console token (§4). The console's own UDS is exempt; `SO_PEERCRED` already gates it.
 - **IN-5.** The listeners `tailscaled` itself owns (its WireGuard UDP port and the `tailscale serve` front on the tailnet IP) are the only non-trusty listeners allowed. They are named in the §9 inventory.
 - **IN-6.** The orchestrator publishes no port of the sled (`docker run` with no `-p`; a Kubernetes Service, if any, targets nothing in the sled).
+- **IN-7.** No sled agent or Claude Code process can change Tailscale state (#11156). `tailscaled` and its LocalAPI socket run in a sidecar container, as a uid that is neither root nor the agents' uid, sharing only the sled's network namespace. The socket sits in a 0700 directory in the sidecar's own filesystem. From the agents' uid, `tailscale up`, `login`, `set`, `funnel`, `serve` and `nc` all fail to reach a daemon. Agents get no read-only status either. The operator drives Tailscale from the host through the sidecar.
+- **IN-8.** The repo cannot enforce the tailnet side, so each operator must provide it before a sled joins: a one-time, short-expiry pre-auth key tagged with the sled tag; tailnet lock, with the sled node signed by a trusted lock key; and an ACL policy that grants no `ssh` rule and no `funnel` node attribute to the sled tag. Tailscale denies both by default, so the requirement is that no rule grants them.
 
 ## 4. Console token {#SPEC-SLEDNET-04~draft}
 
@@ -108,6 +110,7 @@ Not on the list, so denied: crates.io, static.crates.io, index.crates.io, regist
 **Tailscale hosts (ruling D20, OQ-3).** `tailscaled` needs outbound TCP 443 to `controlplane.tailscale.com` and `login.tailscale.com`, and to the DERP relays ([Tailscale firewall ports](https://tailscale.com/kb/1082/firewall-ports)). Closed list: the two control hosts. DERP cannot be a closed list. The DERP map holds 95 hosts in 28 regions, all named `derp<region><letter>.tailscale.com`, and Tailscale says the count may grow ([DERP map](https://controlplane.tailscale.com/derpmap/default)). The proxy therefore matches that pattern only. It does not allow `.tailscale.com` as a whole, so `log`, `console` and the website stay denied. Squid rule: `acl derp dstdom_regex -i ^derp[0-9]+[a-z]*(-all)?\.tailscale\.com$`, plus `dstdomain controlplane.tailscale.com login.tailscale.com`. The control plane prefers TCP 80 and falls back to 443; the proxy accepts 443 only, so the fallback is taken.
 
 - **Relay-only.** An HTTPS `CONNECT` proxy carries TCP only. Direct WireGuard paths (UDP, source port 41641) and STUN (UDP 3478, sent to DERP servers) cannot use it, and OUT-1 leaves the app no UDP route. Every tailnet connection to a sled is relayed over DERP, with higher latency than a direct path. `tailscale serve` to the console still works.
+- **Control isolation (IN-7).** The allowlist cannot tell tailnets apart. IN-7 stops agents from re-pointing the sled's own `tailscaled` at another tailnet or opening it to SSH or Funnel. It does not stop an agent from bringing a `tailscaled` binary of its own (for example in a git clone) and running it in userspace mode through the proxy. That residual stays with ruling D20; V5 fails while such a process runs in the sled.
 - **Logging decision.** The sled image sets `TS_NO_LOGS_NO_SUPPORT=true` for `tailscaled` ([logging docs](https://tailscale.com/kb/1011/log-mesh-traffic)). The log host is then not needed and stays denied. Cost: Tailscale may not give support for a sled's node ([tailscaled flags](https://tailscale.com/kb/1278/tailscaled)). A sled is a no-route namespace, so sending client logs to a third party is the wrong default.
 - **Unverified.** Tailscale's KB does not say that `tailscaled` honours `HTTPS_PROXY`. Rung 2 must start `tailscaled` with the §7 proxy env, run `tailscale serve`, and read `access.log` for every `CONNECT` host. A host seen there and not allowed is a finding for a new ruling (OUT-5).
 
@@ -171,7 +174,7 @@ The image sets each variable below in its `ENV` layer. None holds a secret.
 
 **ID:** SPEC-SLEDNET-09~draft
 
-A sled passes when V1 to V4 all pass on the running sled. Each check prints PASS or FAIL per row and exits non-zero on any FAIL.
+A sled passes when V1 to V5 all pass on the running sled. Each check prints PASS or FAIL per row and exits non-zero on any FAIL. Today only V1 (`check_v1.sh`) and V5 (`check_tailscale.sh`) are scripted, and `launch.sh` runs both (§12). V2, V3 and V4 are not scripted yet ([#11167](https://github.com/bobmatnyc/trusty-tools/issues/11167)); until they are, a launched sled is ready on V1 and V5 only, and its READY line says so.
 
 **V1 — squid deny log.** After a standard exercise (stack start, `check.sh`, one Claude Code session, one `git fetch` and one `gh api` call on a sled repo):
 
@@ -190,6 +193,16 @@ A sled passes when V1 to V4 all pass on the running sled. Each check prints PASS
 **V3 — env check.** A script compares each §7 variable against its expected value and prints the name and PASS or FAIL, never the value. It also checks that the console token file exists with mode `0400` or `0600`, and the GitHub token file likewise, by `stat` only, never by reading.
 
 **V4 — console token.** From inside the sled: a request with no token gets `401`; a wrong token gets `401`; the right token gets `200`. Then a search of the console log, the stack logs and `tm doctor` output for the token value finds zero hits. Starting the console with a group-readable token file exits non-zero.
+
+**V5 — Tailscale control isolation (IN-7).** From the docker host, `docker/sled/check_tailscale.sh`:
+
+- As the agents' uid in the sled, `tailscale up`, `tailscale set --ssh`, `tailscale funnel` and `tailscale nc` each fail to reach a daemon; a daemon that answers and refuses is a FAIL.
+- In the sled, the socket path is absent and its directory is not writable by the agents' uid; no `tailscaled` process or binary is present, and no abstract unix socket names Tailscale.
+- The sidecar shares the sled's network namespace and nothing else, its `tailscaled` runs as a uid that is neither root nor the agents' uid, and its socket directory is that uid's, mode 0700.
+- In the sidecar, `RunSSH` is false and `tailscale funnel status` shows no funnel.
+- The sled network namespace has no TCP LISTEN socket owned by the sidecar uid, so `tailscaled` runs no SOCKS5, HTTP-proxy or debug listener the agents could use.
+
+`scripts/check_sled_tailscale_isolation.sh` checks the same layout statically, without docker, in CI.
 
 V1 cannot tell an update check from a ticket call on `api.github.com`: squid sees the host only. The update-check rule is verified by V3 and by the tagent unit test that the check is skipped under `TRUSTY_NO_UPDATE_CHECK`.
 
@@ -217,6 +230,15 @@ V1 cannot tell an update check from a ticket call on `api.github.com`: squid see
 - **OQ-2.** `docker/cloudtest/README.md:112-113` says Claude Code token refresh also needs `platform.claude.com` and `claude.ai`. If so, `steady` breaks at token expiry. Measure in rung 2 (run past one refresh on `steady` and read `access.log`), then either move those hosts to `steady` by ruling or keep the login window.
 - **OQ-3. Resolved by D20 (2026-11-11).** The Tailscale control hosts and the DERP pattern join the `steady` allowlist (§6). Tailnet traffic is relay-only. Client logging is off. Rung 2 confirms `tailscaled` uses the proxy.
 - **OQ-4.** The pinned hf-hub ignores `HF_HUB_OFFLINE`. Keep the variable as ruled, or drop it as dead config.
+
+## 12. Launch rule {#SPEC-SLEDNET-12~draft}
+
+**ID:** SPEC-SLEDNET-12~draft
+
+- **LR-1.** Every sled reaches the internet only through the egress proxy surface of §6. No sled container has a published port, a second network, a host namespace, privileged mode or an added capability.
+- **LR-2.** `docker/sled/launch.sh` is the only supported way to start a sled (#11156). It builds the `--internal` network on the subnet of the proxy's `internal_net` rule, starts the proxy and the app hardened, inspects them, and refuses (stops the app, exits non-zero) on any break of LR-1, on a token-like env name, on a mount outside its allowlist, on a secret file looser than 600 or owned by another uid, and on a Docker engine older than 26.0.0 (the CVE-2024-29018 fix for DNS from `--internal` networks). The proxy binds `http_port` to its internal-network address only, so the default bridge gets no answer on 3128. `launch.sh` then runs V1 and V5 (§9) and refuses on any FAIL. V1 is the host-firewall gate: its probe of the internal gateway, every TCP port plus UDP, is the check that the host drops sled traffic to host services; there is no separate iptables or nft assert. The READY line names the checks that passed and names V2 to V4 as not scripted ([#11167](https://github.com/bobmatnyc/trusty-tools/issues/11167)).
+- **LR-3.** `launch.sh --check-only` re-runs the inspection on a running sled. A network attached after launch fails it. It acts only on a container that carries the label `launch.sh` sets; any other target is refused and left running.
+- **LR-4.** A `docker run` line in the sled README is reference only.
 
 ## References
 

@@ -1,0 +1,2 @@
+Added
+- The Architect prompt carries the technical-level rule and the six level definitions: owner-facing text follows the `TECH LEVEL:` hook line, a secondary user gets their own level, a detail request raises one item without changing the setting, items below `senior-engineer` link a full technical brief, and relays and records stay technical. The Architect bundle's provenance records the updated skills (#11064).

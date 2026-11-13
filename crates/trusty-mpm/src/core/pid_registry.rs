@@ -43,6 +43,13 @@
 //! session before any signal is sent. Dead-PID and PID-reused removals are NOT
 //! debounced — deleting a stale file can never harm a live process.
 //!
+//! Live-session evidence (#10753): the debounce is time only, so an idle
+//! session that sends no hook within one interval was still SIGTERMed. Before
+//! a `Terminate` verdict, [`classify_pidfile`] now asks
+//! [`ProcessProbe::host_evidence`] whether a live tmux pane still hosts the
+//! PID ([`crate::core::pid_host`]); a hosted PID is kept and an unanswerable
+//! check is never signalled.
+//!
 //! Test: the `tests` submodule exercises register/unregister/entries round-trips,
 //! the full [`classify_pidfile`] decision matrix against a fake probe and a temp
 //! directory, and the [`PidOrphanGc`] debounce (including the daemon-restart
@@ -52,6 +59,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use tracing::{debug, info, warn};
+
+pub use crate::core::pid_host::HostEvidence;
 
 /// File-extension marker for PID files in the registry directory.
 const PID_FILE_EXT: &str = "pid";
@@ -93,6 +102,15 @@ pub trait ProcessProbe {
     /// (e.g. the process exited between the check and the signal — a benign race).
     /// Test: `FakeProbe` records the PID and reports success.
     fn terminate(&self, pid: u32) -> bool;
+
+    /// Whether a live tmux pane still hosts the process at this PID (#10753).
+    ///
+    /// Why: the live session-id set is empty after a daemon restart, so it
+    /// cannot tell an idle live session from an orphan; the process tree can.
+    /// What: [`HostEvidence::Hosted`] spares the PID, `Unhosted` lets the
+    /// orphan path proceed, `Unknown` spares it this pass (fail-closed).
+    /// Test: `RecordingProbe` in `tests/pid_registry_sweep.rs` scripts it.
+    fn host_evidence(&self, pid: u32) -> HostEvidence;
 }
 
 /// The verdict for a single `.pid` file during an orphan sweep.
@@ -107,10 +125,15 @@ pub trait ProcessProbe {
 /// Test: `classify_*` unit tests assert the variant for each input class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PidDecision {
-    /// The session-id is still in the live registry — leave the PID file alone.
+    /// The session-id is still in the live registry, or a live tmux pane still
+    /// hosts the process (#10753) — leave the PID file alone.
     Keep,
-    /// Untracked, alive, and still a `claude` process → SIGTERM, then remove.
+    /// Untracked, alive, still a `claude` process, and no tmux pane hosts it →
+    /// SIGTERM, then remove.
     Terminate,
+    /// Untracked, alive and `claude`, but whether a pane hosts it could not be
+    /// determined (#10753) → no signal, file kept, re-checked next sweep.
+    Unverifiable,
     /// Untracked but dead, or alive under a reused (non-`claude`) PID → remove
     /// the stale file without signalling. Carries why, for the audit log.
     RemoveStale(StaleReason),
@@ -150,15 +173,26 @@ pub struct PidEntry {
 /// Why: this is the one place the PID-reuse mitigation (§13.5) lives, so it can
 /// be audited and unit-tested exhaustively. A bug here risks SIGTERMing the wrong
 /// process, so the rule is conservative: signal ONLY a still-alive, still-named-
-/// `claude`, genuinely-untracked PID.
+/// `claude`, genuinely-untracked PID that no tmux pane hosts. The live set
+/// alone is not evidence of an orphan: it is empty after a daemon restart until
+/// a hook event refills it (#10753), so the pane check is what spares an idle
+/// live session. A pane check that cannot answer fails closed.
 /// What: a [`PidDecision`] computed as —
 /// 1. session-id present in `live_session_ids` → [`PidDecision::Keep`]; else
 /// 2. process not alive → [`PidDecision::RemoveStale`]`(ProcessDead)`; else
 /// 3. process alive but not named `claude` → [`PidDecision::RemoveStale`]`(PidReused)`; else
-/// 4. untracked, alive, still `claude` → [`PidDecision::Terminate`].
+/// 4. [`ProcessProbe::host_evidence`] is `Hosted` → [`PidDecision::Keep`];
+///    `Unknown` → [`PidDecision::Unverifiable`]; `Unhosted` →
+///    [`PidDecision::Terminate`].
 ///
 /// Test: `classify_keeps_tracked`, `classify_removes_dead`,
-/// `classify_removes_reused_pid`, and `classify_terminates_untracked_claude`.
+/// `classify_removes_reused_pid`, `classify_terminates_untracked_claude`,
+/// `classify_keeps_tmux_hosted_untracked_claude`,
+/// `classify_unknown_host_is_unverifiable`, and in
+/// `tests/pid_registry_sweep.rs`
+/// `restart_with_empty_live_set_spares_tmux_hosted_claude_across_two_sweeps`,
+/// `restart_with_empty_live_set_reaps_claude_whose_tmux_is_gone`,
+/// `sweep_never_signals_when_host_cannot_be_determined`.
 pub fn classify_pidfile(
     entry: &PidEntry,
     live_session_ids: &HashSet<String>,
@@ -176,8 +210,14 @@ pub fn classify_pidfile(
     if !probe.is_claude(entry.pid) {
         return PidDecision::RemoveStale(StaleReason::PidReused);
     }
-    // All gates passed: an untracked, live, genuine `claude` orphan.
-    PidDecision::Terminate
+    // #10753: Gate 4 — an empty live set is no proof of an orphan; a live
+    // tmux pane above the process is proof it is not one.
+    match probe.host_evidence(entry.pid) {
+        HostEvidence::Hosted => PidDecision::Keep,
+        HostEvidence::Unknown => PidDecision::Unverifiable,
+        // All gates passed: an untracked, unhosted, live `claude` orphan.
+        HostEvidence::Unhosted => PidDecision::Terminate,
+    }
 }
 
 /// Outcome counts from one [`PidRegistry::sweep_orphans`] pass.
@@ -202,6 +242,9 @@ pub struct SweepOutcome {
     /// Untracked-alive-`claude` candidates seen for the FIRST time this pass —
     /// spared by the debounce, pending confirmation on the next sweep.
     pub deferred: usize,
+    /// Untracked-alive-`claude` PIDs whose tmux host could not be determined —
+    /// spared without signalling (fail-closed, #10753).
+    pub unverifiable: usize,
 }
 
 /// Cross-pass debounce for the PID-file orphan sweep (#1918).
@@ -406,14 +449,17 @@ impl PidRegistry {
     /// process). A `Terminate` verdict only fires SIGTERM + removes the file when
     /// `gc` shows the session-id was ALSO a candidate on the previous sweep;
     /// otherwise the file is left untouched and counted in
-    /// [`SweepOutcome::deferred`]. `gc`'s candidate history is updated to this
+    /// [`SweepOutcome::deferred`]. An `Unverifiable` verdict (#10753) sends no
+    /// signal, keeps the file and counts in [`SweepOutcome::unverifiable`].
+    /// `gc`'s candidate history is updated to this
     /// pass's set before returning, so the next sweep's debounce reflects THIS
     /// pass. A removal failure is logged and does not abort the pass. Returns a
     /// [`SweepOutcome`] summary.
     /// Test: `sweep_terminates_only_untracked_claude`,
     /// `sweep_removes_dead_without_signal`, `sweep_spares_reused_pid`,
     /// `sweep_keeps_tracked`, `pid_debounce_spares_first_sighting`,
-    /// `pid_debounce_terminates_second_sighting`.
+    /// `pid_debounce_terminates_second_sighting`,
+    /// `sweep_never_signals_when_host_cannot_be_determined`.
     pub fn sweep_orphans(
         &self,
         live_session_ids: &HashSet<String>,
@@ -435,6 +481,18 @@ impl PidRegistry {
         for entry in &entries {
             match classify_pidfile(entry, live_session_ids, probe) {
                 PidDecision::Keep => {}
+                PidDecision::Unverifiable => {
+                    // #10753: fail closed — never SIGTERM on an unanswered pane
+                    // check, and drop any debounce history so a later kill
+                    // still needs two fresh confirmed sightings.
+                    warn!(
+                        session_id = %entry.session_id,
+                        pid = entry.pid,
+                        "pid-registry: cannot tell whether a tmux pane hosts this claude; \
+                         not signalling"
+                    );
+                    outcome.unverifiable += 1;
+                }
                 PidDecision::Terminate => {
                     this_pass_candidates.insert(entry.session_id.clone());
                     if gc.prev_candidates.contains(&entry.session_id) {
@@ -475,6 +533,7 @@ impl PidRegistry {
             terminated = outcome.terminated,
             removed_stale = outcome.removed_stale,
             deferred = outcome.deferred,
+            unverifiable = outcome.unverifiable,
             "pid-registry: orphan sweep complete"
         );
         outcome
@@ -500,7 +559,9 @@ impl PidRegistry {
 /// this impl wires [`is_alive`](ProcessProbe::is_alive) to the existing
 /// `is_process_alive` (a `kill(pid, 0)` existence check), the name check to the
 /// same `claude`-substring `comm` lookup the rest of the crate uses, and
-/// [`terminate`](ProcessProbe::terminate) to a real SIGTERM.
+/// [`terminate`](ProcessProbe::terminate) to a real SIGTERM, and
+/// [`host_evidence`](ProcessProbe::host_evidence) to the tmux-ancestry walk in
+/// [`crate::core::pid_host::os_host_evidence`] (#10753).
 /// What: a unit struct whose methods delegate to OS calls. Construct with
 /// [`OsProcessProbe::default`].
 /// Test: only the `terminate` seam touches the OS destructively, so it is not
@@ -516,6 +577,10 @@ impl ProcessProbe for OsProcessProbe {
 
     fn is_claude(&self, pid: u32) -> bool {
         crate::core::process::process_name_is_claude(pid)
+    }
+
+    fn host_evidence(&self, pid: u32) -> HostEvidence {
+        crate::core::pid_host::os_host_evidence(pid)
     }
 
     fn terminate(&self, pid: u32) -> bool {
@@ -548,6 +613,8 @@ mod tests {
     struct FakeProbe {
         alive: HashSet<u32>,
         claude: HashSet<u32>,
+        /// PIDs with a host-evidence answer other than `Unhosted` (#10753).
+        hosts: std::collections::HashMap<u32, HostEvidence>,
         terminated: std::cell::RefCell<Vec<u32>>,
     }
 
@@ -556,8 +623,14 @@ mod tests {
             Self {
                 alive: alive.iter().copied().collect(),
                 claude: claude.iter().copied().collect(),
+                hosts: std::collections::HashMap::new(),
                 terminated: std::cell::RefCell::new(Vec::new()),
             }
+        }
+
+        fn with_host(mut self, pid: u32, evidence: HostEvidence) -> Self {
+            self.hosts.insert(pid, evidence);
+            self
         }
     }
 
@@ -571,6 +644,12 @@ mod tests {
         fn terminate(&self, pid: u32) -> bool {
             self.terminated.borrow_mut().push(pid);
             true
+        }
+        fn host_evidence(&self, pid: u32) -> HostEvidence {
+            self.hosts
+                .get(&pid)
+                .copied()
+                .unwrap_or(HostEvidence::Unhosted)
         }
     }
 
@@ -685,6 +764,23 @@ mod tests {
     }
 
     #[test]
+    fn classify_keeps_tmux_hosted_untracked_claude() {
+        // #10753: an empty live set (post-restart) is not proof of an orphan;
+        // a live tmux pane above the process keeps it.
+        let probe = FakeProbe::new(&[41], &[41]).with_host(41, HostEvidence::Hosted);
+        let d = classify_pidfile(&entry("idle-live", 41), &live(&[]), &probe);
+        assert_eq!(d, PidDecision::Keep);
+    }
+
+    #[test]
+    fn classify_unknown_host_is_unverifiable() {
+        // #10753: an unanswerable pane check fails closed — never `Terminate`.
+        let probe = FakeProbe::new(&[42], &[42]).with_host(42, HostEvidence::Unknown);
+        let d = classify_pidfile(&entry("unsure", 42), &live(&[]), &probe);
+        assert_eq!(d, PidDecision::Unverifiable);
+    }
+
+    #[test]
     fn sweep_terminates_only_untracked_claude() {
         // Full matrix over two sweeps (the #1918 debounce requires a `Terminate`
         // candidate to be confirmed on a second consecutive sweep before it is
@@ -775,6 +871,7 @@ mod tests {
                 terminated: 0,
                 removed_stale: 0,
                 deferred: 0,
+                unverifiable: 0,
             }
         );
         assert_eq!(reg.entries().unwrap(), vec![entry("tracked", 9)]);

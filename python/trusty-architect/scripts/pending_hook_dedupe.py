@@ -15,7 +15,11 @@ inbox/owner-turns.jsonl, or $ARCHITECT_OWNER_TURNS), which relay_provenance.py c
 against; the record keeps its newest half once it passes OWNER_TURNS_MAX bytes.
 main() also appends pm_cursor.inject_block() (unread PM wake messages, repeated every call, D39) to the same
 additionalContext and echoes the hook's own hook_event_name (PostToolUse or UserPromptSubmit).
-Test: scripts/test_pending_answers_hook.py, scripts/test_user_state.py, scripts/test_pm_cursor.py
+#11064: build_output also appends level_line() ("TECH LEVEL: <level> (<rule>)", technical_level.line) after the user
+state, with the same timing: on the first call after the level changes, then once per REMIND_SECS. The level is the
+owner's setting, or a secondary user's own (turn_speaker: the `[SECONDARY USER <name> via` prompt marker, kept for
+that turn's tool calls); such a prompt is not an owner turn.
+Test: tests/test_pending_answers_hook.py, tests/test_technical_level.py, tests/test_pm_cursor.py
 """
 import json
 import os
@@ -81,13 +85,46 @@ def decide(items, state_path, session, now=None, user_state=None, state_reason=N
     return "\n".join(lines) or None
 
 
+def level_line(state_path, session, level, now=None, who=None):
+    """#11064: the technical-level line (technical_level.line), throttled like the user state: the same level for the
+    same reader in the same session, under REMIND_SECS since the last emission -> None. A change of level or of reader
+    (owner or secondary user `who`) speaks at once. Shares the session's state entry (keys tl, tl_last)."""
+    import technical_level
+    now = time.time() if now is None else now
+    level = technical_level.normalize(level)
+    key = f"{who}:{level}" if who else level
+    state = _load(state_path)
+    prev = state.get(session) or {}
+    if key == prev.get("tl") and now - float(prev.get("tl_last", 0)) < REMIND_SECS:
+        return None
+    state[session] = dict(prev, tl=key, tl_last=now)
+    _save(state_path, state)
+    return technical_level.line(level, who)
+
+
+def turn_speaker(state_path, session, d):
+    """#11064 (TL-8): the secondary user the current turn answers, or None for the owner. Each UserPromptSubmit sets it
+    from its `[SECONDARY USER <name> via` marker; the turn's later tool calls reuse it (session key tl_who)."""
+    import technical_level
+    state = _load(state_path)
+    prev = state.get(session) or {}
+    if d.get("hook_event_name") != "UserPromptSubmit":
+        return prev.get("tl_who") or None
+    who = technical_level.speaker(d.get("prompt")) or ""
+    if who != prev.get("tl_who", ""):
+        state[session] = dict(prev, tl_who=who)
+        _save(state_path, state)
+    return who or None
+
+
 def owner_prompt(d):
-    """True for a UserPromptSubmit turn the owner typed: not a poller wake ("[poll "), a task notification ("<") or a
-    slash command (self-clear, resume). The voice relay ("[the owner via Codex") counts as the owner."""
+    """True for a UserPromptSubmit turn the owner typed: not a poller wake ("[poll "), a task notification ("<"), a
+    slash command (self-clear, resume) or a secondary user's message ("[SECONDARY USER ", #11064). The voice relay
+    ("[the owner via Codex") counts as the owner."""
     if d.get("hook_event_name") != "UserPromptSubmit":
         return False
     p = str(d.get("prompt") or "").lstrip()
-    return bool(p) and not p.startswith(("[poll ", "<", "/"))
+    return bool(p) and not p.startswith(("[poll ", "<", "/", "[SECONDARY USER "))
 
 
 OWNER_TURNS_MAX = 1024 * 1024
@@ -170,6 +207,16 @@ def build_output(d, now=None):
                       user_state=eff["state"], state_reason=eff["reason"])
         if line:
             parts.append(line)
+        try:  # #11064: the technical level rides next to the user state; a read or write error never blocks a tool call
+            import technical_level
+            sess = str(d.get("session_id", ""))
+            who = turn_speaker(STATE, sess, d)
+            level = technical_level.read_user(who) if who else technical_level.read(qroot)
+            tline = level_line(STATE, sess, level, now, who)
+            if tline:
+                parts.append(tline)
+        except Exception as e:  # noqa: BLE001 - StoreError, schema or file errors must not block a tool call
+            sys.stderr.write(f"technical level line failed: {e!r}\n")
     except OSError:
         pass
     try:
