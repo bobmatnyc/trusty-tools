@@ -18,6 +18,10 @@
 //! FAIL-CLOSED: any other tool, server, key shape or value, a non-object
 //! input, an unreadable payload, a subagent, an unknown thread, and a missing,
 //! empty or non-PM launch stamp keep the deny. An audit line that cannot be written denies, as for the Architect.
+//! #11273: [`main_thread_role`] — the same thread and stamp tests, naming a PM
+//! or Architect main session — is the read pass's identity; it lives here so
+//! the stamp is compared in one file. No PM launch record exists yet, so this
+//! arm stays a PM's only send.
 //! Test: `egress_guard_pm_dm_tests.rs`; end to end in
 //! `tests/tm_hook_egress_pm_dm_11194.rs`.
 

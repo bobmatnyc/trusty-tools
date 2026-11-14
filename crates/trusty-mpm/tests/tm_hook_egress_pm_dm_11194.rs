@@ -140,6 +140,39 @@ fn pm_dm_send_without_the_pm_launch_stamp_is_denied() {
     assert_eq!(audit(tmp.path()), "", "no deny writes an allow line");
 }
 
+/// 🔴 #11273: a PM main session's Slack read passes with one audit line; an
+/// unstamped session's and a subagent's read stay denied; a read whose
+/// audit line cannot be written denies (GP-047).
+#[test]
+fn pm_main_session_read_passes_and_subagent_read_is_denied_11273() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let read = call(
+        "mcp__slack-mcp__slack_search_messages",
+        serde_json::json!({ "query": "BODY-11273" }),
+    );
+    assert_allowed(&run_in(tmp.path(), &read, &[]), "PM read");
+    let mut sub = read.clone();
+    sub["agent_id"] = serde_json::json!("agent-synth-1");
+    assert_denied(&run_in(tmp.path(), &sub, &[]), "subagent read");
+    let unstamped = run_stamped(tmp.path(), &read, &[], None);
+    assert_denied(&unstamped, "unstamped read");
+    let text = audit(tmp.path());
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.starts_with("egress-main-read-allowed "), "{text}");
+    assert!(text.contains("role=pm"), "{text}");
+    assert!(!text.contains("BODY-11273"), "{text}");
+
+    let blocked = tempfile::tempdir().expect("tempdir");
+    std::fs::write(blocked.path().join("trusty-mpm"), "x").expect("write blocker");
+    let out = run_in(blocked.path(), &read, &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"deny\""),
+        "unwritable audit denies: {stdout}"
+    );
+    assert!(stdout.contains("#11273"), "{stdout}");
+}
+
 /// 🔴 #11194: an allowed DM send whose audit line cannot be written denies.
 #[test]
 fn pm_dm_send_with_unwritable_audit_is_denied() {

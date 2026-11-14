@@ -348,6 +348,44 @@ fn architect_allow_needs_its_audit_line() {
     assert_eq!(audited(deny.clone(), Some(allowed), None, TIME), deny);
 }
 
+/// 🔴 #11273: an unbound Architect (stamp, no launch record) keeps the
+/// family and Bash deny here, now naming `tm fleet bind`; the main-session
+/// read pass after this lift passes its read, never its send, and never its
+/// subagent's read.
+#[test]
+fn unbound_architect_reads_pass_after_this_lift_and_sends_do_not_11273() {
+    use crate::commands::egress_guard_main_read::lift as main_read;
+    let fx = fixture();
+    let env = spoof_env(&fx);
+    let config = || allowlist(&fx);
+    let table = FamilyTable::builtin();
+    let read_call = payload(&fx, "mcp__slack-mcp__slack_read_channel", json!({}));
+    let mut sub_read = read_call.clone();
+    sub_read["agent_id"] = json!("agent-7");
+    for (call, want_allow) in [
+        (read_call, true),
+        (sub_read, false),
+        (slack_send(&fx), false),
+    ] {
+        let read: Result<Value, HookStdinError> = Ok(call.clone());
+        let first = verdict(&read, &table, |p| evaluate(p, &env, &config));
+        let (first, allowed) = lift(first, &read, &table, &env, &config);
+        assert!(allowed.is_none(), "the record-bound lift must not fire");
+        let (v, _) = main_read(first, &read, &table, &env);
+        assert_eq!(v == Verdict::Allow, want_allow, "{call}");
+    }
+    let read: Result<Value, HookStdinError> = Ok(slack_bash(&fx));
+    let first = verdict(&read, &table, |p| evaluate(p, &env, &config));
+    let (first, _) = lift(first, &read, &table, &env, &config);
+    match first {
+        Verdict::Deny { check, reason } => {
+            assert_eq!(check, BASH_CHECK);
+            assert!(reason.contains("tm fleet bind"), "{reason}");
+        }
+        Verdict::Allow => panic!("an unbound Architect's Bash send must be denied"),
+    }
+}
+
 /// 🔴 #10447: payload fields are reduced to a safe alphabet, so a session id
 /// carrying a newline cannot forge a second audit line.
 #[test]

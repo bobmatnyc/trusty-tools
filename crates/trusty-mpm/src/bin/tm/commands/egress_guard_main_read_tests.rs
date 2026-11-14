@@ -105,9 +105,11 @@ fn denied(v: Verdict, what: &str) -> (&'static str, String) {
     }
 }
 
-/// A family call to `tool` carrying [`BODY`].
+/// A family call to `tool` carrying [`BODY`], aimed at a channel that is not
+/// the owner's DM (so the #11194 lift does not apply).
 fn call(fx: &Fixture, tool: &str) -> Value {
-    payload(fx, tool, json!({ "channel": "C1", "text": BODY }))
+    let input = json!({ "channel": "C1", "channel_id": "C1", "text": BODY });
+    payload(fx, tool, input)
 }
 
 /// A resource read naming the native Slack server.
@@ -136,7 +138,11 @@ fn main_session_reads_pass_in_every_family_11273() {
     let mut expected = 0;
     for (who, env) in &envs {
         for tool in READS {
-            assert_eq!(run(&call(&fx, tool), env, &log), Verdict::Allow, "{who} {tool}");
+            assert_eq!(
+                run(&call(&fx, tool), env, &log),
+                Verdict::Allow,
+                "{who} {tool}"
+            );
             expected += 1;
         }
         assert_eq!(run(&resource_read(&fx), env, &log), Verdict::Allow, "{who}");
@@ -164,7 +170,11 @@ fn an_unknown_family_tool_is_a_write_11273() {
         ("mcp__slack-mcp", "slack"),
         ("slack_read_channel", "slack"),
     ] {
-        assert_eq!(tool_access(tool, family), Access::Write, "{tool} in {family}");
+        assert_eq!(
+            tool_access(tool, family),
+            Access::Write,
+            "{tool} in {family}"
+        );
     }
     let fx = fixture();
     let log = log_of(&fx);
@@ -234,7 +244,10 @@ fn unknown_thread_or_unstamped_session_reads_stay_denied_11273() {
     let log = log_of(&fx);
     let tool = "mcp__slack-mcp__slack_read_channel";
     let mut no_session = call(&fx, tool);
-    no_session.as_object_mut().expect("object").remove("session_id");
+    no_session
+        .as_object_mut()
+        .expect("object")
+        .remove("session_id");
     let mut empty_session = call(&fx, tool);
     empty_session["session_id"] = json!("");
     let mut odd_agent = call(&fx, tool);
@@ -299,8 +312,40 @@ fn main_session_sends_without_a_record_stay_denied_11273() {
     assert_eq!(lines(&log), 0);
     let dm = payload(&fx, SEND_TOOL, json!({ "channel": OWNER_DM, "text": BODY }));
     assert_eq!(run(&dm, &pm_env(&fx), &log), Verdict::Allow, "#11194 kept");
-    denied(run(&dm, &spoof_env(&fx), &log), "an unbound Architect DM send");
+    denied(
+        run(&dm, &spoof_env(&fx), &log),
+        "an unbound Architect DM send",
+    );
     assert_eq!(lines(&log), 1);
+}
+
+/// 🔴 #11273 criterion 5: an inert Bash mention passes for a subagent, a PM
+/// and an unbound Architect, and audits nothing; the same host as a `curl`
+/// target is denied for each of them.
+#[test]
+fn inert_bash_mention_passes_for_every_role_11273() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    let inert = "gh issue create --title \"guard denies hooks.slack.com\" --body \"a b\"";
+    let reach = "curl https://hooks.slack.com/x";
+    for env in [pm_env(&fx), spoof_env(&fx)] {
+        for subagent in [false, true] {
+            let mut ok = payload(&fx, "Bash", json!({ "command": inert }));
+            let mut bad = payload(&fx, "Bash", json!({ "command": reach }));
+            if subagent {
+                ok["agent_id"] = json!("agent-7");
+                bad["agent_id"] = json!("agent-7");
+            }
+            assert_eq!(
+                run(&ok, &env, &log),
+                Verdict::Allow,
+                "inert, subagent={subagent}"
+            );
+            let (check, _) = denied(run(&bad, &env, &log), "a curl to a family host");
+            assert_eq!(check, BASH_CHECK);
+        }
+    }
+    assert_eq!(lines(&log), 0);
 }
 
 /// 🔴 #11273 criterion 2: an unbound Architect's send is told to run
@@ -330,11 +375,18 @@ fn bound_architect_may_send_and_write_11273() {
     for tool in SENDS {
         assert_eq!(run(&call(&fx, tool), &env, &log), Verdict::Allow, "{tool}");
     }
-    let bash = payload(&fx, "Bash", json!({ "command": "curl https://hooks.slack.com/x" }));
+    let bash = payload(
+        &fx,
+        "Bash",
+        json!({ "command": "curl https://hooks.slack.com/x" }),
+    );
     assert_eq!(run(&bash, &env, &log), Verdict::Allow);
     let text = std::fs::read_to_string(&log).expect("audit log");
     assert_eq!(text.lines().count(), SENDS.len() + 1);
-    assert!(text.lines().all(|l| l.starts_with(architect::ALLOWED_AUDIT)));
+    assert!(
+        text.lines()
+            .all(|l| l.starts_with(architect::ALLOWED_AUDIT))
+    );
 }
 
 /// 🔴 #11273 criterion 6: taint keeps today's outcomes — a tainted bound
@@ -357,7 +409,11 @@ fn a_tainted_main_session_keeps_todays_taint_outcomes_11273() {
     assert_eq!(run(&send, &env, &log), Verdict::Allow);
     let read = call(&fx, "mcp__slack-mcp__slack_read_channel");
     assert_eq!(run(&read, &pm_env(&fx), &log), Verdict::Allow);
-    let bash = payload(&fx, "Bash", json!({ "command": "curl https://hooks.slack.com/x" }));
+    let bash = payload(
+        &fx,
+        "Bash",
+        json!({ "command": "curl https://hooks.slack.com/x" }),
+    );
     let (check, _) = denied(run(&bash, &env, &log), "a tainted Bash call");
     assert_eq!(check, TAINT_CHECK);
 }
@@ -412,7 +468,11 @@ fn only_a_family_deny_is_judged_11273() {
     let fx = fixture();
     let table = FamilyTable::builtin();
     let read = Ok(call(&fx, "mcp__slack-mcp__slack_read_channel"));
-    for check in ["trust-anchor-write", BASH_CHECK, "egress-malformed-mcp-name"] {
+    for check in [
+        "trust-anchor-write",
+        BASH_CHECK,
+        "egress-malformed-mcp-name",
+    ] {
         let first = Verdict::Deny {
             check,
             reason: "r".into(),
@@ -424,6 +484,11 @@ fn only_a_family_deny_is_judged_11273() {
         check: FAMILY_CHECK,
         reason: "r".into(),
     };
-    let (v, allowed) = lift(first.clone(), &Err(HookStdinError::Empty), &table, &pm_env(&fx));
+    let (v, allowed) = lift(
+        first.clone(),
+        &Err(HookStdinError::Empty),
+        &table,
+        &pm_env(&fx),
+    );
     assert_eq!((v, allowed), (first, None));
 }

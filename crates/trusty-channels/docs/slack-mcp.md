@@ -61,9 +61,13 @@ markdown.
 
 ## Read-only allowlist under the egress guard
 
-`tm hook --egress-guard` (#8454) refuses every Slack MCP tool in a
-tm-launched session, reads included. The host `config.yaml` may grant one
-project two read tools (#10387):
+`tm hook --egress-guard` (#8454) refuses every Slack MCP tool to a
+subagent, reads included. Since #11273 a PM's or the Architect's main
+session may call the `slack-mcp` read, search and list tools; a send or
+write needs the Architect's tm launch record (#10447), bar a PM's send to
+the owner's DM (#11194). No PM launch record exists yet. The host
+`config.yaml` may grant one project two read tools for every caller,
+subagents included (#10387):
 
 ```yaml
 channels:

@@ -179,3 +179,7 @@ fn tool_mention(
         !exec && !bare_host
     })
 }
+
+#[cfg(test)]
+#[path = "egress_guard_bash_mention_tests.rs"]
+mod tests;

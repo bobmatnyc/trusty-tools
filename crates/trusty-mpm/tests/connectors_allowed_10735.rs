@@ -19,14 +19,27 @@ use std::process::Stdio;
 use trusty_mpm::core::architect_lockdown::Lockdown;
 use trusty_mpm::core::session_profile::SessionProfile;
 
-/// Pipe `stdin` into `tm hook --egress-guard`; returns (exit ok, stdout).
+/// Pipe `stdin` into an unstamped `tm hook --egress-guard`; returns (exit
+/// ok, stdout).
 fn run_guard(stdin: &[u8]) -> (bool, String) {
+    run_guard_as(stdin, None)
+}
+
+/// [`run_guard`] with the launch stamp `stamp` (#11273), or none at all.
+fn run_guard_as(stdin: &[u8], stamp: Option<&str>) -> (bool, String) {
     let data = tempfile::tempdir().expect("data dir");
-    let mut child = common::tm_command_in(common::tm_spawn_home())
+    let mut command = common::tm_command_in(common::tm_spawn_home());
+    command
         .args(["--url", "http://127.0.0.1:1", "hook", "--egress-guard"])
         .env("TRUSTY_DATA_DIR_OVERRIDE", data.path())
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
+        // #11273: the runner's own stamp must not decide the case.
+        .env_remove("TRUSTY_MPM_SESSION_PROFILE");
+    if let Some(stamp) = stamp {
+        command.env("TRUSTY_MPM_SESSION_PROFILE", stamp);
+    }
+    let mut child = command
         .current_dir(data.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -129,6 +142,26 @@ fn the_kept_egress_denies_still_hold() {
             "{case}: {stdout}"
         );
     }
+}
+
+/// 🔴 #11273: a native (non-connector) read passes for a PM main session and
+/// stays denied for its subagent; a PM's native send stays denied.
+#[test]
+fn a_main_session_native_read_passes_and_a_subagent_read_stays_denied_11273() {
+    let read = payload("mcp__notion__notion-search", serde_json::json!({}));
+    let (ok, stdout) = run_guard_as(&read, Some("pm"));
+    assert!(ok && stdout.trim().is_empty(), "PM read allowed: {stdout}");
+    let mut sub: serde_json::Value = serde_json::from_slice(&read).expect("json");
+    sub["agent_id"] = serde_json::json!("agent-7");
+    let sub = sub.to_string().into_bytes();
+    let (_, stdout) = run_guard_as(&sub, Some("pm"));
+    assert_eq!(decision(&stdout).as_deref(), Some("deny"), "{stdout}");
+    let send = payload(
+        "mcp__notion__notion-create-pages",
+        serde_json::json!({"pages": []}),
+    );
+    let (_, stdout) = run_guard_as(&send, Some("pm"));
+    assert_eq!(decision(&stdout).as_deref(), Some("deny"), "{stdout}");
 }
 
 /// 🔴 #10735, #10725: the Architect launch denies no connector family and does

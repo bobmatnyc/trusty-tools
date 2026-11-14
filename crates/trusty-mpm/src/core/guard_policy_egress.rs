@@ -63,7 +63,7 @@ pub static EGRESS_MALFORMED_MCP_NAME: GuardPolicy = policy(
 pub static EGRESS_FAMILY: GuardPolicy = policy(
     "GP-043",
     "egress-family",
-    "No messaging or mail family call (Slack, Gmail, Notion, chat); a main session may read, and a send or write needs the tm launch record.",
+    "No messaging or mail family call (Slack, Gmail, Notion, chat); a main session may read, and a send or write needs the tm launch record (bar a PM's owner-DM send).",
     "#8454, #10387, #10447, #11194, #11273",
     ALL,
     true,
