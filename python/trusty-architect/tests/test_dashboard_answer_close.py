@@ -4,7 +4,8 @@ Why: the r-183 close wrote "Relayed HH:MMZ" over the text the owner typed for an
 schema refused the `relayed` field the readers already honour, so the Architect had no allowed place for the marker.
 Covers: a close that records the relay in `relayed` keeps both owner fields and passes the schema; a close (update,
 set or batch) that would change `answer_note` or `answer` is refused (exit 2) and leaves the item answered; a reopen
-(status open) and an Architect marker note are not owner words and stay writable.
+(status open) may clear them but not replace them; only a note with the Architect's generated shape ("Relayed
+HH:MMZ", "Acknowledged HH:MMZ: ...") stays writable, and an owner note that merely starts with a marker word does not.
 Test: tests/test_dashboard_answer_close.py
 """
 import json
@@ -75,10 +76,56 @@ def test_set_and_batch_that_drop_the_answer_note_are_refused_10711(tmp_path):
     assert item(root)["data"] == ANSWERED
 
 
-def test_reopen_and_architect_marker_notes_stay_writable_10711(tmp_path):
+@pytest.mark.parametrize("note", ["Relayed 01:42Z", "Relayed 2026-11-05T23:15Z tm-api",
+                                  "Relayed 2026-11-06T23:39Z: two helpers", "Acknowledged 16:20Z",
+                                  "Acknowledged 16:20Z: dropped the work and told tm-a"])
+def test_reopen_and_architect_marker_notes_stay_writable_10711(tmp_path, note):
     root = seed(tmp_path)
     r = db(root, "update", "items", "D34", "--json", json.dumps({"status": "open", "answer": "", "answer_note": ""}))
     assert r.returncode == 0, r.stderr
-    legacy = seed(tmp_path / "legacy", {**ANSWERED, "answer_note": "Relayed 01:42Z"})
-    r = db(legacy, "update", "items", "D34", "--json", json.dumps({"status": "done", "answer_note": "Relayed 01:42Z; done"}))
+    legacy = seed(tmp_path / "legacy", {**ANSWERED, "answer_note": note})
+    r = db(legacy, "update", "items", "D34", "--json", json.dumps({"status": "done", "answer_note": note + "; done"}))
     assert r.returncode == 0, r.stderr
+    assert item(legacy)["data"]["answer_note"] == note + "; done"
+
+
+@pytest.mark.parametrize("owner", ["Acknowledged, ship Friday", "Relayedx", "Relayed to the PM",
+                                   "Relayed 01:42Zebra", "  Relayed 01:42Z"])
+def test_owner_note_that_starts_with_a_marker_word_is_refused_10711(tmp_path, owner):
+    root = seed(tmp_path, {**ANSWERED, "answer_note": owner})
+    r = db(root, "update", "items", "D34", "--json", json.dumps({"status": "done", "answer_note": "Relayed 01:42Z"}))
+    assert r.returncode == 2 and "answer_note" in r.stderr, r.stdout + r.stderr
+    assert item(root)["data"]["answer_note"] == owner
+
+
+def test_reopen_cannot_launder_an_owner_note_10711(tmp_path):
+    root = seed(tmp_path)
+    r1 = db(root, "update", "items", "D34", "--json", json.dumps({"status": "open", "answer_note": "Relayed 01:42Z"}))
+    r2 = db(root, "update", "items", "D34", "--json", json.dumps({"status": "done"}))
+    assert r1.returncode == 2 and "answer_note" in r1.stderr, r1.stdout + r1.stderr
+    assert item(root)["data"]["answer_note"] == TYPED, (r2.returncode, r2.stderr)
+    r = db(root, "update", "items", "D34", "--json", json.dumps({"status": "open", "answer": "Yes"}))
+    data = item(root)["data"]
+    assert r.returncode == 2 and "answer holds" in r.stderr and (data["answer"], data["answer_note"]) == ("Other", TYPED)
+
+
+def test_batch_with_one_refused_op_writes_nothing_10711(tmp_path):
+    root = seed(tmp_path)
+    ops = tmp_path / "ops.json"
+    ops.write_text(json.dumps([
+        {"action": "set", "collection": "items", "id": "D35", "data": {**ANSWERED, "answer_note": "x"}},
+        {"action": "update", "collection": "items", "id": "D34", "data": {**CLOSE, "answer_note": "Relayed 01:42Z"}}]))
+    r = db(root, "batch", str(ops))
+    assert r.returncode == 2 and "answer_note" in r.stderr, r.stdout + r.stderr
+    assert item(root)["data"] == ANSWERED
+    with pytest.raises(ds.NotFound):
+        ds.Store(str(root)).get("items", "D35")
+
+
+def test_unreadable_stored_item_refuses_the_write_10711(tmp_path):
+    root = seed(tmp_path)
+    path = root / "items" / "D34.json"
+    path.write_text("{not json")
+    r = db(root, "update", "items", "D34", "--json", json.dumps(CLOSE))
+    assert r.returncode == 2 and "unreadable" in r.stderr, r.stdout + r.stderr
+    assert path.read_text() == "{not json"

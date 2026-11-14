@@ -17,7 +17,7 @@ Writes to collection "items" validate `steps`: each is an object with a non-empt
 set/create/update/batch on `items` print a stderr warning (never a refusal) when kind is question or action and `task` (a T id) is missing.
 The same writes print a stderr warning (never a refusal) per level_lint.py finding in title, detail or options at the item's technical level (#11064).
 status-brief <T id> <MB id> <project/path.md> puts {id, at, brief} at the front of the task's `status_briefs` (newest first; schema-checked; the same id moves to the front).
-Writes to collection "items" (set, update, batch) refuse a change to a stored owner `answer` / `answer_note` unless the write reopens the item; the relay goes in `relayed`.
+Writes to collection "items" (set, update, batch) refuse a change to a stored owner `answer` / `answer_note` (a reopen may only clear them); the relay goes in `relayed`.
 Writes to collection "items" refuse an open/running task (kind task) left with no `steps` and no `progress` (ar-T33); `validate` lists any such open task.
 Writes to collection "sessions" validate the `site` block (per-project live/staging/origin/default_branch/deploy_model/deploy_owner/notes + `src` map) against schemas/dashboard/sessions.schema.json; an invalid block is refused (exit 2).
 Writes to collection "questions" (set, update on the merged doc, batch) validate against schemas/dashboard/questions.schema.json; an invalid doc is refused (exit 2).

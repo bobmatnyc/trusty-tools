@@ -56,6 +56,7 @@ refuse_owner_answer_change(store, verb, id, data) is dashboard-db.py's guard: th
 Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py, tests/test_dashboard_answer_close.py
 """
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -85,17 +86,30 @@ def qualified(root, entries):
     return [dict(e, qid=e["id"] if e.get("kind") == "owner_command" else dq.qualify(sid, e["id"])) for e in entries]
 
 
-ARCHITECT_MARKS = ("Relayed", "Acknowledged")   # #10711: Architect notes from before `relayed` (r-183, r-189)
+# #10711: the notes r-183 ("Relayed HH:MMZ") and r-189 ("Acknowledged HH:MMZ: <what>") generated before `relayed`;
+# the time may also be a full ISO date-time ("Relayed 2026-11-05T23:15Z tm-api"). Anything else is the owner's.
+ARCHITECT_MARK = re.compile(r"(?:Relayed|Acknowledged) (?:\d{4}-\d{2}-\d{2}T)?(?:[01]\d|2[0-3]):[0-5]\dZ(?!\w)")
+
+
+def is_architect_mark(note):
+    """True when `note` has the Architect's generated shape: marker word, a space, then an HH:MMZ or ISO time."""
+    return isinstance(note, str) and ARCHITECT_MARK.match(note) is not None
+
+
+def _cleared(value):
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def refuse_owner_answer_change(store, verb, doc_id, data):
     """Refuse an items set/update that changes the owner's stored `answer` or `answer_note`.
 
     Why: a close wrote "Relayed HH:MMZ" over the text the owner typed for an "Other" answer (#10711).
-    What: raises StoreError naming the field when the stored doc holds it as a non-empty string (an `answer_note`
-    starting "Relayed"/"Acknowledged" is the Architect's, not the owner's) and the doc after the write differs,
-    unless that doc reopens the item (status open). A missing doc passes; any other read failure propagates.
-    Test: test_close_that_overwrites_an_owner_answer_field_is_refused_10711, test_set_and_batch_that_drop_the_answer_note_are_refused_10711
+    What: raises StoreError naming each field the stored doc holds as a non-empty string that the doc after the write
+    changes. A reopen (status open) may also clear either field to empty, never set a new value. An `answer_note` with
+    the Architect's generated shape (is_architect_mark) is exempt. An empty stored `answer_note` is unguarded: it holds
+    no owner text. A missing doc passes; any other read failure propagates.
+    Test: test_close_that_overwrites_an_owner_answer_field_is_refused_10711, test_owner_note_that_starts_with_a_marker_word_is_refused_10711,
+    test_reopen_cannot_launder_an_owner_note_10711, test_reopen_and_architect_marker_notes_stay_writable_10711
     """
     if not isinstance(data, dict):
         return
@@ -104,10 +118,10 @@ def refuse_owner_answer_change(store, verb, doc_id, data):
     except ds.NotFound:
         return
     new = {**cur, **data} if verb == "update" else data
-    if new.get("status") == "open":
-        return
+    reopen = new.get("status") == "open"
     hit = [f for f in ("answer", "answer_note") if isinstance(cur.get(f), str) and cur[f].strip() and new.get(f) != cur[f]
-           and not (f == "answer_note" and cur[f].lstrip().startswith(ARCHITECT_MARKS))]
+           and not (reopen and _cleared(new.get(f))) and not (f == "answer_note" and is_architect_mark(cur[f]))]
     if hit:
-        raise ds.StoreError(f"item {doc_id}: {' and '.join(hit)} hold the owner's answer and never change; "
+        holds, changes = ("holds", "changes") if len(hit) == 1 else ("hold", "change")
+        raise ds.StoreError(f"item {doc_id}: {' and '.join(hit)} {holds} the owner's answer and never {changes}; "
                             "record the relay in `relayed` (\"<iso> <session>\") instead")
