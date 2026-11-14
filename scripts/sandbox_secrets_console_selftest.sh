@@ -42,6 +42,14 @@
 #                 real console does), in a new --dir, over a reused 0775 dir,
 #                 over a 0777 dir, and with a relative --dir; a symlinked
 #                 <dir>/data or <dir>/data/trusty-events refuses (exit 1)
+#     events-bin-* (#11159) --events-bin starts a third child, with the four
+#                 pinned names and `serve --socket <dir>/data/trusty-events/
+#                 trusty-events.sock`, before the console (the console stub
+#                 sees the socket); TERM stops it and removes events.pid; a
+#                 stale socket is removed first, and a bus that binds none
+#                 refuses (exit 1) before the console runs, with teardown; a
+#                 relative path refuses; a live events pid refuses a second
+#                 run, and `--stop DIR` stops it
 #
 # Usage: ./scripts/sandbox_secrets_console_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -81,7 +89,7 @@ expect_eq() {
 
 # Each stub records under the HOME it was given, then runs until TERM.
 mkdir -p "$TMP_ROOT/bin"
-for role in secrets console; do
+for role in secrets console events events-nobind; do
   cat > "$TMP_ROOT/bin/stub-$role" <<'STUB_EOF'
 #!/bin/sh
 role="${0##*/}"
@@ -95,13 +103,25 @@ pwd -P > "$HOME/$role.pwd"
 # #11159: the real console resolves the bus socket with create_dir_all, so
 # under umask 002 it makes <data>/trusty-events 0775 unless it already exists.
 [ "$role" != stub-console ] || mkdir -p "$TRUSTY_DATA_DIR_OVERRIDE/trusty-events"
-trap 'exit 0' TERM INT
+# #11159: the console records whether the bus socket existed when it started.
+[ "$role" != stub-console ] || { [ -S "$TRUSTY_DATA_DIR_OVERRIDE/trusty-events/trusty-events.sock" ] && echo present || echo absent; } > "$HOME/console.bus"
+# #11159: stub-events binds the --socket it was given, as the real bus does;
+# stub-events-nobind never does. chdir keeps the bind under the sun_path limit.
+if [ "$role" = stub-events ]; then
+  python3 -I -c 'import os,socket,sys,time; d,n=os.path.split(sys.argv[1]); os.chdir(d); s=socket.socket(socket.AF_UNIX); s.bind(n); s.listen(1); time.sleep(3600)' "$3" &
+  py=$!
+  trap 'kill "$py" 2>/dev/null; exit 0' TERM INT
+else
+  trap 'exit 0' TERM INT
+fi
 while :; do sleep 0.1; done
 STUB_EOF
   chmod +x "$TMP_ROOT/bin/stub-$role"
 done
 SB="$TMP_ROOT/bin/stub-secrets"
 CB="$TMP_ROOT/bin/stub-console"
+EB="$TMP_ROOT/bin/stub-events"
+EBN="$TMP_ROOT/bin/stub-events-nobind"
 
 # mode_of PATH: the permission bits in octal, e.g. 700; empty when absent.
 mode_of() {
@@ -123,7 +143,7 @@ run_launcher() {
 # the launcher itself, so a TERM sent to $! reaches it.
 spawn_launcher() {
   (
-    exec env -i PATH="$PATH" TMPDIR="$TMP_ROOT" SANDBOX_SOCKET_WAIT_SECS=0 \
+    exec env -i PATH="$PATH" TMPDIR="$TMP_ROOT" SANDBOX_SOCKET_WAIT_SECS="${RUN_WAIT_SECS:-0}" \
       TELEGRAM_BOT_TOKEN="$FAKE_TOKEN" OPENAI_API_KEY="$FAKE_KEY" \
       OP_SERVICE_ACCOUNT_TOKEN="$FAKE_TOKEN" TRUSTY_CONSOLE_BIND=0.0.0.0:7788 \
       bash "$LAUNCHER" "$@"
@@ -395,6 +415,106 @@ mkdir -p "$DIR8/data" "$DIR8/real"
 ln -s "$DIR8/real" "$DIR8/data/trusty-events"
 expect_refusal events-dir-symlink 1 --secrets-bin "$SB" --console-bin "$CB" --dir "$DIR8"
 [ -z "$(ls -A "$DIR8/real")" ] || fail events-dir-symlink-created "a refused run wrote through the symlink"
+
+# #11159: --events-bin starts the bus before the console, with the pinned names
+# and socket; TERM stops it. RUN_WAIT_SECS gives the stub time to bind.
+alive() { kill -0 "$1" 2>/dev/null; }
+# gone PATH...: true when none of the paths exists.
+gone() { local f; for f in "$@"; do [ ! -e "$f" ] || return 1; done; }
+RUN_WAIT_SECS=5
+D9="$TMP_ROOT/case-events-bin"
+mkdir -p "$D9"
+spawn_launcher --secrets-bin "$SB" --console-bin "$CB" --events-bin "$EB" --dir "$D9" \
+  --bind "127.0.0.1:$PORT" --projects 1 > "$TMP_ROOT/out-events-bin" 2>&1
+if wait_for "$D9/home/stub-console.pwd" && wait_for "$D9/home/stub-events.args"; then
+  expect_eq events-bin-argv "$(tr '\n' ' ' < "$D9/home/stub-events.args")" \
+    "serve --socket $D9/data/trusty-events/trusty-events.sock "
+  expect_eq events-bin-allowlist "$(names "$D9/home/stub-events.names")" \
+    "HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_SANDBOX "
+  expect_eq events-bin-before-console "$(cat "$D9/home/console.bus")" present
+  expect_eq events-bin-dir-mode "$(mode_of "$D9/data/trusty-events")" 700
+else
+  fail events-bin "the stubs never ran"
+  sed 's/^/    /' "$TMP_ROOT/out-events-bin"
+fi
+EP9=""
+[ -f "$D9/events.pid" ] && EP9="$(cat "$D9/events.pid")"
+kill -TERM "$LAUNCHER_PID" 2>/dev/null || true
+wait "$LAUNCHER_PID" 2>/dev/null || true
+LAUNCHER_PID=""
+if [ -n "$EP9" ] && ! alive "$EP9" && [ ! -e "$D9/events.pid" ]; then
+  pass events-bin-teardown
+else
+  fail events-bin-teardown "the events stub outlived the launcher, or left its pidfile"
+fi
+bash "$LAUNCHER" --stop "$D9" > /dev/null 2>&1 || true
+
+# Without --events-bin the console sees no bus socket.
+D10="$TMP_ROOT/case-events-none"
+mkdir -p "$D10"
+spawn_launcher --secrets-bin "$SB" --console-bin "$CB" --dir "$D10" \
+  --bind "127.0.0.1:$PORT" --projects 1 > "$TMP_ROOT/out-events-none" 2>&1
+if wait_for "$D10/home/console.bus"; then
+  expect_eq events-none-no-bus "$(cat "$D10/home/console.bus")" absent
+  if gone "$D10/events.pid"; then pass events-none-no-pidfile; else fail events-none-no-pidfile "events.pid exists"; fi
+else
+  fail events-none "the console stub never ran"
+fi
+kill -TERM "$LAUNCHER_PID" 2>/dev/null || true
+wait "$LAUNCHER_PID" 2>/dev/null || true
+LAUNCHER_PID=""
+bash "$LAUNCHER" --stop "$D10" > /dev/null 2>&1 || true
+
+# A stale socket from an earlier run is removed, and a bus that binds none
+# refuses before the console runs (exit 1), leaving no child behind.
+D11="$TMP_ROOT/case-events-stale"
+mkdir -p "$D11/data/trusty-events"
+chmod 700 "$D11/data/trusty-events"
+python3 -I -c 'import os,socket,sys; d,n=os.path.split(sys.argv[1]); os.chdir(d); socket.socket(socket.AF_UNIX).bind(n)' \
+  "$D11/data/trusty-events/trusty-events.sock"
+[ -S "$D11/data/trusty-events/trusty-events.sock" ] || fail events-stale-setup "no stale socket made"
+RUN_WAIT_SECS=1
+expect_refusal events-bin-nobind 1 --secrets-bin "$SB" --console-bin "$CB" --events-bin "$EBN" --dir "$D11" \
+  --bind "127.0.0.1:$PORT" --projects 1
+RUN_WAIT_SECS=5
+if gone "$D11/data/trusty-events/trusty-events.sock"; then pass events-stale-removed; else fail events-stale-removed "the stale socket survived"; fi
+if gone "$D11/home/stub-console.pwd"; then pass events-nobind-no-console; else fail events-nobind-no-console "the console started"; fi
+if gone "$D11/events.pid" "$D11/secrets.pid"; then pass events-nobind-teardown; else fail events-nobind-teardown "a pidfile remains"; fi
+
+D12="$TMP_ROOT/case-events-rel"
+mkdir -p "$D12"
+expect_refusal rel-events-bin 1 --secrets-bin "$SB" --console-bin "$CB" --dir "$D12" --events-bin bin/stub-events
+[ -z "$(ls -A "$D12")" ] || fail rel-events-bin-created "a refused run created files in --dir"
+
+# A live events pid refuses a second run, and --stop stops it. The launcher is
+# killed, then the secrets and console children, so only the bus is left.
+D13="$TMP_ROOT/case-events-live"
+mkdir -p "$D13"
+spawn_launcher --secrets-bin "$SB" --console-bin "$CB" --events-bin "$EB" --dir "$D13" \
+  --bind "127.0.0.1:$PORT" --projects 1 > "$TMP_ROOT/out-events-live" 2>&1
+if wait_for "$D13/console.pid" && wait_for "$D13/events.pid" && wait_for "$D13/home/console.bus"; then
+  kill -KILL "$LAUNCHER_PID" 2>/dev/null || true
+  wait "$LAUNCHER_PID" 2>/dev/null || true
+  LAUNCHER_PID=""
+  EP13="$(cat "$D13/events.pid")"
+  for role in secrets console; do kill -TERM "$(cat "$D13/$role.pid")" 2>/dev/null || true; done
+  sleep 0.5
+  alive "$EP13" || fail events-live-setup "the events stub is not running"
+  expect_refusal events-live-pid 1 --secrets-bin "$SB" --console-bin "$CB" --events-bin "$EB" --dir "$D13" \
+    --bind "127.0.0.1:$PORT" --projects 1
+  if grep -q "(events) is recorded live" "$TMP_ROOT/out-events-live-pid"; then
+    pass events-live-pid-names-role
+  else
+    fail events-live-pid-names-role "the refusal does not name the events child"
+  fi
+  bash "$LAUNCHER" --stop "$D13" > /dev/null 2>&1 || true
+  if ! alive "$EP13" && [ ! -e "$D13/events.pid" ]; then pass events-stop; else fail events-stop "--stop left the events stub or its pidfile"; fi
+else
+  fail events-live "the stubs never ran"
+  kill -TERM "$LAUNCHER_PID" 2>/dev/null || true
+  LAUNCHER_PID=""
+fi
+RUN_WAIT_SECS=0
 
 echo "sandbox_secrets_console_selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]
