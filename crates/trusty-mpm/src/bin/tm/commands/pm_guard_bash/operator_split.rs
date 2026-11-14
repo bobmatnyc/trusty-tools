@@ -6,7 +6,8 @@
 //! uses. [`super::tokenize`] runs this pass before `shlex`.
 //! What: [`split_operators`] returns the segment with a space inserted at each
 //! place bash would end a word before or after an operator.
-//! Test: `operator_split_tests` (the `operator_split_*` rows).
+//! Test: `operator_split_cuts_each_redirect_class`,
+//! `operator_split_keeps_refusing_glued_secret_reads`.
 
 use std::borrow::Cow;
 
