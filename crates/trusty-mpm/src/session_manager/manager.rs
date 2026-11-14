@@ -374,6 +374,9 @@ pub struct SessionManager {
     /// #9167 AC5: where each delivered inject is recorded. Installed by a
     /// process with a bus producer only; see `inject_record.rs`.
     pub(crate) inject_recorder: std::sync::OnceLock<Arc<dyn super::inject_record::InjectRecorder>>,
+    /// #10989: a test's trusty-search stand-in for the post-start restore.
+    #[cfg(test)]
+    pub(crate) index_restore_socket: std::sync::OnceLock<PathBuf>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -423,6 +426,8 @@ impl SessionManager {
             taint_dir: std::sync::OnceLock::new(),
             removal_recorder: std::sync::OnceLock::new(),
             inject_recorder: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            index_restore_socket: std::sync::OnceLock::new(),
         })
     }
 

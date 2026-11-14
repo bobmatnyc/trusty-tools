@@ -552,3 +552,35 @@ async fn a_failed_unpark_fails_the_spawn_by_name() {
     assert!(err.contains("widget-idx"), "{err}");
     assert!(err.contains("still parked"), "{err}");
 }
+
+/// #10989 F2: a project with no session records still has a palace to unload.
+/// Its checkout comes from the registry row (`local_checkout_for`), so the
+/// decommission succeeds while a healthy trusty-memory runs.
+/// Test: this function IS the test. Fails if `shutdown_target` takes the root
+/// only from session records (the palace is then unresolved and the verb
+/// refuses with `IndexShutdown`).
+#[tokio::test]
+async fn decommission_project_without_records_unloads_by_its_checkout() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, healthy_search, rig};
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let checkout = crate::test_support::hermetic_temp_dir();
+    let mut project = registry.get("widget").await.expect("row");
+    project.name = "local-proj".into();
+    project.repo_url = checkout.path().to_string_lossy().into_owned();
+    project.project_key = Some("local:1234".into());
+    registry.register(project).await.expect("register");
+    let rig = rig(healthy_search(), healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "local-proj", Ok(rig.capability()))
+        .await
+        .expect("a project with no records decommissions");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    assert!(
+        matches!(shutdown.palace, ShutdownState::Unloaded { .. }),
+        "{shutdown:?}"
+    );
+    assert!(report.stopped.is_empty() && report.left_as_is.is_empty());
+}

@@ -247,12 +247,17 @@ impl SessionManager {
 /// What to shut down for `project`, given every session record bound to it.
 ///
 /// What: the first bound record whose checkout (`workspace_path`, else `cwd`)
-/// is on disk supplies the path; see [`ShutdownTarget::for_project`].
+/// is on disk supplies the path, else the project's own
+/// [`crate::project::local_checkout_for`] when that is on disk (#10989 F2: a
+/// project with no records still resolves its palace); see
+/// [`ShutdownTarget::for_project`].
+/// Test: `decommission_project_without_records_unloads_by_its_checkout`.
 fn shutdown_target(project: &Project, records: &[SessionRecord]) -> ShutdownTarget {
     let root = records
         .iter()
         .map(|r| r.workspace_path.clone().unwrap_or_else(|| r.cwd.clone()))
-        .find(|p| p.is_dir());
+        .find(|p| p.is_dir())
+        .or_else(|| crate::project::local_checkout_for(project).filter(|p| p.is_dir()));
     ShutdownTarget::for_project(
         project.project_key.as_deref(),
         &project.repo_url,

@@ -315,12 +315,11 @@ pub async fn spawn_managed(
             )
         })?;
     // #10989: undo a decommission park of this project's index; a failure is named.
-    crate::session_manager::index_restore::restore_for_session(
-        &registry,
-        &record,
-        crate::session_manager::index_restore::IndexRestore::acquire(),
-    )
-    .await?;
+    state
+        .session_manager()
+        .await
+        .restore_parked_index(&registry, &record)
+        .await?;
 
     Ok(record)
 }
@@ -1111,6 +1110,11 @@ pub async fn resume_managed(
         .await
         .map_err(ResumeManagedError::from)?;
     mgr.note_operator_resume(id).await;
+    // #10989 F3: unpark a decommission park before the launch; a failure is
+    // this resume's error once the runtime is up, as on the spawn path.
+    let restored = mgr
+        .restore_parked_index(&*state.project_registry().await, &record)
+        .await;
 
     let workspace = record
         .workspace_path
@@ -1225,6 +1229,7 @@ pub async fn resume_managed(
         // an error.
         return Err(ResumeManagedError::Other(msg));
     }
+    restored.map_err(ResumeManagedError::Other)?;
 
     Ok(mgr.get(id).await.unwrap_or(record))
 }

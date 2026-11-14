@@ -121,8 +121,9 @@ impl IndexShutdownReport {
 /// What to shut down for one project (#10989).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShutdownTarget {
-    /// The `search.project.resolve` query: an `owner/repo` or an absolute path.
-    pub search_query: Option<String>,
+    /// The `search.project.resolve` queries, tried in order until one hits:
+    /// the `owner/repo` identity, then the checkout paths.
+    pub search_queries: Vec<String>,
     /// The palace id, or why it could not be resolved.
     pub palace: Result<String, String>,
 }
@@ -131,15 +132,25 @@ impl ShutdownTarget {
     /// The target for a project with registry key `project_key`, remote
     /// `repo_url`, and a session checkout `root` (if any is on disk).
     ///
-    /// What: the search query is the `owner/repo` identity — `project_key`
-    /// when it is one, else parsed from `repo_url` — else `root`'s path. The
-    /// palace resolves through `trusty_common::palace_resolve` from `root` and
-    /// `repo_url`, the same call session launch exports `TRUSTY_MEMORY_PALACE`
-    /// from.
-    /// Test: `target_prefers_the_project_key_then_the_remote_then_the_path`.
+    /// What: the queries are the `owner/repo` identity ([`repo_identity`]),
+    /// then `root`, then `repo_url` when it is an absolute path, deduplicated.
+    /// The palace resolves through `trusty_common::palace_resolve` from `root`
+    /// and `repo_url`, the same call session launch exports
+    /// `TRUSTY_MEMORY_PALACE` from.
+    /// Test: `target_prefers_the_project_key_then_the_remote_then_the_path`,
+    /// `a_path_project_is_parked_by_its_path`.
     pub fn for_project(project_key: Option<&str>, repo_url: &str, root: Option<&Path>) -> Self {
-        let search_query = repo_identity(project_key, repo_url)
-            .or_else(|| root.map(|r| r.to_string_lossy().into_owned()));
+        let path_url = Some(repo_url.trim()).filter(|u| u.starts_with('/'));
+        let mut search_queries: Vec<String> = Vec::new();
+        let candidates = repo_identity(project_key, repo_url)
+            .into_iter()
+            .chain(root.map(|r| r.to_string_lossy().into_owned()))
+            .chain(path_url.map(str::to_string));
+        for query in candidates {
+            if !search_queries.contains(&query) {
+                search_queries.push(query);
+            }
+        }
         let remote = Some(repo_url).filter(|u| !u.trim().is_empty());
         let palace = match root {
             Some(root) => trusty_common::palace_resolve::resolve_palace_with_remote(root, remote)
@@ -148,23 +159,24 @@ impl ShutdownTarget {
             None => Err("no checkout on disk to resolve the palace from".to_string()),
         };
         Self {
-            search_query,
+            search_queries,
             palace,
         }
     }
 }
 
 /// A project's `owner/repo` identity: `project_key` when it is one, else
-/// parsed from `repo_url`; `None` for a `local:` key with no GitHub remote.
+/// [`crate::project::project_key_from_repo_url`] of `repo_url`; `None` for a
+/// `local:` key with no GitHub remote.
+///
+/// #10989 F1: a path `repo_url` is never parsed as a URL — `/a/b/work/tools`
+/// would invent `work/tools`; its identity is its checkout's origin, if any.
 pub(crate) fn repo_identity(project_key: Option<&str>, repo_url: &str) -> Option<String> {
     project_key
         .filter(|k| !k.starts_with("local:"))
         .and_then(trusty_common::repo_identity::RepoIdentity::parse)
         .map(|r| r.canonical())
-        .or_else(|| {
-            trusty_common::github_path::parse_github_path(repo_url)
-                .map(|g| format!("{}/{}", g.owner, g.repo))
-        })
+        .or_else(|| crate::project::project_key_from_repo_url(repo_url))
 }
 
 /// The capability to shut a project's indexes down without deleting data.
@@ -209,7 +221,7 @@ impl IndexShutdown {
     /// Test: `shutdown_parks_and_unloads_and_never_deletes`.
     pub async fn shut_down(&self, target: &ShutdownTarget) -> IndexShutdownReport {
         IndexShutdownReport {
-            search: park_search(self.search.as_deref(), target.search_query.as_deref()).await,
+            search: park_search(self.search.as_deref(), &target.search_queries).await,
             palace: unload_palace(self.memory.as_deref(), &target.palace).await,
         }
     }
@@ -219,61 +231,96 @@ impl IndexShutdown {
 ///
 /// Why: a missing socket or a refused connect means no daemon, so nothing is
 /// loaded; a daemon that accepts and then fails a call is a failure.
-pub(super) async fn listening(socket: Option<&Path>) -> Option<&Path> {
-    let socket = socket?;
+/// What: `Ok(Some)` when the connect succeeds; `Ok(None)` for no socket path,
+/// `NotFound` or `ConnectionRefused`; `Err` for any other connect error and
+/// for the timeout (#10989 F4: those cannot tell that nothing is loaded).
+/// Test: `an_unreachable_socket_is_a_failure_not_a_daemon_down`.
+pub(super) async fn listening(socket: Option<&Path>) -> Result<Option<&Path>, String> {
+    let Some(socket) = socket else {
+        return Ok(None);
+    };
     let connect = tokio::net::UnixStream::connect(socket);
     match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
-        Ok(Ok(_)) => Some(socket),
-        _ => None,
+        Ok(Ok(_)) => Ok(Some(socket)),
+        Ok(Err(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(None)
+        }
+        Ok(Err(e)) => Err(format!("could not connect to {}: {e}", socket.display())),
+        Err(_) => Err(format!(
+            "connecting to {} timed out after {CONNECT_TIMEOUT:?}",
+            socket.display()
+        )),
     }
 }
 
-/// Resolve the project's index, then park it for the decommission.
-async fn park_search(socket: Option<&Path>, query: Option<&str>) -> ShutdownState {
-    let Some(socket) = listening(socket).await else {
-        return ShutdownState::NotLoaded {
-            reason: "trusty-search is not running".to_string(),
-        };
-    };
-    let Some(query) = query else {
-        return ShutdownState::Failed {
-            id: None,
-            error: "the project has no repo identity or checkout path to resolve".to_string(),
-        };
-    };
-    let resolved = search_rpc::call_at(
-        socket,
-        METHOD_RESOLVE,
-        json!({ "project": query }),
-        CALL_TIMEOUT,
-    )
-    .await;
-    let index_id = match resolved {
+/// One resolve answer: the index, a miss, or a failure.
+enum Resolved {
+    Index(String),
+    Miss,
+    Failed(String),
+}
+
+/// Ask `search.project.resolve` for `query`'s live index.
+async fn resolve_index(socket: &Path, query: &str) -> Resolved {
+    let params = json!({ "project": query });
+    match search_rpc::call_at(socket, METHOD_RESOLVE, params, CALL_TIMEOUT).await {
         Ok(body) => match body.get("index_id").and_then(Value::as_str) {
-            Some(id) => id.to_string(),
-            None => {
-                return ShutdownState::Failed {
-                    id: None,
-                    error: format!("{METHOD_RESOLVE} answered no index_id for {query}"),
-                };
-            }
+            Some(id) => Resolved::Index(id.to_string()),
+            None => Resolved::Failed(format!("{METHOD_RESOLVE} answered no index_id for {query}")),
         },
-        // A resolve miss: no live index — an earlier decommission parked it,
-        // or the project was never indexed.
+        // A miss: no live index — an earlier decommission parked it, or the
+        // project was never indexed.
         Err(e)
             if e.downcast_ref::<SearchRpcError>()
                 .is_some_and(SearchRpcError::is_not_found) =>
         {
+            Resolved::Miss
+        }
+        Err(e) => Resolved::Failed(format!("{e:#}")),
+    }
+}
+
+/// Resolve the project's index, then park it for the decommission.
+///
+/// What: tries each query in order; a miss moves to the next (#10989 F1: an
+/// identity miss retries by path), and only a miss on every query is
+/// [`ShutdownState::NotLoaded`].
+async fn park_search(socket: Option<&Path>, queries: &[String]) -> ShutdownState {
+    let socket = match listening(socket).await {
+        Ok(Some(socket)) => socket,
+        Ok(None) => {
             return ShutdownState::NotLoaded {
-                reason: format!("no live index for {query}"),
+                reason: "trusty-search is not running".to_string(),
             };
         }
-        Err(e) => {
-            return ShutdownState::Failed {
-                id: None,
-                error: format!("{e:#}"),
-            };
+        Err(error) => return ShutdownState::Failed { id: None, error },
+    };
+    if queries.is_empty() {
+        return ShutdownState::Failed {
+            id: None,
+            error: "the project has no repo identity or checkout path to resolve".to_string(),
+        };
+    }
+    let mut found = None;
+    for query in queries {
+        match resolve_index(socket, query).await {
+            Resolved::Index(id) => {
+                found = Some(id);
+                break;
+            }
+            Resolved::Miss => {}
+            Resolved::Failed(error) => return ShutdownState::Failed { id: None, error },
         }
+    }
+    let Some(index_id) = found else {
+        return ShutdownState::NotLoaded {
+            reason: format!("no live index for {}", queries.join(" or ")),
+        };
     };
     let params = json!({ "index_id": index_id, "decommission": true });
     match search_rpc::call_at(socket, METHOD_PARK, params, CALL_TIMEOUT).await {
@@ -294,10 +341,14 @@ async fn park_search(socket: Option<&Path>, query: Option<&str>) -> ShutdownStat
 
 /// Unload the project's palace.
 async fn unload_palace(socket: Option<&Path>, palace: &Result<String, String>) -> ShutdownState {
-    let Some(socket) = listening(socket).await else {
-        return ShutdownState::NotLoaded {
-            reason: "trusty-memory is not running".to_string(),
-        };
+    let socket = match listening(socket).await {
+        Ok(Some(socket)) => socket,
+        Ok(None) => {
+            return ShutdownState::NotLoaded {
+                reason: "trusty-memory is not running".to_string(),
+            };
+        }
+        Err(error) => return ShutdownState::Failed { id: None, error },
     };
     let palace = match palace {
         Ok(p) => p,

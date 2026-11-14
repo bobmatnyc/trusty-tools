@@ -131,7 +131,7 @@ pub(crate) fn busy_memory() -> Answer {
 
 fn target() -> ShutdownTarget {
     ShutdownTarget {
-        search_query: Some("acme/widget".into()),
+        search_queries: vec!["acme/widget".into()],
         palace: Ok("acme-widget".into()),
     }
 }
@@ -304,7 +304,7 @@ async fn a_daemon_not_running_holds_nothing_and_an_unresolved_target_fails() {
 
     let rig = rig(healthy_search(), healthy_memory()).await;
     let unresolved = ShutdownTarget {
-        search_query: None,
+        search_queries: Vec::new(),
         palace: Err("could not resolve the palace: bad pin".into()),
     };
     let report = rig.capability().shut_down(&unresolved).await;
@@ -347,14 +347,90 @@ fn target_prefers_the_project_key_then_the_remote_then_the_path() {
     let root = std::path::Path::new("/nonexistent/widget");
     let by_key =
         ShutdownTarget::for_project(Some("acme/widget"), "https://github.com/other/name", None);
-    assert_eq!(by_key.search_query.as_deref(), Some("acme/widget"));
+    assert_eq!(by_key.search_queries, vec!["acme/widget".to_string()]);
     let by_remote = ShutdownTarget::for_project(
         Some("local:1234"),
         "https://github.com/Acme/Widget.git",
         None,
     );
-    assert_eq!(by_remote.search_query.as_deref(), Some("acme/widget"));
+    assert_eq!(by_remote.search_queries, vec!["acme/widget".to_string()]);
     let by_path = ShutdownTarget::for_project(None, "", Some(root));
-    assert_eq!(by_path.search_query.as_deref(), Some("/nonexistent/widget"));
+    assert_eq!(
+        by_path.search_queries,
+        vec!["/nonexistent/widget".to_string()]
+    );
     assert!(by_key.palace.is_err(), "no checkout, no palace");
+}
+
+/// A trusty-search whose resolve answers only `path`, and misses all else.
+fn resolves_only(path: &'static str) -> Answer {
+    Arc::new(move |method, params| match method {
+        METHOD_RESOLVE if params["project"] == path => Ok(json!({ "index_id": "proj-idx" })),
+        METHOD_RESOLVE => Err(RpcError::new(NOT_FOUND, "no live index")),
+        METHOD_PARK => Ok(json!({ "index_id": "proj-idx", "parked": true, "unloaded": true })),
+        other => Err(RpcError::new(-32601, format!("unexpected {other}"))),
+    })
+}
+
+/// Why: #10989 F1 — a path `repo_url` with a `local:` key must not yield an
+/// invented `owner/repo` (`/x/y/proj` is not `y/proj`); the project resolves
+/// and parks by its path, and an identity miss retries by the checkout path.
+/// Test: this test. Fails if `repo_identity` parses a path as a URL, or if an
+/// identity miss reports `NotLoaded` without trying the path.
+#[tokio::test]
+async fn a_path_project_is_parked_by_its_path() {
+    let target = ShutdownTarget::for_project(Some("local:1234"), "/x/y/proj", None);
+    assert_eq!(target.search_queries, vec!["/x/y/proj".to_string()]);
+    let rig = rig(resolves_only("/x/y/proj"), healthy_memory()).await;
+    let cap = IndexShutdown::at(Some(rig.search_socket()), None);
+    let report = cap.shut_down(&target).await;
+    assert_eq!(
+        report.search,
+        ShutdownState::Unloaded {
+            id: "proj-idx".into()
+        },
+        "{:?}",
+        rig.methods()
+    );
+
+    // An identity whose index is not found retries by the checkout path.
+    let root = std::path::Path::new("/x/y/proj");
+    let target = ShutdownTarget::for_project(Some("acme/widget"), "", Some(root));
+    let report = cap.shut_down(&target).await;
+    assert_eq!(
+        report.search,
+        ShutdownState::Unloaded {
+            id: "proj-idx".into()
+        }
+    );
+}
+
+/// Why: #10989 F4 (Fail-Open Check) — only a missing socket or a refused
+/// connect means "not running". Any other connect error cannot tell that
+/// nothing is loaded, so the shutdown fails both items and the restore fails.
+/// Test: this test. A socket path under a regular file connects with
+/// `ENOTDIR`; it fails if `listening` maps that to "not running".
+#[tokio::test]
+async fn an_unreachable_socket_is_a_failure_not_a_daemon_down() {
+    use crate::session_manager::index_restore::{IndexRestore, RestoreState, RestoreTarget};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("not-a-dir");
+    std::fs::write(&file, b"").expect("file");
+    let socket = file.join("daemon.sock");
+
+    let report = IndexShutdown::at(Some(socket.clone()), Some(socket.clone()))
+        .shut_down(&target())
+        .await;
+    assert_eq!(report.still_loaded().len(), 2, "{report:?}");
+
+    let restore = IndexRestore::at(Some(socket))
+        .restore(&RestoreTarget {
+            identity: Some("acme/widget".into()),
+            root: None,
+        })
+        .await;
+    assert!(
+        matches!(restore, RestoreState::Failed { .. }),
+        "{restore:?}"
+    );
 }

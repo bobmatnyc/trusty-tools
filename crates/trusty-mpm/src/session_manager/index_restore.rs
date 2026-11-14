@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use trusty_common::search_rpc;
 
 use super::index_shutdown::{CALL_TIMEOUT, is_true, listening, repo_identity};
+use super::manager::SessionManager;
 use super::record::SessionRecord;
 use crate::project::{ProjectRegistry, resolve_session_project};
 
@@ -120,8 +121,16 @@ impl IndexRestore {
     /// Test: `restore_unparks_only_the_projects_decommission_park`,
     /// `a_refused_unpark_is_a_failure_naming_the_index`.
     pub async fn restore(&self, target: &RestoreTarget) -> RestoreState {
-        let Some(socket) = listening(self.search.as_deref()).await else {
-            return RestoreState::NotRunning;
+        let socket = match listening(self.search.as_deref()).await {
+            Ok(Some(socket)) => socket,
+            Ok(None) => return RestoreState::NotRunning,
+            // #10989 F4: an unreachable socket cannot tell that nothing is parked.
+            Err(error) => {
+                return RestoreState::Failed {
+                    ids: Vec::new(),
+                    error,
+                };
+            }
         };
         let map = match search_rpc::call_at(socket, METHOD_MAP, json!({}), CALL_TIMEOUT).await {
             Ok(map) => map,
@@ -169,9 +178,10 @@ impl IndexRestore {
 
 /// Undo `record`'s project's decommission park; `Err` names what stays parked.
 ///
-/// Why: #10989 — `spawn_managed` calls this for every new session, so a
-/// project started again after a decommission gets its index back, and an
-/// unpark that fails is the spawn's error rather than a silent success.
+/// Why: #10989 — every spawn and resume reaches this through
+/// [`SessionManager::restore_parked_index`], so a project started again after
+/// a decommission gets its index back, and an unpark that fails is the
+/// route's error rather than a silent success.
 /// What: the identity comes from the registry project `record` binds to (its
 /// `project_key`, else its `repo_url`), else from `record.repo_url`; the root
 /// is the record's workspace, else its cwd. `restore` `Err(reason)` (a test
@@ -227,6 +237,25 @@ pub async fn restore_for_session(
             Ok(RestoreState::NotRunning)
         }
         state => Ok(state),
+    }
+}
+
+impl SessionManager {
+    /// The one post-start restore `spawn_managed` and `resume_managed` call
+    /// (#10989 F3): [`restore_for_session`] with this manager's capability.
+    ///
+    /// Test: `a_resume_after_a_decommission_unparks_the_index`.
+    pub(crate) async fn restore_parked_index(
+        &self,
+        registry: &ProjectRegistry,
+        record: &SessionRecord,
+    ) -> Result<RestoreState, String> {
+        #[cfg(test)]
+        if let Some(socket) = self.index_restore_socket.get() {
+            let cap = Ok(IndexRestore::at(Some(socket.clone())));
+            return restore_for_session(registry, record, cap).await;
+        }
+        restore_for_session(registry, record, IndexRestore::acquire()).await
     }
 }
 
