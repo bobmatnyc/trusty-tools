@@ -2,18 +2,19 @@
 //!
 //! Why: trusty-mpm 1.14.0 registered a checkout only from `tm connect`, on the
 //! client. A `tm launch` of a checkout with an origin, any other `POST /sessions`
-//! client, and a running session a discovery scan adopts all reached the daemon
-//! without a `projects.json` row, so `tm secrets assign` answered "project not
-//! registered" for a project with a live session.
+//! client, and a running tm session a discovery scan adopts all reached the
+//! daemon without a `projects.json` row, so `tm secrets assign` answered
+//! "project not registered" for a project with a live session.
 //! What: [`register_seen_session_project`] runs
 //! [`register_session_checkout`] against the daemon's own registry and logs the
-//! outcome; [`register_adopted_sessions`] applies it to the sessions one
-//! discovery scan adopted. Neither ever fails the session: a failure is a warn
+//! outcome; [`register_adopted_sessions`] applies it to the tm-launched tmux
+//! sessions one discovery scan adopted (never a native `claude` cwd, D50). Neither ever fails the session: a failure is a warn
 //! line naming the cause, and the session stays registered.
 //! Test: `session_project_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
+use crate::core::session::SessionHost;
 use crate::daemon::state::DaemonState;
 use crate::project::{SessionRegistration, SessionRegistrationError, register_session_checkout};
 
@@ -66,19 +67,28 @@ pub async fn register_seen_session_project(
     result
 }
 
-/// Register the checkout of every session one discovery scan adopted.
+/// Register the checkout of every tm session one discovery scan adopted.
 ///
-/// Why: #10368 — a session already running when the daemon starts is first
-/// seen by `discover_all`; without this its project stays unregistered.
-/// What: for each adopted `tmux_name`, the session's `project_path`, else its
-/// non-empty `workdir`, goes through [`register_seen_session_project`]. A session
-/// with neither is skipped.
-/// Test: `an_adopted_session_registers_its_checkout_as_a_project`.
+/// Why: #10368 — a tm session already running when the daemon starts is first
+/// seen by `discover_all`; without this its project stays unregistered. D50: a
+/// registered checkout gates owner- and user-scope secret reads, so a plain
+/// `claude` run (native, or in an external tmux session) must never register.
+/// What: keeps adopted sessions that are tmux-hosted and carry a tm-managed
+/// name (`is_managed_session_name`); each one's `project_path`, else its
+/// non-empty `workdir`, goes through [`register_seen_session_project`]. Every
+/// other session, and one with no directory, is skipped.
+/// Test: `only_a_tm_launched_tmux_session_registers_when_adopted`,
+/// `a_native_adopted_cwd_writes_no_project_row`.
 pub async fn register_adopted_sessions(state: &DaemonState, adopted: &[String]) {
     let dirs: Vec<PathBuf> = state
         .list_sessions()
         .into_iter()
         .filter(|s| adopted.contains(&s.tmux_name))
+        // #10368: D50 — only a tmux session tm launched, never a native cwd.
+        .filter(|s| {
+            s.origin == SessionHost::Tmux
+                && crate::core::names::is_managed_session_name(&s.tmux_name)
+        })
         .filter_map(|s| {
             s.project_path
                 .or_else(|| (!s.workdir.is_empty()).then(|| PathBuf::from(&s.workdir)))
