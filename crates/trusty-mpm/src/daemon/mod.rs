@@ -113,6 +113,8 @@ pub mod mcp_project;
 pub mod mcp_project_decommission;
 // #10991: `tm session archive`, shared by the MCP tool, socket and HTTP.
 pub mod session_archive;
+// #10368: a session the daemon first sees registers its checkout.
+pub mod session_project;
 // #7357: the backfill both registration transports share.
 pub mod mcp_proxy;
 pub mod mcp_session;
