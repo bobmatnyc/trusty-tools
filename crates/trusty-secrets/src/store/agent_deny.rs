@@ -64,7 +64,7 @@ pub enum ControlItem {
     DenyMigrated,
     /// The key is push-only for agents (#10998): every agent read of its
     /// value is refused as for [`ControlItem::AgentDeny`]; a push to a sync
-    /// target may honour it ([`is_push_only`]). Per key.
+    /// target admits it ([`agent_push_denied`]). Per key.
     PushOnly,
 }
 
@@ -236,6 +236,37 @@ pub fn agent_denied(
     }
     migrate_vault(backend, index, vault, mode, audit)?;
     agent_blocked(backend, vault, key)
+}
+
+/// Whether an agent is refused a push of `key` to a sync target (#10999).
+///
+/// Why: Architect decision 2026-11-11 02:35Z (#10998) — a push-only key may
+/// be pushed by an agent; the value goes from the server to the target and
+/// never reaches the agent. A deny still refuses, and wins over the mark.
+/// What: as [`agent_denied`], but only [`ControlItem::AgentDeny`] refuses.
+/// The push-only mark is then read with [`is_push_only`]; marked or not, an
+/// undenied key is admitted, and a failed lookup of either item is the
+/// error, never "admitted" (Fail-Open Check).
+/// Test: `agent_push_denied_admits_the_mark_refuses_a_deny_and_fails_closed`,
+/// `agent_push_of_a_push_only_key_sends_it`,
+/// `agent_push_with_a_failed_mark_lookup_fails_every_key`.
+pub fn agent_push_denied(
+    backend: &dyn SecretBackend,
+    index: &NamesIndex,
+    vault: &VaultName,
+    key: &SecretKey,
+    mode: AgentDenyMigration,
+    audit: Option<&DenyAudit>,
+) -> Result<bool, SecretsError> {
+    if !backend.holds_agent_controls() {
+        return Ok(mode == AgentDenyMigration::KeepClosed);
+    }
+    migrate_vault(backend, index, vault, mode, audit)?;
+    if backend.control_item(ControlItem::AgentDeny, vault, Some(key))? {
+        return Ok(true);
+    }
+    // #10999: an unreadable mark refuses the push; a readable one admits it.
+    is_push_only(backend, vault, key).map(|_| false)
 }
 
 #[cfg(test)]

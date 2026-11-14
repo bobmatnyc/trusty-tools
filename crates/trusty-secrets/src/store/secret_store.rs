@@ -130,6 +130,29 @@ impl SecretStore {
         .map(|denied| !denied)
     }
 
+    /// Whether an agent may push `key` in `vault` to a sync target (#10999).
+    ///
+    /// What: the inverse of [`agent_deny::agent_push_denied`]: a push-only
+    /// key may be pushed, a denied one may not. Never opens a read path; a
+    /// failed lookup or migration is an error, never "may push".
+    /// Test: `agent_push_of_a_push_only_key_sends_it`,
+    /// `agent_push_with_a_failed_mark_lookup_fails_every_key`.
+    pub fn agents_may_push(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+    ) -> Result<bool, SecretsError> {
+        agent_deny::agent_push_denied(
+            self.backend.as_ref(),
+            &self.index,
+            vault,
+            key,
+            self.migration,
+            self.deny_audit.as_ref(),
+        )
+        .map(|denied| !denied)
+    }
+
     /// [`Self::agents_may_use`] for a vault already migrated.
     fn may_use_migrated(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         if !self.backend.holds_agent_controls() {

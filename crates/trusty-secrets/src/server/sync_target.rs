@@ -2,9 +2,13 @@
 //!
 //! Why: a push sends a project value outside this machine, to a store any
 //! repository writer's workflow can read. So it takes named keys only (D5),
-//! never runs for a caller under Claude Code (D3, owner ruling D63), opens
-//! its target only from the account's own machine config for the checkout's
-//! origin repository (D6), and never touches the names-only index (D4).
+//! opens its target only from the account's own machine config for the
+//! checkout's origin repository (D6), and never touches the names-only index
+//! (D4). #10999 (owner ruling 2026-11-10, Architect E/F) supersedes D3 for
+//! agents: a caller under Claude Code may push a key with no deny, because
+//! the value goes from the server to the CLI's stdin and never reaches the
+//! caller; a key denied to agents stays un-pushable by one, and a key an
+//! agent copied from a Keychain item (push-only, #10998) is pushable by one.
 //! What: [`push`], the body `methods::copy` hands a sync-target destination
 //! to, and [`State::open_sync_target`], the one place a sync target opens.
 //! The audit gate is `copy`'s own: one deny record for a refusal before the
@@ -15,7 +19,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::agents_flag::refuse_agent_caller;
+use super::agents_flag::judge_agent_caller;
 use super::errors::ErrorKind;
 use super::gate::Gate;
 use super::methods::{Caller, to_json};
@@ -23,7 +27,7 @@ use super::project::ProjectContext;
 use super::router::State;
 use crate::api::methods::{CopyRequest, CopyResponse};
 use crate::api::{BackendId, SecretsError};
-use crate::store::{Capabilities, RemoteIdentity, SecretBackend, open_sync_target_at};
+use crate::store::{Capabilities, RemoteIdentity, SecretBackend, SecretStore, open_sync_target_at};
 
 /// Opens a sync target for one repository; replaces the production opener
 /// in tests.
@@ -73,22 +77,35 @@ impl State {
 /// Push `request.keys` from `request.from_backend` to the sync target
 /// `request.to_backend`, inside `methods::copy`'s audited body.
 ///
+/// Why: DOC-74 §15.4 "Push". #10999 supersedes D3 for agent callers: the
+/// value never reaches the caller, so an agent may push what it may use.
 /// What, in order, each refusal before the loop leaving `copy`'s one deny
 /// record: an empty key list is [`ErrorKind::InvalidParams`] (D5); no peer
 /// pid is [`ErrorKind::GrantRefused`]; the caller's ancestry, or on a bridge
-/// call the console's verdict, is read, an unreadable one is
-/// [`ErrorKind::GrantRefused`] and a Claude Code ancestor is
-/// [`ErrorKind::AgentUseRefused`] (D3); the source opens through
+/// call the console's verdict, is judged ([`judge_agent_caller`]) and an
+/// unreadable one is [`ErrorKind::GrantRefused`]; the source opens through
 /// [`State::open`] and the target through [`State::open_sync_target`] with
 /// the project's origin identity; a source without `READ` or a target
 /// without `WRITE | SYNC_TARGET` is [`ErrorKind::Unsupported`]. Then the
 /// audit log is opened, and each key is read from the project vault and
 /// written straight to the target: no index row and no compensation (D4).
+/// For a caller under Claude Code, a key denied to agents in the source, or
+/// one whose deny or push-only mark cannot be read, fails with
+/// [`ErrorKind::AgentKeyDenied`] (or the lookup's kind) before its value is
+/// read; a push-only key is pushed (#10998); its allow records say
+/// `default_policy`. Every record names the caller's pid and agent verdict,
+/// never a value.
 /// A failed key lands in `failed` with a deny record and the next key runs;
 /// no key starts after the request deadline; a record that cannot be
 /// written stops the push with [`ErrorKind::AuditUnavailable`].
 /// Test: `server_copy_to_sync_target_without_keys_is_invalid_params`,
-/// `server_copy_to_sync_target_by_agent_descendant_is_refused_and_audited`,
+/// `server_copy_to_sync_target_by_agent_descendant_pushes_an_undenied_key`,
+/// `agent_push_of_a_denied_key_fails_it_before_its_value_is_read`,
+/// `agent_push_of_a_push_only_key_sends_it`,
+/// `agent_push_with_a_failed_mark_lookup_fails_every_key`,
+/// `agent_github_push_keeps_the_value_out_of_argv_env_reply_and_audit`,
+/// `agent_vercel_push_keeps_the_value_out_of_argv_env_reply_and_audit`,
+/// `server_copy_to_sync_target_with_unreadable_ancestry_is_refused`,
 /// `bridge_copy_to_sync_target_uses_the_console_verdict`,
 /// `server_copy_to_sync_target_leaves_one_record_per_key_naming_the_target`,
 /// `server_copy_to_sync_target_with_unwritable_audit_spawns_nothing`,
@@ -104,10 +121,13 @@ pub(crate) fn push(
     if request.keys.is_empty() {
         return Err(ErrorKind::InvalidParams);
     }
-    // #9069: D3 — the caller is the kernel's peer, never a param.
+    // #9069: the caller is the kernel's peer, never a param.
     let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
-    // #10386 Q3: a copy off the machine stays operator-only.
-    refuse_agent_caller(state, caller, peer, gate)?;
+    // #10999: E supersedes D3 for agents; an unreadable chain still refuses.
+    let agent = judge_agent_caller(state, caller, peer, gate)?;
+    if agent {
+        gate.default_policy();
+    }
     let source = state.open(&request.from_backend)?;
     let target = state.open_sync_target(&request.to_backend, project.identity())?;
     if !source.capabilities().contains(Capabilities::READ)
@@ -118,6 +138,9 @@ pub(crate) fn push(
         return Err(ErrorKind::Unsupported);
     }
     let vault = project.scopes().project().clone();
+    // #10999: F — for an agent, the source's deny is read before any value.
+    let source_store = SecretStore::new(Arc::clone(&source), state.index.clone())
+        .with_deny_audit(gate.deny_audit());
     let mut response = CopyResponse {
         copied: Vec::new(),
         failed: Vec::new(),
@@ -129,12 +152,22 @@ pub(crate) fn push(
         let outcome = if crate::store::deadline::passed() {
             Err(ErrorKind::DeadlineExceeded)
         } else {
-            match source.get(&vault, key) {
+            // #10999: F — a denied key, or a failed deny or push-only lookup,
+            // fails the key; a push-only key (#10998) is pushed.
+            let admitted = match agent {
+                true => match source_store.agents_may_push(&vault, key) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(ErrorKind::AgentKeyDenied),
+                    Err(e) => Err(ErrorKind::from(e)),
+                },
+                false => Ok(()),
+            };
+            admitted.and_then(|()| match source.get(&vault, key) {
                 // #9069: D4 — straight to the target; the index describes local values.
                 Ok(Some(value)) => target.set(&vault, key, &value).map_err(ErrorKind::from),
                 Ok(None) => Err(ErrorKind::NotFound),
                 Err(e) => Err(ErrorKind::from(e)),
-            }
+            })
         };
         gate.record_key(key, outcome)?;
         match outcome {

@@ -227,6 +227,8 @@ fn vercel_existing_variable_is_updated_in_place_and_fails_unproven() {
     shim.holds("production", "API_KEY", "old-value");
     let failed = reason(push(&shim.backend(), "API_KEY"));
     assert!(failed.contains("already existed"), "{failed}");
+    // #10999: the reason tells an agent a retry will not help.
+    assert!(failed.contains("do not retry"), "{failed}");
     assert_eq!(shim.commands(), CLEAN_PUSH);
     assert!(!shim.calls().contains(" rm "), "{}", shim.calls());
     for target in TARGETS {
