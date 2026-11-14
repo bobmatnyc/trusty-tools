@@ -214,6 +214,19 @@ fn architect_dir_from_config(home: &Path) -> Result<(PathBuf, RootSource), DashE
     Ok((dir.join(STORE_SUBDIR), source))
 }
 
+/// Every Architect directory `tm session delete --project-dir` must keep.
+pub fn protected_architect_dirs(
+    _env: &dyn Fn(&str) -> Option<String>,
+    home: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let Some(home) = home else {
+        return Ok(Vec::new());
+    };
+    let mut dirs = recorded_architects(&MpmConfig::load(&home.join(".trusty-mpm")));
+    dirs.push(home.join(DEFAULT_ARCHITECT_DIR));
+    Ok(dirs)
+}
+
 /// `a, b` of the paths' display forms.
 fn join_paths(paths: &[PathBuf]) -> String {
     paths
