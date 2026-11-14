@@ -50,6 +50,7 @@ fn descriptor_names_the_daemon_args_and_the_socket_stop_signal() {
         );
     }
     // The module's default instance key is the only one memory needs.
+    assert!(DaemonDescriptor::BASE_ENV.contains(&DATA_DIR_OVERRIDE_ENV));
     assert_eq!(
         desc.instance_env,
         vec![(
@@ -58,6 +59,53 @@ fn descriptor_names_the_daemon_args_and_the_socket_stop_signal() {
         )]
     );
     assert_eq!(desc.working_dir, PathBuf::from("/"));
+}
+
+// #11085: a variable missing here is one a `start`-spawned daemon silently
+// ignores, while a bridge auto-start (whole environment) honours it.
+#[test]
+fn descriptor_passes_the_security_and_data_variables_but_no_credential() {
+    let _env = crate::commands::env_test_lock().blocking_lock();
+    let desc = descriptor_for(None, PathBuf::from(SOCK)).expect("descriptor");
+    let passed = |name: &str| desc.env_passthrough.iter().any(|n| n == name);
+    for name in [
+        // Gates the authz refusal of `force=true palace_create`.
+        "TRUSTY_MEMORY_MULTI_TENANT",
+        // The model variant every stored vector was embedded with.
+        "TRUSTY_EMBEDDER_MODEL",
+        "TRUSTY_DEVICE",
+        "FASTEMBED_CACHE_DIR",
+        "FASTEMBED_CACHE_PATH",
+        "HF_HOME",
+        "TRUSTY_MEMORY_REDB_CACHE_MB",
+        "TRUSTY_BM25_DAEMON",
+        "TRUSTY_WRITE_OP_BUDGET_SECS",
+        "TRUSTY_TERMINATION_GRACE_SECS",
+        "OLLAMA_HOST",
+        "LD_LIBRARY_PATH",
+    ] {
+        assert!(passed(name), "{name} must reach the daemon");
+    }
+    for name in &desc.env_passthrough {
+        let credential = ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+            .iter()
+            .any(|word| name.contains(word));
+        assert!(!credential, "{name} looks like a credential");
+    }
+    assert!(!passed("OPENROUTER_API_KEY"));
+    // A parent-death stamp is the caller's, never the daemon's (#11098).
+    assert!(!passed("TRUSTY_EXIT_WITH_PARENT"));
+}
+
+#[test]
+fn descriptor_refuses_a_non_utf8_data_dir_override() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let _env = crate::commands::env_test_lock().blocking_lock();
+    // `resolve_data_dir` reads this as unset, so it names the live data dir.
+    let raw = OsString::from_vec(b"/tmp/tm-\xff".to_vec());
+    let err = descriptor_for(Some(&raw), PathBuf::from(SOCK))
+        .expect_err("a non-UTF-8 override must be refused");
+    assert!(format!("{err:#}").contains("UTF-8"), "{err:#}");
 }
 
 #[test]

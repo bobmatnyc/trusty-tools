@@ -33,10 +33,21 @@ pub(crate) const BINARY: &str = "trusty-memory";
 pub(crate) const DAEMON_ARGS: [&str; 2] = ["serve", "--foreground"];
 
 /// Caller variables the daemon still needs once the module clears its
-/// environment (#11098): logging, proxies and CA bundles for model downloads,
-/// the session bus for the Secret Service credential store, and `CARGO_HOME`
-/// for the install-dir lookup.
+/// environment (#11098), beyond `DaemonDescriptor::BASE_ENV`.
+///
+/// Why: a bridge auto-start inherits the caller's whole environment, so a
+/// variable missing here makes a `start`/`restart` daemon behave differently
+/// from a bridge-started one (#11085: `TRUSTY_MEMORY_MULTI_TENANT` off, the
+/// other embedder model). Register here every NON-credential variable a new
+/// `std::env::var` read in the daemon path adds — this crate's `serve` code or
+/// the trusty-common code it calls. Credentials (`OPENROUTER_API_KEY` and any
+/// `*_KEY`/`*_TOKEN`/`*_SECRET`) never go here; the daemon reads them from the
+/// `.env.local` tiers and the credential store instead.
+/// Test: `descriptor_passes_the_security_and_data_variables_but_no_credential`.
 pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
+    // Process and network: logging, proxies and CA bundles for model
+    // downloads, the session bus for the Secret Service credential store,
+    // `CARGO_HOME` for the install-dir lookup, and the ORT/CUDA loader paths.
     "RUST_LOG",
     "RUST_BACKTRACE",
     "HTTP_PROXY",
@@ -52,6 +63,76 @@ pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
     "DBUS_SESSION_BUS_ADDRESS",
     "CARGO_HOME",
     "ORT_DYLIB_PATH",
+    // #11085: the loader path ORT's CUDA provider libraries resolve through.
+    "LD_LIBRARY_PATH",
+    // #11085: trusty-common, embedder (`embedder::{fast_embedder,types,chunk}`).
+    "TRUSTY_EMBEDDER_MODEL",
+    "TRUSTY_DEVICE",
+    "FASTEMBED_CACHE_DIR",
+    "FASTEMBED_CACHE_PATH",
+    "HF_HOME",
+    "TRUSTY_EMBED_ONNX_BATCH",
+    "TRUSTY_ORT_INTRA_THREADS",
+    "TRUSTY_ORT_INTER_THREADS",
+    "TRUSTY_ORT_ALLOW_SPINNING",
+    "TRUSTY_GPU_MEM_LIMIT_BYTES",
+    "TRUSTY_GPU_MEM_LIMIT_MB",
+    // #11085: trusty-common, storage, shutdown, bug capture, update check and
+    // the local model probe (`bm25`, `redb_cache`, `shutdown`, `error_capture`,
+    // `update`, `local_probe`).
+    "TRUSTY_BM25_CORPUS_CAP",
+    "TRUSTY_MEMORY_REDB_CACHE_MB",
+    "TRUSTY_TERMINATION_GRACE_SECS",
+    "TRUSTY_NO_BUG_CAPTURE",
+    "TRUSTY_NO_UPDATE_CHECK",
+    "CI",
+    "OLLAMA_HOST",
+    // #11085: this crate, security and tenancy (`lib.rs`, `tools::palace_ops`).
+    "TRUSTY_MEMORY_MULTI_TENANT",
+    "TRUSTY_SKIP_PALACE_ENFORCEMENT",
+    "TRUSTY_MEMORY_RULINGS_PALACES",
+    // #11085: this crate, BM25 lane and repair.
+    "TRUSTY_BM25_DAEMON",
+    "TRUSTY_BM25_MAX_PALACES",
+    "TRUSTY_BM25_TEXT_BUDGET_MB",
+    "TRUSTY_BM25_NO_BACKFILL",
+    "TRUSTY_BM25_REPAIR_INTERVAL_SECS",
+    // #11085: this crate, palace and session-store residency.
+    "TRUSTY_MEMORY_MAX_OPEN_PALACES",
+    "TRUSTY_MEMORY_MAX_OPEN_SESSION_STORES",
+    "TRUSTY_MEMORY_IDLE_EVICT_SECS",
+    "TRUSTY_MEMORY_STARTUP_OPEN_LIMIT",
+    // #11085: this crate, timeouts and budgets (`engine::timeouts` and the
+    // HNSW op budget, worker liveness).
+    "TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS",
+    "TRUSTY_EMBED_BATCH_TIMEOUT_SECS",
+    "TRUSTY_EMBED_CHUNKED_CAP_SECS",
+    "TRUSTY_OPEN_QUEUE_TIMEOUT_SECS",
+    "TRUSTY_SLOW_WRITE_WARN_SECS",
+    "TRUSTY_WRITE_LOCK_TIMEOUT_SECS",
+    "TRUSTY_WRITE_OP_BUDGET_SECS",
+    "TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS",
+    "TRUSTY_WRITE_TXN_DEADLINE_SECS",
+    "TRUSTY_DREAM_PERMIT_WAIT_SECS",
+    "TRUSTY_HNSW_OP_BUDGET_SECS",
+    "TRUSTY_WEDGE_THRESHOLD_SECS",
+    // #11085: this crate, background work (dream and chunk backfill tickers).
+    "TRUSTY_DREAM_DISABLED",
+    "TRUSTY_DREAM_MAX_CONCURRENT",
+    "TRUSTY_CHUNK_BACKFILL_DISABLED",
+    "TRUSTY_CHUNK_BACKFILL_BACKOFF_SECS",
+    "TRUSTY_CHUNK_BACKFILL_BUSY_SECS",
+    "TRUSTY_CHUNK_BACKFILL_EMBED_SECS",
+    "TRUSTY_CHUNK_BACKFILL_ERROR_BACKOFF_SECS",
+    "TRUSTY_CHUNK_BACKFILL_HOST_FAILURES",
+    "TRUSTY_CHUNK_BACKFILL_IDLE_SECS",
+    "TRUSTY_CHUNK_BACKFILL_LOCK_WAIT_SECS",
+    "TRUSTY_CHUNK_BACKFILL_MAX_CHUNKS",
+    "TRUSTY_CHUNK_BACKFILL_MAX_DRAWERS",
+    "TRUSTY_CHUNK_BACKFILL_MIN_AGE_SECS",
+    "TRUSTY_CHUNK_BACKFILL_PROBE_SECS",
+    "TRUSTY_CHUNK_BACKFILL_SLICE_MS",
+    "TRUSTY_CHUNK_BACKFILL_TICK_MS",
 ];
 
 /// The trusty-memory descriptor for this process's environment.
@@ -80,19 +161,27 @@ pub(crate) fn descriptor() -> Result<DaemonDescriptor> {
 ///
 /// # Errors
 ///
-/// A blank override, or no resolvable install dir.
+/// A blank or non-UTF-8 override, or no resolvable install dir.
 ///
 /// Test: `descriptor_names_the_daemon_args_and_the_socket_stop_signal`,
-/// `descriptor_refuses_a_blank_data_dir_override`.
+/// `descriptor_refuses_a_blank_data_dir_override`,
+/// `descriptor_refuses_a_non_utf8_data_dir_override`.
 pub(crate) fn descriptor_for(
     override_value: Option<&OsString>,
     socket: std::path::PathBuf,
 ) -> Result<DaemonDescriptor> {
-    if override_value.is_some_and(|v| v.to_string_lossy().trim().is_empty()) {
-        bail!(
+    // #11085: `resolve_data_dir` reads a non-UTF-8 value as unset, so it too
+    // names the live data dir while its raw bytes miss the live daemon.
+    match override_value.map(|v| v.to_str()) {
+        Some(None) => bail!(
+            "{DATA_DIR_OVERRIDE_ENV} is not valid UTF-8, which resolves the live data dir; \
+             refusing to act on it. Unset it to manage the live daemon (#11085)"
+        ),
+        Some(Some(v)) if v.trim().is_empty() => bail!(
             "{DATA_DIR_OVERRIDE_ENV} is set but blank, which resolves the live data dir; \
              refusing to act on it. Unset it to manage the live daemon (#11085)"
-        );
+        ),
+        _ => {}
     }
     let mut desc = DaemonDescriptor::new(BINARY, socket, StoppedSignal::SocketRefuses)
         .context("build the trusty-memory lifecycle descriptor")?;
