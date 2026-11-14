@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 use super::super::worktree_git_fixture::{
-    GitWorktreeFixture, StandingProcess, probe_cannot_answer,
+    GitWorktreeFixture, StandingProcess, deny_all, probe_cannot_answer,
 };
 use super::*;
 use crate::core::presence_local::{Authenticator, PresenceOutcome};
@@ -532,4 +532,46 @@ fn a_confirmed_present_delete_removes_a_clean_pushed_checkout() {
         fx.repos_root.join("owner").exists(),
         "only the session's directory goes"
     );
+}
+
+// ---- critic MEDIUM: a partial removal says so ------------------------------
+
+#[test]
+fn a_partial_delete_says_so_and_names_the_record() {
+    let fx = GitWorktreeFixture::new();
+    let locked = fx.repo.join("locked");
+    std::fs::create_dir_all(&locked).expect("mkdir locked");
+    std::fs::write(locked.join("f.txt"), "x\n").expect("write");
+    GitWorktreeFixture::commit_all_and_push(&fx.repo, "locked");
+    let sessions = [session(
+        "s1",
+        &fx.repo,
+        Some(SessionKind::Ordinary),
+        "stopped",
+    )];
+    // Lock the subdirectory after the plan, so `remove_dir_all` fails part-way.
+    let mut restore = None;
+    let err = run_dir_delete(
+        input(&sessions, &fx.repos_root, &[]),
+        DirDeleteOptions::default(),
+        &mut |_| {
+            restore = Some(deny_all(&locked));
+            Confirmation::Yes
+        },
+        &FakeAuth::granted(),
+        &FakeProbes::default(),
+    )
+    .expect_err("a locked subdirectory stops the removal");
+    drop(restore);
+    assert!(matches!(err, DirDeleteError::Remove { .. }), "{err}");
+    let msg = err.to_string();
+    for needle in [
+        "PARTIALLY deleted",
+        "Remove the rest by hand",
+        "a retry is refused once `.git` is gone",
+        "The session record was NOT marked deleted",
+    ] {
+        assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+    }
+    assert!(locked.join("f.txt").exists(), "the locked file survives");
 }
