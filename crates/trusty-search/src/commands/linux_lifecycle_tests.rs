@@ -60,14 +60,14 @@ fn descriptor_resolves_the_data_dir_the_same_way_for_every_verb() {
     assert_eq!(desc.socket, env_dir.path().join("trusty-search.sock"));
     assert_eq!(desc.liveness_args, ["start", "--foreground"]);
     assert_eq!(desc.instance_path_args, path_arg(env_dir.path()));
-    // The default instance: the resolved default data dir, never empty.
-    let default_dir = crate::service::daemon::resolve_daemon_dir(None).expect("default dir");
-    let desc = descriptor_for(None, None, None, None).expect("default");
-    assert_eq!(desc.instance_path_args, path_arg(&default_dir));
     assert!(desc.instance_env.contains(&(
         DATA_DIR_ENV.to_string(),
         Some(env_dir.path().as_os_str().to_owned())
     )));
+    // The default instance: the resolved default data dir, never empty.
+    let default_dir = crate::service::daemon::resolve_daemon_dir(None).expect("default dir");
+    let desc = descriptor_for(None, None, None, None).expect("default");
+    assert_eq!(desc.instance_path_args, path_arg(&default_dir));
     // An explicit socket wins over the data dir's.
     let sock = env_dir.path().join("other.sock");
     let desc = descriptor_for(None, Some(env_dir.path().into()), None, Some(&sock)).expect("s");
@@ -355,6 +355,45 @@ fn wait_exec(pid: u32) {
     }
 }
 
+/// Spawn a sibling as `<links>/sh-bin/trusty-search -c <loop> <argv>`.
+///
+/// Why: the module reads path flags only up to a `--` argument, and the
+/// libtest fixture puts every daemon argument after one. A copy of `/bin/sh`
+/// named `trusty-search` carries `argv` with no `--`, as a real daemon does.
+/// It runs until [`FIX_DIR`] is gone, at most 60 s. `TRUSTY_DATA_DIR` is
+/// removed; `env` is set.
+fn spawn_sh_sibling(links: &Path, argv: &[&str], env: &[(&str, &OsString)]) -> Child {
+    let bin = links.join("sh-bin");
+    std::fs::create_dir_all(&bin).expect("sh bin dir");
+    let sh = bin.join(BINARY);
+    std::fs::copy("/bin/sh", &sh).expect("copy /bin/sh");
+    let script = format!(
+        "i=0; while [ -d \"${FIX_DIR}\" ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done"
+    );
+    let mut cmd = Command::new(&sh);
+    cmd.arg("-c")
+        .arg(script)
+        .args(argv)
+        .env_remove(DATA_DIR_ENV)
+        .env(FIX_DIR, links)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    // A parallel test's fork can hold the copy's write fd until its exec.
+    let mut tries = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => break other.expect("spawn sh sibling"),
+        }
+    }
+}
+
 fn reap(mut child: Child) -> bool {
     let alive = child.try_wait().expect("try_wait").is_none();
     let _ = child.kill();
@@ -448,8 +487,9 @@ async fn restart_names_a_survivor_and_starts_nothing() {
     );
     let pid = fixture.id();
     let mut desc = descriptor_for(Some(run.path()), None, None, Some(&socket)).expect("descriptor");
-    // An install dir with no binary: a start that ran would fail BinaryMissing.
-    desc.install_dir = links.path().join("empty-install");
+    // #11085: restart checks the binary before its stop; the stop error
+    // below returns before any start.
+    desc.install_dir = links.path().join("bin");
     desc.stop_grace = Duration::from_millis(300);
     desc.kill_wait = Duration::from_millis(500);
     let recorder = Recorder {
@@ -464,7 +504,6 @@ async fn restart_names_a_survivor_and_starts_nothing() {
     );
     assert!(shown.contains(&pid.to_string()), "{shown}");
     assert!(shown.contains("survived SIGKILL"), "{shown}");
-    assert!(!shown.contains("not installed"), "start ran: {shown}");
     assert!(alive, "the fixture survived, as the seam made it");
 }
 
@@ -516,19 +555,18 @@ async fn ac6_a_sibling_without_trusty_data_dir_no_longer_blocks_the_default_inst
     ));
     let argv = ["start", "--foreground", "--data-dir", sib.as_str()];
 
-    let sibling = spawn_fixture(
+    let sibling = spawn_sh_sibling(
         links.path(),
         &argv,
         &[(trusty_common::DATA_DIR_OVERRIDE_ENV, &key)],
-        None,
     );
     wait_exec(sibling.id());
     let stopped = lc::stop(&desc).await;
 
     // A healthy default daemon on the descriptor's socket. A spawned one gets
     // only the descriptor's environment, so the fixture keys go in
-    // `instance_env` and the socket in argv; every fixture already carries
-    // FIX_DIR, so the sibling still matches every `instance_env` value.
+    // `instance_env` and the socket in argv; the sibling carries FIX_DIR too,
+    // so it still matches every `instance_env` value.
     let sock_arg = format!("{FIX_SOCKET_ARG}{}", socket.display());
     let fixture_args = [
         "commands::linux_lifecycle::tests::lifecycle_fixture_entry",
