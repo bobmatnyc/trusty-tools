@@ -630,6 +630,57 @@ fn a_failed_session_reread_refuses_the_delete() {
     );
 }
 
+/// #11238: `{}` or a body lacking `sessions` parses as an empty list.
+#[test]
+fn an_empty_reread_list_refuses_the_delete() {
+    let fx = GitWorktreeFixture::new();
+    let err = delete_with_reread(&fx, Ok(vec![]))
+        .expect_err("a re-read list without the target must refuse");
+    assert!(
+        matches!(&err, DirDeleteError::SessionsUnchecked { reason, .. }
+            if reason.contains("missing from the re-read")),
+        "{err}"
+    );
+    assert!(
+        fx.repo.join("README.md").exists(),
+        "the directory was removed"
+    );
+}
+
+#[test]
+fn a_reread_list_without_the_target_refuses_the_delete() {
+    let fx = GitWorktreeFixture::new();
+    let elsewhere = fx.repos_root.join("elsewhere");
+    let other = session("s9", &elsewhere, Some(SessionKind::Ordinary), "active");
+    let err = delete_with_reread(&fx, Ok(vec![other]))
+        .expect_err("a re-read list without the target must refuse");
+    assert!(
+        matches!(&err, DirDeleteError::SessionsUnchecked { reason, .. }
+            if reason.contains("missing from the re-read")),
+        "{err}"
+    );
+    assert!(
+        fx.repo.join("README.md").exists(),
+        "the directory was removed"
+    );
+}
+
+#[test]
+fn the_target_turning_running_at_the_reread_refuses_the_delete() {
+    let fx = GitWorktreeFixture::new();
+    let target = session("s1", &fx.repo, Some(SessionKind::Ordinary), "active");
+    let err = delete_with_reread(&fx, Ok(vec![target]))
+        .expect_err("a target running at the re-read must refuse");
+    assert!(
+        matches!(&err, DirDeleteError::Running { running, .. } if running == &["tm-s1".to_string()]),
+        "{err}"
+    );
+    assert!(
+        fx.repo.join("README.md").exists(),
+        "the directory was removed"
+    );
+}
+
 #[test]
 fn an_unchanged_session_list_at_the_reread_still_deletes() {
     let fx = GitWorktreeFixture::new();
