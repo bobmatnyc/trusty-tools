@@ -55,9 +55,13 @@ async fn a_registered_session_registers_its_checkout_as_a_project() {
     let state = Arc::new(DaemonState::with_root(root.clone()));
     let repo = checkout(&tmp.path().join("widget"), "git@github.com:Acme/Widget.git");
 
-    register_session(State(Arc::clone(&state)), Json(body_for(&repo)))
+    let Json(first_id) = register_session(State(Arc::clone(&state)), Json(body_for(&repo)))
         .await
         .expect("registration succeeds");
+    assert!(
+        state.session(first_id.id).is_some(),
+        "the session is registered"
+    );
 
     let registry = registry_data_dir_under(&root);
     assert_eq!(
@@ -65,7 +69,7 @@ async fn a_registered_session_registers_its_checkout_as_a_project() {
         repo
     );
     let first = std::fs::read(registry.join("projects.json")).expect("row written");
-    register_session(State(Arc::clone(&state)), Json(body_for(&repo)))
+    let _second = register_session(State(Arc::clone(&state)), Json(body_for(&repo)))
         .await
         .expect("second registration succeeds");
     assert_eq!(
