@@ -7,10 +7,7 @@ body { margin: 0; }
 main { box-sizing: border-box; width: 284px; margin: 0 auto; padding: 20px 24px; }
 h1 { margin: 0; text-align: center; font-size: 16px; font-weight: 650; }
 #stage { display: grid; place-items: center; padding: 14px 0 18px; }
-#robot {
-  position: relative; width: 212px; aspect-ratio: 1312 / 1199;
-  overflow: hidden; border-radius: 10px;
-}
+#robot { position: relative; width: 212px; aspect-ratio: 1312 / 1199; }
 #robot > img { display: block; width: 100%; height: 100%; }
 .eye {
   position: absolute; width: 10.06%; height: 11%; top: 46.63%;

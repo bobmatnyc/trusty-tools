@@ -54,11 +54,11 @@ circular clip, and the `UNIT-05` descriptor stays on the primary lockup.
 
 ## Trusty Browser
 
-Trusty Browser uses the supplied orange industrial robot portrait, with illuminated round eyes and a worn metal housing. The horizontal signature uses Chakra Petch Bold and an IBM Plex Mono descriptor. The lettering is outlined so the exported assets render consistently without installed fonts.
+Trusty Browser uses an orange industrial robot portrait, with illuminated round eyes and a worn metal housing. The robot's own polygon outline is the silhouette: every mark sits on a transparent background, with no plate, border or rounded backing. Source: recorded on issue #11239. The horizontal signature uses Chakra Petch Bold and an IBM Plex Mono descriptor. The lettering is outlined so the exported assets render consistently without installed fonts.
 
 - [Paper lockup](trusty-browser-logo.svg)
 - [Night Shift lockup](trusty-browser-logo-reversed.svg)
 - [Light and dark preview](trusty-browser-lockups.png)
 - [Source mark and packaged Chrome icons](../../../../python/trusty-browser/src/trusty_browser/extension/icons)
 
-Use the standalone robot mark for Chrome's toolbar and extensions page. The extension manifest references PNGs at 16, 32, 48 and 128 pixels.
+Use the standalone robot mark for Chrome's toolbar and extensions page. The extension manifest references PNGs at 16, 32, 48 and 128 pixels. The popup shows `trusty-browser.webp` (424x388, twice its 212 px display width); only its eyes follow the pointer.
