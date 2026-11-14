@@ -77,12 +77,15 @@ globalThis.TrustyCodes = deps => {
   }
   // Why: a failed mint, or a `last` end beside a row the broker did not count, gets no later contract signal.
   // What: asks the broker for the profile's list and prunes to it, dropping the permission when it is empty.
-  //   No credential, or a broker that matches none, means nothing can be live. An unreachable broker
-  //   changes nothing; the offline check settles that case.
-  // Test: tests/test_worker.mjs `failure branches never leave a grant usable or a permission held`.
+  //   No credential, or a broker that matches none, means nothing can be live. Any other failure keeps the
+  //   table and drops the permission only when the table is empty and no mint is in flight: a grant missing
+  //   from the table answers UnknownGrant, so nothing live can use it (contract "All-https access", signal 6).
+  // Test: tests/test_worker.mjs `failure branches never leave a grant usable or a permission held`,
+  //   `a failed mint whose grants call also fails releases an unused permission`.
   async function reconcile() {
     try { await listGrants(await credential()); } catch (error) {
-      if ((error.response?.error || error.message) === "NotEnrolled") await changeTable(() => ({}), true).catch(() => {});
+      const none = (error.response?.error || error.message) === "NotEnrolled";
+      await changeTable(t => none ? {} : t, true).catch(() => {});
     }
   }
   async function ended(grant, last) {

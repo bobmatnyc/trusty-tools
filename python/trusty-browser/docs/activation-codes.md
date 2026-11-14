@@ -135,10 +135,23 @@ these signals:
    `tests/test_activation_codes.py`
    `test_the_worker_offline_quiet_matches_the_code_lifetime` fails when either
    side changes without the other.
+6. A failed worker `grants` call (signal 3) while the native port is up:
+   a timeout, a host refusal, an invalid reply, or a changed profile. The
+   worker keeps its table and removes the permission when that table is
+   empty and no mint is in flight. A grant absent from the table answers
+   `UnknownGrant` to every page operation, so no live code or grant can use
+   the permission. A row left in the table keeps it; that row ends through
+   its own `grant_end` (port up) or the offline check (port down).
 
-The broker cannot replace 3, 4 or 5 cheaply: 3 would need a `live` list on
-every mint refusal, 4 is local state the broker never sees, and 5 is the
-case where the broker is unreachable.
+The popup reads the permission state at each mint click. It re-reads it
+after every revoke and every grant poll, and follows
+`chrome.permissions.onAdded` and `onRemoved`, so a removal by any of these
+signals makes the next mint click ask again.
+
+The broker cannot replace 3, 4, 5 or 6 cheaply: 3 would need a `live` list on
+every mint refusal, 4 is local state the broker never sees, 5 is the
+case where the broker is unreachable, and 6 is the case where the broker's
+answer did not arrive.
 
 - Idle expiry and code expiry reach the worker without waiting for an agent
   call: the broker keeps one deadline callback on its own event loop (no

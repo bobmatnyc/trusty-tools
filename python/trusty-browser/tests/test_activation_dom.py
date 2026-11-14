@@ -148,10 +148,17 @@ def test_code_popup_disables_the_tab_choice_without_page_access():
 PAIR_POPUP = """
     window.calls = [];
     let paired = false, held = false;
+    const removedListeners = [];
+    // Chrome's own sequence: the worker removes https://*/* after the revoke reply, on `grant_end` last.
+    const workerRemoves = () => setTimeout(() => {
+      held = false;
+      window.removed = true;
+      for (const fn of removedListeners) fn({origins:['https://*/*'], permissions:[]});
+    }, 50);
     window.chrome = {
       tabs:{query:async () => [{id:42}]},
       permissions:{request:async p => { window.calls.push({permission:p.origins}); held = true; return true; },
-        contains:async () => held},
+        contains:async () => held, onRemoved:{addListener:fn => removedListeners.push(fn)}},
       runtime:{sendMessage:async m => {
         window.calls.push(m.type);
         if (m.type === 'code_preview') return {ok:true,paired,email:'qa@example.test',profile:paired ? 'p' : null,
@@ -160,7 +167,7 @@ PAIR_POPUP = """
         if (m.type === 'pair') { paired = true; return {ok:true,profile:'p'}; }
         if (m.type === 'unpair') { paired = false; held = false; return {ok:true,profile:'p'}; }
         if (m.type === 'grants') return {ok:true,grants:[]};
-        if (m.type === 'revoke_grant') return {ok:true,revoked:1};
+        if (m.type === 'revoke_grant') { if (window.lastCodeEnds) workerRemoves(); return {ok:true,revoked:1}; }
         if (m.type === 'mint') return {ok:true,code:'tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA',grant:'g-0000000000bb',
           scope:m.scope,profile:'p',tab:m.tab,expires_at:Date.now() / 1000 + 300};
         throw Error('unexpected request ' + m.type);
@@ -214,5 +221,33 @@ def test_pairing_popup_activates_mints_and_disconnects_a_profile():
             assert "unpair" in page.evaluate("window.calls")
             assert "tb-" not in page.locator("main").inner_text()
             expect(page.get_by_role("button", name="Activate Extension")).to_be_visible()
+        finally:
+            browser.close()
+
+
+def test_a_mint_click_asks_again_after_the_worker_removed_the_permission():
+    popup = Path(service.__file__).with_name("extension") / "setup.html"
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 284, "height": 800})
+            page.add_init_script("window.lastCodeEnds = true;")
+            page.add_init_script(PAIR_POPUP)
+            page.goto(popup.as_uri())
+            page.get_by_role("button", name="Activate", exact=True).click()
+            page.get_by_role("button", name="Give access to this tab").click()
+            expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
+            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 3")
+            assert permission_requests(page) == [["https://*/*"]]
+            # Cancel code ends the last code; the worker then removes https://*/* (contract "All-https access").
+            page.get_by_role("button", name="Cancel code").click()
+            page.wait_for_function("window.removed === true")
+            page.get_by_role("button", name="Give access to this tab").click()
+            page.wait_for_function("window.calls.filter(c => c === 'mint').length === 2")
+            calls = page.evaluate("window.calls")
+            assert permission_requests(page) == [["https://*/*"], ["https://*/*"]]
+            second_ask = len(calls) - 1 - calls[::-1].index({"permission": ["https://*/*"]})
+            second_mint = len(calls) - 1 - calls[::-1].index("mint")
+            assert second_ask < second_mint
         finally:
             browser.close()

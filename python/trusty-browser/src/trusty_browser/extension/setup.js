@@ -137,11 +137,18 @@ const targetTab = (async () => {
 })().catch(() => null);
 let tab = null, code = null, codeGrant = null, expiresAt = 0, ticker = null, poller = null, accessShown = false;
 // Chrome needs permissions.request inside the click, so the popup tracks whether https://*/* is held.
+// #11239: the worker removes it on its own signals, so the popup follows Chrome's add/remove events and
+// re-reads it after every revoke and grant poll; a mint click then sees the state at click time.
 const ALL_HTTPS = {origins:["https://*/*"]};
 let httpsHeld = false;
 async function checkHttps() {
   try { httpsHeld = await chrome.permissions.contains(ALL_HTTPS) === true; } catch { httpsHeld = false; }
 }
+const coversAllHttps = change => change?.origins?.includes("https://*/*");
+try {
+  chrome.permissions.onRemoved?.addListener(change => { if (coversAllHttps(change)) httpsHeld = false; });
+  chrome.permissions.onAdded?.addListener(change => { if (coversAllHttps(change)) httpsHeld = true; });
+} catch { /* checkHttps still refreshes the state. */ }
 function askHttps() {
   try { return chrome.permissions.request(ALL_HTTPS).catch(() => false); } catch { return Promise.resolve(false); }
 }
@@ -188,6 +195,7 @@ function renderGrants(entries) {
 async function loadGrants() {
   try { renderGrants((await request({type:"grants"})).grants); }
   catch (error) { statusLine.textContent = errorMessage(error); }
+  await checkHttps();
 }
 async function revoke(message) {
   try {
@@ -273,7 +281,7 @@ $("copy").addEventListener("click", async () => {
   } catch { statusLine.textContent = "Could not copy the code."; }
 });
 $("cancel-code").addEventListener("click", () => codeGrant && revoke({type:"revoke_grant", grant:codeGrant}));
-$("new-code").addEventListener("click", () => show("choose"));
+$("new-code").addEventListener("click", () => { show("choose"); void checkHttps(); });
 $("disconnect-all").addEventListener("click", () => revoke({type:"revoke_grants"}));
 $("retry").addEventListener("click", () => loadAccess());
 // #11239: contract "All-https access" — Activate sends `pair` only; the mint click asks for https://*/*.

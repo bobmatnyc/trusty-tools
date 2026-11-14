@@ -494,6 +494,24 @@ test("failure branches never leave a grant usable or a permission held", async (
   assert.deepEqual(leak, {id:leak.id, ok:false, error:"BrowserDisconnected"});
 });
 
+test("a failed mint whose grants call also fails releases an unused permission", async () => {
+  const f = await codeFixture();
+  // Contract "All-https access", signal 6: the native port stays up, so neither the offline check nor an
+  // acknowledgement would settle this; an empty table means nothing live can use the permission.
+  for (const refusal of [{ok:false, error:"AuditUnavailable"}, "disconnect"]) {
+    f.setBroker(msg => msg.op === "mint" ? {ok:false, error:"AuditUnavailable"} : refusal);
+    assert.equal((await mintTab(f, 7)).error, "AuditUnavailable");
+    assert.notEqual(f.native.closed, true);
+    assert.deepEqual([f.perms.held, f.table()], [false, {}], JSON.stringify(refusal));
+  }
+  // A live row in the table keeps the permission and the row; its own grant_end settles it later.
+  f.setBroker(f.fakeBroker);
+  const {grant} = await mintTab(f, 7);
+  f.setBroker(() => ({ok:false, error:"AuditUnavailable"}));
+  assert.equal((await mintTab(f, 8)).error, "AuditUnavailable");
+  assert.deepEqual([f.perms.held, Object.keys(f.table())], [true, [grant]]);
+});
+
 test("page text, typed text and URLs stay inside the operation's reply", async () => {
   const f = await codeFixture();
   const {grant} = await mintTab(f, 7);
