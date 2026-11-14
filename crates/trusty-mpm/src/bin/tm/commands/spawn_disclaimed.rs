@@ -17,7 +17,8 @@
 //! TCC there, and the shim is never emitted into a pane off macOS).
 //! #9092: a launch spec naming the supervisor session is refused before
 //! anything spawns; an Architect starts only via `tm fleet init|relaunch`
-//! ([`launch_from_spec`]).
+//! ([`launch_from_spec`]). #11270: an Architect-stamped spec spawns only
+//! against the grant a binding launch path issued for it.
 //! Test: `run_rejects_empty_argv`; the disclaim/spawn behaviour is covered by
 //! `trusty_mpm::core::spawn_disclaim`'s `disclaimed_status_*` tests, and the
 //! wrapped-pane PID discovery + signal topology by
@@ -117,7 +118,9 @@ pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
     // #9092: the root of the daemon's session store.
     let root = dirs::home_dir().map(|home| home.join(".trusty-mpm"));
     let started = std::time::Instant::now();
-    let (status, code) = launch_from_spec(path, root.as_deref())?;
+    // #11270: the stamp the pane would hand a spec that sets none.
+    let inherited = std::env::var_os(trusty_mpm::core::session_profile::SESSION_PROFILE_ENV);
+    let (status, code) = launch_from_spec(path, root.as_deref(), inherited.as_deref())?;
     println!(
         "{}",
         trusty_mpm::runtime::launch_report::report_exit(code, started.elapsed())
@@ -126,7 +129,8 @@ pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 /// [`run_launch_spec`] up to the child's exit, under the `~/.trusty-mpm`
-/// `root` (`None` when the home directory cannot be resolved).
+/// `root` (`None` when the home directory cannot be resolved), with
+/// `inherited` the shim's own `TRUSTY_MPM_SESSION_PROFILE`.
 ///
 /// Why: #9092 — the spec arrives from any path, so a spec naming the
 /// supervisor session must not start an Architect outside `tm fleet
@@ -136,14 +140,22 @@ pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
 /// non-empty `session_id` is refused before the spawn when
 /// [`claims_supervisor`](trusty_mpm::session_manager::architect_spawn::claims_supervisor)
 /// says it names a `supervisor` record, or cannot say (unreadable store, no
-/// home). Otherwise spawns as before and returns `(exit status, raw code)` as
-/// [`spawn_and_wait`] does.
-/// Test: `a_supervisor_spec_with_markers_stripped_writes_no_record_and_spawns_nothing_9092`,
+/// home). #11270: a launch whose `claude` would carry the Architect stamp
+/// ([`launch_is_architect`](trusty_mpm::runtime::architect_grant::launch_is_architect))
+/// spawns only after
+/// [`redeem`](trusty_mpm::runtime::architect_grant::redeem) consumed the
+/// grant a binding launch path issued for this exact spec; otherwise it is
+/// refused before the spawn, naming `tm fleet relaunch`. Otherwise spawns as
+/// before and returns `(exit status, raw code)` as [`spawn_and_wait`] does.
+/// Test: `an_architect_spec_without_a_grant_is_refused_before_exec_11270`,
+/// `a_granted_architect_spec_launches_once_11270`,
+/// `a_supervisor_spec_with_markers_stripped_writes_no_record_and_spawns_nothing_9092`,
 /// `ordinary_unknown_and_unlisted_specs_still_launch_9092`,
 /// `an_unreadable_store_refuses_a_spec_that_names_a_session_9092`.
 pub(crate) fn launch_from_spec(
     path: &std::path::Path,
     root: Option<&std::path::Path>,
+    inherited: Option<&std::ffi::OsStr>,
 ) -> anyhow::Result<(i32, Option<i32>)> {
     let spec = trusty_mpm::runtime::launch_spec::LaunchSpec::consume(path)
         .with_context(|| "managed launch aborted: its launch spec could not be used")?;
@@ -175,6 +187,18 @@ pub(crate) fn launch_from_spec(
              which starts only through `tm fleet init` or `tm fleet relaunch`",
             spec.session_id
         );
+    }
+    // #11270: an Architect `claude` starts only from a launch path that binds it.
+    if trusty_mpm::runtime::architect_grant::launch_is_architect(&spec, inherited) {
+        root.ok_or_else(|| "the home directory cannot be resolved".to_owned())
+            .and_then(|root| trusty_mpm::runtime::architect_grant::redeem(root, &spec))
+            .map_err(|why| {
+                anyhow::anyhow!(
+                    "managed launch refused: it would start the Architect, and only a tm launch \
+                     path that binds it may ({why}); nothing was started. Run `tm fleet \
+                     relaunch` to start the Architect bound"
+                )
+            })?;
     }
     let mut cmd = spec.to_command();
     spawn_and_wait(&mut cmd, &spec.program)
@@ -231,7 +255,7 @@ mod tests {
         home: &std::path::Path,
         spec: &std::path::Path,
     ) -> anyhow::Result<(i32, Option<i32>)> {
-        launch_from_spec(spec, Some(&home.join(".trusty-mpm")))
+        launch_from_spec(spec, Some(&home.join(".trusty-mpm")), None)
     }
 
     /// Write a spec naming `program` into `dir`, and return its path.

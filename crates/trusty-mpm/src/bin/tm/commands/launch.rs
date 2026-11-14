@@ -324,44 +324,24 @@ pub(crate) async fn launch(
     //    this session back to its GitHub identity for future reconnects.
     //    Unknown fields (like `source_id`) are currently ignored by the daemon —
     //    non-breaking forward-compatible addition.
-    #[derive(Deserialize)]
-    struct Body {
-        #[serde(default)]
-        name: String,
-        /// The registered session's id; `None` when the daemon is unreachable.
-        id: Option<trusty_mpm::core::session::SessionId>,
-    }
     // #10101: the PM lands on its workspace server; the record names it.
     let host = LaunchHost::for_workspace(&managed_path);
-    let (tmux_name, session_id) = match daemon
-        .post("/sessions")
-        .json(&serde_json::json!({
-            "project": managed_workdir,
-            "project_path": managed_workdir,
-            "name": folder_name,
-            "source_id": source_id,
-            "tmux_socket": host.socket(),
-        }))
-        .send()
-        .await
-    {
-        Ok(resp) => match resp.error_for_status() {
-            Ok(resp) => match resp.json::<Body>().await {
-                Ok(body) if !body.name.is_empty() => (body.name, body.id),
-                Ok(body) => (folder_name.clone(), body.id),
-                _ => (folder_name.clone(), None),
-            },
-            // #10101: D3c — a launch the daemon did not register never runs.
-            Err(err) => anyhow::bail!(
-                "the daemon rejected the registration of session {folder_name}: {err}; \
-                 nothing was launched"
-            ),
-        },
-        Err(err) => anyhow::bail!(
-            "the daemon could not be reached to register session {folder_name} ({err}); \
-             nothing was launched"
-        ),
-    };
+    // #11270: an Architect into a running session is refused before the POST.
+    let registration = serde_json::json!({
+        "project": managed_workdir,
+        "project_path": managed_workdir,
+        "name": folder_name,
+        "source_id": source_id,
+        "tmux_socket": host.socket(),
+    });
+    let (tmux_name, session_id) = super::launch_host::register_launch(
+        &daemon,
+        &host,
+        &folder_name,
+        registration,
+        &claude_spec,
+    )
+    .await?;
 
     // 11. Print the full-screen robot splash then the rich info panel.
     //     Pass the real managed worktree path so the banner shows the session
@@ -376,13 +356,14 @@ pub(crate) async fn launch(
     // 12. Create a detached tmux session rooted at the MANAGED clone directory,
     //     on the host server (#10101), through the #2398 choke point.
     //     #10101: a failure from here on removes the registration it leaves.
-    // #11270: `create` attaches to a session of this name already running and
-    // the launch below would type into it unbound; an Architect spec is refused
-    // first. The registration is kept, as in `tm connect`: a `DELETE` would
-    // kill the running session.
-    host.refuse_running_architect(&tmux_name, &claude_spec)?;
+    // #11270: a name the daemon changed is probed again; an Architect is
+    // created exclusively, so it never attaches to a session it did not make.
+    if tmux_name != folder_name {
+        host.refuse_running_architect(&tmux_name, &claude_spec)?;
+    }
     let registered = super::launch_host::Registered::new(&daemon, session_id);
-    if let Err(e) = host.create(&tmux_name, &managed_workdir) {
+    let architect = trusty_mpm::runtime::architect_bind::spec_is_architect(&claude_spec);
+    if let Err(e) = host.create_for(&tmux_name, &managed_workdir, architect) {
         return Err(registered.fail(e).await);
     }
     // RAII guard — disarmed only after successful attach so the session persists
@@ -392,21 +373,9 @@ pub(crate) async fn launch(
     let mut session_guard = LaunchSessionGuard::new(&host, &tmux_name);
 
     // 13. Start `claude` inside the tmux session.
-    let sent = trusty_mpm::runtime::cli_launch::send_spec_launch(
-        host.server(),
-        &tmux_name,
-        &claude_spec,
-        &spec_dir,
-    );
-    match sent {
-        Err(e) => {
-            let e = anyhow::anyhow!(
-                "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
-            );
-            return Err(registered.fail(e).await);
-        }
-        // #8878: an Architect `claude` the launch could not bind is reported.
-        Ok(binding) => binding.report(&tmux_name),
+    // #11270: an Architect it could not bind is killed and is an error.
+    if let Err(e) = host.start_claude(&tmux_name, &claude_spec, &spec_dir) {
+        return Err(registered.fail(e).await);
     }
 
     // 13b. Find the claude process PID inside the tmux pane and report it to
@@ -634,7 +603,9 @@ pub(crate) async fn connect(
     // already running: a `DELETE` would kill it.
     let registered =
         super::launch_host::Registered::new(&daemon, session_id.filter(|_| !already_running));
-    if let Err(e) = host.create(&tmux_name, &workdir) {
+    // #11270: a fresh Architect never attaches to a session it did not make.
+    let exclusive = cli.profile.is_architect() && !already_running;
+    if let Err(e) = host.create_for(&tmux_name, &workdir, exclusive) {
         return Err(registered.fail(e).await);
     }
     // Guard only needed for freshly-created sessions; if the session was already
@@ -663,19 +634,8 @@ pub(crate) async fn connect(
                 trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
             )?;
             let spec_dir = launch_spec_dir(home)?;
-            trusty_mpm::runtime::cli_launch::send_spec_launch(
-                host.server(),
-                &tmux_name,
-                &claude_spec,
-                &spec_dir,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
-                )
-            })
-            // #8878: an Architect `claude` the connect could not bind is reported.
-            .map(|binding| binding.report(&tmux_name))
+            // #11270: an Architect it could not bind is killed and is an error.
+            host.start_claude(&tmux_name, &claude_spec, &spec_dir)
         })();
         if let Err(e) = started {
             return Err(registered.fail(e).await);

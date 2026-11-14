@@ -359,7 +359,7 @@ impl Prepared {
                 );
             }
         }
-        if let Err(err) = stamp_and_send(&profile, &claude_spec, &spec_dir, session) {
+        if let Err(err) = stamp_and_send(&profile, &claude_spec, &spec_dir, session, &root) {
             // #9092: a relaunch never kills a session it did not create.
             if pane == Pane::Create {
                 let _ = tmux::run_tmux(&TmuxCommand::KillSession {
@@ -597,6 +597,7 @@ fn stamp_and_send(
     claude_spec: &trusty_mpm::runtime::launch_spec::LaunchSpec,
     spec_dir: &Path,
     session: &str,
+    root: &Path,
 ) -> anyhow::Result<()> {
     let (key, value) = session_profile::launch_env(*profile);
     let set = tmux::run_tmux(&TmuxCommand::SetEnvironment {
@@ -610,10 +611,17 @@ fn stamp_and_send(
     // #8308: one call types the short line naming the spec.
     // #10101: the Architect is not a fresh PM; it stays on the default server.
     // #8878: unbound here; `record_process` binds through `bind_architect`.
-    trusty_mpm::runtime::cli_launch::send_spec_launch_unbound(None, session, claude_spec, spec_dir)
-        .map_err(|e| {
-            anyhow::anyhow!("{session} was created but `claude` could not be started in it: {e}")
-        })
+    // #11270: the shim's grant goes under this launch's own `~/.trusty-mpm`.
+    trusty_mpm::runtime::cli_launch::send_spec_launch_unbound(
+        None,
+        session,
+        claude_spec,
+        spec_dir,
+        root,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!("{session} was created but `claude` could not be started in it: {e}")
+    })
 }
 
 /// Fail unless a launch in `dir` resolves to the supervisor profile.

@@ -342,6 +342,8 @@ async fn start_session_in_place(
     let settings = trusty_mpm::core::launch_policy::provision_settings(&root, path, None, profile);
     // #10127: built before `POST /sessions`, so a lockdown refusal registers nothing.
     let spec = inplace_session_spec(path, &root, &prompt, settings.file.as_deref())?;
+    // #11270: refused before `POST /sessions`, so a refusal adds no record.
+    host.refuse_running_architect(&name, &spec)?;
 
     #[derive(Deserialize)]
     struct Body {
@@ -388,7 +390,9 @@ async fn start_session_in_place(
         Err(e) => return Err(registered.fail(e).await),
     };
     let workdir = path.to_string_lossy().to_string();
-    if let Err(e) = host.create(&body.name, &workdir) {
+    // #11270: an Architect never attaches to a session it did not make.
+    let architect = trusty_mpm::runtime::architect_bind::spec_is_architect(&spec);
+    if let Err(e) = host.create_for(&body.name, &workdir, architect) {
         // #8286: the manual fallback names the prompt file too.
         let hint = manual_launch_hint(&body.name, &workdir, &prompt.file);
         return Err(registered.fail(e.context(hint)).await);
@@ -408,24 +412,12 @@ async fn start_session_in_place(
     // #8286: `spec` carries the prompt `inplace_prompt_file` wrote above.
     let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
     // #11270: only a session this start created reaches here (the reused arm
-    // returned above), so every launch it types is the bound form.
-    let sent = trusty_mpm::runtime::cli_launch::send_spec_launch(
-        host.server(),
-        &body.name,
-        &spec,
-        &spec_dir,
-    );
-    // #8878: an Architect `claude` the start could not bind is reported.
-    if let Ok(binding) = &sent
-        && let Some(warning) = binding.warning(&body.name)
-    {
-        eprintln!("{warning}");
-    }
-    if let Err(e) = sent {
+    // returned above); an Architect it could not bind is killed and errors.
+    if let Err(e) = host.start_claude(&body.name, &spec, &spec_dir) {
         // Only a session this start created reaches here (D3c guard above).
         host.kill(&body.name);
         let e = anyhow::anyhow!(
-            "claude could not be started in tmux session {} on {}: {e}; the session was killed",
+            "claude could not be started in tmux session {} on {}: {e:#}; the session was killed",
             body.name,
             host.describe()
         );

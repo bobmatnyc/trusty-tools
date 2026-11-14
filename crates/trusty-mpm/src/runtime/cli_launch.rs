@@ -47,6 +47,9 @@ pub enum CliLaunchError {
     /// tmux could not type the line, or exited non-zero.
     #[error("tmux could not type the launch line: {0}")]
     Send(std::io::Error),
+    /// #11270: the Architect launch grant could not be issued.
+    #[error("the Architect launch could not be granted: {0}")]
+    Grant(String),
 }
 
 /// Inputs of an isolated CLI launch: `tm launch`, `tm connect`, the Architect.
@@ -276,23 +279,43 @@ pub fn send_spec_launch(
     spec: &LaunchSpec,
     spec_dir: &Path,
 ) -> Result<super::architect_bind::Binding, CliLaunchError> {
-    send_spec_launch_unbound(server, session, spec, spec_dir)?;
-    Ok(super::architect_bind::bind_live(server, session, spec))
+    let root = super::architect_bind::home_root();
+    send_spec_launch_at(root.as_deref(), server, session, spec, spec_dir)
+}
+
+/// [`send_spec_launch`] under the named `~/.trusty-mpm` `root`, which holds
+/// the #11270 grant and the launch record (the #8545 pinned-home seam).
+/// Test: `a_cli_launch_starts_its_architect_through_the_shim_grant_11270`.
+pub fn send_spec_launch_at(
+    root: Option<&Path>,
+    server: Option<&str>,
+    session: &str,
+    spec: &LaunchSpec,
+    spec_dir: &Path,
+) -> Result<super::architect_bind::Binding, CliLaunchError> {
+    let wrapper =
+        crate::core::spawn_disclaim::launch_wrapper_bin().ok_or(CliLaunchError::NoWrapper)?;
+    send_spec_launch_with(None, server, &wrapper, session, spec, spec_dir, root)?;
+    Ok(super::architect_bind::bind_live_at(
+        root, server, session, spec,
+    ))
 }
 
 /// [`send_spec_launch`] without the bind, for `tm fleet init|relaunch` — which
 /// binds through `architect_session::bind_architect` under its own home and
-/// stops an Architect it cannot bind (#8878, #10448).
+/// stops an Architect it cannot bind (#8878, #10448). #11270: the grant goes
+/// under `root`, that home's `~/.trusty-mpm`.
 /// Test: `every_architect_spawn_site_binds_8878`.
 pub fn send_spec_launch_unbound(
     server: Option<&str>,
     session: &str,
     spec: &LaunchSpec,
     spec_dir: &Path,
+    root: &Path,
 ) -> Result<(), CliLaunchError> {
     let wrapper =
         crate::core::spawn_disclaim::launch_wrapper_bin().ok_or(CliLaunchError::NoWrapper)?;
-    send_spec_launch_with(None, server, &wrapper, session, spec, spec_dir)
+    send_spec_launch_with(None, server, &wrapper, session, spec, spec_dir, Some(root))
 }
 
 /// [`send_spec_launch`] with the tmux binary and the wrapper named (test seam).
@@ -302,11 +325,15 @@ pub fn send_spec_launch_unbound(
 /// then types the line via [`crate::core::tmux::send_launch_line`], which
 /// refuses a line over `MAX_PANE_COMMAND_BYTES` before tmux runs (#8308). On
 /// any failure after the write it removes the spec, since it carries
-/// credentials and no shim will consume it.
+/// credentials and no shim will consume it. #11270: an Architect spec gets
+/// the shim's grant under `root` before the line is typed
+/// ([`super::architect_grant::issue`]); no `root` refuses it, and a failure
+/// revokes the grant.
 /// Test: `send_spec_launch_types_a_short_line_naming_a_readable_spec`,
 /// `send_spec_launch_removes_the_spec_when_tmux_fails`,
 /// `cli_launch_paths_type_through_the_guard`,
-/// `a_cli_launch_is_named_after_its_tmux_session`.
+/// `a_cli_launch_is_named_after_its_tmux_session`,
+/// `a_cli_launch_starts_its_architect_through_the_shim_grant_11270`.
 pub(crate) fn send_spec_launch_with(
     tmux_bin: Option<&str>,
     server: Option<&str>, // See #10101
@@ -314,19 +341,41 @@ pub(crate) fn send_spec_launch_with(
     session: &str,
     spec: &LaunchSpec,
     spec_dir: &Path,
+    root: Option<&Path>,
 ) -> Result<(), CliLaunchError> {
     // #9025: every CLI and fleet launch names itself after its tmux session.
     let spec = &super::remote_name::named_after_session(spec, session);
-    let path = spec.write_in(spec_dir)?;
-    let result = LaunchSpec::verify(&path)
+    // #11270: the shim execs an Architect spec only against this grant.
+    let grant = super::architect_bind::spec_is_architect(spec)
+        .then(|| {
+            let root = root.ok_or_else(|| {
+                CliLaunchError::Grant("the home directory cannot be resolved".to_owned())
+            })?;
+            super::architect_grant::issue(root, spec)
+                .map(|_| root)
+                .map_err(CliLaunchError::Grant)
+        })
+        .transpose()?;
+    let result = spec
+        .write_in(spec_dir)
         .map_err(CliLaunchError::from)
-        .and_then(|_| {
-            let line = pane_line(wrapper, &path);
-            crate::core::tmux::send_launch_line(tmux_bin, server, session, &line)
-                .map_err(CliLaunchError::Send)
+        .and_then(|path| {
+            let sent = LaunchSpec::verify(&path)
+                .map_err(CliLaunchError::from)
+                .and_then(|_| {
+                    let line = pane_line(wrapper, &path);
+                    crate::core::tmux::send_launch_line(tmux_bin, server, session, &line)
+                        .map_err(CliLaunchError::Send)
+                });
+            if sent.is_err() {
+                let _ = std::fs::remove_file(&path);
+            }
+            sent
         });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&path);
+    if result.is_err()
+        && let Some(root) = grant
+    {
+        super::architect_grant::revoke(root, spec);
     }
     result
 }

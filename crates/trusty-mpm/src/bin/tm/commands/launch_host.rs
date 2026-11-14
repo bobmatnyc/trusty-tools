@@ -92,7 +92,10 @@ impl LaunchHost {
     }
 
     /// Create detached session `name` in `workdir` on this server, through
-    /// the crate's one creation choke point (#2398) with `-A` as before.
+    /// the crate's one creation choke point (#2398): with `-A` as before, or
+    /// exclusively for an `architect` launch, so a session someone else made
+    /// after the probe fails the create instead of receiving the launch
+    /// (#11270).
     ///
     /// What: an unverified scrollback limit is a printed warning (#3386).
     ///
@@ -100,14 +103,20 @@ impl LaunchHost {
     ///
     /// tmux could not run or `new-session` failed; the error names the server.
     ///
-    /// Test: `a_cli_create_reaches_the_workspace_server_only`.
-    pub(crate) fn create(&self, name: &str, workdir: &str) -> anyhow::Result<()> {
+    /// Test: `a_cli_create_reaches_the_workspace_server_only`,
+    /// `an_architect_create_never_attaches_11270`.
+    pub(crate) fn create_for(
+        &self,
+        name: &str,
+        workdir: &str,
+        architect: bool,
+    ) -> anyhow::Result<()> {
         let outcome = trusty_mpm::core::tmux::create_managed_session_on(
             None,
             self.server(),
             name,
             Some(workdir),
-            true,
+            !architect,
         );
         let outcome = match outcome {
             Ok(o) if o.output.status.success() => o,
@@ -138,8 +147,8 @@ impl LaunchHost {
     /// What: [`Self::has_session`], then
     /// [`trusty_mpm::runtime::architect_bind::refuse_reused`] for the spec's
     /// stamp; `Ok` for a fresh session or a non-Architect spec.
-    /// Test: `every_reused_session_arm_refuses_an_architect_before_typing_11270`
-    /// (order), `an_architect_launch_into_a_running_session_is_refused_11270`.
+    /// Test: `a_running_session_refuses_only_an_architect_and_types_nothing_11270`,
+    /// `an_architect_launch_into_a_running_session_is_refused_11270`.
     pub(crate) fn refuse_running_architect(
         &self,
         name: &str,
@@ -165,10 +174,74 @@ impl LaunchHost {
     /// Kill session `name` on this server, best-effort.
     /// Test: `a_dropped_guard_kills_on_its_own_server`.
     pub(crate) fn kill(&self, name: &str) {
+        let _ = self.try_kill(name);
+    }
+
+    /// [`Self::kill`], saying why the session may still run.
+    pub(crate) fn try_kill(&self, name: &str) -> Result<(), String> {
         let cmd = TmuxCommand::KillSession {
             name: name.to_owned(),
         };
-        let _ = run_tmux_on(&resolve_tmux_binary_or_bare(), self.server(), &cmd);
+        let out = run_tmux_on(&resolve_tmux_binary_or_bare(), self.server(), &cmd)
+            .map_err(|e| format!("cannot run tmux: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+
+    /// Start `claude` from `spec` in session `name`, which this launch
+    /// created, and bind an Architect it started (#8878, #11270).
+    ///
+    /// Why (#11270): `tm launch`, `tm connect` and `tm session start` warned
+    /// and exited 0 when a fresh Architect could not be bound, and it kept
+    /// running unbound.
+    /// What: [`Self::start_claude_at`] under the process home's `~/.trusty-mpm`.
+    /// Test: `a_fresh_cli_architect_left_unbound_is_killed_and_errors_11270`.
+    pub(crate) fn start_claude(
+        &self,
+        name: &str,
+        spec: &trusty_mpm::runtime::launch_spec::LaunchSpec,
+        spec_dir: &Path,
+    ) -> anyhow::Result<()> {
+        let root = trusty_mpm::runtime::architect_bind::home_root();
+        self.start_claude_at(root.as_deref(), name, spec, spec_dir)
+    }
+
+    /// [`Self::start_claude`] under the named `root` (test seam).
+    ///
+    /// What: [`trusty_mpm::runtime::cli_launch::send_spec_launch_at`] on this
+    /// server, then [`trusty_mpm::runtime::architect_bind::require_bound`],
+    /// which kills session `name` when its Architect is not bound.
+    ///
+    /// # Errors
+    ///
+    /// The launch could not be typed, or an Architect was not bound (the
+    /// session is then killed and the error names `tm fleet relaunch`).
+    pub(crate) fn start_claude_at(
+        &self,
+        root: Option<&Path>,
+        name: &str,
+        spec: &trusty_mpm::runtime::launch_spec::LaunchSpec,
+        spec_dir: &Path,
+    ) -> anyhow::Result<()> {
+        let binding = trusty_mpm::runtime::cli_launch::send_spec_launch_at(
+            root,
+            self.server(),
+            name,
+            spec,
+            spec_dir,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "tmux session {name} created but failed to start claude: {e} (report this with \
+                 `tm doctor` output)"
+            )
+        })?;
+        // #11270: an unbound fresh Architect is stopped and is an error.
+        trusty_mpm::runtime::architect_bind::require_bound(binding, name, || self.try_kill(name))
+            .map(drop)
+            .map_err(anyhow::Error::msg)
     }
 
     /// The `claude` pid in session `name` on this server, retried as
@@ -190,6 +263,56 @@ impl LaunchHost {
             .status
             .success()
             .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+/// Register `tm launch`'s session `requested` (the POST `body`) with the
+/// daemon, after refusing an Architect `spec` whose session already runs.
+///
+/// Why (#11270): the refusal ran after `POST /sessions`, which always adds a
+/// record, so each refused launch left a duplicate record pointing at the
+/// running session, and a `DELETE` of it would kill that session.
+/// What: [`LaunchHost::refuse_running_architect`] for `requested`, then
+/// `POST /sessions`; the registered name (or `requested`) and id.
+///
+/// # Errors
+///
+/// The refusal, or a daemon that rejected or could not take the
+/// registration (#10101 D3c); nothing was launched in either case.
+///
+/// Test: `an_architect_launch_into_a_running_session_registers_nothing_11270`.
+pub(crate) async fn register_launch(
+    daemon: &DaemonClient,
+    host: &LaunchHost,
+    requested: &str,
+    body: serde_json::Value,
+    spec: &trusty_mpm::runtime::launch_spec::LaunchSpec,
+) -> anyhow::Result<(String, Option<trusty_mpm::core::session::SessionId>)> {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        #[serde(default)]
+        name: String,
+        /// The registered session's id; `None` when the daemon is unreachable.
+        id: Option<trusty_mpm::core::session::SessionId>,
+    }
+    host.refuse_running_architect(requested, spec)?;
+    match daemon.post("/sessions").json(&body).send().await {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(resp) => match resp.json::<Body>().await {
+                Ok(body) if !body.name.is_empty() => Ok((body.name, body.id)),
+                Ok(body) => Ok((requested.to_owned(), body.id)),
+                _ => Ok((requested.to_owned(), None)),
+            },
+            // #10101: D3c — a launch the daemon did not register never runs.
+            Err(err) => anyhow::bail!(
+                "the daemon rejected the registration of session {requested}: {err}; \
+                 nothing was launched"
+            ),
+        },
+        Err(err) => anyhow::bail!(
+            "the daemon could not be reached to register session {requested} ({err}); \
+             nothing was launched"
+        ),
     }
 }
 

@@ -111,6 +111,36 @@ fn an_architect_spec_with_no_claude_or_no_home_is_unbound() {
     assert!(!root.join("architect-launch").exists(), "no record written");
 }
 
+/// #11270 (Fail-Open Check): a fresh Architect left unbound is stopped and is
+/// an error naming the session and `tm fleet relaunch`; a failed stop says so.
+/// A bound or non-Architect launch is `Ok` and stops nothing.
+#[test]
+fn a_failed_fresh_bind_stops_the_session_and_errors_11270() {
+    for unbound in [
+        Binding::NoClaude("gone".to_owned()),
+        Binding::NotRecorded("disk".to_owned()),
+    ] {
+        let mut stopped = false;
+        let err = require_bound(unbound.clone(), "tm-a", || {
+            stopped = true;
+            Ok(())
+        })
+        .expect_err("an unbound Architect is an error");
+        assert!(stopped, "{unbound:?} was not stopped");
+        for part in ["tm-a", "NOT bound", "was killed", "tm fleet relaunch"] {
+            assert!(err.contains(part), "{part} missing: {err}");
+        }
+        let err = require_bound(unbound, "tm-a", || Err("no tmux".to_owned()))
+            .expect_err("still an error");
+        assert!(err.contains("could NOT be killed (no tmux)"), "{err}");
+    }
+    let never = || -> Result<(), String> { panic!("nothing to stop") };
+    assert_eq!(
+        require_bound(Binding::NotArchitect, "tm-a", never),
+        Ok(Binding::NotArchitect)
+    );
+}
+
 #[test]
 fn an_unbound_architect_names_the_relaunch() {
     let warn = Binding::NoClaude("gone".to_owned())
@@ -271,13 +301,10 @@ const SITES: &[(&str, Site)] = &[
         "daemon/services/tmux_service.rs",
         Site::Binds("bind_profile("),
     ),
-    (
-        "bin/tm/commands/launch.rs",
-        Site::Binds("send_spec_launch("),
-    ),
+    ("bin/tm/commands/launch.rs", Site::Binds("start_claude(")),
     (
         "bin/tm/commands/session/start.rs",
-        Site::Binds("send_spec_launch("),
+        Site::Binds("start_claude("),
     ),
     (
         "bin/tm/commands/fleet/launch.rs",
@@ -367,15 +394,24 @@ fn every_architect_spawn_site_binds_8878() {
             .and_then(|rest| rest.split("\n}\n").next().map(str::to_owned))
             .unwrap_or_else(|| panic!("{head} in {rel}"))
     };
-    let typer = body("runtime/cli_launch.rs", "pub fn send_spec_launch(");
+    let typer = body("runtime/cli_launch.rs", "pub fn send_spec_launch_at(");
     assert!(
-        typer.contains("bind_live("),
+        typer.contains("bind_live_at("),
         "send_spec_launch does not bind"
     );
-    let deliver = body("runtime/managed_launch.rs", "fn deliver_in(");
+    let deliver = body("runtime/managed_launch.rs", "fn deliver_at(");
     assert!(
         deliver.contains("bind_delivered("),
         "deliver_in does not bind"
+    );
+    // #11270: the CLI step that types the launch settles the bind fail-closed.
+    let start = body(
+        "bin/tm/commands/launch_host.rs",
+        "pub(crate) fn start_claude_at(",
+    );
+    assert!(
+        start.contains("require_bound("),
+        "start_claude does not settle"
     );
 }
 
@@ -393,75 +429,4 @@ fn an_architect_launch_into_a_running_session_is_refused_11270() {
     ] {
         assert!(refusal.contains(part), "{part} missing: {refusal}");
     }
-}
-
-/// The byte offset of `needle` in `text`'s code (comment lines skipped).
-fn code_at(text: &str, needle: &str) -> Option<usize> {
-    let mut at = 0;
-    for line in text.split_inclusive('\n') {
-        if !line.trim_start().starts_with("//")
-            && let Some(col) = line.find(needle)
-        {
-            return Some(at + col);
-        }
-        at += line.len();
-    }
-    None
-}
-
-/// #11270 (Fail-Open Check): every path that can reach a session already
-/// running runs the refusal before the tmux create and before any keystroke,
-/// and `tm session start` no longer types an unbound launch at all.
-#[test]
-fn every_reused_session_arm_refuses_an_architect_before_typing_11270() {
-    let sources = production_sources();
-    let text = |rel: &str| {
-        sources
-            .iter()
-            .find(|(r, _)| r == rel)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_else(|| panic!("{rel} missing"))
-    };
-    let before = |rel: &str, gate: &str, later: &[&str]| {
-        let code = text(rel);
-        let gate_at = code_at(&code, gate).unwrap_or_else(|| panic!("{rel}: no {gate}"));
-        for step in later {
-            let step_at = code_at(&code, step).unwrap_or_else(|| panic!("{rel}: no {step}"));
-            assert!(gate_at < step_at, "{rel}: {step} runs before {gate}");
-        }
-    };
-    let start = "bin/tm/commands/session/start.rs";
-    assert!(
-        !code_has(&text(start), "send_spec_launch_unbound("),
-        "{start} still types an unbound launch"
-    );
-    assert!(
-        code_has(&text(start), "refuse_reused("),
-        "{start} does not refuse"
-    );
-    before(
-        start,
-        "reused_session_notice(&spec",
-        &["host.create(&body.name", "send_spec_launch("],
-    );
-    assert!(code_has(
-        &text("bin/tm/commands/launch_host.rs"),
-        "refuse_reused(spec_is_architect(spec), name)"
-    ));
-    before(
-        "bin/tm/commands/launch.rs",
-        "host.refuse_running_architect(&tmux_name, &claude_spec)",
-        &[
-            "host.create(&tmux_name, &managed_workdir)",
-            "send_spec_launch(",
-        ],
-    );
-    before(
-        "daemon/services/tmux_service.rs",
-        "refuse_reused(",
-        &[
-            "create_session(tmux_name",
-            "driver.send_line(&target, &line)",
-        ],
-    );
 }

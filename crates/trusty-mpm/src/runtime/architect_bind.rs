@@ -19,8 +19,11 @@
 //! ([`refuse_reused`], #11270); `tm fleet bind` re-binds a running Architect
 //! after presence (#8878 PR2a). The bare-`tm` in-place relaunch refuses a
 //! supervisor session before it execs (#9092). [`DEFERRED`] names the one
-//! path that does not bind yet. Every failure is a [`Binding`] the caller
-//! reports; none grants anything, since no record means the floor denies.
+//! path that does not bind yet. Every failure is a [`Binding`]; none grants
+//! anything, since no record means the floor denies. #11270: a fresh
+//! Architect that is not bound is stopped and is an error ([`require_bound`]),
+//! and the launch shim execs an Architect spec only against the grant a
+//! binding path issued ([`crate::runtime::architect_grant`]).
 //! Test: `architect_bind_tests.rs`.
 
 use std::ffi::OsStr;
@@ -128,7 +131,8 @@ pub fn bind_launch(
 /// `tm fleet relaunch` and `tm fleet bind`) when `architect`; `Ok(())`
 /// otherwise. Callers run it before any keystroke reaches the session.
 /// Test: `an_architect_launch_into_a_running_session_is_refused_11270`,
-/// `every_reused_session_arm_refuses_an_architect_before_typing_11270`.
+/// `a_running_session_refuses_only_an_architect_and_types_nothing_11270`,
+/// `a_gui_architect_spawn_into_a_running_session_types_nothing_11270`.
 pub fn refuse_reused(architect: bool, session: &str) -> Result<(), String> {
     if !architect {
         return Ok(());
@@ -179,9 +183,52 @@ pub fn bind_profile(
 /// the pm-guard hook reads) and the `claude` under `session`'s pane shell on
 /// tmux `server`.
 pub fn bind_live(server: Option<&str>, session: &str, spec: &LaunchSpec) -> Binding {
-    bind_launch(home_root().as_deref(), spec, session, || {
+    bind_live_at(home_root().as_deref(), server, session, spec)
+}
+
+/// [`bind_live`] under the named `root` (the #8545 pinned-home seam).
+pub fn bind_live_at(
+    root: Option<&Path>,
+    server: Option<&str>,
+    session: &str,
+    spec: &LaunchSpec,
+) -> Binding {
+    bind_launch(root, spec, session, || {
         crate::core::process::find_claude_pid_in_tmux_on(server, session, FIND_ATTEMPTS, FIND_DELAY)
     })
+}
+
+/// Settle the bind of a launch into tmux session `session` that this command
+/// created: an Architect it could not bind is stopped and is an error.
+///
+/// Why (#11270): a failed bind of a fresh Architect was a warning with exit
+/// 0, and the unbound `claude` kept running as the Architect.
+/// What: [`Binding::NotArchitect`] and [`Binding::Bound`] are `Ok` with the
+/// binding; [`Binding::NoClaude`] and [`Binding::NotRecorded`] run `stop`
+/// (the caller kills the session it created) and are `Err` naming the
+/// session, the cause, whether the stop worked and the remedy, `tm fleet
+/// relaunch`.
+/// Test: `a_failed_fresh_bind_stops_the_session_and_errors_11270`.
+pub fn require_bound(
+    binding: Binding,
+    session: &str,
+    stop: impl FnOnce() -> Result<(), String>,
+) -> Result<Binding, String> {
+    let why = match &binding {
+        Binding::NotArchitect | Binding::Bound(_) => return Ok(binding),
+        Binding::NoClaude(why) | Binding::NotRecorded(why) => why.clone(),
+    };
+    let stopped = match stop() {
+        Ok(()) => format!("tmux session {session} was killed, so no Architect runs unbound"),
+        Err(err) => format!(
+            "tmux session {session} could NOT be killed ({err}), so its `claude` may run \
+             unbound; run `tmux kill-session -t ={session}`"
+        ),
+    };
+    Err(format!(
+        "the Architect `claude` in tmux session {session} was started but NOT bound ({why}); \
+         {stopped}. Run `tm fleet relaunch` to start the Architect bound"
+    ))
 }
 
 /// The process home's `~/.trusty-mpm`, the root the pm-guard hook reads.
