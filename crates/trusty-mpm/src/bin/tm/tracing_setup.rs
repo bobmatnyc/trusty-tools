@@ -127,13 +127,67 @@ pub(crate) fn init_cli_diagnostics_if_wanted(command: &Option<Command>) {
 /// asserted by piping the two streams apart).
 pub(crate) fn init_stderr_only(default: &str) {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| default.into()),
-        )
+        .with_env_filter(env_filter(default))
         .with_writer(std::io::stderr)
         .with_target(false)
         .try_init();
+}
+
+/// Target prefix held at `warn` unless `RUST_LOG` names exactly it (#8948).
+/// A directive target matches by string prefix, so `aws` covers `aws_config`,
+/// `aws_sdk_*`, `aws_smithy_*`, `aws_sigv4` and `aws_credential_types`.
+const AWS_LOG_GUARD: &str = "aws";
+
+/// The `EnvFilter` every subscriber in this binary builds: `RUST_LOG` over
+/// `default`, with the AWS SDK targets held at `warn`.
+///
+/// Why: #8948 — `aws_config::profile::credentials` logs the access key ID at
+/// INFO each time the log-drain S3 adapter (or the `bedrock` SM provider)
+/// rebuilds its credential chain, and the daemon's `info` default wrote it to
+/// the rotated log about once a minute.
+/// What: reads `RUST_LOG` and defers to [`filter_from_directives`].
+/// Test: `aws_info_events_are_dropped_under_rust_log_info`.
+pub(crate) fn env_filter(default: &str) -> tracing_subscriber::EnvFilter {
+    filter_from_directives(std::env::var("RUST_LOG").ok().as_deref(), default)
+}
+
+/// Build the filter from an explicit `RUST_LOG` value, so tests never touch
+/// the process environment.
+///
+/// What: `rust_log` when it parses, else `default` — the same choice
+/// `EnvFilter::try_from_default_env().unwrap_or_else(|_| default.into())`
+/// made. Then `aws=warn` is appended unless a static directive's target is
+/// exactly `aws` (a span-scoped `aws[..]` directive does not count). Precedence: `EnvFilter` applies the most specific (longest) matching
+/// target, so an operator's `aws_config=debug` overrides the guard for
+/// `aws_config::*` only, and `aws=<level>` replaces the guard for all of them.
+/// The target is compared untrimmed, as the parser keeps it: `aws =warn`
+/// does not name `aws`, so the guard stays.
+/// Test: `aws_info_events_are_dropped_under_rust_log_info`,
+/// `aws_info_events_are_dropped_at_the_default_level`,
+/// `an_explicit_aws_directive_is_honoured`,
+/// `a_span_scoped_aws_directive_keeps_the_guard`,
+/// `a_whitespace_padded_aws_directive_keeps_the_guard`.
+fn filter_from_directives(rust_log: Option<&str>, default: &str) -> tracing_subscriber::EnvFilter {
+    use tracing_subscriber::EnvFilter;
+    let base = rust_log
+        .filter(|s| EnvFilter::try_new(s).is_ok())
+        .unwrap_or(default);
+    let mut directives = base.to_string();
+    // #8948: hold AWS SDK targets at warn (key id in log)
+    // Only a static directive (no `[span{fields}]` part) can replace the guard:
+    // `aws[foo]=debug` is dynamic and says nothing about events outside `foo`.
+    // #8948: no trim — the parser keeps `aws =warn` as target "aws ", not aws
+    let named = base
+        .split(',')
+        .filter(|d| !d.contains('['))
+        .filter_map(|d| d.split('=').next())
+        .any(|target| target == AWS_LOG_GUARD);
+    if !named {
+        directives.push_str(&format!(",{AWS_LOG_GUARD}=warn"));
+    }
+    // `EnvFilter::new` drops an unparsable directive rather than failing;
+    // `base` was validated above and the guard is a literal, so none is dropped.
+    EnvFilter::new(directives)
 }
 
 /// Whether the long-running modes should also write every event to stderr.
@@ -235,17 +289,12 @@ pub(crate) fn init_daemon_tracing() -> anyhow::Result<(
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
         .with_ansi(false)
-        .with_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        );
+        .with_filter(env_filter("info"));
     // MCP mode speaks JSON-RPC on stdout — tracing never leaves stdout.
     let stderr_layer = (stderr_sink == StderrSink::Register).then(|| {
         tracing_subscriber::fmt::layer()
             .with_writer(std::io::stderr)
-            .with_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "info".into()),
-            )
+            .with_filter(env_filter("info"))
     });
 
     tracing_subscriber::registry()
@@ -383,6 +432,156 @@ mod tests {
                 "{supervision:?} must still keep stderr when nothing else is configured"
             );
         }
+    }
+
+    /// In-memory stand-in for a log sink.
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// What one daemon-shaped layer (`fmt::layer().with_filter(..)`, the shape
+    /// `init_daemon_tracing` registers twice) writes under
+    /// `filter_from_directives(rust_log, "info")`. Thread-local subscriber and
+    /// an explicit directive string: no global state, no env mutation.
+    fn emitted(rust_log: Option<&str>) -> String {
+        use tracing_subscriber::Layer as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let capture = Capture::default();
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .with_filter(filter_from_directives(rust_log, "info"));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "aws_config::profile::credentials", "info-key-8948");
+            tracing::warn!(target: "aws_config::profile::credentials", "warn-8948");
+            tracing::info!(target: "aws_sdk_s3::client", "sdk-8948");
+            tracing::info!(target: "aws_smithy_runtime::client", "smithy-8948");
+            tracing::info!(target: "trusty_mpm::daemon::log_drain", "own-8948");
+            tracing::debug!(target: "trusty_mpm::daemon::log_drain", "own-debug-8948");
+        });
+        let bytes = capture.0.lock().expect("capture lock").clone();
+        String::from_utf8(bytes).expect("utf8 log output")
+    }
+
+    /// REGRESSION (#8948): the installed plist's `RUST_LOG=info` keeps the
+    /// credential provider's INFO line out of the log, keeps its WARN, and
+    /// leaves trusty's own INFO untouched. RED before the fix: the daemon
+    /// layers used `RUST_LOG` verbatim and wrote `info-key-8948`.
+    #[test]
+    fn aws_info_events_are_dropped_under_rust_log_info() {
+        let out = emitted(Some("info"));
+        assert!(
+            !out.contains("info-key-8948"),
+            "credential line leaked: {out}"
+        );
+        assert!(!out.contains("sdk-8948"), "SDK INFO line leaked: {out}");
+        assert!(
+            !out.contains("smithy-8948"),
+            "smithy INFO line leaked: {out}"
+        );
+        assert!(out.contains("warn-8948"), "AWS WARN must still show: {out}");
+        assert!(out.contains("own-8948"), "own INFO must still show: {out}");
+        assert!(
+            !out.contains("own-debug-8948"),
+            "own DEBUG stays off: {out}"
+        );
+    }
+
+    /// REGRESSION (#8948): with `RUST_LOG` unset the `info` default holds the
+    /// AWS targets down too.
+    #[test]
+    fn aws_info_events_are_dropped_at_the_default_level() {
+        let out = emitted(None);
+        assert!(
+            !out.contains("info-key-8948"),
+            "credential line leaked: {out}"
+        );
+        assert!(out.contains("warn-8948"), "AWS WARN must still show: {out}");
+        assert!(out.contains("own-8948"), "own INFO must still show: {out}");
+    }
+
+    /// An operator's per-target directive beats the guard for its own target
+    /// only; `aws=<level>` replaces the guard outright.
+    #[test]
+    fn an_explicit_aws_directive_is_honoured() {
+        let out = emitted(Some("info,aws_config=debug"));
+        assert!(
+            out.contains("info-key-8948"),
+            "opt-in must be honoured: {out}"
+        );
+        assert!(!out.contains("sdk-8948"), "siblings stay guarded: {out}");
+
+        let out = emitted(Some("info,aws=info"));
+        assert!(
+            out.contains("info-key-8948"),
+            "aws=info must open it: {out}"
+        );
+        assert!(out.contains("sdk-8948"), "aws=info covers the SDK: {out}");
+    }
+
+    /// REGRESSION (#8948 review): a span-scoped directive on `aws` is dynamic,
+    /// so it must not count as naming `aws` and drop the guard for events
+    /// outside that span. `[foo]=debug` (no target) is explicit operator
+    /// scope and stays out of the guard's way.
+    #[test]
+    fn a_span_scoped_aws_directive_keeps_the_guard() {
+        for rust_log in [
+            "info,aws[foo]=debug",
+            "info,aws[{x}]=debug",
+            "info,aws[foo]",
+        ] {
+            let out = emitted(Some(rust_log));
+            assert!(
+                !out.contains("info-key-8948"),
+                "{rust_log}: credential line leaked: {out}"
+            );
+            assert!(
+                !out.contains("sdk-8948"),
+                "{rust_log}: SDK INFO line leaked: {out}"
+            );
+            assert!(
+                out.contains("warn-8948"),
+                "{rust_log}: AWS WARN must still show: {out}"
+            );
+        }
+    }
+
+    /// REGRESSION (#8948 review): `Directive::parse` keeps trailing whitespace
+    /// in the target, so `aws =warn` names `"aws "`, which matches no `aws_*`
+    /// target and must not count as naming `aws` and drop the guard.
+    #[test]
+    fn a_whitespace_padded_aws_directive_keeps_the_guard() {
+        let leaked: Vec<(&str, String)> = [
+            // Red-first: leaked `info-key-8948` at bb873ccb0d.
+            "info,aws =warn",
+            "debug,aws =warn",
+            // Preserved behaviour: the parser rejects the whole string, the
+            // `info` default applies, and the guard is appended.
+            "info, aws=warn",
+            "debug, aws=warn",
+        ]
+        .into_iter()
+        .map(|rust_log| (rust_log, emitted(Some(rust_log))))
+        .filter(|(_, out)| out.contains("info-key-8948"))
+        .collect();
+        assert!(leaked.is_empty(), "credential line leaked: {leaked:#?}");
     }
 
     /// The invariant behind the matrix, stated on its own: no combination of
