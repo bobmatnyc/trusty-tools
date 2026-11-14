@@ -1078,6 +1078,8 @@ bedrock-client = [
     "dep:aws-sdk-bedrockruntime",
     "dep:aws-types",
     "dep:aws-smithy-types",
+    # #10892: `CredentialsError`, to type a missing-credential send failure.
+    "dep:aws-credential-types",
 ]
 # Enables the `inference::config` module (issue #2404, epic #2400 Wave 1): the
 # universal `config` clap command (`ConfigCommand`) that any binary mounts with

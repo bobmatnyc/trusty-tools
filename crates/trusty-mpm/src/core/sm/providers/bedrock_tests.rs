@@ -14,7 +14,11 @@
 //! empty-message validation path, and error classification.
 //! Test: included as `#[cfg(test)] mod tests` via `#[path]` from `bedrock.rs`.
 
-use super::{BedrockProvider, LlmProvider, LlmRequest, map_sdk_error, validate_model_id};
+use trusty_common::inference::{BedrockError, InferenceError};
+
+use super::{
+    BedrockProvider, LlmProvider, LlmRequest, map_inference_error, map_sdk_error, validate_model_id,
+};
 use crate::core::sm::providers::SmLlmError;
 
 /// Why: region resolution (`explicit` > env > `us-east-1`) is the shared
@@ -173,4 +177,41 @@ fn map_sdk_error_classifies_aws_markers() {
     let err = map_sdk_error(wrap("connection reset by peer"), model, region);
     assert!(matches!(err, SmLlmError::Transport(_)));
     assert!(err.is_retryable());
+}
+
+/// Why (#10892): the shared adapter types a failed send, so the SM must route a
+/// missing credential to an alarm and a timeout or transport fault to a retry
+/// by variant — even when the message holds none of the old text markers.
+/// What: each typed variant, with a message carrying no marker, maps to the
+/// class the substring classifier gave it; an `Api` error still reads its code.
+/// Test: this test.
+#[test]
+fn map_inference_error_routes_typed_bedrock_variants() {
+    let (model, region) = ("us.anthropic.claude-sonnet-4-6", "us-east-1");
+    let msg = || "Converse call failed: opaque".to_string();
+
+    let err = map_inference_error(
+        InferenceError::Bedrock(BedrockError::MissingCredential(msg())),
+        model,
+        region,
+    );
+    assert!(matches!(err, SmLlmError::AccessDenied(_)), "{err:?}");
+    assert!(err.is_alarm() && !err.is_retryable());
+
+    for typed in [BedrockError::Timeout(msg()), BedrockError::Transport(msg())] {
+        let err = map_inference_error(InferenceError::Bedrock(typed), model, region);
+        assert!(matches!(err, SmLlmError::Transport(_)), "{err:?}");
+        assert!(err.is_retryable());
+    }
+
+    let err = map_inference_error(
+        InferenceError::Bedrock(BedrockError::Api {
+            status: 429,
+            code: Some("ThrottlingException".into()),
+            message: "Converse call failed: ThrottlingException: slow down".into(),
+        }),
+        model,
+        region,
+    );
+    assert!(matches!(err, SmLlmError::RateLimited), "{err:?}");
 }

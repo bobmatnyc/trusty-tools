@@ -16,7 +16,8 @@
 //! [`InferenceAdapter`]: `chat` converts the request via [`build_converse_parts`]
 //! (which funnels [`convert::build_converse_messages`]/
 //! [`convert::build_tool_config`]), calls the unary `Converse` operation, maps
-//! SDK errors to [`InferenceError::Provider`], and converts the response back via
+//! a failed send to a typed [`InferenceError::Bedrock`] (#10892), and converts
+//! the response back via
 //! [`convert::converse_output_to_chat_response`]; `chat_stream` (#4426) sends the
 //! SAME converted request to `ConverseStream` instead and maps its binary
 //! event-stream framing into the neutral [`ChatStream`] via [`stream`], so a
@@ -33,8 +34,10 @@
 //! `#[ignore]`-gated live `Converse` and `ConverseStream` calls; the configurator
 //! wiring is covered by `crates/trusty-common/tests/inference_bedrock.rs`.
 
+pub mod arn;
 pub(crate) mod cache;
 pub(crate) mod convert;
+mod send_error;
 pub(crate) mod stream;
 
 use async_trait::async_trait;
@@ -44,7 +47,6 @@ use aws_sdk_bedrockruntime::Client as BedrockRuntimeClient;
 use aws_sdk_bedrockruntime::types::{
     InferenceConfiguration, Message, SystemContentBlock, ToolConfiguration,
 };
-use aws_smithy_types::error::display::DisplayErrorContext;
 use aws_types::region::Region;
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
@@ -245,13 +247,15 @@ impl InferenceAdapter for BedrockAdapter {
     /// [`convert::build_tool_config`], sends the Converse request (model id =
     /// [`bedrock_model_id`] applied to `request.model`, e.g.
     /// `us.anthropic.claude-sonnet-4-6` with the `bedrock/` routing prefix
-    /// stripped), maps SDK errors to [`InferenceError::Provider`] with full
-    /// source-chain context via `DisplayErrorContext`, and converts the response
-    /// back via [`convert::converse_output_to_chat_response`] (which keeps the
+    /// stripped), maps a failed send to [`InferenceError::Bedrock`] via
+    /// `send_error::classify_send_error` (#10892: a typed
+    /// [`crate::inference::BedrockError`] carrying the full source-chain
+    /// context), and converts the response back via [`convert::converse_output_to_chat_response`] (which keeps the
     /// FULL `request.model` slug, prefix included, for telemetry readability —
     /// only the value sent to AWS is stripped).
-    /// Test: `super::tests::*` cover the conversion helpers directly; the
-    /// `#[ignore]`-gated `live_bedrock_call` exercises this end-to-end.
+    /// Test: `super::tests::*` cover the conversion helpers directly;
+    /// `chat_without_credentials_returns_missing_credential` drives the error
+    /// path; the `#[ignore]`-gated `live_bedrock_call` exercises this end-to-end.
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         // #5588: Converse has no schema-constrained-output parameter — refuse
         // before the client is built, never drop the schema silently.
@@ -273,11 +277,12 @@ impl InferenceAdapter for BedrockAdapter {
         }
 
         let resp = sdk_req.send().await.map_err(|e| {
-            InferenceError::Provider(format!(
-                "Converse call failed (model={}, region={}): {}",
-                request.model,
-                self.region,
-                DisplayErrorContext(&e)
+            // #10892: a typed cause, not a flattened `Provider` string.
+            InferenceError::Bedrock(send_error::classify_send_error(
+                "Converse",
+                &request.model,
+                &self.region,
+                &e,
             ))
         })?;
 
@@ -304,12 +309,13 @@ impl InferenceAdapter for BedrockAdapter {
     /// messages, sampling, or tool config), sends `ConverseStream`, and returns
     /// the SDK's event receiver wrapped as a [`ChatStream`] via
     /// [`stream::drive`]. A failed `stream=true` handshake surfaces
-    /// SYNCHRONOUSLY as `Err` (per the trait contract, so the caller may choose
+    /// SYNCHRONOUSLY as a typed [`InferenceError::Bedrock`] (#10892; per the trait contract, so the caller may choose
     /// to retry non-streaming); a mid-stream failure surfaces as a terminal `Err`
     /// item and never as a `Done`. Dropping the returned stream drops the
     /// receiver, cancelling the AWS request.
     /// Test: `super::tests::stream_*` drive [`stream::drive`] over a scripted
-    /// event sequence; `super::tests::live_bedrock_converse_stream` (`#[ignore]`)
+    /// event sequence; `chat_without_credentials_returns_missing_credential`
+    /// covers the handshake error; `super::tests::live_bedrock_converse_stream` (`#[ignore]`)
     /// covers this method end to end against the real service.
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatStream, InferenceError> {
         // #5588: same refusal as the unary path — the two transports share a body.
@@ -331,11 +337,12 @@ impl InferenceAdapter for BedrockAdapter {
         }
 
         let output = sdk_req.send().await.map_err(|e| {
-            InferenceError::Provider(format!(
-                "ConverseStream call failed (model={}, region={}): {}",
-                request.model,
-                self.region,
-                DisplayErrorContext(&e)
+            // #10892: a typed cause, not a flattened `Provider` string.
+            InferenceError::Bedrock(send_error::classify_send_error(
+                "ConverseStream",
+                &request.model,
+                &self.region,
+                &e,
             ))
         })?;
 
@@ -508,3 +515,7 @@ pub fn register_bedrock_factory(cfg: &mut Configurator) {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "send_error_tests.rs"]
+mod send_error_tests;

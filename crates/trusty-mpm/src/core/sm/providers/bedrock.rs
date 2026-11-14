@@ -14,9 +14,9 @@
 //! retry with backoff, and per-call cost/latency telemetry (§5.5).
 //! What: [`BedrockProvider`] holds a lazily-constructed [`BedrockAdapter`] and
 //! maps [`LlmRequest`] → shared [`ChatRequest`], delegates the Converse call,
-//! maps a shared [`InferenceError`] back to [`SmLlmError`] via [`map_sdk_error`]
-//! (unchanged substring classifier — the commons `DisplayErrorContext` string
-//! carries the same AWS error-class markers the old raw SDK string did), extracts
+//! maps a shared [`InferenceError`] back to [`SmLlmError`] via
+//! `map_inference_error` (#10892: typed credential/timeout/transport variants
+//! first, then the [`map_sdk_error`] substring classifier for AWS error codes), extracts
 //! text + usage, measures latency, computes cost, and retries bounded times on
 //! transient errors. Config errors (ModelNotFound/AccessDenied/Validation) never
 //! retry and always alarm. The `us.`/`eu.`/… inference-profile prefix is required
@@ -24,7 +24,8 @@
 //! [`SmLlmError::Validation`].
 //! Test: `bedrock_region_resolution`, `bedrock_prefix_validation`,
 //! `bedrock_provider_stores_model_and_region`, `bedrock_empty_messages_is_validation_error`,
-//! and `map_sdk_error_*` in `bedrock_tests.rs`; the live Converse wire path is
+//! `map_inference_error_routes_typed_bedrock_variants` and `map_sdk_error_*` in
+//! `bedrock_tests.rs`; the live Converse wire path is
 //! covered by the shared adapter's `#[ignore]`-gated coverage in
 //! `trusty_common::inference::bedrock`. Cost estimation is covered centrally in
 //! `pricing_tests.rs`.
@@ -36,7 +37,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tracing::{debug, warn};
 use trusty_common::inference::{
-    BedrockAdapter, ChatMessage as InferenceChatMessage, ChatRequest, InferenceAdapter,
+    BedrockAdapter, BedrockError, ChatMessage as InferenceChatMessage, ChatRequest,
+    InferenceAdapter, InferenceError,
 };
 
 use super::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError, pricing};
@@ -165,7 +167,7 @@ impl BedrockProvider {
             .inner
             .chat(&chat_req)
             .await
-            .map_err(|e| map_sdk_error(e.to_string(), &req.model, self.region()))?;
+            .map_err(|e| map_inference_error(e, &req.model, self.region()))?;
 
         let latency_ms = start.elapsed().as_millis() as u64;
         let text = resp.first_text().unwrap_or_default();
@@ -181,6 +183,30 @@ impl BedrockProvider {
             latency_ms,
             cost_usd,
         })
+    }
+}
+
+/// Map a shared adapter error to the right [`SmLlmError`] variant.
+///
+/// Why (#10892): the shared adapter now types a failed send as
+/// [`InferenceError::Bedrock`], so a missing credential, a timeout and a
+/// transport fault are told apart by variant, not by the words in the message.
+/// What: `MissingCredential` → `AccessDenied` (alarm); `Timeout` and
+/// `Transport` → `Transport` (retryable), the class the substring classifier
+/// gave them. An `Api` error and every other error still go through
+/// [`map_sdk_error`], which reads the AWS error code from the message.
+/// Test: `map_inference_error_routes_typed_bedrock_variants`.
+fn map_inference_error(err: InferenceError, model: &str, region: &str) -> SmLlmError {
+    match err {
+        InferenceError::Bedrock(BedrockError::MissingCredential(msg)) => SmLlmError::AccessDenied(
+            format!("AWS Bedrock access denied (model={model}, region={region}): {msg}"),
+        ),
+        InferenceError::Bedrock(BedrockError::Timeout(msg) | BedrockError::Transport(msg)) => {
+            SmLlmError::Transport(format!(
+                "Bedrock Converse SDK error (model={model}, region={region}): {msg}"
+            ))
+        }
+        other => map_sdk_error(other.to_string(), model, region),
     }
 }
 
