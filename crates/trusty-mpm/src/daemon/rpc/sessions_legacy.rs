@@ -231,7 +231,7 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
         "mpm.sessions.register",
         RegisterSession,
         t::RegisterSessionResponse,
-        |s, p| ops::register_session(&s, p)
+        |s, p| ops::register_session(&s, p).await
     );
     // `connect` is a distinct name over the same body, exactly as
     // `POST /api/v1/sessions/connect` is a distinct route over the same handler
@@ -241,7 +241,7 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
         "mpm.sessions.connect",
         RegisterSession,
         t::RegisterSessionResponse,
-        |s, p| ops::register_session(&s, p)
+        |s, p| ops::register_session(&s, p).await
     );
     let r = ok!(
         r,

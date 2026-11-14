@@ -56,15 +56,19 @@ pub(crate) fn read_within(
     read: ItemRead,
 ) -> Result<Option<SecretValue>, SecretsError> {
     let limit = effective_limit(limit);
-    let timeout = |waited| SecretsError::Timeout {
-        backend: BackendId::KEYCHAIN.to_string(),
-        operation: "get",
-        vault: service.to_string(),
-        key: account.to_string(),
-        waited,
+    let timeout = |waited, abandoned_item| {
+        // #11215: the reply and the audit row read the wait from this note.
+        super::timeout_note::note(BackendId::KEYCHAIN.to_string(), waited, abandoned_item);
+        SecretsError::Timeout {
+            backend: BackendId::KEYCHAIN.to_string(),
+            operation: "get",
+            vault: service.to_string(),
+            key: account.to_string(),
+            waited,
+        }
     };
     if limit.is_zero() {
-        return Err(timeout(Duration::ZERO));
+        return Err(timeout(Duration::ZERO, false));
     }
     let failure = |reason: String| SecretsError::Backend {
         backend: BackendId::KEYCHAIN.to_string(),
@@ -75,7 +79,7 @@ pub(crate) fn read_within(
     let item: Item = (service.as_str().to_owned(), account.as_str().to_owned());
     // #10998 fix round 1: one thread per hung item at most.
     if abandoned().contains_key(&item) {
-        return Err(timeout(Duration::ZERO));
+        return Err(timeout(Duration::ZERO, true));
     }
     let phase = Arc::new(Mutex::new(Phase::Running));
     let finish = Finish {
@@ -99,7 +103,7 @@ pub(crate) fn read_within(
             if *phase == Phase::Running {
                 *phase = Phase::Abandoned;
                 *abandoned().entry(item).or_insert(0) += 1;
-                return Err(timeout(limit));
+                return Err(timeout(limit, false));
             }
             // It ended between the timeout and the lock; take its result.
             drop(phase);

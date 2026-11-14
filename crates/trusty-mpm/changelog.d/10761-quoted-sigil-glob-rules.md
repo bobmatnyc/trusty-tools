@@ -1,0 +1,5 @@
+Security
+- The pm-guard secret-read rule now judges a bracket class's `!`/`^` sigil both as negation and as a member, because the shell lexer drops the quoting that makes it a member: `cat .[\!eE]nv` and `cat .['!'eE]nv` expand to `.env` in bash and zsh and are now refused. The unquoted `cat .[!eE]nv` is refused too, since it reaches the guard as the same token (#10761).
+- A `Grep` tool glob is now also read by ripgrep's own glob rules before the basename cut, beside the shell-rule reading it already had: `\` inside a class is a member (`.e[!\]v`), `\x` outside one is `x` (`.e\nv`), and every `{a,b}` branch is judged whole (`{src/x,.env}`). A glob ripgrep would reject, one with too many readings, or one nesting `{…}` deeper than 32 levels is refused, so a deeply nested glob can no longer overflow the hook's stack (#10761).
+- A `Grep` glob over 4,096 bytes is refused as too long to judge, so the hook answers in bounded time (#10761).
+- A word refused because its bracket expressions could not be read exactly now says so, instead of claiming its name is in the secret-bearing file class (#10761).

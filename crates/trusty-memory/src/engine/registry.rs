@@ -34,6 +34,9 @@ use std::time::Duration;
 #[path = "registry_rename.rs"]
 mod rename;
 pub use rename::PalaceRenameError;
+// #10989: an unload answers unloaded only once the palace's files are closed.
+#[cfg(feature = "server")]
+pub(crate) use rename::await_files_closed;
 #[cfg(feature = "server")]
 pub(crate) use rename::{DEFAULT_RENAME_BUSY_WAIT, RenameOptions, RenameOutcome};
 

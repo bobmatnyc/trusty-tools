@@ -1,0 +1,23 @@
+{
+  "case_id": "c02-alpha-nested-cap-omitted",
+  "project_id": "alpha",
+  "boundary": "contract",
+  "description": "Index every module",
+  "subagent_type": "engineer",
+  "model": null,
+  "run_in_background": false,
+  "prompt": "Index every module. Fan out one worker per module as needed.",
+  "rules": [
+    {
+      "rule_id": "alpha-cap-1",
+      "source_kind": "ledger",
+      "source_ref": "ledger/alpha/0001",
+      "span_start": 0,
+      "text": "Each child agent may start at most 2 nested workers.",
+      "authority": "owner_verified",
+      "status": "active"
+    }
+  ],
+  "inherits": [],
+  "worker_state": null
+}

@@ -11,10 +11,10 @@
 //! Test: `preflight_tests.rs`.
 
 use std::fmt;
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use trusty_common::crate_config::{crate_config_path_at, load_at};
 use trusty_common::workspace_layout::expand_tilde;
@@ -396,7 +396,8 @@ fn worktree_fix(repo: &Path) -> String {
 /// What: for each record `<target>/.git/worktrees/<name>` (a real `.git`
 /// directory only), the worktree counts when every file that names its
 /// repository names `target`'s: the record's `commondir` resolves to
-/// `<target>/.git`; the record holds no `config.worktree`; its `gitdir` back
+/// `<target>/.git`; the record's `config.worktree` is absent or sets only
+/// `push.default` (#10560, see [`worktree_config_is_benign`]); its `gitdir` back
 /// pointer resolves to a directory strictly inside `target` other than
 /// `local/`; and that directory's `.git` is a regular file whose `gitdir:`
 /// resolves to the same record. Neither pointer may hold `..`. Anything
@@ -406,6 +407,9 @@ fn worktree_fix(repo: &Path) -> String {
 /// `a_worktree_that_is_not_the_dirs_own_still_refuses`,
 /// `a_worktree_record_whose_commondir_is_not_the_dirs_own_refuses`,
 /// `a_worktree_with_its_own_config_or_remote_refuses`,
+/// `a_worktree_config_holding_only_push_default_passes`,
+/// `a_worktree_config_with_any_other_key_refuses`,
+/// `an_unreadable_or_irregular_worktree_config_refuses`,
 /// `a_worktree_record_or_pointer_that_escapes_refuses`.
 fn own_worktrees(target: &Path) -> Vec<PathBuf> {
     let git_dir = target.join(".git");
@@ -437,9 +441,9 @@ fn own_worktree(target: &Path, records: &Path, record: &Path) -> Option<PathBuf>
         return None;
     }
     // #10262: a per-worktree config can set its own remotes or `core.worktree`.
-    match std::fs::symlink_metadata(record.join("config.worktree")) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        _ => return None,
+    // #10560: tm writes `push.default` there itself; only that key passes.
+    if !worktree_config_is_benign(&record.join("config.worktree")) {
+        return None;
     }
     let back = std::fs::read_to_string(record.join("gitdir")).ok()?;
     let back = record.join(without_parent_dir(back.trim())?);
@@ -458,6 +462,71 @@ fn own_worktree(target: &Path, records: &Path, record: &Path) -> Option<PathBuf>
     let pointer = std::fs::read_to_string(&git).ok()?;
     let pointer = without_parent_dir(pointer.trim().strip_prefix("gitdir:")?.trim())?;
     (std::fs::canonicalize(worktree.join(pointer)).ok()? == record).then_some(worktree)
+}
+
+/// The largest `config.worktree` [`worktree_config_is_benign`] reads; a larger
+/// one refuses. tm's own file is one line.
+const WORKTREE_CONFIG_MAX_BYTES: u64 = 64 * 1024;
+
+/// Whether the record's `config.worktree` at `path` is absent, or a regular
+/// file whose every key is `push.default`.
+///
+/// Why: #10560 — tm sets `push.default = current` per worktree, which names
+/// no repository, while any other key (`remote.*`, `core.worktree`, an
+/// include) could make the worktree part of another one.
+/// What: the file is opened once and refused unless the opened file is the
+/// regular file `lstat` saw; git's own parser lists its bytes with includes
+/// off, so section and name fold case as git does and an include directive or
+/// a subsection is a key of its own. Anything unreadable, oversized,
+/// unparsable or carrying any other key is `false`: the check fails closed.
+/// Test: `a_worktree_config_holding_only_push_default_passes`,
+/// `a_worktree_config_with_any_other_key_refuses`,
+/// `an_unreadable_or_irregular_worktree_config_refuses`.
+fn worktree_config_is_benign(path: &Path) -> bool {
+    let seen = match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return true,
+        Ok(meta) if meta.is_file() => meta,
+        _ => return false,
+    };
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let same = file.metadata().is_ok_and(|opened| {
+        opened.is_file() && (opened.dev(), opened.ino()) == (seen.dev(), seen.ino())
+    });
+    let mut bytes = Vec::new();
+    let read = file
+        .take(WORKTREE_CONFIG_MAX_BYTES + 1)
+        .read_to_end(&mut bytes);
+    if !same || read.is_err() || bytes.len() as u64 > WORKTREE_CONFIG_MAX_BYTES {
+        return false;
+    }
+    config_keys(&bytes).is_some_and(|keys| keys.iter().all(|key| key == "push.default"))
+}
+
+/// The keys git's parser reads in the config text `bytes`, includes off, or
+/// `None` when git cannot run or rejects the text.
+fn config_keys(bytes: &[u8]) -> Option<Vec<String>> {
+    let mut child = git()
+        .args(["config", "--file", "-", "--no-includes", "--list", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let wrote = child.stdin.take()?.write_all(bytes);
+    let out = child.wait_with_output().ok()?;
+    if wrote.is_err() || !out.status.success() {
+        return None;
+    }
+    // `-z`: each entry is `key`, or `key\nvalue`, ended by NUL.
+    let text = String::from_utf8(out.stdout).ok()?;
+    let entries = text.split_terminator('\0');
+    Some(
+        entries
+            .map(|entry| entry.split('\n').next().unwrap_or_default().to_owned())
+            .collect(),
+    )
 }
 
 /// `raw` as a path, or `None` when it is empty or holds a `..` component.

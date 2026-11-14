@@ -9,6 +9,7 @@
 //! `render_report_names_stopped_and_kept_sessions` below.
 
 use trusty_mpm::client::DaemonClient;
+use trusty_mpm::session_manager::index_shutdown::ShutdownState;
 use trusty_mpm::session_manager::project_decommission::ProjectDecommissionReport;
 
 /// Run `tm projects decommission`.
@@ -33,9 +34,14 @@ pub(crate) async fn decommission(
 /// The human view: one headline, then each session id under its outcome.
 fn render_report(report: &ProjectDecommissionReport) -> Vec<String> {
     let mut lines = vec![format!(
-        "project '{}' decommissioned — workspaces and search index kept",
+        "project '{}' decommissioned — workspaces and index data kept",
         report.project.name
     )];
+    // #10989: what the search-index and palace shutdown did.
+    if let Some(shutdown) = &report.index_shutdown {
+        lines.push(format!("  search index: {}", state_line(&shutdown.search)));
+        lines.push(format!("  memory palace: {}", state_line(&shutdown.palace)));
+    }
     lines.push(format!("  stopped ({}):", report.stopped.len()));
     lines.extend(report.stopped.iter().map(|id| format!("    {id}")));
     lines.push(format!(
@@ -44,6 +50,18 @@ fn render_report(report: &ProjectDecommissionReport) -> Vec<String> {
     ));
     lines.extend(report.left_as_is.iter().map(|id| format!("    {id}")));
     lines
+}
+
+/// One shutdown item, in words.
+fn state_line(state: &ShutdownState) -> String {
+    match state {
+        ShutdownState::Unloaded { id } => format!("{id} unloaded (data kept)"),
+        ShutdownState::NotLoaded { reason } => format!("nothing loaded ({reason})"),
+        ShutdownState::Skipped { reason } => format!("skipped ({reason})"),
+        ShutdownState::Failed { id, error } => {
+            format!("FAILED {} ({error})", id.as_deref().unwrap_or(""))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -73,9 +91,23 @@ mod tests {
             },
             stopped: vec!["s1".into()],
             left_as_is: vec!["s2".into()],
+            index_shutdown: Some(
+                trusty_mpm::session_manager::index_shutdown::IndexShutdownReport {
+                    search: ShutdownState::Unloaded {
+                        id: "widget-idx".into(),
+                    },
+                    palace: ShutdownState::NotLoaded {
+                        reason: "trusty-memory is not running".into(),
+                    },
+                },
+            ),
         };
         let lines = render_report(&report);
         assert!(lines[0].contains("widget"), "{lines:?}");
+        assert!(
+            lines.contains(&"  search index: widget-idx unloaded (data kept)".to_string()),
+            "{lines:?}"
+        );
         assert!(lines.contains(&"    s1".to_string()), "{lines:?}");
         assert!(lines.contains(&"    s2".to_string()), "{lines:?}");
     }

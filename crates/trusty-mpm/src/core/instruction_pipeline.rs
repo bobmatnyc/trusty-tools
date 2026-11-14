@@ -337,10 +337,12 @@ pub(crate) fn write_compiled_prompt_recording_in(
 /// `$HOME`, which a concurrently running `RosterTiers`-guarded test mutates.
 /// Injecting the resolver removes that dependence for a caller that needs a
 /// deterministic source-byte count instead.
-/// What: the pure write, then
+/// What: the pure write, then the file's hash into the provisioning ledger
+/// (best-effort, #11221), then
 /// [`crate::core::savings_instructions::record_instruction_compression_in_with`]
 /// with `roster_source` threaded through.
-/// Test: `a_recording_compiled_write_reaches_the_named_framework_root`.
+/// Test: `a_recording_compiled_write_reaches_the_named_framework_root`,
+/// `a_spawn_provisioned_clone_passes_the_dirt_check_11221`.
 pub(crate) fn write_compiled_prompt_recording_in_with(
     content: &FrameworkContent,
     framework_root: &std::path::Path,
@@ -349,6 +351,16 @@ pub(crate) fn write_compiled_prompt_recording_in_with(
     roster_source: impl FnOnce(&std::path::Path) -> usize,
 ) -> std::io::Result<()> {
     write_compiled_prompt_to(dest, prompt)?;
+    // #11221: the ledger vouches for these bytes, so removal can excuse them.
+    if let Err(e) =
+        crate::session_manager::provisioning_ledger::record_compiled_prompt(dest, prompt.as_bytes())
+    {
+        tracing::warn!(
+            path = %dest.display(),
+            "could not record the compiled prompt in the provisioning ledger; a later \
+             removal keeps this workspace (#11221): {e}"
+        );
+    }
     crate::core::savings_instructions::record_instruction_compression_in_with(
         framework_root,
         crate::core::savings_instructions::SectionBytes::of(content),

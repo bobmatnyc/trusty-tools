@@ -662,7 +662,7 @@ pub async fn register_session(
     // #6288: the body is shared with `mpm.sessions.register` over the Unix
     // socket; `mpm.sessions.connect` mounts the same body under its own name,
     // exactly as `POST /api/v1/sessions/connect` does here.
-    Ok(Json(sessions_ops::register_session(&state, body)?))
+    Ok(Json(sessions_ops::register_session(&state, body).await?))
 }
 
 /// `POST /api/v1/sessions/connect` — register a session for a *connect* (no

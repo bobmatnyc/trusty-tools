@@ -136,8 +136,10 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/check.sh \
 # One volume at /data holds all state. TRUSTY_DATA_DIR_OVERRIDE is not set.
 # TRUSTY_SKIP_RAM_CHECK: the 16 GB guard would refuse a 6 GB container.
 # The proxy host name below must equal the proxy container name in README.md.
-# DOC-90 section 7 adds the second block. TAGENT_NO_API (#6433) and
-# TRUSTY_CONSOLE_TOKEN_FILE (#11074) are set ahead of the code that reads them.
+# DOC-90 section 7 adds the second block. TAGENT_NO_API makes tagent refuse
+# --api/--serve unless it is 0/false/no/off or empty (#6433 interim slice).
+# TRUSTY_CONSOLE_TOKEN_FILE (#11074) is
+# set ahead of the code that reads it.
 # TS_NO_LOGS_NO_SUPPORT: tailscaled sends no client logs (D20, DOC-90 section 6).
 # GH_NO_UPDATE_NOTIFIER: gh makes no release check (ruling 4).
 ENV HOME=/data/home \

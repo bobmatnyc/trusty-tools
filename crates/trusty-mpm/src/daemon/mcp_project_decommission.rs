@@ -30,8 +30,9 @@ use crate::session_manager::project_decommission::{
 /// # Errors
 ///
 /// [`DaemonError::NotFound`] for an unknown project; [`DaemonError::Unprocessable`]
-/// for an Architect refusal or a partial stop, carrying the full message (which
-/// names every session that stopped and every one that failed);
+/// for an Architect refusal, a partial stop or an index shutdown failure
+/// (#10989), carrying the full message (which names every session that
+/// stopped, every one that failed, and every index that may still be loaded);
 /// [`DaemonError::Internal`] for a registry stamp failure after the stops
 /// (its message names the stopped sessions) and for any other registry failure.
 /// Test: `project_decommission_marks_the_project_and_lists_it`,
@@ -55,8 +56,10 @@ pub async fn project_decommission_op(
             stamp @ ProjectDecommissionError::StampFailed { .. } => {
                 DaemonError::Internal(stamp.to_string())
             }
+            // #10989: an index left loaded is a refusal naming each item.
             refused @ (ProjectDecommissionError::Protected(_)
-            | ProjectDecommissionError::PartialStop { .. }) => {
+            | ProjectDecommissionError::PartialStop { .. }
+            | ProjectDecommissionError::IndexShutdown { .. }) => {
                 DaemonError::Unprocessable(refused.to_string())
             }
         })

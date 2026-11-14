@@ -48,8 +48,28 @@
 #     cd-fails      under umask 0777 mkdir makes a home the launcher cannot
 #                   enter; it exits 1 and the daemon never starts
 #     teardown      after the daemon exits, the launcher runs
-#                   `tmux -S <dir>/data/tmux/tmux-<uid>/default kill-server`
-#                   and no other tmux call (#9557); skips without python3
+#                   `tmux -S <socket> kill-server` for `default` and a
+#                   tm-ws-* socket beside it, and every tmux call addresses a
+#                   sandbox socket by -S (#9557, #10922); skips without python3
+#     teardown-ws   (#10922) a stub daemon starts a real tm-ws-* tmux server
+#                   whose pane and its child ignore HUP and TERM; after
+#                   teardown the server is gone, both processes are dead and
+#                   the exit is 0; skips without tmux
+#     teardown-survivor  (#10922) a stub daemon leaves a process outside tmux
+#                   with its cwd under <dir>; the launcher names its pid and
+#                   exits 1
+#     teardown-symlink-entry  (#10922) a socket entry symlinked to a scratch
+#                   decoy socket is skipped: no tmux call names it or its target
+#     teardown-symlink-dir  (#10922) tmux-<uid> symlinked to a scratch decoy
+#                   dir refuses the tmux step: no tmux call, exit 1
+#     teardown-dead-pane  (#10922) a pane tmux reports dead is never signalled
+#     teardown-socket-survivor  (#10922) a process with cwd / holding a bound
+#                   unix socket under <dir> is named; exit 1
+#     teardown-find-probe-failed  (#10922) the Linux probe on a find that
+#                   cannot print links (fake find, fake SANDBOX_PROC) exits 1
+#                   naming the check; runs on macOS and Linux.
+#     teardown-probe-failed  (#10922) a survivor probe that fails or is missing
+#                   (SANDBOX_LSOF) is named on stderr; exit 1, never clean
 #     bin-fresh-*   (#10755) against a temp git source root (SANDBOX_SRC_ROOT)
 #                   and a stubbed dependency tree (BIN_FRESH_SOURCES_CMD): a
 #                   stale build artifact refuses, in a dry run and in a real
@@ -393,19 +413,29 @@ if command -v python3 >/dev/null 2>&1; then
   mkdir -p "$DIR10/data/tmux/tmux-$(id -u)" "$FAKE_BIN"
   chmod 700 "$DIR10/data/tmux" "$DIR10/data/tmux/tmux-$(id -u)"
   SOCK10="$DIR10/data/tmux/tmux-$(id -u)/default"
-  python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$SOCK10"
-  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$TMP_ROOT/tmux-calls" > "$FAKE_BIN/tmux"
+  # #10922: a per-workspace server's socket beside `default`.
+  WS10="$DIR10/data/tmux/tmux-$(id -u)/tm-ws-selftest-0123"
+  for s in "$SOCK10" "$WS10"; do
+    python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$s"
+  done
+  # The fake answers no list-sessions, as a stopped server does.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\ncase "$*" in *list-sessions*) exit 1 ;; esac\n' \
+    "$TMP_ROOT/tmux-calls" > "$FAKE_BIN/tmux"
   chmod +x "$FAKE_BIN/tmux"
   set +e
   OUT10="$(env -i PATH="$FAKE_BIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIR10" 2>&1)"
   STATUS10=$?
   set -e
   CALLS10="$(cat "$TMP_ROOT/tmux-calls" 2>/dev/null || true)"
+  KILLS10="$(printf '%s\n' "$CALLS10" | grep 'kill-server' | tr '\n' ' ')"
+  UNSCOPED10="$(printf '%s\n' "$CALLS10" | grep -v "^-S $DIR10/data/tmux/tmux-$(id -u)/" || true)"
   if [ "$STATUS10" -ne 0 ]; then
     fail teardown "launcher exit $STATUS10"
     printf '%s\n' "$OUT10" | sed 's/^/    /'
-  elif [ "$CALLS10" != "-S $SOCK10 kill-server" ]; then
-    fail teardown "tmux calls were [$CALLS10], want [-S $SOCK10 kill-server]"
+  elif [ "$KILLS10" != "-S $SOCK10 kill-server -S $WS10 kill-server " ]; then
+    fail teardown "kill-server calls were [$KILLS10], want one per socket in the sandbox dir"
+  elif [ -n "$UNSCOPED10" ]; then
+    fail teardown "a tmux call did not address a sandbox socket by -S: [$UNSCOPED10]"
   elif ! printf '%s' "$OUT10" | grep -qF "tmux socket: $SOCK10"; then
     fail teardown "the launcher did not name the sandbox socket"
   else
@@ -413,6 +443,239 @@ if command -v python3 >/dev/null 2>&1; then
   fi
 else
   echo "skip teardown: no python3 to bind a fake socket"
+fi
+
+# 10b. teardown-ws (#10922): a stub daemon starts a REAL per-workspace tmux
+# server under the sandbox's TMUX_TMPDIR whose pane, and the pane's child,
+# ignore HUP and TERM, as a `claude` outliving kill-server does; then it
+# exits. Every tmux call here passes -S and runs with TMUX unset.
+if command -v tmux >/dev/null 2>&1; then
+  DIRWS="$TMP_ROOT/casews"
+  mkdir -p "$DIRWS"
+  WS_STUB="$TMP_ROOT/stub-ws-tm"
+  cat > "$WS_STUB" <<'WS_EOF'
+#!/bin/sh
+# The launcher's env -i leaves TMUX unset; -L resolves under its TMUX_TMPDIR.
+tmux -L tm-ws-selftest-4567 new-session -d -s ws \
+  "sh -c 'trap \"\" HUP TERM; sleep 611 & echo \$! > \"$HOME/child-pid\"; echo \$\$ > \"$HOME/pane-pid\"; exec sleep 612'"
+i=0
+while [ "$i" -lt 50 ] && [ ! -s "$HOME/pane-pid" ]; do sleep 0.1; i=$((i + 1)); done
+WS_EOF
+  chmod +x "$WS_STUB"
+  WSSOCK="$DIRWS/data/tmux/tmux-$(id -u)/tm-ws-selftest-4567"
+  set +e
+  OUTWS="$(env -i PATH="$PATH" bash "$LAUNCHER" --bin "$WS_STUB" --dir "$DIRWS" 2>&1)"
+  STATUSWS=$?
+  set -e
+  PANE="$(cat "$DIRWS/home/pane-pid" 2>/dev/null || true)"
+  CHILD="$(cat "$DIRWS/home/child-pid" 2>/dev/null || true)"
+  if [ -z "$PANE" ] || [ -z "$CHILD" ]; then
+    fail teardown-ws "the stub never started its tmux pane"
+    printf '%s\n' "$OUTWS" | sed 's/^/    /'
+  elif env -u TMUX tmux -S "$WSSOCK" list-sessions >/dev/null 2>&1; then
+    fail teardown-ws "the tm-ws server still answers on $WSSOCK"
+  elif kill -0 "$PANE" 2>/dev/null || kill -0 "$CHILD" 2>/dev/null; then
+    fail teardown-ws "a pane process outlived teardown (pane $PANE, child $CHILD)"
+  elif [ "$STATUSWS" -ne 0 ]; then
+    fail teardown-ws "launcher exit $STATUSWS"
+    printf '%s\n' "$OUTWS" | sed 's/^/    /'
+  else
+    pass teardown-ws
+  fi
+  # Whatever the result, leave nothing running: by -S path and by pid only.
+  env -u TMUX tmux -S "$WSSOCK" kill-server >/dev/null 2>&1 || true
+  for p in $PANE $CHILD; do kill -KILL "$p" 2>/dev/null || true; done
+else
+  echo "skip teardown-ws: no tmux"
+fi
+
+# 10c. teardown-survivor (#10922): a process outside tmux with its cwd under
+# <dir> is not the launcher's to kill; teardown names it and exits 1.
+DIRSV="$TMP_ROOT/casesv"
+mkdir -p "$DIRSV"
+SV_STUB="$TMP_ROOT/stub-sv-tm"
+# shellcheck disable=SC2016  # expands in the stub, not here
+printf '%s\n' '#!/bin/sh' 'sleep 613 > /dev/null 2>&1 &' 'echo $! > "$HOME/sv-pid"' > "$SV_STUB"
+chmod +x "$SV_STUB"
+set +e
+OUTSV="$(env -i PATH="$PATH" bash "$LAUNCHER" --bin "$SV_STUB" --dir "$DIRSV" 2>&1)"
+STATUSSV=$?
+set -e
+SVPID="$(cat "$DIRSV/home/sv-pid" 2>/dev/null || true)"
+if [ -z "$SVPID" ]; then
+  fail teardown-survivor "the stub never started its process"
+elif [ "$STATUSSV" -ne 1 ] || ! printf '%s' "$OUTSV" | grep -q "teardown left processes under $DIRSV:.* $SVPID"; then
+  fail teardown-survivor "exit $STATUSSV (want 1), survivor $SVPID not named"
+  printf '%s\n' "$OUTSV" | sed 's/^/    /'
+else
+  pass teardown-survivor
+fi
+[ -z "$SVPID" ] || kill -KILL "$SVPID" 2>/dev/null || true
+
+# 10d-10f use a fake tmux that logs every call and answers no list-sessions;
+# $TMP_ROOT/fake-panes, when present, answers list-panes. The paths are baked
+# in: the launcher runs tmux under `env -i`.
+if command -v python3 >/dev/null 2>&1; then
+  bind_sock() { python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
+  LOGBIN="$TMP_ROOT/logtmux-bin"
+  mkdir -p "$LOGBIN"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\ncase "$*" in *list-sessions*) exit 1 ;; *list-panes*) cat "%s" 2>/dev/null ;; esac\nexit 0\n' \
+    "$TMP_ROOT/calls" "$TMP_ROOT/fake-panes" > "$LOGBIN/tmux"
+  chmod +x "$LOGBIN/tmux"
+  # Scratch decoys only: a socket and a socket dir outside every case dir.
+  DECOY_DIR="$TMP_ROOT/decoy/tmux-$(id -u)"
+  mkdir -p "$DECOY_DIR"
+  DECOY_SOCK="$DECOY_DIR/default"
+  bind_sock "$DECOY_SOCK"
+
+  # 10d. teardown-symlink-entry (#10922): a socket entry symlinked to the
+  # decoy is skipped; `default` beside it is still stopped.
+  DIRSE="$TMP_ROOT/casese"
+  mkdir -p "$DIRSE/data/tmux/tmux-$(id -u)"
+  chmod 700 "$DIRSE/data/tmux" "$DIRSE/data/tmux/tmux-$(id -u)"
+  bind_sock "$DIRSE/data/tmux/tmux-$(id -u)/default"
+  ln -s "$DECOY_SOCK" "$DIRSE/data/tmux/tmux-$(id -u)/tm-ws-decoy"
+  rm -f "$TMP_ROOT/calls" "$TMP_ROOT/fake-panes"
+  set +e
+  OUTSE="$(env -i PATH="$LOGBIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRSE" 2>&1)"
+  STATUSSE=$?
+  set -e
+  CALLSSE="$(cat "$TMP_ROOT/calls" 2>/dev/null || true)"
+  if printf '%s\n' "$CALLSSE" | grep -qe "tm-ws-decoy" -e "$TMP_ROOT/decoy"; then
+    fail teardown-symlink-entry "a tmux -S call named the symlinked entry or its decoy target: [$CALLSSE]"
+  elif ! printf '%s\n' "$CALLSSE" | grep -qxF -- "-S $DIRSE/data/tmux/tmux-$(id -u)/default kill-server"; then
+    fail teardown-symlink-entry "default was not stopped: [$CALLSSE]"
+  elif [ "$STATUSSE" -ne 0 ]; then
+    fail teardown-symlink-entry "launcher exit $STATUSSE"
+    printf '%s\n' "$OUTSE" | sed 's/^/    /'
+  else
+    pass teardown-symlink-entry
+  fi
+
+  # 10e. teardown-symlink-dir (#10922): tmux-<uid> symlinked to the decoy dir
+  # refuses the tmux step: no tmux call at all, exit 1, the refusal named.
+  DIRSD="$TMP_ROOT/casesd"
+  mkdir -p "$DIRSD/data/tmux"
+  chmod 700 "$DIRSD/data/tmux"
+  ln -s "$DECOY_DIR" "$DIRSD/data/tmux/tmux-$(id -u)"
+  rm -f "$TMP_ROOT/calls" "$TMP_ROOT/fake-panes"
+  set +e
+  OUTSD="$(env -i PATH="$LOGBIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRSD" 2>&1)"
+  STATUSSD=$?
+  set -e
+  CALLSSD="$(cat "$TMP_ROOT/calls" 2>/dev/null || true)"
+  if [ -n "$CALLSSD" ]; then
+    fail teardown-symlink-dir "tmux was called through the symlinked dir: [$CALLSSD]"
+  elif [ "$STATUSSD" -ne 1 ] || ! printf '%s' "$OUTSD" | grep -q "teardown refused the tmux socket dir"; then
+    fail teardown-symlink-dir "exit $STATUSSD (want 1), refusal not named"
+    printf '%s\n' "$OUTSD" | sed 's/^/    /'
+  else
+    pass teardown-symlink-dir
+  fi
+
+  # 10f. teardown-dead-pane (#10922): a pane tmux reports dead keeps its pid
+  # out of the TERM list, so a reused pid is never signalled.
+  DIRDP="$TMP_ROOT/casedp"
+  mkdir -p "$DIRDP/data/tmux/tmux-$(id -u)"
+  chmod 700 "$DIRDP/data/tmux" "$DIRDP/data/tmux/tmux-$(id -u)"
+  bind_sock "$DIRDP/data/tmux/tmux-$(id -u)/default"
+  # Detached, so a stopped one is reaped by init, not left a zombie of ours.
+  (sleep 614 > /dev/null 2>&1 & echo $! > "$TMP_ROOT/srv-dp")
+  (sleep 615 > /dev/null 2>&1 & echo $! > "$TMP_ROOT/dead-dp")
+  SRVDP="$(cat "$TMP_ROOT/srv-dp")"
+  DEADDP="$(cat "$TMP_ROOT/dead-dp")"
+  rm -f "$TMP_ROOT/calls"
+  echo "$SRVDP $DEADDP 1" > "$TMP_ROOT/fake-panes"
+  set +e
+  OUTDP="$(env -i PATH="$LOGBIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRDP" 2>&1)"
+  STATUSDP=$?
+  set -e
+  if ! kill -0 "$DEADDP" 2>/dev/null; then
+    fail teardown-dead-pane "the dead pane's pid $DEADDP was signalled"
+  elif kill -0 "$SRVDP" 2>/dev/null; then
+    fail teardown-dead-pane "the server pid $SRVDP was not stopped"
+  elif [ "$STATUSDP" -ne 0 ]; then
+    fail teardown-dead-pane "launcher exit $STATUSDP"
+    printf '%s\n' "$OUTDP" | sed 's/^/    /'
+  else
+    pass teardown-dead-pane
+  fi
+  kill -KILL "$SRVDP" "$DEADDP" 2>/dev/null || true
+
+  # 10g. teardown-socket-survivor (#10922): a process with its cwd at / that
+  # holds a bound unix socket under <dir> is a survivor; exit 1 names it.
+  DIRSS="$TMP_ROOT/casess"
+  mkdir -p "$DIRSS"
+  SS_STUB="$TMP_ROOT/stub-ss-tm"
+  # shellcheck disable=SC2016  # expands in the stub, not here
+  printf '%s\n' '#!/bin/sh' 'cd / || exit 1' \
+    'python3 -I -c "import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(616)" "$HOME/held.sock" > /dev/null 2>&1 &' \
+    'echo $! > "$HOME/ss-pid"' \
+    'i=0; while [ "$i" -lt 50 ] && [ ! -S "$HOME/held.sock" ]; do sleep 0.1; i=$((i + 1)); done' > "$SS_STUB"
+  chmod +x "$SS_STUB"
+  set +e
+  OUTSS="$(env -i PATH="$PATH" bash "$LAUNCHER" --bin "$SS_STUB" --dir "$DIRSS" 2>&1)"
+  STATUSSS=$?
+  set -e
+  SSPID="$(cat "$DIRSS/home/ss-pid" 2>/dev/null || true)"
+  if [ -z "$SSPID" ] || [ ! -S "$DIRSS/home/held.sock" ]; then
+    fail teardown-socket-survivor "the stub never bound its socket"
+  elif [ "$STATUSSS" -ne 1 ] || ! printf '%s' "$OUTSS" | grep -q "teardown left processes under $DIRSS:.* $SSPID"; then
+    fail teardown-socket-survivor "exit $STATUSSS (want 1), socket holder $SSPID not named"
+    printf '%s\n' "$OUTSS" | sed 's/^/    /'
+  else
+    pass teardown-socket-survivor
+  fi
+  [ -z "$SSPID" ] || kill -KILL "$SSPID" 2>/dev/null || true
+else
+  echo "skip teardown-symlink-entry, teardown-symlink-dir, teardown-dead-pane, teardown-socket-survivor: no python3"
+fi
+
+# 10h. teardown-probe-failed (#10922): a survivor check that cannot run is a
+# failure naming the check, never a clean teardown. SANDBOX_LSOF points the
+# probe at a failing or a missing binary; a failing `lsof` also leads PATH.
+PROBEBIN="$TMP_ROOT/probe-bin"
+mkdir -p "$PROBEBIN"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$PROBEBIN/lsof"
+chmod +x "$PROBEBIN/lsof"
+NPF=0
+for probe in "$PROBEBIN/lsof:exited 1" "$TMP_ROOT/no-such-lsof:is missing or not executable"; do
+  NPF=$((NPF + 1))
+  DIRPF="$TMP_ROOT/casepf$NPF"
+  mkdir -p "$DIRPF"
+  set +e
+  OUTPF="$(env -i PATH="$PROBEBIN:$PATH" SANDBOX_LSOF="${probe%%:*}" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRPF" 2>&1)"
+  STATUSPF=$?
+  set -e
+  if [ "$STATUSPF" -ne 1 ] || ! printf '%s' "$OUTPF" | grep -qF "survivor check failed: ${probe%%:*} ${probe#*:}"; then
+    fail teardown-probe-failed "probe ${probe%%:*}: exit $STATUSPF (want 1), failed check not named"
+    printf '%s\n' "$OUTPF" | sed 's/^/    /'
+  else
+    pass "teardown-probe-failed (${probe#*:})"
+  fi
+done
+
+# 10i. teardown-find-probe-failed (#10922): the Linux probe on a `find` that
+# cannot print links (BusyBox has no -printf) is a failure naming the check,
+# never "nothing held". SANDBOX_PROC points the Linux branch at a fake proc
+# tree, so the case runs on macOS and Linux alike.
+FAKEPROC="$TMP_ROOT/fake-proc"
+FINDBIN="$TMP_ROOT/find-bin"
+mkdir -p "$FAKEPROC/self/fd" "$FAKEPROC/net" "$FINDBIN"
+: > "$FAKEPROC/net/unix"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$FINDBIN/find"
+chmod +x "$FINDBIN/find"
+DIRFP="$TMP_ROOT/casefp"
+mkdir -p "$DIRFP"
+set +e
+OUTFP="$(env -i PATH="$FINDBIN:$PATH" SANDBOX_PROC="$FAKEPROC" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRFP" 2>&1)"
+STATUSFP=$?
+set -e
+if [ "$STATUSFP" -ne 1 ] || ! printf '%s' "$OUTFP" | grep -qF "survivor check failed: find cannot list $FAKEPROC/<pid>/cwd and fd links"; then
+  fail teardown-find-probe-failed "exit $STATUSFP (want 1), failed check not named"
+  printf '%s\n' "$OUTFP" | sed 's/^/    /'
+else
+  pass "teardown-find-probe-failed"
 fi
 
 # 11. bin-fresh (#10755): a temp source root and a stubbed dependency tree

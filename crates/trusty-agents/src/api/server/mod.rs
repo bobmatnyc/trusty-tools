@@ -93,6 +93,8 @@ mod project_registration;
 mod project_tools;
 mod projects;
 mod relay;
+// #6433: the `TAGENT_NO_API` off-switch for `--api` / `--serve`.
+pub(crate) mod no_api;
 mod routes;
 mod state;
 mod task_runner;

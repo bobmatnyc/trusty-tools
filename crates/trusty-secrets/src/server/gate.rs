@@ -379,6 +379,11 @@ impl Gate<'_> {
         record.architect = self.architect.then_some(true);
         record.architect_refusal = self.architect_refusal;
         record.copy_source = self.copy_source.clone();
+        // #11215: a time-out row says how long the call waited, or that it
+        // was refused at once for a still-hung item.
+        if denied == Some(ErrorKind::BackendTimeout) {
+            record.backend_wait = crate::store::timeout_note::last().map(Into::into);
+        }
         // #9066: a bridge call names the console's assertion on every record.
         if let Some(verdict) = self.caller.bridge() {
             record.agent_parent = record.agent_parent.or(verdict.agent_parent());

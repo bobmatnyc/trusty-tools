@@ -1,0 +1,2 @@
+Fixed
+- A session the daemon registers (`tm launch`, any `POST /sessions` or `mpm.sessions.register` client), or a tm-launched tmux session it adopts on a discovery scan, now registers its checkout in `projects.json`, so `tm secrets assign` finds a project with a running session. A native `claude` process or an external tmux session never registers (D50). A registry failure is logged at warn and never fails the session (#10368).

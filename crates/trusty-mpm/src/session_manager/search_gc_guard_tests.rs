@@ -49,6 +49,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// that lookup, run against a socket that is not the operator's.
 struct CountingDaemon {
     calls: Arc<AtomicUsize>,
+    // #10989: the method names, so a non-destructive call is told from a delete.
+    methods: Arc<Mutex<Vec<String>>>,
     daemon: MockUdsDaemon,
 }
 
@@ -58,15 +60,27 @@ impl CountingDaemon {
     async fn start() -> Self {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
+        let methods = Arc::new(Mutex::new(Vec::new()));
+        let names = Arc::clone(&methods);
         let socket = search_rpc::search_socket().expect("derive the trusty-search socket");
-        let daemon = uds_mock::spawn_at(socket, move |_method, _params| {
+        let daemon = uds_mock::spawn_at(socket, move |method, _params| {
             counter.fetch_add(1, Ordering::SeqCst);
+            names.lock().expect("methods").push(method.to_string());
             Box::pin(
                 async move { Ok(json!({ "ok": true, "removed": true, "data_deleted": true })) },
             )
         })
         .await;
-        Self { calls, daemon }
+        Self {
+            calls,
+            methods,
+            daemon,
+        }
+    }
+
+    /// The method names asked since the self-check.
+    fn methods_seen(&self) -> Vec<String> {
+        self.methods.lock().expect("methods").clone()
     }
 
     /// Confirm the fixture's own premise: this daemon really does accept and
@@ -82,6 +96,7 @@ impl CountingDaemon {
         .expect("the stand-in daemon must answer — the fixture's premise");
         // The self-check's own call does not count against the assertion.
         self.calls.store(0, Ordering::SeqCst);
+        self.methods.lock().expect("methods").clear();
     }
 
     fn seen(&self) -> usize {
@@ -157,9 +172,10 @@ async fn decommission_issues_no_request_to_a_live_daemon_under_test() {
 /// Why: the #4743 test above passes on the test-harness refusal alone, so it
 /// cannot tell "decommission no longer deletes" from "a test may not delete".
 /// What: the same owned `full` fixture with production state explicitly
-/// allowed, so `DestructiveIndexDelete::acquire` would succeed. Both a session
-/// decommission and a project decommission must reach the daemon zero times.
-/// Restoring effect 4 makes this fail with a count of 1.
+/// allowed, so `DestructiveIndexDelete::acquire` would succeed. A session
+/// decommission must reach the daemon zero times; a project decommission may
+/// only resolve and park (#10989), never delete. Restoring effect 4 makes this
+/// fail with a count of 1.
 /// Test: this function IS the test.
 #[serial_test::serial]
 #[tokio::test]
@@ -222,13 +238,22 @@ async fn decommission_keeps_index_data_when_deletion_is_allowed() {
         })
         .await
         .expect("register");
-    mgr.decommission_project(&registry, "full")
-        .await
-        .expect("project decommission");
-    assert_eq!(
-        daemon.seen(),
-        0,
-        "project decommission sent a request to trusty-search (#10988)"
+    // #10989: project decommission now parks the index; it may resolve and
+    // park, never delete. This stand-in answers resolve with a delete body (no
+    // `index_id`), so the shutdown reports a failure, which is fine here.
+    let _ = mgr.decommission_project(&registry, "full").await;
+    let methods = daemon.methods_seen();
+    let allowed = [
+        crate::session_manager::index_shutdown::METHOD_RESOLVE,
+        crate::session_manager::index_shutdown::METHOD_PARK,
+    ];
+    assert!(
+        methods.iter().all(|m| allowed.contains(&m.as_str())),
+        "project decommission sent a destructive request to trusty-search: {methods:?}"
+    );
+    assert!(
+        !methods.iter().any(|m| m == search_rpc::METHOD_INDEX_DELETE),
+        "project decommission sent search.index.delete (#10988, #10989)"
     );
 }
 

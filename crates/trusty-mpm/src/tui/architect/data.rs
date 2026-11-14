@@ -6,9 +6,8 @@
 //! What: [`fetch_dashboard`] sends `list` for `items`, `goals`, `sessions`
 //! and `questions` plus `tally`. Those two verbs are the only methods this
 //! module names, which is the read-only guarantee (Dc4). [`snapshot_from`]
-//! (pure) turns the documents into one [`DashRow`] list per tab. The store
-//! root is passed in (`tm tui --architect-store`) until the daemon resolves
-//! it itself (#10944).
+//! (pure) turns the documents into one [`DashRow`] list per tab. The daemon
+//! resolves the store root (#10944); `tm tui --architect-store` overrides it.
 //! Test: `snapshot_splits_items_by_kind_and_drops_closed_rows`.
 
 use std::path::Path;
@@ -20,7 +19,13 @@ use trusty_architect::dashboard::{Tally, tally_line};
 use super::Tab;
 use crate::tui::theme::Tone;
 
-/// What the dashboard tabs say when no store root was given (#10944).
+/// Appended to an old daemon's decode error for a request with no `store`
+/// (#10944 version skew).
+pub const OLD_DAEMON_HINT: &str = "the daemon predates store resolution (#10944): \
+     restart or upgrade it, or pass `tm tui --architect-store <dir>`";
+/// Why: kept only for API compatibility; a `#[deprecated]` mark is itself a
+/// semver lint (`global_value_marked_deprecated`), so it stays plain.
+/// What: no longer used since #10944; the daemon resolves the store root.
 pub const STORE_NOT_SET: &str = "Architect store not set: start with `tm tui --architect-store <dir>` \
      or TM_ARCHITECT_STORE (the daemon resolves it itself once #10944 lands)";
 /// The deadline on one dashboard call.
@@ -221,30 +226,42 @@ async fn call(socket: &Path, method: &str, params: Value) -> Result<Value, Strin
         .pointer("/error/message")
         .and_then(Value::as_str)
         .unwrap_or("no result and no error");
+    // #10944: an old daemon still requires `store`; say how to fix the skew.
+    if message.contains("missing field `store`") {
+        return Err(format!("{method}: {message} ({OLD_DAEMON_HINT})"));
+    }
     Err(format!("{method}: {message}"))
 }
 
 /// Read every tab's rows and the tally, or say why it cannot.
 ///
-/// Why: the home loop hands over what it has; the reasons for no data
-/// (no store root, no daemon socket) belong with the fetch.
-/// What: no `root` → [`STORE_NOT_SET`]; no `socket` → UDS-only refusal
-/// (#10899); else four `list` calls and one `tally`.
-/// Test: `fetch_dashboard_says_why_without_store_or_socket`; the socket
-/// round trip runs live (`tm tui --architect-store`).
+/// Why: the home loop hands over what it has; the reason for no data (no
+/// daemon socket) belongs with the fetch. The daemon resolves the store root
+/// itself (#10944), so a missing `root` is not a reason.
+/// What: no `socket` → UDS-only refusal (#10899); else four `list` calls and
+/// one `tally`. A `root` is sent as `store: {root, format: "dir"}`; without
+/// one the params carry no `store` key, and a daemon error comes back as the
+/// text the Failed state shows.
+/// Test: `fetch_dashboard_sends_no_store_when_no_root_is_given`,
+/// `fetch_dashboard_sends_the_root_when_given`,
+/// `fetch_dashboard_says_why_without_a_socket`,
+/// `old_daemon_decode_error_carries_the_upgrade_hint`.
 pub async fn fetch_dashboard(
     socket: Option<&Path>,
     root: Option<&Path>,
 ) -> Result<DashSnapshot, String> {
-    let Some(root) = root else {
-        return Err(STORE_NOT_SET.to_string());
-    };
     let Some(socket) = socket else {
         return Err("the Architect view reads the daemon socket only (#10899)".into());
     };
-    let store = json!({"root": root, "format": "dir"});
+    // #10944: no root → no `store` key; the daemon resolves it.
+    let with_store = |mut params: Value| {
+        if let Some(root) = root {
+            params["store"] = json!({"root": root, "format": "dir"});
+        }
+        params
+    };
     let list = |collection: &str| {
-        let params = json!({"store": store, "collection": collection, "order_by": "rank"});
+        let params = with_store(json!({"collection": collection, "order_by": "rank"}));
         async move {
             let v = call(socket, "mpm.architect.dashboard.list", params).await?;
             Ok::<_, String>(v.as_array().cloned().unwrap_or_default())
@@ -257,7 +274,7 @@ pub async fn fetch_dashboard(
     let tally = call(
         socket,
         "mpm.architect.dashboard.tally",
-        json!({"store": store}),
+        with_store(json!({})),
     )
     .await?;
     Ok(snapshot_from(&items, &goals, &sessions, &questions, &tally))

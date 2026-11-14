@@ -15,6 +15,7 @@
 use trusty_common::uds::server::{CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, RpcError};
 
 use crate::api::SecretsError;
+use crate::store::timeout_note::TimeoutNote;
 
 /// Every failure a `secrets.*` method reports.
 ///
@@ -414,6 +415,64 @@ impl ErrorKind {
     pub(crate) fn to_rpc(self, method: &'static str) -> RpcError {
         RpcError::new(self.code(), format!("{method}: {}", self.text()))
             .with_data(serde_json::json!({ "kind": self.as_str() }))
+    }
+
+    /// [`ErrorKind::to_rpc`], with a [`ErrorKind::BackendTimeout`] told
+    /// apart by the request's time-out `note` (#11215).
+    ///
+    /// Why: a bare "did not answer in time" left the caller unable to tell a
+    /// call that waited out its limit from one refused at once because an
+    /// earlier call on the item still hangs, and named no way out.
+    /// What: for `BackendTimeout` with a note, the message names the backend,
+    /// either the seconds this call waited or the at-once refusal, and the
+    /// recovery step; `data` adds `waited_ms` and `abandoned_item`. The text
+    /// is built from the backend id, a duration and a flag alone, never a
+    /// vault, key or value. Every other case is [`ErrorKind::to_rpc`].
+    /// Test: `server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal`,
+    /// `timeout_reply_text_names_wait_or_refusal_and_the_recovery`.
+    pub(crate) fn to_rpc_noted(self, method: &'static str, note: Option<&TimeoutNote>) -> RpcError {
+        let Some(note) = note.filter(|_| self == Self::BackendTimeout) else {
+            return self.to_rpc(method);
+        };
+        RpcError::new(self.code(), format!("{method}: {}", timeout_text(note))).with_data(
+            serde_json::json!({
+                "kind": self.as_str(),
+                "waited_ms": u64::try_from(note.waited.as_millis()).unwrap_or(u64::MAX),
+                "abandoned_item": note.abandoned_item,
+            }),
+        )
+    }
+}
+
+/// The step that clears a hung item: the abandoned set lives in the server
+/// process, so a new process starts with none (#11215).
+const TIMEOUT_RECOVERY: &str = "answer or dismiss any open macOS Keychain access prompt, or end \
+     the server with `pkill -x trusty-secrets` (the next call starts a fresh one), then retry; a \
+     write the abandoned call carried may still land, so check the value before writing it again";
+
+/// The sentence for one noted time-out; see [`ErrorKind::to_rpc_noted`].
+pub(crate) fn timeout_text(note: &TimeoutNote) -> String {
+    let backend = if note.backend == crate::api::BackendId::KEYCHAIN {
+        "the Keychain".to_owned()
+    } else {
+        format!("the {} backend", note.backend)
+    };
+    if note.abandoned_item {
+        format!(
+            "refused at once: an earlier call to {backend} on this item did not answer in time \
+             and is still waiting, and the item refuses calls until it ends; {TIMEOUT_RECOVERY}"
+        )
+    } else if note.waited.is_zero() {
+        format!(
+            "{backend} was not called: earlier backend calls used the whole request deadline; \
+             retry, and if it repeats, {TIMEOUT_RECOVERY}"
+        )
+    } else {
+        format!(
+            "{backend} did not answer in time: this call waited {:.1} s and was abandoned, and \
+             the item refuses calls until it ends; {TIMEOUT_RECOVERY}",
+            note.waited.as_secs_f64()
+        )
     }
 }
 

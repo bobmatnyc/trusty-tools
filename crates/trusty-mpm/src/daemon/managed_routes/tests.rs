@@ -1708,3 +1708,23 @@ fn list_response_omits_store_health_when_healthy() {
     let json = serde_json::to_value(&degraded).expect("serialize");
     assert_eq!(json["store_health"]["corrupt"], serde_json::json!(true));
 }
+
+/// #10101 live check: `tm sessions attach <managed id>` printed
+/// `tmux attach-session -t '=tm-repob'` with no socket, which attaches on the
+/// default server. A record on a workspace server names that server's socket;
+/// a default-server record keeps the bare command.
+#[test]
+fn attach_cmd_names_the_records_workspace_socket_10101() {
+    let mut r = make_record(None);
+    r.tmux_socket = Some(PathBuf::from("/tmp/tmux-501/tm-ws-repob-1814c0712b9a"));
+    assert_eq!(
+        record_to_json(&r)["attach_cmd"],
+        "tmux -S '/tmp/tmux-501/tm-ws-repob-1814c0712b9a' attach-session -t '=tmpm-test-session'"
+    );
+
+    r.tmux_socket = None;
+    assert_eq!(
+        record_to_json(&r)["attach_cmd"],
+        "tmux attach-session -t '=tmpm-test-session'"
+    );
+}

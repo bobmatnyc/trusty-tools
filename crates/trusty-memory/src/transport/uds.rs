@@ -96,6 +96,8 @@ pub const FOLDED_METHODS: &[&str] = &[
     "memory.status",
     "memory.config",
     "memory.palace_get",
+    // #10989: tm's decommission closes a palace and keeps its data.
+    "memory.palace_unload",
     "memory.palaces_list",
     "memory.drawers_list",
     "memory.drawer_create",
@@ -266,6 +268,13 @@ pub fn build_router(state: AppState) -> RpcRouter {
         "memory.palace_get",
         PalaceParams,
         palaces::get_palace
+    );
+    // #10989: close one palace, keep its data.
+    let router = bind!(
+        router,
+        "memory.palace_unload",
+        PalaceParams,
+        palaces::unload_palace
     );
     // #6155: `PalacesListParams` rather than `NoParams` — `counts: false` asks
     // for the peek-only roster. It defaults to `true`, so `{}` and `null` are

@@ -3,7 +3,8 @@
 Covers: /static/tokens.css (fixed names only), /api/fleet and /api/projects shapes (architect mode), the Projects view
 with an empty registry (no error, no secrets module), /api/cli-profiles and the Secrets and lifecycle
 routes refused (404/405) while their modules are absent, PUT /doc compare-and-swap, the /live page getting the tokens link
-but no shim, gzip on /api/harness, and /config.json carrying the console origin and the configured dashboard port.
+but no shim, gzip on /api/harness, /config.json carrying the console origin and the configured dashboard port, and a
+refused /api/fleet or /api/projects (session mode 404, non-GET 405) sending one response and never running the route.
 Test: tests/test_dashboard_routes.py
 """
 import gzip
@@ -12,6 +13,7 @@ import http.client
 import importlib.util
 import json
 import os
+import socket
 import tempfile
 import threading
 import unittest
@@ -84,6 +86,37 @@ class Routes(unittest.TestCase):
         body = json.loads(data)
         self.assertEqual(body["projects"], [])   # conftest points TRUSTY_MPM_ROOT at an empty registry
         self.assertFalse(body.get("registry_error"))   # no secrets module needed to read it (#10571)
+
+    def raw(self, method, path):
+        """The whole byte stream the server sends for one request (HTTP/1.0: it closes after the response)."""
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:
+            s.sendall(f"{method} {path} HTTP/1.0\r\nHost: 127.0.0.1:{self.port}\r\nContent-Length: 0\r\n\r\n".encode())
+            out = b""
+            while chunk := s.recv(65536):
+                out += chunk
+        return out
+
+    def test_refused_fleet_and_projects_send_one_response_and_never_run_the_route(self):
+        # #11065: _architect_get returned h._err's None, so a refused request also ran the route and sent a second response
+        calls = []
+
+        class Counting:
+            def get(self, *a, **kw):
+                calls.append(a)
+                return {"count": 0, "projects": []}
+
+        self.srv.fleet_cache = self.srv.projects_view = Counting()
+        cases = [("POST", "/api/fleet", b"405"), ("POST", "/api/projects", b"405")]
+        for method, path, want in cases:
+            out = self.raw(method, path)
+            self.assertTrue(out.startswith(b"HTTP/1.0 " + want), (path, out[:40]))
+            self.assertEqual(out.count(b"HTTP/1.0 "), 1, (method, path, out))
+        self.srv.config["mode"] = "session"
+        for path in ("/api/fleet", "/api/projects"):
+            out = self.raw("GET", path)
+            self.assertTrue(out.startswith(b"HTTP/1.0 404"), (path, out[:40]))
+            self.assertEqual(out.count(b"HTTP/1.0 "), 1, (path, out))
+        self.assertEqual(calls, [])
 
     def test_unshipped_optional_routes_are_refused(self):
         self.assertEqual(self.req("GET", "/api/cli-profiles")[0], 404)

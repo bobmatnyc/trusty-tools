@@ -6,8 +6,9 @@ finished, parked or folded before more starts (the owner 2026-11-10).
 What: ACTIVE statuses, wip_cap/wip_count/wip_check (warn into WARNINGS, or raise in refuse mode),
 task_mmdd (the @stamp of a task's `created`), task_mode and task_problem (why a prompt's Task token is
 unusable). Misses go to inbox/task-compliance.jsonl through task_tag.log_miss. datg.py re-exports
-every name.
-Test: tests/test_datg.py TaskTagCase
+every name. #10960 G-5: DELIVERY (DOC-87 section 9.5) and set_delivery, a task's claimed `delivery` state
+and the `needs` of its request, stored as given; datg_guards.delivery_gaps checks them at close.
+Test: tests/test_datg.py TaskTagCase, tests/test_datg_delivery.py
 """
 import re
 
@@ -16,6 +17,7 @@ from datg_store import DatgError
 
 WIP_CAP_DEFAULT = 8   # the owner 2026-11-10: 8 active tasks per Architect/PM ledger; config.wip_cap overrides per ledger
 ACTIVE = ("open", "running")
+DELIVERY = ("prepared", "sent", "delivered", "acknowledged")   # #10960: DOC-87 section 9.5, lowest first
 WARNINGS = []         # messages `add T` collected for the CLI to print on stderr
 
 
@@ -70,3 +72,21 @@ def task_problem(st, prompt):
         if sp["stamp"] and mmdd and sp["stamp"] != mmdd:
             return f"names {sp['id']}@{sp['stamp']} but that id was created @{mmdd} (a reused id?)"
     return None
+
+
+def set_delivery(o, a, pre):
+    """#10960 G-5: store an op's `state` as the task's claimed `delivery` and its `needs`; `needs none` clears it.
+
+    Values are kept as given, never refused: delivery_gaps reads an unknown one as `prepared` and flags it.
+    Test: tests/test_datg_delivery.py DeliveryCase
+    """
+    if a.get("state") is None and a.get("needs") is None:
+        return
+    if pre != "T":
+        raise DatgError("state and needs apply to tasks")
+    if a.get("state") is not None:
+        o["delivery"] = a["state"]
+    if a.get("needs") == "none":
+        o.pop("needs", None)
+    elif a.get("needs") is not None:
+        o["needs"] = a["needs"]

@@ -59,6 +59,10 @@ use self::session_name::SessionNames;
 use crate::cli::FleetAction;
 
 pub(crate) use self::launch::ARCHITECT_SESSION;
+// #11058: `tm doctor` names a kept core script lacking this release's wiring.
+pub(crate) use self::seed::wiring::{
+    CHECK as SEED_WIRING_CHECK, doctor_row as seed_wiring_doctor_row,
+};
 pub(crate) use self::status::status;
 
 /// Dispatch `tm fleet <action>` against the process home.

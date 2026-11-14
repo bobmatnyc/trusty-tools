@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{Value, json};
 
-use super::data::{DashSnapshot, STORE_NOT_SET, fetch_dashboard, snapshot_from};
+use super::data::{DashSnapshot, fetch_dashboard, snapshot_from};
 use super::live::{
     LiveAgent, LiveSession, LiveSnapshot, Record, fetch_live, group, live_lines, merge,
 };
@@ -93,16 +93,114 @@ fn snapshot_splits_items_by_kind_and_drops_closed_rows() {
 }
 
 #[tokio::test]
-async fn fetch_dashboard_says_why_without_store_or_socket() {
-    let socket = Path::new("/nonexistent/sock");
-    let err = fetch_dashboard(Some(socket), None)
+async fn fetch_dashboard_says_why_without_a_socket() {
+    for root in [None, Some(Path::new("/tmp/store"))] {
+        let err = fetch_dashboard(None, root).await.expect_err("no socket");
+        assert!(err.contains("#10899"), "{err}");
+    }
+}
+
+/// A `0700` temp dir holding the stub daemon socket.
+fn stub_socket() -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("narrow the tempdir");
+    let socket = dir.path().join("mpm.sock");
+    (dir, socket)
+}
+
+/// A stub daemon: records each request frame's `params` and answers with
+/// `reply(method)` as the frame's `result` (`Ok`) or `error.message` (`Err`).
+fn serve_recording(
+    socket: &Path,
+    reply: fn(&str) -> Result<Value, &'static str>,
+) -> std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = trusty_common::uds::bind_hardened(socket).expect("bind stub");
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            if BufReader::new(read).read_line(&mut line).await.is_err() {
+                continue;
+            }
+            let frame: Value = serde_json::from_str(&line).expect("request frame");
+            let method = frame["method"].as_str().unwrap_or_default().to_string();
+            let answer = match reply(&method) {
+                Ok(result) => json!({"jsonrpc": "2.0", "id": 1, "result": result}),
+                Err(msg) => json!({"jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32000, "message": msg}}),
+            };
+            log.lock()
+                .expect("log")
+                .push((method, frame["params"].clone()));
+            let mut out = serde_json::to_vec(&answer).expect("encode");
+            out.push(b'\n');
+            let _ = write.write_all(&out).await;
+            let _ = write.shutdown().await;
+        }
+    });
+    seen
+}
+
+fn empty_store(method: &str) -> Result<Value, &'static str> {
+    Ok(if method.ends_with(".tally") {
+        json!({})
+    } else {
+        json!([])
+    })
+}
+
+// #10944: the daemon resolves the root; the TUI must not demand or invent one.
+#[tokio::test]
+async fn fetch_dashboard_sends_no_store_when_no_root_is_given() {
+    let (_dir, socket) = stub_socket();
+    let seen = serve_recording(&socket, empty_store);
+    fetch_dashboard(Some(&socket), None)
         .await
-        .expect_err("no store");
-    assert_eq!(err, STORE_NOT_SET);
-    let err = fetch_dashboard(None, Some(Path::new("/tmp/store")))
+        .expect("daemon rows");
+    let seen = seen.lock().expect("log");
+    assert_eq!(seen.len(), 5, "four lists and one tally: {seen:?}");
+    for (method, params) in seen.iter() {
+        assert!(
+            params.get("store").is_none(),
+            "{method} sent store: {params}"
+        );
+    }
+    assert_eq!(
+        seen[0].1,
+        json!({"collection": "items", "order_by": "rank"})
+    );
+    assert_eq!(seen[4], ("mpm.architect.dashboard.tally".into(), json!({})));
+}
+
+#[tokio::test]
+async fn fetch_dashboard_sends_the_root_when_given() {
+    let (_dir, socket) = stub_socket();
+    let seen = serve_recording(&socket, empty_store);
+    fetch_dashboard(Some(&socket), Some(Path::new("/tmp/arch-store")))
         .await
-        .expect_err("no socket");
-    assert!(err.contains("#10899"), "{err}");
+        .expect("daemon rows");
+    let want = json!({"root": "/tmp/arch-store", "format": "dir"});
+    let seen = seen.lock().expect("log");
+    assert_eq!(seen.len(), 5);
+    for (method, params) in seen.iter() {
+        assert_eq!(params["store"], want, "{method}");
+    }
+}
+
+#[tokio::test]
+async fn old_daemon_decode_error_carries_the_upgrade_hint() {
+    let (_dir, socket) = stub_socket();
+    serve_recording(&socket, |_| Err("invalid params: missing field `store`"));
+    let err = fetch_dashboard(Some(&socket), None)
+        .await
+        .expect_err("old daemon");
+    assert!(err.contains("missing field `store`"), "{err}");
+    assert!(err.contains(super::data::OLD_DAEMON_HINT), "{err}");
 }
 
 #[test]
@@ -115,7 +213,7 @@ fn fetch_is_due_once_per_refresh_and_never_twice_in_flight() {
     };
     assert_eq!(s.fetch_due(t0), both);
     assert_eq!(s.fetch_due(t0 + REFRESH), Due::default(), "both in flight");
-    feed(&mut s, Err(STORE_NOT_SET.into()), LiveSnapshot::default());
+    feed(&mut s, Err("x".into()), LiveSnapshot::default());
     assert_eq!(s.fetch_due(t0 + REFRESH / 2), Due::default(), "fresh");
     assert_eq!(s.fetch_due(t0 + REFRESH), both);
 }
@@ -217,12 +315,14 @@ fn architect_render_lists_rows_with_badges_and_counts() {
 }
 
 #[test]
-fn architect_render_says_why_when_the_store_is_not_set() {
+fn daemon_resolution_error_reaches_the_failed_state_and_the_screen() {
+    // #10944: the daemon's "no Architect store" frame text, shown verbatim.
+    let msg = "mpm.architect.dashboard.list: no Architect store at /h/x (default)";
     let mut s = ArchitectState::default();
-    feed(&mut s, Err(STORE_NOT_SET.into()), LiveSnapshot::default());
+    feed(&mut s, Err(msg.into()), LiveSnapshot::default());
     assert!(matches!(s.dashboard, Fetch::Failed(_)));
     let screen = draw(&s);
-    assert!(screen.contains("--architect-store"), "{screen}");
+    assert!(screen.contains("no Architect store at /h/x"), "{screen}");
 }
 
 fn session_row(id: &str, name: &str, workdir: &str, status: &str) -> SessionRow {

@@ -63,8 +63,10 @@ pub mod errors;
 mod exec;
 mod gate;
 pub mod grant;
+// #11215: the timestamp on the server's start and exit lines.
 #[cfg(test)]
 mod grant_fakes;
+mod log_stamp;
 mod methods;
 pub mod project;
 mod router;
@@ -89,6 +91,7 @@ pub use ancestry::{
 pub use architect::ArchitectRefusal;
 pub use audit::{
     AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
+    BackendWait,
 };
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
 pub use copy_source::CopySourceAudit;
@@ -101,6 +104,7 @@ pub use grant::{
     Clock, ClockError, DEFAULT_MAX_TTL, GrantError, GrantRegistry, GrantRequest, GrantScope,
     GrantToken, MAX_LIVE_GRANTS, MintedGrant, SystemClock,
 };
+pub use log_stamp::log_stamp;
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use router::{

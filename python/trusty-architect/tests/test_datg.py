@@ -191,7 +191,12 @@ class HookCase(Base):
             with open(self.sp, "w") as f:
                 f.write("garbage")
             r = self.hook(payload)
-            self.assertEqual((r.returncode, r.stdout), (0, ""))
+            self.assertEqual(r.returncode, 0)
+            if payload["hook_event_name"] == "SessionStart":   # #10960 G-3: said in the context, never a decision
+                self.assertNotIn("permissionDecision", r.stdout)
+                self.assertIn("ledger unreadable", r.stdout)
+            else:
+                self.assertEqual(r.stdout, "")
             os.unlink(self.sp)
             r = self.hook(payload)
             self.assertEqual((r.returncode, r.stdout), (0, ""))
@@ -768,7 +773,8 @@ class StopHookCase(Base):
         with open(self.sp, "w") as f:
             f.write("garbage")
         r = self.hook({"hook_event_name": "SessionStart", "source": "clear"})
-        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("NOTHING RECONCILED", r.stdout)   # #10960 G-3: the model is told, not only the operator
         self.assertIn("datg hook: failed open", r.stderr)
 
     def test_per_pm_directory_and_legacy_coexist(self):

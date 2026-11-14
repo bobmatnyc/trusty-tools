@@ -3,7 +3,7 @@ name: tm-secrets
 description: Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. Which tm secrets verbs ship in which release.
 user-invocable: true
 metadata:
-  version: "1.5.0"
+  version: "1.6.0"
 category: pm-reference
 tags: [secrets, credentials, keychain, doctor, pm-recommended]
 effort: medium
@@ -130,8 +130,10 @@ field. An agent may write a deny; only a person may remove one. An agent
 may `set` (and so `import`) or locally `copy` a key that has no deny, in its
 own project or owner scope, when the owner asked for it (#10459); its `set`
 confirmation shows only `[N chars]`, and the audit record names its pid and
-project. `delete`, removing a deny, and a copy to a sync target such as
-GitHub Actions stay operator-only. A copy carries a key's deny; a denied key
+project. An agent may also copy a key with no deny to a sync target such as
+GitHub Actions or Vercel (#10999); the value goes to the CLI's stdin and
+never to the agent, and a denied key fails with `agent_key_denied`.
+`delete` and removing a deny stay operator-only. A copy carries a key's deny; a denied key
 cannot be copied into 1Password or Keeper, which cannot hold a deny.
 
 **Socket.** `trusty-secrets serve` answers on
@@ -146,7 +148,7 @@ server derives the vaults from that checkout's remote.
 | `secrets.set` | `new` or `updated`, and a one-time mask: `[N chars]` only for an agent. Its request carries the value. An agent is refused a denied key (`agent_key_denied`). |
 | `secrets.delete` | Whether a key was removed. Operator-only. |
 | `secrets.set_agents_may_use` | `allowed: false` writes the key's agent deny (an agent may); `allowed: true` removes it (a person only) |
-| `secrets.copy` | Names copied and failed; a key's deny travels with it. An agent copies only keys with no deny, never to a sync target. `tm secrets assign` sends it with a vault `source` and `project` set to the named project's checkout. |
+| `secrets.copy` | Names copied and failed; a key's deny travels with it. An agent copies or pushes only keys with no deny. A Vercel key that already existed fails as unproven; do not retry it. `tm secrets assign` sends it with a vault `source` and `project` set to the named project's checkout. |
 | `secrets.doctor` | Backend availability and paths |
 
 Only `secrets.set` echoes any part of a value, and only to a person: its
@@ -166,7 +168,7 @@ kind and the key or reference to the PM. Do not retry under another name.
 | `remote_host_unsupported` | `origin` is not a github.com URL in an accepted form. Do not change the remote. |
 | `project_unresolved`, `project_invalid` | No usable checkout or remote. Report the directory. |
 | `agent_key_denied` | The operator denied this key to agents (per-key deny). Report the key to the PM; only a person removes a deny. |
-| `agent_use_refused` | The method is operator-only for agents (`delete`, removing a deny, a copy to a sync target). Report the method to the PM. |
+| `agent_use_refused` | The method is operator-only for agents (`delete`, removing a deny). Report the method to the PM. |
 | `not_found` | Neither vault indexes the key. Tell the PM the vault and key; the operator enters the value outside every session. |
 | `unknown_backend`, `same_backend` | No such backend on this build or OS, or a copy onto itself. |
 | `backend_failed`, `index_busy`, `index_corrupt`, `storage_unavailable`, `orphaned_backend_entry` | Store fault. Report it; do not touch the Keychain or the index by hand. |

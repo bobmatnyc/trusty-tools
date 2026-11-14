@@ -106,8 +106,9 @@ pub(crate) fn hash_content(content: &str) -> String {
 /// #9236: test-only fault seam. For each index id listed here, the durable
 /// hash-row delete in [`forget_file_hash`] fails after the cache entry is
 /// dropped — the state a refused redb write leaves. #11096: the one-transaction
-/// file delete fails before its commit instead. Keyed by index id so
-/// concurrent tests never see each other's faults.
+/// file delete fails before its commit instead. #11087: so does the chunk,
+/// entity and hash delete of `remove_file_rows_and_hash`. Keyed by index id
+/// so concurrent tests never see each other's faults.
 #[cfg(test)]
 pub(crate) static TEST_FAIL_FORGET_HASH: std::sync::Mutex<Vec<String>> =
     std::sync::Mutex::new(Vec::new());

@@ -492,7 +492,7 @@ async fn copy_named_by_agent_of_a_keychain_item_lands_push_only() {
 }
 
 /// Seed `name` in the project vault and mark it push-only for agents.
-fn seed_push_only(fx: &Fixture, name: &str) {
+pub(super) fn seed_push_only(fx: &Fixture, name: &str) {
     seed(fx, name, SENTINEL_VALUE, true);
     fx.keychain
         .set_control_item(

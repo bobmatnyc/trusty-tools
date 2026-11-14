@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.2] — 2026-11-13
+
+### Fixed
+
+- A dashboard schema `pattern` with an escape class the loader refuses now names that escape (for example `\s`) instead of always saying "like \d" (#10697).
+- The dashboard store refuses a `set`, `update` or batch that writes `meta/settings` `technical_level` or an item's `level_override` outside the six technical levels, whatever the schema mode. A refused op aborts the batch and leaves the store unchanged (#11064).
+
+### Changed
+
+- Reformatted the `request!`/`row!` macro calls to the rustfmt 1.100 layout; no behavior change.
+
 ## [0.2.1] — 2026-11-09
 
 ### Added
