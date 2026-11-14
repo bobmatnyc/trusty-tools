@@ -74,8 +74,8 @@ fields are refused.
 ## All-https access
 
 Owner ruling, 2026-11-14: "Ask for all-https access at Activate, drop it when
-the last code ends." Any profile where the user clicks Activate may be paired;
-tab scope is the default choice. This contract reads "Activate" in that
+the last code ends." Any profile where the user clicks **Pair this profile**
+may be paired; tab scope is the default choice. This contract reads "Activate" in that
 ruling as the click that issues a code: the permission is requested only in a
 mint click, never at pairing, so the pairing acknowledgement that follows
 `pair` (which lists no code) has nothing to remove.
@@ -87,7 +87,8 @@ Request:
   **Give access to the whole profile**), before it sends `mint`, whenever the
   permission is absent. It needs the user gesture, which the service worker
   does not have. This holds for a paired profile and for a workflow-enrolled
-  one alike. The **Activate** click sends `pair` only and requests nothing.
+  one alike. The **Pair this profile** click sends `pair` only and requests
+  nothing.
 - Declining does not block minting; page operations outside the clicked
   origin then answer `PermissionNeeded`.
 
@@ -168,7 +169,7 @@ answer did not arrive.
 ## pair — `enrollment.sock` only
 
 Sender: the extension worker, for a profile with no workflow enrollment, when
-the user clicks Activate in the popup. Same peer and Chrome-host verification
+the user clicks **Pair this profile** in the popup. Same peer and Chrome-host verification
 as enrollment.
 
 | Request | Reply |
@@ -744,12 +745,12 @@ again. A broker error reaches the popup as `error` set to the error name.
 |---|---|---|
 | Loading | Robot, status line | none; sends `code_preview` |
 | Unavailable | The reason: service unreachable, or no signed-in Chrome account | Retry sends `code_preview` |
-| Not paired | "Activate Trusty Browser in this profile" | **Activate** sends `pair`, then `code_preview`; it requests no permission |
+| Not paired | "Let an agent use this browser with an activation code" above **Pair this profile**; "Connect this site's workflow to Trusty Browser" above **Enroll this site's workflow** | **Pair this profile** sends `pair`, then `code_preview`; it requests no permission. On success the status line reads "Profile paired: <email>"; on failure it shows the error |
 | Choose scope | The target tab's origin and title; the grant list | **Give access to this tab** (primary, first) sends `mint` with `scope: "tab"`; **Give access to the whole profile** (secondary, second, labelled as every tab in this profile) sends `mint` with `scope: "profile"` |
 | Code shown | The code in a monospace field, a countdown `m:ss` to `expires_at`, the scope, the grant list | **Copy** writes the code with `navigator.clipboard.writeText` (sends nothing); **Cancel code** sends `revoke_grant` for its grant |
 | Code expired | "Code expired" | **New code** returns to Choose scope |
 | Grant list (part of the two states above) | One row per entry: scope, tab origin and title when known, `waiting for agent, m:ss left` (code) or `agent connected, idle m:ss` (active) | **Disconnect** per row sends `revoke_grant`; **Disconnect all** sends `revoke_grants`. The list refreshes with `grants` every 5 seconds while the popup is open |
-| Workflow enrolled | Existing activation details | Existing controls, plus Choose scope above them |
+| Workflow enrolled | Existing activation details; the status line reads "Extension active" | Existing controls, plus Choose scope above them |
 
 When the target tab has no page access (for example a `chrome://` page), the
 tab choice is disabled with "Open a web page and click Trusty Browser on it";
@@ -978,7 +979,7 @@ JavaScript (worker, page functions, popup):
   hidden while a pairing exists.
 - All-https access: a mint click requests `https://*/*` inside the click
   when it is absent and mints whether or not the user grants it; the
-  Activate click requests nothing; the permission is removed on each
+  **Pair this profile** click requests nothing; the permission is removed on each
   signal of "All-https access" (`grant_end` with `last: true`, an empty
   `live` list, an empty `grants` reply, no credential, the offline check)
   and is kept on `grant_end` with `last: false`.

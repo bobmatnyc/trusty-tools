@@ -590,7 +590,7 @@ test("pair records the pairing only on ok and retries with the same fields", asy
   assert.deepEqual([f.localStore.pairing, f.localStore.pairing_pending], [pending, undefined]);
   assert.deepEqual([f.sent.at(-1).type, f.sent.at(-1).profile], ["hello", pending.profile], "pairing reconnects the port");
   assert.ok(!JSON.stringify([first, done]).includes(pending.key));
-  // A definite refusal drops the pending fields so the next Activate starts fresh.
+  // A definite refusal drops the pending fields so the next Pair this profile click starts fresh.
   const g = await codeFixture({local:{}});
   g.setBroker(msg => msg.op === "pair" ? {ok:false, error:"EnrollmentConflict"} : g.fakeBroker(msg));
   assert.equal((await g.popup({type:"pair"})).error, "EnrollmentConflict");

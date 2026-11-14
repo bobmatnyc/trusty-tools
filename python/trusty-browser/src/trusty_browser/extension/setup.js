@@ -56,7 +56,7 @@ function errorMessage(error) {
 }
 async function submit(replace = false) {
   activate.disabled = $("replace").disabled = $("cancel").disabled = true;
-  activate.textContent = "Activating…";
+  activate.textContent = "Enrolling…";
   statusLine.textContent = "";
   try {
     if (!preview) await refresh();
@@ -99,7 +99,7 @@ async function submit(replace = false) {
     try { await refresh(); } catch { /* Preserve the activation error for retry. */ }
   } finally {
     activate.disabled = $("replace").disabled = $("cancel").disabled = false;
-    activate.textContent = "Activate Extension";
+    activate.textContent = "Enroll this site's workflow";
   }
 }
 activate.addEventListener("click", () => submit());
@@ -284,13 +284,15 @@ $("cancel-code").addEventListener("click", () => codeGrant && revoke({type:"revo
 $("new-code").addEventListener("click", () => { show("choose"); void checkHttps(); });
 $("disconnect-all").addEventListener("click", () => revoke({type:"revoke_grants"}));
 $("retry").addEventListener("click", () => loadAccess());
-// #11239: contract "All-https access" — Activate sends `pair` only; the mint click asks for https://*/*.
+// #11239: contract "All-https access" — Pair this profile sends `pair` only; the mint click asks for https://*/*.
 $("pair").addEventListener("click", async () => {
   $("pair").disabled = true;
   statusLine.textContent = "";
   try {
     await request({type:"pair"});
-    await loadAccess();
+    // Owner ruling Dmt, 2026-11-14: confirm the pairing; loadAccess shows its own error and returns nothing.
+    const paired = await loadAccess();
+    if (paired?.paired) statusLine.textContent = "Profile paired" + (paired.email ? ": " + paired.email : "");
   } catch (error) { statusLine.textContent = errorMessage(error); }
   finally { $("pair").disabled = false; }
 });

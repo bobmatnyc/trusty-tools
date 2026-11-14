@@ -32,8 +32,9 @@ def test_activation_popup():
                 }}};
             """)
             page.goto(popup.as_uri())
-            activate = page.get_by_role("button", name="Activate Extension")
+            activate = page.get_by_role("button", name="Enroll this site's workflow")
             expect(activate).to_be_enabled()
+            expect(page.get_by_text("Connect this site's workflow to Trusty Browser", exact=True)).to_be_visible()
             assert page.get_by_role("textbox").count() == 0
             head = page.locator("#robot > img")
             bounds = head.bounding_box()
@@ -164,7 +165,10 @@ PAIR_POPUP = """
         if (m.type === 'code_preview') return {ok:true,paired,email:'qa@example.test',profile:paired ? 'p' : null,
           target:{tab:m.tab,access:true,origin:'https://a.test',title:'Alpha'}};
         if (m.type === 'preview') return {ok:false,error:'Open a supported signed-in site in the active tab.'};
-        if (m.type === 'pair') { paired = true; return {ok:true,profile:'p'}; }
+        if (m.type === 'pair') {
+          if (window.pairFails) return {ok:false,error:'No signed-in Chrome account.'};
+          paired = true; return {ok:true,profile:'p'};
+        }
         if (m.type === 'unpair') { paired = false; held = false; return {ok:true,profile:'p'}; }
         if (m.type === 'grants') return {ok:true,grants:[]};
         if (m.type === 'revoke_grant') { if (window.lastCodeEnds) workerRemoves(); return {ok:true,revoked:1}; }
@@ -187,13 +191,14 @@ def test_pairing_popup_activates_mints_and_disconnects_a_profile():
             page = browser.new_page(viewport={"width": 284, "height": 800})
             page.add_init_script(PAIR_POPUP)
             page.goto(popup.as_uri())
-            expect(page.get_by_text("Activate Trusty Browser in this profile", exact=True)).to_be_visible()
+            expect(page.get_by_text("Let an agent use this browser with an activation code", exact=True)).to_be_visible()
             expect(page.locator("#access")).to_be_hidden()
-            expect(page.get_by_role("button", name="Activate Extension")).to_be_visible()
-            page.get_by_role("button", name="Activate", exact=True).click()
+            expect(page.get_by_role("button", name="Enroll this site's workflow")).to_be_visible()
+            page.get_by_role("button", name="Pair this profile", exact=True).click()
             page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 2")
+            expect(page.get_by_role("status")).to_have_text("Profile paired: qa@example.test")
             calls = page.evaluate("window.calls")
-            # Contract "All-https access": the Activate click sends `pair` only and requests nothing.
+            # Contract "All-https access": the Pair this profile click sends `pair` only and requests nothing.
             assert calls.index("pair") < calls.index("code_preview", 1)
             assert permission_requests(page) == []
             expect(page.get_by_role("button", name="Give access to this tab")).to_be_enabled()
@@ -201,6 +206,7 @@ def test_pairing_popup_activates_mints_and_disconnects_a_profile():
             for workflow_control in ("#activate", "#details", "#transfer"):
                 expect(page.locator(workflow_control)).to_be_hidden()
             expect(page.locator("#paired-email")).to_have_text("qa@example.test")
+            expect(page.locator("#activate-help")).to_be_hidden()
             # The first mint click asks for all-https access once, before it sends `mint`.
             page.get_by_role("button", name="Give access to this tab").click()
             expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
@@ -214,13 +220,30 @@ def test_pairing_popup_activates_mints_and_disconnects_a_profile():
             page.wait_for_function("window.calls.filter(c => c === 'mint').length === 2")
             assert permission_requests(page) == [["https://*/*"]]
             page.get_by_role("button", name="Disconnect this profile").click()
-            expect(page.get_by_text("Activate Trusty Browser in this profile", exact=True)).to_be_visible()
+            expect(page.get_by_text("Let an agent use this browser with an activation code", exact=True)).to_be_visible()
             expect(page.locator("#access")).to_be_hidden()
             expect(page.locator("#paired")).to_be_hidden()
             expect(page.locator("#code")).to_have_value("")
             assert "unpair" in page.evaluate("window.calls")
             assert "tb-" not in page.locator("main").inner_text()
-            expect(page.get_by_role("button", name="Activate Extension")).to_be_visible()
+            expect(page.get_by_role("button", name="Enroll this site's workflow")).to_be_visible()
+        finally:
+            browser.close()
+
+
+def test_a_failed_pair_click_shows_the_error_and_no_success_text():
+    popup = Path(service.__file__).with_name("extension") / "setup.html"
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 284, "height": 800})
+            page.add_init_script("window.pairFails = true;")
+            page.add_init_script(PAIR_POPUP)
+            page.goto(popup.as_uri())
+            page.get_by_role("button", name="Pair this profile", exact=True).click()
+            expect(page.get_by_role("status")).to_have_text("No signed-in Chrome account.")
+            expect(page.get_by_role("status")).not_to_contain_text("Profile paired")
+            expect(page.get_by_role("button", name="Pair this profile", exact=True)).to_be_enabled()
         finally:
             browser.close()
 
@@ -234,7 +257,7 @@ def test_a_mint_click_asks_again_after_the_worker_removed_the_permission():
             page.add_init_script("window.lastCodeEnds = true;")
             page.add_init_script(PAIR_POPUP)
             page.goto(popup.as_uri())
-            page.get_by_role("button", name="Activate", exact=True).click()
+            page.get_by_role("button", name="Pair this profile", exact=True).click()
             page.get_by_role("button", name="Give access to this tab").click()
             expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
             page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 3")

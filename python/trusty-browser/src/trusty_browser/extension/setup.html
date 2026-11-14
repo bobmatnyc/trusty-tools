@@ -17,10 +17,11 @@
       </div>
     </div>
     <section id="unpaired" hidden>
-      <p>Activate Trusty Browser in this profile</p>
-      <button id="pair">Activate</button>
+      <p id="pair-help">Let an agent use this browser with an activation code</p>
+      <button id="pair" aria-describedby="pair-help">Pair this profile</button>
     </section>
-    <button id="activate" disabled>Activate Extension</button>
+    <p id="activate-help">Connect this site's workflow to Trusty Browser</p>
+    <button id="activate" aria-describedby="activate-help" disabled>Enroll this site's workflow</button>
     <output id="status" aria-live="polite"></output>
     <section id="transfer" hidden>
       <p id="transfer-route"></p>

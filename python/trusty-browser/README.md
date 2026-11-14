@@ -18,7 +18,7 @@ To run in the foreground, use `trusty-browser install-host` and `trusty-browser 
 
 ## Enroll and use a workflow
 
-Open the supported, signed-in site. Click **Trusty Browser** in the Chrome toolbar. Choose **Activate Extension**. Chrome may ask for access to the selected site. Trusty verifies the signed-in Chrome profile and site account, selects the workflow, and pairs the extension. Only the robot’s eyes follow the pointer unless reduced motion is enabled. After activation, expand **Activation details** to see the route and workflow ID.
+Open the supported, signed-in site. Click **Trusty Browser** in the Chrome toolbar. Choose **Enroll this site's workflow**. Chrome may ask for access to the selected site. Trusty verifies the signed-in Chrome profile and site account, selects the workflow, and pairs the extension. Only the robot’s eyes follow the pointer unless reduced motion is enabled. After enrolment the status line reads "Extension active"; expand **Activation details** to see the route and workflow ID.
 
 If the workflow already belongs to another profile, the popup shows the current and proposed Chrome profiles, URLs and site accounts. Choose **Confirm replacement** to transfer the workflow and revoke its old grant, or **Cancel** to keep its route.
 
@@ -49,7 +49,7 @@ One-use activation codes let an agent drive one profile or one tab without a wor
 }
 ```
 
-Any Chrome profile can mint codes: click **Activate** in its popup to pair it (no workflow is needed), then choose this tab (the default) or the whole profile. Activate also asks for access to all `https:` pages; the extension drops that access when the profile's last code or grant ends. Declining it leaves page operations limited to the tab you clicked.
+Any Chrome profile can mint codes: click **Pair this profile** in its popup to pair it (no workflow is needed); the status line then reads "Profile paired" with the profile's email. Then choose this tab (the default) or the whole profile. The first code request also asks for access to all `https:` pages; the extension drops that access when the profile's last code or grant ends. Declining it leaves page operations limited to the tab you clicked.
 
 The server starts and lists its tools even when the service is not running. The agent calls `browser_connect` with the code from the popup, then `browser_tabs` to list the tabs it may address, `browser_select` to lease one, and `page_read`, `page_type`, `page_click` and `page_navigate` on that lease. `page_read` returns element refs that `page_click` and `page_type` take. `browser_release` frees the lease and `browser_disconnect` ends the grant. If the service is down, `browser_connect` answers a `ServiceUnavailable` tool error; call it again once the service is up. Tool shapes and error frames are in "MCP tools", and the broker frame contract in the rest of [docs/activation-codes.md](docs/activation-codes.md).
 

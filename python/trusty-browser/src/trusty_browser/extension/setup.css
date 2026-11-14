@@ -31,6 +31,7 @@ button:focus-visible, summary:focus-visible { outline: 3px solid #754725; outlin
 .secondary { margin-top: 8px; background: transparent; color: #68361d; border-color: #cdb6a4; }
 .secondary:hover { background: #f1e7da; }
 output { display: block; text-align: center; }
+#activate-help:has(+ #activate[hidden]) { display: none; }
 output:not(:empty), details { margin-top: 12px; }
 details, #transfer { overflow-wrap: anywhere; }
 summary { cursor: pointer; }
