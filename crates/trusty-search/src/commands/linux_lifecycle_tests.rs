@@ -109,6 +109,9 @@ fn env_passthrough_carries_every_daemon_setting_and_no_credential() {
         "HTTPS_PROXY",
         "DBUS_SESSION_BUS_ADDRESS",
         "RUST_LOG",
+        // #11085: the boot-time update check's opt-outs (trusty_common::update).
+        "TRUSTY_NO_UPDATE_CHECK",
+        "CI",
     ] {
         assert!(carried(name), "{name} must reach the daemon");
     }
@@ -123,6 +126,9 @@ fn env_passthrough_carries_every_daemon_setting_and_no_credential() {
 }
 
 // Drift guard: a new `env::var` read in this crate must be passed or excluded.
+// #11085: it sees only literal `var("X")` / `var_os("X")` reads in this crate's
+// `src/`. A read through a constant, a helper, or trusty-common escapes it;
+// `env_passthrough_carries_every_daemon_setting_and_no_credential` pins those.
 #[test]
 fn env_passthrough_covers_every_variable_this_crate_reads() {
     let mut missing = std::collections::BTreeSet::new();
@@ -470,6 +476,9 @@ async fn restart_of_a_daemon_that_is_not_running_goes_on_to_start() {
 // down. A sibling that carries TRUSTY_DATA_DIR (as every daemon this crate's
 // `start` spawns does) is told apart. Fixing the first case needs a module
 // change: a liveness rule that excludes `--data-dir` argv not naming this dir.
+// #11085: the wider consequence — with such a sibling running, `restart` of a
+// HEALTHY default daemon stops it, then `start` refuses with `RunningUnserved`,
+// so the default daemon stays down. `restart` exits non-zero naming the pids.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn ac6_residual_a_sibling_without_trusty_data_dir_blocks_the_default_instance() {

@@ -39,6 +39,9 @@ pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
     "LD_LIBRARY_PATH",
     "CUDA_VISIBLE_DEVICES",
     "container",
+    // #11085: opt-outs of the boot-time `trusty_common::update::check_throttled`.
+    trusty_common::update::NO_UPDATE_CHECK_ENV,
+    "CI",
     // Embedder: model, device, caches, sidecars and the python lane.
     "FASTEMBED_CACHE_DIR",
     "FASTEMBED_CACHE_PATH",

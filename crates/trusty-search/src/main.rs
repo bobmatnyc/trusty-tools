@@ -484,6 +484,11 @@ enum Commands {
     ///
     /// A daemon that is not running is started. Refuses while the
     /// trusty-search.service systemd unit is active (#11085).
+    ///
+    /// Respawns as `start --foreground [--data-dir]`: `--auto-discover` and
+    /// `--no-auto-discover` are not carried over; `--device` and the fan-out
+    /// cap survive through daemon.env. A daemon started with `--socket` is
+    /// refused as unidentified by `stop` and `restart`.
     #[cfg(target_os = "linux")]
     #[command(display_order = 22)]
     Restart(commands::linux_lifecycle::LifecycleArgs),
