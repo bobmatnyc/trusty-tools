@@ -176,9 +176,15 @@ impl<'a> Scanner<'a> {
         self.term.get(p).copied().flatten()
     }
 
-    /// The body start of the `[` at `open`: past an optional `!`/`^` sigil.
-    fn body_start(&self, open: usize) -> (usize, bool) {
-        let negated = matches!(self.chars.get(open + 1), Some('!' | '^'));
+    /// Whether the `[` at `open` starts with a `!`/`^` negation sigil.
+    pub(crate) fn has_sigil(&self, open: usize) -> bool {
+        matches!(self.chars.get(open + 1), Some('!' | '^'))
+    }
+
+    /// The body start of the `[` at `open`: past an optional `!`/`^` sigil,
+    /// unless `literal_sigil` reads that sigil as a plain member.
+    fn body_start(&self, open: usize, literal_sigil: bool) -> (usize, bool) {
+        let negated = !literal_sigil && self.has_sigil(open);
         (open + 1 + usize::from(negated), negated)
     }
 
@@ -193,9 +199,12 @@ impl<'a> Scanner<'a> {
     /// Why: #10761 review (F1) — the lexer strips the quoting that made a `]` a
     /// member (`.[x\]e]nv` arrives as `.[x]e]nv`), so each later `]` the scan
     /// reaches past an earlier one is a close the shell may have used.
-    /// Test: `a_quoted_or_escaped_close_bracket_inside_a_class_fails_closed`.
-    pub(crate) fn closes(&self, open: usize, limit: usize) -> Vec<usize> {
-        let (body, _) = self.body_start(open);
+    /// #10761: `literal_sigil` reads a `!`/`^` sigil as a member, the way the
+    /// shell read a quoted one (`.[\!eE]nv`) before the lexer dropped the `\`.
+    /// Test: `a_quoted_or_escaped_close_bracket_inside_a_class_fails_closed`,
+    /// `a_quoted_negation_sigil_is_judged_as_a_member`.
+    pub(crate) fn closes(&self, open: usize, literal_sigil: bool, limit: usize) -> Vec<usize> {
+        let (body, _) = self.body_start(open, literal_sigil);
         let mut next = match self.chars.get(body) {
             None => None,
             Some(']') => self.at(self.past_member(body)),
@@ -223,17 +232,18 @@ impl<'a> Scanner<'a> {
     /// operator ends the word first, which makes the `[` unterminated.
     /// Test: `parses_every_bracket_form_a_shell_accepts`.
     pub(crate) fn parse(&self, open: usize) -> Bracket {
-        match self.closes(open, 0).first() {
-            Some(&end) => self.class_to(open, end),
+        match self.closes(open, false, 0).first() {
+            Some(&end) => self.class_to(open, end, false),
             None => Bracket::Unterminated,
         }
     }
 
     /// Read the `[` at `open` as a class closed by the `]` at `end`, every
-    /// earlier `]` a member. `end` must come from [`Scanner::closes`].
-    pub(crate) fn class_to(&self, open: usize, end: usize) -> Bracket {
+    /// earlier `]` a member. `end` must come from [`Scanner::closes`] called
+    /// with the same `literal_sigil`.
+    pub(crate) fn class_to(&self, open: usize, end: usize, literal_sigil: bool) -> Bracket {
         let chars = self.chars;
-        let (mut i, negated) = self.body_start(open);
+        let (mut i, negated) = self.body_start(open, literal_sigil);
         let mut items = Vec::new();
         let mut opaque = false;
         while i < end {

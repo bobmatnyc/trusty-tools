@@ -276,6 +276,10 @@ pub(crate) mod pm_guard_secret_brackets;
 pub(crate) mod pm_guard_secret_bracket_parse;
 #[cfg(test)]
 mod pm_guard_secret_brackets_tests;
+// #10761: quoted sigils, and a `Grep` glob read by ripgrep's rules.
+#[cfg(test)]
+mod pm_guard_secret_quoting_tests;
+pub(crate) mod pm_guard_secret_rg_glob;
 // #7557: the word-list / ref / text-payload position rules, split out of
 // `pm_guard_secret_read` when the structure check pushed it over the cap.
 pub(crate) mod pm_guard_secret_positions;

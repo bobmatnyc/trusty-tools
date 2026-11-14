@@ -70,12 +70,13 @@ fn denies_a_negated_or_ranged_bracket_glob_onto_a_secret_name() {
 
 #[test]
 fn allows_a_bracket_glob_that_reaches_no_secret_name() {
+    // #10761 follow-up: `cat .[!eE]nv` and `cat id_[!a-zA-Z]sa` moved to
+    // `a_quoted_negation_sigil_is_judged_as_a_member` — the sigil may have been
+    // quoted, which makes it a member.
     for command in [
-        "cat .[!eE]nv",
         "cat .[a-d]nv",
         "cat .[xyz]nv",
         "cat .[[:digit:]]nv",
-        "cat id_[!a-zA-Z]sa",
         "ls [a-z]*.rs",
         "cat file[!0-9].txt",
         "grep '[^a-z]' src/lib.rs",
@@ -98,7 +99,8 @@ fn allows_a_bracket_glob_that_reaches_no_secret_name() {
 fn a_negated_class_excluding_one_case_still_reaches_the_other() {
     assert!(denies("cat .Env"));
     assert!(denies("cat .[!e]nv"));
-    assert!(!denies("cat .[!eE]nv"));
+    // #10761 follow-up: denies, as `.[\!eE]nv` lexes to this same token.
+    assert!(denies("cat .[!eE]nv"));
 }
 
 #[test]
@@ -147,11 +149,13 @@ fn parses_every_bracket_form_a_shell_accepts() {
         bracket_readings("id_[r]sa"),
         Some(vec!["id_rsa".to_string()])
     );
+    // #10761 follow-up: the sigil is also read as a member, so `.env` is
+    // reached beside the negated readings; still `Some`, never empty.
     let negated = bracket_readings(".[!eE]nv");
     assert!(
-        negated
-            .as_ref()
-            .is_some_and(|rs| !rs.is_empty() && !rs.iter().any(|r| r == ".env")),
+        negated.as_ref().is_some_and(|rs| !rs.is_empty()
+            && rs.iter().any(|r| r == ".env")
+            && rs.iter().any(|r| r == ".xnv")),
         "{negated:?}"
     );
     assert!(bracket_readings(".[!e]nv").is_some_and(|rs| rs.iter().any(|r| r == ".Env")));
