@@ -28,7 +28,7 @@ fields are refused.
   Chrome's `documentId`; a navigation inside the same tab keeps the
   incarnation, a closed or replaced tab, or a browser restart, ends it.
 - Constants (`codes.py`): `CODE_TTL = 300` s, `GRANT_IDLE = 1800` s,
-  `MAX_GRANTS_PER_TAB = 1`, `MAX_GRANTS = 3`, lockout `FAIL_LIMIT = 5` failures
+  `MAX_GRANTS_PER_TAB = 1`, lockout `FAIL_LIMIT = 5` failures
   in `FAIL_WINDOW = 60` s, first lock `LOCK_BASE = 60` s, doubling per repeat
   lock up to `LOCK_MAX = 900` s.
 
@@ -68,7 +68,7 @@ Errors (`{"ok": false, "error": <name>}`):
 | `InvalidMint` | Malformed frame, unknown scope, bad or misplaced `tab` |
 | `NotEnrolled` | No active route matches the presented registration |
 | `BrowserDisconnected` | Tab scope and no paired browser for the profile |
-| `GrantLimit` | A live grant already holds this tab, or `MAX_GRANTS` are live; carries `"limit": "tab"` or `"total"` |
+| `GrantLimit` | Tab scope: a live tab grant already holds this tab incarnation; carries `"limit": "tab"`. No limit applies to the number of grants across tabs or profiles |
 | `AuditUnavailable` | The audit line could not be written; no code exists |
 
 ## redeem — `agent.sock`, first frame only
@@ -100,7 +100,7 @@ frame and closes the connection.
 | other browser refusal | Tab scope: the redeem-time tab probe (`inspect`) failed for another reason, such as `AmbiguousTab`; the code stays redeemable |
 | `TabClosed` | Tab scope: the tab incarnation ended before redeem. The code is consumed and never bound to another tab |
 | `BrowserDisconnected` | Profile scope: no paired browser; the code stays redeemable until it expires |
-| `GrantLimit` | Redeem would exceed a cap; the code stays redeemable |
+| `GrantLimit` | Tab scope: another live tab grant holds the tab; the code stays redeemable |
 | `AuditUnavailable` | The audit line could not be written; the code stays redeemable |
 
 Lockout: `CodeRefused` outcomes count as failures. `FAIL_LIMIT` failures
@@ -130,7 +130,7 @@ replaced), `unenrolled` (the route was removed or replaced), `idle` (no
 operation for `GRANT_IDLE`), `audit` (an operation's result line could not be
 written). An idle grant ends at its own next operation, or earlier at the next
 mint, redeem or operator op, whichever comes first; once ended it no longer
-counts toward `MAX_GRANTS_PER_TAB` or `MAX_GRANTS`, and its agent's next call
+counts toward `MAX_GRANTS_PER_TAB` or appears in the operator `grants` list, and its agent's next call
 answers `GrantEnded` with `reason: idle`. A grant also ends silently when its
 socket closes. When a grant ends its claims are dropped and their indicators
 cleared. A click in flight when its

@@ -426,7 +426,7 @@ def test_revoke_during_an_in_flight_click_answers_outcome_unknown(short, clock):
     run(short, body)
 
 
-def test_caps_refuse_mint_and_redeem_beyond_the_limits(short, clock):
+def test_tab_cap_refuses_mint_and_redeem_of_a_second_grant_on_a_tab(short, clock):
     async def body(rig):
         early = [(await rig.mint(rig.alpha, "tab", 7))["code"] for _ in range(2)]
         assert (await rig.redeem(early[0]))[0]["ok"]
@@ -440,15 +440,35 @@ def test_caps_refuse_mint_and_redeem_beyond_the_limits(short, clock):
             "error": "GrantLimit",
             "limit": "tab",
         }
-        for _ in range(codes.MAX_GRANTS - 1):
-            assert (await rig.redeem((await rig.mint(rig.beta))["code"]))[0]["ok"]
-        assert (await rig.mint(rig.beta)) == {
-            "ok": False,
-            "error": "GrantLimit",
-            "limit": "total",
-        }
+        # The refused code stays redeemable once the tab's grant is gone.
         await rig.operator(op="revoke_grants")
-        assert (await rig.mint(rig.beta))["ok"]
+        assert (await rig.mint(rig.alpha, "tab", 7))["ok"]
+
+    run(short, body)
+
+
+def test_more_than_three_grants_on_distinct_tabs_and_profiles_coexist(short, clock):
+    async def body(rig):
+        calls = []
+        for tab in range(1, 6):
+            rig.a.tab = tab  # the redeem probe reads the active tab
+            ack, call = await rig.redeem(
+                (await rig.mint(rig.alpha, "tab", tab))["code"]
+            )
+            assert ack["ok"], ack
+            calls.append(call)
+        for row in (rig.alpha, rig.beta, rig.beta):
+            ack, call = await rig.redeem((await rig.mint(row))["code"])
+            assert ack["ok"], ack
+            calls.append(call)
+        listed = (await rig.operator(op="grants"))["grants"]
+        assert len(listed) == 8
+        assert rig.outcomes("redeem") == ["ok"] * 8
+        for tab, call in enumerate(calls[:5], start=1):
+            rig.a.tab = tab
+            assert (await call({"op": "claim"}))["tab"] == tab
+        assert len(rig.broker.claims) == 5
+        assert (await rig.mint(rig.alpha, "tab", 3))["limit"] == "tab"
 
     run(short, body)
 
@@ -525,23 +545,25 @@ def test_idle_browser_loss_and_socket_close_end_the_grant(short, clock):
     run(short, body)
 
 
-def test_idle_profile_grants_release_the_total_cap(short, clock):
+def test_idle_profile_grants_leave_the_grant_list(short, clock):
     async def body(rig):
         calls = []
-        for _ in range(codes.MAX_GRANTS):
+        for _ in range(3):
             ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
             assert ack["ok"]
             calls.append(call)
         clock[0] += codes.GRANT_IDLE - 1
-        assert (await rig.mint(rig.alpha))["limit"] == "total"
+        assert len((await rig.operator(op="grants"))["grants"]) == 3
+        assert rig.outcomes("grant_end") == []
         clock[0] += 1
+        assert (await rig.operator(op="grants")) == {"ok": True, "grants": []}
+        assert rig.outcomes("grant_end") == ["idle"] * 3
         fresh = []
-        for _ in range(codes.MAX_GRANTS):
+        for _ in range(3):
             ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
             assert ack["ok"], ack
             fresh.append(call)
-        assert rig.outcomes("grant_end") == ["idle"] * codes.MAX_GRANTS
-        assert (await rig.mint(rig.alpha))["limit"] == "total"
+        assert len((await rig.operator(op="grants"))["grants"]) == 3
         for call in calls:
             assert (await gone(call)) == {
                 "ok": False,

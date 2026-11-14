@@ -55,9 +55,10 @@ class Grants(Leases):
     async def expire(self, now: float) -> None:
         """Purge stale codes and end every grant idle for ``GRANT_IDLE`` or longer.
 
-        Why: an idle grant otherwise holds a cap slot until its own agent calls
-        again (#11239). What: runs before every cap check and grant listing.
-        Test: `test_idle_profile_grants_release_the_total_cap`,
+        Why: an idle grant otherwise holds its tab slot and stays listed until
+        its own agent calls again (#11239). What: runs before every cap check
+        and grant listing.
+        Test: `test_idle_profile_grants_leave_the_grant_list`,
         `test_idle_tab_grant_releases_the_tab_cap_even_without_audit`.
         """
         self.purge(now)
@@ -82,8 +83,6 @@ class Grants(Leases):
             >= codes.MAX_GRANTS_PER_TAB
         ):
             raise Refusal("GrantLimit", limit="tab")
-        if len(live) >= codes.MAX_GRANTS:
-            raise Refusal("GrantLimit", limit="total")
 
     def record(self, event: str, grant: Grant | None, **fields: object) -> None:
         """Fail-closed audit line for mint, redeem and admitted operations."""
