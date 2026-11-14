@@ -102,16 +102,17 @@ pub(crate) fn set_agents_may_use(
 
 /// Refuse a caller whose ancestry has a Claude Code process (#10386).
 ///
-/// Why: Architect ruling 2026-10-28 (Q2, Q3) — an operator-only change
-/// (removing a deny, `delete`, a copy to a sync target) stays a person's.
+/// Why: Architect ruling 2026-10-28 (Q2) — an operator-only change
+/// (removing a deny, `delete`) stays a person's.
 /// #10459: `set` and a local `copy` no longer call it; they judge the caller
 /// with [`judge_agent_caller`] and check the key's deny instead.
+/// #10999: nor does a copy to a sync target (Architect E supersedes D3 and
+/// #10386 Q3 for agents); it checks the key's deny the same way.
 /// What: [`judge_agent_caller`], then an agent ancestor is
 /// [`ErrorKind::AgentUseRefused`].
 /// Test: `set_flag_on_by_agent_ancestor_is_refused_and_audited`,
 /// `set_flag_unreadable_ancestry_refuses_on`,
-/// `delete_by_agent_ancestor_is_refused_before_the_backend`,
-/// `server_copy_to_sync_target_by_agent_descendant_is_refused_and_audited`.
+/// `delete_by_agent_ancestor_is_refused_before_the_backend`.
 pub(crate) fn refuse_agent_caller(
     state: &State,
     caller: Caller,
@@ -127,13 +128,15 @@ pub(crate) fn refuse_agent_caller(
 /// Whether the caller has a Claude Code ancestor (#10386, #10459).
 ///
 /// Why: a refusal the server cannot judge is a refusal (Fail-Open Check),
-/// for both the operator-only methods and an agent's write of a key.
+/// for the operator-only methods, an agent's write of a key, and (#10999)
+/// an agent's push to a sync target.
 /// What: `peer` is the socket peer's pid. On a console bridge call the
 /// console's verdict is judged (`BridgeVerdict::judged`), else
 /// [`has_agent_ancestor`] on the peer's ancestry; an unreadable chain is
 /// [`ErrorKind::GrantRefused`]. The verdict goes on the gate's records.
 /// Test: `set_and_delete_with_unreadable_ancestry_or_no_peer_are_refused`,
-/// `set_by_agent_ancestor_of_an_undenied_key_succeeds`.
+/// `set_by_agent_ancestor_of_an_undenied_key_succeeds`,
+/// `server_copy_to_sync_target_with_unreadable_ancestry_is_refused`.
 pub(crate) fn judge_agent_caller(
     state: &State,
     caller: Caller,

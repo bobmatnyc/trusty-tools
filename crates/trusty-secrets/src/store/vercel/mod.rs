@@ -72,8 +72,10 @@ const UNCONFIRMED: &str =
     "the push ran, but the listing that confirms it failed; the value may have been written";
 const NOT_SHOWN: &str = "the push exited 0, but `vercel env ls` does not list the variable on \
      every target; the value may not have landed";
+// #10999: says a retry cannot help, so an agent reading it does not loop.
 const UPDATE_UNPROVEN: &str = "the variable already existed on Vercel and was overwritten in \
-     place, but `vercel env ls` cannot show that its value changed; check the project in Vercel";
+     place, but `vercel env ls` cannot show that its value changed; the new value may already \
+     be set, and a retry reports the same failure, so do not retry; check the project in Vercel";
 
 /// The Vercel sync target for one project.
 ///

@@ -51,13 +51,14 @@ async fn server_copy_to_sync_target_without_keys_is_invalid_params() {
     assert!(target.pushed.lock().unwrap().is_empty());
 }
 
-/// Why: D3 (owner ruling D63) — a pushed value is readable by any workflow
-/// a repository writer adds, so a caller under Claude Code may not push,
-/// whatever the key's "agents may use" flag says. One deny record names the
-/// target and the verdict. Red while the push path has no ancestry check.
+/// Why: #10999 (owner ruling 2026-11-10, Architect E, G) supersedes D3 for
+/// agents — a caller under Claude Code may push a key with no deny, since
+/// the value never reaches it. One allow record per key names the target,
+/// the key, the caller's pid and `agent_parent: true`, and no value. Red
+/// while the push refuses every agent caller with `agent_use_refused`.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn server_copy_to_sync_target_by_agent_descendant_is_refused_and_audited() {
+async fn server_copy_to_sync_target_by_agent_descendant_pushes_an_undenied_key() {
     for id in TARGET_IDS {
         let fx = fixture();
         seed(&fx, "API_KEY", SENTINEL_VALUE, true);
@@ -66,7 +67,7 @@ async fn server_copy_to_sync_target_by_agent_descendant_is_refused_and_audited()
         let (state, _grants) = state_with(&fx, procs);
         let (state, target, opens) = with_fake_target(state);
         let server = fx.start_state(state).await;
-        let refused = call(
+        let pushed = call(
             &fx.settings.socket,
             method::COPY,
             push_params(&fx, id, &["API_KEY"]),
@@ -74,27 +75,200 @@ async fn server_copy_to_sync_target_by_agent_descendant_is_refused_and_audited()
         .await;
         server.stop().await;
 
+        assert!(!wire(&pushed).contains(SENTINEL_VALUE), "{id}");
         assert_eq!(
-            fixed_error(&refused, method::COPY),
-            ErrorKind::AgentUseRefused,
+            ok(pushed),
+            json!({"copied": ["API_KEY"], "failed": []}),
             "{id}"
         );
-        assert_no_value(&refused);
-        assert_eq!(opens.load(Ordering::SeqCst), 0, "{id}");
-        assert!(target.pushed.lock().unwrap().is_empty(), "{id}");
-        let all = records(&fx);
-        assert_eq!(all.len(), 1, "{id}: {all:?}");
+        assert_eq!(opens.load(Ordering::SeqCst), 1, "{id}");
+        let one = ("API_KEY".to_string(), SENTINEL_VALUE.to_string());
+        assert_eq!(*target.pushed.lock().unwrap(), [one], "{id}");
+        let audit = std::fs::read_to_string(&fx.settings.audit_log).unwrap();
+        assert!(!audit.contains(SENTINEL_VALUE), "{id}");
+        let all: Vec<_> = records(&fx)
+            .into_iter()
+            .filter(|r| r.method == AuditMethod::Copy)
+            .collect();
         assert_eq!(
-            (all[0].method, all[0].decision),
-            (AuditMethod::Copy, AuditDecision::Deny)
-        );
-        assert_eq!(
-            all[0].reason.as_ref().map(AuditReason::as_str),
-            Some("agent_use_refused")
+            all.iter().map(shape).collect::<Vec<_>>(),
+            [(
+                AuditMethod::Copy,
+                AuditDecision::Allow,
+                None,
+                Some("API_KEY")
+            )],
+            "{id}"
         );
         assert_eq!(all[0].backend, Some(BackendId::new(id).unwrap()));
         assert_eq!(all[0].agent_parent, Some(true));
         assert_eq!(all[0].caller_pid, Some(me()));
+        assert_eq!(all[0].default_policy, Some(true));
+        assert_eq!(all[0].architect, None, "a push never redeems a ticket");
+    }
+}
+
+/// Why: #10999 F — a key denied to agents stays un-pushable by an agent.
+/// In one push of a denied and an open key, the denied key fails with an
+/// `agent_key_denied` record and its value is never read or sent; the open
+/// key still goes. (A person's push of a denied key is unchanged: the
+/// person-caller tests here seed denied keys.) Red while the push refuses the whole agent request instead.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_push_of_a_denied_key_fails_it_before_its_value_is_read() {
+    for id in TARGET_IDS {
+        let fx = fixture();
+        seed(&fx, "DENIED", SENTINEL_VALUE, false);
+        seed(&fx, "OPEN", OPEN_VALUE, true);
+        let procs = procs_with_me();
+        procs.set_agent(10);
+        let (state, _grants) = state_with(&fx, procs);
+        let (state, target, _opens) = with_fake_target(state);
+        let server = fx.start_state(state).await;
+        let pushed = call(
+            &fx.settings.socket,
+            method::COPY,
+            push_params(&fx, id, &["DENIED", "OPEN"]),
+        )
+        .await;
+        server.stop().await;
+
+        assert!(!wire(&pushed).contains(SENTINEL_VALUE), "{id}");
+        assert_eq!(
+            ok(pushed),
+            json!({"copied": ["OPEN"], "failed": ["DENIED"]}),
+            "{id}"
+        );
+        let one = ("OPEN".to_string(), OPEN_VALUE.to_string());
+        assert_eq!(*target.pushed.lock().unwrap(), [one], "{id}");
+        let all: Vec<_> = records(&fx)
+            .into_iter()
+            .filter(|r| r.method == AuditMethod::Copy)
+            .collect();
+        assert_eq!(
+            all.iter().map(shape).collect::<Vec<_>>(),
+            [
+                (
+                    AuditMethod::Copy,
+                    AuditDecision::Deny,
+                    Some("agent_key_denied"),
+                    Some("DENIED")
+                ),
+                (AuditMethod::Copy, AuditDecision::Allow, None, Some("OPEN")),
+            ],
+            "{id}"
+        );
+        assert!(all.iter().all(|r| r.agent_parent == Some(true)), "{all:?}");
+    }
+}
+
+/// Why: #10999 with #10998 — an agent's copy of a Keychain item lands
+/// push-only, and that agent may then push it: the value goes server to
+/// target and never reaches the agent (every agent read stays refused, see
+/// `push_only_key_is_refused_to_every_agent_read_and_open_to_a_person`). A
+/// deny wins over the mark. Red while the push gates on `agents_may_use`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_push_of_a_push_only_key_sends_it() {
+    for id in TARGET_IDS {
+        let fx = fixture();
+        super::copy_source_tests::seed_push_only(&fx, "PUSHED");
+        seed(&fx, "BOTH", OPEN_VALUE, false);
+        let both = (vault(PROJECT_VAULT), key("BOTH"));
+        let marked =
+            fx.keychain
+                .set_control_item(ControlItem::PushOnly, &both.0, Some(&both.1), true);
+        marked.unwrap();
+        let procs = procs_with_me();
+        procs.set_agent(10);
+        let (state, _grants) = state_with(&fx, procs);
+        let (state, target, _opens) = with_fake_target(state);
+        let server = fx.start_state(state).await;
+        let pushed = call(
+            &fx.settings.socket,
+            method::COPY,
+            push_params(&fx, id, &["PUSHED", "BOTH"]),
+        )
+        .await;
+        server.stop().await;
+
+        assert!(!wire(&pushed).contains(SENTINEL_VALUE), "{id}");
+        assert_eq!(
+            ok(pushed),
+            json!({"copied": ["PUSHED"], "failed": ["BOTH"]}),
+            "{id}"
+        );
+        let one = ("PUSHED".to_string(), SENTINEL_VALUE.to_string());
+        assert_eq!(*target.pushed.lock().unwrap(), [one], "{id}");
+        let audit = std::fs::read_to_string(&fx.settings.audit_log).unwrap();
+        assert!(!audit.contains(SENTINEL_VALUE), "{id}");
+        let all: Vec<_> = records(&fx)
+            .into_iter()
+            .filter(|r| r.method == AuditMethod::Copy)
+            .collect();
+        assert_eq!(
+            all.iter().map(shape).collect::<Vec<_>>(),
+            [
+                (
+                    AuditMethod::Copy,
+                    AuditDecision::Allow,
+                    None,
+                    Some("PUSHED")
+                ),
+                (
+                    AuditMethod::Copy,
+                    AuditDecision::Deny,
+                    Some("agent_key_denied"),
+                    Some("BOTH")
+                ),
+            ],
+            "{id}"
+        );
+        assert!(all.iter().all(|r| r.agent_parent == Some(true)), "{all:?}");
+    }
+}
+
+/// Why: #10999 Fail-Open Check — when the source's control items cannot be
+/// read, an agent's push of a push-only key and of an open key both fail
+/// before any value is read; an unreadable mark never reads as "admitted".
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_push_with_a_failed_mark_lookup_fails_every_key() {
+    for id in TARGET_IDS {
+        let fx = fixture();
+        super::copy_source_tests::seed_push_only(&fx, "PUSHED");
+        seed(&fx, "OPEN", OPEN_VALUE, true);
+        let procs = procs_with_me();
+        procs.set_agent(10);
+        let (state, _grants) = state_with(&fx, procs);
+        let (state, target, _opens) = with_fake_target(state);
+        let server = fx.start_state(state).await;
+        fx.keychain.fail_controls(true);
+        let reads = fx.keychain.reads();
+        let pushed = call(
+            &fx.settings.socket,
+            method::COPY,
+            push_params(&fx, id, &["PUSHED", "OPEN"]),
+        )
+        .await;
+        server.stop().await;
+
+        assert_eq!(
+            ok(pushed),
+            json!({"copied": [], "failed": ["PUSHED", "OPEN"]}),
+            "{id}"
+        );
+        assert!(target.pushed.lock().unwrap().is_empty(), "{id}");
+        assert_eq!(fx.keychain.reads(), reads, "no value was read: {id}");
+        let all: Vec<_> = records(&fx)
+            .into_iter()
+            .filter(|r| r.method == AuditMethod::Copy)
+            .collect();
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert!(
+            all.iter().all(|r| r.decision == AuditDecision::Deny),
+            "{all:?}"
+        );
     }
 }
 
@@ -134,7 +308,8 @@ async fn config_tracked_sync_target_section_is_refused() {
 /// A write-only target that records each pushed key and value.
 #[derive(Debug, Default)]
 pub(super) struct FakeTarget {
-    pushed: Mutex<Vec<(String, String)>>,
+    /// Each pushed key and value, in order.
+    pub(super) pushed: Mutex<Vec<(String, String)>>,
 }
 
 impl SecretBackend for FakeTarget {
@@ -301,9 +476,10 @@ async fn server_copy_from_a_sync_target_is_unsupported() {
     assert!(fx.keychain.is_empty());
 }
 
-/// Why: D3 on the console route — a bridged push is judged on the console's
-/// verdict about its HTTP client: an agent client is refused before the
-/// target opens, a person's push goes through.
+/// Why: the console route — a bridged push is judged on the console's
+/// verdict about its HTTP client. #10999: an agent client's push of a key
+/// denied to agents fails that key and sends nothing; a person's push of
+/// the same key goes through.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bridge_copy_to_sync_target_uses_the_console_verdict() {
@@ -312,7 +488,7 @@ async fn bridge_copy_to_sync_target_uses_the_console_verdict() {
     let procs = procs_with_me();
     procs.set_executable(me(), "/opt/trusty/bin/trusty-console");
     let (state, _grants) = state_with(&fx, procs);
-    let (state, target, opens) = with_fake_target(state);
+    let (state, target, _opens) = with_fake_target(state);
     let server = fx.start_state(state).await;
     let bridged = |id: &str, agent_parent: bool| {
         let mut params = push_params(&fx, id, &["API_KEY"]);
@@ -320,11 +496,10 @@ async fn bridge_copy_to_sync_target_uses_the_console_verdict() {
         call(&fx.settings.socket, "secrets.bridge.copy", params)
     };
     for id in TARGET_IDS {
-        let refused = bridged(id, true).await;
-        let data = refused.error.as_ref().and_then(|e| e.data.clone());
-        assert_eq!(data.unwrap()["kind"], "agent_use_refused", "{id}");
+        let failed = ok(bridged(id, true).await);
+        assert_eq!(failed, json!({"copied": [], "failed": ["API_KEY"]}), "{id}");
     }
-    assert_eq!(opens.load(Ordering::SeqCst), 0);
+    assert!(target.pushed.lock().unwrap().is_empty(), "nothing sent");
     for id in TARGET_IDS {
         let pushed = ok(bridged(id, false).await);
         assert_eq!(pushed, json!({"copied": ["API_KEY"], "failed": []}), "{id}");
@@ -648,6 +823,132 @@ async fn server_copy_to_sync_target_leaves_one_record_per_key_naming_the_target(
         assert_eq!(record.backend, Some(BackendId::github_actions()));
         assert_eq!(record.agent_parent, Some(false));
     }
+}
+
+/// The value-free per-key `copy` records, after asserting each names the
+/// agent caller (#10999 G).
+#[cfg(all(unix, feature = "cli-backends"))]
+fn agent_push_records(fx: &Fixture, target: BackendId) -> Vec<AuditRecord> {
+    let audit = std::fs::read_to_string(&fx.settings.audit_log).unwrap();
+    assert!(!audit.contains(SENTINEL_VALUE), "no value in the audit log");
+    let all: Vec<_> = records(fx)
+        .into_iter()
+        .filter(|r| r.method == AuditMethod::Copy)
+        .collect();
+    for record in &all {
+        assert_eq!(record.backend, Some(target.clone()));
+        assert_eq!(record.agent_parent, Some(true));
+        assert_eq!(record.caller_pid, Some(me()));
+    }
+    all
+}
+
+/// Why: #10999 — an agent's push must never hand it the value: not in the
+/// reply, the CLI's argv or environment, an error, or the audit log, even
+/// when `gh` echoes its stdin to stdout and stderr and fails. The value
+/// reaches `gh` on stdin only; a denied key's value is never read. Red while
+/// the push refuses every agent caller.
+/// Test: itself.
+#[cfg(all(unix, feature = "cli-backends"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_github_push_keeps_the_value_out_of_argv_env_reply_and_audit() {
+    let fx = fixture();
+    let shim = GhShim::new();
+    shim.echo();
+    shim.fail_push("B");
+    machine(&fx, &github_enabled(&shim, ""));
+    seed(&fx, "A", SENTINEL_VALUE, true);
+    seed(&fx, "B", SENTINEL_VALUE, true);
+    seed(&fx, "C", SENTINEL_VALUE, false);
+    let procs = procs_with_me();
+    procs.set_agent(10);
+    let (state, _grants) = state_with(&fx, procs);
+    let server = fx.start_state(state).await;
+    let pushed = call(
+        &fx.settings.socket,
+        method::COPY,
+        push_params(&fx, GITHUB, &["A", "B", "C"]),
+    )
+    .await;
+    server.stop().await;
+
+    assert!(!wire(&pushed).contains(SENTINEL_VALUE));
+    assert_eq!(ok(pushed), json!({"copied": ["A"], "failed": ["B", "C"]}));
+    assert!(!shim.calls().contains(SENTINEL_VALUE), "argv");
+    assert!(!shim.env_log().contains(SENTINEL_VALUE), "environment");
+    assert_eq!(shim.stdin("A").as_deref(), Some(SENTINEL_VALUE));
+    assert_eq!(shim.stdin("C"), None, "a denied key is never sent");
+    let all = agent_push_records(&fx, BackendId::github_actions());
+    let shapes: Vec<_> = all.iter().map(shape).collect();
+    assert_eq!(
+        shapes,
+        [
+            (AuditMethod::Copy, AuditDecision::Allow, None, Some("A")),
+            (
+                AuditMethod::Copy,
+                AuditDecision::Deny,
+                Some("backend_failed"),
+                Some("B")
+            ),
+            (
+                AuditMethod::Copy,
+                AuditDecision::Deny,
+                Some("agent_key_denied"),
+                Some("C")
+            ),
+        ]
+    );
+}
+
+/// Why: #10999 for Vercel — as the GitHub case: an agent pushes an open
+/// key with the value on `vercel env add`'s stdin only, a denied key is
+/// never sent, and no value reaches argv, the environment, the reply or the
+/// audit log, though the CLI echoes its stdin. Red while the push refuses
+/// every agent caller.
+/// Test: itself.
+#[cfg(all(unix, feature = "cli-backends"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_vercel_push_keeps_the_value_out_of_argv_env_reply_and_audit() {
+    let fx = fixture();
+    let shim = VercelShim::new();
+    shim.echo();
+    machine(&fx, &vercel_enabled(&shim, "acme/web"));
+    seed(&fx, "A", SENTINEL_VALUE, true);
+    seed(&fx, "C", SENTINEL_VALUE, false);
+    let procs = procs_with_me();
+    procs.set_agent(10);
+    let (state, _grants) = state_with(&fx, procs);
+    let server = fx.start_state(state).await;
+    let pushed = call(
+        &fx.settings.socket,
+        method::COPY,
+        push_params(&fx, VERCEL, &["A", "C"]),
+    )
+    .await;
+    server.stop().await;
+
+    assert!(!wire(&pushed).contains(SENTINEL_VALUE));
+    assert_eq!(ok(pushed), json!({"copied": ["A"], "failed": ["C"]}));
+    assert!(!shim.calls().contains(SENTINEL_VALUE), "argv");
+    assert!(!shim.env_log().contains(SENTINEL_VALUE), "environment");
+    for target in ["production", "preview"] {
+        assert_eq!(shim.stdin("A", target).as_deref(), Some(SENTINEL_VALUE));
+        assert_eq!(shim.stdin("C", target), None, "a denied key is never sent");
+    }
+    let all = agent_push_records(&fx, BackendId::vercel());
+    let shapes: Vec<_> = all.iter().map(shape).collect();
+    assert_eq!(
+        shapes,
+        [
+            (AuditMethod::Copy, AuditDecision::Allow, None, Some("A")),
+            (
+                AuditMethod::Copy,
+                AuditDecision::Deny,
+                Some("agent_key_denied"),
+                Some("C")
+            ),
+        ]
+    );
 }
 
 /// Why: §3.1 item 7, D15 — doctor lists the GitHub sync target from the
