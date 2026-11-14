@@ -295,6 +295,25 @@ broken locally at `1f732b6d5`, while CI's `Rustdoc intra-doc links` job on the
 same SHA reported 2 broken, both introduced on `main` by #7603 after the PR's
 merge-base, in `trusty-mpm`'s `guided.rs`.
 
+## An Architect-bundle PR must contain main's tip (#11120)
+
+🔴 **`Architect bundle PR is current with main`** (`bundle-pr-current.yml`)
+fails a PR that changes an Architect bundle file while its head does not
+contain main's tip. Two bundle PRs from one base merge their regenerated
+`provenance.json` and `seed_history.tsv` into bytes neither generated; #11236
+and #11191 turned `main` red that way. Owner ruling 2026-11-14.
+
+- The bundle path list and the remedy commands are in
+  `scripts/check_bundle_pr_current.sh`; its selftest is
+  `scripts/check_bundle_pr_current_selftest.sh`.
+- It judges the PR head SHA against a freshly fetched `origin/main`, never the
+  merge commit, which always contains `main`.
+- No `paths:` filter and no job-level `if:`, so it reports on every PR. A PR
+  that changes no bundle file passes at once.
+- For bundle PRs this overrides "a `BEHIND` branch merges fine" below.
+- It runs when the PR changes, not when `main` moves. Re-run it after another
+  bundle PR merges.
+
 ## Merge states, and what each one means
 
 - 🟡 **A `BEHIND` branch merges fine** — use `gh pr merge --squash

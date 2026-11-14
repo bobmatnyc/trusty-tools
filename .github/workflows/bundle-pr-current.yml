@@ -1,0 +1,68 @@
+# Architect-bundle PRs must be current with main (issue #11120; owner ruling
+# 2026-11-14, "Narrow gate: bundle PRs must be current with main").
+#
+# Two PRs that each regenerate the bundle's provenance.json and seed_history.tsv
+# are each green on their own base; merged one after the other, main goes red
+# (#11236 + #11191, repaired by #11246). This job fails a PR that changes an
+# Architect bundle file while its head does not contain main's tip. The bundle
+# path list and the remedy text live in scripts/check_bundle_pr_current.sh.
+#
+# Required-context safe: no `paths:` filter and no job-level `if:` (#5311), so
+# the job reports a conclusion on every PR; the script decides from the diff
+# and passes a PR that changes no bundle file. pull_request only, so no push
+# trigger and no red-main-notify entry (scripts/check-red-main-coverage.sh).
+#
+# Limitation: it runs when the PR changes, not when main moves. A PR that was
+# current when it ran can fall behind before merge; a re-run re-evaluates it.
+name: Architect bundle PR is current
+
+on:
+  pull_request:
+    # Explicit activity types (#4179). `edited` is the event a base-branch
+    # RETARGET fires; `ready_for_review` covers a draft being marked ready.
+    # Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundle-pr-current-${{ github.ref }}
+  cancel-in-progress: ${{ github.event.action != 'edited' && github.event.action != 'ready_for_review' }}
+
+jobs:
+  bundle-pr-current:
+    name: Architect bundle PR is current with main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 — the gate needs the merge base of main and the PR head
+      # and the ancestry between them, which a shallow checkout cannot answer.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Gate selftest (must refuse a bundle PR behind main)
+        run: bash scripts/check_bundle_pr_current_selftest.sh
+
+      # Judge the PR HEAD, never the refs/pull/N/merge commit checkout made
+      # (that commit always contains main), against main's tip as it is now,
+      # not the base.sha frozen at the event (#4688).
+      - name: Refresh main and the PR head
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null \
+            || git fetch --no-tags --quiet origin "${HEAD_SHA}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}" "${HEAD_SHA}^{commit}"
+
+      - name: A PR that changes the Architect bundle contains main's tip
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check_bundle_pr_current.sh --head "${HEAD_SHA}" --base "origin/${BASE_REF}"
