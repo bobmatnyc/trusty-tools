@@ -74,16 +74,39 @@ fn session(id: &str, dir: &Path, kind: Option<SessionKind>, state: &str) -> DirS
     }
 }
 
+/// #11238: a post-prompt re-read with an injected answer.
+struct Reread(Result<Vec<DirSession>, String>);
+
+impl SessionSource for Reread {
+    fn sessions(&self) -> Result<Vec<DirSession>, String> {
+        self.0.clone()
+    }
+}
+
+/// The plan's list; the post-prompt re-read answers the same list.
 fn input<'a>(
     sessions: &'a [DirSession],
     root: &'a Path,
     arch: &'a [PathBuf],
+) -> DirDeleteInput<'a> {
+    // Leaked: a test-only `'a` home for the unchanged re-read.
+    let unchanged: &'a Reread = Box::leak(Box::new(Reread(Ok(sessions.to_vec()))));
+    input_rereading(sessions, root, arch, unchanged)
+}
+
+/// The plan's list, and `recheck` as the post-prompt re-read (#11238).
+fn input_rereading<'a>(
+    sessions: &'a [DirSession],
+    root: &'a Path,
+    arch: &'a [PathBuf],
+    recheck: &'a dyn SessionSource,
 ) -> DirDeleteInput<'a> {
     DirDeleteInput {
         session_id: "s1",
         sessions,
         root,
         architect_dirs: arch,
+        recheck,
     }
 }
 
@@ -121,9 +144,14 @@ fn a_path_outside_the_root_is_never_removed() {
         task: None,
     };
     let probes = FakeProbes::default();
-    let err =
-        DirDeleteCapability::acquire(&forged, &Confirmation::Yes, &FakeAuth::granted(), &probes)
-            .expect_err("forged plan");
+    let err = DirDeleteCapability::acquire(
+        &forged,
+        input(&sessions, &fx.repos_root, &[]),
+        &Confirmation::Yes,
+        &FakeAuth::granted(),
+        &probes,
+    )
+    .expect_err("forged plan");
     assert!(matches!(err, DirDeleteError::Uncontained { .. }), "{err}");
     assert!(
         out.join("keep.txt").exists(),
@@ -534,6 +562,80 @@ fn a_confirmed_present_delete_removes_a_clean_pushed_checkout() {
         fx.repos_root.join("owner").exists(),
         "only the session's directory goes"
     );
+}
+
+// ---- #11238: the session guards run again after the prompt ----------------
+
+/// A delete of `fx.repo` whose plan sees only the stopped target and whose
+/// post-prompt re-read answers `reread`.
+fn delete_with_reread(
+    fx: &GitWorktreeFixture,
+    reread: Result<Vec<DirSession>, String>,
+) -> Result<DirDeleteReport, DirDeleteError> {
+    let sessions = [session(
+        "s1",
+        &fx.repo,
+        Some(SessionKind::Ordinary),
+        "stopped",
+    )];
+    let recheck = Reread(reread);
+    run_dir_delete(
+        input_rereading(&sessions, &fx.repos_root, &[], &recheck),
+        DirDeleteOptions::default(),
+        &mut yes,
+        &FakeAuth::granted(),
+        &OsProbes,
+    )
+}
+
+#[test]
+fn a_session_spawned_during_the_prompt_refuses_the_delete() {
+    let fx = GitWorktreeFixture::new();
+    let target = session("s1", &fx.repo, Some(SessionKind::Ordinary), "stopped");
+    let mut spawned = session("s2", &fx.repo, Some(SessionKind::Ordinary), "active");
+    spawned.workspace = None;
+    spawned.cwd = Some(fx.repo.clone());
+    let err = delete_with_reread(&fx, Ok(vec![target.clone(), spawned]))
+        .expect_err("a session spawned into the target during the prompt must refuse");
+    assert!(
+        matches!(&err, DirDeleteError::Running { running, .. } if running == &["tm-s2".to_string()]),
+        "{err}"
+    );
+    assert!(
+        fx.repo.join("README.md").exists(),
+        "the directory was removed"
+    );
+    // A session already listed whose kind turned protected also refuses.
+    let mut turned = session("s3", &fx.repo, Some(SessionKind::Architect), "stopped");
+    turned.workspace = Some(fx.repo.join("nested"));
+    let err = delete_with_reread(&fx, Ok(vec![target, turned]))
+        .expect_err("a protected occupant at the re-read must refuse");
+    assert!(matches!(err, DirDeleteError::Protected(_)), "{err}");
+    assert!(fx.repo.exists(), "the directory was removed");
+}
+
+#[test]
+fn a_failed_session_reread_refuses_the_delete() {
+    let fx = GitWorktreeFixture::new();
+    let err = delete_with_reread(&fx, Err("daemon unreachable".into()))
+        .expect_err("an unreadable session list must refuse");
+    let text = err.to_string();
+    assert!(
+        text.contains("could not be re-checked") && text.contains("daemon unreachable"),
+        "{text}"
+    );
+    assert!(
+        fx.repo.join("README.md").exists(),
+        "the directory was removed"
+    );
+}
+
+#[test]
+fn an_unchanged_session_list_at_the_reread_still_deletes() {
+    let fx = GitWorktreeFixture::new();
+    let target = session("s1", &fx.repo, Some(SessionKind::Ordinary), "stopped");
+    let report = delete_with_reread(&fx, Ok(vec![target])).expect("delete");
+    assert!(report.removed && !fx.repo.exists());
 }
 
 // ---- critic MEDIUM: a partial removal says so ------------------------------

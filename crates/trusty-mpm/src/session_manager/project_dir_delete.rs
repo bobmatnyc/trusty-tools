@@ -309,8 +309,20 @@ pub struct DirDeleteReport {
     pub removed: bool,
 }
 
+/// Where the session list is read again after the prompt (#11238).
+///
+/// Why: the prompt can stay open indefinitely, and a session spawned into the
+/// target meanwhile is absent from the list the plan checked.
+/// What: `Err(reason)` when the list cannot be read; the delete then refuses.
+/// Test: `a_session_spawned_during_the_prompt_refuses_the_delete`,
+/// `a_failed_session_reread_refuses_the_delete`.
+pub trait SessionSource {
+    /// The current session list, or why it could not be read.
+    fn sessions(&self) -> Result<Vec<DirSession>, String>;
+}
+
 /// The inputs every delete reads (#10992).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct DirDeleteInput<'a> {
     /// The session whose directory goes.
     pub session_id: &'a str,
@@ -320,6 +332,19 @@ pub struct DirDeleteInput<'a> {
     pub root: &'a Path,
     /// Recorded Architect directories, never deleted.
     pub architect_dirs: &'a [PathBuf],
+    /// #11238: the session list, read again after the prompt.
+    pub recheck: &'a dyn SessionSource,
+}
+
+impl std::fmt::Debug for DirDeleteInput<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirDeleteInput")
+            .field("session_id", &self.session_id)
+            .field("sessions", &self.sessions)
+            .field("root", &self.root)
+            .field("architect_dirs", &self.architect_dirs)
+            .finish_non_exhaustive()
+    }
 }
 
 fn uncontained(path: &Path, root: &Path, reason: impl Into<String>) -> DirDeleteError {
@@ -534,6 +559,7 @@ impl DirDeleteCapability {
     /// prompt, so work made while the user typed still refuses.
     pub fn acquire(
         plan: &DirDeletePlan,
+        _input: DirDeleteInput<'_>,
         confirm: &Confirmation,
         auth: &dyn Authenticator,
         probes: &dyn DirProbes,
@@ -604,7 +630,7 @@ pub fn run_dir_delete(
         });
     }
     let answer = confirm(&plan);
-    DirDeleteCapability::acquire(&plan, &answer, auth, probes)?.remove()?;
+    DirDeleteCapability::acquire(&plan, input, &answer, auth, probes)?.remove()?;
     Ok(DirDeleteReport {
         dry_run: false,
         plan,
