@@ -1,0 +1,2 @@
+Added
+- `memory.palace_unload {palace_id}`, a socket method (not an MCP tool) that releases one palace's open handles and caches and keeps its data on disk (#10989). It waits up to 10 s for an in-flight write, flushes the palace's BM25 index, drops its session store and registry handle, and answers `{palace_id, canonical_id, exists, was_resident, unloaded, data_kept}`. A busy palace is refused (`-32006`) and nothing is released; a palace not on disk answers `exists: false`. The next use reopens the palace from disk. tm's project decommission calls it.

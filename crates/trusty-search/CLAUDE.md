@@ -260,7 +260,7 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
 
 - **Schema 1.** `[[projects]] {key, index_id, root_path, pinned_by =
   migration|create|operator, pinned_unix}` and `[[parked]] {index_id, key,
-  root_path, reason = worktree|orphaned|operator, parked_unix}`. `key` is the
+  root_path, reason = worktree|orphaned|operator|decommissioned, parked_unix}`. `key` is the
   resolver's group key: the repo identity, or `root:<path>` for a
   subdirectory index.
 - **Migration.** The first boot with no map pins every group to the index
@@ -289,6 +289,13 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   `data.error = "park_refused"`. A parked index keeps its corpus and its
   `indexes.toml` row; it is unloaded and is not warm-loaded, watched,
   reindexed, or searched by `search.query.all`.
+- `search.project.park {index_id, decommission: true}` (#10989) is tm's
+  project decommission. Any registered index parks, a main checkout and the
+  group's live index included, with `reason = decommissioned`. If the unload
+  is refused (a reindex runs), the park is rolled back (row removed, dropped
+  pins restored) and the call fails `-32009` with
+  `data.error = "park_unload_refused"` and `data.rolled_back`. Unpark
+  reloads it as for any park.
 - `search.project.unpark {index_id}` → `{index_id, unparked, reindex_queued,
   reindex | reindex_error}`: clears the row, reloads the index, queues a
   reindex.
