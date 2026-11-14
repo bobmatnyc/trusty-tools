@@ -757,7 +757,7 @@ const LANDING_BASE_LIMIT: usize = 4;
 /// an unanswerable patch comparison must never lower it.
 /// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`,
 /// `inspect_dirt_still_reports_a_genuinely_unpushed_commit_beside_a_squashed_one`.
-fn count_unlanded(
+pub(crate) fn count_unlanded(
     path: &Path,
     count_args: &[&str],
     list_args: &[&str],

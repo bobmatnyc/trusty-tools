@@ -20,7 +20,9 @@
 //! Architect's or of an unreported kind; no session in it is running; it has
 //! no dirty or unpushed work (`worktree_safety::inspect_dirt_excusing`, which
 //! excuses only what `decommission --force` excuses: `is_provisioning_entry`,
-//! #7660); no live
+//! #7660); a main checkout's `.git` holds no unpushed commit on any local
+//! branch and no stash (`work_outside_head`); no gitignored file that is not
+//! build output (`ignored_output_refusal`, #8534); no live
 //! process stands in it (`worktree_liveness::process_holding`). That probe
 //! sees each process's current working directory only, not open files: a
 //! process holding a file inside the tree with its cwd elsewhere is not seen.
@@ -33,10 +35,12 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::architect::{ProtectedVerb, refusal};
-use super::decommission_force::is_provisioning_entry;
+use super::decommission_force::{WorktreeKind, is_provisioning_entry, worktree_kind};
 use super::record::ManagedSessionState;
 use super::session_kind::SessionKind;
 use super::workspace_guard::is_safe_to_remove;
+use super::worktree_ignored_output::ignored_output_refusal;
+use super::worktree_safety::{count_unlanded, git_stdout};
 use crate::client::ManagedSessionSummary;
 use crate::core::presence_local::{Authenticator, PresenceOutcome};
 
@@ -317,14 +321,67 @@ pub fn contained_dir(dir: &Path, root: &Path) -> Result<PathBuf, DirDeleteError>
     fs::canonicalize(dir).map_err(|e| uncontained(dir, root, format!("cannot resolve it: {e}")))
 }
 
+/// Why `dir`'s own repository holds work outside `HEAD`, or `None` (#10992).
+///
+/// Why: in a main checkout `.git` sits inside the removed tree, so every
+/// local branch and the stash go with it, and the dirt check counts only
+/// `HEAD` and `session/<leaf>`. What: for a main checkout
+/// ([`worktree_kind`]), the commits on any local branch reachable from no
+/// remote, less those whose patch already landed ([`count_unlanded`],
+/// #6507), plus a non-empty `refs/stash`. A linked worktree's branches live
+/// in its common dir outside the tree; a directory with no `.git` has none.
+/// Every probe failure refuses.
+/// Test: `an_unpushed_commit_on_another_branch_refuses`, `a_stash_refuses`,
+/// `a_failed_branch_probe_refuses`.
+fn work_outside_head(dir: &Path) -> Option<String> {
+    let failed = |e: String| Some(format!("the branch and stash check failed: {e}"));
+    match fs::symlink_metadata(dir.join(".git")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return failed(format!("cannot stat `.git`: {e}")),
+        Ok(_) => {}
+    }
+    match worktree_kind(dir) {
+        Ok(WorktreeKind::Linked(_)) => return None,
+        Ok(WorktreeKind::MainCheckout) => {}
+        Err(e) => return failed(e),
+    }
+    let probe = || -> Result<(usize, bool), String> {
+        let heads = git_stdout(dir, &["for-each-ref", "--format=%(refname)", "refs/heads"])?;
+        let tips: Vec<&str> = heads.split_whitespace().collect();
+        let unpushed = if tips.is_empty() {
+            0
+        } else {
+            let count = ["rev-list", "--count", "--branches", "--not", "--remotes"];
+            let list = ["rev-list", "--branches", "--not", "--remotes"];
+            count_unlanded(dir, &count, &list, &tips)?
+        };
+        let stash = git_stdout(dir, &["for-each-ref", "--format=%(refname)", "refs/stash"])?;
+        Ok((unpushed, !stash.trim().is_empty()))
+    };
+    match probe() {
+        Err(e) => failed(e),
+        Ok((0, false)) => None,
+        Ok((unpushed, stash)) => Some(format!(
+            "its `.git` holds {unpushed} unpushed commit(s) on local branches and {} stash; \
+             deleting the directory deletes them",
+            if stash { "a" } else { "no" }
+        )),
+    }
+}
+
 /// The disk guards, run at plan time and again just before removal.
 fn disk_guards(
     dir: &Path,
     task: Option<&str>,
     probes: &dyn DirProbes,
 ) -> Result<(), DirDeleteError> {
-    // #10992: an unanswerable dirt check is dirt, never clean.
-    if let Some(reason) = probes.dirt(dir, task) {
+    // #10992: an unanswerable dirt check is dirt, never clean. The two checks
+    // after it (critic HIGH 1, HIGH 2) refuse the same way.
+    let dirt = probes
+        .dirt(dir, task)
+        .or_else(|| work_outside_head(dir))
+        .or_else(|| ignored_output_refusal(dir));
+    if let Some(reason) = dirt {
         return Err(DirDeleteError::Dirty {
             path: dir.to_path_buf(),
             reason,
