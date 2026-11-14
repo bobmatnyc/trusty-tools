@@ -3,9 +3,14 @@
 // #2936: one `pid_alive` for the crate. This file used to carry a byte-identical
 // private copy of `service::daemon::pid_alive`; adding a third caller in
 // `core::store::staging_reap` would have made that two copies to keep in step.
+// #11085: Linux runs `commands::linux_lifecycle::stop` instead.
+#[cfg(not(target_os = "linux"))]
 use crate::service::daemon::pid_alive;
+#[cfg(not(target_os = "linux"))]
 use anyhow::{bail, Result};
+#[cfg(not(target_os = "linux"))]
 use colored::Colorize;
+#[cfg(not(target_os = "linux"))]
 use std::time::{Duration, Instant};
 
 /// Why: extracted from `main()`. Stopping involves PID-file lookup, SIGTERM,
@@ -28,6 +33,7 @@ use std::time::{Duration, Instant};
 /// Test: with a running daemon → "Daemon stopped" within the grace window. Spawn
 /// two `trusty-search start` instances; stop must reap both.
 /// `stop_window_covers_the_flush_floor` pins the window against the flush floor.
+#[cfg(not(target_os = "linux"))]
 pub async fn handle_stop() -> Result<()> {
     // The daemon writes its PID into the fs4 lockfile at startup
     // (see trusty-search-service/src/daemon.rs). Read the PID, send
@@ -196,6 +202,7 @@ fn launchd_restart_notice(agent_loaded: bool) -> Option<String> {
 /// or grep'ing scripts that mention the string.
 /// Test: in a process tree with two `trusty-search` daemons, returns both;
 /// in a tree with only the calling CLI, returns empty.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn find_daemon_pids() -> Vec<u32> {
     use sysinfo::{ProcessRefreshKind, RefreshKind, System};
     let mut sys = System::new_with_specifics(
@@ -226,7 +233,8 @@ pub(crate) fn find_daemon_pids() -> Vec<u32> {
     out
 }
 
-#[cfg(unix)]
+// #11085: Linux stops through `linux_lifecycle`; only macOS signals by pid.
+#[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) fn send_signal(pid: u32, sig: &str) -> std::io::Result<()> {
     let status = std::process::Command::new("kill")
         .arg(format!("-{sig}"))
