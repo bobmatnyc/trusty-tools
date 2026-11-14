@@ -247,7 +247,9 @@ fn inference_error_class(error: &InferenceError) -> &'static str {
         InferenceError::Deserialise { .. } => "deserialise",
         InferenceError::MissingCredential { .. } => "missing_credential",
         InferenceError::NoAdapterRegistered { .. } => "no_adapter_registered",
-        InferenceError::Provider(_) => "provider",
+        // #10892: a typed Bedrock send failure keeps the label it had as
+        // `Provider`, so a dashboard grouping by it sees no change.
+        InferenceError::Provider(_) | InferenceError::Bedrock(_) => "provider",
         InferenceError::Unsupported(_) => "unsupported",
         // #5588: distinct from `unsupported` — this one names a provider whose
         // registry capabilities cannot serve the request, so an operator
