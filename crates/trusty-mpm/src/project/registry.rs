@@ -168,8 +168,11 @@ impl ProjectRegistry {
                     return Ok(Some(kept.clone()));
                 }
                 // No record holds `key` (checked above), so the key is unique.
-                let key = key
-                    .unwrap_or_else(|| super::project_key::assign_project_key(&project.repo_url));
+                // #10604: an unresolvable `~` checkout is refused, not keyed `local:`.
+                let key = match key {
+                    Some(key) => key,
+                    None => super::project_key::assign_project_key(&project.repo_url)?,
+                };
                 project.project_key = Some(key);
                 projects.insert(project.name.clone(), project);
                 Ok(None)
@@ -486,9 +489,7 @@ impl ExistingProjects {
             existing.names.insert(p.name.clone());
             existing.origin_urls.insert(p.repo_url.trim().to_string());
             // #10696: a legacy record carries no key; derive one from its URL.
-            if let Some(key) = p.project_key.clone().or_else(|| origin_key(&p.repo_url)) {
-                existing.origin_keys.insert(key);
-            }
+            existing.origin_keys.extend(held_keys(p));
         }
         existing
     }
@@ -510,12 +511,35 @@ impl ExistingProjects {
 pub(super) fn holds_registration(p: &Project, project: &Project, key: Option<&str>) -> bool {
     p.name == project.name
         || p.repo_url == project.repo_url
-        || (key.is_some()
-            && p.project_key
-                .clone()
-                .or_else(|| origin_key(&p.repo_url))
-                .as_deref()
-                == key)
+        || key.is_some_and(|key| held_keys(p).iter().any(|held| held == key))
+}
+
+/// The `owner/repo` keys stored row `p` answers to.
+///
+/// Why: #10604 — a `~` row minted before the fix stores the key a URL parse of
+/// `~/…` gave (`trusty-mpm-projects/trusty-tools`). Stored keys are not
+/// migrated (owner decision, 2026-11-02), so the row must also match on the
+/// key its checkout's origin gives now, or registering the same checkout by
+/// its GitHub URL adds a second record.
+/// What: the stored key, else [`origin_key`]; plus, for a `~`-spelled
+/// `repo_url` only, [`super::project_key_from_repo_url`] of it — one `git`
+/// per such row, never per absolute-path row (#10696).
+/// Test: `register_unless_present_keeps_an_old_tilde_keyed_record_10604`,
+/// `session_start_in_an_old_tilde_record_checkout_is_the_same_repo_10604`.
+pub(super) fn held_keys(p: &Project) -> Vec<String> {
+    let mut keys: Vec<String> = p
+        .project_key
+        .clone()
+        .or_else(|| origin_key(&p.repo_url))
+        .into_iter()
+        .collect();
+    if super::project_key::is_home_spelling(&p.repo_url)
+        && let Some(current) = super::project_key_from_repo_url(&p.repo_url)
+        && !keys.contains(&current)
+    {
+        keys.push(current);
+    }
+    keys
 }
 
 /// The `owner/repo` key of a remote URL, or `None` for a checkout path.
@@ -523,10 +547,11 @@ pub(super) fn holds_registration(p: &Project, project: &Project, key: Option<&st
 /// Why: #10696 — this pass runs on every session spawn; a path-form `repo_url`
 /// would make [`super::project_key_from_repo_url`] spawn `git` per record.
 /// A path still matches verbatim through `origin_urls`.
-/// What: `None` for an absolute path, else [`super::project_key_from_repo_url`].
+/// What: `None` for a path spelling (`/…` or `~…`, #10604), else
+/// [`super::project_key_from_repo_url`].
 /// Test: `implicit_registration_registers_a_different_origin`.
 fn origin_key(repo_url: &str) -> Option<String> {
-    if repo_url.trim().starts_with('/') {
+    if super::project_key::is_path_spelling(repo_url) {
         return None;
     }
     super::project_key_from_repo_url(repo_url)
