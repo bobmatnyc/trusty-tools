@@ -276,19 +276,15 @@ $("cancel-code").addEventListener("click", () => codeGrant && revoke({type:"revo
 $("new-code").addEventListener("click", () => show("choose"));
 $("disconnect-all").addEventListener("click", () => revoke({type:"revoke_grants"}));
 $("retry").addEventListener("click", () => loadAccess());
-$("pair").addEventListener("click", () => {
-  // The service worker has no user gesture, so the Activate click itself asks for all-https access.
-  const permission = askHttps();
+// #11239: contract "All-https access" — Activate sends `pair` only; the mint click asks for https://*/*.
+$("pair").addEventListener("click", async () => {
   $("pair").disabled = true;
   statusLine.textContent = "";
-  void (async () => {
-    try {
-      await permission;
-      await request({type:"pair"});
-      await loadAccess();
-    } catch (error) { statusLine.textContent = errorMessage(error); }
-    finally { $("pair").disabled = false; }
-  })();
+  try {
+    await request({type:"pair"});
+    await loadAccess();
+  } catch (error) { statusLine.textContent = errorMessage(error); }
+  finally { $("pair").disabled = false; }
 });
 $("unpair").addEventListener("click", async () => {
   $("unpair").disabled = true;

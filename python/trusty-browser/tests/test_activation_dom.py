@@ -150,7 +150,7 @@ PAIR_POPUP = """
     let paired = false, held = false;
     window.chrome = {
       tabs:{query:async () => [{id:42}]},
-      permissions:{request:async () => { window.calls.push('permission'); held = true; return true; },
+      permissions:{request:async p => { window.calls.push({permission:p.origins}); held = true; return true; },
         contains:async () => held},
       runtime:{sendMessage:async m => {
         window.calls.push(m.type);
@@ -160,11 +160,16 @@ PAIR_POPUP = """
         if (m.type === 'pair') { paired = true; return {ok:true,profile:'p'}; }
         if (m.type === 'unpair') { paired = false; held = false; return {ok:true,profile:'p'}; }
         if (m.type === 'grants') return {ok:true,grants:[]};
+        if (m.type === 'revoke_grant') return {ok:true,revoked:1};
         if (m.type === 'mint') return {ok:true,code:'tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA',grant:'g-0000000000bb',
           scope:m.scope,profile:'p',tab:m.tab,expires_at:Date.now() / 1000 + 300};
         throw Error('unexpected request ' + m.type);
       }}};
 """
+
+
+def permission_requests(page):
+    return [c["permission"] for c in page.evaluate("window.calls") if isinstance(c, dict) and "permission" in c]
 
 
 def test_pairing_popup_activates_mints_and_disconnects_a_profile():
@@ -181,16 +186,26 @@ def test_pairing_popup_activates_mints_and_disconnects_a_profile():
             page.get_by_role("button", name="Activate", exact=True).click()
             page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 2")
             calls = page.evaluate("window.calls")
-            assert calls.index("permission") < calls.index("pair") < calls.index("code_preview", 1)
+            # Contract "All-https access": the Activate click sends `pair` only and requests nothing.
+            assert calls.index("pair") < calls.index("code_preview", 1)
+            assert permission_requests(page) == []
             expect(page.get_by_role("button", name="Give access to this tab")).to_be_enabled()
             expect(page.locator("#unpaired")).to_be_hidden()
             for workflow_control in ("#activate", "#details", "#transfer"):
                 expect(page.locator(workflow_control)).to_be_hidden()
             expect(page.locator("#paired-email")).to_have_text("qa@example.test")
-            # The permission is held now, so the mint click does not ask again.
+            # The first mint click asks for all-https access once, before it sends `mint`.
             page.get_by_role("button", name="Give access to this tab").click()
             expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
-            assert page.evaluate("window.calls").count("permission") == 1
+            calls = page.evaluate("window.calls")
+            assert permission_requests(page) == [["https://*/*"]]
+            assert calls.index({"permission": ["https://*/*"]}) < calls.index("mint")
+            # The permission is held now, so a second mint click mints without asking again.
+            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 3")
+            page.get_by_role("button", name="Cancel code").click()
+            page.get_by_role("button", name="Give access to this tab").click()
+            page.wait_for_function("window.calls.filter(c => c === 'mint').length === 2")
+            assert permission_requests(page) == [["https://*/*"]]
             page.get_by_role("button", name="Disconnect this profile").click()
             expect(page.get_by_text("Activate Trusty Browser in this profile", exact=True)).to_be_visible()
             expect(page.locator("#access")).to_be_hidden()

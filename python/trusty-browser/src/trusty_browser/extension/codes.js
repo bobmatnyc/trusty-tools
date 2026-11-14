@@ -118,10 +118,11 @@ globalThis.TrustyCodes = deps => {
     const {scope} = msg;
     if (!["tab","profile"].includes(scope) || (scope === "tab") !== Object.hasOwn(msg, "tab") ||
         (scope === "tab" && !tabId(msg.tab))) throw new Error("InvalidMint");
-    if (scope === "tab" && !(await pageOps().probe(msg.tab)).access) throw new Error("PermissionNeeded");
     minting++;
     let reply;
     try {
+      // #11239: the probe counts as in flight, so no sweep drops the permission this click just granted.
+      if (scope === "tab" && !(await pageOps().probe(msg.tab)).access) throw new Error("PermissionNeeded");
       reply = await bootstrap({op:"mint", ...cred, scope, ...(scope === "tab" ? {tab:msg.tab} : {})});
       const {code, grant, expires_at} = reply;
       if (typeof grant !== "string" || !/^g-[0-9a-f]{1,64}$/.test(grant)) throw new Error("Invalid mint reply");
