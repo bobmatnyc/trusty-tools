@@ -40,7 +40,9 @@ use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{ServiceAction, handle_service};
 use trusty_memory::commands::setup::{handle_setup, handle_setup_gui_client};
 use trusty_memory::commands::upgrade::handle_upgrade;
-// #11085: Linux dispatches `start` / `stop` to `commands::linux_lifecycle`.
+// #11085: on Linux `start` / `stop` run on trusty_common::linux_lifecycle.
+#[cfg(target_os = "linux")]
+use trusty_memory::commands::linux_lifecycle::{start as handle_start, stop as handle_stop};
 #[cfg(not(target_os = "linux"))]
 use trusty_memory::commands::{start::handle_start, stop::handle_stop};
 use trusty_memory::{resolve_palace_registry_dir, serve};
@@ -739,17 +741,10 @@ async fn run() -> Result<()> {
     }
 
     match cli.command {
-        // #11085: Linux runs the verbs on trusty_common::linux_lifecycle.
-        #[cfg(target_os = "linux")]
-        Command::Start => trusty_memory::commands::linux_lifecycle::start().await,
-        #[cfg(target_os = "linux")]
-        Command::Stop => trusty_memory::commands::linux_lifecycle::stop().await,
+        Command::Start => handle_start().await,
+        Command::Stop => handle_stop().await,
         #[cfg(target_os = "linux")]
         Command::Restart => trusty_memory::commands::linux_lifecycle::restart().await,
-        #[cfg(not(target_os = "linux"))]
-        Command::Start => handle_start().await,
-        #[cfg(not(target_os = "linux"))]
-        Command::Stop => handle_stop().await,
         Command::Serve {
             http,
             foreground,
@@ -883,16 +878,8 @@ async fn run() -> Result<()> {
 async fn run_monitor(target: MonitorTarget) -> Result<()> {
     use trusty_memory::commands::monitor;
     match target {
-        MonitorTarget::Web => {
-            eprintln!(
-                "trusty-memory no longer serves a browser dashboard: ADR-0032 leaves \
-                 trusty-console as the only HTTP surface, and the memory dashboard \
-                 mounts there.\n\
-                 Run `trusty-console` and open its memory page, or use \
-                 `trusty-memory monitor tui` for the terminal dashboard."
-            );
-            Ok(())
-        }
+        // #11085: the notice moved to `monitor` to keep main.rs under the cap.
+        MonitorTarget::Web => monitor::print_web_retired(),
         MonitorTarget::Tui => trusty_common::monitor::memory_tui::run().await,
         MonitorTarget::Status { json } => monitor::handle_status(json).await,
         MonitorTarget::Palaces { id, json } => monitor::handle_palaces(id, json).await,

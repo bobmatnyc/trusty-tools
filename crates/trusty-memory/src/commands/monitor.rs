@@ -69,6 +69,20 @@ async fn fetch_memory_data() -> Result<MemoryData> {
     })
 }
 
+/// `monitor web`: print where the dashboard went; opens nothing (#6286).
+///
+/// Moved here from `main.rs` unchanged (#11085, line cap).
+pub fn print_web_retired() -> Result<()> {
+    eprintln!(
+        "trusty-memory no longer serves a browser dashboard: ADR-0032 leaves \
+         trusty-console as the only HTTP surface, and the memory dashboard \
+         mounts there.\n\
+         Run `trusty-console` and open its memory page, or use \
+         `trusty-memory monitor tui` for the terminal dashboard."
+    );
+    Ok(())
+}
+
 /// Print daemon status: version and aggregate palace/drawer/vector counts.
 ///
 /// Why: the quickest scriptable health check — "is the daemon up and how big
