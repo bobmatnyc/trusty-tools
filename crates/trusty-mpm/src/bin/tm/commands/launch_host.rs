@@ -131,6 +131,27 @@ impl LaunchHost {
         Ok(())
     }
 
+    /// Refuse an Architect `spec` when session `name` is already running here.
+    ///
+    /// Why (#11270): `create` attaches to a running session and the launch
+    /// typed into it could not be bound, so the Architect ran unbound.
+    /// What: [`Self::has_session`], then
+    /// [`trusty_mpm::runtime::architect_bind::refuse_reused`] for the spec's
+    /// stamp; `Ok` for a fresh session or a non-Architect spec.
+    /// Test: `every_reused_session_arm_refuses_an_architect_before_typing_11270`
+    /// (order), `an_architect_launch_into_a_running_session_is_refused_11270`.
+    pub(crate) fn refuse_running_architect(
+        &self,
+        name: &str,
+        spec: &trusty_mpm::runtime::launch_spec::LaunchSpec,
+    ) -> anyhow::Result<()> {
+        use trusty_mpm::runtime::architect_bind::{refuse_reused, spec_is_architect};
+        if !self.has_session(name) {
+            return Ok(());
+        }
+        refuse_reused(spec_is_architect(spec), name).map_err(anyhow::Error::msg)
+    }
+
     /// Whether session `name` exists on this server.
     /// Test: `a_cli_create_reaches_the_workspace_server_only`.
     pub(crate) fn has_session(&self, name: &str) -> bool {

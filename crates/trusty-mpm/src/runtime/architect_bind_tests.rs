@@ -444,9 +444,13 @@ fn every_reused_session_arm_refuses_an_architect_before_typing_11270() {
         "reused_session_notice(&spec",
         &["host.create(&body.name", "send_spec_launch("],
     );
+    assert!(code_has(
+        &text("bin/tm/commands/launch_host.rs"),
+        "refuse_reused(spec_is_architect(spec), name)"
+    ));
     before(
         "bin/tm/commands/launch.rs",
-        "refuse_reused(",
+        "host.refuse_running_architect(&tmux_name, &claude_spec)",
         &[
             "host.create(&tmux_name, &managed_workdir)",
             "send_spec_launch(",

@@ -380,11 +380,7 @@ pub(crate) async fn launch(
     // the launch below would type into it unbound; an Architect spec is refused
     // first. The registration is kept, as in `tm connect`: a `DELETE` would
     // kill the running session.
-    if host.has_session(&tmux_name) {
-        let architect = trusty_mpm::runtime::architect_bind::spec_is_architect(&claude_spec);
-        trusty_mpm::runtime::architect_bind::refuse_reused(architect, &tmux_name)
-            .map_err(anyhow::Error::msg)?;
-    }
+    host.refuse_running_architect(&tmux_name, &claude_spec)?;
     let registered = super::launch_host::Registered::new(&daemon, session_id);
     if let Err(e) = host.create(&tmux_name, &managed_workdir) {
         return Err(registered.fail(e).await);
