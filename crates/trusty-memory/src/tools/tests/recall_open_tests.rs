@@ -203,12 +203,14 @@ async fn concurrent_recalls_of_a_stalled_open_share_one_open_attempt() {
     assert_eq!(state.recall_opens.opens_started(), 1);
 }
 
-/// Why (#11255 review, F2): a shared open that fails must reach the callers
-/// waiting on it as that failure, and must not poison the next attempt.
+/// Why (#11255 review, F2 and N1): a shared open that ends must not poison
+/// the next attempt, and one that ends on the open-queue bound is "busy", so
+/// its waiters answer the retryable `PalaceOpening`, never that bound's error.
 /// What: a 2 s open wait under a 3 s queue bound. The first caller answers
-/// `PalaceOpening` at 2 s; a second wave joins the same open and, waiting to
-/// 4 s, receives the queue timeout at 3 s. Then, with the lock free, a new
-/// call starts a second open, which succeeds.
+/// `PalaceOpening` at 2 s; a second wave joins the same open, which times out
+/// at 3 s, and the wave then joins one fresh open (the second started) and
+/// answers `PalaceOpening` at its own 4 s deadline. With the lock free, that
+/// fresh open succeeds and a later call needs no third.
 /// Test: this function.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
@@ -222,14 +224,49 @@ async fn a_failed_shared_open_reaches_its_waiters_and_a_later_open_succeeds() {
     let e = first[0].as_ref().expect_err("stalled");
     assert!(PalaceOpening::find(e).is_some(), "{e:#}");
     for outcome in concurrent_opens(&state, "failed-open", 8).await {
-        let e = outcome.expect_err("the shared open failed");
-        assert!(PalaceOpening::find(&e).is_none(), "{e:#}");
-        assert!(format!("{e:#}").contains("open queue timed out"), "{e:#}");
+        let e = outcome.expect_err("the open is still stalled");
+        assert!(PalaceOpening::find(&e).is_some(), "{e:#}");
     }
-    assert_eq!(state.recall_opens.opens_started(), 1);
+    assert_eq!(state.recall_opens.opens_started(), 2);
     drop(held);
     crate::tools::recall_open::open_for_recall(&state, "failed-open")
         .await
         .expect("a later open is not poisoned");
     assert_eq!(state.recall_opens.opens_started(), 2);
+}
+
+/// Why (#11255 review, N1): a recall that joined an in-flight open and saw
+/// that open hit the registry's open-queue bound answered `-32603`, so its
+/// caller could not tell it to retry.
+/// What: a 1.5 s open wait over a 0.5 s queue bound, the open lock held
+/// throughout. A first call starts the open and a joiner arrives 150 ms
+/// later. Both answer `-32007` `palace_opening`, the joiner only after its
+/// own whole wait; once the lock frees, a retry succeeds.
+/// Test: this function.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn a_joiner_past_the_open_queue_bound_answers_palace_opening() {
+    let (wait, bound) = (Duration::from_millis(1500), Duration::from_millis(500));
+    let (state, _tmp) = stalled_state("joined-open", wait, bound).await;
+    let id = PalaceId::new("joined-open");
+    let gate = state.registry.open_lock_for_test(&id);
+    let held = gate.lock();
+    let first = crate::handle_message(&state, recall_call("joined-open", "q"));
+    let joiner = async {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let started = std::time::Instant::now();
+        let reply = crate::handle_message(&state, recall_call("joined-open", "q")).await;
+        (reply, started.elapsed())
+    };
+    let (first, (joined, waited)) = tokio::join!(first, joiner);
+    for reply in [&first, &joined] {
+        assert_eq!(reply["error"]["code"], CODE_PALACE_OPENING, "{reply}");
+        assert_eq!(reply["error"]["data"]["kind"], "palace_opening", "{reply}");
+        assert_eq!(reply["error"]["data"]["retryable"], true, "{reply}");
+    }
+    assert!(waited >= wait, "the joiner answered after {waited:?}");
+    drop(held);
+    // Joins the open still in flight, or starts one if none is.
+    let retry = crate::handle_message(&state, recall_call("joined-open", "q")).await;
+    assert!(retry.get("error").is_none(), "retry failed: {retry}");
 }

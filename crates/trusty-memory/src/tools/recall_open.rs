@@ -25,6 +25,7 @@ use tokio::sync::watch;
 use crate::AppState;
 use crate::engine::palace::PalaceId;
 use crate::engine::palace_not_found::PalaceNotFound;
+use crate::engine::registry::OpenQueueTimeout;
 use crate::engine::retrieval::PalaceHandle;
 
 use super::helpers::open_palace_handle;
@@ -111,8 +112,12 @@ impl RecallOpens {
         let (owned, id) = (state.clone(), palace.to_string());
         tokio::task::spawn_blocking(move || {
             // Leaves the map even if the open panics (the sender then drops).
-            let _leave = Leave(&owned.recall_opens, &id);
+            let leave = Leave(&owned.recall_opens, &id);
             let outcome = open_palace_handle(&owned, &id).map_err(Arc::new);
+            // #11255 review, N2: leave the map BEFORE publishing, so a caller
+            // woken by the outcome, or arriving after it, can only start or
+            // join a fresh open, never this finished one.
+            drop(leave);
             tx.send_replace(Some(outcome));
         });
         rx
@@ -174,36 +179,49 @@ fn shared_failure(palace: &str, e: &Arc<anyhow::Error>) -> anyhow::Error {
 /// the same LRU promotion `open_palace_handle` gives it. Otherwise the call
 /// joins the one in-flight open of `palace` ([`RecallOpens`]), which runs on
 /// the blocking pool, and waits at most `state.recall_limits.open_wait` for
-/// its outcome: the handle, or its failure (see [`shared_failure`]). Past
-/// that wait the call fails with [`PalaceOpening`]; the open goes on, never
-/// cancelled. An open task that ends without an outcome (a panic) is an
-/// error, never an empty result.
+/// its outcome: the handle, or its failure (see [`shared_failure`]). A
+/// shared open that hit the registry's open-queue bound ([`OpenQueueTimeout`])
+/// is not this call's failure: the call joins a fresh open for what is left
+/// of its own wait. Past that wait the call fails with [`PalaceOpening`]; the
+/// open goes on, never cancelled. An open task that ends without an outcome
+/// (a panic) is an error, never an empty result.
 /// Test: `a_held_palace_open_answers_palace_opening_and_the_open_continues`,
 /// `concurrent_recalls_of_a_stalled_open_share_one_open_attempt`,
-/// `a_failed_shared_open_reaches_its_waiters_and_a_later_open_succeeds`.
+/// `a_failed_shared_open_reaches_its_waiters_and_a_later_open_succeeds`,
+/// `a_joiner_past_the_open_queue_bound_answers_palace_opening`.
 pub(crate) async fn open_for_recall(state: &AppState, palace: &str) -> Result<Arc<PalaceHandle>> {
     if let Some(handle) = state.registry.get(&PalaceId::new(palace)) {
         return Ok(handle);
     }
     let wait = state.recall_limits.open_wait;
-    let mut rx = RecallOpens::join(state, palace);
-    let shared = match tokio::time::timeout(wait, rx.wait_for(Option::is_some)).await {
-        Ok(Ok(done)) => done.clone(),
-        Ok(Err(_closed)) => None,
-        // #11255: the open is left running; it still registers the palace.
-        Err(_elapsed) => {
-            return Err(PalaceOpening {
-                palace: palace.to_string(),
-                waited: wait,
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let mut rx = RecallOpens::join(state, palace);
+        let shared = match tokio::time::timeout_at(deadline, rx.wait_for(Option::is_some)).await {
+            Ok(Ok(done)) => done.clone(),
+            Ok(Err(_closed)) => None,
+            // #11255: the open is left running; it still registers the palace.
+            Err(_elapsed) => {
+                return Err(PalaceOpening {
+                    palace: palace.to_string(),
+                    waited: wait,
+                }
+                .into());
             }
-            .into());
+        };
+        match shared {
+            Some(Ok(handle)) => return Ok(handle),
+            // #11255 review, N1: the queue bound means "busy", not "failed";
+            // wait out this call's own deadline on a fresh open. A fresh open
+            // starts after the last one left the map (N2), so it waits a whole
+            // queue bound, and the deadline ends the loop.
+            Some(Err(e)) if e.downcast_ref::<OpenQueueTimeout>().is_some() => continue,
+            Some(Err(e)) => return Err(shared_failure(palace, &e)),
+            None => {
+                return Err(anyhow!(
+                    "open palace {palace}: open task ended without an outcome"
+                ));
+            }
         }
-    };
-    match shared {
-        Some(Ok(handle)) => Ok(handle),
-        Some(Err(e)) => Err(shared_failure(palace, &e)),
-        None => Err(anyhow!(
-            "open palace {palace}: open task ended without an outcome"
-        )),
     }
 }
