@@ -71,6 +71,18 @@ pub enum DirDeleteError {
         /// The Architect directory inside it.
         architect: PathBuf,
     },
+    /// A recorded Architect directory could not be resolved for a reason
+    /// other than not existing, so containment in the target is unknown.
+    // #10992 critic MEDIUM: refuse; never fall back to the raw spelling.
+    #[error("refusing to delete {}: cannot resolve the Architect directory {}: {error}", path.display(), architect.display())]
+    ArchitectUnresolved {
+        /// The directory.
+        path: PathBuf,
+        /// The Architect directory that would not resolve.
+        architect: PathBuf,
+        /// The resolution error.
+        error: std::io::Error,
+    },
     /// A session working in the directory is the Architect's, or of a kind
     /// the daemon did not report.
     #[error("{0}")]
@@ -186,13 +198,39 @@ impl DirSession {
     }
 
     /// Whether the workspace or start directory lies inside `canon`.
+    ///
+    /// What: a raw prefix match, else the [`resolve_path`] form's. A path that
+    /// cannot be resolved for any reason but not existing counts as inside.
+    /// Test: `an_unresolvable_occupant_counts`, `a_missing_leaf_under_the_target_counts`.
     fn works_inside(&self, canon: &Path) -> bool {
         [self.workspace.as_deref(), self.cwd.as_deref()]
             .into_iter()
             .flatten()
             .any(|p| {
-                p.starts_with(canon) || fs::canonicalize(p).is_ok_and(|c| c.starts_with(canon))
+                // #10992 critic MEDIUM: an unresolvable path is an occupant (fail closed).
+                p.starts_with(canon)
+                    || match resolve_path(p) {
+                        Ok(c) => c.starts_with(canon),
+                        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+                    }
             })
+    }
+}
+
+/// `p` canonicalized; when `p` does not exist, its nearest existing ancestor
+/// canonicalized with the missing tail joined back (#10992 critic MEDIUM).
+///
+/// Errors: any canonicalize error other than NotFound, or NotFound when no
+/// ancestor resolves.
+fn resolve_path(p: &Path) -> std::io::Result<PathBuf> {
+    match fs::canonicalize(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match (p.parent(), p.file_name()) {
+            (Some(parent), Some(leaf)) if !parent.as_os_str().is_empty() => {
+                Ok(resolve_path(parent)?.join(leaf))
+            }
+            _ => Err(e),
+        },
+        other => other,
     }
 }
 
@@ -410,14 +448,25 @@ pub fn plan_dir_delete(
     let canon = contained_dir(dir, input.root)?;
     let root =
         fs::canonicalize(input.root).map_err(|e| uncontained(dir, input.root, e.to_string()))?;
-    if let Some(a) = input.architect_dirs.iter().find(|a| {
-        let ca = fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
-        ca.starts_with(&canon) || a.starts_with(&canon)
-    }) {
-        return Err(DirDeleteError::ArchitectDir {
-            path: canon,
-            architect: a.clone(),
-        });
+    for a in input.architect_dirs {
+        // #10992 critic MEDIUM: only NotFound may fall back to the raw spelling.
+        let inside = match resolve_path(a) {
+            Ok(ca) => ca.starts_with(&canon) || a.starts_with(&canon),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => a.starts_with(&canon),
+            Err(error) => {
+                return Err(DirDeleteError::ArchitectUnresolved {
+                    path: canon,
+                    architect: a.clone(),
+                    error,
+                });
+            }
+        };
+        if inside {
+            return Err(DirDeleteError::ArchitectDir {
+                path: canon,
+                architect: a.clone(),
+            });
+        }
     }
     let occupants: Vec<&DirSession> = input
         .sessions

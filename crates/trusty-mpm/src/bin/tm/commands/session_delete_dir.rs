@@ -6,7 +6,8 @@
 //! this process; the daemon supplies the session list, and no HTTP route can
 //! remove a directory.
 //! What: [`run`] reads the session and the list from the daemon, the managed
-//! workspace root and the recorded Architect directories from config, and
+//! workspace root and every Architect directory (`protected_architect_dirs`;
+//! a config that exists but cannot be read refuses the delete), and
 //! hands them to `project_dir_delete::run_dir_delete` on a blocking thread.
 //! Every run shows the plan first; a real run then reads the typed directory
 //! name (unless `--yes`) and asks `LocalAuthenticator` for presence. After the
@@ -51,6 +52,8 @@ pub(crate) async fn run(
         sessions.push(DirSession::from_summary(&target));
     }
     let root = workspace_root(&TrustyToolsConfig::load());
+    // #10992 critic HIGH: strict config read plus `ARCHITECT_PROJECT_DIR`;
+    // a guard that cannot get its input refuses.
     let env = |name: &str| std::env::var(name).ok();
     let architect_dirs = protected_architect_dirs(&env, dirs::home_dir().as_deref())
         .map_err(|e| anyhow::anyhow!("refusing to delete a project directory: {e}"))?;
