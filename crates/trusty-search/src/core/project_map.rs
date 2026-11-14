@@ -46,6 +46,8 @@ pub enum ParkReason {
     Orphaned,
     /// An operator parked a same-root sibling.
     Operator,
+    /// tm decommissioned the index's project; any root kind parks (#10989).
+    Decommissioned,
 }
 
 /// One pin: the index a resolver group answers with.

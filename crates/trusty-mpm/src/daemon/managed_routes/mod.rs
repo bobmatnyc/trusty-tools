@@ -97,6 +97,9 @@ mod resume_claim_tests;
 // #8983: the resume grant across both daemon resume paths.
 #[cfg(test)]
 mod resume_grant_tests;
+// #10989 F3: a resume unparks a decommission-parked index.
+#[cfg(test)]
+mod resume_restore_tests;
 pub(crate) mod route_outcome_http;
 mod session_prep;
 mod session_summary;

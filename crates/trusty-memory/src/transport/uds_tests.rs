@@ -538,6 +538,45 @@ async fn rpc_palace_get_reports_not_found_for_an_unknown_id() {
     daemon.shutdown().await;
 }
 
+/// Why (#10989): tm's decommission reaches the unload only over the socket,
+/// so the route itself is pinned: the handle is released, the data stays.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_palace_unload_releases_the_handle_over_the_socket() {
+    let state = test_state();
+    let root = state.data_root.clone();
+    let id = crate::engine::palace::PalaceId::new("unload-me");
+    state
+        .registry
+        .create_palace(
+            &root,
+            crate::engine::palace::Palace {
+                id: id.clone(),
+                name: "unload-me".to_string(),
+                description: None,
+                created_at: chrono::Utc::now(),
+                data_dir: root.join("unload-me"),
+            },
+        )
+        .expect("create palace");
+    state.registry.open_palace(&root, &id).expect("open");
+    let daemon = Daemon::start(state.clone()).await;
+    let result = daemon
+        .call("memory.palace_unload", json!({"palace_id": "unload-me"}))
+        .await
+        .result
+        .expect("unload answers a result");
+    assert_eq!(result["unloaded"], true, "{result}");
+    assert_eq!(result["data_kept"], true, "{result}");
+    assert_eq!(result["was_resident"], true, "{result}");
+    assert!(state.registry.peek(&id).is_none(), "the handle is released");
+    assert!(
+        root.join("unload-me").join("palace.json").exists(),
+        "data kept"
+    );
+    daemon.shutdown().await;
+}
+
 /// Why (#9751): the former REST methods answered a missing palace with the
 /// daemon's own path (`palace metadata missing at <root>/…/palace.json`). On the
 /// wire the refusal names the id and the existing palace ids, capped at 20 with

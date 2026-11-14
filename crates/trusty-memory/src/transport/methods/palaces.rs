@@ -74,6 +74,20 @@ pub async fn get_palace(state: &AppState, params: PalaceParams) -> Result<Value,
     )
 }
 
+/// `memory.palace_unload` — release one palace's open handles, keep its data
+/// (#10989).
+///
+/// tm's project decommission calls it. Socket-only: it is not an MCP tool, so
+/// no agent session can unload a palace. Answers
+/// [`crate::service::unload::UnloadOutcome`]; a busy palace is `Refused`.
+pub async fn unload_palace(state: &AppState, params: PalaceParams) -> Result<Value, ApiError> {
+    to_value(
+        crate::service::MemoryService::new(state.clone())
+            .unload_palace(&params.palace_id)
+            .await?,
+    )
+}
+
 /// One palace's row in [`palaces_list`], or why its counts are missing.
 ///
 /// Why the error is a FIELD rather than an omitted row (#6286): the monitor's

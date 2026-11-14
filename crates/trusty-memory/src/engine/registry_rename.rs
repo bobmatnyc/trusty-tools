@@ -491,13 +491,18 @@ fn invalid(new: &str, reason: &str) -> PalaceRenameError {
 /// its store is, even in a detached blocking job), then the OS redb lock on
 /// both files ([`redb_file_locked`]); a file still open or locked after
 /// `wait` is `Busy`, with nothing changed. Also run on the `replace_empty`
-/// target after `check_target` opened it.
+/// target after `check_target` opened it, and by `memory.palace_unload`
+/// (#10989) before it answers unloaded.
 /// Test: `rename_palace_waits_for_a_dropped_handle_to_close_its_files`,
 /// `rename_palace_replace_empty_waits_for_the_targets_dropped_writer`,
 /// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`,
 /// `rename_palace_waits_for_a_held_kg_file_lock`,
 /// `rename_palace_refuses_while_a_kg_file_lock_outlasts_the_wait`.
-fn await_files_closed(data_root: &Path, keys: &[String], wait: Duration) -> RenameResult<()> {
+pub(crate) fn await_files_closed(
+    data_root: &Path,
+    keys: &[String],
+    wait: Duration,
+) -> RenameResult<()> {
     let deadline = Instant::now() + wait;
     for key in keys {
         let dir = data_root.join(key);
