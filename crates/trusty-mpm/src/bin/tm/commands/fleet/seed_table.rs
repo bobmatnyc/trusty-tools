@@ -389,6 +389,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/relay_provenance.py",
         false
     ),
+    // #10960: the supersession check relay_provenance.py imports at load.
+    embedded!(
+        "scripts/relay_supersession.py",
+        "scripts/relay_supersession.py",
+        false
+    ),
     // posted.sh runs this sibling by path.
     embedded!("scripts/relay-marker.py", "scripts/relay-marker.py", false),
     // See #10161: the `local/architect.json` loader; a module, not a command.
