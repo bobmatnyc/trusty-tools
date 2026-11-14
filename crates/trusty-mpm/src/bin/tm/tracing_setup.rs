@@ -156,13 +156,14 @@ pub(crate) fn env_filter(default: &str) -> tracing_subscriber::EnvFilter {
 ///
 /// What: `rust_log` when it parses, else `default` — the same choice
 /// `EnvFilter::try_from_default_env().unwrap_or_else(|_| default.into())`
-/// made. Then `aws=warn` is appended unless a directive's target is exactly
-/// `aws`. Precedence: `EnvFilter` applies the most specific (longest) matching
+/// made. Then `aws=warn` is appended unless a static directive's target is
+/// exactly `aws` (a span-scoped `aws[..]` directive does not count). Precedence: `EnvFilter` applies the most specific (longest) matching
 /// target, so an operator's `aws_config=debug` overrides the guard for
 /// `aws_config::*` only, and `aws=<level>` replaces the guard for all of them.
 /// Test: `aws_info_events_are_dropped_under_rust_log_info`,
 /// `aws_info_events_are_dropped_at_the_default_level`,
-/// `an_explicit_aws_directive_is_honoured`.
+/// `an_explicit_aws_directive_is_honoured`,
+/// `a_span_scoped_aws_directive_keeps_the_guard`.
 fn filter_from_directives(rust_log: Option<&str>, default: &str) -> tracing_subscriber::EnvFilter {
     use tracing_subscriber::EnvFilter;
     let base = rust_log
@@ -170,10 +171,14 @@ fn filter_from_directives(rust_log: Option<&str>, default: &str) -> tracing_subs
         .unwrap_or(default);
     let mut directives = base.to_string();
     // #8948: hold AWS SDK targets at warn (key id in log)
+    // Only a static directive (no `[span{fields}]` part) can replace the guard:
+    // `aws[foo]=debug` is dynamic and says nothing about events outside `foo`.
     let named = base
         .split(',')
-        .filter_map(|d| d.trim().split(['=', '[']).next())
-        .any(|target| target == AWS_LOG_GUARD);
+        .map(str::trim)
+        .filter(|d| !d.contains('['))
+        .filter_map(|d| d.split('=').next())
+        .any(|target| target.trim() == AWS_LOG_GUARD);
     if !named {
         directives.push_str(&format!(",{AWS_LOG_GUARD}=warn"));
     }
@@ -526,6 +531,33 @@ mod tests {
             "aws=info must open it: {out}"
         );
         assert!(out.contains("sdk-8948"), "aws=info covers the SDK: {out}");
+    }
+
+    /// REGRESSION (#8948 review): a span-scoped directive on `aws` is dynamic,
+    /// so it must not count as naming `aws` and drop the guard for events
+    /// outside that span. `[foo]=debug` (no target) is explicit operator
+    /// scope and stays out of the guard's way.
+    #[test]
+    fn a_span_scoped_aws_directive_keeps_the_guard() {
+        for rust_log in [
+            "info,aws[foo]=debug",
+            "info,aws[{x}]=debug",
+            "info,aws[foo]",
+        ] {
+            let out = emitted(Some(rust_log));
+            assert!(
+                !out.contains("info-key-8948"),
+                "{rust_log}: credential line leaked: {out}"
+            );
+            assert!(
+                !out.contains("sdk-8948"),
+                "{rust_log}: SDK INFO line leaked: {out}"
+            );
+            assert!(
+                out.contains("warn-8948"),
+                "{rust_log}: AWS WARN must still show: {out}"
+            );
+        }
     }
 
     /// The invariant behind the matrix, stated on its own: no combination of
