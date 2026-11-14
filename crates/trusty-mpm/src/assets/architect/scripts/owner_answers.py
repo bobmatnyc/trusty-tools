@@ -52,7 +52,8 @@ text: "<title>" or "<title> — <done_note>"}; the Architect sets done_ack to an
 Reads only through dashboard_store (either format); the rules live in dashboard_derive. Raises StoreError on an unreadable collection.
 Qualified ids (ar-T44): resolve_id(root, ref) maps "S0c:D01" or a bare id to the local id (NotFound when the S id is not this store's own session); qualified(root, entries) adds a derived `qid` ("<S id>:<id>", bare when unknown) to pending entries, so a relay or log line can name the
 entry fleet-wide. Stored ids stay bare.
-Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py
+refuse_owner_answer_change(store, verb, id, data) is dashboard-db.py's guard: the Architect never rewrites the owner's answer.
+Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py, tests/test_dashboard_answer_close.py
 """
 import os
 import sys
@@ -82,3 +83,31 @@ def resolve_id(root, ref):
 def qualified(root, entries):
     sid = dq.store_sid(ds.Store(root or ds.DEFAULT_ROOT))
     return [dict(e, qid=e["id"] if e.get("kind") == "owner_command" else dq.qualify(sid, e["id"])) for e in entries]
+
+
+ARCHITECT_MARKS = ("Relayed", "Acknowledged")   # #10711: Architect notes from before `relayed` (r-183, r-189)
+
+
+def refuse_owner_answer_change(store, verb, doc_id, data):
+    """Refuse an items set/update that changes the owner's stored `answer` or `answer_note`.
+
+    Why: a close wrote "Relayed HH:MMZ" over the text the owner typed for an "Other" answer (#10711).
+    What: raises StoreError naming the field when the stored doc holds it as a non-empty string (an `answer_note`
+    starting "Relayed"/"Acknowledged" is the Architect's, not the owner's) and the doc after the write differs,
+    unless that doc reopens the item (status open). A missing doc passes; any other read failure propagates.
+    Test: test_close_that_overwrites_an_owner_answer_field_is_refused_10711, test_set_and_batch_that_drop_the_answer_note_are_refused_10711
+    """
+    if not isinstance(data, dict):
+        return
+    try:
+        cur = store.get("items", doc_id)["data"]
+    except ds.NotFound:
+        return
+    new = {**cur, **data} if verb == "update" else data
+    if new.get("status") == "open":
+        return
+    hit = [f for f in ("answer", "answer_note") if isinstance(cur.get(f), str) and cur[f].strip() and new.get(f) != cur[f]
+           and not (f == "answer_note" and cur[f].lstrip().startswith(ARCHITECT_MARKS))]
+    if hit:
+        raise ds.StoreError(f"item {doc_id}: {' and '.join(hit)} hold the owner's answer and never change; "
+                            "record the relay in `relayed` (\"<iso> <session>\") instead")

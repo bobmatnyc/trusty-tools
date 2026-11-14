@@ -74,6 +74,7 @@
     "plan_title": {"type": "string"},
     "answer": {"type": ["string", "null"]}, "answer_note": {"type": "string"},
     "answered_at": {"$ref": "#/$defs/isoOrNull"}, "owner_note": {"type": "string"},
+    "relayed": {"type": "string", "minLength": 1},
     "cancelled_at": {"$ref": "#/$defs/iso"}, "cancelled_by": {"type": "string"}, "cancel_note": {"type": "string"},
     "parked": {"$ref": "#/$defs/parked"},
     "resume_request": {"$ref": "#/$defs/req"}, "status_request": {"$ref": "#/$defs/req"},
